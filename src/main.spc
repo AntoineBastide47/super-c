@@ -26,6 +26,7 @@ import driver::emit as *;
 import build_system::manifest as bman;
 import build_system::build as bsys;
 import lsp::server as lsp_srv;
+import bindgen::bindgen as bindgen;
 
 fn run_file(
     path: str,
@@ -633,6 +634,7 @@ enum Mode {
     MODE_LSP, // `super-c lsp`: language server over stdio
     MODE_NEW, // `super-c new <name>`: scaffold a project directory (cargo new)
     MODE_INIT, // `super-c init`: scaffold a project in the current directory (cargo init)
+    MODE_BINDGEN, // `super-c bindgen <header.h>`: C header -> an `extern "C"` module
 }
 
 fn subcommand(arg: str) Mode {
@@ -672,6 +674,9 @@ fn subcommand(arg: str) Mode {
         },
         "init" => {
             Mode::MODE_INIT;
+        },
+        "bindgen" => {
+            Mode::MODE_BINDGEN;
         },
         _ => {
             Mode::MODE_DEFAULT;
@@ -829,6 +834,9 @@ fn main(argv: Vector<str>) i32 {
     let argc = argv.len();
     let mut file = "";
     let mut out_bin = ""; // set by the `build` subcommand (via -o, or defaulted)
+    let mut bg_link = ""; // bindgen: --link=NAME, the library the bindings need on the link line
+    let mut bg_header = ""; // bindgen: --header=SPELLING, how the emitted module #includes it
+    let mut bg_incs = Vector::<String>::new(); // bindgen: -I search paths
 
     let mode = if argc > 1 {
         subcommand(argv[1]);
@@ -1040,6 +1048,34 @@ fn main(argv: Vector<str>) i32 {
                 co.bad = true; // `init` scaffolds the current directory, no arguments
             }
         },
+        MODE_BINDGEN => {
+            while i < argc {
+                let arg = argv[i];
+                if arg == "-o" && i + 1 < argc {
+                    i = i + 1;
+                    out_bin = argv[i];
+                } else if arg.starts_with("--link=") {
+                    bg_link = arg[7..];
+                } else if arg.starts_with("--header=") {
+                    bg_header = arg[9..];
+                } else if arg.starts_with("-I") && arg.len() > 2 {
+                    bg_incs.push(String::from_str(arg[2..]));
+                } else if arg == "-I" && i + 1 < argc {
+                    i = i + 1;
+                    bg_incs.push(String::from_str(argv[i]));
+                } else if arg.starts_with("--cc=") {
+                    bo.cc = arg[5..];
+                } else if !arg.starts_with("-") && file.len() == 0 {
+                    file = arg;
+                } else {
+                    co.bad = true;
+                }
+                i = i + 1;
+            }
+            if file.len() == 0 {
+                co.bad = true; // `bindgen` needs a header
+            }
+        },
     };
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null) {
         co.bad = true;
@@ -1074,6 +1110,7 @@ COMMANDS:
     lsp                    run the language server over stdio
     new <name>             scaffold a new project directory
     init                   scaffold a project in the current directory
+    bindgen <header.h>     generate an extern "C" module from a C header
 
 OPTIONS:
     -o <path>              output binary path (build/release with a file)
@@ -1084,6 +1121,9 @@ OPTIONS:
     --cc=BIN               C compiler to use (else build.toml `cc`, else $CC, else cc)
     --bin=NAME             build/run only that binary target
     --lib                  build only the [lib] target
+    --link=NAME            bindgen: library the generated bindings link against
+    --header=SPELLING      bindgen: how the generated module spells the #include
+    -I <dir>               bindgen: header search path
     --target=T             target: windows|macos|linux|ios|android|wasm
     --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
     --const-eval-steps=N   compile-time evaluation step budget
@@ -1129,6 +1169,11 @@ OPTIONS:
             return 1;
         }
         return bsys::scaffold_project(file, file);
+    }
+    if mode == Mode::MODE_BINDGEN {
+        let rc = bindgen::run(file, out_bin, bg_link, bg_header, &bg_incs, bo.cc);
+        bg_incs.free();
+        return rc;
     }
     if mode == Mode::MODE_INIT {
         let cwd = canon_cwd();

@@ -5,6 +5,7 @@
 // emitted tree -Werror and runs it. Source trees are embedded verbatim as multi-line raw strings.
 import tests::cli_harness as cli;
 import stdio;
+import module::loader as loader;
 
 struct Cmd {
     pub b: [char; 2048],
@@ -4399,6 +4400,57 @@ fn imported_const_sized_array() {
     p.mkfile(
         "main.spc",
         "import lib as lib;\n\nconst V: lib::Val = lib::Val::make(7);\n\nfn main() i32 {\n    return V.get() as i32 - 7 + (sizeof(lib::Val) as i32) - (sizeof(usize) as i32) * 2;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}
+
+// `bindgen` reads a C header through the system preprocessor and writes the `extern "C"` module for it.
+// Checked end to end, because the only claim worth making is that the generated bindings COMPILE and CALL
+// the library: a `.c` sibling of the header is picked up by the ordinary extern-C machinery, so the test
+// links against a real implementation and reads its answer back.
+@test
+fn bindgen_generates_callable_bindings() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.h",
+        "#ifndef LIB_H\n#define LIB_H\n#include <stddef.h>\ntypedef struct lib_ctx lib_ctx;\ntypedef int (*lib_cb)(const char *s, void *user);\nlib_ctx *lib_open(int seed);\nsize_t lib_len(const lib_ctx *c, const char *s, unsigned long bump);\nvoid lib_each(lib_ctx *c, lib_cb cb, void *user);\nvoid lib_close(lib_ctx *c);\nstatic inline int lib_inline(int x) { return x; }\n#endif\n",
+    );
+    p.mkfile(
+        "lib.c",
+        "#include \"lib.h\"\n#include <stdlib.h>\n#include <string.h>\nstruct lib_ctx { int seed; };\nlib_ctx *lib_open(int seed) { lib_ctx *c = malloc(sizeof *c); if (c) c->seed = seed; return c; }\nsize_t lib_len(const lib_ctx *c, const char *s, unsigned long bump) { return strlen(s) + (size_t)c->seed + bump; }\nvoid lib_each(lib_ctx *c, lib_cb cb, void *user) { (void)c; cb(\"x\", user); }\nvoid lib_close(lib_ctx *c) { free(c); }\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
+    let gen = p.run_raw(args.as_str());
+    assert_eq(gen.exit, 0);
+
+    let mut path = String::new();
+    path.format_into("{}/lib.spc", root);
+    let mut spc = String::new();
+    switch loader::read_file(path.as_str()) {
+        Some(t) => {
+            spc.push_string(&t);
+        },
+        None => {},
+    };
+    // The shapes the mapper has to get right, and the one it must leave out.
+    assert(spc.as_str().contains("pub type lib_ctx;"));
+    assert(spc.as_str().contains("pub fn lib_open(seed: i32) *mut lib_ctx;"));
+    assert(spc.as_str().contains("c: *const lib_ctx"));
+    assert(spc.as_str().contains("s: *const char"));
+    assert(spc.as_str().contains("bump: u64") || spc.as_str().contains("bump: u32"));
+    assert(spc.as_str().contains("usize"));
+    assert(spc.as_str().contains("cb: fn(*const char, *mut void) i32"));
+    assert(!spc.as_str().contains("lib_inline")); // a static inline has no symbol to bind
+
+    p.mkfile(
+        "main.spc",
+        "import lib;\n\nfn main() i32 {\n    let c = unsafe lib::lib_open(3);\n    let n = unsafe lib::lib_len(c, \"abcd\".ptr() as *const char, 2);\n    unsafe lib::lib_close(c);\n    if n == 9 { return 0; }\n    return 1;\n}\n",
     );
     let r = p.compile("main.spc");
     assert_eq(r.exit, 0);
