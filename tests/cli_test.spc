@@ -4492,7 +4492,7 @@ fn bindgen_generates_records_enums_and_consts() {
     assert(spc.as_str().contains("pub const LIB_NAME: str<'static> = \"lib\";"));
     assert(spc.as_str().contains("pub const LIB_SCALE: f64 = 0.5;"));
     assert(spc.as_str().contains("pub const LIB_FLAG_B: i32 = 2;")); // an anonymous enum is a const block
-    assert(!spc.as_str().contains("LIB_EXPR")); // an expression macro is not a literal
+    assert(spc.as_str().contains("pub const LIB_EXPR: i32 = 8;")); // folded from LIB_VERSION + 1
     assert(spc.as_str().contains("LIB_SLOW = 10"));
     assert(spc.as_str().contains("LIB_LAST = 11")); // C's auto-increment continues from the explicit value
     assert(spc.as_str().contains("@c.import(\"struct lib_cfg\")")); // a tag C never typedef'd
@@ -4568,4 +4568,54 @@ fn bindgen_walks_paths_recursively() {
     let r = p.run_raw(bad.as_str());
     assert_eq(r.exit, 1);
     assert(r.out_has("needs '-o <dir>'"));
+}
+
+// The shapes a real C library uses that a literals-only reader loses: constants written as expressions
+// (`(1 << 3)`, or one macro in terms of another), types declared as `typedef struct { .. } Name;` with no
+// tag at all, and the globals a library exports. curl.h alone defines 91 of its constants as shift
+// expressions, so refusing them was refusing most of the library's surface.
+@test
+fn bindgen_expressions_anonymous_types_and_globals() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.h",
+        "#ifndef LIB_H\n#define LIB_H\n#define LIB_BASE 4\n#define LIB_SHIFT (1 << 3)\n#define LIB_SUM (LIB_BASE + LIB_SHIFT)\n#define LIB_MIX ((LIB_BASE | 1) & 7)\n#define LIB_CALL(x) ((x) + 1)\ntypedef struct { int x; int y; } lib_pt;\ntypedef enum { LIB_A = 0, LIB_B = 1 << 3, LIB_C } lib_mode;\ntypedef union { int i; float f; } lib_val;\nextern int lib_counter;\nint lib_use(const lib_pt *p, lib_mode m);\n#endif\n",
+    );
+    p.mkfile(
+        "lib.c",
+        "#include \"lib.h\"\nint lib_counter = 41;\nint lib_use(const lib_pt *p, lib_mode m) { return p->x + p->y + (int)m; }\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
+    assert_eq(p.run_raw(args.as_str()).exit, 0);
+
+    let mut path = String::new();
+    path.format_into("{}/lib.spc", root);
+    let mut spc = String::new();
+    switch loader::read_file(path.as_str()) {
+        Some(t) => {
+            spc.push_string(&t);
+        },
+        None => {},
+    };
+    assert(spc.as_str().contains("pub const LIB_SHIFT: i32 = 8;"));
+    assert(spc.as_str().contains("pub const LIB_SUM: i32 = 12;")); // one macro in terms of others
+    assert(spc.as_str().contains("pub const LIB_MIX: i32 = 5;"));
+    assert(!spc.as_str().contains("LIB_CALL")); // function-like macros have no const form
+    assert(spc.as_str().contains("pub struct lib_pt")); // named by its typedef, having no tag
+    assert(spc.as_str().contains("pub union lib_val"));
+    assert(spc.as_str().contains("LIB_B = 8")); // an enumerator written as an expression
+    assert(spc.as_str().contains("LIB_C = 9")); // and C's auto-increment continues from it
+    assert(spc.as_str().contains("pub const lib_counter: i32;")); // an exported global
+
+    p.mkfile(
+        "main.spc",
+        "import lib;\n\nfn main() i32 {\n    let pt = lib::lib_pt { x: 2, y: 3 };\n    let n = unsafe lib::lib_use(&pt, lib::lib_mode::LIB_B);\n    let c = unsafe lib::lib_counter;\n    if n == 13 && c == 41 && lib::LIB_SUM == 12 { return 0; }\n    return 1;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
 }

@@ -462,6 +462,7 @@ struct EnumDef {
     pub tag: String,
     pub vals: Vector<EnumVal>,
     pub ok: bool,
+    pub partial: bool, // at least one enumerator was not evaluable and is absent
     pub mine: bool,
 }
 
@@ -493,8 +494,14 @@ struct Collected {
     pub records: Vector<Record>,
     pub enums: Vector<EnumDef>,
     pub consts: Vector<ConstDef>, // anonymous-enum constants, then object-like macros
+    pub globals: Vector<ConstDef>, // `extern` variables the library exports
     pub widths: Widths,
     pub cur_mine: bool, // whether the declaration being parsed comes from the target header
+    /// The anonymous struct/union/enum body just parsed, waiting for the typedef that names it
+    /// (`typedef struct { .. } Foo;` is how most C libraries declare their types). -1 when there is none.
+    pub pending_agg: i32,
+    pub pending_is_enum: bool,
+    pub saw_extern: bool, // the declaration being parsed carried `extern`: a variable, not a definition
     /// Functions from the target header whose signature this tool could not model. Reported rather than
     /// swallowed: a binding file that is quietly short is worse than one that says what it left out.
     pub skipped: usize,
@@ -505,6 +512,7 @@ extend Collected as Free {
         self.records.free();
         self.enums.free();
         self.consts.free();
+        self.globals.free();
         self.aliases.free();
         self.fns.free();
         self.opaques.free();
@@ -633,10 +641,11 @@ fn int_literal(t: str) i64 {
 /// `{ NAME [= <int>] , ... }`. Auto-increment is C's, so a bare name is one past the previous value. An
 /// enumerator this cannot evaluate marks the whole enum unusable rather than guessing a discriminant --
 /// a wrong constant is a bug at every call site that compares against it.
-fn parse_enum_body(lx: &mut Lexer, c: &mut Collected, tag: str) {
+fn parse_enum_body(lx: &mut Lexer, c: &mut Collected, tag: str, dump: str) {
     let mut e = EnumDef { tag: String::from_str(tag), vals: Vector::<EnumVal>::new(), ok: true, mine: c.cur_mine };
     lx.advance(); // '{'
     let mut next: i64 = 0;
+    let mut known = true;
     loop {
         skip_noise(lx);
         if lx.kind == TK_EOF || lx.at_punct(b'}') {
@@ -658,35 +667,39 @@ fn parse_enum_body(lx: &mut Lexer, c: &mut Collected, tag: str) {
         if lx.at_punct(b'=') {
             lx.advance();
             skip_noise(lx);
-            let mut neg = false;
-            if lx.at_punct(b'-') {
-                neg = true;
-                lx.advance();
-            }
-            let mut v: i64 = -1;
-            if lx.kind == TK_NUM {
-                v = int_literal(lx.text());
-                lx.advance();
-            } else if lx.kind == TK_IDENT {
-                // A previous enumerator of this same enum is the one reference C code actually uses.
-                let mut prev: i64 = 0;
-                if enum_val_of(&e, lx.text(), &mut prev) {
-                    v = prev;
+            // The whole initialiser, up to the comma or brace that ends it, handed to the constant
+            // evaluator: `= 1 << 8` and `= A | B` are as common in headers as a bare number.
+            let vstart = lx.start;
+            let mut vend = lx.start;
+            let mut par: i32 = 0;
+            loop {
+                if lx.kind == TK_EOF {
+                    break;
                 }
+                if par == 0 && (lx.at_punct(b',') || lx.at_punct(b'}')) {
+                    break;
+                }
+                if lx.at_punct(b'(') {
+                    par = par + 1;
+                } else if lx.at_punct(b')') {
+                    par = par - 1;
+                }
+                vend = lx.end;
                 lx.advance();
             }
-            // Anything past a single term (`1 << 3`, `A | B`) is an expression this tool does not evaluate.
-            skip_noise(lx);
-            if v < 0 || !lx.at_punct(b',') && !lx.at_punct(b'}') {
-                e.ok = false;
-            }
-            next = if neg {
-                0 - v;
-            } else {
-                v;
-            };
+            let mut got = false;
+            let v = ce_eval(lx.src.slice(vstart, vend), c, &e, dump, 0, &mut got);
+            next = v;
+            // An enumerator this cannot evaluate makes the NEXT one unknown too, since C's auto-increment
+            // counts from it. Only those are dropped -- the rest of the enum is still worth having.
+            known = got;
         }
-        e.vals.push(EnumVal { name: nm, value: next });
+        if known {
+            e.vals.push(EnumVal { name: nm, value: next });
+        } else {
+            nm.free();
+            e.partial = true;
+        }
         next = next + 1;
         skip_noise(lx);
         if !lx.at_punct(b',') && !lx.at_punct(b'}') {
@@ -725,12 +738,12 @@ fn enum_val_of(e: &EnumDef, name: str, out: *mut i64) bool {
 /// runs recursively. Bitfields, anonymous members and flexible arrays make the record unusable: each one
 /// changes the LAYOUT in a way a field list cannot express, and a record with the wrong layout is worse
 /// than no record at all.
-fn parse_record_body(lx: &mut Lexer, c: &mut Collected, tag: str, is_union: bool) {
+fn parse_record_body(lx: &mut Lexer, c: &mut Collected, tag: str, is_union: bool, dump: str) {
     let mut r = Record {
         tag: String::from_str(tag),
         fields: Vector::<Field>::new(),
         is_union: is_union,
-        ok: tag.len() != 0,
+        ok: true, // a nameless body is named by the typedef that follows; emission re-checks the tag
         mine: c.cur_mine,
     };
     lx.advance(); // '{'
@@ -759,7 +772,7 @@ fn parse_record_body(lx: &mut Lexer, c: &mut Collected, tag: str, is_union: bool
         let mut td = false;
         let mut bc = false;
         let mut st = false;
-        let base = parse_specs(lx, c, &mut td, &mut bc, &mut st);
+        let base = parse_specs(lx, c, &mut td, &mut bc, &mut st, dump);
         let mut any = false;
         loop {
             let mut nm = String::new();
@@ -767,7 +780,7 @@ fn parse_record_body(lx: &mut Lexer, c: &mut Collected, tag: str, is_union: bool
             let mut va = false;
             let mut ps = Vector::<Param>::new();
             let mut adim: i64 = -1;
-            let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut ps, &mut va, false, &mut adim);
+            let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut ps, &mut va, false, &mut adim, dump);
             ps.free();
             if lx.at_punct(b':') {
                 r.ok = false; // a bitfield: its width is not a field type
@@ -820,7 +833,14 @@ fn parse_record_body(lx: &mut Lexer, c: &mut Collected, tag: str, is_union: bool
 /// Declaration specifiers: the type part of a declaration, up to the first declarator. Returns the base
 /// type; `is_typedef` reports a leading `typedef`. A `struct`/`union`/`enum` body is skipped -- only its tag
 /// is kept, and the tag becomes an opaque type if the emitted signatures need it.
-fn parse_specs(lx: &mut Lexer, c: &mut Collected, is_typedef: *mut bool, base_const: *mut bool, is_static: *mut bool) CType {
+fn parse_specs(
+    lx: &mut Lexer,
+    c: &mut Collected,
+    is_typedef: *mut bool,
+    base_const: *mut bool,
+    is_static: *mut bool,
+    dump: str,
+) CType {
     let mut ty = ctype_new();
     let mut signed = true;
     let mut explicit_sign = false;
@@ -851,6 +871,9 @@ fn parse_specs(lx: &mut Lexer, c: &mut Collected, is_typedef: *mut bool, base_co
             // A `static inline` helper left in the header has no external symbol to call.
             if t == "static" {
                 unsafe *is_static = true;
+            }
+            if t == "extern" {
+                c.saw_extern = true;
             }
             lx.advance();
             continue;
@@ -891,9 +914,9 @@ fn parse_specs(lx: &mut Lexer, c: &mut Collected, is_typedef: *mut bool, base_co
             if lx.at_punct(b'{') {
                 defined = true;
                 if is_enum {
-                    parse_enum_body(lx, c, tag.as_str());
+                    parse_enum_body(lx, c, tag.as_str(), dump);
                 } else {
-                    parse_record_body(lx, c, tag.as_str(), is_union);
+                    parse_record_body(lx, c, tag.as_str(), is_union, dump);
                 }
             }
             if is_enum {
@@ -901,8 +924,11 @@ fn parse_specs(lx: &mut Lexer, c: &mut Collected, is_typedef: *mut bool, base_co
                 // can use; anything else is an `int` as far as a call is concerned.
                 // Named by its tag exactly when that enum is one this module emits -- including at a USE
                 // site, which carries no body and is where most of them appear.
-                let _ = defined;
-                if tag.len() != 0 && enum_emitted(c, tag.as_str()) {
+                if tag.len() == 0 && defined {
+                    c.pending_agg = c.enums.len() as i32 - 1; // the typedef below names it, if one follows
+                    c.pending_is_enum = true;
+                    ty.ok = false;
+                } else if tag.len() != 0 && enum_emitted(c, tag.as_str()) {
                     ty.base.push_string(&tag);
                 } else {
                     ty.base.push_str("i32");
@@ -910,6 +936,10 @@ fn parse_specs(lx: &mut Lexer, c: &mut Collected, is_typedef: *mut bool, base_co
             } else if tag.len() != 0 {
                 ty.base.push_string(&tag);
                 c.note_opaque(tag.as_str());
+            } else if defined {
+                c.pending_agg = c.records.len() as i32 - 1;
+                c.pending_is_enum = false;
+                ty.ok = false; // nameless until the typedef below names it
             } else {
                 ty.ok = false; // an anonymous struct has no name to refer to
             }
@@ -1008,6 +1038,7 @@ fn parse_declarator(
     variadic: *mut bool,
     decay: bool,
     arr_len: *mut i64,
+    dump: str,
 ) CType {
     let mut ty = base.clone();
     if base_const {
@@ -1072,7 +1103,7 @@ fn parse_declarator(
     if lx.at_punct(b'(') {
         let mut ps = Vector::<Param>::new();
         let mut va = false;
-        parse_params(lx, c, &mut ps, &mut va);
+        parse_params(lx, c, &mut ps, &mut va, dump);
         if fnptr {
             // Rendered here and carried as a signature: `fn(..) T` is already the pointer.
             let mut sig = String::from_str("fn(");
@@ -1140,7 +1171,7 @@ fn parse_declarator(
     return ty;
 }
 
-fn parse_params(lx: &mut Lexer, c: &mut Collected, out: &mut Vector<Param>, variadic: *mut bool) {
+fn parse_params(lx: &mut Lexer, c: &mut Collected, out: &mut Vector<Param>, variadic: *mut bool, dump: str) {
     lx.advance(); // '('
     let mut idx: i32 = 0;
     loop {
@@ -1160,13 +1191,13 @@ fn parse_params(lx: &mut Lexer, c: &mut Collected, out: &mut Vector<Param>, vari
         let mut td = false;
         let mut bc = false;
         let mut st = false;
-        let base = parse_specs(lx, c, &mut td, &mut bc, &mut st);
+        let base = parse_specs(lx, c, &mut td, &mut bc, &mut st, dump);
         let mut nm = String::new();
         let mut isfn = false;
         let mut va2 = false;
         let mut sub = Vector::<Param>::new();
         let mut adim: i64 = -1;
-        let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut sub, &mut va2, true, &mut adim);
+        let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut sub, &mut va2, true, &mut adim, dump);
         sub.free();
         // `(void)` is an empty parameter list, not a parameter.
         let void_only = nm.len() == 0 && ty.ptr == 0 && ty.fnsig.len() == 0 && ty.base.as_str() == "void";
@@ -1203,7 +1234,7 @@ fn parse_params(lx: &mut Lexer, c: &mut Collected, out: &mut Vector<Param>, vari
 
 /// Walk the whole preprocessed unit. Every typedef is recorded (the target's signatures are spelled with
 /// them, wherever they were declared); only declarations whose origin file is `want` are emitted.
-fn parse_unit(lx: &mut Lexer, c: &mut Collected, want: str, extra: &Vector<String>) {
+fn parse_unit(lx: &mut Lexer, c: &mut Collected, want: str, extra: &Vector<String>, dump: str) {
     loop {
         skip_noise(lx);
         if lx.kind == TK_EOF {
@@ -1226,17 +1257,19 @@ fn parse_unit(lx: &mut Lexer, c: &mut Collected, want: str, extra: &Vector<Strin
         // Published for parse_specs: a struct or enum BODY is parsed from inside the specifier, which is
         // where its origin has to be known -- only the target header's own records are emitted.
         c.cur_mine = mine;
+        c.pending_agg = -1;
+        c.saw_extern = false;
         let mut td = false;
         let mut bc = false;
         let mut st = false;
-        let base = parse_specs(lx, c, &mut td, &mut bc, &mut st);
+        let base = parse_specs(lx, c, &mut td, &mut bc, &mut st, dump);
         loop {
             let mut nm = String::new();
             let mut isfn = false;
             let mut va = false;
             let mut ps = Vector::<Param>::new();
             let mut adim: i64 = -1;
-            let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut ps, &mut va, true, &mut adim);
+            let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut ps, &mut va, true, &mut adim, dump);
             // A parameter this tool could not model poisons the whole signature: a binding with a wrong
             // type is worse than a missing one, so the function is dropped rather than guessed at.
             let mut keep = nm.len() != 0 && !td && !st && isfn && mine && ty.ok;
@@ -1247,6 +1280,13 @@ fn parse_unit(lx: &mut Lexer, c: &mut Collected, want: str, extra: &Vector<Strin
             }
             if nm.len() != 0 && td {
                 record_typedef(c, nm.as_str(), &ty, isfn);
+            }
+            // `extern int errno;` and friends: a global the library exports. Bound as an extern const --
+            // readable, and not claiming a mutability Super-C would then have to police across the FFI.
+            if !keep && !td && !st && !isfn && mine && ty.ok && c.saw_extern && nm.len() != 0 && adim < 0 {
+                let mut vt = String::new();
+                ty.render(&mut vt);
+                c.globals.push(ConstDef { name: String::from_str(nm.as_str()), ty: vt, value: String::new() });
             }
             if keep {
                 let mut ret = String::new();
@@ -1282,8 +1322,26 @@ fn parse_unit(lx: &mut Lexer, c: &mut Collected, want: str, extra: &Vector<Strin
 // A typedef of a pointer-to-struct or of a struct tag keeps its own NAME as an opaque type; anything else
 // resolves to the Super-C type it stands for.
 fn record_typedef(c: &mut Collected, name: str, ty: &CType, is_fn: bool) {
+    let pend = c.pending_agg;
+    let pend_enum = c.pending_is_enum;
+    c.pending_agg = -1;
     if is_fn || c.alias_of(name) >= 0 {
         return;
+    }
+    // `typedef struct { .. } Foo;` -- the body carried no tag, so the typedef IS the name. Most C
+    // libraries declare their types this way, and a nameless record was previously dropped outright.
+    if pend >= 0 && ty.ptr == 0 && ty.fnsig.len() == 0 {
+        let idx = pend as usize;
+        if pend_enum && idx < c.enums.len() && c.enums[idx].tag.len() == 0 {
+            c.enums[idx].tag.push_str(name);
+            c.aliases.push(Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true });
+            return;
+        }
+        if !pend_enum && idx < c.records.len() && c.records[idx].tag.len() == 0 {
+            c.records[idx].tag.push_str(name);
+            c.aliases.push(Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true });
+            return;
+        }
     }
     let mut sub = String::new();
     ty.render(&mut sub);
@@ -1436,6 +1494,268 @@ fn macro_int(line: str) i32 {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// C constant expressions
+// ---------------------------------------------------------------------------------------------------------
+// Enumerators and object-like macros are rarely bare literals -- `(1 << 8)`, `A | B`, `SOME_OTHER_MACRO` --
+// and dropping every one of those loses most of a library's constants (91 of them in curl.h alone). This is
+// the integer subset of C's constant expressions: enough for the shapes headers actually use, and it
+// REFUSES anything else rather than guessing, because a constant that is subtly wrong is worse than absent.
+
+struct CExpr<'a> {
+    pub lx: Lexer<'a>,
+    pub ok: bool,
+}
+
+extend CExpr<'a> as Free {
+    fn free(self: &mut CExpr<'a>) {
+        self.lx.free();
+    }
+}
+
+const CE_DEPTH: i32 = 8;
+
+// One name: an enumerator of the enum being built, a constant already collected, any enum's value, or
+// another macro -- resolved recursively, since headers define constants in terms of each other.
+fn ex_ident(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32, name: str) i64 {
+    if e != null {
+        let mut v: i64 = 0;
+        if enum_val_of(unsafe &*e, name, &mut v) {
+            return v;
+        }
+    }
+    for i in 0..c.consts.len() {
+        if c.consts[i].name.as_str() == name {
+            let lit = int_literal(c.consts[i].value.as_str());
+            if lit >= 0 {
+                return lit;
+            }
+        }
+    }
+    for i in 0..c.enums.len() {
+        let mut v: i64 = 0;
+        if enum_val_of(c.enums.at(i), name, &mut v) {
+            return v;
+        }
+    }
+    if depth < CE_DEPTH {
+        let mut raw = String::new();
+        let got = macro_value(dump, name, &mut raw);
+        if got && raw.len() != 0 {
+            let mut sub = false;
+            let v = ce_eval(raw.as_str(), c, e, dump, depth + 1, &mut sub);
+            raw.free();
+            if sub {
+                return v;
+            }
+            x.ok = false;
+            return 0;
+        }
+        raw.free();
+    }
+    x.ok = false;
+    return 0;
+}
+
+fn ex_primary(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    if x.lx.kind == TK_EOF {
+        x.ok = false;
+        return 0;
+    }
+    if x.lx.at_punct(b'(') {
+        x.lx.advance();
+        let v = ex_or(x, c, e, dump, depth);
+        if !x.lx.at_punct(b')') {
+            x.ok = false;
+            return 0;
+        }
+        x.lx.advance();
+        return v;
+    }
+    if x.lx.kind == TK_NUM {
+        let v = int_literal(x.lx.text());
+        x.lx.advance();
+        if v < 0 {
+            x.ok = false;
+            return 0;
+        }
+        return v;
+    }
+    if x.lx.kind == TK_STR && x.lx.text().byte_at(0) == b'\'' {
+        // A character constant is an integer; only the plain one-byte form is modelled.
+        let t = x.lx.text();
+        x.lx.advance();
+        if t.len() == 3 {
+            return t.byte_at(1);
+        }
+        x.ok = false;
+        return 0;
+    }
+    if x.lx.kind == TK_IDENT {
+        let nm = String::from_str(x.lx.text());
+        x.lx.advance();
+        // A cast (`(int)x`) or a call reaches here as an identifier followed by something unexpected;
+        // both are refused by the caller when the expression does not end cleanly.
+        let v = ex_ident(x, c, e, dump, depth, nm.as_str());
+        nm.free();
+        return v;
+    }
+    x.ok = false;
+    return 0;
+}
+
+fn ex_unary(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    if x.lx.at_punct(b'-') {
+        x.lx.advance();
+        return 0 - ex_unary(x, c, e, dump, depth);
+    }
+    if x.lx.at_punct(b'+') {
+        x.lx.advance();
+        return ex_unary(x, c, e, dump, depth);
+    }
+    if x.lx.at_punct(b'~') {
+        x.lx.advance();
+        return 0 - ex_unary(x, c, e, dump, depth) - 1; // ~v == -v - 1
+    }
+    if x.lx.at_punct(b'!') {
+        x.lx.advance();
+        if ex_unary(x, c, e, dump, depth) == 0 {
+            return 1;
+        }
+        return 0;
+    }
+    return ex_primary(x, c, e, dump, depth);
+}
+
+fn ex_mul(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    let mut v = ex_unary(x, c, e, dump, depth);
+    loop {
+        if x.lx.at_punct(b'*') {
+            x.lx.advance();
+            v = v * ex_unary(x, c, e, dump, depth);
+        } else if x.lx.at_punct(b'/') {
+            x.lx.advance();
+            let d = ex_unary(x, c, e, dump, depth);
+            if d == 0 {
+                x.ok = false;
+                return 0;
+            }
+            v = v / d;
+        } else if x.lx.at_punct(b'%') {
+            x.lx.advance();
+            let d = ex_unary(x, c, e, dump, depth);
+            if d == 0 {
+                x.ok = false;
+                return 0;
+            }
+            v = v % d;
+        } else {
+            return v;
+        }
+    }
+}
+
+fn ex_add(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    let mut v = ex_mul(x, c, e, dump, depth);
+    loop {
+        if x.lx.at_punct(b'+') {
+            x.lx.advance();
+            v = v + ex_mul(x, c, e, dump, depth);
+        } else if x.lx.at_punct(b'-') {
+            x.lx.advance();
+            v = v - ex_mul(x, c, e, dump, depth);
+        } else {
+            return v;
+        }
+    }
+}
+
+fn ex_shift(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    let mut v = ex_add(x, c, e, dump, depth);
+    loop {
+        // The scanner emits punctuation one byte at a time, so `<<` is two `<` in a row.
+        if x.lx.at_punct(b'<') {
+            x.lx.advance();
+            if !x.lx.at_punct(b'<') {
+                x.ok = false;
+                return 0;
+            }
+            x.lx.advance();
+            let sh = ex_add(x, c, e, dump, depth);
+            if sh < 0 || sh > 62 {
+                x.ok = false;
+                return 0;
+            }
+            v = v << sh;
+        } else if x.lx.at_punct(b'>') {
+            x.lx.advance();
+            if !x.lx.at_punct(b'>') {
+                x.ok = false;
+                return 0;
+            }
+            x.lx.advance();
+            let sh = ex_add(x, c, e, dump, depth);
+            if sh < 0 || sh > 62 {
+                x.ok = false;
+                return 0;
+            }
+            v = v >> sh;
+        } else {
+            return v;
+        }
+    }
+}
+
+fn ex_and(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    let mut v = ex_shift(x, c, e, dump, depth);
+    while x.lx.at_punct(b'&') {
+        x.lx.advance();
+        if x.lx.at_punct(b'&') {
+            x.ok = false; // `&&` is a logical operator, not a constant this models
+            return 0;
+        }
+        v = v & ex_shift(x, c, e, dump, depth);
+    }
+    return v;
+}
+
+fn ex_xor(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    let mut v = ex_and(x, c, e, dump, depth);
+    while x.lx.at_punct(b'^') {
+        x.lx.advance();
+        v = v ^ ex_and(x, c, e, dump, depth);
+    }
+    return v;
+}
+
+fn ex_or(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    let mut v = ex_xor(x, c, e, dump, depth);
+    while x.lx.at_punct(b'|') {
+        x.lx.advance();
+        if x.lx.at_punct(b'|') {
+            x.ok = false;
+            return 0;
+        }
+        v = v | ex_xor(x, c, e, dump, depth);
+    }
+    return v;
+}
+
+/// The value of a C integer constant expression, or `ok = false` when any part of it is outside this
+/// subset. `e` (may be null) is an enum under construction, whose earlier enumerators are in scope.
+fn ce_eval(text: str, c: &Collected, e: *const EnumDef, dump: str, depth: i32, ok: *mut bool) i64 {
+    unsafe *ok = false;
+    if text.len() == 0 || depth > CE_DEPTH {
+        return 0;
+    }
+    let mut x = CExpr::<'_> { lx: Lexer::new(text), ok: true };
+    let v = ex_or(&mut x, c, e, dump, depth);
+    // Trailing tokens mean the text was never a constant expression -- a cast, a call, a comma.
+    let clean = x.ok && x.lx.kind == TK_EOF;
+    unsafe *ok = clean;
+    return v;
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // object-like macros
 // ---------------------------------------------------------------------------------------------------------
 
@@ -1547,7 +1867,7 @@ fn is_float_text(v: str) bool {
 /// Turn one macro replacement into a typed Super-C constant. Only literals: an integer, a float or a
 /// string. An expression macro (`(SIZE_MAX >> 1)`, `INT32_MAX`) is left alone -- folding C expressions is
 /// the C compiler's job, and a const that is subtly different from the macro is worse than no const.
-fn macro_const(name: str, raw: str, out: &mut ConstDef) bool {
+fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef) bool {
     let v = strip_parens(raw);
     if v.len() == 0 {
         return false;
@@ -1582,10 +1902,28 @@ fn macro_const(name: str, raw: str, out: &mut ConstDef) bool {
         out.value.push_str(body.slice(0, k));
         return true;
     }
-    let iv = int_literal(body);
+    let mut iv = int_literal(body);
     if iv < 0 {
-        return false;
+        // Not a literal: `(1 << 8)`, `A | B`, or a name standing for another macro. The evaluator settles
+        // whether it is a constant at all -- and refuses when any part of it is outside C's integer subset.
+        let mut got = false;
+        let ev = ce_eval(v, c, null, dump, 0, &mut got);
+        if !got {
+            return false;
+        }
+        out.name.push_str(name);
+        out.ty.push_str(
+            if ev > 0x7FFFFFFF || ev < 0 - 0x80000000 {
+                "i64";
+            } else {
+                "i32";
+            },
+        );
+        out.value.format_into("{}", ev);
+        return true;
     }
+    let _ = iv;
+    iv = int_literal(body);
     // Unsigned only when C says so; the width is the smallest that holds the value, as a literal would be.
     let mut uns = false;
     for i in 0..body.len() {
@@ -1737,7 +2075,7 @@ fn collect_consts(c: &mut Collected, header: str, dump: str) {
         let mut raw = String::new();
         if macro_value(dump, names[i].as_str(), &mut raw) {
             let mut cd = ConstDef { name: String::new(), ty: String::new(), value: String::new() };
-            let ok = macro_const(names[i].as_str(), raw.as_str(), &mut cd) && !name_taken(
+            let ok = macro_const(names[i].as_str(), raw.as_str(), c, dump, &mut cd) && !name_taken(
                 c,
                 c.consts.len(),
                 names[i].as_str(),
@@ -1774,7 +2112,7 @@ fn emit(c: &Collected, header: str, spelling: str, link: str, out: &mut String) 
     let mut first = true;
     for i in 0..c.opaques.len() {
         let nm = c.opaques[i].as_str();
-        if !opaque_used(c, nm) || record_emitted(c, nm) {
+        if !opaque_used(c, nm) || record_emitted(c, nm) || enum_emitted(c, nm) {
             continue;
         }
         // A tag C never typedef'd is `struct x` there, not `x`.
@@ -1808,7 +2146,7 @@ fn emit(c: &Collected, header: str, spelling: str, link: str, out: &mut String) 
     // spelled `struct x` there, which is what the pinned symbol carries.
     for i in 0..c.records.len() {
         let r = c.records.at(i);
-        if !r.mine || !r.ok {
+        if !r.mine || !r.ok || r.tag.len() == 0 {
             continue;
         }
         let kw = if r.is_union {
@@ -1826,6 +2164,12 @@ fn emit(c: &Collected, header: str, spelling: str, link: str, out: &mut String) 
             out.format_into("        pub {}: {},\n", r.fields[j].name.as_str(), r.fields[j].ty.as_str());
         }
         out.push_str("    }\n\n");
+    }
+    for i in 0..c.globals.len() {
+        out.format_into("    pub const {}: {};\n", c.globals[i].name.as_str(), c.globals[i].ty.as_str());
+    }
+    if c.globals.len() != 0 {
+        out.push_byte(b'\n');
     }
     for i in 0..c.fns.len() {
         let f = c.fns.at(i);
@@ -1884,8 +2228,12 @@ fn run_one(
         records: Vector::<Record>::new(),
         enums: Vector::<EnumDef>::new(),
         consts: Vector::<ConstDef>::new(),
+        globals: Vector::<ConstDef>::new(),
         widths: Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8, ptr_b: 8 },
         cur_mine: false,
+        pending_agg: -1,
+        pending_is_enum: false,
+        saw_extern: false,
         skipped: 0,
     };
 
@@ -1916,7 +2264,7 @@ fn run_one(
         switch loader::read_file(ipath.as_str()) {
             Some(text) => {
                 let mut lx = Lexer::new(text.as_str());
-                parse_unit(&mut lx, &mut c, hdr.as_str(), froms);
+                parse_unit(&mut lx, &mut c, hdr.as_str(), froms, mdump.as_str());
                 collect_consts(&mut c, hdr.as_str(), mdump.as_str());
                 let mut out = String::new();
                 emit(&c, hdr.as_str(), spelling.as_str(), link, &mut out);
