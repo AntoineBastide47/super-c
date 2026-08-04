@@ -203,6 +203,10 @@ pub struct AggregateData {
     pub is_public: bool,
     pub is_union: bool,
     pub is_tuple: bool,
+    /// Declared inside an `extern "C" "hdr.h"` block: the HEADER defines this type, and the members here
+    /// only state its layout. Codegen emits no definition for it and spells it the way C does, so the
+    /// binding's type IS the C one; the layout static_assert then checks that claim against the header.
+    pub is_extern: bool,
 }
 pub struct FieldData {
     pub name: NodeId,

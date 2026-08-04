@@ -971,6 +971,7 @@ extend Parser {
                             is_public: false,
                             is_union: false,
                             is_tuple: false,
+                            is_extern: false,
                         },
                     },
                 },
@@ -992,6 +993,7 @@ extend Parser {
                             is_public: false,
                             is_union: false,
                             is_tuple: true,
+                            is_extern: false,
                         },
                     },
                 },
@@ -1012,6 +1014,7 @@ extend Parser {
                         is_public: false,
                         is_union: false,
                         is_tuple: false,
+                        is_extern: false,
                     },
                 },
             },
@@ -1075,6 +1078,7 @@ extend Parser {
                         is_public: false,
                         is_union: false,
                         is_tuple: false,
+                        is_extern: false,
                     },
                 },
             },
@@ -1455,9 +1459,41 @@ extend Parser {
                 self.add_attrs_to(&mut attrs, f);
                 self.expect(TokenType::Semicolon, "';'");
                 self.ast.push(f);
+            } else if self.check(TokenType::Enum) {
+                // Same contract as an extern struct: C declares the enum, this only names its constants.
+                let ed = self.parse_enum();
+                if ed != NODE_NONE {
+                    self.ast.at(ed).as_data.aggregate.is_public = is_public;
+                    self.ast.at(ed).as_data.aggregate.is_extern = true;
+                    self.add_attrs_to(&mut attrs, ed);
+                    self.ast.push(ed);
+                }
+            } else if self.check(TokenType::Struct) || self.check(TokenType::Union) {
+                // The HEADER defines this type; the members only state its layout so field access and
+                // sizeof work. Codegen emits no definition and spells it the way C does, which is what
+                // makes the binding's type the same type the bound functions take.
+                let is_union = self.check(TokenType::Union);
+                let sd = self.parse_struct(); // one shape; `union` only sets the flag below
+                if sd != NODE_NONE {
+                    self.ast.at(sd).as_data.aggregate.is_union = is_union;
+                    if self.ast.at_const(sd).as_data.aggregate.generics.len != 0 {
+                        let sp = self.node_span(sd);
+                        self.errors.emit(
+                            sp.start,
+                            sp.end - sp.start,
+                            format("an extern type cannot be generic: C has no such declaration to match"),
+                        );
+                    }
+                    self.ast.at(sd).as_data.aggregate.is_public = is_public;
+                    self.ast.at(sd).as_data.aggregate.is_extern = true;
+                    self.add_attrs_to(&mut attrs, sd);
+                    self.ast.push(sd);
+                }
             } else if self.check(TokenType::Type) {
                 let ta = self.parse_type_alias(true);
                 self.ast.at(ta).as_data.type_alias.is_public = is_public;
+                // Attached, not dropped: `@c.import` on an opaque handle is what pins its C spelling.
+                self.add_attrs_to(&mut attrs, ta);
                 self.ast.push(ta);
             } else if self.check(TokenType::Const) {
                 let cstart = self.raw_peek().start();
@@ -1493,7 +1529,7 @@ extend Parser {
             } else {
                 self.error_here(
                     if is_public {
-                        "'pub' may only be applied to an extern function, type, or const";
+                        "'pub' may only be applied to an extern function, type, struct, union, enum, or const";
                     } else {
                         "expected extern item";
                     },

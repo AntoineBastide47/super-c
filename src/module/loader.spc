@@ -950,6 +950,12 @@ extend Package {
                         nn = it.as_data.const_def.name;
                         ip = it.as_data.const_def.is_public;
                         it_type = false;
+                    } else if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
+                        // An extern struct/union/enum names a type across module boundaries exactly like a
+                        // top-level one; only its DEFINITION comes from the C header.
+                        nn = it.as_data.aggregate.name;
+                        ip = it.as_data.aggregate.is_public;
+                        it_type = true;
                     } else {
                         ok = false;
                     }
@@ -1103,6 +1109,12 @@ extend Package {
                         nn = it.as_data.const_def.name;
                         ip = it.as_data.const_def.is_public;
                         it_type = false;
+                    } else if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
+                        // An extern struct/union/enum names a type across module boundaries exactly like a
+                        // top-level one; only its DEFINITION comes from the C header.
+                        nn = it.as_data.aggregate.name;
+                        ip = it.as_data.aggregate.is_public;
+                        it_type = true;
                     } else {
                         ok = false;
                     }

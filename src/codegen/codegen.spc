@@ -1305,6 +1305,20 @@ extend Codegen {
         let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
             let iid = unsafe a.list(items)[i as usize];
+            if a.at_const(iid).kind == NodeKind::NODE_EXTERN_BLOCK {
+                let inner = a.at_const(iid).as_data.extern_block.items;
+                for k in 0..inner.len {
+                    let eid = unsafe a.list(inner)[k as usize];
+                    if a.at_const(eid).kind != NodeKind::NODE_ENUM {
+                        continue;
+                    }
+                    let ems = a.at_const(eid).as_data.aggregate.members;
+                    for j in 0..ems.len {
+                        self.enum_of_variant.insert(unsafe a.list(ems)[j as usize], eid);
+                    }
+                }
+                continue;
+            }
             if a.at_const(iid).kind == NodeKind::NODE_ENUM {
                 let ms = a.at_const(iid).as_data.aggregate.members;
                 for j in 0..ms.len {
@@ -2514,16 +2528,24 @@ extend Codegen {
                 let dn = *self.mod_ast(d.module).at_const(d.node);
                 if dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM {
                     let mut nm = Buf256 {};
+                    if self.cg_extern_agg_name(d.module, d.node, &mut nm[0], 160) {
+                        buf_join3(&mut self.trunc, out, cap, &nm[0], sep(decl), decl);
+                        return;
+                    }
                     self.render_qualified(d.module, dn.as_data.aggregate.name, &mut nm[0], 160);
                     buf_join3(&mut self.trunc, out, cap, &nm[0], sep(decl), decl);
                 } else if dn.kind == NodeKind::NODE_TYPE_ALIAS && dn.as_data.type_alias.ty == NODE_NONE {
                     let mut nm = Buf256 {};
-                    render_ident_src(
-                        self.mod_src(d.module),
-                        self.mod_ast(d.module).at_const(dn.as_data.type_alias.name).as_data.name.text,
-                        &mut nm[0],
-                        160,
-                    );
+                    // `@c.import` pins the C spelling of an opaque handle (see the TYPE_OPAQUE branch of
+                    // render_type_id): a header that declares only the TAG needs `struct x`.
+                    if !self.cg_symbol_override(d.module, d.node, &mut nm[0], 160) {
+                        render_ident_src(
+                            self.mod_src(d.module),
+                            self.mod_ast(d.module).at_const(dn.as_data.type_alias.name).as_data.name.text,
+                            &mut nm[0],
+                            160,
+                        );
+                    }
                     buf_join3(&mut self.trunc, out, cap, &nm[0], sep(decl), decl);
                 } else if dn.kind == NodeKind::NODE_TYPE_ALIAS && dn.as_data.type_alias.generics.len == 0 && self.cg_alias_extended(
                     d.module,
@@ -2760,12 +2782,14 @@ extend Codegen {
             buf_join3(&mut self.trunc, out, cap, "void".ptr() as *const char, sep(decl), decl);
         } else if ty.kind == TypeKind::TYPE_STRUCT || ty.kind == TypeKind::TYPE_ENUM {
             let mut nm = Buf256 {};
-            self.render_qualified(
-                ty.module,
-                self.mod_ast(ty.module).at_const(ty.as_data.decl).as_data.aggregate.name,
-                &mut nm[0],
-                160,
-            );
+            if !self.cg_extern_agg_name(ty.module, ty.as_data.decl, &mut nm[0], 160) {
+                self.render_qualified(
+                    ty.module,
+                    self.mod_ast(ty.module).at_const(ty.as_data.decl).as_data.aggregate.name,
+                    &mut nm[0],
+                    160,
+                );
+            }
             buf_join3(&mut self.trunc, out, cap, &nm[0], sep(decl), decl);
         } else if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE {
             let el = *self.type_at(ty.as_data.elem);
@@ -2846,12 +2870,17 @@ extend Codegen {
         } else if ty.kind == TypeKind::TYPE_OPAQUE {
             let mut nm = Buf256 {};
             let dn = *self.mod_ast(ty.module).at_const(ty.as_data.decl);
-            render_ident_src(
-                self.mod_src(ty.module),
-                self.mod_ast(ty.module).at_const(dn.as_data.type_alias.name).as_data.name.text,
-                &mut nm[0],
-                160,
-            );
+            // An opaque handle is spelled as C spells it. Usually that is a typedef name, so the source
+            // name is right; a header that only declares the TAG needs `struct x` written out, which is
+            // what `@c.import` pins -- without it the emitted C names a type that does not exist.
+            if !self.cg_symbol_override(ty.module, ty.as_data.decl, &mut nm[0], 160) {
+                render_ident_src(
+                    self.mod_src(ty.module),
+                    self.mod_ast(ty.module).at_const(dn.as_data.type_alias.name).as_data.name.text,
+                    &mut nm[0],
+                    160,
+                );
+            }
             buf_join3(&mut self.trunc, out, cap, &nm[0], sep(decl), decl);
         } else if ty.kind == TypeKind::TYPE_FUNCTION {
             if self.cg_fn_is_capturing(&ty) {
@@ -2968,6 +2997,23 @@ extend Codegen {
         let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
             let iid = unsafe a.list(items)[i as usize];
+            // An extern enum sits one level down, inside its `extern "C"` block.
+            if a.at_const(iid).kind == NodeKind::NODE_EXTERN_BLOCK {
+                let inner = a.at_const(iid).as_data.extern_block.items;
+                for k in 0..inner.len {
+                    let eid = unsafe a.list(inner)[k as usize];
+                    if a.at_const(eid).kind != NodeKind::NODE_ENUM {
+                        continue;
+                    }
+                    let ems = a.at_const(eid).as_data.aggregate.members;
+                    for j in 0..ems.len {
+                        if unsafe a.list(ems)[j as usize] == variant {
+                            return eid;
+                        }
+                    }
+                }
+                continue;
+            }
             if a.at_const(iid).kind == NodeKind::NODE_ENUM {
                 let ms = a.at_const(iid).as_data.aggregate.members;
                 for j in 0..ms.len {
@@ -2981,6 +3027,14 @@ extend Codegen {
     }
     fn emit_tag_mod(self: &mut Self, m: ModuleId, enum_decl: NodeId, variant: NodeId) {
         let src = self.mod_src(m);
+        // An extern enum's constants are the HEADER's: it declares `LIB_SLOW`, so that is what the call
+        // has to name. Mangling it would reference a second, look-alike enum this module has no business
+        // defining -- which is also why emit_enum_full skips one.
+        if self.mod_ast(m).at_const(enum_decl).as_data.aggregate.is_extern {
+            let vs0 = self.name_span_in(m, self.mod_ast(m).at_const(variant).as_data.variant.name);
+            self.emit_bytes(src_at(src, vs0.start), (vs0.end - vs0.start) as usize);
+            return;
+        }
         let mut pfx = Buf64 {};
         self.render_modpfx(m, &mut pfx[0], 64);
         self.emit_cstr(&pfx[0]);
@@ -8101,6 +8155,26 @@ extend Codegen {
         }
         return null;
     }
+    /// The C spelling of an aggregate declared inside an `extern "C"` block: the header already defines
+    /// it, so its name carries no module prefix. `@c.import("struct foo")` pins the spelling where C's
+    /// differs from a bare identifier -- a tag with no typedef needs the `struct` keyword written out.
+    /// False for an ordinary aggregate, which keeps the mangled name.
+    fn cg_extern_agg_name(self: &Self, m: ModuleId, decl: NodeId, out: *mut char, cap: usize) bool {
+        let n = self.mod_ast(m).at_const(decl);
+        if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM || !n.as_data.aggregate.is_extern {
+            return false;
+        }
+        if self.cg_symbol_override(m, decl, out, cap) {
+            return true;
+        }
+        render_ident_src(
+            self.mod_src(m),
+            self.mod_ast(m).at_const(n.as_data.aggregate.name).as_data.name.text,
+            out,
+            cap,
+        );
+        return true;
+    }
     fn cg_symbol_override(self: &Self, m: ModuleId, fn2: NodeId, out: *mut char, cap: usize) bool {
         let mut a = self.cg_attr(m, fn2, AttrKind::ATTR_EXPORT);
         if a == null {
@@ -11268,6 +11342,10 @@ extend Codegen {
 
     fn type_emittable(self: &Self, declId: NodeId) bool {
         let n = self.cur_ast().at_const(declId);
+        // The header defines an extern aggregate; emitting our own would be a redefinition of it.
+        if n.as_data.aggregate.is_extern && (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) {
+            return false;
+        }
         if n.kind == NodeKind::NODE_STRUCT && n.as_data.aggregate.generics.len == 0 {
             return true;
         }
@@ -12259,6 +12337,9 @@ extend Codegen {
 
     fn emit_enum_full(self: &mut Self, enum_id: NodeId) {
         let ag = self.cur_ast().at_const(enum_id).as_data.aggregate;
+        if ag.is_extern {
+            return; // the header defines it; a copy here would be a second, unrelated enum type
+        }
         let mut nm = Buf160 {};
         self.render_qualified(self.cur_module(), ag.name, &mut nm[0], 160);
         self.buf.format_into("#ifndef SUPER_ENUM_{}\n#define SUPER_ENUM_{}\n", diag::cstr(&nm[0]), diag::cstr(&nm[0]));
@@ -14425,8 +14506,31 @@ extend Codegen {
         let mut any = false;
         let items = self.program_items();
         let ids = self.cur_ast().list(items);
+        // Extern aggregates are checked HERE and nowhere else, and they are the ones the check exists
+        // for: their layout is a CLAIM about a C header this module only includes. The assert compares
+        // the modelled size and alignment against the header's own definition, on every target.
+        let mut ext = Vector::<NodeId>::new();
         for i in 0..items.len {
             let nid = unsafe ids[i as usize];
+            if self.cur_ast().at_const(nid).kind != NodeKind::NODE_EXTERN_BLOCK {
+                continue;
+            }
+            let inner = self.cur_ast().at_const(nid).as_data.extern_block.items;
+            for j in 0..inner.len {
+                let iid = unsafe self.cur_ast().list(inner)[j as usize];
+                let ik = self.cur_ast().at_const(iid).kind;
+                if ik == NodeKind::NODE_STRUCT || ik == NodeKind::NODE_ENUM {
+                    ext.push(iid);
+                }
+            }
+        }
+        let nitems = items.len as usize;
+        for i in 0..nitems + ext.len() {
+            let nid = if i < nitems {
+                unsafe ids[i];
+            } else {
+                ext[i - nitems];
+            };
             let nk = self.cur_ast().at_const(nid).kind;
             let ng = self.cur_ast().at_const(nid).as_data.aggregate.generics.len;
             if nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM || ng != 0 {
@@ -14459,6 +14563,7 @@ extend Codegen {
             );
             any = true;
         }
+        ext.free();
         for ii in 0..unsafe self.cur_ast().instances.len() {
             let it = *self.cur_ast().instance(ii as u32);
             if it.module != self.cur_module() {

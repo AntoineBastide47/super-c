@@ -1578,6 +1578,12 @@ extend Resolver {
                                 let nm = self.ast.at_const(iid).as_data.type_alias.name;
                                 self.declare(nm, iid, Namespace::NS_TYPE);
                             },
+                            NODE_STRUCT | NODE_ENUM => {
+                                // An extern struct/union names a type the same way a top-level one does;
+                                // only its DEFINITION comes from C.
+                                let nm = self.ast.at_const(iid).as_data.aggregate.name;
+                                self.declare(nm, iid, Namespace::NS_TYPE);
+                            },
                             NODE_CONST => {
                                 let nm = self.ast.at_const(iid).as_data.const_def.name;
                                 self.declare(nm, iid, Namespace::NS_VALUE);

@@ -837,6 +837,7 @@ fn main(argv: Vector<str>) i32 {
     let mut bg_link = ""; // bindgen: --link=NAME, the library the bindings need on the link line
     let mut bg_header = ""; // bindgen: --header=SPELLING, how the emitted module #includes it
     let mut bg_incs = Vector::<String>::new(); // bindgen: -I search paths
+    let mut bg_from = Vector::<String>::new(); // bindgen: --from=, extra origin headers to accept
 
     let mode = if argc > 1 {
         subcommand(argv[1]);
@@ -1058,6 +1059,8 @@ fn main(argv: Vector<str>) i32 {
                     bg_link = arg[7..];
                 } else if arg.starts_with("--header=") {
                     bg_header = arg[9..];
+                } else if arg.starts_with("--from=") {
+                    bg_from.push(String::from_str(arg[7..]));
                 } else if arg.starts_with("-I") && arg.len() > 2 {
                     bg_incs.push(String::from_str(arg[2..]));
                 } else if arg == "-I" && i + 1 < argc {
@@ -1124,6 +1127,7 @@ OPTIONS:
     --link=NAME            bindgen: library the generated bindings link against
     --header=SPELLING      bindgen: how the generated module spells the #include
     -I <dir>               bindgen: header search path
+    --from=PART            bindgen: also take declarations from headers whose path contains PART
     --target=T             target: windows|macos|linux|ios|android|wasm
     --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
     --const-eval-steps=N   compile-time evaluation step budget
@@ -1171,8 +1175,9 @@ OPTIONS:
         return bsys::scaffold_project(file, file);
     }
     if mode == Mode::MODE_BINDGEN {
-        let rc = bindgen::run(file, out_bin, bg_link, bg_header, &bg_incs, bo.cc);
+        let rc = bindgen::run(file, out_bin, bg_link, bg_header, &bg_incs, &bg_from, bo.cc);
         bg_incs.free();
+        bg_from.free();
         return rc;
     }
     if mode == Mode::MODE_INIT {

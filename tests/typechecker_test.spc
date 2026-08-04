@@ -2703,3 +2703,21 @@ fn gated_static_assert() {
         "kept and false",
     );
 }
+
+// A struct/union/enum declared inside an `extern "C" "hdr.h"` block is the HEADER's type: the members
+// only state its layout, so field access and sizeof work while the emitted C keeps using the header's own
+// definition. That claim is checked -- the layout static_assert compares the model against the header, per
+// target -- and `@c.import` pins the C spelling for a tag the header never typedef'd.
+@test
+fn extern_aggregates() {
+    h::expect_err_msg(
+        "an extern type cannot be generic",
+        "extern \"C\" \"x.h\" {\n    pub struct S<T> { pub v: T }\n}\nfn main() i32 { return 0; }\n",
+        "an extern type cannot be generic",
+    );
+    h::expect_err_msg(
+        "the block still rejects what it never accepted",
+        "extern \"C\" \"x.h\" {\n    pub let x: i32;\n}\nfn main() i32 { return 0; }\n",
+        "may only be applied to an extern function, type, struct, union, enum, or const",
+    );
+}

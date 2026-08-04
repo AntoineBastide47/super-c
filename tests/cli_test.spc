@@ -4458,3 +4458,54 @@ fn bindgen_generates_callable_bindings() {
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
 }
+
+// The bindings a C library actually needs: its records, its enums and its constants, not just its
+// functions. A record declared inside the extern block IS the header's type -- the emitted C uses the
+// header's own definition and asserts this layout against it -- so the test passes a struct BY POINTER
+// and BY VALUE, reads an enumerator back through C, and compares a generated const.
+@test
+fn bindgen_generates_records_enums_and_consts() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.h",
+        "#ifndef LIB_H\n#define LIB_H\n#include <stddef.h>\n#define LIB_VERSION 7\n#define LIB_NAME \"lib\"\n#define LIB_SCALE 0.5\n#define LIB_EXPR (LIB_VERSION + 1)\nenum lib_mode { LIB_FAST, LIB_SLOW = 10, LIB_LAST };\nenum { LIB_FLAG_A = 1, LIB_FLAG_B = 2 };\ntypedef struct lib_pt { int x; int y; } lib_pt;\nstruct lib_cfg { const char *name; size_t len; lib_pt origin; char tag[8]; enum lib_mode mode; };\nstruct lib_bits { unsigned a : 3; };\nint lib_sum(const struct lib_cfg *c);\nlib_pt lib_origin(const struct lib_cfg *c);\nint lib_mode_of(enum lib_mode m);\n#endif\n",
+    );
+    p.mkfile(
+        "lib.c",
+        "#include \"lib.h\"\n#include <string.h>\nint lib_sum(const struct lib_cfg *c) { return (int)c->len + c->origin.x + c->origin.y + (int)c->mode + c->tag[0]; }\nlib_pt lib_origin(const struct lib_cfg *c) { return c->origin; }\nint lib_mode_of(enum lib_mode m) { return (int)m; }\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
+    assert_eq(p.run_raw(args.as_str()).exit, 0);
+
+    let mut path = String::new();
+    path.format_into("{}/lib.spc", root);
+    let mut spc = String::new();
+    switch loader::read_file(path.as_str()) {
+        Some(t) => {
+            spc.push_string(&t);
+        },
+        None => {},
+    };
+    assert(spc.as_str().contains("pub const LIB_VERSION: i32 = 7;"));
+    assert(spc.as_str().contains("pub const LIB_NAME: str<'static> = \"lib\";"));
+    assert(spc.as_str().contains("pub const LIB_SCALE: f64 = 0.5;"));
+    assert(spc.as_str().contains("pub const LIB_FLAG_B: i32 = 2;")); // an anonymous enum is a const block
+    assert(!spc.as_str().contains("LIB_EXPR")); // an expression macro is not a literal
+    assert(spc.as_str().contains("LIB_SLOW = 10"));
+    assert(spc.as_str().contains("LIB_LAST = 11")); // C's auto-increment continues from the explicit value
+    assert(spc.as_str().contains("@c.import(\"struct lib_cfg\")")); // a tag C never typedef'd
+    assert(spc.as_str().contains("pub tag: [char; 8]")); // an array field keeps its extent
+    assert(!spc.as_str().contains("lib_bits")); // a bitfield has no field-list form
+
+    p.mkfile(
+        "main.spc",
+        "import lib;\n\nfn main() i32 {\n    let mut cfg = lib::lib_cfg {\n        name: \"c\".ptr() as *const char,\n        len: 5,\n        origin: lib::lib_pt { x: 2, y: 3 },\n        tag: [0 as char; 8],\n        mode: lib::lib_mode::LIB_SLOW,\n    };\n    cfg.tag[0] = 'A' as char;\n    let n = unsafe lib::lib_sum(&cfg);\n    let o = unsafe lib::lib_origin(&cfg);\n    let m = unsafe lib::lib_mode_of(lib::lib_mode::LIB_LAST);\n    if n == 85 && o.x == 2 && o.y == 3 && m == 11 && lib::LIB_VERSION == 7 { return 0; }\n    return 1;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}
