@@ -447,3 +447,32 @@ fn sso_budget_follows_pointer_width() {
         0,
     );
 }
+
+// A const-generic parameter in an ARRAY LENGTH position, inferred from the argument. The lowered parameter
+// type cannot carry the binding (`[T; N]` interns with length 0 while N is unbound), so it is read from the
+// parameter's type node -- and from the argument literal's own element count, since that literal is typed
+// against this very parameter and would otherwise also be length 0. Only `f::<3>(..)` used to work; the
+// inferred call emitted `f__v` with a bare `N` left in the C.
+@test
+fn const_generic_array_length_inferred() {
+    h::expect_exit(
+        "inferred from an array literal",
+        "fn width<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 { return width([1, 2, 3]) as i32 - 3; }\n",
+        0,
+    );
+    h::expect_exit(
+        "inferred from a typed local",
+        "fn width<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 {\n    let a: [i32; 2] = [1, 2];\n    return width(a) as i32 - 2;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "two lengths make two instances",
+        "fn width<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 { return (width([1]) + width([1, 2, 3, 4])) as i32 - 5; }\n",
+        0,
+    );
+    h::expect_exit(
+        "an explicit argument still wins",
+        "fn width<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 { return width::<3>([1, 2, 3]) as i32 - 3; }\n",
+        0,
+    );
+}

@@ -65,6 +65,11 @@ pub struct Package {
     /// every module has typechecked, so a method kept alive only by pruned callers is pruned too.
     pub method_edges: Vector<u64>,
     pub edge_seen: Set<u64>,
+    /// Private, non-generic functions referenced from a GENERIC body of their own module, as
+    /// (module << 32 | node). That generic may be monomorphized into ANOTHER TU, which cannot reach a
+    /// `static` symbol -- so its owner emits it with external linkage and declares it in its header.
+    /// Filled once, serially, before codegen forks: every worker must answer this the same way.
+    pub extern_privates: Set<u64>,
     /// The compile-time evaluator (a *mut consteval::ConstEval, kept opaque here to avoid a type cycle);
     /// owned by the driver, created after load, set before type-checking. Null in library/test use.
     pub ceval: *mut void,
@@ -476,6 +481,7 @@ extend Package {
             method_used: Vector::<Vector<bool>>::new(),
             method_edges: Vector::<u64>::new(),
             edge_seen: Set::<u64>::new(),
+            extern_privates: Set::<u64>::new(),
             ceval: null,
             override_asts: Vector::<usize>::new(),
             mod_refs: Vector::<u64>::new(),
@@ -1331,6 +1337,7 @@ extend Package as Free {
         self.method_used.free();
         self.method_edges.free();
         self.edge_seen.free();
+        self.extern_privates.free();
         self.mod_refs.free();
         self.lk_index.free();
         self.lk_built.free();

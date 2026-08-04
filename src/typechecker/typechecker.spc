@@ -1611,6 +1611,68 @@ extend TypeChecker {
         return ty;
     }
 
+    // A const-generic parameter used as an ARRAY LENGTH (`fn f<const N: usize>(a: [T; N])`). The lowered
+    // parameter type cannot carry the binding -- `[T; N]` interns with a length of 0 while N is unbound --
+    // so it is read from the parameter's type NODE against the argument's concrete array type. Without it
+    // the call inferred nothing: the instance emitted as `f__v` with a bare `N` left in the C, and only an
+    // explicit `f::<3>(..)` worked.
+    fn infer_const_len(
+        self: &mut Self,
+        m: ModuleId,
+        tn: NodeId,
+        arg_ty: TypeId,
+        arg_node: NodeId,
+        params: *const DefId,
+        bound: *mut TypeId,
+        n: i32,
+        depth: u32,
+    ) {
+        if tn == NODE_NONE || arg_ty == TYPE_NONE || depth > 8 {
+            return;
+        }
+        let a = self.mod_ast(m);
+        let nk = a.at_const(tn).kind;
+        let at = *self.type_at(arg_ty);
+        if nk == NodeKind::NODE_POINTER_TYPE || nk == NodeKind::NODE_REFERENCE_TYPE {
+            if at.kind == TypeKind::TYPE_POINTER || at.kind == TypeKind::TYPE_REFERENCE {
+                self.infer_const_len(
+                    m,
+                    a.at_const(tn).as_data.indirect_type.ty,
+                    at.as_data.elem,
+                    NODE_NONE,
+                    params,
+                    bound,
+                    n,
+                    depth + 1,
+                );
+            }
+            return;
+        }
+        if nk != NodeKind::NODE_ARRAY_TYPE || at.kind != TypeKind::TYPE_ARRAY {
+            return;
+        }
+        let ar = a.at_const(tn).as_data.array_type;
+        if ar.length != NODE_NONE && a.at_const(ar.length).kind == NodeKind::NODE_IDENTIFIER {
+            // An array LITERAL argument is typed against the expected type, which is this very parameter --
+            // so while N is unbound the literal types as length 0 and has to be counted directly.
+            let mut alen = at.as_data.arr.len;
+            if alen == 0 && arg_node != NODE_NONE && self.cur_ast().at_const(arg_node).kind == NodeKind::NODE_ARRAY_LITERAL {
+                let al = self.cur_ast().at_const(arg_node).as_data.array_literal;
+                if !al.repeat {
+                    alen = al.elements.len;
+                }
+            }
+            let d = a.resolution_def(ar.length);
+            for i in 0..n {
+                if unsafe params[i as usize].module == d.module && unsafe params[i as usize].node == d.node && unsafe bound[i as usize] == TYPE_NONE {
+                    unsafe bound[i as usize] = self.cur_ast().const_value(alen);
+                    break;
+                }
+            }
+        }
+        self.infer_const_len(m, ar.element, at.as_data.arr.elem, NODE_NONE, params, bound, n, depth + 1);
+    }
+
     fn unify_infer(self: &mut Self, param_ty: TypeId, arg_ty: TypeId, params: *const DefId, bound: *mut TypeId, n: i32) {
         if param_ty == TYPE_NONE || arg_ty == TYPE_NONE {
             return;
@@ -1988,6 +2050,15 @@ extend TypeChecker {
         // `[]` literal types with, which is exactly the type the literal must match.
         if lv.kind == ce::CONST_INT && lv.as_data.i >= 0 && lv.as_data.i <= 0xFFFFFFFFi64 {
             return lv.as_data.i as u32;
+        }
+        // A length that belongs to ANOTHER module is that module's to diagnose, in its own source: this
+        // one is only lowering the foreign type to learn its layout, and the module has not been
+        // typechecked yet, so a const-valued length (`[u8; CAP]`, `CAP` folding a `sizeof`) has no value
+        // to fold TO yet and fails here through no fault of its own. Reporting it against the current
+        // module also rendered the foreign span against the wrong source. Every module is typechecked, so
+        // a genuinely non-constant length is still reported -- once, where it is written.
+        if m != self.cur_module() {
+            return 0;
         }
         // diagnose once per node; unsubstituted generic contexts stay silent (re-lowered at instantiation)
         let key = m as u64 << 32 | lenNode as u64;
@@ -7546,13 +7617,20 @@ extend TypeChecker {
             if nexplicit < g && args.len == params.len - skip {
                 for i in 0..args.len {
                     let pid = unsafe fa.list(params)[(i + skip) as usize];
-                    self.unify_infer(
-                        self.decl_type_in(fmod, pid),
-                        a.type_of(unsafe a.list(args)[i as usize]),
-                        &gparams[0],
-                        &mut bound[0],
-                        g,
-                    );
+                    let aty = a.type_of(unsafe a.list(args)[i as usize]);
+                    self.unify_infer(self.decl_type_in(fmod, pid), aty, &gparams[0], &mut bound[0], g);
+                    if fa.at_const(pid).kind == NodeKind::NODE_PARAMETER {
+                        self.infer_const_len(
+                            fmod,
+                            fa.at_const(pid).as_data.parameter.ty,
+                            aty,
+                            unsafe a.list(args)[i as usize],
+                            &gparams[0],
+                            &mut bound[0],
+                            g,
+                            0,
+                        );
+                    }
                 }
                 for k in 0..g {
                     if bound[k as usize] != TYPE_NONE && self.type_at(bound[k as usize]).kind == TypeKind::TYPE_FUNCTION {

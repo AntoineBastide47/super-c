@@ -4365,3 +4365,44 @@ fn explicit_std_module_import() {
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
 }
+
+// A generic body is emitted in whichever TU instantiates it, so everything it names has to be reachable
+// from there. Its module's PRIVATE items are not: a const is `static` in its own TU (folded at the use
+// site now) and so is a plain function (given external linkage and a header prototype now). A `str` value
+// it passes -- `panic("..")` -- needs that type's LAYOUT, which this TU's header only forward-declares
+// unless the include set follows the owner's.
+@test
+fn generic_body_reaches_its_own_module() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.spc",
+        "fn helper(x: i32) i32 {\n    return x + 1;\n}\n\nconst BUMP: i32 = 2;\n\npub fn pick<T>(v: T, n: i32, take: bool) i32 {\n    if !take {\n        panic(\"nope\");\n    }\n    return helper(n) + BUMP;\n}\n",
+    );
+    p.mkfile("main.spc", "import lib as lib;\n\nfn main() i32 {\n    return lib::pick(0, 1, true) - 4;\n}\n");
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}
+
+// A const-sized array in an imported module: lowering that type to learn its layout happens while the
+// IMPORTING module is checked, before the owner is, so a length that names a const has nothing to fold to
+// yet. That is not the program's fault, and the diagnostic belonged to the owner's file anyway.
+@test
+fn imported_const_sized_array() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.spc",
+        "pub struct Head {\n    pub p: *mut u8,\n    pub n: usize,\n}\n\nconst CAP: usize = sizeof(Head) - 1;\n\npub struct Small {\n    pub d: [u8; CAP],\n    pub n: u8,\n}\n\npub union Repr {\n    pub big: Head,\n    pub small: Small,\n}\n\npub struct Val {\n    pub r: Repr,\n}\n\nextend Val {\n    pub const fn make(k: u8) Val {\n        return Val { r: Repr { small: Small { d: [0; CAP], n: k } } };\n    }\n    pub const fn get(self: &Val) u8 {\n        return self.r.small.n;\n    }\n}\n",
+    );
+    p.mkfile(
+        "main.spc",
+        "import lib as lib;\n\nconst V: lib::Val = lib::Val::make(7);\n\nfn main() i32 {\n    return V.get() as i32 - 7 + (sizeof(lib::Val) as i32) - (sizeof(usize) as i32) * 2;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}

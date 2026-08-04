@@ -11946,7 +11946,10 @@ extend Codegen {
         let is_static = if name_override != null {
             spec_static;
         } else {
-            self.multifile && !extern_q && !is_main && !exported && !f.is_public;
+            self.multifile && !extern_q && !is_main && !exported && !f.is_public && !self.cg_fn_extern_private(
+                self.cur_module(),
+                fn_id,
+            );
         };
         let mut ps = Buf1024 {};
         self.render_params(f.params, &mut ps[0], 1024);
@@ -15171,6 +15174,35 @@ extend Codegen {
             }
         }
     }
+    // Mark every module whose aggregate/function-type LAYOUT module `m`'s type pool names, so a TU that
+    // emits code written in `m` includes the same headers `m` itself needs.
+    fn mark_pool_wants(self: &mut Self, m: ModuleId, want: *mut bool, nmod: usize) {
+        let cur = self.cur_module();
+        let a = self.mod_ast(m);
+        for ti in 0..unsafe a.type_pool.len() {
+            let t = *a.type_at(ti as TypeId);
+            if t.kind != TypeKind::TYPE_STRUCT && t.kind != TypeKind::TYPE_ENUM && t.kind != TypeKind::TYPE_FUNCTION || t.module == cur || t.module as usize >= nmod {
+                continue;
+            }
+            if self.package.builtin_of_decl(t.module, t.as_data.decl) >= 0 {
+                continue;
+            }
+            if t.kind == TypeKind::TYPE_FUNCTION && self.cg_decl_is_interface_member(t.module, t.as_data.decl) {
+                continue;
+            }
+            unsafe want[t.module as usize] = true;
+        }
+    }
+    /// A private, non-generic function that a generic body of its own module calls (see
+    /// Package.extern_privates). Its owner drops `static` and declares it in the header, because the
+    /// generic's monomorphization lands in whatever TU instantiates it.
+    fn cg_fn_extern_private(self: &Self, m: ModuleId, fn_id: NodeId) bool {
+        if self.package == null || fn_id == NODE_NONE {
+            return false;
+        }
+        let key = m as u64 << 32 | fn_id as u64;
+        return unsafe self.package.extern_privates.contains(&key);
+    }
     fn emit_referenced_includes(self: &mut Self) {
         let nmod = self.pkg_count();
         let cur = self.cur_module();
@@ -15198,18 +15230,24 @@ extend Codegen {
             }
             unsafe want[d.module as usize] = true;
         }
-        for ti in 0..unsafe self.cur_ast().type_pool.len() {
-            let t = *self.cur_ast().type_at(ti as TypeId);
-            if t.kind != TypeKind::TYPE_STRUCT && t.kind != TypeKind::TYPE_ENUM && t.kind != TypeKind::TYPE_FUNCTION || t.module == cur || t.module as usize >= nmod {
-                continue;
+        self.mark_pool_wants(cur, want, nmod);
+        // A body emitted here but WRITTEN elsewhere -- a monomorphized generic, or the methods of an
+        // instance re-homed into this TU -- uses the types its own module uses, not the ones this module
+        // happens to mention. `panic("..")` inside a generic in another module put a `str` VALUE in this
+        // TU while nothing local named `str`, and C rejected the incomplete type: this module's own header
+        // only ever forward-declares a foreign one. The owner's pool is a safe over-approximation of what
+        // those bodies reach, and it is exactly what the owner's own TU already includes.
+        for i in 0..self.ninsts {
+            let om = unsafe self.insts[i as usize].func.module;
+            if om != cur && om as usize < nmod {
+                self.mark_pool_wants(om, want, nmod);
             }
-            if self.package.builtin_of_decl(t.module, t.as_data.decl) >= 0 {
-                continue;
+        }
+        for ii in 0..unsafe self.cur_ast().instances.len() {
+            let it = *self.cur_ast().instance(ii as u32);
+            if it.module != cur && it.module as usize < nmod && self.inst_rehomed_here(&it) {
+                self.mark_pool_wants(it.module, want, nmod);
             }
-            if t.kind == TypeKind::TYPE_FUNCTION && self.cg_decl_is_interface_member(t.module, t.as_data.decl) {
-                continue;
-            }
-            unsafe want[t.module as usize] = true;
         }
         let scanned = (unsafe stdlib::calloc(
             if nmod != 0 {
@@ -15979,7 +16017,9 @@ extend Codegen {
                 ) {
                     continue;
                 }
-                if want_fn(which, ff.is_public) {
+                // Externally-linked privates are declared with the public ones: that header is how the
+                // TU holding the monomorphized caller reaches them.
+                if want_fn(which, ff.is_public || self.cg_fn_extern_private(self.cur_module(), nid)) {
                     self.emit_function(nid, DefId { module: 0, node: NODE_NONE }, false, false, null, false);
                 }
             } else if nk == NodeKind::NODE_EXTEND {

@@ -1271,6 +1271,73 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
     }
 }
 
+/// Fill `Package.extern_privates`: private, non-generic top-level functions referenced from inside a
+/// GENERIC item of their own module. Full monomorphization emits that generic's body in whichever TU
+/// instantiates it, and a `static` symbol is unreachable from there -- the C compiler reports the call as
+/// undeclared. Their owner emits them with external linkage and a header prototype instead.
+///
+/// Containment is by SOURCE SPAN, the same way the unused-item lint maps a reference to its enclosing
+/// entry: a generic item's span covers its whole body, and no walker over every node kind is needed.
+/// Runs serially, between instance propagation and codegen, because the codegen workers are FORKED --
+/// a set built inside one of them would not exist in the others.
+fn mark_extern_privates(p: &mut loader::Package) {
+    let nm = p.modules.len();
+    for m in 0..nm {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = mod_ast_c(p, m as ModuleId);
+        let items = unsafe a.at_const(a.root).as_data.program.items;
+        if unsafe a.at_const(a.root).kind != NodeKind::NODE_PROGRAM {
+            continue;
+        }
+        let ids = a.list(items);
+        let mut gstart = Vector::<u32>::new();
+        let mut gend = Vector::<u32>::new();
+        for i in 0..items.len {
+            let nid = unsafe ids[i as usize];
+            let n = a.at_const(nid);
+            let generic = n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.generics.len != 0 || n.kind == NodeKind::NODE_EXTEND && n.as_data.extend_def.generics.len != 0;
+            if generic {
+                gstart.push(n.span.start);
+                gend.push(n.span.end);
+            } else if n.kind == NodeKind::NODE_EXTEND {
+                // A generic METHOD of a non-generic extend is monomorphized the same way.
+                let mids = a.list(n.as_data.extend_def.items);
+                for j in 0..n.as_data.extend_def.items.len {
+                    let mid = unsafe mids[j as usize];
+                    let mn = a.at_const(mid);
+                    if mn.kind == NodeKind::NODE_FUNCTION && mn.as_data.function.generics.len != 0 {
+                        gstart.push(mn.span.start);
+                        gend.push(mn.span.end);
+                    }
+                }
+            }
+        }
+        if gstart.len() != 0 {
+            for r in 0..a.resolutions_len() {
+                let d = a.resolution_def(r as NodeId);
+                if d.node == NODE_NONE || d.module != m as ModuleId {
+                    continue;
+                }
+                let dn = a.at_const(d.node);
+                if dn.kind != NodeKind::NODE_FUNCTION || dn.as_data.function.is_public || dn.as_data.function.is_extern || dn.as_data.function.generics.len != 0 {
+                    continue;
+                }
+                let sp = a.at_const(r as NodeId).span;
+                for k in 0..gstart.len() {
+                    if sp.start >= gstart[k] && sp.start < gend[k] {
+                        p.extern_privates.insert(m as u64 << 32 | d.node as u64);
+                        break;
+                    }
+                }
+            }
+        }
+        gstart.free();
+        gend.free();
+    }
+}
+
 fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
@@ -1621,6 +1688,7 @@ pub fn run_package(
         return 1;
     }
     loader::package_propagate_instances(p);
+    mark_extern_privates(p);
 
     let testing = topts != null && unsafe topts.enabled;
     let mut plan = TestPlan::new(n);
