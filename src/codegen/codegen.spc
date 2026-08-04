@@ -1779,11 +1779,18 @@ extend Codegen {
         if self.cur_ast().at_const(id).kind != NodeKind::NODE_IDENTIFIER {
             return false;
         }
-        let d = self.cur_ast().resolution(id);
-        if d == NODE_NONE || self.cur_ast().at_const(d).kind != NodeKind::NODE_GENERIC_PARAM {
+        // resolution_def, not resolution: a generic param is always declared in the module that mentions
+        // it, but this runs on EVERY identifier in a monomorphized body, and `resolution` drops the module.
+        // A reference to any foreign decl (a prelude `panic`) then indexed this Ast with that module's node
+        // id -- past the end of the node pool for any user module smaller than the prelude.
+        let d = self.cur_ast().resolution_def(id);
+        if d.node == NODE_NONE || d.module != unsafe self.cur_ast().module {
             return false;
         }
-        let s = self.subst_lookup(unsafe self.cur_ast().module, d);
+        if self.cur_ast().at_const(d.node).kind != NodeKind::NODE_GENERIC_PARAM {
+            return false;
+        }
+        let s = self.subst_lookup(unsafe self.cur_ast().module, d.node);
         if s == TYPE_NONE || self.type_at(s).kind != TypeKind::TYPE_CONST {
             return false;
         }
@@ -9483,14 +9490,16 @@ extend Codegen {
                     self.emit_ident_mod(d.module, self.mod_ast(d.module).at_const(d.node).as_data.const_def.name);
                 }
             } else if d.node != NODE_NONE && dk == NodeKind::NODE_CONST && self.decl_is_toplevel(d.module, d.node) {
-                let mut nm = Buf256 {};
-                self.render_qualified(
-                    d.module,
-                    self.mod_ast(d.module).at_const(d.node).as_data.const_def.name,
-                    &mut nm[0],
-                    160,
-                );
-                self.emit_cstr(&nm[0]);
+                if !self.cg_emit_foreign_const_value(d) {
+                    let mut nm = Buf256 {};
+                    self.render_qualified(
+                        d.module,
+                        self.mod_ast(d.module).at_const(d.node).as_data.const_def.name,
+                        &mut nm[0],
+                        160,
+                    );
+                    self.emit_cstr(&nm[0]);
+                }
             } else if d.node != NODE_NONE && dk == NodeKind::NODE_FUNCTION {
                 let mut nm = Buf256 {};
                 self.render_qualified(
@@ -10377,6 +10386,9 @@ extend Codegen {
                 return;
             }
             if dn.kind == NodeKind::NODE_CONST && (!self.mangle || self.decl_is_toplevel(d.module, d.node)) {
+                if self.cg_emit_foreign_const_value(d) {
+                    return;
+                }
                 let mut nm = Buf256 {};
                 self.render_qualified(d.module, dn.as_data.const_def.name, &mut nm[0], 160);
                 self.emit_cstr(&nm[0]);
@@ -10461,6 +10473,23 @@ extend Codegen {
 
     // Render a folded scalar as a C literal (typed suffixes, the INT64_MIN special case, %.17g
     // floats). False when the value is not a foldable scalar.
+    /// A PRIVATE top-level const is emitted `static` into the TU of the module that declares it, so its
+    /// name is out of scope anywhere else. A generic body re-homed into another TU -- a container
+    /// instantiated with an allocator from a different module -- still references the consts of the module
+    /// it was written in, and the C compiler then reports an undeclared identifier. Fold the value in
+    /// instead. A `pub` const has a real cross-TU symbol and keeps its name, so the emitted C for every
+    /// reference that already linked is unchanged. Scalars only: an aggregate const is materialized as
+    /// addressable static data. False leaves the caller to emit the name.
+    fn cg_emit_foreign_const_value(self: &mut Self, d: DefId) bool {
+        if self.home_ast == null || d.module == unsafe self.home_ast.module || self.ceval() == null {
+            return false;
+        }
+        let cd = self.mod_ast(d.module).at_const(d.node).as_data.const_def;
+        if cd.is_public || cd.value == NODE_NONE || cd.is_static_mut || cd.is_extern {
+            return false;
+        }
+        return self.emit_scalar_folded(self.ceval().eval(d.module, cd.value));
+    }
     fn emit_scalar_folded(self: &mut Self, v: ce::ConstValue) bool {
         if v.kind == ce::CONST_BOOL {
             if v.as_data.i != 0 {

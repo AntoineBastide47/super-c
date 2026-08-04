@@ -16,8 +16,6 @@ extern "C" {
     pub fn atexit(handler: fn() void) i32;
     @c.import("getenv")
     fn c_getenv(name: *const char) *const char;
-    @c.import("system")
-    fn c_system(command: *const char) i32;
 
     // Numeric parsing. `ato*` return 0 on a bad parse; `strto*` report where parsing stopped via endptr.
     pub fn atoi(s: *const char) i32;
@@ -46,6 +44,16 @@ extern "C" {
     pub fn labs(n: i64) i64;
 }
 
+// A sandboxed iOS app has no shell to reach, and the SDK says so with __API_UNAVAILABLE: naming `system`
+// there does not merely fail at run time, it fails to COMPILE -- which took down every iOS build that
+// reached this module, including every one that only wanted `malloc`. Gated off, so it is the call that is
+// missing rather than the whole module.
+@platform(!ios)
+extern "C" {
+    @c.import("system")
+    fn c_system(command: *const char) i32;
+}
+
 // --- safe wrappers ----------------------------------------------------------------------------------
 
 // The value of environment variable `name`, or `None` if unset (a fresh owned copy -- the C buffer is not
@@ -66,6 +74,7 @@ pub fn getenv(name: str) *const char {
 }
 
 // Run `command` through the shell (NUL-terminated into a temporary), returning its raw `wait`-style status.
+@platform(!ios)
 pub fn system(command: str) i32 {
     let mut c = String::from_str(command);
     return unsafe c_system(c.cstr());

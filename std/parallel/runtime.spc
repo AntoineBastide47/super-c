@@ -84,6 +84,10 @@ const SPIN_MAX: i32 = 2048; // the spinner's look-again budget before it parks -
 const SPIN_IDLE: i32 = 512;
 const LINE: usize = 128; // cache line, and so the stride between two workers -- see `Worker.pad`
 
+// Gated on the instruction set, not asserted everywhere: `pad` is sized for 8-byte pointers, and on wasm32
+// the fields add up to less than a line. Nothing is lost there -- wasm runs one thread, so no second worker
+// exists to share the line with, and the padding it does carry is only wasted bytes rather than a bug.
+@arch(x86_64 | aarch64)
 static_assert(sizeof(Worker) == LINE, "Worker must be exactly one cache line: adjust its padding");
 
 /// One worker's run deque (Chase-Lev): its owner pushes and pops the BOTTOM, thieves steal the TOP, and the

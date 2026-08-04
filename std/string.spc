@@ -3,18 +3,19 @@
 // lives in the sibling `str` prelude module.
 //
 // Representation: the SMALL STRING OPTIMIZATION. `String` is a struct of a `repr` (an untagged union of two
-// same-sized 24-byte layouts) plus the allocator it was built through:
+// same-sized layouts, 24 bytes on a 64-bit target and 12 on a 32-bit one) plus the allocator it was built
+// through:
 //   - Large { ptr, len, cap } -- a heap buffer the value owns.
-//   - Small { data: [u8; 23], len: u8 } -- up to 23 UTF-8 bytes stored INLINE, no allocation.
+//   - Small { data: [u8; SSO_CAP], len: u8 } -- that many UTF-8 bytes stored INLINE, no allocation.
 // The union's last byte is `Small.len` and (little-endian) the most-significant byte of `Large.cap`. The
-// high bit of that byte is the discriminant: set => large (so `cap` keeps its real value in the low 63
-// bits), clear => small (a small length 0..=23 always has its high bit clear). So a freshly built short
-// string lives entirely inline and the first push that crosses 23 bytes transitions it to the heap.
+// high bit of that byte is the discriminant: set => large (so `cap` keeps its real value in the remaining
+// bits), clear => small (a small length 0..=SSO_CAP always has its high bit clear). So a freshly built short
+// string lives entirely inline and the first push that crosses SSO_CAP bytes transitions it to the heap.
 //
 // The allocator `A` is a VALUE stored OUTSIDE the SSO union (`alloc: A`), so the same allocator instance
 // that made an allocation also releases it -- which a stateful arena/pool handle requires (`alloc`/`dealloc`
 // never reconstruct a fresh `A`). A zero-sized allocator (`Global`) costs no space, so a `String<Global>` is
-// still 24 bytes; a non-zero handle makes `String<A>` larger -- the correct price of a stateful allocator.
+// still exactly the union; a non-zero handle makes `String<A>` larger -- the price of a stateful allocator.
 // `new()`/`from_str()`/... use a default-constructed allocator; build a stateful one with `new_in`/
 // `with_capacity_in`/`from_str_in` (the convenience constructors require `A: Default`).
 //
@@ -45,17 +46,26 @@ extern "C" {
     fn __sc_stderr() *mut FILE;
 }
 
-// Heap representation. `cap`'s top bit is the "is large" discriminant; its real value is the low 63 bits.
+// Heap representation. `cap`'s top bit is the "is large" discriminant; its real value is the rest.
 struct StringLarge {
     pub ptr: *mut u8,
     pub len: usize,
     pub cap: usize,
 }
 
-// Inline representation: up to 23 UTF-8 bytes plus a 0..=23 length whose high bit (the discriminant) is
-// always clear. 23 == sizeof(StringLarge) - 1 on a 64-bit target.
+// Both numbers are DERIVED from the pointer width rather than written out. On a 32-bit target (wasm32)
+// `StringLarge` is 12 bytes, so a fixed 23-byte inline buffer would put the discriminant byte past `cap`
+// altogether: every heap string then read back as inline and printed its own header.
+const SSO_CAP: usize = sizeof(StringLarge) - 1;
+const LARGE_BIT: usize = 1 as usize << sizeof(usize) * 8 - 1;
+
+// Inline representation: up to SSO_CAP UTF-8 bytes plus a 0..=SSO_CAP length whose high bit (the
+// discriminant) is always clear.
 struct StringSmall {
-    pub data: [u8; 23],
+    // Spelled out rather than `[u8; SSO_CAP]`: an array length that NAMES a const cannot be folded while
+    // lowering this type for a module typechecked before this one, which is what materializing a
+    // `const S: String` in another module does. A `sizeof` needs only the layout, so it folds there.
+    pub data: [u8; sizeof(StringLarge) - 1],
     pub len: u8,
 }
 
@@ -93,7 +103,7 @@ extend<A: Allocator> String<A> {
         return &mut self.repr.small.data[0];
     }
 
-    // Set the byte length in whichever representation is active (caller keeps a small length <= 23).
+    // Set the byte length in whichever representation is active (caller keeps a small length <= SSO_CAP).
     fn set_len(self: &mut String<A>, n: usize) {
         if self.is_large() {
             self.repr.large.len = n;
@@ -109,7 +119,7 @@ extend<A: Allocator> String<A> {
         if self.is_large() {
             let p = (unsafe self.alloc.realloc(self.repr.large.ptr, self.capacity(), new_cap, 1)) as *mut u8;
             self.repr.large.ptr = p;
-            self.repr.large.cap = new_cap | 1 as usize << 63;
+            self.repr.large.cap = new_cap | LARGE_BIT;
             return;
         }
         let cur = self.repr.small.len as usize;
@@ -119,7 +129,7 @@ extend<A: Allocator> String<A> {
         }
         self.repr.large.ptr = p;
         self.repr.large.len = cur;
-        self.repr.large.cap = new_cap | 1 as usize << 63;
+        self.repr.large.cap = new_cap | LARGE_BIT;
     }
 
     // --- construction --------------------------------------------------------------------------
@@ -130,14 +140,14 @@ extend<A: Allocator> String<A> {
         return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
     }
 
-    /// Pre-size for `cap` bytes through an explicit allocator. Up to 23 stay inline (no allocation).
+    /// Pre-size for `cap` bytes through an explicit allocator. Up to SSO_CAP stay inline (no allocation).
     pub fn with_capacity_in(mut alloc: A, cap: usize) String<A> {
-        if cap <= 23 {
+        if cap <= SSO_CAP {
             return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
         }
         let p = (unsafe alloc.alloc(cap, 1)) as *mut u8;
         return String::<A> {
-            repr: StringRepr { large: StringLarge { ptr: p, len: 0, cap: cap | 1 as usize << 63 } },
+            repr: StringRepr { large: StringLarge { ptr: p, len: 0, cap: cap | LARGE_BIT } },
             alloc: alloc,
         };
     }
@@ -160,12 +170,12 @@ extend<A: Allocator> String<A> {
         return self.repr.small.len as usize;
     }
 
-    /// Total bytes available before the next growth: the real heap capacity, or the 23-byte inline budget.
+    /// Total bytes available before the next growth: the real heap capacity, or the inline budget.
     pub fn capacity(self: &String<A>) usize {
         if self.is_large() {
             return self.repr.large.cap << 1 >> 1; // drop the discriminant bit
         }
-        return 23;
+        return SSO_CAP;
     }
 
     pub fn is_empty(self: &String<A>) bool {
@@ -173,7 +183,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Guarantee room for `additional` more bytes, growing by doubling (amortised O(1) append). Stays
-    /// inline while the total fits in 23 bytes.
+    /// inline while the total fits in the inline budget.
     pub fn reserve(self: &mut String<A>, additional: usize) {
         let needed = self.len() + additional;
         if needed <= self.capacity() {
@@ -234,19 +244,19 @@ extend<A: Allocator> String<A> {
         let n = self.repr.large.len;
         let p = self.repr.large.ptr;
         let cap = self.capacity(); // read BEFORE any memcpy: the inline move overwrites the union's cap field
-        if n <= 23 {
+        if n <= SSO_CAP {
             // move back inline, then free the heap buffer
             if n > 0 {
                 unsafe memcpy(&mut self.repr.small.data[0], p, n);
             }
             unsafe self.alloc.dealloc(p, cap, 1);
-            self.repr.small.len = n as u8; // clears the discriminant (n <= 23)
+            self.repr.small.len = n as u8; // clears the discriminant (n <= SSO_CAP)
             return;
         }
         if self.capacity() != n {
             let np = (unsafe self.alloc.realloc(p, self.capacity(), n, 1)) as *mut u8;
             self.repr.large.ptr = np;
-            self.repr.large.cap = n | 1 as usize << 63;
+            self.repr.large.cap = n | LARGE_BIT;
         }
     }
 
@@ -935,7 +945,7 @@ extend<A: Allocator + Default> String<A> {
         return String::<A>::new_in(A::default());
     }
 
-    /// Pre-size for `cap` bytes (default allocator). Up to 23 stay inline (no allocation); more allocates.
+    /// Pre-size for `cap` bytes (default allocator). Up to SSO_CAP stay inline (no allocation); more allocates.
     pub fn with_capacity(cap: usize) String<A> {
         return String::<A>::with_capacity_in(A::default(), cap);
     }

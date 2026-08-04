@@ -1,7 +1,9 @@
 // Driver-shared helpers for the emit/test/ext_c stages: output paths + mkdir/open under <gen_root>, the
-// keep-list orphan pruner, the runtime-header writer, raw package-Ast accessors, and format_source (the
-// canonical-formatting core behind `super-c fmt` and LSP formatting).
+// keep-list orphan pruner, the runtime-header writer, raw package-Ast accessors, format_source (the
+// canonical-formatting core behind `super-c fmt` and LSP formatting), and the cross-toolchain selection
+// both link paths share.
 import stdio;
+import stdlib;
 import string as cstring;
 import lexer::token as tok;
 import lexer::lexer as lex;
@@ -211,5 +213,135 @@ pub fn write_super_rt(gen_dir: str) {
     if cf != null {
         unsafe stdio::fputs(cg::super_rt_source(), cf);
         unsafe stdio::fclose(cf);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// cross toolchains
+// ---------------------------------------------------------------------------------------------------------
+// Shared by BOTH link paths -- the build.toml engine and the single-file `super-c build foo.spc` -- because
+// a target that reaches only one of them mis-builds silently: the front end gates items on the target while
+// the C compiler still builds for the host.
+
+/// The SDK a `--target=` needs, as an index into the helpers below: 1 iOS, 2 Android, 3 wasm, 0 none
+/// (windows/macos/linux compile with the ordinary `cc`).
+pub const fn target_sdk(target: i32) i32 {
+    if target == 3 {
+        return 3;
+    }
+    if target == 4 {
+        return 1;
+    }
+    if target == 5 {
+        return 2;
+    }
+    return 0;
+}
+
+/// The cross compiler for `sdk`, found through the SDK's own environment variable so no path is baked
+/// into the compiler. Empty when the toolchain is not installed -- the caller then falls back and the
+/// C compiler reports what is missing.
+pub fn sdk_cc(sdk: i32, out: &mut String) {
+    if sdk == 1 {
+        // iOS: clang from the active Xcode, selected by `xcrun` so the SDK path comes from the toolchain
+        out.push_str("xcrun --sdk iphoneos clang");
+        return;
+    }
+    if sdk == 2 {
+        // Android: the NDK's prebuilt clang. $ANDROID_NDK_HOME (or $ANDROID_NDK_ROOT) locates it.
+        let mut ndk = stdlib::getenv("ANDROID_NDK_HOME");
+        if ndk == null || unsafe *ndk == 0 as char {
+            ndk = stdlib::getenv("ANDROID_NDK_ROOT");
+        }
+        if ndk == null || unsafe *ndk == 0 as char {
+            return;
+        }
+        out.push_str(str::from_cstr(ndk));
+        out.push_str("/toolchains/llvm/prebuilt/");
+        out.push_str(ndk_host_tag());
+        out.push_str("/bin/clang");
+        return;
+    }
+    if sdk == 3 {
+        // WebAssembly: the wasi-sdk's clang when present (it brings wasi-libc), else a plain clang,
+        // which can only build freestanding code.
+        let w = stdlib::getenv("WASI_SDK_PATH");
+        if w != null && unsafe *w != 0 as char {
+            out.push_str(str::from_cstr(w));
+            out.push_str("/bin/clang");
+            return;
+        }
+        out.push_str("clang");
+    }
+}
+
+// The NDK lays its prebuilt toolchains out per build host.
+const fn ndk_host_tag() str<'static> {
+    if unsafe shim::sc_host_platform() == 0 {
+        return "windows-x86_64";
+    }
+    if unsafe shim::sc_host_platform() == 1 {
+        return "darwin-x86_64"; // the NDK ships one universal darwin toolchain under this name
+    }
+    return "linux-x86_64";
+}
+
+/// Flags every translation unit needs for a cross target: the triple, and for wasm the wasi sysroot's
+/// own defaults. Nothing here overrides the manifest -- these come first, manifest flags after.
+pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
+    if sdk == 1 {
+        // The triple carries the deployment floor: without a version clang assumes an iOS old enough to
+        // lack thread-local storage, which the runtime's preemption tick needs.
+        cmd.push_str(" -target ");
+        if arch == 0 {
+            cmd.push_str("x86_64-apple-ios13.0-simulator");
+        } else {
+            cmd.push_str("arm64-apple-ios13.0");
+        }
+        return;
+    }
+    if sdk == 2 {
+        // The NDK's clang takes the API level in the triple; 24 is the oldest still widely supported.
+        cmd.push_str(" -target ");
+        if arch == 0 {
+            cmd.push_str("x86_64-linux-android24");
+        } else {
+            cmd.push_str("aarch64-linux-android24");
+        }
+        return;
+    }
+    if sdk == 3 {
+        // A wasi sysroot supplies the libc the emitted C needs. $WASI_SDK_PATH names a full wasi-sdk
+        // (its sysroot sits under share/wasi-sysroot); $WASI_SYSROOT names a bare one. With neither,
+        // only freestanding code can build -- there is no libc to include.
+        let sdkp = stdlib::getenv("WASI_SDK_PATH");
+        if sdkp != null && unsafe *sdkp != 0 as char {
+            cmd.push_str(" -D_WASI_EMULATED_SIGNAL");
+            cmd.push_str(" -target wasm32-wasi --sysroot \"");
+            cmd.push_str(str::from_cstr(sdkp));
+            cmd.push_str("/share/wasi-sysroot\"");
+            return;
+        }
+        let sr = stdlib::getenv("WASI_SYSROOT");
+        if sr != null && unsafe *sr != 0 as char {
+            cmd.push_str(" -D_WASI_EMULATED_SIGNAL");
+            cmd.push_str(" -target wasm32-wasi --sysroot \"");
+            cmd.push_str(str::from_cstr(sr));
+            cmd.push_str("\"");
+            return;
+        }
+        cmd.push_str(" -target wasm32 -nostdlib");
+    }
+}
+
+/// Libraries a cross target needs at LINK time only. wasi keeps signals behind an opt-in emulation
+/// library; the runtime's panic path installs a handler, so the build asks for it.
+pub fn push_sdk_libs(cmd: &mut String, sdk: i32) {
+    if sdk == 3 {
+        let sdkp = stdlib::getenv("WASI_SDK_PATH");
+        let sr = stdlib::getenv("WASI_SYSROOT");
+        if sdkp != null && unsafe *sdkp != 0 as char || sr != null && unsafe *sr != 0 as char {
+            cmd.push_str(" -lwasi-emulated-signal");
+        }
     }
 }

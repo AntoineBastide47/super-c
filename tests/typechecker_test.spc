@@ -2679,3 +2679,27 @@ fn platform_gate_values() {
         "unknown platform 'solaris'; expected windows, macos, linux, wasm, ios, or android",
     );
 }
+
+// A `static_assert` about a layout is precisely what a cross target has to be able to exclude -- a size
+// written for 8-byte pointers is false on wasm32 and says nothing about a bug. The parser used to read the
+// attribute list before one and then throw it away, so the assert fired on every target regardless.
+@test
+fn gated_static_assert() {
+    // `wasm` on both axes: no host the suite runs on is ever wasm, so these two stay gated away wherever
+    // the test itself is built.
+    h::expect_exit(
+        "an assert for another platform does not fire here",
+        "@platform(wasm)\nstatic_assert(sizeof(usize) == 2, \"gated away off wasm\");\nfn main() i32 { return 0; }\n",
+        0,
+    );
+    h::expect_exit(
+        "an assert for another architecture does not fire here",
+        "@arch(wasm32)\nstatic_assert(sizeof(usize) == 2, \"gated away off wasm32\");\nfn main() i32 { return 0; }\n",
+        0,
+    );
+    h::expect_err_msg(
+        "an assert the gate keeps still fires",
+        "@platform(!wasm)\nstatic_assert(sizeof(usize) == 2, \"kept and false\");\nfn main() i32 { return 0; }\n",
+        "kept and false",
+    );
+}

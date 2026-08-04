@@ -4346,3 +4346,22 @@ fn main(argv: Vector<str>) i32 {
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
 }
+
+// `import std::core;` loads the very file the prelude auto-loads, so the loader flags it in place instead
+// of loading a second copy under `__std::core`. The builtin seeder recognised only the `__std::core` PATH,
+// so an explicit import left `i8`/`i32`/... without their synthetic nominal decls and every
+// `extend i8 as Ord` in that same file then failed its `Eq` superinterface. Any std module may be named
+// explicitly; core is the one whose own body depends on the seeding.
+@test
+fn explicit_std_module_import() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::core as core;\nimport std::vector as vec;\n\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(3);\n    let ok = v.at(0) == 3;\n    v.free();\n    if ok { return 0; }\n    return 1;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}

@@ -409,3 +409,41 @@ fn inline_asm() {
         "asm constraint must be a string literal",
     );
 }
+
+// A monomorphized body asks of EVERY identifier whether it is a bound const-generic parameter, and the
+// answer used to be read from the current module's node pool with the referenced decl's node id -- which
+// is only that module's id when the decl is local. A call to any prelude function from inside a generic
+// body (`panic` is the one std itself needs) indexed this Ast with the prelude's node id and read past
+// the end of it. Any generic fn calling any imported fn is enough.
+@test
+fn prelude_call_inside_generic_body() {
+    h::expect_exit(
+        "a prelude call in a generic body",
+        "fn pick<T>(v: T, take: bool) T {\n    if !take { panic(\"no\"); }\n    return v;\n}\nfn main() i32 { return pick(0, true); }\n",
+        0,
+    );
+    h::expect_exit(
+        "two instantiations of the same body",
+        "fn pick<T>(v: T, take: bool) T {\n    if !take { panic(\"no\"); }\n    return v;\n}\nfn main() i32 { return pick(0, true) + pick(0i64, true) as i32; }\n",
+        0,
+    );
+    h::expect_exit(
+        "a real const-generic parameter still resolves",
+        "fn width<const N: usize>(a: &Array<i32, N>) usize {\n    if N == 0 { panic(\"empty\"); }\n    return N;\n}\nfn main() i32 {\n    let mut a = Array::<i32, 3>::new();\n    let r = width(&a) as i32 - 3;\n    a.free();\n    return r;\n}\n",
+        0,
+    );
+}
+
+// The small-string budget is `sizeof(StringLarge) - 1`, so it MUST follow the pointer width: the union's
+// last byte carries the discriminant, and it is the top byte of `cap` only while the two layouts are the
+// same size. Written out as 23 it was right on a 64-bit target and wrong on wasm32, where the byte fell
+// outside `cap` entirely and every heap string read back as inline -- printing its own header. Checked
+// through the public API, so it holds at whatever width the suite runs on.
+@test
+fn sso_budget_follows_pointer_width() {
+    h::expect_exit(
+        "the inline budget is the heap layout minus its discriminant byte",
+        "fn main() i32 {\n    let mut s = String::new();\n    let cap = s.capacity();\n    if cap != sizeof(usize) * 3 - 1 { return 1; }\n    for _i in 0..cap { s.push_byte(b'x'); }\n    if s.capacity() != cap || s.len() != cap { return 2; }\n    s.push_byte(b'y');\n    if s.capacity() <= cap || s.len() != cap + 1 { return 3; }\n    if !s.as_str().ends_with(\"xy\") { return 4; }\n    s.free();\n    return 0;\n}\n",
+        0,
+    );
+}

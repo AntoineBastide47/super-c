@@ -1763,7 +1763,7 @@ pub fn run_package(
     };
     if out_bin.len() != 0 {
         if !err {
-            rc = test_build_and_run(p, null, &keep, out_bin, cflags);
+            rc = test_build_and_run(p, null, &keep, out_bin, cflags, target);
         }
     } else if testing && !err {
         if plan.cases.len() == 0 {
@@ -1774,7 +1774,7 @@ pub fn run_package(
                 Some(runner) => {
                     sink_notify(sink, runner.as_str(), 1);
                     keep.push(runner);
-                    rc = test_build_and_run(p, topts, &keep, "", cflags);
+                    rc = test_build_and_run(p, topts, &keep, "", cflags, target);
                 },
                 None => {
                     rc = 1;

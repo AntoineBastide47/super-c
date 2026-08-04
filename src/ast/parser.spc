@@ -1516,6 +1516,10 @@ extend Parser {
         let mut attrs = self.parse_attributes(16);
         if self.check(TokenType::StaticAssert) {
             let id = self.parse_static_assert();
+            // Attached, not dropped: a `static_assert` about a LAYOUT is exactly the item that has to be
+            // gated per target, and silently discarding `@platform`/`@arch` here fired the assert on the
+            // targets it was written to exclude.
+            self.add_attrs_to(&mut attrs, id);
             return id;
         }
         let is_public = self.match(TokenType::Pub);

@@ -1,9 +1,15 @@
 // FFI bindings for common pthread APIs. Import with `import pthread;`.
 // Opaque pthread structs other than pthread_t are passed as `*mut void` to avoid baking in libc layouts;
 // the sized handles for mutex/cond/rwlock are allocated + initialised by the `sc_*_new` shim below (their
-// C sizes are platform-dependent). Carries `@c.link("pthread")`; every call site requires `unsafe`.
+// C sizes are platform-dependent). Carries `@c.link("pthread")` off Android; every call site requires `unsafe`.
 
+// The `-l` rides on its own gated block rather than on the declarations, which every target needs: bionic
+// keeps the pthread entry points in libc itself and ships no libpthread at all, so the NDK's linker fails
+// on `-lpthread` instead of ignoring it the way macOS and glibc do.
+@platform(!android)
 @c.link("pthread")
+extern "C" {}
+
 extern "C" {
     pub type pthread_t;
 

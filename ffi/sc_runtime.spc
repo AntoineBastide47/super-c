@@ -4,31 +4,28 @@
 // Prefer `std/parallel/platform.spc` for the safe pieces; the rest are used only by the runtime internals.
 // Import with `import sc_runtime;`. Every call requires `unsafe`.
 
-// Parking is the one piece with a per-OS backing LIBRARY, so it is declared once per target: POSIX parks on
-// a pthread condition-variable lot (libpthread), Windows on WaitOnAddress (which lives in the
-// synchronization API set, not kernel32's import library -- omit the flag and the link fails on those three
-// symbols alone). The signatures are identical; `platform_filter` leaves exactly one block standing, and the
-// `-l` rides with it.
-//
-// Park while `*word == expected` until unparked or (timeout_ns >= 0) the deadline; < 0 waits forever.
-// Wakeups may be spurious; the unparker publishes the new state to `*word` before unparking.
-@platform(macos | linux | ios | android)
+// Parking is the one piece with a per-OS backing LIBRARY, and only the library differs -- the declarations
+// are identical everywhere -- so the `-l` rides on gated, otherwise-empty blocks and the functions are
+// declared once, below. POSIX parks on a pthread condition-variable lot (libpthread), except bionic, which
+// keeps those entry points in libc and ships no such library to name. Windows parks on WaitOnAddress, which
+// lives in the synchronization API set rather than kernel32's import library -- omit the flag and the link
+// fails on those three symbols alone. wasm needs nothing: it has one thread, and sc_rt.c's wasm arm parks
+// by returning.
+@platform(macos | linux | ios)
 @c.link("pthread")
-extern "C" "sc_rt.h" {
-    pub fn sc_rt_park(word: *mut i32, expected: i32, timeout_ns: i64) void;
-    pub fn sc_rt_unpark_one(word: *mut i32) void;
-    pub fn sc_rt_unpark_all(word: *mut i32) void;
-}
+extern "C" {}
 
 @platform(windows)
 @c.link("synchronization")
+extern "C" {}
+
 extern "C" "sc_rt.h" {
+    // Park while `*word == expected` until unparked or (timeout_ns >= 0) the deadline; < 0 waits forever.
+    // Wakeups may be spurious; the unparker publishes the new state to `*word` before unparking.
     pub fn sc_rt_park(word: *mut i32, expected: i32, timeout_ns: i64) void;
     pub fn sc_rt_unpark_one(word: *mut i32) void;
     pub fn sc_rt_unpark_all(word: *mut i32) void;
-}
 
-extern "C" "sc_rt.h" {
     pub fn sc_rt_now_ns() u64;
     pub fn sc_rt_ncpu() usize;
 

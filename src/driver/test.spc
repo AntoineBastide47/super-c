@@ -952,11 +952,31 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
 /// Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
 /// linked to that path and we return; otherwise it links `<gen_root>/__tests` and runs it as the test
 /// runner, forwarding `topts`' options.
-pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Vector<String>, out_bin: str, cflags: str) i32 {
-    let mut cc = stdlib::getenv("CC");
-    if cc == null || unsafe *cc == 0 as char {
-        cc = "cc".ptr() as *const char;
+pub fn test_build_and_run(
+    p: &loader::Package,
+    topts: *const TestOpts,
+    keep: &Vector<String>,
+    out_bin: str,
+    cflags: str,
+    target: i32,
+) i32 {
+    // A cross target brings its own compiler, and $CC on the host would be the wrong one. Without this the
+    // front end gated items on `--target=` while the C compiler still built for the host, so `super-c build
+    // app.spc --target=ios` produced a HOST binary and said nothing.
+    let sdk = target_sdk(target);
+    let mut ccs = String::new();
+    if sdk != 0 {
+        sdk_cc(sdk, &mut ccs);
     }
+    if ccs.len() == 0 {
+        let env = stdlib::getenv("CC");
+        if env != null && unsafe *env != 0 as char {
+            ccs.push_str(str::from_cstr(env));
+        } else {
+            ccs.push_str("cc");
+        }
+    }
+    let cc = ccs.as_str();
     let root = p.gen_root.as_str();
     // Every path is DOUBLE-quoted: these lines reach cmd.exe on Windows, which passes single quotes
     // through as ordinary characters. The runner is named with an explicit `.exe` there so running it
@@ -967,9 +987,11 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
         "";
     };
     let mut cmd = String::new();
-    cmd.push_str(str::from_cstr(cc));
+    cmd.push_str(cc);
     cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L");
+    push_sdk_flags(&mut cmd, sdk, p.arch); // the cross triple first; the profile's flags can override
     cmd.push_str(cflags); // the requested profile, if any: a bare build passes none and compiles unoptimised
+    push_sdk_libs(&mut cmd, sdk); // one command compiles AND links here, so the link-only libs ride along
     cmd.push_str(" -o \"");
     if out_bin.len() != 0 {
         cmd.push_str(out_bin);
@@ -1010,7 +1032,7 @@ pub fn test_build_and_run(p: &loader::Package, topts: *const TestOpts, keep: &Ve
         if out_bin.len() != 0 {
             what = "build".ptr() as *const char;
         }
-        unsafe stdio::fprintf(stdio::stderr(), "super-c: %s failed (%s)\n".ptr() as *const char, what, cc);
+        unsafe stdio::fprintf(stdio::stderr(), "super-c: %s failed (%s)\n".ptr() as *const char, what, ccs.cstr());
         return 1;
     }
     if out_bin.len() != 0 {

@@ -761,13 +761,20 @@ extend Package {
         return self.walk_children(id, bootstrap_tags, target);
     }
 
-    /// Inject one synthetic decl per builtin into the core prelude module (`__std::core`), so builtins are
-    /// nominal types that `extend i32 { .. }` can target. The decls live in the node pool only. Run after
-    /// loading, before resolve.
+    /// Inject one synthetic decl per builtin into the core prelude module, so builtins are nominal types
+    /// that `extend i32 { .. }` can target. The decls live in the node pool only. Run after loading, before
+    /// resolve.
+    ///
+    /// Identified by FILE, not by module path: the prelude normally loads it as `__std::core`, but an
+    /// explicit `import std::core` loads the same file first under the user's own path and `load_prelude`
+    /// then only flags it. Matching the path alone left the builtins un-seeded there, so every
+    /// `extend i8 as Ord` in that very file failed its `Eq` superinterface.
     pub fn seed_core(self: &mut Self) {
         self.core_seeded = false;
         for i in 0..self.modules.len() {
-            let is_core = self.modules[i].has_ast && self.modules[i].path.as_str() == "__std::core";
+            let is_core = self.modules[i].has_ast && self.modules[i].prelude && basename_of(
+                self.modules[i].file.as_str(),
+            ) == "core.spc";
             if is_core {
                 for b in 0..BT_COUNT_N {
                     let id = self.modules[i].ast.add(

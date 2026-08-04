@@ -687,6 +687,115 @@ void sc_rt_ctx_free(void *ctx) {
 }
 #endif
 
+#elif defined(__wasm__)
+/* ================================ WebAssembly ======================================================
+   wasm32 has ONE thread of execution and no signals, no mmap and no ucontext. The substrate is still
+   provided in full, so the single-threaded half of `std/parallel` -- Arc, atomics, an uncontended Mutex,
+   a channel drained by the same thread -- compiles and runs. What genuinely needs a second thread or a
+   second stack fails at the call instead of failing to compile inside std.
+   A wait that would block IS a deadlock here: nothing else runs to publish the word it waits on. */
+#include <time.h>
+
+uint64_t sc_rt_now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+size_t sc_rt_ncpu(void) { return 1; }
+
+void sc_rt_sleep_ns(int64_t ns) {
+  if (ns <= 0) return;
+  struct timespec ts;
+  ts.tv_sec = (time_t)(ns / 1000000000ll);
+  ts.tv_nsec = (long)(ns % 1000000000ll);
+  nanosleep(&ts, 0);
+}
+
+void sc_rt_thread_yield(void) {}
+
+/* Returns straight away: `*word` cannot change while this call runs, so waiting for it to change would
+   never end. Callers re-check their own condition in a loop -- the contract a spurious wakeup gives. */
+void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
+  (void)word;
+  (void)expected;
+  if (timeout_ns > 0) sc_rt_sleep_ns(timeout_ns);
+}
+void sc_rt_unpark_one(int32_t *word) { (void)word; }
+void sc_rt_unpark_all(int32_t *word) { (void)word; }
+
+void *sc_rt_stack_alloc(size_t size) { return malloc(size); } /* no guard page: wasm has no mprotect */
+void sc_rt_stack_free(void *usable, size_t size) {
+  (void)size;
+  free(usable);
+}
+void sc_rt_stack_guard_install(void) {}
+void sc_rt_stack_note_size(size_t bytes) { (void)bytes; }
+
+/* No second thread to run `entry` on. Reported HERE rather than by returning a failure code: `spawn` hands
+   the result slot to a `JoinHandle` without running the body, so a quiet failure reads back as the closure's
+   return value -- a missing feature turned into a plausible wrong answer. */
+int sc_rt_thread_create(void **out, void *(*entry)(void *), void *arg) {
+  (void)out;
+  (void)entry;
+  (void)arg;
+  fprintf(stderr, "super-c: wasm has one thread; 'thread::spawn' has nothing to run the closure on\n");
+  abort();
+}
+int sc_rt_thread_join(void *handle) {
+  (void)handle;
+  return -1;
+}
+
+/* A lock is never contended with one thread. The flag is kept so locking twice still traps rather than
+   quietly succeeding, which is the bug that flag would otherwise hide. */
+void *sc_rt_mutex_new(void) { return calloc(1, sizeof(int32_t)); }
+void sc_rt_mutex_free(void *m) { free(m); }
+void sc_rt_mutex_lock(void *m) {
+  int32_t *held = (int32_t *)m;
+  if (*held) {
+    fprintf(stderr, "super-c: deadlock -- mutex locked twice on wasm's single thread\n");
+    abort();
+  }
+  *held = 1;
+}
+void sc_rt_mutex_unlock(void *m) { *(int32_t *)m = 0; }
+
+void *sc_rt_cond_new(void) { return calloc(1, 1); }
+void sc_rt_cond_free(void *c) { free(c); }
+void sc_rt_cond_wait(void *c, void *m) {
+  (void)c;
+  (void)m;
+  fprintf(stderr, "super-c: deadlock -- condition wait on wasm's single thread\n");
+  abort();
+}
+int sc_rt_cond_timedwait_ns(void *c, void *m, int64_t rel_ns) {
+  (void)c;
+  sc_rt_mutex_unlock(m);
+  if (rel_ns > 0) sc_rt_sleep_ns(rel_ns);
+  sc_rt_mutex_lock(m);
+  return 1; /* the deadline woke it -- no signal can arrive */
+}
+void sc_rt_cond_signal(void *c) { (void)c; }
+void sc_rt_cond_broadcast(void *c) { (void)c; }
+
+/* Stackful coroutines need a second stack to switch to, and wasm's call stack is not addressable. */
+void *sc_rt_ctx_alloc(void) { return calloc(1, 1); }
+void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
+  (void)ctx;
+  (void)stack;
+  (void)size;
+  (void)entry;
+  (void)arg;
+}
+void sc_rt_ctx_switch(void *from, void *to) {
+  (void)from;
+  (void)to;
+  fprintf(stderr, "super-c: 'launch' needs a stackful context switch, which wasm does not provide\n");
+  abort();
+}
+void sc_rt_ctx_free(void *ctx) { free(ctx); }
+
 #else
 /* ================================ POSIX ============================================================ */
 #include <errno.h>
