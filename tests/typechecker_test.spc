@@ -539,6 +539,13 @@ fn bug_regressions() {
         "fn m<T>(a: T, b: T) T { return a ^ b; }\nfn main() i32 { let n: i32 = m::<i32>(1, 2); return n; }\n",
         "no 'bit_xor' method for this operator",
     );
+    // Neither side of an operator is pinned to Self: `Output` is associated and `Rhs` defaults to Self,
+    // so one type may multiply another into a third and still declare the conformance.
+    h::expect_exit(
+        "heterogeneous operator conformance",
+        "struct Mat { pub s: i32 }\nstruct Vec3 { pub x: i32 }\nextend Mat as Mul<Vec3> {\n    type Output = Vec3;\n    pub fn mul(self: &Mat, o: &Vec3) Vec3 { return Vec3 { x: self.s * o.x }; }\n}\nfn main() i32 { let m = Mat { s: 6 }; let v: Vec3 = m * Vec3 { x: 7 }; return v.x - 42; }\n",
+        0,
+    );
     // An interface parameter may DEFAULT to Self, so a bare `as Combine` means `as Combine<Self>` while a
     // spelled-out argument gives a heterogeneous right operand. (Two conformances differing ONLY in that
     // argument on one type is not resolvable yet: method lookup picks by name and result, not by operand.)

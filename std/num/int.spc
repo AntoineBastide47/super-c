@@ -688,33 +688,6 @@ extend<const BITS: usize> UInt<BITS> {
         return Option::<UInt<BITS>>::Some(self.divmod(other, &mut r));
     }
 
-    // ---- bitwise -------------------------------------------------------------------------------
-
-    pub fn bit_and(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
-        return UInt::<BITS> { bits: self.bits.bit_and(&other.bits) };
-    }
-
-    pub fn bit_or(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
-        return UInt::<BITS> { bits: self.bits.bit_or(&other.bits) };
-    }
-
-    pub fn bit_xor(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
-        return UInt::<BITS> { bits: self.bits.bit_xor(&other.bits) };
-    }
-
-    pub fn bit_not(self: &UInt<BITS>) UInt<BITS> {
-        return UInt::<BITS> { bits: self.bits.bit_not() };
-    }
-
-    pub fn shl(self: &UInt<BITS>, amount: usize) UInt<BITS> {
-        return UInt::<BITS> { bits: self.bits.shl(amount) };
-    }
-
-    /// Logical right shift -- the only kind an unsigned value has.
-    pub fn shr(self: &UInt<BITS>, amount: usize) UInt<BITS> {
-        return UInt::<BITS> { bits: self.bits.shr_logical(amount) };
-    }
-
     // ---- text ----------------------------------------------------------------------------------
 
     /// Decimal digits. Repeated division by a single limb, which is the cheap path through the divider.
@@ -777,24 +750,81 @@ extend<const BITS: usize> UInt<BITS> {
 // Operators. `+`, `-` and `*` WRAP, which is what the built-in unsigned types do; `/` and `%` panic on a
 // zero divisor, as they do.
 extend<const BITS: usize> UInt<BITS> as Add {
+    type Output = UInt<BITS>;
+
     pub fn add(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
         return self.wrapping_add(other);
     }
 }
 
 extend<const BITS: usize> UInt<BITS> as Sub {
+    type Output = UInt<BITS>;
+
     pub fn sub(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
         return self.wrapping_sub(other);
     }
 }
 
 extend<const BITS: usize> UInt<BITS> as Mul {
+    type Output = UInt<BITS>;
+
     pub fn mul(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
         return self.wrapping_mul(other);
     }
 }
 
+extend<const BITS: usize> UInt<BITS> as BitAnd {
+    type Output = UInt<BITS>;
+
+    pub fn bit_and(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
+        return UInt::<BITS> { bits: self.bits.bit_and(&other.bits) };
+    }
+}
+
+extend<const BITS: usize> UInt<BITS> as BitOr {
+    type Output = UInt<BITS>;
+
+    pub fn bit_or(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
+        return UInt::<BITS> { bits: self.bits.bit_or(&other.bits) };
+    }
+}
+
+extend<const BITS: usize> UInt<BITS> as BitXor {
+    type Output = UInt<BITS>;
+
+    pub fn bit_xor(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
+        return UInt::<BITS> { bits: self.bits.bit_xor(&other.bits) };
+    }
+}
+
+extend<const BITS: usize> UInt<BITS> as BitNot {
+    type Output = UInt<BITS>;
+
+    pub fn bit_not(self: &UInt<BITS>) UInt<BITS> {
+        return UInt::<BITS> { bits: self.bits.bit_not() };
+    }
+}
+
+extend<const BITS: usize> UInt<BITS> as Shl {
+    type Output = UInt<BITS>;
+
+    pub fn shl(self: &UInt<BITS>, amount: usize) UInt<BITS> {
+        return UInt::<BITS> { bits: self.bits.shl(amount) };
+    }
+}
+
+/// Logical right shift -- the only kind an unsigned value has.
+extend<const BITS: usize> UInt<BITS> as Shr {
+    type Output = UInt<BITS>;
+
+    pub fn shr(self: &UInt<BITS>, amount: usize) UInt<BITS> {
+        return UInt::<BITS> { bits: self.bits.shr_logical(amount) };
+    }
+}
+
 extend<const BITS: usize> UInt<BITS> as Div {
+    type Output = UInt<BITS>;
+
     pub fn div(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
         let mut r = UInt::<BITS>::zero();
         return self.divmod(other, &mut r);
@@ -802,6 +832,8 @@ extend<const BITS: usize> UInt<BITS> as Div {
 }
 
 extend<const BITS: usize> UInt<BITS> as Rem {
+    type Output = UInt<BITS>;
+
     pub fn rem(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
         let mut r = UInt::<BITS>::zero();
         let _ = self.divmod(other, &mut r);
@@ -1124,34 +1156,6 @@ extend<const BITS: usize> Int<BITS> {
         return Option::<Int<BITS>>::Some(self.divmod(other, &mut r));
     }
 
-    // ---- bitwise -------------------------------------------------------------------------------
-
-    pub fn bit_and(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
-        return Int::<BITS> { bits: self.bits.bit_and(&other.bits) };
-    }
-
-    pub fn bit_or(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
-        return Int::<BITS> { bits: self.bits.bit_or(&other.bits) };
-    }
-
-    pub fn bit_xor(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
-        return Int::<BITS> { bits: self.bits.bit_xor(&other.bits) };
-    }
-
-    pub fn bit_not(self: &Int<BITS>) Int<BITS> {
-        return Int::<BITS> { bits: self.bits.bit_not() };
-    }
-
-    pub fn shl(self: &Int<BITS>, amount: usize) Int<BITS> {
-        return Int::<BITS> { bits: self.bits.shl(amount) };
-    }
-
-    /// Arithmetic right shift: the sign is what fills the top, so shifting a negative value keeps it
-    /// negative and rounds toward negative infinity.
-    pub fn shr(self: &Int<BITS>, amount: usize) Int<BITS> {
-        return Int::<BITS> { bits: self.bits.shr_arith(amount) };
-    }
-
     // ---- text ----------------------------------------------------------------------------------
 
     pub fn to_string(self: &Int<BITS>) String {
@@ -1204,6 +1208,8 @@ extend<const BITS: usize> Int<BITS> {
 
 // Operators. `+`, `-`, `*`, `/` and `%` TRAP on overflow, which is what the built-in signed types do.
 extend<const BITS: usize> Int<BITS> as Add {
+    type Output = Int<BITS>;
+
     pub fn add(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
         switch self.checked_add(other) {
             Some(v) => {
@@ -1217,6 +1223,8 @@ extend<const BITS: usize> Int<BITS> as Add {
 }
 
 extend<const BITS: usize> Int<BITS> as Sub {
+    type Output = Int<BITS>;
+
     pub fn sub(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
         switch self.checked_sub(other) {
             Some(v) => {
@@ -1230,6 +1238,8 @@ extend<const BITS: usize> Int<BITS> as Sub {
 }
 
 extend<const BITS: usize> Int<BITS> as Mul {
+    type Output = Int<BITS>;
+
     pub fn mul(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
         switch self.checked_mul(other) {
             Some(v) => {
@@ -1242,7 +1252,59 @@ extend<const BITS: usize> Int<BITS> as Mul {
     }
 }
 
+extend<const BITS: usize> Int<BITS> as BitAnd {
+    type Output = Int<BITS>;
+
+    pub fn bit_and(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
+        return Int::<BITS> { bits: self.bits.bit_and(&other.bits) };
+    }
+}
+
+extend<const BITS: usize> Int<BITS> as BitOr {
+    type Output = Int<BITS>;
+
+    pub fn bit_or(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
+        return Int::<BITS> { bits: self.bits.bit_or(&other.bits) };
+    }
+}
+
+extend<const BITS: usize> Int<BITS> as BitXor {
+    type Output = Int<BITS>;
+
+    pub fn bit_xor(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
+        return Int::<BITS> { bits: self.bits.bit_xor(&other.bits) };
+    }
+}
+
+extend<const BITS: usize> Int<BITS> as BitNot {
+    type Output = Int<BITS>;
+
+    pub fn bit_not(self: &Int<BITS>) Int<BITS> {
+        return Int::<BITS> { bits: self.bits.bit_not() };
+    }
+}
+
+extend<const BITS: usize> Int<BITS> as Shl {
+    type Output = Int<BITS>;
+
+    pub fn shl(self: &Int<BITS>, amount: usize) Int<BITS> {
+        return Int::<BITS> { bits: self.bits.shl(amount) };
+    }
+}
+
+/// Arithmetic right shift: the sign is what fills the top, so shifting a negative value keeps it negative
+/// and rounds toward negative infinity.
+extend<const BITS: usize> Int<BITS> as Shr {
+    type Output = Int<BITS>;
+
+    pub fn shr(self: &Int<BITS>, amount: usize) Int<BITS> {
+        return Int::<BITS> { bits: self.bits.shr_arith(amount) };
+    }
+}
+
 extend<const BITS: usize> Int<BITS> as Div {
+    type Output = Int<BITS>;
+
     pub fn div(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
         let mut r = Int::<BITS>::zero();
         return self.divmod(other, &mut r);
@@ -1250,6 +1312,8 @@ extend<const BITS: usize> Int<BITS> as Div {
 }
 
 extend<const BITS: usize> Int<BITS> as Rem {
+    type Output = Int<BITS>;
+
     pub fn rem(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
         let mut r = Int::<BITS>::zero();
         let _ = self.divmod(other, &mut r);

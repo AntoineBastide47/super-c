@@ -27,22 +27,64 @@ pub interface Send {}
 pub interface Sync {}
 
 /// Arithmetic operator overloading: `a + b` dispatches to `a.add(&b)`, and likewise `-`/`*`/`/`/`%` to
-/// sub/mul/div/rem. The result is whatever the method returns (typically Self). A type need not name these
-/// interfaces -- a bare method of the right name is enough -- but conforming documents the intent.
-pub interface Add {
-    fn add(self: &Self, other: &Self) Self;
+/// sub/mul/div/rem. A type need not name these interfaces -- a bare method of the right name is enough --
+/// but conforming documents the intent and is what a generic bound can require.
+///
+/// Neither side is pinned to Self. `Rhs` defaults to Self, which is the common case, so `as Add` means
+/// `as Add<Self>`. `Output` is ASSOCIATED rather than a second parameter, because a type has one result
+/// for a given right operand -- that is what makes `a * b` unambiguous. So a matrix multiplies a vector
+/// into a vector, and says so: `extend Mat as Mul<Vec3> { type Output = Vec3; .. }`.
+pub interface Add<Rhs = Self> {
+    type Output;
+    fn add(self: &Self, other: &Rhs) Self::Output;
 }
-pub interface Sub {
-    fn sub(self: &Self, other: &Self) Self;
+pub interface Sub<Rhs = Self> {
+    type Output;
+    fn sub(self: &Self, other: &Rhs) Self::Output;
 }
-pub interface Mul {
-    fn mul(self: &Self, other: &Self) Self;
+pub interface Mul<Rhs = Self> {
+    type Output;
+    fn mul(self: &Self, other: &Rhs) Self::Output;
 }
-pub interface Div {
-    fn div(self: &Self, other: &Self) Self;
+pub interface Div<Rhs = Self> {
+    type Output;
+    fn div(self: &Self, other: &Rhs) Self::Output;
 }
-pub interface Rem {
-    fn rem(self: &Self, other: &Self) Self;
+pub interface Rem<Rhs = Self> {
+    type Output;
+    fn rem(self: &Self, other: &Rhs) Self::Output;
+}
+
+/// Bitwise operator overloading, on the same rule as the arithmetic ones: `a & b` dispatches to
+/// `a.bit_and(&b)`, `|`/`^` to bit_or/bit_xor, and unary `~a` to `a.bit_not()`.
+pub interface BitAnd<Rhs = Self> {
+    type Output;
+    fn bit_and(self: &Self, other: &Rhs) Self::Output;
+}
+pub interface BitOr<Rhs = Self> {
+    type Output;
+    fn bit_or(self: &Self, other: &Rhs) Self::Output;
+}
+pub interface BitXor<Rhs = Self> {
+    type Output;
+    fn bit_xor(self: &Self, other: &Rhs) Self::Output;
+}
+pub interface BitNot {
+    type Output;
+    fn bit_not(self: &Self) Self::Output;
+}
+
+/// Shifts: `a << n` dispatches to `a.shl(n)` and `a >> n` to `a.shr(n)`. `Rhs` defaults to a COUNT rather
+/// than to Self -- shifting by a value of the shifted type is meaningless once the type is wider than a
+/// machine word, and the built-in integers take a count too. It is still a parameter, so a type that
+/// wants to be shifted by something else may say so.
+pub interface Shl<Rhs = usize> {
+    type Output;
+    fn shl(self: &Self, amount: Rhs) Self::Output;
+}
+pub interface Shr<Rhs = usize> {
+    type Output;
+    fn shr(self: &Self, amount: Rhs) Self::Output;
 }
 
 /// A canonical "zero" / empty value, constructible without arguments.
