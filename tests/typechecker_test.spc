@@ -2721,3 +2721,39 @@ fn extern_aggregates() {
         "may only be applied to an extern function, type, struct, union, enum, or const",
     );
 }
+
+// A const-generic argument written as an EXPRESSION over the enclosing generic's own parameters. Braced
+// so the grammar stays LL(1) -- `A<B * 2>` cannot be told from a type until well past the `<`. The
+// expression is carried unfolded until a substitution binds the parameters, then folded to a width.
+@test
+fn const_generic_expressions() {
+    h::expect_exit(
+        "an expression of literals folds where it is written",
+        "struct A<const N: usize> { pub v: [u64; N] }\nfn main() i32 {\n    let a = A::<{2 * 2}> {};\n    return (sizeof(A<4>) as i32) - 32 + (unsafe a.v[0]) as i32;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "a return type computed from the argument",
+        "struct A<const N: usize> { pub v: [u64; N] }\nfn dbl<const N: usize>(a: &A<N>) A<{N * 2}> {\n    let mut r = A::<{N * 2}> {};\n    unsafe { r.v[N * 2 - 1] = 7; }\n    return r;\n}\nfn main() i32 {\n    let a = A::<2> {};\n    let b = dbl(&a);\n    return (sizeof(A<4>) as i32) - 32 + (unsafe b.v[3]) as i32 - 7;\n}\n",
+        0,
+    );
+    // Expressions are compared in CANONICAL form, not as written, so composing two widenings arrives at
+    // the width the signature promises: `{(W * 2) * 2}` IS `{W * 4}`.
+    h::expect_exit(
+        "composed widths are the same width",
+        "struct A<const N: usize> { pub v: [u64; N] }\nfn dbl<const W: usize>(a: &A<W>) A<{W * 2}> { return A::<{W * 2}> {}; }\nfn quad<const Q: usize>(a: &A<Q>) A<{Q * 4}> {\n    let d = dbl(a);\n    return dbl(&d);\n}\nfn main() i32 {\n    let a = A::<2> {};\n    let q = quad(&a);\n    return (sizeof(A<8>) as i32) - 64 + (unsafe q.v[7]) as i32;\n}\n",
+        0,
+    );
+    // The same canonical form settles the arithmetic identities too.
+    h::expect_exit(
+        "addition, division and shifts reduce to one form",
+        "struct A<const N: usize> { pub v: [u64; N] }\nfn a1<const W: usize>(a: &A<W>) A<{W + W}> { return A::<{W * 2}> {}; }\nfn a2<const W: usize>(a: &A<W>) A<{W * 4 / 2}> { return A::<{W * 2}> {}; }\nfn a3<const W: usize>(a: &A<W>) A<{W << 1}> { return A::<{W * 2}> {}; }\nfn main() i32 {\n    let a = A::<2> {};\n    let x = a1(&a);\n    let y = a2(&a);\n    let z = a3(&a);\n    return ((unsafe x.v[0]) + (unsafe y.v[0]) + (unsafe z.v[0])) as i32;\n}\n",
+        0,
+    );
+    // A width that genuinely differs is still rejected, and the report names both forms.
+    h::expect_err_msg(
+        "a different width does not unify",
+        "struct A<const N: usize> { pub v: [u64; N] }\nfn dbl<const W: usize>(a: &A<W>) A<{W * 2}> { return A::<{W * 2}> {}; }\nfn wrong<const Q: usize>(a: &A<Q>) A<{Q * 3}> { return dbl(a); }\nfn main() i32 { let a = A::<2> {}; let q = wrong(&a); return (unsafe q.v[0]) as i32; }\n",
+        "expected 'A<{3 * Q}>', found 'A<{2 * Q}>'",
+    );
+}

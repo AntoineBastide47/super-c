@@ -572,6 +572,8 @@ fn b_type(b: &mut Builder, id: NodeId) d::DocId {
                     let a = list_at(b, args, i);
                     if nd(b, a).kind == NodeKind::NODE_LITERAL {
                         az.push(node_text(b, a));
+                    } else if fmt_const_arg(b, a) {
+                        az.push(b_const_arg(b, a)); // `{N * 2}`: the braces are what make it an expression
                     } else {
                         az.push(b_type(b, a));
                     }
@@ -976,6 +978,8 @@ fn b_expr(b: &mut Builder, id: NodeId) d::DocId {
                 let a = list_at(b, types, i);
                 if nd(b, a).kind == NodeKind::NODE_LITERAL {
                     az.push(node_text(b, a));
+                } else if fmt_const_arg(b, a) {
+                    az.push(b_const_arg(b, a));
                 } else {
                     az.push(b_type(b, a));
                 }
@@ -1169,6 +1173,8 @@ fn b_expr_type_path(b: &mut Builder, id: NodeId) d::DocId {
             let a = list_at(b, args, i);
             if nd(b, a).kind == NodeKind::NODE_LITERAL {
                 az.push(node_text(b, a));
+            } else if fmt_const_arg(b, a) {
+                az.push(b_const_arg(b, a));
             } else {
                 az.push(b_type(b, a));
             }
@@ -1177,6 +1183,21 @@ fn b_expr_type_path(b: &mut Builder, id: NodeId) d::DocId {
     }
     let r = b.p.concat(&v);
     return r;
+}
+
+// A const-generic argument written as an expression. It reaches here as an ordinary expression node --
+// nothing a TYPE position can otherwise hold -- and the braces have to come back or it will not re-parse.
+fn fmt_const_arg(b: &Builder, id: NodeId) bool {
+    let k = nd(b, id).kind;
+    return k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL;
+}
+
+fn b_const_arg(b: &mut Builder, id: NodeId) d::DocId {
+    let mut v = Vector::<d::DocId>::new();
+    v.push(b.p.txt("{"));
+    v.push(b_expr(b, id));
+    v.push(b.p.txt("}"));
+    return b.p.concat(&v);
 }
 
 // sizeof/alignof accept a type (usual) -- the parser stores a type node.

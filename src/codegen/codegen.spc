@@ -1759,6 +1759,26 @@ extend Codegen {
             }
             return t;
         }
+        // A const-generic argument written as an expression (`UInt<{BITS * 2}>`): the substitution this
+        // body is emitted under is what turns it into a value.
+        // A const-generic argument in canonical form (`UInt<{BITS * 2}>`): the substitution this body is
+        // emitted under turns each parameter in it into a value.
+        if y.kind == TypeKind::TYPE_CONST_EXPR {
+            let l = *self.cur_ast().const_lin_at(y.as_data.inst);
+            let mut v = l.k;
+            for i in 0..l.n {
+                let c = unsafe l.c[i as usize];
+                if c == 0 {
+                    continue;
+                }
+                let b = self.subst_lookup(unsafe l.p[i as usize].module, unsafe l.p[i as usize].node);
+                if b == TYPE_NONE || self.type_at(b).kind != TypeKind::TYPE_CONST {
+                    return t; // not bound here: still symbolic
+                }
+                v = v + self.type_at(b).as_data.value * c;
+            }
+            return self.cur_ast().const_value(v);
+        }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
             let e = self.subst_resolve(y.as_data.elem);
             if e == y.as_data.elem {
@@ -1812,10 +1832,76 @@ extend Codegen {
         return true;
     }
     // An array-length expr's const-generic value (see cg_const_param_value); -1 if not a bound const param.
-    fn cg_const_len_subst(self: &Self, length: NodeId) i64 {
+    fn cg_const_len_subst(self: &mut Self, length: NodeId) i64 {
+        return self.cg_const_len_eval(length, 0);
+    }
+    /// An array LENGTH under the current substitution: a bound const-generic parameter, an integer the
+    /// evaluator can fold, or arithmetic over them. `[u64; BITS / 64]` is the shape that needs the
+    /// arithmetic -- a parameter alone cannot express a type whose generic argument is its BIT width, and
+    /// writing the expression through verbatim emitted C naming a parameter that does not exist there.
+    /// -1 when the length is none of those, which keeps the verbatim path for anything unmodelled.
+    fn cg_const_len_eval(self: &mut Self, id: NodeId, depth: i32) i64 {
+        if id == NODE_NONE || depth > 8 {
+            return -1;
+        }
         let mut v: i64 = 0;
-        if self.cg_const_param_value(length, &mut v) {
+        if self.cg_const_param_value(id, &mut v) {
             return v;
+        }
+        let n = *self.cur_ast().at_const(id);
+        if n.kind == NodeKind::NODE_BINARY {
+            let l = self.cg_const_len_eval(n.as_data.binary.left, depth + 1);
+            let r = self.cg_const_len_eval(n.as_data.binary.right, depth + 1);
+            if l < 0 || r < 0 {
+                return -1;
+            }
+            // A width is a small number; anything else is a runaway (a type whose own method returns a
+            // wider version of it), and reporting that as "not a length" beats trapping the compiler.
+            if l > 0x40000000 || r > 0x40000000 {
+                return -1;
+            }
+            let op = n.as_data.binary.op;
+            if op == TokenType::Plus {
+                return l + r;
+            }
+            if op == TokenType::Minus {
+                if l < r {
+                    return -1;
+                }
+                return l - r;
+            }
+            if op == TokenType::Star {
+                return l * r;
+            }
+            if op == TokenType::Slash {
+                if r == 0 {
+                    return -1;
+                }
+                return l / r;
+            }
+            if op == TokenType::Percent {
+                if r == 0 {
+                    return -1;
+                }
+                return l % r;
+            }
+            if op == TokenType::LeftShift && r < 62 {
+                return l << r;
+            }
+            if op == TokenType::RightShift && r < 62 {
+                return l >> r;
+            }
+            return -1;
+        }
+        // Anything left with no generic parameter in it -- a literal, a top-level const -- is the
+        // evaluator's business; asking it only pays off once the substitution has been ruled out.
+        let ce = self.ceval();
+        if ce == null {
+            return -1;
+        }
+        let cv = ce.eval(self.cur_module(), id);
+        if cv.kind == ce::CONST_INT && cv.as_data.i >= 0 {
+            return cv.as_data.i;
         }
         return -1;
     }
@@ -2988,6 +3074,15 @@ extend Codegen {
             _ => {},
         };
         return NODE_NONE;
+    }
+    // Is `t` an instance of a generic ENUM (`Option<T>`, `Result<T, E>`)? The scrutinee of most switches.
+    fn inst_is_enum(self: &Self, t: TypeId) bool {
+        let y = *self.type_at(t);
+        if y.kind != TypeKind::TYPE_INSTANCE || y.as_data.inst as usize >= unsafe self.cur_ast().instances.len() {
+            return false;
+        }
+        let it = *self.cur_ast().instance(y.as_data.inst);
+        return self.mod_ast(it.module).at_const(it.decl).kind == NodeKind::NODE_ENUM;
     }
     fn enclosing_enum_in(self: &Self, m: ModuleId, variant: NodeId) NodeId {
         if m == self.cur_module() && !self.borrowed {
@@ -7009,7 +7104,12 @@ extend Codegen {
                 self.emit_str("}\n");
                 i = i + 1;
             }
-            if mode != 0 && arms.len > 0 {
+            // An enum switch is exhaustive -- the typechecker rejects one that is not -- so the chain
+            // covers every case. Saying so lets C see it: without the final `else` a statement switch
+            // whose arms all `return` looks like a function that can fall off its end, and every such
+            // switch in every program warned under -Wreturn-type.
+            let enum_scrut = bk == TypeKind::TYPE_ENUM || bk == TypeKind::TYPE_INSTANCE && self.inst_is_enum(base);
+            if (mode != 0 || enum_scrut) && arms.len > 0 {
                 self.emit_indent();
                 self.emit_str("else { __builtin_unreachable(); }\n");
             }

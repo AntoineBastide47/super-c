@@ -279,10 +279,18 @@ extend Parser {
             // A leading lifetime is a lifetime ARGUMENT (`Foo<'a, T>`); a bare integer literal is a
             // const-generic value (e.g. `Buff<i32, 4>`). Both are single-token decisions. This is the
             // shared reader for type paths AND expression turbofish, so one arm covers `Foo::<'a, T>`.
+            // A braced argument is a const-generic EXPRESSION (`UInt<{BITS * 2}>`). Braces because a bare
+            // expression is not decidable from one token here -- `A<B * 2>` cannot be told from a type
+            // until well past the `<` -- and the grammar stays LL(1) by asking for them.
             let arg = if self.check(TokenType::Label) {
                 self.parse_lifetime();
             } else if self.check(TokenType::IntegerLiteral) {
                 self.literal();
+            } else if self.check(TokenType::LeftBrace) {
+                self.advance();
+                let e = self.parse_expression();
+                self.expect(TokenType::RightBrace, "'}'");
+                e;
             } else {
                 self.parse_type();
             };

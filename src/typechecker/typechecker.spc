@@ -1518,6 +1518,56 @@ pub fn render_type_into(
                 sfx,
             );
         }
+    } else if ty.kind == TypeKind::TYPE_CONST_EXPR {
+        // Printed from the canonical form rather than as written: two of these failing to match is the
+        // one diagnostic this type produces, and the forms are what actually differ.
+        let l = a.const_lin_at(ty.as_data.inst);
+        let mut at: usize = 0;
+        if cap > 1 {
+            unsafe buf[0] = '{' as char;
+            at = 1;
+        }
+        for i in 0..l.n {
+            let c = unsafe l.c[i as usize];
+            if c == 0 {
+                continue;
+            }
+            let pd = unsafe l.p[i as usize];
+            let pa = rt_ast(pkg, a, pd.module);
+            let ns = pa.at_const(pa.at_const(pd.node).as_data.generic_param.name).as_data.name.text;
+            let sep = if at > 1 {
+                " + ".ptr() as *const char;
+            } else {
+                "".ptr() as *const char;
+            };
+            if c == 1 {
+                at = at + (unsafe stdio::snprintf(
+                    buf + at,
+                    cap - at,
+                    "%s%.*s".ptr() as *const char,
+                    sep,
+                    (ns.end - ns.start) as i32,
+                    src_at(rt_src(pkg, a, cur_src, pd.module), ns.start),
+                )) as usize;
+            } else {
+                at = at + (unsafe stdio::snprintf(
+                    buf + at,
+                    cap - at,
+                    "%s%lld * %.*s".ptr() as *const char,
+                    sep,
+                    c,
+                    (ns.end - ns.start) as i32,
+                    src_at(rt_src(pkg, a, cur_src, pd.module), ns.start),
+                )) as usize;
+            }
+        }
+        if l.k != 0 && at < cap {
+            at = at + (unsafe stdio::snprintf(buf + at, cap - at, " + %lld".ptr() as *const char, l.k)) as usize;
+        }
+        if at + 1 < cap {
+            unsafe buf[at] = '}' as char;
+            unsafe buf[at + 1] = 0 as char;
+        }
     } else {
         unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "?".ptr() as *const char);
     }
@@ -1576,6 +1626,13 @@ extend TypeChecker {
             return ty;
         }
         let y = *self.type_at(ty);
+        if y.kind == TypeKind::TYPE_CONST_EXPR {
+            let mut out = ConstLin { k: 0, n: 0 };
+            if self.tc_lin_subst(y.as_data.inst, params, args, n, &mut out, 0) {
+                return self.cur_ast().intern_const_lin(&out);
+            }
+            return ty; // a parameter this instantiation does not bind: still symbolic
+        }
         if y.kind == TypeKind::TYPE_GENERIC {
             for i in 0..n {
                 if unsafe params[i as usize].module == y.module && unsafe params[i as usize].node == y.as_data.decl {
@@ -1610,6 +1667,238 @@ extend TypeChecker {
         }
         return ty;
     }
+
+    /// A const-generic expression in canonical form: a constant plus a coefficient per parameter. This is
+    /// what makes `{(N * 2) * 2}` and `{N * 4}` the same width -- comparing the expressions as written
+    /// says they differ, and they do not. Linear is exactly the closed set here: `+`, `-`, and scaling by
+    /// a constant stay inside it, and `N * N` does not, which is refused rather than approximated.
+    fn tc_lin(
+        self: &mut Self,
+        m: ModuleId,
+        id: NodeId,
+        params: *const DefId,
+        args: *const TypeId,
+        n: i32,
+        out: &mut ConstLin,
+        depth: i32,
+    ) bool {
+        if id == NODE_NONE || depth > 12 {
+            return false;
+        }
+        let a = self.mod_ast(m);
+        let node = *a.at_const(id);
+        if node.kind == NodeKind::NODE_IDENTIFIER || node.kind == NodeKind::NODE_MEMBER {
+            let d = a.resolution_def(id);
+            if d.node == NODE_NONE {
+                return false;
+            }
+            // A bound parameter contributes what it is bound TO: a value, or another expression whose
+            // own form is folded in here. That is what composes `dbl(dbl(x))` into one width.
+            for i in 0..n {
+                if unsafe params[i as usize].module == d.module && unsafe params[i as usize].node == d.node {
+                    let bt = unsafe args[i as usize];
+                    if bt == TYPE_NONE {
+                        return false;
+                    }
+                    let by = *self.type_at(bt);
+                    if by.kind == TypeKind::TYPE_CONST {
+                        out.k = out.k + by.as_data.value;
+                        return true;
+                    }
+                    if by.kind == TypeKind::TYPE_CONST_EXPR {
+                        // The binding is itself an expression: fold ITS form in, which is what composes
+                        // `dbl(dbl(x))` into one width rather than leaving two nested ones.
+                        let mut inner = ConstLin { k: 0, n: 0 };
+                        if !self.tc_lin_subst(by.as_data.inst, params, args, n, &mut inner, depth + 1) {
+                            return false;
+                        }
+                        return lin_scale(&inner, 1, out);
+                    }
+                    if by.kind == TypeKind::TYPE_GENERIC {
+                        return lin_add_term(out, DefId { module: by.module, node: by.as_data.decl }, 1);
+                    }
+                    return false;
+                }
+            }
+            return lin_add_term(out, d, 1);
+        }
+        if node.kind == NodeKind::NODE_BINARY {
+            let op = node.as_data.binary.op;
+            let lid = node.as_data.binary.left;
+            let rid = node.as_data.binary.right;
+            if op == TokenType::Plus || op == TokenType::Minus {
+                if !self.tc_lin(m, lid, params, args, n, out, depth + 1) {
+                    return false;
+                }
+                let mut rhs = ConstLin { k: 0, n: 0 };
+                if !self.tc_lin(m, rid, params, args, n, &mut rhs, depth + 1) {
+                    return false;
+                }
+                let sign = if op == TokenType::Plus {
+                    1;
+                } else {
+                    0 - 1;
+                };
+                out.k = out.k + sign * rhs.k;
+                for i in 0..rhs.n {
+                    if !lin_add_term(out, unsafe rhs.p[i as usize], sign * unsafe rhs.c[i as usize]) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            let mut lhs = ConstLin { k: 0, n: 0 };
+            let mut rhs = ConstLin { k: 0, n: 0 };
+            if !self.tc_lin(m, lid, params, args, n, &mut lhs, depth + 1) || !self.tc_lin(
+                m,
+                rid,
+                params,
+                args,
+                n,
+                &mut rhs,
+                depth + 1,
+            ) {
+                return false;
+            }
+            if op == TokenType::Star {
+                // One side must be a plain constant: a product of two parameters is not linear.
+                if rhs.n == 0 {
+                    return lin_scale(&lhs, rhs.k, out);
+                }
+                if lhs.n == 0 {
+                    return lin_scale(&rhs, lhs.k, out);
+                }
+                return false;
+            }
+            if op == TokenType::LeftShift && rhs.n == 0 && rhs.k >= 0 && rhs.k < 32 {
+                return lin_scale(&lhs, 1i64 << rhs.k, out);
+            }
+            if op == TokenType::Slash && rhs.n == 0 && rhs.k != 0 {
+                return lin_divide(&lhs, rhs.k, out);
+            }
+            if op == TokenType::RightShift && rhs.n == 0 && rhs.k >= 0 && rhs.k < 32 {
+                return lin_divide(&lhs, 1i64 << rhs.k, out);
+            }
+            return false;
+        }
+        // A leaf with no parameter in it -- a literal, a named const -- is the evaluator's business.
+        let ceptr = self.ceval();
+        if ceptr != null {
+            let lv = ceptr.eval(m, id);
+            if lv.kind == ce::CONST_INT {
+                out.k = out.k + lv.as_data.i;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Substitute a canonical form: every parameter that this instantiation binds is replaced by what it
+    /// is bound to -- a value, or another form, folded in. What is left is the composed width.
+    fn tc_lin_subst(
+        self: &mut Self,
+        idx: u32,
+        params: *const DefId,
+        args: *const TypeId,
+        n: i32,
+        out: &mut ConstLin,
+        depth: i32,
+    ) bool {
+        if depth > 12 {
+            return false;
+        }
+        let src = *self.cur_ast().const_lin_at(idx);
+        out.k = out.k + src.k;
+        for i in 0..src.n {
+            let coeff = unsafe src.c[i as usize];
+            if coeff == 0 {
+                continue;
+            }
+            let d = unsafe src.p[i as usize];
+            let mut bound = TYPE_NONE;
+            for j in 0..n {
+                if unsafe params[j as usize].module == d.module && unsafe params[j as usize].node == d.node {
+                    bound = unsafe args[j as usize];
+                }
+            }
+            if bound == TYPE_NONE {
+                if !lin_add_term(out, d, coeff) {
+                    return false;
+                }
+                continue;
+            }
+            let by = *self.type_at(bound);
+            if by.kind == TypeKind::TYPE_CONST {
+                out.k = out.k + by.as_data.value * coeff;
+                continue;
+            }
+            if by.kind == TypeKind::TYPE_CONST_EXPR {
+                let mut inner = ConstLin { k: 0, n: 0 };
+                if !self.tc_lin_subst(by.as_data.inst, params, args, n, &mut inner, depth + 1) {
+                    return false;
+                }
+                if !lin_scale(&inner, coeff, out) {
+                    return false;
+                }
+                continue;
+            }
+            // Bound to ANOTHER parameter -- one generic passing its width to the next -- so the term
+            // simply changes which parameter it names.
+            if by.kind == TypeKind::TYPE_GENERIC {
+                if !lin_add_term(out, DefId { module: by.module, node: by.as_data.decl }, coeff) {
+                    return false;
+                }
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    /// Do two types denote the same thing when one or both still carry an unfolded const-generic
+    /// expression? Compared by canonical form, not as written, so `{(N * 2) * 2}` matches `{N * 4}`.
+    fn tc_const_expr_same(self: &mut Self, a: TypeId, b: TypeId) bool {
+        if a == b {
+            return true;
+        }
+        if a == TYPE_NONE || b == TYPE_NONE {
+            return false;
+        }
+        let ya = *self.type_at(a);
+        let yb = *self.type_at(b);
+        if ya.kind == TypeKind::TYPE_CONST_EXPR && yb.kind == TypeKind::TYPE_CONST_EXPR {
+            return const_lin_eq(
+                self.cur_ast().const_lin_at(ya.as_data.inst),
+                self.cur_ast().const_lin_at(yb.as_data.inst),
+            );
+        }
+        if ya.kind != yb.kind {
+            return false;
+        }
+        if ya.kind == TypeKind::TYPE_POINTER || ya.kind == TypeKind::TYPE_REFERENCE || ya.kind == TypeKind::TYPE_SLICE {
+            return ya.qualifier == yb.qualifier && self.tc_const_expr_same(ya.as_data.elem, yb.as_data.elem);
+        }
+        if ya.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let ia = *self.cur_ast().instance(ya.as_data.inst);
+        let ib = *self.cur_ast().instance(yb.as_data.inst);
+        if ia.module != ib.module || ia.decl != ib.decl || ia.n != ib.n {
+            return false;
+        }
+        let mut all = false;
+        for i in 0..ia.n {
+            if !self.tc_const_expr_same(unsafe ia.args[i as usize], unsafe ib.args[i as usize]) {
+                return false;
+            }
+            all = true;
+        }
+        return all;
+    }
+
+    /// Fold a const-generic argument expression with the enclosing generic's parameters bound. The same
+    /// arithmetic the compile-time evaluator does, over a substitution it has no way to see: `{BITS * 2}`
+    /// is written where BITS is a parameter and read where it is a value.
 
     // A const-generic parameter used as an ARRAY LENGTH (`fn f<const N: usize>(a: [T; N])`). The lowered
     // parameter type cannot carry the binding -- `[T; N]` interns with a length of 0 while N is unbound --
@@ -1678,6 +1967,23 @@ extend TypeChecker {
             return;
         }
         let p = *self.type_at(param_ty);
+        // A parameter position written as a bare const-generic parameter reduces to the form `1 * P`,
+        // which binds P exactly as a type parameter would. Anything more (`{P * 2}` in a PARAMETER) would
+        // have to be solved for P, which this does not attempt.
+        if p.kind == TypeKind::TYPE_CONST_EXPR {
+            let l = *self.cur_ast().const_lin_at(p.as_data.inst);
+            if l.k == 0 && l.n == 1 && l.c[0] == 1 {
+                for i in 0..n {
+                    if unsafe params[i as usize].module == l.p[0].module && unsafe params[i as usize].node == l.p[0].node {
+                        if unsafe bound[i as usize] == TYPE_NONE {
+                            unsafe bound[i as usize] = arg_ty;
+                        }
+                        return;
+                    }
+                }
+            }
+            return;
+        }
         if p.kind == TypeKind::TYPE_GENERIC {
             for i in 0..n {
                 if unsafe params[i as usize].module == p.module && unsafe params[i as usize].node == p.as_data.decl {
@@ -2004,6 +2310,11 @@ extend TypeChecker {
         if k == NodeKind::NODE_LITERAL {
             return true;
         }
+        // A braced argument is written as an expression, so it arrives as one: anything that is not a
+        // type path cannot be a type, and the braces already said it is a value.
+        if k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL {
+            return true;
+        }
         if k != NodeKind::NODE_TYPE_PATH {
             return false;
         }
@@ -2026,6 +2337,15 @@ extend TypeChecker {
             if lv.kind == ce::CONST_INT {
                 return self.cur_ast().const_value(lv.as_data.i);
             }
+        }
+        // A braced argument is an ordinary expression node, and one in a TYPE position is never checked,
+        // so the evaluator has no type to work from and answers only its leaves. Reduce it to canonical
+        // form instead: an expression of literals comes out a plain value, and one over the enclosing
+        // generic's own parameters -- unbound HERE -- comes out a form, interned by VALUE so substitution
+        // can compose forms later and two spellings of one width are already the same type.
+        let mut lin = ConstLin { k: 0, n: 0 };
+        if self.tc_lin(m, aid, null, null, 0, &mut lin, 0) {
+            return self.cur_ast().intern_const_lin(&lin);
         }
         let sp = self.mod_ast(m).at_const(aid).span;
         if ceptr != null && ceptr.ce_trap_get().len() != 0 {
@@ -4656,6 +4976,12 @@ extend TypeChecker {
         if ac.kind == TypeKind::TYPE_NEVER {
             return true;
         }
+        // Two unfolded const-generic expressions are interned per NODE, so the same `{N * 2}` written in
+        // a return type and in the value returned are different ids. They denote the same width, and
+        // structural equality is what says so until a substitution folds both to one value.
+        if self.tc_const_expr_same(expected, actual) {
+            return true;
+        }
         // A reference coalesces to its raw-pointer form (`&T` -> `*const T`, `&mut T` -> `*mut T`).
         // Normalizing it here lets the single pointer rule below apply transitively, so `&T` reaches
         // `*const void` via `*const T` (ref -> ptr -> void) with no special case. A BARE `*T` accepts
@@ -6121,6 +6447,64 @@ const fn arith_method_name(op: TokenType) str<'static> {
         return "rem";
     }
     return "";
+}
+
+fn lin_add_term(out: &mut ConstLin, d: DefId, coeff: i64) bool {
+    if coeff == 0 {
+        return true;
+    }
+    for i in 0..out.n {
+        if unsafe out.p[i as usize].module == d.module && unsafe out.p[i as usize].node == d.node {
+            unsafe {
+                out.c[i as usize] = out.c[i as usize] + coeff;
+            }
+            return true;
+        }
+    }
+    if out.n >= 4 {
+        return false;
+    }
+    unsafe {
+        out.p[out.n as usize] = d;
+    }
+    unsafe {
+        out.c[out.n as usize] = coeff;
+    }
+    out.n = out.n + 1;
+    return true;
+}
+
+fn lin_scale(src: &ConstLin, f: i64, out: &mut ConstLin) bool {
+    // Widths are small; a factor this large means the expression is running away, not describing a type.
+    if f > 0x40000000 || f < 0 - 0x40000000 || src.k > 0x40000000 || src.k < 0 - 0x40000000 {
+        return false;
+    }
+    out.k = out.k + src.k * f;
+    for i in 0..src.n {
+        if !lin_add_term(out, unsafe src.p[i as usize], unsafe src.c[i as usize] * f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Only when every part divides exactly: `{(N * 4) / 2}` is `{N * 2}`, and `{N / 2}` is not an integer
+// form of anything this can compare.
+fn lin_divide(src: &ConstLin, d: i64, out: &mut ConstLin) bool {
+    if d == 0 || src.k % d != 0 {
+        return false;
+    }
+    out.k = out.k + src.k / d;
+    for i in 0..src.n {
+        let c = unsafe src.c[i as usize];
+        if c % d != 0 {
+            return false;
+        }
+        if !lin_add_term(out, unsafe src.p[i as usize], c / d) {
+            return false;
+        }
+    }
+    return true;
 }
 
 extend TypeChecker {

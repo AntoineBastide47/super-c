@@ -686,6 +686,13 @@ extend Resolver {
     // const stand where previously only a literal could. A name that is neither falls through to
     // `resolve_type`, so the diagnostic still blames a missing type.
     fn resolve_generic_arg(self: &mut Self, a: NodeId) {
+        // A braced argument (`Foo<{N * 2}>`) is an expression, and its names -- the enclosing generic's
+        // own parameters -- resolve as values, not as types.
+        let k = self.ast.at_const(a).kind;
+        if k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL {
+            self.resolve_expr(a);
+            return;
+        }
         if self.ast.at_const(a).kind == NodeKind::NODE_TYPE_PATH {
             let tp = self.ast.at_const(a).as_data.type_path;
             if tp.parts.len == 1 && tp.args.len == 0 {

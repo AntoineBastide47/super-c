@@ -605,6 +605,50 @@ pub enum TypeKind {
     TYPE_DYN,
     TYPE_NEVER,
     TYPE_CONST, // a const-generic argument value (as_data.value)
+    /// A const-generic argument written as an EXPRESSION over the enclosing generic's own parameters
+    /// (`UInt<{BITS * 2}>`). It cannot be a value yet -- those parameters are unbound where it is written --
+    /// so it carries the expression (`module` + `as_data.decl`) until substitution folds it to a TYPE_CONST.
+    /// Never concrete, so no instance is ever emitted while one is still in the arguments.
+    TYPE_CONST_EXPR,
+}
+
+/// A const-generic expression in canonical form: `k + sum(c_i * P_i)`. Linear is exactly the closed set
+/// for widths -- `+`, `-` and scaling by a constant stay inside it, `N * N` does not -- and comparing
+/// these instead of the expressions as WRITTEN is what makes two spellings of one width the same type.
+pub struct ConstLin {
+    pub k: i64,
+    pub n: i32,
+    pub p: [DefId; 4],
+    pub c: [i64; 4],
+}
+
+pub fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
+    if a.k != b.k {
+        return false;
+    }
+    let mut na: i32 = 0;
+    for i in 0..a.n {
+        if unsafe a.c[i as usize] == 0 {
+            continue;
+        }
+        na = na + 1;
+        let mut found = false;
+        for j in 0..b.n {
+            if unsafe b.p[j as usize].module == unsafe a.p[i as usize].module && unsafe b.p[j as usize].node == unsafe a.p[i as usize].node && unsafe b.c[j as usize] == unsafe a.c[i as usize] {
+                found = true;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    let mut nb: i32 = 0;
+    for j in 0..b.n {
+        if unsafe b.c[j as usize] != 0 {
+            nb = nb + 1;
+        }
+    }
+    return na == nb;
 }
 
 pub struct TyArr {
@@ -755,6 +799,9 @@ pub struct Ast {
     pub mono: Vector<MonoUse>,
     pub mono_at: Vector<u32>,
     pub instances: Vector<TyInstance>,
+    /// Canonical forms of const-generic expressions (`{BITS * 2}`), interned by VALUE so two spellings of
+    /// the same width are one id -- which is what makes `{(N * 2) * 2}` and `{N * 4}` the same type.
+    pub const_lins: Vector<ConstLin>,
     pub method_insts: Vector<MethodInst>,
     pub instance_index: Vector<u32>,
     pub inst_ix_used: u32,
@@ -786,6 +833,7 @@ extend Ast {
             mono: Vector::<MonoUse>::new(),
             mono_at: Vector::<u32>::new(),
             instances: Vector::<TyInstance>::new(),
+            const_lins: Vector::<ConstLin>::new(),
             method_insts: Vector::<MethodInst>::new(),
             instance_index: Vector::<u32>::new(),
             inst_ix_used: 0,
@@ -936,6 +984,35 @@ extend Ast {
 
     /// Interns a (module, decl, args) instantiation and returns its TYPE_INSTANCE TypeId. `n` is
     /// clamped to 8 (the fixed args capacity). Safety: `args` must point at `n` readable TypeIds.
+    /// Intern a const-expression form, returning the TYPE that stands for it -- a plain TYPE_CONST once
+    /// nothing symbolic is left, so a fully substituted width is an ordinary value again.
+    pub fn intern_const_lin(self: &mut Self, l: &ConstLin) TypeId {
+        let mut nz: i32 = 0;
+        for i in 0..l.n {
+            if unsafe l.c[i as usize] != 0 {
+                nz = nz + 1;
+            }
+        }
+        if nz == 0 {
+            return self.const_value(l.k);
+        }
+        for i in 0..self.const_lins.len() {
+            if const_lin_eq(self.const_lins.at(i), l) {
+                return self.intern_type(
+                    Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: i as u32 } },
+                );
+            }
+        }
+        self.const_lins.push(*l);
+        return self.intern_type(
+            Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: self.const_lins.len() as u32 - 1 } },
+        );
+    }
+
+    pub const fn const_lin_at(self: &Self, i: u32) &ConstLin {
+        return self.const_lins.at(i as usize);
+    }
+
     pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut m = n;
         if m > 8 {
@@ -1075,7 +1152,8 @@ extend Ast {
     // `concrete` occupies Ty's former padding byte, so the cached answer needs no parallel allocation.
     fn tc_decide(self: &Self, ty: Ty) bool {
         return switch ty.kind {
-            TYPE_GENERIC => false,
+            // Not a value yet: an instance holding one must not be emitted until substitution folds it.
+            TYPE_GENERIC | TYPE_CONST_EXPR => false,
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => self.type_concrete(ty.as_data.elem),
             TYPE_INSTANCE => {
                 let it = self.instance(ty.as_data.inst);
@@ -1259,6 +1337,7 @@ extend Ast as Free {
         self.mono.free();
         self.mono_at.free();
         self.instances.free();
+        self.const_lins.free();
         self.method_insts.free();
         self.instance_index.free();
         self.method_inst_index.free();
