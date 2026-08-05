@@ -58,11 +58,11 @@ fn matches_hardware_f64_bit_for_bit() {
     let vs = dvals();
     for i in 0..22 {
         let a = unsafe vs[i];
-        assert_eq(f64_bits(Float::<11, 52, IEEE>::from_f64(a).to_f64()), f64_bits(a));
+        assert_eq(f64_bits(Float::<11, 52>::from_f64(a).to_f64()), f64_bits(a));
         for j in 0..22 {
             let b = unsafe vs[j];
-            let fa = Float::<11, 52, IEEE>::from_f64(a);
-            let fb = Float::<11, 52, IEEE>::from_f64(b);
+            let fa = Float::<11, 52>::from_f64(a);
+            let fb = Float::<11, 52>::from_f64(b);
             assert(same64((fa + fb).to_f64(), a + b));
             assert(same64((fa - fb).to_f64(), a - b));
             assert(same64((fa * fb).to_f64(), a * b));
@@ -95,11 +95,11 @@ fn matches_hardware_f32_bit_for_bit() {
     ];
     for i in 0..18 {
         let a = unsafe vs[i];
-        assert_eq(f32_bits(Float::<8, 23, IEEE>::from_f32(a).to_f32()), f32_bits(a));
+        assert_eq(f32_bits(Float::<8, 23>::from_f32(a).to_f32()), f32_bits(a));
         for j in 0..18 {
             let b = unsafe vs[j];
-            let fa = Float::<8, 23, IEEE>::from_f32(a);
-            let fb = Float::<8, 23, IEEE>::from_f32(b);
+            let fa = Float::<8, 23>::from_f32(a);
+            let fb = Float::<8, 23>::from_f32(b);
             assert(same32((fa + fb).to_f32(), a + b));
             assert(same32((fa - fb).to_f32(), a - b));
             assert(same32((fa * fb).to_f32(), a * b));
@@ -238,21 +238,21 @@ fn sqrt_fma_convert_match_libm() {
     ];
     for i in 0..14 {
         let a = unsafe vs[i];
-        assert(same64(Float::<11, 52, IEEE>::from_f64(a).sqrt().to_f64(), unsafe math::sqrt(a)));
+        assert(same64(Float::<11, 52>::from_f64(a).sqrt().to_f64(), unsafe math::sqrt(a)));
         for j in 0..14 {
             for k in 0..14 {
                 let b = unsafe vs[j];
                 let c = unsafe vs[k];
-                let fa = Float::<11, 52, IEEE>::from_f64(a);
-                let fb = Float::<11, 52, IEEE>::from_f64(b);
-                let fc = Float::<11, 52, IEEE>::from_f64(c);
+                let fa = Float::<11, 52>::from_f64(a);
+                let fb = Float::<11, 52>::from_f64(b);
+                let fc = Float::<11, 52>::from_f64(c);
                 assert(same64(fa.fma(&fb, &fc).to_f64(), unsafe math::fma(a, b, c)));
             }
         }
         // widening then narrowing through f128 is the identity; direct narrowing agrees with from_f64
-        let src = Float::<11, 52, IEEE>::from_f64(a);
+        let src = Float::<11, 52>::from_f64(a);
         let wide = f128::convert(&src);
-        assert_eq(f64_bits(Float::<11, 52, IEEE>::convert(&wide).to_f64()), f64_bits(a));
+        assert_eq(f64_bits(Float::<11, 52>::convert(&wide).to_f64()), f64_bits(a));
         assert_eq(f16::convert(&src).to_raw().to_u64(), f16::from_f64(a).to_raw().to_u64());
     }
     // sqrt specials
@@ -262,4 +262,82 @@ fn sqrt_fma_convert_match_libm() {
     // sqrt runs the same generic code at multi-limb widths: an exact square stays exact
     let nine = f128::from_f64(9.0);
     assert(nine.sqrt() == f128::from_f64(3.0));
+}
+
+// Decimal text: to_string -> from_str is the identity (the digit count is chosen for it), parsing
+// agrees with the compiler's own literal reading, and the specials spell as expected.
+@test
+fn decimal_text_round_trips() {
+    let vs: [f64; 12] = [
+        1.0,
+        -1.0,
+        0.5,
+        3.5,
+        0.1,
+        1.5e-300,
+        2.2250738585072014e-308,
+        1.7976931348623157e308,
+        3.141592653589793,
+        1.0e60,
+        0.3333333333333333,
+        -2.25e-10,
+    ];
+    for i in 0..12 {
+        let a = unsafe vs[i];
+        let f = Float::<11, 52>::from_f64(a);
+        let s = f.to_string();
+        switch Float::<11, 52>::from_str(s.as_str()) {
+            Some(b) => {
+                assert_eq(f64_bits(b.to_f64()), f64_bits(a));
+            },
+            None => {
+                assert(false);
+            },
+        };
+        s.free();
+    }
+    switch Float::<11, 52>::from_str("0.1") {
+        Some(v) => {
+            assert_eq(f64_bits(v.to_f64()), f64_bits(0.1));
+        },
+        None => {
+            assert(false);
+        },
+    };
+    let so = f16::from_f64(1.5).to_string();
+    assert(so.as_str() == "1.5e+0");
+    so.free();
+    let sz = f16::zero().to_string();
+    assert(sz.as_str() == "0");
+    sz.free();
+    switch f16::from_str("nan") {
+        Some(v) => {
+            assert(v.is_nan());
+        },
+        None => {
+            assert(false);
+        },
+    };
+    switch f16::from_str("-inf") {
+        Some(v) => {
+            assert(v.is_infinite() && v.is_negative());
+        },
+        None => {
+            assert(false);
+        },
+    };
+    assert(f16::from_str("12x").is_none());
+    assert(f16::from_str("").is_none());
+    // a 36-digit f128 value survives its own text
+    let third = f128::one() / f128::from_f64(3.0);
+    let ts = third.to_string();
+    switch f128::from_str(ts.as_str()) {
+        Some(b) => {
+            assert(b == third);
+        },
+        None => {
+            assert(false);
+        },
+    };
+    ts.free();
 }

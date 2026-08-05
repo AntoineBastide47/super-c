@@ -38,10 +38,7 @@ pub enum FpClass {
     FP_NAN,
 }
 
-// The FAMILY parameter takes a named descriptor (`Float<5, 10, IEEE>`). Its `= IEEE` default -- so a
-// bare `Float<E, F>` reads as IEEE -- needs a compiler whose const parameters accept defaults, which is
-// in this tree but not yet in the release that bootstraps it; the default lands after the next release.
-pub struct Float<const E: usize, const F: usize, const FAMILY: FloatFamily> {
+pub struct Float<const E: usize, const F: usize, const FAMILY: FloatFamily = IEEE> {
     bits: UInt<{1 + E + F}>,
 }
 
@@ -599,6 +596,253 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         return sig;
     }
 
+    // ---- decimal text --------------------------------------------------------------------------
+    // Both directions run in a WIDER instance of this same type -- two more exponent bits, 96 more
+    // fraction bits -- whose correctly-rounded arithmetic carries the digit work. 96 guard bits put the
+    // accumulated scaling error far below the target's half-ulp, so the one final rounding lands right;
+    // an input contrived to sit within 2^-90 of an exact tie is the one place the last digit could go
+    // the other way. Round-tripping to_string -> from_str is exact: the digit count is chosen for it.
+
+    /// Decimal digits that round-trip this format: ceil(precision * log10(2)) + 1.
+    pub const fn decimal_digits() usize {
+        return (F + 1) * 30103 / 100000 + 2;
+    }
+
+    /// Scientific notation, `-d.dddde+dd`, with trailing zeros trimmed. NaN prints `nan`, infinities
+    /// `inf`/`-inf`, zeros `0`/`-0`. Deliberately NOT a `Format` conformance: a conformance emits for
+    /// every instance, this body instantiates the two-sizes-wider format, and that pairing would demand
+    /// ever wider floats without end. As a plain method it exists only where a call asks for it.
+    pub fn to_string(self: &Float<E, F, FAMILY>) String {
+        static_assert(E <= 28, "decimal text runs in a format two exponent bits wider; cap E at 28");
+        if self.is_nan() {
+            return String::from_str("nan");
+        }
+        let mut out = String::new();
+        if self.is_negative() {
+            out.push_str("-");
+        }
+        if self.is_infinite() {
+            out.push_str("inf");
+            return out;
+        }
+        if self.is_zero() {
+            out.push_str("0");
+            return out;
+        }
+        let a = self.abs();
+        let mut w = Float::<{E + 2}, {F + 96}, IEEE>::convert(&a);
+        let ten = Float::<{E + 2}, {F + 96}, IEEE>::from_f64(10.0);
+        let one = Float::<{E + 2}, {F + 96}, IEEE>::one();
+        // Estimate the decimal exponent from the binary one, then correct -- the estimate is within one.
+        let mut eb: i64 = 0;
+        let _ = w.decode_sig3(&mut eb);
+        let mut d10 = eb * 30103 / 100000;
+        let mag = if d10 < 0 {
+            (0 - d10) as u64;
+        } else {
+            d10 as u64;
+        };
+        let scale = Float::<{E + 2}, {F + 96}, IEEE>::pow10_wide(mag);
+        if d10 >= 0 {
+            w = w / scale;
+        } else {
+            w = w * scale;
+        }
+        while !w.ieee_lt(&ten) {
+            w = w / ten;
+            d10 = d10 + 1;
+        }
+        while w.ieee_lt(&one) {
+            w = w * ten;
+            d10 = d10 - 1;
+        }
+        // Extract one digit past the printed count, for the final round.
+        let p = Float::<E, F, FAMILY>::decimal_digits();
+        let mut digits = Vector::<u8>::new();
+        let mut i: usize = 0;
+        while i <= p {
+            let d = w.int_digit();
+            digits.push(d as u8);
+            let dv = Float::<{E + 2}, {F + 96}, IEEE>::from_f64(d as f64);
+            w = (w - dv) * ten;
+            i = i + 1;
+        }
+        if digits[p] >= 5 {
+            let mut j = p;
+            loop {
+                if j == 0 {
+                    // carried past the first digit: the value became 10.0...e -> 1.0...e+1
+                    digits.set(0, 1);
+                    d10 = d10 + 1;
+                    break;
+                }
+                j = j - 1;
+                if digits[j] == 9 {
+                    digits.set(j, 0);
+                } else {
+                    digits.set(j, digits[j] + 1);
+                    break;
+                }
+            }
+        }
+        let mut last = p; // one past the printed digits; trim zeros back to the leading digit
+        while last > 1 && digits[last - 1] == 0 {
+            last = last - 1;
+        }
+        out.push_byte(b'0' + digits[0]);
+        if last > 1 {
+            out.push_str(".");
+            i = 1;
+            while i < last {
+                out.push_byte(b'0' + digits[i]);
+                i = i + 1;
+            }
+        }
+        out.push_str("e");
+        if d10 >= 0 {
+            out.push_str("+");
+        } else {
+            out.push_str("-");
+            d10 = 0 - d10;
+        }
+        out.push_u64(d10 as u64);
+        digits.free();
+        return out;
+    }
+
+    /// Parse `[-]ddd[.ddd][e[+-]ddd]`, plus `nan`, `inf` and `-inf`. None on anything malformed.
+    pub fn from_str(s: str) Option<Float<E, F, FAMILY>> {
+        static_assert(E <= 28, "decimal text runs in a format two exponent bits wider; cap E at 28");
+        let n = s.len();
+        let mut i: usize = 0;
+        let mut negv = false;
+        if i < n && (s[i] == b'-' || s[i] == b'+') {
+            negv = s[i] == b'-';
+            i = i + 1;
+        }
+        if n - i == 3 {
+            if s[i] == b'n' && s[i + 1] == b'a' && s[i + 2] == b'n' {
+                return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::nan());
+            }
+            if s[i] == b'i' && s[i + 1] == b'n' && s[i + 2] == b'f' {
+                return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::infinity(negv));
+            }
+        }
+        let mut acc = Float::<{E + 2}, {F + 96}, IEEE>::zero();
+        let ten = Float::<{E + 2}, {F + 96}, IEEE>::from_f64(10.0);
+        let maxd = Float::<E, F, FAMILY>::decimal_digits() + 10;
+        let mut nsig: usize = 0;
+        let mut exp_adj: i64 = 0;
+        let mut any = false;
+        let mut seen_dot = false;
+        while i < n {
+            let ch = s[i];
+            if ch == b'.' {
+                if seen_dot {
+                    return Option::<Float<E, F, FAMILY>>::None;
+                }
+                seen_dot = true;
+                i = i + 1;
+                continue;
+            }
+            if ch < b'0' || ch > b'9' {
+                break;
+            }
+            any = true;
+            if nsig < maxd {
+                let dv = Float::<{E + 2}, {F + 96}, IEEE>::from_f64((ch - b'0') as f64);
+                acc = acc * ten + dv;
+                if !acc.is_zero() {
+                    nsig = nsig + 1;
+                }
+                if seen_dot {
+                    exp_adj = exp_adj - 1;
+                }
+            } else if !seen_dot {
+                exp_adj = exp_adj + 1; // beyond the tracked precision: only the magnitude moves
+            }
+            i = i + 1;
+        }
+        if !any {
+            return Option::<Float<E, F, FAMILY>>::None;
+        }
+        let mut e10: i64 = 0;
+        if i < n && (s[i] == b'e' || s[i] == b'E') {
+            i = i + 1;
+            let mut nege = false;
+            if i < n && (s[i] == b'-' || s[i] == b'+') {
+                nege = s[i] == b'-';
+                i = i + 1;
+            }
+            if i >= n {
+                return Option::<Float<E, F, FAMILY>>::None;
+            }
+            while i < n {
+                let ch = s[i];
+                if ch < b'0' || ch > b'9' {
+                    return Option::<Float<E, F, FAMILY>>::None;
+                }
+                if e10 < 100000000 {
+                    e10 = e10 * 10 + (ch - b'0') as i64;
+                }
+                i = i + 1;
+            }
+            if nege {
+                e10 = 0 - e10;
+            }
+        }
+        if i != n {
+            return Option::<Float<E, F, FAMILY>>::None;
+        }
+        let total = e10 + exp_adj;
+        let mag = if total < 0 {
+            (0 - total) as u64;
+        } else {
+            total as u64;
+        };
+        let scale = Float::<{E + 2}, {F + 96}, IEEE>::pow10_wide(mag);
+        if total >= 0 {
+            acc = acc * scale;
+        } else {
+            acc = acc / scale;
+        }
+        let mut r = Float::<E, F, FAMILY>::convert(&acc);
+        if negv {
+            r = r.neg();
+        }
+        return Option::<Float<E, F, FAMILY>>::Some(r);
+    }
+
+    /// 10^k by binary exponentiation: log2(k) roundings of error, absorbed by the 96 guard bits.
+    fn pow10_wide(k: u64) Float<E, F, FAMILY> {
+        let mut base = Float::<E, F, FAMILY>::from_f64(10.0);
+        let mut r = Float::<E, F, FAMILY>::one();
+        let mut kk = k;
+        while kk != 0 {
+            if (kk & 1) == 1 {
+                r = r * base;
+            }
+            kk = kk >> 1;
+            if kk != 0 {
+                base = base * base;
+            }
+        }
+        return r;
+    }
+
+    /// The leading integer digit of a value in [0, 10): read straight off the decoded significand.
+    fn int_digit(self: &Float<E, F, FAMILY>) u64 {
+        if self.is_zero() {
+            return 0;
+        }
+        let mut e: i64 = 0;
+        let s3 = self.decode_sig3(&mut e);
+        if e < 0 {
+            return 0;
+        }
+        return s3.shr(F + 3 - e as usize).to_u64();
+    }
+
     // ---- comparison ----------------------------------------------------------------------------
     // IEEE equality and ordering: NaN compares equal to nothing (itself included), the two zeros are
     // one value, and everything else follows the encoding, which is monotonic within a sign.
@@ -1029,10 +1273,10 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
 // The standard formats the built-ins do not cover. `Float<8, 23>` and `Float<11, 52>` ARE the built-in
 // `f32`/`f64` formats and exist for generic code and tests; the aliases keep their built-in names.
-pub type f16 = Float<5, 10, IEEE>;
-pub type f128 = Float<15, 112, IEEE>;
-pub type f256 = Float<19, 236, IEEE>;
-pub type f8e5m2 = Float<5, 2, IEEE>;
+pub type f16 = Float<5, 10>;
+pub type f128 = Float<15, 112>;
+pub type f256 = Float<19, 236>;
+pub type f8e5m2 = Float<5, 2>;
 pub type f8e4m3fn = Float<4, 3, FINITE_ONLY>;
 
 // ---- bit bridges to the built-in floats ----------------------------------------------------------------
