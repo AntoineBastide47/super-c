@@ -622,6 +622,115 @@ pub struct ConstLin {
     pub c: [i64; 4],
 }
 
+pub fn lin_add_term(out: &mut ConstLin, d: DefId, coeff: i64) bool {
+    if coeff == 0 {
+        return true;
+    }
+    for i in 0..out.n {
+        if unsafe out.p[i as usize].module == d.module && unsafe out.p[i as usize].node == d.node {
+            unsafe {
+                out.c[i as usize] = out.c[i as usize] + coeff;
+            }
+            return true;
+        }
+    }
+    if out.n >= 4 {
+        return false;
+    }
+    unsafe {
+        out.p[out.n as usize] = d;
+    }
+    unsafe {
+        out.c[out.n as usize] = coeff;
+    }
+    out.n = out.n + 1;
+    return true;
+}
+
+pub fn lin_scale(src: &ConstLin, f: i64, out: &mut ConstLin) bool {
+    // Widths are small; a factor this large means the expression is running away, not describing a type.
+    if f > 0x40000000 || f < 0 - 0x40000000 || src.k > 0x40000000 || src.k < 0 - 0x40000000 {
+        return false;
+    }
+    out.k = out.k + src.k * f;
+    for i in 0..src.n {
+        if !lin_add_term(out, unsafe src.p[i as usize], unsafe src.c[i as usize] * f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Substitute a const-expression form's parameters and accumulate the result into `out`. `src` holds
+/// form `idx`; `params` are bound to `args`, which are types of `dst`. False when the result leaves the
+/// linear set (a parameter bound to something that is not a width) -- the caller then keeps the form
+/// unfolded rather than inventing a value for it.
+pub fn lin_subst(
+    dst: &Ast,
+    src: &Ast,
+    idx: u32,
+    params: *const DefId,
+    args: *const TypeId,
+    n: i32,
+    out: &mut ConstLin,
+    depth: i32,
+) bool {
+    if depth > 12 {
+        return false;
+    }
+    let form = *src.const_lin_at(idx);
+    out.k = out.k + form.k;
+    for i in 0..form.n {
+        let coeff = unsafe form.c[i as usize];
+        if coeff == 0 {
+            continue;
+        }
+        let d = unsafe form.p[i as usize];
+        let mut bound = TYPE_NONE;
+        for j in 0..n {
+            if unsafe params[j as usize].module == d.module && unsafe params[j as usize].node == d.node {
+                bound = unsafe args[j as usize];
+            }
+        }
+        if bound == TYPE_NONE {
+            if !lin_add_term(out, d, coeff) {
+                return false;
+            }
+            continue;
+        }
+        let by = *dst.type_at(bound);
+        if by.kind == TypeKind::TYPE_CONST {
+            out.k = out.k + by.as_data.value * coeff;
+            continue;
+        }
+        if by.kind == TypeKind::TYPE_CONST_EXPR {
+            let mut inner = ConstLin { k: 0, n: 0 };
+            if !lin_subst(dst, dst, by.as_data.inst, params, args, n, &mut inner, depth + 1) {
+                return false;
+            }
+            if !lin_scale(&inner, coeff, out) {
+                return false;
+            }
+            continue;
+        }
+        // Bound to ANOTHER parameter -- one generic passing its width to the next -- so the term
+        // simply changes which parameter it names.
+        if by.kind == TypeKind::TYPE_GENERIC {
+            if !lin_add_term(out, DefId { module: by.module, node: by.as_data.decl }, coeff) {
+                return false;
+            }
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/// One FNV-1a round, the mixer behind type_skey.
+pub const fn skey_mix(h: u64, v: u64) u64 {
+    return (h ^ v) * 1099511628211u64;
+}
+
 pub fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
     if a.k != b.k {
         return false;
@@ -699,6 +808,16 @@ pub struct TyInstance {
     pub n: u8,
     pub args: [TypeId; 8],
 }
+/// One method reference the type checker resolved, with the receiver type it resolved it ON. The
+/// receiver may still mention the enclosing generic's parameters, so what instance it stands for is
+/// settled per instantiation (seed_mono_body_instances), not here. Recorded in the referring module's
+/// own Ast so modules can be checked in parallel.
+pub struct MethodRef {
+    pub owner: NodeId, // the function or method the reference sits in; NODE_NONE at item level
+    pub recv: TypeId,
+    pub callee: DefId,
+}
+
 pub struct MonoUse {
     pub node: NodeId,
     pub n: u8,
@@ -799,6 +918,7 @@ pub struct Ast {
     pub mono: Vector<MonoUse>,
     pub mono_at: Vector<u32>,
     pub instances: Vector<TyInstance>,
+    pub method_refs: Vector<MethodRef>,
     /// Canonical forms of const-generic expressions (`{BITS * 2}`), interned by VALUE so two spellings of
     /// the same width are one id -- which is what makes `{(N * 2) * 2}` and `{N * 4}` the same type.
     pub const_lins: Vector<ConstLin>,
@@ -833,6 +953,7 @@ extend Ast {
             mono: Vector::<MonoUse>::new(),
             mono_at: Vector::<u32>::new(),
             instances: Vector::<TyInstance>::new(),
+            method_refs: Vector::<MethodRef>::new(),
             const_lins: Vector::<ConstLin>::new(),
             method_insts: Vector::<MethodInst>::new(),
             instance_index: Vector::<u32>::new(),
@@ -1011,6 +1132,46 @@ extend Ast {
 
     pub const fn const_lin_at(self: &Self, i: u32) &ConstLin {
         return self.const_lins.at(i as usize);
+    }
+
+    /// A key for a type that does not depend on which Ast interned it: only package-wide identities
+    /// (a module id, a node id in that module, a literal value) enter the mix, never a TypeId. The
+    /// same type reached through two modules therefore keys the same package-level table entry.
+    pub const fn type_skey(self: &Self, t: TypeId, depth: i32) u64 {
+        if t == TYPE_NONE || depth > 8 {
+            return 0;
+        }
+        let y = *self.type_at(t);
+        let h = skey_mix(skey_mix(14695981039346656037u64, y.kind as u64), y.qualifier);
+        return switch y.kind {
+            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => skey_mix(h, self.type_skey(y.as_data.elem, depth + 1)),
+            TYPE_ARRAY => skey_mix(skey_mix(h, self.type_skey(y.as_data.arr.elem, depth + 1)), y.as_data.arr.len),
+            TYPE_BUILTIN => skey_mix(h, y.as_data.builtin as u64),
+            TYPE_CONST => skey_mix(h, y.as_data.value as u64),
+            TYPE_CONST_EXPR => {
+                let l = self.const_lin_at(y.as_data.inst);
+                let mut k = skey_mix(h, l.k as u64);
+                for i in 0..l.n {
+                    if unsafe l.c[i as usize] == 0 {
+                        continue;
+                    }
+                    k = skey_mix(
+                        skey_mix(skey_mix(k, unsafe l.p[i as usize].module), unsafe l.p[i as usize].node),
+                        (unsafe l.c[i as usize]) as u64,
+                    );
+                }
+                k;
+            },
+            TYPE_INSTANCE | TYPE_DYN => {
+                let it = self.instance(y.as_data.inst);
+                let mut k = skey_mix(skey_mix(h, it.module), it.decl);
+                for i in 0..it.n {
+                    k = skey_mix(k, self.type_skey(unsafe it.args[i], depth + 1));
+                }
+                k;
+            },
+            _ => skey_mix(skey_mix(h, y.module), y.as_data.decl),
+        };
     }
 
     pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
@@ -1348,6 +1509,7 @@ extend Ast as Free {
         self.attrs.free();
         self.lifetime_decls.free();
         self.call_info.free();
+        self.method_refs.free();
     }
 }
 

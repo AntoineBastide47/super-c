@@ -275,6 +275,9 @@ pub struct TypeChecker<'a> {
     // privacy filter input) are all fixed per checker. mark_method_used is re-fired on method hits
     // (idempotent set), so used-lint marking is unchanged.
     pub method_memo: Map<MQKey<'a>, u64>,
+    /// The receiver type the last aggregate lookup resolved on: what tc_mark_method_used pairs a method
+    /// with, since the lookups themselves are keyed by the receiver's DECL and never carry its arguments.
+    pub mark_recv: TypeId,
     // TC-12: tc_peel_target memo, (module<<32|node) -> packed DefId. The first peel does the
     // named_type_of interning; repeats re-derived the same DefId from frozen inputs.
     pub peel_memo: Map<u64, u64>,
@@ -519,6 +522,7 @@ extend TypeChecker {
             dynfn_scan: 1,
             fmt_marked: false,
             method_memo: Map::<MQKey, u64>::new(),
+            mark_recv: TYPE_NONE,
             peel_memo: Map::<u64, u64>::new(),
             lower_memo: Map::<u64, TypeId>::new(),
             carries_memo: Map::<u64, u8>::new(),
@@ -1590,6 +1594,11 @@ extend TypeChecker {
         n_out: &mut i32,
     ) bool {
         *n_out = 0;
+        // Every method lookup reaches its (module, decl) through here, so this is where the RECEIVER a
+        // method is resolved on is recorded -- the one piece the lookups themselves never carry.
+        unsafe {
+            ((self as *const TypeChecker) as *mut TypeChecker).mark_recv = ty;
+        }
         let y = *self.type_at(ty);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             *mod_out = y.module;
@@ -1804,55 +1813,8 @@ extend TypeChecker {
         out: &mut ConstLin,
         depth: i32,
     ) bool {
-        if depth > 12 {
-            return false;
-        }
-        let src = *self.cur_ast().const_lin_at(idx);
-        out.k = out.k + src.k;
-        for i in 0..src.n {
-            let coeff = unsafe src.c[i as usize];
-            if coeff == 0 {
-                continue;
-            }
-            let d = unsafe src.p[i as usize];
-            let mut bound = TYPE_NONE;
-            for j in 0..n {
-                if unsafe params[j as usize].module == d.module && unsafe params[j as usize].node == d.node {
-                    bound = unsafe args[j as usize];
-                }
-            }
-            if bound == TYPE_NONE {
-                if !lin_add_term(out, d, coeff) {
-                    return false;
-                }
-                continue;
-            }
-            let by = *self.type_at(bound);
-            if by.kind == TypeKind::TYPE_CONST {
-                out.k = out.k + by.as_data.value * coeff;
-                continue;
-            }
-            if by.kind == TypeKind::TYPE_CONST_EXPR {
-                let mut inner = ConstLin { k: 0, n: 0 };
-                if !self.tc_lin_subst(by.as_data.inst, params, args, n, &mut inner, depth + 1) {
-                    return false;
-                }
-                if !lin_scale(&inner, coeff, out) {
-                    return false;
-                }
-                continue;
-            }
-            // Bound to ANOTHER parameter -- one generic passing its width to the next -- so the term
-            // simply changes which parameter it names.
-            if by.kind == TypeKind::TYPE_GENERIC {
-                if !lin_add_term(out, DefId { module: by.module, node: by.as_data.decl }, coeff) {
-                    return false;
-                }
-                continue;
-            }
-            return false;
-        }
-        return true;
+        let a = self.cur_ast();
+        return unsafe lin_subst(&*a, &*a, idx, params, args, n, out, depth);
     }
 
     /// Do two types denote the same thing when one or both still carry an unfolded const-generic
@@ -3409,6 +3371,17 @@ extend TypeChecker {
         if self.package == null {
             return;
         }
+        // Recorded before the early return below: the demand this stands for is per (instance, method),
+        // and the first mark settles only the instance it was reached through.
+        if d.node != NODE_NONE {
+            let r = self.mark_recv;
+            if r == TYPE_NONE {
+                unsafe self.package.always_methods.insert(d.module as u64 << 32 | d.node as u64);
+            } else {
+                let cf = self.current_fn;
+                unsafe self.cur_ast().method_refs.push(MethodRef { owner: cf, recv: r, callee: d });
+            }
+        }
         // Marks repeat heavily (memoized lookups re-fire them): once the callee is already used,
         // both the direct mark and the edge are no-ops -- skip the context classification.
         if self.package.method_used_get(d) {
@@ -3594,6 +3567,7 @@ extend TypeChecker {
                 continue;
             }
             if self.tc_method_ret(self.strip(recv), c) == want {
+                self.mark_recv = self.strip(recv); // the overload search bypassed aggregate_of
                 self.tc_mark_method_used(c);
                 return c;
             }
@@ -4622,6 +4596,9 @@ extend TypeChecker {
             return;
         }
         self.fmt_marked = true;
+        // Resolved by decl with no receiver: they land in always_methods, which is what the print
+        // lowering needs -- it names them for whatever String instance it happens to build.
+        self.mark_recv = TYPE_NONE;
         let mut names = Names14 {};
         names[0] = "new".ptr() as *const char;
         names[1] = "print".ptr() as *const char;
@@ -6314,6 +6291,21 @@ extend TypeChecker {
                 nsub = nsub + 1;
                 i = i + 1;
             }
+            // A parameter the conformance did not spell takes its DEFAULT -- `Mul<Rhs = Self>` written as a
+            // bare `as Mul`. Lowered through the frame built so far, so `Self` in the default is the
+            // implementing type and a later default may name an earlier parameter.
+            while i < gens.len && nsub < 8 {
+                let gid = unsafe ia.list(gens)[i as usize];
+                let dft = ia.at_const(gid).as_data.generic_param.default_type;
+                if dft == NODE_NONE {
+                    break;
+                }
+                let d = self.lower_type_in(iface.module, dft);
+                subp[nsub as usize] = DefId { module: iface.module, node: gid };
+                suba[nsub as usize] = self.subst_type(d, &subp[0], &suba[0], nsub);
+                nsub = nsub + 1;
+                i = i + 1;
+            }
         }
         self.check_interface_requirements(id, iface, self_ty, &subp[0], &suba[0], nsub, 0);
     }
@@ -6430,6 +6422,41 @@ extend TypeChecker {
     }
 }
 
+// Compound-assignment token -> the same overload method its binary form uses ("<<=" -> shl).
+const fn compound_method_name(op: TokenType) str<'static> {
+    if op == TokenType::PlusEqual {
+        return "add";
+    }
+    if op == TokenType::MinusEqual {
+        return "sub";
+    }
+    if op == TokenType::StarEqual {
+        return "mul";
+    }
+    if op == TokenType::SlashEqual {
+        return "div";
+    }
+    if op == TokenType::PercentEqual {
+        return "rem";
+    }
+    if op == TokenType::AmpersandEqual {
+        return "bit_and";
+    }
+    if op == TokenType::PipeEqual {
+        return "bit_or";
+    }
+    if op == TokenType::CaretEqual {
+        return "bit_xor";
+    }
+    if op == TokenType::LeftShiftEqual {
+        return "shl";
+    }
+    if op == TokenType::RightShiftEqual {
+        return "shr";
+    }
+    return "";
+}
+
 const fn arith_method_name(op: TokenType) str<'static> {
     if op == TokenType::Plus {
         return "add";
@@ -6446,46 +6473,22 @@ const fn arith_method_name(op: TokenType) str<'static> {
     if op == TokenType::Percent {
         return "rem";
     }
+    if op == TokenType::Ampersand {
+        return "bit_and";
+    }
+    if op == TokenType::Pipe {
+        return "bit_or";
+    }
+    if op == TokenType::Caret {
+        return "bit_xor";
+    }
+    if op == TokenType::LeftShift {
+        return "shl";
+    }
+    if op == TokenType::RightShift {
+        return "shr";
+    }
     return "";
-}
-
-fn lin_add_term(out: &mut ConstLin, d: DefId, coeff: i64) bool {
-    if coeff == 0 {
-        return true;
-    }
-    for i in 0..out.n {
-        if unsafe out.p[i as usize].module == d.module && unsafe out.p[i as usize].node == d.node {
-            unsafe {
-                out.c[i as usize] = out.c[i as usize] + coeff;
-            }
-            return true;
-        }
-    }
-    if out.n >= 4 {
-        return false;
-    }
-    unsafe {
-        out.p[out.n as usize] = d;
-    }
-    unsafe {
-        out.c[out.n as usize] = coeff;
-    }
-    out.n = out.n + 1;
-    return true;
-}
-
-fn lin_scale(src: &ConstLin, f: i64, out: &mut ConstLin) bool {
-    // Widths are small; a factor this large means the expression is running away, not describing a type.
-    if f > 0x40000000 || f < 0 - 0x40000000 || src.k > 0x40000000 || src.k < 0 - 0x40000000 {
-        return false;
-    }
-    out.k = out.k + src.k * f;
-    for i in 0..src.n {
-        if !lin_add_term(out, unsafe src.p[i as usize], unsafe src.c[i as usize] * f) {
-            return false;
-        }
-    }
-    return true;
 }
 
 // Only when every part divides exactly: `{(N * 4) / 2}` is `{N * 2}`, and `{N / 2}` is not an integer
@@ -6573,6 +6576,10 @@ extend TypeChecker {
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
         if op == TokenType::Tilde {
+            let mut ov: TypeId = TYPE_NONE;
+            if self.check_bit_not_overload(id, opnd, &mut ov) {
+                return ov;
+            }
             if opnd != TYPE_NONE && !self.is_int(opnd) {
                 self.errors.emit(sp.start, sp.end - sp.start, format("unary '~' requires an integer operand"));
             }
@@ -6915,6 +6922,67 @@ extend TypeChecker {
         return true;
     }
 
+    /// Unary `~` on an aggregate: the same dispatch the binary operators get, through `bit_not`. Reports
+    /// against the operator rather than falling through to "requires an integer operand", which would name
+    /// the wrong problem for a type that simply has no such method.
+    fn check_bit_not_overload(self: &mut Self, id: NodeId, opnd: TypeId, out: *mut TypeId) bool {
+        let mut os = opnd;
+        while os != TYPE_NONE && self.type_at(os).kind == TypeKind::TYPE_REFERENCE {
+            os = self.type_at(os).as_data.elem;
+        }
+        if os == TYPE_NONE {
+            return false;
+        }
+        let ot = *self.type_at(os);
+        let sp = self.cur_ast().at_const(id).span;
+        if ot.kind == TypeKind::TYPE_GENERIC {
+            if !self.tc_param_bound_provides(ot.module, ot.as_data.decl, "bit_not") {
+                let mut ty = Buf96 {};
+                self.render_type(os, &mut ty[0], 96);
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format(
+                        "type parameter '{}' has no 'bit_not' method for this operator (add a bound that provides it)",
+                        diag::cstr(&ty[0]),
+                    ),
+                );
+                unsafe *out = TYPE_NONE;
+                return true;
+            }
+            unsafe *out = os;
+            return true;
+        }
+        if ot.kind != TypeKind::TYPE_STRUCT && ot.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        unsafe *out = os;
+        if self.aggregate_of(os, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
+            let md = self.find_method_cstr(om, od, "bit_not");
+            if md.node == NODE_NONE {
+                let mut ty = Buf96 {};
+                self.render_type(os, &mut ty[0], 96);
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format("type '{}' has no 'bit_not' method for this operator", diag::cstr(&ty[0])),
+                );
+                unsafe *out = TYPE_NONE;
+                return true;
+            }
+            let ret = self.tc_method_ret(os, md);
+            if ret != TYPE_NONE {
+                unsafe *out = ret;
+            }
+        }
+        return true;
+    }
+
     fn check_binary(self: &mut Self, id: NodeId) TypeId {
         let a = self.cur_ast();
         let bd = a.at_const(id).as_data.binary;
@@ -6944,6 +7012,10 @@ extend TypeChecker {
             return self.binary_numeric(id, l, ln, r, rn, false);
         }
         if op == TokenType::Ampersand || op == TokenType::Pipe || op == TokenType::Caret || op == TokenType::LeftShift || op == TokenType::RightShift {
+            let mut ov: TypeId = TYPE_NONE;
+            if self.check_arith_overload(id, l, &mut ov) {
+                return ov;
+            }
             return self.binary_numeric(id, l, ln, r, rn, true);
         }
         if op == TokenType::AmpersandAmpersand || op == TokenType::PipePipe {
@@ -8953,6 +9025,9 @@ extend TypeChecker {
                 return if_ty(inst_ty != TYPE_NONE, inst_ty, self.named_type_of(bmod, bdecl));
             }
         }
+        // `T::assoc()` names its type rather than passing a receiver, so aggregate_of never sees it:
+        // hand the qualifying instance to the used-marking directly.
+        self.mark_recv = inst_ty;
         let method = self.find_method(bmod, bdecl, mname);
         if method.node != NODE_NONE {
             self.cur_ast().set_resolution_def(mem, method);
@@ -9390,15 +9465,55 @@ extend TypeChecker {
     // rejected -- write a shared `<'a>` to express it. A reborrow of the same parameter's own data has
     // exactly the destination's lifetime and is always fine.
 
+    /// The parameter a compound assignment's right operand answers to, when the overload takes it BY
+    /// VALUE. `x <<= 3` lowers to `x = x.shl(3)`, so 3 is a count and not another x. A by-reference
+    /// parameter (`add(self, other: &Self)`) keeps the plain same-type check, which is what it means.
+    fn compound_param_type(self: &mut Self, op: TokenType, l: TypeId) TypeId {
+        let m = compound_method_name(op);
+        if m.len() == 0 || l == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        let mut ls = l;
+        while ls != TYPE_NONE && self.type_at(ls).kind == TypeKind::TYPE_REFERENCE {
+            ls = self.type_at(ls).as_data.elem;
+        }
+        let k = self.type_at(ls).kind;
+        if k != TypeKind::TYPE_STRUCT && k != TypeKind::TYPE_INSTANCE {
+            return TYPE_NONE;
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(ls, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
+            return TYPE_NONE;
+        }
+        let md = self.find_method_cstr(om, od, m);
+        if md.node == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let p1 = self.tc_method_param(ls, md, 1);
+        if p1 == TYPE_NONE || self.type_at(p1).kind == TypeKind::TYPE_REFERENCE {
+            return TYPE_NONE;
+        }
+        return p1;
+    }
+
     fn check_assignment(self: &mut Self, id: NodeId) TypeId {
         let a = self.cur_ast();
         let bd = a.at_const(id).as_data.binary;
         let l = self.check_expr(bd.left);
-        self.expected = l;
+        let pt = self.compound_param_type(bd.op, l);
+        self.expected = if_ty(pt != TYPE_NONE, pt, l);
         self.check_expr(bd.right);
         if !self.is_assignable(bd.left) {
             let sp = a.at_const(bd.left).span;
             self.errors.emit(sp.start, sp.end - sp.start, format("cannot assign to this expression"));
+        } else if pt != TYPE_NONE {
+            if !self.operand_fits_param(pt, bd.right) {
+                self.err_mismatch(bd.right, pt);
+            }
         } else if !self.compatible(l, bd.right) {
             self.err_mismatch(bd.right, l);
         }
@@ -11777,6 +11892,14 @@ extend TypeChecker {
             for i in 0..ne {
                 let iid = self.ext_items_at(it.module, i);
                 let itn = ma.at_const(iid);
+                // A plain generic extend's methods are instantiated per (instance, method) pair instead,
+                // by seed_mono_body_instances -- closing their signatures for every instance is what a
+                // method returning a wider view of its own receiver turns into an endless chain.
+                let demand = itn.as_data.extend_def.interface_type == NODE_NONE && self.tc_attr(
+                    it.module,
+                    it.decl,
+                    AttrKind::ATTR_EMIT_MACRO,
+                ) == null;
                 if itn.as_data.extend_def.generics.len != 0 && ma.resolution(itn.as_data.extend_def.target_type) == it.decl {
                     let gens = itn.as_data.extend_def.generics;
                     let mut ip = Defs8 {};
@@ -11793,7 +11916,7 @@ extend TypeChecker {
                     for j in 0..ms.len {
                         let mid = unsafe ma.list(ms)[j as usize];
                         let mn = ma.at_const(mid);
-                        if mn.kind == NodeKind::NODE_FUNCTION && mn.as_data.function.generics.len == 0 {
+                        if mn.kind == NodeKind::NODE_FUNCTION && mn.as_data.function.generics.len == 0 && !demand {
                             let ps = mn.as_data.function.params;
                             for p in 0..ps.len {
                                 let pid = unsafe ma.list(ps)[p as usize];

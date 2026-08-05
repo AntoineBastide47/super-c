@@ -65,6 +65,14 @@ pub struct Package {
     /// every module has typechecked, so a method kept alive only by pruned callers is pruned too.
     pub method_edges: Vector<u64>,
     pub edge_seen: Set<u64>,
+    /// The same demand one level finer, for the methods whose signature can name a WIDER instance of
+    /// their own receiver: keyed by inst_method_key, so a pair is emitted for the instances that reach it
+    /// and for no others. Filled by seed_mono_body_instances, read by codegen.
+    pub inst_methods: Set<u64>,
+    /// Methods resolved with NO receiver in hand -- the format helpers the print lowering reaches for,
+    /// and anything else the compiler names by decl alone. Nothing says which instance wants them, so
+    /// every instance does: (module << 32 | node), exempt from the per-instance demand test.
+    pub always_methods: Set<u64>,
     /// Private, non-generic functions referenced from a GENERIC body of their own module, as
     /// (module << 32 | node). That generic may be monomorphized into ANOTHER TU, which cannot reach a
     /// `static` symbol -- so its owner emits it with external linkage and declares it in its header.
@@ -479,6 +487,8 @@ extend Package {
             core_module: 0,
             core_seeded: false,
             method_used: Vector::<Vector<bool>>::new(),
+            inst_methods: Set::<u64>::new(),
+            always_methods: Set::<u64>::new(),
             method_edges: Vector::<u64>::new(),
             edge_seen: Set::<u64>::new(),
             extern_privates: Set::<u64>::new(),
@@ -841,6 +851,11 @@ extend Package {
             }
         }
         self.method_used[m].set(d.node as usize, true);
+    }
+
+    /// Is this method wanted by every instance of its type, rather than by the ones that reach it?
+    pub const fn method_always_used(self: &Self, d: DefId) bool {
+        return self.always_methods.contains(&(d.module as u64 << 32 | d.node as u64));
     }
 
     pub const fn method_used_get(self: &Self, d: DefId) bool {
@@ -1349,6 +1364,8 @@ extend Package as Free {
         self.method_used.free();
         self.method_edges.free();
         self.edge_seen.free();
+        self.inst_methods.free();
+        self.always_methods.free();
         self.extern_privates.free();
         self.mod_refs.free();
         self.lk_index.free();
@@ -1429,6 +1446,23 @@ fn subst_reintern_type(
         nt.as_data.elem = subst_reintern_type(p, dm, om, ty.as_data.elem, gmod, gids, args, nargs);
         let d = pkg_ast_m(p, dm);
         return d.intern_type(nt);
+    }
+    // A width written as an expression over the parameters being bound: fold it, so `UInt<{BITS * 2}>`
+    // under BITS = 192 becomes UInt<384> here exactly as it does in the type checker.
+    if ty.kind == TypeKind::TYPE_CONST_EXPR {
+        let mut ps: [DefId; 8] = [DefId { module: 0, node: NODE_NONE }; 8];
+        let mut k: u8 = 0;
+        while k < nargs && k < 8 {
+            unsafe ps[k as usize] = DefId { module: gmod, node: unsafe gids[k as usize] };
+            k = k + 1;
+        }
+        let mut folded = ConstLin { k: 0, n: 0 };
+        let d = pkg_ast_m(p, dm);
+        let o = pkg_ast_c(p, om);
+        if unsafe lin_subst(&*d, &*o, ty.as_data.inst, &ps[0], args, k, &mut folded, 0) {
+            return d.intern_const_lin(&folded);
+        }
+        return unsafe d.reintern(&*o, t);
     }
     if ty.kind == TypeKind::TYPE_INSTANCE {
         let inst = *pkg_ast_c(p, om).instance(ty.as_data.inst);
@@ -1612,6 +1646,12 @@ fn reintern_method_signature_deps(
             continue;
         }
         let gids = pkg_ast_c(p, itmod).list(egen);
+        let gated = pkg_ast_c(p, itmod).at_const(eid).as_data.extend_def.interface_type == NODE_NONE && !pkg_attr_of(
+            p,
+            itmod,
+            itdecl,
+            AttrKind::ATTR_EMIT_MACRO,
+        );
         let eitems = pkg_ast_c(p, itmod).at_const(eid).as_data.extend_def.items;
         let emids = pkg_ast_c(p, itmod).list(eitems);
         for mm in 0..eitems.len {
@@ -1623,6 +1663,13 @@ fn reintern_method_signature_deps(
             let fgen = pkg_ast_c(p, itmod).at_const(fnid).as_data.function.generics;
             let frets = pkg_ast_c(p, itmod).at_const(fnid).as_data.function.returns;
             if fgen.len != 0 || frets.len > 1 {
+                continue;
+            }
+            // Demand-emitted: this instance gets the method's signature types only when it reaches it.
+            let fd = DefId { module: itmod, node: fnid };
+            if gated && !p.method_always_used(fd) && !p.inst_methods.contains(
+                &inst_method_key(unsafe &*pkg_ast_c(p, dm), fd, args, nargs),
+            ) {
                 continue;
             }
             let fparams = pkg_ast_c(p, itmod).at_const(fnid).as_data.function.params;
@@ -1768,14 +1815,67 @@ fn reintern_method_body_deps(p: &mut Package, hm: ModuleId, it: &TyInstance, cha
         } else {
             m;
         };
-        let npool = unsafe pkg_ast_c(p, om).type_pool.len();
-        let mut t: usize = 1;
-        while t < npool {
-            if !pkg_ast_c(p, om).type_concrete(t as TypeId) && type_params_subset(p, om, t as TypeId, om, gids, ng) {
-                reintern_nested_type(p, om, om, t as TypeId, om, gids, &fargs[0], ng, changed);
+        // Only the bodies this instance actually gets. A demand-emitted method it never reaches shares the
+        // extend's parameters, so substituting its types too is what turns a method returning a wider view
+        // of its own receiver into an endless chain of instances.
+        let mut skip = Vector::<tok::Span>::new();
+        let demand = pkg_ast_c(p, om).at_const(eid).as_data.extend_def.interface_type == NODE_NONE && !pkg_attr_of(
+            p,
+            om,
+            itdecl,
+            AttrKind::ATTR_EMIT_MACRO,
+        );
+        if demand {
+            let eitems = pkg_ast_c(p, om).at_const(eid).as_data.extend_def.items;
+            for j in 0..eitems.len {
+                let mid = unsafe pkg_ast_c(p, om).list(eitems)[j as usize];
+                let mn = pkg_ast_c(p, om).at_const(mid);
+                if mn.kind != NodeKind::NODE_FUNCTION || mn.as_data.function.generics.len != 0 {
+                    continue;
+                }
+                let md = DefId { module: om, node: mid };
+                if p.method_always_used(md) || p.inst_methods.contains(
+                    &inst_method_key(unsafe &*pkg_ast_c(p, om), md, &fargs[0], ng),
+                ) {
+                    continue;
+                }
+                skip.push(pkg_ast_c(p, om).at_const(mid).span);
             }
-            t = t + 1;
         }
+        if !demand {
+            // Nothing to hold back: every body of this extend is emitted for every instance, so the whole
+            // pool sweep stands, types that hang off no node included.
+            let npool = unsafe pkg_ast_c(p, om).type_pool.len();
+            let mut t: usize = 1;
+            while t < npool {
+                if !pkg_ast_c(p, om).type_concrete(t as TypeId) && type_params_subset(p, om, t as TypeId, om, gids, ng) {
+                    reintern_nested_type(p, om, om, t as TypeId, om, gids, &fargs[0], ng, changed);
+                }
+                t = t + 1;
+            }
+            continue;
+        }
+        let nn = unsafe pkg_ast_c(p, om).nodes.len();
+        let mut nid: u32 = 1;
+        while nid as usize < nn {
+            let t = pkg_ast_c(p, om).type_of(nid);
+            if t == TYPE_NONE || pkg_ast_c(p, om).type_concrete(t) || !type_params_subset(p, om, t, om, gids, ng) {
+                nid = nid + 1;
+                continue;
+            }
+            let sp = pkg_ast_c(p, om).at_const(nid).span;
+            let mut skipped = false;
+            for k in 0..skip.len() {
+                if sp.start >= skip[k].start && sp.end <= skip[k].end {
+                    skipped = true;
+                }
+            }
+            if !skipped {
+                reintern_nested_type(p, om, om, t, om, gids, &fargs[0], ng, changed);
+            }
+            nid = nid + 1;
+        }
+        skip.free();
     }
 }
 
@@ -1943,7 +2043,16 @@ struct MonoSeed {
 // The generic function a MonoUse call site targets, or a null DefId.
 const fn mono_callee(p: &Package, m: ModuleId, node: NodeId) DefId {
     let a = pkg_ast_c(p, m);
-    if a.at_const(node).kind != NodeKind::NODE_CALL {
+    let k = a.at_const(node).kind;
+    // A turbofished generic used as a VALUE (`thread_entry::<F, T>` handed to pthread_create) records the
+    // same MonoUse a call does, and monomorphizes the same way -- its body must be walked too.
+    if k != NodeKind::NODE_CALL {
+        if k == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            return a.resolution_def(a.at_const(node).as_data.specialization.expression);
+        }
+        if k == NodeKind::NODE_IDENTIFIER {
+            return a.resolution_def(node);
+        }
         return DefId { module: 0, node: NODE_NONE };
     }
     let callee_id = a.at_const(node).as_data.call.callee;
@@ -1991,6 +2100,137 @@ fn seed_push(seeds: &mut Vector<MonoSeed>, s: MonoSeed) bool {
     return true;
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Demand-driven instantiation of a generic aggregate's methods.
+//
+// A plain generic extend's non-generic methods are the one class codegen emits ON DEMAND. Closing their
+// signatures for every instance -- what a signature-driven closure does -- is not only wasteful but
+// non-terminating: a method whose return type widens its own receiver (`UInt<{BITS * 2}>`) makes the
+// existence of one instance demand a wider one, whose method demands a wider one again. Demand is
+// therefore tracked per (INSTANCE, method) pair. Roots are the call sites that name a concrete receiver;
+// a demanded method's own types and calls are then substituted under that instance's frame, which reaches
+// exactly what that instance really needs.
+// ---------------------------------------------------------------------------------------------------------
+
+/// One method's own types and calls, collected once from the nodes inside its span. A demanded pair
+/// substitutes exactly these, so an instance's frame never reaches a sibling method's signature.
+struct MethodScan {
+    pub md: DefId,
+    pub types: Vector<TypeId>,
+}
+
+fn mscan_of(p: &Package, cache: &mut Vector<MethodScan>, md: DefId) usize {
+    for i in 0..cache.len() {
+        if cache[i].md.module == md.module && cache[i].md.node == md.node {
+            return i;
+        }
+    }
+    let a = pkg_ast_c(p, md.module);
+    let fsp = a.at_const(md.node).span;
+    let mut ms = MethodScan { md: md, types: Vector::<TypeId>::new() };
+    let mut nid: u32 = 1;
+    while nid as usize < unsafe a.nodes.len() {
+        let nd = a.at_const(nid);
+        if nd.span.start >= fsp.start && nd.span.end <= fsp.end {
+            let t = a.type_of(nid);
+            if t != TYPE_NONE && !a.type_concrete(t) {
+                ms.types.push(t);
+            }
+        }
+        nid = nid + 1;
+    }
+    cache.push(ms);
+    return cache.len() - 1;
+}
+
+/// The (module, node) of every method codegen emits on demand, mapped to its extend. Only plain generic
+/// extends qualify: an interface conformance, a generic method and an @emit_macro target are all emitted
+/// unconditionally, so their signatures keep closing as before.
+fn build_gated_methods(p: &Package, out: &mut Map<u64, u32>, all: &mut Map<u64, u32>) {
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = pkg_ast_c(p, m as ModuleId);
+        let items = unsafe a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe a.list(items)[i as usize];
+            let nd = a.at_const(iid);
+            if nd.kind != NodeKind::NODE_EXTEND {
+                continue;
+            }
+            let ed = nd.as_data.extend_def;
+            if ed.target_type == NODE_NONE {
+                continue;
+            }
+            let tg = a.resolution_def(ed.target_type);
+            let demand = ed.generics.len != 0 && ed.interface_type == NODE_NONE && tg.node != NODE_NONE && !pkg_attr_of(
+                p,
+                tg.module,
+                tg.node,
+                AttrKind::ATTR_EMIT_MACRO,
+            );
+            for j in 0..ed.items.len {
+                let mid = unsafe a.list(ed.items)[j as usize];
+                let mn = a.at_const(mid);
+                if mn.kind != NodeKind::NODE_FUNCTION {
+                    continue;
+                }
+                all.insert(m as u64 << 32 | mid as u64, iid);
+                if demand && mn.as_data.function.generics.len == 0 {
+                    out.insert(m as u64 << 32 | mid as u64, iid);
+                }
+            }
+        }
+    }
+}
+
+const fn pkg_attr_of(p: &Package, m: ModuleId, node: NodeId, kind: AttrKind) bool {
+    if m as usize >= p.modules.len() || !p.modules[m as usize].has_ast {
+        return false;
+    }
+    let a = pkg_ast_c(p, m);
+    for i in 0..unsafe a.attrs.len() {
+        let at = unsafe a.attrs[i];
+        if at.owner == node && at.kind == kind as u8 {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Key for an (instance, method) pair. The instance is spelled by the extend arguments rather than by a
+/// TypeId, and type_skey makes those independent of which module's pool interned them.
+pub const fn inst_method_key(a: &Ast, md: DefId, args: *const TypeId, n: u8) u64 {
+    let mut k = skey_mix(skey_mix(14695981039346656037u64, md.module), md.node);
+    for i in 0..n {
+        k = skey_mix(k, a.type_skey(unsafe args[i as usize], 0));
+    }
+    return k;
+}
+
+// The extend arguments a concrete receiver instance supplies, reinterned into the method's own module.
+fn recv_args(p: &mut Package, m: ModuleId, t: TypeId, md: DefId, out: *mut TypeId) i32 {
+    if t == TYPE_NONE {
+        return -1;
+    }
+    let y = *pkg_ast_c(p, m).type_at(t);
+    if y.kind != TypeKind::TYPE_INSTANCE || !pkg_ast_c(p, m).type_concrete(t) {
+        return -1;
+    }
+    let it = *pkg_ast_c(p, m).instance(y.as_data.inst);
+    for i in 0..it.n {
+        unsafe out[i as usize] = if md.module == m {
+            unsafe it.args[i as usize];
+        } else {
+            let sa = pkg_ast_c(p, m);
+            let da = pkg_ast_m(p, md.module);
+            unsafe da.reintern(&*sa, it.args[i as usize]);
+        };
+    }
+    return it.n;
+}
+
 // Body-only generic types of MONOMORPHIZED functions: a `W<T> { .. }` literal inside a generic
 // fn's body appears in no signature, so nothing else interns its concrete instance -- the emitted
 // C then names a struct that was never defined. For every fn instantiation substitute its args
@@ -2006,10 +2246,17 @@ fn seed_push(seeds: &mut Vector<MonoSeed>, s: MonoSeed) bool {
 //
 // Runs single-threaded BEFORE the propagation fixpoint -- codegen's own seeding (expand_nested_insts) is
 // restricted to same-module instantiations because foreign asts are read-only under parallel codegen.
-fn seed_mono_body_instances(p: &mut Package) {
+fn seed_mono_body_instances(p: &mut Package) bool {
     let n = p.modules.len();
     let mut changed = false;
     let mut seeds = Vector::<MonoSeed>::new();
+    // fd is the METHOD and args are its EXTEND's arguments: together they name one (instance, method).
+    let mut mseeds = Vector::<MonoSeed>::new();
+    let mut gated = Map::<u64, u32>::new();
+    let mut ext_of = Map::<u64, u32>::new();
+    let refs = build_ref_index(p);
+    let mut scans = Vector::<MethodScan>::new();
+    build_gated_methods(p, &mut gated, &mut ext_of);
     // Every instantiation a call site pinned down with concrete arguments.
     for u in 0..n {
         if !p.modules[u].has_ast {
@@ -2045,81 +2292,327 @@ fn seed_mono_body_instances(p: &mut Package) {
             let _ = seed_push(&mut seeds, MonoSeed { fd: fd, n: gens.len as u8, args: fargs });
         }
     }
-    // Re-home each seed's body-only types, then follow the generic calls its body makes.
-    let mut head: usize = 0;
-    while head < seeds.len() {
-        let s = seeds[head];
-        head = head + 1;
-        let gens = mono_generics(p, s.fd);
-        if gens.len == 0 {
+    // Every (instance, method) pair a reference already pinned down: its receiver needed no frame.
+    for u in 0..n {
+        if !p.modules[u].has_ast {
             continue;
         }
-        let gids = pkg_ast_c(p, s.fd.module).list(gens);
-        let np = unsafe pkg_ast_c(p, s.fd.module).type_pool.len();
-        let cp = (&mut changed) as *mut bool;
-        let mut t: usize = 1;
-        while t < np {
-            if !pkg_ast_c(p, s.fd.module).type_concrete(t as TypeId) && type_params_subset(
-                p,
-                s.fd.module,
-                t as TypeId,
-                s.fd.module,
-                gids,
-                gens.len,
-            ) {
-                reintern_nested_type(p, s.fd.module, s.fd.module, t as TypeId, s.fd.module, gids, &s.args[0], s.n, cp);
-            }
-            t = t + 1;
-        }
-        // A MonoUse in this module whose arguments mention only THIS function's parameters is a generic
-        // call from inside its body: substituting this seed's frame makes those arguments concrete.
-        let sm = s.fd.module;
-        let nm2 = unsafe pkg_ast_c(p, sm).mono.len();
-        for mj in 0..nm2 {
-            let mu2 = unsafe pkg_ast_c(p, sm).mono[mj];
-            let fd2 = mono_callee(p, sm, mu2.node);
-            let g2 = mono_generics(p, fd2);
-            if g2.len == 0 || g2.len > 8 || mu2.n as u32 < g2.len {
-                continue;
-            }
-            let mut inframe = false;
-            for k in 0..g2.len {
-                if !unsafe pkg_ast_c(p, sm).type_concrete(mu2.args[k as usize]) && type_params_subset(
-                    p,
-                    sm,
-                    unsafe mu2.args[k as usize],
-                    sm,
-                    gids,
-                    gens.len,
-                ) {
-                    inframe = true; // at least one argument is one of our parameters
-                }
-            }
-            if !inframe {
-                continue; // already concrete (seeded directly), or belongs to another function's frame
-            }
+        let nr = unsafe pkg_ast_c(p, u as ModuleId).method_refs.len();
+        for i in 0..nr {
+            let r = *unsafe pkg_ast_c(p, u as ModuleId).method_refs.at(i);
             let mut cargs: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
-            let mut ok = true;
-            for k in 0..g2.len {
-                let st = subst_reintern_type(p, sm, sm, unsafe mu2.args[k as usize], sm, gids, &s.args[0], s.n);
-                if !pkg_ast_c(p, sm).type_concrete(st) {
-                    ok = false;
-                }
-                unsafe cargs[k as usize] = st;
-            }
-            if !ok {
+            let cn = recv_args(p, u as ModuleId, r.recv, r.callee, &mut cargs[0]);
+            if cn >= 0 {
+                mseed_push(p, &mut mseeds, MonoSeed { fd: r.callee, n: cn as u8, args: cargs }, r.callee.module);
                 continue;
             }
-            if fd2.module != sm {
-                for k in 0..g2.len {
-                    let sa = pkg_ast_c(p, sm);
-                    let da = pkg_ast_m(p, fd2.module);
-                    unsafe cargs[k as usize] = unsafe da.reintern(&*sa, cargs[k as usize]);
-                }
+            // A reference from inside a GENERIC METHOD: its frame is that method's own type arguments,
+            // which this pass does not enumerate, so nothing here can say which instance asked. Every
+            // instance does, then -- the same answer the closure gave before demand existed.
+            if r.owner != NODE_NONE && ext_of.contains_key(&(u as u64 << 32 | r.owner as u64)) && pkg_ast_c(
+                p,
+                u as ModuleId,
+            ).at_const(r.owner).as_data.function.generics.len != 0 {
+                p.always_methods.insert(r.callee.module as u64 << 32 | r.callee.node as u64);
             }
-            let _ = seed_push(&mut seeds, MonoSeed { fd: fd2, n: g2.len as u8, args: cargs });
         }
     }
+    // Re-home each seed's body-only types, then follow the calls its body makes. The two worklists feed
+    // each other -- a monomorphized function calls methods, a demanded method calls generic functions --
+    // so both are drained together, and draining them creates instances whose unconditional methods are
+    // themselves call sites: the outer round repeats until no instance is new.
+    let mut head: usize = 0;
+    let mut mhead: usize = 0;
+    let all = tok::Span { start: 0, end: 0xFFFFFFFFu32 };
+    let mut rounds: i32 = 0;
+    let mut ninst: usize = 0;
+    let before = p.inst_methods.len();
+    loop {
+        seed_unconditional_methods(p, &gated, &mut mseeds);
+        while head < seeds.len() || mhead < mseeds.len() {
+            while head < seeds.len() {
+                let s = seeds[head];
+                head = head + 1;
+                let gens = mono_generics(p, s.fd);
+                if gens.len == 0 {
+                    continue;
+                }
+                let gids = pkg_ast_c(p, s.fd.module).list(gens);
+                let np = unsafe pkg_ast_c(p, s.fd.module).type_pool.len();
+                let cp = (&mut changed) as *mut bool;
+                let mut t: usize = 1;
+                while t < np {
+                    if !pkg_ast_c(p, s.fd.module).type_concrete(t as TypeId) && type_params_subset(
+                        p,
+                        s.fd.module,
+                        t as TypeId,
+                        s.fd.module,
+                        gids,
+                        gens.len,
+                    ) {
+                        reintern_nested_type(
+                            p,
+                            s.fd.module,
+                            s.fd.module,
+                            t as TypeId,
+                            s.fd.module,
+                            gids,
+                            &s.args[0],
+                            s.n,
+                            cp,
+                        );
+                    }
+                    t = t + 1;
+                }
+                follow_generic_calls(p, s.fd.module, gids, gens.len, &s.args[0], s.n, all, &mut seeds);
+                follow_method_refs(p, &refs, s.fd.module, s.fd.node, gids, &s.args[0], s.n, &mut mseeds);
+            }
+            while mhead < mseeds.len() {
+                let s = mseeds[mhead];
+                mhead = mhead + 1;
+                let m = s.fd.module;
+                let mut ext: NodeId = NODE_NONE;
+                switch ext_of.get(&(s.fd.module as u64 << 32 | s.fd.node as u64)) {
+                    Some(v) => {
+                        ext = *v;
+                    },
+                    None => {},
+                };
+                if ext == NODE_NONE {
+                    continue;
+                }
+                let gens = pkg_ast_c(p, m).at_const(ext).as_data.extend_def.generics;
+                let gids = pkg_ast_c(p, m).list(gens);
+                let k = inst_method_key(unsafe &*pkg_ast_c(p, m), s.fd, &s.args[0], s.n);
+                p.inst_methods.insert(k);
+                // Only this method's own types: a sibling method's signature shares the frame's parameters,
+                // and substituting it is exactly the closure this pass exists to stop.
+                let si = mscan_of(p, &mut scans, s.fd);
+                let cp = (&mut changed) as *mut bool;
+                let mut ti: usize = 0;
+                while ti < scans[si].types.len() {
+                    let t = scans[si].types[ti];
+                    ti = ti + 1;
+                    reintern_nested_type(p, m, m, t, m, gids, &s.args[0], s.n, cp);
+                }
+                let fsp = pkg_ast_c(p, m).at_const(s.fd.node).span;
+                follow_generic_calls(p, m, gids, gens.len, &s.args[0], s.n, fsp, &mut seeds);
+                follow_method_refs(p, &refs, s.fd.module, s.fd.node, gids, &s.args[0], s.n, &mut mseeds);
+            }
+        }
+        let mut now: usize = 0;
+        for u in 0..n {
+            if p.modules[u].has_ast {
+                now = now + unsafe pkg_ast_c(p, u as ModuleId).instances.len();
+            }
+        }
+        rounds = rounds + 1;
+        if now == ninst || rounds > 32 {
+            break;
+        }
+        ninst = now;
+    }
+    return p.inst_methods.len() != before || changed;
+}
+
+// A method that is NOT demand-emitted -- an interface conformance, a generic method -- has its body
+// emitted for every instance of its type, so the gated methods IT calls are demanded by every instance
+// too. Pair each concrete instance with those methods; seed_push then drives the same walk.
+fn seed_unconditional_methods(p: &mut Package, gated: &Map<u64, u32>, mseeds: &mut Vector<MonoSeed>) {
+    let n = p.modules.len();
+    for u in 0..n {
+        if !p.modules[u].has_ast {
+            continue;
+        }
+        let ni = unsafe pkg_ast_c(p, u as ModuleId).instances.len();
+        for ii in 0..ni {
+            let it = *pkg_ast_c(p, u as ModuleId).instance(ii as u32);
+            if it.module as usize >= n || !p.modules[it.module as usize].has_ast {
+                continue;
+            }
+            let mut concrete = true;
+            for k in 0..it.n {
+                if !unsafe pkg_ast_c(p, u as ModuleId).type_concrete(it.args[k as usize]) {
+                    concrete = false;
+                }
+            }
+            if !concrete {
+                continue;
+            }
+            let im = it.module;
+            let items = unsafe pkg_ast_c(p, im).at_const(pkg_ast_c(p, im).root).as_data.program.items;
+            for i in 0..items.len {
+                let eid = unsafe pkg_ast_c(p, im).list(items)[i as usize];
+                let nd = pkg_ast_c(p, im).at_const(eid);
+                if nd.kind != NodeKind::NODE_EXTEND || nd.as_data.extend_def.generics.len == 0 {
+                    continue;
+                }
+                if pkg_ast_c(p, im).resolution(nd.as_data.extend_def.target_type) != it.decl {
+                    continue;
+                }
+                let eitems = nd.as_data.extend_def.items;
+                for j in 0..eitems.len {
+                    let mid = unsafe pkg_ast_c(p, im).list(eitems)[j as usize];
+                    if pkg_ast_c(p, im).at_const(mid).kind != NodeKind::NODE_FUNCTION {
+                        continue;
+                    }
+                    let md = DefId { module: im, node: mid };
+                    if gated.contains_key(&(im as u64 << 32 | mid as u64)) && !p.method_always_used(md) {
+                        continue; // demand-driven: only a call site puts this pair on the list
+                    }
+                    let mut cargs: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+                    for k in 0..it.n {
+                        unsafe cargs[k as usize] = if im == u as ModuleId {
+                            unsafe it.args[k as usize];
+                        } else {
+                            let sa = pkg_ast_c(p, u as ModuleId);
+                            let da = pkg_ast_m(p, im);
+                            unsafe da.reintern(&*sa, it.args[k as usize]);
+                        };
+                    }
+                    mseed_push(p, mseeds, MonoSeed { fd: md, n: it.n, args: cargs }, im);
+                }
+            }
+        }
+    }
+}
+
+// Queue an (instance, method) pair once. Keyed by inst_method_key rather than by scanning the queue:
+// a package instantiates thousands of pairs, and a linear check would dominate the pass.
+fn mseed_push(p: &mut Package, mseeds: &mut Vector<MonoSeed>, s: MonoSeed, m: ModuleId) {
+    let k = inst_method_key(unsafe &*pkg_ast_c(p, m), s.fd, &s.args[0], s.n);
+    if p.inst_methods.contains(&k) {
+        return;
+    }
+    p.inst_methods.insert(k);
+    mseeds.push(s);
+}
+
+// A MonoUse in `sm` whose arguments mention this frame's parameters is a generic call from inside the
+// body: substituting the frame makes those arguments concrete. `fsp` limits the walk to one body, which
+// a method needs -- its module holds the other methods' calls over the same parameters.
+fn follow_generic_calls(
+    p: &mut Package,
+    sm: ModuleId,
+    gids: *const NodeId,
+    ngids: u32,
+    args: *const TypeId,
+    nargs: u8,
+    fsp: tok::Span,
+    seeds: &mut Vector<MonoSeed>,
+) {
+    let nm2 = unsafe pkg_ast_c(p, sm).mono.len();
+    for mj in 0..nm2 {
+        let mu2 = unsafe pkg_ast_c(p, sm).mono[mj];
+        let msp = pkg_ast_c(p, sm).at_const(mu2.node).span;
+        if msp.start < fsp.start || msp.end > fsp.end {
+            continue;
+        }
+        let fd2 = mono_callee(p, sm, mu2.node);
+        let g2 = mono_generics(p, fd2);
+        if g2.len == 0 || g2.len > 8 || mu2.n as u32 < g2.len {
+            continue;
+        }
+        let mut inframe = false;
+        for k in 0..g2.len {
+            if !unsafe pkg_ast_c(p, sm).type_concrete(mu2.args[k as usize]) && type_params_subset(
+                p,
+                sm,
+                unsafe mu2.args[k as usize],
+                sm,
+                gids,
+                ngids,
+            ) {
+                inframe = true; // at least one argument is one of our parameters
+            }
+        }
+        if !inframe {
+            continue; // already concrete (seeded directly), or belongs to another function's frame
+        }
+        let mut cargs: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+        let mut ok = true;
+        for k in 0..g2.len {
+            let st = subst_reintern_type(p, sm, sm, unsafe mu2.args[k as usize], sm, gids, args, nargs);
+            if !pkg_ast_c(p, sm).type_concrete(st) {
+                ok = false;
+            }
+            unsafe cargs[k as usize] = st;
+        }
+        if !ok {
+            continue;
+        }
+        if fd2.module != sm {
+            for k in 0..g2.len {
+                let sa = pkg_ast_c(p, sm);
+                let da = pkg_ast_m(p, fd2.module);
+                unsafe cargs[k as usize] = unsafe da.reintern(&*sa, cargs[k as usize]);
+            }
+        }
+        let _ = seed_push(seeds, MonoSeed { fd: fd2, n: g2.len as u8, args: cargs });
+    }
+}
+
+// The method references a body makes, resolved through its own frame: the receiver each one was checked
+// against becomes concrete under the frame, and that names the (instance, method) pair it demands.
+fn follow_method_refs(
+    p: &mut Package,
+    refs: &RefIndex,
+    m: ModuleId,
+    owner: NodeId,
+    gids: *const NodeId,
+    args: *const TypeId,
+    nargs: u8,
+    mseeds: &mut Vector<MonoSeed>,
+) {
+    let mut cur: u32 = 0xFFFFFFFFu32;
+    switch refs.head.get(&(m as u64 << 32 | owner as u64)) {
+        Some(v) => {
+            cur = *v;
+        },
+        None => {},
+    };
+    while cur != 0xFFFFFFFFu32 {
+        let r = *unsafe pkg_ast_c(p, m).method_refs.at(refs.at[cur as usize] as usize);
+        cur = refs.next[cur as usize];
+        let st = subst_reintern_type(p, m, m, r.recv, m, gids, args, nargs);
+        let mut cargs: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+        let cn = recv_args(p, m, st, r.callee, &mut cargs[0]);
+        if cn >= 0 {
+            mseed_push(p, mseeds, MonoSeed { fd: r.callee, n: cn as u8, args: cargs }, r.callee.module);
+        }
+    }
+}
+
+/// Every recorded method reference, chained by the (module, owner) body it sits in.
+struct RefIndex {
+    pub head: Map<u64, u32>,
+    pub next: Vector<u32>,
+    pub at: Vector<u32>,
+}
+
+fn build_ref_index(p: &Package) RefIndex {
+    let mut ix = RefIndex { head: Map::<u64, u32>::new(), next: Vector::<u32>::new(), at: Vector::<u32>::new() };
+    for u in 0..p.modules.len() {
+        if !p.modules[u].has_ast {
+            continue;
+        }
+        let nr = unsafe pkg_ast_c(p, u as ModuleId).method_refs.len();
+        for i in 0..nr {
+            let r = *unsafe pkg_ast_c(p, u as ModuleId).method_refs.at(i);
+            let key = u as u64 << 32 | r.owner as u64;
+            let mut prev: u32 = 0xFFFFFFFFu32;
+            switch ix.head.get(&key) {
+                Some(v) => {
+                    prev = *v;
+                },
+                None => {},
+            };
+            ix.at.push(i as u32);
+            ix.next.push(prev);
+            ix.head.insert(key, ix.at.len() as u32 - 1);
+        }
+    }
+    return ix;
 }
 
 /// Owner-emits generic instances used across module boundaries: re-intern every concrete instance (and
@@ -2129,7 +2622,6 @@ pub fn package_propagate_instances(p: &mut Package) {
     // Typechecking is done for every module here: resolve the deferred caller->callee method-use
     // edges before codegen starts consulting method_used_get.
     p.finalize_method_used();
-    seed_mono_body_instances(p);
     let n = p.modules.len();
     // Resolutions are final now; build the cross-module reference bitset once so module_imports (hot inside
     // instance_home_in, called per instance-arg here and in codegen) is an O(1) query, not a linear scan.
@@ -2150,6 +2642,11 @@ pub fn package_propagate_instances(p: &mut Package) {
     let mut first = true;
     while changed {
         changed = false;
+        // Re-run per sweep: re-homing an instance is what puts a type in front of the demand pass, and
+        // seeding a demand is what creates the next instance to re-home.
+        if seed_mono_body_instances(p) {
+            changed = true;
+        }
         for u in 0..n {
             if p.modules[u].has_ast {
                 let start = proc_inst[u];

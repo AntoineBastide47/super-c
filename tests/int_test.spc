@@ -86,6 +86,15 @@ fn division_and_remainder() {
 @test
 fn shifts_move_bits_across_limbs() {
     let one = u128::one();
+    // The shift operators take a COUNT, not another value of the shifted type, so `<<`/`>>` and their
+    // compound forms pass a usize straight through to shl/shr.
+    assert(one << 64 == one.shl(64));
+    assert(one << 64 >> 64 == one);
+    let mut sh = one;
+    sh <<= 12;
+    sh >>= 8;
+    assert(sh == one.shl(4));
+    assert(i128::from_i64(-16) >> 2 == i128::from_i64(-4));
     let hi = one.shl(64);
     assert_eq(hi.limb(0), 0u64);
     assert_eq(hi.limb(1), 1u64);
@@ -97,15 +106,28 @@ fn shifts_move_bits_across_limbs() {
     assert_eq(u128::max().count_ones(), 128);
 }
 
+// Reached through the operators, which is what the BitAnd/BitOr/BitXor/BitNot conformances are for; the
+// methods behind them are the same ones.
 @test
 fn bitwise_operations() {
     let a = u128::from_u64(0xF0F0);
     let b = u128::from_u64(0x0FF0);
-    assert_eq(a.bit_and(&b).to_u64(), 0x00F0u64);
-    assert_eq(a.bit_or(&b).to_u64(), 0xFFF0u64);
-    assert_eq(a.bit_xor(&b).to_u64(), 0xFF00u64);
-    assert(a.bit_not().bit_not() == a);
-    assert(u128::zero().bit_not() == u128::max());
+    assert_eq((a & b).to_u64(), 0x00F0u64);
+    assert_eq((a | b).to_u64(), 0xFFF0u64);
+    assert_eq((a ^ b).to_u64(), 0xFF00u64);
+    assert(~~a == a);
+    assert(~u128::zero() == u128::max());
+    // and the compound forms, which lower to `x = x.op(y)`
+    let mut acc = a;
+    acc &= b;
+    assert(acc == (a & b));
+    acc |= u128::from_u64(0xF);
+    assert(acc == (a & b | u128::from_u64(0xF)));
+    acc ^= acc;
+    assert(acc.is_zero());
+    // signed values reach the same operators
+    assert(~i128::zero() == i128::from_i64(-1));
+    assert((i128::from_i64(12) & i128::from_i64(10)) == i128::from_i64(8));
 }
 
 // The sign bit is the top bit of the top limb, and every signed-specific operation reads it.
@@ -256,14 +278,14 @@ fn widening_and_full_multiplication() {
     // (2^128-1)^2 = 2^256 - 2^129 + 1: low half 1, high half 2^128 - 2.
     assert(lo == u128::one());
     assert(hi == a - u128::one());
-    let p = full_mul(&a, &a);
+    let p = a.full_mul(&a);
     assert_eq(u128::bits() * 2, 256);
     let s = p.to_string();
     assert(s.as_str() == "115792089237316195423570985008687907852589419931798687112530834793049593217025");
     s.free();
     // and a width the aliases do not name, to show the expression is computed rather than looked up
     let b = UInt::<192>::from_u64(0xFFFFFFFFFFFFFFFF);
-    let w = full_mul(&b, &b);
+    let w = b.full_mul(&b);
     assert_eq(UInt::<384>::limbs(), 6);
     let ws = w.to_string();
     assert(ws.as_str() == "340282366920938463426481119284349108225");
@@ -273,8 +295,8 @@ fn widening_and_full_multiplication() {
 // Widening composes: the result of one full product feeds the next, and the width the signature promises
 // is the one that arrives -- `{(B * 2) * 2}` and `{B * 4}` are the same width, not two that look alike.
 fn square_twice<const B: usize>(x: &UInt<B>) UInt<{B * 4}> {
-    let sq = full_mul(x, x);
-    return full_mul(&sq, &sq);
+    let sq = x.full_mul(x);
+    return sq.full_mul(&sq);
 }
 
 @test

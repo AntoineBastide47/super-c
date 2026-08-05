@@ -558,9 +558,14 @@ fn lint_pub_applies(p: &loader::Package, m: usize) bool {
 
 fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_too: bool) bool {
     let it = a.at_const(iid);
+    // Everything inside a conformance is required BY the conformance: a method implements one of its
+    // methods, a `type X = ..` binds one of its associated types. Neither is dead for want of a caller.
+    if in_iface_extend {
+        return false;
+    }
     if it.kind == NodeKind::NODE_FUNCTION {
         let f = it.as_data.function;
-        if f.is_public && !pub_too || f.is_extern || f.body == NODE_NONE || in_iface_extend {
+        if f.is_public && !pub_too || f.is_extern || f.body == NODE_NONE {
             return false;
         }
         return !(item_has_attr(a, iid, AttrKind::ATTR_EXPORT) || item_has_attr(a, iid, AttrKind::ATTR_USED) || item_has_attr(
@@ -721,6 +726,36 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
             }
             let ss = (starts[m] + ents[m][si as usize].node as usize) as u64;
             let ds = (starts[dm] + ents[dm][di as usize].node as usize) as u64;
+            if ss != ds {
+                edges.push(ss << 32 | ds);
+            }
+        }
+        // `a * b` resolves the method by NAME, so the resolution table holds no edge to it. The method
+        // references the type checker recorded do, and they carry the body each one sits in.
+        for i in 0..unsafe a.method_refs.len() {
+            let r = *unsafe a.method_refs.at(i);
+            let dm = r.callee.module as usize;
+            if r.callee.node == NODE_NONE || dm >= nm || ents[dm].len() == 0 {
+                continue;
+            }
+            let ta = mod_ast_c(p, r.callee.module);
+            let di = lint_owner(ents.at(dm), ta.at_const(r.callee.node).span.start);
+            if di < 0 {
+                continue;
+            }
+            let ds = (starts[dm] + ents[dm][di as usize].node as usize) as u64;
+            if r.owner == NODE_NONE {
+                if !used[ds as usize] {
+                    used.set(ds as usize, true);
+                    queue.push(ds as u32);
+                }
+                continue;
+            }
+            let si2 = lint_owner(ents.at(m), a.at_const(r.owner).span.start);
+            if si2 < 0 {
+                continue;
+            }
+            let ss = (starts[m] + ents[m][si2 as usize].node as usize) as u64;
             if ss != ds {
                 edges.push(ss << 32 | ds);
             }

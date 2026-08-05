@@ -522,6 +522,37 @@ fn bug_regressions() {
         "fn add2<T>(a: T, b: T) T { return a + b; }\nfn main() i32 { let n: i32 = add2::<i32>(1, 2); return n; }\n",
         "no 'add' method for this operator",
     );
+    // The bitwise operators report the same way, unary `~` included -- "requires an integer operand"
+    // would name the wrong problem for a type that simply has no such method.
+    h::expect_err_msg(
+        "bitwise operator without method",
+        "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; let b = P { x: 2 }; let c = a & b; return 0; }\n",
+        "has no 'bit_and' method",
+    );
+    h::expect_err_msg(
+        "unary '~' without method",
+        "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; let c = ~a; return 0; }\n",
+        "has no 'bit_not' method",
+    );
+    h::expect_err_msg(
+        "unbounded generic bitwise operator",
+        "fn m<T>(a: T, b: T) T { return a ^ b; }\nfn main() i32 { let n: i32 = m::<i32>(1, 2); return n; }\n",
+        "no 'bit_xor' method for this operator",
+    );
+    // An interface parameter may DEFAULT to Self, so a bare `as Combine` means `as Combine<Self>` while a
+    // spelled-out argument gives a heterogeneous right operand. (Two conformances differing ONLY in that
+    // argument on one type is not resolvable yet: method lookup picks by name and result, not by operand.)
+    h::expect_exit(
+        "interface parameter defaulting to Self",
+        "pub interface Combine<Rhs = Self> {\n    type Output;\n    fn combine(self: &Self, o: &Rhs) Self::Output;\n}\nstruct A { pub x: i32 }\nstruct B { pub y: i32 }\nstruct C { pub z: i32 }\nextend A as Combine {\n    type Output = A;\n    pub fn combine(self: &A, o: &A) A { return A { x: self.x + o.x }; }\n}\nextend C as Combine<B> {\n    type Output = B;\n    pub fn combine(self: &C, o: &B) B { return B { y: self.z * o.y }; }\n}\nfn main() i32 { let a = A { x: 20 }.combine(&A { x: 22 }); let b = C { z: 6 }.combine(&B { y: 7 }); return a.x - 42 + b.y - 42; }\n",
+        0,
+    );
+    // A shift takes a count: the right operand answers to the METHOD's parameter, not to Self.
+    h::expect_err_msg(
+        "shift count type-checked against the parameter",
+        "struct A { pub x: i32 }\nextend A { fn shl(self: &A, n: usize) A { return A { x: self.x }; } }\nfn main() i32 { let a = A { x: 1 }; let p = a << a; return p.x; }\n",
+        "mismatched types",
+    );
     h::expect_err_msg(
         "write through shared ref",
         "struct S { pub x: i32 }\nfn main() i32 { let s = S { x: 1 }; let mut r: &S = &s; r.x = 99; return s.x; }\n",
@@ -2748,6 +2779,14 @@ fn const_generic_expressions() {
     h::expect_exit(
         "addition, division and shifts reduce to one form",
         "struct A<const N: usize> { pub v: [u64; N] }\nfn a1<const W: usize>(a: &A<W>) A<{W + W}> { return A::<{W * 2}> {}; }\nfn a2<const W: usize>(a: &A<W>) A<{W * 4 / 2}> { return A::<{W * 2}> {}; }\nfn a3<const W: usize>(a: &A<W>) A<{W << 1}> { return A::<{W * 2}> {}; }\nfn main() i32 {\n    let a = A::<2> {};\n    let x = a1(&a);\n    let y = a2(&a);\n    let z = a3(&a);\n    return ((unsafe x.v[0]) + (unsafe y.v[0]) + (unsafe z.v[0])) as i32;\n}\n",
+        0,
+    );
+    // A METHOD may widen its own receiver. Instantiating one width must not demand the next: the pair
+    // (instance, method) is what gets emitted, so `A<2>::dbl` exists and `A<4>::dbl` -- which nothing
+    // calls -- does not. Without that this program never finishes compiling.
+    h::expect_exit(
+        "a widening method does not demand the next width",
+        "struct A<const N: usize> { pub v: [u64; N] }\nextend<const N: usize> A<N> {\n    fn dbl(self: &Self) A<{N * 2}> { return A::<{N * 2}> {}; }\n    fn width(self: &Self) usize { return N; }\n}\nfn main() i32 {\n    let a = A::<2> {};\n    let b = a.dbl();\n    return (b.width() as i32) - 4 + (unsafe b.v[3]) as i32;\n}\n",
         0,
     );
     // A width that genuinely differs is still rejected, and the report names both forms.

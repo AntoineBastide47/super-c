@@ -1006,12 +1006,14 @@ extend Resolver {
             NODE_INTERFACE => {
                 let it = self.ast.at_const(id).as_data.interface_def;
                 self.scope_enter();
-                self.declare_generics(it.generics);
-                self.resolve_bounds(it.bounds);
                 let old_self = self.current_self;
                 let old_items = self.current_self_items;
+                // Self is in scope for the interface's OWN generics, not just its items: an operator
+                // interface names it in a parameter default (`Mul<Rhs = Self>`).
                 self.current_self = DefId { module: self.ast.module, node: id };
                 self.current_self_items = it.items;
+                self.declare_generics(it.generics);
+                self.resolve_bounds(it.bounds);
                 self.resolve_associated_items(it.items);
                 self.current_self = old_self;
                 self.current_self_items = old_items;

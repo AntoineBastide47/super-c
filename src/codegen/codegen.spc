@@ -759,6 +759,9 @@ pub struct Codegen<'a> {
     // Memoized "type mentions a TYPE_GENERIC" bits (0 unknown / 1 no / 2 yes) for the instance
     // seeding sweep: concrete types (virtually the whole pool) are skipped without a walk.
     pub genty: Vector<u8>,
+    /// Nodes whose recorded type mentions a generic parameter -- the only ones a substitution frame can
+    /// change. Rebuilt with `genty` whenever the ast switches.
+    pub gnodes: Vector<NodeId>,
     pub genty_ast: *mut Ast,
     // collect_insts runs for the header AND the body of the same module: the second run is a no-op.
     pub insts_ast: *mut Ast,
@@ -889,6 +892,9 @@ pub struct Codegen<'a> {
     pub no_temp_free: bool,
     pub type_state: *mut u8,
     pub inst_emit_state: *mut u8,
+    /// Instances whose forward `typedef` this TU has written, indexed by TypeId. An instance interned
+    /// after the forward pass still gets its struct defined, and C needs the name before the definition.
+    pub td_emitted: Vector<u8>,
     pub inst_emit_n: usize,
     pub errors: diag::Errors,
 }
@@ -898,6 +904,8 @@ extend Codegen as Free {
     pub fn free(self: &mut Self) {
         self.buf.free();
         self.genty.free();
+        self.td_emitted.free();
+        self.gnodes.free();
         self.enum_of_variant.free();
         self.free_ext_cache.free();
         self.ext_head.free();
@@ -987,6 +995,7 @@ extend Codegen {
             call_list: Vector::<NodeId>::new(),
             spec_list: Vector::<NodeId>::new(),
             genty: Vector::<u8>::new(),
+            gnodes: Vector::<NodeId>::new(),
             genty_ast: null,
             insts_ast: null,
             package: package,
@@ -2226,10 +2235,7 @@ extend Codegen {
             // can substitute, so the memoized prefilter skips virtually the whole pool; the
             // bound is pinned because mid-sweep interns are substitution results (concrete).
             if !foreign {
-                if self.genty_ast != self.ast {
-                    self.genty_ast = self.ast;
-                    self.genty.clear();
-                }
+                self.cg_genty_sync();
                 let np = unsafe self.cur_ast().type_pool.len();
                 let mut ti: usize = 1;
                 while ti < np {
@@ -2249,6 +2255,43 @@ extend Codegen {
         }
         self.nexp = i;
     }
+    /// Every type this body names, resolved through the active frame. An aggregate instance a body
+    /// builds appears in no signature, so nothing else interns it and phase_types would leave its C
+    /// struct undefined. Restricted to the body's OWN nodes: a sibling method of the same extend shares
+    /// the frame's parameters, and resolving its signature too is the closure that never ends.
+    fn cg_genty_sync(self: &mut Self) {
+        if self.genty_ast == self.ast {
+            return;
+        }
+        self.genty_ast = self.ast;
+        self.genty.clear();
+        self.gnodes.clear();
+        let nn = unsafe self.cur_ast().nodes.len();
+        let mut nid: u32 = 1;
+        while nid as usize < nn {
+            let t = self.cur_ast().type_of(nid);
+            if t != TYPE_NONE && self.cg_mentions_generic(t, 0) {
+                self.gnodes.push(nid);
+            }
+            nid = nid + 1;
+        }
+    }
+
+    fn cg_subst_span_types(self: &mut Self, owner_id: NodeId) {
+        self.cg_genty_sync();
+        let fsp = self.cur_ast().at_const(owner_id).span;
+        let mut i: usize = 0;
+        while i < self.gnodes.len() {
+            let nid = self.gnodes[i];
+            i = i + 1;
+            let nsp = self.cur_ast().at_const(nid).span;
+            if nsp.start < fsp.start || nsp.end > fsp.end {
+                continue;
+            }
+            let _ = self.subst_resolve(self.cur_ast().type_of(nid));
+        }
+    }
+
     // One body's nested-instantiation walk (the span of fn/method `owner_id`), shared by
     // expand_nested_insts and scan_inst_methods: resolve each generic call's type args through
     // the active subst frame and record the concrete results; args are reinterned into `home`'s
@@ -2418,6 +2461,25 @@ extend Codegen {
             self.source = hsrc;
         }
     }
+    /// A plain generic extend's method is emitted for the instances that reach it, not for every instance
+    /// its type has. `it.args` name the instance, so the pair keys the demand set that
+    /// seed_mono_body_instances filled -- the one class of method whose signature can name a WIDER
+    /// instance of its own receiver, and so the one that must not be closed over blindly.
+    fn cg_inst_method_undemanded(self: &mut Self, it: &TyInstance, itrait: DefId, mid: NodeId) bool {
+        if self.package == null || itrait.node != NODE_NONE {
+            return false;
+        }
+        if self.cg_attr(self.cur_module(), it.decl, AttrKind::ATTR_EMIT_MACRO) != null {
+            return false;
+        }
+        let mdef = DefId { module: self.cur_module(), node: mid };
+        if self.package.method_always_used(mdef) {
+            return false;
+        }
+        let k = loader::inst_method_key(unsafe &*self.cur_ast(), mdef, &it.args[0], it.n);
+        return !unsafe self.package.inst_methods.contains(&k);
+    }
+
     // Per-instance body scan: mirrors emit_inst_methods' extend/method/method-inst walk, subst
     // setup and method_used pruning, but records nested generic-fn instantiations
     // (scan_body_calls) instead of emitting. `mi_src`/`mi_inst` key the method_insts lookup in
@@ -2477,14 +2539,15 @@ extend Codegen {
                 self.nsubst = self.nsubst + 1;
                 g = g + 1;
             }
-            // Seed the aggregate instances this extend's bodies name under the frame (the
-            // fn-inst sweep in expand_nested_insts, same rules: local only -- foreign bodies
-            // re-home through instance propagation instead).
-            if !foreign {
-                if self.genty_ast != self.ast {
-                    self.genty_ast = self.ast;
-                    self.genty.clear();
-                }
+            // A non-gated extend (an interface conformance, an @emit_macro target) has every body emitted
+            // for every instance, so the whole pool sweep stands. Only the demand-emitted class needs the
+            // narrower per-body sweep -- there a sibling method's types are exactly what must not resolve.
+            if !foreign && (itrait.node != NODE_NONE || self.cg_attr(
+                self.cur_module(),
+                it.decl,
+                AttrKind::ATTR_EMIT_MACRO,
+            ) != null) {
+                self.cg_genty_sync();
                 let np = unsafe self.cur_ast().type_pool.len();
                 let mut ti: usize = 1;
                 while ti < np {
@@ -2509,10 +2572,15 @@ extend Codegen {
                         self.cur_module(),
                         it.decl,
                         AttrKind::ATTR_EMIT_MACRO,
-                    ) == null && !self.package.method_used_get(mdef) {
+                    ) == null && !self.package.method_used_get(mdef) || self.cg_inst_method_undemanded(it, itrait, mid) {
                         continue;
                     }
                     self.nsubst = nimpl;
+                    // Local only, mirroring the fn-inst sweep: a foreign body's instances re-home
+                    // through instance propagation instead.
+                    if !foreign {
+                        self.cg_subst_span_types(mid);
+                    }
                     self.scan_body_calls(mid, foreign, mi_src);
                     continue;
                 }
@@ -2538,6 +2606,9 @@ extend Codegen {
                         unsafe self.subst[self.nsubst as usize].concrete = ta;
                         self.nsubst = self.nsubst + 1;
                         mgi = mgi + 1;
+                    }
+                    if !foreign {
+                        self.cg_subst_span_types(mid);
                     }
                     self.scan_body_calls(mid, foreign, mi_src);
                 }
@@ -4121,8 +4192,7 @@ const fn c_op(t: TokenType) *const char {
     }
     return "?".ptr() as *const char;
 }
-// Compound-assignment token -> arithmetic overload method ("+=" -> add); null = not overloadable
-// (bitwise/shift compounds are integer-gated by the typechecker and never reach a struct).
+// Compound-assignment token -> operator overload method ("+=" -> add); null = not overloadable.
 const fn cg_compound_method(op: TokenType) *const char {
     if op == TokenType::PlusEqual {
         return "add".ptr() as *const char;
@@ -4138,6 +4208,21 @@ const fn cg_compound_method(op: TokenType) *const char {
     }
     if op == TokenType::PercentEqual {
         return "rem".ptr() as *const char;
+    }
+    if op == TokenType::AmpersandEqual {
+        return "bit_and".ptr() as *const char;
+    }
+    if op == TokenType::PipeEqual {
+        return "bit_or".ptr() as *const char;
+    }
+    if op == TokenType::CaretEqual {
+        return "bit_xor".ptr() as *const char;
+    }
+    if op == TokenType::LeftShiftEqual {
+        return "shl".ptr() as *const char;
+    }
+    if op == TokenType::RightShiftEqual {
+        return "shr".ptr() as *const char;
     }
     return null;
 }
@@ -4157,6 +4242,21 @@ const fn cg_arith_op_method(op: TokenType) *const char {
     }
     if op == TokenType::Percent {
         return "rem".ptr() as *const char;
+    }
+    if op == TokenType::Ampersand {
+        return "bit_and".ptr() as *const char;
+    }
+    if op == TokenType::Pipe {
+        return "bit_or".ptr() as *const char;
+    }
+    if op == TokenType::Caret {
+        return "bit_xor".ptr() as *const char;
+    }
+    if op == TokenType::LeftShift {
+        return "shl".ptr() as *const char;
+    }
+    if op == TokenType::RightShift {
+        return "shr".ptr() as *const char;
     }
     return null;
 }
@@ -7654,6 +7754,59 @@ extend Codegen {
             }
         }
     }
+    /// Does this overload take its right operand BY REFERENCE? `bit_and(self, other: &Self)` does;
+    /// `shl(self, amount: usize)` does not, and a shift count passed by address would not compile.
+    const fn cg_overload_rhs_byref(self: &Self, mth: DefId) bool {
+        let a = self.mod_ast(mth.module);
+        let ps = a.at_const(mth.node).as_data.function.params;
+        if ps.len < 2 {
+            return true;
+        }
+        let pid = unsafe a.list(ps)[1];
+        let tn = a.at_const(pid).as_data.parameter.ty;
+        return tn != NODE_NONE && a.at_const(tn).kind == NodeKind::NODE_REFERENCE_TYPE;
+    }
+
+    /// `~x` where x is an aggregate: the unary counterpart of emit_arith_overload.
+    fn emit_bit_not_overload(self: &mut Self, operand: NodeId) bool {
+        let t0 = self.cur_ast().type_of(operand);
+        if t0 == TYPE_NONE {
+            return false;
+        }
+        let t = self.strip_ref_only(self.subst_resolve(t0));
+        if t == TYPE_NONE {
+            return false;
+        }
+        let y = *self.type_at(t);
+        if y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let mut om = y.module;
+        let mut od = y.as_data.decl;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.cur_ast().instance(y.as_data.inst);
+            om = it.module;
+            od = it.decl;
+        }
+        let mth = self.cg_find_method_cstr(om, od, "bit_not".ptr() as *const char);
+        if mth.node == NODE_NONE {
+            return false;
+        }
+        let dl = self.cg_ref_depth(self.subst_resolve(t0));
+        let mut v = Buf32 {};
+        self.fresh(&mut v[0], 32);
+        self.buf.format_into("({{ __auto_type {} = ", diag::cstr(&v[0]));
+        self.emit_expr(operand);
+        self.emit_str("; ");
+        self.emit_op_method(y, om, od, mth);
+        let mut vp = "&".ptr() as *const char;
+        if dl != 0 {
+            vp = ref_derefs(dl);
+        }
+        self.buf.format_into("({}{}); }})", diag::cstr(vp), diag::cstr(&v[0]));
+        return true;
+    }
+
     fn emit_arith_overload(self: &mut Self, id: NodeId) bool {
         let bd = self.cur_ast().at_const(id).as_data.binary;
         let m = cg_arith_op_method(bd.op);
@@ -7706,9 +7859,12 @@ extend Codegen {
         if dl != 0 {
             lp = ref_derefs(dl);
         }
-        let mut rp = "&".ptr() as *const char;
-        if dr != 0 {
-            rp = ref_derefs(dr);
+        let mut rp = "".ptr() as *const char;
+        if self.cg_overload_rhs_byref(mth) {
+            rp = "&".ptr() as *const char;
+            if dr != 0 {
+                rp = ref_derefs(dr);
+            }
         }
         self.buf.format_into("({}{}, {}{}); }})", diag::cstr(lp), diag::cstr(&l[0]), diag::cstr(rp), diag::cstr(&r[0]));
         return true;
@@ -8554,9 +8710,12 @@ extend Codegen {
                         self.emit_expr(bd.right);
                         self.buf.format_into("; *{} = ", diag::cstr(&lp[0]));
                         self.emit_op_method(y, om, od, m);
-                        let mut rp = "&".ptr() as *const char;
-                        if dr != 0 {
-                            rp = ref_derefs(dr);
+                        let mut rp = "".ptr() as *const char;
+                        if self.cg_overload_rhs_byref(m) {
+                            rp = "&".ptr() as *const char;
+                            if dr != 0 {
+                                rp = ref_derefs(dr);
+                            }
                         }
                         self.buf.format_into("({}, {}{}); }})", diag::cstr(&lp[0]), diag::cstr(rp), diag::cstr(&rr[0]));
                         return;
@@ -10778,7 +10937,10 @@ extend Codegen {
                 let operand = n.as_data.unary.operand;
                 if op == TokenType::Question {
                     self.emit_try(id);
-                } else if op == TokenType::Star && self.emit_deref_star(id, operand) {} else if op == TokenType::Move || op == TokenType::Unsafe {
+                } else if op == TokenType::Tilde && self.emit_bit_not_overload(operand) {} else if op == TokenType::Star && self.emit_deref_star(
+                    id,
+                    operand,
+                ) {} else if op == TokenType::Move || op == TokenType::Unsafe {
                     self.emit_expr(operand);
                 } else if op == TokenType::Ampersand && !self.is_lvalue(operand) && self.type_at(
                     self.cur_ast().type_of(operand),
@@ -11327,6 +11489,9 @@ const fn ckw(src: str, s: tok::Span, lit: str) bool {
     }
     return unsafe cstring::memcmp(src.ptr() + s.start as usize, lit.ptr(), lit.len()) == 0;
 }
+/// Names an identifier cannot keep in the emitted C. Keywords, plus the <iso646.h> alternative-token
+/// MACROS: the prelude includes that header, so a binding named `and` would expand to `&&` and stop
+/// being an identifier at all.
 const fn is_c_keyword(src: str, s: tok::Span) bool {
     let n = (s.end - s.start) as usize;
     if n == 0 {
@@ -11344,13 +11509,17 @@ const fn is_c_keyword(src: str, s: tok::Span) bool {
         ) || ckw(src, s, "_Static_assert") || ckw(src, s, "_Thread_local");
     }
     if c0 == b'a' {
-        return ckw(src, s, "auto");
+        return ckw(src, s, "auto") || ckw(src, s, "and") || ckw(src, s, "and_eq");
     }
     if c0 == b'b' {
-        return ckw(src, s, "break") || ckw(src, s, "bool");
+        return ckw(src, s, "break") || ckw(src, s, "bool") || ckw(src, s, "bitand") || ckw(src, s, "bitor");
     }
     if c0 == b'c' {
-        return ckw(src, s, "case") || ckw(src, s, "char") || ckw(src, s, "const") || ckw(src, s, "continue");
+        return ckw(src, s, "case") || ckw(src, s, "char") || ckw(src, s, "const") || ckw(src, s, "continue") || ckw(
+            src,
+            s,
+            "compl",
+        );
     }
     if c0 == b'd' {
         return ckw(src, s, "default") || ckw(src, s, "do") || ckw(src, s, "double");
@@ -11369,6 +11538,12 @@ const fn is_c_keyword(src: str, s: tok::Span) bool {
     }
     if c0 == b'l' {
         return ckw(src, s, "long");
+    }
+    if c0 == b'n' {
+        return ckw(src, s, "not") || ckw(src, s, "not_eq");
+    }
+    if c0 == b'o' {
+        return ckw(src, s, "or") || ckw(src, s, "or_eq");
     }
     if c0 == b'r' {
         return ckw(src, s, "register") || ckw(src, s, "restrict") || ckw(src, s, "return");
@@ -11391,6 +11566,9 @@ const fn is_c_keyword(src: str, s: tok::Span) bool {
     }
     if c0 == b'w' {
         return ckw(src, s, "while");
+    }
+    if c0 == b'x' {
+        return ckw(src, s, "xor") || ckw(src, s, "xor_eq");
     }
     return false;
 }
@@ -12599,17 +12777,33 @@ extend Codegen {
         }
         self.emit_str("};\n");
     }
+    /// Note (and if needed write) the forward typedef for an instance, so its definition can follow.
+    fn cg_forward_typedef(self: &mut Self, it: &TyInstance, kw: *const char, nm: *const char, write: bool) {
+        let t = self.cur_ast().intern_instance(it.module, it.decl, &it.args[0], it.n);
+        while self.td_emitted.len() <= t as usize {
+            self.td_emitted.push(0);
+        }
+        if self.td_emitted[t as usize] != 0 {
+            return;
+        }
+        self.td_emitted.set(t as usize, 1);
+        if write {
+            self.buf.format_into("typedef {} {} {};\n", diag::cstr(kw), diag::cstr(nm), diag::cstr(nm));
+        }
+    }
+
     fn emit_struct_inst(self: &mut Self, it: &TyInstance, with_body: bool) {
         let kw = agg_kw(self.cur_ast().at_const(it.decl));
         let mut nm = Buf200 {};
         self.inst_name(it, &mut nm[0], 200);
         if !with_body {
-            self.buf.format_into("typedef {} {} {};\n", diag::cstr(kw), diag::cstr(&nm[0]), diag::cstr(&nm[0]));
+            self.cg_forward_typedef(it, kw, &nm[0], true);
             return;
         }
         if self.inst_mentions_fnval(it) != self.fnval_pass {
             return;
         }
+        self.cg_forward_typedef(it, kw, &nm[0], true);
         let ag = self.cur_ast().at_const(it.decl).as_data.aggregate;
         let gids = self.cur_ast().list(ag.generics);
         self.nsubst = 0;
@@ -12651,12 +12845,13 @@ extend Codegen {
             return;
         }
         if !with_body {
-            self.buf.format_into("typedef struct {} {};\n", diag::cstr(&nm[0]), diag::cstr(&nm[0]));
+            self.cg_forward_typedef(it, "struct".ptr() as *const char, &nm[0], true);
             return;
         }
         if self.inst_mentions_fnval(it) != self.fnval_pass {
             return;
         }
+        self.cg_forward_typedef(it, "struct".ptr() as *const char, &nm[0], true);
         let gids = self.cur_ast().list(ag.generics);
         self.nsubst = 0;
         let mut i: u32 = 0;
@@ -13296,7 +13491,7 @@ extend Codegen {
                         self.cur_module(),
                         it.decl,
                         AttrKind::ATTR_EMIT_MACRO,
-                    ) == null && !self.package.method_used_get(mdef) {
+                    ) == null && !self.package.method_used_get(mdef) || self.cg_inst_method_undemanded(it, itrait, mid) {
                         self.nsubst = 0;
                         continue;
                     }
@@ -16596,7 +16791,11 @@ extend Codegen {
                 for j in 0..ms.len {
                     let mid = unsafe mids[j as usize];
                     let mn = self.cur_ast().at_const(mid);
-                    if mn.kind == NodeKind::NODE_FUNCTION && mn.as_data.function.generics.len == 0 {
+                    if mn.kind == NodeKind::NODE_FUNCTION && mn.as_data.function.generics.len == 0 && !self.cg_inst_method_undemanded(
+                        &it,
+                        itrait,
+                        mid,
+                    ) {
                         if self.seed_type_instances_from_fn_signature(mid) {
                             changed = true;
                         }

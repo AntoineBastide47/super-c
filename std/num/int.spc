@@ -589,6 +589,21 @@ extend<const BITS: usize> UInt<BITS> {
         return UInt::<BITS>::from_bits(lo);
     }
 
+    /// The same full product as ONE value twice as wide. `{BITS * 2}` is a const-generic EXPRESSION: the
+    /// result's width is computed from the receiver's when the call is monomorphized. The wider type is
+    /// instantiated because this call asks for it, not because the method exists -- otherwise every width
+    /// would demand the next one without end.
+    pub fn full_mul(self: &UInt<BITS>, other: &UInt<BITS>) UInt<{BITS * 2}> {
+        let mut hi = UInt::<BITS>::zero();
+        let lo = self.widening_mul(other, &mut hi);
+        let mut r = UInt::<{BITS * 2}>::zero();
+        for i in 0..BITS / 64 {
+            r.set_limb(i, lo.limb(i));
+            r.set_limb(i + BITS / 64, hi.limb(i));
+        }
+        return r;
+    }
+
     // ---- checked -------------------------------------------------------------------------------
 
     pub fn checked_add(self: &UInt<BITS>, other: &UInt<BITS>) Option<UInt<BITS>> {
@@ -832,25 +847,6 @@ extend<const BITS: usize> UInt<BITS> as Format {
     pub fn fmt(self: &UInt<BITS>) String {
         return self.to_string();
     }
-}
-
-/// The full product of two `UInt<BITS>` as ONE value twice as wide. `{BITS * 2}` is a const-generic
-/// EXPRESSION: the result's width is computed from the operands' when the call is monomorphized.
-///
-/// A free function rather than a method, and not by preference. A method belongs to its type, so every
-/// `UInt<BITS>` would carry one returning `UInt<{BITS * 2}>`, whose own would return `UInt<{BITS * 4}>`:
-/// instantiating any width would demand every wider one. Ending that needs the compiler to instantiate a
-/// method per INSTANCE that calls it rather than per method it declares. As a function it is instantiated
-/// where it is called, and each call widens exactly once.
-pub fn full_mul<const BITS: usize>(a: &UInt<BITS>, b: &UInt<BITS>) UInt<{BITS * 2}> {
-    let mut hi = UInt::<BITS>::zero();
-    let lo = a.widening_mul(b, &mut hi);
-    let mut r = UInt::<{BITS * 2}>::zero();
-    for i in 0..BITS / 64 {
-        r.set_limb(i, lo.limb(i));
-        r.set_limb(i + BITS / 64, hi.limb(i));
-    }
-    return r;
 }
 
 // ---------------------------------------------------------------------------------------------------------
