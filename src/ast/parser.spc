@@ -655,7 +655,9 @@ extend Parser {
             } else if self.match(TokenType::Colon) {
                 bounds = self.parse_bounds();
             }
-            let default_type = if !is_const && self.match(TokenType::Equal) {
+            // A const parameter's default is written as a value, but every value that can default one --
+            // a literal, a named constant -- parses as a type, so one parse serves both kinds.
+            let default_type = if self.match(TokenType::Equal) {
                 self.parse_type();
             } else {
                 NODE_NONE;

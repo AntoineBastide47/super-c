@@ -2050,7 +2050,12 @@ extend TypeChecker {
             if dft == NODE_NONE {
                 break;
             }
-            let mut d = self.lower_type_in(dmod, dft);
+            // A CONST parameter's default is a value: fold it the way an explicit argument would be.
+            let mut d = if da.at_const(gid).as_data.generic_param.is_const {
+                self.tc_const_arg(dmod, dft);
+            } else {
+                self.lower_type_in(dmod, dft);
+            };
             if unsafe *tn > 0 {
                 let mut prm = Defs8 {};
                 for j in 0..unsafe *tn {
@@ -2260,6 +2265,21 @@ extend TypeChecker {
         }
         let d = self.cur_ast().resolution_def(id);
         if d.node != NODE_NONE {
+            // A bare generic name whose parameters all DEFAULT still instantiates: `S {}` with
+            // `struct S<const K: Fam = IEEE>` means `S<IEEE> {}`.
+            let dn = self.mod_ast(d.module).at_const(d.node);
+            if (dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM) && dn.as_data.aggregate.generics.len > 0 && self.agg_has_default_at(
+                d.module,
+                d.node,
+                0,
+            ) {
+                let mut ta = Tys8 {};
+                let mut tn: u8 = 0;
+                self.apply_default_args(d.module, d.node, &mut ta[0], &mut tn);
+                let it = self.cur_ast().intern_instance(d.module, d.node, &ta[0], tn);
+                self.cur_ast().set_type(id, it); // codegen renders the literal's type from this node
+                return it;
+            }
             return self.named_type_of(d.module, d.node);
         }
         let b = builtin_of(self.source, self.name_span(id));
@@ -2280,8 +2300,9 @@ extend TypeChecker {
             return true;
         }
         // A braced argument is written as an expression, so it arrives as one: anything that is not a
-        // type path cannot be a type, and the braces already said it is a value.
-        if k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL {
+        // type path cannot be a type, and the braces already said it is a value. A MEMBER path is how a
+        // braced `Family::Ieee` parses -- an enum variant as the value of an enum-typed const parameter.
+        if k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL || k == NodeKind::NODE_MEMBER {
             return true;
         }
         if k != NodeKind::NODE_TYPE_PATH {
@@ -2305,6 +2326,37 @@ extend TypeChecker {
             let lv = ceptr.eval(m, aid);
             if lv.kind == ce::CONST_INT {
                 return self.cur_ast().const_value(lv.as_data.i);
+            }
+        }
+        // An enum VARIANT as the value of an enum-typed const parameter (`{Family::Ieee}`): its
+        // discriminant, computed the way the emitted C computes it -- the explicit value when one is
+        // written, else the previous discriminant plus one.
+        let an = self.mod_ast(m).at_const(aid);
+        if an.kind == NodeKind::NODE_MEMBER && an.as_data.member.path {
+            // Member resolution is the type checker's act, and a braced type-position expression is
+            // never type-checked -- so the variant is found from the OBJECT (the resolver did resolve
+            // the enum) and the member's name.
+            let ed = self.mod_ast(m).resolution_def(an.as_data.member.object);
+            if ed.node != NODE_NONE && self.mod_ast(ed.module).at_const(ed.node).kind == NodeKind::NODE_ENUM {
+                let ea = self.mod_ast(ed.module);
+                let vn = self.mod_ast(m).at_const(an.as_data.member.member).as_data.name.text;
+                let ms = ea.at_const(ed.node).as_data.aggregate.members;
+                let mut next: i64 = 0;
+                for j in 0..ms.len {
+                    let mid = unsafe ea.list(ms)[j as usize];
+                    let vv = ea.at_const(mid).as_data.variant.value;
+                    if vv != NODE_NONE && ceptr != null {
+                        let ev = ceptr.eval(ed.module, vv);
+                        if ev.kind == ce::CONST_INT {
+                            next = ev.as_data.i;
+                        }
+                    }
+                    let mname = ea.at_const(ea.at_const(mid).as_data.variant.name).as_data.name.text;
+                    if spans_eq2(self.mod_src(m), vn, self.mod_src(ed.module), mname) {
+                        return self.cur_ast().const_value(next);
+                    }
+                    next = next + 1;
+                }
             }
         }
         // A braced argument is an ordinary expression node, and one in a TYPE position is never checked,
@@ -5607,9 +5659,17 @@ extend TypeChecker {
             if self.tc_literal_pinned(vid) {
                 return false;
             }
-            return et.kind == TypeKind::TYPE_BUILTIN && (bt_is_float(et.as_data.builtin) || bt_is_complex(
+            let okf = et.kind == TypeKind::TYPE_BUILTIN && (bt_is_float(et.as_data.builtin) || bt_is_complex(
                 et.as_data.builtin,
             ));
+            // Record the CONTEXT's type on the literal, exactly as the integer branch does. The emitted C
+            // is right either way -- the literal passes through textually -- but the compile-time
+            // evaluator folds from the RECORDED type, and an f64 context with an f32 record folded
+            // `f64_bits(0.1)` at single precision.
+            if okf && !probe && !bt_is_complex(et.as_data.builtin) {
+                self.cur_ast().set_type(node, expected);
+            }
+            return okf;
         }
         if tt == TokenType::StringLiteral || tt == TokenType::RawStringLiteral {
             if et.kind != TypeKind::TYPE_POINTER || et.qualifier != TypeQualifier::TYPE_QUAL_CONST as u8 {
@@ -7934,12 +7994,12 @@ extend TypeChecker {
         if en != an || en > 4 {
             return false;
         }
-        let er2 = self.subst_type(self.subst_type(er, gp, ga, gn), rp, ra, rn);
+        let er2 = self.subst_type(self.subst_type(er, rp, ra, rn), gp, ga, gn);
         if !self.ret_eq(er2, ar) {
             return false;
         }
         for i in 0..en {
-            let ep2 = self.subst_type(self.subst_type(ep[i as usize], gp, ga, gn), rp, ra, rn);
+            let ep2 = self.subst_type(self.subst_type(ep[i as usize], rp, ra, rn), gp, ga, gn);
             if ep2 != ap[i as usize] {
                 return false;
             }
@@ -8609,7 +8669,9 @@ extend TypeChecker {
         if conv_target != TYPE_NONE && skip == 1 && params.len == 1 {
             let pid0 = unsafe fa.list(params)[0];
             let raw0 = if_ty(named, self.decl_type_in(fmod, pid0), self.lower_type_in(fmod, pid0));
-            let pt0 = self.subst_type(self.subst_type(raw0, &gparams[0], &gargs[0], gn), &rsubp[0], &rsuba[0], nrsub);
+            // Receiver frame FIRST: an inferred method binding may mention the very parameters the
+            // receiver frame rebinds ({1*BITS} under BITS := {2*BITS}); the old order substituted twice.
+            let pt0 = self.subst_type(self.subst_type(raw0, &rsubp[0], &rsuba[0], nrsub), &gparams[0], &gargs[0], gn);
             let obj0 = a.at_const(callee_id).as_data.member.object;
             if pt0 != TYPE_NONE && !self.compatible(pt0, obj0) {
                 self.err_mismatch(obj0, pt0);
@@ -8641,7 +8703,7 @@ extend TypeChecker {
             for i in 0..expected {
                 let pid = unsafe fa.list(params)[(i + skip) as usize];
                 let raw = if_ty(named, self.decl_type_in(fmod, pid), self.lower_type_in(fmod, pid));
-                let pt = self.subst_type(self.subst_type(raw, &gparams[0], &gargs[0], gn), &rsubp[0], &rsuba[0], nrsub);
+                let pt = self.subst_type(self.subst_type(raw, &rsubp[0], &rsuba[0], nrsub), &gparams[0], &gargs[0], gn);
                 let aid = unsafe a.list(args)[i as usize];
                 if self.type_at(pt).kind == TypeKind::TYPE_FUNCTION {
                     let at = a.type_of(aid);
@@ -8762,7 +8824,7 @@ extend TypeChecker {
         let r0 = unsafe fa.list(returns)[0];
         let rn = fa.at_const(r0);
         let ret = self.lower_type_in(fmod, if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0));
-        return self.subst_type(self.subst_type(ret, &gparams[0], &gargs[0], gn), &rsubp[0], &rsuba[0], nrsub);
+        return self.subst_type(self.subst_type(ret, &rsubp[0], &rsuba[0], nrsub), &gparams[0], &gargs[0], gn);
     }
 
     fn check_generic_bounds(

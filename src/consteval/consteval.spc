@@ -3023,6 +3023,17 @@ extend ConstEval {
             if !lr.ok {
                 return cv_nil();
             }
+            // A REINTERPRETING deref -- `*((&x) as *const f64 as *const u64)` -- loads a value whose
+            // kind disagrees with the deref's static type. The evaluator has no byte representation to
+            // pun through, so folding would substitute the unconverted value; refuse instead, and the
+            // expression runs at runtime where the pun is real.
+            let want = type_builtin(self.ast_ptr(m), rt);
+            if want != BuiltinType::BT_COUNT {
+                let is_f = want == BuiltinType::BT_F32 || want == BuiltinType::BT_F64;
+                if is_f && lr.v.kind != CV_FLOAT || !is_f && lr.v.kind == CV_FLOAT {
+                    return cv_nil();
+                }
+            }
             return lr.v;
         }
         if op == TokenType::Question {

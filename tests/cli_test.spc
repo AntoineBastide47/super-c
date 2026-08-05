@@ -4017,6 +4017,35 @@ fn error_exit_code() {
 // false-positives, an unfoldable array length is a hard error, and a provable panic in a plain
 // function keeps its defined runtime behavior.
 @test
+fn ctfe_reinterpret_is_not_folded() {
+    // A pointer-cast type pun (`*((&x) as *const f64 as *const u64)`) has no compile-time byte
+    // representation to read through: the evaluator must LEAVE it to runtime, not substitute the
+    // unconverted value. The literal also carries its context's type, so the fold that does happen
+    // (none here) would be at the right precision.
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import stdio;
+fn bits(v: f64) u64 {
+    let x = v;
+    return unsafe *((&x) as *const f64 as *const u64);
+}
+fn main() i32 {
+    // 0.1 at f64 precision has bit pattern 0x3FB999999999999A; an f32-precision or value-substituted
+    // fold produces something else.
+    return (bits(0.1) != 0x3FB999999999999A) as i32;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    let run = p.run_bin_env("");
+    assert_eq(run.exit, 0);
+}
+
+@test
 fn ctfe_hardening() {
     let p = cli::proj_new();
     p.mkfile("cyc.spc", r#"const A: i32 = B;

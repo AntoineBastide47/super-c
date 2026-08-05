@@ -760,7 +760,17 @@ extend Resolver {
             let gp = self.ast.at_const(gid).as_data.generic_param;
             self.resolve_bounds(gp.bounds);
             if gp.default_type != NODE_NONE {
-                self.resolve_type(gp.default_type);
+                // A CONST parameter's default is a VALUE -- a named constant spelled as a bare path, or
+                // a braced expression -- so it resolves in the value namespace, not the type one.
+                let dk = self.ast.at_const(gp.default_type).kind;
+                if gp.is_const && dk == NodeKind::NODE_TYPE_PATH && self.ast.at_const(gp.default_type).as_data.type_path.parts.len == 1 {
+                    let first = self.child(self.ast.at_const(gp.default_type).as_data.type_path.parts, 0);
+                    self.resolve_ref(gp.default_type, first, Namespace::NS_VALUE, "constant");
+                } else if gp.is_const && dk != NodeKind::NODE_TYPE_PATH {
+                    self.resolve_expr(gp.default_type);
+                } else {
+                    self.resolve_type(gp.default_type);
+                }
             }
             if gp.const_type != NODE_NONE {
                 self.resolve_type(gp.const_type);

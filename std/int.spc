@@ -8,8 +8,9 @@
 // compiled by the release the bootstrap starts from; that release now carries the substitution.
 //
 // The generic argument is the BIT width, not a limb count: `UInt<256>` says what it is at every use site
-// and in every diagnostic, and the storage `[u64; BITS / 64]` follows from it. Widths must be a positive
-// multiple of 64; a width that is not is a compile-time error at the first operation on the type.
+// and in every diagnostic, and the storage `[u64; (BITS + 63) / 64]` follows from it. ANY positive width
+// works, 64-multiple or not: the top limb's unused bits stay zero, an invariant `set` enforces at the one
+// place limbs are written, so every operation wraps at exactly BITS.
 //
 // Storage is `u64` limbs, LEAST SIGNIFICANT FIRST, for signed values too. A signed value is two's
 // complement over the whole width, so `Int<256>` is exactly `UInt<256>`'s bit pattern read differently:
@@ -52,29 +53,44 @@ const fn mul_wide(a: u64, b: u64, hi: *mut u64) u64 {
 /// The limb vector itself. Everything whose meaning does not depend on signedness lives here, so `UInt`
 /// and `Int` share one implementation of it rather than one converting into the other at every call.
 struct IntBits<const BITS: usize> {
-    limbs: [u64; BITS / 64],
+    limbs: [u64; (BITS + 63) / 64],
 }
 
 extend<const BITS: usize> IntBits<BITS> {
     // Limbs are reached through these two, which are the only places the raw array is touched: the index
-    // is checked against the width at every entry point, and a bad width is refused before any of them.
+    // is checked at every entry point, and `set` masks the top limb, so bits past the width simply do not
+    // exist -- the invariant every operation relies on, kept in one place.
+
+    const fn nlimbs() usize {
+        return (BITS + 63) / 64;
+    }
+
+    /// The live bits of the top limb: all of them when the width is a whole number of limbs.
+    const fn top_mask() u64 {
+        if BITS % 64 == 0 {
+            return 0xFFFFFFFFFFFFFFFF;
+        }
+        return (1u64 << (BITS % 64) as u64) - 1;
+    }
 
     fn get(self: &IntBits<BITS>, i: usize) u64 {
-        if i >= BITS / 64 {
+        if i >= IntBits::<BITS>::nlimbs() {
             return 0; // reading past the top limb yields the zero extension, which is what callers mean
         }
         return unsafe self.limbs[i];
     }
 
     fn set(self: &mut IntBits<BITS>, i: usize, v: u64) {
-        if i < BITS / 64 {
+        let n = IntBits::<BITS>::nlimbs();
+        if i + 1 == n {
+            unsafe self.limbs[i] = v & IntBits::<BITS>::top_mask();
+        } else if i < n {
             unsafe self.limbs[i] = v;
         }
     }
 
     fn zero() IntBits<BITS> {
-        static_assert(BITS >= 64, "an integer width must be at least 64 bits");
-        static_assert(BITS % 64 == 0, "an integer width must be a whole number of 64-bit limbs");
+        static_assert(BITS >= 1, "an integer width must be positive");
         return IntBits::<BITS> {};
     }
 
@@ -85,7 +101,7 @@ extend<const BITS: usize> IntBits<BITS> {
     }
 
     fn is_zero(self: &IntBits<BITS>) bool {
-        for i in 0..BITS / 64 {
+        for i in 0..IntBits::<BITS>::nlimbs() {
             if self.get(i) != 0 {
                 return false;
             }
@@ -116,7 +132,7 @@ extend<const BITS: usize> IntBits<BITS> {
 
     /// Index of the highest set bit, or -1 for zero. Drives division's iteration count.
     fn top_bit(self: &IntBits<BITS>) i64 {
-        let mut i = BITS / 64;
+        let mut i = IntBits::<BITS>::nlimbs();
         while i > 0 {
             i = i - 1;
             let l = self.get(i);
@@ -141,7 +157,7 @@ extend<const BITS: usize> IntBits<BITS> {
     fn add_carry(self: &IntBits<BITS>, other: &IntBits<BITS>, carry_out: *mut u64) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
         let mut carry: u64 = 0;
-        for i in 0..BITS / 64 {
+        for i in 0..IntBits::<BITS>::nlimbs() {
             let a = self.get(i);
             let b = other.get(i);
             let s1 = a + b; // u64 addition wraps at the width, which is the carry test below
@@ -149,7 +165,13 @@ extend<const BITS: usize> IntBits<BITS> {
             let s2 = s1 + carry;
             let c2 = (s2 < s1) as u64;
             r.set(i, s2);
-            carry = c1 | c2;
+            // For a partial top limb the carry sits INSIDE the u64, one past the width's top bit --
+            // both operands are masked, so the sum holds at most one bit there.
+            if BITS % 64 != 0 && i + 1 == IntBits::<BITS>::nlimbs() {
+                carry = s2 >> (BITS % 64) as u64;
+            } else {
+                carry = c1 | c2;
+            }
         }
         unsafe *carry_out = carry;
         return r;
@@ -158,7 +180,7 @@ extend<const BITS: usize> IntBits<BITS> {
     fn sub_borrow(self: &IntBits<BITS>, other: &IntBits<BITS>, borrow_out: *mut u64) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
         let mut borrow: u64 = 0;
-        for i in 0..BITS / 64 {
+        for i in 0..IntBits::<BITS>::nlimbs() {
             let a = self.get(i);
             let b = other.get(i);
             let d1 = a - b;
@@ -183,7 +205,7 @@ extend<const BITS: usize> IntBits<BITS> {
     /// The low `BITS` of the full product -- what wrapping multiplication means, for either signedness.
     fn mul_wrap(self: &IntBits<BITS>, other: &IntBits<BITS>, overflow: *mut bool) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
-        let n = BITS / 64;
+        let n = IntBits::<BITS>::nlimbs();
         let mut over = false;
         for i in 0..n {
             let a = self.get(i);
@@ -208,6 +230,9 @@ extend<const BITS: usize> IntBits<BITS> {
                 let s2 = s1 + carry;
                 hi = hi + (s2 < s1) as u64;
                 r.set(i + j, s2);
+                if BITS % 64 != 0 && i + j + 1 == n && s2 >> (BITS % 64) as u64 != 0 {
+                    over = true; // bits above the width inside the top limb
+                }
                 carry = hi;
             }
             if carry != 0 {
@@ -221,6 +246,9 @@ extend<const BITS: usize> IntBits<BITS> {
                         let s = cur + carry;
                         carry = (s < cur) as u64;
                         r.set(k, s);
+                        if BITS % 64 != 0 && k + 1 == n && s >> (BITS % 64) as u64 != 0 {
+                            over = true;
+                        }
                         k = k + 1;
                     }
                     if carry != 0 {
@@ -237,9 +265,10 @@ extend<const BITS: usize> IntBits<BITS> {
     /// values multiply to 2N bits, so nothing narrower than a second N-bit value holds what the low half
     /// loses -- a carry-out BIT would say only THAT it overflowed, which `checked_mul` already reports.
     fn mul_full(self: &IntBits<BITS>, other: &IntBits<BITS>, hi_out: *mut IntBits<BITS>) IntBits<BITS> {
-        let n = BITS / 64;
-        let mut lo = IntBits::<BITS>::zero();
-        let mut hi = IntBits::<BITS>::zero();
+        let n = IntBits::<BITS>::nlimbs();
+        // The 2*BITS-bit product accumulates in a double-width scratch, because the low/high split sits
+        // at BITS -- a limb edge only when the width is a whole number of limbs.
+        let mut prod = IntBits::<{BITS * 2}>::zero();
         for i in 0..n {
             let a = self.get(i);
             if a == 0 {
@@ -250,32 +279,30 @@ extend<const BITS: usize> IntBits<BITS> {
                 let b = other.get(j);
                 let mut h: u64 = 0;
                 let l = mul_wide(a, b, &mut h);
-                let k = i + j;
-                let cur = if k < n {
-                    lo.get(k);
-                } else {
-                    hi.get(k - n);
-                };
+                let cur = prod.get(i + j);
                 // a*b + cur + carry is at most 2^128 - 1, so neither carry can push `h` past a limb.
                 let s1 = cur + l;
                 h = h + (s1 < cur) as u64;
                 let s2 = s1 + carry;
                 h = h + (s2 < s1) as u64;
-                if k < n {
-                    lo.set(k, s2);
-                } else {
-                    hi.set(k - n, s2);
-                }
+                prod.set(i + j, s2);
                 carry = h;
             }
             let mut k = i + n;
             while carry != 0 && k < n + n {
-                let cur = hi.get(k - n);
+                let cur = prod.get(k);
                 let s = cur + carry;
                 carry = (s < cur) as u64;
-                hi.set(k - n, s);
+                prod.set(k, s);
                 k = k + 1;
             }
+        }
+        let mut lo = IntBits::<BITS>::zero();
+        let mut hi = IntBits::<BITS>::zero();
+        let top = prod.shr_logical(BITS);
+        for i in 0..n {
+            lo.set(i, prod.get(i)); // set() masks the top limb: exactly the low BITS
+            hi.set(i, top.get(i));
         }
         unsafe *hi_out = hi;
         return lo;
@@ -285,7 +312,7 @@ extend<const BITS: usize> IntBits<BITS> {
 
     fn bit_and(self: &IntBits<BITS>, other: &IntBits<BITS>) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
-        for i in 0..BITS / 64 {
+        for i in 0..IntBits::<BITS>::nlimbs() {
             r.set(i, self.get(i) & other.get(i));
         }
         return r;
@@ -293,7 +320,7 @@ extend<const BITS: usize> IntBits<BITS> {
 
     fn bit_or(self: &IntBits<BITS>, other: &IntBits<BITS>) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
-        for i in 0..BITS / 64 {
+        for i in 0..IntBits::<BITS>::nlimbs() {
             r.set(i, self.get(i) | other.get(i));
         }
         return r;
@@ -301,7 +328,7 @@ extend<const BITS: usize> IntBits<BITS> {
 
     fn bit_xor(self: &IntBits<BITS>, other: &IntBits<BITS>) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
-        for i in 0..BITS / 64 {
+        for i in 0..IntBits::<BITS>::nlimbs() {
             r.set(i, self.get(i) ^ other.get(i));
         }
         return r;
@@ -309,7 +336,7 @@ extend<const BITS: usize> IntBits<BITS> {
 
     fn bit_not(self: &IntBits<BITS>) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
-        for i in 0..BITS / 64 {
+        for i in 0..IntBits::<BITS>::nlimbs() {
             r.set(i, ~self.get(i));
         }
         return r;
@@ -321,7 +348,7 @@ extend<const BITS: usize> IntBits<BITS> {
         if amount >= BITS {
             return r;
         }
-        let n = BITS / 64;
+        let n = IntBits::<BITS>::nlimbs();
         let limb_shift = amount / 64;
         let bit_shift = amount % 64;
         let mut i = n;
@@ -346,7 +373,7 @@ extend<const BITS: usize> IntBits<BITS> {
         if amount >= BITS {
             return r;
         }
-        let n = BITS / 64;
+        let n = IntBits::<BITS>::nlimbs();
         let limb_shift = amount / 64;
         let bit_shift = amount % 64;
         for i in 0..n {
@@ -382,7 +409,7 @@ extend<const BITS: usize> IntBits<BITS> {
     // ---- unsigned comparison ------------------------------------------------------------------
 
     fn cmp_unsigned(self: &IntBits<BITS>, other: &IntBits<BITS>) i32 {
-        let mut i = BITS / 64;
+        let mut i = IntBits::<BITS>::nlimbs();
         while i > 0 {
             i = i - 1;
             let a = self.get(i);
@@ -398,7 +425,7 @@ extend<const BITS: usize> IntBits<BITS> {
     }
 
     fn eq_bits(self: &IntBits<BITS>, other: &IntBits<BITS>) bool {
-        for i in 0..BITS / 64 {
+        for i in 0..IntBits::<BITS>::nlimbs() {
             if self.get(i) != other.get(i) {
                 return false;
             }
@@ -441,7 +468,7 @@ extend<const BITS: usize> IntBits<BITS> {
         }
         let mut q = IntBits::<BITS>::zero();
         let mut rem: u64 = 0;
-        let mut i = BITS / 64;
+        let mut i = IntBits::<BITS>::nlimbs();
         while i > 0 {
             i = i - 1;
             let cur = self.get(i);
@@ -477,11 +504,11 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     pub const fn bytes() usize {
-        return BITS / 8;
+        return (BITS + 7) / 8;
     }
 
     pub const fn limbs() usize {
-        return BITS / 64;
+        return (BITS + 63) / 64;
     }
 
     // The only places `bits` is named from outside this type's own methods: a wrapper's field belongs
@@ -548,7 +575,7 @@ extend<const BITS: usize> UInt<BITS> {
 
     pub fn count_ones(self: &UInt<BITS>) usize {
         let mut n: usize = 0;
-        for i in 0..BITS / 64 {
+        for i in 0..UInt::<BITS>::limbs() {
             let mut l = self.bits.get(i);
             while l != 0 {
                 n = n + (l & 1u64) as usize;
@@ -594,7 +621,7 @@ extend<const BITS: usize> UInt<BITS> {
     pub fn widen<const M: usize>(v: &UInt<M>) UInt<BITS> {
         static_assert(M <= BITS, "widen: the target must be at least as wide as the source");
         let mut r = UInt::<BITS>::zero();
-        for i in 0..M / 64 {
+        for i in 0..(M + 63) / 64 {
             r.set_limb(i, v.limb(i));
         }
         return r;
@@ -681,8 +708,8 @@ extend<const BITS: usize> UInt<BITS> {
     /// implicitly: an implicit conversion must be lossless, and these deliberately are not.
     pub fn cast_unsigned<const M: usize>(v: &UInt<M>) UInt<BITS> {
         let mut r = UInt::<BITS>::zero();
-        for i in 0..BITS / 64 {
-            if i < M / 64 {
+        for i in 0..UInt::<BITS>::limbs() {
+            if i < (M + 63) / 64 {
                 r.set_limb(i, v.limb(i));
             }
         }
@@ -696,12 +723,17 @@ extend<const BITS: usize> UInt<BITS> {
             0u64;
         };
         let mut r = UInt::<BITS>::zero();
-        for i in 0..BITS / 64 {
-            if i < M / 64 {
+        for i in 0..UInt::<BITS>::limbs() {
+            if i < (M + 63) / 64 {
                 r.set_limb(i, v.limb(i));
             } else {
                 r.set_limb(i, fill);
             }
+        }
+        // A source width that ends inside a limb keeps its own top bits zero, so the sign must also
+        // fill the rest of that boundary limb.
+        if fill != 0 && M % 64 != 0 && M < BITS {
+            r.set_limb(M / 64, v.limb(M / 64) | fill << (M % 64) as u64);
         }
         return r;
     }
@@ -713,12 +745,16 @@ extend<const BITS: usize> UInt<BITS> {
     pub fn full_mul(self: &UInt<BITS>, other: &UInt<BITS>) UInt<{BITS * 2}> {
         let mut hi = UInt::<BITS>::zero();
         let lo = self.widening_mul(other, &mut hi);
-        let mut r = UInt::<{BITS * 2}>::zero();
-        for i in 0..BITS / 64 {
-            r.set_limb(i, lo.limb(i));
-            r.set_limb(i + BITS / 64, hi.limb(i));
+        // The halves are placed by limb copy and a shift rather than a cast: the split at BITS is a limb
+        // edge only for whole-limb widths, and the shift puts the high half exactly there.
+        let mut wl = UInt::<{BITS * 2}>::zero();
+        let mut wh = UInt::<{BITS * 2}>::zero();
+        for i in 0..UInt::<BITS>::limbs() {
+            wl.set_limb(i, lo.limb(i));
+            wh.set_limb(i, hi.limb(i));
         }
-        return r;
+        let placed = wh.shl(BITS);
+        return wl.bit_or(&placed);
     }
 
     // ---- checked -------------------------------------------------------------------------------
@@ -982,7 +1018,7 @@ extend<const BITS: usize> UInt<BITS> as Ord {
 extend<const BITS: usize> UInt<BITS> as Hash {
     pub fn hash(self: &UInt<BITS>) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
-        for i in 0..BITS / 64 {
+        for i in 0..UInt::<BITS>::limbs() {
             h = (h ^ self.bits.get(i)) * 1099511628211u64;
         }
         return h;
@@ -1023,11 +1059,11 @@ extend<const BITS: usize> Int<BITS> {
     }
 
     pub const fn bytes() usize {
-        return BITS / 8;
+        return (BITS + 7) / 8;
     }
 
     pub const fn limbs() usize {
-        return BITS / 64;
+        return (BITS + 63) / 64;
     }
 
     fn from_bits(b: IntBits<BITS>) Int<BITS> {
@@ -1058,15 +1094,20 @@ extend<const BITS: usize> Int<BITS> {
     pub fn from_i64(v: i64) Int<BITS> {
         let mut b = IntBits::<BITS>::from_u64(v as u64);
         if v < 0 {
-            for i in 1..BITS / 64 {
+            for i in 1..(BITS + 63) / 64 {
                 b.set(i, 0xFFFFFFFFFFFFFFFF);
             }
         }
         return Int::<BITS> { bits: b };
     }
 
-    /// The low 64 bits as a signed value, discarding the rest.
+    /// The low 64 bits as a signed value, discarding the rest; a width below 64 sign-extends from its
+    /// own top bit, so the value survives the trip.
     pub fn to_i64(self: &Int<BITS>) i64 {
+        if BITS < 64 {
+            let sh = (64 - BITS) as u64;
+            return (self.bits.get(0) << sh) as i64 >> sh as i64;
+        }
         return self.bits.get(0) as i64;
     }
 
@@ -1101,12 +1142,15 @@ extend<const BITS: usize> Int<BITS> {
         } else {
             0u64;
         };
-        for i in 0..BITS / 64 {
-            if i < M / 64 {
+        for i in 0..Int::<BITS>::limbs() {
+            if i < (M + 63) / 64 {
                 r.set_limb(i, v.limb(i));
             } else {
                 r.set_limb(i, fill);
             }
+        }
+        if fill != 0 && M % 64 != 0 && M < BITS {
+            r.set_limb(M / 64, v.limb(M / 64) | fill << (M % 64) as u64);
         }
         return r;
     }
@@ -1158,20 +1202,23 @@ extend<const BITS: usize> Int<BITS> {
             0u64;
         };
         let mut r = Int::<BITS>::zero();
-        for i in 0..BITS / 64 {
-            if i < M / 64 {
+        for i in 0..Int::<BITS>::limbs() {
+            if i < (M + 63) / 64 {
                 r.set_limb(i, v.limb(i));
             } else {
                 r.set_limb(i, fill);
             }
+        }
+        if fill != 0 && M % 64 != 0 && M < BITS {
+            r.set_limb(M / 64, v.limb(M / 64) | fill << (M % 64) as u64);
         }
         return r;
     }
 
     pub fn cast_unsigned<const M: usize>(v: &UInt<M>) Int<BITS> {
         let mut r = Int::<BITS>::zero();
-        for i in 0..BITS / 64 {
-            if i < M / 64 {
+        for i in 0..Int::<BITS>::limbs() {
+            if i < (M + 63) / 64 {
                 r.set_limb(i, v.limb(i));
             }
         }
@@ -1566,7 +1613,7 @@ extend<const BITS: usize> Int<BITS> as Ord {
 extend<const BITS: usize> Int<BITS> as Hash {
     pub fn hash(self: &Int<BITS>) u64 {
         let mut h: u64 = 0xcbf29ce484222325;
-        for i in 0..BITS / 64 {
+        for i in 0..Int::<BITS>::limbs() {
             h = (h ^ self.bits.get(i)) * 1099511628211u64;
         }
         return h;

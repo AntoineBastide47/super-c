@@ -1761,6 +1761,182 @@ fn reintern_cross_module(p: &mut Package, sm: ModuleId, start: usize) bool {
     return changed;
 }
 
+// Every generic-method call in `fsp`, recorded under the given frame (see record_framed_method_inst).
+fn record_framed_span(p: &mut Package, sm: ModuleId, fsp: tok::Span, gids: *const NodeId, fargs: *const TypeId, ng: u8) {
+    let nn = unsafe pkg_ast_c(p, sm).nodes.len();
+    let mut nid: u32 = 1;
+    while nid as usize < nn {
+        let sp = pkg_ast_c(p, sm).at_const(nid).span;
+        if sp.start >= fsp.start && sp.end <= fsp.end {
+            let _ = record_framed_method_inst(p, sm, nid, gids, fargs, ng);
+        }
+        nid = nid + 1;
+    }
+}
+
+// The frames a generic METHOD's instantiations define: for each (instance, method, targs) entry, the
+// extend's parameters bind to the instance's arguments and the method's own to the targs. Everything the
+// body names -- nested aggregate instances, deeper generic-method calls -- substitutes through that
+// combined frame, which is what lets a cross-format `convert<E2, F2>` exist at all. Returns growth.
+fn record_method_inst_frames(p: &mut Package, m: ModuleId, changed: *mut bool) {
+    let nmi = unsafe pkg_ast_c(p, m).method_insts.len();
+    let mut k: usize = 0;
+    while k < nmi {
+        let mi = *unsafe pkg_ast_c(p, m).method_insts.at(k);
+        k = k + 1;
+        let s = pkg_ast_c(p, m);
+        if mi.method as usize >= unsafe s.nodes.len() {
+            continue; // a foreign node id: this ast cannot interpret it
+        }
+        let mn = s.at_const(mi.method);
+        if mn.kind != NodeKind::NODE_FUNCTION || mn.as_data.function.generics.len == 0 {
+            continue;
+        }
+        // The enclosing extend, by containment; its target must match the instance's decl.
+        let items = unsafe s.at_const(s.root).as_data.program.items;
+        let mut ext = NODE_NONE;
+        for i in 0..items.len {
+            let iid = unsafe s.list(items)[i as usize];
+            if s.at_const(iid).kind != NodeKind::NODE_EXTEND {
+                continue;
+            }
+            let ms = s.at_const(iid).as_data.extend_def.items;
+            for j in 0..ms.len {
+                if unsafe s.list(ms)[j as usize] == mi.method {
+                    ext = iid;
+                }
+            }
+        }
+        if ext == NODE_NONE {
+            continue;
+        }
+        if s.type_at(mi.instance).kind != TypeKind::TYPE_INSTANCE {
+            continue;
+        }
+        let inst = *s.instance(s.type_at(mi.instance).as_data.inst);
+        let egen = s.at_const(ext).as_data.extend_def.generics;
+        let mgen = mn.as_data.function.generics;
+        let mut gids2: [NodeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+        let mut args2: [TypeId; 8] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+        let mut n2: u8 = 0;
+        let mut g: u32 = 0;
+        while g < egen.len && g < inst.n as u32 && n2 < 8 {
+            unsafe gids2[n2 as usize] = unsafe s.list(egen)[g as usize];
+            unsafe args2[n2 as usize] = unsafe inst.args[g as usize];
+            n2 = n2 + 1;
+            g = g + 1;
+        }
+        g = 0;
+        while g < mgen.len && g < mi.n as u32 && n2 < 8 {
+            unsafe gids2[n2 as usize] = unsafe s.list(mgen)[g as usize];
+            unsafe args2[n2 as usize] = unsafe mi.targs[g as usize];
+            n2 = n2 + 1;
+            g = g + 1;
+        }
+        let fsp = mn.span;
+        // Nested method-inst calls under the combined frame, plus the body's own aggregate instances.
+        let nn = unsafe pkg_ast_c(p, m).nodes.len();
+        let mut nid: u32 = 1;
+        while nid as usize < nn {
+            let sp = pkg_ast_c(p, m).at_const(nid).span;
+            if sp.start >= fsp.start && sp.end <= fsp.end {
+                if record_framed_method_inst(p, m, nid, &gids2[0], &args2[0], n2) {
+                    unsafe *changed = true;
+                }
+                let t = pkg_ast_c(p, m).type_of(nid);
+                if t != TYPE_NONE && !pkg_ast_c(p, m).type_concrete(t) && type_params_subset(p, m, t, m, &gids2[0], n2) {
+                    reintern_nested_type(p, m, m, t, m, &gids2[0], &args2[0], n2, changed);
+                }
+            }
+            nid = nid + 1;
+        }
+        if unsafe pkg_ast_c(p, m).method_insts.len() != nmi {
+            // The walk itself registered new entries; the propagate fixpoint re-runs this pass.
+            unsafe *changed = true;
+        }
+    }
+}
+
+// A generic-METHOD call inside a generic body: its type arguments and receiver mention the enclosing
+// frame's parameters, so the resting call-site sweep (reintern_method_insts) sees nothing concrete.
+// Substituting the frame makes them concrete, and the (receiver instance, method, targs) then registers
+// in the module that emits the instance -- without this, the call site names a specialization nobody
+// defines. Returns whether anything new was recorded.
+fn record_framed_method_inst(
+    p: &mut Package,
+    sm: ModuleId,
+    nid: NodeId,
+    gids: *const NodeId,
+    fargs: *const TypeId,
+    ng: u8,
+) bool {
+    let np = p.modules.len();
+    let s = pkg_ast_c(p, sm);
+    if s.at_const(nid).kind != NodeKind::NODE_CALL {
+        return false;
+    }
+    let callee_id = s.at_const(nid).as_data.call.callee;
+    if s.at_const(callee_id).kind != NodeKind::NODE_MEMBER {
+        return false;
+    }
+    let member_id = s.at_const(callee_id).as_data.member.member;
+    let md = s.resolution_def(member_id);
+    if md.node == NODE_NONE || md.module as usize >= np || !p.modules[md.module as usize].has_ast {
+        return false;
+    }
+    let mn = pkg_ast_c(p, md.module).at_const(md.node);
+    if mn.kind != NodeKind::NODE_FUNCTION || mn.as_data.function.generics.len == 0 {
+        return false;
+    }
+    let mu = s.type_args(nid);
+    if mu == null || unsafe mu.n == 0 {
+        return false;
+    }
+    let mtn = if unsafe mu.n < 4 {
+        unsafe mu.n;
+    } else {
+        4 as u8;
+    };
+    let mut rty = s.type_of(s.at_const(callee_id).as_data.member.object);
+    let mut yk = s.type_at(rty).kind;
+    while yk == TypeKind::TYPE_POINTER || yk == TypeKind::TYPE_REFERENCE {
+        rty = s.type_at(rty).as_data.elem;
+        yk = s.type_at(rty).kind;
+    }
+    rty = subst_reintern_type(p, sm, sm, rty, sm, gids, fargs, ng);
+    if pkg_ast_c(p, sm).type_at(rty).kind != TypeKind::TYPE_INSTANCE || !pkg_ast_c(p, sm).type_concrete(rty) {
+        return false;
+    }
+    let mut targs: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
+    for t in 0..mtn {
+        let st = subst_reintern_type(p, sm, sm, unsafe mu.args[t as usize], sm, gids, fargs, ng);
+        if !pkg_ast_c(p, sm).type_concrete(st) {
+            return false;
+        }
+        unsafe targs[t as usize] = st;
+    }
+    let recv = *pkg_ast_c(p, sm).instance(pkg_ast_c(p, sm).type_at(rty).as_data.inst);
+    let home = p.instance_home_mid(sm, &recv);
+    let mut dm = md.module;
+    if home as usize < np {
+        dm = home;
+    }
+    let rinst = if dm == sm {
+        rty;
+    } else {
+        let d = pkg_ast_m(p, dm);
+        unsafe d.reintern(&*pkg_ast_c(p, sm), rty);
+    };
+    if dm != sm {
+        for t in 0..mtn {
+            let d = pkg_ast_m(p, dm);
+            unsafe targs[t as usize] = unsafe d.reintern(&*pkg_ast_c(p, sm), targs[t as usize]);
+        }
+    }
+    let d = pkg_ast_m(p, dm);
+    return d.add_method_inst(rinst, md.node, &targs[0], mtn);
+}
+
 // Body-only generic types of a generic aggregate's METHODS: a `W<T> {..}` literal inside
 // `extend<T> P<T>` names no field or signature type, so neither deps walk above interns its
 // concrete instance for a given `P<args>` -- the emitted C then references an undefined struct.
@@ -1858,11 +2034,6 @@ fn reintern_method_body_deps(p: &mut Package, hm: ModuleId, it: &TyInstance, cha
         let nn = unsafe pkg_ast_c(p, om).nodes.len();
         let mut nid: u32 = 1;
         while nid as usize < nn {
-            let t = pkg_ast_c(p, om).type_of(nid);
-            if t == TYPE_NONE || pkg_ast_c(p, om).type_concrete(t) || !type_params_subset(p, om, t, om, gids, ng) {
-                nid = nid + 1;
-                continue;
-            }
             let sp = pkg_ast_c(p, om).at_const(nid).span;
             let mut skipped = false;
             for k in 0..skip.len() {
@@ -1870,7 +2041,17 @@ fn reintern_method_body_deps(p: &mut Package, hm: ModuleId, it: &TyInstance, cha
                     skipped = true;
                 }
             }
-            if !skipped {
+            if skipped {
+                nid = nid + 1;
+                continue;
+            }
+            // A call node carries its own recording, whatever its recorded type says: the generic
+            // METHOD it names has a specialization only if some frame writes it down.
+            if record_framed_method_inst(p, om, nid, gids, &fargs[0], ng) {
+                unsafe *changed = true;
+            }
+            let t = pkg_ast_c(p, om).type_of(nid);
+            if t != TYPE_NONE && !pkg_ast_c(p, om).type_concrete(t) && type_params_subset(p, om, t, om, gids, ng) {
                 reintern_nested_type(p, om, om, t, om, gids, &fargs[0], ng, changed);
             }
             nid = nid + 1;
@@ -2420,6 +2601,8 @@ fn seed_mono_body_instances(p: &mut Package) bool {
                 }
                 follow_generic_calls(p, s.fd.module, gids, gens.len, &s.args[0], s.n, all, &mut seeds);
                 follow_method_refs(p, &refs, s.fd.module, s.fd.node, gids, &s.args[0], s.n, &mut mseeds);
+                let fnsp = pkg_ast_c(p, s.fd.module).at_const(s.fd.node).span;
+                record_framed_span(p, s.fd.module, fnsp, gids, &s.args[0], s.n);
             }
             while mhead < mseeds.len() {
                 let s = mseeds[mhead];
@@ -2452,6 +2635,7 @@ fn seed_mono_body_instances(p: &mut Package) bool {
                 let fsp = pkg_ast_c(p, m).at_const(s.fd.node).span;
                 follow_generic_calls(p, m, gids, gens.len, &s.args[0], s.n, fsp, &mut seeds);
                 follow_method_refs(p, &refs, s.fd.module, s.fd.node, gids, &s.args[0], s.n, &mut mseeds);
+                record_framed_span(p, m, fsp, gids, &s.args[0], s.n);
             }
         }
         let mut now: usize = 0;
@@ -2714,6 +2898,7 @@ pub fn package_propagate_instances(p: &mut Package) {
                 if reintern_method_insts(p, u as ModuleId, &mut sites[u], first) {
                     changed = true;
                 }
+                record_method_inst_frames(p, u as ModuleId, &mut changed);
             }
         }
         first = false;

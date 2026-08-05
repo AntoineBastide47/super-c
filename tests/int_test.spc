@@ -75,6 +75,53 @@ fn float_casts_round_once_and_saturate() {
     assert(u128::from_u64(16777217) as f32 == 16777216.0f32); // rounds to even at 24 bits
 }
 
+// A width need not be a whole number of limbs: the top limb's unused bits stay zero (an invariant the
+// one limb-write site enforces), so every operation wraps at exactly BITS. The float formats depend on
+// this -- Float<5, 10> stores 16 bits.
+@test
+fn partial_limb_widths() {
+    // 16-bit: wraps at 16, and checked arithmetic sees the true carry
+    let one16 = UInt::<16>::one();
+    let m16 = UInt::<16>::from_u64(65535);
+    assert(m16.wrapping_add(&one16).is_zero());
+    assert(m16.checked_add(&one16).is_none());
+    let s16 = m16.to_string();
+    assert(s16.as_str() == "65535");
+    s16.free();
+    // 100-bit: the carry crosses limb 0 into the partial limb, and overflow detection sees bit 100
+    let big = UInt::<100>::max();
+    let one100 = UInt::<100>::one();
+    let two100 = UInt::<100>::from_u64(2);
+    assert(big.wrapping_add(&one100).is_zero());
+    assert_eq(big.bit_length(), 100);
+    assert_eq(big.count_ones(), 100);
+    assert(big.checked_mul(&two100).is_none());
+    // division and the full product at a partial width
+    let three = UInt::<100>::from_u64(3);
+    let mut r100 = UInt::<100>::zero();
+    let q = big.divmod(&three, &mut r100);
+    let qs = q.to_string();
+    assert(qs.as_str() == "422550200076076467165567735125");
+    qs.free();
+    let f = UInt::<100>::from_u64(0xFFFFFFFFFFFFFFFF);
+    let p = f.full_mul(&f);
+    let ps = p.to_string();
+    assert(ps.as_str() == "340282366920938463426481119284349108225");
+    ps.free();
+    // signed 20-bit: the sign bit sits mid-limb, and every signed operation reads it there
+    let m = Int::<20>::from_i64(-3);
+    assert_eq(m.to_i64(), -3i64);
+    assert(m.is_negative());
+    assert_eq(m.shr(1).to_i64(), -2i64);
+    assert_eq(Int::<20>::min().to_i64(), -524288i64);
+    assert_eq(Int::<20>::max().to_i64(), 524287i64);
+    // widening across a mid-limb boundary sign-extends through it
+    let w = Int::<100>::widen(&m);
+    assert_eq(w.to_i64(), -3i64);
+    assert(w.is_negative());
+    assert_eq(Int::<20>::cast_signed(&w).to_i64(), -3i64);
+}
+
 @test
 fn width_is_the_generic_argument() {
     assert_eq(u128::bits(), 128);

@@ -572,6 +572,21 @@ fn bug_regressions() {
         "fn main() i32 { let a: u128 = 1; let b = a as bool; return 0; }\n",
         "invalid cast",
     );
+    // Enum-valued const generic parameters: the argument is a named constant descriptor, the value
+    // participates in the type's identity, and the parameter folds in expression position. A DEFAULT on a
+    // const parameter fills an omitted argument -- `S` alone means `S<FB>`.
+    h::expect_exit(
+        "enum-valued const generics with a default",
+        "enum Fam { A, B }\nconst FA: Fam = Fam::A;\nconst FB: Fam = Fam::B;\nstruct S<const K: Fam = FB> { pub v: u64 }\nextend<const K: Fam> S<K> {\n    fn which(self: &Self) i32 {\n        if K == Fam::B { return 2; }\n        return 1;\n    }\n}\nfn main() i32 {\n    let a = S::<FA> { v: 1 };\n    let b: S = S { v: 2 };\n    return a.which() + b.which() - 3;\n}\n",
+        0,
+    );
+    // The receiver frame substitutes BEFORE a method's inferred generics: a receiver like T<{N * 2}>
+    // rebinds the very parameter an inferred binding mentions, and the old order substituted it twice.
+    h::expect_exit(
+        "receiver frame precedes method-generic bindings",
+        "struct W<const N: usize> { pub v: u64 }\nextend<const N: usize> W<N> {\n    pub fn take<const M: usize>(src: &W<M>) W<N> { return W::<N> { v: src.v }; }\n}\nfn dbl<const B: usize>(a: &W<B>) W<{B * 2}> { return W::<{B * 2}>::take(a); }\nfn main() i32 { let a = W::<3> { v: 9 }; let d = dbl(&a); return d.v as i32 - 9; }\n",
+        0,
+    );
     // A shift takes a count: the right operand answers to the METHOD's parameter, not to Self.
     h::expect_err_msg(
         "shift count type-checked against the parameter",
