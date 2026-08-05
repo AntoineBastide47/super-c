@@ -547,12 +547,30 @@ fn bug_regressions() {
         0,
     );
     // An interface parameter may DEFAULT to Self, so a bare `as Combine` means `as Combine<Self>` while a
-    // spelled-out argument gives a heterogeneous right operand. (Two conformances differing ONLY in that
-    // argument on one type is not resolvable yet: method lookup picks by name and result, not by operand.)
+    // spelled-out argument gives a heterogeneous right operand. Both may sit on ONE type: what the call
+    // passes chooses between them, and the two mangle apart.
     h::expect_exit(
         "interface parameter defaulting to Self",
-        "pub interface Combine<Rhs = Self> {\n    type Output;\n    fn combine(self: &Self, o: &Rhs) Self::Output;\n}\nstruct A { pub x: i32 }\nstruct B { pub y: i32 }\nstruct C { pub z: i32 }\nextend A as Combine {\n    type Output = A;\n    pub fn combine(self: &A, o: &A) A { return A { x: self.x + o.x }; }\n}\nextend C as Combine<B> {\n    type Output = B;\n    pub fn combine(self: &C, o: &B) B { return B { y: self.z * o.y }; }\n}\nfn main() i32 { let a = A { x: 20 }.combine(&A { x: 22 }); let b = C { z: 6 }.combine(&B { y: 7 }); return a.x - 42 + b.y - 42; }\n",
+        "pub interface Combine<Rhs = Self> {\n    type Output;\n    fn combine(self: &Self, o: &Rhs) Self::Output;\n}\nstruct A { pub x: i32 }\nstruct B { pub y: i32 }\nextend A as Combine {\n    type Output = A;\n    pub fn combine(self: &A, o: &A) A { return A { x: self.x + o.x }; }\n}\nextend A as Combine<B> {\n    type Output = B;\n    pub fn combine(self: &A, o: &B) B { return B { y: self.x * o.y }; }\n}\nfn main() i32 { let a = A { x: 20 }.combine(&A { x: 22 }); let b = A { x: 6 }.combine(&B { y: 7 }); return a.x - 42 + b.y - 42; }\n",
         0,
+    );
+    // The same choice for an OPERATOR, whose right operand is already typed when it is made.
+    h::expect_exit(
+        "operator picked by its right operand",
+        "struct Mat { pub s: i32 }\nstruct Vec3 { pub x: i32 }\nextend Mat as Mul {\n    type Output = Mat;\n    pub fn mul(self: &Mat, o: &Mat) Mat { return Mat { s: self.s * o.s }; }\n}\nextend Mat as Mul<Vec3> {\n    type Output = Vec3;\n    pub fn mul(self: &Mat, o: &Vec3) Vec3 { return Vec3 { x: self.s * o.x }; }\n}\nfn main() i32 { let m = Mat { s: 6 }; let sq = m * Mat { s: 7 }; let v = m * Vec3 { x: 5 }; return sq.s - 42 + v.x - 30; }\n",
+        0,
+    );
+    // Implicit conversion is LOSSLESS only: a narrowing width is refused, and a cast with no
+    // conversion path is invalid rather than broken C.
+    h::expect_err_msg(
+        "implicit narrowing between widths is rejected",
+        "fn main() i32 { let c: u256 = u256::one(); let d: u128 = c; return 0; }\n",
+        "mismatched types",
+    );
+    h::expect_err_msg(
+        "a cast with no conversion path is invalid",
+        "fn main() i32 { let a: u128 = 1; let b = a as bool; return 0; }\n",
+        "invalid cast",
     );
     // A shift takes a count: the right operand answers to the METHOD's parameter, not to Self.
     h::expect_err_msg(

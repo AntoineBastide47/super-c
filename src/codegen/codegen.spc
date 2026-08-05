@@ -7807,6 +7807,18 @@ extend Codegen {
         return true;
     }
 
+    /// The method the type checker chose for this operator, or a null DefId. Its NAME no longer decides:
+    /// a type may provide one operator through two conformances with different right operands.
+    const fn cg_op_method(self: &Self, id: NodeId) DefId {
+        switch unsafe self.cur_ast().op_method.get(&id) {
+            Some(v) => {
+                return DefId { module: (*v >> 32) as ModuleId, node: (*v) as NodeId };
+            },
+            None => {},
+        };
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
     fn emit_arith_overload(self: &mut Self, id: NodeId) bool {
         let bd = self.cur_ast().at_const(id).as_data.binary;
         let m = cg_arith_op_method(bd.op);
@@ -7835,7 +7847,10 @@ extend Codegen {
             om = bt.module;
             od = bt.as_data.decl;
         }
-        let mth = self.cg_find_method_cstr(om, od, m);
+        let mut mth = self.cg_op_method(id);
+        if mth.node == NODE_NONE {
+            mth = self.cg_find_method_cstr(om, od, m);
+        }
         if mth.node == NODE_NONE {
             return false;
         }
@@ -10554,6 +10569,11 @@ extend Codegen {
             self.emit_str("__");
         }
         self.emit_ident_mod(mth.module, self.mod_ast(mth.module).at_const(mth.node).as_data.function.name);
+        // Two conformances providing one operator for different right operands mangle apart; the
+        // definitions already carry the suffix, so the call has to as well.
+        let mut isfx = Buf200 {};
+        self.cg_iface_suffix(mth.module, mth.node, &mut isfx[0], 200);
+        self.emit_cstr(&isfx[0]);
     }
     // Emit `node` for a by-value comparison: reference levels are peeled with `*` so the pointees are
     // compared. Pointers (ref depth 0) are left as-is (address comparison).
@@ -10881,7 +10901,71 @@ extend Codegen {
         return false;
     }
 
+    /// Emit the conversion the type checker recorded for this node, if any, around the expression
+    /// itself. Returns whether it handled the node.
+    fn emit_coerced(self: &mut Self, id: NodeId) bool {
+        let cu = self.cur_ast().coerce_of(id);
+        if cu == null {
+            return false;
+        }
+        let target = unsafe cu.target;
+        let mth = unsafe cu.method;
+        let mut bt = *self.type_at(self.subst_resolve(target));
+        if bt.kind != TypeKind::TYPE_INSTANCE && bt.kind != TypeKind::TYPE_STRUCT {
+            // A receiver-style conversion (`to_u64`) produces a builtin: the method is named by the
+            // SOURCE -- the type of the expression being converted.
+            bt = *self.type_at(self.strip_ref_only(self.subst_resolve(self.cur_ast().type_of(id))));
+        }
+        let mut om = bt.module;
+        let mut od = bt.as_data.decl;
+        if bt.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.cur_ast().instance(bt.as_data.inst);
+            om = it.module;
+            od = it.decl;
+        } else if bt.kind != TypeKind::TYPE_STRUCT {
+            return false;
+        }
+        self.cur_ast().clear_coerce(id); // the wrapped expression must emit plainly
+        // A by-reference parameter needs an addressable operand, and the expression may be an rvalue
+        // (`from_i64(-2) as i64`): bind it once, then convert. By-value operands pass straight through.
+        let byref = self.cg_param_is_ref(mth, 0);
+        let mut tmp = Buf32 {};
+        if byref {
+            self.fresh(&mut tmp[0], 32);
+            self.buf.format_into("({{ __auto_type {} = ", diag::cstr(&tmp[0]));
+            self.emit_expr(id);
+            self.emit_str("; ");
+        }
+        self.emit_op_method(bt, om, od, mth);
+        // A conversion generic in its source (`widen<M>`) is one specialization per source width.
+        self.emit_method_targs(id, mth);
+        if byref {
+            self.buf.format_into("(&{}); }})", diag::cstr(&tmp[0]));
+        } else {
+            self.emit_str("(");
+            self.emit_expr(id);
+            self.emit_str(")");
+        }
+        self.cur_ast().set_coerce(id, target, mth);
+        return true;
+    }
+
+    /// Is parameter `idx` of this method declared as a reference?
+    const fn cg_param_is_ref(self: &Self, mth: DefId, idx: u32) bool {
+        let a = self.mod_ast(mth.module);
+        let ps = a.at_const(mth.node).as_data.function.params;
+        if ps.len <= idx {
+            return false;
+        }
+        let pid = unsafe a.list(ps)[idx as usize];
+        let tn = a.at_const(pid).as_data.parameter.ty;
+        return tn != NODE_NONE && a.at_const(tn).kind == NodeKind::NODE_REFERENCE_TYPE;
+    }
+
     fn emit_expr(self: &mut Self, id: NodeId) {
+        if self.emit_coerced(id) {
+            return;
+        }
         if id == NODE_NONE {
             return;
         }
@@ -11147,6 +11231,17 @@ extend Codegen {
                 }
             },
             NODE_CAST => {
+                // A cast that dispatched to a conversion: the recorded call builds the target VALUE, and
+                // a struct target must not also get a C cast -- C cannot cast to a struct type. A scalar
+                // conversion (`to_u64`) keeps the cast, which is what narrows its result.
+                let cu = self.cur_ast().coerce_of(n.as_data.cast.expression);
+                if cu != null {
+                    let ck = self.type_at(self.subst_resolve(unsafe cu.target)).kind;
+                    if ck == TypeKind::TYPE_INSTANCE || ck == TypeKind::TYPE_STRUCT {
+                        self.emit_expr(n.as_data.cast.expression);
+                        return;
+                    }
+                }
                 let mut t = Buf256 {};
                 self.render_type_node(n.as_data.cast.ty, "".ptr() as *const char, &mut t[0], 256);
                 self.buf.format_into("(({})", diag::cstr(&t[0]));

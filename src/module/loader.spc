@@ -1995,6 +1995,60 @@ fn reintern_method_insts(p: &mut Package, sm: ModuleId, sites: &mut Vector<NodeI
             changed = true;
         }
     }
+    // A generic conversion the type checker inserted (`widen<M>`, `cast_of<M>`) is a method
+    // instantiation with no call node, so the sweep above cannot find it: its record carries the
+    // receiver instance and the node whose type_args hold the inferred source width.
+    for ci in 0..s.coerce_count() {
+        let cu = *s.coerce_at_index(ci);
+        if !s.coerce_current(cu.node, ci) {
+            continue; // superseded: the node was re-checked against a different expected type
+        }
+        let md = cu.method;
+        if md.node == NODE_NONE || md.module as usize >= np || !p.modules[md.module as usize].has_ast {
+            continue;
+        }
+        if pkg_ast_c(p, md.module).at_const(md.node).as_data.function.generics.len == 0 {
+            continue;
+        }
+        let mu = s.type_args(cu.node);
+        if mu == null || unsafe mu.n == 0 {
+            continue;
+        }
+        let rty = cu.target;
+        if s.type_at(rty).kind != TypeKind::TYPE_INSTANCE || !s.type_concrete(rty) {
+            continue;
+        }
+        let recv = *s.instance(s.type_at(rty).as_data.inst);
+        let home = p.instance_home_mid(sm, &recv);
+        let mut dm = md.module;
+        if home as usize < np {
+            dm = home;
+        }
+        let mtn = if unsafe mu.n < 4 {
+            unsafe mu.n;
+        } else {
+            4 as u8;
+        };
+        let rinst = if dm == sm {
+            rty;
+        } else {
+            let d = pkg_ast_m(p, dm);
+            unsafe d.reintern(&*s, rty);
+        };
+        let mut targs: [TypeId; 4] = [0u32, 0u32, 0u32, 0u32];
+        for t in 0..mtn {
+            if dm == sm {
+                unsafe targs[t as usize] = unsafe mu.args[t as usize];
+            } else {
+                let d = pkg_ast_m(p, dm);
+                unsafe targs[t as usize] = unsafe d.reintern(&*s, mu.args[t as usize]);
+            }
+        }
+        let d = pkg_ast_m(p, dm);
+        if d.add_method_inst(rinst, md.node, &targs[0], mtn) {
+            changed = true;
+        }
+    }
     return changed;
 }
 

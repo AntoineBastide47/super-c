@@ -66,7 +66,9 @@ fn switch_ranges() {
     h::expect_c("exclusive arm upper bound", SWITCH_RANGES, "< 20");
     h::expect_c("inclusive arm upper bound", SWITCH_RANGES, "<= 30");
     h::expect_c("open-start arm is upper-only", SWITCH_RANGES, "< 5");
-    h::expect_c_absent("open-start arm has no lower bound", SWITCH_RANGES, ">= 5");
+    // The needle carries the `&&` a lower bound is always followed by: this scans EVERY emitted module,
+    // and a bare ">= 5" also matches a prelude bound check on 512.
+    h::expect_c_absent("open-start arm has no lower bound", SWITCH_RANGES, ">= 5 &&");
     h::expect_c("open-end arm is lower-only", SWITCH_RANGES, ">= 99");
     h::expect_c_absent("open-end arm has no upper bound", SWITCH_RANGES, "< 99");
 }

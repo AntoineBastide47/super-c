@@ -1,12 +1,11 @@
 // Fixed-width integers of any size: `UInt<BITS>` and `Int<BITS>`, monomorphized per width, with the
-// aliases `u128`/`u256`/`u512`/`u1024` and `i128`/`i256`/`i512`/`i1024` on top. Import with
-// `import std::num::int as *;` for the aliases unqualified, or `import std::num::int;` to name them
-// through the module.
+// aliases `u128`/`u256`/`u512`/`u1024` and `i128`/`i256`/`i512`/`i1024` on top. A top-level std file, so
+// the aliases resolve unqualified everywhere and these read like the built-in integers: `let a: u128 = 42`
+// converts the literal through the `From` conformances below, exactly as a narrower built-in widens.
 //
-// Deliberately NOT a prelude module. The storage `[u64; BITS / 64]` needs a compiler that substitutes a
-// const-generic ARGUMENT into an array length expression, which the release the bootstrap starts from does
-// not have; a prelude module is compiled by that release, and this one would not build there. It can move
-// up once a release carries the substitution.
+// It sat under `std/num/` until a release could compile it. The storage `[u64; BITS / 64]` needs a compiler
+// that substitutes a const-generic ARGUMENT into an array length expression, and a prelude module is
+// compiled by the release the bootstrap starts from; that release now carries the substitution.
 //
 // The generic argument is the BIT width, not a limb count: `UInt<256>` says what it is at every use site
 // and in every diagnostic, and the storage `[u64; BITS / 64]` follows from it. Widths must be a positive
@@ -589,6 +588,124 @@ extend<const BITS: usize> UInt<BITS> {
         return UInt::<BITS>::from_bits(lo);
     }
 
+    /// The widening conversion between widths: a `UInt<M>` read as a `UInt<BITS>` at least as wide. The
+    /// compiler applies it implicitly wherever a `UInt<BITS>` is expected, exactly as a narrower built-in
+    /// integer widens to a wider one; a narrowing M is rejected where the copy would lose limbs.
+    pub fn widen<const M: usize>(v: &UInt<M>) UInt<BITS> {
+        static_assert(M <= BITS, "widen: the target must be at least as wide as the source");
+        let mut r = UInt::<BITS>::zero();
+        for i in 0..M / 64 {
+            r.set_limb(i, v.limb(i));
+        }
+        return r;
+    }
+
+    /// The value as a double, rounded ONCE: the top 64 bits are taken with a sticky bit -- any dropped
+    /// low bit ORed into the bottom -- so the single u64 conversion rounds exactly as converting the
+    /// full value would. Accumulating limb by limb instead would round at every step. Values past f64's
+    /// range become infinity, as the built-in conversions do.
+    pub fn to_f64(self: &UInt<BITS>) f64 {
+        let n = self.bit_length();
+        if n <= 64 {
+            return self.limb(0) as f64;
+        }
+        let shift = n - 64;
+        let top = self.shr(shift);
+        let mut u = top.limb(0);
+        let back = top.shl(shift);
+        if !(back == *self) {
+            u = u | 1;
+        }
+        let mut f = u as f64;
+        for _i in 0..shift {
+            f = f * 2.0;
+        }
+        return f;
+    }
+
+    /// The same, to f32: the u64 carrier holds every bit that can matter for a 24-bit mantissa too.
+    pub fn to_f32(self: &UInt<BITS>) f32 {
+        let n = self.bit_length();
+        if n <= 64 {
+            return self.limb(0) as f32;
+        }
+        let shift = n - 64;
+        let top = self.shr(shift);
+        let mut u = top.limb(0);
+        let back = top.shl(shift);
+        if !(back == *self) {
+            u = u | 1;
+        }
+        let mut f = u as f32;
+        for _i in 0..shift {
+            f = f * 2.0f32;
+        }
+        return f;
+    }
+
+    /// The integer part of a double, SATURATING: NaN and everything below zero give zero, values at or
+    /// past 2^BITS give max(). Peels 64-bit chunks top-down; a double carries 53 significant bits, so at
+    /// most two rounds move every bit it can express, and each subtraction is exact.
+    pub fn from_f64(v: f64) UInt<BITS> {
+        if !(v == v) || v < 1.0 {
+            return UInt::<BITS>::zero();
+        }
+        let two64: f64 = 18446744073709551616.0;
+        let mut r = UInt::<BITS>::zero();
+        let mut rest = v;
+        while rest >= 1.0 {
+            let mut x = rest;
+            let mut sh: usize = 0;
+            while x >= two64 {
+                x = x / two64;
+                sh = sh + 1;
+            }
+            if sh * 64 >= BITS {
+                return UInt::<BITS>::max();
+            }
+            let chunk = x as u64;
+            r = r + UInt::<BITS>::from_u64(chunk).shl(sh * 64);
+            let mut back = chunk as f64;
+            for _i in 0..sh * 64 {
+                back = back * 2.0;
+            }
+            rest = rest - back;
+        }
+        return r;
+    }
+
+    /// What `expr as uN` means for these types, with exactly C's cast semantics: truncate when the
+    /// target is narrower, extend when wider -- by zero here, and by the sign in `cast_signed`, because
+    /// extension follows the SOURCE's signedness. `as` dispatches to whichever the operand fits; the pair
+    /// is named by source rather than overloaded so the two monomorphize to distinct symbols. Not applied
+    /// implicitly: an implicit conversion must be lossless, and these deliberately are not.
+    pub fn cast_unsigned<const M: usize>(v: &UInt<M>) UInt<BITS> {
+        let mut r = UInt::<BITS>::zero();
+        for i in 0..BITS / 64 {
+            if i < M / 64 {
+                r.set_limb(i, v.limb(i));
+            }
+        }
+        return r;
+    }
+
+    pub fn cast_signed<const M: usize>(v: &Int<M>) UInt<BITS> {
+        let fill = if v.is_negative() {
+            0xFFFFFFFFFFFFFFFFu64;
+        } else {
+            0u64;
+        };
+        let mut r = UInt::<BITS>::zero();
+        for i in 0..BITS / 64 {
+            if i < M / 64 {
+                r.set_limb(i, v.limb(i));
+            } else {
+                r.set_limb(i, fill);
+            }
+        }
+        return r;
+    }
+
     /// The same full product as ONE value twice as wide. `{BITS * 2}` is a const-generic EXPRESSION: the
     /// result's width is computed from the receiver's when the call is monomorphized. The wider type is
     /// instantiated because this call asks for it, not because the method exists -- otherwise every width
@@ -770,6 +887,15 @@ extend<const BITS: usize> UInt<BITS> as Mul {
 
     pub fn mul(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
         return self.wrapping_mul(other);
+    }
+}
+
+/// `From<u64>` is what lets a `UInt<BITS>` stand where the built-in integers do: an integer literal or a
+/// `u64` value converts implicitly at an assignment, an argument or an operand, exactly as a narrower
+/// built-in widens to a wider one.
+extend<const BITS: usize> UInt<BITS> as From<u64> {
+    pub fn from(v: u64) UInt<BITS> {
+        return UInt::<BITS>::from_u64(v);
     }
 }
 
@@ -963,6 +1089,93 @@ extend<const BITS: usize> Int<BITS> {
 
     pub fn bit(self: &Int<BITS>, i: usize) bool {
         return self.bits.bit(i) != 0;
+    }
+
+    /// The widening conversion between widths, SIGN-EXTENDING: the source's sign fills every limb above
+    /// it, so a negative value stays the same number. Applied implicitly, as the built-in signed types are.
+    pub fn widen<const M: usize>(v: &Int<M>) Int<BITS> {
+        static_assert(M <= BITS, "widen: the target must be at least as wide as the source");
+        let mut r = Int::<BITS>::zero();
+        let fill = if v.is_negative() {
+            0xFFFFFFFFFFFFFFFFu64;
+        } else {
+            0u64;
+        };
+        for i in 0..BITS / 64 {
+            if i < M / 64 {
+                r.set_limb(i, v.limb(i));
+            } else {
+                r.set_limb(i, fill);
+            }
+        }
+        return r;
+    }
+
+    /// The value as a double, through the magnitude: MIN needs no special case, because negating it
+    /// wraps back to itself and its unsigned reading IS the magnitude.
+    pub fn to_f64(self: &Int<BITS>) f64 {
+        if self.is_negative() {
+            return 0.0 - self.wrapping_neg().to_unsigned().to_f64();
+        }
+        return self.to_unsigned().to_f64();
+    }
+
+    pub fn to_f32(self: &Int<BITS>) f32 {
+        if self.is_negative() {
+            return 0.0f32 - self.wrapping_neg().to_unsigned().to_f32();
+        }
+        return self.to_unsigned().to_f32();
+    }
+
+    /// The integer part of a double, SATURATING at min()/max(); NaN gives zero.
+    pub fn from_f64(v: f64) Int<BITS> {
+        if !(v == v) {
+            return Int::<BITS>::zero();
+        }
+        let lim = UInt::<BITS>::one().shl(BITS - 1);
+        if v < 0.0 {
+            let mag = UInt::<BITS>::from_f64(0.0 - v);
+            if mag > lim {
+                return Int::<BITS>::min();
+            }
+            // magnitude 2^(BITS-1) reads as MIN unsigned, and negating MIN wraps back to MIN: exact
+            return Int::<BITS>::from_unsigned(&mag).wrapping_neg();
+        }
+        let mag = UInt::<BITS>::from_f64(v);
+        if !(mag < lim) {
+            return Int::<BITS>::max();
+        }
+        return Int::<BITS>::from_unsigned(&mag);
+    }
+
+    /// `expr as iN`, with C's cast semantics: truncate when narrower, extend per the SOURCE's
+    /// signedness when wider. Named by source rather than overloaded so the two monomorphize to
+    /// distinct symbols; not applied implicitly.
+    pub fn cast_signed<const M: usize>(v: &Int<M>) Int<BITS> {
+        let fill = if v.is_negative() {
+            0xFFFFFFFFFFFFFFFFu64;
+        } else {
+            0u64;
+        };
+        let mut r = Int::<BITS>::zero();
+        for i in 0..BITS / 64 {
+            if i < M / 64 {
+                r.set_limb(i, v.limb(i));
+            } else {
+                r.set_limb(i, fill);
+            }
+        }
+        return r;
+    }
+
+    pub fn cast_unsigned<const M: usize>(v: &UInt<M>) Int<BITS> {
+        let mut r = Int::<BITS>::zero();
+        for i in 0..BITS / 64 {
+            if i < M / 64 {
+                r.set_limb(i, v.limb(i));
+            }
+        }
+        return r;
     }
 
     /// The same bits read as unsigned: a negative value becomes its two's-complement magnitude.
@@ -1249,6 +1462,13 @@ extend<const BITS: usize> Int<BITS> as Mul {
                 panic("arithmetic overflow");
             },
         };
+    }
+}
+
+/// The signed counterpart: an integer literal or an `i64` value converts implicitly.
+extend<const BITS: usize> Int<BITS> as From<i64> {
+    pub fn from(v: i64) Int<BITS> {
+        return Int::<BITS>::from_i64(v);
     }
 }
 

@@ -818,6 +818,16 @@ pub struct MethodRef {
     pub callee: DefId,
 }
 
+/// A conversion the type checker inserted at an expression: `target::from(expr)`. What lets a library
+/// integer stand where a built-in one is expected -- at an assignment, an argument, an operand or a cast.
+/// `node` names the expression, so the loader can walk these records: a superseded entry (the node was
+/// re-checked) is recognized by `coerce_at` no longer pointing at it.
+pub struct CoerceUse {
+    pub node: NodeId,
+    pub target: TypeId,
+    pub method: DefId,
+}
+
 pub struct MonoUse {
     pub node: NodeId,
     pub n: u8,
@@ -919,6 +929,8 @@ pub struct Ast {
     pub mono_at: Vector<u32>,
     pub instances: Vector<TyInstance>,
     pub method_refs: Vector<MethodRef>,
+    pub coerces: Vector<CoerceUse>,
+    pub coerce_at: Map<u32, u32>,
     /// Canonical forms of const-generic expressions (`{BITS * 2}`), interned by VALUE so two spellings of
     /// the same width are one id -- which is what makes `{(N * 2) * 2}` and `{N * 4}` the same type.
     pub const_lins: Vector<ConstLin>,
@@ -935,6 +947,10 @@ pub struct Ast {
     pub lifetime_decls: Vector<LifetimeDecl>,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
     pub call_info: Map<u32, u64>,
+    /// Per operator node: the method the type checker chose, as (module << 32 | node). Two conformances
+    /// may provide one operator for different right operands, so the NAME no longer identifies it and
+    /// codegen must not resolve it a second time.
+    pub op_method: Map<u32, u64>,
     pub root: NodeId,
     pub module: ModuleId,
 }
@@ -954,6 +970,8 @@ extend Ast {
             mono_at: Vector::<u32>::new(),
             instances: Vector::<TyInstance>::new(),
             method_refs: Vector::<MethodRef>::new(),
+            coerces: Vector::<CoerceUse>::new(),
+            coerce_at: Map::<u32, u32>::new(),
             const_lins: Vector::<ConstLin>::new(),
             method_insts: Vector::<MethodInst>::new(),
             instance_index: Vector::<u32>::new(),
@@ -1395,6 +1413,46 @@ extend Ast {
         return self.mono.at((idx - 1) as usize);
     }
 
+    /// Record the conversion `node` needs. Last writer wins: a node re-checked against a new expected
+    /// type converts to that one.
+    pub fn set_coerce(self: &mut Self, node: NodeId, target: TypeId, method: DefId) {
+        self.coerces.push(CoerceUse { node: node, target: target, method: method });
+        self.coerce_at.insert(node, self.coerces.len() as u32 - 1);
+    }
+
+    pub const fn coerce_of(self: &Self, node: NodeId) *const CoerceUse {
+        switch self.coerce_at.get(&node) {
+            Some(i) => {
+                return self.coerces.at((*i) as usize);
+            },
+            None => {},
+        };
+        return null;
+    }
+
+    pub fn clear_coerce(self: &mut Self, node: NodeId) {
+        self.coerce_at.remove(&node);
+    }
+
+    pub const fn coerce_count(self: &Self) usize {
+        return self.coerces.len();
+    }
+
+    pub const fn coerce_at_index(self: &Self, i: usize) &CoerceUse {
+        return self.coerces.at(i);
+    }
+
+    /// Is entry `idx` the one its node currently points at? False for an entry superseded by a re-check.
+    pub const fn coerce_current(self: &Self, node: NodeId, idx: usize) bool {
+        switch self.coerce_at.get(&node) {
+            Some(i) => {
+                return (*i) as usize == idx;
+            },
+            None => {},
+        };
+        return false;
+    }
+
     pub fn add_dyn_use(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId) {
         self.add_dyn_use_alloc(node, src, dyn_ty, TYPE_NONE);
     }
@@ -1509,7 +1567,10 @@ extend Ast as Free {
         self.attrs.free();
         self.lifetime_decls.free();
         self.call_info.free();
+        self.op_method.free();
         self.method_refs.free();
+        self.coerces.free();
+        self.coerce_at.free();
     }
 }
 

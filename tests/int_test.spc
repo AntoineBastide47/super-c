@@ -1,9 +1,79 @@
-// `std::num::int` -- the arbitrary-width fixed integers. What is worth testing here is the places the limb
+// `std::int` (a prelude module) -- the arbitrary-width fixed integers. What is worth testing here is the places the limb
 // representation shows through: a carry crossing a limb boundary, a borrow crossing it the other way, a
 // product wider than one limb, the sign bit at the top of the top limb, and the ends of each range.
 // Widths are exercised at 128, 256 and 512 bits so the monomorphizer produces more than one instantiation.
 
-import std::num::int as *;
+// These read like the built-in integers: a prelude module, so the aliases need no import, and an integer
+// literal or a `u64`/`i64` value converts through the `From` conformances wherever one is expected.
+@test
+fn reads_like_a_builtin_integer() {
+    let a: u128 = 42;
+    assert_eq(a.to_u64(), 42u64);
+    // literal as an operand, on both sides of a comparison
+    assert((a + 1).to_u64() == 43u64);
+    assert(a == 42);
+    assert(a > 41);
+    assert(a < 43);
+    // a built-in value widens into it, and the arithmetic then happens at the wide width
+    let n: u64 = 0xFFFFFFFFFFFFFFFF;
+    let wide: u128 = n;
+    let sum = wide + 2;
+    let s = sum.to_string();
+    assert(s.as_str() == "18446744073709551617");
+    s.free();
+    // signed, including a negative literal
+    let neg: i128 = -5;
+    assert(neg < i128::zero());
+    assert(neg + 5 == i128::zero());
+}
+
+// Widths convert like the built-in integers too. Implicitly only WIDENING, which is lossless -- the
+// signed form extends the sign, so a negative value stays the same number. `as` carries exactly C's cast
+// semantics through the cast_unsigned/cast_signed pair: truncation when narrower, extension by the
+// SOURCE's signedness when wider, and a scalar cast lands on the value's own to_u64/to_i64.
+@test
+fn widths_convert_like_builtins() {
+    let a: u128 = 7;
+    let b: u256 = a; // implicit widening
+    assert(b.to_u64() == 7);
+    let sgn: i256 = -9;
+    let wider: i512 = sgn; // sign-extended
+    assert(wider.to_i64() == -9);
+    // as: down, across signedness, and to a built-in
+    let big = u256::from_u64(0xFFFFFFFFFFFFFFFF) + 1;
+    let low = big as u128;
+    assert(low.limb(0) == 0);
+    assert(low.limb(1) == 1);
+    let n: i128 = -1;
+    assert(n as u128 == u128::max()); // two's complement reinterpret, as C casts do
+    assert((n as u256).limb(3) == 0xFFFFFFFFFFFFFFFF); // sign-extends because the SOURCE is signed
+    assert(a as u64 == 7u64);
+    assert(a as u32 == 7u32);
+    assert(i128::from_i64(-2) as i64 == -2i64);
+}
+
+// Float casts round ONCE: the top 64 bits carry a sticky bit, so the single u64 conversion rounds
+// exactly as converting the full value would -- limb-by-limb accumulation would round at every step.
+// The float-to-integer direction truncates and SATURATES (NaN gives zero), as Rust's float casts do.
+@test
+fn float_casts_round_once_and_saturate() {
+    assert(u128::from_u64(7) as f64 == 7.0);
+    assert(7.0 as u128 == u128::from_u64(7));
+    // 2^127 - 1 rounds up to 2^127 exactly; without the sticky bit it rounds wrong
+    assert((u128::max() >> 1) as f64 == 170141183460469231731687303715884105728.0);
+    // a large power of two is exact and round-trips
+    let p = u128::one() << 100;
+    assert((p as f64) as u128 == p);
+    // signed, negative, fractional, and out-of-range saturation
+    assert(i128::from_i64(-9) as f64 == -9.0);
+    assert((0.0 - 9.75) as i128 == i128::from_i64(-9));
+    assert(1.0e60 as u128 == u128::max());
+    assert(((0.0 - 3.5) as u128).is_zero());
+    assert(1.0e60 as i128 == i128::max());
+    assert((0.0 - 1.0e60) as i128 == i128::min());
+    // f32 has its own path, not a double round through f64
+    assert(u128::from_u64(16777217) as f32 == 16777216.0f32); // rounds to even at 24 bits
+}
 
 @test
 fn width_is_the_generic_argument() {

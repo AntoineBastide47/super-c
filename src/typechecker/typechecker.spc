@@ -278,6 +278,11 @@ pub struct TypeChecker<'a> {
     /// The receiver type the last aggregate lookup resolved on: what tc_mark_method_used pairs a method
     /// with, since the lookups themselves are keyed by the receiver's DECL and never carry its arguments.
     pub mark_recv: TypeId,
+    /// The argument list of the call whose callee is being resolved, so overload selection can look at
+    /// what is being passed. Empty outside that window -- a bare member access has no arguments.
+    pub call_args: NodeList,
+    /// Guards tc_coerce_from against re-entering itself through the oracle it hangs off.
+    pub coerce_depth: i32,
     // TC-12: tc_peel_target memo, (module<<32|node) -> packed DefId. The first peel does the
     // named_type_of interning; repeats re-derived the same DefId from frozen inputs.
     pub peel_memo: Map<u64, u64>,
@@ -523,6 +528,8 @@ extend TypeChecker {
             fmt_marked: false,
             method_memo: Map::<MQKey, u64>::new(),
             mark_recv: TYPE_NONE,
+            call_args: NodeList { start: 0, len: 0 },
+            coerce_depth: 0,
             peel_memo: Map::<u64, u64>::new(),
             lower_memo: Map::<u64, TypeId>::new(),
             carries_memo: Map::<u64, u8>::new(),
@@ -3487,7 +3494,7 @@ extend TypeChecker {
     // Every method named `name` on (m, decl) across the extend scopes -- the un-memoized collector
     // behind overload disambiguation. Only runs when a first candidate's return type did not fit the
     // expected type, so the common single-candidate path never pays for it.
-    fn find_method_all(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, out: &mut Defs8) i32 {
+    fn find_method_all(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, lit: str, out: &mut Defs8) i32 {
         let ni = self.ext_scopes();
         let mut nout: i32 = 0;
         let mut s: i32 = -1;
@@ -3520,12 +3527,13 @@ extend TypeChecker {
                     if mn.kind != NodeKind::NODE_FUNCTION || mm != self.cur_module() && !mn.as_data.function.is_public {
                         continue;
                     }
-                    if spans_eq2(
-                        self.source,
-                        name,
-                        self.mod_src(mm),
-                        a.at_const(mn.as_data.function.name).as_data.name.text,
-                    ) && nout as usize < out.len() {
+                    let mname = a.at_const(mn.as_data.function.name).as_data.name.text;
+                    let hit = if lit.len() != 0 {
+                        span_is(self.mod_src(mm), mname, lit);
+                    } else {
+                        spans_eq2(self.source, name, self.mod_src(mm), mname);
+                    };
+                    if hit && nout as usize < out.len() {
                         out[nout as usize] = DefId { module: mm, node: mid };
                         nout = nout + 1;
                     }
@@ -3534,6 +3542,115 @@ extend TypeChecker {
             s = s + 1;
         }
         return nout;
+    }
+
+    /// Would a parameter of type `pt` take a value of type `at`? Deliberately strict -- identity, or one
+    /// reference away from it. Overload selection only has to REJECT what a candidate plainly cannot
+    /// take; anything it cannot decide leaves the choice to the caller.
+    fn tc_param_accepts(self: &mut Self, pt: TypeId, at: TypeId) bool {
+        if pt == TYPE_NONE || at == TYPE_NONE {
+            return true; // unknown on either side: this argument does not constrain the choice
+        }
+        if pt == at {
+            return true;
+        }
+        let p = *self.type_at(pt);
+        let v = *self.type_at(at);
+        if p.kind == TypeKind::TYPE_REFERENCE && p.as_data.elem == at {
+            return true;
+        }
+        if v.kind == TypeKind::TYPE_REFERENCE && v.as_data.elem == pt {
+            return true;
+        }
+        return p.kind == TypeKind::TYPE_REFERENCE && v.kind == TypeKind::TYPE_REFERENCE && p.as_data.elem == v.as_data.elem;
+    }
+
+    /// The type of an argument WITHOUT checking it. Overload selection runs before a call's arguments are
+    /// typed, and checking them here would record their moves and borrows a second time. Answers only for
+    /// the shapes that need no evaluation -- a name, a struct literal, a reference to either -- and
+    /// TYPE_NONE otherwise, which simply leaves that argument out of the decision.
+    fn tc_peek_arg_type(self: &mut Self, id: NodeId) TypeId {
+        if id == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let a = self.cur_ast();
+        let n = *a.at_const(id);
+        if n.kind == NodeKind::NODE_IDENTIFIER {
+            let d = a.resolution_def(id);
+            if d.node == NODE_NONE {
+                return TYPE_NONE;
+            }
+            return self.decl_type_in(d.module, d.node);
+        }
+        if n.kind == NodeKind::NODE_STRUCT_INITIALIZER {
+            return self.type_of_type_node(n.as_data.struct_initializer.ty);
+        }
+        if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Ampersand {
+            let inner = self.tc_peek_arg_type(n.as_data.unary.operand);
+            if inner == TYPE_NONE {
+                return TYPE_NONE;
+            }
+            return self.cur_ast().intern_type(
+                Ty {
+                    kind: TypeKind::TYPE_REFERENCE,
+                    qualifier: n.as_data.unary.qualifier as u8,
+                    as_data: TyAs { elem: inner },
+                },
+            );
+        }
+        return TYPE_NONE;
+    }
+
+    /// Choose among same-named methods by what their PARAMETERS accept. The `want`-directed pick below
+    /// separates candidates by their result, which cannot tell two conformances apart when they differ
+    /// only in their right operand (`as Mul` and `as Mul<Vec3>`). Returns `first` unless exactly one
+    /// candidate fits, so an undecidable case behaves exactly as before.
+    fn tc_pick_by_args(
+        self: &mut Self,
+        m: ModuleId,
+        decl: NodeId,
+        name: tok::Span,
+        lit: str,
+        recv: TypeId,
+        first: DefId,
+        args: *const TypeId,
+        nargs: i32,
+    ) DefId {
+        let mut cands = Defs8 {};
+        let n = self.find_method_all(m, decl, name, lit, &mut cands);
+        if n < 2 {
+            return first;
+        }
+        let mut best = DefId { module: 0, node: NODE_NONE };
+        let mut nbest: i32 = 0;
+        for i in 0..n {
+            let c = cands[i as usize];
+            let np = self.mod_ast(c.module).at_const(c.node).as_data.function.params.len as i32;
+            // The receiver is a parameter of the declaration but not of the call: whichever of the two
+            // arities lines up is the skip, and a candidate matching neither cannot be this call.
+            let skip = np - nargs;
+            if skip != 0 && skip != 1 {
+                continue;
+            }
+            let mut ok = true;
+            for j in 0..nargs {
+                if !self.tc_param_accepts(self.tc_method_param(recv, c, j + skip), unsafe args[j as usize]) {
+                    ok = false;
+                }
+            }
+            if ok {
+                if nbest == 0 {
+                    best = c;
+                }
+                nbest = nbest + 1;
+            }
+        }
+        if nbest == 1 && best.node != NODE_NONE {
+            self.mark_recv = recv;
+            self.tc_mark_method_used(best);
+            return best;
+        }
+        return first;
     }
 
     // Several extends may define the same method name through different interface conformances
@@ -3550,14 +3667,29 @@ extend TypeChecker {
         recv: TypeId,
         want: TypeId,
     ) DefId {
-        if first.node == NODE_NONE || want == TYPE_NONE || recv == TYPE_NONE {
+        if first.node == NODE_NONE || recv == TYPE_NONE {
+            return first;
+        }
+        // What the call PASSES decides before what it expects back.
+        let ca = self.call_args;
+        if ca.len != 0 && ca.len <= 8 {
+            let mut at = Tys8 {};
+            for i in 0..ca.len {
+                at[i as usize] = self.tc_peek_arg_type(unsafe self.cur_ast().list(ca)[i as usize]);
+            }
+            let byarg = self.tc_pick_by_args(m, decl, name, "", self.strip(recv), first, &at[0], ca.len as i32);
+            if byarg.node != first.node || byarg.module != first.module {
+                return byarg;
+            }
+        }
+        if want == TYPE_NONE {
             return first;
         }
         if self.tc_method_ret(self.strip(recv), first) == want {
             return first;
         }
         let mut cands = Defs8 {};
-        let n = self.find_method_all(m, decl, name, &mut cands);
+        let n = self.find_method_all(m, decl, name, "", &mut cands);
         if n < 2 {
             return first;
         }
@@ -4922,11 +5054,249 @@ extend TypeChecker {
         return self.compatible_in(expected, node, false);
     }
 
+    /// The oracle, plus the USER-DEFINED conversions. A type that provides `From<S>` accepts an S
+    /// wherever it is expected, which is what makes a library integer usable where a built-in one is:
+    /// `let a: u128 = 42`, `a + 1`, `f(a)`. Tried only after every built-in rule has failed, so nothing
+    /// that converted before converts differently now.
+    fn compatible_in(self: &mut Self, expected: TypeId, node: NodeId, probe: bool) bool {
+        if self.compatible_core(expected, node, probe) {
+            return true;
+        }
+        return self.tc_coerce_from(expected, node, probe);
+    }
+
+    fn tc_coerce_from(self: &mut Self, expected: TypeId, node: NodeId, probe: bool) bool {
+        if expected == TYPE_NONE || node == NODE_NONE || self.coerce_depth > 2 {
+            return false;
+        }
+        let want = self.strip(expected);
+        let wk = self.type_at(want).kind;
+        if wk != TypeKind::TYPE_STRUCT && wk != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let mut m: ModuleId = 0;
+        let mut decl = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(want, &mut m, &mut decl, &mut gp, &mut ga, &mut gn) {
+            return false;
+        }
+        let md = self.find_method_cstr(m, decl, "from");
+        if md.node != NODE_NONE {
+            let pt = self.tc_method_param(want, md, 0);
+            // Only NUMERIC conversions apply implicitly. A `From<str>` on an owning type would let a
+            // bare string literal allocate without a call in sight; a `From<u64>` on an integer type is
+            // the built-in widening rule extended to library integers, which is all this is for.
+            if pt != TYPE_NONE && pt != want && self.is_int(pt) {
+                self.coerce_depth = self.coerce_depth + 1;
+                let fits = self.compatible_in(pt, node, true);
+                self.coerce_depth = self.coerce_depth - 1;
+                if fits {
+                    if !probe {
+                        // Re-run unprobed so a literal takes the CONVERSION's parameter type.
+                        self.coerce_depth = self.coerce_depth + 1;
+                        let _ = self.compatible_in(pt, node, false);
+                        self.coerce_depth = self.coerce_depth - 1;
+                        self.cur_ast().set_coerce(node, want, md);
+                    }
+                    return true;
+                }
+            }
+        }
+        return self.tc_coerce_named(want, node, "widen", probe);
+    }
+
+    /// `expr as T` where the source or target is a generic INSTANCE. Returns true when it settled the
+    /// cast -- by recording a conversion, or by reporting it invalid -- and false to leave the cast to
+    /// the built-in rules. Only VALUE casts are taken (both sides an instance, struct or builtin):
+    /// pointer, reference and enum casts keep their existing meaning.
+    fn tc_cast_conv(self: &mut Self, id: NodeId, expr: NodeId, src: TypeId, dst: TypeId) bool {
+        let sk = self.type_at(src).kind;
+        let dk = self.type_at(dst).kind;
+        if sk != TypeKind::TYPE_INSTANCE && dk != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let value_kinds = (sk == TypeKind::TYPE_INSTANCE || sk == TypeKind::TYPE_STRUCT || sk == TypeKind::TYPE_BUILTIN) && (dk == TypeKind::TYPE_INSTANCE || dk == TypeKind::TYPE_STRUCT || dk == TypeKind::TYPE_BUILTIN);
+        if !value_kinds {
+            return false;
+        }
+        // Target an instance: the implicit path first (identical to the binding this cast is redundant
+        // with), then the C-semantics `cast_of` overloads.
+        if dk == TypeKind::TYPE_INSTANCE {
+            // The C-semantics pair first: total over widths and signedness, so a narrowing cast never
+            // reaches `widen` (whose narrowing rejection is for the IMPLICIT path). The implicit path
+            // then covers what the pair cannot: a literal or built-in value source, through `from`.
+            if self.tc_coerce_named(dst, expr, "cast_unsigned", false) || self.tc_coerce_named(
+                dst,
+                expr,
+                "cast_signed",
+                false,
+            ) {
+                return true;
+            }
+            if self.tc_coerce_from(dst, expr, false) {
+                return true;
+            }
+            // A FLOAT source: the target's own truncating conversion, `from_f64`.
+            if sk == TypeKind::TYPE_BUILTIN && bt_is_float(self.type_at(src).as_data.builtin) {
+                let mut m: ModuleId = 0;
+                let mut decl = NODE_NONE;
+                let mut gp = Defs8 {};
+                let mut ga = Tys8 {};
+                let mut gn: i32 = 0;
+                if self.aggregate_of(dst, &mut m, &mut decl, &mut gp, &mut ga, &mut gn) {
+                    let md = self.find_method_cstr(m, decl, "from_f64");
+                    if md.node != NODE_NONE {
+                        self.cur_ast().set_coerce(expr, dst, md);
+                        return true;
+                    }
+                }
+            }
+        }
+        // Target a built-in scalar: the value's own conversion, and the built-in cast then narrows --
+        // integers through to_u64/to_i64, floats through to_f32/to_f64.
+        if sk == TypeKind::TYPE_INSTANCE && dk == TypeKind::TYPE_BUILTIN {
+            let dst_int = self.is_int(dst);
+            let dst_flt = bt_is_float(self.type_at(dst).as_data.builtin);
+            let mut m: ModuleId = 0;
+            let mut decl = NODE_NONE;
+            let mut gp = Defs8 {};
+            let mut ga = Tys8 {};
+            let mut gn: i32 = 0;
+            if (dst_int || dst_flt) && self.aggregate_of(src, &mut m, &mut decl, &mut gp, &mut ga, &mut gn) {
+                let mut md = DefId { module: 0, node: NODE_NONE };
+                if dst_int {
+                    md = self.find_method_cstr(m, decl, "to_u64");
+                    if md.node == NODE_NONE {
+                        md = self.find_method_cstr(m, decl, "to_i64");
+                    }
+                } else {
+                    if self.type_at(dst).as_data.builtin == BuiltinType::BT_F32 {
+                        md = self.find_method_cstr(m, decl, "to_f32");
+                    }
+                    if md.node == NODE_NONE {
+                        md = self.find_method_cstr(m, decl, "to_f64");
+                    }
+                }
+                if md.node != NODE_NONE {
+                    let ret = self.tc_method_ret(src, md);
+                    if ret != TYPE_NONE && self.type_at(ret).kind == TypeKind::TYPE_BUILTIN {
+                        self.cur_ast().set_coerce(expr, ret, md);
+                        return true;
+                    }
+                }
+            }
+        }
+        let mut s = Buf96 {};
+        let mut d = Buf96 {};
+        self.render_type(src, &mut s[0], 96);
+        self.render_type(dst, &mut d[0], 96);
+        let sp = self.cur_ast().at_const(id).span;
+        self.errors.emit(
+            sp.start,
+            sp.end - sp.start,
+            format("invalid cast from '{}' to '{}'", diag::cstr(&s[0]), diag::cstr(&d[0])),
+        );
+        return true;
+    }
+
+    /// Are `want` and `actual` instances of one decl differing in a single CONST argument, with the
+    /// source's larger? The shape of a width parameter -- what makes `UInt<256> -> UInt<128>` narrowing.
+    fn tc_const_arg_shrinks(self: &mut Self, want: TypeId, actual: TypeId) bool {
+        let wy = *self.type_at(want);
+        let ay = *self.type_at(actual);
+        if wy.kind != TypeKind::TYPE_INSTANCE || ay.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let wi = *self.cur_ast().instance(wy.as_data.inst);
+        let ai = *self.cur_ast().instance(ay.as_data.inst);
+        if wi.decl != ai.decl || wi.module != ai.module || wi.n != 1 || ai.n != 1 {
+            return false;
+        }
+        let wa = *self.type_at(wi.args[0]);
+        let aa = *self.type_at(ai.args[0]);
+        return wa.kind == TypeKind::TYPE_CONST && aa.kind == TypeKind::TYPE_CONST && aa.as_data.value > wa.as_data.value;
+    }
+
+    /// A conversion that is generic in its SOURCE: `widen<M>(&UInt<M>)` (and `cast_of<M>` for `as`)
+    /// accepts any width, so one method covers every pair. M is not fixed by the receiver, so it is
+    /// inferred by unifying each candidate's declared parameter against what is actually there -- the
+    /// candidates are same-named overloads (a signed and an unsigned source), and unification is what
+    /// picks between them. The instantiation is recorded here because this use site is not a call node,
+    /// so nothing else will record it.
+    fn tc_coerce_named(self: &mut Self, want: TypeId, node: NodeId, lit: str, probe: bool) bool {
+        let mut m: ModuleId = 0;
+        let mut decl = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(want, &mut m, &mut decl, &mut gp, &mut ga, &mut gn) {
+            return false;
+        }
+        let actual = self.strip(self.cur_ast().type_of(node));
+        if actual == TYPE_NONE || actual == want || !self.type_at(actual).concrete {
+            return false;
+        }
+        let mut cands = Defs8 {};
+        let nc = self.find_method_all(m, decl, tok::Span::empty(), lit, &mut cands);
+        for c in 0..nc {
+            let md = cands[c as usize];
+            let gens = self.mod_ast(md.module).at_const(md.node).as_data.function.generics;
+            if gens.len == 0 || gens.len > 8 {
+                continue;
+            }
+            let mut pt = self.tc_method_param(want, md, 0);
+            if pt == TYPE_NONE {
+                continue;
+            }
+            if self.type_at(pt).kind == TypeKind::TYPE_REFERENCE {
+                pt = self.type_at(pt).as_data.elem;
+            }
+            let mut prm = Defs8 {};
+            let mut bnd = Tys8 {};
+            let mut np: i32 = 0;
+            while np < gens.len as i32 && np < 8 {
+                prm[np as usize] = DefId {
+                    module: md.module,
+                    node: unsafe self.mod_ast(md.module).list(gens)[np as usize],
+                };
+                bnd[np as usize] = TYPE_NONE;
+                np = np + 1;
+            }
+            self.unify_infer(pt, actual, &prm[0], &mut bnd[0], np);
+            let mut all = true;
+            for i in 0..np {
+                if bnd[i as usize] == TYPE_NONE {
+                    all = false;
+                }
+            }
+            if !all || self.subst_type(pt, &prm[0], &bnd[0], np) != actual {
+                continue;
+            }
+            // `widen` is the IMPLICIT conversion, so it must be lossless: when source and target are
+            // instances of one decl differing in a single const argument, a larger source is refused
+            // here -- the mismatch then reports normally instead of tripping the method's own
+            // static_assert in the emitted C.
+            if lit == "widen" && self.tc_const_arg_shrinks(want, actual) {
+                continue;
+            }
+            if !probe {
+                self.mark_recv = want;
+                self.tc_mark_method_used(md);
+                self.cur_ast().set_coerce(node, want, md);
+                self.cur_ast().set_type_args(node, &bnd[0], np as u8);
+            }
+            return true;
+        }
+        return false;
+    }
+
     // The one implicit-conversion oracle. `probe` answers "would this coerce, cleanly?" with no
     // observable effects: paths that would diagnose report false, and nothing is recorded
     // (set_type/dyn uses). The redundant-cast lint probes the cast OPERAND against the expected type
     // through this, so it covers every implicit conversion by construction.
-    fn compatible_in(self: &mut Self, expected: TypeId, node: NodeId, probe: bool) bool {
+    fn compatible_core(self: &mut Self, expected: TypeId, node: NodeId, probe: bool) bool {
         let actual = self.cur_ast().type_of(node);
         if actual == TYPE_NONE && expected != TYPE_NONE {
             // `null` types as TYPE_NONE; don't let the wildcard below accept it for value types
@@ -6891,7 +7261,15 @@ extend TypeChecker {
         let mut gn: i32 = 0;
         unsafe *out = ls;
         if self.aggregate_of(ls, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
-            let md = self.find_method_cstr(om, od, m);
+            let mut md = self.find_method_cstr(om, od, m);
+            // Two conformances may provide this operator for different right operands; the operand is
+            // already typed here, so it picks between them.
+            if md.node != NODE_NONE {
+                let mut rt = Tys8 {};
+                rt[0] = self.cur_ast().type_of(right);
+                md = self.tc_pick_by_args(om, od, tok::Span::empty(), m, ls, md, &rt[0], 1);
+                unsafe self.cur_ast().op_method.insert(id, md.module as u64 << 32 | md.node as u64);
+            }
             if md.node == NODE_NONE {
                 let sp = self.cur_ast().at_const(id).span;
                 let mut ty = Buf96 {};
@@ -6964,6 +7342,9 @@ extend TypeChecker {
         unsafe *out = os;
         if self.aggregate_of(os, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             let md = self.find_method_cstr(om, od, "bit_not");
+            if md.node != NODE_NONE {
+                unsafe self.cur_ast().op_method.insert(id, md.module as u64 << 32 | md.node as u64);
+            }
             if md.node == NODE_NONE {
                 let mut ty = Buf96 {};
                 self.render_type(os, &mut ty[0], 96);
@@ -7623,7 +8004,9 @@ extend TypeChecker {
             }
         } else if pck == NodeKind::NODE_MEMBER {
             self.expected = want;
+            self.call_args = a.at_const(id).as_data.call.args;
             callee = self.check_member(callee_id, true);
+            self.call_args = NodeList { start: 0, len: 0 };
             let fd = a.resolution_def(a.at_const(callee_id).as_data.member.member);
             if fd.node != NODE_NONE && (fd.module == self.cur_module() || self.package != null && fd.module as usize < self.pkg_count()) && self.mod_ast(
                 fd.module,
@@ -10007,7 +10390,20 @@ extend TypeChecker {
                         ),
                     );
                 }
-                if src != TYPE_NONE && dst != TYPE_NONE && src != dst {
+                // A cast whose source or target is a generic INSTANCE dispatches to a conversion: the
+                // implicit path first (`from`/`widen`, so `x as u256` behaves exactly like the binding
+                // it is redundant with), then the `cast_of` overloads, which carry C's cast semantics --
+                // truncate when narrower, sign- or zero-extend per the SOURCE's signedness when wider.
+                // A cast to a built-in integer goes through the value's own `to_u64`/`to_i64`, and the
+                // built-in cast then narrows that. Without a conversion the cast is invalid: the C a
+                // struct cast would emit does not compile.
+                let converted = src != TYPE_NONE && dst != TYPE_NONE && src != dst && self.tc_cast_conv(
+                    id,
+                    a.at_const(id).as_data.cast.expression,
+                    src,
+                    dst,
+                );
+                if !converted && src != TYPE_NONE && dst != TYPE_NONE && src != dst {
                     let sk = self.type_at(src).kind;
                     let dk = self.type_at(dst).kind;
                     let aggregate = sk == TypeKind::TYPE_STRUCT || sk == TypeKind::TYPE_ENUM || sk == TypeKind::TYPE_FUNCTION || dk == TypeKind::TYPE_STRUCT || dk == TypeKind::TYPE_ENUM || dk == TypeKind::TYPE_FUNCTION;
