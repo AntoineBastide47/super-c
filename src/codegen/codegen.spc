@@ -15969,16 +15969,11 @@ extend Codegen {
                 continue;
             }
             if it.module == cur {
-                if it.decl as usize >= unsafe self.cur_ast().nodes.len() {
-                    eprintln(
-                        "CGDBG: tu={} ii={} it.module={} it.decl={} nodes={} n={}",
-                        unsafe self.package.modules[cur as usize].path.as_str(),
-                        ii,
-                        it.module,
-                        it.decl,
-                        unsafe self.cur_ast().nodes.len(),
-                        it.n,
-                    );
+                // Not every instance names an aggregate: a structural `dyn fn` interns its
+                // FUNCTION_TYPE node. Reading that as AggregateData walks a garbage member list.
+                let dk = self.cur_ast().at_const(it.decl).kind;
+                if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM {
+                    continue;
                 }
                 let ag = self.cur_ast().at_const(it.decl).as_data.aggregate;
                 let gids = self.cur_ast().list(ag.generics);
