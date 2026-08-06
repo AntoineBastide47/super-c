@@ -13128,8 +13128,14 @@ extend Codegen {
             return;
         }
         unsafe state[idx as usize] = 1;
-        let ag = self.cur_ast().at_const(it.decl).as_data.aggregate;
         let dk = self.cur_ast().at_const(it.decl).kind;
+        if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM {
+            // Not every instance names an aggregate: a structural `dyn fn` interns its
+            // FUNCTION_TYPE node. Reading that as AggregateData walks a garbage member list.
+            unsafe state[idx as usize] = 2;
+            return;
+        }
+        let ag = self.cur_ast().at_const(it.decl).as_data.aggregate;
         let mut deps = TyArgs32 {};
         let mut nh: i32 = 0;
         let gids = self.cur_ast().list(ag.generics);
