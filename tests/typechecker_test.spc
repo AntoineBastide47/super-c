@@ -2836,3 +2836,25 @@ fn const_generic_expressions() {
         "expected 'A<{3 * Q}>', found 'A<{2 * Q}>'",
     );
 }
+
+// An array literal's elements need not all name the same type themselves: the context's element type
+// (or, absent one, the first element's) settles what each literal means, exactly as `let x: u64 = 1`
+// does for a scalar. A value that genuinely does not convert is still a mismatch.
+@test
+fn array_literals_adopt_the_element_type() {
+    h::expect_exit(
+        "mixed suffixed and bare literals adopt the annotated element",
+        "fn main() i32 {\n    let vs: [u64; 4] = [0u64, 1, 2, 0x8000000000000000];\n    return ((unsafe vs[3]) >> 63) as i32 + (unsafe vs[1]) as i32 - 2;\n}\n",
+        0,
+    );
+    h::expect_exit(
+        "without a context the first element's type leads",
+        "fn main() i32 {\n    let vs = [0u64, 1, 2];\n    return (unsafe vs[2]) as i32 - 2;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "narrowing between suffixed elements is still a mismatch",
+        "fn main() i32 {\n    let vs = [1i32, 0u64];\n    return (unsafe vs[1]) as i32;\n}\n",
+        "mismatched types",
+    );
+}

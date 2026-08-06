@@ -424,3 +424,51 @@ fn widening_composes_across_widths() {
     assert(s.as_str() == "115792089237316195398462578067141184799968521174335529155754622898352762650625");
     s.free();
 }
+
+// The 128-bit width is the one that routes through the C compiler's native 128-bit type where one
+// exists; UInt<256> never does. Recomputing every 128-bit result inside u256 and truncating back is
+// therefore a differential test of the native path against the limb code -- and on a target without
+// the native type both sides run limb code, so the test still holds.
+@test
+fn native_128_path_matches_the_limb_code() {
+    let vs: [u64; 6] = [0u64, 1, 2, 0x8000000000000000, 0xFFFFFFFFFFFFFFFF, 0xDEADBEEFCAFEBABE];
+    for i in 0..6 {
+        for j in 0..6 {
+            let a = u128::from_u64(unsafe vs[i]) << 64 | unsafe vs[j];
+            for k in 0..6 {
+                for l in 0..6 {
+                    let b = u128::from_u64(unsafe vs[k]) << 64 | unsafe vs[l];
+                    let wa: u256 = a;
+                    let wb: u256 = b;
+                    // addition: the wrapped value, and the carry as bit 128 of the wide sum
+                    assert(a.wrapping_add(&b) == (wa + wb) as u128);
+                    assert(a.checked_add(&b).is_none() == !(wa + wb >> 128).is_zero());
+                    // subtraction: round-trips, and the borrow is the unsigned order
+                    assert(a.wrapping_sub(&b).wrapping_add(&b) == a);
+                    assert(a.checked_sub(&b).is_none() == a < b);
+                    // multiplication: the exact 256-bit product is the ground truth for all three forms
+                    let p = wa * wb;
+                    assert(a.wrapping_mul(&b) == p as u128);
+                    assert(a.checked_mul(&b).is_none() == !(p >> 128).is_zero());
+                    assert(a.full_mul(&b) == p);
+                    // division: quotient and remainder against the wide divider, plus reconstruction
+                    if !b.is_zero() {
+                        let mut r = u128::zero();
+                        let q = a.divmod(&b, &mut r);
+                        assert(q == (wa / wb) as u128);
+                        assert(r == (wa % wb) as u128);
+                        assert(r < b);
+                        assert(q.wrapping_mul(&b).wrapping_add(&r) == a);
+                    }
+                }
+            }
+            // decimal text runs on the small divider; the wide width answers with the limb code
+            let w: u256 = a;
+            let s1 = a.to_string();
+            let s2 = w.to_string();
+            assert(s1.as_str() == s2.as_str());
+            s1.free();
+            s2.free();
+        }
+    }
+}

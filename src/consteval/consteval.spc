@@ -3097,6 +3097,16 @@ extend ConstEval {
             if o.kind != CV_INT {
                 return cv_nil();
             }
+            // A `~` on an operator-overloaded aggregate (e.g. UInt<128>) reaches here only when the
+            // operand folded through a scalar coercion; complementing that 64-bit stand-in would be a
+            // wrong value at the aggregate's width. Runtime dispatches the overload instead.
+            let sr = self.ce_strip_refptr(f, m, self.ce_type(m, operand));
+            if sr.ok {
+                let k = self.ast_ptr(sr.m).type_at(sr.t).kind;
+                if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_INSTANCE {
+                    return cv_nil();
+                }
+            }
             let mut bb = b;
             if b == BuiltinType::BT_COUNT {
                 bb = BuiltinType::BT_I64;
@@ -3309,7 +3319,21 @@ extend ConstEval {
                     mn = "eq";
                 } else if op == TokenType::LessThan || op == TokenType::LessThanEqual || op == TokenType::GreaterThan || op == TokenType::GreaterThanEqual {
                     mn = "cmp";
+                } else if op == TokenType::LeftShift {
+                    mn = "shl";
+                } else if op == TokenType::RightShift {
+                    mn = "shr";
+                } else if op == TokenType::Ampersand {
+                    mn = "bit_and";
+                } else if op == TokenType::Pipe {
+                    mn = "bit_or";
+                } else if op == TokenType::Caret {
+                    mn = "bit_xor";
                 }
+                // Every operator an aggregate can overload maps to its method above, so an aggregate
+                // operand never reaches the scalar fold below -- where a coerced literal's 64-bit
+                // value would stand in for the aggregate and fold to a wrong number (or trap a shift
+                // that is in range at the aggregate's width).
                 if mn.len() != 0 {
                     let rr = self.ce_recv_of(f, sr.m, sr.t);
                     if !rr.ok {

@@ -726,9 +726,16 @@ pub fn lin_subst(
     return true;
 }
 
-/// One FNV-1a round, the mixer behind type_skey.
+/// One mixing round, the mixer behind type_skey and inst_method_key. A plain FNV-1a round is NOT
+/// enough here: its output has no avalanche, so the small structured inputs these keys are built from
+/// (node ids, const widths) land clustered, and two live (method, instance) pairs have collided in
+/// practice -- silently dropping a demand seed. The splitmix64 finalizer after the FNV step makes
+/// every input bit reach every output bit, which puts collisions at the 64-bit birthday bound.
 pub const fn skey_mix(h: u64, v: u64) u64 {
-    return (h ^ v) * 1099511628211u64;
+    let mut x = (h ^ v) * 1099511628211u64;
+    x = (x ^ x >> 30) * 0xBF58476D1CE4E5B9u64;
+    x = (x ^ x >> 27) * 0x94D049BB133111EBu64;
+    return x ^ x >> 31;
 }
 
 pub fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {

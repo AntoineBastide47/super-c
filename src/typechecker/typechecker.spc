@@ -10849,6 +10849,7 @@ extend TypeChecker {
             return TYPE_NONE;
         }
         let mut elem = TYPE_NONE;
+        let mut mis = NODE_NONE; // first cross-element mismatch, deferred until the context has spoken
         for i in 0..elements.len {
             let eid = unsafe a.list(elements)[i as usize];
             let el = a.at_const(eid);
@@ -10896,9 +10897,10 @@ extend TypeChecker {
             } else if et != elem && et != TYPE_NONE && elem != TYPE_NONE {
                 let e0 = self.type_at(elem).kind;
                 let ei = self.type_at(et).kind;
-                if !(e0 == TypeKind::TYPE_FUNCTION && ei == TypeKind::TYPE_FUNCTION && self.fn_compatible(elem, et)) {
-                    self.err_mismatch(eid, elem);
-                    elem = TYPE_NONE;
+                if !(e0 == TypeKind::TYPE_FUNCTION && ei == TypeKind::TYPE_FUNCTION && self.fn_compatible(elem, et)) && mis == NODE_NONE {
+                    // Deferred, not emitted: the context (or the first element's type) may still absorb
+                    // the difference below, exactly as it absorbs `let x: u64 = 1`.
+                    mis = eid;
                 }
             }
         }
@@ -10906,11 +10908,20 @@ extend TypeChecker {
             // The context may want a WIDER element than the elements gave themselves. An integer literal is
             // i32 on its own, so `let a: [i64; 4] = [3, 0, 0, 7]` was rejected over a difference the same
             // lossless widening already smooths away for a scalar `let x: i64 = 3`. Adopt the wanted element
-            // type when every element converts to it cleanly, and otherwise leave the inferred one so the
-            // mismatch is reported against what was actually written.
+            // type when every element converts to it cleanly -- also when elements DISAGREE among
+            // themselves (`[0u64, 1, 2]`), where the wanted type (or, absent one, the first element's)
+            // settles what each literal means. Otherwise leave the inferred type so the mismatch is
+            // reported against what was actually written.
             let we = self.wanted_elem(expected);
-            if we != TYPE_NONE && we != elem && self.elements_fit(elements, we) {
+            if we != TYPE_NONE && (we != elem || mis != NODE_NONE) && self.elements_fit(elements, we) {
                 elem = we;
+                mis = NODE_NONE;
+            } else if mis != NODE_NONE && we == TYPE_NONE && self.elements_fit(elements, elem) {
+                mis = NODE_NONE;
+            }
+            if mis != NODE_NONE {
+                self.err_mismatch(mis, elem);
+                return TYPE_NONE;
             }
             return self.cur_ast().intern_type(
                 Ty { kind: TypeKind::TYPE_ARRAY, as_data: TyAs { arr: TyArr { elem: elem, len: 0 } } },

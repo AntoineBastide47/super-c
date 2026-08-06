@@ -23,6 +23,11 @@
 // types do; `Int` arithmetic TRAPS on overflow, as the built-in signed types do. Division by zero panics
 // either way. `wrapping_*`, `checked_*` and `saturating_*` are there when a different answer is wanted.
 //
+// The 128-bit width additionally routes addition, subtraction, multiplication and division through the
+// C compiler's native 128-bit integer type where one exists (the `sc_i128_*` helpers in `int128.h`,
+// shipped next to this file); targets without one, and every other width, run the limb code. Identical
+// results either way -- the two paths are pinned against each other in the tests.
+//
 // Both are plain values: no heap, no allocator, no `Free`. They copy like the built-in integers do.
 
 // ---------------------------------------------------------------------------------------------------------
@@ -44,6 +49,27 @@ const fn mul_wide(a: u64, b: u64, hi: *mut u64) u64 {
     let mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu64) + (p10 & 0xFFFFFFFFu64);
     unsafe *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
     return p00 & 0xFFFFFFFFu64 | mid << 32;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// the native 128-bit fast path
+// ---------------------------------------------------------------------------------------------------------
+
+// Whether the C compiler building the emitted code has a native 128-bit integer type is knowable only
+// THERE, so the choice is made there: `sc_has_i128()` (int128.h, shipped next to this file) folds to a
+// constant, a `BITS == 128 && use_i128()` branch keeps exactly one side, and on targets without the
+// type the helpers below are never-reached stubs. Limbs pass as explicit 64-bit halves, least
+// significant first.
+extern "C" "int128.h" {
+    fn sc_has_i128() i32;
+    fn sc_i128_add(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64, carry: *mut u64) void;
+    fn sc_i128_sub(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64, borrow: *mut u64) void;
+    fn sc_i128_mul(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64, hl: *mut u64, hh: *mut u64) void;
+    fn sc_i128_divmod(al: u64, ah: u64, bl: u64, bh: u64, ql: *mut u64, qh: *mut u64, rl: *mut u64, rh: *mut u64) void;
+}
+
+fn use_i128() bool {
+    return unsafe sc_has_i128() != 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -155,6 +181,17 @@ extend<const BITS: usize> IntBits<BITS> {
     // detection is derived from.
 
     fn add_carry(self: &IntBits<BITS>, other: &IntBits<BITS>, carry_out: *mut u64) IntBits<BITS> {
+        if BITS == 128 && use_i128() {
+            let mut lo: u64 = 0;
+            let mut hi: u64 = 0;
+            let mut c: u64 = 0;
+            unsafe sc_i128_add(self.get(0), self.get(1), other.get(0), other.get(1), &mut lo, &mut hi, &mut c);
+            let mut r = IntBits::<BITS>::zero();
+            r.set(0, lo);
+            r.set(1, hi);
+            unsafe *carry_out = c;
+            return r;
+        }
         let mut r = IntBits::<BITS>::zero();
         let mut carry: u64 = 0;
         for i in 0..IntBits::<BITS>::nlimbs() {
@@ -178,6 +215,17 @@ extend<const BITS: usize> IntBits<BITS> {
     }
 
     fn sub_borrow(self: &IntBits<BITS>, other: &IntBits<BITS>, borrow_out: *mut u64) IntBits<BITS> {
+        if BITS == 128 && use_i128() {
+            let mut lo: u64 = 0;
+            let mut hi: u64 = 0;
+            let mut b: u64 = 0;
+            unsafe sc_i128_sub(self.get(0), self.get(1), other.get(0), other.get(1), &mut lo, &mut hi, &mut b);
+            let mut r = IntBits::<BITS>::zero();
+            r.set(0, lo);
+            r.set(1, hi);
+            unsafe *borrow_out = b;
+            return r;
+        }
         let mut r = IntBits::<BITS>::zero();
         let mut borrow: u64 = 0;
         for i in 0..IntBits::<BITS>::nlimbs() {
@@ -204,6 +252,18 @@ extend<const BITS: usize> IntBits<BITS> {
 
     /// The low `BITS` of the full product -- what wrapping multiplication means, for either signedness.
     fn mul_wrap(self: &IntBits<BITS>, other: &IntBits<BITS>, overflow: *mut bool) IntBits<BITS> {
+        if BITS == 128 && use_i128() {
+            let mut lo: u64 = 0;
+            let mut hi: u64 = 0;
+            let mut hl: u64 = 0;
+            let mut hh: u64 = 0;
+            unsafe sc_i128_mul(self.get(0), self.get(1), other.get(0), other.get(1), &mut lo, &mut hi, &mut hl, &mut hh);
+            let mut r = IntBits::<BITS>::zero();
+            r.set(0, lo);
+            r.set(1, hi);
+            unsafe *overflow = hl != 0 || hh != 0; // a nonzero high half is exactly what wrapping lost
+            return r;
+        }
         let mut r = IntBits::<BITS>::zero();
         let n = IntBits::<BITS>::nlimbs();
         let mut over = false;
@@ -265,6 +325,21 @@ extend<const BITS: usize> IntBits<BITS> {
     /// values multiply to 2N bits, so nothing narrower than a second N-bit value holds what the low half
     /// loses -- a carry-out BIT would say only THAT it overflowed, which `checked_mul` already reports.
     fn mul_full(self: &IntBits<BITS>, other: &IntBits<BITS>, hi_out: *mut IntBits<BITS>) IntBits<BITS> {
+        if BITS == 128 && use_i128() {
+            let mut p0: u64 = 0;
+            let mut p1: u64 = 0;
+            let mut p2: u64 = 0;
+            let mut p3: u64 = 0;
+            unsafe sc_i128_mul(self.get(0), self.get(1), other.get(0), other.get(1), &mut p0, &mut p1, &mut p2, &mut p3);
+            let mut l = IntBits::<BITS>::zero();
+            l.set(0, p0);
+            l.set(1, p1);
+            let mut h = IntBits::<BITS>::zero();
+            h.set(0, p2);
+            h.set(1, p3);
+            unsafe *hi_out = h;
+            return l;
+        }
         let n = IntBits::<BITS>::nlimbs();
         // The 2*BITS-bit product accumulates in a double-width scratch, because the low/high split sits
         // at BITS -- a limb edge only when the width is a whole number of limbs.
@@ -442,6 +517,31 @@ extend<const BITS: usize> IntBits<BITS> {
         if divisor.is_zero() {
             panic("integer division by zero");
         }
+        if BITS == 128 && use_i128() {
+            let mut ql: u64 = 0;
+            let mut qh: u64 = 0;
+            let mut rl: u64 = 0;
+            let mut rh: u64 = 0;
+            unsafe sc_i128_divmod(
+                self.get(0),
+                self.get(1),
+                divisor.get(0),
+                divisor.get(1),
+                &mut ql,
+                &mut qh,
+                &mut rl,
+                &mut rh,
+            );
+            let mut q = IntBits::<BITS>::zero();
+            q.set(0, ql);
+            q.set(1, qh);
+            let mut r = IntBits::<BITS>::zero();
+            r.set(0, rl);
+            r.set(1, rh);
+            unsafe *quot = q;
+            unsafe *rem = r;
+            return;
+        }
         let mut q = IntBits::<BITS>::zero();
         let mut r = IntBits::<BITS>::zero();
         let top = self.top_bit();
@@ -465,6 +565,18 @@ extend<const BITS: usize> IntBits<BITS> {
     fn divmod_small(self: &IntBits<BITS>, d: u64, quot: *mut IntBits<BITS>) u64 {
         if d == 0 {
             panic("integer division by zero");
+        }
+        if BITS == 128 && use_i128() {
+            let mut ql: u64 = 0;
+            let mut qh: u64 = 0;
+            let mut rl: u64 = 0;
+            let mut rh: u64 = 0;
+            unsafe sc_i128_divmod(self.get(0), self.get(1), d, 0, &mut ql, &mut qh, &mut rl, &mut rh);
+            let mut q = IntBits::<BITS>::zero();
+            q.set(0, ql);
+            q.set(1, qh);
+            unsafe *quot = q;
+            return rl; // a one-limb divisor leaves a one-limb remainder
         }
         let mut q = IntBits::<BITS>::zero();
         let mut rem: u64 = 0;
