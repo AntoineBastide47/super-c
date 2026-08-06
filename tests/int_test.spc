@@ -472,3 +472,215 @@ fn native_128_path_matches_the_limb_code() {
         }
     }
 }
+
+// The bit-utility and arithmetic tail: each answer is checked against a reformulation through already
+// pinned operations (shifts, wrapping arithmetic, the 256-bit ground truth), never against itself.
+@test
+fn bit_utilities_and_arithmetic_tail() {
+    let x = u128::from_u64(0xDEADBEEF00000000u64) << 64 | 0x12345678u64;
+    // counts
+    assert_eq(x.count_ones() + x.count_zeros(), 128);
+    assert_eq(x.trailing_zeros(), 3);
+    assert_eq(u128::zero().trailing_zeros(), 128);
+    assert_eq(u128::one().trailing_zeros(), 0);
+    assert_eq((u128::one() << 127).trailing_zeros(), 127);
+    // rotation: leaves one end, returns at the other; a full turn is identity
+    assert(x.rotate_left(0) == x);
+    assert(x.rotate_left(128) == x);
+    assert(x.rotate_left(40).rotate_right(40) == x);
+    let rl = x << 1 | x >> 127;
+    assert(x.rotate_left(1) == rl);
+    // a PARTIAL width rotates through its own BITS, not a limb's 64
+    let p = UInt::<100>::one();
+    assert(p.rotate_right(1) == UInt::<100>::one() << 99);
+    // byte and bit reversal are involutions, and land where they should
+    assert(x.swap_bytes().swap_bytes() == x);
+    assert_eq(x.swap_bytes().limb(1), 0x7856341200000000u64);
+    assert(x.reverse_bits().reverse_bits() == x);
+    assert(u128::one().reverse_bits() == u128::one() << 127);
+    // powers of two
+    assert(!x.is_power_of_two());
+    assert((u128::one() << 90).is_power_of_two());
+    assert(u128::from_u64(100).next_power_of_two() == u128::from_u64(128));
+    assert(u128::from_u64(128).next_power_of_two() == u128::from_u64(128));
+    assert(u128::zero().next_power_of_two() == u128::one());
+    assert(u128::max().checked_next_power_of_two().is_none());
+    // overflowing_*: value matches wrapping, flag matches checked
+    let m = u128::max();
+    let one = u128::one();
+    let two = u128::from_u64(2);
+    let four = u128::from_u64(4);
+    let (av, ao) = m.overflowing_add(&one);
+    assert(av.is_zero() && ao);
+    let (bv, bo) = u128::zero().overflowing_sub(&one);
+    assert(bv == m && bo);
+    let (mv, mo) = m.overflowing_mul(&two);
+    assert(mv == m.wrapping_mul(&two) && mo);
+    let (nv, no) = u128::from_u64(3).overflowing_mul(&four);
+    assert(nv == u128::from_u64(12) && !no);
+    // pow against repeated multiplication, and its overflow report
+    let three = u128::from_u64(3);
+    let mut acc = u128::one();
+    for _i in 0..77 {
+        acc = acc * three;
+    }
+    assert(three.pow(77) == acc);
+    assert(three.checked_pow(77).is_some());
+    assert(three.checked_pow(100).is_none()); // 3^100 needs 159 bits
+    assert(u128::from_u64(2).pow(0) == u128::one());
+    // abs_diff and checked_rem
+    let seven = u128::from_u64(7);
+    let nine = u128::from_u64(9);
+    let z = u128::zero();
+    assert(seven.abs_diff(&nine) == two);
+    assert(m.abs_diff(&z) == m);
+    assert(seven.checked_rem(&three).unwrap() == one);
+    assert(seven.checked_rem(&z).is_none());
+}
+
+// The signed tail: delegations read the same bits, the euclidean pair satisfies its defining law for
+// every sign combination, and overflow reporting matches the checked family.
+@test
+fn signed_tail_and_euclid() {
+    let n = i128::from_i64(-2);
+    assert_eq(n.count_ones(), 127); // two's complement -2: every bit but bit 0
+    assert_eq(n.trailing_zeros(), 1);
+    assert(n.signum() == i128::from_i64(-1));
+    assert(i128::zero().signum().is_zero());
+    assert(i128::from_i64(5).signum() == i128::one());
+    let imax = i128::max();
+    let ifour = i128::from_i64(4);
+    assert(i128::min().abs_diff(&imax) == u128::max());
+    assert(i128::from_i64(-3).abs_diff(&ifour) == u128::from_u64(7));
+    // euclid: d*q + r == self and 0 <= r < |d|, all four sign shapes
+    let vals: [i64; 4] = [7i64, -7i64, 9i64, -9i64];
+    for i in 0..4 {
+        for j in 0..4 {
+            let a = i128::from_i64(unsafe vals[i]);
+            let b = i128::from_i64(
+                if unsafe vals[j] > 0 {
+                    3i64;
+                } else {
+                    -3i64;
+                },
+            );
+            let q = a.div_euclid(&b);
+            let r = a.rem_euclid(&b);
+            assert(!r.is_negative());
+            assert(r < i128::from_i64(3));
+            assert(b * q + r == a);
+        }
+    }
+    // overflowing against checked
+    let ione = i128::one();
+    let ineg1 = i128::from_i64(-1);
+    let (av, ao) = i128::max().overflowing_add(&ione);
+    assert(ao && av == i128::min());
+    let (sv, so) = i128::min().overflowing_sub(&ione);
+    assert(so && sv == i128::max());
+    let (_mv, mo) = i128::min().overflowing_mul(&ineg1);
+    assert(mo);
+    // pow traps are reported, and the plain form matches multiplication
+    assert(i128::from_i64(-3).pow(3) == i128::from_i64(-27));
+    assert(i128::from_i64(2).checked_pow(126).is_some());
+    assert(i128::from_i64(2).checked_pow(127).is_none());
+}
+
+// Bytes and radix text: round-trips are exact (partial top byte included), byte order is what the
+// name says, and every radix agrees with the decimal the type already pins.
+@test
+fn bytes_and_radix_text() {
+    let x = u128::from_u64(0x0102030405060708u64) << 64 | 0x090A0B0C0D0E0F10u64;
+    let mut le = Array::<u8, 16>::new();
+    x.to_le_bytes(le.index_range_mut(0usize..16));
+    assert_eq(le[0] as i32, 0x10);
+    assert_eq(le[15] as i32, 0x01);
+    assert(u128::from_le_bytes(le[0..16]) == x);
+    let mut be = Array::<u8, 16>::new();
+    x.to_be_bytes(be.index_range_mut(0usize..16));
+    assert_eq(be[0] as i32, 0x01);
+    assert_eq(be[15] as i32, 0x10);
+    assert(u128::from_be_bytes(be[0..16]) == x);
+    // a partial width: 100 bits = 13 bytes, 4 live bits in the top one, masked on the way back in
+    let p = UInt::<100>::max();
+    let mut pb = Array::<u8, 13>::new();
+    p.to_le_bytes(pb.index_range_mut(0usize..13));
+    assert_eq(pb[12] as i32, 0x0F);
+    assert(UInt::<100>::from_le_bytes(pb[0..13]) == p);
+    let mut full = Array::<u8, 13>::new();
+    for i in 0usize..13 {
+        full[i] = 0xFF;
+    }
+    assert(UInt::<100>::from_le_bytes(full[0..13]) == p); // bits past the width do not exist
+    // a missing high byte reads as the zero it is
+    assert(u128::from_le_bytes(le[0..8]) == u128::from_u64(0x090A0B0C0D0E0F10u64));
+    // signed round-trip preserves the sign bits exactly
+    let sn = i128::from_i64(-123456789);
+    let mut sb = Array::<u8, 16>::new();
+    sn.to_le_bytes(sb.index_range_mut(0usize..16));
+    assert(i128::from_le_bytes(sb[0..16]) == sn);
+    sn.to_be_bytes(sb.index_range_mut(0usize..16));
+    assert(i128::from_be_bytes(sb[0..16]) == sn);
+    // radix: hex, binary and base 36 against the decimal ground truth
+    let v = u128::from_str("340282366920938463463374607431768211455").unwrap(); // 2^128 - 1
+    let hex = v.to_string_radix(16);
+    assert(hex.as_str() == "ffffffffffffffffffffffffffffffff");
+    hex.free();
+    let two = u128::from_u64(2);
+    let bin = two.pow(100).to_string_radix(2);
+    assert_eq(bin.len(), 101);
+    assert(bin.as_str().byte_at(0) == b'1');
+    bin.free();
+    assert(u128::from_str_radix("ffffffffffffffffffffffffffffffff", 16).unwrap() == v);
+    assert(u128::from_str_radix("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", 16).unwrap() == v);
+    assert(u128::from_str_radix("100000000000000000000000000000000", 16).is_none()); // one too wide
+    assert(u128::from_str_radix("12", 2).is_none()); // digit outside the radix
+    assert(u128::from_str_radix("10", 37).is_none());
+    let rt = u128::from_str_radix("zz", 36).unwrap();
+    assert(rt == u128::from_u64(1295));
+    assert(i128::from_str_radix("-80000000000000000000000000000000", 16).unwrap() == i128::min());
+    assert(i128::from_str_radix("7fffffffffffffffffffffffffffffff", 16).unwrap() == i128::max());
+    let sm = i128::from_i64(-255);
+    let sh = sm.to_string_radix(16);
+    assert(sh.as_str() == "-ff");
+    sh.free();
+}
+
+// Integer literals wider than 64 bits, admitted wherever the context expects UInt<N>/Int<N>: the
+// typechecker parses the digits into the storage's limbs at compile time, so the emitted value is a
+// compound literal, not a runtime conversion. Decimal and hex, both signs, partial widths, and the
+// operand position (where the left side's type is the context).
+@test
+fn wide_integer_literals() {
+    let a: u128 = 340282366920938463463374607431768211455;
+    assert(a == u128::max());
+    let h: u128 = 0xDEADBEEF00000000123456789ABCDEF0;
+    assert_eq(h.limb(1), 0xDEADBEEF00000000u64);
+    assert_eq(h.limb(0), 0x123456789ABCDEF0u64);
+    let mn: i128 = -170141183460469231731687303715884105728;
+    assert(mn == i128::min());
+    let mx: i128 = 170141183460469231731687303715884105727;
+    assert(mx == i128::max());
+    let p: UInt<100> = 0xFFFFFFFFFFFFFFFFFFFFFFFFF;
+    assert(p == UInt::<100>::max());
+    let big: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
+    assert(big == u256::max());
+    // the operand position: the left side's width is what the literal means
+    let one: u128 = 1;
+    let b = one + 18446744073709551616;
+    assert_eq(b.limb(1), 1u64);
+    assert(b == 18446744073709551617);
+    // separators and a negative hex magnitude
+    let sep: u128 = 340_282_366_920_938_463_463_374_607_431_768_211_455;
+    assert(sep == u128::max());
+    let nh: i128 = -0x80000000000000000000000000000000;
+    assert(nh == i128::min());
+    // and the SUFFIX spelling: the width rides on the literal, so no context is needed at all
+    let sa = 5i128;
+    assert(sa == i128::from_i64(5));
+    assert(340282366920938463463374607431768211455u128 == u128::max());
+    assert(-170141183460469231731687303715884105728i128 == i128::min());
+    assert(0xFFu256 == u256::from_u64(255));
+    assert(7u100 == UInt::<100>::from_u64(7)); // ANY width, not just the aliased ones
+    assert(sa + 1i128 == 6i128);
+}

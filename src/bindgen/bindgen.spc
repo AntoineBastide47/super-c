@@ -11,9 +11,12 @@
 // parsed -- a typedef from <stddef.h> is needed to resolve one in the target -- but only declarations whose
 // origin is the requested header are emitted.
 //
-// Scope: functions, the typedefs needed to spell their signatures, and opaque `pub type` for structs that
-// only ever appear behind a pointer. A struct whose FIELDS a caller needs is not emitted: its layout would
-// have to match C exactly on every target, which is a promise this tool cannot make from one host's headers.
+// Scope: functions, the typedefs needed to spell their signatures, enums (tagged ones as `enum`, anonymous
+// enumerators and object-like macros as constants), fielded structs/unions where every member is modelable
+// (the emitted C layout-asserts them against the header on every target; bitfields and anonymous members
+// fall back to opaque), `extern` globals (const-qualified as `const`, writable as `static mut`), and opaque
+// `pub type` for everything reached only through a pointer. Function-LIKE macros cannot appear at all: the
+// preprocessor has already expanded them away by the time anything here runs.
 
 import stdio;
 import stdlib;
@@ -477,6 +480,7 @@ struct ConstDef {
     pub name: String,
     pub ty: String,
     pub value: String,
+    pub mutable: bool, // a global whose C declaration is not const: bound as `static mut`
 }
 
 extend ConstDef as Free {
@@ -1281,12 +1285,16 @@ fn parse_unit(lx: &mut Lexer, c: &mut Collected, want: str, extra: &Vector<Strin
             if nm.len() != 0 && td {
                 record_typedef(c, nm.as_str(), &ty, isfn);
             }
-            // `extern int errno;` and friends: a global the library exports. Bound as an extern const --
-            // readable, and not claiming a mutability Super-C would then have to police across the FFI.
+            // `extern int errno;` and friends: a global the library exports. Bound by what C itself
+            // declares: a const-qualified binding becomes an extern `const` (readable), anything else a
+            // `static mut`, whose accesses carry the ordinary static-mut unsafe rules across the FFI.
             if !keep && !td && !st && !isfn && mine && ty.ok && c.saw_extern && nm.len() != 0 && adim < 0 {
                 let mut vt = String::new();
                 ty.render(&mut vt);
-                c.globals.push(ConstDef { name: String::from_str(nm.as_str()), ty: vt, value: String::new() });
+                let wr = ty.fnsig.len() != 0 || !ty.qual_at(ty.ptr);
+                c.globals.push(
+                    ConstDef { name: String::from_str(nm.as_str()), ty: vt, value: String::new(), mutable: wr },
+                );
             }
             if keep {
                 let mut ret = String::new();
@@ -1399,13 +1407,18 @@ fn temp_path(tag: str) String {
     return p;
 }
 
-fn cpp_command(cc: str, header: str, incs: &Vector<String>, dump_macros: bool) String {
+fn cpp_command(cc: str, header: str, incs: &Vector<String>, cflags: &Vector<String>, dump_macros: bool) String {
     let mut cmd = String::from_str(cc);
     cmd.push_str(" -E");
     if dump_macros {
         cmd.push_str(" -dM");
     }
     cmd.push_str(" -x c");
+    for i in 0..cflags.len() {
+        cmd.push_str(" \"");
+        cmd.push_string(&cflags[i]);
+        cmd.push_byte(b'"');
+    }
     for i in 0..incs.len() {
         cmd.push_str(" -I\"");
         cmd.push_string(&incs[i]);
@@ -2166,7 +2179,11 @@ fn emit(c: &Collected, header: str, spelling: str, link: str, out: &mut String) 
         out.push_str("    }\n\n");
     }
     for i in 0..c.globals.len() {
-        out.format_into("    pub const {}: {};\n", c.globals[i].name.as_str(), c.globals[i].ty.as_str());
+        if c.globals[i].mutable {
+            out.format_into("    pub static mut {}: {};\n", c.globals[i].name.as_str(), c.globals[i].ty.as_str());
+        } else {
+            out.format_into("    pub const {}: {};\n", c.globals[i].name.as_str(), c.globals[i].ty.as_str());
+        }
     }
     if c.globals.len() != 0 {
         out.push_byte(b'\n');
@@ -2204,6 +2221,7 @@ fn run_one(
     spelling_in: str,
     incs: &Vector<String>,
     froms: &Vector<String>,
+    cflags: &Vector<String>,
     cc_str: str,
 ) i32 {
     let cc = String::from_str(cc_str);
@@ -2238,7 +2256,7 @@ fn run_one(
     };
 
     let mut mdump = String::new();
-    let mut mcmd = cpp_command(cc.as_str(), hdr.as_str(), incs, true);
+    let mut mcmd = cpp_command(cc.as_str(), hdr.as_str(), incs, cflags, true);
     if unsafe shim::sc_run(mcmd.cstr(), null, mpath.cstr(), null, null) == 0 {
         switch loader::read_file(mpath.as_str()) {
             Some(t) => {
@@ -2251,7 +2269,7 @@ fn run_one(
     }
     let _ = unsafe shim::sc_unlink(mpath.cstr());
 
-    let mut cmd = cpp_command(cc.as_str(), hdr.as_str(), incs, false);
+    let mut cmd = cpp_command(cc.as_str(), hdr.as_str(), incs, cflags, false);
     let prc = unsafe shim::sc_run(cmd.cstr(), null, ipath.cstr(), null, null);
     if prc != 0 {
         unsafe stdio::fprintf(
@@ -2475,6 +2493,7 @@ pub fn run(
     spelling_in: str,
     incs: &Vector<String>,
     froms: &Vector<String>,
+    cflags: &Vector<String>,
     cc_in: str,
 ) i32 {
     let mut cc = String::from_str(cc_in);
@@ -2559,6 +2578,7 @@ pub fn run(
                 jobs[i].spelling.as_str(),
                 incs,
                 froms,
+                cflags,
                 cc.as_str(),
             ) != 0 {
                 rc = 1;

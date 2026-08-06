@@ -757,6 +757,20 @@ const fn num_suffix_kind(p: *const u8, n: usize) i32 {
     ) || memeq(p, "u32") || memeq(p, "u64")) || n == 5 && (memeq(p, "isize") || memeq(p, "usize")) {
         return 0;
     }
+    // Any other `[iu]<digits>` names a LIBRARY width -- `5i128`, `0xFFu256`, `7u100` -- which the
+    // lexer cannot resolve: the typechecker knows the prelude's UInt<N>/Int<N> and validates the
+    // width and the value there. The lexer only accepts the shape.
+    if n >= 2 && (unsafe p[0] == b'i' || unsafe p[0] == b'u') {
+        let mut digits_only = true;
+        for j in 1..n {
+            if unsafe p[j] < b'0' || unsafe p[j] > b'9' {
+                digits_only = false;
+            }
+        }
+        if digits_only {
+            return 0;
+        }
+    }
     return -1;
 }
 

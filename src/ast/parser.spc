@@ -1536,10 +1536,44 @@ extend Parser {
                 );
                 self.add_attrs_to(&mut attrs, cnode);
                 self.ast.push(cnode);
+            } else if self.check(TokenType::Static) {
+                // A writable C global: `static mut` DECLARES what the header defines, so it takes no
+                // initializer and codegen emits no definition -- only the accesses, which carry
+                // `static mut`'s unsafe rules across the FFI unchanged.
+                let sstart = self.raw_peek().start();
+                self.advance();
+                if !self.match(TokenType::Mut) {
+                    self.error_here("expected 'mut' after 'static' (a read-only C global is an extern 'const')");
+                }
+                let sname = self.identifier();
+                self.expect(TokenType::Colon, "':'");
+                let stype = self.parse_type();
+                if self.check(TokenType::Equal) {
+                    self.error_here("an extern static takes no initializer: the C side defines it");
+                }
+                self.expect(TokenType::Semicolon, "';'");
+                let snode = self.ast.add(
+                    Node {
+                        kind: NodeKind::NODE_CONST,
+                        span: Span::new(sstart, self.previous_end()),
+                        as_data: NodeAs {
+                            const_def: ConstData {
+                                name: sname,
+                                ty: stype,
+                                value: NODE_NONE,
+                                is_public: is_public,
+                                is_extern: true,
+                                is_static_mut: true,
+                            },
+                        },
+                    },
+                );
+                self.add_attrs_to(&mut attrs, snode);
+                self.ast.push(snode);
             } else {
                 self.error_here(
                     if is_public {
-                        "'pub' may only be applied to an extern function, type, struct, union, enum, or const";
+                        "'pub' may only be applied to an extern function, type, struct, union, enum, const, or static";
                     } else {
                         "expected extern item";
                     },
@@ -1907,7 +1941,10 @@ extend Parser {
             return self.ast.add(
                 Node {
                     kind: NodeKind::NODE_PATTERN_NAME,
-                    span: self.node_span(name),
+                    // From `start`, not the identifier's own span: a `mut` binding is part of the
+                    // pattern's text, and the formatter prints patterns from their span -- an
+                    // identifier-only span silently REWROTE `Some(mut x)` to `Some(x)`.
+                    span: Span::new(start, self.previous_end()),
                     as_data: NodeAs { pattern: PatternData { name: name, children: NodeList { start: 0, len: 0 } } },
                 },
             );

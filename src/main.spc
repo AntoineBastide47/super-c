@@ -842,8 +842,12 @@ fn main(argv: Vector<str>) i32 {
     let mut bg_header = ""; // bindgen: --header=SPELLING, how the emitted module #includes it
     let mut bg_incs = Vector::<String>::new(); // bindgen: -I search paths
     let mut bg_from = Vector::<String>::new(); // bindgen: --from=, extra origin headers to accept
+    let mut bg_cflags = Vector::<String>::new(); // bindgen: --cflag=, passed to the preprocessor verbatim
     let mut vendor_name = ""; // vendor: optional name override for vendor/<name>
     let mut vendor_dir = "."; // vendor: --dir=, the project root vendored into
+    let mut vendor_ref = ""; // vendor: --ref=, the branch, tag or commit pinned for a git source
+    let mut vendor_force = false; // vendor: --force, replace an existing vendor/<name>
+    let mut clean_cache = false; // clean: --cache, also drop the machine-global object cache
 
     let mode = if argc > 1 {
         subcommand(argv[1]);
@@ -985,6 +989,8 @@ fn main(argv: Vector<str>) i32 {
             while i < argc {
                 if argv[i].starts_with("--out-dir=") {
                     bo.out_dir = argv[i][10..];
+                } else if argv[i] == "--cache" {
+                    clean_cache = true;
                 } else {
                     co.bad = true;
                 }
@@ -1060,6 +1066,10 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 if arg.starts_with("--dir=") {
                     vendor_dir = arg[6..];
+                } else if arg.starts_with("--ref=") {
+                    vendor_ref = arg[6..];
+                } else if arg == "--force" {
+                    vendor_force = true;
                 } else if !arg.starts_with("--") && file.len() == 0 {
                     file = arg; // the source: a git url or a local directory
                 } else if !arg.starts_with("--") && vendor_name.len() == 0 {
@@ -1085,6 +1095,8 @@ fn main(argv: Vector<str>) i32 {
                     bg_header = arg[9..];
                 } else if arg.starts_with("--from=") {
                     bg_from.push(String::from_str(arg[7..]));
+                } else if arg.starts_with("--cflag=") {
+                    bg_cflags.push(String::from_str(arg[8..]));
                 } else if arg.starts_with("-I") && arg.len() > 2 {
                     bg_incs.push(String::from_str(arg[2..]));
                 } else if arg == "-I" && i + 1 < argc {
@@ -1136,7 +1148,7 @@ COMMANDS:
     test                   build and run the test suite (tests/ by convention)
     bench                  build and run the benchmarks (bench/ by convention)
     command <name>         run a [command.NAME] from build.toml
-    clean                  remove build outputs
+    clean [--cache]        remove build outputs (--cache: the global object cache too)
     fmt  [<path>...]       format source in place (or verify with --check)
     lint [<path>...]       report lint warnings (apply fixes with --fix)
     lsp                    run the language server over stdio
@@ -1158,6 +1170,7 @@ OPTIONS:
     --header=SPELLING      bindgen: how the generated module spells the #include
     -I <dir>               bindgen: header search path
     --from=PART            bindgen: also take declarations from headers whose path contains PART
+    --cflag=F              bindgen: extra flag for the preprocessor invocation (repeatable)
     --target=T             target: windows|macos|linux|ios|android|wasm
     --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
     --const-eval-steps=N   compile-time evaluation step budget
@@ -1168,6 +1181,8 @@ OPTIONS:
     --suggest-const        lint: also flag functions that could be 'const fn'
     --no-run               bench: build the bench binary but do not run it
     --dir=D                vendor: project root vendored into (default: the current directory)
+    --ref=R                vendor: branch, tag or commit to pin (git sources)
+    --force                vendor: replace an existing vendor/<name>
     --test                 script: collect @test functions, build, and run
     --test-filter=S        run only tests whose name contains S
     --test-jobs=N          bound the test process pool (default: one per core)
@@ -1206,7 +1221,7 @@ OPTIONS:
         return bsys::scaffold_project(file, file);
     }
     if mode == Mode::MODE_VENDOR {
-        return bsys::vendor_dep(vendor_dir, file, vendor_name);
+        return bsys::vendor_dep(vendor_dir, file, vendor_name, vendor_ref, vendor_force);
     }
     if mode == Mode::MODE_BINDGEN {
         let mut bg_paths = Vector::<String>::new();
@@ -1214,10 +1229,11 @@ OPTIONS:
         for k in 0..extra.len() {
             bg_paths.push(String::from_str(argv[*extra.at(k)]));
         }
-        let rc = bindgen::run(&bg_paths, out_bin, bg_link, bg_header, &bg_incs, &bg_from, bo.cc);
+        let rc = bindgen::run(&bg_paths, out_bin, bg_link, bg_header, &bg_incs, &bg_from, &bg_cflags, bo.cc);
         bg_paths.free();
         bg_incs.free();
         bg_from.free();
+        bg_cflags.free();
         return rc;
     }
     if mode == Mode::MODE_INIT {
@@ -1322,6 +1338,13 @@ OPTIONS:
             }
             if mode == Mode::MODE_CLEAN {
                 rc = bsys::manifest_clean(&man);
+                if clean_cache {
+                    let cd = bsys::object_cache_dir();
+                    if cd.len() != 0 {
+                        bsys::rm_rf(cd.as_str());
+                        println("removed {}", cd.as_str());
+                    }
+                }
             } else if mode == Mode::MODE_TEST {
                 topts.enabled = true;
                 rc = bsys::manifest_test(&man, profile, jobs, &topts, std_dir, ce_steps, ce_mem, target, bootstrap_tags);

@@ -152,6 +152,193 @@ pub fn rm_rf(path: str) {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// the global object cache: ~/.super-c/cache, content-addressed
+// ---------------------------------------------------------------------------------------------------------
+// A translation unit whose C text, quoted-include closure, compiler version and flags all match a
+// previous compile -- in ANY project on this machine -- reuses that compile's object instead of
+// running the C compiler again. The key hashes CONTENT, never paths, so the cache needs no
+// invalidation story: different content is a different key. System headers (<...>) are outside the
+// key; the compiler-version fingerprint stands in for them, the same bet ccache's direct mode makes.
+
+/// The cache directory: $SC_CACHE_DIR, else <home>/.super-c/cache; empty = caching disabled
+/// (SC_NO_CACHE set, or no resolvable home).
+pub fn object_cache_dir() String {
+    let off = stdlib::getenv("SC_NO_CACHE");
+    if off != null && unsafe *off != 0 as char {
+        return String::new();
+    }
+    let dir = stdlib::getenv("SC_CACHE_DIR");
+    if dir != null && unsafe *dir != 0 as char {
+        return String::from_cstr(dir);
+    }
+    let mut home = stdlib::getenv("HOME");
+    if home == null || unsafe *home == 0 as char {
+        home = stdlib::getenv("USERPROFILE");
+    }
+    if home == null || unsafe *home == 0 as char {
+        return String::new();
+    }
+    let mut out = String::from_cstr(home);
+    out.push_str("/.super-c/cache");
+    return out;
+}
+
+// Two independent mixing lanes: an object served for the WRONG key would be a silent mislink, so the
+// key is 128 bits, not 64.
+const fn ch_mix(h: u64, v: u64) u64 {
+    let mut x = (h ^ v) * 1099511628211u64;
+    x = (x ^ x >> 30) * 0xBF58476D1CE4E5B9u64;
+    x = (x ^ x >> 27) * 0x94D049BB133111EBu64;
+    return x ^ x >> 31;
+}
+
+fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
+    let mut a = *h1;
+    let mut b = *h2;
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        let mut w: u64 = 0;
+        let mut k: usize = 0;
+        while k < 8 {
+            w = w | (unsafe p[i + k]) as u64 << (k * 8) as u64;
+            k = k + 1;
+        }
+        a = ch_mix(a, w);
+        b = ch_mix(b, ~w);
+        i = i + 8;
+    }
+    let mut tail: u64 = 0;
+    let mut k: usize = 0;
+    while i < n {
+        tail = tail | (unsafe p[i]) as u64 << (k * 8) as u64;
+        i = i + 1;
+        k = k + 1;
+    }
+    a = ch_mix(a, tail ^ n as u64);
+    b = ch_mix(b, ~(tail ^ n as u64));
+    *h1 = a;
+    *h2 = b;
+}
+
+// Hash a file and, recursively, every file its `#include "..."` lines name (resolved the way the C
+// compiler resolves them: relative to the INCLUDING file). False = something was unreadable, and the
+// unit is not cacheable -- a header outside the key would mean stale objects served as fresh.
+fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, visited: &mut Vector<String>) bool {
+    if depth > 64 {
+        return false;
+    }
+    for i in 0..visited.len() {
+        if visited.at(i).as_str() == path {
+            return true;
+        }
+    }
+    visited.push(String::from_str(path));
+    let body = loader::read_file(path);
+    if body.is_none() {
+        return false;
+    }
+    let b = body.unwrap();
+    let s = b.as_str();
+    ch_mix_bytes(h1, h2, s.ptr(), s.len());
+    let mut base = path.len();
+    while base > 0 && path[base - 1] != b'/' && path[base - 1] != b'\\' {
+        base = base - 1;
+    }
+    let mut i: usize = 0;
+    let n = s.len();
+    while i < n {
+        // start of line: `#` [ws] `include` [ws] `"..."`
+        let ls = i;
+        while i < n && s[i] != b'\n' {
+            i = i + 1;
+        }
+        let mut j = ls;
+        while j < i && (s[j] == b' ' || s[j] == b'\t') {
+            j = j + 1;
+        }
+        if j < i && s[j] == b'#' {
+            j = j + 1;
+            while j < i && (s[j] == b' ' || s[j] == b'\t') {
+                j = j + 1;
+            }
+            if j + 7 <= i && s.slice(j, j + 7) == "include" {
+                j = j + 7;
+                while j < i && (s[j] == b' ' || s[j] == b'\t') {
+                    j = j + 1;
+                }
+                if j < i && s[j] == b'"' {
+                    j = j + 1;
+                    let hs = j;
+                    while j < i && s[j] != b'"' {
+                        j = j + 1;
+                    }
+                    if j < i {
+                        let name = s.slice(hs, j);
+                        let abs = name.len() > 0 && name[0] == b'/' || name.len() > 2 && name[1] == b':';
+                        let cut = if base > 0 {
+                            base - 1;
+                        } else {
+                            0 as usize;
+                        };
+                        let inc = if abs {
+                            String::from_str(name);
+                        } else {
+                            join2(path.slice(0, cut), name);
+                        };
+                        if !ch_hash_file(inc.as_str(), h1, h2, depth + 1, visited) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The gen-tree prefix in a stored .d is replaced by `@/`, so a dependency list written in one project
+// reads correctly in every other; paths outside the tree (absolute backing headers) stay as written.
+fn hex64(v: u64, out: &mut String) {
+    let d = "0123456789abcdef";
+    let mut i = 16;
+    while i > 0 {
+        i = i - 1;
+        out.push_byte(d.byte_at((v >> (i * 4) as u64 & 15u64) as usize));
+    }
+}
+
+fn dep_portable(s: str, gen: str) String {
+    let mut out = String::new();
+    let mut i: usize = 0;
+    while i < s.len() {
+        if i + gen.len() < s.len() && s.slice(i, i + gen.len()) == gen && s[i + gen.len()] == b'/' {
+            out.push_str("@");
+            i = i + gen.len();
+        } else {
+            out.push_byte(s[i]);
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+fn dep_local(s: str, gen: str) String {
+    let mut out = String::new();
+    let mut i: usize = 0;
+    while i < s.len() {
+        if i + 1 < s.len() && s[i] == b'@' && s[i + 1] == b'/' {
+            out.push_str(gen);
+            i = i + 1;
+        } else {
+            out.push_byte(s[i]);
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // content-sync: <root_dir>/build -> <out>/gen. Unchanged files keep their mtime (the staleness anchor);
 // orphans in gen are deleted so removed modules do not linger in the link.
 // ---------------------------------------------------------------------------------------------------------
@@ -374,6 +561,10 @@ struct Pend {
     pub log: String,
     pub cmdpath: String, // <obj>.cmd: fingerprint + last duration
     pub prev_ms: i64, // last recorded duration; longest-first scheduling shrinks the tail
+    pub cobj: String, // global-cache install target for the object; empty = not cacheable
+    pub oout: String, // the object this compile writes (the install source)
+    pub dout: String, // its .d sibling
+    pub genpfx: String, // gen root, for the portable .d rewrite
 }
 
 extend Pend as Free {
@@ -382,6 +573,10 @@ extend Pend as Free {
         self.fp.free();
         self.log.free();
         self.cmdpath.free();
+        self.cobj.free();
+        self.oout.free();
+        self.dout.free();
+        self.genpfx.free();
     }
 }
 
@@ -403,6 +598,10 @@ struct Job {
     pub log: String,
     pub cmdpath: String,
     pub start: i64,
+    pub cobj: String, // see Pend: the global-cache install, performed on success
+    pub oout: String,
+    pub dout: String,
+    pub genpfx: String,
 }
 
 extend Job as Free {
@@ -410,16 +609,46 @@ extend Job as Free {
         self.fp.free();
         self.log.free();
         self.cmdpath.free();
+        self.cobj.free();
+        self.oout.free();
+        self.dout.free();
+        self.genpfx.free();
     }
 }
 
-// On success, persist fingerprint + duration; on failure, surface the captured compiler output.
+// On success, persist fingerprint + duration -- and install the object into the global cache, via a
+// key-named temp + rename so concurrent builds (which would write the SAME bytes) stay atomic. On
+// failure, surface the captured compiler output.
 fn finish_job(j: &mut Job, code: i32) i32 {
     if code != 0 {
         cat_file(j.log.as_str());
     } else {
         let rec = format("{}\n{}", j.fp.as_str(), unsafe shim::sc_ticks_ms() - j.start);
         write_file(j.cmdpath.as_str(), rec.as_str());
+        if j.cobj.len() != 0 {
+            let mut tmp = j.cobj.clone();
+            tmp.push_str(".tmp");
+            if copy_file(j.oout.as_str(), tmp.as_str()) == 0 {
+                let mut tc = tmp.clone();
+                let mut oc = j.cobj.clone();
+                let _ = unsafe shim::sc_rename(tc.cstr(), oc.cstr());
+            }
+            let dep = loader::read_file(j.dout.as_str());
+            if !dep.is_none() {
+                let d = dep.unwrap();
+                let port = dep_portable(d.as_str(), j.genpfx.as_str());
+                let mut dtmp = j.cobj.clone();
+                dtmp.push_str(".d.tmp");
+                if write_file(dtmp.as_str(), port.as_str()) == 0 {
+                    let mut cd = j.cobj.clone();
+                    cd.truncate(cd.len() - 2);
+                    cd.push_str(".d");
+                    let mut dc = dtmp.clone();
+                    let mut cdc = cd.clone();
+                    let _ = unsafe shim::sc_rename(dc.cstr(), cdc.cstr());
+                }
+            }
+        }
     }
     unsafe shim::sc_unlink(j.log.cstr());
     return code;
@@ -572,6 +801,7 @@ struct CcStream {
     pub total_c: usize,
     pub stale_n: usize,
     pub ret: i32,
+    pub cache: String, // the global object cache directory; empty = disabled
 }
 
 extend CcStream {
@@ -628,6 +858,9 @@ extend CcStream {
         }
         self.cmd_prefix = self.cc.clone();
         self.cmd_prefix.push_string(&self.cc_tail);
+        if self.cache.len() != 0 {
+            mkdirs(self.cache.as_str());
+        }
     }
 
     // Sync one finished file raw -> gen (byte-compare keeps the mtime anchor); a source also gets
@@ -714,15 +947,72 @@ extend CcStream {
             }
             let dir = String::from_str(full.slice(0, k - 1));
             mkdirs(dir.as_str());
+            let mut cobj = String::new();
+            if self.cache.len() != 0 {
+                let mut h1: u64 = 0xcbf29ce484222325;
+                let mut h2: u64 = 0x9e3779b97f4a7c15;
+                let mut visited = Vector::<String>::new();
+                ch_mix_bytes(&mut h1, &mut h2, self.ccver.as_str().ptr(), self.ccver.len());
+                ch_mix_bytes(&mut h1, &mut h2, self.cc_tail.as_str().ptr(), self.cc_tail.len());
+                if ch_hash_file(cpath.as_str(), &mut h1, &mut h2, 0, &mut visited) {
+                    let mut keyname = String::new();
+                    hex64(h1, &mut keyname);
+                    hex64(h2, &mut keyname);
+                    keyname.push_str(".o");
+                    cobj = join2(self.cache.as_str(), keyname.as_str());
+                    if self.cache_restore(&cobj, opath.as_str(), dpath.as_str(), &fp) {
+                        self.objs.push(opath.clone());
+                        return;
+                    }
+                }
+            }
             let mut log = opath.clone();
             log.push_str(".log");
             cmd.push_str(" > \"");
             cmd.push_str(log.as_str());
             cmd.push_str("\" 2>&1");
-            self.pend.push(Pend { cmd: cmd, fp: fp, log: log, cmdpath: cmdpath, prev_ms: prev_ms });
+            self.pend.push(
+                Pend {
+                    cmd: cmd,
+                    fp: fp,
+                    log: log,
+                    cmdpath: cmdpath,
+                    prev_ms: prev_ms,
+                    cobj: cobj,
+                    oout: opath.clone(),
+                    dout: dpath.clone(),
+                    genpfx: self.gen.clone(),
+                },
+            );
             self.stale_n = self.stale_n + 1;
         }
         self.objs.push(opath.clone());
+    }
+
+    // A cache hit: the object (and its portable dependency list) copy into place, and the .cmd
+    // records the fingerprint so the next build's staleness check needs no cache at all.
+    fn cache_restore(self: &mut Self, cobj: &String, opath: str, dpath: str, fp: &String) bool {
+        let mut co = cobj.clone();
+        if unsafe shim::sc_mtime(co.cstr()) == 0 {
+            return false;
+        }
+        if copy_file(cobj.as_str(), opath) != 0 {
+            return false;
+        }
+        let mut cd = cobj.clone();
+        cd.truncate(cd.len() - 2);
+        cd.push_str(".d");
+        let dep = loader::read_file(cd.as_str());
+        if !dep.is_none() {
+            let d = dep.unwrap();
+            let loc = dep_local(d.as_str(), self.gen.as_str());
+            let _ = write_file(dpath, loc.as_str());
+        }
+        let mut cmdp = String::from_str(opath.slice(0, opath.len() - 2));
+        cmdp.push_str(".cmd");
+        let rec = format("{}\n0", fp.as_str());
+        let _ = write_file(cmdp.as_str(), rec.as_str());
+        return true;
     }
 
     // Fill free slots (longest-known-first) and reap whatever already exited; never blocks.
@@ -761,6 +1051,10 @@ extend CcStream {
                         log: w.log.clone(),
                         cmdpath: w.cmdpath.clone(),
                         start: unsafe shim::sc_ticks_ms(),
+                        cobj: w.cobj.clone(),
+                        oout: w.oout.clone(),
+                        dout: w.dout.clone(),
+                        genpfx: w.genpfx.clone(),
                     },
                 );
             }
@@ -791,6 +1085,10 @@ extend CcStream {
                             log: w.log.clone(),
                             cmdpath: w.cmdpath.clone(),
                             start: unsafe shim::sc_ticks_ms(),
+                            cobj: w.cobj.clone(),
+                            oout: w.oout.clone(),
+                            dout: w.dout.clone(),
+                            genpfx: w.genpfx.clone(),
                         },
                     );
                 }
@@ -910,6 +1208,7 @@ fn engine_build(
         total_c: 0,
         stale_n: 0,
         ret: 0,
+        cache: object_cache_dir(),
     };
     let mut sink = EmitSink { ctx: &mut stream, notify: stream_notify };
 
@@ -1448,9 +1747,12 @@ fn copy_tree(srcd: str, dstd: str) i32 {
 
 /// `super-c vendor <src> [name]`: copy a dependency's source into `<root>/vendor/<name>`, where the
 /// module loader already resolves it -- `import vendor::<name>::<module>;` -- so vendoring records
-/// nothing in the manifest. A git source (a scheme, a `git@` remote, or a `.git` suffix) is cloned;
-/// anything else must be a local directory and is copied. No `.git` survives either way.
-pub fn vendor_dep(root: str, src: str, name_arg: str) i32 {
+/// nothing in the manifest. A git source (a scheme, a `git@` remote, or a `.git` suffix) is cloned
+/// with its submodules and `--ref` pins a branch, tag or commit; anything else must be a local
+/// directory and is copied. No `.git` survives either way -- vendored source belongs to the project's
+/// history -- which is also why `.vendor` records the source and the exact commit: with the
+/// repository gone, that file is the only statement of WHAT was vendored.
+pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool) i32 {
     let mut base = src;
     if base.ends_with(".git") {
         base = base.slice(0, base.len() - 4);
@@ -1475,18 +1777,47 @@ pub fn vendor_dep(root: str, src: str, name_arg: str) i32 {
     let dest = join2(vdir.as_str(), name);
     let mut dp = dest.clone();
     if unsafe shim::sc_stat_isdir(dp.cstr()) == 1 {
-        eprintln("vendor: '{}' already exists (remove it to vendor again)", dest.as_str());
-        return 1;
+        if !force {
+            eprintln("vendor: '{}' already exists (replace it with --force)", dest.as_str());
+            return 1;
+        }
+        rm_rf(dest.as_str());
     }
     let is_git = src.starts_with("git@") || src.ends_with(".git") || scheme_len(src) != 0;
+    if !is_git && ref_arg.len() != 0 {
+        eprintln("vendor: --ref pins a git source; '{}' is a local directory", src);
+        return 1;
+    }
     mkdirs(vdir.as_str());
+    let mut stamp = String::from_str("source = \"");
+    stamp.push_str(src);
+    stamp.push_str("\"\n");
     if is_git {
-        let mut cmd = String::from_str("git clone -q");
+        let mut cmd = String::from_str("git clone -q --recurse-submodules");
         push_quoted(&mut cmd, src);
         push_quoted(&mut cmd, dest.as_str());
         if shell(cmd.as_str()) != 0 {
             eprintln("vendor: git clone failed for '{}'", src);
             return 1;
+        }
+        if ref_arg.len() != 0 {
+            // --detach takes a commit hash as readily as a branch or tag name.
+            let mut co = String::from_str("git -C");
+            push_quoted(&mut co, dest.as_str());
+            co.push_str(" checkout -q --detach");
+            push_quoted(&mut co, ref_arg);
+            if shell(co.as_str()) != 0 {
+                eprintln("vendor: no ref '{}' in '{}'", ref_arg, src);
+                rm_rf(dest.as_str());
+                return 1;
+            }
+        }
+        // The exact commit, captured BEFORE the repository is stripped -- afterwards nobody can ask.
+        let head = git_head(dest.as_str());
+        if head.len() != 0 {
+            stamp.push_str("commit = \"");
+            stamp.push_str(head.as_str());
+            stamp.push_str("\"\n");
         }
         let g = join2(dest.as_str(), ".git");
         rm_rf(g.as_str());
@@ -1502,8 +1833,34 @@ pub fn vendor_dep(root: str, src: str, name_arg: str) i32 {
             return 1;
         }
     }
+    let sf = join2(dest.as_str(), ".vendor");
+    let _ = write_file(sf.as_str(), stamp.as_str());
     println("vendored {} at {} (import vendor::{}::<module>;)", name, dest.as_str(), name);
     return 0;
+}
+
+// `git rev-parse HEAD` of a checkout, read back through a temp file (`shell` gives only an exit code).
+fn git_head(dir: str) String {
+    let tmp = join2(dir, ".vendor-head");
+    let mut cmd = String::from_str("git -C");
+    push_quoted(&mut cmd, dir);
+    cmd.push_str(" rev-parse HEAD >");
+    push_quoted(&mut cmd, tmp.as_str());
+    let rc = shell(cmd.as_str());
+    let mut out = String::new();
+    if rc == 0 {
+        switch loader::read_file(tmp.as_str()) {
+            Some(t) => {
+                out = t;
+                while out.len() > 0 && (out.as_str()[out.len() - 1] == b'\n' || out.as_str()[out.len() - 1] == b'\r') {
+                    out.truncate(out.len() - 1);
+                }
+            },
+            None => {},
+        };
+    }
+    rm_rf(tmp.as_str());
+    return out;
 }
 
 // Length of a URL scheme prefix ("https://...") including the separator, 0 when there is none.

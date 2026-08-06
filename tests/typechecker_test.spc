@@ -2789,7 +2789,7 @@ fn extern_aggregates() {
     h::expect_err_msg(
         "the block still rejects what it never accepted",
         "extern \"C\" \"x.h\" {\n    pub let x: i32;\n}\nfn main() i32 { return 0; }\n",
-        "may only be applied to an extern function, type, struct, union, enum, or const",
+        "may only be applied to an extern function, type, struct, union, enum, const, or static",
     );
 }
 
@@ -2834,6 +2834,51 @@ fn const_generic_expressions() {
         "a different width does not unify",
         "struct A<const N: usize> { pub v: [u64; N] }\nfn dbl<const W: usize>(a: &A<W>) A<{W * 2}> { return A::<{W * 2}> {}; }\nfn wrong<const Q: usize>(a: &A<Q>) A<{Q * 3}> { return dbl(a); }\nfn main() i32 { let a = A::<2> {}; let q = wrong(&a); return (unsafe q.v[0]) as i32; }\n",
         "expected 'A<{3 * Q}>', found 'A<{2 * Q}>'",
+    );
+    // Floor division rides the canonical form as a trailing divisor: `{(W + 7) / 8}` is the byte
+    // count every serialization API is generic over. It does not distribute -- only an exact
+    // division simplifies -- so the form carries the divisor whole and folds at instantiation.
+    h::expect_exit(
+        "a floor-divided width folds at instantiation",
+        "struct A<const N: usize> { pub v: [u64; N] }\nfn bytes<const W: usize>(a: &A<W>) A<{(W + 7) / 8}> {\n    return A::<{(W + 7) / 8}> {};\n}\nfn main() i32 {\n    let a = A::<20> {};\n    let b = bytes(&a);\n    return (sizeof(A<3>) as i32) - 24 + (unsafe b.v[2]) as i32;\n}\n",
+        0,
+    );
+    // Wide literals are validated against the expected width at compile time; without a wide
+    // expectation the 64-bit diagnostic stands.
+    h::expect_err_msg(
+        "one past the unsigned top does not fit",
+        "fn main() i32 {\n    let x: u128 = 340282366920938463463374607431768211456;\n    return 0;\n}\n",
+        "does not fit the expected type's 128 bits",
+    );
+    h::expect_err_msg(
+        "one past the signed top does not fit",
+        "fn main() i32 {\n    let x: i128 = 170141183460469231731687303715884105728;\n    return 0;\n}\n",
+        "does not fit the expected type's 128 bits",
+    );
+    h::expect_err_msg(
+        "one below the signed bottom does not fit",
+        "fn main() i32 {\n    let x: i128 = -170141183460469231731687303715884105729;\n    return 0;\n}\n",
+        "does not fit the expected type's 128 bits",
+    );
+    h::expect_err_msg(
+        "no wide expectation: the 64-bit diagnostic stands",
+        "fn main() i32 {\n    let x = 340282366920938463463374607431768211455;\n    return 0;\n}\n",
+        "too large to fit in a 64-bit integer",
+    );
+    h::expect_err_msg(
+        "a suffix width past 1024 names no type",
+        "fn main() i32 {\n    let x = 5u2000;\n    return 0;\n}\n",
+        "widths run from 1 to 1024",
+    );
+    h::expect_err_msg(
+        "a suffixed value is range-checked against ITS width",
+        "fn main() i32 {\n    let x = 340282366920938463463374607431768211456u128;\n    return 0;\n}\n",
+        "does not fit the expected type's 128 bits",
+    );
+    h::expect_err_msg(
+        "a divided width that differs is rejected, divisor named",
+        "struct A<const N: usize> { pub v: [u64; N] }\nfn bytes<const W: usize>(a: &A<W>) A<{(W + 7) / 8}> { return A::<{W / 8}> {}; }\nfn main() i32 { let a = A::<20> {}; let b = bytes(&a); return (unsafe b.v[0]) as i32; }\n",
+        "/ 8}",
     );
 }
 

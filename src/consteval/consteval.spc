@@ -2689,6 +2689,9 @@ extend ConstEval {
         let src = self.ce_src(m);
         let rt = self.ce_type(m, id);
         if n.kind == NodeKind::NODE_LITERAL {
+            if self.ast_ptr(m).wide_lit_of(id) >= 0 {
+                return cv_nil(); // wider than the evaluator's scalars; codegen emits the limbs
+            }
             if ntt == TokenType::IntegerLiteral {
                 return cv_scalar_of(self.eval_int_literal(m, id), m);
             }
@@ -2990,6 +2993,9 @@ extend ConstEval {
         let rt = self.ce_type(m, id);
         if op == TokenType::Move || op == TokenType::Unsafe {
             return self.ev_in(f, m, operand);
+        }
+        if op == TokenType::Minus && self.ast_ptr(m).wide_lit_of(id) >= 0 {
+            return cv_nil(); // a wide negative literal; codegen emits the limbs
         }
         if op == TokenType::Ampersand {
             let was = self.trap_mark();

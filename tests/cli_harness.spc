@@ -48,6 +48,21 @@ extend CliResult {
         eprintln("--- end of captured output ---");
         return false;
     }
+    /// `exit == 0`, but it DUMPS what was captured when the answer is no -- out_shows' sibling for
+    /// exit codes: a remote crash otherwise reports nothing beyond the number.
+    pub fn ok(self: &CliResult) bool {
+        if self.exit == 0 {
+            return true;
+        }
+        eprintln("--- expected exit 0, got {}; captured output follows ---", self.exit);
+        if self.out == null {
+            eprintln("(nothing captured)");
+        } else {
+            unsafe stdio::fputs(self.out, stdio::stderr());
+        }
+        eprintln("--- end of captured output ---");
+        return false;
+    }
 }
 extend CliResult as Free {
     pub fn free(self: &mut Self) {
@@ -513,4 +528,79 @@ extend Proj as Free {
     pub fn free(self: &mut Self) {
         let _ = unsafe shim::sc_rm_rf(self.rootp());
     }
+}
+
+/// Run the compiler under test FROM `dir` with one environment variable set -- the shape the global
+/// object-cache tests need: the engine resolves build.toml from its working directory and the cache
+/// from its environment. No shell syntax: Windows' sc_run hands the line to CreateProcess verbatim,
+/// so the directory moves via chdir (safe: the runner gives every test its own process) and the
+/// variable rides sc_run's env parameter. superc_path() resolves before the chdir moves ".".
+pub fn superc_env_in(dir: str, key: str, val: str, args: str) CliResult {
+    let mut cmd = String::new();
+    cmd.format_into("\"{}\" {}", superc_path(), args);
+    let mut env = String::new();
+    env.format_into("{}={}", key, val);
+    let mut op = String::new();
+    op.format_into("{}/.envout", dir);
+    let mut d = String::from_str(dir);
+    if unsafe shim::sc_chdir(d.cstr()) != 0 {
+        return CliResult { exit: -1, out: null };
+    }
+    return exec_env(cmd.cstr(), op.cstr(), env.cstr());
+}
+
+/// How many entries of `dir` end with `suffix`.
+pub fn dir_count_suffix(dir: str, suffix: str) i32 {
+    let mut d = String::from_str(dir);
+    let dh = unsafe shim::sc_opendir(d.cstr());
+    if dh == null {
+        return 0;
+    }
+    let mut n = 0;
+    loop {
+        let e = unsafe shim::sc_readdir(dh);
+        if e == null {
+            break;
+        }
+        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        if nm.ends_with(suffix) {
+            n = n + 1;
+        }
+    }
+    unsafe shim::sc_closedir(dh);
+    return n;
+}
+
+/// Overwrite every `suffix`-named entry of `dir` with junk; how many were hit. What proves a cache is
+/// really READ: a later consumer must choke on the junk.
+pub fn dir_corrupt_suffix(dir: str, suffix: str) i32 {
+    let mut d = String::from_str(dir);
+    let dh = unsafe shim::sc_opendir(d.cstr());
+    if dh == null {
+        return 0;
+    }
+    let mut names = Vector::<String>::new();
+    loop {
+        let e = unsafe shim::sc_readdir(dh);
+        if e == null {
+            break;
+        }
+        let nm = str::from_cstr(unsafe shim::sc_dirent_name(e));
+        if nm.ends_with(suffix) {
+            names.push(String::from_str(nm));
+        }
+    }
+    unsafe shim::sc_closedir(dh);
+    for i in 0..names.len() {
+        let mut fp = String::from_str(dir);
+        fp.push_str("/");
+        fp.push_string(names.at(i));
+        let f = stdio::fopen(fp.as_str(), "wb");
+        if f != null {
+            let junk = "not an object file";
+            unsafe stdio::fwrite(junk.ptr(), 1, junk.len(), f);
+            unsafe stdio::fclose(f);
+        }
+    }
+    return names.len() as i32;
 }

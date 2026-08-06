@@ -885,16 +885,22 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     pub fn from_f64(v: f64) Float<E, F, FAMILY> {
         let vb = f64_bits(v);
-        return Float::<E, F, FAMILY>::from_parts(vb >> 63 != 0, (vb >> 52 & 0x7FF) as i64, vb & 0xFFFFFFFFFFFFF, 11, 52);
+        return Float::<E, F, FAMILY>::from_scalar_parts(
+            vb >> 63 != 0,
+            (vb >> 52 & 0x7FF) as i64,
+            vb & 0xFFFFFFFFFFFFF,
+            11,
+            52,
+        );
     }
 
     pub fn from_f32(v: f32) Float<E, F, FAMILY> {
         let vb = f32_bits(v) as u64;
-        return Float::<E, F, FAMILY>::from_parts(vb >> 31 != 0, (vb >> 23 & 0xFF) as i64, vb & 0x7FFFFF, 8, 23);
+        return Float::<E, F, FAMILY>::from_scalar_parts(vb >> 31 != 0, (vb >> 23 & 0xFF) as i64, vb & 0x7FFFFF, 8, 23);
     }
 
     /// Decode a built-in format's fields (fraction in one u64) and round into THIS format.
-    fn from_parts(negative: bool, ebits: i64, frac: u64, se: usize, sf: usize) Float<E, F, FAMILY> {
+    fn from_scalar_parts(negative: bool, ebits: i64, frac: u64, se: usize, sf: usize) Float<E, F, FAMILY> {
         let emax_src = (1i64 << se as i64) - 1;
         let bias_src = (1i64 << (se - 1) as i64) - 1;
         if ebits == emax_src {
@@ -942,18 +948,18 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     pub fn to_f64(self: &Float<E, F, FAMILY>) f64 {
-        let b = self.to_parts(11, 52);
+        let b = self.to_scalar_bits(11, 52);
         return f64_from_bits(b);
     }
 
     pub fn to_f32(self: &Float<E, F, FAMILY>) f32 {
-        let b = self.to_parts(8, 23);
+        let b = self.to_scalar_bits(8, 23);
         return f32_from_bits(b as u32);
     }
 
     /// Round THIS value into a built-in format's fields, packed as its raw bits in a u64. The target
     /// significand always fits one limb, so the rounding runs in plain u64 arithmetic.
-    fn to_parts(self: &Float<E, F, FAMILY>, de: usize, df: usize) u64 {
+    fn to_scalar_bits(self: &Float<E, F, FAMILY>, de: usize, df: usize) u64 {
         let sbit = if self.sign() {
             1u64 << (de + df) as u64;
         } else {
@@ -1021,6 +1027,419 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             ebits = (e + bias_dst) as u64;
         }
         return sbit | ebits << df as u64 | k2 & (1u64 << df as u64) - 1;
+    }
+}
+
+extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> {
+    // ---- integer rounding ----------------------------------------------------------------------
+    // Bit surgery on the encoding, so every result is EXACT: clearing fraction bits truncates, and
+    // the one-step corrections go through add/sub, which are exact on integers this small.
+
+    /// The integer part: rounds toward zero.
+    pub fn trunc(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.is_nan() || self.is_infinite() {
+            return *self;
+        }
+        let eb = self.exp_field();
+        let e = eb as i64 - Float::<E, F, FAMILY>::bias();
+        if eb == 0 || e < 0 {
+            if self.sign() {
+                return Float::<E, F, FAMILY>::neg_zero();
+            }
+            return Float::<E, F, FAMILY>::zero();
+        }
+        if e >= F as i64 {
+            return *self;
+        }
+        let drop = (F as i64 - e) as usize;
+        return Float::<E, F, FAMILY>::from_raw(self.to_raw().shr(drop).shl(drop));
+    }
+
+    /// The largest integer at or below the value.
+    pub fn floor(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        let t = self.trunc();
+        if self.sign() && !(t.to_raw() == self.to_raw()) {
+            let one = Float::<E, F, FAMILY>::one();
+            return t.sub(&one);
+        }
+        return t;
+    }
+
+    /// The smallest integer at or above the value.
+    pub fn ceil(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        let t = self.trunc();
+        if !self.sign() && !(t.to_raw() == self.to_raw()) {
+            let one = Float::<E, F, FAMILY>::one();
+            return t.add(&one);
+        }
+        return t;
+    }
+
+    // The half bit and what lies below it, for the two round flavors. Works from the NORMALIZED
+    // significand (decode_sig3 renormalizes subnormals), so a family whose subnormals reach past 0.5
+    // is read correctly too.
+    fn round_parts(self: &Float<E, F, FAMILY>, half: &mut bool, rest: &mut bool, odd: &mut bool) i64 {
+        let mut e: i64 = 0;
+        let sig = self.decode_sig3(&mut e).shr(3);
+        *half = false;
+        *rest = false;
+        *odd = false;
+        if e < 0 - 1 || e >= F as i64 {
+            return e;
+        }
+        if e == 0 - 1 {
+            *half = true; // the MSB is the half digit
+            let msb_only = UInt::<{F + 8}>::one().shl(sig.bit_length() - 1);
+            *rest = !(sig == msb_only); // any bit below the MSB
+            return e;
+        }
+        let hpos = (F as i64 - e - 1) as usize;
+        *half = sig.bit(hpos);
+        if hpos > 0 {
+            let below = sig.shr(hpos).shl(hpos);
+            *rest = !(below == sig);
+        }
+        *odd = sig.bit(hpos + 1);
+        return e;
+    }
+
+    /// Rounds to the nearest integer, halves AWAY from zero -- what C's round does.
+    pub fn round(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.is_nan() || self.is_infinite() || self.is_zero() {
+            return *self;
+        }
+        let mut half = false;
+        let mut rest = false;
+        let mut odd = false;
+        let e = self.round_parts(&mut half, &mut rest, &mut odd);
+        if e >= F as i64 {
+            return *self;
+        }
+        let t = self.trunc();
+        if !half {
+            return t;
+        }
+        let one = Float::<E, F, FAMILY>::one();
+        if self.sign() {
+            return t.sub(&one);
+        }
+        return t.add(&one);
+    }
+
+    /// Rounds to the nearest integer, halves to the EVEN neighbour -- the default IEEE rounding.
+    pub fn round_ties_even(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.is_nan() || self.is_infinite() || self.is_zero() {
+            return *self;
+        }
+        let mut half = false;
+        let mut rest = false;
+        let mut odd = false;
+        let e = self.round_parts(&mut half, &mut rest, &mut odd);
+        if e >= F as i64 {
+            return *self;
+        }
+        let t = self.trunc();
+        if !half || !rest && !odd {
+            return t;
+        }
+        let one = Float::<E, F, FAMILY>::one();
+        if self.sign() {
+            return t.sub(&one);
+        }
+        return t.add(&one);
+    }
+
+    /// The fractional part: self - trunc(self), exact, keeping the value's sign; NaN for infinities.
+    pub fn fract(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        let t = self.trunc();
+        return self.sub(&t);
+    }
+
+    // ---- selection -----------------------------------------------------------------------------
+
+    /// The smaller value, IGNORING a NaN operand (both NaN gives NaN); the negative zero counts as
+    /// smaller than the positive one, so the answer is deterministic everywhere.
+    pub fn min(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.is_nan() {
+            return *other;
+        }
+        if other.is_nan() {
+            return *self;
+        }
+        if self.ieee_lt(other) {
+            return *self;
+        }
+        if other.ieee_lt(self) {
+            return *other;
+        }
+        if self.sign() {
+            return *self; // equal incl the zeros: the negative-signed one is the minimum
+        }
+        return *other;
+    }
+
+    pub fn max(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.is_nan() {
+            return *other;
+        }
+        if other.is_nan() {
+            return *self;
+        }
+        if self.ieee_lt(other) {
+            return *other;
+        }
+        if other.ieee_lt(self) {
+            return *self;
+        }
+        if self.sign() {
+            return *other;
+        }
+        return *self;
+    }
+
+    /// Clamps into [lo, hi]. Panics when lo > hi or a bound is NaN -- the RANGE is the caller's
+    /// constant, so a broken one is a bug, not an input. A NaN VALUE passes through as NaN.
+    pub fn clamp(self: &Float<E, F, FAMILY>, lo: &Float<E, F, FAMILY>, hi: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if lo.is_nan() || hi.is_nan() || hi.ieee_lt(lo) {
+            panic("clamp requires an ordered, NaN-free range");
+        }
+        if self.is_nan() {
+            return *self;
+        }
+        if self.ieee_lt(lo) {
+            return *lo;
+        }
+        if hi.ieee_lt(self) {
+            return *hi;
+        }
+        return *self;
+    }
+
+    /// The value with `from`'s sign -- including onto NaN and zero, which negation alone cannot reach.
+    pub fn copysign(self: &Float<E, F, FAMILY>, from: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.sign() == from.sign() {
+            return *self;
+        }
+        return self.neg();
+    }
+
+    /// +-1 by the sign, so signum(-0) is -1 and signum(+0) is +1 (copysign's reading); NaN stays NaN.
+    pub fn signum(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.is_nan() {
+            return *self;
+        }
+        let one = Float::<E, F, FAMILY>::one();
+        return one.copysign(self);
+    }
+
+    // ---- neighbours ----------------------------------------------------------------------------
+
+    /// The next representable value toward +infinity. On the encoding this is one raw step: magnitude
+    /// up for a positive value, down for a negative one, and -0 steps to the smallest positive
+    /// subnormal. In the FINITE_ONLY family one past max_finite is the NaN slot, and NaN is what
+    /// comes back -- there IS nothing else past the top there.
+    pub fn next_up(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.is_nan() {
+            return *self;
+        }
+        if self.is_infinite() {
+            if !self.sign() {
+                return *self;
+            }
+            return Float::<E, F, FAMILY>::max_finite(true);
+        }
+        let one = UInt::<{1 + E + F}>::one();
+        let r = self.to_raw();
+        if self.sign() {
+            if self.is_zero() {
+                return Float::<E, F, FAMILY>::from_raw(one); // -0 -> the smallest positive
+            }
+            return Float::<E, F, FAMILY>::from_raw(r.wrapping_sub(&one));
+        }
+        return Float::<E, F, FAMILY>::from_raw(r.wrapping_add(&one));
+    }
+
+    pub fn next_down(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        return self.neg().next_up().neg();
+    }
+
+    /// The distance to the next representable magnitude: 2^(max(e, emin) - F). The smallest positive
+    /// subnormal for zero, infinity for infinity, NaN for NaN.
+    pub fn ulp(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.is_nan() {
+            return *self;
+        }
+        if self.is_infinite() {
+            return self.abs();
+        }
+        let one = UInt::<{1 + E + F}>::one();
+        if self.is_zero() {
+            return Float::<E, F, FAMILY>::from_raw(one);
+        }
+        let mut e: i64 = 0;
+        let _ = self.decode_sig3(&mut e);
+        if e < Float::<E, F, FAMILY>::emin() {
+            e = Float::<E, F, FAMILY>::emin();
+        }
+        let t = e - F as i64;
+        if t >= Float::<E, F, FAMILY>::emin() {
+            let z = UInt::<{1 + E + F}>::zero();
+            return Float::<E, F, FAMILY>::pack(false, (t + Float::<E, F, FAMILY>::bias()) as u64, &z);
+        }
+        // Below the normal range the spacing is one subnormal bit.
+        let pos = (t - (Float::<E, F, FAMILY>::emin() - F as i64)) as usize;
+        return Float::<E, F, FAMILY>::from_raw(one.shl(pos));
+    }
+
+    /// self * 2^n, correctly rounded (one round_pack): exponent arithmetic, no multiplication.
+    pub fn scalbn(self: &Float<E, F, FAMILY>, n: i64) Float<E, F, FAMILY> {
+        if self.is_nan() || self.is_infinite() || self.is_zero() {
+            return *self;
+        }
+        let mut nn = n;
+        if nn > 1000000 {
+            nn = 1000000;
+        }
+        if nn < 0 - 1000000 {
+            nn = 0 - 1000000;
+        }
+        let mut e: i64 = 0;
+        let sig = self.decode_sig3(&mut e);
+        return Float::<E, F, FAMILY>::round_pack(self.sign(), e + nn, sig);
+    }
+
+    // ---- the encoding's parts --------------------------------------------------------------------
+
+    /// Sign, biased exponent field, and stored fraction -- the raw fields, not the mathematical
+    /// significand (the implicit bit is not included).
+    pub fn to_parts(self: &Float<E, F, FAMILY>) (bool, u64, UInt<{1 + E + F}>) {
+        return self.sign(), self.exp_field(), self.frac_field();
+    }
+
+    /// The inverse of to_parts; the exponent and fraction are masked to their fields.
+    pub fn from_parts(negative: bool, ebits: u64, frac: &UInt<{1 + E + F}>) Float<E, F, FAMILY> {
+        let m = UInt::<{1 + E + F}>::max().shr(1 + E);
+        let f = frac.bit_and(&m);
+        return Float::<E, F, FAMILY>::pack(negative, ebits & Float::<E, F, FAMILY>::exp_field_max(), &f);
+    }
+
+    // ---- integers, directly ----------------------------------------------------------------------
+    // The wide integers convert WITHOUT an f64 stopover: the top F+4 bits ride into round_pack with a
+    // sticky bit, so the single rounding is the correct one at any width -- u128 -> f128 is exact
+    // where f64 in the middle would have rounded twice.
+
+    fn from_mag<const M: usize>(negative: bool, v: &UInt<M>) Float<E, F, FAMILY> {
+        if v.is_zero() {
+            return Float::<E, F, FAMILY>::zero();
+        }
+        let n = v.bit_length();
+        let mut sig = UInt::<{F + 8}>::zero();
+        if n <= F + 4 {
+            let mut i: usize = 0;
+            while i * 64 < n {
+                sig.set_limb(i, v.limb(i));
+                i = i + 1;
+            }
+            sig = sig.shl(F + 4 - n);
+        } else {
+            let sh = n - (F + 4);
+            let top = v.shr(sh);
+            let back = top.shl(sh);
+            let mut i: usize = 0;
+            while i * 64 < F + 5 {
+                sig.set_limb(i, top.limb(i));
+                i = i + 1;
+            }
+            if !(back == *v) {
+                let one = UInt::<{F + 8}>::one();
+                sig = sig.bit_or(&one); // sticky: the dropped bits still steer the rounding
+            }
+        }
+        return Float::<E, F, FAMILY>::round_pack(negative, (n - 1) as i64, sig);
+    }
+
+    pub fn from_uint<const M: usize>(v: &UInt<M>) Float<E, F, FAMILY> {
+        return Float::<E, F, FAMILY>::from_mag(false, v);
+    }
+
+    pub fn from_int<const M: usize>(v: &Int<M>) Float<E, F, FAMILY> {
+        if v.is_negative() {
+            let mag = v.wrapping_neg().to_unsigned(); // MIN wraps to itself: its unsigned reading IS the magnitude
+            return Float::<E, F, FAMILY>::from_mag(true, &mag);
+        }
+        let mag = v.to_unsigned();
+        return Float::<E, F, FAMILY>::from_mag(false, &mag);
+    }
+
+    /// The integer part, SATURATING like the built-in casts: NaN and everything below zero give
+    /// zero, values at or past 2^M give max(). An OUT parameter names the width -- `x.to_uint(&mut
+    /// r)` -- because a generic return position binds nothing at a call site.
+    pub fn to_uint<const M: usize>(self: &Float<E, F, FAMILY>, out: &mut UInt<M>) {
+        *out = UInt::<M>::zero();
+        Float::<E, F, FAMILY>::mag_into(self, out);
+    }
+
+    // The shared magnitude conversion. An OUT parameter rather than a generic return, because the
+    // width is inferred from an argument -- a return position binds nothing.
+    fn mag_into<const M: usize>(v: &Float<E, F, FAMILY>, out: &mut UInt<M>) {
+        if v.is_nan() || v.is_zero() || v.sign() {
+            return;
+        }
+        if v.is_infinite() {
+            *out = UInt::<M>::max();
+            return;
+        }
+        let mut e: i64 = 0;
+        let sig = v.decode_sig3(&mut e).shr(3);
+        if e < 0 {
+            return;
+        }
+        if e >= M as i64 {
+            *out = UInt::<M>::max();
+            return;
+        }
+        if e < F as i64 {
+            // Truncate in the wide significand FIRST: UInt<M> may be narrower than the significand.
+            let t = sig.shr((F as i64 - e) as usize);
+            let mut i: usize = 0;
+            while i * 64 < e as usize + 1 {
+                out.set_limb(i, t.limb(i));
+                i = i + 1;
+            }
+            return;
+        }
+        let mut r = UInt::<M>::zero();
+        let mut i: usize = 0;
+        while i * 64 < F + 1 {
+            r.set_limb(i, sig.limb(i));
+            i = i + 1;
+        }
+        *out = r.shl((e - F as i64) as usize);
+    }
+
+    /// The integer part, saturating at min()/max(); NaN gives zero.
+    pub fn to_int<const M: usize>(self: &Float<E, F, FAMILY>, out: &mut Int<M>) {
+        if self.is_nan() {
+            *out = Int::<M>::zero();
+            return;
+        }
+        let a = self.abs();
+        let mut mag = UInt::<M>::zero();
+        Float::<E, F, FAMILY>::mag_into(&a, &mut mag);
+        let lim = UInt::<M>::one().shl(M - 1);
+        if self.sign() {
+            if mag.cmp(&lim) >= 0 {
+                *out = Int::<M>::min();
+                return;
+            }
+            *out = Int::<M>::from_unsigned(&mag).wrapping_neg();
+            return;
+        }
+        if mag.cmp(&lim) >= 0 {
+            *out = Int::<M>::max();
+            return;
+        }
+        *out = Int::<M>::from_unsigned(&mag);
     }
 }
 
@@ -1240,6 +1659,59 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 }
 
+extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> as Rem {
+    type Output = Float<E, F, FAMILY>;
+
+    /// C's fmod: the remainder of truncating division, with the DIVIDEND's sign -- and EXACT, because
+    /// the remainder of two representable values always is; the shift-subtract runs on the integer
+    /// significands, one exponent step per iteration. NaN for a NaN operand, x % 0, and inf % y;
+    /// x % inf is x.
+    pub fn rem(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+        if self.is_nan() || other.is_nan() || self.is_infinite() || other.is_zero() {
+            return Float::<E, F, FAMILY>::nan();
+        }
+        if other.is_infinite() || self.is_zero() {
+            return *self;
+        }
+        let mut ex: i64 = 0;
+        let mut ey: i64 = 0;
+        let mut ux = self.decode_sig3(&mut ex).shr(3);
+        let uy = other.decode_sig3(&mut ey).shr(3);
+        if ex < ey {
+            return *self; // |x| < |y|: x is its own remainder
+        }
+        while ex > ey {
+            if ux.cmp(&uy) >= 0 {
+                ux = ux.wrapping_sub(&uy);
+            }
+            ux = ux.shl(1);
+            ex = ex - 1;
+        }
+        if ux.cmp(&uy) >= 0 {
+            ux = ux.wrapping_sub(&uy);
+        }
+        if ux.is_zero() {
+            if self.sign() {
+                return Float::<E, F, FAMILY>::neg_zero();
+            }
+            return Float::<E, F, FAMILY>::zero();
+        }
+        // Normalize the MSB back to F -- but no lower than emin, where the result is subnormal. A
+        // subnormal DIVISOR sits below emin already: then nothing may shift, and round_pack's own
+        // subnormal path finishes the (exact) encoding.
+        let mut sh = F + 1 - ux.bit_length();
+        let mut cap = ey - Float::<E, F, FAMILY>::emin();
+        if cap < 0 {
+            cap = 0;
+        }
+        if cap < sh as i64 {
+            sh = cap as usize;
+        }
+        ux = ux.shl(sh);
+        return Float::<E, F, FAMILY>::round_pack(self.sign(), ey - sh as i64, ux.shl(3));
+    }
+}
+
 extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> as Eq {
     pub fn eq(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) bool {
         return self.ieee_eq(other);
@@ -1258,6 +1730,17 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             return 1;
         }
         return 0;
+    }
+}
+
+extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> as Hash {
+    /// Consistent with Eq's IEEE equality where equality exists: +0 and -0 are equal and hash alike.
+    /// (NaN equals nothing, so its hash constrains nothing.)
+    pub fn hash(self: &Float<E, F, FAMILY>) u64 {
+        if self.is_zero() {
+            return UInt::<{1 + E + F}>::zero().hash();
+        }
+        return self.bits.hash();
     }
 }
 

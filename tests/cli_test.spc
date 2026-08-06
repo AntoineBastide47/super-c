@@ -6,6 +6,7 @@
 import tests::cli_harness as cli;
 import stdio;
 import module::loader as loader;
+import build_system::build as bsys;
 
 struct Cmd {
     pub b: [char; 2048],
@@ -492,12 +493,12 @@ fn dyn_fn_box_roundtrip() {
         "fn make_adder(k: i32) Box<dyn fn(i32) i32> {\n    return |x: i32| x + k;\n}\n\nfn main() i32 {\n    let f = make_adder(10);\n    return f(5) - 15;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", "#include \"__std/interfaces.h\""), "owned dyn pulls in the Global allocator header");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(lk.exit, 0); // the boxed closure env is freed -- no leak under the fatal gate
+    assert(lk.ok()); // the boxed closure env is freed -- no leak under the fatal gate
 }
 
 // The self-hosted leak tracker: super_rt.h interposes the emitted code's malloc/realloc/free call
@@ -4636,7 +4637,7 @@ fn bindgen_expressions_anonymous_types_and_globals() {
     assert(spc.as_str().contains("pub union lib_val"));
     assert(spc.as_str().contains("LIB_B = 8")); // an enumerator written as an expression
     assert(spc.as_str().contains("LIB_C = 9")); // and C's auto-increment continues from it
-    assert(spc.as_str().contains("pub const lib_counter: i32;")); // an exported global
+    assert(spc.as_str().contains("pub static mut lib_counter: i32;")); // an exported WRITABLE global
 
     p.mkfile(
         "main.spc",
@@ -4719,27 +4720,209 @@ fn vendor_clones_git_and_strips_the_repository() {
     );
     assert_eq(cli::run_quiet(gc.cstr()), 0);
     gc.free();
+    // tag the first state, then move the tip past it: --ref must be able to reach back
+    let mut gt = String::new();
+    gt.format_into("git -C \"{}/srcrepo\" tag v1", root);
+    assert_eq(cli::run_quiet(gt.cstr()), 0);
+    gt.free();
+    p.mkfile("srcrepo/lib.spc", "pub fn seven() i32 { return 8; }\n");
+    let mut g2 = String::new();
+    g2.format_into(
+        "git -C \"{}/srcrepo\" -c user.email=v@e -c user.name=v -c commit.gpgsign=false commit -q -am y",
+        root,
+    );
+    assert_eq(cli::run_quiet(g2.cstr()), 0);
+    g2.free();
     let mut gb = String::new();
     gb.format_into("git clone -q --bare \"{}/srcrepo\" \"{}/dep.git\"", root, root);
     assert_eq(cli::run_quiet(gb.cstr()), 0);
     gb.free();
+    // pinned to the tag: the vendored tree is the FIRST state, not the tip
     let mut args = String::new();
-    args.format_into("vendor \"{}/dep.git\" mylib --dir=\"{}\"", root, root);
+    args.format_into("vendor \"{}/dep.git\" mylib --ref=v1 --dir=\"{}\"", root, root);
     let r = p.run_raw(args.as_str());
     args.free();
     assert_eq(r.exit, 0);
     let mut lib = String::new();
     lib.format_into("{}/vendor/mylib/lib.spc", root);
-    assert(loader::read_file(lib.as_str()).is_some(), "the clone arrived under the given name");
-    lib.free();
+    switch loader::read_file(lib.as_str()) {
+        Some(mut t) => {
+            assert(cli::contains_str(t.cstr(), "return 7"), "--ref=v1 vendors the tagged state");
+            t.free();
+        },
+        None => {
+            assert(false, "the clone arrived under the given name");
+        },
+    };
     let mut head = String::new();
     head.format_into("{}/vendor/mylib/.git/HEAD", root);
     assert(loader::read_file(head.as_str()).is_none(), "no .git survives vendoring");
     head.free();
-    p.mkfile("main.spc", "import vendor::mylib::lib;\nfn main() i32 { return lib::seven() - 7; }\n");
+    // provenance: the stamp names the source and the exact commit the repository can no longer answer for
+    let mut st = String::new();
+    st.format_into("{}/vendor/mylib/.vendor", root);
+    switch loader::read_file(st.as_str()) {
+        Some(mut t) => {
+            assert(cli::contains_str(t.cstr(), "source = "), "the stamp names the source");
+            assert(cli::contains_str(t.cstr(), "commit = "), "and the commit");
+            t.free();
+        },
+        None => {
+            assert(false, "a git vendor writes a .vendor stamp");
+        },
+    };
+    st.free();
+    // --force re-vendors in place; without a ref that lands the tip, proving the replace really happened
+    let mut fargs = String::new();
+    fargs.format_into("vendor \"{}/dep.git\" mylib --force --dir=\"{}\"", root, root);
+    assert_eq(p.run_raw(fargs.as_str()).exit, 0);
+    fargs.free();
+    switch loader::read_file(lib.as_str()) {
+        Some(mut t) => {
+            assert(cli::contains_str(t.cstr(), "return 8"), "--force replaced the pinned state with the tip");
+            t.free();
+        },
+        None => {
+            assert(false, "the re-vendor arrived");
+        },
+    };
+    lib.free();
+    // a ref the repository does not have is an error, and leaves nothing behind
+    let mut bargs = String::new();
+    bargs.format_into("vendor \"{}/dep.git\" other --ref=nope --dir=\"{}\"", root, root);
+    assert(p.run_raw(bargs.as_str()).exit != 0);
+    bargs.free();
+    let mut op = String::new();
+    op.format_into("{}/vendor/other/lib.spc", root);
+    assert(loader::read_file(op.as_str()).is_none(), "a failed ref checkout is cleaned up");
+    op.free();
+    p.mkfile("main.spc", "import vendor::mylib::lib;\nfn main() i32 { return lib::seven() - 8; }\n");
     let c = p.compile("main.spc");
     assert_eq(c.exit, 0);
     let cc = p.cc_build("");
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
+}
+
+// A writable C global: `static mut` inside an extern block DECLARES what the C side defines. The
+// access carries static mut's unsafe rule across the FFI, codegen emits no definition and no mangled
+// name -- the emitted C reads and writes the library's own symbol.
+@test
+fn extern_static_mut_binds_a_writable_global() {
+    let p = cli::proj_new();
+    p.mkfile("g.h", "extern int counter;\n");
+    p.mkfile("g.c", "#include \"g.h\"\nint counter = 1;\n");
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"g.h\" {\n    pub static mut counter: i32;\n}\nfn main() i32 {\n    unsafe {\n        counter = counter + 41;\n    }\n    return unsafe counter - 42;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert_eq(r.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+    // the write is guarded exactly like any static mut
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"g.h\" {\n    pub static mut counter: i32;\n}\nfn main() i32 {\n    counter = 5;\n    return 0;\n}\n",
+    );
+    p.expect_fail("main.spc", "requires an 'unsafe' block");
+    // and the C side owns the storage: an initializer here is refused
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"g.h\" {\n    pub static mut counter: i32 = 3;\n}\nfn main() i32 { return 0; }\n",
+    );
+    p.expect_fail("main.spc", "the C side defines it");
+}
+
+// bindgen binds globals by what C itself declares -- writable ones as `static mut`, const-qualified
+// ones as `const` -- and --cflag reaches the preprocessor, so a feature-gated declaration appears
+// exactly when the flag says so. The generated module is then used end to end: the .c sibling of the
+// backing header supplies the definitions, and the program mutates the bound global through it.
+@test
+fn bindgen_globals_and_cflag() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.h",
+        "extern int counter;\nextern const int limit;\n#ifdef FEATURE_ON\nint gated_fn(int x);\n#endif\nint bump(int by);\n",
+    );
+    p.mkfile(
+        "lib.c",
+        "#include \"lib.h\"\nint counter = 2;\nconst int limit = 40;\nint bump(int by) { counter += by; return counter; }\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
+    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    args.free();
+    let mut gp = String::new();
+    gp.format_into("{}/lib.spc", root);
+    switch loader::read_file(gp.as_str()) {
+        Some(mut t) => {
+            assert(cli::contains_str(t.cstr(), "pub static mut counter: i32;"), "a writable global binds as static mut");
+            assert(cli::contains_str(t.cstr(), "pub const limit: i32;"), "a const-qualified one stays const");
+            assert(!cli::contains_str(t.cstr(), "gated_fn"), "the gated declaration is absent without the flag");
+            t.free();
+        },
+        None => {
+            assert(false, "bindgen wrote the module");
+        },
+    };
+    // --cflag reaches the preprocessor: the gate opens
+    let mut args2 = String::new();
+    args2.format_into("bindgen \"{}/lib.h\" --header=lib.h --cflag=-DFEATURE_ON -o \"{}/lib.spc\"", root, root);
+    assert_eq(p.run_raw(args2.as_str()).exit, 0);
+    args2.free();
+    switch loader::read_file(gp.as_str()) {
+        Some(mut t) => {
+            assert(cli::contains_str(t.cstr(), "pub fn gated_fn(x: i32) i32;"), "--cflag turned the declaration on");
+            t.free();
+        },
+        None => {
+            assert(false, "bindgen wrote the module again");
+        },
+    };
+    gp.free();
+    // the generated module works: read the const, mutate the global directly and through the library
+    p.mkfile(
+        "main.spc",
+        "import lib;\nfn main() i32 {\n    unsafe {\n        lib::counter = lib::counter + 1;\n    }\n    let n = unsafe lib::bump(2);\n    return n + lib::limit - 45;\n}\n",
+    );
+    let c = p.compile("main.spc");
+    assert_eq(c.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}
+
+// The machine-global object cache: content-addressed on (compiler version, flags, TU text, quoted
+// include closure), so a from-scratch build of already-seen units copies objects instead of running
+// the C compiler. The poisoning step is what PROVES the hits: junk in the cache must break a fresh
+// build, SC_NO_CACHE must ignore it, and a wiped cache must repopulate.
+@test
+fn global_object_cache_round_trip() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    println(\"cache\");\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    let mut cache = String::new();
+    cache.format_into("{}/ocache", root);
+    let mut bdir = String::new();
+    bdir.format_into("{}/build", root);
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok());
+    assert(cli::dir_count_suffix(cache.as_str(), ".o") > 0, "a build installs its objects");
+    bsys::rm_rf(bdir.as_str());
+    assert(cli::dir_corrupt_suffix(cache.as_str(), ".o") > 0);
+    assert(
+        cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").exit != 0,
+        "a fresh build links the cached objects, so junk there must break it",
+    );
+    bsys::rm_rf(bdir.as_str());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "opting out never touches the cache");
+    bsys::rm_rf(bdir.as_str());
+    bsys::rm_rf(cache.as_str());
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok());
+    assert(cli::dir_count_suffix(cache.as_str(), ".o") > 0, "a wiped cache repopulates");
+    cache.free();
+    bdir.free();
 }

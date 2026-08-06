@@ -231,3 +231,14 @@ fn golden_lifetimes() {
     // a lifetime-parameterised associated type (GAT)
     expect_fmt("interface Lend{type Item<'a>;}", "interface Lend {\n    type Item<'a>;\n}\n");
 }
+
+// A `mut` binding inside a pattern is semantics, not style: the printer works from the pattern's
+// span, and a span that started at the identifier silently REWROTE `Some(mut x)` to `Some(x)` --
+// formatting then changed what the program means.
+@test
+fn golden_pattern_mut_binding() {
+    expect_fmt(
+        "fn f(o: i32) i32 { switch o { 1 => { return 1; }, _ => { return 0; }, }; }\nenum O { N, S(i32), }\nfn g(o: O) i32 { return switch o { S(mut x) => { x = x + 1; x; }, N => { 0; }, }; }",
+        "fn f(o: i32) i32 {\n    switch o {\n        1 => {\n            return 1;\n        },\n        _ => {\n            return 0;\n        },\n    };\n}\nenum O {\n    N,\n    S(i32),\n}\nfn g(o: O) i32 {\n    return switch o {\n        S(mut x) => {\n            x = x + 1;\n            x;\n        },\n        N => {\n            0;\n        },\n    };\n}\n",
+    );
+}

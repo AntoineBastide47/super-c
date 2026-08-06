@@ -309,6 +309,8 @@ pub struct TypeChecker<'a> {
     pub ph_t4: loader::LookupHit,
     pub ph_option: loader::LookupHit,
     pub ph_result: loader::LookupHit,
+    pub ph_uint: loader::LookupHit, // the prelude's UInt/Int: what admits a wide integer literal
+    pub ph_int: loader::LookupHit,
 }
 
 // Takes the package pointer as usize: a *mut Package value is move-tracked (Package is Free).
@@ -544,6 +546,8 @@ extend TypeChecker {
             ph_t4: ph_lookup(pkg, "Tuple4"),
             ph_option: ph_lookup(pkg, "Option"),
             ph_result: ph_lookup(pkg, "Result"),
+            ph_uint: ph_lookup(pkg, "UInt"),
+            ph_int: ph_lookup(pkg, "Int"),
         };
     }
 
@@ -1412,7 +1416,17 @@ pub fn render_type_into(
     buf: *mut char,
     cap: usize,
 ) {
+    if tid == TYPE_NONE {
+        // No type was ever assigned: there is nothing IN the value to render. Instance arguments
+        // recover the parameter's NAME from their declaration below; a bare hole has no declaration.
+        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "_".ptr() as *const char);
+        return;
+    }
     let ty = *a.type_at(tid);
+    if ty.kind == TypeKind::TYPE_ERROR {
+        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "_".ptr() as *const char);
+        return;
+    }
     if ty.kind == TypeKind::TYPE_BUILTIN {
         unsafe stdio::snprintf(
             buf,
@@ -1484,7 +1498,27 @@ pub fn render_type_into(
         let mut i: u8 = 0;
         while i < it.n && at < cap {
             let mut argb = Buf96 {};
-            render_type_into(pkg, a, cur_src, unsafe it.args[i as usize], &mut argb[0], 64);
+            let ai = unsafe it.args[i as usize];
+            if ai == TYPE_NONE || a.type_at(ai).kind == TypeKind::TYPE_ERROR {
+                // An argument inference never filled: name the declaration's own parameter --
+                // `UInt<BITS>` says WHAT is undetermined, where `UInt<?>` said nothing.
+                let gens = ma.at_const(it.decl).as_data.aggregate.generics;
+                if i as u32 < gens.len {
+                    let gid = unsafe ma.list(gens)[i as usize];
+                    let gn = ma.at_const(ma.at_const(gid).as_data.generic_param.name).as_data.name.text;
+                    unsafe stdio::snprintf(
+                        &mut argb[0],
+                        96,
+                        "%.*s".ptr() as *const char,
+                        (gn.end - gn.start) as i32,
+                        src_at(rt_src(pkg, a, cur_src, it.module), gn.start),
+                    );
+                } else {
+                    unsafe stdio::snprintf(&mut argb[0], 96, "%s".ptr() as *const char, "?".ptr() as *const char);
+                }
+            } else {
+                render_type_into(pkg, a, cur_src, ai, &mut argb[0], 64);
+            }
             let mut sep = "".ptr() as *const char;
             if i != 0 {
                 sep = ", ".ptr() as *const char;
@@ -1529,6 +1563,10 @@ pub fn render_type_into(
                 sfx,
             );
         }
+    } else if ty.kind == TypeKind::TYPE_CONST {
+        // A concrete const argument prints its VALUE: `UInt<64>`, not `UInt<?>` -- the number is the
+        // whole point of the diagnostic.
+        unsafe stdio::snprintf(buf, cap, "%lld".ptr() as *const char, ty.as_data.value);
     } else if ty.kind == TypeKind::TYPE_CONST_EXPR {
         // Printed from the canonical form rather than as written: two of these failing to match is the
         // one diagnostic this type produces, and the forms are what actually differ.
@@ -1574,6 +1612,9 @@ pub fn render_type_into(
         }
         if l.k != 0 && at < cap {
             at = at + (unsafe stdio::snprintf(buf + at, cap - at, " + %lld".ptr() as *const char, l.k)) as usize;
+        }
+        if lin_div_of(l) != 1 && at < cap {
+            at = at + (unsafe stdio::snprintf(buf + at, cap - at, " / %lld".ptr() as *const char, lin_div_of(l))) as usize;
         }
         if at + 1 < cap {
             unsafe buf[at] = '}' as char;
@@ -1688,6 +1729,21 @@ extend TypeChecker {
     /// what makes `{(N * 2) * 2}` and `{N * 4}` the same width -- comparing the expressions as written
     /// says they differ, and they do not. Linear is exactly the closed set here: `+`, `-`, and scaling by
     /// a constant stay inside it, and `N * N` does not, which is refused rather than approximated.
+    // The inexact case: keep the divisor ON the form -- `{(BITS + 7) / 8}` stays floor((BITS+7)/8)
+    // until a substitution makes it a number. Installed only onto an empty accumulator, because the
+    // divisor covers the whole form.
+    fn tc_lin_floor(self: &Self, lhs: &ConstLin, d: i64, out: &mut ConstLin) bool {
+        if d <= 1 || lin_div_of(lhs) != 1 {
+            return false;
+        }
+        if out.k != 0 || out.n != 0 || lin_div_of(out) != 1 {
+            return false;
+        }
+        *out = *lhs;
+        out.div = d;
+        return true;
+    }
+
     fn tc_lin(
         self: &mut Self,
         m: ModuleId,
@@ -1726,6 +1782,18 @@ extend TypeChecker {
                         // `dbl(dbl(x))` into one width rather than leaving two nested ones.
                         let mut inner = ConstLin { k: 0, n: 0 };
                         if !self.tc_lin_subst(by.as_data.inst, params, args, n, &mut inner, depth + 1) {
+                            return false;
+                        }
+                        if lin_is_concrete(&inner) {
+                            out.k = out.k + lin_value(&inner);
+                            return true;
+                        }
+                        if lin_div_of(&inner) != 1 {
+                            // Whole or not at all: the divisor covers the entire form.
+                            if out.k == 0 && out.n == 0 && lin_div_of(out) == 1 {
+                                *out = inner;
+                                return true;
+                            }
                             return false;
                         }
                         return lin_scale(&inner, 1, out);
@@ -1790,10 +1858,16 @@ extend TypeChecker {
                 return lin_scale(&lhs, 1i64 << rhs.k, out);
             }
             if op == TokenType::Slash && rhs.n == 0 && rhs.k != 0 {
-                return lin_divide(&lhs, rhs.k, out);
+                if lin_divide(&lhs, rhs.k, out) {
+                    return true;
+                }
+                return self.tc_lin_floor(&lhs, rhs.k, out);
             }
             if op == TokenType::RightShift && rhs.n == 0 && rhs.k >= 0 && rhs.k < 32 {
-                return lin_divide(&lhs, 1i64 << rhs.k, out);
+                if lin_divide(&lhs, 1i64 << rhs.k, out) {
+                    return true;
+                }
+                return self.tc_lin_floor(&lhs, 1i64 << rhs.k, out);
             }
             return false;
         }
@@ -1941,7 +2015,7 @@ extend TypeChecker {
         // have to be solved for P, which this does not attempt.
         if p.kind == TypeKind::TYPE_CONST_EXPR {
             let l = *self.cur_ast().const_lin_at(p.as_data.inst);
-            if l.k == 0 && l.n == 1 && l.c[0] == 1 {
+            if l.k == 0 && l.n == 1 && l.c[0] == 1 && lin_div_of(&l) == 1 {
                 for i in 0..n {
                     if unsafe params[i as usize].module == l.p[0].module && unsafe params[i as usize].node == l.p[0].node {
                         if unsafe bound[i as usize] == TYPE_NONE {
@@ -6924,6 +6998,9 @@ const fn arith_method_name(op: TokenType) str<'static> {
 // Only when every part divides exactly: `{(N * 4) / 2}` is `{N * 2}`, and `{N / 2}` is not an integer
 // form of anything this can compare.
 fn lin_divide(src: &ConstLin, d: i64, out: &mut ConstLin) bool {
+    if lin_div_of(src) != 1 {
+        return false; // dividing a divided form would stack floors; nothing writes that
+    }
     if d == 0 || src.k % d != 0 {
         return false;
     }
@@ -6941,11 +7018,28 @@ fn lin_divide(src: &ConstLin, d: i64, out: &mut ConstLin) bool {
 }
 
 extend TypeChecker {
-    fn check_unary(self: &mut Self, id: NodeId) TypeId {
+    fn check_unary(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         let a = self.cur_ast();
         let op = a.at_const(id).as_data.unary.op;
         let operand = a.at_const(id).as_data.unary.operand;
         let qual = a.at_const(id).as_data.unary.qualifier;
+        // A negative literal past i64, where the context expects Int<N>: the sign belongs to the
+        // literal, so the pair becomes one wide value here -- checking the operand alone would only
+        // reject it.
+        if op == TokenType::Minus && a.at_const(operand).kind == NodeKind::NODE_LITERAL && a.at_const(operand).as_data.literal.token_type == TokenType::IntegerLiteral {
+            if self.tc_wide_literal(operand, id, true, expected) {
+                return self.cur_ast().type_of(id);
+            }
+            let lr = a.at_const(operand).as_data.literal.raw;
+            let mut ws: u32 = 0;
+            let wt = self.tc_lit_wide_suffix(lr, &mut ws);
+            if wt != TYPE_NONE {
+                let mut wb: i64 = 0;
+                if self.tc_wide_target(wt, &mut wb) == 2 && self.tc_wide_literal_at(operand, id, true, wt, ws, true) {
+                    return self.cur_ast().type_of(id);
+                }
+            }
+        }
         if op == TokenType::Ampersand {
             self.addr_ctx = true;
         }
@@ -7431,6 +7525,16 @@ extend TypeChecker {
         let rn = bd.right;
         let op = bd.op;
         let l = self.check_expr(ln);
+        // A wide-integer operand: the left side's UInt<N>/Int<N> is what an integer literal on the
+        // right means, exactly as the operators' Rhs = Self default reads. Without this the literal
+        // is checked contextless and a >64-bit one has nowhere to go.
+        let rk = a.at_const(rn).kind;
+        if (rk == NodeKind::NODE_LITERAL || rk == NodeKind::NODE_UNARY) && op != TokenType::AmpersandAmpersand && op != TokenType::PipePipe {
+            let mut wbits: i64 = 0;
+            if self.tc_wide_target(l, &mut wbits) != 0 {
+                self.expected = l;
+            }
+        }
         let r = self.check_expr(rn);
         let sp = a.at_const(id).span;
         if op == TokenType::Plus || op == TokenType::Minus {
@@ -10371,7 +10475,7 @@ extend TypeChecker {
         let mut result = TYPE_NONE;
         switch nk {
             NODE_LITERAL => {
-                result = self.check_literal(id);
+                result = self.check_literal(id, expected);
             },
             NODE_IDENTIFIER => {
                 let d = a.resolution_def(id);
@@ -10382,7 +10486,7 @@ extend TypeChecker {
                 self.tc_static_mut_use(id, d);
             },
             NODE_UNARY => {
-                result = self.check_unary(id);
+                result = self.check_unary(id, expected);
             },
             NODE_BINARY => {
                 result = self.check_binary(id);
@@ -10676,7 +10780,268 @@ extend TypeChecker {
         return result;
     }
 
-    fn check_literal(self: &mut Self, id: NodeId) TypeId {
+    // The expected type as a wide-integer target: 1 = UInt<bits>, 2 = Int<bits>, 0 = neither.
+    fn tc_wide_target(self: &Self, t: TypeId, bits: &mut i64) i32 {
+        let mut arg = TYPE_NONE;
+        let mut kind = 0;
+        if self.prelude_instance_args_hit(t, self.ph_uint, &mut arg, 1) == 1 {
+            kind = 1;
+        } else if self.prelude_instance_args_hit(t, self.ph_int, &mut arg, 1) == 1 {
+            kind = 2;
+        }
+        if kind == 0 || arg == TYPE_NONE {
+            return 0;
+        }
+        let ay = *self.type_at(arg);
+        if ay.kind != TypeKind::TYPE_CONST || ay.as_data.value < 1 || ay.as_data.value > 1024 {
+            return 0; // symbolic width: nothing to validate the digits against
+        }
+        *bits = ay.as_data.value;
+        return kind;
+    }
+
+    /// A literal too wide for 64 bits (or a negative one past i64), where the context expects the
+    /// prelude's UInt<N>/Int<N>: the digits are parsed here, validated against N, stored as the
+    /// STORAGE's limbs (two's-complemented for a negative), and the node typed as the target --
+    /// codegen then emits the limbs directly. Everything 64-bit-sized keeps the From conversions.
+    /// A literal's `[iu]<width>` suffix as the prelude type it names -- `5i128` is Int<128>, `7u100`
+    /// is UInt<100> -- or TYPE_NONE when the literal carries none. The builtin suffixes never reach
+    /// here: ast_numeric_suffix takes them first.
+    fn tc_lit_wide_suffix(self: &mut Self, lr: tok::Span, sfx: &mut u32) TypeId {
+        let src = self.source;
+        let mut bsf = lr.end;
+        if ast_numeric_suffix(src, lr.start, lr.end, &mut bsf) != BuiltinType::BT_COUNT {
+            return TYPE_NONE; // a BUILTIN suffix (`1i64`): never a library width
+        }
+        let mut i = lr.end;
+        while i > lr.start && src[(i - 1) as usize] >= b'0' && src[(i - 1) as usize] <= b'9' {
+            i = i - 1;
+        }
+        if i == lr.end || i <= lr.start + 1 {
+            return TYPE_NONE;
+        }
+        let c = src[(i - 1) as usize];
+        if c != b'i' && c != b'u' {
+            return TYPE_NONE;
+        }
+        let mut w: i64 = 0;
+        let mut j = i;
+        while j < lr.end {
+            w = w * 10 + (src[j as usize] - b'0') as i64;
+            if w > 100000 {
+                return TYPE_NONE;
+            }
+            j = j + 1;
+        }
+        if w < 1 || w > 1024 {
+            return TYPE_NONE;
+        }
+        let hit = if c == b'i' {
+            self.ph_int;
+        } else {
+            self.ph_uint;
+        };
+        if hit.node == NODE_NONE {
+            return TYPE_NONE;
+        }
+        *sfx = i - 1;
+        let arg = self.cur_ast().const_value(w);
+        return self.cur_ast().intern_instance(hit.mid, hit.node, &arg, 1);
+    }
+
+    fn tc_wide_literal(self: &mut Self, lit: NodeId, outer: NodeId, neg: bool, expected: TypeId) bool {
+        return self.tc_wide_literal_at(lit, outer, neg, expected, 0, false);
+    }
+
+    fn tc_wide_literal_at(
+        self: &mut Self,
+        lit: NodeId,
+        outer: NodeId,
+        neg: bool,
+        expected: TypeId,
+        sfx_at: u32,
+        forced: bool,
+    ) bool {
+        let mut bits: i64 = 0;
+        let kind = self.tc_wide_target(expected, &mut bits);
+        if kind == 0 {
+            return false;
+        }
+        if neg && kind == 1 {
+            return false; // a negative literal cannot be unsigned; the ordinary diagnostic says so
+        }
+        let a = self.cur_ast();
+        let lr = a.at_const(lit).as_data.literal.raw;
+        let mut sfx = lr.end;
+        if sfx_at != 0 {
+            sfx = sfx_at; // a `[iu]<width>` suffix: the caller resolved it, the digits end here
+        } else {
+            let sb = ast_numeric_suffix(self.source, lr.start, lr.end, &mut sfx);
+            if sb != BuiltinType::BT_COUNT {
+                return false; // a suffix names a BUILTIN type; it cannot also mean UInt<N>
+            }
+        }
+        let mut p = unsafe (self.source.ptr() + lr.start as usize);
+        let mut len = (sfx - lr.start) as usize;
+        let (base, skip) = lit_base_prefix(p, len);
+        p = unsafe (p + skip);
+        len = len - skip;
+        let mut limbs: [u64; 16] = [
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+        ];
+        let mut nl: usize = 1; // live limbs; grows as carries land
+        let mut i: usize = 0;
+        let sp = a.at_const(outer).span;
+        while i < len {
+            let ch = unsafe p[i];
+            i = i + 1;
+            if ch == b'_' {
+                continue;
+            }
+            let d: u64 = if ch <= b'9' {
+                ch - b'0';
+            } else {
+                (ch | 0x20u8) - b'a' + 10u8;
+            };
+            // limbs = limbs * base + d, multi-precision: each limb splits so the partials stay in 64 bits.
+            let mut carry = d;
+            for j in 0..nl {
+                let v = unsafe limbs[j];
+                let lo = (v & 0xFFFFFFFFu64) * base + carry;
+                let hi = (v >> 32) * base + (lo >> 32);
+                unsafe limbs[j] = lo & 0xFFFFFFFFu64 | hi << 32;
+                carry = hi >> 32;
+            }
+            if carry != 0 {
+                if nl == 16 {
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format("integer literal is too large: 1024 bits is the widest a literal reaches"),
+                    );
+                    return true; // consumed: the diagnostic here beats the 64-bit one
+                }
+                unsafe limbs[nl] = carry;
+                nl = nl + 1;
+            }
+        }
+        // The magnitude's highest set bit, for the range check.
+        let mut top: i64 = 0 - 1;
+        let mut j = 16;
+        while j > 0 {
+            j = j - 1;
+            let v = unsafe limbs[j];
+            if v != 0 && top < 0 {
+                let mut b2: i64 = 63;
+                while b2 >= 0 {
+                    if (v >> b2 as u64 & 1u64) != 0 {
+                        top = j as i64 * 64 + b2;
+                        b2 = 0 - 1;
+                    } else {
+                        b2 = b2 - 1;
+                    }
+                }
+            }
+        }
+        // 64-bit-sized values keep the From conversions (they fold; this table is for the rest) --
+        // except under a width SUFFIX, where the literal IS the type and always encodes directly.
+        if !forced {
+            if kind == 1 && top < 64 {
+                return false;
+            }
+            if kind == 2 && !neg && top < 63 {
+                return false;
+            }
+            let l0 = limbs[0];
+            if kind == 2 && neg && (top < 63 || top == 63 && l0 == 0x8000000000000000u64) {
+                return false;
+            }
+        }
+        let limit = if kind == 1 {
+            bits; // unsigned: the value needs at most `bits` bits
+        } else if neg {
+            bits; // -2^(bits-1) is in range: its magnitude has bit (bits-1) set and nothing above
+        } else {
+            bits - 1; // positive signed: at most bits-1
+        };
+        let in_range = if kind == 2 && neg {
+            // magnitude <= 2^(bits-1): top bit at most bits-1, and if AT bits-1, nothing below it
+            let mut ok = top < bits;
+            if ok && top == bits - 1 {
+                for j2 in 0..16 {
+                    let v = unsafe limbs[j2];
+                    let expect: u64 = if j2 as i64 == (bits - 1) / 64 {
+                        1u64 << ((bits - 1) % 64) as u64;
+                    } else if j2 as i64 < (bits - 1) / 64 {
+                        0u64;
+                    } else {
+                        0u64;
+                    };
+                    if j2 as i64 <= (bits - 1) / 64 && v != expect {
+                        ok = false;
+                    }
+                }
+            }
+            ok;
+        } else {
+            top < limit;
+        };
+        if !in_range {
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("integer literal does not fit the expected type's {} bits", bits),
+            );
+            return true;
+        }
+        if neg {
+            // Two's complement at the width: invert, add one, mask the partial top limb.
+            let mut carry: u64 = 1;
+            for j2 in 0..16 {
+                let v = ~unsafe limbs[j2];
+                let sum = v + carry;
+                carry = if sum < v {
+                    1u64;
+                } else {
+                    0u64;
+                };
+                unsafe limbs[j2] = sum;
+            }
+        }
+        // Bits past the width do not exist: mask the top limb, zero everything above (the negative
+        // fill reaches all 16 limbs otherwise).
+        let nlimbs = ((bits + 63) / 64) as usize;
+        for j2 in 0usize..16 {
+            if j2 >= nlimbs {
+                unsafe limbs[j2] = 0;
+            } else if j2 + 1 == nlimbs && bits % 64 != 0 {
+                unsafe limbs[j2] = unsafe limbs[j2] & (1u64 << (bits % 64) as u64) - 1;
+            }
+        }
+        unsafe self.cur_ast().wide_lits.push(WideLit { node: outer, ty: expected, limbs: limbs });
+        self.cur_ast().set_type(outer, expected);
+        if outer != lit {
+            self.cur_ast().set_type(lit, expected);
+        }
+        return true;
+    }
+
+    fn check_literal(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         let a = self.cur_ast();
         let tt = a.at_const(id).as_data.literal.token_type;
         let lr = a.at_const(id).as_data.literal.raw;
@@ -10686,6 +11051,33 @@ extend TypeChecker {
             let mut result = Ast::builtin(BuiltinType::BT_I32);
             if sb != BuiltinType::BT_COUNT {
                 result = Ast::builtin(sb);
+            }
+            if sb == BuiltinType::BT_COUNT {
+                // `5i128`, `0xFFu256`: a library-width suffix IS the type; the digits encode directly.
+                let mut ws: u32 = 0;
+                let wt = self.tc_lit_wide_suffix(lr, &mut ws);
+                if wt != TYPE_NONE {
+                    if self.tc_wide_literal_at(id, id, false, wt, ws, true) {
+                        return self.cur_ast().type_of(id);
+                    }
+                    return wt; // the range diagnostic already fired; the type still stands
+                }
+                // The lexer admits any `[iu]<digits>` tail; one that named no type must stop HERE,
+                // not surface as broken C.
+                let mut k = lr.end;
+                let src2 = self.source;
+                while k > lr.start && src2[(k - 1) as usize] >= b'0' && src2[(k - 1) as usize] <= b'9' {
+                    k = k - 1;
+                }
+                if k > lr.start && k < lr.end && (src2[(k - 1) as usize] == b'i' || src2[(k - 1) as usize] == b'u') && k - 1 > lr.start {
+                    let sp2 = a.at_const(id).span;
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format("no integer type is this literal's suffix: widths run from 1 to 1024"),
+                    );
+                    return result;
+                }
             }
             let mut p = unsafe (self.source.ptr() + lr.start as usize);
             let mut len = (sfx - lr.start) as usize;
@@ -10715,6 +11107,13 @@ extend TypeChecker {
                 i = i + 1;
             }
             let sp = a.at_const(id).span;
+            if overflow || sb == BuiltinType::BT_COUNT && acc > 0x7FFFFFFFFFFFFFFFu64 {
+                // Wider than a 64-bit carrier (or past i64 with a signed wide expectation): where the
+                // context expects UInt<N>/Int<N>, the literal becomes that value directly.
+                if self.tc_wide_literal(id, id, false, expected) {
+                    return self.cur_ast().type_of(id);
+                }
+            }
             if overflow {
                 self.errors.emit(
                     sp.start,

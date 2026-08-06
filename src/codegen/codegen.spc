@@ -1786,6 +1786,10 @@ extend Codegen {
                 }
                 v = v + self.type_at(b).as_data.value * c;
             }
+            if lin_div_of(&l) != 1 {
+                let folded = ConstLin { k: v, n: 0, div: l.div };
+                v = lin_value(&folded);
+            }
             return self.cur_ast().const_value(v);
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
@@ -10962,7 +10966,42 @@ extend Codegen {
         return tn != NODE_NONE && a.at_const(tn).kind == NodeKind::NODE_REFERENCE_TYPE;
     }
 
+    // A wide integer literal: the typechecker validated the digits and left the STORED limbs; what
+    // remains is the storage's own compound literal, trailing zero limbs elided (C fills them).
+    fn emit_wide_lit(self: &mut Self, wi: i64) {
+        let w = *unsafe self.cur_ast().wide_lits.at(wi as usize);
+        let mut tn = Buf256 {};
+        self.render_type_id(w.ty, "".ptr() as *const char, &mut tn[0], 256);
+        self.emit_str("((");
+        self.emit_cstr(&tn[0]);
+        self.emit_str("){ .bits = { .limbs = { ");
+        let mut last: usize = 0;
+        for i in 0usize..16 {
+            if unsafe w.limbs[i] != 0 {
+                last = i;
+            }
+        }
+        for i in 0usize..last + 1 {
+            if i != 0 {
+                self.emit_str(", ");
+            }
+            let mut b = Buf160 {};
+            unsafe stdio::snprintf(&mut b[0], 160, "0x%llxULL".ptr() as *const char, unsafe w.limbs[i]);
+            self.emit_cstr(&b[0]);
+        }
+        self.emit_str(" } } })");
+    }
+
     fn emit_expr(self: &mut Self, id: NodeId) {
+        if id != NODE_NONE {
+            // Before the coercion wrapper: a wide literal already IS the target type, so a From
+            // conversion the operator machinery recorded around the plain literal must not apply.
+            let wl = self.cur_ast().wide_lit_of(id);
+            if wl >= 0 {
+                self.emit_wide_lit(wl);
+                return;
+            }
+        }
         if self.emit_coerced(id) {
             return;
         }
@@ -15473,6 +15512,9 @@ extend Codegen {
         let mut decl = Buf256 {};
         self.render_type_node(cd.ty, &nm[0], &mut decl[0], 256);
         if cd.is_static_mut {
+            if cd.is_extern {
+                return; // an extern static: the C side defines the storage, the header declares it
+            }
             if !cd.is_public {
                 self.emit_str("static ");
             }
@@ -15567,6 +15609,9 @@ extend Codegen {
                 continue;
             }
             if cd.is_static_mut {
+                if cd.is_extern {
+                    continue; // declared by the backing C header, under its own unmangled name
+                }
                 let mut nm = Buf160 {};
                 self.render_qualified(self.cur_module(), cd.name, &mut nm[0], 160);
                 let mut decl = Buf256 {};

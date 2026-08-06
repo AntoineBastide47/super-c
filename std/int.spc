@@ -697,6 +697,105 @@ extend<const BITS: usize> UInt<BITS> {
         return n;
     }
 
+    pub fn count_zeros(self: &UInt<BITS>) usize {
+        return BITS - self.count_ones();
+    }
+
+    pub fn trailing_zeros(self: &UInt<BITS>) usize {
+        if self.is_zero() {
+            return BITS;
+        }
+        let mut n: usize = 0;
+        let mut i: usize = 0;
+        loop {
+            let l = self.bits.get(i);
+            if l != 0 {
+                let mut v = l;
+                while (v & 1u64) == 0 {
+                    n = n + 1;
+                    v = v >> 1;
+                }
+                return n;
+            }
+            n = n + 64;
+            i = i + 1;
+        }
+    }
+
+    /// Rotation at the type's own width: bits leaving one end come back in at the other, so a partial
+    /// width rotates through exactly BITS positions, not through a limb's 64.
+    pub fn rotate_left(self: &UInt<BITS>, amount: usize) UInt<BITS> {
+        let k = amount % BITS;
+        if k == 0 {
+            return *self;
+        }
+        let hi = self.shr(BITS - k);
+        return self.shl(k).bit_or(&hi);
+    }
+
+    pub fn rotate_right(self: &UInt<BITS>, amount: usize) UInt<BITS> {
+        let k = amount % BITS;
+        if k == 0 {
+            return *self;
+        }
+        let hi = self.shl(BITS - k);
+        return self.shr(k).bit_or(&hi);
+    }
+
+    /// Byte order reversed. Bytes are a claim about layout, so this exists only for whole-byte widths.
+    pub fn swap_bytes(self: &UInt<BITS>) UInt<BITS> {
+        static_assert(BITS % 8 == 0, "swap_bytes needs a whole number of bytes");
+        let nb = BITS / 8;
+        let mut r = UInt::<BITS>::zero();
+        for i in 0..nb {
+            let b = self.bits.get(i / 8) >> (i % 8 * 8) as u64 & 0xFFu64;
+            let j = nb - 1 - i;
+            r.bits.set(j / 8, r.bits.get(j / 8) | b << (j % 8 * 8) as u64);
+        }
+        return r;
+    }
+
+    pub fn reverse_bits(self: &UInt<BITS>) UInt<BITS> {
+        let mut r = UInt::<BITS>::zero();
+        for i in 0..BITS {
+            if self.bits.bit(i) != 0 {
+                r.bits.set_bit(BITS - 1 - i, true);
+            }
+        }
+        return r;
+    }
+
+    pub fn is_power_of_two(self: &UInt<BITS>) bool {
+        return self.count_ones() == 1;
+    }
+
+    /// The smallest power of two at or above the value. Panics when that power is 2^BITS, one past the
+    /// top of the range -- `checked_next_power_of_two` answers None there instead.
+    pub fn next_power_of_two(self: &UInt<BITS>) UInt<BITS> {
+        switch self.checked_next_power_of_two() {
+            Some(v) => {
+                return v;
+            },
+            None => {
+                panic("arithmetic overflow");
+            },
+        };
+    }
+
+    pub fn checked_next_power_of_two(self: &UInt<BITS>) Option<UInt<BITS>> {
+        let one = UInt::<BITS>::one();
+        if self.cmp(&one) <= 0 {
+            return Option::<UInt<BITS>>::Some(one);
+        }
+        // For a value above one, the answer is 1 << bit_length(value - 1): exactly the value when it
+        // already is a power of two, the next one otherwise.
+        let n = self.wrapping_sub(&one).bit_length();
+        if n >= BITS {
+            return Option::<UInt<BITS>>::None;
+        }
+        return Option::<UInt<BITS>>::Some(one.shl(n));
+    }
+
     // ---- wrapping ------------------------------------------------------------------------------
 
     pub fn wrapping_add(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
@@ -933,6 +1032,81 @@ extend<const BITS: usize> UInt<BITS> {
         };
     }
 
+    // ---- overflowing: the wrapped value together with whether it wrapped ------------------------
+
+    pub fn overflowing_add(self: &UInt<BITS>, other: &UInt<BITS>) (UInt<BITS>, bool) {
+        let mut c: u64 = 0;
+        let r = UInt::<BITS> { bits: self.bits.add_carry(&other.bits, &mut c) };
+        return r, c != 0;
+    }
+
+    pub fn overflowing_sub(self: &UInt<BITS>, other: &UInt<BITS>) (UInt<BITS>, bool) {
+        let mut b: u64 = 0;
+        let r = UInt::<BITS> { bits: self.bits.sub_borrow(&other.bits, &mut b) };
+        return r, b != 0;
+    }
+
+    pub fn overflowing_mul(self: &UInt<BITS>, other: &UInt<BITS>) (UInt<BITS>, bool) {
+        let mut o = false;
+        let r = UInt::<BITS> { bits: self.bits.mul_wrap(&other.bits, &mut o) };
+        return r, o;
+    }
+
+    /// Exponentiation by squaring, WRAPPING at the width like the operators; `checked_pow` reports
+    /// overflow instead.
+    pub fn pow(self: &UInt<BITS>, exp: u32) UInt<BITS> {
+        let mut acc = UInt::<BITS>::one();
+        let mut base = *self;
+        let mut e = exp;
+        while e != 0 {
+            if (e & 1) != 0 {
+                acc = acc.wrapping_mul(&base);
+            }
+            base = base.wrapping_mul(&base);
+            e = e >> 1;
+        }
+        return acc;
+    }
+
+    pub fn checked_pow(self: &UInt<BITS>, exp: u32) Option<UInt<BITS>> {
+        let mut acc = UInt::<BITS>::one();
+        let mut base = *self;
+        let mut e = exp;
+        while e != 0 {
+            if (e & 1) != 0 {
+                switch acc.checked_mul(&base) {
+                    Some(v) => {
+                        acc = v;
+                    },
+                    None => {
+                        return Option::<UInt<BITS>>::None;
+                    },
+                };
+            }
+            e = e >> 1;
+            if e == 0 {
+                break; // the last squaring feeds nothing: its overflow would be a false alarm
+            }
+            switch base.checked_mul(&base) {
+                Some(v) => {
+                    base = v;
+                },
+                None => {
+                    return Option::<UInt<BITS>>::None;
+                },
+            };
+        }
+        return Option::<UInt<BITS>>::Some(acc);
+    }
+
+    /// |self - other|: the smaller subtracted from the larger, which wrapping arithmetic makes exact.
+    pub fn abs_diff(self: &UInt<BITS>, other: &UInt<BITS>) UInt<BITS> {
+        if self.cmp(other) >= 0 {
+            return self.wrapping_sub(other);
+        }
+        return other.wrapping_sub(self);
+    }
+
     // ---- division ------------------------------------------------------------------------------
 
     /// Quotient and remainder in one pass -- the division routine runs once, which `div` and `rem`
@@ -951,6 +1125,68 @@ extend<const BITS: usize> UInt<BITS> {
         }
         let mut r = UInt::<BITS>::zero();
         return Option::<UInt<BITS>>::Some(self.divmod(other, &mut r));
+    }
+
+    pub fn checked_rem(self: &UInt<BITS>, other: &UInt<BITS>) Option<UInt<BITS>> {
+        if other.is_zero() {
+            return Option::<UInt<BITS>>::None;
+        }
+        let mut r = UInt::<BITS>::zero();
+        let _ = self.divmod(other, &mut r);
+        return Option::<UInt<BITS>>::Some(r);
+    }
+
+    // ---- bytes ---------------------------------------------------------------------------------
+    // Serialization at the value's own width: bytes() = (BITS + 7) / 8 bytes, a partial top byte
+    // carrying the remaining bits. Slices rather than fixed arrays, so any buffer serves; `to_*`
+    // panics on one too short (a silent truncation would be a wrong VALUE), `from_*` reads at most
+    // bytes() and masks anything past the width, so a round-trip is exact.
+
+    pub fn to_le_bytes(self: &UInt<BITS>, out: []mut u8) {
+        let nb = UInt::<BITS>::bytes();
+        if out.len() < nb {
+            panic("to_le_bytes: the buffer is smaller than the value");
+        }
+        for i in 0..nb {
+            out[i] = (self.bits.get(i / 8) >> (i % 8 * 8) as u64) as u8;
+        }
+    }
+
+    pub fn from_le_bytes(b: []u8) UInt<BITS> {
+        let mut nb = UInt::<BITS>::bytes();
+        if b.len() < nb {
+            nb = b.len(); // missing high bytes read as the zeros they are
+        }
+        let mut r = UInt::<BITS>::zero();
+        for i in 0..nb {
+            let li = i / 8;
+            r.bits.set(li, r.bits.get(li) | b[i] as u64 << (i % 8 * 8) as u64);
+        }
+        return r;
+    }
+
+    pub fn to_be_bytes(self: &UInt<BITS>, out: []mut u8) {
+        let nb = UInt::<BITS>::bytes();
+        if out.len() < nb {
+            panic("to_be_bytes: the buffer is smaller than the value");
+        }
+        for i in 0..nb {
+            out[nb - 1 - i] = (self.bits.get(i / 8) >> (i % 8 * 8) as u64) as u8;
+        }
+    }
+
+    pub fn from_be_bytes(b: []u8) UInt<BITS> {
+        let n = b.len();
+        let mut nb = UInt::<BITS>::bytes();
+        if n < nb {
+            nb = n;
+        }
+        let mut r = UInt::<BITS>::zero();
+        for i in 0..nb {
+            let li = i / 8;
+            r.bits.set(li, r.bits.get(li) | b[n - 1 - i] as u64 << (i % 8 * 8) as u64);
+        }
+        return r;
     }
 
     // ---- text ----------------------------------------------------------------------------------
@@ -995,6 +1231,79 @@ extend<const BITS: usize> UInt<BITS> {
                 Some(m) => {
                     let d = UInt::<BITS>::from_u64(ch - b'0');
                     switch m.checked_add(&d) {
+                        Some(v) => {
+                            acc = v;
+                        },
+                        None => {
+                            return Option::<UInt<BITS>>::None;
+                        },
+                    };
+                },
+                None => {
+                    return Option::<UInt<BITS>>::None;
+                },
+            };
+        }
+        return Option::<UInt<BITS>>::Some(acc);
+    }
+
+    /// Digits in any radix from 2 to 36, `a`-`z` past 9; repeated single-limb division, like `to_string`.
+    /// Panics on a radix outside that range -- the caller wrote it, so it is a bug, not an input.
+    pub fn to_string_radix(self: &UInt<BITS>, radix: u32) String {
+        if radix < 2 || radix > 36 {
+            panic("radix must be between 2 and 36");
+        }
+        let mut out = String::new();
+        if self.is_zero() {
+            out.push_byte(b'0');
+            return out;
+        }
+        let mut digits = String::new();
+        let mut cur = self.bits;
+        while !cur.is_zero() {
+            let mut q = IntBits::<BITS>::zero();
+            let d = cur.divmod_small(radix, &mut q);
+            if d < 10 {
+                digits.push_byte(b'0' + d as u8);
+            } else {
+                digits.push_byte(b'a' + (d - 10) as u8);
+            }
+            cur = q;
+        }
+        let mut i = digits.len();
+        while i > 0 {
+            i = i - 1;
+            out.push_byte(digits.as_str().byte_at(i));
+        }
+        digits.free();
+        return out;
+    }
+
+    /// Parse digits in any radix from 2 to 36, either letter case. `None` on an empty string, a digit
+    /// outside the radix, a radix outside the range, or a value too wide to represent.
+    pub fn from_str_radix(s: str, radix: u32) Option<UInt<BITS>> {
+        if radix < 2 || radix > 36 || s.len() == 0 {
+            return Option::<UInt<BITS>>::None;
+        }
+        let base = UInt::<BITS>::from_u64(radix);
+        let mut acc = UInt::<BITS>::zero();
+        for i in 0..s.len() {
+            let ch = s.byte_at(i);
+            let mut d: u32 = 255;
+            if ch >= b'0' && ch <= b'9' {
+                d = ch - b'0';
+            } else if ch >= b'a' && ch <= b'z' {
+                d = ch - b'a' + 10;
+            } else if ch >= b'A' && ch <= b'Z' {
+                d = ch - b'A' + 10;
+            }
+            if d >= radix {
+                return Option::<UInt<BITS>>::None;
+            }
+            let dv = UInt::<BITS>::from_u64(d);
+            switch acc.checked_mul(&base) {
+                Some(m) => {
+                    switch m.checked_add(&dv) {
                         Some(v) => {
                             acc = v;
                         },
@@ -1244,6 +1553,64 @@ extend<const BITS: usize> Int<BITS> {
         return self.bits.bit(i) != 0;
     }
 
+    // ---- bit utilities: the unsigned view's, over the same bits ---------------------------------
+
+    pub fn count_ones(self: &Int<BITS>) usize {
+        return self.to_unsigned().count_ones();
+    }
+
+    pub fn count_zeros(self: &Int<BITS>) usize {
+        return BITS - self.count_ones();
+    }
+
+    pub fn leading_zeros(self: &Int<BITS>) usize {
+        return self.to_unsigned().leading_zeros();
+    }
+
+    pub fn trailing_zeros(self: &Int<BITS>) usize {
+        return self.to_unsigned().trailing_zeros();
+    }
+
+    pub fn rotate_left(self: &Int<BITS>, amount: usize) Int<BITS> {
+        let u = self.to_unsigned().rotate_left(amount);
+        return Int::<BITS>::from_unsigned(&u);
+    }
+
+    pub fn rotate_right(self: &Int<BITS>, amount: usize) Int<BITS> {
+        let u = self.to_unsigned().rotate_right(amount);
+        return Int::<BITS>::from_unsigned(&u);
+    }
+
+    pub fn swap_bytes(self: &Int<BITS>) Int<BITS> {
+        let u = self.to_unsigned().swap_bytes();
+        return Int::<BITS>::from_unsigned(&u);
+    }
+
+    pub fn reverse_bits(self: &Int<BITS>) Int<BITS> {
+        let u = self.to_unsigned().reverse_bits();
+        return Int::<BITS>::from_unsigned(&u);
+    }
+
+    /// -1, 0 or 1 by the value's sign.
+    pub fn signum(self: &Int<BITS>) Int<BITS> {
+        if self.is_negative() {
+            return Int::<BITS>::from_i64(-1);
+        }
+        if self.is_zero() {
+            return Int::<BITS>::zero();
+        }
+        return Int::<BITS>::one();
+    }
+
+    /// |self - other| as the UNSIGNED width: the true distance always fits there, which is exactly
+    /// what a signed return could not promise (MIN.abs_diff(MAX) is one past the signed top).
+    pub fn abs_diff(self: &Int<BITS>, other: &Int<BITS>) UInt<BITS> {
+        if self.cmp(other) >= 0 {
+            return self.wrapping_sub(other).to_unsigned();
+        }
+        return other.wrapping_sub(self).to_unsigned();
+    }
+
     /// The widening conversion between widths, SIGN-EXTENDING: the source's sign fills every limb above
     /// it, so a negative value stays the same number. Applied implicitly, as the built-in signed types are.
     pub fn widen<const M: usize>(v: &Int<M>) Int<BITS> {
@@ -1464,6 +1831,76 @@ extend<const BITS: usize> Int<BITS> {
         };
     }
 
+    // ---- overflowing: the wrapped value together with whether it wrapped ------------------------
+
+    pub fn overflowing_add(self: &Int<BITS>, other: &Int<BITS>) (Int<BITS>, bool) {
+        let r = self.wrapping_add(other);
+        let sa = self.is_negative();
+        return r, sa == other.is_negative() && r.is_negative() != sa;
+    }
+
+    pub fn overflowing_sub(self: &Int<BITS>, other: &Int<BITS>) (Int<BITS>, bool) {
+        let r = self.wrapping_sub(other);
+        let sa = self.is_negative();
+        return r, sa != other.is_negative() && r.is_negative() != sa;
+    }
+
+    pub fn overflowing_mul(self: &Int<BITS>, other: &Int<BITS>) (Int<BITS>, bool) {
+        let r = self.wrapping_mul(other);
+        switch self.checked_mul(other) {
+            Some(_v) => {
+                return r, false;
+            },
+            None => {
+                return r, true;
+            },
+        };
+    }
+
+    /// Exponentiation by squaring. TRAPS on overflow like the signed operators; `checked_pow` reports
+    /// it instead.
+    pub fn pow(self: &Int<BITS>, exp: u32) Int<BITS> {
+        switch self.checked_pow(exp) {
+            Some(v) => {
+                return v;
+            },
+            None => {
+                panic("arithmetic overflow");
+            },
+        };
+    }
+
+    pub fn checked_pow(self: &Int<BITS>, exp: u32) Option<Int<BITS>> {
+        let mut acc = Int::<BITS>::one();
+        let mut base = *self;
+        let mut e = exp;
+        while e != 0 {
+            if (e & 1) != 0 {
+                switch acc.checked_mul(&base) {
+                    Some(v) => {
+                        acc = v;
+                    },
+                    None => {
+                        return Option::<Int<BITS>>::None;
+                    },
+                };
+            }
+            e = e >> 1;
+            if e == 0 {
+                break; // the last squaring feeds nothing: its overflow would be a false alarm
+            }
+            switch base.checked_mul(&base) {
+                Some(v) => {
+                    base = v;
+                },
+                None => {
+                    return Option::<Int<BITS>>::None;
+                },
+            };
+        }
+        return Option::<Int<BITS>>::Some(acc);
+    }
+
     /// Magnitude. Panics on MIN, whose magnitude is one past the top of the range.
     pub fn abs(self: &Int<BITS>) Int<BITS> {
         if !self.is_negative() {
@@ -1528,6 +1965,68 @@ extend<const BITS: usize> Int<BITS> {
         return Option::<Int<BITS>>::Some(self.divmod(other, &mut r));
     }
 
+    pub fn checked_rem(self: &Int<BITS>, other: &Int<BITS>) Option<Int<BITS>> {
+        let mn = Int::<BITS>::min();
+        let neg1 = Int::<BITS>::from_i64(-1);
+        if other.is_zero() || self.eq(&mn) && other.eq(&neg1) {
+            return Option::<Int<BITS>>::None;
+        }
+        let mut r = Int::<BITS>::zero();
+        let _ = self.divmod(other, &mut r);
+        return Option::<Int<BITS>>::Some(r);
+    }
+
+    /// Euclidean division: the remainder is always in [0, |divisor|), so the quotient rounds toward
+    /// negative infinity for a positive divisor -- what modular index arithmetic wants, and what
+    /// truncating `/` refuses to promise for negative operands. Panics exactly where `/` does.
+    pub fn div_euclid(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
+        let mut r = Int::<BITS>::zero();
+        let q = self.divmod(other, &mut r);
+        if r.is_negative() {
+            // The adjusted quotient stays in range: it moves toward zero for a negative divisor, and
+            // the one case a +1 could overflow (MIN / -1) already panicked inside divmod.
+            let one = Int::<BITS>::one();
+            if other.is_negative() {
+                return q.wrapping_add(&one);
+            }
+            return q.wrapping_sub(&one);
+        }
+        return q;
+    }
+
+    pub fn rem_euclid(self: &Int<BITS>, other: &Int<BITS>) Int<BITS> {
+        let mut r = Int::<BITS>::zero();
+        let _ = self.divmod(other, &mut r);
+        if r.is_negative() {
+            if other.is_negative() {
+                return r.wrapping_sub(other);
+            }
+            return r.wrapping_add(other);
+        }
+        return r;
+    }
+
+    // ---- bytes ---------------------------------------------------------------------------------
+    // The unsigned view's serialization over the same two's-complement bits.
+
+    pub fn to_le_bytes(self: &Int<BITS>, out: []mut u8) {
+        self.to_unsigned().to_le_bytes(out);
+    }
+
+    pub fn from_le_bytes(b: []u8) Int<BITS> {
+        let u = UInt::<BITS>::from_le_bytes(b);
+        return Int::<BITS>::from_unsigned(&u);
+    }
+
+    pub fn to_be_bytes(self: &Int<BITS>, out: []mut u8) {
+        self.to_unsigned().to_be_bytes(out);
+    }
+
+    pub fn from_be_bytes(b: []u8) Int<BITS> {
+        let u = UInt::<BITS>::from_be_bytes(b);
+        return Int::<BITS>::from_unsigned(&u);
+    }
+
     // ---- text ----------------------------------------------------------------------------------
 
     pub fn to_string(self: &Int<BITS>) String {
@@ -1560,6 +2059,51 @@ extend<const BITS: usize> Int<BITS> {
                 let v = Int::<BITS>::from_unsigned(&u);
                 if neg {
                     // A magnitude of exactly MIN's is the one negative value with no positive form.
+                    let mn = Int::<BITS>::min();
+                    if v.is_negative() && !v.eq(&mn) {
+                        return Option::<Int<BITS>>::None;
+                    }
+                    return Option::<Int<BITS>>::Some(v.wrapping_neg());
+                }
+                if v.is_negative() {
+                    return Option::<Int<BITS>>::None; // the magnitude overflowed into the sign bit
+                }
+                return Option::<Int<BITS>>::Some(v);
+            },
+            None => {
+                return Option::<Int<BITS>>::None;
+            },
+        };
+    }
+
+    /// The magnitude's digits in any radix from 2 to 36, `-`-prefixed when negative.
+    pub fn to_string_radix(self: &Int<BITS>, radix: u32) String {
+        if !self.is_negative() {
+            return self.to_unsigned().to_string_radix(radix);
+        }
+        let mag = self.wrapping_neg().to_unsigned();
+        let mut out = String::from_str("-");
+        let digits = mag.to_string_radix(radix);
+        out.push_str(digits.as_str());
+        digits.free();
+        return out;
+    }
+
+    /// Parse an optionally signed value in any radix from 2 to 36; the same range rules as `from_str`.
+    pub fn from_str_radix(s: str, radix: u32) Option<Int<BITS>> {
+        if s.len() == 0 {
+            return Option::<Int<BITS>>::None;
+        }
+        let neg = s.byte_at(0) == b'-';
+        let body = if neg || s.byte_at(0) == b'+' {
+            s.slice(1, s.len());
+        } else {
+            s;
+        };
+        switch UInt::<BITS>::from_str_radix(body, radix) {
+            Some(u) => {
+                let v = Int::<BITS>::from_unsigned(&u);
+                if neg {
                     let mn = Int::<BITS>::min();
                     if v.is_negative() && !v.eq(&mn) {
                         return Option::<Int<BITS>>::None;

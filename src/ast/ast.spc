@@ -620,11 +620,48 @@ pub struct ConstLin {
     pub n: i32,
     pub p: [DefId; 4],
     pub c: [i64; 4],
+    /// Floor divisor applied to the WHOLE form, last: value = (k + sum) / div. 0 or 1 = none. What
+    /// admits `{(BITS + 7) / 8}` -- the byte count every serialization API is generic over -- into
+    /// canonical form; a divided form composes with nothing further (scaling or adding to it would
+    /// need distribution floor division does not grant), so every combinator below refuses one.
+    pub div: i64,
+}
+
+pub const fn lin_div_of(l: &ConstLin) i64 {
+    if l.div <= 1 {
+        return 1;
+    }
+    return l.div;
+}
+
+pub const fn lin_is_concrete(l: &ConstLin) bool {
+    for i in 0..l.n {
+        if unsafe l.c[i as usize] != 0 {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The concrete value of a parameter-free form: the constant term through the floor divisor.
+pub const fn lin_value(l: &ConstLin) i64 {
+    let d = lin_div_of(l);
+    if d == 1 {
+        return l.k;
+    }
+    let q = l.k / d;
+    if l.k % d != 0 && l.k < 0 {
+        return q - 1;
+    }
+    return q;
 }
 
 pub fn lin_add_term(out: &mut ConstLin, d: DefId, coeff: i64) bool {
     if coeff == 0 {
         return true;
+    }
+    if lin_div_of(out) != 1 {
+        return false; // a term added AFTER the floor divisor would be divided; it was not written so
     }
     for i in 0..out.n {
         if unsafe out.p[i as usize].module == d.module && unsafe out.p[i as usize].node == d.node {
@@ -651,6 +688,9 @@ pub fn lin_scale(src: &ConstLin, f: i64, out: &mut ConstLin) bool {
     // Widths are small; a factor this large means the expression is running away, not describing a type.
     if f > 0x40000000 || f < 0 - 0x40000000 || src.k > 0x40000000 || src.k < 0 - 0x40000000 {
         return false;
+    }
+    if lin_div_of(src) != 1 || lin_div_of(out) != 1 {
+        return false; // scaling does not distribute over the floor divisor
     }
     out.k = out.k + src.k * f;
     for i in 0..src.n {
@@ -679,6 +719,13 @@ pub fn lin_subst(
         return false;
     }
     let form = *src.const_lin_at(idx);
+    if lin_div_of(&form) != 1 {
+        // The divisor covers the WHOLE form, so it transfers only onto an empty accumulator.
+        if out.k != 0 || out.n != 0 || lin_div_of(out) != 1 {
+            return false;
+        }
+        out.div = form.div;
+    }
     out.k = out.k + form.k;
     for i in 0..form.n {
         let coeff = unsafe form.c[i as usize];
@@ -707,6 +754,10 @@ pub fn lin_subst(
             let mut inner = ConstLin { k: 0, n: 0 };
             if !lin_subst(dst, dst, by.as_data.inst, params, args, n, &mut inner, depth + 1) {
                 return false;
+            }
+            if lin_is_concrete(&inner) {
+                out.k = out.k + lin_value(&inner) * coeff;
+                continue;
             }
             if !lin_scale(&inner, coeff, out) {
                 return false;
@@ -739,7 +790,7 @@ pub const fn skey_mix(h: u64, v: u64) u64 {
 }
 
 pub fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
-    if a.k != b.k {
+    if a.k != b.k || lin_div_of(a) != lin_div_of(b) {
         return false;
     }
     let mut na: i32 = 0;
@@ -823,6 +874,16 @@ pub struct MethodRef {
     pub owner: NodeId, // the function or method the reference sits in; NODE_NONE at item level
     pub recv: TypeId,
     pub callee: DefId,
+}
+
+/// A wide integer literal: one whose value does not fit 64 bits, admitted where the expected type is
+/// the prelude's UInt<N>/Int<N>. The typechecker parses the digits into STORED limbs here (already
+/// two's-complemented and top-masked for a negative or partial width); codegen emits them as the
+/// storage's compound literal. 16 limbs (1024 bits) is the cap -- a wider constant is built from parts.
+pub struct WideLit {
+    pub node: NodeId,
+    pub ty: TypeId,
+    pub limbs: [u64; 16],
 }
 
 /// A conversion the type checker inserted at an expression: `target::from(expr)`. What lets a library
@@ -936,6 +997,7 @@ pub struct Ast {
     pub mono_at: Vector<u32>,
     pub instances: Vector<TyInstance>,
     pub method_refs: Vector<MethodRef>,
+    pub wide_lits: Vector<WideLit>,
     pub coerces: Vector<CoerceUse>,
     pub coerce_at: Map<u32, u32>,
     /// Canonical forms of const-generic expressions (`{BITS * 2}`), interned by VALUE so two spellings of
@@ -977,6 +1039,7 @@ extend Ast {
             mono_at: Vector::<u32>::new(),
             instances: Vector::<TyInstance>::new(),
             method_refs: Vector::<MethodRef>::new(),
+            wide_lits: Vector::<WideLit>::new(),
             coerces: Vector::<CoerceUse>::new(),
             coerce_at: Map::<u32, u32>::new(),
             const_lins: Vector::<ConstLin>::new(),
@@ -1140,7 +1203,7 @@ extend Ast {
             }
         }
         if nz == 0 {
-            return self.const_value(l.k);
+            return self.const_value(lin_value(l));
         }
         for i in 0..self.const_lins.len() {
             if const_lin_eq(self.const_lins.at(i), l) {
@@ -1159,6 +1222,16 @@ extend Ast {
         return self.const_lins.at(i as usize);
     }
 
+    /// Index of the wide-literal record for `id`, -1 when it has none. Linear: wide literals are rare.
+    pub const fn wide_lit_of(self: &Self, id: NodeId) i64 {
+        for i in 0..self.wide_lits.len() {
+            if self.wide_lits.at(i).node == id {
+                return i as i64;
+            }
+        }
+        return 0 - 1;
+    }
+
     /// A key for a type that does not depend on which Ast interned it: only package-wide identities
     /// (a module id, a node id in that module, a literal value) enter the mix, never a TypeId. The
     /// same type reached through two modules therefore keys the same package-level table entry.
@@ -1175,7 +1248,7 @@ extend Ast {
             TYPE_CONST => skey_mix(h, y.as_data.value as u64),
             TYPE_CONST_EXPR => {
                 let l = self.const_lin_at(y.as_data.inst);
-                let mut k = skey_mix(h, l.k as u64);
+                let mut k = skey_mix(skey_mix(h, l.k as u64), lin_div_of(l) as u64);
                 for i in 0..l.n {
                     if unsafe l.c[i as usize] == 0 {
                         continue;
@@ -1576,6 +1649,7 @@ extend Ast as Free {
         self.call_info.free();
         self.op_method.free();
         self.method_refs.free();
+        self.wide_lits.free();
         self.coerces.free();
         self.coerce_at.free();
     }
