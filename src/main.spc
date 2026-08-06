@@ -634,6 +634,7 @@ enum Mode {
     MODE_LSP, // `super-c lsp`: language server over stdio
     MODE_NEW, // `super-c new <name>`: scaffold a project directory (cargo new)
     MODE_INIT, // `super-c init`: scaffold a project in the current directory (cargo init)
+    MODE_VENDOR, // `super-c vendor <git-url|dir> [name]`: copy a dependency into vendor/
     MODE_BINDGEN, // `super-c bindgen <header.h>`: C header -> an `extern "C"` module
 }
 
@@ -674,6 +675,9 @@ fn subcommand(arg: str) Mode {
         },
         "init" => {
             Mode::MODE_INIT;
+        },
+        "vendor" => {
+            Mode::MODE_VENDOR;
         },
         "bindgen" => {
             Mode::MODE_BINDGEN;
@@ -838,6 +842,8 @@ fn main(argv: Vector<str>) i32 {
     let mut bg_header = ""; // bindgen: --header=SPELLING, how the emitted module #includes it
     let mut bg_incs = Vector::<String>::new(); // bindgen: -I search paths
     let mut bg_from = Vector::<String>::new(); // bindgen: --from=, extra origin headers to accept
+    let mut vendor_name = ""; // vendor: optional name override for vendor/<name>
+    let mut vendor_dir = "."; // vendor: --dir=, the project root vendored into
 
     let mode = if argc > 1 {
         subcommand(argv[1]);
@@ -1049,6 +1055,24 @@ fn main(argv: Vector<str>) i32 {
                 co.bad = true; // `init` scaffolds the current directory, no arguments
             }
         },
+        MODE_VENDOR => {
+            while i < argc {
+                let arg = argv[i];
+                if arg.starts_with("--dir=") {
+                    vendor_dir = arg[6..];
+                } else if !arg.starts_with("--") && file.len() == 0 {
+                    file = arg; // the source: a git url or a local directory
+                } else if !arg.starts_with("--") && vendor_name.len() == 0 {
+                    vendor_name = arg;
+                } else {
+                    co.bad = true;
+                }
+                i = i + 1;
+            }
+            if file.len() == 0 {
+                co.bad = true; // `vendor` needs a source
+            }
+        },
         MODE_BINDGEN => {
             while i < argc {
                 let arg = argv[i];
@@ -1118,6 +1142,7 @@ COMMANDS:
     lsp                    run the language server over stdio
     new <name>             scaffold a new project directory
     init                   scaffold a project in the current directory
+    vendor <src> [name]    copy a git repository or a local folder into vendor/<name>
     bindgen <path>...      generate extern "C" modules from C headers (a directory recurses)
 
 OPTIONS:
@@ -1142,6 +1167,7 @@ OPTIONS:
     --fix                  lint: apply machine-applicable fixes and re-lint
     --suggest-const        lint: also flag functions that could be 'const fn'
     --no-run               bench: build the bench binary but do not run it
+    --dir=D                vendor: project root vendored into (default: the current directory)
     --test                 script: collect @test functions, build, and run
     --test-filter=S        run only tests whose name contains S
     --test-jobs=N          bound the test process pool (default: one per core)
@@ -1178,6 +1204,9 @@ OPTIONS:
             return 1;
         }
         return bsys::scaffold_project(file, file);
+    }
+    if mode == Mode::MODE_VENDOR {
+        return bsys::vendor_dep(vendor_dir, file, vendor_name);
     }
     if mode == Mode::MODE_BINDGEN {
         let mut bg_paths = Vector::<String>::new();

@@ -223,6 +223,15 @@ int sc_unlink(const char *path) {
   return unlink(path);
 #endif
 }
+/* Make a path writable so unlink can remove it: git creates its object files read-only, and on
+   Windows _unlink refuses a read-only file outright. */
+int sc_chmod_rw(const char *path) {
+#if defined(_WIN32)
+  return _chmod(path, _S_IREAD | _S_IWRITE);
+#else
+  return chmod(path, 0644);
+#endif
+}
 void *sc_opendir(const char *path) { return (void *)opendir(path); }
 void *sc_readdir(void *dir) { return (void *)readdir((DIR *)dir); }
 int sc_closedir(void *dir) { return closedir((DIR *)dir); }

@@ -143,7 +143,11 @@ pub fn rm_rf(path: str) {
         }
         unsafe shim::sc_rmdir(p.cstr());
     } else if isdir == 0 {
-        unsafe shim::sc_unlink(p.cstr());
+        if unsafe shim::sc_unlink(p.cstr()) != 0 {
+            // Read-only file (a vendored repository's git objects): make it writable and retry.
+            let _ = unsafe shim::sc_chmod_rw(p.cstr());
+            unsafe shim::sc_unlink(p.cstr());
+        }
     }
 }
 
@@ -1370,6 +1374,152 @@ pub fn scaffold_project(dir: str, name: str) i32 {
         let _ = shell(cmd.as_str()); // best-effort: no git, no repository, no error
     }
     println("created {} project at {}", name, dir);
+    return 0;
+}
+
+// Byte-for-byte file copy, streamed: read_file would also work for source text, but a vendored tree
+// can carry anything (test fixtures, images), so nothing here may assume text.
+fn copy_file(srcp: str, dstp: str) i32 {
+    let fi = stdio::fopen(srcp, "rb");
+    if fi == null {
+        return 1;
+    }
+    let fo = stdio::fopen(dstp, "wb");
+    if fo == null {
+        unsafe stdio::fclose(fi);
+        return 1;
+    }
+    let mut buf = Array::<char, 4096>::new();
+    let mut rc = 0;
+    loop {
+        let n = unsafe stdio::fread(&mut buf[0], 1, 4096, fi);
+        if n == 0 {
+            break;
+        }
+        if unsafe stdio::fwrite(&buf[0], 1, n, fo) != n {
+            rc = 1;
+            break;
+        }
+    }
+    unsafe stdio::fclose(fi);
+    unsafe stdio::fclose(fo);
+    return rc;
+}
+
+/// Recursive directory copy. Any `.git` entry is dropped AT EVERY LEVEL: vendored source belongs to
+/// the project's own history, and a nested repository (the dependency's, or a submodule's) would be
+/// invisible to -- and shadow files from -- the repository the project lives in.
+fn copy_tree(srcd: str, dstd: str) i32 {
+    mkdirs(dstd);
+    let mut sp = String::from_str(srcd);
+    let dh = unsafe shim::sc_opendir(sp.cstr());
+    if dh == null {
+        return 1;
+    }
+    let mut names = Vector::<String>::new();
+    loop {
+        let e = unsafe shim::sc_readdir(dh);
+        if e == null {
+            break;
+        }
+        let nm = unsafe shim::sc_dirent_name(e);
+        let s = str::from_cstr(nm);
+        if s == "." || s == ".." || s == ".git" {
+            continue;
+        }
+        names.push(String::from_str(s));
+    }
+    unsafe shim::sc_closedir(dh);
+    let mut rc = 0;
+    for i in 0..names.len() {
+        let s = join2(srcd, names.at(i).as_str());
+        let d = join2(dstd, names.at(i).as_str());
+        let mut sc = s.clone();
+        if unsafe shim::sc_stat_isdir(sc.cstr()) == 1 {
+            if copy_tree(s.as_str(), d.as_str()) != 0 {
+                rc = 1;
+            }
+        } else if copy_file(s.as_str(), d.as_str()) != 0 {
+            rc = 1;
+        }
+    }
+    return rc;
+}
+
+/// `super-c vendor <src> [name]`: copy a dependency's source into `<root>/vendor/<name>`, where the
+/// module loader already resolves it -- `import vendor::<name>::<module>;` -- so vendoring records
+/// nothing in the manifest. A git source (a scheme, a `git@` remote, or a `.git` suffix) is cloned;
+/// anything else must be a local directory and is copied. No `.git` survives either way.
+pub fn vendor_dep(root: str, src: str, name_arg: str) i32 {
+    let mut base = src;
+    if base.ends_with(".git") {
+        base = base.slice(0, base.len() - 4);
+    }
+    while base.len() > 0 && base[base.len() - 1] == b'/' {
+        base = base.slice(0, base.len() - 1);
+    }
+    let mut k = base.len();
+    while k > 0 && base[k - 1] != b'/' && base[k - 1] != b':' {
+        k = k - 1;
+    }
+    let name = if name_arg.len() != 0 {
+        name_arg;
+    } else {
+        base.slice(k, base.len());
+    };
+    if name.len() == 0 {
+        eprintln("vendor: cannot derive a name from '{}' (name one: super-c vendor <src> <name>)", src);
+        return 1;
+    }
+    let vdir = join2(root, "vendor");
+    let dest = join2(vdir.as_str(), name);
+    let mut dp = dest.clone();
+    if unsafe shim::sc_stat_isdir(dp.cstr()) == 1 {
+        eprintln("vendor: '{}' already exists (remove it to vendor again)", dest.as_str());
+        return 1;
+    }
+    let is_git = src.starts_with("git@") || src.ends_with(".git") || scheme_len(src) != 0;
+    mkdirs(vdir.as_str());
+    if is_git {
+        let mut cmd = String::from_str("git clone -q");
+        push_quoted(&mut cmd, src);
+        push_quoted(&mut cmd, dest.as_str());
+        if shell(cmd.as_str()) != 0 {
+            eprintln("vendor: git clone failed for '{}'", src);
+            return 1;
+        }
+        let g = join2(dest.as_str(), ".git");
+        rm_rf(g.as_str());
+    } else {
+        let mut sp = String::from_str(src);
+        if unsafe shim::sc_stat_isdir(sp.cstr()) != 1 {
+            eprintln("vendor: '{}' is not a directory (a git source needs a scheme, git@, or .git)", src);
+            return 1;
+        }
+        if copy_tree(src, dest.as_str()) != 0 {
+            eprintln("vendor: copy failed for '{}'", src);
+            rm_rf(dest.as_str());
+            return 1;
+        }
+    }
+    println("vendored {} at {} (import vendor::{}::<module>;)", name, dest.as_str(), name);
+    return 0;
+}
+
+// Length of a URL scheme prefix ("https://...") including the separator, 0 when there is none.
+fn scheme_len(s: str) usize {
+    for i in 0..s.len() {
+        let c = s[i];
+        if c == b':' {
+            if i + 2 < s.len() && s[i + 1] == b'/' && s[i + 2] == b'/' {
+                return i + 3;
+            }
+            return 0;
+        }
+        if !(c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'+' || c == b'-' || c == b'.') {
+            return 0;
+        }
+    }
     return 0;
 }
 

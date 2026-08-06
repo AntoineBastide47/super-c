@@ -4648,3 +4648,98 @@ fn bindgen_expressions_anonymous_types_and_globals() {
     assert_eq(cc.exit, 0);
     assert_eq(p.run_bin(), 0);
 }
+
+// `super-c vendor` copies a dependency into vendor/<name>, where the loader's project-root-relative
+// import resolution already finds it -- no manifest entry, no search path. A git source is recognized
+// by a scheme, a `git@` remote, or a `.git` suffix and is cloned; anything else must be a local
+// directory and is copied. The vendored modules then import as `vendor::<name>::<module>`, which is
+// checked end to end by running a program through two of them.
+@test
+fn vendor_copies_and_imports_resolve() {
+    let p = cli::proj_new();
+    p.mkfile("dep/geo.spc", "pub fn area(w: i32, h: i32) i32 { return w * h; }\n");
+    p.mkfile("dep/util/more.spc", "pub fn twice(x: i32) i32 { return x * 2; }\n");
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("vendor \"{}/dep\" --dir=\"{}\"", root, root);
+    let r = p.run_raw(args.as_str());
+    assert_eq(r.exit, 0);
+    assert(r.out_has("import vendor::dep::"), "the success line teaches the import spelling");
+    let mut nested = String::new();
+    nested.format_into("{}/vendor/dep/util/more.spc", root);
+    assert(loader::read_file(nested.as_str()).is_some(), "nested files arrive");
+    nested.free();
+    // the same name again is refused, not overwritten
+    let r2 = p.run_raw(args.as_str());
+    assert(r2.exit != 0);
+    assert(r2.out_has("already exists"));
+    args.free();
+    // a missing source is an error, not an empty vendor directory
+    let mut bad = String::new();
+    bad.format_into("vendor \"{}/nope\" --dir=\"{}\"", root, root);
+    let rb = p.run_raw(bad.as_str());
+    assert(rb.exit != 0);
+    assert(rb.out_has("not a directory"));
+    bad.free();
+    // the vendored modules resolve through ordinary imports and run
+    p.mkfile(
+        "main.spc",
+        "import vendor::dep::geo;\nimport vendor::dep::util::more;\nfn main() i32 { return geo::area(6, 7) + more::twice(0) - 42; }\n",
+    );
+    let c = p.compile("main.spc");
+    assert_eq(c.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}
+
+// The clone path, against a local bare repository (offline), with the `.git` suffix as the trigger.
+// What matters beyond arrival: the clone's own `.git` is gone -- vendored source belongs to the
+// project's history, and a nested repository would shadow it from the outer one.
+@test
+fn vendor_clones_git_and_strips_the_repository() {
+    let p = cli::proj_new();
+    p.mkfile("srcrepo/lib.spc", "pub fn seven() i32 { return 7; }\n");
+    let root = str::from_cstr(p.rootp());
+    let mut g = String::new();
+    g.format_into("git -C \"{}/srcrepo\" init -q", root);
+    if cli::run_quiet(g.cstr()) != 0 {
+        g.free();
+        return; // no git on this machine: the clone path cannot be exercised
+    }
+    g.free();
+    let mut ga = String::new();
+    ga.format_into("git -C \"{}/srcrepo\" add lib.spc", root);
+    assert_eq(cli::run_quiet(ga.cstr()), 0);
+    ga.free();
+    let mut gc = String::new();
+    gc.format_into(
+        "git -C \"{}/srcrepo\" -c user.email=v@e -c user.name=v -c commit.gpgsign=false commit -q -m x",
+        root,
+    );
+    assert_eq(cli::run_quiet(gc.cstr()), 0);
+    gc.free();
+    let mut gb = String::new();
+    gb.format_into("git clone -q --bare \"{}/srcrepo\" \"{}/dep.git\"", root, root);
+    assert_eq(cli::run_quiet(gb.cstr()), 0);
+    gb.free();
+    let mut args = String::new();
+    args.format_into("vendor \"{}/dep.git\" mylib --dir=\"{}\"", root, root);
+    let r = p.run_raw(args.as_str());
+    args.free();
+    assert_eq(r.exit, 0);
+    let mut lib = String::new();
+    lib.format_into("{}/vendor/mylib/lib.spc", root);
+    assert(loader::read_file(lib.as_str()).is_some(), "the clone arrived under the given name");
+    lib.free();
+    let mut head = String::new();
+    head.format_into("{}/vendor/mylib/.git/HEAD", root);
+    assert(loader::read_file(head.as_str()).is_none(), "no .git survives vendoring");
+    head.free();
+    p.mkfile("main.spc", "import vendor::mylib::lib;\nfn main() i32 { return lib::seven() - 7; }\n");
+    let c = p.compile("main.spc");
+    assert_eq(c.exit, 0);
+    let cc = p.cc_build("");
+    assert_eq(cc.exit, 0);
+    assert_eq(p.run_bin(), 0);
+}

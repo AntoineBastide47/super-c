@@ -30,6 +30,7 @@ extern "C" "driver_shim.h" {
     pub fn sc_mkdir(path: *const char) i32;
     pub fn sc_rmdir(path: *const char) i32;
     pub fn sc_unlink(path: *const char) i32;
+    pub fn sc_chmod_rw(path: *const char) i32;
     pub fn sc_opendir(path: *const char) *mut void;
     pub fn sc_readdir(dir: *mut void) *mut void;
     pub fn sc_closedir(dir: *mut void) i32;
