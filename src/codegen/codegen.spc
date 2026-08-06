@@ -15969,6 +15969,17 @@ extend Codegen {
                 continue;
             }
             if it.module == cur {
+                if it.decl as usize >= unsafe self.cur_ast().nodes.len() {
+                    eprintln(
+                        "CGDBG: tu={} ii={} it.module={} it.decl={} nodes={} n={}",
+                        unsafe self.package.modules[cur as usize].path.as_str(),
+                        ii,
+                        it.module,
+                        it.decl,
+                        unsafe self.cur_ast().nodes.len(),
+                        it.n,
+                    );
+                }
                 let ag = self.cur_ast().at_const(it.decl).as_data.aggregate;
                 let gids = self.cur_ast().list(ag.generics);
                 self.nsubst = 0;
