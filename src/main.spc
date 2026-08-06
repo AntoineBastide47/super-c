@@ -835,6 +835,7 @@ fn chdir_to_manifest() {
 }
 
 fn main(argv: Vector<str>) i32 {
+    unsafe shim::sc_trace_install();
     let argc = argv.len();
     let mut file = "";
     let mut out_bin = ""; // set by the `build` subcommand (via -o, or defaulted)

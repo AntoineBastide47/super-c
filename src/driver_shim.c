@@ -801,3 +801,29 @@ int sc_exec(const char *cmd) {
   return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 #endif
+
+/* Crash attribution for the compiler itself: every panic ends in abort(), which raises SIGABRT before
+   the process dies, so a handler installed here is the one place a stack survives to be printed. POSIX
+   prints symbolized frames; Windows has no DWARF-aware symbolizer at runtime, so it prints each return
+   address as an offset from the PE base (ASLR-stable) for addr2line against the same binary. */
+#include <signal.h>
+#if defined(_WIN32)
+static void sc_trace_abort(int sig) {
+  (void)sig;
+  void *bt[32];
+  unsigned short n = RtlCaptureStackBackTrace(0, 32, bt, NULL);
+  char *base = (char *)GetModuleHandleA(NULL);
+  fprintf(stderr, "trace: base %p\n", (void *)base);
+  for (unsigned short i = 0; i < n; i++)
+    fprintf(stderr, "trace: +0x%llx\n", (unsigned long long)((char *)bt[i] - base));
+  fflush(stderr);
+}
+#else
+#  include <execinfo.h>
+static void sc_trace_abort(int sig) {
+  (void)sig;
+  void *bt[32];
+  backtrace_symbols_fd(bt, backtrace(bt, 32), 2);
+}
+#endif
+void sc_trace_install(void) { signal(SIGABRT, sc_trace_abort); }

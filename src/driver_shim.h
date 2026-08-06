@@ -22,6 +22,7 @@ int sc_mkdir(const char *path);   /* mkdir(path, 0775); ignores EEXIST at the ca
 int sc_rmdir(const char *path);   /* rmdir(path) */
 int sc_unlink(const char *path);  /* unlink(path) */
 int sc_chmod_rw(const char *path); /* make writable so unlink can remove it (read-only git objects) */
+void sc_trace_install(void);      /* print a stack on SIGABRT: every panic aborts, and dies silent otherwise */
 void *sc_opendir(const char *path);
 void *sc_readdir(void *dir);      /* the next struct dirent *, or NULL */
 int sc_closedir(void *dir);
