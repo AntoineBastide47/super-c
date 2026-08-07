@@ -1409,30 +1409,75 @@ pub enum TypeTag {
 }
 
 /// One field of a reflected struct or union. `offset` is the byte offset in the C layout the
-/// compiled program actually uses; for a union every field reports offset 0.
+/// compiled program actually uses; for a union every field reports offset 0. `kind` is the tag of
+/// the field's own type (one level -- reflect that type itself to go deeper).
 pub struct FieldInfo {
     pub name: str<'static>,
     pub offset: usize,
     pub size: usize,
+    pub kind: TypeTag,
 }
 
 /// One variant of a reflected enum. `tag` is the value the variant has at runtime -- the declared
-/// constant for a payload-less enum, the declaration index for an enum with payloads.
+/// constant for a payload-less enum, the declaration index for an enum with payloads. `payload` is
+/// the variant's number of payload values (0 = a unit variant).
 pub struct VariantInfo {
     pub name: str<'static>,
     pub tag: i32,
+    pub payload: usize,
 }
 
 /// The result of `type_info::<T>()`, a compiler intrinsic that folds at compile time -- there is no
 /// declaration of `type_info` anywhere, and the value costs nothing unless it is reached. Fully
 /// non-owning: every member is a scalar or a `'static` view into static data, so a `TypeInfo` is
 /// never freed and can be stored or passed anywhere. `fields` is empty unless `kind` is
-/// `Struct`/`Tuple`/`Union`; `variants` is empty unless `kind` is `Enum`.
+/// `Struct`/`Tuple`/`Union`; `variants` is empty unless `kind` is `Enum`; `elem` is the tag of the
+/// pointee/element type for `Pointer`/`Reference`/`Array`/`Slice` (else `Void`); `len` is the
+/// element count for `Array` (else 0).
 pub struct TypeInfo {
     pub name: str<'static>,
     pub kind: TypeTag,
     pub size: usize,
     pub align: usize,
+    pub elem: TypeTag,
+    pub len: usize,
     pub fields: Slice<'static, FieldInfo>,
     pub variants: Slice<'static, VariantInfo>,
+}
+
+extend TypeInfo {
+    /// The field named `name`, or None. FieldInfo is a value of views: returning it copies nothing
+    /// it owns, because it owns nothing.
+    pub const fn field(self: &TypeInfo, name: str) Option<FieldInfo> {
+        for i in 0..self.fields.len {
+            let f = self.fields.get(i);
+            if f.name == name {
+                return Option::<FieldInfo>::Some(*f);
+            }
+        }
+        return Option::<FieldInfo>::None;
+    }
+
+    /// The variant named `name`, or None.
+    pub const fn variant(self: &TypeInfo, name: str) Option<VariantInfo> {
+        for i in 0..self.variants.len {
+            let v = self.variants.get(i);
+            if v.name == name {
+                return Option::<VariantInfo>::Some(*v);
+            }
+        }
+        return Option::<VariantInfo>::None;
+    }
+
+    /// The variant whose runtime value is `tag`, or None -- the reverse lookup a `Display` for a
+    /// C-valued enum needs.
+    pub const fn variant_by_tag(self: &TypeInfo, tag: i32) Option<VariantInfo> {
+        for i in 0..self.variants.len {
+            let v = self.variants.get(i);
+            if v.tag == tag {
+                return Option::<VariantInfo>::Some(*v);
+            }
+        }
+        return Option::<VariantInfo>::None;
+    }
 }

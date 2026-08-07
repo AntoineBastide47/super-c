@@ -514,7 +514,7 @@ fn static_assert() {
 fn type_info_intrinsic() {
     h::expect_ok(
         "type_info folds in const context",
-        "struct P { x: i32, y: u8, }\nstatic_assert(type_info::<P>().size == 8);\nstatic_assert(type_info::<P>().fields.len == 2, \"fields\");\nstatic_assert(type_info::<i32>().align == 4);\nconst TI: TypeInfo = type_info::<P>();\nfn main() i32 { return TI.fields.len as i32 - 2; }\n",
+        "struct P { x: i32, y: u8, }\nstatic_assert(type_info::<P>().size == 8);\nstatic_assert(type_info::<P>().fields.len == 2, \"fields\");\nstatic_assert(type_info::<i32>().align == 4);\nstatic_assert(type_info::<[u8; 3]>().len == 3, \"array len\");\nstatic_assert(type_info::<[u8; 3]>().elem == TypeTag::Uint, \"array elem\");\nstatic_assert(type_info::<*const P>().elem == TypeTag::Struct, \"pointee\");\nconst TI: TypeInfo = type_info::<P>();\nstatic_assert(TI.field(\"y\").is_some(), \"field lookup folds\");\nfn main() i32 { return TI.fields.len as i32 - 2; }\n",
     );
     h::expect_ok(
         "type_info in a generic body",

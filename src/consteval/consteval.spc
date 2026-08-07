@@ -2314,6 +2314,41 @@ extend ConstEval {
         return -1;
     }
 
+    // Resolve (m0, t0) through a LayoutEnv chain while it names a generic param -- the env-frame
+    // sibling of ce_rtype, for field types inside a generic instance's decl.
+    fn ce_ti_env_ty(self: &Self, m0: ModuleId, t0: TypeId, env: *const LayoutEnv) RType {
+        let mut m = m0;
+        let mut t = t0;
+        for _ in 0..8 {
+            if t == TYPE_NONE {
+                return RType { ok: false };
+            }
+            let y = self.ast_ptr(m).type_at(t);
+            if y.kind != TypeKind::TYPE_GENERIC {
+                return RType { ok: true, m: m, t: t };
+            }
+            let ymod = y.module;
+            let ydecl = y.as_data.decl;
+            let mut e = env;
+            let mut found = false;
+            while e != null && !found {
+                for i in 0..unsafe e.n {
+                    if unsafe e.pmod == ymod && unsafe e.params[i as usize] == ydecl {
+                        m = unsafe e.argm;
+                        t = unsafe e.args[i as usize];
+                        found = true;
+                        break;
+                    }
+                }
+                e = unsafe e.parent;
+            }
+            if !found {
+                return RType { ok: false };
+            }
+        }
+        return RType { ok: false };
+    }
+
     // `type_info::<T>()`: build the TypeInfo object graph for the recorded type argument. Every decl
     // the graph needs (TypeInfo, str, TypeTag, Slice, FieldInfo, VariantInfo) is derived from the
     // call's own result type, so no name lookup and no package access is involved.
@@ -2490,7 +2525,17 @@ extend ConstEval {
                     let src2 = self.ce_src(dm2);
                     fname = src2.slice(sp.start as usize, sp.end as usize);
                 }
-                let fv = self.ce_ti_member(strm, strn, tim, sty, fity, fname, off, fl.size, -1);
+                // The field type's own tag, through the instance's substitution; advisory, so an
+                // untaggable field type degrades to Void rather than failing the whole descriptor.
+                let fr = self.ce_ti_env_ty(dm2, ft, envp);
+                let mut ftag: i64 = 0;
+                if fr.ok {
+                    ftag = self.ce_ti_tag(fr.m, fr.t, strm, strn, slm, sln);
+                    if ftag < 0 {
+                        ftag = 0;
+                    }
+                }
+                let fv = self.ce_ti_member(strm, strn, tim, sty, kty, fity, fname, off, fl.size, -1, ftag as u64);
                 if fv.kind != CV_AGG {
                     fobjs.free();
                     return out;
@@ -2552,11 +2597,13 @@ extend ConstEval {
                     strn,
                     tim,
                     sty,
+                    kty,
                     vity,
                     src2.slice(sp.start as usize, sp.end as usize),
                     0,
                     0,
                     vtag,
+                    da2.at_const(vid).as_data.variant.payload.len,
                 );
                 if vv.kind != CV_AGG {
                     vobjs.free();
@@ -2570,6 +2617,27 @@ extend ConstEval {
             vobjs.free();
             if failed {
                 return out;
+            }
+        }
+        // Element tag and array length; advisory like a field's kind, so Void on the untaggable.
+        let mut etag: i64 = 0;
+        let mut alen: u64 = 0;
+        let mut ety2 = TYPE_NONE;
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
+            ety2 = y.as_data.elem;
+        } else if y.kind == TypeKind::TYPE_ARRAY {
+            ety2 = y.as_data.arr.elem;
+            alen = y.as_data.arr.len;
+        } else if tag == 10 && y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_ptr(tm).instance(y.as_data.inst);
+            if it.n > 0 {
+                ety2 = it.args[0];
+            }
+        }
+        if ety2 != TYPE_NONE {
+            etag = self.ce_ti_tag(tm, ety2, strm, strn, slm, sln);
+            if etag < 0 {
+                etag = 0;
             }
         }
         // Assemble: the two slices, then the TypeInfo struct itself.
@@ -2589,11 +2657,21 @@ extend ConstEval {
         let i_kind = self.ce_ti_findf(tim, tin, "kind");
         let i_size = self.ce_ti_findf(tim, tin, "size");
         let i_align = self.ce_ti_findf(tim, tin, "align");
+        let i_elem = self.ce_ti_findf(tim, tin, "elem");
+        let i_len = self.ce_ti_findf(tim, tin, "len");
         let i_fields = self.ce_ti_findf(tim, tin, "fields");
         let i_vars = self.ce_ti_findf(tim, tin, "variants");
-        if i_name < 0 || i_kind < 0 || i_size < 0 || i_align < 0 || i_fields < 0 || i_vars < 0 {
+        if i_name < 0 || i_kind < 0 || i_size < 0 || i_align < 0 || i_elem < 0 || i_len < 0 || i_fields < 0 || i_vars < 0 {
             return out;
         }
+        unsafe self.obj_ptr(to).slots.set(
+            i_elem as usize,
+            CeVal { kind: CV_INT, tm: tim, ty: kty, as_data: CeValAs { i: etag } },
+        );
+        unsafe self.obj_ptr(to).slots.set(
+            i_len as usize,
+            CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_USIZE), as_data: CeValAs { i: alen as i64 } },
+        );
         unsafe self.obj_ptr(to).slots.set(i_name as usize, nmv);
         unsafe self.obj_ptr(to).slots.set(
             i_kind as usize,
@@ -2614,18 +2692,22 @@ extend ConstEval {
         return ret;
     }
 
-    // A FieldInfo (`tag < 0`: name/offset/size) or VariantInfo (`tag >= 0`: name/tag) object.
+    // A FieldInfo (`tag < 0`: name/offset/size/kind, `aux` = the field type's TypeTag index) or
+    // VariantInfo (`tag >= 0`: name/tag/payload, `aux` = the payload value count) object. `kty` is
+    // the TypeTag enum's TypeId in tim's pool, for the FieldInfo `kind` slot.
     fn ce_ti_member(
         self: &mut Self,
         strm: ModuleId,
         strn: NodeId,
         tim: ModuleId,
         sty: TypeId,
+        kty: TypeId,
         ety: TypeId,
         name: str,
         off: u64,
         size: u64,
         tag: i64,
+        aux: u64,
     ) CeVal {
         let ye = *self.ast_ptr(tim).type_at(ety);
         if ye.kind != TypeKind::TYPE_STRUCT {
@@ -2650,17 +2732,28 @@ extend ConstEval {
         unsafe self.obj_ptr(o).slots.set(i_name as usize, nmv);
         if tag >= 0 {
             let i_tag = self.ce_ti_findf(em, en, "tag");
-            if i_tag < 0 {
+            let i_pl = self.ce_ti_findf(em, en, "payload");
+            if i_tag < 0 || i_pl < 0 {
                 return cv_nil();
             }
             unsafe self.obj_ptr(o).slots.set(
                 i_tag as usize,
                 CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_I32), as_data: CeValAs { i: tag } },
             );
+            unsafe self.obj_ptr(o).slots.set(
+                i_pl as usize,
+                CeVal {
+                    kind: CV_INT,
+                    tm: 0,
+                    ty: Ast::builtin(BuiltinType::BT_USIZE),
+                    as_data: CeValAs { i: aux as i64 },
+                },
+            );
         } else {
             let i_off = self.ce_ti_findf(em, en, "offset");
             let i_size = self.ce_ti_findf(em, en, "size");
-            if i_off < 0 || i_size < 0 {
+            let i_kind = self.ce_ti_findf(em, en, "kind");
+            if i_off < 0 || i_size < 0 || i_kind < 0 {
                 return cv_nil();
             }
             unsafe self.obj_ptr(o).slots.set(
@@ -2680,6 +2773,10 @@ extend ConstEval {
                     ty: Ast::builtin(BuiltinType::BT_USIZE),
                     as_data: CeValAs { i: size as i64 },
                 },
+            );
+            unsafe self.obj_ptr(o).slots.set(
+                i_kind as usize,
+                CeVal { kind: CV_INT, tm: tim, ty: kty, as_data: CeValAs { i: aux as i64 } },
             );
         }
         return CeVal { kind: CV_AGG, tm: tim, ty: ety, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };

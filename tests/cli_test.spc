@@ -126,8 +126,23 @@ fn main() i32 {
   if kindof::<*const i32>() != TypeTag::Pointer { return 6; }
   if kindof::<str>() != TypeTag::Str { return 7; }
   if kindof::<(i32, bool)>() != TypeTag::Tuple { return 8; }
+  switch TI.field("x") {
+    Some(f) => { if f.kind != TypeTag::Int { return 9; } },
+    None => { return 10; },
+  };
+  switch type_info::<Shape>().variant("Line") {
+    Some(v) => { if v.payload != 2 { return 11; } },
+    None => { return 12; },
+  };
+  switch ci.variant_by_tag(7) {
+    Some(v) => { print("tag7={}\n", v.name); },
+    None => { return 13; },
+  };
+  let ai = type_info::<[u16; 4]>();
+  if ai.len != 4 || ai.elem != TypeTag::Uint { return 14; }
   return 0;
 }
+enum Shape { Dot, Line(i32, i32), }
 "#,
     );
     let r = p.compile("main.spc");
@@ -140,6 +155,7 @@ fn main() i32 {
     assert(rr.ok());
     assert(rr.out_shows("Point.y"), "struct and field names are readable at runtime");
     assert(rr.out_shows("Blue=7"), "variant names carry their declared tag");
+    assert(rr.out_shows("tag7=Blue"), "variant_by_tag reverses a declared value");
 }
 
 @test
