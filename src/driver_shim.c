@@ -24,7 +24,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__wasi__)
 #  include <spawn.h>
 #endif
 #if defined(_WIN32)
@@ -32,7 +32,7 @@
 #  include <io.h>      /* _access, _unlink */
 #  include <process.h> /* _getpid */
 #  include <windows.h>
-#else
+#elif !defined(__wasi__)
 #  include <sys/wait.h> /* WIFEXITED/WEXITSTATUS */
 #endif
 #if defined(__APPLE__)
@@ -108,8 +108,9 @@ int sc_same_file(const char *a, const char *b) {
 #endif
 }
 
-#if defined(_WIN32)
-/* system() returns the child's exit code directly on Windows (no wait-status encoding). */
+#if defined(_WIN32) || defined(__wasi__)
+/* system() returns the child's exit code directly on Windows (no wait-status encoding), and WASI
+   has no child processes at all -- the stubs below never produce a status to decode. */
 int sc_wifexited(int status) {
   (void)status;
   return 1;
@@ -163,6 +164,8 @@ int sc_exe_path(char *buf, unsigned size) {
 int sc_getpid(void) {
 #if defined(_WIN32)
   return (int)_getpid();
+#elif defined(__wasi__)
+  return 1; /* WASI has no pids; a constant keeps pid-suffixed temp names stable */
 #else
   return (int)getpid();
 #endif
@@ -176,6 +179,8 @@ int sc_host_platform(void) {
   return 0;
 #elif defined(__ANDROID__)
   return 5; /* checked before __linux__: bionic is its own platform */
+#elif defined(__wasi__)
+  return 3; /* wasm */
 #elif defined(__APPLE__)
   return 1;
 #else
@@ -288,7 +293,10 @@ long long sc_ticks_ms(void) {
 /* Start `cmd` through the shell without waiting (redirections live inside the string); the returned
    pid/handle is claimed by sc_wait_any. -1 on spawn failure. */
 long long sc_spawn(const char *cmd) {
-#if defined(_WIN32)
+#if defined(__wasi__)
+  (void)cmd;
+  return -1; /* WASI has no processes; the caller's spawn-failure path reports it */
+#elif defined(_WIN32)
   const char *sh = getenv("COMSPEC");
   if (!sh)
     sh = "cmd.exe";
@@ -320,7 +328,10 @@ long long sc_spawn(const char *cmd) {
 /* Wait until ANY of the n spawned children exits: returns its index and stores its exit code, so the
    scheduler refills the freed slot immediately instead of draining in FIFO order. -1 on error. */
 int sc_wait_any(const int64_t *pids, int n, int *code) {
-#if defined(_WIN32)
+#if defined(__wasi__)
+  (void)pids; (void)n; (void)code;
+  return -1;
+#elif defined(_WIN32)
   HANDLE hs[MAXIMUM_WAIT_OBJECTS];
   if (n > MAXIMUM_WAIT_OBJECTS)
     n = MAXIMUM_WAIT_OBJECTS;
@@ -354,7 +365,10 @@ int sc_wait_any(const int64_t *pids, int n, int *code) {
    Unlike sc_wait_any it never reaps a pid outside `pids`, so it is safe while unrelated children
    (the parallel emit workers) are alive. */
 int sc_try_wait(const int64_t *pids, int n, int *code) {
-#if defined(_WIN32)
+#if defined(__wasi__)
+  (void)pids; (void)n; (void)code;
+  return -1;
+#elif defined(_WIN32)
   HANDLE hs[MAXIMUM_WAIT_OBJECTS];
   if (n > MAXIMUM_WAIT_OBJECTS)
     n = MAXIMUM_WAIT_OBJECTS;
@@ -383,7 +397,7 @@ int sc_try_wait(const int64_t *pids, int n, int *code) {
 
 /* fork() for the parallel emit workers; -1 where unsupported (Windows), which selects the serial path. */
 long long sc_fork(void) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__wasi__)
   return -1;
 #else
   return (long long)fork();
@@ -392,7 +406,7 @@ long long sc_fork(void) {
 
 /* Anonymous pipe: fds[0] read end, fds[1] write end. -1 on failure or Windows. */
 int sc_pipe(int *fds) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__wasi__)
   (void)fds;
   return -1;
 #else
@@ -477,7 +491,7 @@ int sc_asan(void) {
 /* Block for ONE specific child; its exit code via *code, 0 on success, -1 on error/Windows.
    Never reaps unrelated children. */
 int sc_waitpid(long long pid, int *code) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__wasi__)
   (void)pid; (void)code;
   return -1;
 #else
@@ -758,6 +772,16 @@ int sc_exec(const char *cmd) {
   free(line);
   return rc;
 }
+#elif defined(__wasi__)
+/* WASI has no processes: every command runner fails cleanly and the caller reports it. */
+int sc_run(const char *cmd, const char *in_path, const char *out_path, const char *err_path, const char *env) {
+  (void)cmd; (void)in_path; (void)out_path; (void)err_path; (void)env;
+  return -1;
+}
+int sc_exec(const char *cmd) {
+  (void)cmd;
+  return -1;
+}
 #else
 int sc_run(const char *cmd, const char *in_path, const char *out_path, const char *err_path, const char *env) {
   extern char **environ;
@@ -806,6 +830,9 @@ int sc_exec(const char *cmd) {
    the process dies, so a handler installed here is the one place a stack survives to be printed. POSIX
    prints symbolized frames; Windows has no DWARF-aware symbolizer at runtime, so it prints each return
    address as an offset from the PE base (ASLR-stable) for addr2line against the same binary. */
+#if defined(__wasi__)
+void sc_trace_install(void) {} /* WASI has neither signals nor a backtrace to print */
+#else
 #include <signal.h>
 #if defined(_WIN32)
 static void sc_trace_abort(int sig) {
@@ -827,3 +854,4 @@ static void sc_trace_abort(int sig) {
 }
 #endif
 void sc_trace_install(void) { signal(SIGABRT, sc_trace_abort); }
+#endif

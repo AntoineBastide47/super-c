@@ -19,10 +19,10 @@ fn compiles_file() {
     let p = cli::proj_new();
     p.mkfile("prog.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(7); }\n");
     let r = p.compile("prog.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_exists("prog.c"), "module .c is emitted under build/");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 7);
 }
 
@@ -49,9 +49,9 @@ fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);
 "#,
     );
     let r = p.compile("xm.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 21);
 }
 
@@ -78,11 +78,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", "[2] = 30"), "const designator index folded into the C output");
     assert(p.gen_has("main.c", "_Static_assert(sizeof(Pt) == 8"), "layout verification assert emitted");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 54);
 
     // a folded-FALSE static_assert is a SUPER-C error (with our span), not a downstream C error
@@ -132,7 +132,7 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", r#"_Static_assert(true, "ctfe")"#), "fib(20) ran at compile time");
     assert(p.gen_has("main.c", r#"_Static_assert(true, "loops fold")"#), "collatz(27) ran at compile time");
     assert(p.gen_has("main.c", r#"_Static_assert(true, "floats fold")"#), "float CTFE ran at compile time");
@@ -141,7 +141,7 @@ fn main() i32 {
     assert(!p.gen_has("main.c", "fib(9"), "no interpreted call survives in main (fib(9))");
     assert(p.gen_has("main.c", "late()"), "an un-intercepted extern callee stays a runtime call");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 8);
 
     // an over-budget callee bails to a runtime call instead of hanging the compiler
@@ -156,7 +156,7 @@ fn main() i32 { if spin() > 0 { return 3; } return 4; }
 "#,
     );
     let s = p.compile("main.spc");
-    assert_eq(s.exit, 0);
+    assert(s.ok());
     assert(p.gen_has("main.c", "spin()"), "over-budget callee stays a runtime call");
 
     // --const-eval-steps starves a loop-driven assert -> reports the budget
@@ -180,7 +180,7 @@ fn main() i32 { return 0; }
 "#,
     );
     let m = p.compile_flags("--const-eval-steps=100000", "main.spc");
-    assert_eq(m.exit, 0);
+    assert(m.ok());
     assert(p.gen_has("main.c", r#"_Static_assert(true, "memoized")"#), "the call cache collapsed the recursion");
 
     // raw strings are CTFE-visible (hash-delimited content with an interior quote folds like any literal)
@@ -192,7 +192,7 @@ fn main() i32 { return 0; }
 "##,
     );
     let rw = p.compile("main.spc");
-    assert_eq(rw.exit, 0);
+    assert(rw.ok());
     assert(p.gen_has("main.c", r#"_Static_assert(true, "raw folds")"#), "raw string len folded at compile time");
 }
 
@@ -246,7 +246,7 @@ fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(
         p.gen_has("main.c", r#"_Static_assert(true, "deferred: asserts may precede their callee")"#),
         "assert above its callee folds",
@@ -255,7 +255,7 @@ fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
     assert(p.gen_has("main.c", r#"_Static_assert(true, "the abstract heap folds")"#), "malloc/free fold");
     assert(p.gen_has("main.c", r#"_Static_assert(true, "payload enums fold")"#), "Option + switch folds");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 
     // a would-be runtime trap in a required-const context reports its reason
@@ -348,14 +348,14 @@ fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5(
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", r#"_Static_assert(true, "try both paths")"#), "? folds both ways");
     assert(p.gen_has("main.c", r#"_Static_assert(true, "slices + range indexing")"#), "slices fold");
     assert(p.gen_has("main.c", r#"_Static_assert(true, "struct patterns + &const")"#), "struct patterns fold");
     assert(p.gen_has("main.c", r#"_Static_assert(true, "interface default body")"#), "interface defaults fold");
     assert(p.gen_has("main.c", r#"_Static_assert(true, "Map and Set fold")"#), "Map/Set fold");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -371,10 +371,10 @@ fn raii_cond_move_reassign() {
         "fn consume(s: String) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    let mut buf = String::from_str(\"seed\");\n    let mut total: usize = 0;\n    for _i in 0..3 {\n        total = total + consume(buf);\n        buf = String::from_str(\"abcd\");\n    }\n    return (total + buf.len()) as i32 - 16;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", "if (!__mv"), "reassign free is flag-guarded");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -390,10 +390,10 @@ fn raii_drop_on_field_assign() {
         "struct Holder {\n    pub name: String,\n}\n\nextend Holder as Free {\n    pub fn free(self: &mut Holder) {\n        self.name.free();\n    }\n}\n\nfn take_name(h: &mut Holder) String {\n    return replace(&mut h.name, String::new());\n}\n\nfn main() i32 {\n    let mut h = Holder { name: String::from_str(\"first\") };\n    let mut n: usize = 0;\n    for _i in 0..3 {\n        h.name = String::from_str(\"abcdefgh\");\n        n = n + h.name.len();\n    }\n    let taken = take_name(&mut h);\n    n = n + taken.len();\n    return n as i32 - 32;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", "String__free"), "field overwrite frees the old value");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 
     // a field moved out ANYWHERE in the body (even conditionally) guards the assign-free for that
@@ -403,10 +403,10 @@ fn raii_drop_on_field_assign() {
         "struct H {\n    pub name: String,\n}\n\nextend H as Free {\n    pub fn free(self: &mut H) {\n        self.name.free();\n    }\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn shuffle(h: &mut H) usize {\n    let mut n: usize = 0;\n    if h.name.len() > 3 {\n        let a = unsafe h.name;\n        n = n + sink(a);\n    }\n    h.name = String::from_str(\"next\");\n    return n + h.name.len();\n}\n\nfn main() i32 {\n    let mut h = H { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let n = shuffle(&mut h);\n    return n as i32 - 36;\n}\n",
     );
     let c2 = p.compile("cond.spc");
-    assert_eq(c2.exit, 0);
+    assert(c2.ok());
     assert(p.gen_has("cond.c", ") String__free"), "conditionally-moved field assign-free is flag-guarded");
     let cc2 = p.cc_build("");
-    assert_eq(cc2.exit, 0);
+    assert(cc2.ok());
     assert_eq(p.run_bin(), 0);
 
     // moving a field out of a value implementing Free is REJECTED (Rust's rule): the free body
@@ -431,12 +431,12 @@ fn raii_free_glue_untouched_fields() {
         "struct Pair {\n    pub a: String,\n    pub b: String,\n    pub n: i32,\n    pub peek: *const String,\n}\n\nextend Pair as Free {\n    pub fn free(self: &mut Pair) {\n        self.a.free();\n    }\n}\n\nstruct Whole {\n    pub s: String,\n}\n\nextend Whole as Free {\n    pub fn free(self: &mut Whole) {\n        self.s.free();\n    }\n}\n\nfn main() i32 {\n    let mut q = Pair {\n        a: String::from_str(\"abcdefghijklmnopqrstuvwxyz\"),\n        b: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\"),\n        n: 0,\n        peek: null,\n    };\n    q.n = q.a.len() as i32 + q.b.len() as i32;\n    let w = Whole { s: String::from_str(\"zz\") };\n    return q.n + w.s.len() as i32 - 60;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", "Pair__free__fb("), "incomplete impl gets the wrapper");
     assert(p.gen_has("main.c", "String__free(&self->b);"), "untouched field is glue-freed");
     assert(!p.gen_has("main.c", "Whole__free__fb"), "complete impl emits no wrapper");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -451,14 +451,14 @@ fn local_const_lifecycle() {
         "struct P {\n    pub x: i32,\n    pub y: i32,\n}\n\nconst fn mk() P {\n    return P { x: 3, y: 4 };\n}\n\nfn build() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(5u32);\n    v.push(9u32);\n    return v;\n}\n\nfn main() i32 {\n    const A: P = mk();\n    const L: Vector<u32> = build();\n    return A.x + A.y + L.len() as i32 + *L.at(0) as i32 - 14;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", "Vector__u32 L = build();"), "owning local const is a runtime local");
     assert(p.gen_has("main.c", "Vector__u32__free(&L);"), "owning local const is freed at scope exit");
     assert(p.gen_has("main.c", "static const P A = { .x = 3, .y = 4 };"), "value const folds to static data");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(lk.exit, 0); // runs, and the owning const is freed (no leak under the fatal gate)
+    assert(lk.ok()); // runs, and the owning const is freed (no leak under the fatal gate)
 
     // a GLOBAL owning const is the other lifecycle: no scope exit, so it is materialized into the
     // binary -- buffer included -- and never freed
@@ -467,12 +467,12 @@ fn local_const_lifecycle() {
         "fn mk() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nconst V: Vector<u32> = mk();\n\nfn main() i32 {\n    return (V.len() - 1) as i32;\n}\n",
     );
     let g = p.compile("g.spc");
-    assert_eq(g.exit, 0);
+    assert(g.ok());
     assert(p.gen_has("g.c", "static const uint32_t V__ct0[8]"), "the buffer is static data");
     assert(p.gen_has("g.c", ".ptr = (void *)V__ct0"), "the const points at it");
     assert(!p.gen_has("g.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
     let gr = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(gr.exit, 0);
+    assert(gr.ok());
     // moving an owning const out is rejected
     p.mkfile(
         "m.spc",
@@ -513,15 +513,15 @@ fn leak_tracker() {
         "fn main() i32 {\n    forget(String::from_str(\"deliberately abandoned, past the inline budget\"));\n    return 0;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_exists("super_rt.c"), "tracker runtime is written");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=1 ");
-    assert_eq(lk.exit, 0);
+    assert(lk.ok());
     assert(lk.out_has("super-c leaks: 1 allocation"), "survivor reported at exit");
     let off = p.run_bin_env("SC_LEAK_CHECK=0 "); // =0 disables even when the suite itself runs traced
-    assert_eq(off.exit, 0);
+    assert(off.ok());
     assert(!off.out_has("super-c leaks"), "inert when disabled");
 
     let q = cli::proj_new();
@@ -530,11 +530,11 @@ fn leak_tracker() {
         "fn main() i32 {\n    let mut v = Vector::<String>::new();\n    v.push(String::from_str(\"owned and freed\"));\n    v.push(String::from_str(\"also freed\"));\n    return (v.len() - 2) as i32;\n}\n",
     );
     let r2 = q.compile("main.spc");
-    assert_eq(r2.exit, 0);
+    assert(r2.ok());
     let cc2 = q.cc_build("");
-    assert_eq(cc2.exit, 0);
+    assert(cc2.ok());
     let ok = q.run_bin_env("SC_LEAK_CHECK=1 ");
-    assert_eq(ok.exit, 0);
+    assert(ok.ok());
     assert(!ok.out_has("super-c leaks"), "leak-free run reports nothing");
 
     // fatal mode: survivors turn the exit code nonzero (23), so CI can gate on leak-freedom
@@ -542,7 +542,7 @@ fn leak_tracker() {
     assert_eq(ft.exit, 23);
     assert(ft.out_has("super-c leaks: 1 allocation"), "fatal mode still prints the report");
     let ftc = q.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(ftc.exit, 0);
+    assert(ftc.ok());
 
     // double frees are detected via the freed-entry history: both stacks reported, exit 0 in
     // report mode, abort in fatal mode
@@ -552,11 +552,11 @@ fn leak_tracker() {
         "extern \"C\" {\n    fn malloc(n: usize) *mut void;\n    fn free(pt: *mut void) void;\n}\n\nfn main(args: Vector<str>) i32 {\n    let pt = unsafe malloc(64 + args.len());\n    unsafe free(pt);\n    unsafe free(pt);\n    return 0;\n}\n",
     );
     let rd = d.compile("main.spc");
-    assert_eq(rd.exit, 0);
+    assert(rd.ok());
     let ccd = d.cc_build("");
-    assert_eq(ccd.exit, 0);
+    assert(ccd.ok());
     let dbl = d.run_bin_env("SC_LEAK_CHECK=1 ");
-    assert_eq(dbl.exit, 0);
+    assert(dbl.ok());
     assert(dbl.out_has("super-c double free:"), "double free detected");
     assert(dbl.out_has("freed again at:"), "both sites reported");
     let dblf = d.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -575,7 +575,7 @@ fn auto_derive_free() {
         "struct Plain {\n    pub s: String,\n    pub n: i32,\n}\n\nstruct Nested {\n    pub p: Plain,\n    pub tag: String,\n}\n\nenum Ev {\n    None,\n    Named(String),\n}\n\nfn main() i32 {\n    let a = Plain { s: String::from_str(\"plain owning field, long past the sso budget\"), n: 1 };\n    let b = Nested {\n        p: Plain { s: String::from_str(\"nested owning field, long past the sso\"), n: 2 },\n        tag: String::from_str(\"nested tag string, also long past the sso\"),\n    };\n    let e = Ev::Named(String::from_str(\"enum payload string, long past the sso\"));\n    let mut v = Vector::<Plain>::new();\n    v.push(Plain { s: String::from_str(\"vector element string, long past sso\"), n: 3 });\n    let k = a.n + b.p.n + v.len() as i32;\n    let ok = switch e {\n        Named(sx) => sx.len() > 0,\n        _ => false,\n    };\n    return k + (ok as i32) - 5;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", "static void Plain__free__d(Plain *const self)"), "struct free synthesized");
     assert(p.gen_has("main.c", "Plain__free__d(&self->p);"), "nested derive composes");
     assert(
@@ -583,9 +583,9 @@ fn auto_derive_free() {
         "enum payload freed per variant",
     );
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(lk.exit, 0);
+    assert(lk.ok());
     assert(!lk.out_has("super-c leaks"), "derived aggregates are leak-free");
 
     // partial moves out of a derived value are rejected (same rule as explicit Free impls)
@@ -623,9 +623,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("feat.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 115);
 }
 
@@ -649,9 +649,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -722,18 +722,18 @@ fn main() i32 { return 0; }
     assert(r.out_has("3 passed, 1 failed"), "final tally");
     // --test-filter narrows selection; a fully passing selection exits 0
     let f = p.compile_flags("--test --test-filter=drains --test-jobs=2", "main.spc");
-    assert_eq(f.exit, 0);
+    assert(f.ok());
     assert(f.out_has("running 1 test"), "filter selected one");
     assert(f.out_has("1 passed, 0 failed"), "filtered run passes");
     // --test-no-fork runs in-process and skips should_panic tests
     let nf = p.compile_flags("--test --test-no-fork --test-filter=boom", "main.spc");
-    assert_eq(nf.exit, 0);
+    assert(nf.ok());
     assert(nf.out_has("skipped (should_panic needs fork)"), "no-fork skips should_panic");
     // a normal (non---test) build still compiles and runs its own main (tests not emitted)
     let nb = p.compile("main.spc");
-    assert_eq(nb.exit, 0);
+    assert(nb.ok());
     let cc = p.cc_build_plain("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -766,13 +766,13 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("genbv.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(
         p.gen_has("genbv.h", "struct opt__Opt__genbv__Bar {"),
         "instance full-monomorphized in the user module's header",
     );
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 60);
 }
 
@@ -803,9 +803,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("genbd.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 42);
 }
 
@@ -824,11 +824,11 @@ fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p
 "#,
     );
     let r = p.compile("emac.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("emac.h", "PAIR_DECLARE("), "@emit_macro emits DECLARE template");
     assert(p.gen_has("emac.h", "PAIR_DEFINE("), "@emit_macro emits DEFINE template");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 7);
 
     // a plain-C consumer instantiates the template over its own C type (no Super-C compiler involved)
@@ -886,9 +886,9 @@ fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()
 "#,
     );
     let r = p.compile("pibf.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 7);
 }
 
@@ -919,9 +919,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 42);
 }
 
@@ -946,9 +946,9 @@ fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 42);
 }
 
@@ -991,11 +991,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // spawn requires F: Send, and a raw pointer is not Send (nor is a closure that captures one), so sending a
@@ -1143,11 +1143,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // @platform gates @c.source/@c.link: a windows-only extern block (backing header + link flag) must not
@@ -1176,7 +1176,7 @@ fn main() i32 {
     );
     // Builds on the host even though the windows block names a header that does not exist: it is gated out.
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     // The always-on link is present; the windows-only one only when windows is what we are building for.
     assert(p.gen_has("__ldflags", "-lm"), "ungated @c.link lands in __ldflags");
     if cli::on_windows() {
@@ -1220,11 +1220,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Preemption (M6/Phase 9): the scheduler is cooperative, so a task that never blocks would own its worker
@@ -1274,12 +1274,12 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", "__sc_safepoint();"), "a loop in a launching program gets a safepoint");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 
     // ... and a program that never launches pays nothing: no safepoint is emitted at all.
     let q = cli::proj_new();
@@ -1295,7 +1295,7 @@ fn main() i32 {
 "#,
     );
     let r2 = q.compile("main.spc");
-    assert_eq(r2.exit, 0);
+    assert(r2.ok());
     assert(!q.gen_has("main.c", "__sc_safepoint();"), "a program that never launches gets no safepoints");
 }
 
@@ -1363,11 +1363,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // A coroutine stack that runs out must SAY so. The guard page turns an overflow into a fault, and without
@@ -1409,9 +1409,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let over = p.run_bin();
     assert(over != 0, "a 256 KiB stack cannot hold 800 KiB of frames");
     assert(p.run_bin_env("").out_has("stack overflow"), "and it says so instead of dying silently");
@@ -1449,9 +1449,9 @@ fn main() i32 {
 "#,
     );
     let r2 = p.compile("main.spc");
-    assert_eq(r2.exit, 0);
+    assert(r2.ok());
     let cc2 = p.cc_build("");
-    assert_eq(cc2.exit, 0);
+    assert(cc2.ok());
     assert_eq(p.run_bin(), 0); // 4 MiB is enough
 
     // A wild pointer is a crash, not a stack overflow: the message must not appear.
@@ -1477,9 +1477,9 @@ fn main() i32 {
 "#,
     );
     let r3 = p.compile("main.spc");
-    assert_eq(r3.exit, 0);
+    assert(r3.ok());
     let cc3 = p.cc_build("");
-    assert_eq(cc3.exit, 0);
+    assert(cc3.ok());
     let wild = p.run_bin_env("");
     assert(wild.exit != 0, "a wild write still crashes");
     assert(!wild.out_has("stack overflow"), "and is NOT reported as a stack overflow");
@@ -1528,11 +1528,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 
     // A panic inside a coroutine is attributed to it.
     let q = cli::proj_new();
@@ -1556,9 +1556,9 @@ fn main() i32 {
 "#,
     );
     let r2 = q.compile("main.spc");
-    assert_eq(r2.exit, 0);
+    assert(r2.ok());
     let cc2 = q.cc_build("");
-    assert_eq(cc2.exit, 0);
+    assert(cc2.ok());
     let run2 = q.run_bin_env("");
     assert(run2.exit != 0, "the panic takes the process down");
     assert(run2.out_has("[task "), "the panic names the task it happened in");
@@ -1651,11 +1651,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // UDP and typed failures. Every operation that can fail returns `Result<T, IoError>`, so the caller can
@@ -1723,11 +1723,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 
     let q = cli::proj_new();
     q.mkfile(
@@ -1789,11 +1789,11 @@ fn main() i32 {
 "#,
     );
     let r2 = q.compile("main.spc");
-    assert_eq(r2.exit, 0);
+    assert(r2.ok());
     let cc2 = q.cc_build("");
-    assert_eq(cc2.exit, 0);
+    assert(cc2.ok());
     let run2 = q.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run2.exit, 0);
+    assert(run2.ok());
 }
 
 // What the reactor is FOR: a hundred simultaneous connections served by two workers and one poller thread,
@@ -1893,11 +1893,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // `@blocking` (M6/Phase 10): the attribute makes a call to an extern function go through a generated
@@ -1960,12 +1960,12 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("main.c", "__sc_blk_sleep("), "the call goes through the generated wrapper");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Guided scheduling: each claim takes a share of what REMAINS rather than a fixed grain, so early claims
@@ -1998,11 +1998,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // `@blocking` packs a call's arguments into a frame for the pool thread to run from, which a variadic call
@@ -2087,11 +2087,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Deterministic replay (std/parallel/runtime): `SC_SCHED_SEED` pins the pool to one worker and hands every
@@ -2138,9 +2138,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     for s in 0..2 {
         let env = if s == 0 {
             "SC_SCHED_SEED=7 ";
@@ -2148,9 +2148,9 @@ fn main() i32 {
             "SC_SCHED_SEED=1234567 ";
         };
         let a = p.run_bin_env(env);
-        assert_eq(a.exit, 0);
+        assert(a.ok());
         let b = p.run_bin_env(env);
-        assert_eq(b.exit, 0);
+        assert(b.ok());
         let sa = str::from_cstr(a.out);
         let sb = str::from_cstr(b.out);
         assert(sa.len() > 60, "the fixture logged an order");
@@ -2202,11 +2202,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Lock-order tracking (`SC_LOCK_ORDER`): a deadlock is reported the first time two locks are taken in
@@ -2236,16 +2236,16 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     // -DSC_LOCKDEP is what compiles the hooks in at all: they sit on a lock fast path of one CAS, so an
     // ungated call to check an env flag tripled `mutex_uncontended`. The `race` profile defines it.
     let cc = p.cc_build("-DSC_LOCKDEP");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     // Compiled in but not switched on: an inversion costs nothing and says nothing.
     let quiet = p.run_bin();
     assert_eq(quiet, 0);
     let on = p.run_bin_env("SC_LOCK_ORDER=1 ");
-    assert_eq(on.exit, 0);
+    assert(on.ok());
     assert(on.out_has("lock order inversion"), "expected the inversion to be reported");
 }
 
@@ -2315,11 +2315,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Task-aware parking: 50 coroutines (30 producers + 20 consumers) share a bounded(2) channel -- MORE
@@ -2388,11 +2388,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // `sleep` and the scheduler's timer list: a sleeping coroutine parks on its deadline instead of holding its
@@ -2452,11 +2452,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Task-aware `Mutex` / `RwLock` acquisition. On ONE worker: task A takes the mutex and then blocks on a
@@ -2561,11 +2561,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Unbounded channels and channel timeouts: 100 sends with nobody draining must all be accepted (the ring
@@ -2644,11 +2644,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Every timed wait racing its own deadline, on purpose: with one-nanosecond timeouts the timer fires while
@@ -2718,11 +2718,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Multi-way waiting (std/parallel/select): one consumer coroutine waits on TWO channels at once while two
@@ -2880,11 +2880,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // The rest of the selector's surface. A send arm on a FULL channel is not ready until a drainer makes room
@@ -3016,11 +3016,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // The `select` keyword end to end: it lowers (src/desugar) to the same `Selector` the test above drives by
@@ -3173,11 +3173,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // A `select` whose arms are malformed. Each one is reported on its own -- a bad arm still consumes its
@@ -3244,11 +3244,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // The data-parallel API (std/parallel/data): the whole surface over 5000 elements -- `each` reading every
@@ -3360,11 +3360,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // The data-parallel API composes with the rest of the runtime: a parallel call NESTED inside a parallel body
@@ -3424,11 +3424,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // A parallel body is copied to every worker and run from several at once, so it may neither own a capture nor
@@ -3478,9 +3478,9 @@ fn interior_mutability_via_unsafe_cell() {
         "fn main() i32 {\n    let cell = UnsafeCell::<i32>::new(7);\n    unsafe {\n        cell.get()[0] = 42;\n    }\n    return unsafe {\n        cell.get()[0];\n    } - 42;\n}\n",
     );
     let ro = ok.compile("main.spc");
-    assert_eq(ro.exit, 0);
+    assert(ro.ok());
     let cc = ok.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(ok.run_bin(), 0);
 }
 
@@ -3540,11 +3540,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // A trivial app should not dump the whole std prelude tree (Vector/Map/String not written).
@@ -3553,12 +3553,12 @@ fn prelude_output_is_demand_driven() {
     let p = cli::proj_new();
     p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(42); }\n");
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(!p.gen_exists("__std/vector.c"), "trivial output should not emit unused std vector.c");
     assert(!p.gen_exists("__std/map.c"), "trivial output should not emit unused std map.c");
     assert(!p.gen_exists("__std/string.c"), "trivial output should not emit unused std string.c");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 42);
 }
 
@@ -3586,9 +3586,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 42);
 }
 
@@ -3609,9 +3609,9 @@ fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); }
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 36);
 }
 
@@ -3655,9 +3655,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 25);
 }
 
@@ -3681,9 +3681,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("-lm");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 13);
 }
 
@@ -3732,13 +3732,13 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("unistd.h", "#include <unistd.h>"), "the unistd block pulls in its header");
     assert(p.gen_has("filesystem.h", "#include <dirent.h>"), "the filesystem blocks pull in theirs");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 // Import forms + mangling: an alias import, a glob import, two modules with a same-named public function
@@ -3763,9 +3763,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 140);
 }
 
@@ -3798,17 +3798,17 @@ fn external_c_sources() {
     let mut flag = String::from_str("-l");
     flag.push_str(lib);
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("__ldflags", flag.as_str()), "@c.link lands in build/__ldflags");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 48);
 
     // drop the extern blocks: the wrapper TUs go, and so does the flag they contributed. `-lm` stays --
     // the prelude's float methods are emitted into every program, so libm is on every POSIX link line.
     p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n");
     let r2 = p.compile("main.spc");
-    assert_eq(r2.exit, 0);
+    assert(r2.ok());
     assert_eq(p.gen_count("__ext"), 0);
     assert(!p.gen_has("__ldflags", flag.as_str()), "a dropped extern block takes its link flag with it");
     if !cli::on_windows() {
@@ -3871,9 +3871,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 70);
 }
 
@@ -3897,9 +3897,9 @@ fn format_conformances() {
 "#,
     );
     let r = p.compile("fmt.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 18);
 }
 
@@ -3936,9 +3936,9 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 42);
 
     // a mutual by-value embedding is infinite size
@@ -4039,11 +4039,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     let run = p.run_bin_env("");
-    assert_eq(run.exit, 0);
+    assert(run.ok());
 }
 
 @test
@@ -4071,9 +4071,9 @@ fn main() i32 { return scale(4); }
 fn main() i32 { if Z != 0 && 10 / Z > 1 { return 1; } return 0; }
 "#);
     let r3 = p3.compile("sc.spc");
-    assert_eq(r3.exit, 0);
+    assert(r3.ok());
     let cc3 = p3.cc_build("");
-    assert_eq(cc3.exit, 0);
+    assert(cc3.ok());
     assert_eq(p3.run_bin(), 0);
 
     let p4 = cli::proj_new();
@@ -4087,9 +4087,9 @@ fn main() i32 { if Z != 0 && 10 / Z > 1 { return 1; } return 0; }
 fn main() i32 { return boom(); }
 "#);
     let r5 = p5.compile("pan.spc");
-    assert_eq(r5.exit, 0);
+    assert(r5.ok());
     let cc5 = p5.cc_build("");
-    assert_eq(cc5.exit, 0);
+    assert(cc5.ok());
     assert(p5.run_bin() != 0, "the panic still aborts at runtime");
 }
 
@@ -4147,9 +4147,9 @@ fn main() i32 { let x = spin(1000u64); if x != 499500u64 { return 1; } return 0;
 "#,
     );
     let r4 = p4.compile("runtime.spc");
-    assert_eq(r4.exit, 0);
+    assert(r4.ok());
     let cc4 = p4.cc_build("");
-    assert_eq(cc4.exit, 0);
+    assert(cc4.ok());
     assert_eq(p4.run_bin(), 0);
 
     // mutually recursive const fns are legal; const fn also runs as a normal function at runtime
@@ -4163,9 +4163,9 @@ fn main(argv: Vector<str>) i32 { if is_even(argv.len() as u32 * 2) { return 0; }
 "#,
     );
     let r5 = p5.compile("rec.spc");
-    assert_eq(r5.exit, 0);
+    assert(r5.ok());
     let cc5 = p5.cc_build("");
-    assert_eq(cc5.exit, 0);
+    assert(cc5.ok());
     assert_eq(p5.run_bin(), 0);
 }
 
@@ -4206,9 +4206,9 @@ fn main() i32 { return T - 27; }
 "#,
     );
     let r3 = p3.compile("use.spc");
-    assert_eq(r3.exit, 0);
+    assert(r3.ok());
     let cc3 = p3.cc_build("");
-    assert_eq(cc3.exit, 0);
+    assert(cc3.ok());
     assert_eq(p3.run_bin(), 0);
 
     // a const pointing at freed compile-time memory is rejected
@@ -4281,11 +4281,11 @@ fn main() i32 {
 "#,
     );
     let r = p.compile("mat.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(p.gen_has("mat.c", "__ct0"), "auxiliary statics are emitted");
     assert(p.gen_has("mat.c", ".next = (void *)"), "pointer relocations are emitted");
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 
     // An owning (Free) type materializes too -- buffer and all. What keeps it sound is that no copy
@@ -4308,14 +4308,14 @@ fn main() i32 {
 "#,
     );
     let r2 = p2.compile("own.spc");
-    assert_eq(r2.exit, 0);
+    assert(r2.ok());
     assert(p2.gen_has("own.c", "static const uint32_t V__ct0[8]"), "the Vector's buffer is static data");
     assert(!p2.gen_has("own.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
     let cc2 = p2.cc_build("");
-    assert_eq(cc2.exit, 0);
+    assert(cc2.ok());
     // bind it: run_bin_env hands the captured output to the caller, and dropping it leaks the buffer
     let lk2 = p2.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert_eq(lk2.exit, 0);
+    assert(lk2.ok());
 
     // and nothing can obtain a copy to free, or mutate it in place
     let p3 = cli::proj_new();
@@ -4372,9 +4372,9 @@ fn main(argv: Vector<str>) i32 {
 "#,
     );
     let r = p.compile("diff.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -4391,9 +4391,9 @@ fn explicit_std_module_import() {
         "import std::core as core;\nimport std::vector as vec;\n\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(3);\n    let ok = v.at(0) == 3;\n    v.free();\n    if ok { return 0; }\n    return 1;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -4411,9 +4411,9 @@ fn generic_body_reaches_its_own_module() {
     );
     p.mkfile("main.spc", "import lib as lib;\n\nfn main() i32 {\n    return lib::pick(0, 1, true) - 4;\n}\n");
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -4432,9 +4432,9 @@ fn imported_const_sized_array() {
         "import lib as lib;\n\nconst V: lib::Val = lib::Val::make(7);\n\nfn main() i32 {\n    return V.get() as i32 - 7 + (sizeof(lib::Val) as i32) - (sizeof(usize) as i32) * 2;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -4457,7 +4457,7 @@ fn bindgen_generates_callable_bindings() {
     let mut args = String::new();
     args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
     let gen = p.run_raw(args.as_str());
-    assert_eq(gen.exit, 0);
+    assert(gen.ok());
 
     let mut path = String::new();
     path.format_into("{}/lib.spc", root);
@@ -4483,9 +4483,9 @@ fn bindgen_generates_callable_bindings() {
         "import lib;\n\nfn main() i32 {\n    let c = unsafe lib::lib_open(3);\n    let n = unsafe lib::lib_len(c, \"abcd\".ptr() as *const char, 2);\n    unsafe lib::lib_close(c);\n    if n == 9 { return 0; }\n    return 1;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -4534,9 +4534,9 @@ fn bindgen_generates_records_enums_and_consts() {
         "import lib;\n\nfn main() i32 {\n    let mut cfg = lib::lib_cfg {\n        name: \"c\".ptr() as *const char,\n        len: 5,\n        origin: lib::lib_pt { x: 2, y: 3 },\n        tag: [0 as char; 8],\n        mode: lib::lib_mode::LIB_SLOW,\n    };\n    cfg.tag[0] = 'A' as char;\n    let n = unsafe lib::lib_sum(&cfg);\n    let o = unsafe lib::lib_origin(&cfg);\n    let m = unsafe lib::lib_mode_of(lib::lib_mode::LIB_LAST);\n    if n == 85 && o.x == 2 && o.y == 3 && m == 11 && lib::LIB_VERSION == 7 { return 0; }\n    return 1;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -4644,9 +4644,9 @@ fn bindgen_expressions_anonymous_types_and_globals() {
         "import lib;\n\nfn main() i32 {\n    let pt = lib::lib_pt { x: 2, y: 3 };\n    let n = unsafe lib::lib_use(&pt, lib::lib_mode::LIB_B);\n    let c = unsafe lib::lib_counter;\n    if n == 13 && c == 41 && lib::LIB_SUM == 12 { return 0; }\n    return 1;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -4664,7 +4664,7 @@ fn vendor_copies_and_imports_resolve() {
     let mut args = String::new();
     args.format_into("vendor \"{}/dep\" --dir=\"{}\"", root, root);
     let r = p.run_raw(args.as_str());
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     assert(r.out_has("import vendor::dep::"), "the success line teaches the import spelling");
     let mut nested = String::new();
     nested.format_into("{}/vendor/dep/util/more.spc", root);
@@ -4688,9 +4688,9 @@ fn vendor_copies_and_imports_resolve() {
         "import vendor::dep::geo;\nimport vendor::dep::util::more;\nfn main() i32 { return geo::area(6, 7) + more::twice(0) - 42; }\n",
     );
     let c = p.compile("main.spc");
-    assert_eq(c.exit, 0);
+    assert(c.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -4742,7 +4742,7 @@ fn vendor_clones_git_and_strips_the_repository() {
     args.format_into("vendor \"{}/dep.git\" mylib --ref=v1 --dir=\"{}\"", root, root);
     let r = p.run_raw(args.as_str());
     args.free();
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let mut lib = String::new();
     lib.format_into("{}/vendor/mylib/lib.spc", root);
     switch loader::read_file(lib.as_str()) {
@@ -4798,9 +4798,9 @@ fn vendor_clones_git_and_strips_the_repository() {
     op.free();
     p.mkfile("main.spc", "import vendor::mylib::lib;\nfn main() i32 { return lib::seven() - 8; }\n");
     let c = p.compile("main.spc");
-    assert_eq(c.exit, 0);
+    assert(c.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -4817,9 +4817,9 @@ fn extern_static_mut_binds_a_writable_global() {
         "extern \"C\" \"g.h\" {\n    pub static mut counter: i32;\n}\nfn main() i32 {\n    unsafe {\n        counter = counter + 41;\n    }\n    return unsafe counter - 42;\n}\n",
     );
     let r = p.compile("main.spc");
-    assert_eq(r.exit, 0);
+    assert(r.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
     // the write is guarded exactly like any static mut
     p.mkfile(
@@ -4889,9 +4889,9 @@ fn bindgen_globals_and_cflag() {
         "import lib;\nfn main() i32 {\n    unsafe {\n        lib::counter = lib::counter + 1;\n    }\n    let n = unsafe lib::bump(2);\n    return n + lib::limit - 45;\n}\n",
     );
     let c = p.compile("main.spc");
-    assert_eq(c.exit, 0);
+    assert(c.ok());
     let cc = p.cc_build("");
-    assert_eq(cc.exit, 0);
+    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 

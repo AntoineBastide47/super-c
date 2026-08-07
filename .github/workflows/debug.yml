@@ -1,0 +1,125 @@
+# The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
+# content, and every push runs it. Edit the job for the next investigation; do not remove the file.
+# Current probe: the release workflow's wasm leg.
+name: Debug
+on:
+  push
+permissions:
+  contents: read
+concurrency:
+  group: debug-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-wasm-${{ github.sha }}
+          restore-keys: |
+            ccache-wasm-
+            ccache-linux-
+
+      - name: Configure ccache dir
+        run: |
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"
+          command -v ccache >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y ccache; }
+
+      - name: Cache wasi toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/wasi-sdk
+            ~/.wasmtime
+          key: wasi-toolchain-sdk25-v1
+
+      - name: Set up wasi-sdk + wasmtime
+        run: |
+          set -eu
+          if [ ! -x "$HOME/wasi-sdk/bin/clang" ]; then
+            curl -sSfL -o /tmp/wasi-sdk.tar.gz \
+              https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+            mkdir -p "$HOME/wasi-sdk"
+            tar -xzf /tmp/wasi-sdk.tar.gz -C "$HOME/wasi-sdk" --strip-components=1
+          fi
+          if [ ! -x "$HOME/.wasmtime/bin/wasmtime" ]; then
+            curl -sSf https://wasmtime.dev/install.sh | bash
+          fi
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch bootstrap super-c from the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          name="super-c-linux-x86_64"
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
+          tar xzf "${name}.tar.gz"
+          if [ -f "${name}/super-c" ]; then cp "${name}/super-c" super-c-boot; else cp "${name}" super-c-boot; fi
+          chmod +x ./super-c-boot
+
+      - name: Build the native compiler
+        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
+
+      - name: Build the wasm compiler
+        run: |
+          set -eu
+          rm -rf src/build
+          ./super-c src/main.spc --target=wasm
+          "$HOME/wasi-sdk/bin/clang" -O2 -std=gnu11 -D_POSIX_C_SOURCE=200809L \
+            -D_WASI_EMULATED_SIGNAL -lwasi-emulated-signal \
+            -Wl,-z,stack-size=8388608 -Wl,--stack-first \
+            $(find src/build/raw -name '*.c') -lm -o super-c.wasm
+          rm -rf src/build
+
+      # The self-hosting fixpoint, on wasm: gen1 (the artifact) transpiles the WHOLE COMPILER under
+      # wasmtime, that tree builds gen2, and gen2's emission of the same input must be byte-identical.
+      # Emission is path-dependent (hashes mix path strings), so gen2 emits at the SAME path gen1 did.
+      # (No byte-diff against the native binary: instance homing follows hash orders that differ
+      # between 32- and 64-bit hosts.) The tree carries its own compiler: std/ffi resolve beside the
+      # binary, and inputs are absolute because wasmtime's guest cwd is "/".
+      - name: Self-host fixpoint under wasmtime
+        run: |
+          set -eu
+          mkdir -p /tmp/wwasm
+          cp -R src std ffi /tmp/wwasm/ && rm -rf /tmp/wwasm/src/build
+          cp super-c.wasm /tmp/wwasm/
+          wasmtime run --dir=/ --argv0 /tmp/wwasm/super-c.wasm -- \
+            /tmp/wwasm/super-c.wasm /tmp/wwasm/src/main.spc --target=wasm 2>/tmp/wasm-err.txt \
+            || { head -60 /tmp/wasm-err.txt; exit 1; }
+          # warnings (unused-pub etc.) are expected; any error line is not
+          if grep -m1 -E '^error' /tmp/wasm-err.txt; then head -40 /tmp/wasm-err.txt; exit 1; fi
+          mv /tmp/wwasm/src/build /tmp/wasm-gen1
+          "$HOME/wasi-sdk/bin/clang" -O1 -std=gnu11 -D_POSIX_C_SOURCE=200809L \
+            -D_WASI_EMULATED_SIGNAL -lwasi-emulated-signal \
+            -Wl,-z,stack-size=8388608 -Wl,--stack-first \
+            $(find /tmp/wasm-gen1/raw -name '*.c') -lm -o /tmp/wwasm/gen2.wasm
+          wasmtime run --dir=/ --argv0 /tmp/wwasm/gen2.wasm -- \
+            /tmp/wwasm/gen2.wasm /tmp/wwasm/src/main.spc --target=wasm 2>/dev/null
+          diff -r /tmp/wasm-gen1 /tmp/wwasm/src/build
+
+      - name: Run the test suite against the wasm compiler
+        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test
+
+      - name: Package
+        run: |
+          set -eu
+          name="super-c-wasm32-wasip1"
+          mkdir -p "dist/${name}"
+          cp super-c.wasm "dist/${name}/"
+          cp -R std ffi "dist/${name}/"
+          tar -C dist -czf "${name}.tar.gz" "${name}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: super-c-wasm32-wasip1.tar.gz
+          if-no-files-found: error

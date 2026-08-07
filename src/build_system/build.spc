@@ -38,15 +38,8 @@ fn mkdirs(path: str) {
 }
 
 fn shell(cmd: str) i32 {
-    let rc = stdlib::system(cmd);
-    if unsafe shim::sc_wifexited(rc) != 0 {
-        return unsafe shim::sc_wexitstatus(rc);
-    }
-    return if rc == 0 {
-        0;
-    } else {
-        1;
-    };
+    let mut c = String::from_str(cmd);
+    return unsafe shim::sc_exec(c.cstr());
 }
 
 fn cat_file(path: str) {
@@ -1839,14 +1832,14 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
     return 0;
 }
 
-// `git rev-parse HEAD` of a checkout, read back through a temp file (`shell` gives only an exit code).
+// `git rev-parse HEAD` of a checkout, read back through a temp file. `sc_run` does the stdout
+// redirection itself: a `>` in the command would need a shell, which Windows does not get.
 fn git_head(dir: str) String {
-    let tmp = join2(dir, ".vendor-head");
+    let mut tmp = join2(dir, ".vendor-head");
     let mut cmd = String::from_str("git -C");
     push_quoted(&mut cmd, dir);
-    cmd.push_str(" rev-parse HEAD >");
-    push_quoted(&mut cmd, tmp.as_str());
-    let rc = shell(cmd.as_str());
+    cmd.push_str(" rev-parse HEAD");
+    let rc = unsafe shim::sc_run(cmd.cstr(), null, tmp.cstr(), null, null);
     let mut out = String::new();
     if rc == 0 {
         switch loader::read_file(tmp.as_str()) {
@@ -2098,12 +2091,18 @@ pub fn manifest_test(
     unsafe stdio::fwrite(src.as_str().ptr(), 1, src.len(), f);
     unsafe stdio::fclose(f);
     // the harness compiles+runs snippets through the binary we just built ("./" so it never
-    // resolves through PATH when the bin name is bare)
+    // resolves through PATH when the bin name is bare) -- unless SC_TEST_SUPERC names a different
+    // compiler under test (the wasm lane's wasmtime wrapper), which then takes its place.
     let mut binb = String::new();
-    if binp.as_str().find_byte(b'/') < 0 {
-        binb.push_str("./");
+    let ov = stdlib::getenv("SC_TEST_SUPERC");
+    if ov != null && unsafe *ov != 0 as char {
+        binb.push_str(str::from_cstr(ov));
+    } else {
+        if binp.as_str().find_byte(b'/') < 0 {
+            binb.push_str("./");
+        }
+        binb.push_string(&binp);
     }
-    binb.push_string(&binp);
     unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
     let mut p = loader::package_load_rooted(
         rootp.as_str(),

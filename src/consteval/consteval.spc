@@ -2784,9 +2784,12 @@ extend ConstEval {
                     as_data: CeValAs { fnv: CvFn { m: d.module, fn_id: d.node } },
                 };
             }
+            if dk != NodeKind::NODE_CONST {
+                return cv_nil(); // read the union arm only for a NODE_CONST: a garbage bool byte is UB in C
+            }
             let dval = self.ast_ptr(d.module).at_const(d.node).as_data.const_def.value;
             let is_static_mut = self.ast_ptr(d.module).at_const(d.node).as_data.const_def.is_static_mut;
-            if dk != NodeKind::NODE_CONST || dval == NODE_NONE || is_static_mut {
+            if dval == NODE_NONE || is_static_mut {
                 return cv_nil();
             }
             let mut v = self.ev_const_init(d.module, dval);

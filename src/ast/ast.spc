@@ -1130,11 +1130,15 @@ extend Ast {
         self.type_pool.clear();
         self.type_index.clear();
         self.type_ix_used = 0;
-        // seeds go to the pool only: the first intern_type rebuild indexes the whole pool
-        self.type_pool.push(Ty { kind: TypeKind::TYPE_ERROR, concrete: true });
+        // seeds go to the pool only: the first intern_type rebuild indexes the whole pool -- and
+        // they pass through ty_canon like every interned entry, or their union tail bytes would be
+        // whatever the C compiler left there and byte-identity dedup would miss them.
+        self.type_pool.push(Ast::ty_canon(&Ty { kind: TypeKind::TYPE_ERROR, concrete: true }));
         for b in 0..BuiltinType::BT_COUNT as u8 {
             self.type_pool.push(
-                Ty { kind: TypeKind::TYPE_BUILTIN, concrete: true, as_data: TyAs { builtin: b as BuiltinType } },
+                Ast::ty_canon(
+                    &Ty { kind: TypeKind::TYPE_BUILTIN, concrete: true, as_data: TyAs { builtin: b as BuiltinType } },
+                ),
             );
         }
     }
@@ -1156,8 +1160,30 @@ extend Ast {
 
     /// Interns `t`, returning the existing TypeId on a hit. Ids are dense insertion-order indices
     /// into `type_pool`; the hash index only picks probe buckets, so identity never depends on it.
+    // Byte identity (the memcmp eq / word-wise hash above) is only sound over CANONICAL bytes: a
+    // construction site initializes one union arm and leaves the rest of TyAs to the C compiler,
+    // which owes us nothing there. Rewrite the value through a zeroed union with only the kind's
+    // live arm copied, so equal types are equal BYTES no matter how they were built.
+    fn ty_canon(t: &Ty) Ty {
+        let mut c = Ty {
+            kind: t.kind,
+            qualifier: t.qualifier,
+            concrete: t.concrete,
+            module: t.module,
+            as_data: TyAs { value: 0 },
+        };
+        if t.kind == TypeKind::TYPE_CONST {
+            c.as_data.value = t.as_data.value;
+        } else if t.kind == TypeKind::TYPE_ARRAY {
+            c.as_data.arr = t.as_data.arr;
+        } else if t.kind != TypeKind::TYPE_ERROR && t.kind != TypeKind::TYPE_NEVER {
+            c.as_data.decl = t.as_data.decl; // every 4-byte arm (decl/elem/inst/builtin) overlays these bytes
+        }
+        return c;
+    }
+
     pub fn intern_type(self: &mut Self, t: Ty) TypeId {
-        let mut nt = t;
+        let mut nt = Ast::ty_canon(&t);
         nt.concrete = self.tc_decide(t);
         if self.type_index.len() == 0 || (self.type_ix_used as usize + 1) * 4 >= self.type_index.len() * 3 {
             self.type_ix_used = Ast::ix_rebuild(&mut self.type_index, self.type_pool.len()) as u32;
