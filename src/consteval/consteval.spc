@@ -149,6 +149,7 @@ pub type Buf64 = Array<char, 64>;
 pub type Buf24 = Array<char, 24>;
 pub type Buf512 = Array<char, 512>;
 pub type Buf4096 = Array<u8, 4096>;
+pub type Buf32 = Array<u8, 32>;
 
 // --- layout engine structs ----------------------------------------------------------------------
 
@@ -2142,6 +2143,688 @@ extend ConstEval {
         );
         return CeVal { kind: CV_AGG, tm: m, ty: self.ce_type(m, id), as_data: CeValAs { p: CvPtr { obj: so, off: 0 } } };
     }
+
+    // Index of the NODE_FIELD named `name` among the decl's fields, -1 when absent.
+    fn ce_ti_findf(self: &Self, dm: ModuleId, dn: NodeId, name: str) i32 {
+        let da = self.ast_ptr(dm);
+        let ms = da.at_const(dn).as_data.aggregate.members;
+        let mut idx: i32 = 0;
+        for i in 0..ms.len {
+            let fid = unsafe da.list(ms)[i as usize];
+            if da.at_const(fid).kind == NodeKind::NODE_FIELD {
+                if self.ce_span_is(dm, self.name_text(dm, da.at_const(fid).as_data.field.name), name) {
+                    return idx;
+                }
+                idx = idx + 1;
+            }
+        }
+        return -1;
+    }
+
+    // A `str` value as a CeVal: a heap byte block plus the two-field view struct, exactly the shape
+    // eval_str_literal builds. (sm, sn) is the prelude `str` decl; (stym, sty) its type.
+    fn ce_ti_str(self: &mut Self, sm: ModuleId, sn: NodeId, stym: ModuleId, sty: TypeId, bytes: str) CeVal {
+        let nb = bytes.len() as u32;
+        let mut block: u32 = 0;
+        if nb != 0 {
+            block = self.ce_obj_new(nb);
+            if block == 0 {
+                return cv_nil();
+            }
+            let bo = self.obj_ptr(block);
+            unsafe bo.heap = 1;
+            unsafe bo.bytes = nb;
+            unsafe bo.em = 0;
+            unsafe bo.et = Ast::builtin(BuiltinType::BT_U8);
+            unsafe bo.esz = 1;
+            for k in 0..nb {
+                unsafe self.obj_ptr(block).slots.set(
+                    k as usize,
+                    CeVal {
+                        kind: CV_INT,
+                        tm: 0,
+                        ty: Ast::builtin(BuiltinType::BT_U8),
+                        as_data: CeValAs { i: bytes[k as usize] },
+                    },
+                );
+            }
+        }
+        let ptr_i = self.ce_ti_findf(sm, sn, "ptr");
+        let len_i = self.ce_ti_findf(sm, sn, "len");
+        if ptr_i < 0 || len_i < 0 {
+            return cv_nil();
+        }
+        let so = self.ce_obj_new(self.ce_field_count(sm, sn));
+        if so == 0 {
+            return cv_nil();
+        }
+        unsafe self.obj_ptr(so).dm = sm;
+        unsafe self.obj_ptr(so).dn = sn;
+        unsafe self.obj_ptr(so).slots.set(
+            ptr_i as usize,
+            CeVal { kind: CV_PTR, tm: 0, ty: TYPE_NONE, as_data: CeValAs { p: CvPtr { obj: block, off: 0 } } },
+        );
+        unsafe self.obj_ptr(so).slots.set(
+            len_i as usize,
+            CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_USIZE), as_data: CeValAs { i: nb } },
+        );
+        return CeVal { kind: CV_AGG, tm: stym, ty: sty, as_data: CeValAs { p: CvPtr { obj: so, off: 0 } } };
+    }
+
+    // The TypeTag variant index for (tm, tt); -1 when the type has no tag (unreachable kinds).
+    // Variant order is pinned by std/core.spc's TypeTag declaration.
+    fn ce_ti_tag(self: &mut Self, tm: ModuleId, tt: TypeId, strm: ModuleId, strn: NodeId, slm: ModuleId, sln: NodeId) i64 {
+        let y = *self.ast_ptr(tm).type_at(tt);
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            switch y.as_data.builtin {
+                BT_VOID => {
+                    return 0;
+                },
+                BT_BOOL => {
+                    return 1;
+                },
+                BT_CHAR | BT_I8 | BT_I16 | BT_I32 | BT_I64 | BT_ISIZE => {
+                    return 2;
+                },
+                BT_U8 | BT_U16 | BT_U32 | BT_U64 | BT_USIZE => {
+                    return 3;
+                },
+                BT_F32 | BT_F64 => {
+                    return 4;
+                },
+                BT_C32 | BT_C64 => {
+                    return 5;
+                },
+                BT_VALIST => {
+                    return 17;
+                },
+                _ => {
+                    return -1;
+                },
+            };
+        }
+        if y.kind == TypeKind::TYPE_POINTER {
+            return 6;
+        }
+        if y.kind == TypeKind::TYPE_REFERENCE {
+            return 7;
+        }
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            return 8;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return 9;
+        }
+        if y.kind == TypeKind::TYPE_DYN {
+            return 16;
+        }
+        if y.kind == TypeKind::TYPE_OPAQUE {
+            return 17;
+        }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_INSTANCE {
+            let mut dm = y.module;
+            let mut dn = y.as_data.decl;
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *self.ast_ptr(tm).instance(y.as_data.inst);
+                dm = it.module;
+                dn = it.decl;
+                if dm == slm && dn == sln {
+                    return 10;
+                }
+                // SliceMut lives beside Slice; matching the decl's own name keeps the compare exact.
+                if dm == slm && self.ce_span_is(
+                    dm,
+                    self.name_text(dm, self.ast_ptr(dm).at_const(dn).as_data.aggregate.name),
+                    "SliceMut",
+                ) {
+                    return 10;
+                }
+                // `(A, B)` lowered to the prelude Tuple2..4 before this ever ran: report it as the
+                // tuple it was written as, not as the struct it lowered to.
+                let tnm = self.name_text(dm, self.ast_ptr(dm).at_const(dn).as_data.aggregate.name);
+                if self.ce_span_is(dm, tnm, "Tuple2") || self.ce_span_is(dm, tnm, "Tuple3") || self.ce_span_is(
+                    dm,
+                    tnm,
+                    "Tuple4",
+                ) {
+                    return 12;
+                }
+            }
+            if dm == strm && dn == strn {
+                return 11;
+            }
+            if !self.has_ast(dm) {
+                return -1;
+            }
+            let d = self.ast_ptr(dm).at_const(dn);
+            if d.kind == NodeKind::NODE_ENUM {
+                return 15;
+            }
+            if d.kind != NodeKind::NODE_STRUCT {
+                return -1;
+            }
+            if d.as_data.aggregate.is_union {
+                return 14;
+            }
+            if d.as_data.aggregate.is_tuple {
+                return 12;
+            }
+            return 13;
+        }
+        return -1;
+    }
+
+    // `type_info::<T>()`: build the TypeInfo object graph for the recorded type argument. Every decl
+    // the graph needs (TypeInfo, str, TypeTag, Slice, FieldInfo, VariantInfo) is derived from the
+    // call's own result type, so no name lookup and no package access is involved.
+    fn ce_type_info(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Rets {
+        let out = Rets { ok: false, n: 0 };
+        let mu = self.ast_ptr(m).type_args(id);
+        if mu == null || unsafe mu.n == 0 {
+            return out;
+        }
+        let rt = self.ce_rtype(f, m, unsafe mu.args[0]);
+        if !rt.ok {
+            return out;
+        }
+        return self.ce_type_info_of(f, m, id, rt.m, rt.t);
+    }
+
+    // The graph build behind ce_type_info, with T given explicitly: codegen calls this per emitted
+    // call site, where the generic substitution lives in ITS frames, not in a CeFrame.
+    fn ce_type_info_of(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId, tm: ModuleId, tt: TypeId) Rets {
+        let out = Rets { ok: false, n: 0 };
+        let rty = self.ce_type(m, id);
+        let rr = self.ce_recv_of(f, m, rty);
+        if !rr.ok || rr.r.dn == NODE_NONE {
+            return out;
+        }
+        let tim = rr.r.dm;
+        let tin = rr.r.dn;
+        // The six TypeInfo fields, by name; their decl types name every other decl the graph uses.
+        let da = self.ast_ptr(tim);
+        let mut sty = TYPE_NONE; // str
+        let mut kty = TYPE_NONE; // TypeTag
+        let mut flty = TYPE_NONE; // Slice<FieldInfo>
+        let mut vrty = TYPE_NONE; // Slice<VariantInfo>
+        let ms = da.at_const(tin).as_data.aggregate.members;
+        for i in 0..ms.len {
+            let fid = unsafe da.list(ms)[i as usize];
+            if da.at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let fnm = self.name_text(tim, da.at_const(fid).as_data.field.name);
+            let fty = self.ce_type(tim, da.at_const(fid).as_data.field.ty);
+            if self.ce_span_is(tim, fnm, "name") {
+                sty = fty;
+            } else if self.ce_span_is(tim, fnm, "kind") {
+                kty = fty;
+            } else if self.ce_span_is(tim, fnm, "fields") {
+                flty = fty;
+            } else if self.ce_span_is(tim, fnm, "variants") {
+                vrty = fty;
+            }
+        }
+        if sty == TYPE_NONE || kty == TYPE_NONE || flty == TYPE_NONE || vrty == TYPE_NONE {
+            return out;
+        }
+        let ys = *da.type_at(sty);
+        if ys.kind != TypeKind::TYPE_STRUCT {
+            return out;
+        }
+        let strm = ys.module;
+        let strn = ys.as_data.decl;
+        let yf = *da.type_at(flty);
+        let yv = *da.type_at(vrty);
+        if yf.kind != TypeKind::TYPE_INSTANCE || yv.kind != TypeKind::TYPE_INSTANCE {
+            return out;
+        }
+        let fit = *da.instance(yf.as_data.inst);
+        let vit = *da.instance(yv.as_data.inst);
+        let slm = fit.module;
+        let sln = fit.decl;
+        let fity = fit.args[0]; // FieldInfo, in tim's pool
+        let vity = vit.args[0]; // VariantInfo, in tim's pool
+        let tag = self.ce_ti_tag(tm, tt, strm, strn, slm, sln);
+        if tag < 0 {
+            return out;
+        }
+        // Size and align; void is the one kind with no C layout.
+        let mut size: u64 = 0;
+        let mut align: u64 = 1;
+        if tag != 0 {
+            let lay = self.ce_layout_f(f, tm, tt);
+            if !lay.ok {
+                return out;
+            }
+            size = lay.size;
+            align = lay.align;
+        }
+        // Name: builtin spelling, or the decl's declared name; anonymous kinds stay "".
+        let y = *self.ast_ptr(tm).type_at(tt);
+        let mut nm = "";
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            nm = builtin_name(y.as_data.builtin);
+        } else if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_INSTANCE {
+            let mut dm = y.module;
+            let mut dn = y.as_data.decl;
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *self.ast_ptr(tm).instance(y.as_data.inst);
+                dm = it.module;
+                dn = it.decl;
+            }
+            if self.has_ast(dm) {
+                let sp = self.name_text(dm, self.ast_ptr(dm).at_const(dn).as_data.aggregate.name);
+                let src = self.ce_src(dm);
+                nm = src.slice(sp.start as usize, sp.end as usize);
+            }
+        }
+        // Fields (struct/tuple/union) and variants (enum).
+        let mut nfields: u32 = 0;
+        let mut fblock: u32 = 0;
+        let mut nvars: u32 = 0;
+        let mut vblock: u32 = 0;
+        if tag == 12 || tag == 13 || tag == 14 {
+            let mut dm2 = y.module;
+            let mut dn2 = y.as_data.decl;
+            let mut envp: *const LayoutEnv = null;
+            let mut frame = LayoutEnv { parent: null, pmod: 0, params: null, argm: tm, n: 0 };
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *self.ast_ptr(tm).instance(y.as_data.inst);
+                dm2 = it.module;
+                dn2 = it.decl;
+                let gens = self.ast_ptr(dm2).at_const(dn2).as_data.aggregate.generics;
+                frame.pmod = dm2;
+                frame.params = self.ast_ptr(dm2).list(gens);
+                let mut gi: u32 = 0;
+                while gi < gens.len && gi as u8 < it.n && frame.n < 8 {
+                    unsafe frame.args[frame.n as usize] = unsafe it.args[gi as usize];
+                    frame.n = frame.n + 1;
+                    gi = gi + 1;
+                }
+                envp = &frame;
+            }
+            let fesz = self.layout_of(tim, fity, null, 0);
+            if !fesz.ok {
+                return out;
+            }
+            let da2 = self.ast_ptr(dm2);
+            let agg = da2.at_const(dn2).as_data.aggregate;
+            let is_union = agg.is_union;
+            let is_tuple = agg.is_tuple;
+            let packed = self.ce_attr(dm2, dn2, AttrKind::ATTR_PACKED) != null;
+            let fs = agg.members;
+            let mut fobjs = Vector::<CeVal>::new();
+            let mut run: u64 = 0;
+            for i in 0..fs.len {
+                let fid = unsafe da2.list(fs)[i as usize];
+                if !is_tuple && da2.at_const(fid).kind != NodeKind::NODE_FIELD {
+                    continue;
+                }
+                let mut ftn = fid;
+                if !is_tuple {
+                    ftn = da2.at_const(fid).as_data.field.ty;
+                }
+                let ft = self.ce_type(dm2, ftn);
+                let fl = self.layout_of(dm2, ft, envp, 1);
+                if ft == TYPE_NONE || !fl.ok {
+                    fobjs.free();
+                    return out;
+                }
+                let mut fa = fl.align;
+                if packed {
+                    fa = 1;
+                }
+                let mut off: u64 = 0;
+                if !is_union {
+                    off = round_up(run, fa);
+                    run = off + fl.size;
+                }
+                let mut fname = "";
+                let mut tbuf = Buf32 {};
+                if is_tuple {
+                    let tn = ti_tuple_name(&mut tbuf, fobjs.len() as u32);
+                    fname = tn;
+                } else {
+                    let sp = self.name_text(dm2, da2.at_const(fid).as_data.field.name);
+                    let src2 = self.ce_src(dm2);
+                    fname = src2.slice(sp.start as usize, sp.end as usize);
+                }
+                let fv = self.ce_ti_member(strm, strn, tim, sty, fity, fname, off, fl.size, -1);
+                if fv.kind != CV_AGG {
+                    fobjs.free();
+                    return out;
+                }
+                fobjs.push(fv);
+            }
+            nfields = fobjs.len() as u32;
+            fblock = self.ce_ti_block(tim, fity, fesz.size, &fobjs);
+            let failed = fblock == 0 && nfields != 0;
+            fobjs.free();
+            if failed {
+                return out;
+            }
+        }
+        if tag == 15 {
+            let mut dm2 = y.module;
+            let mut dn2 = y.as_data.decl;
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *self.ast_ptr(tm).instance(y.as_data.inst);
+                dm2 = it.module;
+                dn2 = it.decl;
+            }
+            let vesz = self.layout_of(tim, vity, null, 0);
+            if !vesz.ok {
+                return out;
+            }
+            let da2 = self.ast_ptr(dm2);
+            let vs = da2.at_const(dn2).as_data.aggregate.members;
+            let mut any_payload = false;
+            for i in 0..vs.len {
+                if da2.at_const(unsafe da2.list(vs)[i as usize]).as_data.variant.payload.len > 0 {
+                    any_payload = true;
+                }
+            }
+            let mut vobjs = Vector::<CeVal>::new();
+            let mut next: i64 = 0;
+            for i in 0..vs.len {
+                let vid = unsafe da2.list(vs)[i as usize];
+                if !any_payload {
+                    let vval = da2.at_const(vid).as_data.variant.value;
+                    if vval != NODE_NONE {
+                        let e = self.eval(dm2, vval);
+                        if e.kind != CONST_INT {
+                            vobjs.free();
+                            return out;
+                        }
+                        next = e.as_data.i;
+                    }
+                }
+                let mut vtag = next;
+                if any_payload {
+                    vtag = i;
+                }
+                next = next + 1;
+                let sp = self.name_text(dm2, da2.at_const(vid).as_data.variant.name);
+                let src2 = self.ce_src(dm2);
+                let vv = self.ce_ti_member(
+                    strm,
+                    strn,
+                    tim,
+                    sty,
+                    vity,
+                    src2.slice(sp.start as usize, sp.end as usize),
+                    0,
+                    0,
+                    vtag,
+                );
+                if vv.kind != CV_AGG {
+                    vobjs.free();
+                    return out;
+                }
+                vobjs.push(vv);
+            }
+            nvars = vobjs.len() as u32;
+            vblock = self.ce_ti_block(tim, vity, vesz.size, &vobjs);
+            let failed = vblock == 0 && nvars != 0;
+            vobjs.free();
+            if failed {
+                return out;
+            }
+        }
+        // Assemble: the two slices, then the TypeInfo struct itself.
+        let fsl = self.ce_ti_slice(slm, sln, tim, fity, flty, fblock, nfields);
+        let vsl = self.ce_ti_slice(slm, sln, tim, vity, vrty, vblock, nvars);
+        let nmv = self.ce_ti_str(strm, strn, tim, sty, nm);
+        if fsl.kind != CV_AGG || vsl.kind != CV_AGG || nmv.kind != CV_AGG {
+            return out;
+        }
+        let to = self.ce_obj_new(self.ce_field_count(tim, tin));
+        if to == 0 {
+            return out;
+        }
+        unsafe self.obj_ptr(to).dm = tim;
+        unsafe self.obj_ptr(to).dn = tin;
+        let i_name = self.ce_ti_findf(tim, tin, "name");
+        let i_kind = self.ce_ti_findf(tim, tin, "kind");
+        let i_size = self.ce_ti_findf(tim, tin, "size");
+        let i_align = self.ce_ti_findf(tim, tin, "align");
+        let i_fields = self.ce_ti_findf(tim, tin, "fields");
+        let i_vars = self.ce_ti_findf(tim, tin, "variants");
+        if i_name < 0 || i_kind < 0 || i_size < 0 || i_align < 0 || i_fields < 0 || i_vars < 0 {
+            return out;
+        }
+        unsafe self.obj_ptr(to).slots.set(i_name as usize, nmv);
+        unsafe self.obj_ptr(to).slots.set(
+            i_kind as usize,
+            CeVal { kind: CV_INT, tm: tim, ty: kty, as_data: CeValAs { i: tag } },
+        );
+        unsafe self.obj_ptr(to).slots.set(
+            i_size as usize,
+            CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_USIZE), as_data: CeValAs { i: size as i64 } },
+        );
+        unsafe self.obj_ptr(to).slots.set(
+            i_align as usize,
+            CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_USIZE), as_data: CeValAs { i: align as i64 } },
+        );
+        unsafe self.obj_ptr(to).slots.set(i_fields as usize, fsl);
+        unsafe self.obj_ptr(to).slots.set(i_vars as usize, vsl);
+        let mut ret = Rets { ok: true, n: 1 };
+        ret.vals[0] = CeVal { kind: CV_AGG, tm: m, ty: rty, as_data: CeValAs { p: CvPtr { obj: to, off: 0 } } };
+        return ret;
+    }
+
+    // A FieldInfo (`tag < 0`: name/offset/size) or VariantInfo (`tag >= 0`: name/tag) object.
+    fn ce_ti_member(
+        self: &mut Self,
+        strm: ModuleId,
+        strn: NodeId,
+        tim: ModuleId,
+        sty: TypeId,
+        ety: TypeId,
+        name: str,
+        off: u64,
+        size: u64,
+        tag: i64,
+    ) CeVal {
+        let ye = *self.ast_ptr(tim).type_at(ety);
+        if ye.kind != TypeKind::TYPE_STRUCT {
+            return cv_nil();
+        }
+        let em = ye.module;
+        let en = ye.as_data.decl;
+        let nmv = self.ce_ti_str(strm, strn, tim, sty, name);
+        if nmv.kind != CV_AGG {
+            return cv_nil();
+        }
+        let o = self.ce_obj_new(self.ce_field_count(em, en));
+        if o == 0 {
+            return cv_nil();
+        }
+        unsafe self.obj_ptr(o).dm = em;
+        unsafe self.obj_ptr(o).dn = en;
+        let i_name = self.ce_ti_findf(em, en, "name");
+        if i_name < 0 {
+            return cv_nil();
+        }
+        unsafe self.obj_ptr(o).slots.set(i_name as usize, nmv);
+        if tag >= 0 {
+            let i_tag = self.ce_ti_findf(em, en, "tag");
+            if i_tag < 0 {
+                return cv_nil();
+            }
+            unsafe self.obj_ptr(o).slots.set(
+                i_tag as usize,
+                CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_I32), as_data: CeValAs { i: tag } },
+            );
+        } else {
+            let i_off = self.ce_ti_findf(em, en, "offset");
+            let i_size = self.ce_ti_findf(em, en, "size");
+            if i_off < 0 || i_size < 0 {
+                return cv_nil();
+            }
+            unsafe self.obj_ptr(o).slots.set(
+                i_off as usize,
+                CeVal {
+                    kind: CV_INT,
+                    tm: 0,
+                    ty: Ast::builtin(BuiltinType::BT_USIZE),
+                    as_data: CeValAs { i: off as i64 },
+                },
+            );
+            unsafe self.obj_ptr(o).slots.set(
+                i_size as usize,
+                CeVal {
+                    kind: CV_INT,
+                    tm: 0,
+                    ty: Ast::builtin(BuiltinType::BT_USIZE),
+                    as_data: CeValAs { i: size as i64 },
+                },
+            );
+        }
+        return CeVal { kind: CV_AGG, tm: tim, ty: ety, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
+    }
+
+    // A heap block holding `objs` as elements of type (tim, ety); 0 = failed (or empty input).
+    fn ce_ti_block(self: &mut Self, tim: ModuleId, ety: TypeId, esz: u64, objs: &Vector<CeVal>) u32 {
+        let n = objs.len() as u32;
+        if n == 0 {
+            return 0;
+        }
+        let b = self.ce_obj_new(n);
+        if b == 0 {
+            return 0;
+        }
+        let bo = self.obj_ptr(b);
+        unsafe bo.heap = 1;
+        unsafe bo.bytes = n as u64 * esz;
+        unsafe bo.em = tim;
+        unsafe bo.et = ety;
+        unsafe bo.esz = esz;
+        for k in 0..n {
+            unsafe self.obj_ptr(b).slots.set(k as usize, *objs.at(k as usize));
+        }
+        return b;
+    }
+
+    // A Slice<E> view struct over `block` (0 = the empty slice: null ptr, len 0).
+    fn ce_ti_slice(
+        self: &mut Self,
+        slm: ModuleId,
+        sln: NodeId,
+        tim: ModuleId,
+        ety: TypeId,
+        slty: TypeId,
+        block: u32,
+        n: u32,
+    ) CeVal {
+        let ptr_i = self.ce_ti_findf(slm, sln, "ptr");
+        let len_i = self.ce_ti_findf(slm, sln, "len");
+        if ptr_i < 0 || len_i < 0 {
+            return cv_nil();
+        }
+        let so = self.ce_obj_new(self.ce_field_count(slm, sln));
+        if so == 0 {
+            return cv_nil();
+        }
+        unsafe self.obj_ptr(so).dm = slm;
+        unsafe self.obj_ptr(so).dn = sln;
+        unsafe self.obj_ptr(so).nargs = 1;
+        unsafe self.obj_ptr(so).am[0] = tim;
+        unsafe self.obj_ptr(so).at[0] = ety;
+        unsafe self.obj_ptr(so).slots.set(
+            ptr_i as usize,
+            CeVal { kind: CV_PTR, tm: 0, ty: TYPE_NONE, as_data: CeValAs { p: CvPtr { obj: block, off: 0 } } },
+        );
+        unsafe self.obj_ptr(so).slots.set(
+            len_i as usize,
+            CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_USIZE), as_data: CeValAs { i: n } },
+        );
+        return CeVal { kind: CV_AGG, tm: tim, ty: slty, as_data: CeValAs { p: CvPtr { obj: so, off: 0 } } };
+    }
+}
+
+// The source spelling of a builtin type, as `type_info` reports it.
+const fn builtin_name(bt: BuiltinType) str<'static> {
+    switch bt {
+        BT_BOOL => {
+            return "bool";
+        },
+        BT_CHAR => {
+            return "char";
+        },
+        BT_I8 => {
+            return "i8";
+        },
+        BT_I16 => {
+            return "i16";
+        },
+        BT_I32 => {
+            return "i32";
+        },
+        BT_I64 => {
+            return "i64";
+        },
+        BT_ISIZE => {
+            return "isize";
+        },
+        BT_U8 => {
+            return "u8";
+        },
+        BT_U16 => {
+            return "u16";
+        },
+        BT_U32 => {
+            return "u32";
+        },
+        BT_U64 => {
+            return "u64";
+        },
+        BT_USIZE => {
+            return "usize";
+        },
+        BT_F32 => {
+            return "f32";
+        },
+        BT_F64 => {
+            return "f64";
+        },
+        BT_C32 => {
+            return "c32";
+        },
+        BT_C64 => {
+            return "c64";
+        },
+        BT_VALIST => {
+            return "va_list";
+        },
+        BT_VOID => {
+            return "void";
+        },
+        _ => {
+            return "";
+        },
+    };
+}
+
+// "_<k>" into `buf`: the field names a tuple's members answer to.
+fn ti_tuple_name(buf: &mut Buf32, k: u32) str {
+    buf[0] = b'_';
+    let mut n: usize = 1;
+    let mut digits = Buf32 {};
+    let mut v = k;
+    let mut nd: usize = 0;
+    do {
+        digits[nd] = b'0' + (v % 10) as u8;
+        nd = nd + 1;
+        v = v / 10;
+    } while v != 0;
+    while nd > 0 {
+        nd = nd - 1;
+        buf[n] = digits[nd];
+        n = n + 1;
+    }
+    return str::from_raw(&buf[0], n);
 }
 
 // Backward scan: the innermost binding of a shadowed name wins.
@@ -6158,6 +6841,14 @@ extend ConstEval {
             callee = a.at_const(callee).as_data.specialization.expression;
             ck = a.at_const(callee).kind;
         }
+        // type_info::<T>(): intrinsic, no declaration -- the unresolved name is the marker.
+        if ck == NodeKind::NODE_IDENTIFIER && a.resolution_def(callee).node == NODE_NONE && a.resolution(callee) == NODE_NONE && self.ce_span_is(
+            m,
+            a.at_const(callee).as_data.name.text,
+            "type_info",
+        ) {
+            return self.ce_type_info(f, m, id);
+        }
         let call_args = a.at_const(id).as_data.call.args;
         let nargs = call_args.len;
         let mut out = Rets { ok: false, n: 0 };
@@ -7041,6 +7732,33 @@ extend ConstEval {
             return bad;
         }
         self.sref_set(m, id, r.root as i64 + 1);
+        return r;
+    }
+
+    /// `type_info::<T>()` at a RUNTIME use site: build and capture the descriptor for the concrete
+    /// (am, at) codegen resolved through its substitution frames. Unmemoized -- the same call node
+    /// emits once per monomorphized instance, each with its own T, so the (module, node) memo
+    /// `eval_static` uses would serve the first instance's answer to all of them.
+    pub fn eval_type_info_static(self: &mut Self, m: ModuleId, id: NodeId, am: ModuleId, at: TypeId) StaticRes {
+        let bad = StaticRes { ok: false, root: 0 };
+        if id == NODE_NONE || m as usize >= self.nmods || self.depth != 0 || self.nframes != 0 {
+            return bad;
+        }
+        self.steps = 0;
+        self.trap = "";
+        self.trap_kind = CE_TRAP_NONE;
+        self.trap_nframes = 0;
+        self.trap_in_constfn = false;
+        self.ce_objs_reset();
+        self.depth = 1;
+        let r0 = self.ce_type_info_of(null, m, id, am, at);
+        self.depth = 0;
+        if !r0.ok || r0.n != 1 || r0.vals[0].kind != CV_AGG {
+            self.ce_objs_reset();
+            return bad;
+        }
+        let r = self.ce_capture(r0.vals[0]);
+        self.ce_objs_reset();
         return r;
     }
 

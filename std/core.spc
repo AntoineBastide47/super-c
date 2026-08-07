@@ -1384,3 +1384,55 @@ pub fn forget<T>(value: T) {
     let cell = ForgetCell::<T> { some: value };
     let _ = (&cell) as *const ForgetCell<T>;
 }
+
+/// What sort of type `type_info::<T>()` described. `Slice` covers `[]T`/`[]mut T`, `Str` is `str`;
+/// every other named struct instance -- `Vector<T>`, `Box<T>`, user structs -- reports `Struct`.
+pub enum TypeTag {
+    Void,
+    Bool,
+    Int,
+    Uint,
+    Float,
+    Complex,
+    Pointer,
+    Reference,
+    Function,
+    Array,
+    Slice,
+    Str,
+    Tuple,
+    Struct,
+    Union,
+    Enum,
+    Dyn,
+    Opaque,
+}
+
+/// One field of a reflected struct or union. `offset` is the byte offset in the C layout the
+/// compiled program actually uses; for a union every field reports offset 0.
+pub struct FieldInfo {
+    pub name: str<'static>,
+    pub offset: usize,
+    pub size: usize,
+}
+
+/// One variant of a reflected enum. `tag` is the value the variant has at runtime -- the declared
+/// constant for a payload-less enum, the declaration index for an enum with payloads.
+pub struct VariantInfo {
+    pub name: str<'static>,
+    pub tag: i32,
+}
+
+/// The result of `type_info::<T>()`, a compiler intrinsic that folds at compile time -- there is no
+/// declaration of `type_info` anywhere, and the value costs nothing unless it is reached. Fully
+/// non-owning: every member is a scalar or a `'static` view into static data, so a `TypeInfo` is
+/// never freed and can be stored or passed anywhere. `fields` is empty unless `kind` is
+/// `Struct`/`Tuple`/`Union`; `variants` is empty unless `kind` is `Enum`.
+pub struct TypeInfo {
+    pub name: str<'static>,
+    pub kind: TypeTag,
+    pub size: usize,
+    pub align: usize,
+    pub fields: Slice<'static, FieldInfo>,
+    pub variants: Slice<'static, VariantInfo>,
+}

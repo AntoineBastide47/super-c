@@ -2630,6 +2630,12 @@ extend TypeChecker {
                     let mut i: u32 = 0;
                     while i < args.len && tn < 8 {
                         let aid = unsafe a.list(args)[i as usize];
+                        // Lifetime arguments occupy list slots but are not type arguments (erased here,
+                        // tracked by borrowck) -- exactly as the same-module path skips them.
+                        if a.at_const(aid).kind == NodeKind::NODE_LIFETIME {
+                            i = i + 1;
+                            continue;
+                        }
                         if self.tc_arg_is_const(m, aid) {
                             ta[tn as usize] = self.tc_const_arg(m, aid);
                             tn = tn + 1;
@@ -8254,6 +8260,45 @@ extend TypeChecker {
                 let ot = self.cur_ast().intern_instance(oh.mid, oh.node, &oa[0], 1);
                 self.cur_ast().set_type(id, ot);
                 return ot;
+            }
+            // type_info::<T>(): compiler intrinsic -- a TypeInfo descriptor of T, folded at compile
+            // time (consteval builds the object graph; codegen emits static data at runtime uses).
+            if a.at_const(spx.expression).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(spx.expression).node == NODE_NONE && span_is(
+                self.source,
+                a.at_const(spx.expression).as_data.name.text,
+                "type_info",
+            ) {
+                let sp2 = a.at_const(id).span;
+                let args2 = a.at_const(id).as_data.call.args;
+                if tp_args.len != 1 || args2.len != 0 {
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format("type_info takes exactly one type argument and no values"),
+                    );
+                    return TYPE_NONE;
+                }
+                let tt = self.resolve_type(unsafe a.list(tp_args)[0]);
+                if tt == TYPE_NONE {
+                    return TYPE_NONE;
+                }
+                if self.type_at(tt).kind == TypeKind::TYPE_OPAQUE {
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format("type_info cannot describe an opaque type (its layout is unknown)"),
+                    );
+                    return TYPE_NONE;
+                }
+                let th = self.package.prelude_lookup("TypeInfo", true);
+                if th.node == NODE_NONE {
+                    self.errors.emit(sp2.start, sp2.end - sp2.start, format("type_info requires the std prelude"));
+                    return TYPE_NONE;
+                }
+                self.cur_ast().set_type_args(id, &tt, 1);
+                let rt3 = self.named_type_of(th.mid, th.node);
+                self.cur_ast().set_type(id, rt3);
+                return rt3;
             }
         }
         let args = a.at_const(id).as_data.call.args;

@@ -104,6 +104,45 @@ fn main() i32 {
 // call sites emit the literal, pure statement-position calls vanish, unfoldable/over-budget callees degrade
 // to runtime calls, and the compile stays fast.
 @test
+fn type_info_reflection() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"struct Point { pub x: i32, pub y: u8, }
+enum Color { Red, Green, Blue = 7, }
+fn kindof<T>() TypeTag { return type_info::<T>().kind; }
+const TI: TypeInfo = type_info::<Point>();
+static_assert(TI.size == 8, "point size");
+fn main() i32 {
+  if TI.fields.len != 2 { return 1; }
+  let f1 = TI.fields.get(1);
+  if f1.offset != 4 || f1.size != 1 { return 2; }
+  print("{}.{}\n", TI.name, f1.name);
+  let ci = type_info::<Color>();
+  if ci.variants.len != 3 || ci.variants.get(2).tag != 7 { return 3; }
+  print("{}={}\n", ci.variants.get(2).name, ci.variants.get(2).tag);
+  if kindof::<Color>() != TypeTag::Enum { return 4; }
+  if kindof::<[]u8>() != TypeTag::Slice { return 5; }
+  if kindof::<*const i32>() != TypeTag::Pointer { return 6; }
+  if kindof::<str>() != TypeTag::Str { return 7; }
+  if kindof::<(i32, bool)>() != TypeTag::Tuple { return 8; }
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("main.c", "static const TypeInfo TI"), "the const descriptor materialized as static data");
+    assert(p.gen_has("main.c", "__sc_ti"), "a runtime call site emitted its block-scope descriptor");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("Point.y"), "struct and field names are readable at runtime");
+    assert(rr.out_shows("Blue=7"), "variant names carry their declared tag");
+}
+
+@test
 fn ctfe() {
     let p = cli::proj_new();
     p.mkfile(

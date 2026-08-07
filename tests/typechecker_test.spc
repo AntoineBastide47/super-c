@@ -511,6 +511,28 @@ fn static_assert() {
 }
 
 @test
+fn type_info_intrinsic() {
+    h::expect_ok(
+        "type_info folds in const context",
+        "struct P { x: i32, y: u8, }\nstatic_assert(type_info::<P>().size == 8);\nstatic_assert(type_info::<P>().fields.len == 2, \"fields\");\nstatic_assert(type_info::<i32>().align == 4);\nconst TI: TypeInfo = type_info::<P>();\nfn main() i32 { return TI.fields.len as i32 - 2; }\n",
+    );
+    h::expect_ok(
+        "type_info in a generic body",
+        "fn nm<T>() str<'static> { return type_info::<T>().name; }\nfn main() i32 { return nm::<u8>().len() as i32 - 2; }\n",
+    );
+    h::expect_err_msg(
+        "type_info takes exactly one type argument",
+        "fn main() i32 { let _ = type_info::<i32, u8>(); return 0; }\n",
+        "exactly one type argument",
+    );
+    h::expect_err_msg(
+        "type_info takes no value arguments",
+        "fn main() i32 { let _ = type_info::<i32>(5); return 0; }\n",
+        "exactly one type argument",
+    );
+}
+
+@test
 fn bug_regressions() {
     h::expect_err_msg(
         "op rhs type-checked",

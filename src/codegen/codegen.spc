@@ -1569,6 +1569,46 @@ extend Codegen {
     }
     // dyn_cast::<T>(d): compare the vtable's tid string against T's mangled name; Some wraps the
     // data pointer, None otherwise.
+    // type_info::<T>(): the descriptor is pure static data, so the call site becomes a GNU statement
+    // expression holding block-scope `static const` objects (the same graph the CTFE path captures)
+    // and yielding the TypeInfo. T resolves through the active substitution frames, so a call inside
+    // a generic body emits the right descriptor per instance.
+    fn emit_type_info(self: &mut Self, id: NodeId) {
+        let mu = self.cur_ast().type_args(id);
+        let mut ok = mu != null && unsafe mu.n != 0 && self.ceval() != null;
+        let mut tt = TYPE_NONE;
+        if ok {
+            tt = self.subst_resolve(unsafe mu.args[0]);
+            ok = tt != TYPE_NONE && self.type_is_concrete(tt);
+        }
+        let mut sr = ce::StaticRes { ok: false, root: 0 };
+        if ok {
+            sr = self.ceval().eval_type_info_static(self.cur_module(), id, self.cur_module(), tt);
+        }
+        if !sr.ok {
+            // No graph (unlayoutable T): surface it as a named, greppable C error.
+            self.emit_str("__sc_type_info_unsupported()");
+            return;
+        }
+        let mut nm = Buf256 {};
+        unsafe stdio::snprintf(&mut nm[0], 256, "__sc_ti%u".ptr() as *const char, id);
+        self.emit_str("({ ");
+        if !self.emit_static_group(&nm[0], sr.root, true) {
+            self.emit_str("__sc_type_info_unsupported(); })");
+            return;
+        }
+        let t = self.cg_static_type(sr.root);
+        let mut d = Buf512 {};
+        self.render_type_id(t, &nm[0], &mut d[0], 512);
+        self.emit_str("__attribute__((unused)) static const ");
+        self.emit_cstr(&d[0]);
+        self.emit_str(" = ");
+        self.emit_static_init(&nm[0], sr.root);
+        self.emit_str("; ");
+        self.emit_cstr(&nm[0]);
+        self.emit_str("; })");
+    }
+
     fn emit_dyn_cast(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let arg = unsafe a.list(a.at_const(id).as_data.call.args)[0];
@@ -6239,7 +6279,7 @@ extend Codegen {
                     }
                     self.emit_str(";\n");
                     self.cg_register_auto_free(id);
-                } else if self.emit_const_materialized(&nm[0], &decl[0], n.as_data.const_def.value, false) {
+                } else if self.emit_const_materialized(&nm[0], &decl[0], n.as_data.const_def.value, false, true) {
                     // A call-bearing initializer (`const A = mk()`) is CTFE-folded to static data --
                     // the same path a top-level const takes -- so it is a valid C constant, not a
                     // runtime call in a `static const` initializer (which the C compiler rejects).
@@ -11158,6 +11198,18 @@ extend Codegen {
                     self.emit_dyn_cast(id);
                     return;
                 }
+                if cn.kind == NodeKind::NODE_GENERIC_SPECIALIZATION && self.cur_ast().at_const(
+                    cn.as_data.specialization.expression,
+                ).kind == NodeKind::NODE_IDENTIFIER && self.cur_ast().resolution_def(
+                    cn.as_data.specialization.expression,
+                ).node == NODE_NONE && span_is(
+                    self.mod_src(self.cur_module()),
+                    self.cur_ast().at_const(cn.as_data.specialization.expression).as_data.name.text,
+                    "type_info".ptr() as *const char,
+                ) {
+                    self.emit_type_info(id);
+                    return;
+                }
                 let mut freeflag = Buf32 {};
                 freeflag[0] = 0 as char;
                 if cn.kind == NodeKind::NODE_MEMBER && !cn.as_data.member.path && cn.as_data.member.object != NODE_NONE && self.cur_ast().at_const(
@@ -15454,11 +15506,101 @@ extend Codegen {
         self.emit_str(" }");
     }
 
-    fn emit_static_group(self: &mut Self, name: *const char, root: u32) {
+    // The top standalone ancestor of statics entry `e` (embedded entries emit inside it).
+    fn cg_static_anc(self: &Self, e: u32) u32 {
+        let ce = self.ceval();
+        let mut cur = e;
+        while unsafe ce.static_at(cur).parent != ce::S_NO_PARENT {
+            cur = unsafe ce.static_at(cur).parent;
+        }
+        return cur;
+    }
+
+    // Children-first definition order for the group's auxiliaries, for BLOCK scope, where C forbids
+    // the tentative forward declarations the file-scope emission leans on. False = the group is
+    // cyclic and cannot be ordered without them (the caller falls back to the syntactic path).
+    fn cg_static_group_order(self: &mut Self, root: u32, out: &mut Vector<u32>) bool {
+        let ce = self.ceval();
+        let groupn = unsafe ce.static_at(root).groupn;
+        let mut done = Vector::<bool>::new();
+        done.resize_default((root + groupn) as usize);
+        let mut nsa: u32 = 0; // standalone auxiliaries; embedded entries emit inline in their parent
+        for gi in root + 1..root + groupn {
+            if unsafe ce.static_at(gi).parent == ce::S_NO_PARENT {
+                nsa = nsa + 1;
+            }
+        }
+        loop {
+            let before = out.len();
+            for gi in root + 1..root + groupn {
+                if unsafe ce.static_at(gi).parent != ce::S_NO_PARENT || *done.at(gi as usize) {
+                    continue;
+                }
+                // ready = every standalone this one's initializer points at is already emitted
+                let mut ready = true;
+                for e in root..root + groupn {
+                    if self.cg_static_anc(e) != gi {
+                        continue;
+                    }
+                    for ri in 0..unsafe ce.static_at(e).rels.len() {
+                        let rk = unsafe ce.static_at(e).rels.at(ri).kind;
+                        if rk != ce::SREL_STATIC && rk != ce::SREL_INTERIOR {
+                            continue;
+                        }
+                        let t = self.cg_static_anc(unsafe ce.static_at(e).rels.at(ri).target);
+                        if t != gi && !*done.at(t as usize) {
+                            ready = false;
+                        }
+                    }
+                }
+                if ready {
+                    out.push(gi);
+                    done.set(gi as usize, true);
+                }
+            }
+            if out.len() as u32 == nsa {
+                done.free();
+                return true;
+            }
+            if out.len() == before {
+                done.free();
+                return false; // a reference cycle: only forward declarations could break it
+            }
+        }
+    }
+
+    fn emit_static_one(self: &mut Self, name: *const char, gi: u32) {
+        let t = self.cg_static_type(gi);
+        let og = unsafe self.ceval().static_at(gi).ord;
+        let mut aux = Buf256 {};
+        unsafe stdio::snprintf(&mut aux[0], 256, "%s__ct%u".ptr() as *const char, name, og - 1);
+        let mut d = Buf512 {};
+        self.render_type_id(t, &aux[0], &mut d[0], 512);
+        self.emit_str("__attribute__((unused)) static const ");
+        self.emit_cstr(&d[0]);
+        self.emit_str(" = ");
+        self.emit_static_init(name, gi);
+        self.emit_str(";\n");
+    }
+
+    fn emit_static_group(self: &mut Self, name: *const char, root: u32, local: bool) bool {
         let ce = self.ceval();
         let groupn = unsafe ce.static_at(root).groupn;
         if groupn <= 1 {
-            return;
+            return true;
+        }
+        if local {
+            // Block scope: no tentative declarations, so definitions go children-first.
+            let mut order = Vector::<u32>::new();
+            if !self.cg_static_group_order(root, &mut order) {
+                order.free();
+                return false;
+            }
+            for i in 0..order.len() {
+                self.emit_static_one(name, *order.at(i));
+            }
+            order.free();
+            return true;
         }
         // tentative forward declarations first: back-references and cycles resolve against them
         for gi in root + 1..root + groupn {
@@ -15479,22 +15621,20 @@ extend Codegen {
             if unsafe ce.static_at(gi).parent != ce::S_NO_PARENT {
                 continue;
             }
-            let t = self.cg_static_type(gi);
-            let og = unsafe ce.static_at(gi).ord;
-            let mut aux = Buf256 {};
-            unsafe stdio::snprintf(&mut aux[0], 256, "%s__ct%u".ptr() as *const char, name, og - 1);
-            let mut d = Buf512 {};
-            self.render_type_id(t, &aux[0], &mut d[0], 512);
-            self.emit_str("__attribute__((unused)) static const ");
-            self.emit_cstr(&d[0]);
-            self.emit_str(" = ");
-            self.emit_static_init(name, gi);
-            self.emit_str(";\n");
+            self.emit_static_one(name, gi);
         }
+        return true;
     }
 
     // Materialize a call-bearing const initializer as static data; false = use the syntactic path.
-    fn emit_const_materialized(self: &mut Self, name: *const char, decl: *const char, value: NodeId, is_public: bool) bool {
+    fn emit_const_materialized(
+        self: &mut Self,
+        name: *const char,
+        decl: *const char,
+        value: NodeId,
+        is_public: bool,
+        local: bool,
+    ) bool {
         if value == NODE_NONE || self.ceval() == null || !self.cg_init_needs_ctfe(value) {
             return false;
         }
@@ -15505,7 +15645,9 @@ extend Codegen {
         if !self.cg_static_group_ok(sr.root, is_public) {
             return false;
         }
-        self.emit_static_group(name, sr.root);
+        if !self.emit_static_group(name, sr.root, local) {
+            return false;
+        }
         self.emit_str("__attribute__((unused)) static const ");
         self.emit_cstr(decl);
         self.emit_str(" = ");
@@ -15533,7 +15675,7 @@ extend Codegen {
             self.emit_str(";\n");
             return;
         }
-        if self.emit_const_materialized(&nm[0], &decl[0], cd.value, cd.is_public) {
+        if self.emit_const_materialized(&nm[0], &decl[0], cd.value, cd.is_public, false) {
             return;
         }
         if self.ceval() != null {
@@ -15590,7 +15732,7 @@ extend Codegen {
                 self.render_ident(csp, unsafe (np + k), 256 - k);
                 let mut decl = Buf320 {};
                 self.render_type_node(cd.ty, np, &mut decl[0], 320);
-                if self.emit_const_materialized(np, &decl[0], cd.value, cd.is_public) {
+                if self.emit_const_materialized(np, &decl[0], cd.value, cd.is_public, false) {
                     continue;
                 }
                 if self.ceval() != null {
@@ -16270,7 +16412,9 @@ extend Codegen {
         self.collect_insts(); // phase_types below must see body-substituted aggregate instances
         let mut guard = Buf160 {};
         let np = (&mut guard[0]) as *mut char;
-        let mut at = bappend(&mut self.trunc, np, 160, 0, "SUPER_".ptr() as *const char);
+        // SUPER_M_ (module), never bare SUPER_: a module named `rt` would otherwise derive
+        // SUPER_RT_H -- the runtime header's own guard -- and silently skip its inclusion.
+        let mut at = bappend(&mut self.trunc, np, 160, 0, "SUPER_M_".ptr() as *const char);
         let mp = unsafe self.package.modules[self.cur_module() as usize].path.as_str();
         let n = mp.len();
         let mut i: usize = 0;
