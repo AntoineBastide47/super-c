@@ -596,7 +596,7 @@ extend Resolver {
         // closure whose floor it sits below. Module-level items (functions/consts) never capture.
         if ns == Namespace::NS_VALUE && self.closures.len() != 0 && idx != 0 && idx - 1 < self.closures[self.closures.len() - 1].floor {
             let dk = self.ast.at_const(decl).kind;
-            if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME {
+            if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_INLINE_FOR || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME {
                 let mut f = self.closures.len();
                 while f > 0 {
                     f = f - 1;
@@ -1209,13 +1209,21 @@ extend Resolver {
                 self.resolve_expr(wd.condition);
                 self.resolve_block(wd.body);
             },
-            NODE_FOR => {
+            NODE_FOR | NODE_INLINE_FOR => {
                 let fr = self.ast.at_const(id).as_data.for_stmt;
                 self.resolve_expr(fr.iterable); // evaluated before the binding is in scope
                 self.scope_enter();
                 self.declare(fr.binding, id, Namespace::NS_VALUE);
                 self.resolve_block(fr.body);
                 self.scope_exit();
+            },
+            NODE_PARALLEL_FOR => {
+                // Sugar marker; `body` is the closure the parser built over the binding, so resolving
+                // it AS a closure is what fills its captures -- desugar (which runs after this pass)
+                // could not. The binding is the closure's parameter, not a loop binding.
+                let fr = self.ast.at_const(id).as_data.for_stmt;
+                self.resolve_expr(fr.iterable);
+                self.resolve_expr(fr.body);
             },
             NODE_EXPRESSION_STATEMENT => {
                 let v = self.ast.at_const(id).as_data.single.value;

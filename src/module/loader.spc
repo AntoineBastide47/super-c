@@ -677,6 +677,7 @@ extend Package {
         if std_root.len() != 0 {
             let mut has_launch = false;
             let mut has_select = false;
+            let mut has_parfor = false;
             let nn = a.nodes.len();
             for ni in 0..nn {
                 let k = a.at_const(ni as NodeId).kind;
@@ -684,8 +685,10 @@ extend Package {
                     has_launch = true;
                 } else if k == NodeKind::NODE_SELECT {
                     has_select = true;
+                } else if k == NodeKind::NODE_PARALLEL_FOR {
+                    has_parfor = true;
                 }
-                if has_launch && has_select {
+                if has_launch && has_select && has_parfor {
                     break;
                 }
             }
@@ -701,6 +704,13 @@ extend Package {
                 sf.push_str("/std/parallel/selector.spc");
                 child_paths.push(String::from_str("std::parallel::selector"));
                 child_files.push(sf);
+            }
+            // Same for `parallel for`, which lowers to std::parallel::data's `range`.
+            if has_parfor {
+                let mut df = String::from_str(std_root);
+                df.push_str("/std/parallel/data.spc");
+                child_paths.push(String::from_str("std::parallel::data"));
+                child_files.push(df);
             }
             // Same bargain for `@blocking`: a call to one of those functions is emitted as a wrapper
             // that hands the work to the blocking pool, so that module has to be linked in -- but only

@@ -5263,7 +5263,7 @@ extend ConstEval {
             NODE_WHILE => {
                 return self.exec_while(f, m, id);
             },
-            NODE_FOR => {
+            NODE_FOR | NODE_INLINE_FOR => {
                 return self.exec_for(f, m, id);
             },
             NODE_RETURN => {

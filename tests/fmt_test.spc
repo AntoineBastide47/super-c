@@ -31,6 +31,15 @@ fn expect_fmt(src: str, want: str) {
 }
 
 @test
+fn golden_for_modifiers() {
+    expect_fmt("fn f(){inline for i in 0..4{g(i);}}", "fn f() {\n    inline for i in 0..4 {\n        g(i);\n    }\n}\n");
+    expect_fmt(
+        "fn f(){parallel for i in 0..n(){g(i);}}",
+        "fn f() {\n    parallel for i in 0..n() {\n        g(i);\n    }\n}\n",
+    );
+}
+
+@test
 fn golden_unsafe_fn() {
     expect_fmt(
         "pub unsafe fn f(p:*const i32)i32{return unsafe *p;}",

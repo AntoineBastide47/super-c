@@ -2972,7 +2972,7 @@ extend tc::TypeChecker {
                 self.bc_loop_pop(le);
                 self.loop_depth = self.loop_depth - 1;
             },
-            NODE_FOR => {
+            NODE_FOR | NODE_INLINE_FOR => {
                 let fd = a.at_const(id).as_data.for_stmt;
                 self.loop_depth = self.loop_depth + 1;
                 let le = self.tc_loop_push(fd.label, id, false);
@@ -3621,7 +3621,7 @@ extend tc::TypeChecker {
             NODE_WHILE => {
                 return self.tc_scan_returns_attributable(m, n.as_data.while_stmt.body, depth + 1);
             },
-            NODE_FOR => {
+            NODE_FOR | NODE_INLINE_FOR => {
                 return self.tc_scan_returns_attributable(m, n.as_data.for_stmt.body, depth + 1);
             },
             NODE_MATCH => {
@@ -4108,7 +4108,7 @@ extend tc::TypeChecker {
                 let b = unsafe self.borrows[i as usize];
                 if b.binding == thru && b.root != NODE_NONE {
                     let rk = a.at_const(b.root).kind;
-                    if rk == NodeKind::NODE_LET || rk == NodeKind::NODE_PATTERN_NAME || rk == NodeKind::NODE_IDENTIFIER || rk == NodeKind::NODE_FOR {
+                    if rk == NodeKind::NODE_LET || rk == NodeKind::NODE_PATTERN_NAME || rk == NodeKind::NODE_IDENTIFIER || rk == NodeKind::NODE_FOR || rk == NodeKind::NODE_INLINE_FOR {
                         let rsp = a.at_const(recv).span;
                         self.errors.emit(
                             rsp.start,

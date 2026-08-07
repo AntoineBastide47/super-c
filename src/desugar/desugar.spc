@@ -35,6 +35,8 @@ pub fn desugar_ast(ast: &mut Ast, package: *const loader::Package) {
             lower_to_core_call(ast, package, i as NodeId, "std::parallel::runtime", "submit");
         } else if kind == NodeKind::NODE_SELECT {
             lower_select(ast, package, i as NodeId);
+        } else if kind == NodeKind::NODE_PARALLEL_FOR {
+            lower_parallel_for(ast, package, i as NodeId);
         }
     }
 }
@@ -198,6 +200,27 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     let stmts = ast.commit(mark);
     ast.at(id).kind = NodeKind::NODE_BLOCK;
     ast.at(id).as_data.block.statements = stmts;
+}
+
+// `parallel for i in a..b { B }` becomes `std::parallel::data::range(a..b, fn(i) { B });` -- the
+// closure already exists (the parser built it as the marker's body so resolve filled its captures);
+// all that is left is the call around it and the marker flip to an expression statement.
+fn lower_parallel_for(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
+    let pkg = unsafe &*package;
+    let m = pkg.find("std::parallel::data");
+    if m < 0 {
+        return;
+    }
+    let f = shim(pkg, m as ModuleId, "range");
+    if f.node == NODE_NONE {
+        return;
+    }
+    let fr = ast.at_const(id).as_data.for_stmt;
+    let span = ast.at_const(id).span;
+    let kw = tok::Span::new(span.start, span.start + 8); // the `parallel` keyword's own text
+    let call = call_shim(ast, f, kw, fr.iterable, fr.body);
+    ast.at(id).kind = NodeKind::NODE_EXPRESSION_STATEMENT;
+    ast.at(id).as_data = NodeAs { single: SingleData { value: call } };
 }
 
 // A free function in the selector module, or a NODE_NONE DefId when it is missing.

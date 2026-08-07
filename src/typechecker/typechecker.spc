@@ -6227,7 +6227,7 @@ extend TypeChecker {
             return NODE_NONE;
         }
         let dk = a.at_const(d.node).kind;
-        if dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_FOR {
+        if dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_INLINE_FOR {
             return d.node;
         }
         return NODE_NONE;
@@ -7781,6 +7781,28 @@ extend TypeChecker {
         }
         let ct = *self.type_at(callee);
         if ct.kind != TypeKind::TYPE_FUNCTION {
+            // A generic fn callee has no concrete fn TYPE this early, but its declared params that
+            // do not mention a type parameter are still exact -- `range(0..n, ..)`'s Range<usize>
+            // should reach the range literal even though the fn is generic over its closure.
+            let mut cd = self.cur_ast().resolution_def(callee_node);
+            if cd.node == NODE_NONE && self.cur_ast().at_const(callee_node).kind == NodeKind::NODE_MEMBER {
+                cd = self.cur_ast().resolution_def(self.cur_ast().at_const(callee_node).as_data.member.member);
+            }
+            if cd.node != NODE_NONE && cd.module as usize < self.pkg_count() && self.mod_ast(cd.module).at_const(
+                cd.node,
+            ).kind == NodeKind::NODE_FUNCTION {
+                let fd = self.mod_ast(cd.module).at_const(cd.node).as_data.function;
+                if fd.generics.len > 0 && argi < fd.params.len {
+                    let pn = unsafe self.mod_ast(cd.module).list(fd.params)[argi as usize];
+                    let ptn = self.mod_ast(cd.module).at_const(pn).as_data.parameter.ty;
+                    if ptn != NODE_NONE {
+                        let pt0 = self.lower_type_in(cd.module, ptn);
+                        if pt0 != TYPE_NONE && self.cur_ast().type_concrete(pt0) {
+                            return pt0;
+                        }
+                    }
+                }
+            }
             return TYPE_NONE;
         }
         let fa = self.mod_ast(ct.module);
@@ -8304,8 +8326,9 @@ extend TypeChecker {
         let args = a.at_const(id).as_data.call.args;
         for i in 0..args.len {
             let aid = unsafe a.list(args)[i as usize];
-            // `[]` and a generic fn named as a value both take their type from the parameter.
-            if self.tc_is_iface_assoc_call(aid) || a.at_const(aid).kind == NodeKind::NODE_CLOSURE || self.tc_wants_param_type(
+            // `[]`, a generic fn named as a value, and a range literal all take their type from the
+            // parameter (a range's bounds adopt the parameter's element type, like bare literals do).
+            if self.tc_is_iface_assoc_call(aid) || a.at_const(aid).kind == NodeKind::NODE_CLOSURE || a.at_const(aid).kind == NodeKind::NODE_RANGE || self.tc_wants_param_type(
                 aid,
             ) {
                 self.expected = self.tc_param_expected(callee, callee_id, i);
@@ -10646,7 +10669,7 @@ extend TypeChecker {
                 if d.node != NODE_NONE && d.module == self.cur_module() {
                     dk = a.at_const(d.node).kind;
                 }
-                if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_CONST {
+                if dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_INLINE_FOR || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_CONST {
                     let vt = a.type_of(d.node);
                     if vt == TYPE_NONE {
                         let vsp = a.at_const(v).span;
@@ -10809,9 +10832,29 @@ extend TypeChecker {
                 result = self.check_tuple_value(id, expected);
             },
             NODE_RANGE => {
-                let s = self.check_expr(a.at_const(id).as_data.pattern_range.start);
-                let e = self.check_expr(a.at_const(id).as_data.pattern_range.end);
-                let elem = self.range_type(id, s, e);
+                // An expected Range<E> reaches the bounds, so `0..100` against Range<usize> types
+                // its literals usize -- the same adoption a bare literal argument gets.
+                let mut want = TYPE_NONE;
+                if self.prelude_instance_args_hit(expected, self.ph_range, &mut want, 1) != 1 {
+                    want = TYPE_NONE;
+                }
+                let rs = a.at_const(id).as_data.pattern_range.start;
+                let re = a.at_const(id).as_data.pattern_range.end;
+                self.expected = want;
+                let s = self.check_expr(rs);
+                self.expected = want;
+                let e = self.check_expr(re);
+                let mut elem = self.range_type(id, s, e);
+                // Literal bounds adopt the expected element type (bare literals only re-type through
+                // `compatible`, so the adoption is decided here, where Range<E> is known).
+                if want != TYPE_NONE && elem != TYPE_NONE && elem != want && self.compatible(want, rs) && self.compatible(
+                    want,
+                    re,
+                ) {
+                    elem = want;
+                    self.cur_ast().set_type(rs, want);
+                    self.cur_ast().set_type(re, want);
+                }
                 if a.at_const(id).as_data.pattern_range.start == NODE_NONE || a.at_const(id).as_data.pattern_range.end == NODE_NONE {
                     let sp = a.at_const(id).span;
                     self.errors.emit(sp.start, sp.end - sp.start, format("a range value needs both a start and an end"));
@@ -11957,6 +12000,18 @@ extend TypeChecker {
         self.loop_depth = self.loop_depth + 1;
         let le = self.tc_loop_push(a.at_const(id).as_data.for_stmt.label, id, false);
         let iter = a.at_const(id).as_data.for_stmt.iterable;
+        // `inline for` unrolls at emission: its iterable must be a closed `a..b` range -- there is
+        // nothing to unroll over an iterator, and an open bound has no count.
+        if a.at_const(id).kind == NodeKind::NODE_INLINE_FOR && (a.at_const(iter).kind != NodeKind::NODE_RANGE || a.at_const(
+            iter,
+        ).as_data.pattern_range.start == NODE_NONE || a.at_const(iter).as_data.pattern_range.end == NODE_NONE) {
+            let sp = a.at_const(iter).span;
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format("'inline for' iterates a closed constant range ('a..b' or 'a..=b')"),
+            );
+        }
         let mut elem = TYPE_NONE;
         if a.at_const(iter).kind == NodeKind::NODE_RANGE {
             let s = self.check_expr(a.at_const(iter).as_data.pattern_range.start);
@@ -12148,7 +12203,7 @@ extend TypeChecker {
             NODE_WHILE => {
                 self.tc_check_while(id);
             },
-            NODE_FOR => {
+            NODE_FOR | NODE_INLINE_FOR => {
                 self.tc_check_for(id);
             },
             NODE_EXPRESSION_STATEMENT => {
@@ -12180,6 +12235,15 @@ extend TypeChecker {
                 }
                 unsafe self.cur_ast().set_resolution(id, self.loop_stack[le as usize].node);
                 self.tc_note_resolution(id, unsafe self.loop_stack[le as usize].node);
+                // An unrolled loop has no backedge and no end label to jump to.
+                if self.cur_ast().at_const(unsafe self.loop_stack[le as usize].node).kind == NodeKind::NODE_INLINE_FOR {
+                    let sp2 = self.cur_ast().at_const(id).span;
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format("'break' and 'continue' cannot target an 'inline for' (its body is unrolled)"),
+                    );
+                }
                 if nk != NodeKind::NODE_BREAK {
                     return;
                 }

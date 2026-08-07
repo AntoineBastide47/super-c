@@ -160,6 +160,13 @@ pub enum NodeKind {
     // the winning arm's body -- see src/desugar.
     NODE_SELECT,
     NODE_SELECT_ARM,
+    // `inline for i in a..b { .. }` (ForData): unrolled at emission -- the bounds must fold to
+    // compile-time constants; the body is emitted once per value with `i` a const binding. Checked
+    // like NODE_FOR everywhere; break/continue inside are rejected at typecheck.
+    NODE_INLINE_FOR,
+    // `parallel for i in a..b { .. }` (ForData): sugar for std::parallel::data::range(a..b, body as
+    // closure); desugared post-resolve (src/desugar), so later passes never see it.
+    NODE_PARALLEL_FOR,
     NODE_KIND_COUNT,
 }
 

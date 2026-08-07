@@ -1487,11 +1487,14 @@ fn b_stmt(b: &mut Builder, id: NodeId) d::DocId {
                 v.push(b_block(b, w.body));
             }
         },
-        NODE_FOR => {
+        NODE_FOR | NODE_INLINE_FOR => {
             let f = n.as_data.for_stmt;
             if f.label.end > f.label.start {
                 v.push(span_doc(b, f.label));
                 v.push(b.p.txt(": "));
+            }
+            if n.kind == NodeKind::NODE_INLINE_FOR {
+                v.push(b.p.txt("inline "));
             }
             v.push(b.p.txt("for "));
             v.push(node_text(b, f.binding));
@@ -1499,6 +1502,16 @@ fn b_stmt(b: &mut Builder, id: NodeId) d::DocId {
             v.push(b_expr(b, f.iterable));
             v.push(b.p.txt(" "));
             v.push(b_block(b, f.body));
+        },
+        NODE_PARALLEL_FOR => {
+            // The marker's body is the closure the parser wrapped the block in; print the block.
+            let f = n.as_data.for_stmt;
+            v.push(b.p.txt("parallel for "));
+            v.push(node_text(b, f.binding));
+            v.push(b.p.txt(" in "));
+            v.push(b_expr(b, f.iterable));
+            v.push(b.p.txt(" "));
+            v.push(b_block(b, nd(b, f.body).as_data.closure.body));
         },
         NODE_EXPRESSION_STATEMENT => {
             let e = n.as_data.single.value;

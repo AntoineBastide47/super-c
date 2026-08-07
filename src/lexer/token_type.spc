@@ -115,6 +115,10 @@ pub enum TokenType {
     VaEnd,
     Launch,
     Select,
+    // Contextual for-modifiers: the LEXER fuses `inline`/`parallel` into these only when the next
+    // word is `for`; everywhere else both spellings stay ordinary identifiers (std::parallel!).
+    InlineFor,
+    ParallelFor,
 }
 
 extend TokenType {
@@ -227,6 +231,8 @@ extend TokenType {
             Arrow => "Arrow",
             FatArrow => "FatArrow",
             Eof => "Eof",
+            InlineFor => "InlineFor",
+            ParallelFor => "ParallelFor",
             LineComment => "LineComment",
             BlockComment => "BlockComment",
             DocLineComment => "DocLineComment",

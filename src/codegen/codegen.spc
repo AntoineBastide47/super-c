@@ -6341,6 +6341,11 @@ extend Codegen {
                 self.cg_loop_pop(le);
                 self.loop_defer_base = saved_ldb;
             },
+            NODE_INLINE_FOR => {
+                // Not a loop at emission: N copies of the body, no backedge, no break label (the
+                // typechecker rejected break/continue), so none of the loop bookkeeping applies.
+                self.emit_inline_for(id);
+            },
             NODE_BREAK | NODE_CONTINUE => {
                 let is_brk = nk == NodeKind::NODE_BREAK;
                 let le = self.cg_loop_find(self.cur_ast().resolution(id));
@@ -6775,6 +6780,63 @@ extend Codegen {
         self.emit_block(fs.body);
         self.emit_str("\n");
     }
+    // One `inline for` bound: the evaluator first (it handles negatives and full CTFE), then the
+    // substitution-aware length fold, which is what resolves a const-generic parameter (`0..N`,
+    // `0..N * 2`) to this instance's value.
+    fn cg_inline_bound(self: &mut Self, id: NodeId, out: &mut i64) bool {
+        if id == NODE_NONE {
+            return false;
+        }
+        let ce = self.ceval();
+        if ce != null {
+            let cv = ce.eval(self.cur_module(), id);
+            if cv.kind == ce::CONST_INT {
+                *out = cv.as_data.i;
+                return true;
+            }
+        }
+        let v = self.cg_const_len_eval(id, 0);
+        if v >= 0 {
+            *out = v;
+            return true;
+        }
+        return false;
+    }
+
+    // `inline for i in a..b`: the body emitted once per range value, each copy in its own C block
+    // with `i` a const binding. The bounds fold through the const evaluator or, in a generic body,
+    // through the substitution frames; a bound that does neither (or an absurd unroll count) emits
+    // a call to an undeclared, greppable function, turning the misuse into a named C error the way
+    // an unlayoutable type_info does.
+    fn emit_inline_for(self: &mut Self, id: NodeId) {
+        let fs = self.cur_ast().at_const(id).as_data.for_stmt;
+        let r = self.cur_ast().at_const(fs.iterable).as_data.pattern_range;
+        let mut lo: i64 = 0;
+        let mut hi: i64 = 0;
+        if !self.cg_inline_bound(r.start, &mut lo) || !self.cg_inline_bound(r.end, &mut hi) {
+            self.emit_str("__sc_inline_for_bounds_not_constant();\n");
+            return;
+        }
+        if r.inclusive {
+            hi = hi + 1;
+        }
+        if hi - lo > 16384 {
+            self.emit_str("__sc_inline_for_unroll_too_large();\n");
+            return;
+        }
+        let ety = self.cur_ast().type_of(id);
+        let name = self.name_span(fs.binding);
+        let mut v = lo;
+        while v < hi {
+            self.emit_str("{ ");
+            self.emit_binding(ety, name, true);
+            self.buf.format_into(" = {}; ", v);
+            self.emit_block(fs.body);
+            self.emit_str("}\n");
+            v = v + 1;
+        }
+    }
+
     fn emit_for(self: &mut Self, id: NodeId) {
         let le = self.cg_loop_find(id);
         let fs = self.cur_ast().at_const(id).as_data.for_stmt;
@@ -7646,7 +7708,7 @@ extend Codegen {
             let b = self.cur_ast().at_const(id).as_data.while_stmt.body;
             self.cg_scan_moves(cnd, cond);
             self.cg_scan_moves(b, true);
-        } else if nk == NodeKind::NODE_FOR {
+        } else if nk == NodeKind::NODE_FOR || nk == NodeKind::NODE_INLINE_FOR {
             let it = self.cur_ast().at_const(id).as_data.for_stmt.iterable;
             let b = self.cur_ast().at_const(id).as_data.for_stmt.body;
             self.cg_scan_moves(it, cond);
@@ -8642,7 +8704,7 @@ extend Codegen {
         if n.kind == NodeKind::NODE_PARAMETER {
             return self.name_span(n.as_data.parameter.name);
         }
-        if n.kind == NodeKind::NODE_FOR {
+        if n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR {
             return self.name_span(n.as_data.for_stmt.binding);
         }
         if n.kind == NodeKind::NODE_PATTERN_NAME {
@@ -10026,7 +10088,7 @@ extend Codegen {
             dk = self.mod_ast(d.module).at_const(d.node).kind;
         }
         let mut ty = Buf256 {};
-        if d.node != NODE_NONE && (dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_CONST) {
+        if d.node != NODE_NONE && (dk == NodeKind::NODE_LET || dk == NodeKind::NODE_PARAMETER || dk == NodeKind::NODE_FOR || dk == NodeKind::NODE_INLINE_FOR || dk == NodeKind::NODE_IDENTIFIER || dk == NodeKind::NODE_PATTERN_NAME || dk == NodeKind::NODE_CONST) {
             if n.kind == NodeKind::NODE_ALIGNOF {
                 let mut vt = self.subst_resolve(self.cur_ast().type_of(vnode));
                 let mut y = self.type_at(vt);
@@ -12245,7 +12307,7 @@ extend Codegen {
             }
             return self.cg_subtree_uses_multi(n.as_data.while_stmt.body, pids, np, used, left);
         }
-        if k == NodeKind::NODE_FOR {
+        if k == NodeKind::NODE_FOR || k == NodeKind::NODE_INLINE_FOR {
             if self.cg_subtree_uses_multi(n.as_data.for_stmt.iterable, pids, np, used, left) {
                 return true;
             }

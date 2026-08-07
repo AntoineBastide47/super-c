@@ -511,6 +511,32 @@ fn static_assert() {
 }
 
 @test
+fn inline_and_parallel_for() {
+    h::expect_ok(
+        "inline for unrolls a const range",
+        "fn main() i32 { let mut s = 0; inline for i in 0..4 { s += i; } return s - 6; }\n",
+    );
+    h::expect_err_msg(
+        "inline for needs a closed range",
+        "fn main() i32 { let v = [1, 2, 3]; inline for x in v { let _ = x; } return 0; }\n",
+        "closed constant range",
+    );
+    h::expect_err_msg(
+        "no break inside inline for",
+        "fn main() i32 { inline for i in 0..3 { break; } return 0; }\n",
+        "cannot target an 'inline for'",
+    );
+    h::expect_ok(
+        "range literals adopt the parameter element type",
+        "fn take(r: Range<usize>) usize { return r.end; }\nfn main() i32 { return take(0..10) as i32 - 10; }\n",
+    );
+    h::expect_ok(
+        "inline and parallel stay ordinary identifiers",
+        "fn main() i32 { let inline = 1; let parallel = 2; return inline + parallel - 3; }\n",
+    );
+}
+
+@test
 fn type_info_intrinsic() {
     h::expect_ok(
         "type_info folds in const context",

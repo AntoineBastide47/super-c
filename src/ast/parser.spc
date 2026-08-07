@@ -2992,15 +2992,59 @@ extend Parser {
                     },
                 );
             },
-            For => {
+            For | InlineFor | ParallelFor => {
+                let mut kind = NodeKind::NODE_FOR;
+                if self.check(TokenType::InlineFor) {
+                    kind = NodeKind::NODE_INLINE_FOR;
+                } else if self.check(TokenType::ParallelFor) {
+                    kind = NodeKind::NODE_PARALLEL_FOR;
+                }
                 self.advance();
+                if kind != NodeKind::NODE_FOR {
+                    // The modifier token spans only `inline`/`parallel`; the `for` itself follows.
+                    // (A label cannot reach here: the Label arm admits only while/do/for/loop.)
+                    self.expect(TokenType::For, "'for'");
+                }
                 let binding = self.identifier();
                 self.expect(TokenType::In, "'in'");
                 let iterable = self.parse_range_mode(RangeContext::RANGE_FOR, ExpressionGrammar::EXPR_CONDITION);
-                let body = self.parse_block();
+                let mut body = self.parse_block();
+                if kind == NodeKind::NODE_PARALLEL_FOR {
+                    // The body IS a closure over the binding: built here so resolve treats it as one
+                    // and fills its captures; desugar then only wraps it in the std range() call.
+                    let pmark = self.ast.mark();
+                    self.ast.push(
+                        self.ast.add(
+                            Node {
+                                kind: NodeKind::NODE_PARAMETER,
+                                span: self.node_span(binding),
+                                as_data: NodeAs {
+                                    parameter: ParameterData { name: binding, ty: NODE_NONE, is_mutable: false },
+                                },
+                            },
+                        ),
+                    );
+                    let params = self.ast.commit(pmark);
+                    body = self.ast.add(
+                        Node {
+                            kind: NodeKind::NODE_CLOSURE,
+                            span: Span::new(start, self.node_span(body).end),
+                            as_data: NodeAs {
+                                closure: ClosureData {
+                                    params: params,
+                                    returns: NodeList { start: 0, len: 0 },
+                                    body: body,
+                                    expr_body: false,
+                                    captures: NodeList { start: 0, len: 0 },
+                                    mut_caps: 0,
+                                },
+                            },
+                        },
+                    );
+                }
                 result = self.ast.add(
                     Node {
-                        kind: NodeKind::NODE_FOR,
+                        kind: kind,
                         span: Span::new(start, self.node_span(body).end),
                         as_data: NodeAs {
                             for_stmt: ForData { binding: binding, iterable: iterable, body: body, label: label },
@@ -3207,7 +3251,7 @@ extend Parser {
                     result = self.parse_loop_stmt(start, label);
                 }
             },
-            While | Do | For | Loop => {
+            While | Do | For | Loop | InlineFor | ParallelFor => {
                 result = self.parse_loop_stmt(start, Span::empty());
             },
             Unsafe => {

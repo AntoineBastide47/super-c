@@ -402,6 +402,29 @@ fn identifier(l: &mut Lexer) {
     if 2 <= identifier_len && identifier_len <= 13 {
         kind = keywords(unsafe (l.bytes.ptr() + l.start), identifier_len);
     }
+    // Contextual for-modifiers: `inline`/`parallel` fuse to a modifier token ONLY when the next word
+    // is `for` -- they cannot be plain keywords (std::parallel is a module path). The peek crosses
+    // whitespace but not comments; the token itself spans only the modifier word, so the `for` that
+    // follows lexes normally and the grammar stays LL(1).
+    if kind == TokenType::Identifier && (identifier_len == 6 || identifier_len == 8) {
+        let p = unsafe (l.bytes.ptr() + l.start);
+        let inl = identifier_len == 6 && memeq(p, "inline");
+        if inl || identifier_len == 8 && memeq(p, "parallel") {
+            let mut j = i;
+            while (l.class[l.bytes.byte_at(j) as usize] & CC_WS) != 0u8 {
+                j = j + 1;
+            }
+            if l.bytes.byte_at(j) == b'f' && l.bytes.byte_at(j + 1) == b'o' && l.bytes.byte_at(j + 2) == b'r' && (l.class[l.bytes.byte_at(
+                j + 3,
+            ) as usize] & CC_ID_PART) == 0u8 {
+                kind = if inl {
+                    TokenType::InlineFor;
+                } else {
+                    TokenType::ParallelFor;
+                };
+            }
+        }
+    }
     add_token(l, kind);
 }
 

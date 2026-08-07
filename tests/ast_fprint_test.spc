@@ -53,6 +53,7 @@ const fn kind_name(k: ast::NodeKind) str<'static> {
         NODE_IF => "If",
         NODE_WHILE => "While",
         NODE_FOR => "For",
+        NODE_INLINE_FOR => "InlineFor",
         NODE_EXPRESSION_STATEMENT => "ExpressionStatement",
         NODE_UNARY => "Unary",
         NODE_BINARY => "Binary",
@@ -240,7 +241,7 @@ fn print_node(out: *mut stdio::FILE, a: &ast::Ast, id: ast::NodeId, source: *con
             print_child(out, a, n.as_data.while_stmt.condition, source, d);
             print_child(out, a, n.as_data.while_stmt.body, source, d);
         },
-        NODE_FOR => {
+        NODE_FOR | NODE_INLINE_FOR => {
             print_child(out, a, n.as_data.for_stmt.binding, source, d);
             print_child(out, a, n.as_data.for_stmt.iterable, source, d);
             print_child(out, a, n.as_data.for_stmt.body, source, d);

@@ -104,6 +104,46 @@ fn main() i32 {
 // call sites emit the literal, pure statement-position calls vanish, unfoldable/over-budget callees degrade
 // to runtime calls, and the compile stays fast.
 @test
+fn inline_for_and_parallel_for() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"import std::parallel::atomics as atom;
+import std::parallel::runtime as rt;
+fn sum_upto<const N: usize>() usize {
+  let mut t: usize = 0;
+  inline for i in 0..N { t += i; }
+  return t;
+}
+fn main() i32 {
+  let mut s = 0;
+  inline for i in 0..4 { s += i; }
+  if s != 6 { return 1; }
+  if sum_upto::<10>() != 45 { return 3; }
+  let sum = atom::Atomic::<i64>::new(0);
+  let sp = &sum;
+  parallel for i in 0..100 {
+    let _ = sp.fetch_add(i as i64, atom::MemoryOrder::Relaxed);
+  }
+  if sum.load(atom::MemoryOrder::SeqCst) != 4950 { return 2; }
+  print("ok\n");
+  rt::shutdown();
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("main.c", "const int32_t i = 3"), "the inline for physically unrolled");
+    assert(!p.gen_has("main.c", "__sc_inline_for"), "constant bounds folded");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("ok"), "the parallel for summed through the atomic");
+}
+
+@test
 fn type_info_reflection() {
     let p = cli::proj_new();
     p.mkfile(
