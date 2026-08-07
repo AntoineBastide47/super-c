@@ -203,7 +203,8 @@ static inline __attribute__((unused)) void __sc_safepoint(void) {
   if (__sc_pre_hook) __sc_pre_hook();
 }
 /* leak tracker (super_rt.c): interposes the emitted code's malloc/realloc/free call sites.
-   Inert unless the SC_LEAK_CHECK environment variable is set. */
+   Inert unless the SC_LEAK_CHECK environment variable is set; compile with -DSC_NO_LEAK_CHECK to
+   drop the interposition entirely (super_rt.c still links: the coroutine runtime calls sc_lk_bt_*). */
 void *sc_lk_malloc(size_t __n);
 void *sc_lk_calloc(size_t __n, size_t __m);
 void *sc_lk_realloc(void *__p, size_t __n);
@@ -213,10 +214,12 @@ void sc_lk_free(void *__p);
    unaffected -- only the per-allocation call stack is skipped while paused. Balanced; safe to nest. */
 void sc_lk_bt_pause(void);
 void sc_lk_bt_resume(void);
+#ifndef SC_NO_LEAK_CHECK
 #define malloc(__n) sc_lk_malloc(__n)
 #define calloc(__n, __m) sc_lk_calloc(__n, __m)
 #define realloc(__p, __n) sc_lk_realloc(__p, __n)
 #define free(__p) sc_lk_free(__p)
+#endif
 "#.ptr() as *const char;
 }
 
