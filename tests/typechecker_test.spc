@@ -533,7 +533,7 @@ fn fields_projection() {
     h::expect_err_msg(
         "the binder has three members",
         "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(&p) { let _ = f.other; } return 0; }\n",
-        "'.name', '.index', and '.value'",
+        "nothing else",
     );
     h::expect_ok(
         "a closure that ignores the binder is allowed",

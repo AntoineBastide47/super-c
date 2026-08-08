@@ -1057,6 +1057,17 @@ extend ConstEval {
                 return RType { ok: false };
             }
             let y = self.ast_ptr(m).type_at(t);
+            // A live reflection copy resolves its own projection: the binder's current field (or
+            // active-variant payload) IS this iteration's type.
+            if y.kind == TypeKind::TYPE_FIELD_PROJECTION {
+                let pres = self.ce_proj_resolve(m, t);
+                if !pres.ok {
+                    return RType { ok: false };
+                }
+                m = pres.m;
+                t = pres.t;
+                continue;
+            }
             if y.kind != TypeKind::TYPE_GENERIC {
                 return RType { ok: true, m: m, t: t };
             }
@@ -1198,6 +1209,18 @@ extend ConstEval {
         }
         let am = self.mut_ast_ptr(m);
         let y = *am.type_at(t);
+        // A projection under a LIVE reflection copy substitutes eagerly to the copy's concrete
+        // type, so generic bindings (V := f.value's type) are ordinary types downstream.
+        if y.kind == TypeKind::TYPE_FIELD_PROJECTION {
+            let prr = self.ce_proj_resolve(m, t);
+            if !prr.ok {
+                return TYPE_NONE;
+            }
+            if prr.m == m {
+                return prr.t;
+            }
+            return self.mut_ast_ptr(m).reintern(unsafe &*self.ast_ptr(prr.m), prr.t);
+        }
         if y.kind == TypeKind::TYPE_GENERIC {
             if f == null {
                 return TYPE_NONE;
@@ -2216,7 +2239,15 @@ extend ConstEval {
 
     // The TypeTag variant index for (tm, tt); -1 when the type has no tag (unreachable kinds).
     // Variant order is pinned by std/core.spc's TypeTag declaration.
-    fn ce_ti_tag(self: &mut Self, tm: ModuleId, tt: TypeId, strm: ModuleId, strn: NodeId, slm: ModuleId, sln: NodeId) i64 {
+    pub fn ce_ti_tag(
+        self: &mut Self,
+        tm: ModuleId,
+        tt: TypeId,
+        strm: ModuleId,
+        strn: NodeId,
+        slm: ModuleId,
+        sln: NodeId,
+    ) i64 {
         let y = *self.ast_ptr(tm).type_at(tt);
         if y.kind == TypeKind::TYPE_BUILTIN {
             switch y.as_data.builtin {
@@ -3324,6 +3355,36 @@ extend ConstEval {
             let mem = a.at_const(id).as_data.member.member;
             let obj_n = a.at_const(id).as_data.member.object;
             let mname = self.name_text(m, mem);
+            // `&mut f.value` / `&mut v.value`: an interior pointer into the subject's object -- the
+            // slot is the field index (or the payload slot past the tag for an ACTIVE variant).
+            let prj = self.ce_proj_of(m, obj_n);
+            if prj != null && self.ce_span_is(m, mname, "value") {
+                let sub3 = unsafe prj.sub;
+                if (sub3.kind == CV_PTR || sub3.kind == CV_AGG) && sub3.as_data.p.off == 0 {
+                    let mut slot = unsafe prj.k;
+                    if unsafe prj.vmode {
+                        let o3 = self.obj_ptr(sub3.as_data.p.obj);
+                        if o3 == null || unsafe o3.is_enum == 0 || unsafe o3.slots.len() < 2 {
+                            return ValRes { ok: false };
+                        }
+                        let a3 = unsafe o3.slots[0];
+                        if a3.kind != CV_INT || a3.as_data.i != unsafe prj.k {
+                            return ValRes { ok: false };
+                        }
+                        slot = 1;
+                    }
+                    return ValRes {
+                        ok: true,
+                        v: CeVal {
+                            kind: CV_PTR,
+                            tm: m,
+                            ty: TYPE_NONE,
+                            as_data: CeValAs { p: CvPtr { obj: sub3.as_data.p.obj, off: slot as u32 } },
+                        },
+                    };
+                }
+                return ValRes { ok: false };
+            }
             let br = self.ce_base_obj(f, m, obj_n);
             if !br.ok {
                 return ValRes { ok: false };
@@ -5439,6 +5500,74 @@ extend ConstEval {
         }
     }
 
+    // The type a projection stands for in the CURRENT interpreter iteration: field type for a
+    // fields binder, single-payload type for a variants binder (its own k).
+    fn ce_proj_resolve(self: &Self, m: ModuleId, t: TypeId) RType {
+        let binder = self.ast_ptr(m).type_at(t).as_data.proj.binder;
+        let mut i = self.ce_projs.len();
+        while i > 0 {
+            i = i - 1;
+            let pr = self.ce_projs.at(i);
+            if pr.binder != binder {
+                continue;
+            }
+            let om = pr.om;
+            let owner = pr.owner;
+            let mut fdm: ModuleId = 0;
+            let mut ftn = NODE_NONE;
+            if pr.vmode {
+                let vid = self.ce_proj_variant(om, owner, pr.k, &mut fdm);
+                if vid == NODE_NONE {
+                    return RType { ok: false };
+                }
+                let vd = self.ast_ptr(fdm).at_const(vid).as_data.variant;
+                if vd.payload.len != 1 {
+                    return RType { ok: false };
+                }
+                let pe = unsafe self.ast_ptr(fdm).list(vd.payload)[0];
+                ftn = pe;
+                if vd.struct_payload {
+                    ftn = self.ast_ptr(fdm).at_const(pe).as_data.field.ty;
+                }
+            } else {
+                let fid = self.ce_proj_field(om, owner, pr.k, &mut fdm);
+                if fid == NODE_NONE {
+                    return RType { ok: false };
+                }
+                ftn = fid;
+                if self.ast_ptr(fdm).at_const(fid).kind == NodeKind::NODE_FIELD {
+                    ftn = self.ast_ptr(fdm).at_const(fid).as_data.field.ty;
+                }
+            }
+            let ft = self.ce_type(fdm, ftn);
+            if ft == TYPE_NONE {
+                return RType { ok: false };
+            }
+            // instance owners substitute their generics into the field type
+            let y2 = *self.ast_ptr(om).type_at(owner);
+            if y2.kind == TypeKind::TYPE_INSTANCE {
+                let it2 = *self.ast_ptr(om).instance(y2.as_data.inst);
+                let gens2 = self.ast_ptr(it2.module).at_const(it2.decl).as_data.aggregate.generics;
+                let mut frame2 = LayoutEnv {
+                    parent: null,
+                    pmod: it2.module,
+                    params: self.ast_ptr(it2.module).list(gens2),
+                    argm: om,
+                    n: 0,
+                };
+                let mut gi2: u32 = 0;
+                while gi2 < gens2.len && gi2 as u8 < it2.n && frame2.n < 8 {
+                    unsafe frame2.args[frame2.n as usize] = unsafe it2.args[gi2 as usize];
+                    frame2.n = frame2.n + 1;
+                    gi2 = gi2 + 1;
+                }
+                return self.ce_ti_env_ty(fdm, ft, &frame2);
+            }
+            return RType { ok: true, m: fdm, t: ft };
+        }
+        return RType { ok: false };
+    }
+
     // The active fields-loop iteration `obj_n` (a binder identifier) refers to, by resolution;
     // null when obj_n is not a live binder.
     fn ce_proj_of(self: &Self, m: ModuleId, obj_n: NodeId) *const CeProj {
@@ -5471,6 +5600,7 @@ extend ConstEval {
             return cv_nil();
         }
         let mname = self.name_text(m, a.at_const(id).as_data.member.member);
+        let vmode = unsafe pr.vmode;
         if self.ce_span_is(m, mname, "index") {
             return CeVal {
                 kind: CV_INT,
@@ -5479,16 +5609,84 @@ extend ConstEval {
                 as_data: CeValAs { i: unsafe pr.k },
             };
         }
+        if vmode && self.ce_span_is(m, mname, "tag") {
+            return CeVal {
+                kind: CV_INT,
+                tm: 0,
+                ty: Ast::builtin(BuiltinType::BT_I32),
+                as_data: CeValAs { i: unsafe pr.k },
+            };
+        }
+        if vmode && (self.ce_span_is(m, mname, "payload") || self.ce_span_is(m, mname, "is_active")) {
+            let mut fdm: ModuleId = 0;
+            let vid = self.ce_proj_variant(unsafe pr.om, unsafe pr.owner, unsafe pr.k, &mut fdm);
+            if vid == NODE_NONE {
+                return cv_nil();
+            }
+            if self.ce_span_is(m, mname, "payload") {
+                return CeVal {
+                    kind: CV_INT,
+                    tm: 0,
+                    ty: Ast::builtin(BuiltinType::BT_USIZE),
+                    as_data: CeValAs { i: self.ast_ptr(fdm).at_const(vid).as_data.variant.payload.len },
+                };
+            }
+            let sub2 = unsafe pr.sub;
+            if sub2.kind != CV_PTR && sub2.kind != CV_AGG || sub2.as_data.p.off != 0 {
+                return cv_nil();
+            }
+            let o2 = self.obj_ptr(sub2.as_data.p.obj);
+            if o2 == null || unsafe o2.is_enum == 0 || unsafe o2.slots.len() == 0 {
+                return cv_nil();
+            }
+            let act = unsafe o2.slots[0];
+            if act.kind != CV_INT {
+                return cv_nil();
+            }
+            return CeVal {
+                kind: CV_BOOL,
+                tm: 0,
+                ty: Ast::builtin(BuiltinType::BT_BOOL),
+                as_data: CeValAs {
+                    i: if act.as_data.i == unsafe pr.k {
+                        1;
+                    } else {
+                        0;
+                    },
+                },
+            };
+        }
         if self.ce_span_is(m, mname, "value") {
             let sub = unsafe pr.sub;
             if sub.kind != CV_PTR && sub.kind != CV_AGG || sub.as_data.p.off != 0 {
                 return cv_nil();
             }
             let o = self.obj_ptr(sub.as_data.p.obj);
-            if o == null || (unsafe pr.k) as usize >= unsafe o.slots.len() {
+            if o == null {
+                return cv_nil();
+            }
+            if vmode {
+                // the ACTIVE single payload: slot 0 is the tag, slot 1 the payload
+                if unsafe o.is_enum == 0 || unsafe o.slots.len() < 2 {
+                    return cv_nil();
+                }
+                let act2 = unsafe o.slots[0];
+                if act2.kind != CV_INT || act2.as_data.i != unsafe pr.k {
+                    return cv_nil();
+                }
+                return unsafe o.slots[1];
+            }
+            if (unsafe pr.k) as usize >= unsafe o.slots.len() {
                 return cv_nil();
             }
             return unsafe o.slots[(unsafe pr.k) as usize];
+        }
+        if !vmode && (self.ce_span_is(m, mname, "offset") || self.ce_span_is(m, mname, "size") || self.ce_span_is(
+            m,
+            mname,
+            "kind",
+        )) {
+            return self.ce_proj_meta(m, pr, mname);
         }
         if self.ce_span_is(m, mname, "name") {
             let sty = self.ce_type(m, id);
@@ -5502,6 +5700,22 @@ extend ConstEval {
             let dm = unsafe pr.om;
             let dt = unsafe pr.owner;
             let mut fdm: ModuleId = 0;
+            if vmode {
+                let vid = self.ce_proj_variant(dm, dt, unsafe pr.k, &mut fdm);
+                if vid == NODE_NONE {
+                    return cv_nil();
+                }
+                let vda = self.ast_ptr(fdm);
+                let vsp = self.name_text(fdm, vda.at_const(vid).as_data.variant.name);
+                let vsrc = self.ce_src(fdm);
+                return self.ce_ti_str(
+                    ys.module,
+                    ys.as_data.decl,
+                    m,
+                    sty,
+                    vsrc.slice(vsp.start as usize, vsp.end as usize),
+                );
+            }
             let fid = self.ce_proj_field(dm, dt, unsafe pr.k, &mut fdm);
             if fid == NODE_NONE {
                 return cv_nil();
@@ -5516,6 +5730,133 @@ extend ConstEval {
             return self.ce_ti_str(ys.module, ys.as_data.decl, m, sty, ti_tuple_name(&mut tb, (unsafe pr.k) as u32));
         }
         return cv_nil();
+    }
+
+    // `f.offset` / `f.size` / `f.kind` under the interpreter: the same numbers type_info reports.
+    fn ce_proj_meta(self: &mut Self, m: ModuleId, pr: *const CeProj, mname: tok::Span) CeVal {
+        let om = unsafe pr.om;
+        let owner = unsafe pr.owner;
+        let mut fdm: ModuleId = 0;
+        let fid = self.ce_proj_field(om, owner, unsafe pr.k, &mut fdm);
+        if fid == NODE_NONE {
+            return cv_nil();
+        }
+        // instance substitution frame, exactly as the descriptor build sets it up
+        let y = *self.ast_ptr(om).type_at(owner);
+        let mut envp: *const LayoutEnv = null;
+        let mut frame = LayoutEnv { parent: null, pmod: 0, params: null, argm: om, n: 0 };
+        let mut dm2 = y.module;
+        let mut dn2 = y.as_data.decl;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_ptr(om).instance(y.as_data.inst);
+            dm2 = it.module;
+            dn2 = it.decl;
+            let gens = self.ast_ptr(dm2).at_const(dn2).as_data.aggregate.generics;
+            frame.pmod = dm2;
+            frame.params = self.ast_ptr(dm2).list(gens);
+            let mut gi: u32 = 0;
+            while gi < gens.len && gi as u8 < it.n && frame.n < 8 {
+                unsafe frame.args[frame.n as usize] = unsafe it.args[gi as usize];
+                frame.n = frame.n + 1;
+                gi = gi + 1;
+            }
+            envp = &frame;
+        }
+        let da2 = self.ast_ptr(dm2);
+        let agg = da2.at_const(dn2).as_data.aggregate;
+        let packed = self.ce_attr(dm2, dn2, AttrKind::ATTR_PACKED) != null;
+        let mut run: u64 = 0;
+        let mut idx2: i64 = 0;
+        for i in 0..agg.members.len {
+            let cf = unsafe da2.list(agg.members)[i as usize];
+            if !agg.is_tuple && da2.at_const(cf).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let mut ftn = cf;
+            if !agg.is_tuple {
+                ftn = da2.at_const(cf).as_data.field.ty;
+            }
+            let ft = self.ce_type(dm2, ftn);
+            let fl = self.layout_of(dm2, ft, envp, 1);
+            if ft == TYPE_NONE || !fl.ok {
+                return cv_nil();
+            }
+            let mut fa = fl.align;
+            if packed {
+                fa = 1;
+            }
+            let off = if agg.is_union {
+                0u64;
+            } else {
+                round_up(run, fa);
+            };
+            if !agg.is_union {
+                run = off + fl.size;
+            }
+            if idx2 == unsafe pr.k {
+                if self.ce_span_is(m, mname, "offset") {
+                    return CeVal {
+                        kind: CV_INT,
+                        tm: 0,
+                        ty: Ast::builtin(BuiltinType::BT_USIZE),
+                        as_data: CeValAs { i: off as i64 },
+                    };
+                }
+                if self.ce_span_is(m, mname, "size") {
+                    return CeVal {
+                        kind: CV_INT,
+                        tm: 0,
+                        ty: Ast::builtin(BuiltinType::BT_USIZE),
+                        as_data: CeValAs { i: fl.size as i64 },
+                    };
+                }
+                // kind: TypeTag of the field's type, via the same mapping the descriptor uses
+                if self.pkg == null {
+                    return cv_nil();
+                }
+                let sh = self.pkg.prelude_lookup("str", true);
+                let lh = self.pkg.prelude_lookup("Slice", true);
+                if sh.node == NODE_NONE || lh.node == NODE_NONE {
+                    return cv_nil();
+                }
+                let fr2 = self.ce_ti_env_ty(dm2, ft, envp);
+                if !fr2.ok {
+                    return cv_nil();
+                }
+                let mut tg = self.ce_ti_tag(fr2.m, fr2.t, sh.mid, sh.node, lh.mid, lh.node);
+                if tg < 0 {
+                    tg = 0;
+                }
+                return CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_I32), as_data: CeValAs { i: tg } };
+            }
+            idx2 = idx2 + 1;
+        }
+        return cv_nil();
+    }
+
+    // The k-th VARIANT node of (m, owner)'s enum decl; NODE_NONE past the end or non-enum.
+    fn ce_proj_variant(self: &Self, m: ModuleId, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
+        let y = *self.ast_ptr(m).type_at(owner);
+        let mut dm = y.module;
+        let mut dn = NODE_NONE;
+        if y.kind == TypeKind::TYPE_ENUM {
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_ptr(m).instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+        } else {
+            return NODE_NONE;
+        }
+        if !self.has_ast(dm) || self.ast_ptr(dm).at_const(dn).kind != NodeKind::NODE_ENUM {
+            return NODE_NONE;
+        }
+        let ms = self.ast_ptr(dm).at_const(dn).as_data.aggregate.members;
+        if idx < 0 || idx >= ms.len as i64 {
+            return NODE_NONE;
+        }
+        *out_m = dm;
+        return unsafe self.ast_ptr(dm).list(ms)[idx as usize];
     }
 
     // The k-th field node of (m, owner), mirroring codegen's walk; NODE_NONE past the end.
@@ -5559,12 +5900,18 @@ extend ConstEval {
         // fields(&v): interpret the unroll -- one pass per field, the binder served by ce_projs.
         if a.at_const(id).kind == NodeKind::NODE_INLINE_FOR && a.at_const(iter_n).kind == NodeKind::NODE_CALL {
             let fcl = a.at_const(iter_n).as_data.call.callee;
-            if a.at_const(fcl).kind != NodeKind::NODE_IDENTIFIER || !self.ce_span_is(
+            let is_flds = a.at_const(fcl).kind == NodeKind::NODE_IDENTIFIER && self.ce_span_is(
                 m,
                 a.at_const(fcl).as_data.name.text,
                 "fields",
-            ) {
-                return Flow::Bail; // variants(&e) has no interpreter yet
+            );
+            let is_vars2 = a.at_const(fcl).kind == NodeKind::NODE_IDENTIFIER && self.ce_span_is(
+                m,
+                a.at_const(fcl).as_data.name.text,
+                "variants",
+            );
+            if !is_flds && !is_vars2 {
+                return Flow::Bail; // payloads(v) has no interpreter yet
             }
             let pt = self.ce_type(m, id);
             if pt == TYPE_NONE || self.ast_ptr(m).type_at(pt).kind != TypeKind::TYPE_FIELD_PROJECTION {
@@ -5582,10 +5929,15 @@ extend ConstEval {
             let mut k: i64 = 0;
             loop {
                 let mut fdm: ModuleId = 0;
-                if self.ce_proj_field(pr.m, pr.t, k, &mut fdm) == NODE_NONE {
+                let more = if is_vars2 {
+                    self.ce_proj_variant(pr.m, pr.t, k, &mut fdm) != NODE_NONE;
+                } else {
+                    self.ce_proj_field(pr.m, pr.t, k, &mut fdm) != NODE_NONE;
+                };
+                if !more {
                     return Flow::Ok;
                 }
-                self.ce_projs.push(CeProj { binder: id, k: k, sub: sub, om: pr.m, owner: pr.t });
+                self.ce_projs.push(CeProj { binder: id, k: k, sub: sub, om: pr.m, owner: pr.t, vmode: is_vars2 });
                 let st = self.exec_stmt(f, m, body);
                 let _ = self.ce_projs.pop();
                 if st == Flow::Return || st == Flow::Bail {
@@ -7923,6 +8275,7 @@ pub struct CeProj {
     pub sub: CeVal,
     pub om: ModuleId,
     pub owner: TypeId,
+    pub vmode: bool, // variants(&e) rather than fields(&v)
 }
 
 pub struct StaticRes {

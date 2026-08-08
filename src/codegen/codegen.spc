@@ -1829,6 +1829,69 @@ extend Codegen {
         );
     }
 
+    // Does copy `k` of `binder`'s loop over `owner` exist? Mode-aware: field, variant, or the
+    // current variant's k-th payload.
+    fn cg_proj_count_more(self: &Self, binder: NodeId, owner: TypeId, k: i64) bool {
+        let mut dmx: ModuleId = 0;
+        if self.cg_proj_pmode(binder) {
+            let outer = self.cg_proj_outer(binder);
+            let vk = self.cg_proj_cur(outer);
+            if outer == NODE_NONE || vk < 0 {
+                return false;
+            }
+            let vid = self.cg_proj_variant_node(owner, vk, &mut dmx);
+            if vid == NODE_NONE {
+                return false;
+            }
+            return self.cg_proj_payload_node(dmx, vid, k) != NODE_NONE;
+        }
+        if self.cg_proj_vmode(binder) {
+            return self.cg_proj_variant_node(owner, k, &mut dmx) != NODE_NONE;
+        }
+        return self.cg_proj_field_node(owner, k, &mut dmx) != NODE_NONE;
+    }
+
+    // True when `binder` is a payloads(v) loop over a variants binder.
+    fn cg_proj_pmode(self: &Self, binder: NodeId) bool {
+        if binder == NODE_NONE || self.cur_ast().at_const(binder).kind != NodeKind::NODE_INLINE_FOR {
+            return false;
+        }
+        let it = self.cur_ast().at_const(binder).as_data.for_stmt.iterable;
+        if self.cur_ast().at_const(it).kind != NodeKind::NODE_CALL {
+            return false;
+        }
+        let cl = self.cur_ast().at_const(it).as_data.call.callee;
+        return self.cur_ast().at_const(cl).kind == NodeKind::NODE_IDENTIFIER && span_is(
+            self.mod_src(self.cur_module()),
+            self.cur_ast().at_const(cl).as_data.name.text,
+            "payloads".ptr() as *const char,
+        );
+    }
+
+    // The variants loop a payloads(v) binder iterates within (its argument's binder), or NODE_NONE.
+    fn cg_proj_outer(self: &Self, binder: NodeId) NodeId {
+        let it = self.cur_ast().at_const(binder).as_data.for_stmt.iterable;
+        let args2 = self.cur_ast().at_const(it).as_data.call.args;
+        if args2.len != 1 {
+            return NODE_NONE;
+        }
+        let pav = unsafe self.cur_ast().list(args2)[0];
+        if self.cur_ast().at_const(pav).kind != NodeKind::NODE_IDENTIFIER {
+            return NODE_NONE;
+        }
+        return self.cur_ast().resolution(pav);
+    }
+
+    // The j-th payload entry node of variant `vid` (NODE_FIELD for struct payloads, the type node
+    // for tuple ones); NODE_NONE past the end.
+    fn cg_proj_payload_node(self: &Self, dm: ModuleId, vid: NodeId, j: i64) NodeId {
+        let vd = self.mod_ast(dm).at_const(vid).as_data.variant;
+        if j < 0 || j >= vd.payload.len as i64 {
+            return NODE_NONE;
+        }
+        return unsafe self.mod_ast(dm).list(vd.payload)[j as usize];
+    }
+
     // The k-th VARIANT of `owner`'s enum decl; NODE_NONE past the end or for a non-enum.
     fn cg_proj_variant_node(self: &Self, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
         let y = *self.type_at(owner);
@@ -1859,6 +1922,43 @@ extend Codegen {
     // variants loop (TYPE_NONE for unit and multi-payload variants -- those copies must guard with
     // `if v.payload == 1`, which the emitter folds away).
     fn cg_proj_value_ty(self: &Self, binder: NodeId, owner: TypeId, idx: i64) TypeId {
+        if self.cg_proj_pmode(binder) {
+            let outer = self.cg_proj_outer(binder);
+            let vk = self.cg_proj_cur(outer);
+            if outer == NODE_NONE || vk < 0 {
+                return TYPE_NONE;
+            }
+            let mut dm3: ModuleId = 0;
+            let vid3 = self.cg_proj_variant_node(owner, vk, &mut dm3);
+            if vid3 == NODE_NONE {
+                return TYPE_NONE;
+            }
+            let pe3 = self.cg_proj_payload_node(dm3, vid3, idx);
+            if pe3 == NODE_NONE {
+                return TYPE_NONE;
+            }
+            let da3 = self.mod_ast(dm3);
+            let mut ptn3 = pe3;
+            if da3.at_const(vid3).as_data.variant.struct_payload {
+                ptn3 = da3.at_const(pe3).as_data.field.ty;
+            }
+            let ptl3 = da3.type_of(ptn3);
+            if ptl3 == TYPE_NONE {
+                return TYPE_NONE;
+            }
+            let mut pt3 = self.cur_ast().reintern(unsafe &*da3, ptl3);
+            let y3 = *self.type_at(owner);
+            if y3.kind == TypeKind::TYPE_INSTANCE {
+                let it3 = *self.cur_ast().instance(y3.as_data.inst);
+                let gens3 = self.mod_ast(it3.module).at_const(it3.decl).as_data.aggregate.generics;
+                let mut gn3 = gens3.len;
+                if gn3 > it3.n as u32 {
+                    gn3 = it3.n;
+                }
+                pt3 = self.cg_ty_map(pt3, it3.module, self.mod_ast(it3.module).list(gens3), &it3.args[0], gn3);
+            }
+            return pt3;
+        }
         if !self.cg_proj_vmode(binder) {
             return self.cg_proj_field_ty(owner, idx);
         }
@@ -2734,6 +2834,21 @@ extend Codegen {
                 owners.free();
                 return; // an outer frame concretizes the owner; that pass enumerates
             }
+            // a payloads binder enumerates within its variants binder: that one goes FIRST, so the
+            // cross-product recursion has the variant fixed before counting payloads
+            if self.cg_proj_pmode(b) {
+                let outer = self.cg_proj_outer(b);
+                let mut oseen = false;
+                for bi2 in 0..binders.len() {
+                    if *binders.at(bi2) == outer {
+                        oseen = true;
+                    }
+                }
+                if outer != NODE_NONE && !oseen {
+                    binders.push(outer);
+                    owners.push(ow);
+                }
+            }
             binders.push(b);
             owners.push(ow);
         }
@@ -2776,16 +2891,9 @@ extend Codegen {
         }
         let owner = *owners.at(d);
         let binder = *binders.at(d);
-        let vmode = self.cg_proj_vmode(binder);
         let mut k: i64 = 0;
         loop {
-            let mut dmx: ModuleId = 0;
-            let more = if vmode {
-                self.cg_proj_variant_node(owner, k, &mut dmx) != NODE_NONE;
-            } else {
-                self.cg_proj_field_node(owner, k, &mut dmx) != NODE_NONE;
-            };
-            if !more {
+            if !self.cg_proj_count_more(binder, owner, k) {
                 break;
             }
             self.ti_stack.push(binder as u64 << 32 | k as u64);
@@ -7289,7 +7397,16 @@ extend Codegen {
                 } else if span_is(src, osp, "variants".ptr() as *const char) {
                     want = 1;
                 }
-                let cl = o1.as_data.member.object;
+                let mut cl = o1.as_data.member.object;
+                // a stored descriptor works too: `let ti = type_info::<T>(); .. 0..ti.fields.len`
+                if self.cur_ast().at_const(cl).kind == NodeKind::NODE_IDENTIFIER {
+                    let lr2 = self.cur_ast().resolution(cl);
+                    if lr2 != NODE_NONE && self.cur_ast().at_const(lr2).kind == NodeKind::NODE_LET && self.cur_ast().at_const(
+                        lr2,
+                    ).as_data.let_stmt.value != NODE_NONE {
+                        cl = self.cur_ast().at_const(lr2).as_data.let_stmt.value;
+                    }
+                }
                 if want >= 0 && self.cur_ast().at_const(cl).kind == NodeKind::NODE_CALL {
                     let cn = *self.cur_ast().at_const(self.cur_ast().at_const(cl).as_data.call.callee);
                     if cn.kind == NodeKind::NODE_GENERIC_SPECIALIZATION && self.cur_ast().at_const(
@@ -7338,25 +7455,18 @@ extend Codegen {
                 self.emit_str("__sc_fields_owner_not_concrete();\n");
                 return;
             }
-            let vmode = self.cg_proj_vmode(id);
             let mut n: i64 = 0;
-            let mut dmx: ModuleId = 0;
-            loop {
-                let more = if vmode {
-                    self.cg_proj_variant_node(owner, n, &mut dmx) != NODE_NONE;
-                } else {
-                    self.cg_proj_field_node(owner, n, &mut dmx) != NODE_NONE;
-                };
-                if !more {
-                    break;
-                }
+            while self.cg_proj_count_more(id, owner, n) {
                 n = n + 1;
             }
             // The subject stays C-visibly used even when no copy (or no copy's body) mentions it --
             // a name/index-only body reads nothing through v, and -Werror flags the unused local.
-            self.emit_str("(void)(");
-            self.emit_expr(unsafe self.cur_ast().list(self.cur_ast().at_const(fs.iterable).as_data.call.args)[0]);
-            self.emit_str(");\n");
+            // A payloads(v) loop has no subject of its own (v is the outer binder, not a C value).
+            if !self.cg_proj_pmode(id) {
+                self.emit_str("(void)(");
+                self.emit_expr(unsafe self.cur_ast().list(self.cur_ast().at_const(fs.iterable).as_data.call.args)[0]);
+                self.emit_str(");\n");
+            }
             if n == 0 {
                 return;
             }
@@ -7387,6 +7497,18 @@ extend Codegen {
         }
         let ety = self.cur_ast().type_of(id);
         let name = self.name_span(fs.binding);
+        // A folded bound's source reads vanish from the C: keep non-literal bound expressions
+        // C-visibly evaluated (they folded, so they are effect-free).
+        if self.cur_ast().at_const(r.start).kind != NodeKind::NODE_LITERAL {
+            self.emit_str("(void)(");
+            self.emit_expr(r.start);
+            self.emit_str(");\n");
+        }
+        if self.cur_ast().at_const(r.end).kind != NodeKind::NODE_LITERAL {
+            self.emit_str("(void)(");
+            self.emit_expr(r.end);
+            self.emit_str(");\n");
+        }
         if lo >= hi {
             // Zero iterations still emit ONE dead copy: the body's uses of surrounding locals must
             // stay visible to the C compiler (-Werror=unused-variable), and `if (0)` is discarded.
@@ -7399,7 +7521,8 @@ extend Codegen {
         }
         let mut v = lo;
         while v < hi {
-            self.emit_str("{ ");
+            // unused-attributed: a body that never reads the binding is legal, -Werror included
+            self.emit_str("{ __attribute__((unused)) ");
             self.emit_binding(ety, name, true);
             self.buf.format_into(" = {}; ", v);
             self.emit_block(fs.body);
@@ -10499,6 +10622,63 @@ extend Codegen {
         }
     }
 
+    // The payloads-loop binder: p.index / p.name / p.value against the OUTER loop's current
+    // variant of the OUTER loop's subject.
+    fn emit_proj_payload_member(self: &mut Self, n: Node, lid: NodeId, cur: i64, owner: TypeId) {
+        let src = self.mod_src(self.cur_module());
+        let name = self.name_span(n.as_data.member.member);
+        let outer = self.cg_proj_outer(lid);
+        let vk = self.cg_proj_cur(outer);
+        let mut dm: ModuleId = 0;
+        let mut vid = NODE_NONE;
+        if cur >= 0 && outer != NODE_NONE && vk >= 0 {
+            vid = self.cg_proj_variant_node(owner, vk, &mut dm);
+        }
+        let mut pe = NODE_NONE;
+        if vid != NODE_NONE {
+            pe = self.cg_proj_payload_node(dm, vid, cur);
+        }
+        if pe == NODE_NONE {
+            self.emit_str("__sc_field_binder_escapes()");
+            return;
+        }
+        if span_is(src, name, "index".ptr() as *const char) {
+            self.buf.format_into("{}", cur);
+            return;
+        }
+        let da = self.mod_ast(dm);
+        let vd = da.at_const(vid).as_data.variant;
+        let mut pnb = Buf128 {};
+        let mut pl2: usize = 0;
+        if vd.struct_payload {
+            pl2 = render_ident_src(
+                self.mod_src(dm),
+                self.name_span_in(dm, da.at_const(pe).as_data.field.name),
+                &mut pnb[0],
+                120,
+            );
+        } else {
+            pl2 = (unsafe stdio::snprintf(&mut pnb[0], 128, "_%lld".ptr() as *const char, cur)) as usize;
+        }
+        if span_is(src, name, "name".ptr() as *const char) {
+            self.emit_str("(str){ (const uint8_t *)\"");
+            self.emit_cstr(&pnb[0]);
+            self.buf.format_into("\", {} }", pl2);
+            return;
+        }
+        // value: through the OUTER loop's subject
+        let oit = self.cur_ast().at_const(outer).as_data.for_stmt.iterable;
+        let arg = unsafe self.cur_ast().list(self.cur_ast().at_const(oit).as_data.call.args)[0];
+        let mut vnb2 = Buf128 {};
+        render_ident_src(self.mod_src(dm), self.name_span_in(dm, vd.name), &mut vnb2[0], 120);
+        self.emit_str("(");
+        self.emit_expr(arg);
+        self.emit_str(")->payload.");
+        self.emit_cstr(&vnb2[0]);
+        self.emit_str(".");
+        self.emit_cstr(&pnb[0]);
+    }
+
     // The variants-loop binder members past `.index`: name/tag/payload are copy constants,
     // `.is_active` compares the subject's live tag, `.value` is the single payload's place.
     fn emit_proj_variant_member(self: &mut Self, lid: NodeId, cur: i64, dm: ModuleId, vid: NodeId, name: tok::Span) {
@@ -10564,6 +10744,10 @@ extend Codegen {
         if lty != TYPE_NONE && self.type_at(lty).kind == TypeKind::TYPE_FIELD_PROJECTION {
             owner = self.subst_resolve(self.type_at(lty).as_data.proj.owner);
         }
+        if self.cg_proj_pmode(lid) {
+            self.emit_proj_payload_member(n, lid, cur, owner);
+            return;
+        }
         let vmode = self.cg_proj_vmode(lid);
         let mut dm: ModuleId = 0;
         let mut fid = NODE_NONE;
@@ -10587,6 +10771,37 @@ extend Codegen {
             self.emit_proj_variant_member(lid, cur, dm, fid, name);
             return;
         }
+        if span_is(self.mod_src(self.cur_module()), name, "size".ptr() as *const char) || span_is(
+            self.mod_src(self.cur_module()),
+            name,
+            "kind".ptr() as *const char,
+        ) {
+            let ft2 = self.cg_proj_field_ty(owner, cur);
+            if ft2 == TYPE_NONE {
+                self.emit_str("__sc_field_binder_escapes()");
+                return;
+            }
+            if span_is(self.mod_src(self.cur_module()), name, "size".ptr() as *const char) {
+                let mut tb2 = Buf256 {};
+                self.render_type_id(ft2, "".ptr() as *const char, &mut tb2[0], 240);
+                self.emit_str("sizeof(");
+                self.emit_cstr(&tb2[0]);
+                self.emit_str(")");
+                return;
+            }
+            let ce2 = self.ceval();
+            let sh = self.package.prelude_lookup("str", true);
+            let lh = self.package.prelude_lookup("Slice", true);
+            let mut tg: i64 = 0;
+            if ce2 != null && sh.node != NODE_NONE && lh.node != NODE_NONE {
+                tg = ce2.ce_ti_tag(self.cur_module(), ft2, sh.mid, sh.node, lh.mid, lh.node);
+                if tg < 0 {
+                    tg = 0;
+                }
+            }
+            self.buf.format_into("{}", tg);
+            return;
+        }
         let da = self.mod_ast(dm);
         let mut fnb = Buf128 {};
         let mut fl: usize = 0;
@@ -10604,6 +10819,16 @@ extend Codegen {
             self.emit_str("(str){ (const uint8_t *)\"");
             self.emit_cstr(&fnb[0]);
             self.buf.format_into("\", {} }", fl);
+            return;
+        }
+        if span_is(self.mod_src(self.cur_module()), name, "offset".ptr() as *const char) {
+            let mut ob2 = Buf256 {};
+            self.render_type_id(owner, "".ptr() as *const char, &mut ob2[0], 240);
+            self.emit_str("offsetof(");
+            self.emit_cstr(&ob2[0]);
+            self.emit_str(", ");
+            self.emit_cstr(&fnb[0]);
+            self.emit_str(")");
             return;
         }
         let it0 = self.cur_ast().at_const(lid).as_data.for_stmt.iterable;

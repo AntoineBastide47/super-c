@@ -40,3 +40,20 @@ pub fn reflect_hash<T>(v: &T) u64 {
 fn reflect_hash_field<V: Hash>(x: &V) u64 {
     return x.hash();
 }
+
+/// `"Line(42)"` / `"Dot"` for any payload-bearing enum: the ACTIVE variant's name, and its value
+/// when it carries exactly one (a multi-payload variant renders just its name).
+pub fn reflect_variant_string<T>(e: &T) String {
+    let mut s = String::new();
+    inline for v in variants(e) {
+        if v.is_active {
+            s.push_str(v.name);
+            if v.payload == 1 {
+                s.push_str("(");
+                reflect_fmt_field(&mut s, &v.value);
+                s.push_str(")");
+            }
+        }
+    }
+    return s;
+}

@@ -157,22 +157,90 @@ fn main() i32 {
 }
 
 @test
+fn reflection_tail() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"enum Shape { Dot, Pair(i32, i64), Tri { a: u8, b: i32, c: i64 }, }
+struct PP { pub x: i32, pub y: i32, }
+fn width<V>(x: &V) usize { let _ = x; return sizeof(V); }
+fn payload_widths<T>(e: &T) usize {
+  let mut s: usize = 0;
+  inline for v in variants(e) {
+    if v.is_active { inline for p in payloads(v) { s += width(&p.value); } }
+  }
+  return s;
+}
+const fn reset<V: Default>(v: &mut V) { *v = V::default(); }
+const fn cmut() i32 {
+  let mut p = PP { x: 5, y: 6 };
+  inline for f in fields(&mut p) { if f.index == 1 { reset(&mut f.value); } }
+  return p.x * 10 + p.y;
+}
+static_assert(cmut() == 50, "ctfe mut projection");
+const fn cvars() i64 {
+  let s = Shape::Pair(3, 4);
+  let mut t: i64 = 0;
+  inline for v in variants(&s) { if v.is_active && v.payload == 2 { t += v.tag as i64 + 100; } }
+  return t;
+}
+static_assert(cvars() == 101, "ctfe variants");
+fn main() i32 {
+  let s1 = Shape::Dot;
+  let s2 = Shape::Pair(1, 2);
+  let s3 = Shape::Tri { a: 1, b: 2, c: 3 };
+  if payload_widths(&s1) != 0 { return 1; }
+  if payload_widths(&s2) != 12 { return 2; }
+  if payload_widths(&s3) != 13 { return 3; }
+  let p2 = PP { x: 3, y: 4 };
+  let ti = type_info::<PP>();
+  let mut n: usize = 0;
+  inline for i in 0..ti.fields.len { n += 1; }
+  if n != 2 { return 4; }
+  let mut off1: usize = 99;
+  inline for f in fields(&p2) { if f.index == 1 { off1 = f.offset; } let _ = f.kind; let _ = f.size; }
+  if off1 != 4 { return 5; }
+  print("tail ok\n");
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("tail ok"), "payloads, CTFE mutation, and binder metadata all hold");
+    // three-module obligation chain: the diagnostic lands at the binding call, two hops out
+    let p2 = cli::proj_new();
+    p2.mkfile(
+        "hop.spc",
+        r#"pub interface Pretty { fn m(self: &Self) i64; }
+extend i32 as Pretty { pub fn m(self: &i32) i64 { return (*self) as i64 + 0; } }
+pub fn render<V: Pretty>(v: &V) i64 { return v.m(); }
+pub fn dump_all<T>(v: &T) i64 { let mut s: i64 = 0; inline for f in fields(v) { s += render(&f.value); } return s; }
+"#,
+    );
+    p2.mkfile("hop2.spc", r#"import hop;
+pub fn wrap<T>(v: &T) i64 { return hop::dump_all(v); }
+"#);
+    p2.mkfile(
+        "main.spc",
+        r#"import hop2;
+struct Bad { pub a: i32, pub b: bool, }
+fn main() i32 { let b = Bad { a: 1, b: true }; let _ = hop2::wrap(&b); return 0; }
+"#,
+    );
+    p2.expect_fail("main.spc", "does not satisfy a bound the callee's reflection loop requires");
+}
+
+@test
 fn reflect_enum_variants() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
         r#"enum Shape { Dot, Line(i64), Label(str), Pair(i32, i32), }
-fn fmt_one<V: Format>(out: &mut String, x: &V) { let fs = x.fmt(); out.push_str(fs.as_str()); fs.free(); }
-fn reflect_variant_string<T>(e: &T) String {
-  let mut s = String::new();
-  inline for v in variants(e) {
-    if v.is_active {
-      s.push_str(v.name);
-      if v.payload == 1 { s.push_str("("); fmt_one(&mut s, &v.value); s.push_str(")"); }
-    }
-  }
-  return s;
-}
 fn main() i32 {
   let a = Shape::Dot;
   let b = Shape::Line(42);

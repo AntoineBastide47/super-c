@@ -4248,11 +4248,45 @@ extend TypeChecker {
         return ok;
     }
 
+    // The function (or extend method) whose span contains `node`; NODE_NONE at item level.
+    fn tc_enclosing_fn(self: &Self, node: NodeId) NodeId {
+        let a = self.cur_ast();
+        let sp = a.at_const(node).span;
+        let items = unsafe a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe a.list(items)[i as usize];
+            let ik = a.at_const(iid).kind;
+            if ik == NodeKind::NODE_FUNCTION {
+                let isp = a.at_const(iid).span;
+                if isp.start <= sp.start && sp.end <= isp.end {
+                    return iid;
+                }
+            } else if ik == NodeKind::NODE_EXTEND {
+                let esp = a.at_const(iid).span;
+                if esp.start <= sp.start && sp.end <= esp.end {
+                    let ms = a.at_const(iid).as_data.extend_def.items;
+                    for k2 in 0..ms.len {
+                        let mid2 = unsafe a.list(ms)[k2 as usize];
+                        if a.at_const(mid2).kind == NodeKind::NODE_FUNCTION {
+                            let msp = a.at_const(mid2).span;
+                            if msp.start <= sp.start && sp.end <= msp.end {
+                                return mid2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return NODE_NONE;
+    }
+
     /// Discharge foreign callees' projection obligations against this module's recorded
     /// instantiations. Driven AFTER every module has typechecked, so a callee's obligations exist
-    /// regardless of module order. One hop: an owner still symbolic here keeps the emitted-C
-    /// backstop instead of chasing multi-module chains.
-    pub fn discharge_foreign_obligations(self: &mut Self) {
+    /// regardless of module order. `starts[m]` = the obligation index already processed for callee
+    /// module m in earlier passes; a still-symbolic owner re-defers into THIS module's list, and
+    /// the driver iterates passes until no list grows -- multi-hop chains resolve hop per pass.
+    pub fn discharge_foreign_obligations(self: &mut Self, starts: *const u32) bool {
+        let mut grew = false;
         let nmu = (unsafe self.cur_ast().mono).len();
         for i in 0..nmu {
             let mu = *(unsafe self.cur_ast().mono).at(i);
@@ -4292,7 +4326,11 @@ extend TypeChecker {
                 i2 = i2 + 1;
             }
             let nob = (unsafe fa.proj_obs).len();
+            let ostart = (unsafe starts[cd.module as usize]) as usize;
             for oi in 0..nob {
+                if oi < ostart {
+                    continue; // an earlier pass already ran this obligation against this module
+                }
                 let ob = *(unsafe fa.proj_obs).at(oi);
                 if ob.fnd != cd.node {
                     continue;
@@ -4300,6 +4338,12 @@ extend TypeChecker {
                 let owner0 = self.cur_ast().reintern(unsafe &*fa, ob.owner);
                 let owner2 = self.subst_type(owner0, &gp[0], &ga[0], gn2);
                 if !self.cur_ast().type_concrete(owner2) {
+                    // still symbolic: this fn's own callers must bind it -- hand the obligation up
+                    let host = self.tc_enclosing_fn(mu.node);
+                    if host != NODE_NONE {
+                        (unsafe self.cur_ast().proj_obs).push(ProjOb { fnd: host, owner: owner2, iface: ob.iface });
+                        grew = true;
+                    }
                     continue;
                 }
                 if !self.proj_fields_satisfy(owner2, ob.iface, 0, false) {
@@ -4318,6 +4362,7 @@ extend TypeChecker {
                 }
             }
         }
+        return grew;
     }
 
     fn type_satisfies(self: &mut Self, ty: TypeId, iface: DefId, depth: i32) bool {
@@ -8380,7 +8425,11 @@ extend TypeChecker {
             self.source,
             a.at_const(callee_id).as_data.name.text,
             "fields",
-        ) || span_is(self.source, a.at_const(callee_id).as_data.name.text, "variants")) {
+        ) || span_is(self.source, a.at_const(callee_id).as_data.name.text, "variants") || span_is(
+            self.source,
+            a.at_const(callee_id).as_data.name.text,
+            "payloads",
+        )) {
             let fsp2 = a.at_const(id).span;
             self.errors.emit(
                 fsp2.start,
@@ -9455,6 +9504,16 @@ extend TypeChecker {
                     );
                 }
             }
+            if !vmode && (span_is(self.source, name, "offset") || span_is(self.source, name, "size")) {
+                return Ast::builtin(BuiltinType::BT_USIZE);
+            }
+            if !vmode && span_is(self.source, name, "kind") {
+                let th2 = self.package.prelude_lookup("TypeTag", true);
+                if th2.node != NODE_NONE {
+                    return self.named_type_of(th2.mid, th2.node);
+                }
+                return TYPE_NONE;
+            }
             if vmode && span_is(self.source, name, "tag") {
                 return Ast::builtin(BuiltinType::BT_I32);
             }
@@ -9477,7 +9536,9 @@ extend TypeChecker {
                 self.errors.emit(
                     sp0.start,
                     sp0.end - sp0.start,
-                    format("a field binder has '.name', '.index', and '.value' -- nothing else"),
+                    format(
+                        "a field binder has '.name', '.index', '.value', '.offset', '.size', and '.kind' -- nothing else",
+                    ),
                 );
             }
             return TYPE_NONE;
@@ -12317,13 +12378,41 @@ extend TypeChecker {
                 self.source,
                 a.at_const(fcallee).as_data.name.text,
                 "variants",
-            )) {
+            ) || span_is(self.source, a.at_const(fcallee).as_data.name.text, "payloads")) {
                 let is_vars = span_is(self.source, a.at_const(fcallee).as_data.name.text, "variants");
+                let is_pay = span_is(self.source, a.at_const(fcallee).as_data.name.text, "payloads");
                 let fargs = a.at_const(iter).as_data.call.args;
                 let fsp = a.at_const(iter).span;
                 let mut owner = TYPE_NONE;
                 let mut pq = TypeQualifier::TYPE_QUAL_NONE as u8;
-                if fargs.len != 1 {
+                if is_pay {
+                    // payloads(v): v IS a variants binder; the projection shares its enum owner.
+                    let mut pok = false;
+                    if fargs.len == 1 {
+                        let pav = unsafe a.list(fargs)[0];
+                        if a.at_const(pav).kind == NodeKind::NODE_IDENTIFIER {
+                            let plid = a.resolution(pav);
+                            self.proj_obj_ok = true;
+                            let pty = self.check_expr(pav);
+                            self.proj_obj_ok = false;
+                            if plid != NODE_NONE && a.at_const(plid).kind == NodeKind::NODE_INLINE_FOR && pty != TYPE_NONE && self.type_at(
+                                pty,
+                            ).kind == TypeKind::TYPE_FIELD_PROJECTION {
+                                owner = self.type_at(pty).as_data.proj.owner;
+                                pq = self.type_at(pty).qualifier;
+                                pok = true;
+                            }
+                        }
+                    }
+                    if !pok {
+                        self.errors.emit(
+                            fsp.start,
+                            fsp.end - fsp.start,
+                            format("payloads takes the variants binder itself: 'inline for p in payloads(v)'"),
+                        );
+                        owner = TYPE_NONE;
+                    }
+                } else if fargs.len != 1 {
                     self.errors.emit(
                         fsp.start,
                         fsp.end - fsp.start,
@@ -12343,7 +12432,7 @@ extend TypeChecker {
                         );
                     }
                 }
-                if owner != TYPE_NONE {
+                if owner != TYPE_NONE && !is_pay {
                     let ok2 = *self.type_at(owner);
                     if is_vars {
                         if ok2.kind != TypeKind::TYPE_ENUM && ok2.kind != TypeKind::TYPE_INSTANCE && ok2.kind != TypeKind::TYPE_GENERIC {
