@@ -341,6 +341,7 @@ pub struct ConstEval<'a> {
     pub statics: Vector<StaticObj>, // materialized const object graphs (grouped per root)
     pub ti_nfields: i64, // field/variant counts of the LAST ce_type_info_of build (type_info_count)
     pub ti_nvars: i64,
+    pub ce_projs: Vector<CeProj>, // active fields-loop iterations, innermost last
     pub sref: Vector<Vector<i64>>, // [module][node] eval_static memo: 0 unattempted, -1 failed, else root+1
 }
 
@@ -3586,6 +3587,12 @@ extend ConstEval {
             return v;
         }
         if n.kind == NodeKind::NODE_MEMBER {
+            if !n.as_data.member.path {
+                let pv = self.ce_proj_member(m, id);
+                if pv.kind != CV_NIL_K {
+                    return pv;
+                }
+            }
             if n.as_data.member.path {
                 let mut d = a.resolution_def(id);
                 if d.node == NODE_NONE {
@@ -5432,10 +5439,156 @@ extend ConstEval {
         }
     }
 
+    // The active fields-loop iteration `obj_n` (a binder identifier) refers to, by resolution;
+    // null when obj_n is not a live binder.
+    fn ce_proj_of(self: &Self, m: ModuleId, obj_n: NodeId) *const CeProj {
+        let a = self.ast_ptr(m);
+        if a.at_const(obj_n).kind != NodeKind::NODE_IDENTIFIER {
+            return null;
+        }
+        let lid = a.resolution(obj_n);
+        if lid == NODE_NONE || a.at_const(lid).kind != NodeKind::NODE_INLINE_FOR {
+            return null;
+        }
+        let mut i = self.ce_projs.len();
+        while i > 0 {
+            i = i - 1;
+            if self.ce_projs.at(i).binder == lid {
+                return self.ce_projs.at(i);
+            }
+        }
+        return null;
+    }
+
+    // `f.name` / `f.index` / `f.value` under the interpreter; CV_NIL_K when `id` is no binder member.
+    fn ce_proj_member(self: &mut Self, m: ModuleId, id: NodeId) CeVal {
+        let a = self.ast_ptr(m);
+        if a.at_const(id).as_data.member.path {
+            return cv_nil();
+        }
+        let pr = self.ce_proj_of(m, a.at_const(id).as_data.member.object);
+        if pr == null {
+            return cv_nil();
+        }
+        let mname = self.name_text(m, a.at_const(id).as_data.member.member);
+        if self.ce_span_is(m, mname, "index") {
+            return CeVal {
+                kind: CV_INT,
+                tm: 0,
+                ty: Ast::builtin(BuiltinType::BT_USIZE),
+                as_data: CeValAs { i: unsafe pr.k },
+            };
+        }
+        if self.ce_span_is(m, mname, "value") {
+            let sub = unsafe pr.sub;
+            if sub.kind != CV_PTR && sub.kind != CV_AGG || sub.as_data.p.off != 0 {
+                return cv_nil();
+            }
+            let o = self.obj_ptr(sub.as_data.p.obj);
+            if o == null || (unsafe pr.k) as usize >= unsafe o.slots.len() {
+                return cv_nil();
+            }
+            return unsafe o.slots[(unsafe pr.k) as usize];
+        }
+        if self.ce_span_is(m, mname, "name") {
+            let sty = self.ce_type(m, id);
+            if sty == TYPE_NONE {
+                return cv_nil();
+            }
+            let ys = *self.ast_ptr(m).type_at(sty);
+            if ys.kind != TypeKind::TYPE_STRUCT {
+                return cv_nil();
+            }
+            let dm = unsafe pr.om;
+            let dt = unsafe pr.owner;
+            let mut fdm: ModuleId = 0;
+            let fid = self.ce_proj_field(dm, dt, unsafe pr.k, &mut fdm);
+            if fid == NODE_NONE {
+                return cv_nil();
+            }
+            let da = self.ast_ptr(fdm);
+            if da.at_const(fid).kind == NodeKind::NODE_FIELD {
+                let sp = self.name_text(fdm, da.at_const(fid).as_data.field.name);
+                let src = self.ce_src(fdm);
+                return self.ce_ti_str(ys.module, ys.as_data.decl, m, sty, src.slice(sp.start as usize, sp.end as usize));
+            }
+            let mut tb = Buf32 {};
+            return self.ce_ti_str(ys.module, ys.as_data.decl, m, sty, ti_tuple_name(&mut tb, (unsafe pr.k) as u32));
+        }
+        return cv_nil();
+    }
+
+    // The k-th field node of (m, owner), mirroring codegen's walk; NODE_NONE past the end.
+    fn ce_proj_field(self: &Self, m: ModuleId, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
+        let y = *self.ast_ptr(m).type_at(owner);
+        let mut dm = y.module;
+        let mut dn = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT {
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_ptr(m).instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+        } else {
+            return NODE_NONE;
+        }
+        if !self.has_ast(dm) || self.ast_ptr(dm).at_const(dn).kind != NodeKind::NODE_STRUCT {
+            return NODE_NONE;
+        }
+        let da = self.ast_ptr(dm);
+        let ag = da.at_const(dn).as_data.aggregate;
+        let mut k: i64 = 0;
+        for i in 0..ag.members.len {
+            let fid = unsafe da.list(ag.members)[i as usize];
+            if !ag.is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            if k == idx {
+                *out_m = dm;
+                return fid;
+            }
+            k = k + 1;
+        }
+        return NODE_NONE;
+    }
+
     fn exec_for(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Flow {
         let a = self.ast_ptr(m);
         let iter_n = a.at_const(id).as_data.for_stmt.iterable;
         let body = a.at_const(id).as_data.for_stmt.body;
+        // fields(&v): interpret the unroll -- one pass per field, the binder served by ce_projs.
+        if a.at_const(id).kind == NodeKind::NODE_INLINE_FOR && a.at_const(iter_n).kind == NodeKind::NODE_CALL {
+            let pt = self.ce_type(m, id);
+            if pt == TYPE_NONE || self.ast_ptr(m).type_at(pt).kind != TypeKind::TYPE_FIELD_PROJECTION {
+                return Flow::Bail;
+            }
+            let pr = self.ce_rtype(f, m, self.ast_ptr(m).type_at(pt).as_data.proj.owner);
+            if !pr.ok {
+                return Flow::Bail;
+            }
+            let arg = unsafe a.list(a.at_const(iter_n).as_data.call.args)[0];
+            let sub = self.ev_rval(f, m, arg);
+            if sub.kind != CV_PTR && sub.kind != CV_AGG {
+                return xfail(f);
+            }
+            let mut k: i64 = 0;
+            loop {
+                let mut fdm: ModuleId = 0;
+                if self.ce_proj_field(pr.m, pr.t, k, &mut fdm) == NODE_NONE {
+                    return Flow::Ok;
+                }
+                self.ce_projs.push(CeProj { binder: id, k: k, sub: sub, om: pr.m, owner: pr.t });
+                let st = self.exec_stmt(f, m, body);
+                let _ = self.ce_projs.pop();
+                if st == Flow::Return || st == Flow::Bail {
+                    return st;
+                }
+                if !self.ce_tick() {
+                    return Flow::Bail;
+                }
+                k = k + 1;
+            }
+        }
         if a.at_const(iter_n).kind == NodeKind::NODE_RANGE {
             let start_n = a.at_const(iter_n).as_data.pattern_range.start;
             let end_n = a.at_const(iter_n).as_data.pattern_range.end;
@@ -7752,6 +7905,16 @@ extend StaticObj as Free {
         self.slots.free();
         self.rels.free();
     }
+}
+
+// One live `inline for f in fields(..)` iteration in the interpreter: which loop, which field,
+// and the evaluated subject the field values are read out of.
+pub struct CeProj {
+    pub binder: NodeId,
+    pub k: i64,
+    pub sub: CeVal,
+    pub om: ModuleId,
+    pub owner: TypeId,
 }
 
 pub struct StaticRes {

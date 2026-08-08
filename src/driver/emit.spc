@@ -239,6 +239,28 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
     return !had;
 }
 
+// Cross-module reflection-bound obligations: discharged once every module is typechecked, so a
+// callee's obligations exist regardless of check order (module order follows imports, not calls).
+fn discharge_obligations(p: &mut loader::Package, n: usize) {
+    for i in 0..n {
+        let pkg = p as *mut loader::Package;
+        let m = &mut p.modules[i];
+        let src = m.source.as_str().ptr() as *const char;
+        let len = m.source.len();
+        let a = replace(&mut m.ast, Ast::new(0));
+        let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+        p.set_override(i as ModuleId, t.ast.get());
+        t.discharge_foreign_obligations();
+        p.clear_override(i as ModuleId);
+        if t.has_errors() {
+            t.log_errors();
+            p.ok = false;
+        }
+        let back = t.take_ast();
+        p.modules[i].ast = back;
+    }
+}
+
 fn typecheck_module(
     p: &mut loader::Package,
     i: usize,
@@ -1694,6 +1716,9 @@ pub fn run_package(
     for i in 0..n {
         let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null);
         p.ok = ok && p.ok;
+    }
+    if p.ok {
+        discharge_obligations(p, n);
     }
     if !p.ok {
         return 1;

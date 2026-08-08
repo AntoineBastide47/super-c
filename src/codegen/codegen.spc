@@ -2527,28 +2527,52 @@ extend Codegen {
         if gg.node == NODE_NONE {
             return;
         }
-        let mut pj = TYPE_NONE;
+        // Distinct binders in the call's args (a call may mix two nested fields loops).
+        let mut binders = Vector::<NodeId>::new();
+        let mut owners = Vector::<TypeId>::new();
         for kk in 0..n {
             let r = self.cg_find_proj(self.subst_resolve(args[kk as usize]));
-            if r != TYPE_NONE {
-                pj = r;
+            if r == TYPE_NONE {
+                continue;
             }
-        }
-        if pj == TYPE_NONE {
-            return;
-        }
-        let binder = self.type_at(pj).as_data.proj.binder;
-        let owner = self.subst_resolve(self.type_at(pj).as_data.proj.owner);
-        if !self.type_is_concrete(owner) {
-            return; // an outer frame concretizes the owner; that pass enumerates
-        }
-        let mut k: i64 = 0;
-        loop {
-            let mut dmx: ModuleId = 0;
-            if self.cg_proj_field_node(owner, k, &mut dmx) == NODE_NONE {
-                break;
+            let b = self.type_at(r).as_data.proj.binder;
+            let mut seen = false;
+            for bi in 0..binders.len() {
+                if *binders.at(bi) == b {
+                    seen = true;
+                }
             }
-            self.ti_stack.push(binder as u64 << 32 | k as u64);
+            if seen {
+                continue;
+            }
+            let ow = self.subst_resolve(self.type_at(r).as_data.proj.owner);
+            if !self.type_is_concrete(ow) {
+                binders.free();
+                owners.free();
+                return; // an outer frame concretizes the owner; that pass enumerates
+            }
+            binders.push(b);
+            owners.push(ow);
+        }
+        if binders.len() != 0 {
+            self.cg_proj_fanout_rec(nid, foreign, home, &binders, &owners, 0);
+        }
+        binders.free();
+        owners.free();
+    }
+
+    // Enumerate the cross product of the call's binders, depth-first; at full depth every
+    // projection resolves, so the concrete instance records like any other.
+    fn cg_proj_fanout_rec(
+        self: &mut Self,
+        nid: NodeId,
+        foreign: bool,
+        home: *mut Ast,
+        binders: &Vector<NodeId>,
+        owners: &Vector<TypeId>,
+        d: usize,
+    ) {
+        if d == binders.len() {
             let mut ca = TyArgs8 {};
             let mut cn2: i32 = 0;
             let g3 = self.generic_call_target(nid, &mut ca[0], &mut cn2);
@@ -2565,6 +2589,18 @@ extend Codegen {
             if allc {
                 self.record_inst(g3, &ca[0], cn2, nid);
             }
+            return;
+        }
+        let owner = *owners.at(d);
+        let binder = *binders.at(d);
+        let mut k: i64 = 0;
+        loop {
+            let mut dmx: ModuleId = 0;
+            if self.cg_proj_field_node(owner, k, &mut dmx) == NODE_NONE {
+                break;
+            }
+            self.ti_stack.push(binder as u64 << 32 | k as u64);
+            self.cg_proj_fanout_rec(nid, foreign, home, binders, owners, d + 1);
             let _ = self.ti_stack.pop();
             k = k + 1;
         }
@@ -7102,11 +7138,12 @@ extend Codegen {
             while self.cg_proj_field_node(owner, n, &mut dmx) != NODE_NONE {
                 n = n + 1;
             }
+            // The subject stays C-visibly used even when no copy (or no copy's body) mentions it --
+            // a name/index-only body reads nothing through v, and -Werror flags the unused local.
+            self.emit_str("(void)(");
+            self.emit_expr(unsafe self.cur_ast().list(self.cur_ast().at_const(fs.iterable).as_data.call.args)[0]);
+            self.emit_str(");\n");
             if n == 0 {
-                // Keep v (the fields argument) C-visibly used even with nothing to iterate.
-                self.emit_str("(void)(");
-                self.emit_expr(unsafe self.cur_ast().list(self.cur_ast().at_const(fs.iterable).as_data.call.args)[0]);
-                self.emit_str(");\n");
                 return;
             }
             let mut k: i64 = 0;

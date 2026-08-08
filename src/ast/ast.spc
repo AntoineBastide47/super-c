@@ -913,6 +913,14 @@ pub struct CoerceUse {
     pub method: DefId,
 }
 
+// One deferred field-projection bound: prove `iface` for every field of `owner` once a call binds
+// the owner; owned by fn decl `fnd` in this module.
+pub struct ProjOb {
+    pub fnd: NodeId,
+    pub owner: TypeId,
+    pub iface: DefId,
+}
+
 pub struct MonoUse {
     pub node: NodeId,
     pub n: u8,
@@ -1011,6 +1019,10 @@ pub struct Ast {
     pub type_ix_used: u32,
     pub types: Vector<u32>,
     pub mono: Vector<MonoUse>,
+    // Deferred field-projection bound proofs recorded while this module's bodies were checked
+    // (owner still symbolic); discharged by callers -- same-module inline, cross-module in the
+    // driver's post-typecheck obligation pass.
+    pub proj_obs: Vector<ProjOb>,
     pub mono_at: Vector<u32>,
     pub instances: Vector<TyInstance>,
     pub method_refs: Vector<MethodRef>,
@@ -1053,6 +1065,7 @@ extend Ast {
             type_ix_used: 0,
             types: Vector::<u32>::new(),
             mono: Vector::<MonoUse>::new(),
+            proj_obs: Vector::<ProjOb>::new(),
             mono_at: Vector::<u32>::new(),
             instances: Vector::<TyInstance>::new(),
             method_refs: Vector::<MethodRef>::new(),

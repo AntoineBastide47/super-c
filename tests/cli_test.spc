@@ -157,6 +157,68 @@ fn main() i32 {
 }
 
 @test
+fn fields_projection_extended() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.spc",
+        r#"pub interface Pretty { fn pretty(self: &Self) i64; }
+extend i32 as Pretty { pub fn pretty(self: &i32) i64 { return (*self) as i64 + 0; } }
+pub fn render<V: Pretty>(v: &V) i64 { return v.pretty(); }
+pub fn dump_all<T>(v: &T) i64 {
+  let mut s: i64 = 0;
+  inline for f in fields(v) { s += render(&f.value); }
+  return s;
+}
+"#,
+    );
+    p.mkfile(
+        "main.spc",
+        r#"import lib;
+import string as cstr;
+struct A { pub x: i32, pub y: u8, }
+struct B { pub s: i64, pub t: bool, }
+fn zero_into<V>(dst: &mut V) { unsafe cstr::memset(dst as *mut V, 0, sizeof(V)); }
+fn clear_all<T>(v: &mut T) {
+  inline for f in fields(v) { zero_into(&mut f.value); }
+}
+fn pairw<U, V>(u: &U, v: &V) usize { let _ = u; let _ = v; return sizeof(U) * 100 + sizeof(V); }
+fn cross<T1, T2>(a: &T1, b: &T2) usize {
+  let mut s: usize = 0;
+  inline for f in fields(a) { inline for g in fields(b) { s += pairw(&f.value, &g.value); } }
+  return s;
+}
+const fn cfields() usize {
+  let a = A { x: 1, y: 2 };
+  let mut n: usize = 0;
+  inline for f in fields(&a) { n += f.name.len(); }
+  return n;
+}
+static_assert(cfields() == 2, "ctfe fields");
+struct OnlyInt { pub v: i32, }
+fn main() i32 {
+  let mut a = A { x: 7, y: 3 };
+  clear_all(&mut a);
+  if a.x != 0 || a.y != 0 { return 1; }
+  let a2 = A { x: 1, y: 2 };
+  let b = B { s: 3, t: true };
+  if cross(&a2, &b) != 1018 { return 2; }
+  let oi = OnlyInt { v: 9 };
+  if lib::dump_all(&oi) != 9 { return 3; }
+  print("extended ok\n");
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("extended ok"), "mut projections, cross product, CTFE, and cross-module all hold");
+}
+
+@test
 fn fields_projection_serializer() {
     let p = cli::proj_new();
     p.mkfile(

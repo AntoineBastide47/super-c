@@ -535,10 +535,14 @@ fn fields_projection() {
         "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(&p) { let _ = f.other; } return 0; }\n",
         "'.name', '.index', and '.value'",
     );
+    h::expect_ok(
+        "a closure that ignores the binder is allowed",
+        "struct P { pub x: i32, }\nfn ap<F: fn() i32>(g: F) i32 { return g(); }\nfn main() i32 { let p = P { x: 1 }; let mut s = 0; inline for f in fields(&p) { s += ap(fn() i32 { return 2; }) + f.index as i32; } return s - 2; }\n",
+    );
     h::expect_err_msg(
-        "no closures under a fields loop",
-        "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(&p) { let c = fn() i32 { return 0; }; let _ = c; let _ = f.index; } return 0; }\n",
-        "closure cannot appear",
+        "a closure cannot capture the binder",
+        "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(&p) { let c = fn() usize { return f.index; }; let _ = c; } return 0; }\n",
+        "cannot capture the field binder",
     );
     h::expect_err_msg(
         "the binder cannot escape bare",

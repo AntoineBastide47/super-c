@@ -143,14 +143,6 @@ extend MQKey as Eq {
 
 /// The per-module checker. Also the state substrate for the borrowck pass, which extends TypeChecker
 /// and re-walks function bodies after check() (Ast.call_info bridges the two).
-// One deferred field-projection bound: prove `iface` for every field of `owner` once a call binds
-// the owner to a concrete type; owned by the fn whose body created it.
-pub struct ProjOb {
-    pub fnd: NodeId,
-    pub owner: TypeId,
-    pub iface: DefId,
-}
-
 pub struct TypeChecker<'a> {
     pub ast: UnsafeCell<Ast>,
     pub source: str<'a>,
@@ -194,11 +186,10 @@ pub struct TypeChecker<'a> {
     pub scope_depth: u32,
     pub loop_depth: u32,
     pub fields_depth: u32, // nesting inside `inline for .. in fields(..)` bodies (closures rejected there)
-    // Deferred per-field bound proofs: a projection bound in THIS fn's body whose owner is still a
-    // type parameter. Discharged (or re-deferred) at each call site that binds the owner.
-    pub proj_obs: Vector<ProjOb>,
     pub proj_obj_ok: bool, // one-shot: the identifier being checked is a member's object
     pub binding_depth: Map<u32, u32>,
+    pub closure_depth: u32, // nesting of closure bodies being checked
+    pub proj_cbase: Map<u32, u32>, // fields-loop node -> closure_depth at its entry (capture guard)
     pub defer_stack: [NodeId; 256],
     pub defer_depth: [u32; 256],
     pub ndefers: u32,
@@ -503,9 +494,10 @@ extend TypeChecker {
             scope_depth: 0,
             loop_depth: 0,
             fields_depth: 0,
-            proj_obs: Vector::<ProjOb>::new(),
             proj_obj_ok: false,
             binding_depth: Map::<u32, u32>::new(),
+            closure_depth: 0,
+            proj_cbase: Map::<u32, u32>::new(),
             ndefers: 0,
             in_loop_recheck: false,
             place_use: false,
@@ -4256,6 +4248,78 @@ extend TypeChecker {
         return ok;
     }
 
+    /// Discharge foreign callees' projection obligations against this module's recorded
+    /// instantiations. Driven AFTER every module has typechecked, so a callee's obligations exist
+    /// regardless of module order. One hop: an owner still symbolic here keeps the emitted-C
+    /// backstop instead of chasing multi-module chains.
+    pub fn discharge_foreign_obligations(self: &mut Self) {
+        let nmu = (unsafe self.cur_ast().mono).len();
+        for i in 0..nmu {
+            let mu = *(unsafe self.cur_ast().mono).at(i);
+            let a = self.cur_ast();
+            if mu.node as usize >= (unsafe a.mono_at).len() || (unsafe a.mono_at)[mu.node as usize] != i as u32 + 1 {
+                continue; // superseded entry: a re-checked node records again
+            }
+            if a.at_const(mu.node).kind != NodeKind::NODE_CALL {
+                continue;
+            }
+            let mut callee = a.at_const(mu.node).as_data.call.callee;
+            if a.at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                callee = a.at_const(callee).as_data.specialization.expression;
+            }
+            let mut cd = a.resolution_def(callee);
+            if cd.node == NODE_NONE && a.at_const(callee).kind == NodeKind::NODE_MEMBER {
+                cd = a.resolution_def(a.at_const(callee).as_data.member.member);
+            }
+            if cd.node == NODE_NONE || cd.module == self.cur_module() || cd.module as usize >= self.pkg_count() {
+                continue;
+            }
+            let fa = self.mod_ast(cd.module);
+            if fa.at_const(cd.node).kind != NodeKind::NODE_FUNCTION || (unsafe fa.proj_obs).len() == 0 {
+                continue;
+            }
+            let gens = fa.at_const(cd.node).as_data.function.generics;
+            let mut gp = Defs8 {};
+            let mut gn2: i32 = 0;
+            while gn2 < gens.len as i32 && gn2 < 8 {
+                gp[gn2 as usize] = DefId { module: cd.module, node: unsafe fa.list(gens)[gn2 as usize] };
+                gn2 = gn2 + 1;
+            }
+            let mut ga = Tys8 {};
+            let mut i2: u8 = 0;
+            while i2 < mu.n {
+                ga[i2 as usize] = unsafe mu.args[i2 as usize];
+                i2 = i2 + 1;
+            }
+            let nob = (unsafe fa.proj_obs).len();
+            for oi in 0..nob {
+                let ob = *(unsafe fa.proj_obs).at(oi);
+                if ob.fnd != cd.node {
+                    continue;
+                }
+                let owner0 = self.cur_ast().reintern(unsafe &*fa, ob.owner);
+                let owner2 = self.subst_type(owner0, &gp[0], &ga[0], gn2);
+                if !self.cur_ast().type_concrete(owner2) {
+                    continue;
+                }
+                if !self.proj_fields_satisfy(owner2, ob.iface, 0, false) {
+                    let mut on2 = Buf96 {};
+                    self.render_type(owner2, &mut on2[0], 96);
+                    let sp2 = self.cur_ast().at_const(mu.node).span;
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format(
+                            "a field of '{}' does not satisfy a bound the callee's reflection loop requires",
+                            diag::cstr(&on2[0]),
+                        ),
+                    );
+                    let _ = self.proj_fields_satisfy(owner2, ob.iface, 0, true);
+                }
+            }
+        }
+    }
+
     fn type_satisfies(self: &mut Self, ty: TypeId, iface: DefId, depth: i32) bool {
         // A field projection: with the owner concrete, the proof IS the per-field proof, made here
         // with the offending field named; a symbolic owner defers the obligation to this fn's call
@@ -4265,7 +4329,7 @@ extend TypeChecker {
             if self.cur_ast().type_concrete(powner) {
                 return self.proj_fields_satisfy(powner, iface, depth, false);
             }
-            self.proj_obs.push(ProjOb { fnd: self.current_fn, owner: powner, iface: iface });
+            (unsafe self.cur_ast().proj_obs).push(ProjOb { fnd: self.current_fn, owner: powner, iface: iface });
             return true;
         }
         if ty == TYPE_NONE || ty == TYPE_ERROR || depth > BOUND_MAX_DEPTH {
@@ -6024,6 +6088,10 @@ extend TypeChecker {
                 a.at_const(node).as_data.member.object,
             );
             let mut oty = a.type_of(obj);
+            // `f.value` through a fields(&mut v) binder is as mutable as the subject reference.
+            if nk == NodeKind::NODE_MEMBER && oty != TYPE_NONE && self.type_at(oty).kind == TypeKind::TYPE_FIELD_PROJECTION {
+                return self.type_at(oty).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+            }
             let mut via_ref = false;
             let mut ref_mut = false;
             if nk == NodeKind::NODE_INDEX {
@@ -9185,17 +9253,19 @@ extend TypeChecker {
         // the checker that created them): with the owner now bound, prove every field -- or, still
         // symbolic, hand the obligation up to the current fn's own call sites.
         if fmod == self.cur_module() {
-            let nobs = self.proj_obs.len();
+            let nobs = (unsafe self.cur_ast().proj_obs).len();
             let mut oi: usize = 0;
             while oi < nobs {
-                let ob = *self.proj_obs.at(oi);
+                let ob = *(unsafe self.cur_ast().proj_obs).at(oi);
                 oi = oi + 1;
                 if ob.fnd != fdecl {
                     continue;
                 }
                 let owner2 = self.subst_type(ob.owner, gparams, gargs, gn);
                 if !self.cur_ast().type_concrete(owner2) {
-                    self.proj_obs.push(ProjOb { fnd: self.current_fn, owner: owner2, iface: ob.iface });
+                    (unsafe self.cur_ast().proj_obs).push(
+                        ProjOb { fnd: self.current_fn, owner: owner2, iface: ob.iface },
+                    );
                     continue;
                 }
                 if !self.proj_fields_satisfy(owner2, ob.iface, 0, false) {
@@ -9345,6 +9415,24 @@ extend TypeChecker {
         // The reflection binder: `f.name`/`f.index` are ordinary data, `f.value` is the projected
         // field place (the projection type itself, one concrete type per emitted copy).
         if self.type_at(base).kind == TypeKind::TYPE_FIELD_PROJECTION {
+            // A closure has ONE lifted C form; a binder use inside it would need one per copy.
+            let blid = a.resolution(obj_node);
+            if blid != NODE_NONE {
+                switch self.proj_cbase.get(&blid) {
+                    Some(cb) => {
+                        if self.closure_depth > *cb {
+                            let csp2 = a.at_const(id).span;
+                            self.errors.emit(
+                                csp2.start,
+                                csp2.end - csp2.start,
+                                format("a closure cannot capture the field binder (its type differs per field)"),
+                            );
+                            return TYPE_NONE;
+                        }
+                    },
+                    None => {},
+                };
+            }
             if span_is(self.source, name, "value") {
                 return base;
             }
@@ -10304,17 +10392,15 @@ extend TypeChecker {
         return l;
     }
     fn check_closure(self: &mut Self, id: NodeId, cwant: TypeId) TypeId {
-        // A closure's environment is typed once; a captured field binder would need one type per
-        // emitted copy, which the env cannot have. Rejecting the closure keeps the model whole.
-        if self.fields_depth > 0 {
-            let csp = self.cur_ast().at_const(id).span;
-            self.errors.emit(
-                csp.start,
-                csp.end - csp.start,
-                format("a closure cannot appear inside 'inline for .. in fields(..)'"),
-            );
-            return TYPE_NONE;
-        }
+        // Inside a fields loop a closure is fine as long as it never touches the binder -- its one
+        // lifted C form serves every copy. Binder USES check the depth watermark (proj_cbase).
+        self.closure_depth = self.closure_depth + 1;
+        let cres = self.check_closure_in(id, cwant);
+        self.closure_depth = self.closure_depth - 1;
+        return cres;
+    }
+
+    fn check_closure_in(self: &mut Self, id: NodeId, cwant: TypeId) TypeId {
         let a = self.cur_ast();
         let params = a.at_const(id).as_data.closure.params;
         let mut sigp = Tys8 {};
@@ -12199,6 +12285,7 @@ extend TypeChecker {
                 let fargs = a.at_const(iter).as_data.call.args;
                 let fsp = a.at_const(iter).span;
                 let mut owner = TYPE_NONE;
+                let mut pq = TypeQualifier::TYPE_QUAL_NONE as u8;
                 if fargs.len != 1 {
                     self.errors.emit(
                         fsp.start,
@@ -12210,6 +12297,7 @@ extend TypeChecker {
                     let ay = *self.type_at(av);
                     if ay.kind == TypeKind::TYPE_REFERENCE {
                         owner = ay.as_data.elem;
+                        pq = ay.qualifier; // fields(&mut v): every f.value is a mutable place
                     } else if av != TYPE_NONE {
                         self.errors.emit(
                             fsp.start,
@@ -12233,6 +12321,7 @@ extend TypeChecker {
                     let pt = self.cur_ast().intern_type(
                         Ty {
                             kind: TypeKind::TYPE_FIELD_PROJECTION,
+                            qualifier: pq,
                             module: self.cur_module(),
                             as_data: TyAs { proj: TyProj { owner: owner, binder: id } },
                         },
@@ -12241,6 +12330,7 @@ extend TypeChecker {
                     self.cur_ast().set_type(id, pt);
                 }
                 self.binding_depth.insert(id, self.scope_depth + 1);
+                self.proj_cbase.insert(id, self.closure_depth);
                 self.fields_depth = self.fields_depth + 1;
                 self.check_loop_body(self.cur_ast().at_const(id).as_data.for_stmt.body);
                 self.fields_depth = self.fields_depth - 1;
