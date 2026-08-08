@@ -640,9 +640,14 @@ extend Resolver {
                 return;
             }
         }
-        // `dyn_cast` (vtable type-id compare) and `type_info` (reflection fold) are compiler
-        // intrinsics: no declaration exists; the typechecker recognizes the unresolved name.
-        if span_is(self.source, name, "dyn_cast") || span_is(self.source, name, "type_info") {
+        // `dyn_cast` (vtable type-id compare), `type_info` (reflection fold) and `fields` (the
+        // inline-for reflection binder) are compiler intrinsics: no declaration exists; the
+        // typechecker recognizes the unresolved name.
+        if span_is(self.source, name, "dyn_cast") || span_is(self.source, name, "type_info") || span_is(
+            self.source,
+            name,
+            "fields",
+        ) {
             return;
         }
         self.errors.emit(

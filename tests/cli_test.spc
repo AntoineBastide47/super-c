@@ -157,6 +157,43 @@ fn main() i32 {
 }
 
 @test
+fn fields_projection_serializer() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"struct Inner { pub a: u16, }
+struct Mixed { pub p: Inner, pub q: i64, pub r: bool, }
+fn width<V>(v: &V) usize { let _ = v; return sizeof(V); }
+fn dump<T>(v: &T) usize {
+  let mut s: usize = 0;
+  inline for f in fields(v) {
+    print("[{}]{}:{} ", f.index, f.name, width(&f.value));
+    s += width(&f.value);
+  }
+  print("\n");
+  return s;
+}
+fn main() i32 {
+  let m = Mixed { p: Inner { a: 1 }, q: 2, r: true };
+  if dump(&m) != sizeof(Inner) + 9 { return 1; }
+  let i = Inner { a: 3 };
+  if dump(&i) != 2 { return 2; }
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("main.c", "width__i64"), "the projection fanned out to each field type");
+    assert(p.gen_has("main.c", "width__bool"), "including the last field");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("[1]q:8"), "names, indices, and per-field types line up");
+}
+
+@test
 fn type_info_reflection() {
     let p = cli::proj_new();
     p.mkfile(

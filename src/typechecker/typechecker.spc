@@ -143,6 +143,14 @@ extend MQKey as Eq {
 
 /// The per-module checker. Also the state substrate for the borrowck pass, which extends TypeChecker
 /// and re-walks function bodies after check() (Ast.call_info bridges the two).
+// One deferred field-projection bound: prove `iface` for every field of `owner` once a call binds
+// the owner to a concrete type; owned by the fn whose body created it.
+pub struct ProjOb {
+    pub fnd: NodeId,
+    pub owner: TypeId,
+    pub iface: DefId,
+}
+
 pub struct TypeChecker<'a> {
     pub ast: UnsafeCell<Ast>,
     pub source: str<'a>,
@@ -185,6 +193,11 @@ pub struct TypeChecker<'a> {
     pub nborrows: u32,
     pub scope_depth: u32,
     pub loop_depth: u32,
+    pub fields_depth: u32, // nesting inside `inline for .. in fields(..)` bodies (closures rejected there)
+    // Deferred per-field bound proofs: a projection bound in THIS fn's body whose owner is still a
+    // type parameter. Discharged (or re-deferred) at each call site that binds the owner.
+    pub proj_obs: Vector<ProjOb>,
+    pub proj_obj_ok: bool, // one-shot: the identifier being checked is a member's object
     pub binding_depth: Map<u32, u32>,
     pub defer_stack: [NodeId; 256],
     pub defer_depth: [u32; 256],
@@ -489,6 +502,9 @@ extend TypeChecker {
             nborrows: 0,
             scope_depth: 0,
             loop_depth: 0,
+            fields_depth: 0,
+            proj_obs: Vector::<ProjOb>::new(),
+            proj_obj_ok: false,
             binding_depth: Map::<u32, u32>::new(),
             ndefers: 0,
             in_loop_recheck: false,
@@ -1619,6 +1635,12 @@ pub fn render_type_into(
         if at + 1 < cap {
             unsafe buf[at] = '}' as char;
             unsafe buf[at + 1] = 0 as char;
+        }
+    } else if ty.kind == TypeKind::TYPE_FIELD_PROJECTION {
+        // The symbolic per-field type of a reflection loop: name it by what it projects.
+        let at = (unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "field of ".ptr() as *const char)) as usize;
+        if at < cap {
+            render_type_into(pkg, a, cur_src, ty.as_data.proj.owner, unsafe (buf + at), cap - at);
         }
     } else {
         unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "?".ptr() as *const char);
@@ -4175,7 +4197,77 @@ extend TypeChecker {
         return false;
     }
 
+    // Every field of `owner` satisfies `iface`? Failures add a NOTE naming the field (the caller
+    // emits the spanned bound error), so a reflection loop's bound failure points at the field.
+    fn proj_fields_satisfy(self: &mut Self, owner: TypeId, iface: DefId, depth: i32, notes: bool) bool {
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(owner, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
+            return true;
+        }
+        let da = self.mod_ast(om);
+        if da.at_const(od).kind != NodeKind::NODE_STRUCT {
+            return true;
+        }
+        let ag = da.at_const(od).as_data.aggregate;
+        let mut ok = true;
+        let mut idx: i64 = 0;
+        for i in 0..ag.members.len {
+            let fid = unsafe da.list(ag.members)[i as usize];
+            if !ag.is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let ft = self.subst_type(self.decl_type_in(om, fid), &gp[0], &ga[0], gn);
+            if !self.type_satisfies(ft, iface, depth + 1) {
+                if !notes {
+                    return false;
+                }
+                let mut on = Buf96 {};
+                self.render_type(owner, &mut on[0], 96);
+                let mut fn2 = Buf96 {};
+                self.render_type(ft, &mut fn2[0], 96);
+                if ag.is_tuple {
+                    self.errors.note(
+                        format(
+                            "field {} of '{}' is '{}', which does not satisfy the bound",
+                            idx,
+                            diag::cstr(&on[0]),
+                            diag::cstr(&fn2[0]),
+                        ),
+                    );
+                } else {
+                    let fsp3 = da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text;
+                    self.errors.note(
+                        format(
+                            "field '{}' of '{}' is '{}', which does not satisfy the bound",
+                            diag::span_str(self.mod_src(om), fsp3.start, fsp3.end),
+                            diag::cstr(&on[0]),
+                            diag::cstr(&fn2[0]),
+                        ),
+                    );
+                }
+                ok = false;
+            }
+            idx = idx + 1;
+        }
+        return ok;
+    }
+
     fn type_satisfies(self: &mut Self, ty: TypeId, iface: DefId, depth: i32) bool {
+        // A field projection: with the owner concrete, the proof IS the per-field proof, made here
+        // with the offending field named; a symbolic owner defers the obligation to this fn's call
+        // sites (check_generic_bounds), where the owner gets bound.
+        if self.type_at(ty).kind == TypeKind::TYPE_FIELD_PROJECTION {
+            let powner = self.type_at(ty).as_data.proj.owner;
+            if self.cur_ast().type_concrete(powner) {
+                return self.proj_fields_satisfy(powner, iface, depth, false);
+            }
+            self.proj_obs.push(ProjOb { fnd: self.current_fn, owner: powner, iface: iface });
+            return true;
+        }
         if ty == TYPE_NONE || ty == TYPE_ERROR || depth > BOUND_MAX_DEPTH {
             return true;
         }
@@ -8215,6 +8307,20 @@ extend TypeChecker {
                 self.tc_check_test_ref(md, a.at_const(id).span);
             }
         }
+        // fields(&v) anywhere but as an `inline for` iterable (which never reaches check_call).
+        if pck == NodeKind::NODE_IDENTIFIER && a.resolution_def(callee_id).node == NODE_NONE && a.resolution(callee_id) == NODE_NONE && span_is(
+            self.source,
+            a.at_const(callee_id).as_data.name.text,
+            "fields",
+        ) {
+            let fsp2 = a.at_const(id).span;
+            self.errors.emit(
+                fsp2.start,
+                fsp2.end - fsp2.start,
+                format("fields(&v) is only valid as the iterable of an 'inline for'"),
+            );
+            return TYPE_NONE;
+        }
         // assert builtins
         if pck == NodeKind::NODE_IDENTIFIER && self.package != null {
             let ad = a.resolution_def(callee_id);
@@ -9064,7 +9170,46 @@ extend TypeChecker {
                                 diag::span_str(self.mod_src(fmod), bsp.start, bsp.end),
                             ),
                         );
+                        // Notes attach to the error just emitted: name the failing field(s).
+                        let gy2 = *self.type_at(unsafe gargs[i as usize]);
+                        if gy2.kind == TypeKind::TYPE_FIELD_PROJECTION && self.cur_ast().type_concrete(
+                            gy2.as_data.proj.owner,
+                        ) {
+                            let _ = self.proj_fields_satisfy(gy2.as_data.proj.owner, bi, 0, true);
+                        }
                     }
+                }
+            }
+        }
+        // The callee's deferred field-projection obligations (same module: obligations live with
+        // the checker that created them): with the owner now bound, prove every field -- or, still
+        // symbolic, hand the obligation up to the current fn's own call sites.
+        if fmod == self.cur_module() {
+            let nobs = self.proj_obs.len();
+            let mut oi: usize = 0;
+            while oi < nobs {
+                let ob = *self.proj_obs.at(oi);
+                oi = oi + 1;
+                if ob.fnd != fdecl {
+                    continue;
+                }
+                let owner2 = self.subst_type(ob.owner, gparams, gargs, gn);
+                if !self.cur_ast().type_concrete(owner2) {
+                    self.proj_obs.push(ProjOb { fnd: self.current_fn, owner: owner2, iface: ob.iface });
+                    continue;
+                }
+                if !self.proj_fields_satisfy(owner2, ob.iface, 0, false) {
+                    let mut on2 = Buf96 {};
+                    self.render_type(owner2, &mut on2[0], 96);
+                    self.errors.emit(
+                        sp.start,
+                        sp.end - sp.start,
+                        format(
+                            "a field of '{}' does not satisfy a bound the callee's reflection loop requires",
+                            diag::cstr(&on2[0]),
+                        ),
+                    );
+                    let _ = self.proj_fields_satisfy(owner2, ob.iface, 0, true);
                 }
             }
         }
@@ -9185,7 +9330,9 @@ extend TypeChecker {
         let want = self.expected;
         self.expected = TYPE_NONE;
         let obj_node = a.at_const(id).as_data.member.object;
+        self.proj_obj_ok = true;
         let obj = self.check_expr(obj_node);
+        self.proj_obj_ok = false;
         if obj == TYPE_NONE {
             return TYPE_NONE;
         }
@@ -9195,6 +9342,26 @@ extend TypeChecker {
         let mname = a.at_const(id).as_data.member.member;
         let name = self.name_span(mname);
         let base = self.strip(obj);
+        // The reflection binder: `f.name`/`f.index` are ordinary data, `f.value` is the projected
+        // field place (the projection type itself, one concrete type per emitted copy).
+        if self.type_at(base).kind == TypeKind::TYPE_FIELD_PROJECTION {
+            if span_is(self.source, name, "value") {
+                return base;
+            }
+            if span_is(self.source, name, "name") {
+                return self.prelude_str_type();
+            }
+            if span_is(self.source, name, "index") {
+                return Ast::builtin(BuiltinType::BT_USIZE);
+            }
+            let sp0 = a.at_const(id).span;
+            self.errors.emit(
+                sp0.start,
+                sp0.end - sp0.start,
+                format("a field binder has '.name', '.index', and '.value' -- nothing else"),
+            );
+            return TYPE_NONE;
+        }
         let mut bmod: ModuleId = 0;
         let mut bdecl = NODE_NONE;
         let mut gp = Defs8 {};
@@ -10137,6 +10304,17 @@ extend TypeChecker {
         return l;
     }
     fn check_closure(self: &mut Self, id: NodeId, cwant: TypeId) TypeId {
+        // A closure's environment is typed once; a captured field binder would need one type per
+        // emitted copy, which the env cannot have. Rejecting the closure keeps the model whole.
+        if self.fields_depth > 0 {
+            let csp = self.cur_ast().at_const(id).span;
+            self.errors.emit(
+                csp.start,
+                csp.end - csp.start,
+                format("a closure cannot appear inside 'inline for .. in fields(..)'"),
+            );
+            return TYPE_NONE;
+        }
         let a = self.cur_ast();
         let params = a.at_const(id).as_data.closure.params;
         let mut sigp = Tys8 {};
@@ -10864,6 +11042,16 @@ extend TypeChecker {
             },
             _ => {},
         };
+        // The reflection binder never stands alone: without a member access there is no copy for it
+        // to mean, so a bare `f` (stored, returned, passed) is rejected here, where its use is.
+        if nk == NodeKind::NODE_IDENTIFIER && result != TYPE_NONE && self.type_at(result).kind == TypeKind::TYPE_FIELD_PROJECTION && !self.proj_obj_ok {
+            let bsp2 = a.at_const(id).span;
+            self.errors.emit(
+                bsp2.start,
+                bsp2.end - bsp2.start,
+                format("the field binder is only used through '.name', '.index', or '.value'"),
+            );
+        }
         self.cur_ast().set_type(id, result);
         return result;
     }
@@ -12000,6 +12188,69 @@ extend TypeChecker {
         self.loop_depth = self.loop_depth + 1;
         let le = self.tc_loop_push(a.at_const(id).as_data.for_stmt.label, id, false);
         let iter = a.at_const(id).as_data.for_stmt.iterable;
+        // `inline for f in fields(&v)`: the reflection binder mode. `f` (and `f.value`) get ONE
+        // symbolic type -- the field projection of v's type against this loop -- so the body checks
+        // once; enumeration and the emitter's per-copy state make it each field's type in turn.
+        if a.at_const(id).kind == NodeKind::NODE_INLINE_FOR && a.at_const(iter).kind == NodeKind::NODE_CALL {
+            let fcallee = a.at_const(iter).as_data.call.callee;
+            if a.at_const(fcallee).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(fcallee).node == NODE_NONE && a.resolution(
+                fcallee,
+            ) == NODE_NONE && span_is(self.source, a.at_const(fcallee).as_data.name.text, "fields") {
+                let fargs = a.at_const(iter).as_data.call.args;
+                let fsp = a.at_const(iter).span;
+                let mut owner = TYPE_NONE;
+                if fargs.len != 1 {
+                    self.errors.emit(
+                        fsp.start,
+                        fsp.end - fsp.start,
+                        format("fields takes exactly one reference argument"),
+                    );
+                } else {
+                    let av = self.check_expr(unsafe a.list(fargs)[0]);
+                    let ay = *self.type_at(av);
+                    if ay.kind == TypeKind::TYPE_REFERENCE {
+                        owner = ay.as_data.elem;
+                    } else if av != TYPE_NONE {
+                        self.errors.emit(
+                            fsp.start,
+                            fsp.end - fsp.start,
+                            format("fields borrows its subject: write fields(&v)"),
+                        );
+                    }
+                }
+                if owner != TYPE_NONE {
+                    let ok2 = *self.type_at(owner);
+                    if ok2.kind != TypeKind::TYPE_STRUCT && ok2.kind != TypeKind::TYPE_INSTANCE && ok2.kind != TypeKind::TYPE_GENERIC {
+                        self.errors.emit(
+                            fsp.start,
+                            fsp.end - fsp.start,
+                            format("fields iterates a struct, tuple, or union (or a type parameter standing for one)"),
+                        );
+                        owner = TYPE_NONE;
+                    }
+                }
+                if owner != TYPE_NONE {
+                    let pt = self.cur_ast().intern_type(
+                        Ty {
+                            kind: TypeKind::TYPE_FIELD_PROJECTION,
+                            module: self.cur_module(),
+                            as_data: TyAs { proj: TyProj { owner: owner, binder: id } },
+                        },
+                    );
+                    self.cur_ast().set_type(iter, pt);
+                    self.cur_ast().set_type(id, pt);
+                }
+                self.binding_depth.insert(id, self.scope_depth + 1);
+                self.fields_depth = self.fields_depth + 1;
+                self.check_loop_body(self.cur_ast().at_const(id).as_data.for_stmt.body);
+                self.fields_depth = self.fields_depth - 1;
+                if le >= 0 {
+                    self.tc_loop_pop(le, self.cur_ast().at_const(id).span);
+                }
+                self.loop_depth = self.loop_depth - 1;
+                return;
+            }
+        }
         // `inline for` unrolls at emission: its iterable must be a closed `a..b` range -- there is
         // nothing to unroll over an iterator, and an open bound has no count.
         if a.at_const(id).kind == NodeKind::NODE_INLINE_FOR && (a.at_const(iter).kind != NodeKind::NODE_RANGE || a.at_const(

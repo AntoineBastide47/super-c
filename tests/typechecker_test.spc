@@ -511,6 +511,53 @@ fn static_assert() {
 }
 
 @test
+fn fields_projection() {
+    h::expect_ok(
+        "fields iterates a concrete struct",
+        "struct P { pub x: i32, pub y: u8, }\nfn main() i32 { let p = P { x: 1, y: 2 }; let mut n: usize = 0; inline for f in fields(&p) { n += f.index + 1; } return n as i32 - 3; }\n",
+    );
+    h::expect_ok(
+        "f.value feeds a generic callee per field",
+        "struct P { pub x: i32, pub y: u8, }\nfn w<V>(v: &V) usize { let _ = v; return sizeof(V); }\nfn total<T>(v: &T) usize { let mut s: usize = 0; inline for f in fields(v) { s += w(&f.value); } return s; }\nfn main() i32 { let p = P { x: 1, y: 2 }; return total(&p) as i32 - 5; }\n",
+    );
+    h::expect_err_msg(
+        "fields wants a reference",
+        "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(p) { let _ = f.index; } return 0; }\n",
+        "borrows its subject",
+    );
+    h::expect_err_msg(
+        "fields outside inline for",
+        "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; let _ = fields(&p); return 0; }\n",
+        "only valid as the iterable",
+    );
+    h::expect_err_msg(
+        "the binder has three members",
+        "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(&p) { let _ = f.other; } return 0; }\n",
+        "'.name', '.index', and '.value'",
+    );
+    h::expect_err_msg(
+        "no closures under a fields loop",
+        "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(&p) { let c = fn() i32 { return 0; }; let _ = c; let _ = f.index; } return 0; }\n",
+        "closure cannot appear",
+    );
+    h::expect_err_msg(
+        "the binder cannot escape bare",
+        "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(&p) { let g = f; let _ = g; } return 0; }\n",
+        "only used through",
+    );
+    h::expect_err_msg(
+        "a concrete owner proves bounds per field",
+        "interface I { fn m(self: &Self) i32; }\nextend i32 as I { pub fn m(self: &i32) i32 { return *self; } }\nstruct B { pub a: i32, pub b: bool, }\nfn r<V: I>(v: &V) i32 { return v.m(); }\nfn main() i32 { let b = B { a: 1, b: true }; let mut s = 0; inline for f in fields(&b) { s += r(&f.value); } return s; }\n",
+        "does not satisfy bound 'I'",
+    );
+    h::expect_err_msg(
+        "a deferred owner is proven at the binding call site",
+        "interface I { fn m(self: &Self) i32; }\nextend i32 as I { pub fn m(self: &i32) i32 { return *self; } }\nstruct B { pub a: i32, pub b: bool, }\nfn r<V: I>(v: &V) i32 { return v.m(); }\nfn d<T>(v: &T) i32 { let mut s = 0; inline for f in fields(v) { s += r(&f.value); } return s; }\nfn main() i32 { let b = B { a: 1, b: true }; return d(&b); }\n",
+        "reflection loop requires",
+    );
+}
+
+@test
 fn inline_and_parallel_for() {
     h::expect_ok(
         "inline for unrolls a const range",

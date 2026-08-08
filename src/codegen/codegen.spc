@@ -715,6 +715,10 @@ pub struct Codegen<'a> {
     // so a truncation is a hard error and never silently-invalid emitted C. Per-Codegen, so two of them
     // emitting at once -- which a parallel emit loop would do -- cannot clear each other's flag.
     pub trunc: bool,
+    // The (binder, field-index) stack of `inline for .. in fields(..)` copies being emitted --
+    // one entry per enclosing fields-loop, so nested loops normalize against their own binder.
+    // Packed (binder << 32) | index. subst_resolve reads it to resolve TYPE_FIELD_PROJECTION.
+    pub ti_stack: Vector<u64>,
     pub ast: *mut Ast,
     pub source: str<'a>,
     pub buf: String,
@@ -970,6 +974,7 @@ extend Codegen {
         return Codegen {
             ast: ast_u as *mut Ast,
             source: source,
+            ti_stack: Vector::<u64>::new(),
             buf: String::new(),
             enum_of_variant: Map::<u32, u32>::new(),
             free_ext_cache: Map::<u64, DefId>::new(),
@@ -1361,6 +1366,13 @@ extend Codegen {
         let ty = *self.type_at(t);
         if ty.kind == TypeKind::TYPE_BUILTIN {
             return String::from_cstr(builtin_name(ty.as_data.builtin));
+        }
+        if ty.kind == TypeKind::TYPE_FIELD_PROJECTION {
+            // Reaching the mangler unresolved is a bug upstream; a distinctive symbol keeps it from
+            // colliding with any real instance and makes the C error name the problem.
+            let mut q = String::from_str("__sc_unresolved_field_projection_");
+            q.format_into("{}", ty.as_data.proj.binder);
+            return q;
         }
         if ty.kind == TypeKind::TYPE_STRUCT || ty.kind == TypeKind::TYPE_ENUM {
             let mut q = Buf256 {};
@@ -1799,11 +1811,149 @@ extend Codegen {
         }
         return TYPE_NONE;
     }
+    // The k-th field of `owner`'s decl (NODE_FIELD, or the type node itself for a tuple member) and
+    // that decl's module; NODE_NONE when out of range or `owner` is not a struct. The walk order is
+    // the one type_info reports, so `f.index` and TypeInfo.fields agree.
+    fn cg_proj_field_node(self: &Self, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
+        let y = *self.type_at(owner);
+        let mut dm = y.module;
+        let mut dn = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT {
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.cur_ast().instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+        } else {
+            return NODE_NONE;
+        }
+        let da = self.mod_ast(dm);
+        if da.at_const(dn).kind != NodeKind::NODE_STRUCT {
+            return NODE_NONE;
+        }
+        let ag = da.at_const(dn).as_data.aggregate;
+        let mut k: i64 = 0;
+        for i in 0..ag.members.len {
+            let fid = unsafe da.list(ag.members)[i as usize];
+            if !ag.is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            if k == idx {
+                *out_m = dm;
+                return fid;
+            }
+            k = k + 1;
+        }
+        return NODE_NONE;
+    }
+
+    // Rebuild `t` with `pm`'s generic params replaced by `args` -- the frame-free substitution the
+    // projection normalizer needs (subst_resolve is const, so it cannot borrow the frame stack).
+    fn cg_ty_map(self: &Self, t: TypeId, pm: ModuleId, params: *const NodeId, args: *const TypeId, n: u32) TypeId {
+        let y = *self.type_at(t);
+        if y.kind == TypeKind::TYPE_GENERIC {
+            for i in 0..n {
+                if y.module == pm && unsafe params[i as usize] == y.as_data.decl {
+                    return unsafe args[i as usize];
+                }
+            }
+            return t;
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            let e = self.cg_ty_map(y.as_data.elem, pm, params, args, n);
+            if e == y.as_data.elem {
+                return t;
+            }
+            let mut nt = y;
+            nt.as_data.elem = e;
+            return self.cur_ast().intern_type(nt);
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let src = *self.cur_ast().instance(y.as_data.inst);
+            let mut na = TyArgs8 {};
+            let mut changed = false;
+            for i in 0..src.n {
+                na[i as usize] = self.cg_ty_map(unsafe src.args[i as usize], pm, params, args, n);
+                if na[i as usize] != unsafe src.args[i as usize] {
+                    changed = true;
+                }
+            }
+            if changed {
+                return self.cur_ast().intern_instance(src.module, src.decl, &na[0], src.n);
+            }
+            return t;
+        }
+        return t;
+    }
+
+    // The k-th field's TYPE under `owner`'s instance arguments, in the current pool; TYPE_NONE when
+    // unprojectable. What a TYPE_FIELD_PROJECTION normalizes to.
+    fn cg_proj_field_ty(self: &Self, owner: TypeId, idx: i64) TypeId {
+        let mut dm: ModuleId = 0;
+        let fid = self.cg_proj_field_node(owner, idx, &mut dm);
+        if fid == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let da = self.mod_ast(dm);
+        let mut ftn = fid;
+        if da.at_const(fid).kind == NodeKind::NODE_FIELD {
+            ftn = da.at_const(fid).as_data.field.ty;
+        }
+        let ftl = da.type_of(ftn);
+        if ftl == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        let mut ft = self.cur_ast().reintern(unsafe &*da, ftl);
+        let y = *self.type_at(owner);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.cur_ast().instance(y.as_data.inst);
+            let gens = self.mod_ast(it.module).at_const(it.decl).as_data.aggregate.generics;
+            let mut gn = gens.len;
+            if gn > it.n as u32 {
+                gn = it.n;
+            }
+            ft = self.cg_ty_map(ft, it.module, self.mod_ast(it.module).list(gens), &it.args[0], gn);
+        }
+        return ft;
+    }
+
+    // The active field index for `binder`'s fields-loop, -1 when none is being emitted.
+    const fn cg_proj_cur(self: &Self, binder: NodeId) i64 {
+        let mut i = self.ti_stack.len();
+        while i > 0 {
+            i = i - 1;
+            let p = *self.ti_stack.at(i);
+            if (p >> 32) as u32 == binder {
+                return (p & 0xFFFFFFFFu64) as i64;
+            }
+        }
+        return -1;
+    }
+
     fn subst_resolve(self: &Self, t: TypeId) TypeId {
-        if self.nsubst == 0 {
+        if self.nsubst == 0 && self.ti_stack.len() == 0 {
             return t;
         }
         let y = *self.type_at(t);
+        // A field projection: with the owner concrete and its loop's copy being emitted, it IS that
+        // copy's field type; otherwise it stays symbolic (owner substituted, so collection keys on
+        // the concrete owner).
+        if y.kind == TypeKind::TYPE_FIELD_PROJECTION {
+            let owner = self.subst_resolve(y.as_data.proj.owner);
+            let cur = self.cg_proj_cur(y.as_data.proj.binder);
+            if cur >= 0 && self.type_is_concrete(owner) {
+                let ft = self.cg_proj_field_ty(owner, cur);
+                if ft != TYPE_NONE {
+                    return ft;
+                }
+            }
+            if owner != y.as_data.proj.owner {
+                let mut nt = y;
+                nt.as_data.proj.owner = owner;
+                return self.cur_ast().intern_type(nt);
+            }
+            return t;
+        }
         if y.kind == TypeKind::TYPE_GENERIC {
             let s = self.subst_lookup(y.module, y.as_data.decl);
             if s != TYPE_NONE {
@@ -2201,6 +2351,9 @@ extend Codegen {
                 let fn2 = self.generic_call_target(i, &mut args[0], &mut n);
                 if fn2.node != NODE_NONE {
                     self.record_inst(fn2, &args[0], n, i);
+                    if !self.tyargs_concrete(&args[0], n) {
+                        self.cg_record_proj_fanout(i, false, self.ast);
+                    }
                 }
             }
             let ik = self.cur_ast().at_const(i).kind;
@@ -2343,6 +2496,80 @@ extend Codegen {
     // expand_nested_insts and scan_inst_methods: resolve each generic call's type args through
     // the active subst frame and record the concrete results; args are reinterned into `home`'s
     // pool when the walk runs on a foreign owner's ast.
+    // The first TYPE_FIELD_PROJECTION inside `t` (under refs/pointers/instances), TYPE_NONE if none.
+    fn cg_find_proj(self: &Self, t: TypeId) TypeId {
+        let y = *self.type_at(t);
+        if y.kind == TypeKind::TYPE_FIELD_PROJECTION {
+            return t;
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            return self.cg_find_proj(y.as_data.elem);
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.cur_ast().instance(y.as_data.inst);
+            for i in 0..it.n {
+                let r = self.cg_find_proj(unsafe it.args[i]);
+                if r != TYPE_NONE {
+                    return r;
+                }
+            }
+        }
+        return TYPE_NONE;
+    }
+
+    // A nested call whose type args carry a field projection: enumerate it -- one concrete instance
+    // per field of the (substituted) owner, by re-resolving the call's args under each (binder, k).
+    // The enumeration is what turns ONE symbolic MonoUse into serialize<i32>, serialize<u8>, ...
+    fn cg_record_proj_fanout(self: &mut Self, nid: NodeId, foreign: bool, home: *mut Ast) {
+        let mut args = TyArgs8 {};
+        let mut n: i32 = 0;
+        let gg = self.generic_call_target(nid, &mut args[0], &mut n);
+        if gg.node == NODE_NONE {
+            return;
+        }
+        let mut pj = TYPE_NONE;
+        for kk in 0..n {
+            let r = self.cg_find_proj(self.subst_resolve(args[kk as usize]));
+            if r != TYPE_NONE {
+                pj = r;
+            }
+        }
+        if pj == TYPE_NONE {
+            return;
+        }
+        let binder = self.type_at(pj).as_data.proj.binder;
+        let owner = self.subst_resolve(self.type_at(pj).as_data.proj.owner);
+        if !self.type_is_concrete(owner) {
+            return; // an outer frame concretizes the owner; that pass enumerates
+        }
+        let mut k: i64 = 0;
+        loop {
+            let mut dmx: ModuleId = 0;
+            if self.cg_proj_field_node(owner, k, &mut dmx) == NODE_NONE {
+                break;
+            }
+            self.ti_stack.push(binder as u64 << 32 | k as u64);
+            let mut ca = TyArgs8 {};
+            let mut cn2: i32 = 0;
+            let g3 = self.generic_call_target(nid, &mut ca[0], &mut cn2);
+            let mut allc = g3.node != NODE_NONE;
+            for kk in 0..cn2 {
+                ca[kk as usize] = self.subst_resolve(ca[kk as usize]);
+                if !self.type_is_concrete(ca[kk as usize]) {
+                    allc = false;
+                }
+                if foreign {
+                    ca[kk as usize] = home.reintern(unsafe &*self.cur_ast(), ca[kk as usize]);
+                }
+            }
+            if allc {
+                self.record_inst(g3, &ca[0], cn2, nid);
+            }
+            let _ = self.ti_stack.pop();
+            k = k + 1;
+        }
+    }
+
     fn scan_body_calls(self: &mut Self, owner_id: NodeId, foreign: bool, home: *mut Ast) {
         let fsp = self.cur_ast().at_const(owner_id).span;
         // CG-10: visit only NODE_CALLs (same nid order as the full arena sweep). The list is
@@ -2391,6 +2618,8 @@ extend Codegen {
             }
             if concrete {
                 self.record_inst(g2, &args[0], n, nid);
+            } else {
+                self.cg_record_proj_fanout(nid, foreign, home);
             }
         }
         // A generic fn used as a VALUE (turbofished `f::<..>` fn pointer) inside this body:
@@ -6856,6 +7085,41 @@ extend Codegen {
     // an unlayoutable type_info does.
     fn emit_inline_for(self: &mut Self, id: NodeId) {
         let fs = self.cur_ast().at_const(id).as_data.for_stmt;
+        if self.cur_ast().at_const(fs.iterable).kind == NodeKind::NODE_CALL {
+            // fields(&v): one copy per field of the substituted owner; the ti_stack entry makes
+            // every projection-typed expression in the body THIS copy's field.
+            let pt0 = self.cur_ast().type_of(id);
+            let mut owner = TYPE_NONE;
+            if pt0 != TYPE_NONE && self.type_at(pt0).kind == TypeKind::TYPE_FIELD_PROJECTION {
+                owner = self.subst_resolve(self.type_at(pt0).as_data.proj.owner);
+            }
+            if owner == TYPE_NONE || !self.type_is_concrete(owner) {
+                self.emit_str("__sc_fields_owner_not_concrete();\n");
+                return;
+            }
+            let mut n: i64 = 0;
+            let mut dmx: ModuleId = 0;
+            while self.cg_proj_field_node(owner, n, &mut dmx) != NODE_NONE {
+                n = n + 1;
+            }
+            if n == 0 {
+                // Keep v (the fields argument) C-visibly used even with nothing to iterate.
+                self.emit_str("(void)(");
+                self.emit_expr(unsafe self.cur_ast().list(self.cur_ast().at_const(fs.iterable).as_data.call.args)[0]);
+                self.emit_str(");\n");
+                return;
+            }
+            let mut k: i64 = 0;
+            while k < n {
+                self.ti_stack.push(id as u64 << 32 | k as u64);
+                self.emit_str("{ ");
+                self.emit_block(fs.body);
+                self.emit_str("}\n");
+                let _ = self.ti_stack.pop();
+                k = k + 1;
+            }
+            return;
+        }
         let r = self.cur_ast().at_const(fs.iterable).as_data.pattern_range;
         let mut lo: i64 = 0;
         let mut hi: i64 = 0;
@@ -9984,8 +10248,70 @@ extend Codegen {
         }
     }
 
+    // `f.name` / `f.index` / `f.value` on a fields-loop binder: emitted from the CURRENT copy's
+    // field -- a str literal, the index constant, or a member access through the fields() argument.
+    fn emit_proj_member(self: &mut Self, id: NodeId, lid: NodeId) {
+        let n = *self.cur_ast().at_const(id);
+        let cur = self.cg_proj_cur(lid);
+        let lty = self.cur_ast().type_of(lid);
+        let mut owner = TYPE_NONE;
+        if lty != TYPE_NONE && self.type_at(lty).kind == TypeKind::TYPE_FIELD_PROJECTION {
+            owner = self.subst_resolve(self.type_at(lty).as_data.proj.owner);
+        }
+        let mut dm: ModuleId = 0;
+        let mut fid = NODE_NONE;
+        if cur >= 0 {
+            fid = self.cg_proj_field_node(owner, cur, &mut dm);
+        }
+        if fid == NODE_NONE {
+            self.emit_str("__sc_field_binder_escapes()");
+            return;
+        }
+        let name = self.name_span(n.as_data.member.member);
+        if span_is(self.mod_src(self.cur_module()), name, "index".ptr() as *const char) {
+            self.buf.format_into("{}", cur);
+            return;
+        }
+        let da = self.mod_ast(dm);
+        let mut fnb = Buf128 {};
+        let mut fl: usize = 0;
+        if da.at_const(fid).kind == NodeKind::NODE_FIELD {
+            fl = render_ident_src(
+                self.mod_src(dm),
+                self.name_span_in(dm, da.at_const(fid).as_data.field.name),
+                &mut fnb[0],
+                120,
+            );
+        } else {
+            fl = (unsafe stdio::snprintf(&mut fnb[0], 128, "_%lld".ptr() as *const char, cur)) as usize;
+        }
+        if span_is(self.mod_src(self.cur_module()), name, "name".ptr() as *const char) {
+            self.emit_str("(str){ (const uint8_t *)\"");
+            self.emit_cstr(&fnb[0]);
+            self.buf.format_into("\", {} }", fl);
+            return;
+        }
+        let it0 = self.cur_ast().at_const(lid).as_data.for_stmt.iterable;
+        let arg = unsafe self.cur_ast().list(self.cur_ast().at_const(it0).as_data.call.args)[0];
+        self.emit_str("(");
+        self.emit_expr(arg);
+        self.emit_str(")->");
+        self.emit_cstr(&fnb[0]);
+    }
+
     fn emit_member(self: &mut Self, id: NodeId, want_mut: bool) {
         let n = *self.cur_ast().at_const(id);
+        if !n.as_data.member.path && n.as_data.member.object != NODE_NONE && self.cur_ast().at_const(
+            n.as_data.member.object,
+        ).kind == NodeKind::NODE_IDENTIFIER {
+            let lid = self.cur_ast().resolution(n.as_data.member.object);
+            if lid != NODE_NONE && self.cur_ast().at_const(lid).kind == NodeKind::NODE_INLINE_FOR && self.cur_ast().at_const(
+                self.cur_ast().at_const(lid).as_data.for_stmt.iterable,
+            ).kind == NodeKind::NODE_CALL {
+                self.emit_proj_member(id, lid);
+                return;
+            }
+        }
         if n.as_data.member.path {
             let mut d = self.cur_ast().resolution_def(id);
             if d.node == NODE_NONE {

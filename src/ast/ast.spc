@@ -617,6 +617,11 @@ pub enum TypeKind {
     /// so it carries the expression (`module` + `as_data.decl`) until substitution folds it to a TYPE_CONST.
     /// Never concrete, so no instance is ever emitted while one is still in the arguments.
     TYPE_CONST_EXPR,
+    /// `f.value` inside `inline for f in fields(&v)`: the I-th field of `owner`, where I is the
+    /// iteration the emitted copy belongs to. Symbolic like TYPE_CONST_EXPR -- it names a type the
+    /// enclosing generic cannot know yet; substitution plus the emitter's current-field state
+    /// normalize it to the field's concrete type, one copy at a time. Never concrete.
+    TYPE_FIELD_PROJECTION,
 }
 
 /// A const-generic expression in canonical form: `k + sum(c_i * P_i)`. Linear is exactly the closed set
@@ -829,6 +834,10 @@ pub struct TyArr {
     pub elem: TypeId,
     pub len: u32,
 }
+pub struct TyProj {
+    pub owner: TypeId, // the reflected type (may be a generic param); Ty.module is the binder's module
+    pub binder: NodeId, // the NODE_INLINE_FOR the projection belongs to
+}
 pub union TyAs {
     pub builtin: BuiltinType,
     pub elem: TypeId,
@@ -836,6 +845,7 @@ pub union TyAs {
     pub inst: u32,
     pub arr: TyArr,
     pub value: i64, // TYPE_CONST: a const-generic value
+    pub proj: TyProj, // TYPE_FIELD_PROJECTION
 }
 pub struct Ty {
     pub kind: TypeKind,
@@ -1183,6 +1193,8 @@ extend Ast {
             c.as_data.value = t.as_data.value;
         } else if t.kind == TypeKind::TYPE_ARRAY {
             c.as_data.arr = t.as_data.arr;
+        } else if t.kind == TypeKind::TYPE_FIELD_PROJECTION {
+            c.as_data.proj = t.as_data.proj; // both words are significant: owner AND binder
         } else if t.kind != TypeKind::TYPE_ERROR && t.kind != TypeKind::TYPE_NEVER {
             c.as_data.decl = t.as_data.decl; // every 4-byte arm (decl/elem/inst/builtin) overlays these bytes
         }
@@ -1445,7 +1457,7 @@ extend Ast {
     fn tc_decide(self: &Self, ty: Ty) bool {
         return switch ty.kind {
             // Not a value yet: an instance holding one must not be emitted until substitution folds it.
-            TYPE_GENERIC | TYPE_CONST_EXPR => false,
+            TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION => false,
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => self.type_concrete(ty.as_data.elem),
             TYPE_INSTANCE => {
                 let it = self.instance(ty.as_data.inst);
@@ -1480,6 +1492,11 @@ extend Ast {
                     unsafe na[i] = self.reintern(src, unsafe inst.args[i]);
                 }
                 self.intern_instance(inst.module, inst.decl, &na[0], inst.n);
+            },
+            TYPE_FIELD_PROJECTION => {
+                let mut nt = ty;
+                nt.as_data.proj.owner = self.reintern(src, ty.as_data.proj.owner);
+                self.intern_type(nt);
             },
             TYPE_DYN => {
                 // dyn payload is an instance index (interface + optional type args): remap it
