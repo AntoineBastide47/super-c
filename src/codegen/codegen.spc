@@ -6800,6 +6800,52 @@ extend Codegen {
             *out = v;
             return true;
         }
+        // A reflection bound: `type_info::<T>().fields.len` / `.variants.len`. CTFE alone cannot
+        // resolve T inside a generic body, but the substitution frames here can -- and the count
+        // comes from the same consteval build that makes the descriptor, so they cannot disagree.
+        let src = self.mod_src(self.cur_module());
+        let n1 = *self.cur_ast().at_const(id);
+        if ce != null && n1.kind == NodeKind::NODE_MEMBER && span_is(
+            src,
+            self.cur_ast().at_const(n1.as_data.member.member).as_data.name.text,
+            "len".ptr() as *const char,
+        ) {
+            let o1 = *self.cur_ast().at_const(n1.as_data.member.object);
+            if o1.kind == NodeKind::NODE_MEMBER {
+                let osp = self.cur_ast().at_const(o1.as_data.member.member).as_data.name.text;
+                let mut want: i32 = -1;
+                if span_is(src, osp, "fields".ptr() as *const char) {
+                    want = 0;
+                } else if span_is(src, osp, "variants".ptr() as *const char) {
+                    want = 1;
+                }
+                let cl = o1.as_data.member.object;
+                if want >= 0 && self.cur_ast().at_const(cl).kind == NodeKind::NODE_CALL {
+                    let cn = *self.cur_ast().at_const(self.cur_ast().at_const(cl).as_data.call.callee);
+                    if cn.kind == NodeKind::NODE_GENERIC_SPECIALIZATION && self.cur_ast().at_const(
+                        cn.as_data.specialization.expression,
+                    ).kind == NodeKind::NODE_IDENTIFIER && self.cur_ast().resolution_def(
+                        cn.as_data.specialization.expression,
+                    ).node == NODE_NONE && span_is(
+                        src,
+                        self.cur_ast().at_const(cn.as_data.specialization.expression).as_data.name.text,
+                        "type_info".ptr() as *const char,
+                    ) {
+                        let mu = self.cur_ast().type_args(cl);
+                        if mu != null && unsafe mu.n != 0 {
+                            let tt = self.subst_resolve(unsafe mu.args[0]);
+                            if tt != TYPE_NONE && self.type_is_concrete(tt) {
+                                let c = ce.type_info_count(self.cur_module(), cl, self.cur_module(), tt, want);
+                                if c >= 0 {
+                                    *out = c;
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         return false;
     }
 
@@ -6826,6 +6872,16 @@ extend Codegen {
         }
         let ety = self.cur_ast().type_of(id);
         let name = self.name_span(fs.binding);
+        if lo >= hi {
+            // Zero iterations still emit ONE dead copy: the body's uses of surrounding locals must
+            // stay visible to the C compiler (-Werror=unused-variable), and `if (0)` is discarded.
+            self.emit_str("if (0) { ");
+            self.emit_binding(ety, name, true);
+            self.emit_str(" = 0; ");
+            self.emit_block(fs.body);
+            self.emit_str("}\n");
+            return;
+        }
         let mut v = lo;
         while v < hi {
             self.emit_str("{ ");

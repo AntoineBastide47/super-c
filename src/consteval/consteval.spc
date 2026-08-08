@@ -339,6 +339,8 @@ pub struct ConstEval<'a> {
     pub fx_no: Vector<FxNo<'a>>,
     pub fx_depth: u32,
     pub statics: Vector<StaticObj>, // materialized const object graphs (grouped per root)
+    pub ti_nfields: i64, // field/variant counts of the LAST ce_type_info_of build (type_info_count)
+    pub ti_nvars: i64,
     pub sref: Vector<Vector<i64>>, // [module][node] eval_static memo: 0 unattempted, -1 failed, else root+1
 }
 
@@ -2459,6 +2461,8 @@ extend ConstEval {
         let mut fblock: u32 = 0;
         let mut nvars: u32 = 0;
         let mut vblock: u32 = 0;
+        self.ti_nfields = 0;
+        self.ti_nvars = 0;
         if tag == 12 || tag == 13 || tag == 14 {
             let mut dm2 = y.module;
             let mut dn2 = y.as_data.decl;
@@ -2543,6 +2547,7 @@ extend ConstEval {
                 fobjs.push(fv);
             }
             nfields = fobjs.len() as u32;
+            self.ti_nfields = nfields;
             fblock = self.ce_ti_block(tim, fity, fesz.size, &fobjs);
             let failed = fblock == 0 && nfields != 0;
             fobjs.free();
@@ -2612,6 +2617,7 @@ extend ConstEval {
                 vobjs.push(vv);
             }
             nvars = vobjs.len() as u32;
+            self.ti_nvars = nvars;
             vblock = self.ce_ti_block(tim, vity, vesz.size, &vobjs);
             let failed = vblock == 0 && nvars != 0;
             vobjs.free();
@@ -7830,6 +7836,33 @@ extend ConstEval {
         }
         self.sref_set(m, id, r.root as i64 + 1);
         return r;
+    }
+
+    /// The `fields.len`/`variants.len` (`want` 0/1) of T's descriptor, computed by the same build
+    /// the descriptor itself gets so the two can never disagree; -1 when T has none. Codegen's
+    /// inline-for bound fold is the caller -- the T it resolved through its substitution frames is
+    /// exactly what CTFE alone cannot see.
+    pub fn type_info_count(self: &mut Self, m: ModuleId, id: NodeId, am: ModuleId, at: TypeId, want: i32) i64 {
+        if id == NODE_NONE || m as usize >= self.nmods || self.depth != 0 || self.nframes != 0 {
+            return -1;
+        }
+        self.steps = 0;
+        self.trap = "";
+        self.trap_kind = CE_TRAP_NONE;
+        self.trap_nframes = 0;
+        self.trap_in_constfn = false;
+        self.ce_objs_reset();
+        self.depth = 1;
+        let r0 = self.ce_type_info_of(null, m, id, am, at);
+        self.depth = 0;
+        self.ce_objs_reset();
+        if !r0.ok {
+            return -1;
+        }
+        if want == 0 {
+            return self.ti_nfields;
+        }
+        return self.ti_nvars;
     }
 
     /// `type_info::<T>()` at a RUNTIME use site: build and capture the descriptor for the concrete

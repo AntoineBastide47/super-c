@@ -115,11 +115,23 @@ fn sum_upto<const N: usize>() usize {
   inline for i in 0..N { t += i; }
   return t;
 }
+struct Pt { pub x: i32, pub y: u8, }
+fn field_names<T>() usize {
+  let ti = type_info::<T>();
+  let mut seen: usize = 0;
+  inline for i in 0..type_info::<T>().fields.len {
+    print("field {}\n", ti.fields.get(i).name);
+    seen += 1;
+  }
+  return seen;
+}
 fn main() i32 {
   let mut s = 0;
   inline for i in 0..4 { s += i; }
   if s != 6 { return 1; }
   if sum_upto::<10>() != 45 { return 3; }
+  if field_names::<Pt>() != 2 { return 4; }
+  if field_names::<i64>() != 0 { return 5; }
   let sum = atom::Atomic::<i64>::new(0);
   let sp = &sum;
   parallel for i in 0..100 {
@@ -141,6 +153,7 @@ fn main() i32 {
     let rr = p.run_bin_env("");
     assert(rr.ok());
     assert(rr.out_shows("ok"), "the parallel for summed through the atomic");
+    assert(rr.out_shows("field y"), "a generic body unrolled over type_info fields");
 }
 
 @test
