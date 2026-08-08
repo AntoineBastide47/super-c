@@ -251,7 +251,7 @@ fn main() i32 {
   let sc = reflect_variant_string(&c);
   let sd = reflect_variant_string(&d);
   print("{} {} {} {}\n", sa.as_str(), sb.as_str(), sc.as_str(), sd.as_str());
-  let ok = sa.as_str() == "Dot" && sb.as_str() == "Line(42)" && sc.as_str() == "Label(hi)" && sd.as_str() == "Pair";
+  let ok = sa.as_str() == "Dot" && sb.as_str() == "Line(42)" && sc.as_str() == "Label(hi)" && sd.as_str() == "Pair(1, 2)";
   sa.free();
   sb.free();
   sc.free();
@@ -267,7 +267,7 @@ fn main() i32 {
     assert(cc.ok());
     let rr = p.run_bin_env("");
     assert(rr.ok());
-    assert(rr.out_shows("Dot Line(42) Label(hi) Pair"), "active-variant reflection across payload shapes");
+    assert(rr.out_shows("Dot Line(42) Label(hi) Pair(1, 2)"), "active-variant reflection across payload shapes");
 }
 
 @test
@@ -306,6 +306,85 @@ fn main() i32 {
     let rr = p.run_bin_env("");
     assert(rr.ok());
     assert(rr.out_shows("Nested { p: Point { x: 1, y: 2 }, n: 9 }"), "derives compose through conformances");
+}
+
+@test
+fn derive_and_interface_defaults() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.spc",
+        r#"pub interface Pretty {
+  fn pp(self: &Self) String { return reflect_string(self); }
+}
+@derive(Format, Hash)
+pub struct Point { pub x: i32, pub y: i32, }
+"#,
+    );
+    p.mkfile(
+        "main.spc",
+        r#"import lib;
+@derive(Format, Hash)
+enum Shape { Dot, Line(i32), Pair(i32, i64), }
+@derive(Format, lib::Pretty)
+struct Duo<A: Format, B: Format> { pub a: A, pub b: B, }
+fn main() i32 {
+  let p = lib::Point { x: 1, y: 2 };
+  let s = p.fmt();
+  let ok = s.as_str() == "Point { x: 1, y: 2 }";
+  s.free();
+  if !ok { return 1; }
+  let d = Shape::Dot;
+  let l = Shape::Line(42);
+  let l2 = Shape::Line(42);
+  let l3 = Shape::Line(43);
+  let pr = Shape::Pair(3, 4);
+  let sv = pr.fmt();
+  let ok2 = sv.as_str() == "Pair(3, 4)";
+  sv.free();
+  if !ok2 { return 2; }
+  let sd = d.fmt();
+  let ok3 = sd.as_str() == "Dot";
+  sd.free();
+  if !ok3 { return 3; }
+  if l.hash() != l2.hash() { return 4; }
+  if l.hash() == l3.hash() { return 5; }
+  if d.hash() == pr.hash() { return 6; }
+  let q = Duo::<i32, str> { a: 7, b: "hi" };
+  let qs = q.fmt();
+  let qp = q.pp();
+  let ok4 = qs.as_str() == "Duo { a: 7, b: hi }" && qp.as_str() == qs.as_str();
+  qs.free();
+  qp.free();
+  if !ok4 { return 7; }
+  let p2 = lib::Point { x: 1, y: 2 };
+  if p.hash() != p2.hash() { return 8; }
+  print("ok\n");
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("ok"), "@derive conformances inherit the reflection defaults across modules");
+
+    // A field that lacks the required bound names itself at the conformance, not in the emitted C.
+    let bad = cli::proj_new();
+    bad.mkfile(
+        "main.spc",
+        r#"struct NoFmt { pub p: *const u8, }
+@derive(Format)
+struct Bad { pub a: i32, pub b: NoFmt, }
+fn main() i32 { let b = Bad { a: 1, b: NoFmt { p: null } }; let s = b.fmt(); s.free(); return 0; }
+"#,
+    );
+    let br = bad.compile("main.spc");
+    assert(br.exit != 0, "unsatisfied derived bound rejects the build");
+    assert(br.out_has("does not satisfy a bound required by the interface's default method 'fmt'"));
+    assert(br.out_has("field 'b' of 'Bad' is 'NoFmt'"), "the offending field names itself");
 }
 
 @test

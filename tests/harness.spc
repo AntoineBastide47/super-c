@@ -145,6 +145,16 @@ extend ParsedAst as Free {
 }
 
 pub fn parse_ast(src: str) ParsedAst {
+    return parse_ast_opt(src, true);
+}
+
+// The formatter's parse: `@derive` stays attribute trivia (no synthesized extends), exactly as
+// format_source parses.
+pub fn parse_ast_for_fmt(src: str) ParsedAst {
+    return parse_ast_opt(src, false);
+}
+
+fn parse_ast_opt(src: str, expand_derive: bool) ParsedAst {
     let mut r = ParsedAst { errors: 0, ast: Ast::new(0) };
     let mut s = String::from_str(src);
     let mut lx = lex::Lexer::new(&mut s, "");
@@ -155,6 +165,7 @@ pub fn parse_ast(src: str) ParsedAst {
     }
     let toks = lx.take_tokens();
     let mut ps = par::Parser::new(toks, s.as_str(), "");
+    ps.expand_derive = expand_derive;
     ps.build_ast();
     if ps.has_errors() {
         r.errors = ps.errors.errors.len();

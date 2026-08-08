@@ -8,7 +8,7 @@ import string as cstring;
 
 // Parse + format at `width`. Asserts the source parses (goldens are full programs).
 fn fmt_of(src: str, width: i32) String {
-    let pa = h::parse_ast(src);
+    let pa = h::parse_ast_for_fmt(src);
     assert(pa.errors == 0, "golden source does not parse");
     let mut out = String::new();
     fbld::format_program(&pa.ast, src, width, &mut out);
@@ -37,6 +37,13 @@ fn golden_for_modifiers() {
         "fn f(){parallel for i in 0..n(){g(i);}}",
         "fn f() {\n    parallel for i in 0..n() {\n        g(i);\n    }\n}\n",
     );
+}
+
+@test
+fn golden_derive() {
+    // `@derive` prints as attribute trivia, verbatim; the synthesized extends never reach the
+    // formatter's AST.
+    expect_fmt("@derive(Format,Hash)\nstruct P{x:i32,}", "@derive(Format,Hash)\nstruct P {\n    x: i32,\n}\n");
 }
 
 @test

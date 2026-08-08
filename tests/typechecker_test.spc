@@ -511,6 +511,28 @@ fn static_assert() {
 }
 
 @test
+fn duplicate_conformance() {
+    h::expect_err_msg(
+        "a repeated conformance is rejected",
+        "struct P { pub x: i32, }\nextend P as Format {}\nextend P as Format {}\nfn main() i32 { return 0; }\n",
+        "duplicate conformance",
+    );
+    h::expect_err_msg(
+        "positionally identical generic conformances are the same conformance",
+        "interface Conv<T> { fn conv(self: &Self) T; }\nstruct W<A> { pub v: A, }\nextend<A> W<A> as Conv<i32> { pub fn conv(self: &W<A>) i32 { return 1; } }\nextend<B> W<B> as Conv<i32> { pub fn conv(self: &W<B>) i32 { return 2; } }\nfn main() i32 { return 0; }\n",
+        "duplicate conformance",
+    );
+    h::expect_ok(
+        "the same interface at different arguments is a different conformance",
+        "interface Conv<T> { fn conv(self: &Self) T; }\nstruct P { pub x: i32, }\nextend P as Conv<i32> { pub fn conv(self: &P) i32 { return self.x; } }\nextend P as Conv<bool> { pub fn conv(self: &P) bool { return self.x != 0; } }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_ok(
+        "inherent extends may repeat",
+        "struct P { pub x: i32, }\nextend P { pub fn a(self: &P) i32 { return 1; } }\nextend P { pub fn b(self: &P) i32 { return 2; } }\nfn main() i32 { let p = P { x: 0 }; return p.a() - p.b() + 1; }\n",
+    );
+}
+
+@test
 fn fields_projection() {
     h::expect_ok(
         "fields iterates a concrete struct",

@@ -655,6 +655,29 @@ fn attributes() {
     }
 }
 
+@test
+fn derive_attribute() {
+    let c = h::parse_ast("@derive(Format, Hash)\nstruct P { x: i32, }\n");
+    assert(c.errors == 0, "@derive parses");
+    assert(c.ast.at_const(c.ast.root).as_data.program.items.len == 3, "two extends synthesized before the struct");
+    assert(item(&c.ast, 0).kind == NodeKind::NODE_EXTEND, "first synthesized extend");
+    assert(item(&c.ast, 1).kind == NodeKind::NODE_EXTEND, "second synthesized extend");
+    assert(item(&c.ast, 2).kind == NodeKind::NODE_STRUCT, "declaration follows its conformances");
+    assert(item(&c.ast, 0).as_data.extend_def.items.len == 0, "synthesized conformance is empty");
+    {
+        let g = h::parse_ast("@derive(Pretty)\nstruct Pair<A: Format, B> { a: A, b: B, }\n");
+        assert(g.errors == 0, "@derive on a generic struct parses");
+        assert(item(&g.ast, 0).as_data.extend_def.generics.len == 2, "extend inherits both type parameters");
+    }
+    assert(h::parse_has_error("@derive(Format)\nfn m() {}\n"), "@derive on a fn rejected");
+    assert(h::parse_has_error("@derive()\nstruct S { x: i32, }\n"), "empty @derive list rejected");
+    assert(h::parse_has_error("@derive\nstruct S { x: i32, }\n"), "argument-less @derive rejected");
+    assert(
+        h::parse_has_error("extend i32 { @derive(Format)\npub fn f(self: &i32) i32 { return *self; } }\n"),
+        "@derive inside an extend rejected",
+    );
+}
+
 // Regressions for parser bugs from the cross-stage hunt.
 @test
 fn bug_regressions() {

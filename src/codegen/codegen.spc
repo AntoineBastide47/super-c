@@ -2650,6 +2650,7 @@ extend Codegen {
             }
             i = i + 1;
         }
+        self.collect_default_insts();
         // Fixpoint between the two collectors: expanding a fn instance can seed aggregate
         // instances whose methods must be scanned, and scanning a method body can record fn
         // instances that must be expanded.
@@ -2660,6 +2661,79 @@ extend Codegen {
             self.collect_method_insts();
             if self.nexp >= self.ninsts && self.nscan >= unsafe self.cur_ast().instances.len() {
                 break;
+            }
+        }
+    }
+    // Instances the INHERITED default bodies of this TU's concrete extends name (mirrors
+    // emit_default_methods' walk): each default is emitted with Self bound to the target, so every
+    // generic call inside it must be collected under that frame or the emitted C references an
+    // undeclared specialization.
+    fn collect_default_insts(self: &mut Self) {
+        let items = self.program_items();
+        let ids = self.cur_ast().list(items);
+        for i in 0..items.len {
+            let nid = unsafe ids[i as usize];
+            if self.cur_ast().at_const(nid).kind != NodeKind::NODE_EXTEND {
+                continue;
+            }
+            let ed = self.cur_ast().at_const(nid).as_data.extend_def;
+            if ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE || ed.generics.len != 0 {
+                continue;
+            }
+            let iface = self.cur_ast().resolution_def(ed.interface_type);
+            let target = self.cur_ast().resolution_def(ed.target_type);
+            if iface.node == NODE_NONE || target.node == NODE_NONE {
+                continue;
+            }
+            let foreign = iface.module != self.cur_module();
+            if foreign && (self.package == null || iface.module as usize >= self.pkg_count()) {
+                continue;
+            }
+            let mut dms = ExtChain {};
+            let nd = self.cg_default_method_list(nid, iface, &mut dms[0], 64);
+            if nd == 0 {
+                continue;
+            }
+            let mut bb: i32 = -1;
+            if self.package != null {
+                bb = self.package.builtin_of_decl(target.module, target.node);
+            }
+            let tkind_is_enum = self.mod_ast(target.module).at_const(target.node).kind == NodeKind::NODE_ENUM;
+            let ia = self.mod_ast(iface.module);
+            let mut tyv = Ty { kind: TypeKind::TYPE_STRUCT, module: target.module, as_data: TyAs { decl: target.node } };
+            if bb >= 0 {
+                tyv = Ty { kind: TypeKind::TYPE_BUILTIN, as_data: TyAs { builtin: bb as BuiltinType } };
+            } else if tkind_is_enum {
+                tyv = Ty { kind: TypeKind::TYPE_ENUM, module: target.module, as_data: TyAs { decl: target.node } };
+            }
+            let tty = ia.intern_type(tyv);
+            let home = self.ast;
+            let hsrc = self.source;
+            let mut oninst: usize = 0;
+            let mut optypes: usize = 0;
+            if foreign {
+                self.source = self.mod_src(iface.module);
+                self.ast = ia;
+                self.borrowed = true;
+                oninst = unsafe self.cur_ast().instances.len();
+                optypes = unsafe self.cur_ast().type_pool.len();
+            }
+            for d in 0..nd {
+                let rid = dms[d as usize] as NodeId;
+                self.nsubst = 1;
+                self.subst[0].param = iface;
+                self.subst[0].concrete = tty;
+                if !foreign {
+                    self.cg_subst_span_types(rid);
+                }
+                self.scan_body_calls(rid, foreign, home);
+            }
+            self.nsubst = 0;
+            if foreign {
+                self.cur_ast().restore_arena(optypes, oninst);
+                self.borrowed = false;
+                self.ast = home;
+                self.source = hsrc;
             }
         }
     }
@@ -3223,6 +3297,54 @@ extend Codegen {
                 }
             }
             self.nsubst = 0;
+            // The instance also inherits the interface's default bodies (emit_inst_methods emits
+            // them per instance): scan those under Self -> instance, or their generic calls -- the
+            // `reflect_string(self)` shape -- are never collected.
+            if itrait.node != NODE_NONE && !minst_only && !(itrait.module != self.cur_module() && (self.package == null || itrait.module as usize >= self.pkg_count())) {
+                let mut dms = ExtChain {};
+                let nd = self.cg_default_method_list(nid, itrait, &mut dms[0], 64);
+                if nd > 0 {
+                    let mut tty = self.cur_ast().intern_instance(it.module, it.decl, &it.args[0], it.n);
+                    let ifr = itrait.module != self.cur_module();
+                    let bast = self.ast;
+                    let bsrc = self.source;
+                    let bbr = self.borrowed;
+                    let mut ionin: usize = 0;
+                    let mut ionty: usize = 0;
+                    let mut imark = false;
+                    if ifr {
+                        let ia2 = self.mod_ast(itrait.module);
+                        tty = ia2.reintern(unsafe &*bast, tty);
+                        if ia2 != mi_src {
+                            ionin = unsafe ia2.instances.len();
+                            ionty = unsafe ia2.type_pool.len();
+                            imark = true;
+                        }
+                        self.ast = ia2;
+                        self.source = self.mod_src(itrait.module);
+                        self.borrowed = true;
+                    }
+                    for d2 in 0..nd {
+                        let rid = dms[d2 as usize] as NodeId;
+                        self.nsubst = 1;
+                        self.subst[0].param = itrait;
+                        self.subst[0].concrete = tty;
+                        if self.cur_ast() == mi_src {
+                            self.cg_subst_span_types(rid);
+                        }
+                        self.scan_body_calls(rid, self.cur_ast() != mi_src, mi_src);
+                    }
+                    self.nsubst = 0;
+                    if ifr {
+                        if imark {
+                            self.cur_ast().restore_arena(ionty, ionin);
+                        }
+                        self.ast = bast;
+                        self.source = bsrc;
+                        self.borrowed = bbr;
+                    }
+                }
+            }
         }
     }
 }
@@ -14745,6 +14867,74 @@ extend Codegen {
                 }
                 self.nsubst = 0;
             }
+            // Inherited interface defaults, one copy per instance, named like the extend's own
+            // methods (inst_name + "__" + method) -- the call site mangles the same way. Emitted
+            // with Self bound to the instance; collect_method_insts scanned the same bodies.
+            if itrait.node != NODE_NONE && !self.minst_only && !(itrait.module != self.cur_module() && (self.package == null || itrait.module as usize >= self.pkg_count())) {
+                let mut dms = ExtChain {};
+                let nd = self.cg_default_method_list(nid, itrait, &mut dms[0], 64);
+                if nd > 0 {
+                    let ia2 = self.mod_ast(itrait.module);
+                    let isrc = self.mod_src(itrait.module);
+                    let iface_pub = ia2.at_const(itrait.node).as_data.interface_def.is_public;
+                    let vis2 = !ifnv && iface_pub;
+                    let stat2 = self.multifile && !vis2;
+                    let mut tty = self.cur_ast().intern_instance(it.module, it.decl, &it.args[0], it.n);
+                    let ifr = itrait.module != self.cur_module();
+                    let bast = self.ast;
+                    let bsrc = self.source;
+                    let bbr = self.borrowed;
+                    let mut ionin: usize = 0;
+                    let mut ionty: usize = 0;
+                    let mut imark = false;
+                    if ifr {
+                        tty = ia2.reintern(unsafe &*bast, tty);
+                        if ia2 != mi_src {
+                            ionin = unsafe ia2.instances.len();
+                            ionty = unsafe ia2.type_pool.len();
+                            imark = true;
+                        }
+                        self.ast = ia2;
+                        self.source = isrc;
+                        self.borrowed = true;
+                        self.dflt_home = unsafe bast.module;
+                        self.dflt_home_set = true;
+                    }
+                    for d2 in 0..nd {
+                        let rid = dms[d2 as usize] as NodeId;
+                        let wf = if ifnv {
+                            which != PROTO_PUBLIC;
+                        } else {
+                            want_fn(which, vis2);
+                        };
+                        if !with_body && !wf {
+                            continue;
+                        }
+                        let mut dnm = Buf320 {};
+                        let mut a3 = bappend(&mut self.trunc, &mut dnm[0], 320, 0, &inm[0]);
+                        a3 = bappend(&mut self.trunc, &mut dnm[0], 320, a3, "__".ptr() as *const char);
+                        let rsp = ia2.at_const(ia2.at_const(rid).as_data.function.name).as_data.name.text;
+                        render_ident_src(isrc, rsp, unsafe ((&mut dnm[0]) as *mut char + a3), 320 - a3);
+                        self.nsubst = 1;
+                        self.subst[0].param = itrait;
+                        self.subst[0].concrete = tty;
+                        if !with_body {
+                            self.emit_ret_struct_named(rid, &dnm[0]);
+                        }
+                        self.emit_function(rid, DefId { module: 0, node: NODE_NONE }, false, with_body, &dnm[0], stat2);
+                        self.nsubst = 0;
+                    }
+                    if ifr {
+                        if imark {
+                            self.cur_ast().restore_arena(ionty, ionin);
+                        }
+                        self.borrowed = bbr;
+                        self.dflt_home_set = false;
+                        self.ast = bast;
+                        self.source = bsrc;
+                    }
+                }
+            }
         }
     }
     fn emit_method_specializations(self: &mut Self, which: i32, with_body: bool) {
@@ -14941,6 +15131,42 @@ extend Codegen {
             self.ast = home;
             self.source = hsrc;
         }
+    }
+    // The interface default methods an extend INHERITS: the interface's non-generic default-bodied
+    // items with no same-name override among the extend's own items. The NodeIds live in the IFACE ast.
+    fn cg_default_method_list(self: &mut Self, nid: NodeId, iface: DefId, out: *mut i32, cap: i32) i32 {
+        let ed = self.cur_ast().at_const(nid).as_data.extend_def;
+        let ia = self.mod_ast(iface.module);
+        let isrc = self.mod_src(iface.module);
+        let req = ia.at_const(iface.node).as_data.interface_def.items;
+        let rids = ia.list(req);
+        let hids = self.cur_ast().list(ed.items);
+        let mut n: i32 = 0;
+        for r in 0..req.len {
+            let rid = unsafe rids[r as usize];
+            let rm = ia.at_const(rid);
+            if rm.kind != NodeKind::NODE_FUNCTION || rm.as_data.function.body == NODE_NONE || rm.as_data.function.generics.len != 0 {
+                continue;
+            }
+            let rmn = ia.at_const(rm.as_data.function.name).as_data.name.text;
+            let mut overridden = false;
+            for h in 0..ed.items.len {
+                let hm = self.cur_ast().at_const(unsafe hids[h as usize]);
+                if hm.kind == NodeKind::NODE_FUNCTION && cg_span_eq(
+                    self.source,
+                    self.cur_ast().at_const(hm.as_data.function.name).as_data.name.text,
+                    isrc,
+                    rmn,
+                ) {
+                    overridden = true;
+                }
+            }
+            if !overridden && n < cap {
+                unsafe out[n as usize] = rid as i32;
+                n = n + 1;
+            }
+        }
+        return n;
     }
     fn emit_default_methods(self: &mut Self, which: i32, with_body: bool) {
         let items = self.program_items();

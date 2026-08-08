@@ -4261,10 +4261,16 @@ extend TypeChecker {
                 if isp.start <= sp.start && sp.end <= isp.end {
                     return iid;
                 }
-            } else if ik == NodeKind::NODE_EXTEND {
+            } else if ik == NodeKind::NODE_EXTEND || ik == NodeKind::NODE_INTERFACE {
                 let esp = a.at_const(iid).span;
                 if esp.start <= sp.start && sp.end <= esp.end {
-                    let ms = a.at_const(iid).as_data.extend_def.items;
+                    let ms = if ik == NodeKind::NODE_EXTEND {
+                        a.at_const(iid).as_data.extend_def.items;
+                    } else {
+                        // an interface DEFAULT body: the obligation lands on the interface method,
+                        // where every inheriting conformance discharges it with Self bound
+                        a.at_const(iid).as_data.interface_def.items;
+                    };
                     for k2 in 0..ms.len {
                         let mid2 = unsafe a.list(ms)[k2 as usize];
                         if a.at_const(mid2).kind == NodeKind::NODE_FUNCTION {
@@ -4363,6 +4369,99 @@ extend TypeChecker {
             }
         }
         return grew;
+    }
+
+    // Reflection-bound obligations carried by interface DEFAULT bodies, discharged at every
+    // conformance that INHERITS them: `extend T as Format {}` must prove what `fmt`'s body defers
+    // (each field satisfies Format), with Self bound to T. Runs in the driver's fixpoint alongside
+    // discharge_foreign_obligations -- the default's own obligations only exist after its module's
+    // cross-module hand-up -- over the [starts, ends) window so no obligation runs against an extend
+    // twice across passes. A conformance whose target is still generic proves nothing here: its
+    // instantiations discharge through their own call sites.
+    pub fn discharge_conformance_obligations(self: &mut Self, starts: *const u32, ends: *const u32) bool {
+        let items = unsafe self.cur_ast().at_const(self.cur_ast().root).as_data.program.items;
+        for i in 0..items.len {
+            let id = unsafe self.cur_ast().list(items)[i as usize];
+            if self.cur_ast().at_const(id).kind != NodeKind::NODE_EXTEND {
+                continue;
+            }
+            let itype = self.cur_ast().at_const(id).as_data.extend_def.interface_type;
+            if itype == NODE_NONE {
+                continue;
+            }
+            let iface = self.cur_ast().resolution_def(itype);
+            if iface.node == NODE_NONE || iface.module as usize >= self.pkg_count() {
+                continue;
+            }
+            let ostart = (unsafe starts[iface.module as usize]) as usize;
+            let oend = (unsafe ends[iface.module as usize]) as usize;
+            if ostart >= oend {
+                continue;
+            }
+            let ia = self.mod_ast(iface.module);
+            if ia.at_const(iface.node).kind != NodeKind::NODE_INTERFACE {
+                continue;
+            }
+            let mut subp = Defs8 {};
+            let mut suba = Tys8 {};
+            let nsub = self.tc_extend_self_frame(id, iface, &mut subp, &mut suba);
+            let req = ia.at_const(iface.node).as_data.interface_def.items;
+            for r in 0..req.len {
+                let rid = unsafe ia.list(req)[r as usize];
+                let rm = ia.at_const(rid);
+                if rm.kind != NodeKind::NODE_FUNCTION || rm.as_data.function.body == NODE_NONE || rm.as_data.function.generics.len != 0 {
+                    continue;
+                }
+                let rn = ia.at_const(rm.as_data.function.name).as_data.name.text;
+                if self.find_extend_item_named(id, rn, iface.module) != NODE_NONE {
+                    continue; // overridden: the extend's own body was checked normally
+                }
+                // One error per required bound: the default's call chain hands the same (owner,
+                // iface) requirement up once per branch it flows through.
+                let mut seen = Defs8 {};
+                let mut nseen: i32 = 0;
+                for oi in ostart..oend {
+                    let ob = *(unsafe ia.proj_obs).at(oi);
+                    if ob.fnd != rid {
+                        continue;
+                    }
+                    let mut dup = false;
+                    for si in 0..nseen {
+                        if seen[si as usize].module == ob.iface.module && seen[si as usize].node == ob.iface.node {
+                            dup = true;
+                        }
+                    }
+                    if dup {
+                        continue;
+                    }
+                    if nseen < 8 {
+                        seen[nseen as usize] = ob.iface;
+                        nseen = nseen + 1;
+                    }
+                    let owner0 = self.cur_ast().reintern(unsafe &*ia, ob.owner);
+                    let owner2 = self.subst_type(owner0, &subp[0], &suba[0], nsub);
+                    if !self.cur_ast().type_concrete(owner2) {
+                        continue;
+                    }
+                    if !self.proj_fields_satisfy(owner2, ob.iface, 0, false) {
+                        let mut on2 = Buf96 {};
+                        self.render_type(owner2, &mut on2[0], 96);
+                        let sp2 = self.cur_ast().at_const(itype).span;
+                        self.errors.emit(
+                            sp2.start,
+                            sp2.end - sp2.start,
+                            format(
+                                "a field of '{}' does not satisfy a bound required by the interface's default method '{}'",
+                                diag::cstr(&on2[0]),
+                                diag::span_str(self.mod_src(iface.module), rn.start, rn.end),
+                            ),
+                        );
+                        let _ = self.proj_fields_satisfy(owner2, ob.iface, 0, true);
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     fn type_satisfies(self: &mut Self, ty: TypeId, iface: DefId, depth: i32) bool {
@@ -6979,20 +7078,14 @@ extend TypeChecker {
         }
     }
 
-    fn check_extend_conformance(self: &mut Self, id: NodeId) {
-        let iface = self.cur_ast().resolution_def(self.cur_ast().at_const(id).as_data.extend_def.interface_type);
-        if iface.node == NODE_NONE {
-            return;
-        }
-        self.check_marker_is_unsafe(id, iface);
+    // The conformance's substitution frame: Self -> the implementing type, then the interface's
+    // spelled (or defaulted) generic parameters. Shared by check_extend_conformance and the driver's
+    // default-body obligation discharge; returns the frame length.
+    fn tc_extend_self_frame(self: &mut Self, id: NodeId, iface: DefId, subp: &mut Defs8, suba: &mut Tys8) i32 {
         let target = self.cur_ast().at_const(id).as_data.extend_def.target_type;
-        let self_ty = self.resolve_type(target);
-        let mut subp = Defs8 {};
-        let mut suba = Tys8 {};
-        let mut nsub: i32 = 0;
         subp[0] = DefId { module: iface.module, node: iface.node };
-        suba[0] = self_ty;
-        nsub = 1;
+        suba[0] = self.resolve_type(target);
+        let mut nsub: i32 = 1;
         let ia = self.mod_ast(iface.module);
         let itype = self.cur_ast().at_const(id).as_data.extend_def.interface_type;
         if ia.at_const(iface.node).kind == NodeKind::NODE_INTERFACE && self.cur_ast().at_const(itype).kind == NodeKind::NODE_TYPE_PATH {
@@ -7022,7 +7115,119 @@ extend TypeChecker {
                 i = i + 1;
             }
         }
-        self.check_interface_requirements(id, iface, self_ty, &subp[0], &suba[0], nsub, 0);
+        return nsub;
+    }
+
+    // The position of param node `p` among `ext`'s type parameters, -1 when it is not one of them.
+    const fn tc_gp_index(self: &Self, ext: NodeId, p: NodeId) i32 {
+        let gens = self.cur_ast().at_const(ext).as_data.extend_def.generics;
+        for i in 0..gens.len {
+            if unsafe self.cur_ast().list(gens)[i as usize] == p {
+                return i as i32;
+            }
+        }
+        return -1;
+    }
+
+    // Structural type equality for the duplicate-conformance comparison: interned identity, with two
+    // extends' OWN type parameters equal by POSITION (`extend<A> P<A> as I<A>` written twice names
+    // the same conformance even though the two `A`s are different nodes).
+    fn tc_dup_ty_eq(self: &Self, ta: TypeId, tb: TypeId, ea: NodeId, eb: NodeId) bool {
+        if ta == tb {
+            return true;
+        }
+        let ya = *self.type_at(ta);
+        let yb = *self.type_at(tb);
+        if ya.kind != yb.kind {
+            return false;
+        }
+        if ya.kind == TypeKind::TYPE_GENERIC {
+            let pa = self.tc_gp_index(ea, ya.as_data.decl);
+            return pa >= 0 && pa == self.tc_gp_index(eb, yb.as_data.decl);
+        }
+        if ya.kind == TypeKind::TYPE_INSTANCE {
+            let ia = *self.cur_ast().instance(ya.as_data.inst);
+            let ib = *self.cur_ast().instance(yb.as_data.inst);
+            if ia.module != ib.module || ia.decl != ib.decl || ia.n != ib.n {
+                return false;
+            }
+            for k in 0..ia.n {
+                if !self.tc_dup_ty_eq(unsafe ia.args[k as usize], unsafe ib.args[k as usize], ea, eb) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if ya.kind == TypeKind::TYPE_POINTER || ya.kind == TypeKind::TYPE_REFERENCE || ya.kind == TypeKind::TYPE_SLICE {
+            return ya.qualifier == yb.qualifier && self.tc_dup_ty_eq(ya.as_data.elem, yb.as_data.elem, ea, eb);
+        }
+        return false;
+    }
+
+    fn check_extend_conformance(self: &mut Self, id: NodeId) {
+        let itype = self.cur_ast().at_const(id).as_data.extend_def.interface_type;
+        let iface = self.cur_ast().resolution_def(itype);
+        if iface.node == NODE_NONE {
+            return;
+        }
+        self.check_marker_is_unsafe(id, iface);
+        let mut subp = Defs8 {};
+        let mut suba = Tys8 {};
+        let nsub = self.tc_extend_self_frame(id, iface, &mut subp, &mut suba);
+        // A type states one conformance per (interface, arguments) pair -- `Conv<i32>` and
+        // `Conv<bool>` are distinct, a repeat of either could only redefine its methods. Scan the
+        // EARLIER siblings so the later extend carries the error; a cross-module duplicate still
+        // surfaces at link.
+        let tgt = self.cur_ast().resolution_def(self.cur_ast().at_const(id).as_data.extend_def.target_type);
+        let items = unsafe self.cur_ast().at_const(self.cur_ast().root).as_data.program.items;
+        for i in 0..items.len {
+            let prev = unsafe self.cur_ast().list(items)[i as usize];
+            if prev == id {
+                break;
+            }
+            if self.cur_ast().at_const(prev).kind != NodeKind::NODE_EXTEND {
+                continue;
+            }
+            let pit = self.cur_ast().at_const(prev).as_data.extend_def.interface_type;
+            if pit == NODE_NONE {
+                continue;
+            }
+            let piface = self.cur_ast().resolution_def(pit);
+            if piface.module != iface.module || piface.node != iface.node {
+                continue;
+            }
+            let ptgt = self.cur_ast().resolution_def(self.cur_ast().at_const(prev).as_data.extend_def.target_type);
+            if ptgt.module != tgt.module || ptgt.node != tgt.node {
+                continue;
+            }
+            let mut psubp = Defs8 {};
+            let mut psuba = Tys8 {};
+            let pnsub = self.tc_extend_self_frame(prev, iface, &mut psubp, &mut psuba);
+            let mut same = pnsub == nsub;
+            let mut k: i32 = 0;
+            while same && k < nsub {
+                same = self.tc_dup_ty_eq(psuba[k as usize], suba[k as usize], prev, id);
+                k = k + 1;
+            }
+            if same {
+                let sp = self.cur_ast().at_const(itype).span;
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format(
+                        "duplicate conformance: the type already declares 'as {}'",
+                        diag::span_str(self.source, sp.start, sp.end),
+                    ),
+                );
+                self.errors.note(
+                    format(
+                        "a type conforms to an interface once; merge the items into the first 'extend', or remove one",
+                    ),
+                );
+                return;
+            }
+        }
+        self.check_interface_requirements(id, iface, suba[0], &subp[0], &suba[0], nsub, 0);
     }
 
     // ---- operators ----

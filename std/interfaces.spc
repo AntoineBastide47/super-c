@@ -136,8 +136,12 @@ pub interface Ord: Eq {
 }
 
 /// A stable hash of the value, for hash maps and sets. Equal values (per `Eq`) must hash equally.
+/// `hash` DEFAULTS to the reflected FNV-1a over the fields' (or the active variant's) own hashes,
+/// so a bare `extend T as Hash {}` derives it (see `@derive`); implement `hash` to override.
 pub interface Hash {
-    fn hash(self: &Self) u64;
+    fn hash(self: &Self) u64 {
+        return reflect_any_hash(self);
+    }
 }
 
 extern "C" {
@@ -199,9 +203,13 @@ extend Global as Default {
     }
 }
 
-/// A human-readable rendering of the value.
+/// A human-readable rendering of the value. `fmt` DEFAULTS to the reflected form -- `"Name { a: 1 }"`
+/// for a struct/union whose fields are all `Format`, `"Case(payload, ..)"` for an enum -- so a bare
+/// `extend T as Format {}` derives it (see `@derive`); implement `fmt` to override.
 pub interface Format {
-    fn fmt(self: &Self) String;
+    fn fmt(self: &Self) String {
+        return reflect_any_string(self);
+    }
 }
 
 /// A sink of bytes (files, buffers, sockets). `write` returns the number of bytes accepted.

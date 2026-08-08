@@ -61,6 +61,14 @@ pub struct Parser<'a> {
     // entries): a bare `return;` inside it desugars to returning these bindings. Cleared for closure
     // bodies (closures have their own return list and no named-return support).
     pub nrets: Vector<NodeId>,
+    // `@derive(I, ..)` pending on the next item: the interface type nodes parsed from the attribute's
+    // token range, expanded into empty `extend T as I {}` siblings when the struct/enum arrives.
+    // `expand_derive` is off for the FORMATTER only -- it prints the attribute text verbatim and must
+    // not see the synthesized extends.
+    pub derive_ifaces: Vector<NodeId>,
+    pub derive_start: u32,
+    pub derive_end: u32,
+    pub expand_derive: bool,
 }
 
 extend Parser {
@@ -76,6 +84,10 @@ extend Parser {
             errors: diag::Errors::new(),
             bootstrap_tags: false,
             nrets: Vector::<NodeId>::new(),
+            derive_ifaces: Vector::<NodeId>::new(),
+            derive_start: 0,
+            derive_end: 0,
+            expand_derive: true,
         };
     }
 
@@ -1374,6 +1386,7 @@ extend Parser {
         let mark = self.ast.mark();
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             let mut attrs = self.parse_attributes(16);
+            self.reject_derive_here();
             let is_public = self.match(TokenType::Pub);
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(true);
@@ -1453,6 +1466,7 @@ extend Parser {
         let mark = self.ast.mark();
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             let mut attrs = self.parse_attributes(16);
+            self.reject_derive_here();
             let is_public = self.match(TokenType::Pub);
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(false);
@@ -1595,6 +1609,7 @@ extend Parser {
     pub fn parse_item(self: &mut Self) NodeId {
         let mut attrs = self.parse_attributes(16);
         if self.check(TokenType::StaticAssert) {
+            self.reject_derive_here();
             let id = self.parse_static_assert();
             // Attached, not dropped: a `static_assert` about a LAYOUT is exactly the item that has to be
             // gated per target, and silently discarding `@platform`/`@arch` here fired the assert on the
@@ -1604,6 +1619,7 @@ extend Parser {
         }
         let is_public = self.match(TokenType::Pub);
         if self.check(TokenType::Static) {
+            self.reject_derive_here();
             let sid = self.parse_static();
             if sid != NODE_NONE {
                 self.ast.at(sid).as_data.const_def.is_public = is_public;
@@ -1683,7 +1699,129 @@ extend Parser {
         };
         self.validate_item_attrs(&mut attrs, id);
         self.add_attrs_to(&mut attrs, id);
+        if self.derive_ifaces.len() > 0 {
+            self.expand_derives(id, &attrs);
+        }
         return id;
+    }
+
+    // A pending `@derive` reached a position that cannot take it: report and drop it.
+    fn reject_derive_here(self: &mut Self) {
+        if self.derive_ifaces.len() > 0 {
+            self.errors.emit(
+                self.derive_start,
+                self.derive_end - self.derive_start,
+                format("'@derive' may only be applied to a struct, union, or enum declaration"),
+            );
+            self.derive_ifaces.clear();
+        }
+    }
+
+    fn make_name(self: &mut Self, sp: Span) NodeId {
+        return self.ast.add(
+            Node {
+                kind: NodeKind::NODE_IDENTIFIER,
+                span: sp,
+                as_data: NodeAs { name: NameData { text: sp, is_mutable: false } },
+            },
+        );
+    }
+
+    // A bare `Name` type path whose text is `sp` -- the synthesized reference resolves by name like
+    // written source.
+    fn make_simple_type(self: &mut Self, sp: Span) NodeId {
+        let mark = self.ast.mark();
+        self.ast.push(self.make_name(sp));
+        let parts = self.ast.commit(mark);
+        return self.ast.add(
+            Node {
+                kind: NodeKind::NODE_TYPE_PATH,
+                span: sp,
+                as_data: NodeAs { type_path: TypePathData { parts: parts, args: NodeList { start: 0, len: 0 } } },
+            },
+        );
+    }
+
+    // `@derive(I, ..)` on the just-parsed aggregate: one empty `extend<G..> T<G..> as I {}` sibling
+    // per interface, pushed onto the open top-level item list ahead of the declaration. The extend
+    // REUSES the declaration's generic-param nodes (same names, same bounds -> a conditional
+    // conformance when the params are bounded); the target's arguments are fresh name references so
+    // each scope resolves its own. The declaration's `@platform`/`@arch` gates are copied onto the
+    // extends so a gated type never leaves an unfiltered conformance behind.
+    fn expand_derives(self: &mut Self, decl: NodeId, attrs: &Vector<Attr>) {
+        if decl == NODE_NONE || self.ast.at_const(decl).kind != NodeKind::NODE_STRUCT && self.ast.at_const(decl).kind != NodeKind::NODE_ENUM {
+            self.reject_derive_here();
+            return;
+        }
+        if self.ast.lifetimes_of(decl).len != 0 {
+            self.errors.emit(
+                self.derive_start,
+                self.derive_end - self.derive_start,
+                format(
+                    "'@derive' cannot synthesize a conformance for a lifetime-parameterized type; write the 'extend' explicitly",
+                ),
+            );
+            self.derive_ifaces.clear();
+            return;
+        }
+        let agg = self.ast.at_const(decl).as_data.aggregate;
+        let nsp = self.ast.at_const(agg.name).as_data.name.text;
+        // Copied out first: node building below grows the arenas a `list` pointer indexes into.
+        let mut gid_copy = Vector::<NodeId>::new();
+        let mut gsp_copy = Vector::<Span>::new();
+        for g in 0..agg.generics.len {
+            let gid = unsafe self.ast.list(agg.generics)[g as usize];
+            gid_copy.push(gid);
+            gsp_copy.push(self.ast.at_const(self.ast.at_const(gid).as_data.generic_param.name).as_data.name.text);
+        }
+        for i in 0..self.derive_ifaces.len() {
+            let iface = *self.derive_ifaces.at(i);
+            let pmark = self.ast.mark();
+            self.ast.push(self.make_name(nsp));
+            let parts = self.ast.commit(pmark);
+            let amark = self.ast.mark();
+            for g in 0..gsp_copy.len() {
+                self.ast.push(self.make_simple_type(gsp_copy[g]));
+            }
+            let targs = self.ast.commit(amark);
+            let target = self.ast.add(
+                Node {
+                    kind: NodeKind::NODE_TYPE_PATH,
+                    span: nsp,
+                    as_data: NodeAs { type_path: TypePathData { parts: parts, args: targs } },
+                },
+            );
+            let gmark = self.ast.mark();
+            for g in 0..gid_copy.len() {
+                self.ast.push(gid_copy[g]);
+            }
+            let egen = self.ast.commit(gmark);
+            let ext = self.ast.add(
+                Node {
+                    kind: NodeKind::NODE_EXTEND,
+                    span: Span::new(self.derive_start, self.derive_end),
+                    as_data: NodeAs {
+                        extend_def: ExtendData {
+                            generics: egen,
+                            interface_type: iface,
+                            target_type: target,
+                            items: NodeList { start: 0, len: 0 },
+                            is_unsafe: false,
+                        },
+                    },
+                },
+            );
+            for a in 0..attrs.len() {
+                let at = *attrs.at(a);
+                if at.kind == AttrKind::ATTR_PLATFORM as u8 || at.kind == AttrKind::ATTR_ARCH as u8 {
+                    self.ast.add_attr(Attr { owner: ext, kind: at.kind, arg: at.arg, str_span: at.str_span });
+                }
+            }
+            self.ast.push(ext);
+        }
+        gid_copy.free();
+        gsp_copy.free();
+        self.derive_ifaces.clear();
     }
 
     pub fn parse_arguments(self: &mut Self) NodeList {
@@ -3957,6 +4095,46 @@ extend Parser {
             }
             return true;
         }
+        if syntax.parts == 1 && self.text_is(ns, "derive") {
+            // Sugar, fully expanded at parse: each listed interface becomes an empty
+            // `extend T as I {}` sibling of the next struct/union/enum, which then INHERITS the
+            // interface's default bodies. No Attr record survives -- the extends are the record.
+            if !syntax.has_args || Parser::attr_arg_count(&syntax) == 0 {
+                self.errors.emit(
+                    ns.start(),
+                    ns.len(),
+                    format(
+                        "attribute '@derive' requires an interface list, e.g. '@derive(Format)' or '@derive(Format, Hash)'",
+                    ),
+                );
+                return false;
+            }
+            self.derive_start = ns.start();
+            self.derive_end = self.previous_end();
+            if self.expand_derive {
+                // Re-parse the captured token range as types: `current` rewinds into the argument
+                // slice and is restored, so `@derive(Conv<i32>)` gets a real generic type node.
+                let save = self.current;
+                self.current = syntax.arg_start;
+                while self.current < syntax.arg_end {
+                    let t = self.parse_type_path();
+                    if t != NODE_NONE {
+                        self.derive_ifaces.push(t);
+                    }
+                    if self.current < syntax.arg_end && !self.match(TokenType::Comma) {
+                        let bad = self.raw_peek();
+                        self.errors.emit(
+                            bad.start(),
+                            bad.len(),
+                            format("expected ',' between '@derive' interface names"),
+                        );
+                        break;
+                    }
+                }
+                self.current = save;
+            }
+            return false;
+        }
         if syntax.parts == 1 && self.text_is(ns, "platform") {
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_PLATFORM as u8, arg: 0, str_span: Span::empty() };
             self.parse_platform_attr(&syntax, out);
@@ -4257,5 +4435,6 @@ extend Parser as Free {
         self.ast.free();
         self.errors.free();
         self.nrets.free();
+        self.derive_ifaces.free();
     }
 }

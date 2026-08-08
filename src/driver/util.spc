@@ -71,6 +71,9 @@ pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 
         }
     }
     let mut ps = par::Parser::new(sig, vsrc.as_str(), path);
+    // The formatter prints `@derive` as attribute text and reprints the source items 1:1, so the
+    // synthesized extends must not exist in its AST.
+    ps.expand_derive = false;
     ps.build_ast();
     if ps.has_errors() {
         ps.errors.log();

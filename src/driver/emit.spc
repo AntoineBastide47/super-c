@@ -265,8 +265,12 @@ fn discharge_obligations(p: &mut loader::Package, n: usize) {
             if t.discharge_foreign_obligations(starts.as_ptr()) {
                 grew = true;
             }
+            if t.discharge_conformance_obligations(starts.as_ptr(), ends.as_ptr()) {
+                grew = true;
+            }
             p.clear_override(i as ModuleId);
             if t.has_errors() {
+                t.errors.finalize(str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
                 t.log_errors();
                 p.ok = false;
             }
