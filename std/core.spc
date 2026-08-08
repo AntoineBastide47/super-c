@@ -1481,3 +1481,90 @@ extend TypeInfo {
         return Option::<VariantInfo>::None;
     }
 }
+
+// `Format` for the builtin scalars: `{}` formats them natively, but a `V: Format` bound (the
+// reflection derives dispatch through one) needs the conformance to exist as an interface fact.
+
+extend i8 as Format {
+    pub fn fmt(self: &i8) String {
+        return format("{}", *self);
+    }
+}
+
+extend i16 as Format {
+    pub fn fmt(self: &i16) String {
+        return format("{}", *self);
+    }
+}
+
+extend i32 as Format {
+    pub fn fmt(self: &i32) String {
+        return format("{}", *self);
+    }
+}
+
+extend i64 as Format {
+    pub fn fmt(self: &i64) String {
+        return format("{}", *self);
+    }
+}
+
+extend isize as Format {
+    pub fn fmt(self: &isize) String {
+        return format("{}", *self);
+    }
+}
+
+extend u8 as Format {
+    pub fn fmt(self: &u8) String {
+        return format("{}", *self);
+    }
+}
+
+extend u16 as Format {
+    pub fn fmt(self: &u16) String {
+        return format("{}", *self);
+    }
+}
+
+extend u32 as Format {
+    pub fn fmt(self: &u32) String {
+        return format("{}", *self);
+    }
+}
+
+extend u64 as Format {
+    pub fn fmt(self: &u64) String {
+        return format("{}", *self);
+    }
+}
+
+extend usize as Format {
+    pub fn fmt(self: &usize) String {
+        return format("{}", *self);
+    }
+}
+
+extend f32 as Format {
+    pub fn fmt(self: &f32) String {
+        return format("{}", *self);
+    }
+}
+
+extend f64 as Format {
+    pub fn fmt(self: &f64) String {
+        return format("{}", *self);
+    }
+}
+
+extend bool as Format {
+    pub fn fmt(self: &bool) String {
+        return format("{}", *self);
+    }
+}
+
+extend char as Format {
+    pub fn fmt(self: &char) String {
+        return format("{}", *self);
+    }
+}

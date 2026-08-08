@@ -5558,6 +5558,14 @@ extend ConstEval {
         let body = a.at_const(id).as_data.for_stmt.body;
         // fields(&v): interpret the unroll -- one pass per field, the binder served by ce_projs.
         if a.at_const(id).kind == NodeKind::NODE_INLINE_FOR && a.at_const(iter_n).kind == NodeKind::NODE_CALL {
+            let fcl = a.at_const(iter_n).as_data.call.callee;
+            if a.at_const(fcl).kind != NodeKind::NODE_IDENTIFIER || !self.ce_span_is(
+                m,
+                a.at_const(fcl).as_data.name.text,
+                "fields",
+            ) {
+                return Flow::Bail; // variants(&e) has no interpreter yet
+            }
             let pt = self.ce_type(m, id);
             if pt == TYPE_NONE || self.ast_ptr(m).type_at(pt).kind != TypeKind::TYPE_FIELD_PROJECTION {
                 return Flow::Bail;

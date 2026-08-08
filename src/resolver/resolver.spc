@@ -647,7 +647,7 @@ extend Resolver {
             self.source,
             name,
             "fields",
-        ) {
+        ) || span_is(self.source, name, "variants") {
             return;
         }
         self.errors.emit(

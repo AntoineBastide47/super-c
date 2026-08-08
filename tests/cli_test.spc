@@ -157,6 +157,90 @@ fn main() i32 {
 }
 
 @test
+fn reflect_enum_variants() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"enum Shape { Dot, Line(i64), Label(str), Pair(i32, i32), }
+fn fmt_one<V: Format>(out: &mut String, x: &V) { let fs = x.fmt(); out.push_str(fs.as_str()); fs.free(); }
+fn reflect_variant_string<T>(e: &T) String {
+  let mut s = String::new();
+  inline for v in variants(e) {
+    if v.is_active {
+      s.push_str(v.name);
+      if v.payload == 1 { s.push_str("("); fmt_one(&mut s, &v.value); s.push_str(")"); }
+    }
+  }
+  return s;
+}
+fn main() i32 {
+  let a = Shape::Dot;
+  let b = Shape::Line(42);
+  let c = Shape::Label("hi");
+  let d = Shape::Pair(1, 2);
+  let sa = reflect_variant_string(&a);
+  let sb = reflect_variant_string(&b);
+  let sc = reflect_variant_string(&c);
+  let sd = reflect_variant_string(&d);
+  print("{} {} {} {}\n", sa.as_str(), sb.as_str(), sc.as_str(), sd.as_str());
+  let ok = sa.as_str() == "Dot" && sb.as_str() == "Line(42)" && sc.as_str() == "Label(hi)" && sd.as_str() == "Pair";
+  sa.free();
+  sb.free();
+  sc.free();
+  sd.free();
+  if !ok { return 1; }
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("Dot Line(42) Label(hi) Pair"), "active-variant reflection across payload shapes");
+}
+
+@test
+fn reflect_derives() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"struct Point { pub x: i32, pub y: u8, }
+struct Nested { pub p: Point, pub n: i64, }
+extend Point as Format { pub fn fmt(self: &Point) String { return reflect_string(self); } }
+extend Point as Hash { pub fn hash(self: &Point) u64 { return reflect_hash(self); } }
+fn main() i32 {
+  let p = Point { x: 7, y: 3 };
+  let s = reflect_string(&p);
+  let ok = s.as_str() == "Point { x: 7, y: 3 }";
+  s.free();
+  if !ok { return 1; }
+  let nv = Nested { p: Point { x: 1, y: 2 }, n: 9 };
+  let s2 = reflect_string(&nv);
+  print("{}\n", s2.as_str());
+  let ok2 = s2.as_str() == "Nested { p: Point { x: 1, y: 2 }, n: 9 }";
+  s2.free();
+  if !ok2 { return 2; }
+  let q = Point { x: 7, y: 3 };
+  if reflect_hash(&p) != reflect_hash(&q) { return 3; }
+  if reflect_hash(&p) == reflect_hash(&Point { x: 7, y: 4 }) { return 4; }
+  if reflect_hash(&nv) == 0 { return 5; }
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("Nested { p: Point { x: 1, y: 2 }, n: 9 }"), "derives compose through conformances");
+}
+
+@test
 fn fields_projection_extended() {
     let p = cli::proj_new();
     p.mkfile(

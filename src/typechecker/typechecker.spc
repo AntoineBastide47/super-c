@@ -8375,17 +8375,17 @@ extend TypeChecker {
                 self.tc_check_test_ref(md, a.at_const(id).span);
             }
         }
-        // fields(&v) anywhere but as an `inline for` iterable (which never reaches check_call).
-        if pck == NodeKind::NODE_IDENTIFIER && a.resolution_def(callee_id).node == NODE_NONE && a.resolution(callee_id) == NODE_NONE && span_is(
+        // fields(&v)/variants(&e) anywhere but as an `inline for` iterable (never reaches here).
+        if pck == NodeKind::NODE_IDENTIFIER && a.resolution_def(callee_id).node == NODE_NONE && a.resolution(callee_id) == NODE_NONE && (span_is(
             self.source,
             a.at_const(callee_id).as_data.name.text,
             "fields",
-        ) {
+        ) || span_is(self.source, a.at_const(callee_id).as_data.name.text, "variants")) {
             let fsp2 = a.at_const(id).span;
             self.errors.emit(
                 fsp2.start,
                 fsp2.end - fsp2.start,
-                format("fields(&v) is only valid as the iterable of an 'inline for'"),
+                format("fields(&v)/variants(&e) are only valid as the iterable of an 'inline for'"),
             );
             return TYPE_NONE;
         }
@@ -9442,12 +9442,44 @@ extend TypeChecker {
             if span_is(self.source, name, "index") {
                 return Ast::builtin(BuiltinType::BT_USIZE);
             }
+            // The variants binder adds the enum-only members.
+            let mut vmode = false;
+            if blid != NODE_NONE && a.at_const(blid).kind == NodeKind::NODE_INLINE_FOR {
+                let vit = a.at_const(blid).as_data.for_stmt.iterable;
+                if a.at_const(vit).kind == NodeKind::NODE_CALL {
+                    let vcl = a.at_const(vit).as_data.call.callee;
+                    vmode = a.at_const(vcl).kind == NodeKind::NODE_IDENTIFIER && span_is(
+                        self.source,
+                        a.at_const(vcl).as_data.name.text,
+                        "variants",
+                    );
+                }
+            }
+            if vmode && span_is(self.source, name, "tag") {
+                return Ast::builtin(BuiltinType::BT_I32);
+            }
+            if vmode && span_is(self.source, name, "payload") {
+                return Ast::builtin(BuiltinType::BT_USIZE);
+            }
+            if vmode && span_is(self.source, name, "is_active") {
+                return Ast::builtin(BuiltinType::BT_BOOL);
+            }
             let sp0 = a.at_const(id).span;
-            self.errors.emit(
-                sp0.start,
-                sp0.end - sp0.start,
-                format("a field binder has '.name', '.index', and '.value' -- nothing else"),
-            );
+            if vmode {
+                self.errors.emit(
+                    sp0.start,
+                    sp0.end - sp0.start,
+                    format(
+                        "a variant binder has '.name', '.index', '.tag', '.payload', '.is_active', and '.value' -- nothing else",
+                    ),
+                );
+            } else {
+                self.errors.emit(
+                    sp0.start,
+                    sp0.end - sp0.start,
+                    format("a field binder has '.name', '.index', and '.value' -- nothing else"),
+                );
+            }
             return TYPE_NONE;
         }
         let mut bmod: ModuleId = 0;
@@ -12281,7 +12313,12 @@ extend TypeChecker {
             let fcallee = a.at_const(iter).as_data.call.callee;
             if a.at_const(fcallee).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(fcallee).node == NODE_NONE && a.resolution(
                 fcallee,
-            ) == NODE_NONE && span_is(self.source, a.at_const(fcallee).as_data.name.text, "fields") {
+            ) == NODE_NONE && (span_is(self.source, a.at_const(fcallee).as_data.name.text, "fields") || span_is(
+                self.source,
+                a.at_const(fcallee).as_data.name.text,
+                "variants",
+            )) {
+                let is_vars = span_is(self.source, a.at_const(fcallee).as_data.name.text, "variants");
                 let fargs = a.at_const(iter).as_data.call.args;
                 let fsp = a.at_const(iter).span;
                 let mut owner = TYPE_NONE;
@@ -12308,7 +12345,18 @@ extend TypeChecker {
                 }
                 if owner != TYPE_NONE {
                     let ok2 = *self.type_at(owner);
-                    if ok2.kind != TypeKind::TYPE_STRUCT && ok2.kind != TypeKind::TYPE_INSTANCE && ok2.kind != TypeKind::TYPE_GENERIC {
+                    if is_vars {
+                        if ok2.kind != TypeKind::TYPE_ENUM && ok2.kind != TypeKind::TYPE_INSTANCE && ok2.kind != TypeKind::TYPE_GENERIC {
+                            self.errors.emit(
+                                fsp.start,
+                                fsp.end - fsp.start,
+                                format(
+                                    "variants iterates an enum with payload variants (or a type parameter standing for one)",
+                                ),
+                            );
+                            owner = TYPE_NONE;
+                        }
+                    } else if ok2.kind != TypeKind::TYPE_STRUCT && ok2.kind != TypeKind::TYPE_INSTANCE && ok2.kind != TypeKind::TYPE_GENERIC {
                         self.errors.emit(
                             fsp.start,
                             fsp.end - fsp.start,

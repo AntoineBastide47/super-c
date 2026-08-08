@@ -679,3 +679,10 @@ extend Lines as Iterator<str> {
         return Option::<str>::Some(piece);
     }
 }
+
+// `{}` formats a str natively; the INTERFACE fact exists for `V: Format` bounds (reflection).
+extend str as Format {
+    pub fn fmt(self: &str) String {
+        return format("{}", *self);
+    }
+}
