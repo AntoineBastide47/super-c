@@ -177,6 +177,19 @@ jobs:
           command -v ccache >/dev/null 2>&1 || choco install -y --no-progress ccache
 
       # --- Clean outputs only ---------------------------------------------------------------------------
+      # Defender's real-time scan inspects every freshly written .o and every spawned test binary;
+      # on this workload (hundreds of cc runs, fork-per-test fixtures) that is a 2-3x multiplier.
+      # The runner is ephemeral and the paths are ours, so excluding them costs nothing.
+      - name: Exclude work dirs from Defender (Windows)
+        if: matrix.target == 'windows'
+        shell: powershell
+        run: |
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+          Add-MpPreference -ExclusionProcess "gcc.exe"
+          Add-MpPreference -ExclusionProcess "ld.exe"
+          Add-MpPreference -ExclusionProcess "super-c.exe"
+
       - name: Clean release outputs
         run: rm -rf build src/build ci/build super-c super-c.exe* super-c-boot* smoke*
 
@@ -395,6 +408,11 @@ jobs:
           wasmtime run --dir=/ --argv0 /tmp/wwasm/gen2.wasm -- \
             /tmp/wwasm/gen2.wasm /tmp/wwasm/src/main.spc --target=wasm 2>/dev/null
           diff -r /tmp/wasm-gen1 /tmp/wwasm/src/build
+
+      # One ahead-of-time compile; ci/wasm-superc.sh picks the .cwasm up and every one of the
+      # suite's wasmtime invocations skips the module JIT it was otherwise paying per call.
+      - name: Precompile the wasm module
+        run: wasmtime compile super-c.wasm -o super-c.cwasm
 
       - name: Run the test suite against the wasm compiler
         run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test

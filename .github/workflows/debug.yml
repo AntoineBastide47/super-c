@@ -1,6 +1,6 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
 # content, and every push runs it. Edit the job for the next investigation; do not remove the file.
-# Current probe: the release workflow's wasm leg.
+# Current probe: the release workflow's wasm leg, plus the Windows test suite.
 name: Debug
 on:
   push
@@ -10,6 +10,98 @@ concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-windows-${{ github.sha }}
+          restore-keys: ccache-windows-
+
+      - name: Configure ccache dir
+        run: |
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=500M" >> "$GITHUB_ENV"
+
+      - name: Cache mingw-w64 install
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\ProgramData\chocolatey\lib\mingw
+            C:\ProgramData\chocolatey\lib\ccache
+            C:\ProgramData\mingw64
+            C:\tools\mingw64
+          key: mingw-w64-${{ runner.os }}-choco-v2
+          restore-keys: mingw-w64-${{ runner.os }}-
+
+      - name: Set up mingw-w64
+        run: |
+          find_mingw_bin() {
+            { find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } |
+              while read -r dir; do
+                if [ -x "$dir/gcc.exe" ] || [ -x "$dir/gcc" ]; then
+                  echo "$dir"
+                  break
+                fi
+              done
+          }
+          mingw_bin="$(find_mingw_bin)"
+          if [ -z "$mingw_bin" ]; then
+            choco install -y --no-progress mingw
+            mingw_bin="$(find_mingw_bin)"
+          fi
+          test -n "$mingw_bin"
+          cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
+          echo "CC=gcc" >> "$GITHUB_ENV"
+          echo "BINEXT=.exe" >> "$GITHUB_ENV"
+          echo "SC_CSTD=-std=gnu11 -D_POSIX_C_SOURCE=200809L" >> "$GITHUB_ENV"
+          command -v ccache >/dev/null 2>&1 || choco install -y --no-progress ccache
+
+      - name: Exclude work dirs from Defender
+        shell: powershell
+        run: |
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+          Add-MpPreference -ExclusionProcess "gcc.exe"
+          Add-MpPreference -ExclusionProcess "ld.exe"
+          Add-MpPreference -ExclusionProcess "super-c.exe"
+
+      - name: Fetch bootstrap super-c from the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          arch="$(uname -m)"
+          name="super-c-windows-${arch}"
+          boot="super-c-boot${BINEXT:-}"
+          gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.zip" --dir . --clobber
+          7z x -y "${name}.zip" >/dev/null
+          if [ -f "${name}/super-c.exe" ]; then cp "${name}/super-c.exe" "$boot"; else cp "${name}.exe" "$boot"; fi
+          test -x "./$boot"
+
+      - name: Build the compiler
+        run: |
+          set -eu
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
+          bin="super-c${BINEXT:-}"
+          [ -f "./$bin" ] || mv "./super-c" "./$bin"
+          test -x "./$bin"
+
+      - name: Run the test suite
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          SC_LEAK_CHECK=fatal "./$bin" test ${cstd:+"$cstd"}
+
   wasm:
     runs-on: ubuntu-latest
     defaults:

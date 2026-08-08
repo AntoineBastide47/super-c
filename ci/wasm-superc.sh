@@ -19,6 +19,13 @@ if [ "$(uname -s)" = Linux ]; then HOST_TARGET=linux; fi
 if [ "$(uname -m)" = x86_64 ]; then HOST_ARCH=x86_64; fi
 PIN="--target=$HOST_TARGET --arch=$HOST_ARCH"
 case "$*" in *--target=*) PIN="" ;; esac
+# A precompiled sibling skips the per-invocation module JIT (CI compiles it once; see release.yml).
+CWASM="${SC_WASM_CWASM:-${WASM%.wasm}.cwasm}"
+if [ -f "$CWASM" ]; then
+  exec wasmtime run --allow-precompiled --dir=/ --argv0 "$WASM" \
+    ${SC_LEAK_CHECK:+--env SC_LEAK_CHECK="$SC_LEAK_CHECK"} \
+    -- "$CWASM" "$@" $PIN
+fi
 exec wasmtime run --dir=/ --argv0 "$WASM" \
   ${SC_LEAK_CHECK:+--env SC_LEAK_CHECK="$SC_LEAK_CHECK"} \
   -- "$WASM" "$@" $PIN
