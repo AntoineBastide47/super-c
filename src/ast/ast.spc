@@ -65,6 +65,18 @@ pub struct Attr {
     pub str_span: tok::Span,
 }
 
+/// One `@reflect(key = value)` entry, in its own side table: the key/value payload does not fit
+/// Attr, and the consumers (the type_info graph builder, the binder members) read it by OWNER.
+/// `vkind`: 0 = bool (a bare key is `true`), 1 = int, 2 = string (`vspan` is the content, no
+/// quotes; spans index the owning module's source).
+pub struct MetaAttr {
+    pub owner: NodeId,
+    pub vkind: u8,
+    pub ival: i64,
+    pub key: tok::Span,
+    pub vspan: tok::Span,
+}
+
 pub enum TypeQualifier {
     TYPE_QUAL_NONE,
     TYPE_QUAL_CONST,
@@ -1042,6 +1054,7 @@ pub struct Ast {
     pub deref_uses: Vector<DerefUse>,
     pub deref_at: Vector<u32>,
     pub attrs: Vector<Attr>,
+    pub metas: Vector<MetaAttr>,
     pub lifetime_decls: Vector<LifetimeDecl>,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
     pub call_info: Map<u32, u64>,
@@ -1083,6 +1096,7 @@ extend Ast {
             deref_uses: Vector::<DerefUse>::new(),
             deref_at: Vector::<u32>::new(),
             attrs: Vector::<Attr>::new(),
+            metas: Vector::<MetaAttr>::new(),
             root: NODE_NONE,
             module: 0,
         };
@@ -1462,6 +1476,10 @@ extend Ast {
         self.attrs.push(attr);
     }
 
+    pub fn add_meta(self: &mut Self, m: MetaAttr) {
+        self.metas.push(m);
+    }
+
     pub const fn type_concrete(self: &Self, t: TypeId) bool {
         return self.type_at(t).concrete;
     }
@@ -1708,6 +1726,7 @@ extend Ast as Free {
         self.deref_uses.free();
         self.deref_at.free();
         self.attrs.free();
+        self.metas.free();
         self.lifetime_decls.free();
         self.call_info.free();
         self.op_method.free();

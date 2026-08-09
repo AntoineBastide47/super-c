@@ -679,6 +679,16 @@ fn lint_report_item(
     root_mod: bool,
 ) {
     let it = a.at_const(iid);
+    // a `@reflect`-tagged declaration is REACHED at startup: its exported descriptor registers
+    // itself, and the metadata is the point even when no code names the type
+    if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
+        let nmet = (unsafe a.metas).len();
+        for k in 0..nmet {
+            if (unsafe a.metas).at(k).owner == iid {
+                return;
+            }
+        }
+    }
     let src = p.modules[m as usize].source.as_str();
     let mut what = "function";
     let mut nid = NODE_NONE;

@@ -2408,14 +2408,29 @@ extend ConstEval {
         if !rr.ok || rr.r.dn == NODE_NONE {
             return out;
         }
-        let tim = rr.r.dm;
-        let tin = rr.r.dn;
+        return self.ce_type_info_decl(f, m, rr.r.dm, rr.r.dn, rty, tm, tt);
+    }
+
+    // The graph build with the TypeInfo DECL given directly -- the export path has no typed call
+    // node to derive it from.
+    fn ce_type_info_decl(
+        self: &mut Self,
+        f: *mut CeFrame,
+        m: ModuleId,
+        tim: ModuleId,
+        tin: NodeId,
+        rty: TypeId,
+        tm: ModuleId,
+        tt: TypeId,
+    ) Rets {
+        let out = Rets { ok: false, n: 0 };
         // The six TypeInfo fields, by name; their decl types name every other decl the graph uses.
         let da = self.ast_ptr(tim);
         let mut sty = TYPE_NONE; // str
         let mut kty = TYPE_NONE; // TypeTag
         let mut flty = TYPE_NONE; // Slice<FieldInfo>
         let mut vrty = TYPE_NONE; // Slice<VariantInfo>
+        let mut mty = TYPE_NONE; // Slice<MetaInfo> (absent in a pre-metadata std: everything meta stays off)
         let ms = da.at_const(tin).as_data.aggregate.members;
         for i in 0..ms.len {
             let fid = unsafe da.list(ms)[i as usize];
@@ -2432,6 +2447,8 @@ extend ConstEval {
                 flty = fty;
             } else if self.ce_span_is(tim, fnm, "variants") {
                 vrty = fty;
+            } else if self.ce_span_is(tim, fnm, "meta") {
+                mty = fty;
             }
         }
         if sty == TYPE_NONE || kty == TYPE_NONE || flty == TYPE_NONE || vrty == TYPE_NONE {
@@ -2454,6 +2471,41 @@ extend ConstEval {
         let sln = fit.decl;
         let fity = fit.args[0]; // FieldInfo, in tim's pool
         let vity = vit.args[0]; // VariantInfo, in tim's pool
+        // MetaInfo's type, its `kind` enum's type, and its element size -- all from the decls, so a
+        // std without the meta field simply leaves mety TYPE_NONE and every meta slot untouched.
+        let mut mety = TYPE_NONE;
+        let mut mkty = TYPE_NONE;
+        let mut mesz: u64 = 0;
+        if mty != TYPE_NONE {
+            let ym0 = *da.type_at(mty);
+            if ym0.kind == TypeKind::TYPE_INSTANCE {
+                let mit = *da.instance(ym0.as_data.inst);
+                mety = mit.args[0];
+                let ymm = *da.type_at(mety);
+                if ymm.kind == TypeKind::TYPE_STRUCT {
+                    let mem0 = ymm.module;
+                    let men0 = ymm.as_data.decl;
+                    let mma = self.ast_ptr(mem0);
+                    let mms = mma.at_const(men0).as_data.aggregate.members;
+                    for q in 0..mms.len {
+                        let mfid = unsafe mma.list(mms)[q as usize];
+                        if mma.at_const(mfid).kind != NodeKind::NODE_FIELD {
+                            continue;
+                        }
+                        if self.ce_span_is(mem0, self.name_text(mem0, mma.at_const(mfid).as_data.field.name), "kind") {
+                            mkty = self.ce_type(mem0, mma.at_const(mfid).as_data.field.ty);
+                        }
+                    }
+                    let mlay = self.layout_of(tim, mety, null, 0);
+                    if mlay.ok {
+                        mesz = mlay.size;
+                    }
+                }
+            }
+            if mety == TYPE_NONE || mkty == TYPE_NONE || mesz == 0 {
+                mety = TYPE_NONE;
+            }
+        }
         let tag = self.ce_ti_tag(tm, tt, strm, strn, slm, sln);
         if tag < 0 {
             return out;
@@ -2576,6 +2628,24 @@ extend ConstEval {
                     fobjs.free();
                     return out;
                 }
+                if mety != TYPE_NONE && !self.ce_ti_attach_meta(
+                    fv,
+                    dm2,
+                    fid,
+                    tim,
+                    strm,
+                    strn,
+                    slm,
+                    sln,
+                    sty,
+                    mety,
+                    mkty,
+                    mty,
+                    mesz,
+                ) {
+                    fobjs.free();
+                    return out;
+                }
                 fobjs.push(fv);
             }
             nfields = fobjs.len() as u32;
@@ -2643,6 +2713,24 @@ extend ConstEval {
                     da2.at_const(vid).as_data.variant.payload.len,
                 );
                 if vv.kind != CV_AGG {
+                    vobjs.free();
+                    return out;
+                }
+                if mety != TYPE_NONE && !self.ce_ti_attach_meta(
+                    vv,
+                    dm2,
+                    vid,
+                    tim,
+                    strm,
+                    strn,
+                    slm,
+                    sln,
+                    sty,
+                    mety,
+                    mkty,
+                    mty,
+                    mesz,
+                ) {
                     vobjs.free();
                     return out;
                 }
@@ -2725,9 +2813,165 @@ extend ConstEval {
         );
         unsafe self.obj_ptr(to).slots.set(i_fields as usize, fsl);
         unsafe self.obj_ptr(to).slots.set(i_vars as usize, vsl);
+        if mety != TYPE_NONE {
+            // the TYPE declaration's own `@reflect` entries (a non-decl kind matches nothing)
+            let mut tdm = tm;
+            let mut tdn = NODE_NONE;
+            if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+                tdm = y.module;
+                tdn = y.as_data.decl;
+            } else if y.kind == TypeKind::TYPE_INSTANCE {
+                let it3 = *self.ast_ptr(tm).instance(y.as_data.inst);
+                tdm = it3.module;
+                tdn = it3.decl;
+            }
+            let tms = self.ce_ti_meta_slice(tdm, tdn, tim, strm, strn, slm, sln, sty, mety, mkty, mty, mesz);
+            let i_meta = self.ce_ti_findf(tim, tin, "meta");
+            if tms.kind != CV_AGG || i_meta < 0 {
+                return out;
+            }
+            unsafe self.obj_ptr(to).slots.set(i_meta as usize, tms);
+        }
         let mut ret = Rets { ok: true, n: 1 };
         ret.vals[0] = CeVal { kind: CV_AGG, tm: m, ty: rty, as_data: CeValAs { p: CvPtr { obj: to, off: 0 } } };
         return ret;
+    }
+
+    // The `@reflect` entries attached to decl `own` in module `dm`, as a MetaInfo slice value;
+    // the empty slice when there are none.
+    fn ce_ti_meta_slice(
+        self: &mut Self,
+        dm: ModuleId,
+        own: NodeId,
+        tim: ModuleId,
+        strm: ModuleId,
+        strn: NodeId,
+        slm: ModuleId,
+        sln: NodeId,
+        sty: TypeId,
+        mety: TypeId,
+        mkty: TypeId,
+        mslty: TypeId,
+        mesz: u64,
+    ) CeVal {
+        let ym = *self.ast_ptr(tim).type_at(mety);
+        let mem = ym.module;
+        let men = ym.as_data.decl;
+        let i_name = self.ce_ti_findf(mem, men, "name");
+        let i_kind = self.ce_ti_findf(mem, men, "kind");
+        let i_b = self.ce_ti_findf(mem, men, "b");
+        let i_i = self.ce_ti_findf(mem, men, "i");
+        let i_s = self.ce_ti_findf(mem, men, "s");
+        if i_name < 0 || i_kind < 0 || i_b < 0 || i_i < 0 || i_s < 0 {
+            return cv_nil();
+        }
+        let mut objs = Vector::<CeVal>::new();
+        let src = self.ce_src(dm);
+        let nmetas = if own != NODE_NONE && self.has_ast(dm) {
+            (unsafe self.ast_ptr(dm).metas).len();
+        } else {
+            0 as usize;
+        };
+        for i in 0..nmetas {
+            let ma = *(unsafe self.ast_ptr(dm).metas).at(i);
+            if ma.owner != own {
+                continue;
+            }
+            let o = self.ce_obj_new(self.ce_field_count(mem, men));
+            if o == 0 {
+                objs.free();
+                return cv_nil();
+            }
+            unsafe self.obj_ptr(o).dm = mem;
+            unsafe self.obj_ptr(o).dn = men;
+            let nmv = self.ce_ti_str(strm, strn, tim, sty, src.slice(ma.key.start as usize, ma.key.end as usize));
+            let mut sv = self.ce_ti_str(strm, strn, tim, sty, "");
+            if ma.vkind == 2 {
+                sv = self.ce_ti_str(strm, strn, tim, sty, src.slice(ma.vspan.start as usize, ma.vspan.end as usize));
+            }
+            if nmv.kind != CV_AGG || sv.kind != CV_AGG {
+                objs.free();
+                return cv_nil();
+            }
+            unsafe self.obj_ptr(o).slots.set(i_name as usize, nmv);
+            unsafe self.obj_ptr(o).slots.set(
+                i_kind as usize,
+                CeVal { kind: CV_INT, tm: tim, ty: mkty, as_data: CeValAs { i: ma.vkind } },
+            );
+            unsafe self.obj_ptr(o).slots.set(
+                i_b as usize,
+                CeVal {
+                    kind: CV_BOOL,
+                    tm: 0,
+                    ty: Ast::builtin(BuiltinType::BT_BOOL),
+                    as_data: CeValAs {
+                        i: if ma.vkind == 0 {
+                            ma.ival;
+                        } else {
+                            0;
+                        },
+                    },
+                },
+            );
+            unsafe self.obj_ptr(o).slots.set(
+                i_i as usize,
+                CeVal {
+                    kind: CV_INT,
+                    tm: 0,
+                    ty: Ast::builtin(BuiltinType::BT_I64),
+                    as_data: CeValAs {
+                        i: if ma.vkind == 1 {
+                            ma.ival;
+                        } else {
+                            0;
+                        },
+                    },
+                },
+            );
+            unsafe self.obj_ptr(o).slots.set(i_s as usize, sv);
+            objs.push(CeVal { kind: CV_AGG, tm: tim, ty: mety, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } });
+        }
+        let n2 = objs.len() as u32;
+        let blk = self.ce_ti_block(tim, mety, mesz, &objs);
+        objs.free();
+        if blk == 0 && n2 != 0 {
+            return cv_nil();
+        }
+        return self.ce_ti_slice(slm, sln, tim, mety, mslty, blk, n2);
+    }
+
+    // Attach decl `own`'s meta slice to a just-built FieldInfo/VariantInfo object; false = failed.
+    fn ce_ti_attach_meta(
+        self: &mut Self,
+        member: CeVal,
+        dm: ModuleId,
+        own: NodeId,
+        tim: ModuleId,
+        strm: ModuleId,
+        strn: NodeId,
+        slm: ModuleId,
+        sln: NodeId,
+        sty: TypeId,
+        mety: TypeId,
+        mkty: TypeId,
+        mslty: TypeId,
+        mesz: u64,
+    ) bool {
+        let ms = self.ce_ti_meta_slice(dm, own, tim, strm, strn, slm, sln, sty, mety, mkty, mslty, mesz);
+        if ms.kind != CV_AGG {
+            return false;
+        }
+        let o = member.as_data.p.obj;
+        let op = self.obj_ptr(o);
+        if op == null {
+            return false;
+        }
+        let i_m = self.ce_ti_findf(unsafe op.dm, unsafe op.dn, "meta");
+        if i_m < 0 {
+            return false;
+        }
+        unsafe self.obj_ptr(o).slots.set(i_m as usize, ms);
+        return true;
     }
 
     // A FieldInfo (`tag < 0`: name/offset/size/kind, `aux` = the field type's TypeTag index) or
@@ -7493,8 +7737,136 @@ extend ConstEval {
         return ValRes { ok: true, v: out };
     }
 
+    // Binder metadata reads (`f.has_meta("k")` and friends) fold to per-copy constants under the
+    // interpreter, exactly as the emitter computes them.
+    fn ce_meta_call(self: &mut Self, m: ModuleId, id: NodeId) Rets {
+        let out = Rets { ok: false, n: 0 };
+        let a = self.ast_ptr(m);
+        let cn = *a.at_const(a.at_const(id).as_data.call.callee);
+        if cn.kind != NodeKind::NODE_MEMBER || cn.as_data.member.path {
+            return out;
+        }
+        let pr = self.ce_proj_of(m, cn.as_data.member.object);
+        if pr == null {
+            return out;
+        }
+        let mnm = self.name_text(m, cn.as_data.member.member);
+        let is_has = self.ce_span_is(m, mnm, "has_meta");
+        let is_b = self.ce_span_is(m, mnm, "meta_bool");
+        let is_i = self.ce_span_is(m, mnm, "meta_int");
+        let is_s = self.ce_span_is(m, mnm, "meta_str");
+        if !is_has && !is_b && !is_i && !is_s {
+            return out;
+        }
+        let args = a.at_const(id).as_data.call.args;
+        if args.len != 1 {
+            return out;
+        }
+        let a0 = *a.at_const(unsafe a.list(args)[0]);
+        if a0.kind != NodeKind::NODE_LITERAL {
+            return out;
+        }
+        let key = self.ce_src(m).slice(a0.span.start as usize + 1, a0.span.end as usize - 1);
+        let mut fdm: ModuleId = 0;
+        let node = if unsafe pr.vmode {
+            self.ce_proj_variant(unsafe pr.om, unsafe pr.owner, unsafe pr.k, &mut fdm);
+        } else {
+            self.ce_proj_field(unsafe pr.om, unsafe pr.owner, unsafe pr.k, &mut fdm);
+        };
+        let mut mi: i32 = -1;
+        if node != NODE_NONE {
+            let da = self.ast_ptr(fdm);
+            let dsrc = self.ce_src(fdm);
+            let nn = (unsafe da.metas).len();
+            for i in 0..nn {
+                let ma = *(unsafe da.metas).at(i);
+                if ma.owner == node && dsrc.slice(ma.key.start as usize, ma.key.end as usize) == key {
+                    mi = i as i32;
+                    break;
+                }
+            }
+        }
+        let mut ma2 = MetaAttr {
+            owner: NODE_NONE,
+            vkind: 0,
+            ival: 0,
+            key: tok::Span::empty(),
+            vspan: tok::Span::empty(),
+        };
+        if mi >= 0 {
+            ma2 = *(unsafe self.ast_ptr(fdm).metas).at(mi as usize);
+        }
+        let mut ret = Rets { ok: true, n: 1 };
+        if is_has {
+            ret.vals[0] = CeVal {
+                kind: CV_BOOL,
+                tm: 0,
+                ty: Ast::builtin(BuiltinType::BT_BOOL),
+                as_data: CeValAs {
+                    i: if mi >= 0 {
+                        1;
+                    } else {
+                        0;
+                    },
+                },
+            };
+            return ret;
+        }
+        if is_b {
+            ret.vals[0] = CeVal {
+                kind: CV_BOOL,
+                tm: 0,
+                ty: Ast::builtin(BuiltinType::BT_BOOL),
+                as_data: CeValAs {
+                    i: if mi >= 0 && ma2.vkind == 0 && ma2.ival != 0 {
+                        1;
+                    } else {
+                        0;
+                    },
+                },
+            };
+            return ret;
+        }
+        if is_i {
+            ret.vals[0] = CeVal {
+                kind: CV_INT,
+                tm: 0,
+                ty: Ast::builtin(BuiltinType::BT_I64),
+                as_data: CeValAs {
+                    i: if mi >= 0 && ma2.vkind == 1 {
+                        ma2.ival;
+                    } else {
+                        0;
+                    },
+                },
+            };
+            return ret;
+        }
+        // meta_str: a str view over the RAW value bytes (escape sequences stay as written)
+        let sh = self.pkg.prelude_lookup("str", true);
+        let sty2 = self.ce_type(m, id);
+        if sh.node == NODE_NONE || sty2 == TYPE_NONE {
+            return out;
+        }
+        let mut text = "";
+        if mi >= 0 && ma2.vkind == 2 {
+            let dsrc2 = self.ce_src(fdm);
+            text = dsrc2.slice(ma2.vspan.start as usize, ma2.vspan.end as usize);
+        }
+        let sv = self.ce_ti_str(sh.mid, sh.node, m, sty2, text);
+        if sv.kind != CV_AGG {
+            return out;
+        }
+        ret.vals[0] = sv;
+        return ret;
+    }
+
     fn ce_call(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Rets {
         let a = self.ast_ptr(m);
+        let mcv = self.ce_meta_call(m, id);
+        if mcv.ok {
+            return mcv;
+        }
         let mut callee = a.at_const(id).as_data.call.callee;
         let mut ck = a.at_const(callee).kind;
         if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
@@ -8438,6 +8810,35 @@ extend ConstEval {
     /// (am, at) codegen resolved through its substitution frames. Unmemoized -- the same call node
     /// emits once per monomorphized instance, each with its own T, so the (module, node) memo
     /// `eval_static` uses would serve the first instance's answer to all of them.
+    // The export path's materialization: like eval_type_info_static, but the TypeInfo decl comes
+    // from the prelude (there is no typed call node).
+    pub fn eval_type_info_export(self: &mut Self, m: ModuleId, rty: TypeId, am: ModuleId, at: TypeId) StaticRes {
+        let bad = StaticRes { ok: false, root: 0 };
+        if m as usize >= self.nmods || self.depth != 0 || self.nframes != 0 {
+            return bad;
+        }
+        let tih = self.pkg.prelude_lookup("TypeInfo", true);
+        if tih.node == NODE_NONE {
+            return bad;
+        }
+        self.steps = 0;
+        self.trap = "";
+        self.trap_kind = CE_TRAP_NONE;
+        self.trap_nframes = 0;
+        self.trap_in_constfn = false;
+        self.ce_objs_reset();
+        self.depth = 1;
+        let r0 = self.ce_type_info_decl(null, m, tih.mid, tih.node, rty, am, at);
+        self.depth = 0;
+        if !r0.ok || r0.n != 1 || r0.vals[0].kind != CV_AGG {
+            self.ce_objs_reset();
+            return bad;
+        }
+        let r = self.ce_capture(r0.vals[0]);
+        self.ce_objs_reset();
+        return r;
+    }
+
     pub fn eval_type_info_static(self: &mut Self, m: ModuleId, id: NodeId, am: ModuleId, at: TypeId) StaticRes {
         let bad = StaticRes { ok: false, root: 0 };
         if id == NODE_NONE || m as usize >= self.nmods || self.depth != 0 || self.nframes != 0 {

@@ -69,6 +69,9 @@ pub struct Parser<'a> {
     pub derive_start: u32,
     pub derive_end: u32,
     pub expand_derive: bool,
+    // `@reflect(key = value, ..)` entries pending on the next declaration; flushed with the owner
+    // by add_attrs_to (struct/enum/field/variant only -- anything else is an error).
+    pub pending_metas: Vector<MetaAttr>,
 }
 
 extend Parser {
@@ -88,6 +91,7 @@ extend Parser {
             derive_start: 0,
             derive_end: 0,
             expand_derive: true,
+            pending_metas: Vector::<MetaAttr>::new(),
         };
     }
 
@@ -949,18 +953,28 @@ extend Parser {
     }
 
     pub fn parse_field(self: &mut Self) NodeId {
+        let mut fattrs = self.parse_attributes(4);
+        self.reject_derive_here();
+        // span starts AFTER the attributes: the formatter prints them as leading trivia from the
+        // inter-field gap, so the field's own span must not swallow them
         let start = self.raw_peek().start();
         let is_public = self.match(TokenType::Pub);
         let name = self.identifier();
         self.expect(TokenType::Colon, "':'");
         let ty = self.parse_type();
-        return self.ast.add(
+        let fid = self.ast.add(
             Node {
                 kind: NodeKind::NODE_FIELD,
                 span: Span::new(start, self.node_span(ty).end),
                 as_data: NodeAs { field: FieldData { name: name, ty: ty, value: NODE_NONE, is_public: is_public } },
             },
         );
+        if fattrs.len() > 0 {
+            let sp0 = self.ast.at_const(fid).span;
+            self.errors.emit(sp0.start, sp0.end - sp0.start, format("only '@reflect' applies to a field declaration"));
+        }
+        self.add_attrs_to(&mut fattrs, fid);
+        return fid;
     }
 
     pub fn parse_fields(self: &mut Self) NodeList {
@@ -1046,7 +1060,10 @@ extend Parser {
     }
 
     pub fn parse_variant(self: &mut Self) NodeId {
+        let mut vattrs = self.parse_attributes(4);
+        self.reject_derive_here();
         let start = self.raw_peek().start();
+        let saved_metas = replace(&mut self.pending_metas, Vector::<MetaAttr>::new());
         let name = self.identifier();
         let mut payload = NodeList { start: 0, len: 0 };
         let mut struct_payload = false;
@@ -1061,7 +1078,7 @@ extend Parser {
         } else if self.match(TokenType::Equal) {
             value = self.parse_expression();
         }
-        return self.ast.add(
+        let vid = self.ast.add(
             Node {
                 kind: NodeKind::NODE_VARIANT,
                 span: Span::new(start, self.previous_end()),
@@ -1070,6 +1087,14 @@ extend Parser {
                 },
             },
         );
+        if vattrs.len() > 0 {
+            let sp0 = self.ast.at_const(vid).span;
+            self.errors.emit(sp0.start, sp0.end - sp0.start, format("only '@reflect' applies to a variant declaration"));
+        }
+        self.pending_metas.free();
+        self.pending_metas = saved_metas;
+        self.add_attrs_to(&mut vattrs, vid);
+        return vid;
     }
 
     pub fn parse_enum(self: &mut Self) NodeId {
@@ -1627,6 +1652,13 @@ extend Parser {
             self.add_attrs_to(&mut attrs, sid);
             return sid;
         }
+        // The item's own `@reflect` entries and `@derive` list survive the nested attribute scans
+        // inside its braces (fields and variants run parse_attributes too, whose stray guards would
+        // eat them).
+        let saved_metas = replace(&mut self.pending_metas, Vector::<MetaAttr>::new());
+        let saved_derives = replace(&mut self.derive_ifaces, Vector::<NodeId>::new());
+        let saved_dstart = self.derive_start;
+        let saved_dend = self.derive_end;
         if is_public && !self.check(TokenType::Fn) && !self.check(TokenType::Struct) && !self.check(TokenType::Union) && !self.check(
             TokenType::Enum,
         ) && !self.check(TokenType::Const) && !self.check(TokenType::Type) && !self.check(TokenType::Interface) && !self.check(
@@ -1697,6 +1729,12 @@ extend Parser {
                 return NODE_NONE;
             },
         };
+        self.pending_metas.free();
+        self.pending_metas = saved_metas;
+        self.derive_ifaces.free();
+        self.derive_ifaces = saved_derives;
+        self.derive_start = saved_dstart;
+        self.derive_end = saved_dend;
         self.validate_item_attrs(&mut attrs, id);
         self.add_attrs_to(&mut attrs, id);
         if self.derive_ifaces.len() > 0 {
@@ -4135,6 +4173,76 @@ extend Parser {
             }
             return false;
         }
+        if syntax.parts == 1 && self.text_is(ns, "reflect") {
+            // User metadata for the reflection descriptor: `@reflect(hidden)`,
+            // `@reflect(label = "Speed", max = 100)`. Keys with no value read as `true`. Stored in
+            // the metas side table; no Attr record survives.
+            if !syntax.has_args || Parser::attr_arg_count(&syntax) == 0 {
+                self.errors.emit(
+                    ns.start(),
+                    ns.len(),
+                    format(
+                        "attribute '@reflect' requires entries, e.g. '@reflect(hidden)' or '@reflect(label = \"x\", max = 100)'",
+                    ),
+                );
+                return false;
+            }
+            let count = Parser::attr_arg_count(&syntax);
+            let mut i: usize = 0;
+            while i < count {
+                let k = self.attr_arg(&syntax, i);
+                if k.kind() != TokenType::Identifier {
+                    self.errors.emit(k.start(), k.len(), format("expected a '@reflect' key name"));
+                    break;
+                }
+                let mut ma = MetaAttr { owner: NODE_NONE, vkind: 0, ival: 1, key: k.span(), vspan: Span::empty() };
+                i = i + 1;
+                if i < count && self.attr_arg(&syntax, i).kind() == TokenType::Equal {
+                    i = i + 1;
+                    let mut vok = i < count;
+                    if vok {
+                        let v = self.attr_arg(&syntax, i);
+                        if v.kind() == TokenType::True {
+                            ma.ival = 1;
+                        } else if v.kind() == TokenType::False {
+                            ma.ival = 0;
+                        } else if v.kind() == TokenType::IntegerLiteral {
+                            ma.vkind = 1;
+                            ma.ival = self.parse_attr_int(v);
+                        } else if v.kind() == TokenType::StringLiteral {
+                            ma.vkind = 2;
+                            ma.vspan = Span::new(v.start() + 1, v.end() - 1);
+                        } else {
+                            vok = false;
+                        }
+                    }
+                    if !vok {
+                        let at = if i < count {
+                            self.attr_arg(&syntax, i);
+                        } else {
+                            syntax.name;
+                        };
+                        self.errors.emit(
+                            at.start(),
+                            at.len(),
+                            format("a '@reflect' value is an integer, a string, 'true', or 'false'"),
+                        );
+                        break;
+                    }
+                    i = i + 1;
+                }
+                self.pending_metas.push(ma);
+                if i < count {
+                    if self.attr_arg(&syntax, i).kind() != TokenType::Comma {
+                        let at = self.attr_arg(&syntax, i);
+                        self.errors.emit(at.start(), at.len(), format("expected ',' between '@reflect' entries"));
+                        break;
+                    }
+                    i = i + 1;
+                }
+            }
+            return false;
+        }
         if syntax.parts == 1 && self.text_is(ns, "platform") {
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_PLATFORM as u8, arg: 0, str_span: Span::empty() };
             self.parse_platform_attr(&syntax, out);
@@ -4261,6 +4369,11 @@ extend Parser {
     }
 
     pub fn parse_attributes(self: &mut Self, cap: usize) Vector<Attr> {
+        // A stray pending `@reflect` (its position never reached add_attrs_to) is an error, not a
+        // silent transfer to whatever declaration comes next.
+        if self.pending_metas.len() > 0 {
+            self.flush_metas_to(NODE_NONE);
+        }
         let mut attrs = Vector::<Attr>::new();
         if !self.check(TokenType::At) {
             return attrs;
@@ -4281,6 +4394,33 @@ extend Parser {
             attr.owner = owner;
             self.ast.add_attr(attr);
         }
+        self.flush_metas_to(owner);
+    }
+
+    // Attach pending `@reflect` entries to their declaration -- or reject the position.
+    fn flush_metas_to(self: &mut Self, owner: NodeId) {
+        if self.pending_metas.len() == 0 {
+            return;
+        }
+        let mut ok = owner != NODE_NONE;
+        if ok {
+            let k = self.ast.at_const(owner).kind;
+            ok = k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_FIELD || k == NodeKind::NODE_VARIANT;
+        }
+        for i in 0..self.pending_metas.len() {
+            let mut ma = *self.pending_metas.at(i);
+            if !ok {
+                self.errors.emit(
+                    ma.key.start,
+                    ma.key.end - ma.key.start,
+                    format("'@reflect' applies to a struct, enum, field, or variant declaration"),
+                );
+                break;
+            }
+            ma.owner = owner;
+            self.ast.add_meta(ma);
+        }
+        self.pending_metas.clear();
     }
 
     pub fn validate_item_attrs(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) {
@@ -4436,5 +4576,6 @@ extend Parser as Free {
         self.errors.free();
         self.nrets.free();
         self.derive_ifaces.free();
+        self.pending_metas.free();
     }
 }

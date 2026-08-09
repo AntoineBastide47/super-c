@@ -442,6 +442,89 @@ fn main() i32 {
 }
 
 @test
+fn reflect_metadata() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"@reflect(entity, version = 3)
+struct Player {
+  @reflect(render, label = "Speed", max = 100)
+  pub speed: i32,
+  pub internal: i64,
+  @reflect(render)
+  pub hp: u8,
+}
+@reflect(entity)
+enum Mode { Off, @reflect(hidden)
+On, }
+fn touch<V>(x: &V) usize { let _ = x; return sizeof(V); }
+fn render_all<T>(v: &T) i64 {
+  let mut acc: i64 = 0;
+  inline for f in fields(v) {
+    if f.has_meta("render") {
+      acc = acc + f.meta_int("max") + f.meta_str("label").len() as i64 + touch(&f.value) as i64;
+    }
+  }
+  return acc;
+}
+const fn cfold() i64 {
+  let p = Player { speed: 1, internal: 2, hp: 3 };
+  return render_all(&p);
+}
+static_assert(cfold() == 110, "meta binder reads fold in CTFE");
+const fn cmeta() bool {
+  let ti = type_info::<Player>();
+  if !ti.has_meta("entity") { return false; }
+  switch ti.fields.get(0).meta("label") {
+    Some(m) => { return m.kind == MetaKind::Str && m.s == "Speed"; },
+    None => { return false; },
+  };
+}
+static_assert(cmeta(), "descriptor metadata folds in CTFE");
+extern "C" {
+    fn __sc_reflect_types(n: *mut usize) *const *const void;
+}
+fn main() i32 {
+  let p = Player { speed: 1, internal: 2, hp: 3 };
+  if render_all(&p) != 110 { return 1; }
+  let ti = type_info::<Player>();
+  switch ti.fields.get(0).meta("max") {
+    Some(m) => { if m.kind != MetaKind::Int || m.i != 100 { return 2; } },
+    None => { return 3; },
+  };
+  if ti.fields.get(1).has_meta("render") { return 4; }
+  let tm = type_info::<Mode>();
+  switch tm.variant("On") {
+    Some(v) => { if !v.has_meta("hidden") { return 5; } },
+    None => { return 6; },
+  };
+  let mut n: usize = 0;
+  let arr = unsafe __sc_reflect_types(&mut n);
+  if n != 2 { return 7; }
+  let mut entities: usize = 0;
+  for i in 0..n {
+    let t = unsafe &*((unsafe arr[i]) as *const TypeInfo);
+    if t.has_meta("entity") { entities = entities + 1; }
+  }
+  if entities != 2 { return 8; }
+  print("ok\n");
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("main.c", "touch__i32((&"), "the tagged copies call their callee");
+    assert(!p.gen_has("main.c", "touch__i64((&"), "the untagged copy's call is never emitted");
+    assert(p.gen_has("main.c", "sc_typeinfo_Player"), "the tagged type exports its descriptor");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("ok"), "metadata reads, folding, and the registry all agree");
+}
+
+@test
 fn std_reflection_defaults() {
     let p = cli::proj_new();
     p.mkfile("lib.spc", r#"@derive(Eq, Hash, Format)

@@ -202,6 +202,13 @@ static inline __attribute__((unused)) void __sc_safepoint(void) {
   __sc_pre_tick = 2048;
   if (__sc_pre_hook) __sc_pre_hook();
 }
+/* reflection registry (super_rt.c): `@reflect`-tagged concrete types register their exported
+   `sc_typeinfo_<name>` descriptor at startup (constructor order). External tools dlopen the binary
+   and walk the SAME static descriptors the program reads: __sc_reflect_types yields the registered
+   pointers (each a `const TypeInfo *`; layout per std/core.spc, policed by the emitted layout
+   asserts). Fixed capacity: no allocation, so the leak tracker stays silent. */
+void __sc_reflect_register(const void *__ti);
+const void **__sc_reflect_types(size_t *__n);
 /* leak tracker (super_rt.c): interposes the emitted code's malloc/realloc/free call sites.
    Inert unless the SC_LEAK_CHECK environment variable is set; compile with -DSC_NO_LEAK_CHECK to
    drop the interposition entirely (super_rt.c still links: the coroutine runtime calls sc_lk_bt_*). */
@@ -245,6 +252,19 @@ _Thread_local int32_t __sc_pre_tick = 2048;
 void (*__sc_pre_hook)(void) = 0;
 /* Installed by a scheduler before it starts any worker, so every safepoint's read happens-after it. */
 void __sc_set_preempt_hook(void (*__f)(void)) { __sc_pre_hook = __f; }
+
+/* Reflection registry (see super_rt.h). A fixed static table: registration happens in constructors,
+   before main and before any allocator interposition question can arise. */
+#define SC_REFLECT_MAX 1024
+static const void *__sc_refl[SC_REFLECT_MAX];
+static size_t __sc_refl_n = 0;
+void __sc_reflect_register(const void *__ti) {
+  if (__sc_refl_n < SC_REFLECT_MAX) __sc_refl[__sc_refl_n++] = __ti;
+}
+const void **__sc_reflect_types(size_t *__n) {
+  if (__n) *__n = __sc_refl_n;
+  return __sc_refl;
+}
 #include <stdint.h>
 #if defined(__has_include) && !defined(__ANDROID__)
 /* bionic ships <execinfo.h> but only DECLARES backtrace()/backtrace_symbols() from API 33, so the
@@ -1581,6 +1601,83 @@ extend Codegen {
     }
     // dyn_cast::<T>(d): compare the vtable's tid string against T's mangled name; Some wraps the
     // data pointer, None otherwise.
+    // `@reflect`-tagged CONCRETE types export their descriptor: a named `const TypeInfo
+    // sc_typeinfo_<name>` global (the same static graph type_info materializes) plus a constructor
+    // that registers it, so a dlopen'ing tool can walk every tagged type through
+    // __sc_reflect_types. A generic declaration has no single descriptor and is skipped; its
+    // instances stay reachable through type_info.
+    fn emit_reflect_exports(self: &mut Self) {
+        if self.ceval() == null || self.package == null {
+            return;
+        }
+        let items = self.program_items();
+        let ids = self.cur_ast().list(items);
+        for i in 0..items.len {
+            let nid = unsafe ids[i as usize];
+            let nk = self.cur_ast().at_const(nid).kind;
+            if nk != NodeKind::NODE_STRUCT && nk != NodeKind::NODE_ENUM {
+                continue;
+            }
+            if self.cur_ast().at_const(nid).as_data.aggregate.generics.len != 0 {
+                continue;
+            }
+            let mut tagged = false;
+            let nmet = (unsafe self.cur_ast().metas).len();
+            for k in 0..nmet {
+                if (unsafe self.cur_ast().metas).at(k).owner == nid {
+                    tagged = true;
+                    break;
+                }
+            }
+            if !tagged {
+                continue;
+            }
+            let tk = if nk == NodeKind::NODE_ENUM {
+                TypeKind::TYPE_ENUM;
+            } else {
+                TypeKind::TYPE_STRUCT;
+            };
+            let tt = self.cur_ast().intern_type(Ty { kind: tk, module: self.cur_module(), as_data: TyAs { decl: nid } });
+            let tih = self.package.prelude_lookup("TypeInfo", true);
+            if tih.node == NODE_NONE {
+                continue;
+            }
+            let rty = self.cur_ast().intern_type(
+                Ty { kind: TypeKind::TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } },
+            );
+            let sr = self.ceval().eval_type_info_export(self.cur_module(), rty, self.cur_module(), tt);
+            if !sr.ok {
+                continue;
+            }
+            let mut qn = Buf200 {};
+            self.render_qualified(
+                self.cur_module(),
+                self.cur_ast().at_const(nid).as_data.aggregate.name,
+                &mut qn[0],
+                160,
+            );
+            let mut nm = Buf256 {};
+            unsafe stdio::snprintf(&mut nm[0], 256, "sc_typeinfo_%s".ptr() as *const char, &qn[0]);
+            self.emit_str("\n/* @reflect export */\n");
+            if !self.emit_static_group(&nm[0], sr.root, false) {
+                continue;
+            }
+            let t = self.cg_static_type(sr.root);
+            let mut d = Buf512 {};
+            self.render_type_id(t, &nm[0], &mut d[0], 512);
+            self.emit_str("const ");
+            self.emit_cstr(&d[0]);
+            self.emit_str(" = ");
+            self.emit_static_init(&nm[0], sr.root);
+            self.emit_str(";\n");
+            self.buf.format_into(
+                "__attribute__((constructor)) static void __sc_reg_{}(void) {{ __sc_reflect_register((const void *)&{}); }}\n",
+                diag::cstr(&qn[0]),
+                diag::cstr(&nm[0]),
+            );
+        }
+    }
+
     // type_info::<T>(): the descriptor is pure static data, so the call site becomes a GNU statement
     // expression holding block-scope `static const` objects (the same graph the CTFE path captures)
     // and yielding the TypeInfo. T resolves through the active substitution frames, so a call inside
@@ -2103,14 +2200,273 @@ extend Codegen {
 
     // -1 unknown, else 0/1: a comparison of a binder constant (f.index, v.index, v.tag, v.payload)
     // against an integer the evaluator can fold, decided for the copy being emitted.
+    // The shared tail of the binder-const `if` fold: the constant side `mv` against the literal
+    // side, honoring operand order for the ordered comparisons.
+    fn cg_binder_cond_cmp(self: &mut Self, cond: NodeId, mv: i64, lit: NodeId, mem_left: bool) i32 {
+        let ce = self.ceval();
+        if ce == null {
+            return -1;
+        }
+        let cv = ce.eval(self.cur_module(), lit);
+        if cv.kind != ce::CONST_INT {
+            return -1;
+        }
+        let lv = cv.as_data.i;
+        let op = self.cur_ast().at_const(cond).as_data.binary.op;
+        let mut r = false;
+        if op == TokenType::EqualEqual {
+            r = mv == lv;
+        } else if op == TokenType::BangEqual {
+            r = mv != lv;
+        } else if op == TokenType::LessThan {
+            r = if mem_left {
+                mv < lv;
+            } else {
+                lv < mv;
+            };
+        } else if op == TokenType::GreaterThan {
+            r = if mem_left {
+                mv > lv;
+            } else {
+                lv > mv;
+            };
+        } else if op == TokenType::LessThanEqual {
+            r = if mem_left {
+                mv <= lv;
+            } else {
+                lv <= mv;
+            };
+        } else if op == TokenType::GreaterThanEqual {
+            r = if mem_left {
+                mv >= lv;
+            } else {
+                lv >= mv;
+            };
+        } else {
+            return -1;
+        }
+        return if r {
+            1;
+        } else {
+            0;
+        };
+    }
+
+    // The current copy's `@reflect` entry for the key at [key_lo, key_hi) in THIS module's source:
+    // the index into the decl module's metas table, -1 when absent (or the copy has no declaration).
+    // Shared by the metadata-call emitter and the binder-const `if` fold.
+    fn cg_binder_meta(self: &mut Self, lid: NodeId, key_lo: u32, key_hi: u32, out_dm: &mut ModuleId) i32 {
+        let cur = self.cg_proj_cur(lid);
+        if cur < 0 {
+            return -1;
+        }
+        let lty = self.cur_ast().type_of(lid);
+        if lty == TYPE_NONE || self.type_at(lty).kind != TypeKind::TYPE_FIELD_PROJECTION {
+            return -1;
+        }
+        let owner = self.subst_resolve(self.type_at(lty).as_data.proj.owner);
+        let mut dm: ModuleId = 0;
+        let mut node = NODE_NONE;
+        if self.cg_proj_pmode(lid) {
+            let outer = self.cg_proj_outer(lid);
+            let vk = self.cg_proj_cur(outer);
+            if outer != NODE_NONE && vk >= 0 {
+                let vid = self.cg_proj_variant_node(owner, vk, &mut dm);
+                if vid != NODE_NONE {
+                    node = self.cg_proj_payload_node(dm, vid, cur);
+                }
+            }
+        } else if self.cg_proj_vmode(lid) {
+            node = self.cg_proj_variant_node(owner, cur, &mut dm);
+        } else {
+            node = self.cg_proj_field_node(owner, cur, &mut dm);
+        }
+        if node == NODE_NONE {
+            return -1;
+        }
+        let a = self.mod_ast(dm);
+        let n = (unsafe a.metas).len();
+        for i in 0..n {
+            let ma = *(unsafe a.metas).at(i);
+            if ma.owner == node && spans_eq2(
+                self.mod_src(self.cur_module()),
+                tok::Span::new(key_lo, key_hi),
+                self.mod_src(dm),
+                ma.key,
+            ) {
+                *out_dm = dm;
+                return i as i32;
+            }
+        }
+        return -1;
+    }
+
+    // A binder metadata CALL's constant: kind 0 = bool (has_meta/meta_bool, `out` 0/1), 1 = int
+    // (meta_int), 2 = string (meta_str, `out` = the metas index or -1, `out_dm` its module);
+    // -1 = not a metadata call.
+    fn cg_meta_call_val(self: &mut Self, id: NodeId, out: &mut i64, out_dm: &mut ModuleId) i32 {
+        if self.cur_ast().at_const(id).kind != NodeKind::NODE_CALL {
+            return -1;
+        }
+        let cn = *self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee);
+        if cn.kind != NodeKind::NODE_MEMBER || cn.as_data.member.path {
+            return -1;
+        }
+        let mobj = cn.as_data.member.object;
+        if self.cur_ast().at_const(mobj).kind != NodeKind::NODE_IDENTIFIER {
+            return -1;
+        }
+        let lid = self.cur_ast().resolution(mobj);
+        if lid == NODE_NONE || self.cur_ast().at_const(lid).kind != NodeKind::NODE_INLINE_FOR {
+            return -1;
+        }
+        let src = self.mod_src(self.cur_module());
+        let mnm = self.name_span(cn.as_data.member.member);
+        let is_has = span_is(src, mnm, "has_meta".ptr() as *const char);
+        let is_b = span_is(src, mnm, "meta_bool".ptr() as *const char);
+        let is_i = span_is(src, mnm, "meta_int".ptr() as *const char);
+        let is_s = span_is(src, mnm, "meta_str".ptr() as *const char);
+        if !is_has && !is_b && !is_i && !is_s {
+            return -1;
+        }
+        let args = self.cur_ast().at_const(id).as_data.call.args;
+        if args.len != 1 {
+            return -1;
+        }
+        let a0 = *self.cur_ast().at_const(unsafe self.cur_ast().list(args)[0]);
+        if a0.kind != NodeKind::NODE_LITERAL {
+            return -1;
+        }
+        let ksp = a0.span;
+        let mut dm: ModuleId = 0;
+        let mi = self.cg_binder_meta(lid, ksp.start + 1, ksp.end - 1, &mut dm);
+        if is_s {
+            *out = mi;
+            *out_dm = dm;
+            return 2;
+        }
+        let mut ma = ast::MetaAttr {
+            owner: NODE_NONE,
+            vkind: 0,
+            ival: 0,
+            key: tok::Span::empty(),
+            vspan: tok::Span::empty(),
+        };
+        if mi >= 0 {
+            ma = *(unsafe self.mod_ast(dm).metas).at(mi as usize);
+        }
+        if is_has {
+            *out = if mi >= 0 {
+                1;
+            } else {
+                0;
+            };
+            return 0;
+        }
+        if is_b {
+            *out = if mi >= 0 && ma.vkind == 0 && ma.ival != 0 {
+                1;
+            } else {
+                0;
+            };
+            return 0;
+        }
+        *out = if mi >= 0 && ma.vkind == 1 {
+            ma.ival;
+        } else {
+            0;
+        };
+        return 1;
+    }
+
+    // `f.has_meta("k")` and friends emit as the per-copy CONSTANT the metadata resolves to.
+    fn emit_binder_meta_call(self: &mut Self, id: NodeId) bool {
+        let mut v: i64 = 0;
+        let mut dm: ModuleId = 0;
+        let k = self.cg_meta_call_val(id, &mut v, &mut dm);
+        if k < 0 {
+            return false;
+        }
+        if k == 2 {
+            // the string value's RAW source bytes (escape sequences stay as written, matching the
+            // compile-time evaluator's view), C-escaped just enough to re-quote
+            self.emit_str("(str){ (const uint8_t *)\"");
+            let mut n2: u64 = 0;
+            if v >= 0 {
+                let ma = *(unsafe self.mod_ast(dm).metas).at(v as usize);
+                if ma.vkind == 2 {
+                    let msrc = self.mod_src(dm);
+                    let mut i2 = ma.vspan.start as usize;
+                    while i2 < ma.vspan.end as usize {
+                        let b = msrc.byte_at(i2);
+                        if b == b'"' || b == b'\\' {
+                            self.buf.push_byte(b'\\');
+                            self.buf.push_byte(b);
+                        } else if b < 0x20 as u8 {
+                            self.emit_octal_escape(b);
+                        } else {
+                            self.buf.push_byte(b);
+                        }
+                        n2 = n2 + 1;
+                        i2 = i2 + 1;
+                    }
+                }
+            }
+            self.buf.format_into("\", {} }}", n2);
+            return true;
+        }
+        self.buf.format_into("{}", v);
+        return true;
+    }
+
     fn cg_binder_cond(self: &mut Self, cond: NodeId) i32 {
         let a = self.cur_ast();
+        // metadata predicates fold too: `if f.has_meta("k")`, `if !f.has_meta("k")`
+        if a.at_const(cond).kind == NodeKind::NODE_CALL {
+            let mut mv0: i64 = 0;
+            let mut mdm0: ModuleId = 0;
+            let mk = self.cg_meta_call_val(cond, &mut mv0, &mut mdm0);
+            if mk == 0 {
+                return if mv0 != 0 {
+                    1;
+                } else {
+                    0;
+                };
+            }
+            return -1;
+        }
+        if a.at_const(cond).kind == NodeKind::NODE_UNARY && a.at_const(cond).as_data.unary.op == TokenType::Bang {
+            let inner = self.cg_binder_cond(a.at_const(cond).as_data.unary.operand);
+            if inner >= 0 {
+                return 1 - inner;
+            }
+            return -1;
+        }
         if a.at_const(cond).kind != NodeKind::NODE_BINARY {
             return -1;
         }
         let b = a.at_const(cond).as_data.binary;
         let mut mem = b.left;
         let mut lit = b.right;
+        // a metadata call on either side is a per-copy constant like the plain members below
+        {
+            let mut mmv: i64 = 0;
+            let mut mdm2: ModuleId = 0;
+            let mut mside = b.left;
+            let mut mk2 = self.cg_meta_call_val(mside, &mut mmv, &mut mdm2);
+            if mk2 != 0 && mk2 != 1 {
+                mside = b.right;
+                mk2 = self.cg_meta_call_val(mside, &mut mmv, &mut mdm2);
+            }
+            if mk2 == 0 || mk2 == 1 {
+                let mlit = if mside == b.left {
+                    b.right;
+                } else {
+                    b.left;
+                };
+                return self.cg_binder_cond_cmp(cond, mmv, mlit, mside == b.left);
+            }
+        }
         if a.at_const(mem).kind != NodeKind::NODE_MEMBER {
             mem = b.right;
             lit = b.left;
@@ -2151,53 +2507,7 @@ extend Codegen {
         } else {
             return -1;
         }
-        let ce = self.ceval();
-        if ce == null {
-            return -1;
-        }
-        let cv = ce.eval(self.cur_module(), lit);
-        if cv.kind != ce::CONST_INT {
-            return -1;
-        }
-        let lv = cv.as_data.i;
-        let op = b.op;
-        let mut r = false;
-        if op == TokenType::EqualEqual {
-            r = mv == lv;
-        } else if op == TokenType::BangEqual {
-            r = mv != lv;
-        } else if op == TokenType::LessThan {
-            r = if mem == b.left {
-                mv < lv;
-            } else {
-                lv < mv;
-            };
-        } else if op == TokenType::GreaterThan {
-            r = if mem == b.left {
-                mv > lv;
-            } else {
-                lv > mv;
-            };
-        } else if op == TokenType::LessThanEqual {
-            r = if mem == b.left {
-                mv <= lv;
-            } else {
-                lv <= mv;
-            };
-        } else if op == TokenType::GreaterThanEqual {
-            r = if mem == b.left {
-                mv >= lv;
-            } else {
-                lv >= mv;
-            };
-        } else {
-            return -1;
-        }
-        return if r {
-            1;
-        } else {
-            0;
-        };
+        return self.cg_binder_cond_cmp(cond, mv, lit, mem == b.left);
     }
 
     // The active field index for `binder`'s fields-loop, -1 when none is being emitted.
@@ -6291,6 +6601,9 @@ extend Codegen {
             return;
         }
         if self.emit_expect_builtin(id) {
+            return;
+        }
+        if self.emit_binder_meta_call(id) {
             return;
         }
         // `x.free()` intrinsic on an unresolved generic receiver
@@ -17825,6 +18138,7 @@ extend Codegen {
             self.phase_auto_frees();
             self.emit_dyn_tables();
             self.phase_bodies();
+            self.emit_reflect_exports();
             self.emit_test_wrappers();
         } else {
             self.emit_cstr(super_rt_includes());
@@ -17842,6 +18156,7 @@ extend Codegen {
             self.phase_auto_frees();
             self.emit_dyn_tables();
             self.phase_bodies();
+            self.emit_reflect_exports();
             self.emit_test_wrappers();
         }
         let src = self.source;

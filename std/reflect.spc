@@ -1,8 +1,68 @@
-// Reflection-derived operations: each is written ONCE over `fields(v)` / `variants(v)` and
-// monomorphizes per concrete type into exactly the code a hand-written version would be -- no
-// runtime type walk, no erasure. The per-field bounds (Format, Hash) are proven per field at each
-// use site; a field that lacks one names itself in the diagnostic. `Format` and `Hash` use the
-// `reflect_any_*` pair as their DEFAULT bodies, so a bare `extend T as Format {}` derives them.
+// Reflection-derived operations, and the reference for the COMPILE-TIME REFLECTION intrinsics they
+// are written over. The intrinsics are compiler constructs, not functions -- no declaration exists
+// anywhere, so this header is their documentation.
+//
+//   type_info::<T>()   A non-owning `TypeInfo` descriptor of T (name, kind, size, align, fields,
+//                      variants, meta; see std/core.spc). Folds at compile time; a runtime use
+//                      reads static data. Cannot describe an opaque FFI type.
+//   zeroed::<T>()      An all-zero-bytes T. `unsafe`: zero bytes are not a valid value of every
+//                      type. It is the seed the reflection constructors fill field by field --
+//                      releasing an all-zero value is a no-op for every owning std type.
+//   fields(&v)         The field binder: `inline for f in fields(&v) { .. }` typechecks the body
+//                      ONCE against a symbolic per-field type and the emitter unrolls one copy per
+//                      field, each with the field's concrete type -- no runtime walk, no erasure.
+//                      Subjects must be references; `fields(&mut v)` makes each `f.value` a mutable
+//                      place. Iterates a struct, tuple, or union (or a type parameter standing for
+//                      one; on an enum the loop simply has zero copies).
+//   variants(&e)       The variant binder, over an enum's declaration order. `v.is_active` is the
+//                      only member that reads the subject; everything else is a per-copy constant.
+//   payloads(v)        The payload sub-binder of the ACTIVE variants loop: it takes the variants
+//                      BINDER itself (`inline for p in payloads(v)`), never a value, and projects
+//                      through the outer loop's subjects.
+//
+// Every binder form exists only as the iterable of an `inline for` (a `parallel for` or a stored
+// value is rejected), and a closure inside the body may not capture the binder -- its type differs
+// per copy. Binder members:
+//
+//   f.name / f.index               `str<'static>` / `usize` copy constants ("_0", "_1", .. for
+//                                  tuples).
+//   f.value                        THE field itself, at its own type: pass `&f.value` (or
+//                                  `&mut f.value` through a `&mut` subject) to a generic callee and
+//                                  it monomorphizes per field. The bound that callee places on its
+//                                  parameter is proven PER FIELD, and a failing field names itself
+//                                  in the diagnostic.
+//   f.offset / f.size / f.kind     C-layout byte offset, sizeof, and the `TypeTag` of the field's
+//                                  type.
+//   v.tag / v.payload / v.name     The variant's discriminant (the enum CONSTANT's value for a
+//                                  payload-less enum), its payload count, and its name.
+//   v.is_active                    Whether the subject currently holds this variant.
+//   p.value / p.index / p.name     One payload of the active variant, like a field.
+//
+// PAIRED subjects: `fields(&a, &b)` / `variants(&a, &b)` bind a second subject of the SAME type.
+// `f.other` (fields, payloads) is the second subject's same field -- always read-only -- and
+// `v.other_active` tests the second subject's tag. This is what field-wise equality, ordering, and
+// clone-into are built from; there is no way to reach a second value's field without it.
+//
+// METADATA: `@reflect(key, key = 100, key = "text", ..)` on a struct/enum/field/variant attaches
+// `MetaInfo` entries the descriptor carries (`ti.meta`, `ti.fields.get(i).meta`, `VariantInfo.meta`;
+// lookups via `.meta("key")` / `.has_meta("key")`). Inside a binder body, `f.has_meta("k")`,
+// `f.meta_bool("k")`, `f.meta_int("k")`, and `f.meta_str("k")` are PER-COPY CONSTANTS (a missing
+// key reads false / 0 / ""; the key must be a string literal), and an `if` over them folds at
+// emission -- the untagged copies' bodies are never emitted. A `@reflect` tag on a CONCRETE type
+// additionally EXPORTS its descriptor as the C global `sc_typeinfo_<name>` and registers it at
+// startup: an external tool reads `__sc_reflect_types` (super_rt.h) and walks the same statics the
+// program uses. String values keep their RAW source bytes (escape sequences are not processed).
+//
+// All of it works under the compile-time evaluator (`const fn`, static_assert), including writes
+// through `&mut f.value` -- except `zeroed` (runtime only) and payload-less enums (their subject is
+// not an object). `if` conditions on per-copy constants (`v.payload == 1`, `f.index != 0`,
+// `f.has_meta("k")`) fold at emission, so the untaken copy's body is never emitted at all.
+//
+// The derive helpers below are each written ONCE over these binders and monomorphize per concrete
+// type into exactly the code a hand-written version would be. `Format`/`Hash`/`Eq`/`Ord`/`Clone`/
+// `Default` use them as DEFAULT bodies, so a bare `extend T as I {}` -- or `@derive(I, ..)` on the
+// declaration, which expands to exactly those extends -- derives the implementation; defining the
+// method overrides it.
 
 /// `"Name { a: 1, b: x }"` for any struct, tuple, or union whose fields all satisfy `Format`.
 pub fn reflect_string<T>(v: &T) String {

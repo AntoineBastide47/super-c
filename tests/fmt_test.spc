@@ -40,6 +40,15 @@ fn golden_for_modifiers() {
 }
 
 @test
+fn golden_reflect() {
+    // `@reflect` prints as attribute trivia at type AND field positions, verbatim.
+    expect_fmt(
+        "@reflect(entity)\nstruct P {\n    @reflect(render, max = 100)\n    x: i32,\n}\n",
+        "@reflect(entity)\nstruct P {\n    @reflect(render, max = 100)\n    x: i32,\n}\n",
+    );
+}
+
+@test
 fn golden_derive() {
     // `@derive` prints as attribute trivia, verbatim; the synthesized extends never reach the
     // formatter's AST.

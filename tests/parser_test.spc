@@ -656,6 +656,23 @@ fn attributes() {
 }
 
 @test
+fn reflect_attribute() {
+    let c = h::parse_ast(
+        "@reflect(entity, version = 3)\nstruct P {\n    @reflect(render, label = \"Speed\")\n    x: i32,\n    y: u8,\n}\n@reflect(kindtag = \"mode\")\nenum E {\n    @reflect(hidden)\n    A,\n    B,\n}\n",
+    );
+    assert(c.errors == 0, "@reflect parses at type, field, and variant positions");
+    assert(c.ast.metas.len() == 6, "six entries recorded");
+    assert(h::parse_has_error("@reflect(x)\nfn m() {}\n"), "@reflect on a fn rejected");
+    assert(h::parse_has_error("@reflect\nstruct S { x: i32, }\n"), "argument-less @reflect rejected");
+    assert(h::parse_has_error("@reflect()\nstruct S { x: i32, }\n"), "empty @reflect rejected");
+    assert(h::parse_has_error("@reflect(k = 1.5)\nstruct S { x: i32, }\n"), "a float value rejected");
+    assert(
+        h::parse_has_error("struct S {\n    @c.packed\n    x: i32,\n}\n"),
+        "non-reflect attributes rejected at field position",
+    );
+}
+
+@test
 fn derive_attribute() {
     let c = h::parse_ast("@derive(Format, Hash)\nstruct P { x: i32, }\n");
     assert(c.errors == 0, "@derive parses");

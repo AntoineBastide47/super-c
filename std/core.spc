@@ -1408,14 +1408,52 @@ pub enum TypeTag {
     Opaque,
 }
 
+/// The value form of one `@reflect(key = value)` entry. A bare key (`@reflect(hidden)`) is `Bool`
+/// with `b == true`.
+pub enum MetaKind {
+    Bool,
+    Int,
+    Str,
+}
+
+/// One `@reflect` entry attached to a type, field, or variant declaration. A value of views: it
+/// owns nothing. Exactly one of `b`/`i`/`s` is meaningful, named by `kind`; the inactive slots
+/// read false / 0 / "".
+pub struct MetaInfo {
+    pub name: str<'static>,
+    pub kind: MetaKind,
+    pub b: bool,
+    pub i: i64,
+    pub s: str<'static>,
+}
+
 /// One field of a reflected struct or union. `offset` is the byte offset in the C layout the
 /// compiled program actually uses; for a union every field reports offset 0. `kind` is the tag of
-/// the field's own type (one level -- reflect that type itself to go deeper).
+/// the field's own type (one level -- reflect that type itself to go deeper). `meta` holds the
+/// declaration's `@reflect` entries, in written order.
 pub struct FieldInfo {
     pub name: str<'static>,
     pub offset: usize,
     pub size: usize,
     pub kind: TypeTag,
+    pub meta: Slice<'static, MetaInfo>,
+}
+
+extend FieldInfo {
+    /// The first `@reflect` entry named `name`, or None.
+    pub const fn meta(self: &FieldInfo, name: str) Option<MetaInfo> {
+        for i in 0..self.meta.len {
+            let m = self.meta.get(i);
+            if m.name == name {
+                return Option::<MetaInfo>::Some(*m);
+            }
+        }
+        return Option::<MetaInfo>::None;
+    }
+
+    pub const fn has_meta(self: &FieldInfo, name: str) bool {
+        return self.meta(name).is_some();
+    }
 }
 
 /// One variant of a reflected enum. `tag` is the value the variant has at runtime -- the declared
@@ -1425,6 +1463,24 @@ pub struct VariantInfo {
     pub name: str<'static>,
     pub tag: i32,
     pub payload: usize,
+    pub meta: Slice<'static, MetaInfo>,
+}
+
+extend VariantInfo {
+    /// The first `@reflect` entry named `name`, or None.
+    pub const fn meta(self: &VariantInfo, name: str) Option<MetaInfo> {
+        for i in 0..self.meta.len {
+            let m = self.meta.get(i);
+            if m.name == name {
+                return Option::<MetaInfo>::Some(*m);
+            }
+        }
+        return Option::<MetaInfo>::None;
+    }
+
+    pub const fn has_meta(self: &VariantInfo, name: str) bool {
+        return self.meta(name).is_some();
+    }
 }
 
 /// The result of `type_info::<T>()`, a compiler intrinsic that folds at compile time -- there is no
@@ -1443,6 +1499,7 @@ pub struct TypeInfo {
     pub len: usize,
     pub fields: Slice<'static, FieldInfo>,
     pub variants: Slice<'static, VariantInfo>,
+    pub meta: Slice<'static, MetaInfo>,
 }
 
 extend TypeInfo {
@@ -1456,6 +1513,21 @@ extend TypeInfo {
             }
         }
         return Option::<FieldInfo>::None;
+    }
+
+    /// The first `@reflect` entry named `name` on the TYPE declaration itself, or None.
+    pub const fn meta(self: &TypeInfo, name: str) Option<MetaInfo> {
+        for i in 0..self.meta.len {
+            let m = self.meta.get(i);
+            if m.name == name {
+                return Option::<MetaInfo>::Some(*m);
+            }
+        }
+        return Option::<MetaInfo>::None;
+    }
+
+    pub const fn has_meta(self: &TypeInfo, name: str) bool {
+        return self.meta(name).is_some();
     }
 
     /// The variant named `name`, or None.

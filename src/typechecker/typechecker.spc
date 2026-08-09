@@ -8821,6 +8821,71 @@ extend TypeChecker {
         let callee_id = a.at_const(id).as_data.call.callee;
         let pck = a.at_const(callee_id).kind;
         let mut callee = TYPE_NONE;
+        // Binder metadata reads -- `f.has_meta("k")` / `f.meta_bool` / `f.meta_int` / `f.meta_str`
+        // on a fields/variants/payloads binder: per-copy CONSTANTS the emitter (and the binder-const
+        // `if` elision) computes from the declaration's `@reflect` entries. The key must be a string
+        // LITERAL; a missing key reads false / 0 / "".
+        if pck == NodeKind::NODE_MEMBER && !a.at_const(callee_id).as_data.member.path {
+            let mobj = a.at_const(callee_id).as_data.member.object;
+            if a.at_const(mobj).kind == NodeKind::NODE_IDENTIFIER {
+                let blid = a.resolution(mobj);
+                if blid != NODE_NONE && a.at_const(blid).kind == NodeKind::NODE_INLINE_FOR && a.type_of(blid) != TYPE_NONE && self.type_at(
+                    a.type_of(blid),
+                ).kind == TypeKind::TYPE_FIELD_PROJECTION {
+                    let mnm = self.name_span(a.at_const(callee_id).as_data.member.member);
+                    let is_has = span_is(self.source, mnm, "has_meta");
+                    let is_b = span_is(self.source, mnm, "meta_bool");
+                    let is_i = span_is(self.source, mnm, "meta_int");
+                    let is_s = span_is(self.source, mnm, "meta_str");
+                    if is_has || is_b || is_i || is_s {
+                        switch self.proj_cbase.get(&blid) {
+                            Some(cb) => {
+                                if self.closure_depth > *cb {
+                                    let csp3 = a.at_const(id).span;
+                                    self.errors.emit(
+                                        csp3.start,
+                                        csp3.end - csp3.start,
+                                        format("a closure cannot capture the field binder (its type differs per field)"),
+                                    );
+                                    return TYPE_NONE;
+                                }
+                            },
+                            None => {},
+                        };
+                        let margs = a.at_const(id).as_data.call.args;
+                        let mut lit_ok = margs.len == 1;
+                        if lit_ok {
+                            let a0 = a.at_const(unsafe a.list(margs)[0]);
+                            lit_ok = a0.kind == NodeKind::NODE_LITERAL && a0.as_data.literal.token_type == TokenType::StringLiteral;
+                        }
+                        if !lit_ok {
+                            let sp4 = a.at_const(id).span;
+                            self.errors.emit(
+                                sp4.start,
+                                sp4.end - sp4.start,
+                                format("a binder metadata read takes exactly one string literal key"),
+                            );
+                            return TYPE_NONE;
+                        }
+                        let kt = self.prelude_str_type();
+                        self.cur_ast().set_type(unsafe a.list(margs)[0], kt);
+                        if is_i {
+                            let rt4 = Ast::builtin(BuiltinType::BT_I64);
+                            self.cur_ast().set_type(id, rt4);
+                            return rt4;
+                        }
+                        if is_s {
+                            let rt5 = self.prelude_str_type();
+                            self.cur_ast().set_type(id, rt5);
+                            return rt5;
+                        }
+                        let rt6 = Ast::builtin(BuiltinType::BT_BOOL);
+                        self.cur_ast().set_type(id, rt6);
+                        return rt6;
+                    }
+                }
+            }
+        }
         // `x.free()` intrinsic no-op check
         if pck == NodeKind::NODE_MEMBER && !a.at_const(callee_id).as_data.member.path && a.at_const(id).as_data.call.args.len == 0 {
             let mem = a.at_const(callee_id).as_data.member.member;
