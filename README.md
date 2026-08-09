@@ -594,6 +594,7 @@ fn rejects_bad_input() { panic("boom"); }
 ```sh
 super-c --test app.spc                      # collect @test fns, build, run (fork-isolated, parallel)
 super-c --test --test-filter=drains app.spc # substring selection
+super-c --test --test-shard=1/2 app.spc     # stable one-based CI shard
 super-c --test --test-jobs=4 app.spc        # bound the process pool (default: one per core)
 super-c --test --test-no-fork app.spc       # in-process, for debuggers (should_panic is skipped)
 ```

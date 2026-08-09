@@ -22,7 +22,7 @@ extern "C" {
     pub fn strstr(haystack: *const char, needle: *const char) *mut char;
 }
 
-pub fn copy(dst: []mut u8, src: []u8) usize {
+pub const fn copy(dst: []mut u8, src: []u8) usize {
     let mut n = dst.len();
     if src.len() < n {
         n = src.len();

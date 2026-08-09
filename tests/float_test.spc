@@ -7,7 +7,7 @@
 
 import math;
 
-fn dvals() [f64; 22] {
+const fn dvals() [f64; 22] {
     return [
         0.0,
         -0.0,
@@ -37,14 +37,14 @@ fn dvals() [f64; 22] {
 // Two values are "the same result" when their bits are -- except NaN, which is one VALUE with many
 // encodings: 0/0 yields the platform's default quiet NaN, and x86's carries the sign bit set where
 // AArch64's does not. Comparing payloads would fail on hardware differences IEEE never promises.
-fn same64(x: f64, y: f64) bool {
+const fn same64(x: f64, y: f64) bool {
     if x != x && y != y {
         return true;
     }
     return f64_bits(x) == f64_bits(y);
 }
 
-fn same32(x: f32, y: f32) bool {
+const fn same32(x: f32, y: f32) bool {
     if x != x && y != y {
         return true;
     }

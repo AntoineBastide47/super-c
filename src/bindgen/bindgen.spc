@@ -71,11 +71,11 @@ extend Lexer<'a> {
         return lx;
     }
 
-    fn text(self: &Lexer<'a>) str {
+    const fn text(self: &Lexer<'a>) str {
         return self.src.slice(self.start, self.end);
     }
 
-    fn at_punct(self: &Lexer<'a>, c: u8) bool {
+    const fn at_punct(self: &Lexer<'a>, c: u8) bool {
         return self.kind == TK_PUNCT && self.end == self.start + 1 && self.src.byte_at(self.start) == c;
     }
 
@@ -549,11 +549,11 @@ extend Collected {
 
 // Vendor noise that carries no meaning for a binding. `__attribute__`, `__declspec` and `asm` take a
 // parenthesised argument; the rest are bare words.
-fn noise_word(s: str) bool {
+const fn noise_word(s: str) bool {
     return s == "__extension__" || s == "__inline" || s == "__inline__" || s == "inline" || s == "__restrict" || s == "__restrict__" || s == "restrict" || s == "_Nullable" || s == "_Nonnull" || s == "_Null_unspecified" || s == "__nullable" || s == "__nonnull" || s == "_Noreturn" || s == "__cdecl" || s == "__stdcall" || s == "__fastcall" || s == "__volatile" || s == "volatile" || s == "_Atomic" || s == "__pragma" || s == "__forceinline";
 }
 
-fn noise_call(s: str) bool {
+const fn noise_call(s: str) bool {
     return s == "__attribute__" || s == "__attribute" || s == "__declspec" || s == "asm" || s == "__asm" || s == "__asm__" || s == "__has_attribute";
 }
 
@@ -577,7 +577,7 @@ fn skip_noise(lx: &mut Lexer) {
 }
 
 // A Super-C keyword cannot name a parameter; a trailing underscore keeps the C name recognisable.
-fn keyword(s: str) bool {
+const fn keyword(s: str) bool {
     return s == "as" || s == "import" || s == "break" || s == "case" || s == "const" || s == "continue" || s == "defer" || s == "asm" || s == "do" || s == "dyn" || s == "else" || s == "enum" || s == "extern" || s == "false" || s == "fn" || s == "for" || s == "if" || s == "extend" || s == "in" || s == "let" || s == "loop" || s == "switch" || s == "move" || s == "mut" || s == "new" || s == "null" || s == "pub" || s == "sizeof" || s == "alignof" || s == "return" || s == "self" || s == "Self" || s == "struct" || s == "interface" || s == "true" || s == "type" || s == "union" || s == "unsafe" || s == "where" || s == "while" || s == "str" || s == "int";
 }
 
@@ -1475,7 +1475,7 @@ fn read_widths(text: str) Widths {
     return w;
 }
 
-fn line_defines(line: str, name: str) bool {
+const fn line_defines(line: str, name: str) bool {
     if !line.starts_with("#define ") {
         return false;
     }

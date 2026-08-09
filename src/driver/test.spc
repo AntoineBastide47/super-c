@@ -19,12 +19,14 @@ import codegen::codegen as cg;
 import utils::errors as diag;
 import driver::util as *;
 
-/// --test run options, forwarded to the generated runner as `--jobs=` / `--no-fork` / `--filter=`.
+/// --test run options, forwarded to the generated runner.
 pub struct TestOpts {
     pub enabled: bool,
     pub jobs: i32,
     pub no_fork: bool,
     pub filter: *const char,
+    pub shard: i32,
+    pub shards: i32,
 }
 /// One runnable @test. `wants` is a bitmask of the wrapper's arguments: 1 = fixture/receiver param,
 /// 2 = global-env param. The suite fields are set only for suite-method tests taking `self`.
@@ -679,19 +681,29 @@ static int sc_runner_ncpu(void) {
 }
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0); /* forked children must not inherit (and re-flush) buffered lines */
-  int jobs = 0, no_fork = 0;
+  int jobs = 0, no_fork = 0, shard = 1, shards = 1;
   const char *filter = NULL;
   for (int i = 1; i < argc; i++) {
     if (!strncmp(argv[i], "--jobs=", 7)) jobs = atoi(argv[i] + 7);
     else if (!strcmp(argv[i], "--no-fork")) no_fork = 1;
     else if (!strncmp(argv[i], "--filter=", 9)) filter = argv[i] + 9;
+    else if (!strncmp(argv[i], "--shard=", 8)) {
+      char tail;
+      if (sscanf(argv[i] + 8, "%d/%d%c", &shard, &shards, &tail) != 2 || shard < 1 || shard > shards) {
+        fprintf(stderr, "invalid test shard: expected K/N with 1 <= K <= N\n");
+        return 2;
+      }
+    }
   }
   if (jobs < 1) jobs = sc_runner_ncpu();
   int sel[SC_NTESTS > 0 ? SC_NTESTS : 1];
-  int nsel = 0;
+  int nsel = 0, matched = 0;
   for (int i = 0; i < SC_NTESTS; i++)
-    if (sc_match(SC_TESTS[i].name, filter)) sel[nsel++] = i;
-  printf("running %d test%s\n", nsel, nsel == 1 ? "" : "s");
+    if (sc_match(SC_TESTS[i].name, filter) && matched++ % shards == shard - 1) sel[nsel++] = i;
+  if (shards > 1)
+    printf("running %d test%s (shard %d/%d)\n", nsel, nsel == 1 ? "" : "s", shard, shards);
+  else
+    printf("running %d test%s\n", nsel, nsel == 1 ? "" : "s");
   void *genv = NULL;
   if (nsel > 0) genv = sc_genv_init();
   int passed = 0, failed = 0, skipped = 0;
@@ -770,12 +782,19 @@ int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   setvbuf(stderr, NULL, _IOFBF, BUFSIZ); /* keep each child's flushed diagnostic in one append */
   const char *filter = NULL;
-  int run_one = -1, no_fork = 0, jobs = 0;
+  int run_one = -1, no_fork = 0, jobs = 0, shard = 1, shards = 1;
   for (int i = 1; i < argc; i++) {
     if (!strncmp(argv[i], "--run-one=", 10)) run_one = atoi(argv[i] + 10);
     else if (!strncmp(argv[i], "--jobs=", 7)) jobs = atoi(argv[i] + 7);
     else if (!strcmp(argv[i], "--no-fork")) no_fork = 1;
     else if (!strncmp(argv[i], "--filter=", 9)) filter = argv[i] + 9;
+    else if (!strncmp(argv[i], "--shard=", 8)) {
+      char tail;
+      if (sscanf(argv[i] + 8, "%d/%d%c", &shard, &shards, &tail) != 2 || shard < 1 || shard > shards) {
+        fprintf(stderr, "invalid test shard: expected K/N with 1 <= K <= N\n");
+        return 2;
+      }
+    }
   }
   if (jobs < 1) jobs = sc_runner_ncpu();
   /* WaitForMultipleObjects cannot watch more than this many handles at once. */
@@ -787,10 +806,13 @@ int main(int argc, char **argv) {
     return 0;
   }
   int sel[SC_NTESTS > 0 ? SC_NTESTS : 1];
-  int nsel = 0;
+  int nsel = 0, matched = 0;
   for (int i = 0; i < SC_NTESTS; i++)
-    if (sc_match(SC_TESTS[i].name, filter)) sel[nsel++] = i;
-  printf("running %d test%s\n", nsel, nsel == 1 ? "" : "s");
+    if (sc_match(SC_TESTS[i].name, filter) && matched++ % shards == shard - 1) sel[nsel++] = i;
+  if (shards > 1)
+    printf("running %d test%s (shard %d/%d)\n", nsel, nsel == 1 ? "" : "s", shard, shards);
+  else
+    printf("running %d test%s\n", nsel, nsel == 1 ? "" : "s");
   int passed = 0, failed = 0, skipped = 0;
   if (no_fork) { /* in-process, same meaning as POSIX: no isolation, so no panic can be caught */
     void *genv = nsel > 0 ? sc_genv_init() : NULL;
@@ -1056,6 +1078,17 @@ pub fn test_build_and_run(
         run.push_str(" \"--filter=");
         run.push_str(str::from_cstr(unsafe topts.filter));
         run.push_str("\"");
+    }
+    if unsafe topts.shards > 0 {
+        let mut sb = Buf64 {};
+        unsafe stdio::snprintf(
+            &mut sb[0],
+            64,
+            " --shard=%d/%d".ptr() as *const char,
+            unsafe topts.shard,
+            unsafe topts.shards,
+        );
+        run.push_str(str::from_cstr(&sb[0]));
     }
     let rrc = unsafe shim::sc_exec(run.cstr());
     if rrc < 0 {

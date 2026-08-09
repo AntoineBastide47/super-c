@@ -156,7 +156,7 @@ extend Server {
     }
 
     // The workspace-batch root: sweep=true with no origin (the manifest root is origin "" + sweep=false).
-    fn is_batch(self: &Self, r: usize) bool {
+    const fn is_batch(self: &Self, r: usize) bool {
         return self.roots.at(r).sweep && self.roots.at(r).origin.len() == 0;
     }
 
@@ -785,7 +785,7 @@ fn uri_doc_path(uri: str) String {
 
 // `build.toml` is served by the manifest half of the server (src/lsp/buildtoml.spc): it is not Super-C
 // source, so none of the package machinery applies to it.
-fn is_manifest_path(path: str) bool {
+const fn is_manifest_path(path: str) bool {
     return path.ends_with("build.toml");
 }
 

@@ -78,7 +78,7 @@ const SECTIONS: [Key; 4] = [
 ];
 
 // Does a key declared for `pat` apply in `sec`? A pattern ending in '.' is a prefix.
-fn sec_matches(pat: str, sec: str) bool {
+const fn sec_matches(pat: str, sec: str) bool {
     if pat.len() != 0 && pat[pat.len() - 1] == b'.' {
         return sec.len() > pat.len() && sec.starts_with(pat);
     }

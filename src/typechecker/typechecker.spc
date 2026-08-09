@@ -1147,7 +1147,7 @@ extend TypeChecker {
     /// The generic function `node` names, or NODE_NONE when it names something else. A generic function
     /// has no type of its own -- only its instantiations do -- so naming one as a VALUE needs the type
     /// arguments pinned before it can be a fn pointer.
-    fn tc_generic_fn_named(self: &Self, node: NodeId) DefId {
+    const fn tc_generic_fn_named(self: &Self, node: NodeId) DefId {
         let a = self.cur_ast();
         let mut n = node;
         if a.at_const(n).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
@@ -1170,7 +1170,7 @@ extend TypeChecker {
 
     /// Does `node` need the context type pushed into it before it can be checked? A generic function
     /// named as a value and an empty array literal both carry no type of their own.
-    fn tc_wants_param_type(self: &Self, node: NodeId) bool {
+    const fn tc_wants_param_type(self: &Self, node: NodeId) bool {
         let n = self.cur_ast().at_const(node);
         if n.kind == NodeKind::NODE_ARRAY_LITERAL {
             return !n.as_data.array_literal.repeat && n.as_data.array_literal.elements.len == 0;
@@ -1746,7 +1746,7 @@ extend TypeChecker {
     // The inexact case: keep the divisor ON the form -- `{(BITS + 7) / 8}` stays floor((BITS+7)/8)
     // until a substitution makes it a number. Installed only onto an empty accumulator, because the
     // divisor covers the whole form.
-    fn tc_lin_floor(self: &Self, lhs: &ConstLin, d: i64, out: &mut ConstLin) bool {
+    const fn tc_lin_floor(self: &Self, lhs: &ConstLin, d: i64, out: &mut ConstLin) bool {
         if d <= 1 || lin_div_of(lhs) != 1 {
             return false;
         }
@@ -3712,7 +3712,7 @@ extend TypeChecker {
     /// Would a parameter of type `pt` take a value of type `at`? Deliberately strict -- identity, or one
     /// reference away from it. Overload selection only has to REJECT what a candidate plainly cannot
     /// take; anything it cannot decide leaves the choice to the caller.
-    fn tc_param_accepts(self: &mut Self, pt: TypeId, at: TypeId) bool {
+    const fn tc_param_accepts(self: &mut Self, pt: TypeId, at: TypeId) bool {
         if pt == TYPE_NONE || at == TYPE_NONE {
             return true; // unknown on either side: this argument does not constrain the choice
         }
@@ -5849,7 +5849,7 @@ extend TypeChecker {
 
     /// Are `want` and `actual` instances of one decl differing in a single CONST argument, with the
     /// source's larger? The shape of a width parameter -- what makes `UInt<256> -> UInt<128>` narrowing.
-    fn tc_const_arg_shrinks(self: &mut Self, want: TypeId, actual: TypeId) bool {
+    const fn tc_const_arg_shrinks(self: &mut Self, want: TypeId, actual: TypeId) bool {
         let wy = *self.type_at(want);
         let ay = *self.type_at(actual);
         if wy.kind != TypeKind::TYPE_INSTANCE || ay.kind != TypeKind::TYPE_INSTANCE {

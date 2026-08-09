@@ -11,6 +11,15 @@ concurrency:
   cancel-in-progress: true
 jobs:
   windows:
+    name: windows (tests ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - test_shard: "1/2"
+            cache_shard: 1
+          - test_shard: "2/2"
+            cache_shard: 2
     runs-on: windows-latest
     defaults:
       run:
@@ -22,8 +31,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-windows-${{ github.sha }}
-          restore-keys: ccache-windows-
+          key: ccache-windows-${{ matrix.cache_shard }}-${{ github.sha }}
+          restore-keys: |
+            ccache-windows-${{ matrix.cache_shard }}-
+            ccache-windows-
 
       - name: Configure ccache dir
         run: |
@@ -100,9 +111,20 @@ jobs:
           set -eu
           bin="super-c${BINEXT:-}"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./$bin" test ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$bin" test --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
 
   wasm:
+    name: wasm (tests ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - test_shard: "1/2"
+            cache_shard: 1
+            artifact: true
+          - test_shard: "2/2"
+            cache_shard: 2
+            artifact: false
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -114,8 +136,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-wasm-${{ github.sha }}
+          key: ccache-wasm-${{ matrix.cache_shard }}-${{ github.sha }}
           restore-keys: |
+            ccache-wasm-${{ matrix.cache_shard }}-
             ccache-wasm-
             ccache-linux-
 
@@ -199,9 +222,10 @@ jobs:
           diff -r /tmp/wasm-gen1 /tmp/wwasm/src/build
 
       - name: Run the test suite against the wasm compiler
-        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test
+        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --test-shard=${{ matrix.test_shard }}
 
       - name: Package
+        if: matrix.artifact
         run: |
           set -eu
           name="super-c-wasm32-wasip1"
@@ -210,7 +234,8 @@ jobs:
           cp -R std ffi "dist/${name}/"
           tar -C dist -czf "${name}.tar.gz" "${name}"
 
-      - uses: actions/upload-artifact@v4
+      - if: matrix.artifact
+        uses: actions/upload-artifact@v4
         with:
           name: wasm
           path: super-c-wasm32-wasip1.tar.gz

@@ -285,7 +285,7 @@ fn norm_conv_dir(dir: &mut String, key: str, errs: &mut diag::Errors) {
 }
 
 // The `super-c` subcommand names: reserved, so a `[command.NAME]` can never shadow one.
-fn is_builtin_command(name: str) bool {
+const fn is_builtin_command(name: str) bool {
     return name == "build" || name == "release" || name == "fmt" || name == "lint" || name == "run" || name == "command" || name == "clean" || name == "test" || name == "bench" || name == "lsp" || name == "new" || name == "init";
 }
 

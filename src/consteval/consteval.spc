@@ -2239,7 +2239,7 @@ extend ConstEval {
 
     // The TypeTag variant index for (tm, tt); -1 when the type has no tag (unreachable kinds).
     // Variant order is pinned by std/core.spc's TypeTag declaration.
-    pub fn ce_ti_tag(
+    pub const fn ce_ti_tag(
         self: &mut Self,
         tm: ModuleId,
         tt: TypeId,
@@ -6113,7 +6113,7 @@ extend ConstEval {
     }
 
     // The k-th VARIANT node of (m, owner)'s enum decl; NODE_NONE past the end or non-enum.
-    fn ce_proj_variant(self: &Self, m: ModuleId, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
+    const fn ce_proj_variant(self: &Self, m: ModuleId, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
         let y = *self.ast_ptr(m).type_at(owner);
         let mut dm = y.module;
         let mut dn = NODE_NONE;

@@ -1408,7 +1408,7 @@ fn main() i32 {
 }
 
 // The --test pipeline end to end: @test collection across modules, per-module and global fixtures, method
-// suites (fixture-as-self), should_panic, fork isolation of a failing assertion, --test-filter, --test-no-fork.
+// suites (fixture-as-self), should_panic, fork isolation, filtering, sharding, and --test-no-fork.
 @test
 fn test_pipeline() {
     let p = cli::proj_new();
@@ -1472,11 +1472,19 @@ fn main() i32 { return 0; }
     assert(r.out_shows("right: 7"), "assert shows right value");
     assert(r.out_has("teardown suite"), "global @test_free ran");
     assert(r.out_has("3 passed, 1 failed"), "final tally");
-    // --test-filter narrows selection; a fully passing selection exits 0
-    let f = p.compile_flags("--test --test-filter=drains --test-jobs=2", "main.spc");
-    assert(f.ok());
-    assert(f.out_has("running 1 test"), "filter selected one");
-    assert(f.out_has("1 passed, 0 failed"), "filtered run passes");
+    // Shards partition the filtered test order without overlap; each adjacent pair is split.
+    let s1 = p.compile_flags("--test --test-filter=main:: --test-shard=1/2 --test-jobs=2", "main.spc");
+    assert(s1.ok());
+    assert(s1.out_has("running 2 tests (shard 1/2)"), "first shard selected two tests");
+    assert(s1.out_has("test main::drains ... ok"), "first shard contains test zero");
+    assert(s1.out_has("test main::boom ... ok"), "first shard contains test two");
+    assert(!s1.out_has("main::fails"), "first shard excludes test one");
+    let s2 = p.compile_flags("--test --test-shard=2/2", "main.spc");
+    assert_eq(s2.exit, 1);
+    assert(s2.out_has("running 2 tests (shard 2/2)"), "second shard selected two tests");
+    assert(s2.out_has("test main::fails ... FAILED"), "second shard contains test one");
+    assert(s2.out_has("test main::Counter::bumps ... ok"), "second shard contains test three");
+    assert(!s2.out_has("main::drains"), "second shard excludes test zero");
     // --test-no-fork runs in-process and skips should_panic tests
     let nf = p.compile_flags("--test --test-no-fork --test-filter=boom", "main.spc");
     assert(nf.ok());

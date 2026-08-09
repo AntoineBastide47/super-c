@@ -491,8 +491,11 @@ fn general_call() {
     run_general(OP_CALL);
 }
 @test
-fn general_cond() {
+fn general_cond_true() {
     run_general(OP_COND_T);
+}
+@test
+fn general_cond_false() {
     run_general(OP_COND_F);
 }
 @test
@@ -500,7 +503,10 @@ fn general_reassign() {
     run_general(OP_REASSIGN);
 }
 @test
+fn general_vector_pop() {
+    run_general(OP_VPOP);
+}
+@test
 fn general_vector() {
     run_general(OP_VECTOR);
-    run_general(OP_VPOP);
 }

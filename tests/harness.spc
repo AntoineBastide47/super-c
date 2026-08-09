@@ -53,7 +53,7 @@ extend Compiled {
 }
 
 // Copy at most 511 bytes of `s` into dst[512], NUL-terminated (dst is pre-zeroed by the caller).
-fn copy_msg(dst: *mut char, s: &String) {
+const fn copy_msg(dst: *mut char, s: &String) {
     let n = s.len();
     let k = if n < 511 {
         n;

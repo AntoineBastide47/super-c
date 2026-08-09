@@ -606,7 +606,7 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
 // Whether the binary-project pub lint applies to module `m`: never to the std/ffi trees -- they are
 // libraries whose `pub` is API for downstream programs, even when they sit inside the workspace
 // (nested std modules do not carry the prelude flag, so the file location is the reliable signal).
-fn lint_pub_applies(p: &loader::Package, m: usize) bool {
+const fn lint_pub_applies(p: &loader::Package, m: usize) bool {
     if !p.lint_pub || p.modules[m].prelude {
         return false;
     }

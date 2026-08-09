@@ -56,16 +56,36 @@ jobs:
   build:
     needs: resolve
     if: github.actor == github.repository_owner
+    name: build (${{ matrix.target }}, tests ${{ matrix.test_shard }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: linux
+            test_shard: "1/2"
+            cache_shard: 1
+            artifact: true
+          - os: ubuntu-latest
+            target: linux
+            test_shard: "2/2"
+            cache_shard: 2
+            artifact: false
           - os: macos-latest
             target: macos
+            test_shard: "1/1"
+            cache_shard: 1
+            artifact: true
           - os: windows-latest
             target: windows
+            test_shard: "1/2"
+            cache_shard: 1
+            artifact: true
+          - os: windows-latest
+            target: windows
+            test_shard: "2/2"
+            cache_shard: 2
+            artifact: false
     runs-on: ${{ matrix.os }}
     # Run every step in bash so the shared build steps behave identically on the Windows runner
     # (Git Bash), not just on Linux/macOS.
@@ -82,14 +102,16 @@ jobs:
       # GitHub runners already ship a working `cc`, so nothing is installed by default -- these caches pay
       # off the moment a compiler/dep install is added below, and cost nothing otherwise. NOTE: only the
       # *installation* is cached; build OUTPUTS are never cached (see the Clean step).
-      # ccache: the compilation cache itself, shared across runs (keyed loose so every run
-      # restores the latest and saves its own). CCACHE_DIR pins one workspace path on all OSes.
+      # Each test shard keeps its own ccache so parallel jobs can save all compiled test inputs.
+      # CCACHE_DIR pins one workspace path on all OSes.
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-${{ matrix.target }}-${{ needs.resolve.outputs.sha }}
-          restore-keys: ccache-${{ matrix.target }}-
+          key: ccache-${{ matrix.target }}-${{ matrix.cache_shard }}-${{ needs.resolve.outputs.sha }}
+          restore-keys: |
+            ccache-${{ matrix.target }}-${{ matrix.cache_shard }}-
+            ccache-${{ matrix.target }}-
 
       - name: Configure ccache dir
         run: |
@@ -241,9 +263,10 @@ jobs:
           set -eu
           bin="super-c${BINEXT:-}"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./$bin" test ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$bin" test --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
 
       - name: Build the release binary
+        if: matrix.artifact
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
@@ -257,6 +280,7 @@ jobs:
       # on the worker pool, channels, `select`, the data-parallel API and the timer list -- built and run by
       # the release binary, so the artifact that ships is the one that was exercised.
       - name: Run the concurrency smoke test
+        if: matrix.artifact
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
@@ -267,6 +291,7 @@ jobs:
 
       # --- Package one archive per platform -------------------------------------------------------------
       - name: Package
+        if: matrix.artifact
         run: |
           set -eu
           arch="$(uname -m)"
@@ -285,7 +310,8 @@ jobs:
             echo "ASSET=${name}.tar.gz" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - if: matrix.artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
           path: ${{ env.ASSET }}
@@ -299,6 +325,17 @@ jobs:
   wasm:
     needs: resolve
     if: github.actor == github.repository_owner
+    name: wasm (tests ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - test_shard: "1/2"
+            cache_shard: 1
+            artifact: true
+          - test_shard: "2/2"
+            cache_shard: 2
+            artifact: false
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -312,8 +349,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ccache-wasm-${{ needs.resolve.outputs.sha }}
+          key: ccache-wasm-${{ matrix.cache_shard }}-${{ needs.resolve.outputs.sha }}
           restore-keys: |
+            ccache-wasm-${{ matrix.cache_shard }}-
             ccache-wasm-
             ccache-linux-
 
@@ -397,9 +435,10 @@ jobs:
           diff -r /tmp/wasm-gen1 /tmp/wwasm/src/build
 
       - name: Run the test suite against the wasm compiler
-        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test
+        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --test-shard=${{ matrix.test_shard }}
 
       - name: Package
+        if: matrix.artifact
         run: |
           set -eu
           name="super-c-wasm32-wasip1"
@@ -408,7 +447,8 @@ jobs:
           cp -R std ffi "dist/${name}/"
           tar -C dist -czf "${name}.tar.gz" "${name}"
 
-      - uses: actions/upload-artifact@v4
+      - if: matrix.artifact
+        uses: actions/upload-artifact@v4
         with:
           name: wasm
           path: super-c-wasm32-wasip1.tar.gz

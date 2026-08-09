@@ -1187,7 +1187,7 @@ fn b_expr_type_path(b: &mut Builder, id: NodeId) d::DocId {
 
 // A const-generic argument written as an expression. It reaches here as an ordinary expression node --
 // nothing a TYPE position can otherwise hold -- and the braces have to come back or it will not re-parse.
-fn fmt_const_arg(b: &Builder, id: NodeId) bool {
+const fn fmt_const_arg(b: &Builder, id: NodeId) bool {
     let k = nd(b, id).kind;
     return k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL;
 }

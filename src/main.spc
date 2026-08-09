@@ -87,6 +87,24 @@ fn parse_size(s: *const char) u64 {
     return 0;
 }
 
+// Parse the one-based K/N used by --test-shard. Both numbers must consume the full argument.
+fn parse_test_shard(s: *const char, topts: &mut TestOpts) bool {
+    let mut slash: *mut char = null;
+    let shard = unsafe stdlib::strtoul(s, &mut slash, 10);
+    if slash as usize == s as usize || unsafe *slash != '/' as char {
+        return false;
+    }
+    let next = unsafe (slash + 1);
+    let mut endp: *mut char = null;
+    let shards = unsafe stdlib::strtoul(next, &mut endp, 10);
+    if endp as usize == next as usize || unsafe *endp != 0 as char || shard < 1 || shard > shards || shards > 2147483647 {
+        return false;
+    }
+    topts.shard = shard as i32;
+    topts.shards = shards as i32;
+    return true;
+}
+
 // The std/ directory next to the running binary ("<exe dir>/std"), so the prelude is found regardless of cwd.
 fn exe_std_dir(argv0: *const char) *mut char {
     let mut buf = PathBuf {};
@@ -860,7 +878,7 @@ fn main(argv: Vector<str>) i32 {
     let mut lint_sc = false; // lint --suggest-const: warn on functions the deep CTFE scan proves always evaluable
     let mut bench_norun = false; // bench --no-run: build the bench binary only
     let mut extra = Vector::<usize>::new(); // argv indices of extra `fmt`/`lint` paths
-    let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null };
+    let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null, shard: 0, shards: 0 };
     let mut co = CommonOpts {
         ce_steps: 0,
         ce_mem: 0,
@@ -892,6 +910,10 @@ fn main(argv: Vector<str>) i32 {
                     topts.no_fork = true;
                 } else if arg.starts_with("--test-filter=") {
                     topts.filter = (&arg[14]) as *const char;
+                } else if arg.starts_with("--test-shard=") {
+                    if !parse_test_shard((&arg[13]) as *const char, &mut topts) {
+                        co.bad = true;
+                    }
                 } else if arg.starts_with("--") {
                     co.bad = true;
                 } else if file.len() == 0 {
@@ -1013,6 +1035,10 @@ fn main(argv: Vector<str>) i32 {
                     topts.no_fork = true;
                 } else if arg.starts_with("--test-filter=") {
                     topts.filter = (&arg[14]) as *const char;
+                } else if arg.starts_with("--test-shard=") {
+                    if !parse_test_shard((&arg[13]) as *const char, &mut topts) {
+                        co.bad = true;
+                    }
                 } else {
                     let common = common_flag(&mut co, arg);
                     if !common && !build_flag(&mut bo, &mut co, arg) {
@@ -1122,7 +1148,7 @@ fn main(argv: Vector<str>) i32 {
             }
         },
     };
-    if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null) {
+    if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null || topts.shards != 0) {
         co.bad = true;
     }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
@@ -1186,6 +1212,7 @@ OPTIONS:
     --force                vendor: replace an existing vendor/<name>
     --test                 script: collect @test functions, build, and run
     --test-filter=S        run only tests whose name contains S
+    --test-shard=K/N       run shard K of N (one-based, stable round-robin)
     --test-jobs=N          bound the test process pool (default: one per core)
     --test-no-fork         run tests in-process (for a debugger)
 "#.ptr() as *const char,

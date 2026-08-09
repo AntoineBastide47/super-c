@@ -1208,7 +1208,7 @@ extend Ast {
     // construction site initializes one union arm and leaves the rest of TyAs to the C compiler,
     // which owes us nothing there. Rewrite the value through a zeroed union with only the kind's
     // live arm copied, so equal types are equal BYTES no matter how they were built.
-    fn ty_canon(t: &Ty) Ty {
+    const fn ty_canon(t: &Ty) Ty {
         let mut c = Ty {
             kind: t.kind,
             qualifier: t.qualifier,

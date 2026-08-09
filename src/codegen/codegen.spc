@@ -1171,7 +1171,7 @@ extend Codegen {
             self.emit_bytes("_".ptr() as *const char, 1);
         }
     }
-    fn render_ident(self: &Self, s: tok::Span, buf: *mut char, cap: usize) usize {
+    const fn render_ident(self: &Self, s: tok::Span, buf: *mut char, cap: usize) usize {
         return render_ident_src(self.source, s, buf, cap);
     }
 
@@ -1812,7 +1812,7 @@ extend Codegen {
             at = bappend(&mut self.trunc, out, cap, at, &e[0]);
         }
     }
-    fn render_macro_param(self: &Self, m: ModuleId, decl: NodeId, buf: *mut char, cap: usize) usize {
+    const fn render_macro_param(self: &Self, m: ModuleId, decl: NodeId, buf: *mut char, cap: usize) usize {
         let gp = self.mod_ast(m).at_const(decl);
         return render_ident_src(self.mod_src(m), self.name_span_in(m, gp.as_data.generic_param.name), buf, cap);
     }
@@ -1966,7 +1966,7 @@ extend Codegen {
     }
 
     // The variants loop a payloads(v) binder iterates within (its argument's binder), or NODE_NONE.
-    fn cg_proj_outer(self: &Self, binder: NodeId) NodeId {
+    const fn cg_proj_outer(self: &Self, binder: NodeId) NodeId {
         let it = self.cur_ast().at_const(binder).as_data.for_stmt.iterable;
         let args2 = self.cur_ast().at_const(it).as_data.call.args;
         if args2.len != 1 {
@@ -1981,7 +1981,7 @@ extend Codegen {
 
     // The j-th payload entry node of variant `vid` (NODE_FIELD for struct payloads, the type node
     // for tuple ones); NODE_NONE past the end.
-    fn cg_proj_payload_node(self: &Self, dm: ModuleId, vid: NodeId, j: i64) NodeId {
+    const fn cg_proj_payload_node(self: &Self, dm: ModuleId, vid: NodeId, j: i64) NodeId {
         let vd = self.mod_ast(dm).at_const(vid).as_data.variant;
         if j < 0 || j >= vd.payload.len as i64 {
             return NODE_NONE;
@@ -1990,7 +1990,7 @@ extend Codegen {
     }
 
     // The k-th VARIANT of `owner`'s enum decl; NODE_NONE past the end or for a non-enum.
-    fn cg_proj_variant_node(self: &Self, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
+    const fn cg_proj_variant_node(self: &Self, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
         let y = *self.type_at(owner);
         let mut dm = y.module;
         let mut dn = NODE_NONE;
@@ -4208,7 +4208,7 @@ extend Codegen {
         return NODE_NONE;
     }
     // Is `t` an instance of a generic ENUM (`Option<T>`, `Result<T, E>`)? The scrutinee of most switches.
-    fn inst_is_enum(self: &Self, t: TypeId) bool {
+    const fn inst_is_enum(self: &Self, t: TypeId) bool {
         let y = *self.type_at(t);
         if y.kind != TypeKind::TYPE_INSTANCE || y.as_data.inst as usize >= unsafe self.cur_ast().instances.len() {
             return false;
@@ -4274,7 +4274,7 @@ extend Codegen {
     fn emit_tag(self: &mut Self, enum_decl: NodeId, variant: NodeId) {
         self.emit_tag_mod(self.cur_module(), enum_decl, variant);
     }
-    fn render_variant_name(self: &Self, m: ModuleId, variant: NodeId, buf: *mut char, cap: usize) {
+    const fn render_variant_name(self: &Self, m: ModuleId, variant: NodeId, buf: *mut char, cap: usize) {
         render_ident_src(
             self.mod_src(m),
             self.name_span_in(m, self.mod_ast(m).at_const(variant).as_data.variant.name),
@@ -13164,7 +13164,7 @@ fn builtin_of(src: str, s: tok::Span) i32 {
     return -1;
 }
 
-fn render_ident_src(src: str, s: tok::Span, buf: *mut char, cap: usize) usize {
+const fn render_ident_src(src: str, s: tok::Span, buf: *mut char, cap: usize) usize {
     let source_len = (s.end - s.start) as usize;
     let suffix = is_c_keyword(src, s);
     let mut full = source_len;
@@ -13189,7 +13189,7 @@ fn render_ident_src(src: str, s: tok::Span, buf: *mut char, cap: usize) usize {
 
 // `tr` is the emitting Codegen's truncation flag, raised when the text does not fit. It travels with the
 // buffer rather than sitting in a global, so two Codegens rendering at once keep separate answers.
-fn bappend_bytes(tr: *mut bool, out: *mut char, cap: usize, at: usize, text: *const char, n: usize) usize {
+const fn bappend_bytes(tr: *mut bool, out: *mut char, cap: usize, at: usize, text: *const char, n: usize) usize {
     if at < cap {
         let room = cap - at - 1;
         let mut copied = n;
