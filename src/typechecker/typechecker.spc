@@ -3419,6 +3419,25 @@ extend TypeChecker {
     // TC-8: both lookups are memoized -- callers re-resolve the same method's owner repeatedly
     // (tc_method_param + tc_method_ret alone scan twice per operator check). Lazy insert through a
     // const-cast, the codebase's established pattern for caches behind &Self.
+    // The INTERFACE whose item list holds `method`, NODE_NONE when it is not an interface item.
+    fn tc_enclosing_interface(self: &Self, m: ModuleId, method: NodeId) NodeId {
+        let a = self.mod_ast(m);
+        let items = unsafe a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe a.list(items)[i as usize];
+            if a.at_const(iid).kind != NodeKind::NODE_INTERFACE {
+                continue;
+            }
+            let ms = a.at_const(iid).as_data.interface_def.items;
+            for j in 0..ms.len {
+                if unsafe a.list(ms)[j as usize] == method {
+                    return iid;
+                }
+            }
+        }
+        return NODE_NONE;
+    }
+
     fn enclosing_extend(self: &Self, m: ModuleId, method: NodeId) NodeId {
         let key = m as u64 << 32 | method as u64;
         switch self.encl_ext_memo.get(&key) {
@@ -3999,6 +4018,55 @@ extend TypeChecker {
         self.method_memo.insert(mq, r.module as u64 << 32 | r.node as u64);
         return r;
     }
+    // `find_default_method` by LITERAL name: operator dispatch has no source span to compare with.
+    fn find_default_method_cstr(self: &mut Self, tmod: ModuleId, tdecl: NodeId, mname: str) DefId {
+        let ni = self.ext_scopes();
+        let mut s: i32 = -1;
+        while s < ni {
+            let mut m = tmod;
+            if s >= 0 {
+                m = self.ext_scope_at(s);
+            }
+            if s >= 0 && m == tmod {
+                s = s + 1;
+                continue;
+            }
+            self.ensure_ext_items(m);
+            let a = self.mod_ast(m);
+            let ne = self.ext_items_len(m);
+            for i in 0..ne {
+                let iid = self.ext_items_at(m, i);
+                let it = a.at_const(iid);
+                if it.as_data.extend_def.interface_type == NODE_NONE {
+                    continue;
+                }
+                let tg = self.tc_peel_target(a.resolution_def(it.as_data.extend_def.target_type));
+                if tg.module != tmod || tg.node != tdecl {
+                    continue;
+                }
+                let iff = a.resolution_def(it.as_data.extend_def.interface_type);
+                if iff.node == NODE_NONE || iff.module as usize >= self.pkg_count() {
+                    continue;
+                }
+                let ia = self.mod_ast(iff.module);
+                let req = ia.at_const(iff.node).as_data.interface_def.items;
+                for r in 0..req.len {
+                    let rid = unsafe ia.list(req)[r as usize];
+                    let rm = ia.at_const(rid);
+                    if rm.kind == NodeKind::NODE_FUNCTION && rm.as_data.function.body != NODE_NONE && span_is(
+                        self.mod_src(iff.module),
+                        ia.at_const(rm.as_data.function.name).as_data.name.text,
+                        mname,
+                    ) {
+                        return DefId { module: iff.module, node: rid };
+                    }
+                }
+            }
+            s = s + 1;
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
     fn find_default_method_scan(self: &mut Self, tmod: ModuleId, tdecl: NodeId, name: tok::Span) DefId {
         let ni = self.ext_scopes();
         let mut s: i32 = -1;
@@ -7413,6 +7481,14 @@ extend TypeChecker {
                 return nrsub;
             }
         }
+        // A method declared ON THE INTERFACE (an inherited default body): its signature's Self
+        // substitutes to the receiver.
+        let ienc = self.tc_enclosing_interface(md.module, md.node);
+        if ienc != NODE_NONE && nrsub < 8 {
+            unsafe rsubp[nrsub as usize] = DefId { module: md.module, node: ienc };
+            unsafe rsuba[nrsub as usize] = self.strip(recv);
+            nrsub = nrsub + 1;
+        }
         let mut rmod: ModuleId = 0;
         let mut rdecl = NODE_NONE;
         let mut gp = Defs8 {};
@@ -8001,6 +8077,14 @@ extend TypeChecker {
                 unsafe self.cur_ast().op_method.insert(id, md.module as u64 << 32 | md.node as u64);
             }
             if md.node == NODE_NONE {
+                // an interface DEFAULT the conformance inherits (a derived `eq`/`cmp`) provides the
+                // operator too
+                md = self.find_default_method_cstr(om, od, m);
+                if md.node != NODE_NONE {
+                    unsafe self.cur_ast().op_method.insert(id, md.module as u64 << 32 | md.node as u64);
+                }
+            }
+            if md.node == NODE_NONE {
                 let sp = self.cur_ast().at_const(id).span;
                 let mut ty = Buf96 {};
                 self.render_type(ls, &mut ty[0], 96);
@@ -8199,7 +8283,9 @@ extend TypeChecker {
             }
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
-        if ls != TYPE_NONE && (self.type_at(ls).kind == TypeKind::TYPE_STRUCT || self.type_at(ls).kind == TypeKind::TYPE_INSTANCE) {
+        let ls_enum = ls != TYPE_NONE && self.type_at(ls).kind == TypeKind::TYPE_ENUM;
+        let mut native_enum = false;
+        if ls != TYPE_NONE && (self.type_at(ls).kind == TypeKind::TYPE_STRUCT || self.type_at(ls).kind == TypeKind::TYPE_INSTANCE || ls_enum) {
             let mut om: ModuleId = 0;
             let mut od = NODE_NONE;
             let mut gp = Defs8 {};
@@ -8211,7 +8297,7 @@ extend TypeChecker {
                     mm = "cmp";
                 }
                 let rnn = self.cur_ast().at_const(rn);
-                if rnn.kind == NodeKind::NODE_LITERAL && rnn.as_data.literal.token_type == TokenType::Null {
+                if !ls_enum && rnn.kind == NodeKind::NODE_LITERAL && rnn.as_data.literal.token_type == TokenType::Null {
                     let mut ty = Buf96 {};
                     self.render_type(ls, &mut ty[0], 96);
                     self.errors.emit(
@@ -8221,8 +8307,15 @@ extend TypeChecker {
                     );
                     return Ast::builtin(BuiltinType::BT_BOOL);
                 }
-                let md = self.find_method_cstr(om, od, mm);
+                let mut md = self.find_method_cstr(om, od, mm);
                 if md.node == NODE_NONE {
+                    // an interface DEFAULT the conformance inherits (a derived `eq`/`cmp`) serves
+                    // the operator too
+                    md = self.find_default_method_cstr(om, od, mm);
+                }
+                if md.node == NODE_NONE && ls_enum {
+                    native_enum = true; // no conformance: the native discriminant comparison below
+                } else if md.node == NODE_NONE {
                     let mut ty = Buf96 {};
                     self.render_type(ls, &mut ty[0], 96);
                     let mut iface = "Eq".ptr() as *const char;
@@ -8249,7 +8342,9 @@ extend TypeChecker {
                     }
                 }
             }
-            return Ast::builtin(BuiltinType::BT_BOOL);
+            if !native_enum {
+                return Ast::builtin(BuiltinType::BT_BOOL);
+            }
         }
         if ls != TYPE_NONE && self.type_at(ls).kind == TypeKind::TYPE_GENERIC {
             let gy = *self.type_at(ls);
@@ -9168,6 +9263,34 @@ extend TypeChecker {
                             gi = gi + 1;
                         }
                     }
+                }
+            }
+        }
+        // `T::default()` reaching an interface DEFAULT: the qualified type IS Self
+        if cn_kind == NodeKind::NODE_MEMBER && cn_path && nrsub < 8 {
+            let md = a.resolution_def(a.at_const(callee_id).as_data.member.member);
+            let mut tr = NODE_NONE;
+            if md.node != NODE_NONE {
+                tr = self.enclosing_trait(md.module, md.node);
+            }
+            if tr != NODE_NONE {
+                let pobj = a.at_const(callee_id).as_data.member.object;
+                let mut target = self.strip(a.type_of(pobj));
+                if target == TYPE_NONE {
+                    // a bare `P::` base records no type; its resolution names the aggregate
+                    let ob = a.resolution_def(pobj);
+                    if ob.node != NODE_NONE {
+                        let obk = self.mod_ast(ob.module).at_const(ob.node).kind;
+                        if obk == NodeKind::NODE_STRUCT || obk == NodeKind::NODE_ENUM {
+                            target = self.named_type_of(ob.module, ob.node);
+                        }
+                    }
+                }
+                let ty2 = *self.type_at(target);
+                if ty2.kind == TypeKind::TYPE_STRUCT || ty2.kind == TypeKind::TYPE_ENUM || ty2.kind == TypeKind::TYPE_INSTANCE {
+                    rsubp[nrsub as usize] = DefId { module: md.module, node: tr };
+                    rsuba[nrsub as usize] = target;
+                    nrsub = nrsub + 1;
                 }
             }
         }
@@ -10418,7 +10541,12 @@ extend TypeChecker {
         // `T::assoc()` names its type rather than passing a receiver, so aggregate_of never sees it:
         // hand the qualifying instance to the used-marking directly.
         self.mark_recv = inst_ty;
-        let method = self.find_method(bmod, bdecl, mname);
+        let mut method = self.find_method(bmod, bdecl, mname);
+        if method.node == NODE_NONE {
+            // an interface DEFAULT the conformance inherits (a derived `default()`) is reachable
+            // through the qualified path too
+            method = self.find_default_method(bmod, bdecl, mname);
+        }
         if method.node != NODE_NONE {
             self.cur_ast().set_resolution_def(mem, method);
             return self.decl_type_in(method.module, method.node);

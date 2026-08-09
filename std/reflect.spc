@@ -96,3 +96,124 @@ pub fn reflect_any_hash<T>(v: &T) u64 {
     }
     return reflect_hash(v);
 }
+
+/// Field-by-field equality through each field's own `Eq`, in declaration order -- `fields(a, b)`
+/// pairs every field with the other subject's same field.
+pub fn reflect_eq<T>(a: &T, b: &T) bool {
+    inline for f in fields(a, b) {
+        if !reflect_eq_field(&f.value, &f.other) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn reflect_eq_field<V: Eq>(x: &V, y: &V) bool {
+    return x.eq(y);
+}
+
+/// Enum equality: the same ACTIVE variant, then every payload pair equal through its own `Eq`.
+pub fn reflect_variant_eq<T>(a: &T, b: &T) bool {
+    let mut r = true;
+    inline for v in variants(a, b) {
+        if v.is_active {
+            if !v.other_active {
+                r = false;
+            } else {
+                inline for p in payloads(v) {
+                    if !reflect_eq_field(&p.value, &p.other) {
+                        r = false;
+                    }
+                }
+            }
+        }
+    }
+    return r;
+}
+
+/// Lexicographic field ordering through each field's own `Ord`: the first unequal field decides.
+pub fn reflect_cmp<T>(a: &T, b: &T) i32 {
+    inline for f in fields(a, b) {
+        let c = reflect_cmp_field(&f.value, &f.other);
+        if c != 0 {
+            return c;
+        }
+    }
+    return 0;
+}
+
+fn reflect_cmp_field<V: Ord>(x: &V, y: &V) i32 {
+    return x.cmp(y);
+}
+
+/// Enum ordering: by discriminant first, then the shared ACTIVE variant's payloads lexicographically.
+pub fn reflect_variant_cmp<T>(a: &T, b: &T) i32 {
+    let mut ta: i32 = 0;
+    let mut tb: i32 = 0;
+    inline for v in variants(a) {
+        if v.is_active {
+            ta = v.tag;
+        }
+    }
+    inline for v in variants(b) {
+        if v.is_active {
+            tb = v.tag;
+        }
+    }
+    if ta != tb {
+        if ta < tb {
+            return -1;
+        }
+        return 1;
+    }
+    let mut c: i32 = 0;
+    inline for v in variants(a, b) {
+        if v.is_active && v.other_active {
+            inline for p in payloads(v) {
+                if c == 0 {
+                    c = reflect_cmp_field(&p.value, &p.other);
+                }
+            }
+        }
+    }
+    return c;
+}
+
+pub fn reflect_any_eq<T>(a: &T, b: &T) bool {
+    if type_info::<T>().kind == TypeTag::Union {
+        panic("a derived 'eq' covers structs, tuples, and enums; write it by hand for a union");
+    }
+    if type_info::<T>().kind == TypeTag::Enum {
+        return reflect_variant_eq(a, b);
+    }
+    return reflect_eq(a, b);
+}
+
+pub fn reflect_any_cmp<T>(a: &T, b: &T) i32 {
+    if type_info::<T>().kind == TypeTag::Union {
+        panic("a derived 'cmp' covers structs, tuples, and enums; write it by hand for a union");
+    }
+    if type_info::<T>().kind == TypeTag::Enum {
+        return reflect_variant_cmp(a, b);
+    }
+    return reflect_cmp(a, b);
+}
+
+/// A fresh deep copy built field by field: a `zeroed` T seeded, then every field cloned in from the
+/// source through its own `Clone`. Overwriting the zeroed placeholder is safe -- releasing an
+/// all-zero value is a no-op for every owning std type. Enums need the active variant CONSTRUCTED,
+/// and a union's overlapping fields cannot be cloned independently, so both refuse loudly.
+pub fn reflect_clone<T>(v: &T) T {
+    if type_info::<T>().kind == TypeTag::Enum || type_info::<T>().kind == TypeTag::Union {
+        panic("a derived 'clone' covers structs and tuples; write it by hand for an enum or union");
+    }
+    let mut out = unsafe zeroed::<T>();
+    inline for f in fields(&mut out, v) {
+        reflect_clone_field(&mut f.value, &f.other);
+    }
+    return out;
+}
+
+fn reflect_clone_field<V: Clone>(dst: &mut V, src: &V) {
+    *dst = src.clone();
+}

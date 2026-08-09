@@ -442,6 +442,86 @@ fn main() i32 {
 }
 
 @test
+fn std_reflection_defaults() {
+    let p = cli::proj_new();
+    p.mkfile("lib.spc", r#"@derive(Eq, Hash, Format)
+pub struct Key { pub a: i32, pub b: u8, }
+"#);
+    p.mkfile(
+        "main.spc",
+        r#"import lib;
+@derive(Eq, Ord, Clone, Default)
+struct Point { pub x: i32, pub y: i32, }
+@derive(Eq, Ord)
+enum Shape { Dot, Line(i32), Pair(i32, i64), }
+@derive(Eq, Clone, Default)
+struct Bag { pub v: Vector<i32>, pub n: i32, }
+fn main() i32 {
+  let a = Point { x: 1, y: 2 };
+  let b = Point { x: 1, y: 2 };
+  let c = Point { x: 1, y: 3 };
+  if !a.eq(&b) || a.eq(&c) || !a.ne(&c) { return 1; }
+  if a == c || !(a == b) || !(a < c) || c < a { return 2; }
+  if a.cmp(&b) != 0 || a.cmp(&c) >= 0 || c.cmp(&a) <= 0 { return 3; }
+  let d = Point::default();
+  if d.x != 0 || d.y != 0 { return 4; }
+  let e = a.clone();
+  if !e.eq(&a) { return 5; }
+  let s1 = Shape::Line(42);
+  let s2 = Shape::Line(42);
+  let s3 = Shape::Line(43);
+  let s4 = Shape::Pair(1, 2);
+  if !s1.eq(&s2) || s1.eq(&s3) || s1.eq(&s4) { return 6; }
+  if !(s1 == s2) || s1 == s3 { return 7; }
+  if s1.cmp(&s2) != 0 || s1.cmp(&s3) >= 0 || s4.cmp(&s1) <= 0 { return 8; }
+  let mut bag = Bag::default();
+  bag.v.push(9);
+  bag.n = 5;
+  let bag2 = bag.clone();
+  if !bag2.eq(&bag) || bag2.v.len() != 1 { return 9; }
+  let mut m = Map::<lib::Key, i64>::new();
+  m.insert(lib::Key { a: 1, b: 2 }, 10);
+  let hit = lib::Key { a: 1, b: 2 };
+  let miss = lib::Key { a: 1, b: 9 };
+  switch m.get(&hit) {
+    Some(v) => { if *v != 10 { return 10; } },
+    None => { return 11; },
+  };
+  if m.get(&miss).is_some() { return 12; }
+  print("{}\n", hit);
+  print("ok\n");
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("Key { a: 1, b: 2 }"), "a derived cross-module key formats through {}");
+    assert(rr.out_shows("ok"), "Eq/Ord/Clone/Default derive through the std interface defaults");
+
+    // A derived clone on an enum refuses loudly instead of fabricating a zeroed value.
+    let bad = cli::proj_new();
+    bad.mkfile(
+        "main.spc",
+        r#"enum E { X, Y(i32), }
+extend E as Clone {}
+fn main() i32 { let e = E::Y(5); let c = e.clone(); let _ = c; return 0; }
+"#,
+    );
+    let br = bad.compile("main.spc");
+    assert(br.ok());
+    let bcc = bad.cc_build("");
+    assert(bcc.ok());
+    let brr = bad.run_bin_env("");
+    assert(!brr.ok(), "the derived enum clone panics");
+    assert(brr.out_has("write it by hand for an enum or union"), "the refusal names the fix");
+}
+
+@test
 fn paired_reflection_and_construction() {
     let p = cli::proj_new();
     p.mkfile(

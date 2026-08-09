@@ -87,15 +87,23 @@ pub interface Shr<Rhs = usize> {
     fn shr(self: &Self, amount: Rhs) Self::Output;
 }
 
-/// A canonical "zero" / empty value, constructible without arguments.
+/// A canonical "zero" / empty value, constructible without arguments. `default` DEFAULTS to a value
+/// with every field defaulted through its own `Default`, so a bare `extend T as Default {}` derives
+/// it for a struct or tuple (an enum or union must implement it by hand); implement to override.
 pub interface Default {
-    fn default() Self;
+    fn default() Self {
+        return reflect_default::<Self>();
+    }
 }
 
 /// An explicit deep copy. (Plain assignment is a shallow, bitwise copy; `clone` is for types that own a
-/// heap allocation and need a fresh one.)
+/// heap allocation and need a fresh one.) `clone` DEFAULTS to a field-by-field deep copy through each
+/// field's own `Clone`, so a bare `extend T as Clone {}` derives it for a struct or tuple (an enum or
+/// union must implement it by hand); implement to override.
 pub interface Clone {
-    fn clone(self: &Self) Self;
+    fn clone(self: &Self) Self {
+        return reflect_clone(self);
+    }
 }
 
 /// Smart-pointer dereference: a wrapper that transparently exposes its pointee. A method not found on the
@@ -120,9 +128,13 @@ pub interface Into<T> {
     fn into(self: Self) T;
 }
 
-/// Equality. `eq` must be reflexive, symmetric and transitive.
+/// Equality. `eq` must be reflexive, symmetric and transitive. It DEFAULTS to field-wise (or
+/// active-variant) reflected equality, so a bare `extend T as Eq {}` derives it; implement to
+/// override.
 pub interface Eq {
-    fn eq(self: &Self, other: &Self) bool;
+    fn eq(self: &Self, other: &Self) bool {
+        return reflect_any_eq(self, other);
+    }
 
     fn ne(self: &Self, other: &Self) bool {
         return !self.eq(other);
@@ -130,9 +142,13 @@ pub interface Eq {
 }
 
 /// Total ordering. `cmp` returns a negative value when `self < other`, zero when equal, positive when
-/// `self > other`. Requires `Eq` for consistency between `==` and ordering.
+/// `self > other`. Requires `Eq` for consistency between `==` and ordering. It DEFAULTS to
+/// lexicographic field order (or discriminant-then-payload order for an enum), so a bare
+/// `extend T as Ord {}` derives it; implement to override.
 pub interface Ord: Eq {
-    fn cmp(self: &Self, other: &Self) i32;
+    fn cmp(self: &Self, other: &Self) i32 {
+        return reflect_any_cmp(self, other);
+    }
 }
 
 /// A stable hash of the value, for hash maps and sets. Equal values (per `Eq`) must hash equally.
@@ -251,4 +267,23 @@ pub interface Index<T, S> {
 pub interface IndexMut<T, S> {
     fn index_mut(self: &mut Self, i: usize) &mut T;
     fn index_range_mut(self: &mut Self, r: Range<usize>) S;
+}
+
+/// A value with every field defaulted through its own `Default`, built over a `zeroed` seed like
+/// `reflect_clone`. Enums and unions refuse for the same reasons. Lives HERE rather than in
+/// `reflect`: `Default`'s default body must name it in `::<Self>` position, which resolves only
+/// same-module (the prelude still exposes it unqualified everywhere).
+pub fn reflect_default<T>() T {
+    if type_info::<T>().kind == TypeTag::Enum || type_info::<T>().kind == TypeTag::Union {
+        panic("a derived 'default' covers structs and tuples; write it by hand for an enum or union");
+    }
+    let mut out = unsafe zeroed::<T>();
+    inline for f in fields(&mut out) {
+        reflect_default_field(&mut f.value);
+    }
+    return out;
+}
+
+fn reflect_default_field<V: Default>(dst: &mut V) {
+    *dst = V::default();
 }

@@ -4661,7 +4661,12 @@ extend Codegen {
         return self.cg_find_method_impl(tmod, tdecl, nsrc, name, null);
     }
     fn cg_find_method_cstr(self: &Self, tmod: ModuleId, tdecl: NodeId, lit: *const char) DefId {
-        return self.cg_find_method_impl(tmod, tdecl, "", tok::Span::empty(), lit);
+        let m = self.cg_find_method_impl(tmod, tdecl, "", tok::Span::empty(), lit);
+        if m.node != NODE_NONE {
+            return m;
+        }
+        // an interface DEFAULT the conformance inherits (a derived `eq`/`cmp`/..) provides it too
+        return self.cg_conf_method_impl(tmod, tdecl, lit);
     }
 
     // CG-1: a conservative, allocation-free "could this node fold?" pre-filter. Returns false ONLY when the
@@ -11860,7 +11865,9 @@ extend Codegen {
             return false;
         }
         let bt = *self.type_at(lt);
-        if bt.kind != TypeKind::TYPE_STRUCT && bt.kind != TypeKind::TYPE_INSTANCE {
+        // Enums lower through a conformance's eq/cmp when one exists (derived or written); the
+        // lookup below returning NONE keeps the native discriminant comparison.
+        if bt.kind != TypeKind::TYPE_STRUCT && bt.kind != TypeKind::TYPE_INSTANCE && bt.kind != TypeKind::TYPE_ENUM {
             return false;
         }
         let mut om: ModuleId = 0;
@@ -18967,10 +18974,10 @@ const fn bt_unsigned_cast(b: BuiltinType) *const char {
 }
 
 extend Codegen {
-    // The `fmt` implementation a `{}` argument formats through: the method of a conformance to an
-    // interface that REQUIRES `fmt` (Format, hand-written or derived), or that interface's default
-    // body when the conformance is empty. NODE_NONE when the type has no such conformance.
-    fn cg_fmt_impl(self: &mut Self, tmod: ModuleId, tdecl: NodeId) DefId {
+    // The implementation a conformance provides for method `lit`: the extend's own item, or the
+    // interface's default body when the conformance leaves it inherited. NODE_NONE when no
+    // conformance requires a method of that name.
+    fn cg_conf_method_impl(self: &Self, tmod: ModuleId, tdecl: NodeId, lit: *const char) DefId {
         let mut scopes = ScopeArr {};
         scopes[0] = tmod;
         let mut ns: i32 = 1;
@@ -19016,10 +19023,10 @@ extend Codegen {
                 for r in 0..req.len {
                     let rid = unsafe ia.list(req)[r as usize];
                     let rm = ia.at_const(rid);
-                    if rm.kind != NodeKind::NODE_FUNCTION || rm.as_data.function.generics.len != 0 || rm.as_data.function.params.len != 1 || !span_is(
+                    if rm.kind != NodeKind::NODE_FUNCTION || rm.as_data.function.generics.len != 0 || !span_is(
                         self.mod_src(itr.module),
                         ia.at_const(rm.as_data.function.name).as_data.name.text,
-                        "fmt".ptr() as *const char,
+                        lit,
                     ) {
                         continue;
                     }
@@ -19031,7 +19038,7 @@ extend Codegen {
                         if mn.kind == NodeKind::NODE_FUNCTION && span_is(
                             self.mod_src(m),
                             a.at_const(mn.as_data.function.name).as_data.name.text,
-                            "fmt".ptr() as *const char,
+                            lit,
                         ) {
                             return DefId { module: m, node: mid };
                         }
@@ -19043,6 +19050,17 @@ extend Codegen {
             }
         }
         return DefId { module: 0, node: NODE_NONE };
+    }
+
+    fn cg_fmt_impl(self: &mut Self, tmod: ModuleId, tdecl: NodeId) DefId {
+        let md = self.cg_conf_method_impl(tmod, tdecl, "fmt".ptr() as *const char);
+        if md.node != NODE_NONE {
+            let mf = self.mod_ast(md.module).at_const(md.node).as_data.function;
+            if mf.params.len != 1 {
+                return DefId { module: 0, node: NODE_NONE };
+            }
+        }
+        return md;
     }
 
     // `{}` for a value that conforms: `{ String __s = T__fmt(&arg); push; free; }`, with an rvalue
