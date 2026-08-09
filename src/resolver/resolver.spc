@@ -647,7 +647,11 @@ extend Resolver {
             self.source,
             name,
             "fields",
-        ) || span_is(self.source, name, "variants") || span_is(self.source, name, "payloads") {
+        ) || span_is(self.source, name, "variants") || span_is(self.source, name, "payloads") || span_is(
+            self.source,
+            name,
+            "zeroed",
+        ) {
             return;
         }
         self.errors.emit(

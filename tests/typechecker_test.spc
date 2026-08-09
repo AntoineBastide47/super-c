@@ -511,6 +511,39 @@ fn static_assert() {
 }
 
 @test
+fn paired_binders() {
+    h::expect_err_msg(
+        "'.other' needs a second subject",
+        "struct P { pub x: i32, }\nfn f<T>(a: &T) usize { inline for f in fields(a) { let _ = &f.other; } return 0; }\nfn main() i32 { let p = P { x: 1 }; return f(&p) as i32; }\n",
+        "requires a two-subject loop",
+    );
+    h::expect_err_msg(
+        "the second subject must match the first",
+        "struct P { pub x: i32, }\nstruct Q { pub y: i32, }\nfn main() i32 { let p = P { x: 1 }; let q = Q { y: 2 };\n  inline for f in fields(&p, &q) { let _ = f.index; }\n  return 0; }\n",
+        "second subject must be a reference to the same type",
+    );
+    h::expect_err_msg(
+        "'.other' is a read-only place",
+        "struct P { pub x: i32, }\nfn z<V>(d: &mut V) { let _ = d; }\nfn main() i32 { let mut a = P { x: 1 }; let b = P { x: 2 };\n  inline for f in fields(&mut a, &b) { z(&mut f.other); }\n  return 0; }\n",
+        "cannot take '&mut' of an immutable",
+    );
+    h::expect_err_msg(
+        "zeroed demands an unsafe context",
+        "fn main() i32 { let x = zeroed::<i32>(); return x; }\n",
+        "requires an unsafe context",
+    );
+    h::expect_err_msg(
+        "zeroed takes a type, not values",
+        "fn main() i32 { let x = unsafe zeroed::<i32>(1); return x; }\n",
+        "exactly one type argument",
+    );
+    h::expect_ok(
+        "a paired loop reads both subjects",
+        "struct P { pub x: i32, }\nfn same<T>(a: &T, b: &T) bool { inline for f in fields(a, b) { let _ = &f.value; let _ = &f.other; } return true; }\nfn main() i32 { let p = P { x: 1 }; let q = P { x: 1 };\n  if same(&p, &q) { return 0; }\n  return 1; }\n",
+    );
+}
+
+@test
 fn duplicate_conformance() {
     h::expect_err_msg(
         "a repeated conformance is rejected",
@@ -554,7 +587,7 @@ fn fields_projection() {
     );
     h::expect_err_msg(
         "the binder has three members",
-        "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(&p) { let _ = f.other; } return 0; }\n",
+        "struct P { pub x: i32, }\nfn main() i32 { let p = P { x: 1 }; inline for f in fields(&p) { let _ = f.bogus; } return 0; }\n",
         "nothing else",
     );
     h::expect_ok(

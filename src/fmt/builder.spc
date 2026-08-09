@@ -2101,14 +2101,31 @@ fn b_item_body(b: &mut Builder, items: NodeList, outer: tok::Span) d::DocId {
     return r;
 }
 
-// Find the `{` between `from` and `to` so leading trivia scans start after it.
+// Find the `{` between `from` and `to` so leading trivia scans start after it. Scans FORWARD and
+// skips comment interiors: the first member's leading comment may itself contain a brace, and a
+// backward scan would land inside it -- dropping the comment from the lead-trivia window.
 fn item_gap_floor(b: &Builder, from: u32, to: u32) u32 {
-    let mut i = to as usize;
-    while i > from as usize {
-        i = i - 1;
-        if b.src.byte_at(i) == b'{' {
+    let mut i = from as usize;
+    while i < to as usize {
+        let c = b.src.byte_at(i);
+        if c == b'/' && i + 1 < to as usize && b.src.byte_at(i + 1) == b'/' {
+            while i < to as usize && b.src.byte_at(i) != b'\n' {
+                i = i + 1;
+            }
+            continue;
+        }
+        if c == b'/' && i + 1 < to as usize && b.src.byte_at(i + 1) == b'*' {
+            i = i + 2;
+            while i + 1 < to as usize && !(b.src.byte_at(i) == b'*' && b.src.byte_at(i + 1) == b'/') {
+                i = i + 1;
+            }
+            i = i + 2;
+            continue;
+        }
+        if c == b'{' {
             return (i + 1) as u32;
         }
+        i = i + 1;
     }
     return from;
 }

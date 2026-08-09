@@ -47,6 +47,15 @@ fn golden_derive() {
 }
 
 @test
+fn golden_brace_in_member_comment() {
+    // A leading member comment containing `{` must survive: the block-opener scan skips comments.
+    expect_fmt(
+        "extend P {\n    // a `{}` example\n    fn f(self: &Self) i32 {\n        return 1;\n    }\n}\n",
+        "extend P {\n    // a `{}` example\n    fn f(self: &Self) i32 {\n        return 1;\n    }\n}\n",
+    );
+}
+
+@test
 fn golden_unsafe_fn() {
     expect_fmt(
         "pub unsafe fn f(p:*const i32)i32{return unsafe *p;}",

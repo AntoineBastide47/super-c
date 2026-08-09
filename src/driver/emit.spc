@@ -242,6 +242,26 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
 // Cross-module reflection-bound obligations: discharged once every module is typechecked, so a
 // callee's obligations exist regardless of check order (module order follows imports, not calls).
 fn discharge_obligations(p: &mut loader::Package, n: usize) {
+    // Package-wide duplicate conformances first: a per-module concern, but only decidable once
+    // every module is typechecked, like the obligations below.
+    for i in 0..n {
+        let pkg = p as *mut loader::Package;
+        let m = &mut p.modules[i];
+        let src = m.source.as_str().ptr() as *const char;
+        let len = m.source.len();
+        let a = replace(&mut m.ast, Ast::new(0));
+        let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+        p.set_override(i as ModuleId, t.ast.get());
+        t.check_cross_module_dup_conformances();
+        p.clear_override(i as ModuleId);
+        if t.has_errors() {
+            t.errors.finalize(str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
+            t.log_errors();
+            p.ok = false;
+        }
+        let back = t.take_ast();
+        p.modules[i].ast = back;
+    }
     // Pass k proves what pass k-1's re-deferrals made provable; the per-module cursors keep any
     // obligation from being run against a caller module twice. Chains are as deep as the module
     // graph at most, and the pass cap is a runaway backstop, not a real bound.

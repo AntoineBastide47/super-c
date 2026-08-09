@@ -303,19 +303,10 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
     return lo - 1;
 }
 
-// Render one diagnostic into a pretty source-annotated block: the message, a `--> file:line:col`
-// location, the offending source line (windowed to 120 cols), a caret run under the span, and notes.
+// The `--> file:line:col` location, the offending source line (windowed to 120 cols), and the
+// caret run under the span -- the block every rendered diagnostic shares.
 @c.cold
-fn render(
-    msg: &String,
-    source: str,
-    line_starts: &Vector<u32>,
-    mut off: u32,
-    span: u32,
-    file: str,
-    notes: &String,
-    kind: str,
-) String {
+fn push_loc_block(out: &mut String, source: str, line_starts: &Vector<u32>, mut off: u32, span: u32, file: str) {
     let src_len = source.len();
     if off as usize > src_len {
         off = src_len as u32;
@@ -353,11 +344,7 @@ fn render(
             carets = 1;
         }
     }
-    let mut out = String::new();
-    out.push_str(kind);
-    out.push_str(": ");
-    out.push_string(msg);
-    out.push_str("\n--> ");
+    out.push_str("--> ");
     if file.len() != 0 {
         out.push_str(file);
         out.push_byte(58); // ':'
@@ -393,6 +380,56 @@ fn render(
     for _ in 0..carets {
         out.push_byte(94);
     } // '^'
+}
+
+// Render one diagnostic into a pretty source-annotated block: the message, the location block,
+// and notes.
+@c.cold
+fn render(
+    msg: &String,
+    source: str,
+    line_starts: &Vector<u32>,
+    off: u32,
+    span: u32,
+    file: str,
+    notes: &String,
+    kind: str,
+) String {
+    let mut out = String::new();
+    out.push_str(kind);
+    out.push_str(": ");
+    out.push_string(msg);
+    out.push_byte(10); // '\n'
+    push_loc_block(&mut out, source, line_starts, off, span, file);
     out.push_string(notes);
+    return out;
+}
+
+/// A bare location block for a SECONDARY site -- rendered into a note, where the primary rendering
+/// pass cannot reach another file's source. Builds its own line index (cold path).
+@c.cold
+pub fn render_site(source: str, file: str, off: u32, span: u32) String {
+    let mut line_starts = Vector::<u32>::new();
+    line_starts.push(0);
+    let len = source.len();
+    let mut i: usize = 0;
+    while i < len {
+        let b = source[i];
+        if b == 10 {
+            i = i + 1;
+            line_starts.push(i as u32);
+        } else if b == 13 {
+            i = i + 1;
+            if i < len && source[i] == 10 {
+                i = i + 1;
+            }
+            line_starts.push(i as u32);
+        } else {
+            i = i + 1;
+        }
+    }
+    let mut out = String::new();
+    push_loc_block(&mut out, source, &line_starts, off, span, file);
+    line_starts.free();
     return out;
 }

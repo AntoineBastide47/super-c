@@ -388,6 +388,157 @@ fn main() i32 { let b = Bad { a: 1, b: NoFmt { p: null } }; let s = b.fmt(); s.f
 }
 
 @test
+fn format_args_via_conformance() {
+    let p = cli::proj_new();
+    p.mkfile("lib.spc", r#"@derive(Format, Hash)
+pub struct Point { pub x: i32, pub y: i32, }
+"#);
+    p.mkfile(
+        "main.spc",
+        r#"import lib;
+@derive(Format)
+enum Shape { Dot, Pair(i32, i64), }
+struct Duo<A: Format, B: Format> { pub a: A, pub b: B, }
+extend<A: Format, B: Format> Duo<A, B> as Format {}
+fn mk() lib::Point { return lib::Point { x: 9, y: 8 }; }
+fn show(v: &dyn Format) String { return v.fmt(); }
+const fn ph() u64 { let p = lib::Point { x: 1, y: 2 }; return p.hash(); }
+static_assert(ph() != 0, "derived hash folds at compile time");
+fn main() i32 {
+  let p = lib::Point { x: 1, y: 2 };
+  print("{}\n", p);
+  let r = &p;
+  print("ref {}\n", r);
+  print("rv {}\n", mk());
+  let s = Shape::Pair(3, 4);
+  print("{} {}\n", s, Shape::Dot);
+  let d = Duo::<i32, str> { a: 7, b: "hi" };
+  print("{}\n", d);
+  let m = format("in format: {}", p);
+  print("{}\n", m.as_str());
+  m.free();
+  print("{:>24}\n", p);
+  let ds = show(&p);
+  print("dyn {}\n", ds.as_str());
+  ds.free();
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("Point { x: 1, y: 2 }"), "a conforming value formats through its own fmt");
+    assert(rr.out_shows("ref Point { x: 1, y: 2 }"), "references format as their pointee");
+    assert(rr.out_shows("rv Point { x: 9, y: 8 }"), "an rvalue is materialized and freed");
+    assert(rr.out_shows("Pair(3, 4) Dot"), "derived enums format directly");
+    assert(rr.out_shows("Duo { a: 7, b: hi }"), "generic instances format directly");
+    assert(rr.out_shows("in format: Point { x: 1, y: 2 }"), "format() takes conforming values too");
+    assert(rr.out_shows("    Point { x: 1, y: 2 }"), "width padding applies to the rendered form");
+    assert(rr.out_shows("dyn Point { x: 1, y: 2 }"), "dyn dispatch reaches the inherited default");
+}
+
+@test
+fn paired_reflection_and_construction() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"struct P { pub x: i32, pub v: Vector<i32>, }
+enum E { A, B(i32), C(i32, i64), }
+enum Color { Red = 3, Green = 7, }
+fn eqf<V: Eq>(a: &V, b: &V) bool { return a.eq(b); }
+fn cmpf<V: Ord>(a: &V, b: &V) i32 { return a.cmp(b); }
+fn setc<V: Clone>(dst: &mut V, src: &V) { *dst = src.clone(); }
+fn setd<V: Default>(dst: &mut V) { *dst = V::default(); }
+fn req<T>(a: &T, b: &T) bool {
+  inline for f in fields(a, b) { if !eqf(&f.value, &f.other) { return false; } }
+  return true;
+}
+fn rcmp<T>(a: &T, b: &T) i32 {
+  inline for f in fields(a, b) { let c = cmpf(&f.value, &f.other); if c != 0 { return c; } }
+  return 0;
+}
+fn rclone<T>(src: &T) T {
+  let mut out = unsafe zeroed::<T>();
+  inline for f in fields(&mut out, src) { setc(&mut f.value, &f.other); }
+  return out;
+}
+fn rdefault<T>() T {
+  let mut out = unsafe zeroed::<T>();
+  inline for f in fields(&mut out) { setd(&mut f.value); }
+  return out;
+}
+fn veq<T>(a: &T, b: &T) bool {
+  let mut r = true;
+  inline for v in variants(a, b) {
+    if v.is_active {
+      if !v.other_active { r = false; }
+      else { inline for pp in payloads(v) { if !eqf(&pp.value, &pp.other) { r = false; } } }
+    }
+  }
+  return r;
+}
+fn vtag<T>(e: &T) i32 {
+  let mut t: i32 = 0;
+  inline for v in variants(e) { if v.is_active { t = v.tag; } }
+  return t;
+}
+const fn creq() bool {
+  let a = P2 { x: 4, y: 5 };
+  let b = P2 { x: 4, y: 5 };
+  return req(&a, &b);
+}
+struct P2 { pub x: i32, pub y: i64, }
+static_assert(creq(), "paired fields fold at compile time");
+fn main() i32 {
+  let mut va = Vector::<i32>::new();
+  va.push(1);
+  let mut vb = Vector::<i32>::new();
+  vb.push(1);
+  let a = P { x: 9, v: va };
+  let b = P { x: 9, v: vb };
+  if !req(&a, &b) { return 1; }
+  let c = rclone(&a);
+  if !req(&c, &a) { return 2; }
+  if c.v.len() != 1 { return 3; }
+  let d = rdefault::<P>();
+  if d.x != 0 || d.v.len() != 0 { return 4; }
+  let p1 = P2 { x: 1, y: 2 };
+  let p2 = P2 { x: 1, y: 3 };
+  if rcmp(&p1, &p2) >= 0 { return 5; }
+  if rcmp(&p2, &p1) <= 0 { return 6; }
+  if rcmp(&p1, &p1) != 0 { return 7; }
+  let ea = E::C(1, 2);
+  let eb = E::C(1, 2);
+  let ec = E::C(1, 3);
+  let ed = E::B(1);
+  if !veq(&ea, &eb) { return 8; }
+  if veq(&ea, &ec) { return 9; }
+  if veq(&ea, &ed) { return 10; }
+  let ca = Color::Red;
+  let cb = Color::Red;
+  let cc = Color::Green;
+  if !veq(&ca, &cb) { return 11; }
+  if veq(&ca, &cc) { return 12; }
+  if vtag(&cc) != 7 { return 13; }
+  print("ok\n");
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("ok"), "paired binders, zeroed construction, and tagless enums all behave");
+}
+
+@test
 fn fields_projection_extended() {
     let p = cli::proj_new();
     p.mkfile(

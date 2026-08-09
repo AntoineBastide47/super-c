@@ -2727,6 +2727,26 @@ extend Codegen {
                     self.cg_subst_span_types(rid);
                 }
                 self.scan_body_calls(rid, foreign, home);
+                // The default's RETURN types must reach the home pool: the header proto
+                // forward-declares them and the C file's include marking walks the pool -- a
+                // `String` return this module never otherwise names.
+                if foreign {
+                    let rf = *self.cur_ast().at_const(rid);
+                    let rr2 = self.cur_ast().list(rf.as_data.function.returns);
+                    for q in 0..rf.as_data.function.returns.len {
+                        let rq = unsafe rr2[q as usize];
+                        let rn2 = *self.cur_ast().at_const(rq);
+                        let tno = if rn2.kind == NodeKind::NODE_PARAMETER {
+                            rn2.as_data.parameter.ty;
+                        } else {
+                            rq;
+                        };
+                        let tt2 = self.subst_resolve(self.cur_ast().type_of(tno));
+                        if self.type_is_concrete(tt2) {
+                            let _ = home.reintern(unsafe &*self.cur_ast(), tt2);
+                        }
+                    }
+                }
             }
             self.nsubst = 0;
             if foreign {
@@ -7585,9 +7605,12 @@ extend Codegen {
             // a name/index-only body reads nothing through v, and -Werror flags the unused local.
             // A payloads(v) loop has no subject of its own (v is the outer binder, not a C value).
             if !self.cg_proj_pmode(id) {
-                self.emit_str("(void)(");
-                self.emit_expr(unsafe self.cur_ast().list(self.cur_ast().at_const(fs.iterable).as_data.call.args)[0]);
-                self.emit_str(");\n");
+                let sargs = self.cur_ast().at_const(fs.iterable).as_data.call.args;
+                for si in 0..sargs.len {
+                    self.emit_str("(void)(");
+                    self.emit_expr(unsafe self.cur_ast().list(sargs)[si as usize]);
+                    self.emit_str(");\n");
+                }
             }
             if n == 0 {
                 return;
@@ -10788,9 +10811,14 @@ extend Codegen {
             self.buf.format_into("\", {} }", pl2);
             return;
         }
-        // value: through the OUTER loop's subject
+        // value / other: through the OUTER loop's first / second subject
         let oit = self.cur_ast().at_const(outer).as_data.for_stmt.iterable;
-        let arg = unsafe self.cur_ast().list(self.cur_ast().at_const(oit).as_data.call.args)[0];
+        let oargs = self.cur_ast().at_const(oit).as_data.call.args;
+        let mut ai: u32 = 0;
+        if span_is(src, name, "other".ptr() as *const char) && oargs.len > 1 {
+            ai = 1;
+        }
+        let arg = unsafe self.cur_ast().list(oargs)[ai as usize];
         let mut vnb2 = Buf128 {};
         render_ident_src(self.mod_src(dm), self.name_span_in(dm, vd.name), &mut vnb2[0], 120);
         self.emit_str("(");
@@ -10803,11 +10831,28 @@ extend Codegen {
 
     // The variants-loop binder members past `.index`: name/tag/payload are copy constants,
     // `.is_active` compares the subject's live tag, `.value` is the single payload's place.
-    fn emit_proj_variant_member(self: &mut Self, lid: NodeId, cur: i64, dm: ModuleId, vid: NodeId, name: tok::Span) {
+    // `tagenum`: set to the enum DECL when it is payload-less -- a bare C enum, so the subject IS
+    // the discriminant and the comparison names the enum CONSTANT (explicit values stay correct).
+    fn emit_proj_variant_member(
+        self: &mut Self,
+        lid: NodeId,
+        cur: i64,
+        dm: ModuleId,
+        vid: NodeId,
+        name: tok::Span,
+        tagenum: NodeId,
+    ) {
         let src = self.mod_src(self.cur_module());
         let da = self.mod_ast(dm);
         let vd = da.at_const(vid).as_data.variant;
         if span_is(src, name, "tag".ptr() as *const char) {
+            if tagenum != NODE_NONE {
+                // a bare C enum's discriminant is the CONSTANT (explicit values included)
+                self.emit_str("((int32_t)");
+                self.emit_tag_mod(dm, tagenum, vid);
+                self.emit_str(")");
+                return;
+            }
             self.buf.format_into("{}", cur); // a payload enum's tag IS the declaration index
             return;
         }
@@ -10816,10 +10861,38 @@ extend Codegen {
             return;
         }
         let it0 = self.cur_ast().at_const(lid).as_data.for_stmt.iterable;
-        let arg = unsafe self.cur_ast().list(self.cur_ast().at_const(it0).as_data.call.args)[0];
+        let vargs = self.cur_ast().at_const(it0).as_data.call.args;
+        let arg = unsafe self.cur_ast().list(vargs)[0];
         if span_is(src, name, "is_active".ptr() as *const char) {
+            if tagenum != NODE_NONE {
+                self.emit_str("((*(");
+                self.emit_expr(arg);
+                self.emit_str(")) == ");
+                self.emit_tag_mod(dm, tagenum, vid);
+                self.emit_str(")");
+                return;
+            }
             self.emit_str("((");
             self.emit_expr(arg);
+            self.buf.format_into(")->tag == {})", cur);
+            return;
+        }
+        // other_active: the SECOND subject's tag against this copy's variant
+        if span_is(src, name, "other_active".ptr() as *const char) {
+            if vargs.len < 2 {
+                self.emit_str("__sc_field_binder_escapes()");
+                return;
+            }
+            if tagenum != NODE_NONE {
+                self.emit_str("((*(");
+                self.emit_expr(unsafe self.cur_ast().list(vargs)[1]);
+                self.emit_str(")) == ");
+                self.emit_tag_mod(dm, tagenum, vid);
+                self.emit_str(")");
+                return;
+            }
+            self.emit_str("((");
+            self.emit_expr(unsafe self.cur_ast().list(vargs)[1]);
             self.buf.format_into(")->tag == {})", cur);
             return;
         }
@@ -10890,7 +10963,25 @@ extend Codegen {
             return;
         }
         if vmode {
-            self.emit_proj_variant_member(lid, cur, dm, fid, name);
+            let oy2 = *self.type_at(owner);
+            let mut edm: ModuleId = 0;
+            let mut ednode = NODE_NONE;
+            if oy2.kind == TypeKind::TYPE_ENUM {
+                edm = oy2.module;
+                ednode = oy2.as_data.decl;
+            } else if oy2.kind == TypeKind::TYPE_INSTANCE {
+                let ei = *self.cur_ast().instance(oy2.as_data.inst);
+                edm = ei.module;
+                ednode = ei.decl;
+            }
+            let mut tagenum = NODE_NONE;
+            if ednode != NODE_NONE && self.mod_ast(edm).at_const(ednode).kind == NodeKind::NODE_ENUM && !self.aggregate_has_payload_in(
+                edm,
+                ednode,
+            ) {
+                tagenum = ednode;
+            }
+            self.emit_proj_variant_member(lid, cur, dm, fid, name, tagenum);
             return;
         }
         if span_is(self.mod_src(self.cur_module()), name, "size".ptr() as *const char) || span_is(
@@ -10954,7 +11045,12 @@ extend Codegen {
             return;
         }
         let it0 = self.cur_ast().at_const(lid).as_data.for_stmt.iterable;
-        let arg = unsafe self.cur_ast().list(self.cur_ast().at_const(it0).as_data.call.args)[0];
+        let fargs = self.cur_ast().at_const(it0).as_data.call.args;
+        let mut ai: u32 = 0;
+        if span_is(self.mod_src(self.cur_module()), name, "other".ptr() as *const char) && fargs.len > 1 {
+            ai = 1;
+        }
+        let arg = unsafe self.cur_ast().list(fargs)[ai as usize];
         self.emit_str("(");
         self.emit_expr(arg);
         self.emit_str(")->");
@@ -12314,6 +12410,22 @@ extend Codegen {
                     "type_info".ptr() as *const char,
                 ) {
                     self.emit_type_info(id);
+                    return;
+                }
+                if cn.kind == NodeKind::NODE_GENERIC_SPECIALIZATION && self.cur_ast().at_const(
+                    cn.as_data.specialization.expression,
+                ).kind == NodeKind::NODE_IDENTIFIER && self.cur_ast().resolution_def(
+                    cn.as_data.specialization.expression,
+                ).node == NODE_NONE && span_is(
+                    self.mod_src(self.cur_module()),
+                    self.cur_ast().at_const(cn.as_data.specialization.expression).as_data.name.text,
+                    "zeroed".ptr() as *const char,
+                ) {
+                    // zeroed::<T>(): an all-zero compound literal of the substituted type
+                    let zt = self.subst_resolve(self.cur_ast().type_of(id));
+                    let mut zb = Buf256 {};
+                    self.render_type_id(zt, "".ptr() as *const char, &mut zb[0], 240);
+                    self.buf.format_into("(({}){{0}})", diag::cstr(&zb[0]));
                     return;
                 }
                 let mut freeflag = Buf32 {};
@@ -18855,6 +18967,165 @@ const fn bt_unsigned_cast(b: BuiltinType) *const char {
 }
 
 extend Codegen {
+    // The `fmt` implementation a `{}` argument formats through: the method of a conformance to an
+    // interface that REQUIRES `fmt` (Format, hand-written or derived), or that interface's default
+    // body when the conformance is empty. NODE_NONE when the type has no such conformance.
+    fn cg_fmt_impl(self: &mut Self, tmod: ModuleId, tdecl: NodeId) DefId {
+        let mut scopes = ScopeArr {};
+        scopes[0] = tmod;
+        let mut ns: i32 = 1;
+        if self.cur_module() != tmod {
+            scopes[1] = self.cur_module();
+            ns = 2;
+        }
+        for s in 0..ns {
+            let m = scopes[s as usize];
+            let a = self.mod_ast(m);
+            let items = unsafe a.at_const(a.root).as_data.program.items;
+            let mut ch = ExtChain {};
+            let nchain = self.cg_ext_chain(m, tdecl, &mut ch[0], 64);
+            let total = if nchain >= 0 {
+                nchain;
+            } else {
+                items.len as i32;
+            };
+            for x in 0..total {
+                let i = if nchain >= 0 {
+                    ch[x as usize];
+                } else {
+                    x;
+                };
+                let iid = unsafe a.list(items)[i as usize];
+                let it = a.at_const(iid);
+                if it.kind != NodeKind::NODE_EXTEND || it.as_data.extend_def.target_type == NODE_NONE || it.as_data.extend_def.interface_type == NODE_NONE {
+                    continue;
+                }
+                let tg = a.resolution_def(it.as_data.extend_def.target_type);
+                if tg.module != tmod || tg.node != tdecl {
+                    continue;
+                }
+                let itr = a.resolution_def(it.as_data.extend_def.interface_type);
+                if itr.node == NODE_NONE || itr.module as usize >= self.pkg_count() {
+                    continue;
+                }
+                let ia = self.mod_ast(itr.module);
+                if ia.at_const(itr.node).kind != NodeKind::NODE_INTERFACE {
+                    continue;
+                }
+                let req = ia.at_const(itr.node).as_data.interface_def.items;
+                for r in 0..req.len {
+                    let rid = unsafe ia.list(req)[r as usize];
+                    let rm = ia.at_const(rid);
+                    if rm.kind != NodeKind::NODE_FUNCTION || rm.as_data.function.generics.len != 0 || rm.as_data.function.params.len != 1 || !span_is(
+                        self.mod_src(itr.module),
+                        ia.at_const(rm.as_data.function.name).as_data.name.text,
+                        "fmt".ptr() as *const char,
+                    ) {
+                        continue;
+                    }
+                    // the extend's own override wins; otherwise the interface default
+                    let ms = it.as_data.extend_def.items;
+                    for j in 0..ms.len {
+                        let mid = unsafe a.list(ms)[j as usize];
+                        let mn = a.at_const(mid);
+                        if mn.kind == NodeKind::NODE_FUNCTION && span_is(
+                            self.mod_src(m),
+                            a.at_const(mn.as_data.function.name).as_data.name.text,
+                            "fmt".ptr() as *const char,
+                        ) {
+                            return DefId { module: m, node: mid };
+                        }
+                    }
+                    if rm.as_data.function.body != NODE_NONE {
+                        return DefId { module: itr.module, node: rid };
+                    }
+                }
+            }
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
+    // `{}` for a value that conforms: `{ String __s = T__fmt(&arg); push; free; }`, with an rvalue
+    // materialized (and freed) first and references formatting as their pointee.
+    fn emit_fmt_conforming(self: &mut Self, tb: *const char, arg: NodeId, t: TypeId) bool {
+        let mut vt = t;
+        while self.type_at(vt).kind == TypeKind::TYPE_REFERENCE {
+            vt = self.type_at(vt).as_data.elem;
+        }
+        let rd = self.cg_ref_depth(t);
+        let vy = *self.type_at(vt);
+        let mut fmod: ModuleId = 0;
+        let mut fdecl = NODE_NONE;
+        if vy.kind == TypeKind::TYPE_STRUCT || vy.kind == TypeKind::TYPE_ENUM {
+            fmod = vy.module;
+            fdecl = vy.as_data.decl;
+        } else if vy.kind == TypeKind::TYPE_INSTANCE {
+            let ii = *self.cur_ast().instance(vy.as_data.inst);
+            fmod = ii.module;
+            fdecl = ii.decl;
+        }
+        if fdecl == NODE_NONE {
+            return false;
+        }
+        let md = self.cg_fmt_impl(fmod, fdecl);
+        if md.node == NODE_NONE {
+            return false;
+        }
+        let mut sn = Buf32 {};
+        self.fresh(&mut sn[0], 32);
+        let mut vn = Buf32 {};
+        let materialize = rd == 0 && !self.is_lvalue(arg);
+        if materialize {
+            self.fresh(&mut vn[0], 32);
+            let mut d = Buf300 {};
+            self.render_type_id(vt, &vn[0], &mut d[0], 300);
+            self.buf.format_into("{{ {} = ", diag::cstr(&d[0]));
+            self.emit_expr(arg);
+            self.buf.format_into("; String {} = ", diag::cstr(&sn[0]));
+        } else {
+            self.buf.format_into("{{ String {} = ", diag::cstr(&sn[0]));
+        }
+        if vy.kind == TypeKind::TYPE_INSTANCE {
+            let mut inm = Buf256 {};
+            self.inst_name(self.cur_ast().instance(vy.as_data.inst), &mut inm[0], 200);
+            self.emit_cstr(&inm[0]);
+        } else {
+            let mut pfx = Buf64 {};
+            self.render_modpfx(md.module, &mut pfx[0], 64);
+            self.emit_cstr(&pfx[0]);
+            self.emit_ident_mod(fmod, self.mod_ast(fmod).at_const(fdecl).as_data.aggregate.name);
+        }
+        self.emit_str("__");
+        self.emit_ident_mod(md.module, self.mod_ast(md.module).at_const(md.node).as_data.function.name);
+        let mut isfx = Buf256 {};
+        self.cg_iface_suffix(md.module, md.node, &mut isfx[0], 200);
+        self.emit_cstr(&isfx[0]);
+        self.emit_str("(");
+        if materialize {
+            self.buf.format_into("&{}", diag::cstr(&vn[0]));
+        } else if rd > 0 {
+            self.buf.format_into("{}(", diag::cstr(ref_derefs(rd)));
+            self.emit_expr(arg);
+            self.emit_str(")");
+        } else {
+            self.emit_recv_addr(arg, false);
+        }
+        self.emit_str(");\n");
+        self.buf.format_into(
+            "String__push_str(&{}, String__as_str(&{})); String__free(&{});",
+            diag::cstr(tb),
+            diag::cstr(&sn[0]),
+            diag::cstr(&sn[0]),
+        );
+        if materialize && self.cg_type_is_free(vt) {
+            self.emit_str(" ");
+            let _ = self.emit_free_target(vt);
+            self.buf.format_into("(&{});", diag::cstr(&vn[0]));
+        }
+        self.emit_str(" }\n");
+        return true;
+    }
+
     fn fmt_arg_core(self: &mut Self, tb: *const char, arg: NodeId, sp: &FmtSpec, y: Ty, t: TypeId) bool {
         if sp.ty == 'x' as char || sp.ty == 'X' as char {
             let ud = if sp.ty == 'X' as char {
@@ -18971,7 +19242,7 @@ extend Codegen {
             }
             return true;
         }
-        return false;
+        return self.emit_fmt_conforming(tb, arg, t);
     }
     fn emit_format_arg(self: &mut Self, f: *const char, arg: NodeId, sp: &FmtSpec) bool {
         let t = self.subst_resolve(self.cur_ast().type_of(arg));

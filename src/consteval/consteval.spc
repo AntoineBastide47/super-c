@@ -3358,8 +3358,12 @@ extend ConstEval {
             // `&mut f.value` / `&mut v.value`: an interior pointer into the subject's object -- the
             // slot is the field index (or the payload slot past the tag for an ACTIVE variant).
             let prj = self.ce_proj_of(m, obj_n);
-            if prj != null && self.ce_span_is(m, mname, "value") {
-                let sub3 = unsafe prj.sub;
+            if prj != null && (self.ce_span_is(m, mname, "value") || self.ce_span_is(m, mname, "other")) {
+                let sub3 = if self.ce_span_is(m, mname, "other") {
+                    unsafe prj.sub2;
+                } else {
+                    unsafe prj.sub;
+                };
                 if (sub3.kind == CV_PTR || sub3.kind == CV_AGG) && sub3.as_data.p.off == 0 {
                     let mut slot = unsafe prj.k;
                     if unsafe prj.vmode {
@@ -5656,8 +5660,38 @@ extend ConstEval {
                 },
             };
         }
-        if self.ce_span_is(m, mname, "value") {
-            let sub = unsafe pr.sub;
+        if vmode && self.ce_span_is(m, mname, "other_active") {
+            let so = unsafe pr.sub2;
+            if so.kind != CV_PTR && so.kind != CV_AGG || so.as_data.p.off != 0 {
+                return cv_nil();
+            }
+            let oo = self.obj_ptr(so.as_data.p.obj);
+            if oo == null || unsafe oo.is_enum == 0 || unsafe oo.slots.len() == 0 {
+                return cv_nil();
+            }
+            let oact = unsafe oo.slots[0];
+            if oact.kind != CV_INT {
+                return cv_nil();
+            }
+            return CeVal {
+                kind: CV_BOOL,
+                tm: 0,
+                ty: Ast::builtin(BuiltinType::BT_BOOL),
+                as_data: CeValAs {
+                    i: if oact.as_data.i == unsafe pr.k {
+                        1;
+                    } else {
+                        0;
+                    },
+                },
+            };
+        }
+        if self.ce_span_is(m, mname, "value") || !vmode && self.ce_span_is(m, mname, "other") {
+            let sub = if self.ce_span_is(m, mname, "other") {
+                unsafe pr.sub2;
+            } else {
+                unsafe pr.sub;
+            };
             if sub.kind != CV_PTR && sub.kind != CV_AGG || sub.as_data.p.off != 0 {
                 return cv_nil();
             }
@@ -5921,10 +5955,18 @@ extend ConstEval {
             if !pr.ok {
                 return Flow::Bail;
             }
-            let arg = unsafe a.list(a.at_const(iter_n).as_data.call.args)[0];
+            let cargs = a.at_const(iter_n).as_data.call.args;
+            let arg = unsafe a.list(cargs)[0];
             let sub = self.ev_rval(f, m, arg);
             if sub.kind != CV_PTR && sub.kind != CV_AGG {
                 return xfail(f);
+            }
+            let mut sub2 = sub;
+            if cargs.len > 1 {
+                sub2 = self.ev_rval(f, m, unsafe a.list(cargs)[1]);
+                if sub2.kind != CV_PTR && sub2.kind != CV_AGG {
+                    return xfail(f);
+                }
             }
             let mut k: i64 = 0;
             loop {
@@ -5937,7 +5979,9 @@ extend ConstEval {
                 if !more {
                     return Flow::Ok;
                 }
-                self.ce_projs.push(CeProj { binder: id, k: k, sub: sub, om: pr.m, owner: pr.t, vmode: is_vars2 });
+                self.ce_projs.push(
+                    CeProj { binder: id, k: k, sub: sub, sub2: sub2, om: pr.m, owner: pr.t, vmode: is_vars2 },
+                );
                 let st = self.exec_stmt(f, m, body);
                 let _ = self.ce_projs.pop();
                 if st == Flow::Return || st == Flow::Bail {
@@ -8273,6 +8317,7 @@ pub struct CeProj {
     pub binder: NodeId,
     pub k: i64,
     pub sub: CeVal,
+    pub sub2: CeVal, // the second subject of a paired loop (== sub when there is only one)
     pub om: ModuleId,
     pub owner: TypeId,
     pub vmode: bool, // variants(&e) rather than fields(&v)

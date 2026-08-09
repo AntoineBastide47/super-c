@@ -4371,6 +4371,106 @@ extend TypeChecker {
         return grew;
     }
 
+    // Cross-module duplicate conformances, for interfaces written WITHOUT arguments (Format, Hash,
+    // ..): the same-module case errors in check_extend_conformance; across modules the two copies
+    // would only collide at link as a C redefinition, so name the duplicate here instead. Scans the
+    // EARLIER modules so the later declaration carries the error. Argumented conformances
+    // (`Conv<i32>`) are exempt -- distinct arguments are legal, and comparing them across pools is
+    // not worth the rare case the linker still catches.
+    pub fn check_cross_module_dup_conformances(self: &mut Self) {
+        let items = unsafe self.cur_ast().at_const(self.cur_ast().root).as_data.program.items;
+        for i in 0..items.len {
+            let id = unsafe self.cur_ast().list(items)[i as usize];
+            if self.cur_ast().at_const(id).kind != NodeKind::NODE_EXTEND {
+                continue;
+            }
+            let itype = self.cur_ast().at_const(id).as_data.extend_def.interface_type;
+            if itype == NODE_NONE {
+                continue;
+            }
+            if self.cur_ast().at_const(itype).kind == NodeKind::NODE_TYPE_PATH && self.cur_ast().at_const(itype).as_data.type_path.args.len != 0 {
+                continue;
+            }
+            let iface = self.cur_ast().resolution_def(itype);
+            let tgt = self.cur_ast().resolution_def(self.cur_ast().at_const(id).as_data.extend_def.target_type);
+            if iface.node == NODE_NONE || tgt.node == NODE_NONE {
+                continue;
+            }
+            // Earlier modules only: exactly ONE error per duplicate pair, and it embeds the other
+            // site's block, so both instances are shown without a mirrored second report.
+            let mut j: usize = 0;
+            let mut hit = false;
+            while j < self.cur_module() as usize && !hit {
+                let a = self.mod_ast(j as ModuleId);
+                let pits = unsafe a.at_const(a.root).as_data.program.items;
+                for k in 0..pits.len {
+                    let pid = unsafe a.list(pits)[k as usize];
+                    if a.at_const(pid).kind != NodeKind::NODE_EXTEND {
+                        continue;
+                    }
+                    let pit = a.at_const(pid).as_data.extend_def.interface_type;
+                    if pit == NODE_NONE {
+                        continue;
+                    }
+                    if a.at_const(pit).kind == NodeKind::NODE_TYPE_PATH && a.at_const(pit).as_data.type_path.args.len != 0 {
+                        continue;
+                    }
+                    let piface = a.resolution_def(pit);
+                    let ptgt = a.resolution_def(a.at_const(pid).as_data.extend_def.target_type);
+                    if piface.module == iface.module && piface.node == iface.node && ptgt.module == tgt.module && ptgt.node == tgt.node {
+                        let sp = self.cur_ast().at_const(itype).span;
+                        let psp = a.at_const(pit).span;
+                        self.errors.emit(
+                            sp.start,
+                            sp.end - sp.start,
+                            format(
+                                "duplicate conformance: module '{}' also declares this conformance for the type",
+                                unsafe self.package.modules[j].path.as_str(),
+                            ),
+                        );
+                        let site = diag::render_site(
+                            self.mod_src(j as ModuleId),
+                            unsafe self.package.modules[j].file.as_str(),
+                            psp.start,
+                            psp.end - psp.start,
+                        );
+                        self.errors.note(format("the other conformance is declared here\n{}", site.as_str()));
+                        site.free();
+                        self.errors.note(
+                            format(
+                                "a type conforms to an interface once across the whole package; remove one of the two",
+                            ),
+                        );
+                        hit = true;
+                        break;
+                    }
+                }
+                j = j + 1;
+            }
+        }
+    }
+
+    // One conformance obligation against one concrete owner: the error names the owner and the
+    // default method, the note pass names the offending field.
+    fn tc_conf_ob_check(self: &mut Self, owner: TypeId, ob_iface: DefId, itype: NodeId, rn: tok::Span, imod: ModuleId) {
+        if self.proj_fields_satisfy(owner, ob_iface, 0, false) {
+            return;
+        }
+        let mut on2 = Buf96 {};
+        self.render_type(owner, &mut on2[0], 96);
+        let sp2 = self.cur_ast().at_const(itype).span;
+        self.errors.emit(
+            sp2.start,
+            sp2.end - sp2.start,
+            format(
+                "a field of '{}' does not satisfy a bound required by the interface's default method '{}'",
+                diag::cstr(&on2[0]),
+                diag::span_str(self.mod_src(imod), rn.start, rn.end),
+            ),
+        );
+        let _ = self.proj_fields_satisfy(owner, ob_iface, 0, true);
+    }
+
     // Reflection-bound obligations carried by interface DEFAULT bodies, discharged at every
     // conformance that INHERITS them: `extend T as Format {}` must prove what `fmt`'s body defers
     // (each field satisfies Format), with Self bound to T. Runs in the driver's fixpoint alongside
@@ -4396,6 +4496,10 @@ extend TypeChecker {
             let ostart = (unsafe starts[iface.module as usize]) as usize;
             let oend = (unsafe ends[iface.module as usize]) as usize;
             if ostart >= oend {
+                continue;
+            }
+            let tgt = self.cur_ast().resolution_def(self.cur_ast().at_const(id).as_data.extend_def.target_type);
+            if tgt.node == NODE_NONE {
                 continue;
             }
             let ia = self.mod_ast(iface.module);
@@ -4440,24 +4544,66 @@ extend TypeChecker {
                     }
                     let owner0 = self.cur_ast().reintern(unsafe &*ia, ob.owner);
                     let owner2 = self.subst_type(owner0, &subp[0], &suba[0], nsub);
-                    if !self.cur_ast().type_concrete(owner2) {
+                    if self.cur_ast().type_concrete(owner2) {
+                        self.tc_conf_ob_check(owner2, ob.iface, itype, rn, iface.module);
                         continue;
                     }
-                    if !self.proj_fields_satisfy(owner2, ob.iface, 0, false) {
-                        let mut on2 = Buf96 {};
-                        self.render_type(owner2, &mut on2[0], 96);
-                        let sp2 = self.cur_ast().at_const(itype).span;
-                        self.errors.emit(
-                            sp2.start,
-                            sp2.end - sp2.start,
-                            format(
-                                "a field of '{}' does not satisfy a bound required by the interface's default method '{}'",
-                                diag::cstr(&on2[0]),
-                                diag::span_str(self.mod_src(iface.module), rn.start, rn.end),
-                            ),
-                        );
-                        let _ = self.proj_fields_satisfy(owner2, ob.iface, 0, true);
+                    // A GENERIC conformance proves nothing symbolically: run the obligation
+                    // against every concrete instantiation of the target the package recorded,
+                    // with the extend's parameters bound positionally through the target's
+                    // written arguments.
+                    let xd = self.cur_ast().at_const(id).as_data.extend_def;
+                    if xd.generics.len == 0 || self.cur_ast().at_const(xd.target_type).kind != NodeKind::NODE_TYPE_PATH {
+                        continue;
                     }
+                    let targs = self.cur_ast().at_const(xd.target_type).as_data.type_path.args;
+                    let mut seen3 = Vector::<TypeId>::new();
+                    for j in 0..self.pkg_count() {
+                        let oa = self.mod_ast(j as ModuleId);
+                        let ninst = (unsafe oa.instances).len();
+                        for q in 0..ninst {
+                            let it2 = *(unsafe oa.instances).at(q);
+                            if it2.decl != tgt.node || it2.module != tgt.module {
+                                continue;
+                            }
+                            let mut pp = Defs8 {};
+                            let mut pa = Tys8 {};
+                            let mut np: i32 = 0;
+                            let mut usable = true;
+                            let mut kk: u32 = 0;
+                            while kk < targs.len && kk < it2.n as u32 && np < 8 {
+                                let an = unsafe self.cur_ast().list(targs)[kk as usize];
+                                let pd = self.cur_ast().resolution_def(an);
+                                let ca = self.cur_ast().reintern(unsafe &*oa, unsafe it2.args[kk as usize]);
+                                if pd.node == NODE_NONE || !self.cur_ast().type_concrete(ca) {
+                                    usable = false;
+                                }
+                                pp[np as usize] = pd;
+                                pa[np as usize] = ca;
+                                np = np + 1;
+                                kk = kk + 1;
+                            }
+                            if !usable {
+                                continue;
+                            }
+                            let owner3 = self.subst_type(owner2, &pp[0], &pa[0], np);
+                            if !self.cur_ast().type_concrete(owner3) {
+                                continue;
+                            }
+                            let mut dup3 = false;
+                            for z in 0..seen3.len() {
+                                if seen3[z] == owner3 {
+                                    dup3 = true;
+                                }
+                            }
+                            if dup3 {
+                                continue;
+                            }
+                            seen3.push(owner3);
+                            self.tc_conf_ob_check(owner3, ob.iface, itype, rn, iface.module);
+                        }
+                    }
+                    seen3.free();
                 }
             }
         }
@@ -6232,8 +6378,13 @@ extend TypeChecker {
                 a.at_const(node).as_data.member.object,
             );
             let mut oty = a.type_of(obj);
-            // `f.value` through a fields(&mut v) binder is as mutable as the subject reference.
+            // `f.value` through a fields(&mut v) binder is as mutable as the subject reference;
+            // `f.other` is ALWAYS read-only -- it shares value's type (so a generic callee unifies
+            // both), and mutability of the place is denied by NAME instead.
             if nk == NodeKind::NODE_MEMBER && oty != TYPE_NONE && self.type_at(oty).kind == TypeKind::TYPE_FIELD_PROJECTION {
+                if span_is(self.source, self.name_span(a.at_const(node).as_data.member.member), "other") {
+                    return false;
+                }
                 return self.type_at(oty).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
             }
             let mut via_ref = false;
@@ -7219,6 +7370,15 @@ extend TypeChecker {
                         diag::span_str(self.source, sp.start, sp.end),
                     ),
                 );
+                let pf = if self.package != null {
+                    unsafe self.package.modules[self.cur_module() as usize].file.as_str();
+                } else {
+                    "";
+                };
+                let psp = self.cur_ast().at_const(pit).span;
+                let site = diag::render_site(self.source, pf, psp.start, psp.end - psp.start);
+                self.errors.note(format("the first conformance is declared here\n{}", site.as_str()));
+                site.free();
                 self.errors.note(
                     format(
                         "a type conforms to an interface once; merge the items into the first 'extend', or remove one",
@@ -8711,6 +8871,40 @@ extend TypeChecker {
                 self.cur_ast().set_type(id, ot);
                 return ot;
             }
+            // zeroed::<T>(): compiler intrinsic -- an all-zero-bytes T, the `unsafe` seed the
+            // reflection constructors (reflect_default / reflect_clone) then fill field by field.
+            if a.at_const(spx.expression).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(spx.expression).node == NODE_NONE && span_is(
+                self.source,
+                a.at_const(spx.expression).as_data.name.text,
+                "zeroed",
+            ) {
+                let sp2 = a.at_const(id).span;
+                let args2 = a.at_const(id).as_data.call.args;
+                if tp_args.len != 1 || args2.len != 0 {
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format("zeroed takes exactly one type argument and no values"),
+                    );
+                    return TYPE_NONE;
+                }
+                if self.tc_needs_unsafe() {
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format(
+                            "'zeroed' requires an unsafe context (all-zero bytes are not a valid value of every type)",
+                        ),
+                    );
+                }
+                let tt = self.resolve_type(unsafe a.list(tp_args)[0]);
+                if tt == TYPE_NONE {
+                    return TYPE_NONE;
+                }
+                self.cur_ast().set_type_args(id, &tt, 1);
+                self.cur_ast().set_type(id, tt);
+                return tt;
+            }
             // type_info::<T>(): compiler intrinsic -- a TypeInfo descriptor of T, folded at compile
             // time (consteval builds the object graph; codegen emits static data at runtime uses).
             if a.at_const(spx.expression).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(spx.expression).node == NODE_NONE && span_is(
@@ -9709,6 +9903,32 @@ extend TypeChecker {
                     );
                 }
             }
+            // Two-subject loops add `.other` (fields/payloads: the second subject's same field, a
+            // read-only place) and `.other_active` (variants: the second subject's tag test).
+            if !vmode && span_is(self.source, name, "other") {
+                if self.tc_binder_nsubj(blid) != 2 {
+                    let osp = a.at_const(id).span;
+                    self.errors.emit(
+                        osp.start,
+                        osp.end - osp.start,
+                        format("'.other' requires a two-subject loop: write fields(&a, &b)"),
+                    );
+                    return TYPE_NONE;
+                }
+                return base; // value's own type: one projection per binder, so generic callees unify
+            }
+            if vmode && span_is(self.source, name, "other_active") {
+                if self.tc_binder_nsubj(blid) != 2 {
+                    let osp = a.at_const(id).span;
+                    self.errors.emit(
+                        osp.start,
+                        osp.end - osp.start,
+                        format("'.other_active' requires a two-subject loop: write variants(&a, &b)"),
+                    );
+                    return TYPE_NONE;
+                }
+                return Ast::builtin(BuiltinType::BT_BOOL);
+            }
             if !vmode && (span_is(self.source, name, "offset") || span_is(self.source, name, "size")) {
                 return Ast::builtin(BuiltinType::BT_USIZE);
             }
@@ -9734,7 +9954,7 @@ extend TypeChecker {
                     sp0.start,
                     sp0.end - sp0.start,
                     format(
-                        "a variant binder has '.name', '.index', '.tag', '.payload', '.is_active', and '.value' -- nothing else",
+                        "a variant binder has '.name', '.index', '.tag', '.payload', '.is_active', '.value', and '.other_active' (two subjects) -- nothing else",
                     ),
                 );
             } else {
@@ -9742,7 +9962,7 @@ extend TypeChecker {
                     sp0.start,
                     sp0.end - sp0.start,
                     format(
-                        "a field binder has '.name', '.index', '.value', '.offset', '.size', and '.kind' -- nothing else",
+                        "a field binder has '.name', '.index', '.value', '.offset', '.size', '.kind', and '.other' (two subjects) -- nothing else",
                     ),
                 );
             }
@@ -12567,6 +12787,29 @@ extend TypeChecker {
         self.loop_depth = self.loop_depth - 1;
     }
     @c.noinline
+    // How many subjects the binder loop `blid` projects from: `fields(&a, &b)` has two, and
+    // `payloads(v)` reads through the OUTER variants loop's own subjects.
+    fn tc_binder_nsubj(self: &Self, blid: NodeId) u32 {
+        let a = self.cur_ast();
+        if blid == NODE_NONE || a.at_const(blid).kind != NodeKind::NODE_INLINE_FOR {
+            return 1;
+        }
+        let it = a.at_const(blid).as_data.for_stmt.iterable;
+        if a.at_const(it).kind != NodeKind::NODE_CALL {
+            return 1;
+        }
+        let cl = a.at_const(it).as_data.call.callee;
+        let args = a.at_const(it).as_data.call.args;
+        if a.at_const(cl).kind == NodeKind::NODE_IDENTIFIER && span_is(
+            self.source,
+            a.at_const(cl).as_data.name.text,
+            "payloads",
+        ) && args.len == 1 {
+            return self.tc_binder_nsubj(a.resolution(unsafe a.list(args)[0]));
+        }
+        return args.len;
+    }
+
     fn tc_check_for(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         self.loop_depth = self.loop_depth + 1;
@@ -12617,11 +12860,11 @@ extend TypeChecker {
                         );
                         owner = TYPE_NONE;
                     }
-                } else if fargs.len != 1 {
+                } else if fargs.len != 1 && fargs.len != 2 {
                     self.errors.emit(
                         fsp.start,
                         fsp.end - fsp.start,
-                        format("fields takes exactly one reference argument"),
+                        format("fields takes one or two reference arguments"),
                     );
                 } else {
                     let av = self.check_expr(unsafe a.list(fargs)[0]);
@@ -12635,6 +12878,20 @@ extend TypeChecker {
                             fsp.end - fsp.start,
                             format("fields borrows its subject: write fields(&v)"),
                         );
+                    }
+                    // fields(&a, &b): a PAIRED loop; `.other` projects b's same field. The second
+                    // subject is read-only and must be the same type, or the pairing means nothing.
+                    if fargs.len == 2 && owner != TYPE_NONE {
+                        let bv = self.check_expr(unsafe a.list(fargs)[1]);
+                        let by = *self.type_at(bv);
+                        if by.kind != TypeKind::TYPE_REFERENCE || by.as_data.elem != owner {
+                            self.errors.emit(
+                                fsp.start,
+                                fsp.end - fsp.start,
+                                format("the second subject must be a reference to the same type as the first"),
+                            );
+                            owner = TYPE_NONE;
+                        }
                     }
                 }
                 if owner != TYPE_NONE && !is_pay {
