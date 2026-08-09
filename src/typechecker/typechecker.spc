@@ -375,6 +375,16 @@ const fn builtin_of(src: str, s: tok::Span) i32 {
 const fn bt_is_int(b: BuiltinType) bool {
     return b as u8 >= BuiltinType::BT_I8 as u8 && b as u8 <= BuiltinType::BT_USIZE as u8;
 }
+// The content span of a raw string literal: past `r##"` and before `"##`.
+const fn tc_raw_content(src: str, s: tok::Span) tok::Span {
+    let mut i = s.start + 1;
+    let mut h: u32 = 0;
+    while src[i as usize] == b'#' {
+        i = i + 1;
+        h = h + 1;
+    }
+    return tok::Span { start: i + 1, end: s.end - 1 - h };
+}
 const fn bt_is_float(b: BuiltinType) bool {
     return b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64;
 }
@@ -8594,6 +8604,540 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
+    // ---- `format` rewrite ----------------------------------------------------------------------
+    // Node builders for the rewrite; each keeps the resolution/type side tables sized (they were
+    // sized before typecheck, and these are the only nodes built during it).
+    fn tc_add_node(self: &mut Self, n: Node) NodeId {
+        let nid = self.cur_ast().add(n);
+        self.cur_ast().grow_sidetables();
+        return nid;
+    }
+    fn tc_ident(self: &mut Self, span: tok::Span) NodeId {
+        return self.tc_add_node(
+            Node {
+                kind: NodeKind::NODE_IDENTIFIER,
+                span: span,
+                as_data: NodeAs { name: NameData { text: span, is_mutable: false } },
+            },
+        );
+    }
+    fn tc_local_use(self: &mut Self, span: tok::Span, letn: NodeId) NodeId {
+        let u = self.tc_ident(span);
+        self.cur_ast().set_resolution(u, letn);
+        return u;
+    }
+    fn tc_ref_of(self: &mut Self, operand: NodeId, mutable: bool) NodeId {
+        return self.tc_add_node(
+            Node {
+                kind: NodeKind::NODE_UNARY,
+                span: self.cur_ast().at_const(operand).span,
+                as_data: NodeAs {
+                    unary: UnaryData {
+                        op: TokenType::Ampersand,
+                        operand: operand,
+                        qualifier: if mutable {
+                            TypeQualifier::TYPE_QUAL_MUT;
+                        } else {
+                            TypeQualifier::TYPE_QUAL_NONE;
+                        },
+                    },
+                },
+            },
+        );
+    }
+    fn tc_deref_of(self: &mut Self, operand: NodeId) NodeId {
+        return self.tc_add_node(
+            Node {
+                kind: NodeKind::NODE_UNARY,
+                span: self.cur_ast().at_const(operand).span,
+                as_data: NodeAs {
+                    unary: UnaryData { op: TokenType::Star, operand: operand, qualifier: TypeQualifier::TYPE_QUAL_NONE },
+                },
+            },
+        );
+    }
+    fn tc_expr_stmt(self: &mut Self, value: NodeId, span: tok::Span) NodeId {
+        return self.tc_add_node(
+            Node {
+                kind: NodeKind::NODE_EXPRESSION_STATEMENT,
+                span: span,
+                as_data: NodeAs { single: SingleData { value: value } },
+            },
+        );
+    }
+    fn tc_lit(self: &mut Self, from: u32, to: u32, tt2: TokenType, seg: bool) NodeId {
+        return self.tc_add_node(
+            Node {
+                kind: NodeKind::NODE_LITERAL,
+                span: tok::Span { start: from, end: to },
+                as_data: NodeAs {
+                    literal: LiteralData { raw: tok::Span { start: from, end: to }, token_type: tt2, seg: seg },
+                },
+            },
+        );
+    }
+    // A call to a prelude `sugar_fmt_*` shim (std/string.spc): the callee identifier's text is
+    // never read because its resolution is seeded here.
+    fn tc_shim_call(self: &mut Self, name: str, span: tok::Span, sa: *const NodeId, n: u32) NodeId {
+        let h = self.package.prelude_lookup(name, false);
+        let callee = self.tc_ident(span);
+        self.cur_ast().set_resolution_def(callee, DefId { module: h.mid, node: h.node });
+        let mark = self.cur_ast().mark();
+        for i in 0..n {
+            self.cur_ast().push(unsafe sa[i as usize]);
+        }
+        let cargs = self.cur_ast().commit(mark);
+        return self.tc_add_node(
+            Node {
+                kind: NodeKind::NODE_CALL,
+                span: span,
+                as_data: NodeAs { call: CallData { callee: callee, args: cargs } },
+            },
+        );
+    }
+    // `sugar_fmt_<shim>(first, v, ...extra)` -- the String always threads by value as `first`.
+    fn tc_fmt_call(self: &mut Self, shim: str, kw: tok::Span, first: NodeId, v: NodeId, extra: NodeId) NodeId {
+        let mut sa = Nodes8 {};
+        let mut n: u32 = 0;
+        if first != NODE_NONE {
+            sa[0] = first;
+            n = 1;
+        }
+        if v != NODE_NONE {
+            sa[n as usize] = v;
+            n = n + 1;
+        }
+        if extra != NODE_NONE {
+            sa[n as usize] = extra;
+            n = n + 1;
+        }
+        return self.tc_shim_call(shim, kw, &sa[0], n);
+    }
+    // `f = <call>;` pushed as a statement.
+    fn tc_fmt_assign(self: &mut Self, letf: NodeId, kw: tok::Span, call: NodeId) {
+        let asg = self.tc_add_node(
+            Node {
+                kind: NodeKind::NODE_ASSIGNMENT,
+                span: kw,
+                as_data: NodeAs {
+                    binary: BinaryData { left: self.tc_local_use(kw, letf), op: TokenType::Equal, right: call },
+                },
+            },
+        );
+        let stmt = self.tc_expr_stmt(asg, kw);
+        self.cur_ast().push(stmt);
+    }
+    // `f = sugar_fmt_<shim>(f, v);` pushed as a statement.
+    fn tc_fmt_push(self: &mut Self, letf: NodeId, kw: tok::Span, shim: str, v: NodeId, extra: NodeId) {
+        let call = self.tc_fmt_call(shim, kw, self.tc_local_use(kw, letf), v, extra);
+        self.tc_fmt_assign(letf, kw, call);
+    }
+
+    // One placeholder: dispatch on the ARGUMENT's checked type to a shim whose parameter every
+    // source type reaches by implicit lossless widening (no synthesized casts), mirroring what the
+    // old codegen lowering emitted per type. False = reported, caller abandons the rewrite.
+    // One placeholder: dispatch on the ARGUMENT's checked type to a shim whose value parameter
+    // every source type reaches by implicit lossless widening (no synthesized casts), mirroring
+    // what the old codegen lowering emitted per type. A width spec renders the value through the
+    // SAME shim onto a fresh String and pads it in as a piece. False = reported, caller abandons.
+    fn tc_fmt_arg(
+        self: &mut Self,
+        letf: NodeId,
+        kw: tok::Span,
+        argid: NodeId,
+        sty: u8,
+        prec_seen: bool,
+        prec_s: u32,
+        prec_e: u32,
+        width_s: u32,
+        width_e: u32,
+        fill_s: u32,
+        fill_e: u32,
+        align: u8,
+    ) bool {
+        let at = self.cur_ast().type_of(argid);
+        let y = *self.type_at(at);
+        let asp = self.cur_ast().at_const(argid).span;
+        let b = if y.kind == TypeKind::TYPE_BUILTIN {
+            y.as_data.builtin;
+        } else {
+            BuiltinType::BT_COUNT;
+        };
+        if prec_seen && !(b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64) {
+            self.errors.emit(
+                asp.start,
+                asp.end - asp.start,
+                format("{}", "`{:.N}` precision requires a float argument"),
+            );
+            return false;
+        }
+        let signed = b as u8 >= BuiltinType::BT_I8 as u8 && b as u8 <= BuiltinType::BT_ISIZE as u8;
+        let unsig = b as u8 >= BuiltinType::BT_U8 as u8 && b as u8 <= BuiltinType::BT_USIZE as u8;
+        let mut shim: str = "";
+        let mut varg = argid;
+        let mut extra = NODE_NONE;
+        if sty != 0 as u8 {
+            if sty == b'b' {
+                if b == BuiltinType::BT_I8 || b == BuiltinType::BT_U8 {
+                    shim = "sugar_fmt_bin8";
+                } else if b == BuiltinType::BT_I16 || b == BuiltinType::BT_U16 {
+                    shim = "sugar_fmt_bin16";
+                } else if b == BuiltinType::BT_I32 || b == BuiltinType::BT_U32 {
+                    shim = "sugar_fmt_bin32";
+                } else if b == BuiltinType::BT_I64 {
+                    shim = "sugar_fmt_bin64i";
+                } else if b == BuiltinType::BT_U64 {
+                    shim = "sugar_fmt_bin64u";
+                } else if b == BuiltinType::BT_ISIZE {
+                    shim = "sugar_fmt_bin_is";
+                } else if b == BuiltinType::BT_USIZE {
+                    shim = "sugar_fmt_bin_us";
+                } else if b == BuiltinType::BT_CHAR {
+                    shim = "sugar_fmt_bin_c";
+                }
+            } else if b == BuiltinType::BT_ISIZE {
+                shim = if sty == b'X' {
+                    "sugar_fmt_hex_is_up";
+                } else {
+                    "sugar_fmt_hex_is";
+                };
+            } else if b == BuiltinType::BT_USIZE {
+                shim = if sty == b'X' {
+                    "sugar_fmt_hex_us_up";
+                } else {
+                    "sugar_fmt_hex_us";
+                };
+            } else if signed {
+                shim = if sty == b'X' {
+                    "sugar_fmt_hex_i_up";
+                } else {
+                    "sugar_fmt_hex_i";
+                };
+            } else if unsig {
+                shim = if sty == b'X' {
+                    "sugar_fmt_hex_u_up";
+                } else {
+                    "sugar_fmt_hex_u";
+                };
+            } else if b == BuiltinType::BT_CHAR {
+                shim = if sty == b'X' {
+                    "sugar_fmt_hex_c_up";
+                } else {
+                    "sugar_fmt_hex_c";
+                };
+            }
+            if shim.len() == 0 {
+                self.errors.emit(
+                    asp.start,
+                    asp.end - asp.start,
+                    format("{}", "`{:x}`/`{:X}`/`{:b}` formats require an integer argument"),
+                );
+                return false;
+            }
+        } else if prec_seen {
+            shim = "sugar_fmt_f64_prec";
+            extra = self.tc_lit(prec_s, prec_e, TokenType::IntegerLiteral, false);
+        } else if b != BuiltinType::BT_COUNT {
+            shim = if b == BuiltinType::BT_BOOL {
+                "sugar_fmt_bool";
+            } else if b == BuiltinType::BT_CHAR {
+                "sugar_fmt_char";
+            } else if b == BuiltinType::BT_ISIZE {
+                "sugar_fmt_isize";
+            } else if b == BuiltinType::BT_USIZE {
+                "sugar_fmt_usize";
+            } else if signed {
+                "sugar_fmt_i64";
+            } else if unsig {
+                "sugar_fmt_u64";
+            } else if b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64 {
+                "sugar_fmt_f64";
+            } else {
+                "";
+            };
+            if shim.len() == 0 {
+                return self.tc_fmt_unformattable(asp);
+            }
+        } else if at == self.prelude_str_type() {
+            shim = "sugar_fmt_str";
+        } else {
+            // strip references; aggregates and generic params go through the `Format` bound
+            let mut vt = at;
+            let mut rd: u32 = 0;
+            while self.type_at(vt).kind == TypeKind::TYPE_REFERENCE {
+                vt = self.type_at(vt).as_data.elem;
+                rd = rd + 1;
+            }
+            let vy = *self.type_at(vt);
+            if rd == 0 && vy.kind == TypeKind::TYPE_INSTANCE {
+                // a Global-allocated String pushes directly; other allocators format via `fmt`
+                let ii = *self.cur_ast().instance(vy.as_data.inst);
+                let sh = self.package.prelude_lookup("String", true);
+                let gh = self.package.prelude_lookup("Global", true);
+                if ii.decl == sh.node && ii.module == sh.mid && ii.n == 1 && ii.args[0] == self.named_type_of(
+                    gh.mid,
+                    gh.node,
+                ) {
+                    if self.is_place(argid) {
+                        shim = "sugar_fmt_string";
+                        varg = self.tc_ref_of(argid, false);
+                    } else {
+                        shim = "sugar_fmt_owned";
+                    }
+                }
+            }
+            if shim.len() == 0 {
+                if vy.kind == TypeKind::TYPE_STRUCT || vy.kind == TypeKind::TYPE_ENUM || vy.kind == TypeKind::TYPE_INSTANCE || vy.kind == TypeKind::TYPE_GENERIC {
+                    if rd == 0 && !self.is_place(argid) {
+                        shim = "sugar_fmt_val_owned";
+                    } else {
+                        shim = "sugar_fmt_val";
+                        if rd == 0 {
+                            varg = self.tc_ref_of(argid, false);
+                        } else {
+                            let mut k: u32 = 1;
+                            while k < rd {
+                                varg = self.tc_deref_of(varg);
+                                k = k + 1;
+                            }
+                        }
+                    }
+                } else {
+                    return self.tc_fmt_unformattable(asp);
+                }
+            }
+        }
+        if width_e > width_s {
+            // f = sugar_fmt_pad_X(f, <shim>(sugar_fmt_new(), v), width, fill);
+            let pshim = if align == b'<' {
+                "sugar_fmt_pad_l";
+            } else if align == b'^' {
+                "sugar_fmt_pad_c";
+            } else if align == b'>' {
+                "sugar_fmt_pad_r";
+            } else if self.is_numeric(at) {
+                "sugar_fmt_pad_r";
+            } else {
+                "sugar_fmt_pad_l";
+            };
+            let newc = self.tc_fmt_call("sugar_fmt_new", kw, NODE_NONE, NODE_NONE, NODE_NONE);
+            let piece = self.tc_fmt_call(shim, kw, newc, varg, extra);
+            let mut pa = Nodes8 {};
+            pa[0] = self.tc_local_use(kw, letf);
+            pa[1] = piece;
+            pa[2] = self.tc_lit(width_s, width_e, TokenType::IntegerLiteral, false);
+            // the fill character rides as a RAW one-byte segment literal (escaping-proof)
+            pa[3] = self.tc_lit(fill_s, fill_e, TokenType::RawStringLiteral, true);
+            let pc = self.tc_shim_call(pshim, kw, &pa[0], 4);
+            self.tc_fmt_assign(letf, kw, pc);
+        } else {
+            self.tc_fmt_push(letf, kw, shim, varg, extra);
+        }
+        return true;
+    }
+
+    fn tc_fmt_unformattable(self: &mut Self, asp: tok::Span) bool {
+        self.errors.emit(
+            asp.start,
+            asp.end - asp.start,
+            format("{}", "argument is not directly formattable (call its .fmt())"),
+        );
+        self.errors.note(format("implement Format for this type or pass a value that already formats directly"));
+        return false;
+    }
+
+    // `format("a{}b", v)` rewrites IN PLACE into a value block
+    //     { let mut f = sugar_fmt_new(); sugar_fmt_str(&mut f, "a"); sugar_fmt_i64(&mut f, v); ... f; }
+    // then the block is typechecked like handwritten code: downstream passes never see a `format`
+    // call, so consteval folds it through the ordinary interpreter and codegen needs no format
+    // lowering. Template diagnostics live here now; every error path leaves the node as the
+    // (already reported) call, which nothing downstream runs on.
+    fn tc_check_format(self: &mut Self, id: NodeId) TypeId {
+        let sh = self.package.prelude_lookup("String", true);
+        let gh = self.package.prelude_lookup("Global", true);
+        let mut sa = Tys8 {};
+        sa[0] = self.named_type_of(gh.mid, gh.node);
+        let sret = self.cur_ast().intern_instance(sh.mid, sh.node, &sa[0], 1);
+        self.cur_ast().set_type(id, sret);
+        let sp = self.cur_ast().at_const(id).span;
+        let args = self.cur_ast().at_const(id).as_data.call.args;
+        let mut is_raw = false;
+        let mut ok_lit = false;
+        if args.len > 0 {
+            let a0 = unsafe self.cur_ast().list(args)[0];
+            if self.cur_ast().at_const(a0).kind == NodeKind::NODE_LITERAL {
+                let t0 = self.cur_ast().at_const(a0).as_data.literal.token_type;
+                is_raw = t0 == TokenType::RawStringLiteral;
+                ok_lit = t0 == TokenType::StringLiteral || is_raw;
+            }
+        }
+        if !ok_lit {
+            self.errors.emit(sp.start, sp.end - sp.start, format("format string must be a string literal"));
+            self.errors.note(format("format strings are parsed at compile time so placeholders can be checked"));
+            return sret;
+        }
+        let ne0 = self.errors.errors.len();
+        for i in 1..args.len {
+            self.expected = TYPE_NONE;
+            if self.check_expr(unsafe self.cur_ast().list(args)[i as usize]) == TYPE_NONE {
+                return sret;
+            }
+        }
+        if self.errors.errors.len() != ne0 {
+            return sret;
+        }
+        let a0 = unsafe self.cur_ast().list(args)[0];
+        let rawsp = self.cur_ast().at_const(a0).as_data.literal.raw;
+        let src = self.source;
+        let content = if is_raw {
+            tc_raw_content(src, rawsp);
+        } else {
+            tok::Span { start: rawsp.start + 1, end: rawsp.end - 1 };
+        };
+        let kw = self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee).span;
+        let seg_tt = if is_raw {
+            TokenType::RawStringLiteral;
+        } else {
+            TokenType::StringLiteral;
+        };
+        let mark = self.cur_ast().mark();
+        let newc = self.tc_shim_call("sugar_fmt_new", kw, null, 0);
+        let letf = self.tc_add_node(
+            Node {
+                kind: NodeKind::NODE_LET,
+                span: kw,
+                as_data: NodeAs {
+                    let_stmt: LetData { name: self.tc_ident(kw), ty: NODE_NONE, value: newc, is_mutable: true },
+                },
+            },
+        );
+        self.cur_ast().push(letf);
+        let endc = content.end;
+        let mut i = content.start;
+        let mut seg = i;
+        let mut ai: u32 = 1;
+        let mut bad = false;
+        while i < endc {
+            let c = src[i as usize];
+            if (c == b'{' || c == b'}') && i + 1 < endc && src[(i + 1) as usize] == c {
+                i = i + 2;
+                continue;
+            }
+            if c == b'{' {
+                // scan the spec keeping SPANS: every literal the rewrite builds points at real text
+                let mut fill_s = i;
+                let mut fill_e = i;
+                let mut align: u8 = 0;
+                let mut width_s = i;
+                let mut width_e = i;
+                let mut prec_seen = false;
+                let mut prec_s = i;
+                let mut prec_e = i;
+                let mut sty: u8 = 0;
+                let mut j = i + 1;
+                if j < endc && src[j as usize] == b':' {
+                    j = j + 1;
+                    if j + 1 < endc && (src[(j + 1) as usize] == b'<' || src[(j + 1) as usize] == b'>' || src[(j + 1) as usize] == b'^') && src[j as usize] != b'}' {
+                        fill_s = j;
+                        fill_e = j + 1;
+                        align = src[(j + 1) as usize];
+                        j = j + 2;
+                    } else if j < endc && (src[j as usize] == b'<' || src[j as usize] == b'>' || src[j as usize] == b'^') {
+                        align = src[j as usize];
+                        j = j + 1;
+                    }
+                    if j < endc && src[j as usize] == b'0' && fill_e == fill_s {
+                        fill_s = j;
+                        fill_e = j + 1;
+                        j = j + 1;
+                    }
+                    width_s = j;
+                    while j < endc && src[j as usize] >= b'0' && src[j as usize] <= b'9' {
+                        j = j + 1;
+                    }
+                    width_e = j;
+                    if j < endc && src[j as usize] == b'.' {
+                        j = j + 1;
+                        prec_s = j;
+                        while j < endc && src[j as usize] >= b'0' && src[j as usize] <= b'9' {
+                            j = j + 1;
+                        }
+                        prec_e = j;
+                        prec_seen = prec_e > prec_s;
+                    }
+                    if j < endc && (src[j as usize] == b'x' || src[j as usize] == b'X' || src[j as usize] == b'b') {
+                        sty = src[j as usize];
+                        j = j + 1;
+                    }
+                }
+                if j < endc && src[j as usize] == b'}' {
+                    if i > seg {
+                        let sl = self.tc_lit(seg, i, seg_tt, true);
+                        self.tc_fmt_push(letf, kw, "sugar_fmt_str", sl, NODE_NONE);
+                    }
+                    if ai >= args.len {
+                        self.errors.emit(
+                            sp.start,
+                            sp.end - sp.start,
+                            format("{}", "more `{}` placeholders than arguments"),
+                        );
+                        self.errors.note(
+                            format(
+                                "{}",
+                                "add an argument for each placeholder or escape literal braces as '{{' and '}}'",
+                            ),
+                        );
+                        bad = true;
+                        break;
+                    }
+                    let argid = unsafe self.cur_ast().list(args)[ai as usize];
+                    if !self.tc_fmt_arg(
+                        letf,
+                        kw,
+                        argid,
+                        sty,
+                        prec_seen,
+                        prec_s,
+                        prec_e,
+                        width_s,
+                        width_e,
+                        fill_s,
+                        fill_e,
+                        align,
+                    ) {
+                        bad = true;
+                        break;
+                    }
+                    ai = ai + 1;
+                    i = j + 1;
+                    seg = i;
+                    continue;
+                }
+            }
+            i = i + 1;
+        }
+        if !bad && ai < args.len {
+            self.errors.emit(sp.start, sp.end - sp.start, format("{}", "more arguments than `{}` placeholders"));
+            self.errors.note(format("{}", "remove the extra argument or add a matching '{}' placeholder"));
+            bad = true;
+        }
+        if bad {
+            self.cur_ast().commit(mark); // abandon the partial rewrite; the nodes stay, unreferenced
+            return sret;
+        }
+        if endc > seg {
+            let sl = self.tc_lit(seg, endc, seg_tt, true);
+            self.tc_fmt_push(letf, kw, "sugar_fmt_str", sl, NODE_NONE);
+        }
+        let tail = self.tc_expr_stmt(self.tc_local_use(kw, letf), kw);
+        self.cur_ast().push(tail);
+        let stmts = self.cur_ast().commit(mark);
+        self.cur_ast().at(id).kind = NodeKind::NODE_BLOCK;
+        self.cur_ast().at(id).as_data = NodeAs { block: BlockData { statements: stmts } };
+        self.expected = TYPE_NONE;
+        return self.check_expr(id);
+    }
+
     fn tc_check_assert(self: &mut Self, id: NodeId, kind: i32) TypeId {
         let a = self.cur_ast();
         let args = a.at_const(id).as_data.call.args;
@@ -8983,6 +9527,9 @@ extend TypeChecker {
                 if akind != 0 {
                     return self.tc_check_assert(id, akind);
                 }
+                if span_is(self.mod_src(ad.module), anm, "format") {
+                    return self.tc_check_format(id);
+                }
             }
         }
         // dyn_cast::<T>(d): compiler intrinsic -- vtable type-id compare, Option<&T> result
@@ -9194,15 +9741,11 @@ extend TypeChecker {
         let mut fmt_builtin = false;
         if named && self.package != null && fmod as usize < self.pkg_count() && unsafe self.package.modules[fmod as usize].prelude {
             let fnm = fa.at_const(fa.at_const(fdecl).as_data.function.name).as_data.name.text;
-            fmt_builtin = span_is(self.mod_src(fmod), fnm, "format") || span_is(self.mod_src(fmod), fnm, "format_into") || span_is(
+            fmt_builtin = span_is(self.mod_src(fmod), fnm, "format_into") || span_is(self.mod_src(fmod), fnm, "print") || span_is(
                 self.mod_src(fmod),
                 fnm,
-                "print",
-            ) || span_is(self.mod_src(fmod), fnm, "println") || span_is(self.mod_src(fmod), fnm, "eprint") || span_is(
-                self.mod_src(fmod),
-                fnm,
-                "eprintln",
-            );
+                "println",
+            ) || span_is(self.mod_src(fmod), fnm, "eprint") || span_is(self.mod_src(fmod), fnm, "eprintln");
             if fmt_builtin {
                 self.mark_format_helpers();
             }
@@ -13196,12 +13739,11 @@ extend TypeChecker {
             },
             NODE_BLOCK => {
                 let stmts = a.at_const(id).as_data.block.statements;
-                // Stable across the recursion: children storage is append-only and nothing commits
-                // AST nodes during checking (interning goes to the separate type/instance pools).
-                let sp = a.list(stmts);
+                // Re-read the list base every iteration: the `format` rewrite APPENDS children
+                // mid-check, so a pointer cached across the recursion can dangle on regrowth.
                 let mut diverged = false;
                 for i in 0..stmts.len {
-                    let sid = unsafe sp[i as usize];
+                    let sid = unsafe a.list(stmts)[i as usize];
                     let sk = a.at_const(sid).kind;
                     // Lint: the first statement after a diverging one (return/break/continue, or an
                     // expression of type `!`) never executes. static_asserts are compile-time: exempt.

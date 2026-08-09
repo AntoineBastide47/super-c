@@ -1115,8 +1115,8 @@ extend<A: Allocator> String<A> as Index<u8, str> {
 /// Formatted output, compiler builtins. The first argument is a string literal with `{}` placeholders; the
 /// trailing arguments fill them in order and are appended by their type (any integer/float, bool, char, str,
 /// String, or any `Format` type). `{{`/`}}` are literal braces. `format` returns the built String; `print`
-/// writes it to stdout; `println` adds a trailing newline. (Bodies are stubs -- the compiler splits the
-/// literal and emits the per-argument appends at each call site.)
+/// writes it to stdout; `println` adds a trailing newline. (Bodies are stubs -- the typechecker rewrites a
+/// `format` call into `sugar_fmt_*` shim calls, so it const-folds; the print family is lowered by codegen.)
 pub fn format(_fmt: str, ...) String {
     return String::<Global>::new();
 }
@@ -1131,4 +1131,176 @@ pub fn eprintln(_fmt: str, ...) {}
 // Lowered by codegen; this body is never emitted.
 extend<A: Allocator> String<A> {
     pub fn format_into(self: &mut String<A>, _fmt: str, ...) {}
+}
+
+// ---- `format` lowering targets ----
+// The typechecker rewrites every `format(..)` call into a block of assignments through these
+// shims -- `f = sugar_fmt_i64(f, v);` -- so the result const-folds like ordinary code. The String
+// threads BY VALUE (move in, move out): statements keep C's evaluation order strict, and a padded
+// placeholder reuses the same shims to render its piece as one nested expression, so no second
+// local is ever needed. Each value parameter's type is what the widening rules let every dispatched
+// source type reach implicitly (the rewrite synthesizes no casts). Not meant to be called by hand.
+pub fn sugar_fmt_new() String {
+    return String::<Global>::new();
+}
+pub fn sugar_fmt_str(mut s: String, v: str) String {
+    s.push_str(v);
+    return s;
+}
+pub fn sugar_fmt_string(mut s: String, v: &String) String {
+    s.push_string(v);
+    return s;
+}
+pub fn sugar_fmt_owned(mut s: String, v: String) String {
+    s.push_string(&v);
+    return s;
+}
+pub fn sugar_fmt_i64(mut s: String, v: i64) String {
+    s.push_i64(v);
+    return s;
+}
+pub fn sugar_fmt_u64(mut s: String, v: u64) String {
+    s.push_u64(v);
+    return s;
+}
+// isize/usize have no implicit widening (their width is platform-dependent), so they get their own
+// shims; same for their hex/bin forms below.
+pub fn sugar_fmt_isize(mut s: String, v: isize) String {
+    s.push_i64(v as i64);
+    return s;
+}
+pub fn sugar_fmt_usize(mut s: String, v: usize) String {
+    s.push_u64(v as u64);
+    return s;
+}
+pub fn sugar_fmt_f64(mut s: String, v: f64) String {
+    s.push_f64(v);
+    return s;
+}
+pub fn sugar_fmt_f64_prec(mut s: String, v: f64, prec: u32) String {
+    s.push_f64_prec(v, prec);
+    return s;
+}
+pub fn sugar_fmt_bool(mut s: String, v: bool) String {
+    if v {
+        s.push_str("true");
+    } else {
+        s.push_str("false");
+    }
+    return s;
+}
+pub fn sugar_fmt_char(mut s: String, v: char) String {
+    s.push_byte(v as u8);
+    return s;
+}
+pub fn sugar_fmt_hex_i(mut s: String, v: i64) String {
+    s.push_hex_i64(v, false);
+    return s;
+}
+pub fn sugar_fmt_hex_i_up(mut s: String, v: i64) String {
+    s.push_hex_i64(v, true);
+    return s;
+}
+pub fn sugar_fmt_hex_u(mut s: String, v: u64) String {
+    s.push_hex(v, false);
+    return s;
+}
+pub fn sugar_fmt_hex_u_up(mut s: String, v: u64) String {
+    s.push_hex(v, true);
+    return s;
+}
+pub fn sugar_fmt_hex_c(mut s: String, v: char) String {
+    s.push_hex(v as u64, false);
+    return s;
+}
+pub fn sugar_fmt_hex_c_up(mut s: String, v: char) String {
+    s.push_hex(v as u64, true);
+    return s;
+}
+pub fn sugar_fmt_hex_is(mut s: String, v: isize) String {
+    s.push_hex_i64(v as i64, false);
+    return s;
+}
+pub fn sugar_fmt_hex_is_up(mut s: String, v: isize) String {
+    s.push_hex_i64(v as i64, true);
+    return s;
+}
+pub fn sugar_fmt_hex_us(mut s: String, v: usize) String {
+    s.push_hex(v as u64, false);
+    return s;
+}
+pub fn sugar_fmt_hex_us_up(mut s: String, v: usize) String {
+    s.push_hex(v as u64, true);
+    return s;
+}
+// `{:b}` renders at the ARGUMENT's width (an i8 shows 8 digits), so one shim per width; the sub-64
+// ones take i64 because every narrower integer, signed or not, widens to it losslessly.
+pub fn sugar_fmt_bin8(mut s: String, v: i64) String {
+    s.push_bin((v & 0xFF) as u64);
+    return s;
+}
+pub fn sugar_fmt_bin16(mut s: String, v: i64) String {
+    s.push_bin((v & 0xFFFF) as u64);
+    return s;
+}
+pub fn sugar_fmt_bin32(mut s: String, v: i64) String {
+    s.push_bin((v & 0xFFFFFFFF) as u64);
+    return s;
+}
+pub fn sugar_fmt_bin64i(mut s: String, v: i64) String {
+    s.push_bin(v as u64);
+    return s;
+}
+pub fn sugar_fmt_bin64u(mut s: String, v: u64) String {
+    s.push_bin(v);
+    return s;
+}
+pub fn sugar_fmt_bin_c(mut s: String, v: char) String {
+    s.push_bin(v as u64);
+    return s;
+}
+pub fn sugar_fmt_bin_is(mut s: String, v: isize) String {
+    s.push_bin((v as i64) as u64);
+    return s;
+}
+pub fn sugar_fmt_bin_us(mut s: String, v: usize) String {
+    s.push_bin(v as u64);
+    return s;
+}
+pub fn sugar_fmt_val<T: Format>(mut s: String, v: &T) String {
+    let r = v.fmt();
+    s.push_string(&r);
+    return s;
+}
+pub fn sugar_fmt_val_owned<T: Format>(mut s: String, v: T) String {
+    let r = v.fmt();
+    s.push_string(&r);
+    return s;
+}
+// Width padding: `piece` is the placeholder rendered on its own (by the shims above, on a fresh
+// String -- SSO keeps short pieces off the heap); it lands in `s` filled up to `width` with
+// `fill`'s first byte (space when empty -- the spec had no fill character to point at).
+pub fn sugar_fmt_pad_l(mut s: String, piece: String, width: usize, fill: str) String {
+    let from = s.len();
+    s.push_string(&piece);
+    s.pad_at(from, width, sugar_fill_byte(fill), 0u8);
+    return s;
+}
+pub fn sugar_fmt_pad_r(mut s: String, piece: String, width: usize, fill: str) String {
+    let from = s.len();
+    s.push_string(&piece);
+    s.pad_at(from, width, sugar_fill_byte(fill), 1u8);
+    return s;
+}
+pub fn sugar_fmt_pad_c(mut s: String, piece: String, width: usize, fill: str) String {
+    let from = s.len();
+    s.push_string(&piece);
+    s.pad_at(from, width, sugar_fill_byte(fill), 2u8);
+    return s;
+}
+fn sugar_fill_byte(fill: str) u8 {
+    if fill.len() == 0 {
+        return b' ';
+    }
+    return fill[0];
 }

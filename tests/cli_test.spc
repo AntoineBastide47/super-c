@@ -5686,3 +5686,232 @@ fn global_object_cache_round_trip() {
     cache.free();
     bdir.free();
 }
+
+// `format` is rewritten at typecheck into `sugar_fmt_*` shim calls, so it folds under CTFE like
+// ordinary code and its template diagnostics are compile errors of the checker, not of codegen.
+@test
+fn format_desugar_and_fold() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"@derive(Format)
+pub struct P { pub x: i32, pub y: i32, }
+const fn cf() usize {
+  let s = format("x = {} y = {}", 42, "hi");
+  return s.len();
+}
+const CL: usize = cf();
+fn main() i32 {
+  static_assert(cf() == 13, "format folds in a const fn");
+  static_assert(CL == 13, "and in a const initializer");
+  let a = format("{:x}|{:>4}|{:.2}|{}", 255, 7, 1.5, P { x: 1, y: 2 });
+  println("{}", a.as_str());
+  let n: usize = 3;
+  let b = format("{{{}}}", n);
+  println("{}", b.as_str());
+  a.free();
+  b.free();
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("main.c", "CL = 13ULL"), "the const initializer folded to its value");
+    assert(p.gen_has("main.c", "sugar_fmt_new"), "runtime sites thread the desugar shims");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("ff|   7|1.50|P { x: 1, y: 2 }"), "hex, width, precision, and Format dispatch");
+    assert(rr.out_shows("{3}"), "escaped braces around a placeholder");
+    p.mkfile("main.spc", "fn main() i32 { let s = format(\"{} {}\", 1); s.free(); return 0; }\n");
+    let e = p.compile("main.spc");
+    assert(e.exit != 0, "placeholder/argument mismatch rejects the build");
+    assert(e.out_has("more `{}` placeholders than arguments"), "and says which way");
+}
+
+// `TypeInfo.methods` enumerates the `extend` functions declared for a type -- across modules, for
+// builtins and generic instances too -- and carries `@reflect` entries on methods. Enumeration
+// only: a descriptor cannot invoke.
+@test
+fn method_reflection() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"pub struct Robot { pub id: i32, }
+extend Robot {
+  @reflect(doc = "primary accessor")
+  pub fn ident(self: &Robot) i32 { return self.id; }
+  fn helper(self: &Robot, _k: i32, _j: bool) {}
+  pub fn make(v: i32) Robot { return Robot { id: v }; }
+}
+const fn nmeth() usize { return type_info::<Robot>().methods.len; }
+fn main() i32 {
+  static_assert(nmeth() == 3, "extend fns enumerate in CTFE");
+  let ti = type_info::<Robot>();
+  let m = ti.method("ident").unwrap();
+  if m.arity != 0 || !m.is_pub || m.ret != TypeTag::Int { return 1; }
+  if !m.has_meta("doc") || m.meta("doc").unwrap().s != "primary accessor" { return 2; }
+  let h = ti.method("helper").unwrap();
+  if h.arity != 2 || h.is_pub || h.ret != TypeTag::Void { return 3; }
+  let mk = ti.method("make").unwrap();
+  if mk.arity != 1 || mk.ret != TypeTag::Struct { return 4; }
+  if type_info::<i32>().method("fmt").is_none() { return 5; }
+  if type_info::<Vector<i32>>().method("push").is_none() { return 6; }
+  print("ok\n");
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("ok"), "method names, arities, visibility, return tags, and metadata agree");
+}
+
+// `zeroed::<T>()` folds recursively (so a derived `Default` folds through it), and `static_assert`
+// runs INSIDE fn bodies -- per instantiation for a generic fn, where a violated guard is a
+// compile error naming the offending type argument.
+@test
+fn ctfe_zeroed_and_body_asserts() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"struct Inner { pub p: *const u8, pub n: i64, }
+struct P { pub x: i32, pub f: f64, pub inner: Inner, pub ok: bool, }
+const fn cz() bool {
+  let z = unsafe zeroed::<P>();
+  return z.x == 0 && z.f == 0.0 && z.inner.n == 0 && z.inner.p == null && !z.ok;
+}
+static_assert(cz(), "zeroed folds recursively");
+struct Point2 { pub a: i32, pub b: i32, }
+extend Point2 as Default {}
+const fn cd() i32 {
+  let d = Point2::default();
+  return d.a + d.b;
+}
+static_assert(cd() == 0, "derived default folds through zeroed");
+struct S { pub x: i32, }
+fn only_structs<T>(v: &T) usize {
+  static_assert(type_info::<T>().kind == TypeTag::Struct, "only_structs takes a struct");
+  let _ = v;
+  return sizeof(T);
+}
+const fn cguard() usize {
+  let s = S { x: 1 };
+  static_assert(1 + 1 == 2, "arithmetic still works");
+  return only_structs(&s);
+}
+static_assert(cguard() == 4, "const fn body asserts evaluate");
+fn main() i32 {
+  let s = S { x: 1 };
+  if only_structs(&s) != 4 { return 1; }
+  print("ok\n");
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("ok"), "zeroed, derived default, and body asserts all fold");
+    p.mkfile(
+        "main.spc",
+        r#"enum E { A, B, }
+fn only_structs<T>(v: &T) usize {
+  static_assert(type_info::<T>().kind == TypeTag::Struct, "only_structs takes a struct");
+  let _ = v;
+  return sizeof(T);
+}
+fn main() i32 {
+  let e = E::A;
+  let _ = only_structs(&e);
+  return 0;
+}
+"#,
+    );
+    let e = p.compile("main.spc");
+    assert(e.exit != 0, "a violated per-instantiation guard rejects the build");
+    assert(e.out_has("static assertion failed: only_structs takes a struct"), "with the guard's message");
+    assert(e.out_has("in the instantiation where the first type parameter is 'E'"), "naming the type argument");
+}
+
+// Payload-less enums project through `variants` in CTFE (tags are the declared constants),
+// `payloads` folds, and a binder `meta_str` comparison in a binder-const `if` elides the untaken
+// copies -- so a generic touched only under an untaken guard is never instantiated.
+@test
+fn tagless_variants_and_meta_elision() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        r#"enum Color { Red = 3, Green = 7, }
+const fn ctag() i32 {
+  let c = Color::Green;
+  let mut t: i32 = 0;
+  inline for v in variants(&c) {
+    if v.is_active { t = v.tag; }
+  }
+  return t;
+}
+static_assert(ctag() == 7, "tagless variants fold with declared constants");
+const fn ceq() bool {
+  let a = Color::Red;
+  let b = Color::Red;
+  let c = Color::Green;
+  return reflect_variant_eq(&a, &b) && !reflect_variant_eq(&a, &c);
+}
+static_assert(ceq(), "tagless paired variants fold");
+enum Sh { Dot, Pair(i32, i64), }
+const fn psum() i64 {
+  let s = Sh::Pair(3, 4);
+  let mut acc: i64 = 0;
+  inline for v in variants(&s) {
+    if v.is_active {
+      inline for q in payloads(v) { acc = acc + q.value as i64; }
+    }
+  }
+  return acc;
+}
+static_assert(psum() == 7, "payload projection folds");
+struct P {
+  @reflect(group = "physics")
+  pub a: i32,
+  @reflect(group = "render")
+  pub b: i64,
+  pub c: u8,
+}
+fn touch<V>(x: &V) usize { let _ = x; return sizeof(V); }
+fn phys<T>(v: &T) i64 {
+  let mut acc: i64 = 0;
+  inline for f in fields(v) {
+    if f.meta_str("group") == "physics" { acc = acc + touch(&f.value) as i64; }
+    if f.meta_str("group") != "render" { acc = acc + 1; }
+  }
+  return acc;
+}
+fn main() i32 {
+  if ctag() != 7 || !ceq() || psum() != 7 { return 1; }
+  let pv = P { a: 1, b: 2, c: 3 };
+  if phys(&pv) != 6 { return 2; }
+  print("ok\n");
+  return 0;
+}
+"#,
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("main.c", "touch__i32((&"), "the taken guard calls its callee");
+    assert(!p.gen_has("main.c", "touch__i64((&"), "an untaken meta_str guard's call is never emitted");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let rr = p.run_bin_env("");
+    assert(rr.ok());
+    assert(rr.out_shows("ok"), "tagless tags, payload folds, and guard elision agree at runtime");
+}

@@ -196,6 +196,9 @@ pub struct NameData {
 pub struct LiteralData {
     pub raw: tok::Span,
     pub token_type: tt::TokenType,
+    // `format` desugar segment: `raw` is BARE content (no quotes) inside a template literal, and
+    // doubled braces in it collapse to one on emission/evaluation. Parser-built literals never set this.
+    pub seg: bool,
 }
 pub struct FunctionData {
     pub name: NodeId,
@@ -1149,6 +1152,15 @@ extend Ast {
     pub fn grow_resolutions(self: &mut Self) {
         while self.resolutions.len() < self.nodes.len() {
             self.resolutions.push(DefId { module: 0, node: NODE_NONE });
+        }
+    }
+
+    /// Like grow_resolutions, but for nodes built DURING typecheck (the `format` rewrite): the type
+    /// side table was sized by init_types, so it must grow in lockstep too.
+    pub fn grow_sidetables(self: &mut Self) {
+        self.grow_resolutions();
+        while self.types.len() < self.nodes.len() {
+            self.types.push(TYPE_NONE);
         }
     }
 

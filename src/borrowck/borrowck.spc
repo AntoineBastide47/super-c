@@ -3402,12 +3402,18 @@ extend tc::TypeChecker {
                     self.tc_add_late(ld.node);
                 }
             }
+        }
+        // A plain whole-local assignment re-initializes AFTER its RHS runs (real evaluation order),
+        // so `x = f(x)` moves x into f and the store revives it -- and an RHS that reads an
+        // already-moved x is caught instead of being hidden by an early unmark.
+        let selfref = plain && lhs_local;
+        if lhs_local && !selfref {
             self.tc_init(ld.node);
             self.tc_unmark_move(ld.node);
         }
         // Re-initialising a place makes its partial-move records stale: `p.a = v` re-owns `p.a`, and a
         // whole `p = v` re-owns every sub-place of `p`.
-        if plain {
+        if plain && !selfref {
             self.tc_clear_moved_place(bd.left);
         }
         let lt = if_ty(lhs_local, a.type_of(ld.node), TYPE_NONE);
@@ -3421,10 +3427,20 @@ extend tc::TypeChecker {
             }
         }
         let bm = self.borrow_mark();
-        self.bc_expr(bd.left, false, false);
-        self.tc_mark_capture_mut(bd.left);
-        self.bc_expr(bd.right, false, false);
-        self.tc_mark_move(bd.right);
+        if selfref {
+            self.bc_expr(bd.right, false, false);
+            self.tc_mark_move(bd.right);
+            self.tc_init(ld.node);
+            self.tc_unmark_move(ld.node);
+            self.tc_clear_moved_place(bd.left);
+            self.bc_expr(bd.left, false, false);
+            self.tc_mark_capture_mut(bd.left);
+        } else {
+            self.bc_expr(bd.left, false, false);
+            self.tc_mark_capture_mut(bd.left);
+            self.bc_expr(bd.right, false, false);
+            self.tc_mark_move(bd.right);
+        }
         let l = a.type_of(bd.left);
         if ref_rebind {
             if self.nborrows > bm {

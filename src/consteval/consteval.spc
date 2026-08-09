@@ -2048,21 +2048,25 @@ extend ConstEval {
         let src = self.ce_src(m);
         let sp = a.at_const(id).as_data.literal.raw;
         let raw = a.at_const(id).as_data.literal.token_type == TokenType::RawStringLiteral;
+        let seg = a.at_const(id).as_data.literal.seg;
         let mut i = sp.start;
-        let mut hashes: u32 = 0;
-        while i < sp.end && src[i as usize] != b'"' {
-            if src[i as usize] == b'#' {
-                hashes = hashes + 1;
+        let mut endpos = sp.end;
+        if !seg {
+            let mut hashes: u32 = 0;
+            while i < sp.end && src[i as usize] != b'"' {
+                if src[i as usize] == b'#' {
+                    hashes = hashes + 1;
+                }
+                i = i + 1;
+            }
+            if i >= sp.end {
+                return cv_nil();
             }
             i = i + 1;
-        }
-        if i >= sp.end {
-            return cv_nil();
-        }
-        i = i + 1;
-        let mut endpos = sp.end - 1;
-        if raw {
-            endpos = endpos - hashes;
+            endpos = sp.end - 1;
+            if raw {
+                endpos = endpos - hashes;
+            }
         }
         let mut bytes = Buf4096 {};
         let mut nb: u32 = 0;
@@ -2072,6 +2076,9 @@ extend ConstEval {
             }
             let mut c = src[i as usize];
             i = i + 1;
+            if seg && (c == b'{' || c == b'}') && i < endpos && src[i as usize] == c {
+                i = i + 1; // doubled template brace: one byte survives
+            }
             if !raw && c == b'\\' && i < endpos {
                 let e = src[i as usize];
                 i = i + 1;
@@ -2386,6 +2393,125 @@ extend ConstEval {
     // `type_info::<T>()`: build the TypeInfo object graph for the recorded type argument. Every decl
     // the graph needs (TypeInfo, str, TypeTag, Slice, FieldInfo, VariantInfo) is derived from the
     // call's own result type, so no name lookup and no package access is involved.
+    // zeroed::<T>(): the all-zero value, recursively -- scalars zero, pointers null, aggregates
+    // with every slot zeroed. Enums and unions have no honest zero (a tag + overlap), so they trap.
+    fn ce_zeroed(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Rets {
+        let out = Rets { ok: false, n: 0 };
+        let mu = self.ast_ptr(m).type_args(id);
+        if mu == null || unsafe mu.n == 0 {
+            return out;
+        }
+        let rt = self.ce_rtype(f, m, unsafe mu.args[0]);
+        if !rt.ok {
+            return out;
+        }
+        let v = self.ce_zero_of(rt.m, rt.t, 0);
+        if v.kind == CV_NIL_K {
+            return out;
+        }
+        let mut ret = Rets { ok: true, n: 1 };
+        ret.vals[0] = v;
+        return ret;
+    }
+
+    fn ce_zero_of(self: &mut Self, m: ModuleId, t: TypeId, depth: i32) CeVal {
+        if depth > 32 {
+            return cv_nil();
+        }
+        let y = *self.ast_ptr(m).type_at(t);
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            let b = y.as_data.builtin;
+            if b == BuiltinType::BT_BOOL {
+                return CeVal { kind: CV_BOOL, tm: m, ty: t, as_data: CeValAs { i: 0 } };
+            }
+            if b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64 {
+                return CeVal { kind: CV_FLOAT, tm: m, ty: t, as_data: CeValAs { f: 0.0 } };
+            }
+            return CeVal { kind: CV_INT, tm: m, ty: t, as_data: CeValAs { i: 0 } };
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_FUNCTION {
+            return CeVal { kind: CV_PTR, tm: m, ty: t, as_data: CeValAs { p: CvPtr { obj: 0, off: 0 } } };
+        }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE {
+            let mut dm = y.module;
+            let mut dn = y.as_data.decl;
+            let mut it = TyInstance {};
+            let mut has_inst = false;
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                it = *self.ast_ptr(m).instance(y.as_data.inst);
+                dm = it.module;
+                dn = it.decl;
+                has_inst = true;
+            }
+            let da = self.ast_ptr(dm);
+            if da.at_const(dn).kind != NodeKind::NODE_STRUCT || da.at_const(dn).as_data.aggregate.is_union {
+                return cv_nil();
+            }
+            let o = self.ce_obj_new(self.ce_field_count(dm, dn));
+            if o == 0 {
+                return cv_nil();
+            }
+            unsafe self.obj_ptr(o).dm = dm;
+            unsafe self.obj_ptr(o).dn = dn;
+            if has_inst {
+                unsafe self.obj_ptr(o).nargs = it.n;
+                for gi in 0..it.n {
+                    unsafe self.obj_ptr(o).am[gi as usize] = m;
+                    unsafe self.obj_ptr(o).at[gi as usize] = unsafe it.args[gi as usize];
+                }
+            }
+            // per-field zero, through the instance's substitution
+            let gens = da.at_const(dn).as_data.aggregate.generics;
+            let mut env = LayoutEnv { parent: null, pmod: dm, params: da.list(gens), argm: m, n: 0 };
+            if has_inst {
+                let mut gi2: u32 = 0;
+                while gi2 < gens.len && gi2 as u8 < it.n && env.n < 8 {
+                    unsafe env.args[env.n as usize] = unsafe it.args[gi2 as usize];
+                    env.n = env.n + 1;
+                    gi2 = gi2 + 1;
+                }
+            }
+            let ms = da.at_const(dn).as_data.aggregate.members;
+            let is_tuple = da.at_const(dn).as_data.aggregate.is_tuple;
+            let mut si: usize = 0;
+            for i in 0..ms.len {
+                let fid = unsafe da.list(ms)[i as usize];
+                if !is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
+                    continue;
+                }
+                let ftn = if is_tuple {
+                    fid;
+                } else {
+                    da.at_const(fid).as_data.field.ty;
+                };
+                let ft = self.ce_type(dm, ftn);
+                if ft == TYPE_NONE {
+                    return cv_nil();
+                }
+                let fr = self.ce_ti_env_ty(
+                    dm,
+                    ft,
+                    if has_inst {
+                        (&env) as *const LayoutEnv;
+                    } else {
+                        null;
+                    },
+                );
+                if !fr.ok {
+                    return cv_nil();
+                }
+                let fv = self.ce_zero_of(fr.m, fr.t, depth + 1);
+                if fv.kind == CV_NIL_K {
+                    return cv_nil();
+                }
+                unsafe self.obj_ptr(o).slots.set(si, fv);
+                si = si + 1;
+            }
+            return CeVal { kind: CV_AGG, tm: m, ty: t, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
+        }
+        return cv_nil();
+    }
+
     fn ce_type_info(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) Rets {
         let out = Rets { ok: false, n: 0 };
         let mu = self.ast_ptr(m).type_args(id);
@@ -2431,6 +2557,7 @@ extend ConstEval {
         let mut flty = TYPE_NONE; // Slice<FieldInfo>
         let mut vrty = TYPE_NONE; // Slice<VariantInfo>
         let mut mty = TYPE_NONE; // Slice<MetaInfo> (absent in a pre-metadata std: everything meta stays off)
+        let mut mmty = TYPE_NONE; // Slice<MethodInfo> (absent in a pre-methods std: no enumeration)
         let ms = da.at_const(tin).as_data.aggregate.members;
         for i in 0..ms.len {
             let fid = unsafe da.list(ms)[i as usize];
@@ -2449,6 +2576,8 @@ extend ConstEval {
                 vrty = fty;
             } else if self.ce_span_is(tim, fnm, "meta") {
                 mty = fty;
+            } else if self.ce_span_is(tim, fnm, "methods") {
+                mmty = fty;
             }
         }
         if sty == TYPE_NONE || kty == TYPE_NONE || flty == TYPE_NONE || vrty == TYPE_NONE {
@@ -2504,6 +2633,25 @@ extend ConstEval {
             }
             if mety == TYPE_NONE || mkty == TYPE_NONE || mesz == 0 {
                 mety = TYPE_NONE;
+            }
+        }
+        // MethodInfo's type and element size, schema-driven like meta.
+        let mut mhty = TYPE_NONE;
+        let mut mhsz: u64 = 0;
+        if mmty != TYPE_NONE {
+            let yh0 = *da.type_at(mmty);
+            if yh0.kind == TypeKind::TYPE_INSTANCE {
+                let hit = *da.instance(yh0.as_data.inst);
+                mhty = hit.args[0];
+                if da.type_at(mhty).kind == TypeKind::TYPE_STRUCT {
+                    let hlay = self.layout_of(tim, mhty, null, 0);
+                    if hlay.ok {
+                        mhsz = hlay.size;
+                    }
+                }
+            }
+            if mhty == TYPE_NONE || mhsz == 0 {
+                mhty = TYPE_NONE;
             }
         }
         let tag = self.ce_ti_tag(tm, tt, strm, strn, slm, sln);
@@ -2745,6 +2893,112 @@ extend ConstEval {
                 return out;
             }
         }
+        // Methods: every `extend` function declared for a decl-backed or builtin T, across all
+        // modules in load order, declaration order within a module. A conformance's INHERITED
+        // defaults declare nothing, so they are not listed.
+        let mut nmeths: u32 = 0;
+        let mut hblock: u32 = 0;
+        if mhty != TYPE_NONE {
+            let mut dm3: ModuleId = 0;
+            let mut dn3 = NODE_NONE;
+            let mut bb = BuiltinType::BT_COUNT;
+            if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+                dm3 = y.module;
+                dn3 = y.as_data.decl;
+            } else if y.kind == TypeKind::TYPE_INSTANCE {
+                let it4 = *self.ast_ptr(tm).instance(y.as_data.inst);
+                dm3 = it4.module;
+                dn3 = it4.decl;
+            } else if y.kind == TypeKind::TYPE_BUILTIN {
+                bb = y.as_data.builtin;
+            }
+            if dn3 != NODE_NONE || bb != BuiltinType::BT_COUNT {
+                let mut hobjs = Vector::<CeVal>::new();
+                let mut fail = false;
+                let mut q: usize = 0;
+                while q < self.nmods && !fail {
+                    let qm = q as ModuleId;
+                    q = q + 1;
+                    if !self.has_ast(qm) {
+                        continue;
+                    }
+                    let qa = self.ast_ptr(qm);
+                    if (unsafe qa.nodes).len() == 0 {
+                        continue;
+                    }
+                    let items = unsafe qa.at_const(qa.root).as_data.program.items;
+                    for i3 in 0..items.len {
+                        let iid = unsafe qa.list(items)[i3 as usize];
+                        if qa.at_const(iid).kind != NodeKind::NODE_EXTEND {
+                            continue;
+                        }
+                        let target = qa.at_const(iid).as_data.extend_def.target_type;
+                        if target == NODE_NONE {
+                            continue;
+                        }
+                        let mut match_recv = false;
+                        if dn3 != NODE_NONE {
+                            let tg = qa.resolution_def(target);
+                            match_recv = tg.module == dm3 && tg.node == dn3;
+                        } else {
+                            let tt2 = self.ce_type(qm, target);
+                            if tt2 != TYPE_NONE {
+                                let ty2 = self.ast_ptr(qm).type_at(tt2);
+                                match_recv = ty2.kind == TypeKind::TYPE_BUILTIN && ty2.as_data.builtin == bb;
+                            }
+                        }
+                        if !match_recv {
+                            continue;
+                        }
+                        let ms2 = qa.at_const(iid).as_data.extend_def.items;
+                        for k2 in 0..ms2.len {
+                            let mid = unsafe qa.list(ms2)[k2 as usize];
+                            if qa.at_const(mid).kind != NodeKind::NODE_FUNCTION {
+                                continue;
+                            }
+                            let hv = self.ce_ti_method(qm, mid, strm, strn, slm, sln, tim, sty, kty, mhty);
+                            if hv.kind != CV_AGG {
+                                fail = true;
+                                break;
+                            }
+                            if mety != TYPE_NONE && !self.ce_ti_attach_meta(
+                                hv,
+                                qm,
+                                mid,
+                                tim,
+                                strm,
+                                strn,
+                                slm,
+                                sln,
+                                sty,
+                                mety,
+                                mkty,
+                                mty,
+                                mesz,
+                            ) {
+                                fail = true;
+                                break;
+                            }
+                            hobjs.push(hv);
+                        }
+                        if fail {
+                            break;
+                        }
+                    }
+                }
+                if fail {
+                    hobjs.free();
+                    return out;
+                }
+                nmeths = hobjs.len() as u32;
+                hblock = self.ce_ti_block(tim, mhty, mhsz, &hobjs);
+                let hfailed = hblock == 0 && nmeths != 0;
+                hobjs.free();
+                if hfailed {
+                    return out;
+                }
+            }
+        }
         // Element tag and array length; advisory like a field's kind, so Void on the untaggable.
         let mut etag: i64 = 0;
         let mut alen: u64 = 0;
@@ -2831,6 +3085,14 @@ extend ConstEval {
                 return out;
             }
             unsafe self.obj_ptr(to).slots.set(i_meta as usize, tms);
+        }
+        if mhty != TYPE_NONE {
+            let hsl = self.ce_ti_slice(slm, sln, tim, mhty, mmty, hblock, nmeths);
+            let i_meth = self.ce_ti_findf(tim, tin, "methods");
+            if hsl.kind != CV_AGG || i_meth < 0 {
+                return out;
+            }
+            unsafe self.obj_ptr(to).slots.set(i_meth as usize, hsl);
         }
         let mut ret = Rets { ok: true, n: 1 };
         ret.vals[0] = CeVal { kind: CV_AGG, tm: m, ty: rty, as_data: CeValAs { p: CvPtr { obj: to, off: 0 } } };
@@ -3062,6 +3324,93 @@ extend ConstEval {
             );
         }
         return CeVal { kind: CV_AGG, tm: tim, ty: ety, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
+    }
+
+    // A MethodInfo object for the extend function (mm, mid): name/arity/is_pub/ret by field name.
+    // `arity` excludes a `self` receiver; `ret` is the one-level tag of a single declared return
+    // type, Void otherwise (none, several, or untaggable -- advisory like a field's kind).
+    fn ce_ti_method(
+        self: &mut Self,
+        mm: ModuleId,
+        mid: NodeId,
+        strm: ModuleId,
+        strn: NodeId,
+        slm: ModuleId,
+        sln: NodeId,
+        tim: ModuleId,
+        sty: TypeId,
+        kty: TypeId,
+        hty: TypeId,
+    ) CeVal {
+        let yh = *self.ast_ptr(tim).type_at(hty);
+        if yh.kind != TypeKind::TYPE_STRUCT {
+            return cv_nil();
+        }
+        let em = yh.module;
+        let en = yh.as_data.decl;
+        let fa2 = self.ast_ptr(mm);
+        let fd = fa2.at_const(mid).as_data.function;
+        let sp = self.name_text(mm, fd.name);
+        let src2 = self.ce_src(mm);
+        let nmv = self.ce_ti_str(strm, strn, tim, sty, src2.slice(sp.start as usize, sp.end as usize));
+        if nmv.kind != CV_AGG {
+            return cv_nil();
+        }
+        let mut ar = fd.params.len as i64;
+        if fd.params.len > 0 {
+            let p0 = fa2.at_const(unsafe fa2.list(fd.params)[0]).as_data.parameter.name;
+            if self.ce_span_is(mm, fa2.at_const(p0).as_data.name.text, "self") {
+                ar = ar - 1;
+            }
+        }
+        let mut rtag: i64 = 0;
+        if fd.returns.len == 1 {
+            let r0 = self.ce_type(mm, unsafe fa2.list(fd.returns)[0]);
+            if r0 != TYPE_NONE {
+                let t2 = self.ce_ti_tag(mm, r0, strm, strn, slm, sln);
+                if t2 > 0 {
+                    rtag = t2;
+                }
+            }
+        }
+        let o = self.ce_obj_new(self.ce_field_count(em, en));
+        if o == 0 {
+            return cv_nil();
+        }
+        unsafe self.obj_ptr(o).dm = em;
+        unsafe self.obj_ptr(o).dn = en;
+        let i_name = self.ce_ti_findf(em, en, "name");
+        let i_ar = self.ce_ti_findf(em, en, "arity");
+        let i_pub = self.ce_ti_findf(em, en, "is_pub");
+        let i_ret = self.ce_ti_findf(em, en, "ret");
+        if i_name < 0 || i_ar < 0 || i_pub < 0 || i_ret < 0 {
+            return cv_nil();
+        }
+        unsafe self.obj_ptr(o).slots.set(i_name as usize, nmv);
+        unsafe self.obj_ptr(o).slots.set(
+            i_ar as usize,
+            CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_USIZE), as_data: CeValAs { i: ar } },
+        );
+        unsafe self.obj_ptr(o).slots.set(
+            i_pub as usize,
+            CeVal {
+                kind: CV_BOOL,
+                tm: 0,
+                ty: Ast::builtin(BuiltinType::BT_BOOL),
+                as_data: CeValAs {
+                    i: if fd.is_public {
+                        1;
+                    } else {
+                        0;
+                    },
+                },
+            },
+        );
+        unsafe self.obj_ptr(o).slots.set(
+            i_ret as usize,
+            CeVal { kind: CV_INT, tm: tim, ty: kty, as_data: CeValAs { i: rtag } },
+        );
+        return CeVal { kind: CV_AGG, tm: tim, ty: hty, as_data: CeValAs { p: CvPtr { obj: o, off: 0 } } };
     }
 
     // A heap block holding `objs` as elements of type (tim, ety); 0 = failed (or empty input).
@@ -3610,7 +3959,17 @@ extend ConstEval {
                 };
                 if (sub3.kind == CV_PTR || sub3.kind == CV_AGG) && sub3.as_data.p.off == 0 {
                     let mut slot = unsafe prj.k;
-                    if unsafe prj.vmode {
+                    if unsafe prj.pmode {
+                        let o4 = self.obj_ptr(sub3.as_data.p.obj);
+                        if o4 == null || unsafe o4.is_enum == 0 || (unsafe o4.slots).len() < (2 as i64 + unsafe prj.k) as usize {
+                            return ValRes { ok: false };
+                        }
+                        let a4 = unsafe o4.slots[0];
+                        if a4.kind != CV_INT || a4.as_data.i != unsafe prj.vk {
+                            return ValRes { ok: false };
+                        }
+                        slot = 1 as i64 + unsafe prj.k;
+                    } else if unsafe prj.vmode {
                         let o3 = self.obj_ptr(sub3.as_data.p.obj);
                         if o3 == null || unsafe o3.is_enum == 0 || unsafe o3.slots.len() < 2 {
                             return ValRes { ok: false };
@@ -5568,6 +5927,26 @@ extend ConstEval {
             NODE_LET => {
                 return self.exec_let(f, m, id);
             },
+            NODE_STATIC_ASSERT => {
+                // evaluated in place: a failing assert fails THIS evaluation with its own message
+                let bd2 = a.at_const(id).as_data.binary;
+                let cv2 = self.ev_rval(f, m, bd2.left);
+                if cv2.kind != CV_BOOL && cv2.kind != CV_INT {
+                    return Flow::Bail;
+                }
+                if cv2.as_data.i == 0 {
+                    let mut msg2 = "static assertion failed";
+                    if bd2.right != NODE_NONE {
+                        let rsp2 = a.at_const(bd2.right).as_data.literal.raw;
+                        if rsp2.end > rsp2.start + 2 {
+                            msg2 = self.ce_src(m).slice(rsp2.start as usize + 1, rsp2.end as usize - 1);
+                        }
+                    }
+                    self.ce_trap(CE_TRAP_PANIC, msg2);
+                    return Flow::Bail;
+                }
+                return Flow::Ok;
+            },
             NODE_IF => {
                 let c = self.ev_rval(f, m, a.at_const(id).as_data.if_stmt.condition);
                 if c.kind != CV_BOOL {
@@ -5849,6 +6228,75 @@ extend ConstEval {
         }
         let mname = self.name_text(m, a.at_const(id).as_data.member.member);
         let vmode = unsafe pr.vmode;
+        // payloads binder: k indexes the ACTIVE variant vk's payload slots (enum object slot 1+k)
+        if unsafe pr.pmode {
+            if self.ce_span_is(m, mname, "index") {
+                return CeVal {
+                    kind: CV_INT,
+                    tm: 0,
+                    ty: Ast::builtin(BuiltinType::BT_USIZE),
+                    as_data: CeValAs { i: unsafe pr.k },
+                };
+            }
+            let mut fdm3: ModuleId = 0;
+            let vid3 = self.ce_proj_variant(unsafe pr.om, unsafe pr.owner, unsafe pr.vk, &mut fdm3);
+            if vid3 == NODE_NONE {
+                return cv_nil();
+            }
+            let da3 = self.ast_ptr(fdm3);
+            let vd3 = da3.at_const(vid3).as_data.variant;
+            if self.ce_span_is(m, mname, "name") {
+                let sty3 = self.ce_type(m, id);
+                if sty3 == TYPE_NONE {
+                    return cv_nil();
+                }
+                let ys3 = *self.ast_ptr(m).type_at(sty3);
+                if ys3.kind != TypeKind::TYPE_STRUCT {
+                    return cv_nil();
+                }
+                if vd3.struct_payload {
+                    let pe3 = unsafe da3.list(vd3.payload)[(unsafe pr.k) as usize];
+                    let sp3 = self.name_text(fdm3, da3.at_const(pe3).as_data.field.name);
+                    let src3 = self.ce_src(fdm3);
+                    return self.ce_ti_str(
+                        ys3.module,
+                        ys3.as_data.decl,
+                        m,
+                        sty3,
+                        src3.slice(sp3.start as usize, sp3.end as usize),
+                    );
+                }
+                let mut tb3 = Buf32 {};
+                return self.ce_ti_str(
+                    ys3.module,
+                    ys3.as_data.decl,
+                    m,
+                    sty3,
+                    ti_tuple_name(&mut tb3, (unsafe pr.k) as u32),
+                );
+            }
+            let want_other = self.ce_span_is(m, mname, "other");
+            if self.ce_span_is(m, mname, "value") || want_other {
+                let sb = if want_other {
+                    unsafe pr.sub2;
+                } else {
+                    unsafe pr.sub;
+                };
+                if sb.kind != CV_PTR && sb.kind != CV_AGG || sb.as_data.p.off != 0 {
+                    return cv_nil();
+                }
+                let ob = self.obj_ptr(sb.as_data.p.obj);
+                if ob == null || unsafe ob.is_enum == 0 || (unsafe ob.slots).len() < (2 as i64 + unsafe pr.k) as usize {
+                    return cv_nil();
+                }
+                let act3 = unsafe ob.slots[0];
+                if act3.kind != CV_INT || act3.as_data.i != unsafe pr.vk {
+                    return cv_nil();
+                }
+                return unsafe ob.slots[(1 as i64 + unsafe pr.k) as usize];
+            }
+            return cv_nil();
+        }
         if self.ce_span_is(m, mname, "index") {
             return CeVal {
                 kind: CV_INT,
@@ -5858,12 +6306,8 @@ extend ConstEval {
             };
         }
         if vmode && self.ce_span_is(m, mname, "tag") {
-            return CeVal {
-                kind: CV_INT,
-                tm: 0,
-                ty: Ast::builtin(BuiltinType::BT_I32),
-                as_data: CeValAs { i: unsafe pr.k },
-            };
+            let tgv = self.ce_variant_tag(unsafe pr.om, unsafe pr.owner, unsafe pr.k);
+            return CeVal { kind: CV_INT, tm: 0, ty: Ast::builtin(BuiltinType::BT_I32), as_data: CeValAs { i: tgv } };
         }
         if vmode && (self.ce_span_is(m, mname, "payload") || self.ce_span_is(m, mname, "is_active")) {
             let mut fdm: ModuleId = 0;
@@ -5877,6 +6321,26 @@ extend ConstEval {
                     tm: 0,
                     ty: Ast::builtin(BuiltinType::BT_USIZE),
                     as_data: CeValAs { i: self.ast_ptr(fdm).at_const(vid).as_data.variant.payload.len },
+                };
+            }
+            // a payload-less enum's subject is a SCALAR cell: compare it against the declared tag
+            if self.ce_enum_tagless(unsafe pr.om, unsafe pr.owner) {
+                let cell = self.ce_tagless_subject(unsafe pr.sub);
+                if cell.kind != CV_INT {
+                    return cv_nil();
+                }
+                let tgv2 = self.ce_variant_tag(unsafe pr.om, unsafe pr.owner, unsafe pr.k);
+                return CeVal {
+                    kind: CV_BOOL,
+                    tm: 0,
+                    ty: Ast::builtin(BuiltinType::BT_BOOL),
+                    as_data: CeValAs {
+                        i: if cell.as_data.i == tgv2 {
+                            1;
+                        } else {
+                            0;
+                        },
+                    },
                 };
             }
             let sub2 = unsafe pr.sub;
@@ -5905,6 +6369,25 @@ extend ConstEval {
             };
         }
         if vmode && self.ce_span_is(m, mname, "other_active") {
+            if self.ce_enum_tagless(unsafe pr.om, unsafe pr.owner) {
+                let cell2 = self.ce_tagless_subject(unsafe pr.sub2);
+                if cell2.kind != CV_INT {
+                    return cv_nil();
+                }
+                let tgv3 = self.ce_variant_tag(unsafe pr.om, unsafe pr.owner, unsafe pr.k);
+                return CeVal {
+                    kind: CV_BOOL,
+                    tm: 0,
+                    ty: Ast::builtin(BuiltinType::BT_BOOL),
+                    as_data: CeValAs {
+                        i: if cell2.as_data.i == tgv3 {
+                            1;
+                        } else {
+                            0;
+                        },
+                    },
+                };
+            }
             let so = unsafe pr.sub2;
             if so.kind != CV_PTR && so.kind != CV_AGG || so.as_data.p.off != 0 {
                 return cv_nil();
@@ -6113,6 +6596,70 @@ extend ConstEval {
     }
 
     // The k-th VARIANT node of (m, owner)'s enum decl; NODE_NONE past the end or non-enum.
+    // Whether the projection owner is a payload-less enum -- a bare C enum whose CTFE subject is a
+    // SCALAR cell, not an aggregate object.
+    fn ce_enum_tagless(self: &Self, m: ModuleId, owner: TypeId) bool {
+        let y = *self.ast_ptr(m).type_at(owner);
+        if y.kind != TypeKind::TYPE_ENUM {
+            return false;
+        }
+        let a = self.ast_ptr(y.module);
+        let vs = a.at_const(y.as_data.decl).as_data.aggregate.members;
+        for i in 0..vs.len {
+            if a.at_const(unsafe a.list(vs)[i as usize]).as_data.variant.payload.len > 0 {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The DECLARED discriminant of variant `k`: the running constant chain for a payload-less enum
+    // (explicit `= value`s included), the declaration index otherwise.
+    fn ce_variant_tag(self: &mut Self, m: ModuleId, owner: TypeId, k: i64) i64 {
+        if !self.ce_enum_tagless(m, owner) {
+            return k;
+        }
+        let y = *self.ast_ptr(m).type_at(owner);
+        let dm = y.module;
+        let a = self.ast_ptr(dm);
+        let vs = a.at_const(y.as_data.decl).as_data.aggregate.members;
+        let mut next: i64 = 0;
+        for i in 0..vs.len {
+            let vid = unsafe a.list(vs)[i as usize];
+            let vval = a.at_const(vid).as_data.variant.value;
+            if vval != NODE_NONE {
+                let e = self.eval(dm, vval);
+                if e.kind == CONST_INT {
+                    next = e.as_data.i;
+                }
+            }
+            if i as i64 == k {
+                return next;
+            }
+            next = next + 1;
+        }
+        return k;
+    }
+
+    // The scalar value a payload-less enum SUBJECT holds (directly, or through the pointed cell).
+    fn ce_tagless_subject(self: &Self, sub: CeVal) CeVal {
+        if sub.kind == CV_INT {
+            return sub;
+        }
+        if sub.kind != CV_PTR {
+            return cv_nil();
+        }
+        let o = self.obj_ptr(sub.as_data.p.obj);
+        if o == null || sub.as_data.p.off as usize >= (unsafe o.slots).len() {
+            return cv_nil();
+        }
+        let cell = unsafe o.slots[sub.as_data.p.off as usize];
+        if cell.kind != CV_INT {
+            return cv_nil();
+        }
+        return cell;
+    }
+
     const fn ce_proj_variant(self: &Self, m: ModuleId, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
         let y = *self.ast_ptr(m).type_at(owner);
         let mut dm = y.module;
@@ -6188,8 +6735,61 @@ extend ConstEval {
                 a.at_const(fcl).as_data.name.text,
                 "variants",
             );
+            let is_pay = a.at_const(fcl).kind == NodeKind::NODE_IDENTIFIER && self.ce_span_is(
+                m,
+                a.at_const(fcl).as_data.name.text,
+                "payloads",
+            );
+            if is_pay {
+                // one pass per payload of the OUTER loop's current variant, through its subjects
+                let cargs0 = a.at_const(iter_n).as_data.call.args;
+                if cargs0.len != 1 {
+                    return Flow::Bail;
+                }
+                let opr = self.ce_proj_of(m, unsafe a.list(cargs0)[0]);
+                if opr == null {
+                    return Flow::Bail;
+                }
+                let mut fdm0: ModuleId = 0;
+                let ovid = self.ce_proj_variant(unsafe opr.om, unsafe opr.owner, unsafe opr.k, &mut fdm0);
+                if ovid == NODE_NONE {
+                    return Flow::Bail;
+                }
+                let np = self.ast_ptr(fdm0).at_const(ovid).as_data.variant.payload.len;
+                let osub = unsafe opr.sub;
+                let osub2 = unsafe opr.sub2;
+                let oom = unsafe opr.om;
+                let oowner = unsafe opr.owner;
+                let ovk = unsafe opr.k;
+                let mut pk: i64 = 0;
+                while pk as u32 < np {
+                    self.ce_projs.push(
+                        CeProj {
+                            binder: id,
+                            k: pk,
+                            sub: osub,
+                            sub2: osub2,
+                            om: oom,
+                            owner: oowner,
+                            vmode: false,
+                            pmode: true,
+                            vk: ovk,
+                        },
+                    );
+                    let st = self.exec_stmt(f, m, body);
+                    let _ = self.ce_projs.pop();
+                    if st == Flow::Return || st == Flow::Bail {
+                        return st;
+                    }
+                    if !self.ce_tick() {
+                        return Flow::Bail;
+                    }
+                    pk = pk + 1;
+                }
+                return Flow::Ok;
+            }
             if !is_flds && !is_vars2 {
-                return Flow::Bail; // payloads(v) has no interpreter yet
+                return Flow::Bail;
             }
             let pt = self.ce_type(m, id);
             if pt == TYPE_NONE || self.ast_ptr(m).type_at(pt).kind != TypeKind::TYPE_FIELD_PROJECTION {
@@ -6202,13 +6802,16 @@ extend ConstEval {
             let cargs = a.at_const(iter_n).as_data.call.args;
             let arg = unsafe a.list(cargs)[0];
             let sub = self.ev_rval(f, m, arg);
-            if sub.kind != CV_PTR && sub.kind != CV_AGG {
+            // a payload-less enum subject is its SCALAR value (address-of a scalar local evaluates
+            // through); everything else must be a place
+            let tagless = is_vars2 && self.ce_enum_tagless(pr.m, pr.t);
+            if sub.kind != CV_PTR && sub.kind != CV_AGG && !(tagless && sub.kind == CV_INT) {
                 return xfail(f);
             }
             let mut sub2 = sub;
             if cargs.len > 1 {
                 sub2 = self.ev_rval(f, m, unsafe a.list(cargs)[1]);
-                if sub2.kind != CV_PTR && sub2.kind != CV_AGG {
+                if sub2.kind != CV_PTR && sub2.kind != CV_AGG && !(tagless && sub2.kind == CV_INT) {
                     return xfail(f);
                 }
             }
@@ -6224,7 +6827,17 @@ extend ConstEval {
                     return Flow::Ok;
                 }
                 self.ce_projs.push(
-                    CeProj { binder: id, k: k, sub: sub, sub2: sub2, om: pr.m, owner: pr.t, vmode: is_vars2 },
+                    CeProj {
+                        binder: id,
+                        k: k,
+                        sub: sub,
+                        sub2: sub2,
+                        om: pr.m,
+                        owner: pr.t,
+                        vmode: is_vars2,
+                        pmode: false,
+                        vk: 0,
+                    },
                 );
                 let st = self.exec_stmt(f, m, body);
                 let _ = self.ce_projs.pop();
@@ -7768,11 +8381,20 @@ extend ConstEval {
         }
         let key = self.ce_src(m).slice(a0.span.start as usize + 1, a0.span.end as usize - 1);
         let mut fdm: ModuleId = 0;
-        let node = if unsafe pr.vmode {
-            self.ce_proj_variant(unsafe pr.om, unsafe pr.owner, unsafe pr.k, &mut fdm);
+        let mut node = NODE_NONE;
+        if unsafe pr.pmode {
+            let vvp = self.ce_proj_variant(unsafe pr.om, unsafe pr.owner, unsafe pr.vk, &mut fdm);
+            if vvp != NODE_NONE {
+                let plp = self.ast_ptr(fdm).at_const(vvp).as_data.variant.payload;
+                if (unsafe pr.k) as u32 < plp.len {
+                    node = unsafe self.ast_ptr(fdm).list(plp)[(unsafe pr.k) as usize];
+                }
+            }
+        } else if unsafe pr.vmode {
+            node = self.ce_proj_variant(unsafe pr.om, unsafe pr.owner, unsafe pr.k, &mut fdm);
         } else {
-            self.ce_proj_field(unsafe pr.om, unsafe pr.owner, unsafe pr.k, &mut fdm);
-        };
+            node = self.ce_proj_field(unsafe pr.om, unsafe pr.owner, unsafe pr.k, &mut fdm);
+        }
         let mut mi: i32 = -1;
         if node != NODE_NONE {
             let da = self.ast_ptr(fdm);
@@ -7872,6 +8494,13 @@ extend ConstEval {
         if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
             callee = a.at_const(callee).as_data.specialization.expression;
             ck = a.at_const(callee).kind;
+        }
+        if ck == NodeKind::NODE_IDENTIFIER && a.resolution_def(callee).node == NODE_NONE && a.resolution(callee) == NODE_NONE && self.ce_span_is(
+            m,
+            a.at_const(callee).as_data.name.text,
+            "zeroed",
+        ) {
+            return self.ce_zeroed(f, m, id);
         }
         // type_info::<T>(): intrinsic, no declaration -- the unresolved name is the marker.
         if ck == NodeKind::NODE_IDENTIFIER && a.resolution_def(callee).node == NODE_NONE && a.resolution(callee) == NODE_NONE && self.ce_span_is(
@@ -8333,6 +8962,45 @@ extend ConstEval {
     /// CONST_NONE. A top-level call (no live eval) resets budgets, trap state and the object heap;
     /// after a failed fold, ce_trap_get/ce_trap_detail say why. Non-scalar successes memoize as
     /// AGG_OK and still report CONST_NONE.
+    // Evaluate `id` under an EXPLICIT generic substitution -- codegen's per-instantiation
+    // static_assert check. No memoization: the same node folds differently per instance.
+    pub fn eval_typed(
+        self: &mut Self,
+        m: ModuleId,
+        id: NodeId,
+        pmod: ModuleId,
+        params: *const NodeId,
+        am2: *const ModuleId,
+        at2: *const TypeId,
+        n: u8,
+    ) ConstValue {
+        if id == NODE_NONE || m as usize >= self.nmods || self.depth != 0 || self.nframes != 0 {
+            return ce_none();
+        }
+        self.steps = 0;
+        self.trap = "";
+        self.trap_kind = CE_TRAP_NONE;
+        self.trap_nframes = 0;
+        self.trap_in_constfn = false;
+        self.ce_objs_reset();
+        let mut fr = ce_frame_zero();
+        fr.pmod = pmod;
+        let mut i: u8 = 0;
+        while i < n && i < 8 {
+            unsafe fr.params_g[i as usize] = unsafe params[i as usize];
+            unsafe fr.am[i as usize] = unsafe am2[i as usize];
+            unsafe fr.at[i as usize] = unsafe at2[i as usize];
+            i = i + 1;
+        }
+        fr.ng = i;
+        self.depth = 1;
+        let v = self.ev(&mut fr, m, id);
+        self.depth = 0;
+        let pub_v = cv_pub(v);
+        self.ce_objs_reset();
+        return pub_v;
+    }
+
     pub fn eval(self: &mut Self, m: ModuleId, id: NodeId) ConstValue {
         if id == NODE_NONE || m as usize >= self.nmods {
             return ce_none();
@@ -8693,6 +9361,8 @@ pub struct CeProj {
     pub om: ModuleId,
     pub owner: TypeId,
     pub vmode: bool, // variants(&e) rather than fields(&v)
+    pub pmode: bool, // payloads(v): k indexes the ACTIVE variant vk's payload slots
+    pub vk: i64,
 }
 
 pub struct StaticRes {

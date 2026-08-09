@@ -719,6 +719,9 @@ pub struct CgTestInfo {
 
 // zero-init buffer wrappers (fixed C-string scratch)
 pub type Buf32 = Array<char, 32>;
+pub type Nodes8 = Array<NodeId, 8>;
+pub type Tys8 = Array<TypeId, 8>;
+pub type Mods8 = Array<ModuleId, 8>;
 pub type ExtChain = Array<i32, 64>;
 pub type Bools64 = Array<bool, 64>;
 pub type Buf64 = Array<char, 64>;
@@ -2454,7 +2457,7 @@ extend Codegen {
             let mut mdm2: ModuleId = 0;
             let mut mside = b.left;
             let mut mk2 = self.cg_meta_call_val(mside, &mut mmv, &mut mdm2);
-            if mk2 != 0 && mk2 != 1 {
+            if mk2 < 0 {
                 mside = b.right;
                 mk2 = self.cg_meta_call_val(mside, &mut mmv, &mut mdm2);
             }
@@ -2465,6 +2468,36 @@ extend Codegen {
                     b.left;
                 };
                 return self.cg_binder_cond_cmp(cond, mmv, mlit, mside == b.left);
+            }
+            // meta_str against a string LITERAL folds by raw-byte equality
+            if mk2 == 2 && (b.op == TokenType::EqualEqual || b.op == TokenType::BangEqual) {
+                let mlit2 = if mside == b.left {
+                    b.right;
+                } else {
+                    b.left;
+                };
+                let ln = a.at_const(mlit2);
+                if ln.kind == NodeKind::NODE_LITERAL && ln.as_data.literal.token_type == TokenType::StringLiteral {
+                    let want = tok::Span::new(ln.span.start + 1, ln.span.end - 1);
+                    let mut eqv = false;
+                    if mmv >= 0 {
+                        let ma3 = *(unsafe self.mod_ast(mdm2).metas).at(mmv as usize);
+                        if ma3.vkind == 2 {
+                            eqv = spans_eq2(self.mod_src(self.cur_module()), want, self.mod_src(mdm2), ma3.vspan);
+                        }
+                    } else {
+                        eqv = want.end == want.start; // a missing key reads ""
+                    }
+                    if b.op == TokenType::BangEqual {
+                        eqv = !eqv;
+                    }
+                    return if eqv {
+                        1;
+                    } else {
+                        0;
+                    };
+                }
+                return -1;
             }
         }
         if a.at_const(mem).kind != NodeKind::NODE_MEMBER {
@@ -5543,7 +5576,7 @@ extend Codegen {
         }
         let callee = self.cur_ast().at_const(id).as_data.call.callee;
         let ck = self.cur_ast().at_const(callee).kind;
-        let mut kind: i32 = 0; // 1=format 2=print 3=println 4=eprint 5=eprintln 6=.format_into
+        let mut kind: i32 = 0; // 2=print 3=println 4=eprint 5=eprintln 6=.format_into (`format` is rewritten at typecheck)
         let mut dst_recv: NodeId = NODE_NONE;
         if ck == NodeKind::NODE_MEMBER {
             // Method form `<dst>.format_into("template", args..)`: dst is the receiver, so its &mut borrow
@@ -5568,9 +5601,7 @@ extend Codegen {
             let fnamenode = self.mod_ast(d.module).at_const(d.node).as_data.function.name;
             let fnm = self.mod_ast(d.module).at_const(fnamenode).as_data.name.text;
             let dsrc = self.mod_src(d.module);
-            if span_is(dsrc, fnm, "format".ptr() as *const char) {
-                kind = 1;
-            } else if span_is(dsrc, fnm, "print".ptr() as *const char) {
+            if span_is(dsrc, fnm, "print".ptr() as *const char) {
                 kind = 2;
             } else if span_is(dsrc, fnm, "println".ptr() as *const char) {
                 kind = 3;
@@ -5770,8 +5801,6 @@ extend Codegen {
         }
         if kind == 6 {
             self.emit_str("})"); // void: appended in place, dst is borrowed (no free)
-        } else if kind == 1 {
-            self.buf.format_into("{}; }})", diag::cstr(fp));
         } else if kind >= 4 {
             self.buf.format_into("String__eprint(&{}); String__free(&{}); }})", diag::cstr(fp), diag::cstr(fp));
         } else {
@@ -7570,6 +7599,60 @@ extend Codegen {
     }
     fn emit_static_assert(self: &mut Self, id: NodeId) {
         let bd = self.cur_ast().at_const(id).as_data.binary;
+        // Per-instantiation evaluation first: under the active substitution the condition is this
+        // instance's compile-time fact -- a true assert vanishes, a false one is a COMPILE error,
+        // and only an unfoldable condition falls through to C's _Static_assert.
+        let ce0 = self.ceval();
+        if ce0 != null {
+            let mut prm = Nodes8 {};
+            let mut ams = Mods8 {};
+            let mut ats = Tys8 {};
+            let mut np: u8 = 0;
+            let mut pmod: ModuleId = 0;
+            for k in 0..self.nsubst {
+                let pd = unsafe self.subst[k as usize].param;
+                if np == 0 {
+                    pmod = pd.module;
+                }
+                if pd.module == pmod && np < 8 {
+                    prm[np as usize] = pd.node;
+                    ams[np as usize] = self.cur_module();
+                    ats[np as usize] = unsafe self.subst[k as usize].concrete;
+                    np = np + 1;
+                }
+            }
+            let cv = ce0.eval_typed(self.cur_module(), bd.left, pmod, &prm[0], &ams[0], &ats[0], np);
+            if cv.kind == ce::CONST_INT || cv.kind == ce::CONST_BOOL {
+                if cv.as_data.i != 0 {
+                    // holds for this instantiation: emit the folded form (the C carries the record)
+                    self.emit_str("_Static_assert(true, ");
+                    if bd.right != NODE_NONE {
+                        self.emit_reescaped(self.cur_ast().at_const(bd.right).as_data.literal.raw, false);
+                    } else {
+                        self.emit_str("\"static assertion failed\"");
+                    }
+                    self.emit_str(");\n");
+                    return;
+                }
+                let sp = self.cur_ast().at_const(id).span;
+                let mut msg = "static assertion failed";
+                if bd.right != NODE_NONE {
+                    let rsp = self.cur_ast().at_const(bd.right).as_data.literal.raw;
+                    if rsp.end > rsp.start + 2 {
+                        msg = diag::span_str(self.source, rsp.start + 1, rsp.end - 1);
+                    }
+                }
+                self.errors.emit(sp.start, sp.end - sp.start, format("static assertion failed: {}", msg));
+                if np > 0 {
+                    let mut tn2 = Buf128 {};
+                    self.render_type_id(ats[0], "".ptr() as *const char, &mut tn2[0], 120);
+                    self.errors.note(
+                        format("in the instantiation where the first type parameter is '{}'", diag::cstr(&tn2[0])),
+                    );
+                }
+                return;
+            }
+        }
         self.emit_str("_Static_assert(");
         let sc = self.const_ctx;
         self.const_ctx = true;
@@ -10128,10 +10211,13 @@ extend Codegen {
             }
         }
         // Drop-on-assign: `place = v` frees the old value of a Free-typed SAFE place first.
-        // Statically dead (unconditionally moved) places skip the free; conditionally-moved places
-        // guard it with the move-site flags and reset them -- exact on every path. RHS evaluates
-        // before the free, mirroring the identifier path.
-        if bd.op == TokenType::Equal && lt != TYPE_NONE && self.cg_type_is_free(lt) && self.cg_safe_place(bd.left) {
+        // Statically dead (unconditionally moved) places skip the free -- including a bare binding
+        // the RHS itself consumed (`x = f(x)`), which `lmoved` already established above;
+        // conditionally-moved places guard it with the move-site flags and reset them -- exact on
+        // every path. RHS evaluates before the free, mirroring the identifier path.
+        if bd.op == TokenType::Equal && lt != TYPE_NONE && !lmoved && self.cg_type_is_free(lt) && self.cg_safe_place(
+            bd.left,
+        ) {
             let cls = self.cg_moved_place_class(bd.left);
             if cls != 1 {
                 let mut r = Buf32 {};
@@ -12965,11 +13051,17 @@ extend Codegen {
                 self.depth = self.depth + 1;
                 let stmts = n.as_data.block.statements;
                 let saved = self.no_temp_free;
+                // The block's own lets register auto-free defers; they must not survive into the
+                // enclosing scope's flushes (a later return would free a name that is out of C
+                // scope). The tail statement moves the block's value out, so its entry is silent;
+                // nothing here needs an emitted free.
+                let dbase = self.defer_top;
                 for i in 0..stmts.len {
                     self.no_temp_free = i + 1 == stmts.len;
                     self.emit_indent();
                     self.emit_stmt(unsafe self.cur_ast().list(stmts)[i as usize]);
                 }
+                self.defer_top = dbase;
                 self.no_temp_free = saved;
                 self.depth = self.depth - 1;
                 self.emit_indent();
@@ -12993,6 +13085,13 @@ extend Codegen {
             self.emit_str("NULL");
         } else if tt == TokenType::CharacterLiteral {
             self.emit_reescaped(s, true);
+        } else if (tt == TokenType::StringLiteral || tt == TokenType::RawStringLiteral) && n.as_data.literal.seg {
+            let ir = tt == TokenType::RawStringLiteral;
+            self.emit_str("(str){ (const uint8_t *)");
+            self.emit_fmt_lit(ir, s.start as usize, s.end as usize, false);
+            self.emit_str(", sizeof(");
+            self.emit_fmt_lit(ir, s.start as usize, s.end as usize, false);
+            self.emit_str(") - 1 }");
         } else if tt == TokenType::StringLiteral {
             let tid = self.cur_ast().type_of(id);
             let mut isptr = false;

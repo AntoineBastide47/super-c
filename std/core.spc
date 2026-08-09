@@ -1483,13 +1483,47 @@ extend VariantInfo {
     }
 }
 
+/// One method a reflected type declares in an `extend` block -- inherent or conformance, `self`
+/// receiver or associated. ENUMERATION only: reflection cannot invoke a method (there is no value
+/// call path through a descriptor); use the name to document, filter by `meta`, or dispatch by
+/// hand. `arity` counts the value parameters with the `self` receiver excluded; `ret` is the
+/// one-level tag of the return type (`Void` for none, for several, or for one that has no tag,
+/// e.g. an unsubstituted generic). A conformance left fully inherited (`extend T as I {}`)
+/// declares no methods, so its defaults are not listed. `meta` holds the declaration's `@reflect`
+/// entries, in written order.
+pub struct MethodInfo {
+    pub name: str<'static>,
+    pub arity: usize,
+    pub is_pub: bool,
+    pub ret: TypeTag,
+    pub meta: Slice<'static, MetaInfo>,
+}
+
+extend MethodInfo {
+    /// The first `@reflect` entry named `name`, or None.
+    pub const fn meta(self: &MethodInfo, name: str) Option<MetaInfo> {
+        for i in 0..self.meta.len {
+            let m = self.meta.get(i);
+            if m.name == name {
+                return Option::<MetaInfo>::Some(*m);
+            }
+        }
+        return Option::<MetaInfo>::None;
+    }
+
+    pub const fn has_meta(self: &MethodInfo, name: str) bool {
+        return self.meta(name).is_some();
+    }
+}
+
 /// The result of `type_info::<T>()`, a compiler intrinsic that folds at compile time -- there is no
 /// declaration of `type_info` anywhere, and the value costs nothing unless it is reached. Fully
 /// non-owning: every member is a scalar or a `'static` view into static data, so a `TypeInfo` is
 /// never freed and can be stored or passed anywhere. `fields` is empty unless `kind` is
 /// `Struct`/`Tuple`/`Union`; `variants` is empty unless `kind` is `Enum`; `elem` is the tag of the
 /// pointee/element type for `Pointer`/`Reference`/`Array`/`Slice` (else `Void`); `len` is the
-/// element count for `Array` (else 0).
+/// element count for `Array` (else 0). `methods` lists every `extend` function declared FOR a
+/// decl-backed or builtin type, across all modules, in declaration order.
 pub struct TypeInfo {
     pub name: str<'static>,
     pub kind: TypeTag,
@@ -1500,6 +1534,7 @@ pub struct TypeInfo {
     pub fields: Slice<'static, FieldInfo>,
     pub variants: Slice<'static, VariantInfo>,
     pub meta: Slice<'static, MetaInfo>,
+    pub methods: Slice<'static, MethodInfo>,
 }
 
 extend TypeInfo {
@@ -1539,6 +1574,18 @@ extend TypeInfo {
             }
         }
         return Option::<VariantInfo>::None;
+    }
+
+    /// The first method named `name`, or None (conformances can declare the same name more than
+    /// once; iterate `methods` to see every declaration).
+    pub const fn method(self: &TypeInfo, name: str) Option<MethodInfo> {
+        for i in 0..self.methods.len {
+            let m = self.methods.get(i);
+            if m.name == name {
+                return Option::<MethodInfo>::Some(*m);
+            }
+        }
+        return Option::<MethodInfo>::None;
     }
 
     /// The variant whose runtime value is `tag`, or None -- the reverse lookup a `Display` for a

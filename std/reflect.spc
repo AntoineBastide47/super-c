@@ -3,8 +3,10 @@
 // anywhere, so this header is their documentation.
 //
 //   type_info::<T>()   A non-owning `TypeInfo` descriptor of T (name, kind, size, align, fields,
-//                      variants, meta; see std/core.spc). Folds at compile time; a runtime use
-//                      reads static data. Cannot describe an opaque FFI type.
+//                      variants, meta, methods; see std/core.spc). Folds at compile time; a runtime
+//                      use reads static data. Cannot describe an opaque FFI type. `methods` lists
+//                      every `extend` function declared for a decl-backed or builtin type
+//                      (enumeration only -- a descriptor cannot invoke).
 //   zeroed::<T>()      An all-zero-bytes T. `unsafe`: zero bytes are not a valid value of every
 //                      type. It is the seed the reflection constructors fill field by field --
 //                      releasing an all-zero value is a no-op for every owning std type.
@@ -43,19 +45,21 @@
 // `v.other_active` tests the second subject's tag. This is what field-wise equality, ordering, and
 // clone-into are built from; there is no way to reach a second value's field without it.
 //
-// METADATA: `@reflect(key, key = 100, key = "text", ..)` on a struct/enum/field/variant attaches
-// `MetaInfo` entries the descriptor carries (`ti.meta`, `ti.fields.get(i).meta`, `VariantInfo.meta`;
-// lookups via `.meta("key")` / `.has_meta("key")`). Inside a binder body, `f.has_meta("k")`,
-// `f.meta_bool("k")`, `f.meta_int("k")`, and `f.meta_str("k")` are PER-COPY CONSTANTS (a missing
-// key reads false / 0 / ""; the key must be a string literal), and an `if` over them folds at
-// emission -- the untagged copies' bodies are never emitted. A `@reflect` tag on a CONCRETE type
+// METADATA: `@reflect(key, key = 100, key = "text", ..)` on a struct/enum/field/variant/method
+// attaches `MetaInfo` entries the descriptor carries (`ti.meta`, `ti.fields.get(i).meta`,
+// `VariantInfo.meta`, `MethodInfo.meta`; lookups via `.meta("key")` / `.has_meta("key")`). Inside a
+// binder body, `f.has_meta("k")`, `f.meta_bool("k")`, `f.meta_int("k")`, and `f.meta_str("k")` are
+// PER-COPY CONSTANTS (a missing key reads false / 0 / ""; the key must be a string literal), and an
+// `if` over them -- including a `meta_str` compare against a string literal -- folds at emission,
+// so the untagged copies' bodies are never emitted. A `@reflect` tag on a CONCRETE type
 // additionally EXPORTS its descriptor as the C global `sc_typeinfo_<name>` and registers it at
 // startup: an external tool reads `__sc_reflect_types` (super_rt.h) and walks the same statics the
 // program uses. String values keep their RAW source bytes (escape sequences are not processed).
 //
-// All of it works under the compile-time evaluator (`const fn`, static_assert), including writes
-// through `&mut f.value` -- except `zeroed` (runtime only) and payload-less enums (their subject is
-// not an object). `if` conditions on per-copy constants (`v.payload == 1`, `f.index != 0`,
+// All of it works under the compile-time evaluator (`const fn`, static_assert -- which also runs
+// INSIDE fn bodies, per instantiation for a generic fn), including writes through `&mut f.value`,
+// `zeroed`, payload-less enums (tags read their declared constants), `payloads` projection, and
+// `format`. `if` conditions on per-copy constants (`v.payload == 1`, `f.index != 0`,
 // `f.has_meta("k")`) fold at emission, so the untaken copy's body is never emitted at all.
 //
 // The derive helpers below are each written ONCE over these binders and monomorphize per concrete

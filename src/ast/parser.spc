@@ -271,7 +271,7 @@ extend Parser {
             Node {
                 kind: NodeKind::NODE_LITERAL,
                 span: token.span(),
-                as_data: NodeAs { literal: LiteralData { raw: token.span(), token_type: token.kind() } },
+                as_data: NodeAs { literal: LiteralData { raw: token.span(), token_type: token.kind(), seg: false } },
             },
         );
     }
@@ -4405,7 +4405,7 @@ extend Parser {
         let mut ok = owner != NODE_NONE;
         if ok {
             let k = self.ast.at_const(owner).kind;
-            ok = k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_FIELD || k == NodeKind::NODE_VARIANT;
+            ok = k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_FIELD || k == NodeKind::NODE_VARIANT || k == NodeKind::NODE_FUNCTION;
         }
         for i in 0..self.pending_metas.len() {
             let mut ma = *self.pending_metas.at(i);
@@ -4413,7 +4413,7 @@ extend Parser {
                 self.errors.emit(
                     ma.key.start,
                     ma.key.end - ma.key.start,
-                    format("'@reflect' applies to a struct, enum, field, or variant declaration"),
+                    format("'@reflect' applies to a struct, enum, field, variant, or function declaration"),
                 );
                 break;
             }

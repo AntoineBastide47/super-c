@@ -662,7 +662,8 @@ fn reflect_attribute() {
     );
     assert(c.errors == 0, "@reflect parses at type, field, and variant positions");
     assert(c.ast.metas.len() == 6, "six entries recorded");
-    assert(h::parse_has_error("@reflect(x)\nfn m() {}\n"), "@reflect on a fn rejected");
+    assert(!h::parse_has_error("@reflect(x)\nfn m() {}\n"), "@reflect on a fn accepted (method reflection)");
+    assert(h::parse_has_error("@reflect(x)\nconst C: i32 = 1;\n"), "@reflect on a non-declaration rejected");
     assert(h::parse_has_error("@reflect\nstruct S { x: i32, }\n"), "argument-less @reflect rejected");
     assert(h::parse_has_error("@reflect()\nstruct S { x: i32, }\n"), "empty @reflect rejected");
     assert(h::parse_has_error("@reflect(k = 1.5)\nstruct S { x: i32, }\n"), "a float value rejected");
