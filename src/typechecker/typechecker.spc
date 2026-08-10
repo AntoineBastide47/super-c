@@ -10,6 +10,7 @@ import lexer::token as tok;
 import lexer::token_type as *;
 import ast::ast as *;
 import module::loader as loader;
+import pattern::pattern as pat;
 import consteval::consteval as ce;
 import utils::errors as diag;
 
@@ -11524,9 +11525,111 @@ extend TypeChecker {
             i = i + 1;
         }
     }
+    // The shared pattern matrix (pattern::pattern) decides coverage; the legacy
+    // walker below stays as the budget-overflow fallback, so adversarial or-expansions keep the old
+    // verdicts. Messages are unchanged.
     fn check_match_exhaustive(self: &mut Self, id: NodeId, scrut: TypeId) {
         if scrut == TYPE_NONE {
             return;
+        }
+        let a = self.cur_ast();
+        let base = self.strip(scrut);
+        let mut emod2: ModuleId = 0;
+        let mut edecl2 = NODE_NONE;
+        let mut gp2 = Defs8 {};
+        let mut ga2 = Tys8 {};
+        let mut gn2: i32 = 0;
+        let agok2 = self.aggregate_of(base, &mut emod2, &mut edecl2, &mut gp2, &mut ga2, &mut gn2);
+        let is_enum2 = agok2 && self.mod_ast(emod2).at_const(edecl2).kind == NodeKind::NODE_ENUM;
+        // Fast path: the allocation-free legacy walk accepts the dominant shapes (catch-alls,
+        // whole-variant covers, both bools). It only ever under-approximates, so an accept is
+        // final; the matrix arbitrates the would-reject remainder (deep payload splits).
+        if self.legacy_exhaustive(id, scrut, false) {
+            return;
+        }
+        let arms2 = a.at_const(id).as_data.match_expr.arms;
+        let mut cx = pat::PatCx::new(self.package, a, self.source);
+        for i in 0..arms2.len {
+            let arm = a.at_const(unsafe a.list(arms2)[i as usize]);
+            if arm.as_data.match_arm.guard == NODE_NONE {
+                cx.add_arm(arm.as_data.match_arm.pattern, i);
+            }
+        }
+        if !cx.overflow {
+            let sp2 = a.at_const(a.at_const(id).as_data.match_expr.value).span;
+            if is_enum2 {
+                let variants2 = self.mod_ast(emod2).at_const(edecl2).as_data.aggregate.members;
+                if variants2.len <= MATCH_MAX_VARIANTS {
+                    let mut nmiss: u32 = 0;
+                    for k in 0..variants2.len {
+                        let vd = DefId { module: emod2, node: unsafe self.mod_ast(emod2).list(variants2)[k as usize] };
+                        if cx.variant_missing(vd, k) {
+                            nmiss = nmiss + 1;
+                        }
+                    }
+                    if !cx.overflow {
+                        if nmiss == 0 {
+                            return;
+                        }
+                        let mut s2 = "s".ptr() as *const char;
+                        if nmiss == 1 {
+                            s2 = "".ptr() as *const char;
+                        }
+                        self.errors.emit(
+                            sp2.start,
+                            sp2.end - sp2.start,
+                            format("switch is not exhaustive: missing {} variant{}", nmiss, diag::cstr(s2)),
+                        );
+                        self.errors.note(format("match every variant or add a '_' arm"));
+                        return;
+                    }
+                }
+            }
+            if !cx.overflow {
+                let missing = cx.wildcard_useful();
+                if !cx.overflow {
+                    if !missing {
+                        return;
+                    }
+                    self.errors.emit(sp2.start, sp2.end - sp2.start, format("switch is not exhaustive"));
+                    self.errors.note(format("add a '_' arm to cover the remaining values"));
+                    return;
+                }
+            }
+        }
+        let _ = self.legacy_exhaustive(id, scrut, true);
+    }
+
+    // Matrix usefulness marks the first arm no value can reach (earlier GUARDED arms
+    // cover nothing for later arms -- their guard may fail). Same message and once-per-switch
+    // cadence as the legacy check; a budget overflow reports nothing, like the legacy walker.
+    fn lint_unreachable_arms(self: &mut Self, id: NodeId) {
+        let a = self.cur_ast();
+        let mut cx = pat::PatCx::new(self.package, a, self.source);
+        let arms = a.at_const(id).as_data.match_expr.arms;
+        for i in 0..arms.len {
+            let arm = a.at_const(unsafe a.list(arms)[i as usize]).as_data.match_arm;
+            if i != 0 && !cx.arm_reachable(arm.pattern, i) && !cx.overflow {
+                let psp = a.at_const(arm.pattern).span;
+                self.errors.warn(
+                    psp.start,
+                    psp.end - psp.start,
+                    format("unreachable arm: a previous arm matches every value"),
+                );
+                return;
+            }
+            if arm.guard == NODE_NONE {
+                cx.add_arm(arm.pattern, i);
+            }
+        }
+    }
+
+    // The pre-matrix coverage walk: catch-alls, whole-variant bit sets, and the bool pair. Returns
+    // true when it proves the switch exhaustive (a sound under-approximation of the matrix).
+    // `report` emits the legacy diagnostics -- the matrix-overflow path only.
+    fn legacy_exhaustive(self: &mut Self, id: NodeId, scrut: TypeId, report: bool) bool {
+        if scrut == TYPE_NONE {
+            return true;
         }
         let a = self.cur_ast();
         let base = self.strip(scrut);
@@ -11562,7 +11665,7 @@ extend TypeChecker {
             }
         }
         if catchall {
-            return;
+            return true;
         }
         let sp = a.at_const(a.at_const(id).as_data.match_expr.value).span;
         if is_enum && variants.len <= MATCH_MAX_VARIANTS {
@@ -11573,25 +11676,30 @@ extend TypeChecker {
                 }
             }
             if nmiss == 0 {
-                return;
+                return true;
             }
-            let mut s2 = "s".ptr() as *const char;
-            if nmiss == 1 {
-                s2 = "".ptr() as *const char;
+            if report {
+                let mut s2 = "s".ptr() as *const char;
+                if nmiss == 1 {
+                    s2 = "".ptr() as *const char;
+                }
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format("switch is not exhaustive: missing {} variant{}", nmiss, diag::cstr(s2)),
+                );
+                self.errors.note(format("match every variant or add a '_' arm"));
             }
-            self.errors.emit(
-                sp.start,
-                sp.end - sp.start,
-                format("switch is not exhaustive: missing {} variant{}", nmiss, diag::cstr(s2)),
-            );
-            self.errors.note(format("match every variant or add a '_' arm"));
-            return;
+            return false;
         }
         if base == Ast::builtin(BuiltinType::BT_BOOL) && tcov && fcov {
-            return;
+            return true;
         }
-        self.errors.emit(sp.start, sp.end - sp.start, format("switch is not exhaustive"));
-        self.errors.note(format("add a '_' arm to cover the remaining values"));
+        if report {
+            self.errors.emit(sp.start, sp.end - sp.start, format("switch is not exhaustive"));
+            self.errors.note(format("add a '_' arm to cover the remaining values"));
+        }
+        return false;
     }
 
     // ---- region variables (phase 1: allocation + slot counting; the solver consumes these later) ----
@@ -12060,33 +12168,11 @@ extend TypeChecker {
         let arms = a.at_const(id).as_data.match_expr.arms;
         let mut first = true;
         let ovf = false;
-        let mut caught = false;
         let mut result = TYPE_NONE;
         for i in 0..arms.len {
             let aid = unsafe a.list(arms)[i as usize];
             let arm = a.at_const(aid).as_data.match_arm;
-            // Lint: an unguarded wildcard / bare-binding arm catches everything; later arms never run.
-            if caught {
-                let psp = a.at_const(arm.pattern).span;
-                self.errors.warn(
-                    psp.start,
-                    psp.end - psp.start,
-                    format("unreachable arm: a previous arm matches every value"),
-                );
-                caught = false; // once per switch
-            }
             self.check_pattern(arm.pattern, scrut, bind_ref);
-            if self.lint && arm.guard == NODE_NONE && !caught {
-                let pk = a.at_const(arm.pattern).kind;
-                if pk == NodeKind::NODE_PATTERN_WILDCARD {
-                    caught = true;
-                } else if pk == NodeKind::NODE_PATTERN_NAME && a.at_const(arm.pattern).as_data.pattern.children.len == 0 {
-                    let d = a.resolution_def(a.at_const(arm.pattern).as_data.pattern.name);
-                    caught = d.node == NODE_NONE || d.module as usize < self.pkg_count() && self.mod_ast(d.module).at_const(
-                        d.node,
-                    ).kind != NodeKind::NODE_VARIANT;
-                }
-            }
             let g = self.check_expr(arm.guard);
             if arm.guard != NODE_NONE && g != TYPE_NONE && !self.is_bool(g) {
                 let sp = a.at_const(arm.guard).span;
@@ -12124,6 +12210,9 @@ extend TypeChecker {
         if arms.len != 0 {}
         if ovf {}
         self.check_match_exhaustive(id, scrut);
+        if self.lint {
+            self.lint_unreachable_arms(id);
+        }
         return result;
     }
 

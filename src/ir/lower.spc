@@ -1,8 +1,8 @@
-// Typed AST -> Core IR lowering (migration Phase 4). Consumes ONLY the typed-facts boundary
+// Typed AST -> Core IR lowering. Consumes ONLY the typed-facts boundary
 // (ast::facts) plus syntax structure and source spans; every semantic decision (types, resolutions,
 // call targets, operator methods, coercions, deref chains, dyn erasures) is read from the recorded
 // facts, never re-derived -- except the for-loop `next` method shim, which mirrors codegen until the
-// instance graph owns method demand (Phase 6).
+// instance graph owns method demand.
 //
 // Evaluation order (documented before implementation, per the plan; matches the current emitter):
 //   - receiver before call arguments; arguments left to right
@@ -21,6 +21,7 @@ import ast::ast as *;
 import ast::facts as facts;
 import module::loader as loader;
 import ir::core as ir;
+import pattern::pattern as pat;
 
 /// One binding in scope: the declaring node (LET name / parameter / pattern name) -> its local.
 struct Binding {
@@ -513,7 +514,7 @@ extend Lowerer {
         } else if k == NodeKind::NODE_FOR {
             self.lower_for(id);
         } else if k == NodeKind::NODE_INLINE_FOR {
-            // Numeric unroll is an emission concern (Phase 9 folds the bounds); the loop lowers
+            // Numeric unroll is an emission concern (the bounds fold at const evaluation); the loop lowers
             // structurally like `for` so its body is verified Core IR.
             self.lower_for(id);
         } else if k == NodeKind::NODE_BREAK {
@@ -736,7 +737,7 @@ extend Lowerer {
     // `for` over a range literal lowers to an index loop. `inline for` over `fields`/`variants`/
     // `payloads` binders (angle 3) stays a compatibility intrinsic: the binder's operands feed one
     // IN_REFLECT assignment to the binding, and the body lowers once with normal semantics --
-    // Phase 9's substitution-aware instance lowering replaces this with real per-field expansion.
+    // substitution-aware instance lowering replaces this with real per-field expansion.
     fn lower_for(self: &mut Self, id: NodeId) {
         let d = self.f.node(id).as_data.for_stmt;
         let sp = self.f.node(id).span;
@@ -898,7 +899,7 @@ extend Lowerer {
     }
 
     // `for` over an indexable sequence (array, slice, sequence value): an index loop over RV_LEN
-    // with an explicit element load per iteration -- the uniform Phase 4 sequence model; Phase 9's
+    // with an explicit element load per iteration -- the uniform sequence model until
     // instance-aware lowering specializes it per concrete carrier.
     fn lower_for_indexed(self: &mut Self, id: NodeId) {
         let d = self.f.node(id).as_data.for_stmt;
@@ -1259,7 +1260,7 @@ extend Lowerer {
         if t == tt::TokenType::Null {
             return self.const_op(ir::Constant { kind: ir::CK_INT, ty: ty, val: 0, raw: d.raw, item: no });
         }
-        // Integer/char literals: the exact value is CTFE's business (Phase 9); the span keeps the
+        // Integer/char literals: the exact value is CTFE's business; the span keeps the
         // spelling, `val` carries the common decimal fast path.
         return self.const_op(
             ir::Constant { kind: ir::CK_INT, ty: ty, val: parse_dec(self.src, d.raw), raw: d.raw, item: no },
@@ -1342,7 +1343,7 @@ extend Lowerer {
 
     // `expr?`: test the carrier's discriminant; the ok arm yields the payload, the error arm fills
     // the return slot through the IN_TRY_ERR compatibility intrinsic (the `From` conversion and
-    // rewrap stay CTFE/codegen-owned until Phase 9) and returns through the pending defers.
+    // rewrap stay CTFE/codegen-owned) and returns through the pending defers.
     fn lower_question(self: &mut Self, id: NodeId, operand: NodeId) ir::OperandId {
         let ty = self.f.node_type(id);
         let sp = self.f.node(id).span;
@@ -2274,7 +2275,7 @@ extend Lowerer {
 
     // ---- match ------------------------------------------------------------------------------------
 
-    // Naive arm-order lowering (Phase 5 replaces this with the pattern-matrix compiler): test each
+    // Naive arm-order fallback lowering (guarded matches; the decision tree covers the rest): test each
     // arm's pattern; on success bind + run guard + body; else fall to the next arm.
     fn lower_match(self: &mut Self, id: NodeId, dest: ir::PlaceId) bool {
         let d = self.f.node(id).as_data.match_expr;
@@ -2284,6 +2285,29 @@ extend Lowerer {
             return false;
         }
         let vpl = self.spill(vop, sp);
+        // Guard-free matches lower through the shared decision tree, so no place is
+        // retested once its constructor is known. Guarded matches (and or-patterns that bind, or a
+        // budget overflow) keep the sequential arm chain below -- guards run after their arm's
+        // tests and before its body either way.
+        let mut sequential = false;
+        for i in 0..d.arms.len {
+            let ad = self.f.node(unsafe self.f.list(d.arms)[i as usize]).as_data.match_arm;
+            if ad.guard != NODE_NONE || self.or_pattern_binds(ad.pattern) {
+                sequential = true;
+            }
+        }
+        if !sequential {
+            let mut cx = pat::PatCx::new(self.pkg, self.f.ast, self.src);
+            for i in 0..d.arms.len {
+                let ad = self.f.node(unsafe self.f.list(d.arms)[i as usize]).as_data.match_arm;
+                cx.add_arm(ad.pattern, i);
+            }
+            let tree = cx.build_tree();
+            if tree.ok {
+                self.lower_match_tree(id, dest, vpl, &cx, &tree);
+                return self.err.len() == 0;
+            }
+        }
         let join = self.open_block();
         for i in 0..d.arms.len {
             let arm = unsafe self.f.list(d.arms)[i as usize];
@@ -2578,6 +2602,389 @@ extend Lowerer {
             return;
         }
         self.fail_at("pattern-kind", p);
+    }
+
+    // Does `p` contain an or-pattern that binds a name? (Those keep sequential lowering.)
+    fn or_pattern_binds(self: &Self, p: NodeId) bool {
+        if p == NODE_NONE {
+            return false;
+        }
+        let k = self.f.node(p).kind;
+        if k == NodeKind::NODE_PATTERN_OR {
+            return self.pattern_binds(p);
+        }
+        if k == NodeKind::NODE_PATTERN_NAME || k == NodeKind::NODE_PATTERN_TUPLE || k == NodeKind::NODE_PATTERN_STRUCT || k == NodeKind::NODE_PATTERN_FIELD {
+            let ch = self.f.node(p).as_data.pattern.children;
+            for i in 0..ch.len {
+                if self.or_pattern_binds(unsafe self.f.list(ch)[i as usize]) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Materialize the place a DtPath denotes (memoized per path id).
+    fn place_of_path(self: &mut Self, t: &pat::DecisionTree, pid: u32, vpl: ir::PlaceId, cache: &mut Vector<u32>) ir::PlaceId {
+        if cache[pid as usize] != ir::IR_NONE {
+            return cache[pid as usize];
+        }
+        let path = *t.paths.at(pid as usize);
+        let mut base = vpl;
+        if path.parent != pat::P_NONE {
+            base = self.place_of_path(t, path.parent, vpl, cache);
+        }
+        if path.parent != pat::P_NONE || path.downcast >= 0 || path.fdecl != NODE_NONE || path.pat != NODE_NONE {
+            let mut ty = self.body.places.at(base as usize).ty;
+            if path.pat != NODE_NONE {
+                let pt = self.f.node_type(path.pat);
+                if pt != TYPE_NONE {
+                    ty = pt;
+                }
+            }
+            if path.downcast >= 0 {
+                let bty = self.body.places.at(base as usize).ty;
+                base = self.place_project(
+                    base,
+                    ir::Projection { kind: ir::PJ_DOWNCAST, data: path.downcast as u32, sub: path.vdecl.node, ty: bty },
+                );
+            }
+            base = self.place_project(
+                base,
+                ir::Projection { kind: ir::PJ_FIELD, data: path.field, sub: path.fdecl, ty: ty },
+            );
+        }
+        cache.set(pid as usize, base);
+        return base;
+    }
+
+    // Bind every name in `p` against `v` WITHOUT tests: the decision tree already proved the
+    // constructors on this path, so variant payloads are reached by direct downcast projections.
+    fn pattern_bind_total(self: &mut Self, p: NodeId, v: ir::PlaceId) {
+        if p == NODE_NONE || self.err.len() != 0 {
+            return;
+        }
+        let k = self.f.node(p).kind;
+        let sp = self.f.node(p).span;
+        if k == NodeKind::NODE_PATTERN_WILDCARD || k == NodeKind::NODE_PATTERN_LITERAL || k == NodeKind::NODE_PATTERN_RANGE {
+            return;
+        }
+        if k == NodeKind::NODE_PATTERN_OR {
+            return; // binding or-alternatives never reach the tree path
+        }
+        if k == NodeKind::NODE_IDENTIFIER {
+            self.bind_name(p, v, sp);
+            return;
+        }
+        if k == NodeKind::NODE_PATTERN_NAME {
+            let pd = self.f.node(p).as_data.pattern;
+            let vd = self.f.res(pd.name);
+            if vd.node != NODE_NONE && self.decl_kind(vd) == NodeKind::NODE_VARIANT {
+                return; // a bare variant test binds nothing
+            }
+            if pd.children.len != 0 {
+                self.pattern_bind_total(unsafe self.f.list(pd.children)[0], v);
+            }
+            self.bind_name(p, v, sp);
+            return;
+        }
+        if k == NodeKind::NODE_PATTERN_TUPLE || k == NodeKind::NODE_PATTERN_STRUCT {
+            let pd = self.f.node(p).as_data.pattern;
+            let mut base = v;
+            let vd = if pd.name != NODE_NONE {
+                self.f.res(pd.name);
+            } else {
+                DefId { module: 0, node: NODE_NONE };
+            };
+            let isv = vd.node != NODE_NONE && self.decl_kind(vd) == NodeKind::NODE_VARIANT;
+            if isv {
+                let mut en = NODE_NONE;
+                let ord = self.variant_ordinal(vd, &mut en);
+                if ord >= 0 {
+                    let bty = self.body.places.at(v as usize).ty;
+                    base = self.place_project(
+                        v,
+                        ir::Projection { kind: ir::PJ_DOWNCAST, data: ord as u32, sub: vd.node, ty: bty },
+                    );
+                }
+            }
+            if k == NodeKind::NODE_PATTERN_TUPLE && !isv && pd.children.len == 1 {
+                self.pattern_bind_total(unsafe self.f.list(pd.children)[0], base);
+                return;
+            }
+            for i in 0..pd.children.len {
+                let cid = unsafe self.f.list(pd.children)[i as usize];
+                if k == NodeKind::NODE_PATTERN_STRUCT {
+                    let fpd = self.f.node(cid).as_data.pattern;
+                    if fpd.children.len == 0 {
+                        continue;
+                    }
+                    let subp = unsafe self.f.list(fpd.children)[0];
+                    let fd = self.f.res(fpd.name);
+                    let fty = self.f.node_type(subp);
+                    let fpl = self.place_project(
+                        base,
+                        ir::Projection { kind: ir::PJ_FIELD, data: i, sub: fd.node, ty: fty },
+                    );
+                    self.pattern_bind_total(subp, fpl);
+                } else {
+                    let cpl = self.tuple_field(base, i, cid);
+                    self.pattern_bind_total(cid, cpl);
+                }
+            }
+        }
+    }
+
+    // Emit the decision tree: every DT_TEST reads its memoized place once; leaves jump to shared
+    // per-arm blocks (bindings + body emitted exactly once per arm). `cont` is where the write
+    // cursor must land when this subtree is fully sealed.
+    fn emit_tree(
+        self: &mut Self,
+        t: &pat::DecisionTree,
+        cx: &pat::PatCx,
+        node: u32,
+        vpl: ir::PlaceId,
+        cache: &mut Vector<u32>,
+        armb: &Vector<u32>,
+        cont: ir::BlockId,
+        sp: tok::Span,
+    ) {
+        if self.err.len() != 0 {
+            return;
+        }
+        let n = *t.nodes.at(node as usize);
+        if n.kind == pat::DT_LEAF {
+            self.seal(self.goto_term(armb[n.arm as usize], sp), cont);
+            return;
+        }
+        if n.kind == pat::DT_FAIL {
+            self.seal(self.term0(ir::TM_UNREACHABLE, sp), cont);
+            return;
+        }
+        let pl = self.place_of_path(t, n.place, vpl, cache);
+        let k0 = cx.pats.at(t.edges.at(n.edge_start as usize).pat as usize).kind;
+        if k0 == pat::PC_TUPLE || k0 == pat::PC_STRUCT {
+            // single always-complete constructor: no runtime test
+            let child = t.edges.at(n.edge_start as usize).child;
+            self.emit_tree(t, cx, child, vpl, cache, armb, cont, sp);
+            return;
+        }
+        if k0 == pat::PC_VARIANT || k0 == pat::PC_BOOL {
+            // one switch over the discriminant / value; no place is read twice
+            let mut sw_op = ir::IR_NONE;
+            if k0 == pat::PC_VARIANT {
+                let ut = Ast::builtin(BuiltinType::BT_U32);
+                let dt = self.temp(ut, sp);
+                let dp = self.place_of_local(dt);
+                self.assign(
+                    dp,
+                    ir::Rvalue {
+                        kind: ir::RV_DISCRIMINANT,
+                        a: pl,
+                        b: 0,
+                        c: 0,
+                        target: ut,
+                        item: DefId { module: 0, node: NODE_NONE },
+                    },
+                    sp,
+                );
+                sw_op = self.copy_op(dp);
+            } else {
+                sw_op = self.copy_op(pl);
+            }
+            let mut blocks = Vector::<u32>::new();
+            for e in 0..n.edge_len {
+                blocks.push(self.open_block());
+            }
+            let dflt: ir::BlockId = if n.default_child != pat::P_NONE {
+                self.open_block();
+            } else {
+                blocks[(n.edge_len - 1) as usize];
+            };
+            let mut tm = self.term0(ir::TM_SWITCH, sp);
+            tm.a = sw_op;
+            tm.sw_start = self.body.switch_pool.len() as u32;
+            let pairs: u32 = if n.default_child != pat::P_NONE {
+                n.edge_len;
+            } else {
+                n.edge_len - 1;
+            };
+            for e in 0..pairs {
+                let ep = cx.pats.at(t.edges.at((n.edge_start + e) as usize).pat as usize);
+                self.body.switch_pool.push(ep.val as u64 << 32 | blocks[e as usize] as u64);
+            }
+            tm.sw_len = pairs;
+            tm.t0 = dflt;
+            self.seal(tm, blocks[0]);
+            for e in 0..n.edge_len {
+                let next: ir::BlockId = if e + 1 <= n.edge_len - 1 {
+                    blocks[(e + 1) as usize];
+                } else if n.default_child != pat::P_NONE {
+                    dflt;
+                } else {
+                    cont;
+                };
+                self.emit_tree(t, cx, t.edges.at((n.edge_start + e) as usize).child, vpl, cache, armb, next, sp);
+            }
+            if n.default_child != pat::P_NONE {
+                self.emit_tree(t, cx, n.default_child, vpl, cache, armb, cont, sp);
+            }
+            return;
+        }
+        // integers / ranges / opaque literals: a comparison chain, one edge at a time
+        for e in 0..n.edge_len {
+            let eid = (n.edge_start + e) as usize;
+            let ep = *cx.pats.at(t.edges.at(eid).pat as usize);
+            let hit = self.open_block();
+            let miss = self.open_block();
+            let mut cond = ir::IR_NONE;
+            if ep.kind == pat::PC_INT {
+                let ity = self.body.places.at(pl as usize).ty;
+                let cop = self.const_op(
+                    ir::Constant {
+                        kind: ir::CK_INT,
+                        ty: ity,
+                        val: ep.val,
+                        raw: sp,
+                        item: DefId { module: 0, node: NODE_NONE },
+                    },
+                );
+                cond = self.eq_test(pl, cop, sp);
+            } else if ep.kind == pat::PC_RANGE {
+                let rd = self.f.node(ep.node).as_data.pattern_range;
+                let mut ok = true;
+                if rd.start != NODE_NONE {
+                    let lo = self.pattern_bound(rd.start);
+                    let lop = self.lower_expr(lo);
+                    if lop == ir::IR_NONE {
+                        return;
+                    }
+                    cond = self.cmp_test(pl, lop, tt::TokenType::GreaterThanEqual, sp);
+                    ok = false;
+                }
+                if rd.end != NODE_NONE {
+                    let hi = self.pattern_bound(rd.end);
+                    let hop = self.lower_expr(hi);
+                    if hop == ir::IR_NONE {
+                        return;
+                    }
+                    let rel: tt::TokenType = if rd.inclusive {
+                        tt::TokenType::LessThanEqual;
+                    } else {
+                        tt::TokenType::LessThan;
+                    };
+                    let c2 = self.cmp_test(pl, hop, rel, sp);
+                    if cond == ir::IR_NONE {
+                        cond = c2;
+                    } else {
+                        // both bounds: fold with a boolean and
+                        let bt = Ast::builtin(BuiltinType::BT_BOOL);
+                        let at = self.temp(bt, sp);
+                        let ap = self.place_of_local(at);
+                        self.assign(
+                            ap,
+                            ir::Rvalue {
+                                kind: ir::RV_BINARY,
+                                a: cond,
+                                b: c2,
+                                c: tt::TokenType::AmpersandAmpersand as u8,
+                                target: bt,
+                                item: DefId { module: 0, node: NODE_NONE },
+                            },
+                            sp,
+                        );
+                        cond = self.copy_op(ap);
+                    }
+                }
+                if ok && cond == ir::IR_NONE {
+                    let bt = Ast::builtin(BuiltinType::BT_BOOL);
+                    cond = self.const_op(
+                        ir::Constant {
+                            kind: ir::CK_BOOL,
+                            ty: bt,
+                            val: 1,
+                            raw: sp,
+                            item: DefId { module: 0, node: NODE_NONE },
+                        },
+                    );
+                }
+            } else {
+                // opaque literal: compare against the lowered pattern expression
+                let val = if self.f.node(ep.node).kind == NodeKind::NODE_PATTERN_LITERAL {
+                    self.f.node(ep.node).as_data.single.value;
+                } else {
+                    ep.node;
+                };
+                let lop = self.lower_expr(val);
+                if lop == ir::IR_NONE {
+                    return;
+                }
+                cond = self.eq_test(pl, lop, sp);
+            }
+            let mut tm = self.term0(ir::TM_SWITCH, sp);
+            tm.a = cond;
+            tm.sw_start = self.body.switch_pool.len() as u32;
+            self.body.switch_pool.push(1u64 << 32 | hit as u64);
+            tm.sw_len = 1;
+            tm.t0 = miss;
+            self.seal(tm, hit);
+            self.emit_tree(t, cx, t.edges.at(eid).child, vpl, cache, armb, miss, sp);
+        }
+        if n.default_child != pat::P_NONE {
+            self.emit_tree(t, cx, n.default_child, vpl, cache, armb, cont, sp);
+        } else {
+            self.seal(self.term0(ir::TM_UNREACHABLE, sp), cont);
+        }
+    }
+
+    // Tree-driven match lowering: emit the tree, then each arm exactly once (bindings from the
+    // original pattern, in source order, then the body), all joining after the match.
+    fn lower_match_tree(
+        self: &mut Self,
+        id: NodeId,
+        dest: ir::PlaceId,
+        vpl: ir::PlaceId,
+        cx: &pat::PatCx,
+        t: &pat::DecisionTree,
+    ) {
+        let d = self.f.node(id).as_data.match_expr;
+        let sp = self.f.node(id).span;
+        let join = self.open_block();
+        let mut armb = Vector::<u32>::new();
+        for i in 0..d.arms.len {
+            armb.push(self.open_block());
+        }
+        let mut cache = Vector::<u32>::new();
+        for i in 0..t.paths.len() {
+            cache.push(ir::IR_NONE);
+        }
+        let after = self.open_block();
+        self.emit_tree(t, cx, t.root, vpl, &mut cache, &armb, after, sp);
+        if self.err.len() != 0 {
+            return;
+        }
+        self.seal_dead(after, sp);
+        for i in 0..d.arms.len {
+            self.cur = armb[i as usize];
+            self.run_start = self.body.statements.len() as u32;
+            let ad = self.f.node(unsafe self.f.list(d.arms)[i as usize]).as_data.match_arm;
+            self.pattern_bind_total(ad.pattern, vpl);
+            if dest != ir::IR_NONE {
+                self.lower_value_into(ad.body, dest);
+            } else {
+                self.lower_stmt(ad.body);
+            }
+            if self.err.len() != 0 {
+                return;
+            }
+            self.seal(self.goto_term(join, sp), join);
+            if i != d.arms.len - 1 {
+                // the next arm block writes next; seal moved the cursor to join already
+                self.cur = join;
+            }
+        }
+        self.cur = join;
+        self.run_start = self.body.statements.len() as u32;
     }
 
     fn cmp_test(self: &mut Self, v: ir::PlaceId, rhs: ir::OperandId, rel: tt::TokenType, sp: tok::Span) ir::OperandId {

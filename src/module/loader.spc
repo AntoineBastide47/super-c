@@ -95,7 +95,7 @@ pub struct Package {
     pub mod_refs: Vector<u64>,
     pub mod_refs_w: usize,
     pub mod_refs_ready: bool,
-    /// The package declaration index (Phase 2): symbols, ItemMeta records, per-module name maps,
+    /// The package declaration index: symbols, ItemMeta records, per-module name maps,
     /// import adjacency + SCCs, and the LangItem table. Built once on first use after loading
     /// (top-level decl names and imports are parse-final); `ensure_index` rebuilds it when a module
     /// is appended later (the LSP's batch load). `lookup`/`glob_lookup`/`prelude_lookup` and the
@@ -186,8 +186,8 @@ pub enum ItemKind {
 }
 
 /// One record per top-level or associated declaration. `node` is the legacy declaration NodeId:
-/// DefId{module, node} identity and C mangling key off it for the whole migration. Signatures and
-/// attributes stay reachable through the node (the Ast side tables are their owner until Phase 11).
+/// DefId{module, node} identity and C mangling key off it. Signatures and
+/// attributes stay reachable through the node (the Ast side tables are their owner).
 pub struct ItemMeta {
     pub module: ModuleId,
     pub node: NodeId,

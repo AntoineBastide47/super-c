@@ -1,8 +1,8 @@
-// Core IR (migration Phase 4): the typed, control-flow, non-SSA executable form every body lowers
+// Core IR: the typed, control-flow, non-SSA executable form every body lowers
 // to. One CoreBody per function, method, closure, or constant initializer. Storage is dense
 // append-only vectors of u32-indexed records -- no per-node heap allocation, no pointers into other
 // stages. Types are the owning module's TypeIds; syntax is referenced only through spans and the
-// optional origin NodeId kept for diagnostics during the migration.
+// optional origin NodeId kept for diagnostic compatibility.
 import ast::ast as *;
 import lexer::token as tok;
 

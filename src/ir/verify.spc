@@ -1,6 +1,6 @@
-// Core IR structural verifier (migration Phase 4): rejects a body when a structural invariant
+// Core IR structural verifier: rejects a body when a structural invariant
 // fails. Runs unconditionally in the SC_CORE_IR development mode; the checks are pure reads.
-// Type-level rules stay coarse until CTFE/layout land (Phase 9): a symbolic or error type is
+// Type-level rules stay coarse until the IR interpreter and layout service land: a symbolic or error type is
 // always permitted in a generic body (plan rule 15).
 import ast::ast as *;
 import ir::core as ir;

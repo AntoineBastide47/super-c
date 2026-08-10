@@ -1,5 +1,5 @@
-// Core IR expected-output tests (migration Phase 4): focused snippets lower to verified bodies whose
-// deterministic print form is asserted structurally, plus direct coverage of the Phase 3 typed-facts
+// Core IR expected-output tests: focused snippets lower to verified bodies whose
+// deterministic print form is asserted structurally, plus direct coverage of the typed-facts
 // boundary accessors. These are compiler-structure tests, not generated-program substitutes.
 import driver_shim as shim;
 import module::loader as loader;

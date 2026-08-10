@@ -366,7 +366,7 @@ fn typecheck_module(
 // over the typed AST carries the recorded types and resolutions; only the borrow/move/lifetime analyses
 // run. This is the one-module primitive borrowck_all falls back to; it may not run while any pool is
 // frozen or any other module's checker is live.
-// Phase 3 dev gate (SC_FACTS_CHECK=1): snapshot every module's semantic-table watermarks right after
+// Dev gate (SC_FACTS_CHECK=1): snapshot every module's semantic-table watermarks right after
 // type checking, assert that borrow checking changed nothing, and report post-codegen arena growth
 // against the documented allowlist (see ast::facts). Off (empty snapshot) without the env var.
 fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) {
@@ -397,7 +397,7 @@ fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, mode: 
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Phase 4 development mode (SC_CORE_IR=1): after borrow checking, lower every function, method,
+// Development mode (SC_CORE_IR=1): after borrow checking, lower every function, method,
 // closure, and constant body to Core IR and run the structural verifier. Reports bodies/failures,
 // lowering time, and retained bytes; failures name the module, node, and first unsupported reason.
 // SC_CORE_IR=print additionally dumps each body's deterministic text form to stderr.
@@ -2158,7 +2158,7 @@ pub fn run_package(
         }
     }
     // Report-only: post-codegen arena growth must stay inside the documented allowlist (the strict
-    // tables are still compared; see ast::facts for what Phases 6/9/10/11 remove).
+    // tables are still compared; see ast::facts for what each later stage removes).
     let _ = facts_verify(p, &wms, facts::FACTS_AFTER_CODEGEN, "codegen");
     return rc;
 }

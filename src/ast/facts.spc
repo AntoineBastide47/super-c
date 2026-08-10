@@ -1,23 +1,23 @@
-// The Phase 3 typed-facts boundary (plans/migration.md): every semantic decision the type checker
+// The typed-facts boundary: every semantic decision the type checker
 // records for a body -- node types, resolutions, call targets, generic arguments, operator methods,
 // coercion/dereference sequences, dynamic conversions, wide literals, captures, attributes and
 // lifetime declarations -- behind ONE read-only interface. Core IR lowering and every later new
 // consumer reads these accessors, never the Ast side tables directly, so the tables can move off
-// `Ast` (Phase 11) without touching consumers. Nothing here mutates.
+// `Ast` without touching consumers. Nothing here mutates.
 //
 // Permitted post-typecheck mutations of the underlying tables (each removed by a later phase; the
 // driver's SC_FACTS_CHECK mode enforces this list):
 //   1. Borrow checking interns types while replaying call/peel decisions, growing `type_pool`,
 //      `instances`, and `const_lins` ONLY -- it makes no new semantic decision (removed by
-//      Phase 7, which reads frozen Core IR instead of re-walking the typed AST).
+//      the borrow checker reads frozen Core IR instead of re-walking the typed AST).
 //   2. Instance propagation and codegen owner-swap emission append to `type_pool`/`type_index`,
 //      `instances`, `method_insts`, `mono`, `const_lins`, `nodes`/`children`, `resolutions`, and
 //      the per-node `types` array, and codegen truncates `instances` during owner-swap (removed by
-//      Phases 6, 10, 11).
+//      instance collection, the streaming backend, and the immutable-syntax switch land).
 //   3. Codegen temporarily removes and restores `coerce_at` entries around operator lowering
-//      (removed by Phase 10).
+//      (removed with the streaming backend).
 //   4. Deferred const-eval folds intern types while discharging package-level obligations
-//      (removed by Phase 9).
+//      (removed with the IR const evaluator).
 // Everything else -- resolutions of existing nodes, coercions, deref/dyn selections, call_info,
 // op_method, method_refs, wide literals, attributes, lifetime declarations -- is frozen at
 // type-check completion in EVERY mode.

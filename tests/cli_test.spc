@@ -1915,7 +1915,7 @@ fn main() i32 {
 
 // @platform gates @c.source/@c.link: a windows-only extern block (backing header + link flag) must not
 // contribute its wrapper TU or -l flag on a non-windows build -- else every target links every OS's runtime
-// C. Regression guard for the extc gating fix (M2 prerequisite).
+// C. Regression guard for the extc gating fix.
 @test
 fn platform_gates_ext_c() {
     let p = cli::proj_new();
@@ -1990,7 +1990,7 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// Preemption (M6/Phase 9): the scheduler is cooperative, so a task that never blocks would own its worker
+// Preemption: the scheduler is cooperative, so a task that never blocks would own its worker
 // forever. Codegen emits a `__sc_safepoint()` at every loop backedge -- but ONLY in a program that uses the
 // coroutine runtime -- and the scheduler installs a hook that yields when the worker has other work queued.
 // Proven here with one worker and a task that spins on a flag only a SECOND task can set: without
@@ -2062,7 +2062,7 @@ fn main() i32 {
     assert(!q.gen_has("main.c", "__sc_safepoint();"), "a program that never launches gets no safepoints");
 }
 
-// Blocking FFI (M6/Phase 10): a worker thread belongs to the scheduler, so a call that blocks it -- a
+// Blocking FFI: a worker thread belongs to the scheduler, so a call that blocks it -- a
 // legacy library, a slow syscall -- must move off the pool. `blocking::call` runs the closure on a separate
 // pool of plain threads and PARKS the calling coroutine until it returns. Proven by ORDER rather than by the
 // clock, which is what makes it reliable under a loaded machine: with ONE worker, four tasks each make a
@@ -2248,7 +2248,7 @@ fn main() i32 {
     assert(!wild.out_has("stack overflow"), "and is NOT reported as a stack overflow");
 }
 
-// Diagnostics (M6/Phase 11): every task carries a process-unique id, the runtime accounts for tasks created
+// Diagnostics: every task carries a process-unique id, the runtime accounts for tasks created
 // versus finished, and a panic inside a task names it instead of just saying the process died.
 @test
 fn task_diagnostics() {
@@ -2334,7 +2334,7 @@ fn main() i32 {
     assert(traced.out_has("complete"), "SC_TASK_TRACE reports completions");
 }
 
-// The reactor (M6/Phase 10, std/parallel/io + net): a coroutine parks on a SOCKET instead of a thread. A
+// The reactor (std/parallel/io + net): a coroutine parks on a SOCKET instead of a thread. A
 // server task accepts and echoes while a client task connects, writes and reads back -- every one of those
 // operations parking on kqueue/epoll rather than blocking a worker. POSIX only, like the reactor itself.
 @test
@@ -2663,7 +2663,7 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// `@blocking` (M6/Phase 10): the attribute makes a call to an extern function go through a generated
+// `@blocking`: the attribute makes a call to an extern function go through a generated
 // wrapper that hands it to the blocking pool, so the call site is unchanged but the coroutine parks instead
 // of holding its worker. Two one-second blocking sleeps on ONE worker: serialized they would take two
 // seconds, so finishing under 1.8s is the proof they overlapped -- plus the emitted C is checked for the

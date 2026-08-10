@@ -1,4 +1,4 @@
-// Deterministic Core IR debug printer (migration Phase 4): a stable text form used only by the
+// Deterministic Core IR debug printer: a stable text form used only by the
 // SC_CORE_IR development mode and the IR expected-output tests. Never runs in a normal build.
 import ast::ast as *;
 import ir::core as ir;
