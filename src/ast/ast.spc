@@ -179,6 +179,11 @@ pub enum NodeKind {
     // `parallel for i in a..b { .. }` (ForData): sugar for std::parallel::data::range(a..b, body as
     // closure); desugared post-resolve (src/desugar), so later passes never see it.
     NODE_PARALLEL_FOR,
+    // An interpolating matchertext literal `M{}"(a {hole} b)"` (BlockData): children alternate
+    // verbatim segment literals (seg=true, MatchertextLiteral) and hole expressions. Typecheck
+    // rewrites it in place into the same `sugar_fmt_*` value block `format()` desugars to, so
+    // borrowck/consteval/codegen never see this kind.
+    NODE_INTERP,
     NODE_KIND_COUNT,
 }
 

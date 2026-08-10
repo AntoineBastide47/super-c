@@ -55,6 +55,11 @@
           "end": "\"\\1"
         },
         {
+          "name": "string.quoted.other.matchertext.super-c",
+          "begin": "M(?:[\\(\\[\\{]+[\\)\\]\\}]+)?\"[\\(\\[\\{]",
+          "end": "[\\)\\]\\}]\""
+        },
+        {
           "name": "string.quoted.double.super-c",
           "begin": "b?\"",
           "end": "\"",

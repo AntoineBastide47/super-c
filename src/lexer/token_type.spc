@@ -119,6 +119,14 @@ pub enum TokenType {
     // word is `for`; everywhere else both spellings stay ordinary identifiers (std::parallel!).
     InlineFor,
     ParallelFor,
+    // Matchertext literals (`M"(...)"`, delimiters () [] {}): content is verbatim, matchers must
+    // match. A whole literal with no interpolation holes is one MatchertextLiteral token; an
+    // interpolating literal (`M{}"(a {hole} b)"`) lexes as Begin, ordinary hole tokens, Mid...,
+    // End -- the delimiter chain is re-read from the Begin token's text.
+    MatchertextLiteral,
+    MatchertextBegin,
+    MatchertextMid,
+    MatchertextEnd,
 }
 
 extend TokenType {
@@ -237,6 +245,10 @@ extend TokenType {
             BlockComment => "BlockComment",
             DocLineComment => "DocLineComment",
             DocBlockComment => "DocBlockComment",
+            MatchertextLiteral => "MatchertextLiteral",
+            MatchertextBegin => "MatchertextBegin",
+            MatchertextMid => "MatchertextMid",
+            MatchertextEnd => "MatchertextEnd",
         };
     }
 }

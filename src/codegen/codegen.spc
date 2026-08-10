@@ -5393,7 +5393,16 @@ const fn utf8_encode(cp: u32, out: *mut u8) i32 {
     unsafe out[3] = (0x80u32 | cp & 0x3Fu32) as u8;
     return 4;
 }
+// Content span of a raw string (past `r##"`, before `"##`) or a matchertext literal (past
+// `Md"(`, before `)"`; the delimiter chain ends at the quote).
 const fn raw_string_content(src: str, s: tok::Span) tok::Span {
+    if src[s.start as usize] == b'M' {
+        let mut i = s.start + 1;
+        while src[i as usize] != b'"' {
+            i = i + 1;
+        }
+        return tok::Span { start: i + 2, end: s.end - 2 };
+    }
     let mut i = s.start + 1;
     let mut h: u32 = 0;
     while src[i as usize] == b'#' {
@@ -5625,7 +5634,7 @@ extend Codegen {
             let a0 = unsafe aids[ti as usize];
             if self.cur_ast().at_const(a0).kind == NodeKind::NODE_LITERAL {
                 let tt = self.cur_ast().at_const(a0).as_data.literal.token_type;
-                is_raw = tt == TokenType::RawStringLiteral;
+                is_raw = tt == TokenType::RawStringLiteral || tt == TokenType::MatchertextLiteral;
                 ok_lit = tt == TokenType::StringLiteral || is_raw;
             }
         }
@@ -10521,7 +10530,7 @@ extend Codegen {
             return false;
         }
         let tt = vn.as_data.literal.token_type;
-        if tt != TokenType::StringLiteral && tt != TokenType::RawStringLiteral {
+        if tt != TokenType::StringLiteral && tt != TokenType::RawStringLiteral && tt != TokenType::MatchertextLiteral {
             return false;
         }
         let h = self.package.prelude_lookup("str", true);
@@ -13085,6 +13094,11 @@ extend Codegen {
             self.emit_str("NULL");
         } else if tt == TokenType::CharacterLiteral {
             self.emit_reescaped(s, true);
+        } else if tt == TokenType::MatchertextLiteral && n.as_data.literal.seg {
+            // interp segment: verbatim bytes, no `{{`/`}}` collapsing (braces are plain matchers)
+            self.emit_str("(str){ (const uint8_t *)");
+            self.emit_raw_c_string(s);
+            self.buf.format_into(", {} }}", s.end - s.start);
         } else if (tt == TokenType::StringLiteral || tt == TokenType::RawStringLiteral) && n.as_data.literal.seg {
             let ir = tt == TokenType::RawStringLiteral;
             self.emit_str("(str){ (const uint8_t *)");
@@ -13132,7 +13146,7 @@ extend Codegen {
             } else {
                 self.emit_span(s);
             }
-        } else if tt == TokenType::RawStringLiteral {
+        } else if tt == TokenType::RawStringLiteral || tt == TokenType::MatchertextLiteral {
             let rc = raw_string_content(self.source, s);
             let tid = self.cur_ast().type_of(id);
             let mut isptr = false;

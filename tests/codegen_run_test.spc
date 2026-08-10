@@ -57,6 +57,30 @@ fn operator_overload_lowering() {
 }
 
 @test
+fn matchertext() {
+    // plain literals decode verbatim (embedded quotes, no escape processing); interpolation
+    // desugars through the sugar_fmt_* path; format() accepts a matchertext template with `{}`
+    // placeholders; interp segments keep doubled braces (they are matchers, not escapes)
+    run_exit(
+        "matchertext literals and interpolation",
+        "fn main() i32 {\n    let a = M\"(ab\"cd)\";\n    let b = M[]\"(v=[10 + 4] q=[a.len() as i32])\";\n    let mut r = 0;\n    if a.len() == 5 { r += 1; }\n    if a[2] == 34u8 { r += 2; }\n    if b.as_str() == \"v=14 q=5\" { r += 4; }\n    if M\"[mix {a} (b)]\" == \"mix {a} (b)\" { r += 8; }\n    let f = format(M\"(x={} {{lit}})\", 9);\n    if f.as_str() == \"x=9 {lit}\" { r += 16; }\n    const K: str = M\"(k)\";\n    if K == \"k\" { r += 32; }\n    let g = M[]\"(brace {{x}} [1])\";\n    if g.as_str() == \"brace {{x}} 1\" { r += 64; }\n    unsafe exit(r);\n}\n",
+        127,
+    );
+    // the runtime hole guard: a spliced value must itself be matchertext -- compliant values
+    // (matched matchers) pass, a breakout value panics; format() args stay unchecked
+    run_exit(
+        "matchertext hole guard accepts compliant values",
+        "fn main() i32 { let ok = \"(a) [b] {c}\"; let s = M{}\"(v={ok})\"; let f = format(\"{}\", \"loose (\"); let mut r = s.len() as i32; if f.len() == 7 { r += 1; } unsafe exit(r); }\n",
+        14,
+    );
+    let bad = h::compile_and_run(
+        "fn main() i32 { let evil = \"Eve(\"; let s = M{}\"(Hi {evil})\"; return s.len() as i32; }\n",
+    );
+    assert(bad.built, "matchertext guard snippet builds");
+    assert(bad.exit != 0, "a non-matchertext hole value must panic, not splice");
+}
+
+@test
 fn arithmetic() {
     run_exit("precedence", "fn main() i32 { unsafe exit(1 + 2 * 3 - 4 / 2); }\n", 5);
     run_exit("mixed precedence", "fn main() i32 { unsafe exit(17 % 5 + 100 / 7 + 6 & 3); }\n", 2);

@@ -124,3 +124,77 @@ fn numeric_errors() {
     expect_error("0b102"); // invalid digit in binary
     expect_error("0xFG"); // invalid digit in hexadecimal
 }
+
+@test
+fn matchertext_literals() {
+    // one token per literal; quotes, backslashes, and nested matchers stay verbatim
+    expect_tokens(
+        "M\"(a \"b\" c)\" M\"[x \\ y]\" M\"{(a)[b]{c}}\"",
+        [TokenType::MatchertextLiteral, TokenType::MatchertextLiteral, TokenType::MatchertextLiteral, TokenType::Eof],
+    );
+    // `M` stays an ordinary identifier unless a valid delimiter chain + quote follows
+    expect_tokens(
+        "M Max M(x) M(\"s\")",
+        [
+            TokenType::Identifier,
+            TokenType::Identifier,
+            TokenType::Identifier,
+            TokenType::LeftParen,
+            TokenType::Identifier,
+            TokenType::RightParen,
+            TokenType::Identifier,
+            TokenType::LeftParen,
+            TokenType::StringLiteral,
+            TokenType::RightParen,
+            TokenType::Eof,
+        ],
+    );
+}
+
+@test
+fn matchertext_interpolation() {
+    // holes lex as ordinary tokens between Begin/Mid/End segments
+    expect_tokens(
+        "M{}\"(a {x} b)\"",
+        [TokenType::MatchertextBegin, TokenType::Identifier, TokenType::MatchertextEnd, TokenType::Eof],
+    );
+    expect_tokens(
+        "M{}\"({a} {b})\"",
+        [
+            TokenType::MatchertextBegin,
+            TokenType::Identifier,
+            TokenType::MatchertextMid,
+            TokenType::Identifier,
+            TokenType::MatchertextEnd,
+            TokenType::Eof,
+        ],
+    );
+    // multi-pair delimiter chain: single braces are plain matchers, `{{` opens the hole
+    expect_tokens(
+        "M{{}}\"({lit} {{x}})\"",
+        [TokenType::MatchertextBegin, TokenType::Identifier, TokenType::MatchertextEnd, TokenType::Eof],
+    );
+    // matchers inside a hole nest without ending it
+    expect_tokens(
+        "M()\"[f (g(1)) h]\"",
+        [
+            TokenType::MatchertextBegin,
+            TokenType::Identifier,
+            TokenType::LeftParen,
+            TokenType::IntegerLiteral,
+            TokenType::RightParen,
+            TokenType::MatchertextEnd,
+            TokenType::Eof,
+        ],
+    );
+}
+
+@test
+fn matchertext_errors() {
+    expect_error("M\"(a ] b)\""); // wrong-kind close inside the template
+    expect_error("M\"(never ends"); // unterminated template
+    expect_error("M\"(x)y\""); // closing matcher not followed by the quote
+    expect_error("M\"x\""); // content does not open with a matcher
+    expect_error("M{}\"(hole {)} bad)\""); // unbalanced matcher inside a hole
+    expect_error("M{}\"(open {x"); // EOF inside an interpolation hole
+}

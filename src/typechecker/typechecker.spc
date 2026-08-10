@@ -375,8 +375,16 @@ const fn builtin_of(src: str, s: tok::Span) i32 {
 const fn bt_is_int(b: BuiltinType) bool {
     return b as u8 >= BuiltinType::BT_I8 as u8 && b as u8 <= BuiltinType::BT_USIZE as u8;
 }
-// The content span of a raw string literal: past `r##"` and before `"##`.
+// The content span of a raw string literal (past `r##"` and before `"##`) or of a matchertext
+// literal (past `Md"(` and before `)"`; the delimiter chain `d` ends at the quote).
 const fn tc_raw_content(src: str, s: tok::Span) tok::Span {
+    if src[s.start as usize] == b'M' {
+        let mut i = s.start + 1;
+        while src[i as usize] != b'"' {
+            i = i + 1;
+        }
+        return tok::Span { start: i + 2, end: s.end - 2 };
+    }
     let mut i = s.start + 1;
     let mut h: u32 = 0;
     while src[i as usize] == b'#' {
@@ -6275,7 +6283,7 @@ extend TypeChecker {
             }
             return okf;
         }
-        if tt == TokenType::StringLiteral || tt == TokenType::RawStringLiteral {
+        if tt == TokenType::StringLiteral || tt == TokenType::RawStringLiteral || tt == TokenType::MatchertextLiteral {
             if et.kind != TypeKind::TYPE_POINTER || et.qualifier != TypeQualifier::TYPE_QUAL_CONST as u8 {
                 return false;
             }
@@ -8754,6 +8762,7 @@ extend TypeChecker {
         fill_s: u32,
         fill_e: u32,
         align: u8,
+        mt: bool,
     ) bool {
         let at = self.cur_ast().type_of(argid);
         let y = *self.type_at(at);
@@ -8930,6 +8939,17 @@ extend TypeChecker {
             pa[3] = self.tc_lit(fill_s, fill_e, TokenType::RawStringLiteral, true);
             let pc = self.tc_shim_call(pshim, kw, &pa[0], 4);
             self.tc_fmt_assign(letf, kw, pc);
+        } else if mt && (shim == "sugar_fmt_str" || shim == "sugar_fmt_char" || shim == "sugar_fmt_string" || shim == "sugar_fmt_owned" || shim == "sugar_fmt_val" || shim == "sugar_fmt_val_owned") {
+            // matchertext hole whose piece can carry matcher bytes: render it onto a fresh String
+            // and splice through the runtime matchertext check (numeric/bool pieces never can, and
+            // append directly). `f = sugar_mt_splice(f, <shim>(sugar_fmt_new(), v));`
+            let newc = self.tc_fmt_call("sugar_fmt_new", kw, NODE_NONE, NODE_NONE, NODE_NONE);
+            let piece = self.tc_fmt_call(shim, kw, newc, varg, extra);
+            let mut pa = Nodes8 {};
+            pa[0] = self.tc_local_use(kw, letf);
+            pa[1] = piece;
+            let pc = self.tc_shim_call("sugar_mt_splice", kw, &pa[0], 2);
+            self.tc_fmt_assign(letf, kw, pc);
         } else {
             self.tc_fmt_push(letf, kw, shim, varg, extra);
         }
@@ -8967,7 +8987,7 @@ extend TypeChecker {
             let a0 = unsafe self.cur_ast().list(args)[0];
             if self.cur_ast().at_const(a0).kind == NodeKind::NODE_LITERAL {
                 let t0 = self.cur_ast().at_const(a0).as_data.literal.token_type;
-                is_raw = t0 == TokenType::RawStringLiteral;
+                is_raw = t0 == TokenType::RawStringLiteral || t0 == TokenType::MatchertextLiteral;
                 ok_lit = t0 == TokenType::StringLiteral || is_raw;
             }
         }
@@ -8995,6 +9015,9 @@ extend TypeChecker {
             tok::Span { start: rawsp.start + 1, end: rawsp.end - 1 };
         };
         let kw = self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee).span;
+        // Template segments decode verbatim for BOTH raw and matchertext templates, and `{{`/`}}`
+        // collapsing applies to every format template, so they ride as raw segments. (Matchertext
+        // segment literals are reserved for NODE_INTERP, where braces stay plain matchers.)
         let seg_tt = if is_raw {
             TokenType::RawStringLiteral;
         } else {
@@ -9104,6 +9127,7 @@ extend TypeChecker {
                         fill_s,
                         fill_e,
                         align,
+                        false,
                     ) {
                         bad = true;
                         break;
@@ -9128,6 +9152,72 @@ extend TypeChecker {
         if endc > seg {
             let sl = self.tc_lit(seg, endc, seg_tt, true);
             self.tc_fmt_push(letf, kw, "sugar_fmt_str", sl, NODE_NONE);
+        }
+        let tail = self.tc_expr_stmt(self.tc_local_use(kw, letf), kw);
+        self.cur_ast().push(tail);
+        let stmts = self.cur_ast().commit(mark);
+        self.cur_ast().at(id).kind = NodeKind::NODE_BLOCK;
+        self.cur_ast().at(id).as_data = NodeAs { block: BlockData { statements: stmts } };
+        self.expected = TYPE_NONE;
+        return self.check_expr(id);
+    }
+
+    // An interpolating matchertext literal rewrites IN PLACE into the same `sugar_fmt_*` value
+    // block `format()` desugars to: each verbatim segment pushes as a str piece, each hole
+    // expression dispatches through tc_fmt_arg with no format spec. Downstream passes never see
+    // NODE_INTERP.
+    fn tc_check_interp(self: &mut Self, id: NodeId) TypeId {
+        let sh = self.package.prelude_lookup("String", true);
+        let gh = self.package.prelude_lookup("Global", true);
+        let mut sa = Tys8 {};
+        sa[0] = self.named_type_of(gh.mid, gh.node);
+        let sret = self.cur_ast().intern_instance(sh.mid, sh.node, &sa[0], 1);
+        self.cur_ast().set_type(id, sret);
+        let kids = self.cur_ast().at_const(id).as_data.block.statements;
+        // the rewrite's identifiers render from their span text, so use just the leading `M`
+        let sp0 = self.cur_ast().at_const(id).span;
+        let kw = tok::Span { start: sp0.start, end: sp0.start + 1 };
+        let ne0 = self.errors.errors.len();
+        for i in 0..kids.len {
+            let kid = unsafe self.cur_ast().list(kids)[i as usize];
+            let kn = self.cur_ast().at_const(kid);
+            if kn.kind == NodeKind::NODE_LITERAL && kn.as_data.literal.seg {
+                continue;
+            }
+            self.expected = TYPE_NONE;
+            if self.check_expr(kid) == TYPE_NONE {
+                return sret;
+            }
+        }
+        if self.errors.errors.len() != ne0 {
+            return sret;
+        }
+        let mark = self.cur_ast().mark();
+        let newc = self.tc_shim_call("sugar_fmt_new", kw, null, 0);
+        let letf = self.tc_add_node(
+            Node {
+                kind: NodeKind::NODE_LET,
+                span: kw,
+                as_data: NodeAs {
+                    let_stmt: LetData { name: self.tc_ident(kw), ty: NODE_NONE, value: newc, is_mutable: true },
+                },
+            },
+        );
+        self.cur_ast().push(letf);
+        let mut bad = false;
+        for i in 0..kids.len {
+            let kid = unsafe self.cur_ast().list(kids)[i as usize];
+            let kn = self.cur_ast().at_const(kid);
+            if kn.kind == NodeKind::NODE_LITERAL && kn.as_data.literal.seg {
+                self.tc_fmt_push(letf, kw, "sugar_fmt_str", kid, NODE_NONE);
+            } else if !self.tc_fmt_arg(letf, kw, kid, 0, false, 0, 0, 0, 0, 0, 0, 0, true) {
+                bad = true;
+                break;
+            }
+        }
+        if bad {
+            self.cur_ast().commit(mark); // abandon the partial rewrite; the nodes stay, unreferenced
+            return sret;
         }
         let tail = self.tc_expr_stmt(self.tc_local_use(kw, letf), kw);
         self.cur_ast().push(tail);
@@ -10269,7 +10359,7 @@ extend TypeChecker {
             while i < args.len {
                 let aid = unsafe a.list(args)[i as usize];
                 let an = a.at_const(aid);
-                if an.kind == NodeKind::NODE_LITERAL && (an.as_data.literal.token_type == TokenType::StringLiteral || an.as_data.literal.token_type == TokenType::RawStringLiteral) {
+                if an.kind == NodeKind::NODE_LITERAL && (an.as_data.literal.token_type == TokenType::StringLiteral || an.as_data.literal.token_type == TokenType::RawStringLiteral || an.as_data.literal.token_type == TokenType::MatchertextLiteral) {
                     self.cur_ast().set_type(aid, cstr);
                 }
                 i = i + 1;
@@ -12063,6 +12153,9 @@ extend TypeChecker {
             NODE_LITERAL => {
                 result = self.check_literal(id, expected);
             },
+            NODE_INTERP => {
+                result = self.tc_check_interp(id);
+            },
             NODE_IDENTIFIER => {
                 let d = a.resolution_def(id);
                 result = self.decl_type_in(d.module, d.node);
@@ -12769,7 +12862,7 @@ extend TypeChecker {
         if tt == TokenType::True || tt == TokenType::False {
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
-        if tt == TokenType::StringLiteral || tt == TokenType::RawStringLiteral {
+        if tt == TokenType::StringLiteral || tt == TokenType::RawStringLiteral || tt == TokenType::MatchertextLiteral {
             return self.prelude_str_type();
         }
         if tt == TokenType::ByteStringLiteral {
@@ -13430,7 +13523,7 @@ extend TypeChecker {
         }
         self.check_expr(e);
         let n = self.cur_ast().at_const(e);
-        let lit = n.kind == NodeKind::NODE_LITERAL && (n.as_data.literal.token_type == TokenType::StringLiteral || n.as_data.literal.token_type == TokenType::RawStringLiteral);
+        let lit = n.kind == NodeKind::NODE_LITERAL && (n.as_data.literal.token_type == TokenType::StringLiteral || n.as_data.literal.token_type == TokenType::RawStringLiteral || n.as_data.literal.token_type == TokenType::MatchertextLiteral);
         if !lit {
             let sp = n.span;
             self.errors.emit(sp.start, sp.end - sp.start, format("{} must be a string literal", what));

@@ -52,6 +52,17 @@ fn build_char_class() CharClass {
     return c;
 }
 
+// One in-flight matchertext literal whose template is paused at an interpolation hole. The
+// delimiter chain is not copied: `dpos`/`d_len` index its openers in the source. `base` is where
+// this literal's open matchers start in `mt_stack`; `hole_depth` counts matcher tokens open in
+// the current hole so the closing delimiter sequence is only recognized at hole level.
+pub struct MtFrame {
+    pub dpos: u32,
+    pub d_len: u8,
+    pub base: u32,
+    pub hole_depth: u32,
+}
+
 pub struct Lexer<'a> {
     pub bytes: str<'a>,
     pub start: usize,
@@ -61,6 +72,8 @@ pub struct Lexer<'a> {
     pub errors: diag::Errors,
     pub class: CharClass,
     pub keep_trivia: bool, // emit comment tokens (the formatter); off for the parser path
+    pub mt: Vector<MtFrame>, // matchertext literals paused at an interpolation hole, innermost last
+    pub mt_stack: Vector<u8>, // open matchers of ALL paused templates (frames slice it via `base`)
 }
 
 extend Lexer {
@@ -77,6 +90,8 @@ extend Lexer {
             errors: diag::Errors::new(),
             class: build_char_class(),
             keep_trivia: false,
+            mt: Vector::<MtFrame>::new(),
+            mt_stack: Vector::<u8>::new(),
         };
     }
 }
@@ -85,6 +100,8 @@ extend Lexer as Free {
     pub fn free(self: &mut Self) {
         self.tokens.free();
         self.errors.free();
+        self.mt.free();
+        self.mt_stack.free();
     }
 }
 
@@ -747,6 +764,219 @@ fn raw_string(l: &mut Lexer, hashes: usize) {
     lexer_error(l, "unterminated raw string literal");
 }
 
+const fn is_mt_open(b: u8) bool {
+    return b == b'(' || b == b'[' || b == b'{';
+}
+const fn is_mt_close(b: u8) bool {
+    return b == b')' || b == b']' || b == b'}';
+}
+const fn mt_closer(b: u8) u8 {
+    if b == b'(' {
+        return b')';
+    }
+    if b == b'[' {
+        return b']';
+    }
+    return b'}';
+}
+
+// `M` (already consumed) starts a matchertext literal only when a VALID delimiter chain
+// (strictly nested pairs, possibly empty) followed by a `"` is ahead. Anything else leaves `M` an
+// ordinary identifier, so existing code like a call `M("x")` or a struct literal `M{}` is
+// untouched -- those never abut a quote through a well-nested chain.
+fn matchertext_ahead(l: &Lexer) bool {
+    let mut i = l.current;
+    let mut dn: usize = 0;
+    while i < l.bytes.len() && is_mt_open(l.bytes.byte_at(i)) {
+        i = i + 1;
+        dn = dn + 1;
+    }
+    let mut k = dn;
+    while k > 0 {
+        k = k - 1;
+        if i >= l.bytes.len() || l.bytes.byte_at(i) != mt_closer(l.bytes.byte_at(l.current + k)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return i < l.bytes.len() && l.bytes.byte_at(i) == b'"';
+}
+
+// Does src[at..at+dn] spell the hole delimiter sequence? Openers as written for the open side;
+// their closers in reverse for the close side.
+const fn mt_seq_at(l: &Lexer, at: usize, dpos: usize, dn: usize, close: bool) bool {
+    let mut k: usize = 0;
+    while k < dn {
+        if at + k >= l.bytes.len() {
+            return false;
+        }
+        let idx = if close {
+            dn - 1 - k;
+        } else {
+            k;
+        };
+        let d = l.bytes.byte_at(dpos + idx);
+        let want = if close {
+            mt_closer(d);
+        } else {
+            d;
+        };
+        if l.bytes.byte_at(at + k) != want {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+// Scans a matchertext template from `current` until the literal ends (closer of the outermost
+// matcher, then `"`) or an interpolation hole opens (the frame's delimiter sequence). `first` is
+// true from the literal head: it selects MatchertextLiteral/Begin over End/Mid. On a hole the
+// frame stays on `l.mt` and the main loop lexes the hole as ordinary tokens.
+fn mt_scan_template(l: &mut Lexer, first: bool) {
+    let fi = l.mt.len() - 1;
+    let dpos = l.mt[fi].dpos as usize;
+    let dn = l.mt[fi].d_len as usize;
+    let base = l.mt[fi].base as usize;
+    let mut i = l.current;
+    while i < l.bytes.len() {
+        let b = l.bytes.byte_at(i);
+        if b == b'\0' {
+            lexer_error_at(l, i, 1, "NUL byte is not allowed in matchertext literals");
+            i = i + 1;
+        } else if b >= 0x80u8 {
+            validate_utf8_at(l, &mut i);
+        } else if is_mt_open(b) {
+            if dn > 0 && mt_seq_at(l, i, dpos, dn, false) {
+                l.current = i + dn;
+                add_token(
+                    l,
+                    if first {
+                        TokenType::MatchertextBegin;
+                    } else {
+                        TokenType::MatchertextMid;
+                    },
+                );
+                l.mt[fi].hole_depth = 0;
+                return;
+            }
+            l.mt_stack.push(b);
+            i = i + 1;
+        } else if is_mt_close(b) {
+            if l.mt_stack.len() == base + 1 {
+                if b == mt_closer(l.mt_stack[base]) {
+                    l.current = i + 1;
+                    if i + 1 < l.bytes.len() && l.bytes.byte_at(i + 1) == b'"' {
+                        l.current = i + 2;
+                    } else {
+                        lexer_error(l, "matchertext literal must end with '\"' right after the closing matcher");
+                    }
+                    add_token(
+                        l,
+                        if first {
+                            TokenType::MatchertextLiteral;
+                        } else {
+                            TokenType::MatchertextEnd;
+                        },
+                    );
+                    let _ = l.mt_stack.pop();
+                    let _ = l.mt.pop();
+                    return;
+                }
+                lexer_error_at(l, i, 1, "mismatched matchers in matchertext literal");
+                i = i + 1;
+            } else {
+                let o = l.mt_stack[l.mt_stack.len() - 1];
+                let _ = l.mt_stack.pop();
+                if b != mt_closer(o) {
+                    lexer_error_at(l, i, 1, "mismatched matchers in matchertext literal");
+                }
+                i = i + 1;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    l.current = i;
+    lexer_error(l, "unterminated matchertext literal");
+    while l.mt_stack.len() > base {
+        let _ = l.mt_stack.pop();
+    }
+    let _ = l.mt.pop();
+}
+
+// `M` consumed, a matcher-run + `"` ahead: validate the delimiter chain (strictly nested pairs),
+// require an opening matcher right after the `"`, then scan the template. Malformed heads resync
+// as an ordinary string literal so one bad literal yields one diagnostic.
+fn matchertext(l: &mut Lexer) {
+    let dpos = l.current;
+    let mut i = l.current;
+    let mut dn: usize = 0;
+    while is_mt_open(l.bytes.byte_at(i)) {
+        i = i + 1;
+        dn = dn + 1;
+    }
+    let mut k = dn;
+    let mut ok = dn <= 255;
+    while ok && k > 0 {
+        k = k - 1;
+        if l.bytes.byte_at(i) != mt_closer(l.bytes.byte_at(dpos + k)) {
+            ok = false;
+        }
+        i = i + 1;
+    }
+    if !ok || l.bytes.byte_at(i) != b'"' {
+        while i < l.bytes.len() && l.bytes.byte_at(i) != b'"' {
+            i = i + 1;
+        }
+        lexer_error_at(
+            l,
+            l.start,
+            i - l.start,
+            "matchertext interpolation delimiter must be strictly nested matcher pairs, like `M{}\"(...)\"` or `M([{}])\"(...)\"`",
+        );
+        l.current = i + 1;
+        string_lit(l, TokenType::StringLiteral);
+        return;
+    }
+    i = i + 1;
+    let o = l.bytes.byte_at(i);
+    if !is_mt_open(o) {
+        lexer_error_at(l, i, 1, "matchertext content must be delimited by '(', '[', or '{' inside the quotes");
+        l.current = i;
+        string_lit(l, TokenType::StringLiteral);
+        return;
+    }
+    l.mt.push(MtFrame { dpos: dpos as u32, d_len: dn as u8, base: l.mt_stack.len() as u32, hole_depth: 0 });
+    l.mt_stack.push(o);
+    l.current = i + 1;
+    mt_scan_template(l, true);
+}
+
+// Matcher-token hooks for interpolation holes: while the innermost frame is paused in a hole,
+// open matchers deepen it and a close matcher at hole level must spell the closing delimiter
+// sequence, which resumes the paused template.
+fn mt_hole_open(l: &mut Lexer) {
+    let fi = l.mt.len() - 1;
+    l.mt[fi].hole_depth = l.mt[fi].hole_depth + 1;
+}
+
+// True when the closer resumed the template (the segment token has been added).
+fn mt_hole_close(l: &mut Lexer) bool {
+    let fi = l.mt.len() - 1;
+    if l.mt[fi].hole_depth > 0 {
+        l.mt[fi].hole_depth = l.mt[fi].hole_depth - 1;
+        return false;
+    }
+    if mt_seq_at(l, l.start, l.mt[fi].dpos as usize, l.mt[fi].d_len as usize, true) {
+        l.current = l.start + l.mt[fi].d_len as usize;
+        mt_scan_template(l, false);
+        return true;
+    }
+    lexer_error_at(l, l.start, 1, "unbalanced matcher in matchertext interpolation hole");
+    return false;
+}
+
 // Scans a digit run allowing '_' only BETWEEN digits; the first bad separator position latches into
 // *error_at (USIZE_MAX = none yet) while scanning continues, so the run is consumed whole.
 fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(u8) bool) {
@@ -1007,26 +1237,44 @@ fn scan_token(l: &mut Lexer) {
             return;
         },
         '{' => {
+            if l.mt.len() != 0 {
+                mt_hole_open(l);
+            }
             add_token(l, TokenType::LeftBrace);
             return;
         },
         '}' => {
+            if l.mt.len() != 0 && mt_hole_close(l) {
+                return;
+            }
             add_token(l, TokenType::RightBrace);
             return;
         },
         '(' => {
+            if l.mt.len() != 0 {
+                mt_hole_open(l);
+            }
             add_token(l, TokenType::LeftParen);
             return;
         },
         ')' => {
+            if l.mt.len() != 0 && mt_hole_close(l) {
+                return;
+            }
             add_token(l, TokenType::RightParen);
             return;
         },
         '[' => {
+            if l.mt.len() != 0 {
+                mt_hole_open(l);
+            }
             add_token(l, TokenType::LeftBracket);
             return;
         },
         ']' => {
+            if l.mt.len() != 0 && mt_hole_close(l) {
+                return;
+            }
             add_token(l, TokenType::RightBracket);
             return;
         },
@@ -1189,6 +1437,14 @@ fn scan_token(l: &mut Lexer) {
             identifier(l);
             return;
         },
+        'M' => {
+            if matchertext_ahead(l) {
+                matchertext(l);
+                return;
+            }
+            identifier(l);
+            return;
+        },
         'b' => {
             if peek_byte(l) == b'\'' {
                 l.current = l.current + 1;
@@ -1268,6 +1524,15 @@ extend Lexer {
         while self.current < self.bytes.len() {
             self.start = self.current;
             scan_token(self);
+        }
+        if self.mt.len() != 0 {
+            self.errors.emit(
+                self.bytes.len() as u32,
+                0,
+                String::from_str("unterminated matchertext literal (unclosed interpolation hole)"),
+            );
+            self.mt.clear();
+            self.mt_stack.clear();
         }
         self.tokens.push(Token::new(TokenType::Eof, self.bytes.len() as u32, 0));
         self.errors.finalize(self.bytes, self.file);

@@ -1143,6 +1143,39 @@ extend<A: Allocator> String<A> {
 pub fn sugar_fmt_new() String {
     return String::<Global>::new();
 }
+// Matchertext interpolation guard: a hole's rendered piece must itself be matchertext -- the
+// ASCII matchers (), [], {} must properly match -- so no runtime value can break out of the
+// literal's structure (each compliant piece keeps the whole result compliant, and matching can
+// never complete ACROSS holes). Byte-level scan: matchers are ASCII, every other byte passes
+// through uninspected. Panics on violation; in a const context the panic fails the fold instead.
+pub fn sugar_mt_splice(mut s: String, piece: String) String {
+    let v = piece.as_str();
+    let mut st = Vector::<u8>::new();
+    let mut ok = true;
+    for i in 0..v.len() {
+        let b = v[i];
+        if b == b'(' || b == b'[' || b == b'{' {
+            st.push(b);
+        } else if b == b')' || b == b']' || b == b'}' {
+            let need = if b == b')' {
+                b'(';
+            } else if b == b']' {
+                b'[';
+            } else {
+                b'{';
+            };
+            if st.len() == 0 || st.pop().unwrap() != need {
+                ok = false;
+                break;
+            }
+        }
+    }
+    if !ok || st.len() != 0 {
+        panic("matchertext interpolation: value is not matchertext (unmatched ASCII matcher)");
+    }
+    s.push_string(&piece);
+    return s;
+}
 pub fn sugar_fmt_str(mut s: String, v: str) String {
     s.push_str(v);
     return s;

@@ -1265,6 +1265,14 @@ extend Resolver {
                 let op = self.ast.at_const(id).as_data.unary.operand;
                 self.resolve_expr(op);
             },
+            NODE_INTERP => {
+                // Interpolating matchertext literal: hole expressions resolve like any expression;
+                // the interleaved segment literals resolve to nothing.
+                let kids = self.ast.at_const(id).as_data.block.statements;
+                for i in 0..kids.len {
+                    self.resolve_expr(self.child(kids, i));
+                }
+            },
             NODE_BINARY | NODE_ASSIGNMENT => {
                 let bd = self.ast.at_const(id).as_data.binary;
                 self.resolve_expr(bd.left);

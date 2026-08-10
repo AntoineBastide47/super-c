@@ -276,6 +276,74 @@ extend Parser {
         );
     }
 
+    // A non-empty verbatim segment of an interpolating matchertext literal, as a seg literal (the
+    // raw span IS the content; nothing to strip at decode time).
+    fn push_mt_seg(self: &mut Self, from: u32, to: u32) {
+        if to <= from {
+            return;
+        }
+        let n = self.ast.add(
+            Node {
+                kind: NodeKind::NODE_LITERAL,
+                span: Span::new(from, to),
+                as_data: NodeAs {
+                    literal: LiteralData {
+                        raw: Span::new(from, to),
+                        token_type: TokenType::MatchertextLiteral,
+                        seg: true,
+                    },
+                },
+            },
+        );
+        self.ast.push(n);
+    }
+
+    // `M{}"(a {hole} b)"`: a MatchertextBegin token, hole expressions lexed as ordinary tokens,
+    // MatchertextMid segments between holes, a MatchertextEnd closing. Children alternate verbatim
+    // segment literals and hole expressions (empty segments are dropped).
+    fn parse_matchertext_interp(self: &mut Self) NodeId {
+        let begin = self.advance();
+        let start = begin.start();
+        // the delimiter chain sits between the `M` and the `"`, openers then closers
+        let mut q = start + 1;
+        while self.source[q as usize] != b'"' {
+            q = q + 1;
+        }
+        let dn = (q - start - 1) / 2;
+        let mark = self.ast.mark();
+        self.push_mt_seg(q + 2, begin.end() - dn);
+        loop {
+            if self.check(TokenType::MatchertextMid) || self.check(TokenType::MatchertextEnd) {
+                let t = self.raw_peek();
+                self.errors.emit(t.start(), t.len(), format("matchertext interpolation hole is empty"));
+            } else {
+                let e = self.parse_expression();
+                self.ast.push(e);
+            }
+            if self.check(TokenType::MatchertextMid) {
+                let t = self.advance();
+                self.push_mt_seg(t.start() + dn, t.end() - dn);
+                continue;
+            }
+            if self.check(TokenType::MatchertextEnd) {
+                let t = self.advance();
+                self.push_mt_seg(t.start() + dn, t.end() - 2);
+                break;
+            }
+            let t = self.raw_peek();
+            self.errors.emit(t.start(), t.len(), format("expected the rest of the matchertext literal"));
+            break;
+        }
+        let kids = self.ast.commit(mark);
+        return self.ast.add(
+            Node {
+                kind: NodeKind::NODE_INTERP,
+                span: Span::new(start, self.previous_end()),
+                as_data: NodeAs { block: BlockData { statements: kids } },
+            },
+        );
+    }
+
     pub fn parse_comma_types(self: &mut Self, close: TokenType) NodeList {
         let mark = self.ast.mark();
         while !self.check(close) && !self.at_end() {
@@ -2209,6 +2277,9 @@ extend Parser {
         if Parser::is_literal_token(kind) {
             return self.literal();
         }
+        if kind == TokenType::MatchertextBegin {
+            return self.parse_matchertext_interp();
+        }
         if kind == TokenType::SelfLower {
             let token = self.advance();
             return self.ast.add(
@@ -2854,7 +2925,7 @@ extend Parser {
         if context == RangeContext::RANGE_PATTERN {
             return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::Minus;
         }
-        return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::SelfLower || t == TokenType::New || t == TokenType::Switch || t == TokenType::Sizeof || t == TokenType::Alignof || Parser::unary_operator(
+        return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::SelfLower || t == TokenType::New || t == TokenType::Switch || t == TokenType::Sizeof || t == TokenType::Alignof || t == TokenType::MatchertextBegin || Parser::unary_operator(
             t,
         );
     }
@@ -4035,7 +4106,9 @@ extend Parser {
     // A string literal in operand position. Parsed directly so a following '(' stays the operand's,
     // not a call's.
     fn parse_asm_string(self: &mut Self, what: str) NodeId {
-        if self.check(TokenType::StringLiteral) || self.check(TokenType::RawStringLiteral) {
+        if self.check(TokenType::StringLiteral) || self.check(TokenType::RawStringLiteral) || self.check(
+            TokenType::MatchertextLiteral,
+        ) {
             return self.literal();
         }
         let t = self.raw_peek();
@@ -4510,7 +4583,7 @@ extend Parser {
     }
 
     pub const fn is_literal_token(kind: TokenType) bool {
-        return kind == TokenType::IntegerLiteral || kind == TokenType::FloatLiteral || kind == TokenType::CharacterLiteral || kind == TokenType::ByteCharacterLiteral || kind == TokenType::StringLiteral || kind == TokenType::RawStringLiteral || kind == TokenType::ByteStringLiteral || kind == TokenType::True || kind == TokenType::False || kind == TokenType::Null;
+        return kind == TokenType::IntegerLiteral || kind == TokenType::FloatLiteral || kind == TokenType::CharacterLiteral || kind == TokenType::ByteCharacterLiteral || kind == TokenType::StringLiteral || kind == TokenType::RawStringLiteral || kind == TokenType::MatchertextLiteral || kind == TokenType::ByteStringLiteral || kind == TokenType::True || kind == TokenType::False || kind == TokenType::Null;
     }
 
     pub const fn unary_operator(kind: TokenType) bool {

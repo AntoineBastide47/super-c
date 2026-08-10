@@ -2047,11 +2047,22 @@ extend ConstEval {
         let a = self.ast_ptr(m);
         let src = self.ce_src(m);
         let sp = a.at_const(id).as_data.literal.raw;
-        let raw = a.at_const(id).as_data.literal.token_type == TokenType::RawStringLiteral;
+        let tt = a.at_const(id).as_data.literal.token_type;
+        let raw = tt == TokenType::RawStringLiteral || tt == TokenType::MatchertextLiteral;
         let seg = a.at_const(id).as_data.literal.seg;
         let mut i = sp.start;
         let mut endpos = sp.end;
-        if !seg {
+        if !seg && tt == TokenType::MatchertextLiteral {
+            // past `Md"(` and before `)"`; the delimiter chain ends at the quote
+            while i < sp.end && src[i as usize] != b'"' {
+                i = i + 1;
+            }
+            if i + 2 >= sp.end {
+                return cv_nil();
+            }
+            i = i + 2;
+            endpos = sp.end - 2;
+        } else if !seg {
             let mut hashes: u32 = 0;
             while i < sp.end && src[i as usize] != b'"' {
                 if src[i as usize] == b'#' {
@@ -2076,8 +2087,8 @@ extend ConstEval {
             }
             let mut c = src[i as usize];
             i = i + 1;
-            if seg && (c == b'{' || c == b'}') && i < endpos && src[i as usize] == c {
-                i = i + 1; // doubled template brace: one byte survives
+            if seg && tt != TokenType::MatchertextLiteral && (c == b'{' || c == b'}') && i < endpos && src[i as usize] == c {
+                i = i + 1; // doubled template brace: one byte survives (interp segments keep both)
             }
             if !raw && c == b'\\' && i < endpos {
                 let e = src[i as usize];
@@ -4165,7 +4176,7 @@ extend ConstEval {
             if ntt == TokenType::Null {
                 return CeVal { kind: CV_PTR, tm: m, ty: rt, as_data: CeValAs { p: CvPtr { obj: 0, off: 0 } } };
             }
-            if ntt == TokenType::StringLiteral || ntt == TokenType::RawStringLiteral {
+            if ntt == TokenType::StringLiteral || ntt == TokenType::RawStringLiteral || ntt == TokenType::MatchertextLiteral {
                 return self.eval_str_literal(f, m, id);
             }
             return cv_nil();
