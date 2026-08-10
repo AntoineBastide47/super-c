@@ -10,6 +10,7 @@ import lexer::token as tok;
 import lexer::lexer as lex;
 import lexer::token_type as ltt;
 import ast::ast as *;
+import ast::facts as facts;
 import ast::parser as par;
 import fmt::builder as fbld;
 import module::loader as loader;
@@ -18,6 +19,10 @@ import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
 import consteval::consteval as ce;
 import codegen::codegen as cg;
+import ir::core as irc;
+import ir::lower as irl;
+import ir::print as irp;
+import ir::verify as irv;
 import utils::errors as diag;
 import driver::util as *;
 
@@ -361,6 +366,176 @@ fn typecheck_module(
 // over the typed AST carries the recorded types and resolutions; only the borrow/move/lifetime analyses
 // run. This is the one-module primitive borrowck_all falls back to; it may not run while any pool is
 // frozen or any other module's checker is live.
+// Phase 3 dev gate (SC_FACTS_CHECK=1): snapshot every module's semantic-table watermarks right after
+// type checking, assert that borrow checking changed nothing, and report post-codegen arena growth
+// against the documented allowlist (see ast::facts). Off (empty snapshot) without the env var.
+fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) {
+    if stdlib::getenv("SC_FACTS_CHECK") == null {
+        return;
+    }
+    for i in 0..p.modules.len() {
+        out.push(facts::watermark(&p.modules[i].ast));
+    }
+}
+
+// Compare the snapshot against the live tables; returns the number of changed tables (0 when the
+// snapshot is empty, i.e. the gate is off). `allow_arenas` selects the codegen allowlist.
+fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, mode: u8, stage: str) u32 {
+    if wms.len() == 0 {
+        return 0;
+    }
+    let mut d: u32 = 0;
+    for i in 0..p.modules.len() {
+        if i < wms.len() {
+            d += facts::watermark_check(&p.modules[i].ast, wms.at(i), i as u32, mode);
+        }
+    }
+    if d != 0 {
+        eprint("facts-check: stage '{}' changed semantic type-check tables\n", stage);
+    }
+    return d;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Phase 4 development mode (SC_CORE_IR=1): after borrow checking, lower every function, method,
+// closure, and constant body to Core IR and run the structural verifier. Reports bodies/failures,
+// lowering time, and retained bytes; failures name the module, node, and first unsupported reason.
+// SC_CORE_IR=print additionally dumps each body's deterministic text form to stderr.
+// ---------------------------------------------------------------------------------------------------------
+
+struct CoreIrStats {
+    pub bodies: u64,
+    pub failed: u64,
+    pub blocks: u64,
+    pub stmts: u64,
+    pub bytes: u64,
+    pub print_all: bool,
+}
+
+fn core_ir_body(p: &loader::Package, m: usize, node: NodeId, is_const: bool, st: &mut CoreIrStats) {
+    let mut lw = irl::Lowerer::new(p, m as ModuleId, node);
+    let ok = if is_const {
+        lw.lower_const(node);
+    } else {
+        lw.lower_fn(node);
+    };
+    st.bodies += 1;
+    if !ok {
+        st.failed += 1;
+        let mut snip = "";
+        if lw.err_node != NODE_NONE {
+            let a2 = unsafe &*p.module_ast_const(m as ModuleId);
+            let esp = a2.at_const(lw.err_node).span;
+            let src = p.modules.at(m).source.as_str();
+            let mut e2 = esp.end as usize;
+            if e2 > esp.start as usize + 48 {
+                e2 = esp.start as usize + 48;
+            }
+            if e2 > src.len() {
+                e2 = src.len();
+            }
+            snip = src.slice(esp.start as usize, e2);
+        }
+        let mut ek: u32 = 0;
+        if lw.err_node != NODE_NONE {
+            let a3 = unsafe &*p.module_ast_const(m as ModuleId);
+            ek = a3.at_const(lw.err_node).kind as u32;
+        }
+        eprint("core-ir: module {} node {}: {} k{} `{}`\n", m, node, lw.err, ek, snip);
+        return;
+    }
+    let tp = unsafe (&*p.module_ast_const(m as ModuleId)).type_pool.len();
+    let v = irv::verify(&lw.body, tp);
+    if v.len() != 0 {
+        st.failed += 1;
+        eprint("core-ir: module {} node {}: verify: {}\n", m, node, v);
+        let dump = irp::print_body(&lw.body);
+        dump.eprintln();
+        return;
+    }
+    st.blocks += lw.body.blocks.len() as u64;
+    st.stmts += lw.body.statements.len() as u64;
+    st.bytes += lw.body.retained_bytes() as u64;
+    if st.print_all {
+        let dump = irp::print_body(&lw.body);
+        dump.eprintln();
+    }
+    // Closures lower as their own bodies against the parent's capture environment.
+    for c in 0..lw.closures.len() {
+        let cn = lw.closures[c];
+        let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
+        let cok = cl.lower_closure_body(cn);
+        st.bodies += 1;
+        if !cok {
+            st.failed += 1;
+            eprint("core-ir: module {} closure {}: {}\n", m, cn, cl.err);
+        } else {
+            let cv = irv::verify(&cl.body, tp);
+            if cv.len() != 0 {
+                st.failed += 1;
+                eprint("core-ir: module {} closure {}: verify: {}\n", m, cn, cv);
+            } else {
+                st.blocks += cl.body.blocks.len() as u64;
+                st.stmts += cl.body.statements.len() as u64;
+                st.bytes += cl.body.retained_bytes() as u64;
+            }
+        }
+    }
+}
+
+fn core_ir_pass(p: &mut loader::Package) u32 {
+    let mode = stdlib::getenv("SC_CORE_IR");
+    if mode == null {
+        return 0;
+    }
+    let t0 = unsafe shim::sc_ticks_ms();
+    let mut st = CoreIrStats { bodies: 0, failed: 0, blocks: 0, stmts: 0, bytes: 0, print_all: false };
+    let ms = diag::cstr(mode);
+    st.print_all = ms == "print";
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let items = a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let nid = unsafe a.list(items)[i as usize];
+            let n = a.at_const(nid);
+            if n.kind == NodeKind::NODE_FUNCTION {
+                if !n.as_data.function.is_extern && n.as_data.function.body != NODE_NONE {
+                    core_ir_body(p, m, nid, false, &mut st);
+                }
+            } else if n.kind == NodeKind::NODE_CONST {
+                if !n.as_data.const_def.is_extern && n.as_data.const_def.value != NODE_NONE {
+                    core_ir_body(p, m, nid, true, &mut st);
+                }
+            } else if n.kind == NodeKind::NODE_EXTEND {
+                let inner = n.as_data.extend_def.items;
+                for j in 0..inner.len {
+                    let iid = unsafe a.list(inner)[j as usize];
+                    let it = a.at_const(iid);
+                    if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.body != NODE_NONE {
+                        core_ir_body(p, m, iid, false, &mut st);
+                    } else if it.kind == NodeKind::NODE_CONST && it.as_data.const_def.value != NODE_NONE {
+                        core_ir_body(p, m, iid, true, &mut st);
+                    }
+                }
+            }
+        }
+    }
+    let dt = unsafe shim::sc_ticks_ms() - t0;
+    eprint(
+        "core-ir: {} bodies, {} failed, {} blocks, {} stmts, {} KiB retained, {} ms\n",
+        st.bodies,
+        st.failed,
+        st.blocks,
+        st.stmts,
+        st.bytes / 1024,
+        dt,
+    );
+    return st.failed as u32;
+}
+
 fn borrowck_module(p: &mut loader::Package, i: usize) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
@@ -1508,8 +1683,16 @@ pub fn lint_package(
     if !p.ok {
         return 1;
     }
+    let mut wms = Vector::<facts::FactsWatermark>::new();
+    facts_snapshot(p, &mut wms);
     p.ok = borrowck_all(p) && p.ok;
     if !p.ok {
+        return 1;
+    }
+    if facts_verify(p, &wms, facts::FACTS_AFTER_BORROWCK, "borrowck") != 0 {
+        return 1;
+    }
+    if core_ir_pass(p) != 0 {
         return 1;
     }
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
@@ -1779,11 +1962,19 @@ pub fn run_package(
     if !p.ok {
         return 1;
     }
+    let mut wms = Vector::<facts::FactsWatermark>::new();
+    facts_snapshot(p, &mut wms);
     p.ok = borrowck_all(p) && p.ok;
     // Release the pool as soon as the one parallel stage is done: the test runner FORKS after this,
     // and a forked child inherits the pool's state but none of its worker threads. (Also what keeps
     // the leak gate green.) The bench calls borrowck_all directly, so its iterations keep a warm pool.
     if !p.ok {
+        return 1;
+    }
+    if facts_verify(p, &wms, facts::FACTS_AFTER_BORROWCK, "borrowck") != 0 {
+        return 1;
+    }
+    if core_ir_pass(p) != 0 {
         return 1;
     }
     if lint {
@@ -1966,5 +2157,8 @@ pub fn run_package(
             };
         }
     }
+    // Report-only: post-codegen arena growth must stay inside the documented allowlist (the strict
+    // tables are still compared; see ast::facts for what Phases 6/9/10/11 remove).
+    let _ = facts_verify(p, &wms, facts::FACTS_AFTER_CODEGEN, "codegen");
     return rc;
 }

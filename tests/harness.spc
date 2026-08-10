@@ -79,7 +79,7 @@ pub fn compile(src: str, stop: i32) Compiled {
         r.errors = lx.errors.errors.len();
         r.stage = STAGE_PARSE;
         if r.errors > 0 {
-            copy_msg(&mut r.first[0], lx.errors.errors.at(0));
+            copy_msg(&mut r.first[0], lx.errors.rendered_errors.at(0));
         }
         return r;
     }
@@ -90,7 +90,7 @@ pub fn compile(src: str, stop: i32) Compiled {
         r.errors = ps.errors.errors.len();
         r.stage = STAGE_PARSE;
         if r.errors > 0 {
-            copy_msg(&mut r.first[0], ps.errors.errors.at(0));
+            copy_msg(&mut r.first[0], ps.errors.rendered_errors.at(0));
         }
         return r;
     }
@@ -545,7 +545,7 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
         let c = rr.errors.errors.len();
         if c > 0 {
             unsafe out.errors = c;
-            unsafe copy_msg(&mut out.first[0], rr.errors.errors.at(0));
+            unsafe copy_msg(&mut out.first[0], rr.errors.rendered_errors.at(0));
         }
     }
     let back = rr.take_ast();
@@ -570,7 +570,7 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
         let c = t.errors.errors.len();
         if c > 0 {
             unsafe out.errors = c;
-            unsafe copy_msg(&mut out.first[0], t.errors.errors.at(0));
+            unsafe copy_msg(&mut out.first[0], t.errors.rendered_errors.at(0));
         }
     }
     let back = t.take_ast();

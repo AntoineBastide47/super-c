@@ -26,7 +26,8 @@ pub fn diagnostics(src: str) Vector<TomlDiag> {
     let (m, errs) = bsys::parse_check(src, "");
     m.free(); // the manifest itself is not wanted here, only its verdict
     for i in 0..errs.errors.len() {
-        out.push(TomlDiag { start: errs.starts[i], len: errs.lens[i], msg: errs.errors.at(i).clone() });
+        let d = errs.errors.at(i);
+        out.push(TomlDiag { start: d.start, len: d.len, msg: d.msg.clone() });
     }
     let e = errs;
     e.free();

@@ -362,7 +362,8 @@ pub fn parse_into(src: str, errs: &mut diag::Errors) Option<Vector<TomlItem>> {
     }
     let bad = p.errors.has_errors();
     for i in 0..p.errors.errors.len() {
-        errs.emit(p.errors.starts[i], p.errors.lens[i], p.errors.errors.at(i).clone());
+        let d = p.errors.errors.at(i);
+        errs.emit(d.start, d.len, d.msg.clone());
     }
     if bad {
         return Option::<Vector<TomlItem>>::None;

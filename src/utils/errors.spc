@@ -1,14 +1,23 @@
-// Diagnostics for every pass: fatal `errors` and non-fatal lint `warns` accumulate as (message, span)
-// rows against one source buffer; `finalize` renders each row IN PLACE into a caret-annotated block
-// (then dedups identical blocks, compacting spans alongside) and `log` prints warnings then errors.
-// LintFix rows record machine-applicable repairs for `lint --fix` (kind 3 carries generated text via
-// `fix_texts`); `fixable_errs` counts errors carrying one, so --fix may apply despite errors only
-// when EVERY error is fixable.
+// Diagnostics for every pass: structured records accumulate as (severity, span, message, note chain)
+// rows against one source buffer; `finalize` dedups the records, then renders each one into a
+// caret-annotated terminal block held in a parallel `rendered_*` store -- it never rewrites a stored
+// record -- and `log` prints warnings then errors. The LSP and the build system read the records
+// directly; nothing parses rendered text back into data.
+// LintFix rows are the structured suggestion store: machine-applicable repairs for `lint --fix`
+// (kind 3 carries generated text via `fix_texts`); `fixable_errs` counts errors carrying one, so
+// --fix may apply despite errors only when EVERY error is fixable.
 import stdlib;
 import string;
 
 /// Per-category cap on recorded diagnostics; emit/warn silently drop rows past it.
 pub const ERRORS_MAX: usize = 256;
+
+/// Severity values match the LSP's DiagnosticSeverity, so consumers forward them unchanged.
+pub const SEV_ERROR: u8 = 1;
+pub const SEV_WARNING: u8 = 2;
+
+/// Empty note-chain link (note indexes are dense u32s into Errors.note_pool).
+pub const NOTE_NONE: u32 = 0xFFFFFFFF;
 
 /// A machine-applicable fix for a lint diagnostic: kind 0 deletes [start, end); kind 1 inserts '_'
 /// before `start` (unused-binding rename); kind 2 inserts 'const ' before `start` (const-fn
@@ -25,19 +34,38 @@ pub struct LintFix {
     pub module: u32, // owning ModuleId, stamped when fixes drain into the driver's shared vector (0 inside Errors)
 }
 
-/// Diagnostic accumulator for one source buffer. Messages are raw until `finalize` rewrites them into
-/// rendered blocks; `starts`/`lens` are parallel span vectors that survive finalize (the LSP reads them).
+/// One structured diagnostic. The span is bytes into the owning source buffer; `code` is a reserved
+/// stable diagnostic code (0 = none); `sequence` records emission order across both severities, so a
+/// later consumer can merge diagnostics from several producers in a stable order.
+pub struct Diagnostic {
+    pub severity: u8, // SEV_ERROR / SEV_WARNING
+    pub code: u16, // reserved diagnostic code; 0 = none
+    pub start: u32,
+    pub len: u32,
+    pub msg: String,
+    pub note_head: u32, // first attached note in Errors.note_pool; NOTE_NONE = none
+    pub note_tail: u32,
+    pub sequence: u32,
+}
+
+/// One note line, chained per diagnostic through the shared pool (no vector per diagnostic).
+pub struct Note {
+    pub text: String,
+    pub next: u32, // next note of the same diagnostic; NOTE_NONE at the end
+}
+
+/// Diagnostic accumulator for one source buffer. Records stay raw for the whole pipeline; `finalize`
+/// fills the parallel `rendered_*` vectors the terminal `log` prints.
 pub struct Errors {
-    pub errors: Vector<String>,
-    pub notes: Vector<String>,
-    pub starts: Vector<u32>,
-    pub lens: Vector<u32>,
-    pub warns: Vector<String>, // non-fatal lint diagnostics (rendered like errors, never fail the build)
-    pub warn_starts: Vector<u32>,
-    pub warn_lens: Vector<u32>,
+    pub errors: Vector<Diagnostic>,
+    pub warns: Vector<Diagnostic>, // non-fatal lint diagnostics (rendered like errors, never fail the build)
+    pub note_pool: Vector<Note>, // shared note storage; per-diagnostic chains via note_head/next
+    pub rendered_errors: Vector<String>, // finalize's terminal blocks, parallel to the (deduped) records
+    pub rendered_warns: Vector<String>,
     pub fixes: Vector<LintFix>,
     pub fix_texts: Vector<String>, // generated insertion payloads for kind-3 fixes
     pub fixable_errs: u32, // errors carrying a machine fix -- `lint --fix` may proceed when EVERY error is fixable
+    pub seq: u32, // next emission sequence
 }
 
 /// Aborts the process with an out-of-memory message; never returns.
@@ -61,16 +89,15 @@ pub const fn span_str(src: str, start: u32, end: u32) str {
 extend Errors {
     pub fn new() Errors {
         return Errors {
-            errors: Vector::<String>::new(),
-            notes: Vector::<String>::new(),
-            starts: Vector::<u32>::new(),
-            lens: Vector::<u32>::new(),
-            warns: Vector::<String>::new(),
-            warn_starts: Vector::<u32>::new(),
-            warn_lens: Vector::<u32>::new(),
+            errors: Vector::<Diagnostic>::new(),
+            warns: Vector::<Diagnostic>::new(),
+            note_pool: Vector::<Note>::new(),
+            rendered_errors: Vector::<String>::new(),
+            rendered_warns: Vector::<String>::new(),
             fixes: Vector::<LintFix>::new(),
             fix_texts: Vector::<String>::new(),
             fixable_errs: 0,
+            seq: 0,
         };
     }
 
@@ -88,9 +115,20 @@ extend Errors {
         if self.warns.len() >= ERRORS_MAX {
             return;
         }
-        self.warns.push(msg);
-        self.warn_starts.push(at);
-        self.warn_lens.push(len);
+        let s = self.seq;
+        self.seq = s + 1;
+        self.warns.push(
+            Diagnostic {
+                severity: SEV_WARNING,
+                code: 0,
+                start: at,
+                len: len,
+                msg: msg,
+                note_head: NOTE_NONE,
+                note_tail: NOTE_NONE,
+                sequence: s,
+            },
+        );
     }
 
     /// Attach a machine-applicable fix to the warning being emitted (fix() always follows its warn();
@@ -126,18 +164,28 @@ extend Errors {
         if self.errors.len() >= ERRORS_MAX {
             return;
         }
-        self.errors.push(msg);
-        self.notes.push(String::new());
-        self.starts.push(at);
-        self.lens.push(len);
+        let s = self.seq;
+        self.seq = s + 1;
+        self.errors.push(
+            Diagnostic {
+                severity: SEV_ERROR,
+                code: 0,
+                start: at,
+                len: len,
+                msg: msg,
+                note_head: NOTE_NONE,
+                note_tail: NOTE_NONE,
+                sequence: s,
+            },
+        );
     }
 
     /// Record a diagnostic that was produced OUT of source order -- a region/lifetime error the solver
     /// only discovers after the whole function body has been walked. `from` is the index the enclosing
-    /// function's diagnostics start at; the message is inserted at the first position in [from, len)
+    /// function's diagnostics start at; the record is inserted at the first position in [from, len)
     /// whose span starts after `at`, so it lands where a reader expects it instead of after every other
-    /// diagnostic in the function. Diagnostics already recorded keep their relative order. Returns the
-    /// index it landed at, for `note_at`.
+    /// diagnostic in the function. Diagnostics already recorded keep their relative order (and their
+    /// emission `sequence`). Returns the index it landed at, for `note_at`.
     @c.cold
     pub fn emit_ordered(self: &mut Self, from: usize, at: u32, len: u32, msg: String) usize {
         if self.errors.len() >= ERRORS_MAX {
@@ -149,45 +197,115 @@ extend Errors {
         } else {
             n;
         };
-        while k < n && self.starts[k] <= at {
+        while k < n && self.errors[k].start <= at {
             k = k + 1;
         }
-        self.errors.insert(k, msg);
-        self.notes.insert(k, String::new());
-        self.starts.insert(k, at);
-        self.lens.insert(k, len);
+        let s = self.seq;
+        self.seq = s + 1;
+        self.errors.insert(
+            k,
+            Diagnostic {
+                severity: SEV_ERROR,
+                code: 0,
+                start: at,
+                len: len,
+                msg: msg,
+                note_head: NOTE_NONE,
+                note_tail: NOTE_NONE,
+                sequence: s,
+            },
+        );
         return k;
+    }
+
+    // Append `msg` to error `index`'s note chain (shared pool; insertion order preserved).
+    @c.cold
+    fn attach_note(self: &mut Self, index: usize, msg: String) {
+        if index >= self.errors.len() {
+            return;
+        }
+        let id = self.note_pool.len() as u32;
+        self.note_pool.push(Note { text: msg, next: NOTE_NONE });
+        if self.errors[index].note_head == NOTE_NONE {
+            self.errors[index].note_head = id;
+        } else {
+            let t = self.errors[index].note_tail;
+            self.note_pool[t as usize].next = id;
+        }
+        self.errors[index].note_tail = id;
     }
 
     /// Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
     @c.cold
     pub fn note(self: &mut Self, msg: String) {
         let n = self.errors.len();
-        if n == 0 || self.notes.len() < n {
+        if n == 0 {
             return;
         }
-        self.notes[n - 1].push_str("\n  = note: ");
-        self.notes[n - 1].push_string(&msg);
+        self.attach_note(n - 1, msg);
     }
 
     /// Attach a note to a SPECIFIC diagnostic (the index `emit_ordered` returned) -- `note` always
     /// targets the last one, which is wrong once a diagnostic has been inserted out of order.
     @c.cold
     pub fn note_at(self: &mut Self, index: usize, msg: String) {
-        if index >= self.notes.len() {
-            return;
-        }
-        self.notes[index].push_str("\n  = note: ");
-        self.notes[index].push_string(&msg);
+        self.attach_note(index, msg);
     }
 
-    /// Render every recorded message in place into a caret-annotated block against `source`/`file`,
-    /// then dedup identical error blocks (spans compacted alongside). Call once, before `log`.
+    // Structural equality for dedup: span, code, message bytes, and the note chains. Severity is
+    // implied (dedup runs within one record vector).
+    @c.cold
+    fn same_diag(self: &Self, a: &Diagnostic, b: &Diagnostic) bool {
+        if a.start != b.start || a.len != b.len || a.code != b.code || !a.msg.equals(&b.msg) {
+            return false;
+        }
+        let mut x = a.note_head;
+        let mut y = b.note_head;
+        while x != NOTE_NONE && y != NOTE_NONE {
+            if !self.note_pool[x as usize].text.equals(&self.note_pool[y as usize].text) {
+                return false;
+            }
+            x = self.note_pool[x as usize].next;
+            y = self.note_pool[y as usize].next;
+        }
+        return x == NOTE_NONE && y == NOTE_NONE;
+    }
+
+    /// Dedup identical records (order-preserving; the same error can be emitted from more than one
+    /// pass), then render every survivor into a caret-annotated terminal block against `source`/`file`.
+    /// The records themselves are never rewritten. Call once, before `log`.
     @c.cold
     pub fn finalize(self: &mut Self, source: str, file: str) {
         if self.errors.len() == 0 && self.warns.len() == 0 {
             return;
         }
+        // Cold path: clone survivors into a fresh vector, drop the rest (note chains stay valid: the
+        // pool is append-only and chains are copied by index).
+        let mut uniq = Vector::<Diagnostic>::new();
+        for k in 0..self.errors.len() {
+            let mut seen = false;
+            for j in 0..uniq.len() {
+                if self.same_diag(uniq.at(j), self.errors.at(k)) {
+                    seen = true;
+                }
+            }
+            if !seen {
+                let d = self.errors.at(k);
+                uniq.push(
+                    Diagnostic {
+                        severity: d.severity,
+                        code: d.code,
+                        start: d.start,
+                        len: d.len,
+                        msg: d.msg.clone(),
+                        note_head: d.note_head,
+                        note_tail: d.note_tail,
+                        sequence: d.sequence,
+                    },
+                );
+            }
+        }
+        self.errors = uniq;
         let len = source.len();
         let mut line_starts = Vector::<u32>::new();
         line_starts.reserve(len / 16);
@@ -208,66 +326,36 @@ extend Errors {
                 i = i + 1;
             }
         }
+        let mut re = Vector::<String>::new();
         for k in 0..self.errors.len() {
-            let block = render(
-                self.errors.at(k),
-                source,
-                &line_starts,
-                self.starts[k],
-                self.lens[k],
-                file,
-                self.notes.at(k),
-                "error",
-            );
-            self.errors.set(k, block);
+            re.push(render(self.errors.at(k), source, &line_starts, file, &self.note_pool, "error"));
         }
-        let empty_note = String::new();
+        self.rendered_errors = re;
+        let mut rw = Vector::<String>::new();
         for k in 0..self.warns.len() {
-            let block = render(
-                self.warns.at(k),
-                source,
-                &line_starts,
-                self.warn_starts[k],
-                self.warn_lens[k],
-                file,
-                &empty_note,
-                "warning",
-            );
-            self.warns.set(k, block);
+            rw.push(render(self.warns.at(k), source, &line_starts, file, &self.note_pool, "warning"));
         }
-
-        // Order-preserving dedup of identical rendered blocks (the same error can be emitted from more
-        // than one pass). Cold path: clone survivors into a fresh vector, drop the rest. starts/lens are
-        // compacted in parallel so each surviving block keeps its span (the LSP reads them post-finalize).
-        let mut uniq = Vector::<String>::new();
-        let mut ustarts = Vector::<u32>::new();
-        let mut ulens = Vector::<u32>::new();
-        for k in 0..self.errors.len() {
-            let mut seen = false;
-            for j in 0..uniq.len() {
-                if uniq[j].equals(self.errors.at(k)) {
-                    seen = true;
-                }
-            }
-            if !seen {
-                uniq.push(self.errors[k].clone());
-                ustarts.push(self.starts[k]);
-                ulens.push(self.lens[k]);
-            }
-        }
-        self.errors = uniq;
-        self.starts = ustarts;
-        self.lens = ulens;
+        self.rendered_warns = rw;
     }
 
-    /// Print the finalized blocks to stderr, warnings before errors.
+    /// Print the finalized blocks to stderr, warnings before errors. Falls back to the raw messages
+    /// when `finalize` has not run.
     @c.cold
     pub fn log(self: &Self) {
-        for i in 0..self.warns.len() {
-            self.warns[i].eprintln();
-        }
-        for i in 0..self.errors.len() {
-            self.errors[i].eprintln();
+        if self.rendered_warns.len() == self.warns.len() && self.rendered_errors.len() == self.errors.len() {
+            for i in 0..self.rendered_warns.len() {
+                self.rendered_warns[i].eprintln();
+            }
+            for i in 0..self.rendered_errors.len() {
+                self.rendered_errors[i].eprintln();
+            }
+        } else {
+            for i in 0..self.warns.len() {
+                self.warns[i].msg.eprintln();
+            }
+            for i in 0..self.errors.len() {
+                self.errors[i].msg.eprintln();
+            }
         }
     }
 }
@@ -275,12 +363,10 @@ extend Errors {
 extend Errors as Free {
     pub fn free(self: &mut Self) {
         self.errors.free();
-        self.notes.free();
-        self.starts.free();
-        self.lens.free();
         self.warns.free();
-        self.warn_starts.free();
-        self.warn_lens.free();
+        self.note_pool.free();
+        self.rendered_errors.free();
+        self.rendered_warns.free();
         self.fixes.free();
         self.fix_texts.free();
     }
@@ -382,26 +468,22 @@ fn push_loc_block(out: &mut String, source: str, line_starts: &Vector<u32>, mut 
     } // '^'
 }
 
-// Render one diagnostic into a pretty source-annotated block: the message, the location block,
-// and notes.
+// Render one record into a pretty source-annotated block: the message, the location block, and the
+// note chain ("\n  = note: <text>" per note, continuation lines unprefixed).
 @c.cold
-fn render(
-    msg: &String,
-    source: str,
-    line_starts: &Vector<u32>,
-    off: u32,
-    span: u32,
-    file: str,
-    notes: &String,
-    kind: str,
-) String {
+fn render(d: &Diagnostic, source: str, line_starts: &Vector<u32>, file: str, pool: &Vector<Note>, kind: str) String {
     let mut out = String::new();
     out.push_str(kind);
     out.push_str(": ");
-    out.push_string(msg);
+    out.push_string(&d.msg);
     out.push_byte(10); // '\n'
-    push_loc_block(&mut out, source, line_starts, off, span, file);
-    out.push_string(notes);
+    push_loc_block(&mut out, source, line_starts, d.start, d.len, file);
+    let mut n = d.note_head;
+    while n != NOTE_NONE {
+        out.push_str("\n  = note: ");
+        out.push_string(&pool[n as usize].text);
+        n = pool[n as usize].next;
+    }
     return out;
 }
 

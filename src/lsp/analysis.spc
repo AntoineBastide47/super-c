@@ -38,41 +38,38 @@ extend DiagRec as Free {
     }
 }
 
-// Reduce a diagnostic to its message: phase entry points finalize their Errors internally, so what we
-// hold is the rendered block ("error: <msg>\n--> file:line:col\n | ..."). Take the first line minus the
-// severity prefix, then append any "= note:" lines (they carry fix hints worth showing in the editor).
-fn block_msg(block: &String) String {
-    let s = block.as_str();
-    let mut start: usize = 0;
-    if s.starts_with("error: ") {
-        start = 7;
-    } else if s.starts_with("warning: ") {
-        start = 9;
-    }
-    let mut end = start;
+// The editor-facing message for one structured record: the message's first line plus one "= note:"
+// line per attached note (its first line, trailing whitespace trimmed -- notes carry fix hints worth
+// showing in the editor; a note's continuation lines are location blocks the editor renders itself).
+fn rec_msg(e: &diag::Errors, d: &diag::Diagnostic) String {
+    let s = d.msg.as_str();
+    let mut end: usize = 0;
     while end < s.len() && s[end] != b'\n' {
         end += 1;
     }
-    let mut out = String::from_str(s.slice(start, end));
-    let mut i = end;
-    while i < s.len() {
-        let ls = i + 1; // line start after the '\n'
-        let mut le = ls;
-        while le < s.len() && s[le] != b'\n' {
+    let mut out = String::from_str(s.slice(0, end));
+    let mut n = d.note_head;
+    while n != diag::NOTE_NONE {
+        let t = e.note_pool.at(n as usize).text.as_str();
+        let mut le: usize = 0;
+        while le < t.len() && t[le] != b'\n' {
             le += 1;
         }
-        let line = s.slice(ls, le).trim();
-        if line.starts_with("= note: ") {
-            out.push_byte(b'\n');
-            out.push_str(line);
+        while le > 0 && (t[le - 1] == b' ' || t[le - 1] == b'\t') {
+            le -= 1;
         }
-        i = le;
+        if le > 0 {
+            out.push_byte(b'\n');
+            out.push_str("= note: ");
+            out.push_str(t.slice(0, le));
+        }
+        n = e.note_pool.at(n as usize).next;
     }
     return out;
 }
 
-// Append every error/warning in `e` (post-finalize: spans stay parallel, see Errors::finalize) as a
-// DiagRec against module `m`.
+// Append every error/warning record in `e` as a DiagRec against module `m` (the records carry their
+// spans and note chains directly; nothing is parsed back out of rendered text).
 fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
     for k in 0..e.errors.len() {
         let mut fk: i32 = -1;
@@ -89,13 +86,14 @@ fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
                 break;
             }
         }
+        let d = e.errors.at(k);
         diags.push(
             DiagRec {
                 module: m,
-                start: e.starts[k],
-                len: e.lens[k],
+                start: d.start,
+                len: d.len,
                 severity: 1,
-                msg: block_msg(e.errors.at(k)),
+                msg: rec_msg(e, d),
                 fix_kind: fk,
                 fix_start: fs,
                 fix_end: 0,
@@ -120,13 +118,14 @@ fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
                 break; // one quick fix per warning
             }
         }
+        let d = e.warns.at(k);
         diags.push(
             DiagRec {
                 module: m,
-                start: e.warn_starts[k],
-                len: e.warn_lens[k],
+                start: d.start,
+                len: d.len,
                 severity: 2,
-                msg: block_msg(e.warns.at(k)),
+                msg: rec_msg(e, d),
                 fix_kind: fk,
                 fix_start: fs,
                 fix_end: fe,

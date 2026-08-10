@@ -95,11 +95,12 @@ pub struct Package {
     pub mod_refs: Vector<u64>,
     pub mod_refs_w: usize,
     pub mod_refs_ready: bool,
-    /// Per-module public-decl name index (LD-2): lk_index[mid] maps fnv_name(name)*2+is_type -> LkEnt, built
-    /// lazily on first lookup into `mid` (top-level decl names are parse-final, so it stays valid for the whole
-    /// pipeline). Replaces Package::lookup's linear item scan with an O(1) probe.
-    pub lk_index: Vector<Map<u64, LkEnt>>,
-    pub lk_built: Vector<bool>,
+    /// The package declaration index (Phase 2): symbols, ItemMeta records, per-module name maps,
+    /// import adjacency + SCCs, and the LangItem table. Built once on first use after loading
+    /// (top-level decl names and imports are parse-final); `ensure_index` rebuilds it when a module
+    /// is appended later (the LSP's batch load). `lookup`/`glob_lookup`/`prelude_lookup` and the
+    /// import-closure cache are adapters over it.
+    pub idx: PkgIndex,
     /// Per-module transitive import closure (LD-3): clo_lists[mid] = [mid, BFS over its imports...],
     /// built lazily on first glob_lookup into `mid` (imports are load-final). Replaces glob_lookup's
     /// per-call seen/queue vectors and per-import path re-joins with a flat cached walk.
@@ -162,16 +163,189 @@ pub struct LookupHit {
     pub mid: ModuleId,
 }
 
-/// One entry in a module's public-decl name index (LD-2): the decl node to return plus the source span of its
-/// name, kept so a lookup can VERIFY the name bytes match (guarding against the ~impossible 64-bit hash
-/// collision — on a verify miss we fall back to the linear scan, so the result is always exact).
-pub struct LkEnt {
+/// Dense index into PkgIndex.items; assigned in module order then source order, never from hash order.
+pub type ItemId = u32;
+pub const ITEM_NONE: ItemId = 0xFFFFFFFF;
+
+/// Dense insertion-order id into the package symbol interner.
+pub type SymbolId = u32;
+pub const SYM_NONE: SymbolId = 0xFFFFFFFF;
+
+/// Item classification in the package declaration index. Append-only: later phases key on the tags.
+pub enum ItemKind {
+    IK_FUNCTION,
+    IK_STRUCT, // struct or union (`is_union` stays on the node)
+    IK_ENUM,
+    IK_TYPE_ALIAS,
+    IK_INTERFACE,
+    IK_CONST,
+    IK_EXTEND, // associated-item owner; unnamed
+    IK_METHOD, // fn inside an extend
+    IK_ASSOC_CONST, // const inside an extend
+    IK_COUNT,
+}
+
+/// One record per top-level or associated declaration. `node` is the legacy declaration NodeId:
+/// DefId{module, node} identity and C mangling key off it for the whole migration. Signatures and
+/// attributes stay reachable through the node (the Ast side tables are their owner until Phase 11).
+pub struct ItemMeta {
+    pub module: ModuleId,
     pub node: NodeId,
-    pub start: u32,
+    pub owner: ItemId, // enclosing IK_EXTEND for methods/assoc consts; ITEM_NONE at top level
+    pub kind: u8, // ItemKind
+    pub name: SymbolId, // SYM_NONE for unnamed declarations (extends)
+    pub is_public: bool,
+    pub is_type: bool, // occupies the type namespace in name lookup
+    pub start: u32, // name span in the module source (the whole-decl span start for unnamed items)
     pub len: u32,
 }
 
-// FNV-1a over a name's bytes; the per-module lookup index keys on `fnv_name(name)*2 + is_type`.
+/// Package symbol interner: identifier bytes -> dense insertion-order SymbolId. The hash map only
+/// FINDS an entry, identity is the dense `names` vector; same-hash names chain through `chain` and
+/// every probe is verified byte-exact, so a 64-bit collision degrades to a short walk, never a wrong
+/// answer. Built in deterministic module and source order by build_index.
+pub struct SymTab {
+    pub names: Vector<String>,
+    pub index: Map<u64, u32>, // fnv(name) -> first SymbolId with that hash
+    pub chain: Vector<u32>, // SymbolId -> next same-hash SymbolId; SYM_NONE ends the walk
+}
+
+/// Compiler-referenced prelude hooks (`prelude_lookup` with a fixed name), resolved to their decl
+/// once per index build. Append-only.
+pub enum LangItem {
+    LI_STR,
+    LI_STRING,
+    LI_SLICE,
+    LI_SLICEMUT,
+    LI_RANGE,
+    LI_GLOBAL,
+    LI_OPTION,
+    LI_VECTOR,
+    LI_TYPEINFO,
+    LI_TYPETAG,
+    LI_UNSAFECELL,
+    LI_ALLOCATOR,
+    LI_DEFAULT,
+    LI_COUNT,
+}
+
+const LI_COUNT_N: usize = LangItem::LI_COUNT as usize;
+
+// The prelude name each LangItem resolves (all in the type namespace), indexed by the enum value.
+const LI_NAMES: [str<'static>; LI_COUNT_N] = [
+    "str",
+    "String",
+    "Slice",
+    "SliceMut",
+    "Range",
+    "Global",
+    "Option",
+    "Vector",
+    "TypeInfo",
+    "TypeTag",
+    "UnsafeCell",
+    "Allocator",
+    "Default",
+];
+
+/// The package declaration index: the immutable package interface built once after every module has
+/// parsed (and rebuilt if a module is appended, e.g. the LSP's batch load). Owns the symbol table,
+/// one ItemMeta per declaration (module order, source order), per-module name maps for O(1) lookup,
+/// the resolved direct-import adjacency, its strongly connected components, and the LangItem table.
+pub struct PkgIndex {
+    pub syms: SymTab,
+    pub items: Vector<ItemMeta>,
+    pub mod_items: Vector<u32>, // modules+1 offsets into `items`
+    pub name_maps: Vector<Map<u64, u32>>, // per module: sym*4 + is_type*2 + is_pub -> ItemId, first wins
+    pub imports: Vector<ModuleId>, // resolved direct imports, declaration order, per-module dedup
+    pub mod_imports: Vector<u32>, // modules+1 offsets into `imports`
+    pub scc_of: Vector<u32>, // module -> import-graph SCC id (completion order; deterministic)
+    pub lang_items: Vector<LookupHit>, // LangItem -> prelude decl (node == NODE_NONE when absent)
+    pub li_map: Map<u64, u32>, // sym*2 + want_type -> LangItem, the prelude_lookup fast path
+    pub built_mods: u32, // module count at build time; a later module append invalidates the index
+}
+
+extend SymTab {
+    pub fn new() SymTab {
+        return SymTab { names: Vector::<String>::new(), index: Map::<u64, u32>::new(), chain: Vector::<u32>::new() };
+    }
+
+    /// The SymbolId already interned for `name`, or SYM_NONE. Byte-exact.
+    pub fn find(self: &Self, name: str) SymbolId {
+        return switch self.index.get(&fnv_name(name)) {
+            Some(h) => {
+                let mut s = *h;
+                while s != SYM_NONE && !self.names[s as usize].eq_str(name) {
+                    s = self.chain[s as usize];
+                }
+                s;
+            },
+            None => SYM_NONE,
+        };
+    }
+
+    /// Intern `name`, returning its dense SymbolId (existing entries are found byte-exact).
+    pub fn intern(self: &mut Self, name: str) SymbolId {
+        let h = fnv_name(name);
+        let head = switch self.index.get(&h) {
+            Some(v) => *v,
+            None => SYM_NONE,
+        };
+        let mut s = head;
+        while s != SYM_NONE && !self.names[s as usize].eq_str(name) {
+            s = self.chain[s as usize];
+        }
+        if s != SYM_NONE {
+            return s;
+        }
+        let id = self.names.len() as SymbolId;
+        self.names.push(String::from_str(name));
+        self.chain.push(head); // new entry heads the (~always empty) same-hash chain
+        self.index.insert(h, id);
+        return id;
+    }
+}
+
+extend SymTab as Free {
+    pub fn free(self: &mut Self) {
+        self.names.free();
+        self.index.free();
+        self.chain.free();
+    }
+}
+
+extend PkgIndex {
+    pub fn new() PkgIndex {
+        return PkgIndex {
+            syms: SymTab::new(),
+            items: Vector::<ItemMeta>::new(),
+            mod_items: Vector::<u32>::new(),
+            name_maps: Vector::<Map<u64, u32>>::new(),
+            imports: Vector::<ModuleId>::new(),
+            mod_imports: Vector::<u32>::new(),
+            scc_of: Vector::<u32>::new(),
+            lang_items: Vector::<LookupHit>::new(),
+            li_map: Map::<u64, u32>::new(),
+            built_mods: 0,
+        };
+    }
+}
+
+extend PkgIndex as Free {
+    pub fn free(self: &mut Self) {
+        self.syms.free();
+        self.items.free();
+        self.mod_items.free();
+        self.name_maps.free();
+        self.imports.free();
+        self.mod_imports.free();
+        self.scc_of.free();
+        self.lang_items.free();
+        self.li_map.free();
+    }
+}
+
+// FNV-1a over a name's bytes; the symbol interner and per-module name maps key on it.
 fn fnv_name(name: str) u64 {
     let p = name.ptr();
     let mut h: u64 = 1469598103934665603u64;
@@ -180,6 +354,88 @@ fn fnv_name(name: str) u64 {
         h = h * 1099511628211u64;
     }
     return h;
+}
+
+// Iterative Tarjan over the import adjacency: fills scc_of[m] with a strongly-connected-component id
+// per module (mutually-importing modules share one). Components are numbered in completion order,
+// which is deterministic for a fixed module set. No recursion: the DFS keeps its own frame stack, so
+// an adversarial import chain cannot exhaust the call stack.
+fn scc_build(n: usize, imports: &Vector<ModuleId>, mod_imports: &Vector<u32>, scc_of: &mut Vector<u32>) {
+    scc_of.clear();
+    let mut order = Vector::<i64>::new(); // discovery index per module; -1 = unvisited
+    let mut low = Vector::<i64>::new();
+    let mut on = Vector::<bool>::new();
+    for i in 0..n {
+        scc_of.push(0);
+        order.push(-1);
+        low.push(-1);
+        on.push(false);
+    }
+    let mut stk = Vector::<u32>::new(); // Tarjan's component stack
+    let mut fv = Vector::<u32>::new(); // DFS frames: module
+    let mut fc = Vector::<u32>::new(); // DFS frames: next out-edge cursor
+    let mut next: i64 = 0;
+    let mut comp: u32 = 0;
+    for root in 0..n {
+        if order[root] >= 0 {
+            continue;
+        }
+        order.set(root, next);
+        low.set(root, next);
+        next += 1;
+        stk.push(root as u32);
+        on.set(root, true);
+        fv.push(root as u32);
+        fc.push(0);
+        while fv.len() != 0 {
+            let v = fv[fv.len() - 1] as usize;
+            let c = fc[fc.len() - 1] as usize;
+            let from = mod_imports[v] as usize;
+            let deg = mod_imports[v + 1] as usize - from;
+            if c < deg {
+                fc.set(fc.len() - 1, (c + 1) as u32);
+                let w = imports[from + c] as usize;
+                if order[w] < 0 {
+                    order.set(w, next);
+                    low.set(w, next);
+                    next += 1;
+                    stk.push(w as u32);
+                    on.set(w, true);
+                    fv.push(w as u32);
+                    fc.push(0);
+                } else if on[w] && order[w] < low[v] {
+                    low.set(v, order[w]);
+                }
+            } else {
+                let _ = fv.pop();
+                let _ = fc.pop();
+                if fv.len() != 0 {
+                    let p = fv[fv.len() - 1] as usize;
+                    if low[v] < low[p] {
+                        low.set(p, low[v]);
+                    }
+                }
+                if low[v] == order[v] {
+                    loop {
+                        let w = stk[stk.len() - 1] as usize;
+                        let _ = stk.pop();
+                        on.set(w, false);
+                        scc_of.set(w, comp);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    comp += 1;
+                }
+            }
+        }
+    }
+    order.free();
+    low.free();
+    on.free();
+    stk.free();
+    fv.free();
+    fc.free();
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -497,8 +753,7 @@ extend Package {
             mod_refs: Vector::<u64>::new(),
             mod_refs_w: 0,
             mod_refs_ready: false,
-            lk_index: Vector::<Map<u64, LkEnt>>::new(),
-            lk_built: Vector::<bool>::new(),
+            idx: PkgIndex::new(),
             clo_lists: Vector::<Vector<ModuleId>>::new(),
             clo_built: Vector::<bool>::new(),
             tok_scratch: Vector::<tok::Token>::new(),
@@ -519,6 +774,12 @@ extend Package {
             return self.override_asts[mid as usize] as *const Ast;
         }
         return &self.modules[mid as usize].ast;
+    }
+
+    /// Read-only view of module `mid`'s Ast for consumers outside the package (the Core IR
+    /// lowerer); honors in-flight overrides like every package-level lookup.
+    pub const fn module_ast_const(self: &Self, mid: ModuleId) *const Ast {
+        return self.module_ast_ptr(mid);
     }
 
     /// Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
@@ -926,248 +1187,374 @@ extend Package {
     // Cross-module name lookup.
     // ------------------------------------------------------------------------------------------------------
 
-    /// Build module `mid`'s public-decl name index on first use (idempotent). Mirrors lookup_linear's exact
-    /// traversal + classification, inserting the FIRST occurrence per (name, is_type) key. Top-level decl
-    /// names/spans are parse-final, so the index stays valid for the whole pipeline.
-    pub fn ensure_lk_index(self: &mut Self, mid: ModuleId) {
+    /// (Re)build the package declaration index: symbols, items, name maps, import adjacency, SCCs,
+    /// and the LangItem table, in deterministic module and source order. Called through ensure_index
+    /// on first lookup after loading; a module appended later (the LSP's batch load) triggers a full
+    /// rebuild. Declaration names, spans, and imports are parse-final, so the result stays valid for
+    /// the whole pipeline.
+    pub fn build_index(self: &mut Self) {
+        let n = self.modules.len();
+        let mut idx = PkgIndex::new();
+        idx.built_mods = n as u32;
+        for m in 0..n {
+            idx.mod_items.push(idx.items.len() as u32);
+            idx.name_maps.push(Map::<u64, u32>::new());
+            idx.mod_imports.push(idx.imports.len() as u32);
+            if self.modules[m].has_ast {
+                self.index_module(&mut idx, m as ModuleId);
+            }
+        }
+        idx.mod_items.push(idx.items.len() as u32);
+        idx.mod_imports.push(idx.imports.len() as u32);
+        scc_build(n, &idx.imports, &idx.mod_imports, &mut idx.scc_of);
+        // LangItem table: resolve each fixed prelude hook once, in prelude_lookup's own module order,
+        // and key the fast path by (symbol, namespace). An unresolved hook (no std loaded, or the
+        // name never interned) stays NODE_NONE and gets no fast-path entry, so the scan fallback
+        // answers those queries identically.
+        for li in 0..LI_COUNT_N {
+            let names: []str = LI_NAMES;
+            let s = idx.syms.find(names[li]);
+            let mut hit = LookupHit { node: NODE_NONE, mid: 0 };
+            if s != SYM_NONE {
+                let key = s as u64 * 4u64 + 3u64; // is_type, public
+                for i in 0..n {
+                    if hit.node == NODE_NONE && self.modules[i].prelude {
+                        switch idx.name_maps[i].get(&key) {
+                            Some(it) => {
+                                hit = LookupHit { node: idx.items[(*it) as usize].node, mid: i as ModuleId };
+                            },
+                            None => {},
+                        };
+                    }
+                }
+                if hit.node != NODE_NONE {
+                    idx.li_map.insert(s as u64 * 2u64 + 1u64, li as u32);
+                }
+            }
+            idx.lang_items.push(hit);
+        }
+        self.idx = idx;
+    }
+
+    /// Build the index if it does not cover the current module set (cheap check; see build_index).
+    pub fn ensure_index(self: &mut Self) {
+        if self.idx.built_mods as usize != self.modules.len() {
+            self.build_index();
+        }
+    }
+
+    // Record one named declaration: intern the name, append its ItemMeta, and (for top-level names
+    // only, owner == ITEM_NONE) claim its (name, namespace, visibility) key first-occurrence-wins.
+    fn index_decl(
+        self: &mut Self,
+        idx: &mut PkgIndex,
+        mid: ModuleId,
+        srcp: *const char,
+        node: NodeId,
+        name_node: NodeId,
+        owner: ItemId,
+        kind: ItemKind,
+        is_public: bool,
+        is_type: bool,
+    ) {
+        let ast = unsafe &*self.module_ast_ptr(mid);
+        if name_node == NODE_NONE {
+            return;
+        }
+        let sp = ast.at_const(name_node).as_data.name.text;
+        let len = sp.end - sp.start;
+        let np = (unsafe (srcp + sp.start as usize)) as *const u8;
+        let sym = idx.syms.intern(str::from_raw(np, len as usize));
+        let it = idx.items.len() as ItemId;
+        idx.items.push(
+            ItemMeta {
+                module: mid,
+                node: node,
+                owner: owner,
+                kind: kind as u8,
+                name: sym,
+                is_public: is_public,
+                is_type: is_type,
+                start: sp.start,
+                len: len,
+            },
+        );
+        if owner == ITEM_NONE {
+            let key = sym as u64 * 4u64 + if is_type {
+                2u64;
+            } else {
+                0u64;
+            } + if is_public {
+                1u64;
+            } else {
+                0u64;
+            };
+            let nm = &mut idx.name_maps[mid as usize];
+            if nm.get(&key).is_none() {
+                nm.insert(key, it);
+            }
+        }
+    }
+
+    // Collect module `mid`'s declarations, associated items, and resolved imports into `idx`.
+    // Classification matches the pre-index lookup scan exactly (same kinds, same first-wins order);
+    // extend bodies additionally contribute IK_EXTEND/IK_METHOD/IK_ASSOC_CONST records.
+    fn index_module(self: &mut Self, idx: &mut PkgIndex, mid: ModuleId) {
         let m = mid as usize;
-        while self.lk_index.len() <= m {
-            self.lk_index.push(Map::<u64, LkEnt>::new());
-        }
-        while self.lk_built.len() <= m {
-            self.lk_built.push(false);
-        }
-        if self.lk_built[m] {
-            return;
-        }
-        self.lk_built[m] = true;
-        if !self.modules[m].has_ast {
-            return;
-        }
-        // srcp is raw (Copy) so no borrow of self lingers while lk_emit takes &mut self below; `ast` comes
-        // from a raw ptr (not a tracked self-borrow), so reading through it across lk_emit calls is fine.
+        // srcp is raw (Copy) so no borrow of self lingers across the &mut self index_decl calls below;
+        // `ast` comes from a raw ptr (not a tracked self-borrow), so reading it across them is fine.
         let srcp = self.modules[m].source.as_str().ptr() as *const char;
+        let src = str::from_raw(srcp as *const u8, self.modules[m].source.len());
         let ast = unsafe &*self.module_ast_ptr(mid);
         let items = ast.at_const(ast.root).as_data.program.items;
         let ids = ast.list(items);
         for i in 0..items.len {
             let nid = unsafe ids[i as usize];
             let n = ast.at_const(nid);
-            if n.kind == NodeKind::NODE_EXTERN_BLOCK {
+            if n.kind == NodeKind::NODE_IMPORT {
+                let path = join_parts(ast, src, n.as_data.import_decl.path, "::");
+                let c = self.find(path.as_str());
+                if c >= 0 {
+                    let mut dup = false;
+                    let from = idx.mod_imports[m];
+                    for e in from as usize..idx.imports.len() {
+                        if idx.imports[e] == c as ModuleId {
+                            dup = true;
+                        }
+                    }
+                    if !dup {
+                        idx.imports.push(c as ModuleId);
+                    }
+                }
+                let p2 = path;
+                p2.free();
+            } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
+                let kd = if n.kind == NodeKind::NODE_STRUCT {
+                    ItemKind::IK_STRUCT;
+                } else {
+                    ItemKind::IK_ENUM;
+                };
+                self.index_decl(
+                    idx,
+                    mid,
+                    srcp,
+                    nid,
+                    n.as_data.aggregate.name,
+                    ITEM_NONE,
+                    kd,
+                    n.as_data.aggregate.is_public,
+                    true,
+                );
+            } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
+                self.index_decl(
+                    idx,
+                    mid,
+                    srcp,
+                    nid,
+                    n.as_data.type_alias.name,
+                    ITEM_NONE,
+                    ItemKind::IK_TYPE_ALIAS,
+                    n.as_data.type_alias.is_public,
+                    true,
+                );
+            } else if n.kind == NodeKind::NODE_INTERFACE {
+                self.index_decl(
+                    idx,
+                    mid,
+                    srcp,
+                    nid,
+                    n.as_data.interface_def.name,
+                    ITEM_NONE,
+                    ItemKind::IK_INTERFACE,
+                    n.as_data.interface_def.is_public,
+                    true,
+                );
+            } else if n.kind == NodeKind::NODE_FUNCTION {
+                self.index_decl(
+                    idx,
+                    mid,
+                    srcp,
+                    nid,
+                    n.as_data.function.name,
+                    ITEM_NONE,
+                    ItemKind::IK_FUNCTION,
+                    n.as_data.function.is_public,
+                    false,
+                );
+            } else if n.kind == NodeKind::NODE_CONST {
+                self.index_decl(
+                    idx,
+                    mid,
+                    srcp,
+                    nid,
+                    n.as_data.const_def.name,
+                    ITEM_NONE,
+                    ItemKind::IK_CONST,
+                    n.as_data.const_def.is_public,
+                    false,
+                );
+            } else if n.kind == NodeKind::NODE_EXTERN_BLOCK {
+                // `pub` raw bindings / opaque handles live one level down, inside the extern block;
+                // they name package-level items exactly like top-level decls.
                 let inner = n.as_data.extern_block.items;
                 let iids = ast.list(inner);
                 for j in 0..inner.len {
                     let iid = unsafe iids[j as usize];
                     let it = ast.at_const(iid);
-                    let mut nn: NodeId = NODE_NONE;
-                    let mut ip = false;
-                    let mut it_type = false;
-                    let mut ok = true;
                     if it.kind == NodeKind::NODE_FUNCTION {
-                        nn = it.as_data.function.name;
-                        ip = it.as_data.function.is_public;
-                        it_type = false;
+                        self.index_decl(
+                            idx,
+                            mid,
+                            srcp,
+                            iid,
+                            it.as_data.function.name,
+                            ITEM_NONE,
+                            ItemKind::IK_FUNCTION,
+                            it.as_data.function.is_public,
+                            false,
+                        );
                     } else if it.kind == NodeKind::NODE_TYPE_ALIAS {
-                        nn = it.as_data.type_alias.name;
-                        ip = it.as_data.type_alias.is_public;
-                        it_type = true;
+                        self.index_decl(
+                            idx,
+                            mid,
+                            srcp,
+                            iid,
+                            it.as_data.type_alias.name,
+                            ITEM_NONE,
+                            ItemKind::IK_TYPE_ALIAS,
+                            it.as_data.type_alias.is_public,
+                            true,
+                        );
                     } else if it.kind == NodeKind::NODE_CONST {
-                        nn = it.as_data.const_def.name;
-                        ip = it.as_data.const_def.is_public;
-                        it_type = false;
+                        self.index_decl(
+                            idx,
+                            mid,
+                            srcp,
+                            iid,
+                            it.as_data.const_def.name,
+                            ITEM_NONE,
+                            ItemKind::IK_CONST,
+                            it.as_data.const_def.is_public,
+                            false,
+                        );
                     } else if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
-                        // An extern struct/union/enum names a type across module boundaries exactly like a
-                        // top-level one; only its DEFINITION comes from the C header.
-                        nn = it.as_data.aggregate.name;
-                        ip = it.as_data.aggregate.is_public;
-                        it_type = true;
-                    } else {
-                        ok = false;
-                    }
-                    if ok && ip {
-                        let sp = ast.at_const(nn).as_data.name.text;
-                        self.lk_emit(m, srcp, sp.start, sp.end, it_type, iid);
+                        // An extern struct/union/enum names a type across module boundaries exactly
+                        // like a top-level one; only its DEFINITION comes from the C header.
+                        let kd = if it.kind == NodeKind::NODE_STRUCT {
+                            ItemKind::IK_STRUCT;
+                        } else {
+                            ItemKind::IK_ENUM;
+                        };
+                        self.index_decl(
+                            idx,
+                            mid,
+                            srcp,
+                            iid,
+                            it.as_data.aggregate.name,
+                            ITEM_NONE,
+                            kd,
+                            it.as_data.aggregate.is_public,
+                            true,
+                        );
                     }
                 }
-            } else {
-                let mut name_node: NodeId = NODE_NONE;
-                let mut is_pub = false;
-                let mut is_type = false;
-                let mut consider = true;
-                if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
-                    name_node = n.as_data.aggregate.name;
-                    is_pub = n.as_data.aggregate.is_public;
-                    is_type = true;
-                } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
-                    name_node = n.as_data.type_alias.name;
-                    is_pub = n.as_data.type_alias.is_public;
-                    is_type = true;
-                } else if n.kind == NodeKind::NODE_INTERFACE {
-                    name_node = n.as_data.interface_def.name;
-                    is_pub = n.as_data.interface_def.is_public;
-                    is_type = true;
-                } else if n.kind == NodeKind::NODE_FUNCTION {
-                    name_node = n.as_data.function.name;
-                    is_pub = n.as_data.function.is_public;
-                    is_type = false;
-                } else if n.kind == NodeKind::NODE_CONST {
-                    name_node = n.as_data.const_def.name;
-                    is_pub = n.as_data.const_def.is_public;
-                    is_type = false;
-                } else {
-                    consider = false;
-                }
-                if consider && is_pub {
-                    let sp = ast.at_const(name_node).as_data.name.text;
-                    self.lk_emit(m, srcp, sp.start, sp.end, is_type, nid);
+            } else if n.kind == NodeKind::NODE_EXTEND {
+                // The extend itself anchors its associated items (owner links); it claims no name.
+                let eid = idx.items.len() as ItemId;
+                let esp = n.span;
+                idx.items.push(
+                    ItemMeta {
+                        module: mid,
+                        node: nid,
+                        owner: ITEM_NONE,
+                        kind: ItemKind::IK_EXTEND as u8,
+                        name: SYM_NONE,
+                        is_public: false,
+                        is_type: false,
+                        start: esp.start,
+                        len: esp.end - esp.start,
+                    },
+                );
+                let inner = n.as_data.extend_def.items;
+                let iids = ast.list(inner);
+                for j in 0..inner.len {
+                    let iid = unsafe iids[j as usize];
+                    let it = ast.at_const(iid);
+                    if it.kind == NodeKind::NODE_FUNCTION {
+                        self.index_decl(
+                            idx,
+                            mid,
+                            srcp,
+                            iid,
+                            it.as_data.function.name,
+                            eid,
+                            ItemKind::IK_METHOD,
+                            it.as_data.function.is_public,
+                            false,
+                        );
+                    } else if it.kind == NodeKind::NODE_CONST {
+                        self.index_decl(
+                            idx,
+                            mid,
+                            srcp,
+                            iid,
+                            it.as_data.const_def.name,
+                            eid,
+                            ItemKind::IK_ASSOC_CONST,
+                            it.as_data.const_def.is_public,
+                            false,
+                        );
+                    }
                 }
             }
         }
     }
 
-    // Hash a decl's name (bytes at srcp[start..end]) into a (name-hash*2+is_type) key and insert into
-    // module-slot `m`'s index, first occurrence wins (matches lookup_linear's first-match order).
-    fn lk_emit(self: &mut Self, m: usize, srcp: *const char, start: u32, end: u32, is_type: bool, node: NodeId) {
-        let len = end - start;
-        let np = (unsafe (srcp + start as usize)) as *const u8;
-        let nm = str::from_raw(np, len as usize);
-        let key = fnv_name(nm) * 2u64 + if is_type {
-            1u64;
-        } else {
-            0u64;
-        };
-        let ent = LkEnt { node: node, start: start, len: len };
-        let mp = &mut self.lk_index[m];
-        if mp.get(&key).is_none() {
-            mp.insert(key, ent);
-        }
-    }
-
-    /// Find a *public* top-level declaration named `name` in module `mid`: a type when `want_type`, otherwise
-    /// a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE. O(1) via the name index.
+    /// Find a *public* top-level declaration named `name` in module `mid`: a type when `want_type`,
+    /// otherwise a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE. O(1):
+    /// a byte-exact symbol probe plus one name-map probe into the package declaration index.
     pub fn lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
         if !self.modules[mid as usize].has_ast {
             return NODE_NONE;
         }
         let mp = (self as *const Package) as *mut Package;
-        mp.ensure_lk_index(mid);
-        let src = self.modules[mid as usize].source.as_str().ptr() as *const char;
-        let key = fnv_name(name) * 2u64 + if want_type {
-            1u64;
+        mp.ensure_index();
+        let s = self.idx.syms.find(name);
+        if s == SYM_NONE {
+            return NODE_NONE;
+        }
+        let key = s as u64 * 4u64 + if want_type {
+            2u64;
         } else {
             0u64;
-        };
-        return switch self.lk_index[mid as usize].get(&key) {
-            Some(e) => {
-                let mut r: NodeId = NODE_NONE;
-                if e.len as usize == name.len() && unsafe cstring::memcmp(
-                    src + e.start as usize,
-                    name.ptr(),
-                    name.len(),
-                ) == 0 {
-                    r = e.node;
-                } else {
-                    r = self.lookup_linear(mid, name, want_type);
-                } // 64-bit key collision (~never) -> exact scan
-                r;
-            },
+        } + 1u64;
+        return switch self.idx.name_maps[mid as usize].get(&key) {
+            Some(it) => self.idx.items[(*it) as usize].node,
             None => NODE_NONE,
         };
     }
 
-    // Linear public-decl scan (LD-2 collision fallback; the original lookup body, semantics unchanged).
-    fn lookup_linear(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
-        if !self.modules[mid as usize].has_ast {
-            return NODE_NONE;
-        }
-        let ast = unsafe &*self.module_ast_ptr(mid);
-        let src = self.modules[mid as usize].source.as_str().ptr() as *const char;
-        let items = ast.at_const(ast.root).as_data.program.items;
-        let ids = ast.list(items);
-        for i in 0..items.len {
-            let nid = unsafe ids[i as usize];
-            let n = ast.at_const(nid);
-            let mut name_node: NodeId = NODE_NONE;
-            let mut is_pub = false;
-            let mut is_type = false;
-            let mut consider = true;
-            if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
-                name_node = n.as_data.aggregate.name;
-                is_pub = n.as_data.aggregate.is_public;
-                is_type = true;
-            } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
-                name_node = n.as_data.type_alias.name;
-                is_pub = n.as_data.type_alias.is_public;
-                is_type = true;
-            } else if n.kind == NodeKind::NODE_INTERFACE {
-                name_node = n.as_data.interface_def.name;
-                is_pub = n.as_data.interface_def.is_public;
-                is_type = true;
-            } else if n.kind == NodeKind::NODE_FUNCTION {
-                name_node = n.as_data.function.name;
-                is_pub = n.as_data.function.is_public;
-                is_type = false;
-            } else if n.kind == NodeKind::NODE_CONST {
-                name_node = n.as_data.const_def.name;
-                is_pub = n.as_data.const_def.is_public;
-                is_type = false;
-            } else if n.kind == NodeKind::NODE_EXTERN_BLOCK {
-                // `pub` raw bindings / opaque handles live one level down, inside the extern block.
-                let inner = n.as_data.extern_block.items;
-                let iids = ast.list(inner);
-                for j in 0..inner.len {
-                    let iid = unsafe iids[j as usize];
-                    let it = ast.at_const(iid);
-                    let mut nn: NodeId = NODE_NONE;
-                    let mut ip = false;
-                    let mut it_type = false;
-                    let mut ok = true;
-                    if it.kind == NodeKind::NODE_FUNCTION {
-                        nn = it.as_data.function.name;
-                        ip = it.as_data.function.is_public;
-                        it_type = false;
-                    } else if it.kind == NodeKind::NODE_TYPE_ALIAS {
-                        nn = it.as_data.type_alias.name;
-                        ip = it.as_data.type_alias.is_public;
-                        it_type = true;
-                    } else if it.kind == NodeKind::NODE_CONST {
-                        nn = it.as_data.const_def.name;
-                        ip = it.as_data.const_def.is_public;
-                        it_type = false;
-                    } else if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
-                        // An extern struct/union/enum names a type across module boundaries exactly like a
-                        // top-level one; only its DEFINITION comes from the C header.
-                        nn = it.as_data.aggregate.name;
-                        ip = it.as_data.aggregate.is_public;
-                        it_type = true;
-                    } else {
-                        ok = false;
-                    }
-                    if ok && ip && it_type == want_type {
-                        let sp = ast.at_const(nn).as_data.name.text;
-                        let l = (sp.end - sp.start) as usize;
-                        if l == name.len() && unsafe cstring::memcmp(src + sp.start as usize, name.ptr(), name.len()) == 0 {
-                            return iid;
-                        }
-                    }
-                }
-                consider = false;
-            } else {
-                consider = false;
-            }
-            if consider && is_pub && is_type == want_type {
-                let sp = ast.at_const(name_node).as_data.name.text;
-                let l = (sp.end - sp.start) as usize;
-                if l == name.len() && unsafe cstring::memcmp(src + sp.start as usize, name.ptr(), name.len()) == 0 {
-                    return nid;
-                }
-            }
-        }
-        return NODE_NONE;
-    }
-
-    /// Like lookup but across every prelude module; the hit's `mid` is the owning module.
+    /// Like lookup but across every prelude module; the hit's `mid` is the owning module. The fixed
+    /// compiler hooks answer O(1) from the LangItem table (resolved by the same scan at index build);
+    /// dynamic names fall back to the module walk.
     pub fn prelude_lookup(self: &Self, name: str, want_type: bool) LookupHit {
+        let mp = (self as *const Package) as *mut Package;
+        mp.ensure_index();
+        let s = self.idx.syms.find(name);
+        if s == SYM_NONE {
+            return LookupHit { node: NODE_NONE, mid: 0 };
+        }
+        let lk = s as u64 * 2u64 + if want_type {
+            1u64;
+        } else {
+            0u64;
+        };
+        switch self.idx.li_map.get(&lk) {
+            Some(li) => {
+                return self.idx.lang_items[(*li) as usize];
+            },
+            None => {},
+        };
         for i in 0..self.modules.len() {
             if self.modules[i].prelude {
                 let d = self.lookup(i as ModuleId, name, want_type);
@@ -1219,13 +1606,16 @@ extend Package {
         return LookupHit { node: NODE_NONE, mid: 0 };
     }
 
-    /// The modules `mid` transitively imports (excluding `mid` itself), breadth-first in declaration order.
+    /// The modules `mid` transitively imports (excluding `mid` itself), breadth-first in declaration
+    /// order -- a BFS over the index import adjacency (identical order to the old per-call AST walk).
     pub fn import_closure(self: &Self, mid: ModuleId) Vector<ModuleId> {
         let n = self.modules.len();
         let mut out = Vector::<ModuleId>::new();
         if mid as usize > n {
             return out;
         } // the standalone Ast (module == count) has no imports to walk
+        let mp = (self as *const Package) as *mut Package;
+        mp.ensure_index();
         let mut seen = Vector::<bool>::new();
         for s in 0..n + 1 {
             seen.push(false);
@@ -1235,20 +1625,14 @@ extend Package {
         let mut cur = mid;
         let mut go = true;
         while go {
-            if cur as usize < n && self.modules[cur as usize].has_ast {
-                let ast = unsafe &*self.module_ast_ptr(cur);
-                let items = ast.at_const(ast.root).as_data.program.items;
-                let ids = ast.list(items);
-                let src = self.modules[cur as usize].source.as_str();
-                for i in 0..items.len {
-                    let it = ast.at_const(unsafe ids[i as usize]);
-                    if it.kind == NodeKind::NODE_IMPORT {
-                        let path = join_parts(ast, src, it.as_data.import_decl.path, "::");
-                        let c = self.find(path.as_str());
-                        if c >= 0 && !seen[c as usize] {
-                            seen.set(c as usize, true);
-                            out.push(c as ModuleId);
-                        }
+            if cur as usize < n {
+                let from = self.idx.mod_imports[cur as usize] as usize;
+                let to = self.idx.mod_imports[cur as usize + 1] as usize;
+                for e in from..to {
+                    let c = self.idx.imports[e];
+                    if !seen[c as usize] {
+                        seen.set(c as usize, true);
+                        out.push(c);
                     }
                 }
             }
@@ -1378,8 +1762,7 @@ extend Package as Free {
         self.always_methods.free();
         self.extern_privates.free();
         self.mod_refs.free();
-        self.lk_index.free();
-        self.lk_built.free();
+        self.idx.free();
         self.clo_lists.free();
         self.clo_built.free();
         self.tok_scratch.free();

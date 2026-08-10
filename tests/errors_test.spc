@@ -29,16 +29,18 @@ fn offset_of(src: str, needle: str) u32 {
 fn render_into(e: &mut diag::Errors, src: str, msg: str, off: u32, span: u32, file: str) String {
     e.emit(off, span, format("{}", msg));
     e.finalize(src, file);
-    return e.errors.at(0).clone();
+    return e.rendered_errors.at(0).clone();
 }
 
 @test
 fn emit_collects() {
     let mut e = diag::Errors::new();
     e.emit(12, 3, format("count is {} for {}", 7, "x"));
-    assert(e.errors.len() == 1 && e.starts.len() == 1 && e.lens.len() == 1, "one message + span recorded");
-    assert(e.errors.at(0).eq_str("count is 7 for x"), "format() rendering"); // pre-finalize
-    assert(*e.starts.at(0) == 12 && *e.lens.at(0) == 3, "span recorded verbatim");
+    assert(e.errors.len() == 1, "one record collected");
+    let d = e.errors.at(0);
+    assert(d.msg.eq_str("count is 7 for x"), "format() rendering"); // records stay raw
+    assert(d.start == 12 && d.len == 3, "span recorded verbatim");
+    assert(d.severity == diag::SEV_ERROR && d.note_head == diag::NOTE_NONE, "record fields");
 }
 
 @test
@@ -69,7 +71,8 @@ fn notes() {
     e.emit(offset_of(src, "y"), 1, format("{}", "unknown name"));
     e.note(format("did you mean '{}'?", "x"));
     e.finalize(src, "");
-    let b = e.errors.at(0).clone();
+    assert(e.errors.at(0).msg.eq_str("unknown name"), "record not rewritten by finalize");
+    let b = e.rendered_errors.at(0).clone();
     assert(contains(&b, "error: unknown name"), "error line");
     assert(contains(&b, "= note: did you mean 'x'?"), "note line");
 }
@@ -107,7 +110,7 @@ fn long_line_windowing() {
     let mut e = diag::Errors::new();
     e.emit(180, 3, format("{}", "m"));
     e.finalize(str::from_raw((&buf.b[0]) as *const u8, 201), "");
-    let b = e.errors.at(0).clone();
+    let b = e.rendered_errors.at(0).clone();
     assert(contains(&b, "--> 1:181"), "column past the window");
     assert(contains(&b, "^"), "a caret");
     // 150 x's in a row would mean no windowing; the 200-char line must be trimmed below that.
