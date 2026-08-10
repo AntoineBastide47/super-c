@@ -49,6 +49,9 @@ pub enum TokenType {
     CharacterLiteral,
     ByteCharacterLiteral,
     StringLiteral,
+    // Retired from surface syntax (replaced by matchertext literals); the variant keeps its
+    // numeric value per the bootstrap contract and marks the SYNTHETIC verbatim-with-brace-
+    // collapse segment literals the format rewrite builds (see tc_check_format).
     RawStringLiteral,
     ByteStringLiteral,
     LeftBrace,

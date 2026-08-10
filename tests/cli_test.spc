@@ -2,7 +2,7 @@
 // the self-hosted driver's CLI surface (usage/argc/missing-file/error-exit/retired-flag) AND the end-to-end
 // multi-file build pipeline (cross-module, generics, dyn, ffi, imports, extern-C, defaults, CTFE, --test).
 // Each @test writes a source tree with cli::Proj, compiles it (compile-only, emitting build/), then cc's the
-// emitted tree -Werror and runs it. Source trees are embedded verbatim as multi-line raw strings.
+// emitted tree -Werror and runs it. Source trees are embedded verbatim as multi-line matchertext literals.
 import tests::cli_harness as cli;
 import stdio;
 import module::loader as loader;
@@ -33,20 +33,20 @@ fn cross_module_enum() {
     let p = cli::proj_new();
     p.mkfile(
         "lib/lib.spc",
-        r#"pub enum Color { Red, Green = 5, Blue }
+        M"(pub enum Color { Red, Green = 5, Blue }
 pub enum Box { Empty, Filled(i32) }
 pub fn red() Color { return Color::Red; }
-"#,
+)",
     );
     p.mkfile(
         "xm.spc",
-        r#"import lib::lib;
+        M"(import lib::lib;
 extern "C" { fn exit(code: i32) void; }
 fn color_code(c: lib::lib::Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }
 fn box_amt(b: lib::lib::Box) i32 { return switch b { Filled(n) => n, Empty => -1, }; }
 fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);
   unsafe exit(color_code(c) + box_amt(b)); }
-"#,
+)",
     );
     let r = p.compile("xm.spc");
     assert(r.ok());
@@ -63,7 +63,7 @@ fn const_eval_flag() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"extern "C" { fn exit(code: i32) void; }
+        M"(extern "C" { fn exit(code: i32) void; }
 const K: i32 = 2;
 struct Pt { pub x: i32, pub y: u8 }
 struct Wrap<T> { pub v: T }
@@ -75,7 +75,7 @@ fn main() i32 {
   let w = Wrap::<[i32; 4]> { v: [1, 2, 3, 4] };
   unsafe exit(a[2] + a[3] + a[0] + w.v[3] + (sizeof((i32, bool)) as i32));
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -108,7 +108,7 @@ fn inline_for_and_parallel_for() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::atomics as atom;
+        M"(import std::parallel::atomics as atom;
 import std::parallel::runtime as rt;
 fn sum_upto<const N: usize>() usize {
   let mut t: usize = 0;
@@ -142,7 +142,7 @@ fn main() i32 {
   rt::shutdown();
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -161,7 +161,7 @@ fn reflection_tail() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"enum Shape { Dot, Pair(i32, i64), Tri { a: u8, b: i32, c: i64 }, }
+        M"(enum Shape { Dot, Pair(i32, i64), Tri { a: u8, b: i32, c: i64 }, }
 struct PP { pub x: i32, pub y: i32, }
 fn width<V>(x: &V) usize { let _ = x; return sizeof(V); }
 fn payload_widths<T>(e: &T) usize {
@@ -203,7 +203,7 @@ fn main() i32 {
   print("tail ok\n");
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -216,21 +216,21 @@ fn main() i32 {
     let p2 = cli::proj_new();
     p2.mkfile(
         "hop.spc",
-        r#"pub interface Pretty { fn m(self: &Self) i64; }
+        M"(pub interface Pretty { fn m(self: &Self) i64; }
 extend i32 as Pretty { pub fn m(self: &i32) i64 { return (*self) as i64 + 0; } }
 pub fn render<V: Pretty>(v: &V) i64 { return v.m(); }
 pub fn dump_all<T>(v: &T) i64 { let mut s: i64 = 0; inline for f in fields(v) { s += render(&f.value); } return s; }
-"#,
+)",
     );
-    p2.mkfile("hop2.spc", r#"import hop;
+    p2.mkfile("hop2.spc", M"(import hop;
 pub fn wrap<T>(v: &T) i64 { return hop::dump_all(v); }
-"#);
+)");
     p2.mkfile(
         "main.spc",
-        r#"import hop2;
+        M"(import hop2;
 struct Bad { pub a: i32, pub b: bool, }
 fn main() i32 { let b = Bad { a: 1, b: true }; let _ = hop2::wrap(&b); return 0; }
-"#,
+)",
     );
     p2.expect_fail("main.spc", "does not satisfy a bound the callee's reflection loop requires");
 }
@@ -240,7 +240,7 @@ fn reflect_enum_variants() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"enum Shape { Dot, Line(i64), Label(str), Pair(i32, i32), }
+        M"(enum Shape { Dot, Line(i64), Label(str), Pair(i32, i32), }
 fn main() i32 {
   let a = Shape::Dot;
   let b = Shape::Line(42);
@@ -259,7 +259,7 @@ fn main() i32 {
   if !ok { return 1; }
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -275,7 +275,7 @@ fn reflect_derives() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"struct Point { pub x: i32, pub y: u8, }
+        M"(struct Point { pub x: i32, pub y: u8, }
 struct Nested { pub p: Point, pub n: i64, }
 extend Point as Format { pub fn fmt(self: &Point) String { return reflect_string(self); } }
 extend Point as Hash { pub fn hash(self: &Point) u64 { return reflect_hash(self); } }
@@ -297,7 +297,7 @@ fn main() i32 {
   if reflect_hash(&nv) == 0 { return 5; }
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -313,16 +313,16 @@ fn derive_and_interface_defaults() {
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
-        r#"pub interface Pretty {
+        M"(pub interface Pretty {
   fn pp(self: &Self) String { return reflect_string(self); }
 }
 @derive(Format, Hash)
 pub struct Point { pub x: i32, pub y: i32, }
-"#,
+)",
     );
     p.mkfile(
         "main.spc",
-        r#"import lib;
+        M"(import lib;
 @derive(Format, Hash)
 enum Shape { Dot, Line(i32), Pair(i32, i64), }
 @derive(Format, lib::Pretty)
@@ -361,7 +361,7 @@ fn main() i32 {
   print("ok\n");
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -375,11 +375,11 @@ fn main() i32 {
     let bad = cli::proj_new();
     bad.mkfile(
         "main.spc",
-        r#"struct NoFmt { pub p: *const u8, }
+        M"(struct NoFmt { pub p: *const u8, }
 @derive(Format)
 struct Bad { pub a: i32, pub b: NoFmt, }
 fn main() i32 { let b = Bad { a: 1, b: NoFmt { p: null } }; let s = b.fmt(); s.free(); return 0; }
-"#,
+)",
     );
     let br = bad.compile("main.spc");
     assert(br.exit != 0, "unsatisfied derived bound rejects the build");
@@ -390,12 +390,12 @@ fn main() i32 { let b = Bad { a: 1, b: NoFmt { p: null } }; let s = b.fmt(); s.f
 @test
 fn format_args_via_conformance() {
     let p = cli::proj_new();
-    p.mkfile("lib.spc", r#"@derive(Format, Hash)
+    p.mkfile("lib.spc", M"(@derive(Format, Hash)
 pub struct Point { pub x: i32, pub y: i32, }
-"#);
+)");
     p.mkfile(
         "main.spc",
-        r#"import lib;
+        M"(import lib;
 @derive(Format)
 enum Shape { Dot, Pair(i32, i64), }
 struct Duo<A: Format, B: Format> { pub a: A, pub b: B, }
@@ -423,7 +423,7 @@ fn main() i32 {
   ds.free();
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -446,7 +446,7 @@ fn reflect_metadata() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"@reflect(entity, version = 3)
+        M"(@reflect(entity, version = 3)
 struct Player {
   @reflect(render, label = "Speed", max = 100)
   pub speed: i32,
@@ -510,7 +510,7 @@ fn main() i32 {
   print("ok\n");
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -527,12 +527,12 @@ fn main() i32 {
 @test
 fn std_reflection_defaults() {
     let p = cli::proj_new();
-    p.mkfile("lib.spc", r#"@derive(Eq, Hash, Format)
+    p.mkfile("lib.spc", M"(@derive(Eq, Hash, Format)
 pub struct Key { pub a: i32, pub b: u8, }
-"#);
+)");
     p.mkfile(
         "main.spc",
-        r#"import lib;
+        M"(import lib;
 @derive(Eq, Ord, Clone, Default)
 struct Point { pub x: i32, pub y: i32, }
 @derive(Eq, Ord)
@@ -575,7 +575,7 @@ fn main() i32 {
   print("ok\n");
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -590,10 +590,10 @@ fn main() i32 {
     let bad = cli::proj_new();
     bad.mkfile(
         "main.spc",
-        r#"enum E { X, Y(i32), }
+        M"(enum E { X, Y(i32), }
 extend E as Clone {}
 fn main() i32 { let e = E::Y(5); let c = e.clone(); let _ = c; return 0; }
-"#,
+)",
     );
     let br = bad.compile("main.spc");
     assert(br.ok());
@@ -609,7 +609,7 @@ fn paired_reflection_and_construction() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"struct P { pub x: i32, pub v: Vector<i32>, }
+        M"(struct P { pub x: i32, pub v: Vector<i32>, }
 enum E { A, B(i32), C(i32, i64), }
 enum Color { Red = 3, Green = 7, }
 fn eqf<V: Eq>(a: &V, b: &V) bool { return a.eq(b); }
@@ -690,7 +690,7 @@ fn main() i32 {
   print("ok\n");
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -706,7 +706,7 @@ fn fields_projection_extended() {
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
-        r#"pub interface Pretty { fn pretty(self: &Self) i64; }
+        M"(pub interface Pretty { fn pretty(self: &Self) i64; }
 extend i32 as Pretty { pub fn pretty(self: &i32) i64 { return (*self) as i64 + 0; } }
 pub fn render<V: Pretty>(v: &V) i64 { return v.pretty(); }
 pub fn dump_all<T>(v: &T) i64 {
@@ -714,11 +714,11 @@ pub fn dump_all<T>(v: &T) i64 {
   inline for f in fields(v) { s += render(&f.value); }
   return s;
 }
-"#,
+)",
     );
     p.mkfile(
         "main.spc",
-        r#"import lib;
+        M"(import lib;
 import string as cstr;
 struct A { pub x: i32, pub y: u8, }
 struct B { pub s: i64, pub t: bool, }
@@ -752,7 +752,7 @@ fn main() i32 {
   print("extended ok\n");
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -768,7 +768,7 @@ fn fields_projection_serializer() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"struct Inner { pub a: u16, }
+        M"(struct Inner { pub a: u16, }
 struct Mixed { pub p: Inner, pub q: i64, pub r: bool, }
 fn width<V>(v: &V) usize { let _ = v; return sizeof(V); }
 fn dump<T>(v: &T) usize {
@@ -787,7 +787,7 @@ fn main() i32 {
   if dump(&i) != 2 { return 2; }
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -805,7 +805,7 @@ fn type_info_reflection() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"struct Point { pub x: i32, pub y: u8, }
+        M"(struct Point { pub x: i32, pub y: u8, }
 enum Color { Red, Green, Blue = 7, }
 fn kindof<T>() TypeTag { return type_info::<T>().kind; }
 const TI: TypeInfo = type_info::<Point>();
@@ -840,7 +840,7 @@ fn main() i32 {
   return 0;
 }
 enum Shape { Dot, Line(i32, i32), }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -860,7 +860,7 @@ fn ctfe() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"extern "C" { fn rand() i32; }
+        M"(extern "C" { fn rand() i32; }
 fn fib(n: i32) i32 {
   if n < 2 { return n; }
   return fib(n - 1) + fib(n - 2);
@@ -881,13 +881,13 @@ fn main() i32 {
   if late() < 0 { return 1; }
   return x;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "ctfe")"#), "fib(20) ran at compile time");
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "loops fold")"#), "collatz(27) ran at compile time");
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "floats fold")"#), "float CTFE ran at compile time");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "ctfe"))"), "fib(20) ran at compile time");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "loops fold"))"), "collatz(27) ran at compile time");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "floats fold"))"), "float CTFE ran at compile time");
     assert(p.gen_has("main.c", "x = 8;"), "the call site folded to its value");
     assert(!p.gen_has("main.c", "fib(10"), "no interpreted call survives in main (fib(10))");
     assert(!p.gen_has("main.c", "fib(9"), "no interpreted call survives in main (fib(9))");
@@ -899,13 +899,13 @@ fn main() i32 {
     // an over-budget callee bails to a runtime call instead of hanging the compiler
     p.mkfile(
         "main.spc",
-        r#"fn spin() i32 {
+        M"(fn spin() i32 {
   let mut i = 0;
   while true { i += 1; if i > 100_000_000 { return i; } }
   return 0;
 }
 fn main() i32 { if spin() > 0 { return 3; } return 4; }
-"#,
+)",
     );
     let s = p.compile("main.spc");
     assert(s.ok());
@@ -914,10 +914,10 @@ fn main() i32 { if spin() > 0 { return 3; } return 4; }
     // --const-eval-steps starves a loop-driven assert -> reports the budget
     p.mkfile(
         "main.spc",
-        r#"fn burn() i32 { let mut i = 0; while i < 1_000_000 { i += 1; } return i; }
+        M"(fn burn() i32 { let mut i = 0; while i < 1_000_000 { i += 1; } return i; }
 static_assert(burn() == 1_000_000, "needs execution");
 fn main() i32 { return 0; }
-"#,
+)",
     );
     let b = p.compile_flags("--const-eval-steps=4096", "main.spc");
     assert(b.exit != 0, "a starved assert fails the build");
@@ -926,26 +926,29 @@ fn main() i32 { return 0; }
     // the (fn, args) call memo folds fib(40) comfortably inside a 100k-step budget
     p.mkfile(
         "main.spc",
-        r#"fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
+        M"(fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
 static_assert(fib(40) == 102_334_155, "memoized");
 fn main() i32 { return 0; }
-"#,
+)",
     );
     let m = p.compile_flags("--const-eval-steps=100000", "main.spc");
     assert(m.ok());
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "memoized")"#), "the call cache collapsed the recursion");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "memoized"))"), "the call cache collapsed the recursion");
 
-    // raw strings are CTFE-visible (hash-delimited content with an interior quote folds like any literal)
+    // matchertext literals are CTFE-visible (verbatim content with an interior quote folds like any literal)
     p.mkfile(
         "main.spc",
-        r##"const G: str = r#"say "hi""#;
+        M"(const G: str = M"[say "hi"]";
 static_assert(G.len() == 8, "raw folds");
 fn main() i32 { return 0; }
-"##,
+)",
     );
     let rw = p.compile("main.spc");
     assert(rw.ok());
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "raw folds")"#), "raw string len folded at compile time");
+    assert(
+        p.gen_has("main.c", M"(_Static_assert(true, "raw folds"))"),
+        "matchertext literal len folded at compile time",
+    );
 }
 
 // CTFE over aggregates and the abstract heap: structs + methods + extend dispatch, local arrays, generics,
@@ -956,7 +959,7 @@ fn ctfe_memory() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"static_assert(vec_sum() == 44, "deferred: asserts may precede their callee");
+        M"(static_assert(vec_sum() == 44, "deferred: asserts may precede their callee");
 struct Pt { x: i32, y: i32 }
 extend Pt {
   pub fn mag2(self: &Pt) i32 { return self.x * self.x + self.y * self.y; }
@@ -995,17 +998,17 @@ fn vec_sum() i32 {
   return s;
 }
 fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(
-        p.gen_has("main.c", r#"_Static_assert(true, "deferred: asserts may precede their callee")"#),
+        p.gen_has("main.c", M"(_Static_assert(true, "deferred: asserts may precede their callee"))"),
         "assert above its callee folds",
     );
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "aggregates fold")"#), "structs/arrays/methods fold");
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "the abstract heap folds")"#), "malloc/free fold");
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "payload enums fold")"#), "Option + switch folds");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "aggregates fold"))"), "structs/arrays/methods fold");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "the abstract heap folds"))"), "malloc/free fold");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "payload enums fold"))"), "Option + switch folds");
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
@@ -1013,10 +1016,10 @@ fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
     // a would-be runtime trap in a required-const context reports its reason
     p.mkfile(
         "main.spc",
-        r#"fn div0(n: i32) i32 { return 10 / n; }
+        M"(fn div0(n: i32) i32 { return 10 / n; }
 static_assert(div0(0) == 1, "traps");
 fn main() i32 { return 0; }
-"#,
+)",
     );
     let d = p.compile("main.spc");
     assert(d.exit != 0, "a trapping assert fails the build");
@@ -1025,7 +1028,7 @@ fn main() i32 { return 0; }
     // use-after-free is caught by the abstract heap
     p.mkfile(
         "main.spc",
-        r#"extern "C" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }
+        M"(extern "C" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }
 fn uaf() i32 {
   let p = unsafe malloc(sizeof(i32)) as *mut i32;
   unsafe p[0] = 1;
@@ -1034,7 +1037,7 @@ fn uaf() i32 {
 }
 static_assert(uaf() == 1, "uaf");
 fn main() i32 { return 0; }
-"#,
+)",
     );
     let u = p.compile("main.spc");
     assert(u.exit != 0, "use-after-free fails the build");
@@ -1048,7 +1051,7 @@ fn ctfe_gaps() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"const K: i32 = 40;
+        M"(const K: i32 = 40;
 fn check(k: i32) Result<i32, i32> {
   if k < 0 { return Result::<i32, i32>::Err(-1); }
   return Result::<i32, i32>::Ok(k + 1);
@@ -1097,15 +1100,15 @@ fn g5() i32 {
 }
 static_assert(g5() == 43, "Map and Set fold");
 fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5() - 43; }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "try both paths")"#), "? folds both ways");
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "slices + range indexing")"#), "slices fold");
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "struct patterns + &const")"#), "struct patterns fold");
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "interface default body")"#), "interface defaults fold");
-    assert(p.gen_has("main.c", r#"_Static_assert(true, "Map and Set fold")"#), "Map/Set fold");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "try both paths"))"), "? folds both ways");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "slices + range indexing"))"), "slices fold");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "struct patterns + &const"))"), "struct patterns fold");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "interface default body"))"), "interface defaults fold");
+    assert(p.gen_has("main.c", M"(_Static_assert(true, "Map and Set fold"))"), "Map/Set fold");
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
@@ -1357,22 +1360,22 @@ fn module_features() {
     let p = cli::proj_new();
     p.mkfile(
         "lib/lib.spc",
-        r#"pub struct Vec2 { pub x: i32, pub y: i32 }
+        M"(pub struct Vec2 { pub x: i32, pub y: i32 }
 pub type V = Vec2;
 pub const BASE: i32 = 100;
 pub fn mk(a: i32, b: i32) Vec2 { return Vec2 { x: a, y: b }; }
-"#,
+)",
     );
     p.mkfile(
         "feat.spc",
-        r#"import lib::lib;
+        M"(import lib::lib;
 extern "C" { fn exit(code: i32) void; }
 extend lib::lib::Vec2 { fn sum(self: &lib::lib::Vec2) i32 { return self.x + self.y; } }
 fn main() i32 {
   let v: lib::lib::V = lib::lib::Vec2 { x: 5, y: 7 };
   let w = lib::lib::mk(1, 2);
   unsafe exit(v.sum() + w.sum() + lib::lib::BASE); }
-"#,
+)",
     );
     let r = p.compile("feat.spc");
     assert(r.ok());
@@ -1386,19 +1389,19 @@ fn main() i32 {
 @test
 fn cross_module_static_mut() {
     let p = cli::proj_new();
-    p.mkfile("state.spc", r#"pub static mut hits: i64 = 0;
+    p.mkfile("state.spc", M"(pub static mut hits: i64 = 0;
 pub fn record() { unsafe hits += 1; }
-"#);
+)");
     p.mkfile(
         "main.spc",
-        r#"import state;
+        M"(import state;
 fn main() i32 {
   state::record();
   state::record();
   unsafe state::hits += 3;
   return (unsafe state::hits - 5) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -1414,7 +1417,7 @@ fn test_pipeline() {
     let p = cli::proj_new();
     p.mkfile(
         "env.spc",
-        r#"pub struct Env { pub tag: String }
+        M"(pub struct Env { pub tag: String }
 extend Env as Free {
   pub fn free(self: &mut Env) { self.tag.free(); }
 }
@@ -1422,11 +1425,11 @@ extend Env as Free {
 fn suite() Env { return Env { tag: String::from_str("suite") }; }
 @test_free(global)
 fn suite_down(env: &mut Env) { eprintln("teardown {}", env.tag.as_str()); }
-"#,
+)",
     );
     p.mkfile(
         "main.spc",
-        r#"import env;
+        M"(import env;
 struct Fx { pub v: Vector<i32> }
 extend Fx as Free {
   pub fn free(self: &mut Fx) { self.v.free(); }
@@ -1458,7 +1461,7 @@ extend Counter {
   }
 }
 fn main() i32 { return 0; }
-"#,
+)",
     );
     let r = p.compile_flags("--test", "main.spc");
     assert_eq(r.exit, 1);
@@ -1504,17 +1507,17 @@ fn cross_module_generic_by_value() {
     let p = cli::proj_new();
     p.mkfile(
         "opt/opt.spc",
-        r#"pub enum Opt<T> { Some(T), None }
+        M"(pub enum Opt<T> { Some(T), None }
 extend<T> Opt<T> {
   pub fn unwrap_or(self: &Opt<T>, d: T) T { return switch self { Some(v) => *v, None => d, }; }
   pub fn map<U>(self: &Opt<T>, f: fn(T) U) Opt<U> {
     return switch self { Some(v) => Opt::<U>::Some(f(*v)), None => Opt::<U>::None, }; }
 }
-"#,
+)",
     );
     p.mkfile(
         "genbv.spc",
-        r#"import opt::opt;
+        M"(import opt::opt;
 extern "C" { fn exit(code: i32) void; }
 struct Bar { pub x: i32 }
 fn bx(b: Bar) i32 { return b.x; }
@@ -1523,7 +1526,7 @@ fn main() i32 {
   let a = o.unwrap_or(Bar { x: 0 }).x;
   let m = o.map(bx).unwrap_or(0);
   unsafe exit(a + m); }
-"#,
+)",
     );
     let r = p.compile("genbv.spc");
     assert(r.ok());
@@ -1543,16 +1546,16 @@ fn cross_module_generic_bound_dispatch() {
     let p = cli::proj_new();
     p.mkfile(
         "bx/bx.spc",
-        r#"pub interface Clone { fn clone(self: &Self) Self; }
+        M"(pub interface Clone { fn clone(self: &Self) Self; }
 pub struct Bx<T> { pub v: T }
 extend<T: Clone> Bx<T> {
   pub fn dup(self: &Bx<T>) Bx<T> { return Bx::<T> { v: self.v.clone() }; }
 }
-"#,
+)",
     );
     p.mkfile(
         "genbd.spc",
-        r#"import bx::bx;
+        M"(import bx::bx;
 extern "C" { fn exit(code: i32) void; }
 struct Bar { pub x: i32 }
 extend Bar as bx::bx::Clone { fn clone(self: &Self) Bar { return Bar { x: self.x }; } }
@@ -1560,7 +1563,7 @@ fn main() i32 {
   let b = bx::bx::Bx::<Bar> { v: Bar { x: 21 } };
   let d = b.dup();
   unsafe exit(d.v.x + b.v.x); }
-"#,
+)",
     );
     let r = p.compile("genbd.spc");
     assert(r.ok());
@@ -1576,12 +1579,12 @@ fn emit_macro_export() {
     let p = cli::proj_new();
     p.mkfile(
         "emac.spc",
-        r#"extern "C" { fn exit(code: i32) void; }
+        M"(extern "C" { fn exit(code: i32) void; }
 @emit_macro
 pub struct Pair<T> { pub a: T, pub b: T }
 extend<T> Pair<T> { pub fn pick(self: &Pair<T>, second: bool) T { if second { return self.b; } return self.a; } }
 fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p.a); }
-"#,
+)",
     );
     let r = p.compile("emac.spc");
     assert(r.ok());
@@ -1594,13 +1597,13 @@ fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p
     // a plain-C consumer instantiates the template over its own C type (no Super-C compiler involved)
     p.mkfile(
         "cuser.c",
-        r#"#include "emac.h"
+        M"(#include "emac.h"
 typedef struct { int n; } CT;
 PAIR_DECLARE(CT, CT, Pair__CT)
 PAIR_DEFINE(CT, CT, Pair__CT)
 int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
   return Pair__CT__pick(&p, 1).n == 9 ? 0 : 1; }
-"#,
+)",
     );
     let mut cc2 = Cmd {};
     unsafe stdio::snprintf(
@@ -1636,14 +1639,14 @@ fn per_extend_bound_filtering() {
     let p = cli::proj_new();
     p.mkfile(
         "pibf.spc",
-        r#"extern "C" { fn exit(code: i32) void; }
+        M"(extern "C" { fn exit(code: i32) void; }
 pub interface Marker { fn mark(self: &Self) i32; }
 pub struct Wrap<T> { pub v: T }
 extend<T> Wrap<T> { pub fn raw(self: &Wrap<T>) i32 { return 7; } }
 extend<T: Marker> Wrap<T> { pub fn marked(self: &Wrap<T>) i32 { return self.v.mark(); } }
 struct Plain { pub n: i32 }
 fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()); }
-"#,
+)",
     );
     let r = p.compile("pibf.spc");
     assert(r.ok());
@@ -1659,7 +1662,7 @@ fn string_non_default_allocator() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }
+        M"(extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }
 struct RawAlloc {}
 extend RawAlloc as Allocator {
   unsafe fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return unsafe malloc(n); }
@@ -1676,7 +1679,7 @@ fn main() i32 {
   if ok { return 42; }
   return 1;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -1692,7 +1695,7 @@ fn warning_clean_unused_emission() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"extern "C" { fn exit(code: i32) void; }
+        M"(extern "C" { fn exit(code: i32) void; }
 fn unused_private() i32 { return 99; }
 interface I { fn value(self: &Self) i32; fn unused_default(self: &Self) i32 { return 123; } }
 struct S { pub x: i32 }
@@ -1703,7 +1706,7 @@ extend<T> Wrap<T> {
   fn unused_method(self: &Self) T { return self.v; }
 }
 fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(s.value() + w.get()); }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -1721,7 +1724,7 @@ fn threads_and_atomics() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::thread as thread;
+        M"(import std::parallel::thread as thread;
 import std::parallel::atomics as atom;
 import std::parallel::arc as arc;
 
@@ -1748,7 +1751,7 @@ fn main() i32 {
     let total = counter.get().load(atom::MemoryOrder::SeqCst);
     return (n as i32 - 7) + (total - 4000) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -1765,14 +1768,14 @@ fn thread_send_rejects_raw_pointer() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::thread as thread;
+        M"(import std::parallel::thread as thread;
 fn main() i32 {
     let mut x: i32 = 5;
     let ptr = &mut x as *mut i32;
     let h = thread::spawn(fn() i32 { return unsafe { ptr[0]; }; });
     return h.join();
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.exit != 0, "capturing a raw pointer into a spawned thread is rejected");
@@ -1789,7 +1792,7 @@ fn launch_rejects_borrowed_capture() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::atomics as atom;
 
 fn main() i32 {
@@ -1801,7 +1804,7 @@ fn main() i32 {
     rt::shutdown();
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.exit != 0, "launching a closure that captures a borrow is rejected");
@@ -1810,7 +1813,7 @@ fn main() i32 {
     let q = cli::proj_new();
     q.mkfile(
         "main.spc",
-        r#"import std::parallel::thread as thread;
+        M"(import std::parallel::thread as thread;
 
 fn main() i32 {
     let mut total: i64 = 0;
@@ -1820,7 +1823,7 @@ fn main() i32 {
     });
     return h.join() as i32;
 }
-"#,
+)",
     );
     let r2 = q.compile("main.spc");
     assert(r2.exit != 0, "spawning a closure that mutates a capture is rejected");
@@ -1835,7 +1838,7 @@ fn platform_substrate() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import sc_runtime;
+        M"(import sc_runtime;
 import std::parallel::platform as platform;
 import std::parallel::thread as thread;
 import atomic;
@@ -1900,7 +1903,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -1918,7 +1921,7 @@ fn platform_gates_ext_c() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"@platform(windows)
+        M"(@platform(windows)
 @c.link("scrt_win_only_lib")
 extern "C" "scrt_no_such_header.h" {
     pub fn scrt_win_only() i32;
@@ -1932,7 +1935,7 @@ extern "C" {
 fn main() i32 {
     return 0;
 }
-"#,
+)",
     );
     // Builds on the host even though the windows block names a header that does not exist: it is gated out.
     let r = p.compile("main.spc");
@@ -1955,7 +1958,7 @@ fn launch_runtime() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
@@ -1977,7 +1980,7 @@ fn main() i32 {
     rt::shutdown();
     return (total - 100) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -1997,7 +2000,7 @@ fn preemption_yields_a_spinning_task() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
@@ -2031,7 +2034,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2045,14 +2048,14 @@ fn main() i32 {
     let q = cli::proj_new();
     q.mkfile(
         "main.spc",
-        r#"fn main() i32 {
+        M"(fn main() i32 {
     let mut t: i64 = 0;
     for i in 0..10 {
         t = t + i as i64;
     }
     return (t - 45) as i32;
 }
-"#,
+)",
     );
     let r2 = q.compile("main.spc");
     assert(r2.ok());
@@ -2071,7 +2074,7 @@ fn blocking_call_frees_the_worker() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::blocking as blocking;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
@@ -2120,7 +2123,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2140,7 +2143,7 @@ fn stack_overflow_is_reported() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::platform as platform;
 
@@ -2166,7 +2169,7 @@ fn main() i32 {
     rt::shutdown();
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2179,7 +2182,7 @@ fn main() i32 {
     // The same recursion fits once the task is given room for it.
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::platform as platform;
 
@@ -2206,7 +2209,7 @@ fn main() i32 {
     rt::shutdown();
     return 0;
 }
-"#,
+)",
     );
     let r2 = p.compile("main.spc");
     assert(r2.ok());
@@ -2217,7 +2220,7 @@ fn main() i32 {
     // A wild pointer is a crash, not a stack overflow: the message must not appear.
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::platform as platform;
 
@@ -2234,7 +2237,7 @@ fn main() i32 {
     rt::shutdown();
     return 0;
 }
-"#,
+)",
     );
     let r3 = p.compile("main.spc");
     assert(r3.ok());
@@ -2252,7 +2255,7 @@ fn task_diagnostics() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
@@ -2285,7 +2288,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2298,7 +2301,7 @@ fn main() i32 {
     let q = cli::proj_new();
     q.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 
 fn main() i32 {
@@ -2313,7 +2316,7 @@ fn main() i32 {
     rt::shutdown();
     return 0;
 }
-"#,
+)",
     );
     let r2 = q.compile("main.spc");
     assert(r2.ok());
@@ -2339,7 +2342,7 @@ fn reactor_tcp_echo() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::net as net;
 import std::parallel::io as io;
 import std::parallel::sync as sync;
@@ -2408,7 +2411,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2427,7 +2430,7 @@ fn reactor_udp_and_typed_errors() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::net;
 import std::parallel::io;
 import std::parallel::sync;
@@ -2480,7 +2483,7 @@ fn main() i32 {
     rt::shutdown();
     return (total - 505) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2492,7 +2495,7 @@ fn main() i32 {
     let q = cli::proj_new();
     q.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::net;
 import std::parallel::io;
 
@@ -2546,7 +2549,7 @@ fn main() i32 {
     rt::shutdown();
     return score - 2;
 }
-"#,
+)",
     );
     let r2 = q.compile("main.spc");
     assert(r2.ok());
@@ -2564,7 +2567,7 @@ fn reactor_many_connections() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::net as net;
 import std::parallel::io as io;
 import std::parallel::sync as sync;
@@ -2650,7 +2653,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2670,7 +2673,7 @@ fn blocking_attribute() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::blocking as blocking;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
@@ -2717,7 +2720,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2736,7 +2739,7 @@ fn data_parallel_guided_schedule() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::data as parallel;
 import std::parallel::atomics as atom;
 
@@ -2755,7 +2758,7 @@ fn main() i32 {
     rt::shutdown();
     return (got - n as i64) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2772,7 +2775,7 @@ fn blocking_attribute_rejects_variadic() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"extern "C" "fcntl.h" {
+        M"(extern "C" "fcntl.h" {
     @blocking
     pub fn open(path: *const char, flags: i32, ...) i32;
 }
@@ -2780,7 +2783,7 @@ fn blocking_attribute_rejects_variadic() {
 fn main() i32 {
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.exit != 0, "@blocking on a variadic is rejected");
@@ -2797,7 +2800,7 @@ fn work_stealing_imbalance() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
@@ -2844,7 +2847,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2865,7 +2868,7 @@ fn deterministic_replay() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 
@@ -2895,7 +2898,7 @@ fn main() i32 {
     rt::shutdown();
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2929,7 +2932,7 @@ fn channel_mpmc() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::channel as chan;
 
 fn main() i32 {
@@ -2959,7 +2962,7 @@ fn main() i32 {
     rt::shutdown();
     return (n - 100) + (total - 1200) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -2978,7 +2981,7 @@ fn lock_order_inversion() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::sync as sync;
+        M"(import std::parallel::sync as sync;
 
 fn main() i32 {
     let a = sync::Mutex::<i64>::new(0);
@@ -2993,7 +2996,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3020,7 +3023,7 @@ fn channel_batch_send_recv() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::channel as chan;
 
 fn main() i32 {
@@ -3072,7 +3075,7 @@ fn main() i32 {
     rt::shutdown();
     return (n - 100) as i32 + (total - 4950) as i32 + bad;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3093,7 +3096,7 @@ fn channel_parking_oversubscribed() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::channel as chan;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
@@ -3145,7 +3148,7 @@ fn main() i32 {
     rt::shutdown();
     return (n - 300) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3164,7 +3167,7 @@ fn coroutine_sleep_and_timers() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::time as time;
 import std::parallel::platform as platform;
@@ -3209,7 +3212,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3229,7 +3232,7 @@ fn task_aware_locks() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::time as time;
 import std::parallel::arc as arc;
@@ -3318,7 +3321,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3337,7 +3340,7 @@ fn channel_unbounded_and_timeouts() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::channel as chan;
 import std::parallel::time as time;
 import std::parallel::platform as platform;
@@ -3401,7 +3404,7 @@ fn main() i32 {
     rt::shutdown();
     return (sum - 4993) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3422,7 +3425,7 @@ fn timed_wait_deadline_races() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::channel as chan;
 import std::parallel::time as time;
@@ -3475,7 +3478,7 @@ fn main() i32 {
     rt::shutdown();
     return (locked - 1000) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3495,7 +3498,7 @@ fn select_waits_on_several_channels() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::channel as chan;
 import std::parallel::selector as selector;
 import std::parallel::sync as sync;
@@ -3637,7 +3640,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3657,7 +3660,7 @@ fn select_arms_and_fairness() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::channel as chan;
 import std::parallel::selector as selector;
 import std::parallel::sync as sync;
@@ -3773,7 +3776,7 @@ fn main() i32 {
     rt::shutdown();
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3794,7 +3797,7 @@ fn select_keyword() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::channel as chan;
 import std::parallel::sync as sync;
 import std::parallel::time as time;
@@ -3930,7 +3933,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -3948,7 +3951,7 @@ fn select_keyword_diagnostics() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::channel as chan;
+        M"(import std::parallel::channel as chan;
 
 fn make() chan::Receiver<i64> {
     let a = chan::Channel::<i64>::bounded(1);
@@ -3975,7 +3978,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.exit != 0, "a malformed select is an error");
@@ -3995,13 +3998,13 @@ fn partial_module_use_after_foreign_expansion() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::selector as selector;
+        M"(import std::parallel::selector as selector;
 
 fn main() i32 {
     let s = selector::Selector::new();
     return s.len() as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4022,7 +4025,7 @@ fn data_parallel_api() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::data as parallel;
 import std::parallel::atomics as atom;
 
@@ -4117,7 +4120,7 @@ fn main() i32 {
     rt::shutdown();
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4136,7 +4139,7 @@ fn data_parallel_nesting() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::runtime as rt;
+        M"(import std::parallel::runtime as rt;
 import std::parallel::data as parallel;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
@@ -4181,7 +4184,7 @@ fn main() i32 {
     rt::shutdown();
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4200,7 +4203,7 @@ fn data_parallel_rejects_mutating_body() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::data as parallel;
+        M"(import std::parallel::data as parallel;
 
 fn main() i32 {
     let mut v = Vector::<i64>::new();
@@ -4210,7 +4213,7 @@ fn main() i32 {
     });
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.exit != 0, "a body that mutates a capture is rejected");
@@ -4253,7 +4256,7 @@ fn sync_primitives() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import std::parallel::thread as thread;
+        M"(import std::parallel::thread as thread;
 import std::parallel::arc as arc;
 import std::parallel::sync as sync;
 
@@ -4297,7 +4300,7 @@ fn main() i32 {
     }
     return (total - 8000) as i32 + (r - 7) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4329,21 +4332,21 @@ fn cross_module_nested_rehomed_instance() {
     let p = cli::proj_new();
     p.mkfile(
         "lib/lib.spc",
-        r#"pub struct Inner<T> { pub value: T }
+        M"(pub struct Inner<T> { pub value: T }
 pub struct Outer<T> { pub inner: Inner<T> }
 extend<T> Outer<T> { pub fn get(self: &Self) T { return self.inner.value; } }
-"#,
+)",
     );
     p.mkfile(
         "main.spc",
-        r#"import lib::lib;
+        M"(import lib::lib;
 extern "C" { fn exit(code: i32) void; }
 struct Bar { pub x: i32 }
 fn main() i32 {
   let o = lib::lib::Outer::<Bar> { inner: lib::lib::Inner::<Bar> { value: Bar { x: 42 } } };
   unsafe exit(o.get().x);
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4360,13 +4363,13 @@ fn cross_module_interface() {
     p.mkfile("shapes.spc", "pub interface Area { fn area(self: *mut Self) i32; }\n");
     p.mkfile(
         "main.spc",
-        r#"import shapes;
+        M"(import shapes;
 extern "C" { fn exit(code: i32) void; }
 struct Sq { pub s: i32 }
 extend Sq as shapes::Area { fn area(self: *mut Self) i32 { return unsafe (self.s * self.s); } }
 fn total<T: shapes::Area>(x: &mut T) i32 { return x.area(); }
 fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4382,7 +4385,7 @@ fn cross_module_dyn() {
     let p = cli::proj_new();
     p.mkfile(
         "shapes.spc",
-        r#"pub interface Shape {
+        M"(pub interface Shape {
     fn area(self: &Self) i32;
     fn tag(self: &Self) i32 { return 7; }
 }
@@ -4391,11 +4394,11 @@ extend Circle as Shape {
     pub fn area(self: &Circle) i32 { return 3 * self.r * self.r; }
 }
 pub fn local_view(s: &dyn Shape) i32 { return s.area(); }
-"#,
+)",
     );
     p.mkfile(
         "main.spc",
-        r#"import shapes;
+        M"(import shapes;
 extern "C" { fn exit(code: i32) void; }
 struct Sq { pub s: i32 }
 extend Sq as shapes::Shape {
@@ -4412,7 +4415,7 @@ fn main() i32 {
     let w = d.tag() + q.tag();
     unsafe exit(t + u + w + d.area());
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4428,7 +4431,7 @@ fn ffi_bindings() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import math;
+        M"(import math;
 import ctype;
 extern "C" { fn exit(code: i32) void; }
 fn main() i32 {
@@ -4438,7 +4441,7 @@ fn main() i32 {
   if ctype::is_alpha(53) { acc = acc + 10; }
   unsafe exit(s + acc);
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4458,7 +4461,7 @@ fn ffi_posix_bindings() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import unistd;
+        M"(import unistd;
 import fcntl;
 import filesystem;
 
@@ -4489,7 +4492,7 @@ fn main() i32 {
     }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4512,7 +4515,7 @@ fn module_imports() {
     p.mkfile("facade.spc", "import deep;\n");
     p.mkfile(
         "main.spc",
-        r#"import string as s;
+        M"(import string as s;
 import math as *;
 import facade as *;
 extern "C" { fn exit(code: i32) void; }
@@ -4520,7 +4523,7 @@ fn main() i32 {
   let d = D { v: deep::dtag() / 10 };
   unsafe exit(s::tag() + tag() + dtag() + d.v);
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4592,26 +4595,26 @@ fn cross_module_defaults() {
     let p = cli::proj_new();
     p.mkfile(
         "shapes.spc",
-        r#"pub interface Shape {
+        M"(pub interface Shape {
   fn area(self: &Self) i32;
   fn double_area(self: &Self) i32 { return self.area() * 2; }
   fn describe(self: &Self) i32 { return self.double_area() + 1; }
 }
-"#,
+)",
     );
     p.mkfile(
         "circle.spc",
-        r#"import shapes;
+        M"(import shapes;
 pub struct Circle { pub r: i32 }
 extend Circle as shapes::Shape {
   pub fn area(self: &Circle) i32 { return self.r * self.r * 3; }
 }
-"#,
+)",
     );
     p.mkfile("point.spc", "pub struct Point { pub x: i32 }\n");
     p.mkfile(
         "main.spc",
-        r#"import circle;
+        M"(import circle;
 import shapes;
 import point;
 extend point::Point as shapes::Shape {
@@ -4628,7 +4631,7 @@ fn main() i32 {
   let n: i32 = 4;
   unsafe exit(c.describe() + dyn_describe(&c) + p.describe() + n.describe());
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4644,7 +4647,7 @@ fn format_conformances() {
     let p = cli::proj_new();
     p.mkfile(
         "fmt.spc",
-        r#"fn main() i32 {
+        M"(fn main() i32 {
   let mut v = Vector::<String>::new();
   v.push(String::from_str("a")); v.push(String::from_str("b"));
   let vs = v.fmt();
@@ -4654,7 +4657,7 @@ fn format_conformances() {
   let rs = r.fmt();
   return vs.len() as i32 + os.len() as i32 + rs.len() as i32;
 }
-"#,
+)",
     );
     let r = p.compile("fmt.spc");
     assert(r.ok());
@@ -4670,21 +4673,21 @@ fn module_cycles() {
     let p = cli::proj_new();
     p.mkfile(
         "a.spc",
-        r#"import b;
+        M"(import b;
 pub struct AN { pub v: i32, pub link: *mut b::BN }
 pub fn even(n: i32) i32 { if n == 0 { return 1; } return b::odd(n - 1); }
-"#,
+)",
     );
     p.mkfile(
         "b.spc",
-        r#"import a;
+        M"(import a;
 pub struct BN { pub v: i32, pub link: *mut a::AN }
 pub fn odd(n: i32) i32 { if n == 0 { return 0; } return a::even(n - 1); }
-"#,
+)",
     );
     p.mkfile(
         "main.spc",
-        r#"import a;
+        M"(import a;
 import b;
 extern "C" { fn exit(code: i32) void; }
 fn main() i32 {
@@ -4693,7 +4696,7 @@ fn main() i32 {
   let linked = unsafe (*bn.link).v + bn.v;
   unsafe exit(linked + a::even(10) * 10);
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4786,7 +4789,7 @@ fn ctfe_reinterpret_is_not_folded() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"import stdio;
+        M"(import stdio;
 fn bits(v: f64) u64 {
     let x = v;
     return unsafe *((&x) as *const f64 as *const u64);
@@ -4796,7 +4799,7 @@ fn main() i32 {
     // fold produces something else.
     return (bits(0.1) != 0x3FB999999999999A) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -4809,27 +4812,27 @@ fn main() i32 {
 @test
 fn ctfe_hardening() {
     let p = cli::proj_new();
-    p.mkfile("cyc.spc", r#"const A: i32 = B;
+    p.mkfile("cyc.spc", M"(const A: i32 = B;
 const B: i32 = A;
 static_assert(A == 0);
 fn main() i32 { return 0; }
-"#);
+)");
     p.expect_fail("cyc.spc", "cyclic constant dependency");
 
     let p2 = cli::proj_new();
     p2.mkfile(
         "ub.spc",
-        r#"const Z: i32 = 0;
+        M"(const Z: i32 = 0;
 fn scale(x: i32) i32 { return x * 2 / Z; }
 fn main() i32 { return scale(4); }
-"#,
+)",
     );
     p2.expect_fail("ub.spc", "undefined behavior");
 
     let p3 = cli::proj_new();
-    p3.mkfile("sc.spc", r#"const Z: i32 = 0;
+    p3.mkfile("sc.spc", M"(const Z: i32 = 0;
 fn main() i32 { if Z != 0 && 10 / Z > 1 { return 1; } return 0; }
-"#);
+)");
     let r3 = p3.compile("sc.spc");
     assert(r3.ok());
     let cc3 = p3.cc_build("");
@@ -4837,15 +4840,15 @@ fn main() i32 { if Z != 0 && 10 / Z > 1 { return 1; } return 0; }
     assert_eq(p3.run_bin(), 0);
 
     let p4 = cli::proj_new();
-    p4.mkfile("len.spc", r#"fn main() i32 { let n = 4; let a: [i32; n] = [1, 2, 3, 4]; return a[0] - 1; }
-"#);
+    p4.mkfile("len.spc", M"(fn main() i32 { let n = 4; let a: [i32; n] = [1, 2, 3, 4]; return a[0] - 1; }
+)");
     p4.expect_fail("len.spc", "array length must be a constant expression");
 
     // a provable panic in a NON-const fn stays runtime behavior (build ok, binary aborts)
     let p5 = cli::proj_new();
-    p5.mkfile("pan.spc", r#"fn boom() i32 { panic("boom"); }
+    p5.mkfile("pan.spc", M"(fn boom() i32 { panic("boom"); }
 fn main() i32 { return boom(); }
-"#);
+)");
     let r5 = p5.compile("pan.spc");
     assert(r5.ok());
     let cc5 = p5.cc_build("");
@@ -4861,35 +4864,35 @@ fn const_fn_semantics() {
     let p = cli::proj_new();
     p.mkfile(
         "bad.spc",
-        r#"import stdlib;
+        M"(import stdlib;
 const fn bad() i32 { return unsafe stdlib::rand(); }
 fn main() i32 { return 0; }
-"#,
+)",
     );
     p.expect_fail("bad.spc", "declared 'const fn' but calls an extern function");
 
     let p2 = cli::proj_new();
     p2.mkfile(
         "trans.spc",
-        r#"import stdlib;
+        M"(import stdlib;
 fn helper() i32 { return unsafe stdlib::rand(); }
 const fn outer() i32 { return helper(); }
 fn main() i32 { return 0; }
-"#,
+)",
     );
     p2.expect_fail("trans.spc", "calls a function that cannot be evaluated at compile time");
 
     let p3 = cli::proj_new();
     p3.mkfile(
         "budget.spc",
-        r#"const fn spin(n: u64) u64 {
+        M"(const fn spin(n: u64) u64 {
     let mut s: u64 = 0;
     let mut i: u64 = 0;
     while i < n { s = s + i; i = i + 1; }
     return s;
 }
 fn main() i32 { let x = spin(100000000u64); if x == 0 { return 1; } return 0; }
-"#,
+)",
     );
     p3.expect_fail("budget.spc", "'const fn' call has compile-time-known arguments but failed to evaluate");
 
@@ -4897,14 +4900,14 @@ fn main() i32 { let x = spin(100000000u64); if x == 0 { return 1; } return 0; }
     let p4 = cli::proj_new();
     p4.mkfile(
         "runtime.spc",
-        r#"fn spin(n: u64) u64 {
+        M"(fn spin(n: u64) u64 {
     let mut s: u64 = 0;
     let mut i: u64 = 0;
     while i < n { s = s + i; i = i + 1; }
     return s;
 }
 fn main() i32 { let x = spin(1000u64); if x != 499500u64 { return 1; } return 0; }
-"#,
+)",
     );
     let r4 = p4.compile("runtime.spc");
     assert(r4.ok());
@@ -4916,11 +4919,11 @@ fn main() i32 { let x = spin(1000u64); if x != 499500u64 { return 1; } return 0;
     let p5 = cli::proj_new();
     p5.mkfile(
         "rec.spc",
-        r#"const fn is_even(n: u32) bool { if n == 0 { return true; } return is_odd(n - 1); }
+        M"(const fn is_even(n: u32) bool { if n == 0 { return true; } return is_odd(n - 1); }
 const fn is_odd(n: u32) bool { if n == 0 { return false; } return is_even(n - 1); }
 static_assert(is_even(10));
 fn main(argv: Vector<str>) i32 { if is_even(argv.len() as u32 * 2) { return 0; } return 1; }
-"#,
+)",
     );
     let r5 = p5.compile("rec.spc");
     assert(r5.ok());
@@ -4937,21 +4940,21 @@ fn mandatory_consts() {
     let p = cli::proj_new();
     p.mkfile(
         "silent.spc",
-        r#"import stdlib;
+        M"(import stdlib;
 fn noisy() i32 { return unsafe stdlib::rand(); }
 const X: i32 = noisy() + 1;
 fn main() i32 { return X * 0; }
-"#,
+)",
     );
     p.expect_fail("silent.spc", "constant cannot be evaluated at compile time");
 
     let p2 = cli::proj_new();
     p2.mkfile(
         "trap.spc",
-        r#"fn div(a: i32, b: i32) i32 { return a / b; }
+        M"(fn div(a: i32, b: i32) i32 { return a / b; }
 const D: i32 = div(1, 0);
 fn main() i32 { return D; }
-"#,
+)",
     );
     p2.expect_fail("trap.spc", "division by zero");
 
@@ -4959,11 +4962,11 @@ fn main() i32 { return D; }
     p3.mkfile("lib/cf.spc", "pub const fn triple(x: i32) i32 { return x * 3; }\n");
     p3.mkfile(
         "use.spc",
-        r#"import lib::cf;
+        M"(import lib::cf;
 const T: i32 = lib::cf::triple(9);
 static_assert(T == 27);
 fn main() i32 { return T - 27; }
-"#,
+)",
     );
     let r3 = p3.compile("use.spc");
     assert(r3.ok());
@@ -4975,7 +4978,7 @@ fn main() i32 { return T - 27; }
     let p4 = cli::proj_new();
     p4.mkfile(
         "dang.spc",
-        r#"import stdlib;
+        M"(import stdlib;
 pub struct Holder { pub p: *mut i32 }
 fn mk() Holder {
     let q = unsafe stdlib::malloc(4) as *mut i32;
@@ -4984,7 +4987,7 @@ fn mk() Holder {
 }
 const H: Holder = mk();
 fn main() i32 { return 0; }
-"#,
+)",
     );
     p4.expect_fail("dang.spc", "freed compile-time memory");
 }
@@ -4996,7 +4999,7 @@ fn materialized_consts() {
     let p = cli::proj_new();
     p.mkfile(
         "mat.spc",
-        r#"import stdlib;
+        M"(import stdlib;
 pub struct Pt { pub x: i32, pub y: i32 }
 pub struct Node { pub v: i32, pub next: *mut Node }
 pub struct Pair { pub a: *mut Node, pub b: *mut Node }
@@ -5038,7 +5041,7 @@ fn main() i32 {
     if lv.len() != 3 { return 6; }
     return 0;
 }
-"#,
+)",
     );
     let r = p.compile("mat.spc");
     assert(r.ok());
@@ -5053,7 +5056,7 @@ fn main() i32 {
     let p2 = cli::proj_new();
     p2.mkfile(
         "own.spc",
-        r#"fn evens(n: u32) Vector<u32> {
+        M"(fn evens(n: u32) Vector<u32> {
     let mut v = Vector::<u32>::new();
     for i in 0..n { v.push(i * 2); }
     return v;
@@ -5065,7 +5068,7 @@ fn main() i32 {
     if t != 20u32 { return 1; }
     return 0;
 }
-"#,
+)",
     );
     let r2 = p2.compile("own.spc");
     assert(r2.ok());
@@ -5113,7 +5116,7 @@ fn ctfe_differential() {
     let p = cli::proj_new();
     p.mkfile(
         "diff.spc",
-        r#"const fn mix(n: u32) u64 {
+        M"(const fn mix(n: u32) u64 {
     let mut h: u64 = 1469598103934665603u64;
     let mut i: u32 = 0;
     while i < n {
@@ -5129,7 +5132,7 @@ fn main(argv: Vector<str>) i32 {
     if rt == CT { return 0; }
     return 1;
 }
-"#,
+)",
     );
     let r = p.compile("diff.spc");
     assert(r.ok());
@@ -5694,7 +5697,7 @@ fn format_desugar_and_fold() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"@derive(Format)
+        M"(@derive(Format)
 pub struct P { pub x: i32, pub y: i32, }
 const fn cf() usize {
   let s = format("x = {} y = {}", 42, "hi");
@@ -5713,7 +5716,7 @@ fn main() i32 {
   b.free();
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -5739,7 +5742,7 @@ fn method_reflection() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"pub struct Robot { pub id: i32, }
+        M"(pub struct Robot { pub id: i32, }
 extend Robot {
   @reflect(doc = "primary accessor")
   pub fn ident(self: &Robot) i32 { return self.id; }
@@ -5762,7 +5765,7 @@ fn main() i32 {
   print("ok\n");
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -5781,7 +5784,7 @@ fn ctfe_zeroed_and_body_asserts() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"struct Inner { pub p: *const u8, pub n: i64, }
+        M"(struct Inner { pub p: *const u8, pub n: i64, }
 struct P { pub x: i32, pub f: f64, pub inner: Inner, pub ok: bool, }
 const fn cz() bool {
   let z = unsafe zeroed::<P>();
@@ -5813,7 +5816,7 @@ fn main() i32 {
   print("ok\n");
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
@@ -5824,7 +5827,7 @@ fn main() i32 {
     assert(rr.out_shows("ok"), "zeroed, derived default, and body asserts all fold");
     p.mkfile(
         "main.spc",
-        r#"enum E { A, B, }
+        M"(enum E { A, B, }
 fn only_structs<T>(v: &T) usize {
   static_assert(type_info::<T>().kind == TypeTag::Struct, "only_structs takes a struct");
   let _ = v;
@@ -5835,7 +5838,7 @@ fn main() i32 {
   let _ = only_structs(&e);
   return 0;
 }
-"#,
+)",
     );
     let e = p.compile("main.spc");
     assert(e.exit != 0, "a violated per-instantiation guard rejects the build");
@@ -5851,7 +5854,7 @@ fn tagless_variants_and_meta_elision() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        r#"enum Color { Red = 3, Green = 7, }
+        M"(enum Color { Red = 3, Green = 7, }
 const fn ctag() i32 {
   let c = Color::Green;
   let mut t: i32 = 0;
@@ -5903,7 +5906,7 @@ fn main() i32 {
   print("ok\n");
   return 0;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert(r.ok());

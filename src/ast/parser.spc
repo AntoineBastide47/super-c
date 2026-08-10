@@ -4106,9 +4106,7 @@ extend Parser {
     // A string literal in operand position. Parsed directly so a following '(' stays the operand's,
     // not a call's.
     fn parse_asm_string(self: &mut Self, what: str) NodeId {
-        if self.check(TokenType::StringLiteral) || self.check(TokenType::RawStringLiteral) || self.check(
-            TokenType::MatchertextLiteral,
-        ) {
+        if self.check(TokenType::StringLiteral) || self.check(TokenType::MatchertextLiteral) {
             return self.literal();
         }
         let t = self.raw_peek();
@@ -4583,7 +4581,7 @@ extend Parser {
     }
 
     pub const fn is_literal_token(kind: TokenType) bool {
-        return kind == TokenType::IntegerLiteral || kind == TokenType::FloatLiteral || kind == TokenType::CharacterLiteral || kind == TokenType::ByteCharacterLiteral || kind == TokenType::StringLiteral || kind == TokenType::RawStringLiteral || kind == TokenType::MatchertextLiteral || kind == TokenType::ByteStringLiteral || kind == TokenType::True || kind == TokenType::False || kind == TokenType::Null;
+        return kind == TokenType::IntegerLiteral || kind == TokenType::FloatLiteral || kind == TokenType::CharacterLiteral || kind == TokenType::ByteCharacterLiteral || kind == TokenType::StringLiteral || kind == TokenType::MatchertextLiteral || kind == TokenType::ByteStringLiteral || kind == TokenType::True || kind == TokenType::False || kind == TokenType::Null;
     }
 
     pub const fn unary_operator(kind: TokenType) bool {

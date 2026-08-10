@@ -24,7 +24,7 @@ extern "C" {
 /// the shared super_rt.h (single-TU builds inline it instead) together with the atomic shims, the
 /// panic/bounds helpers, and the leak-tracker macros that interpose malloc/realloc/free call sites.
 pub const fn super_rt_includes() *const char {
-    return r#"#if __has_include(<assert.h>)
+    return M"(#if __has_include(<assert.h>)
 #include <assert.h>
 #endif
 #if __has_include(<complex.h>)
@@ -227,7 +227,7 @@ void sc_lk_bt_resume(void);
 #define realloc(__p, __n) sc_lk_realloc(__p, __n)
 #define free(__p) sc_lk_free(__p)
 #endif
-"#.ptr() as *const char;
+)".ptr() as *const char;
 }
 
 /// The leak-tracker runtime backing the `super_rt.h` interposition macros, written as `super_rt.c`
@@ -237,7 +237,7 @@ void sc_lk_bt_resume(void);
 /// survivors are reported to stderr at process exit, grouped by allocation stack. Every libc call is
 /// spelled `(malloc)(...)`-parenthesized so the same text also compiles inlined after the macros.
 pub const fn super_rt_source() *const char {
-    return r#"/* super-c runtime: leak tracker (see super_rt.h). Generated; do not edit. */
+    return M"(/* super-c runtime: leak tracker (see super_rt.h). Generated; do not edit. */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -587,7 +587,7 @@ void sc_lk_free(void *__p) {
   }
   if (!skip) (free)(__p);
 }
-"#.ptr() as *const char;
+)".ptr() as *const char;
 }
 
 // Builtin names (for matching unresolved type paths) and their C spellings, indexed by BuiltinType.
@@ -5393,23 +5393,14 @@ const fn utf8_encode(cp: u32, out: *mut u8) i32 {
     unsafe out[3] = (0x80u32 | cp & 0x3Fu32) as u8;
     return 4;
 }
-// Content span of a raw string (past `r##"`, before `"##`) or a matchertext literal (past
-// `Md"(`, before `)"`; the delimiter chain ends at the quote).
-const fn raw_string_content(src: str, s: tok::Span) tok::Span {
-    if src[s.start as usize] == b'M' {
-        let mut i = s.start + 1;
-        while src[i as usize] != b'"' {
-            i = i + 1;
-        }
-        return tok::Span { start: i + 2, end: s.end - 2 };
-    }
+// Content span of a matchertext literal: past `Md"(`, before `)"` (the delimiter chain ends at
+// the quote).
+const fn matchertext_content(src: str, s: tok::Span) tok::Span {
     let mut i = s.start + 1;
-    let mut h: u32 = 0;
-    while src[i as usize] == b'#' {
+    while src[i as usize] != b'"' {
         i = i + 1;
-        h = h + 1;
     }
-    return tok::Span { start: i + 1, end: s.end - 1 - h };
+    return tok::Span { start: i + 2, end: s.end - 2 };
 }
 
 extend Codegen {
@@ -5634,7 +5625,7 @@ extend Codegen {
             let a0 = unsafe aids[ti as usize];
             if self.cur_ast().at_const(a0).kind == NodeKind::NODE_LITERAL {
                 let tt = self.cur_ast().at_const(a0).as_data.literal.token_type;
-                is_raw = tt == TokenType::RawStringLiteral || tt == TokenType::MatchertextLiteral;
+                is_raw = tt == TokenType::MatchertextLiteral;
                 ok_lit = tt == TokenType::StringLiteral || is_raw;
             }
         }
@@ -5652,7 +5643,7 @@ extend Codegen {
         let raw = self.cur_ast().at_const(a0).as_data.literal.raw;
         let src = self.source;
         let content = if is_raw {
-            raw_string_content(src, raw);
+            matchertext_content(src, raw);
         } else {
             tok::Span { start: raw.start + 1, end: raw.end - 1 };
         };
@@ -10530,7 +10521,7 @@ extend Codegen {
             return false;
         }
         let tt = vn.as_data.literal.token_type;
-        if tt != TokenType::StringLiteral && tt != TokenType::RawStringLiteral && tt != TokenType::MatchertextLiteral {
+        if tt != TokenType::StringLiteral && tt != TokenType::MatchertextLiteral {
             return false;
         }
         let h = self.package.prelude_lookup("str", true);
@@ -13146,8 +13137,8 @@ extend Codegen {
             } else {
                 self.emit_span(s);
             }
-        } else if tt == TokenType::RawStringLiteral || tt == TokenType::MatchertextLiteral {
-            let rc = raw_string_content(self.source, s);
+        } else if tt == TokenType::MatchertextLiteral {
+            let rc = matchertext_content(self.source, s);
             let tid = self.cur_ast().type_of(id);
             let mut isptr = false;
             if tid != TYPE_NONE && self.type_at(tid).kind == TypeKind::TYPE_POINTER {

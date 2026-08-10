@@ -718,52 +718,6 @@ fn character(l: &mut Lexer, byte_character: bool) {
     lexer_error(l, "unterminated character literal");
 }
 
-fn raw_string_ahead(l: &Lexer, hashes: *mut usize) bool {
-    let mut i = l.current;
-    while i < l.bytes.len() && l.bytes.byte_at(i) == b'#' {
-        i = i + 1;
-    }
-    if i >= l.bytes.len() || l.bytes.byte_at(i) != b'"' {
-        return false;
-    }
-    unsafe *hashes = i - l.current;
-    return true;
-}
-
-fn raw_string(l: &mut Lexer, hashes: usize) {
-    if hashes > 255 {
-        let start = l.start;
-        lexer_error_at(l, start, hashes + 1, "raw string delimiter contains more than 255 '#' characters");
-    }
-    let mut i = l.current + hashes + 1;
-    while i < l.bytes.len() {
-        let b = l.bytes.byte_at(i);
-        if b == b'"' {
-            let mut close = i + 1;
-            let mut matched: usize = 0;
-            while matched < hashes && close < l.bytes.len() && l.bytes.byte_at(close) == b'#' {
-                close = close + 1;
-                matched = matched + 1;
-            }
-            if matched == hashes {
-                l.current = close;
-                add_token(l, TokenType::RawStringLiteral);
-                return;
-            }
-            i = i + 1;
-        } else if b == b'\0' {
-            lexer_error_at(l, i, 1, "NUL byte is not allowed in raw string literals");
-            i = i + 1;
-        } else if b >= 0x80u8 {
-            validate_utf8_at(l, &mut i);
-        } else {
-            i = i + 1;
-        }
-    }
-    l.current = i;
-    lexer_error(l, "unterminated raw string literal");
-}
-
 const fn is_mt_open(b: u8) bool {
     return b == b'(' || b == b'[' || b == b'{';
 }
@@ -1426,15 +1380,6 @@ fn scan_token(l: &mut Lexer) {
         },
         '0'..='9' => {
             number(l);
-            return;
-        },
-        'r' => {
-            let mut hashes: usize = 0;
-            if raw_string_ahead(l, &mut hashes) {
-                raw_string(l, hashes);
-                return;
-            }
-            identifier(l);
             return;
         },
         'M' => {

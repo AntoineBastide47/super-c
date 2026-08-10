@@ -664,7 +664,7 @@ extend Server {
 // Lifecycle + document sync handlers.
 // ---------------------------------------------------------------------------------------------------------
 
-const CAPABILITIES: str = r#"{"capabilities":{"textDocumentSync":{"openClose":true,"change":1},"hoverProvider":true,"definitionProvider":true,"referencesProvider":true,"renameProvider":true,"documentFormattingProvider":true,"codeActionProvider":true,"completionProvider":{"triggerCharacters":[".",":"]},"semanticTokensProvider":{"legend":{"tokenTypes":["namespace","type","enum","enumMember","interface","typeParameter","parameter","variable","property","function","method"],"tokenModifiers":["declaration","readonly"]},"full":true}},"serverInfo":{"name":"super-c lsp","version":"0.1"}}"#;
+const CAPABILITIES: str = M"({"capabilities":{"textDocumentSync":{"openClose":true,"change":1},"hoverProvider":true,"definitionProvider":true,"referencesProvider":true,"renameProvider":true,"documentFormattingProvider":true,"codeActionProvider":true,"completionProvider":{"triggerCharacters":[".",":"]},"semanticTokensProvider":{"legend":{"tokenTypes":["namespace","type","enum","enumMember","interface","typeParameter","parameter","variable","property","function","method"],"tokenModifiers":["declaration","readonly"]},"full":true}},"serverInfo":{"name":"super-c lsp","version":"0.1"}})";
 
 fn on_initialize(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
     let mut ws = String::new();

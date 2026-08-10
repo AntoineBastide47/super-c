@@ -587,7 +587,7 @@ fn cross_module_enum_cast_array_len() {
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
-        r#"pub enum Kind {
+        M"(pub enum Kind {
     A,
     B,
     C,
@@ -599,11 +599,11 @@ pub const N: usize = Kind::COUNT as usize;
 pub struct Table {
     pub slots: [u32; N],
 }
-"#,
+)",
     );
     p.mkfile(
         "main.spc",
-        r#"import lib;
+        M"(import lib;
 
 struct Holder {
     pub t: lib::Table,
@@ -613,7 +613,7 @@ fn main() i32 {
     let h = Holder { t: lib::Table { slots: [1u32, 2u32, 3u32] } };
     return (h.t.slots[2] - 3) as i32;
 }
-"#,
+)",
     );
     let r = p.compile("main.spc");
     assert_eq(r.exit, 0);

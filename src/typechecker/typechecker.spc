@@ -375,23 +375,14 @@ const fn builtin_of(src: str, s: tok::Span) i32 {
 const fn bt_is_int(b: BuiltinType) bool {
     return b as u8 >= BuiltinType::BT_I8 as u8 && b as u8 <= BuiltinType::BT_USIZE as u8;
 }
-// The content span of a raw string literal (past `r##"` and before `"##`) or of a matchertext
-// literal (past `Md"(` and before `)"`; the delimiter chain `d` ends at the quote).
-const fn tc_raw_content(src: str, s: tok::Span) tok::Span {
-    if src[s.start as usize] == b'M' {
-        let mut i = s.start + 1;
-        while src[i as usize] != b'"' {
-            i = i + 1;
-        }
-        return tok::Span { start: i + 2, end: s.end - 2 };
-    }
+// The content span of a matchertext literal: past `Md"(` and before `)"` (the delimiter chain
+// `d` ends at the quote).
+const fn tc_mt_content(src: str, s: tok::Span) tok::Span {
     let mut i = s.start + 1;
-    let mut h: u32 = 0;
-    while src[i as usize] == b'#' {
+    while src[i as usize] != b'"' {
         i = i + 1;
-        h = h + 1;
     }
-    return tok::Span { start: i + 1, end: s.end - 1 - h };
+    return tok::Span { start: i + 2, end: s.end - 2 };
 }
 const fn bt_is_float(b: BuiltinType) bool {
     return b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64;
@@ -6283,7 +6274,7 @@ extend TypeChecker {
             }
             return okf;
         }
-        if tt == TokenType::StringLiteral || tt == TokenType::RawStringLiteral || tt == TokenType::MatchertextLiteral {
+        if tt == TokenType::StringLiteral || tt == TokenType::MatchertextLiteral {
             if et.kind != TypeKind::TYPE_POINTER || et.qualifier != TypeQualifier::TYPE_QUAL_CONST as u8 {
                 return false;
             }
@@ -8987,7 +8978,7 @@ extend TypeChecker {
             let a0 = unsafe self.cur_ast().list(args)[0];
             if self.cur_ast().at_const(a0).kind == NodeKind::NODE_LITERAL {
                 let t0 = self.cur_ast().at_const(a0).as_data.literal.token_type;
-                is_raw = t0 == TokenType::RawStringLiteral || t0 == TokenType::MatchertextLiteral;
+                is_raw = t0 == TokenType::MatchertextLiteral;
                 ok_lit = t0 == TokenType::StringLiteral || is_raw;
             }
         }
@@ -9010,7 +9001,7 @@ extend TypeChecker {
         let rawsp = self.cur_ast().at_const(a0).as_data.literal.raw;
         let src = self.source;
         let content = if is_raw {
-            tc_raw_content(src, rawsp);
+            tc_mt_content(src, rawsp);
         } else {
             tok::Span { start: rawsp.start + 1, end: rawsp.end - 1 };
         };
@@ -10359,7 +10350,7 @@ extend TypeChecker {
             while i < args.len {
                 let aid = unsafe a.list(args)[i as usize];
                 let an = a.at_const(aid);
-                if an.kind == NodeKind::NODE_LITERAL && (an.as_data.literal.token_type == TokenType::StringLiteral || an.as_data.literal.token_type == TokenType::RawStringLiteral || an.as_data.literal.token_type == TokenType::MatchertextLiteral) {
+                if an.kind == NodeKind::NODE_LITERAL && (an.as_data.literal.token_type == TokenType::StringLiteral || an.as_data.literal.token_type == TokenType::MatchertextLiteral) {
                     self.cur_ast().set_type(aid, cstr);
                 }
                 i = i + 1;
@@ -13523,7 +13514,7 @@ extend TypeChecker {
         }
         self.check_expr(e);
         let n = self.cur_ast().at_const(e);
-        let lit = n.kind == NodeKind::NODE_LITERAL && (n.as_data.literal.token_type == TokenType::StringLiteral || n.as_data.literal.token_type == TokenType::RawStringLiteral || n.as_data.literal.token_type == TokenType::MatchertextLiteral);
+        let lit = n.kind == NodeKind::NODE_LITERAL && (n.as_data.literal.token_type == TokenType::StringLiteral || n.as_data.literal.token_type == TokenType::MatchertextLiteral);
         if !lit {
             let sp = n.span;
             self.errors.emit(sp.start, sp.end - sp.start, format("{} must be a string literal", what));

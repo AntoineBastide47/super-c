@@ -662,7 +662,7 @@ const fn test_runner_includes() *const char {
 // The fixed part of the generated test runner: option parsing, fork-per-test isolation with a waitpid job
 // pool, an in-process fallback (--no-fork), substring selection, per-test reporting, and the exit code.
 const fn test_runner_main_posix() *const char {
-    return r#"static int sc_match(const char *name, const char *filter) {
+    return M"(static int sc_match(const char *name, const char *filter) {
   return !filter || strstr(name, filter) != NULL;
 }
 /* Core count without feature-test-macro landmines: macOS hides _SC_NPROCESSORS_ONLN under strict
@@ -756,14 +756,14 @@ int main(int argc, char **argv) {
     printf("\n%d passed, %d failed\n", passed, failed);
   return failed > 100 ? 100 : failed;
 }
-"#.ptr() as *const char;
+)".ptr() as *const char;
 }
 
 // Windows has no fork(); isolate each test in its own subprocess (`self --run-one=<i>`) so should_panic
 // and crashing tests are caught via the child's exit code. Serial (no job pool); @test_init(global) reruns
 // per test (fresh process) rather than once — same isolation, minor repeated setup.
 const fn test_runner_main_win() *const char {
-    return r#"static int sc_match(const char *name, const char *filter) {
+    return M"(static int sc_match(const char *name, const char *filter) {
   return !filter || strstr(name, filter) != NULL;
 }
 /* Path to re-spawn: argv[0] is whatever the caller typed and need not name a file the loader can open
@@ -884,7 +884,7 @@ int main(int argc, char **argv) {
     printf("\n%d passed, %d failed\n", passed, failed);
   return failed > 100 ? 100 : failed;
 }
-"#.ptr() as *const char;
+)".ptr() as *const char;
 }
 
 /// Write build/__test_main.c: extern wrapper prototypes, the test table (display names `module::fn` or

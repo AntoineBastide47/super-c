@@ -1162,7 +1162,7 @@ fn main(argv: Vector<str>) i32 {
     // input at all (lsp), or discovers the project itself (fmt/lint).
     if co.bad || file.len() == 0 && mode == Mode::MODE_DEFAULT {
         unsafe stdio::fputs(
-            r#"super-c — a systems language that compiles to readable C
+            M"(super-c — a systems language that compiles to readable C
 
 USAGE:
     super-c <file.spc> [options]      compile and run a script
@@ -1215,7 +1215,7 @@ OPTIONS:
     --test-shard=K/N       run shard K of N (one-based, stable round-robin)
     --test-jobs=N          bound the test process pool (default: one per core)
     --test-no-fork         run tests in-process (for a debugger)
-"#.ptr() as *const char,
+)".ptr() as *const char,
             stdio::stderr(),
         );
         return 1;

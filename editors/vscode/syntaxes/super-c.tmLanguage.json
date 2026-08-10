@@ -50,11 +50,6 @@
     "strings": {
       "patterns": [
         {
-          "name": "string.quoted.other.raw.super-c",
-          "begin": "r(#*)\"",
-          "end": "\"\\1"
-        },
-        {
           "name": "string.quoted.other.matchertext.super-c",
           "begin": "M(?:[\\(\\[\\{]+[\\)\\]\\}]+)?\"[\\(\\[\\{]",
           "end": "[\\)\\]\\}]\""
