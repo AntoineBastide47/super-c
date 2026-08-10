@@ -1,9 +1,9 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
-# content, and every push runs it. Edit the job for the next investigation; do not remove the file.
-# Current probe: the release workflow's wasm leg, plus the Windows test suite.
+# content, run on demand from the Actions tab. Edit the job for the next investigation; do not remove
+# the file. Current probe: the release workflow's wasm leg, plus the Windows test suite.
 name: Debug
 on:
-  push
+  workflow_dispatch
 permissions:
   contents: read
 concurrency:
