@@ -2906,6 +2906,9 @@ extend tc::TypeChecker {
                 for i in 0..values.len {
                     let vid = unsafe a.list(values)[i as usize];
                     self.bc_expr(vid, false, false);
+                    // A returned value moves like any other consumer: the field-move and
+                    // deref-move rules apply to `return x.f` too.
+                    self.tc_mark_move(vid);
                     self.tc_capture_move_guard(vid);
                     if i < ret_list.len {
                         self.tc_check_return_lifetime(vid, unsafe a.list(ret_list)[i as usize]);

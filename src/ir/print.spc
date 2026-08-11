@@ -154,6 +154,12 @@ pub fn print_body(b: &ir::CoreBody) String {
                 p_rvalue(&mut out, b, s.rvalue);
             } else if s.kind == ir::ST_ASM {
                 out.push_str("asm");
+            } else if s.kind == ir::ST_STORAGE_LIVE {
+                out.push_str("live _");
+                p_u(&mut out, s.a);
+            } else if s.kind == ir::ST_STORAGE_DEAD {
+                out.push_str("dead _");
+                p_u(&mut out, s.a);
             } else {
                 out.push_str("stmt");
                 p_u(&mut out, s.kind);

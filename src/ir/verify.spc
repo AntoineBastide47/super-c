@@ -79,6 +79,11 @@ pub fn verify(b: &ir::CoreBody, type_pool_len: usize) str<'static> {
                 return "stmt-rvalue-out-of-range";
             }
         }
+        if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
+            if s.a as usize >= b.locals.len() {
+                return "storage-local-out-of-range";
+            }
+        }
     }
     // Blocks: sealed, statement runs in range, successors exist, calls resolved.
     for i in 0..b.blocks.len() {

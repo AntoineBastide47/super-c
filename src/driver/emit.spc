@@ -24,6 +24,11 @@ import ir::lower as irl;
 import ir::print as irp;
 import ir::verify as irv;
 import graph::instances as ig;
+import borrowck::move_paths as bmp;
+import borrowck::facts as bfx;
+import borrowck::dataflow as bdf;
+import borrowck::loans as bln;
+import borrowck::explain as bex;
 import utils::errors as diag;
 import driver::util as *;
 
@@ -535,6 +540,248 @@ fn core_ir_pass(p: &mut loader::Package) u32 {
         dt,
     );
     return st.failed as u32;
+}
+
+// Differential mode (SC_BORROW_IR=1): run the Core IR loan analysis over every lowered body while
+// the established AST checker stays authoritative. The corpus gate is zero reports here -- anything
+// printed is either a false reject to fix or a reviewed precision case. SC_BORROW_IR=ref also runs
+// the reference solver per body and compares required-point sets.
+struct BorrowIrStats {
+    pub bodies: u64,
+    pub skipped: u64, // failed to lower (already counted by SC_CORE_IR)
+    pub move_errs: u64,
+    pub loan_errs: u64,
+    pub ref_diffs: u64,
+    pub ms_facts: u64,
+    pub ms_solve: u64,
+    pub s: bln::Stats,
+}
+
+fn borrow_ir_body(
+    p: &loader::Package,
+    ow: &mut bfx::Owner,
+    m: usize,
+    node: NodeId,
+    is_const: bool,
+    st: &mut BorrowIrStats,
+    run_ref: bool,
+) {
+    let mut lw = irl::Lowerer::new(p, m as ModuleId, node);
+    let ok = if is_const {
+        lw.lower_const(node);
+    } else {
+        lw.lower_fn(node);
+    };
+    if !ok {
+        st.skipped += 1;
+        return;
+    }
+    borrow_ir_run(p, ow, m, &lw.body, st, run_ref);
+    for c in 0..lw.closures.len() {
+        let cn = lw.closures[c];
+        let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
+        if cl.lower_closure_body(cn) {
+            borrow_ir_run(p, ow, m, &cl.body, st, run_ref);
+        } else {
+            st.skipped += 1;
+        }
+    }
+}
+
+fn borrow_ir_run(
+    p: &loader::Package,
+    ow: &mut bfx::Owner,
+    m: usize,
+    body: &irc::CoreBody,
+    st: &mut BorrowIrStats,
+    run_ref: bool,
+) {
+    st.bodies += 1;
+    let t0 = unsafe shim::sc_ticks_ms();
+    let forest = bmp::MoveForest::build(body);
+    let bfacts = bfx::generate(ow, body, &forest);
+    let cfg = bdf::build_cfg(body);
+    let lv = bdf::solve_liveness(&bfacts, &cfg);
+    let t1 = unsafe shim::sc_ticks_ms();
+    let mv = bdf::solve_moves(body, &forest, &bfacts, &cfg);
+    let sv = bln::solve(body, &bfacts, &cfg, &lv);
+    let t2 = unsafe shim::sc_ticks_ms();
+    st.ms_facts += (t1 - t0) as u64;
+    st.ms_solve += (t2 - t1) as u64;
+    bln::stats_add(&mut st.s, &sv.stats);
+    // Deduplicate by (kind, source position): loops replay blocks, defers duplicate statements.
+    let mut seen = Vector::<u64>::new();
+    for e in 0..mv.errs.len() {
+        let er = *mv.errs.at(e);
+        let key = er.kind as u64 << 32 | er.span.start as u64;
+        let mut dup = false;
+        for k in 0..seen.len() {
+            if seen[k] == key {
+                dup = true;
+            }
+        }
+        if dup {
+            continue;
+        }
+        seen.push(key);
+        st.move_errs += 1;
+        let line = bex::render_move(p, m as ModuleId, er.kind, er.span);
+        eprint("borrow-ir: module {} node {}: ", m, body.owner.node);
+        line.eprintln();
+    }
+    if sv.errs.len() != 0 && stdlib::getenv("SC_BORROW_TRACE") != null {
+        for li in 0..bfacts.loans.len() {
+            let lo = *bfacts.loans.at(li);
+            let pl = *body.places.at(lo.place as usize);
+            eprint(
+                "  loan {} kind {} base {} storage {} projs {} origin {} issued {} act {}\n",
+                li,
+                lo.kind,
+                pl.base,
+                body.locals.at(pl.base as usize).storage,
+                pl.proj_len,
+                lo.origin,
+                lo.issued_at,
+                lo.activated_at,
+            );
+        }
+        for e2 in 0..sv.errs.len() {
+            let er2 = *sv.errs.at(e2);
+            eprint("  err kind {} loan {} point {}\n", er2.kind, er2.loan, er2.point);
+        }
+        eprint(
+            "  origins {} uni {} subsets {} uniflows {}\n",
+            bfacts.norigins,
+            bfacts.nuniversal,
+            bfacts.subsets.len(),
+            bfacts.uni_flows.len(),
+        );
+        for si in 0..bfacts.subsets.len() {
+            let sb = *bfacts.subsets.at(si);
+            eprint("  sub {} -> {} @{}\n", sb.from, sb.to, sb.point);
+        }
+    }
+    for e in 0..sv.errs.len() {
+        let er = *sv.errs.at(e);
+        let key = 0x8000000000000000u64 | er.kind as u64 << 32 | er.span.start as u64;
+        let mut dup = false;
+        for k in 0..seen.len() {
+            if seen[k] == key {
+                dup = true;
+            }
+        }
+        if dup {
+            continue;
+        }
+        seen.push(key);
+        st.loan_errs += 1;
+        let line = bex::render(p, m as ModuleId, &bfacts, &er);
+        eprint("borrow-ir: module {} node {}: ", m, body.owner.node);
+        line.eprintln();
+    }
+    seen.free();
+    if run_ref && bfacts.npoints < 2000 {
+        let rr = bln::solve_reference(body, &bfacts, &cfg, &lv);
+        // Compare required-point sets loan by loan against a fresh optimized run.
+        let mut sv2 = bln::solve(body, &bfacts, &cfg, &lv);
+        for li in 0..bfacts.loans.len() {
+            let row = sv2.required_row(li as u32);
+            for w in 0..rr.pwords {
+                if *rr.required.at((li as u32 * rr.pwords + w) as usize) != sv2.req_word(row, w) {
+                    st.ref_diffs += 1;
+                    eprint("borrow-ir: module {} node {}: ref-solver mismatch loan {}\n", m, body.owner.node, li);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn borrow_ir_pass(p: &mut loader::Package) u32 {
+    let mode = stdlib::getenv("SC_BORROW_IR");
+    if mode == null {
+        return 0;
+    }
+    let run_ref = diag::cstr(mode) == "ref";
+    let t0 = unsafe shim::sc_ticks_ms();
+    let mut ow = bfx::Owner::new(p);
+    let mut st = BorrowIrStats {
+        bodies: 0,
+        skipped: 0,
+        move_errs: 0,
+        loan_errs: 0,
+        ref_diffs: 0,
+        ms_facts: 0,
+        ms_solve: 0,
+        s: bln::stats_zero(),
+    };
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let items = a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let nid = unsafe a.list(items)[i as usize];
+            let n = a.at_const(nid);
+            if n.kind == NodeKind::NODE_FUNCTION {
+                if !n.as_data.function.is_extern && n.as_data.function.body != NODE_NONE {
+                    borrow_ir_body(p, &mut ow, m, nid, false, &mut st, run_ref);
+                }
+            } else if n.kind == NodeKind::NODE_CONST {
+                if !n.as_data.const_def.is_extern && n.as_data.const_def.value != NODE_NONE {
+                    borrow_ir_body(p, &mut ow, m, nid, true, &mut st, run_ref);
+                }
+            } else if n.kind == NodeKind::NODE_EXTEND {
+                let inner = n.as_data.extend_def.items;
+                for j in 0..inner.len {
+                    let iid = unsafe a.list(inner)[j as usize];
+                    let it = a.at_const(iid);
+                    if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.body != NODE_NONE {
+                        borrow_ir_body(p, &mut ow, m, iid, false, &mut st, run_ref);
+                    } else if it.kind == NodeKind::NODE_CONST && it.as_data.const_def.value != NODE_NONE {
+                        borrow_ir_body(p, &mut ow, m, iid, true, &mut st, run_ref);
+                    }
+                }
+            }
+        }
+    }
+    let dt = unsafe shim::sc_ticks_ms() - t0;
+    eprint(
+        "borrow-ir: {} bodies ({} skipped), {} move-errs, {} loan-errs, {} ref-diffs, {} ms ({} facts, {} solve)\n",
+        st.bodies,
+        st.skipped,
+        st.move_errs,
+        st.loan_errs,
+        st.ref_diffs,
+        dt,
+        st.ms_facts,
+        st.ms_solve,
+    );
+    eprint(
+        "borrow-ir: origins {} (uni {}), loans {}, points {}, cfg-edges {}, subsets {}, kills {}, activations {}, accesses {}\n",
+        st.s.origins,
+        st.s.universals,
+        st.s.loans,
+        st.s.points,
+        st.s.cfg_edges,
+        st.s.subset_facts,
+        st.s.kill_facts,
+        st.s.activation_facts,
+        st.s.access_facts,
+    );
+    eprint(
+        "borrow-ir: candidates {}, clean {}, queries {} (hits {}), steps {}, loanset-KiB {}, scratch-KiB {}\n",
+        st.s.candidates,
+        st.s.clean_bodies,
+        st.s.queries,
+        st.s.cache_hits,
+        st.s.steps,
+        st.s.loanset_bytes / 1024,
+        st.s.scratch_bytes / 1024,
+    );
+    ow.free();
+    return (st.move_errs + st.loan_errs + st.ref_diffs) as u32;
 }
 
 // Shadow mode (SC_INSTANCES=1): build the Core-IR instance graph after the established propagation
@@ -1823,6 +2070,7 @@ pub fn lint_package(
     if core_ir_pass(p) != 0 {
         return 1;
     }
+    let _ = borrow_ir_pass(p);
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
     // duplicates). The const suggestion is the exception: opt-in (`--suggest-const`, warning every
     // eligible function at once would swamp default lints), and under `--fix` it contributes its
@@ -2105,6 +2353,7 @@ pub fn run_package(
     if core_ir_pass(p) != 0 {
         return 1;
     }
+    let _ = borrow_ir_pass(p);
     if lint {
         lint_unused_items(p, -1);
     }
