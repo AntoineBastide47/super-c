@@ -57,6 +57,12 @@ pub struct PatCx {
     pub subs: Vector<u32>, // flat sub-pattern id pool
     cols: Vector<u32>, // flat row storage (NPat ids)
     rows: Vector<Row>,
+    // usefulness arena: matrices live as (start, len) row descriptors over a flat cell pool;
+    // every recursion level appends behind a watermark and truncates on return, so a whole
+    // query allocates only on first-capacity growth (the plan's flat-row requirement).
+    mcells: Vector<u32>,
+    mrows: Vector<u64>, // start << 32 | len
+    seen: Vector<u32>, // distinct-head scratch, watermark-disciplined like the arenas
     pub budget: u32, // remaining work units; 0 = overflow, answer conservatively
     pub overflow: bool,
 }
@@ -114,6 +120,9 @@ extend PatCx as Free {
         self.subs.free();
         self.cols.free();
         self.rows.free();
+        self.mcells.free();
+        self.mrows.free();
+        self.seen.free();
     }
 }
 
@@ -157,6 +166,9 @@ extend PatCx {
             subs: Vector::<u32>::new(),
             cols: Vector::<u32>::new(),
             rows: Vector::<Row>::new(),
+            mcells: Vector::<u32>::new(),
+            mrows: Vector::<u64>::new(),
+            seen: Vector::<u32>::new(),
             budget: 65536,
             overflow: false,
         };
@@ -601,64 +613,42 @@ extend PatCx {
         return true; // tuple/struct: single constructor
     }
 
-    // Usefulness of query row `q` (NPat ids) against the rows in `rs` (each a Vector<u32>).
-    // Classic specialization; `q` contains no or-patterns (normalization expanded them).
-    fn useful_rec(self: &mut Self, rs: &Vector<Vector<u32>>, q: &Vector<u32>) bool {
-        if !self.spend(rs.len() as u32 + 1) {
+    // Usefulness of the query row at mrows[qrow] against the matrix rows mrows[rs..rs+rn]
+    // (classic specialization; or-patterns were expanded at normalization). All storage is the
+    // watermarked arena: each level appends its specialized matrix + query and truncates on return.
+    fn useful_rec(self: &mut Self, rs: usize, rn: usize, qrow: usize) bool {
+        if !self.spend(rn as u32 + 1) {
             return false; // conservative: not useful => assume covered / unreachable never fires
         }
-        if q.len() == 0 {
-            return rs.len() == 0;
+        let q = self.mrows[qrow];
+        let qs = (q >> 32) as usize;
+        let ql = (q & 0xFFFFFFFFu64) as usize;
+        if ql == 0 {
+            return rn == 0;
         }
-        let q0 = q[0];
+        let q0 = self.mcells[qs];
         let q0k = self.pats.at(q0 as usize).kind;
+        let wm_c = self.mcells.len();
+        let wm_r = self.mrows.len();
+        let wm_p = self.pats.len();
         if q0k != PC_WILD {
-            // specialize on q0's constructor
-            let arity = self.pats.at(q0 as usize).sub_len;
-            let mut nrs = Vector::<Vector<u32>>::new();
-            for r in 0..rs.len() {
-                let row = rs.at(r);
-                let h = row[0];
-                if !self.head_covers(h, q0) {
-                    continue;
-                }
-                let mut nr = Vector::<u32>::new();
-                let hp = *self.pats.at(h as usize);
-                if hp.kind == PC_WILD {
-                    for s in 0..arity {
-                        let w = self.wild(hp.node);
-                        nr.push(w);
-                    }
-                } else {
-                    for s in 0..hp.sub_len {
-                        nr.push(self.subs[(hp.sub_start + s) as usize]);
-                    }
-                }
-                for c in 1..row.len() {
-                    nr.push(row[c]);
-                }
-                nrs.push(nr);
-            }
-            let mut nq = Vector::<u32>::new();
-            let qp = *self.pats.at(q0 as usize);
-            for s in 0..qp.sub_len {
-                nq.push(self.subs[(qp.sub_start + s) as usize]);
-            }
-            for c in 1..q.len() {
-                nq.push(q[c]);
-            }
-            return self.useful_rec(&nrs, &nq);
+            let r = self.useful_spec(rs, rn, qrow, q0);
+            self.mcells.truncate(wm_c);
+            self.mrows.truncate(wm_r);
+            self.pats.truncate(wm_p);
+            return r;
         }
-        // q0 wild: check head-constructor completeness
-        let mut seen = Vector::<u32>::new(); // representative NPat ids of distinct head ctors
+        // q0 wild: distinct head constructors + completeness
+        let wm_s = self.seen.len();
         let mut complete = false;
         let mut variant_count: u32 = 0;
         let mut vmask = Cover4x {};
         let mut tcov = false;
         let mut fcov = false;
         let mut single = P_NONE;
-        for r in 0..rs.len() {
-            let h = rs.at(r)[0];
+        for r in 0..rn {
+            let row = self.mrows[rs + r];
+            let h = self.mcells[(row >> 32) as usize];
             let hp = self.pats.at(h as usize);
             if hp.kind == PC_WILD {
                 continue;
@@ -685,13 +675,14 @@ extend PatCx {
                 single = h;
             }
             let mut dup = false;
-            for s in 0..seen.len() {
-                if self.head_covers(seen[s], h) && self.head_covers(h, seen[s]) {
+            for s2 in wm_s..self.seen.len() {
+                let sv = self.seen[s2];
+                if self.head_covers(sv, h) && self.head_covers(h, sv) {
                     dup = true;
                 }
             }
             if !dup {
-                seen.push(h);
+                self.seen.push(h);
             }
         }
         if single != P_NONE {
@@ -710,87 +701,190 @@ extend PatCx {
             complete = n >= variant_count;
         }
         if !complete {
-            // default matrix: rows with wild heads, minus the column
-            let mut nrs = Vector::<Vector<u32>>::new();
-            for r in 0..rs.len() {
-                let row = rs.at(r);
-                if self.pats.at(row[0] as usize).kind != PC_WILD {
+            // default matrix: wild-headed rows, minus the column
+            let drs = self.mrows.len();
+            let mut drn: usize = 0;
+            for r in 0..rn {
+                let row = self.mrows[rs + r];
+                let rstart = (row >> 32) as usize;
+                let rlen = (row & 0xFFFFFFFFu64) as usize;
+                if self.pats.at(self.mcells[rstart] as usize).kind != PC_WILD {
                     continue;
                 }
-                let mut nr = Vector::<u32>::new();
-                for c in 1..row.len() {
-                    nr.push(row[c]);
+                let ns = self.mcells.len();
+                for c in 1..rlen {
+                    self.mcells.push(self.mcells[rstart + c]);
                 }
-                nrs.push(nr);
+                self.mrows.push(ns as u64 << 32 | (rlen - 1) as u64);
+                drn += 1;
             }
-            let mut nq = Vector::<u32>::new();
-            for c in 1..q.len() {
-                nq.push(q[c]);
+            let nqs = self.mcells.len();
+            for c in 1..ql {
+                self.mcells.push(self.mcells[qs + c]);
             }
-            return self.useful_rec(&nrs, &nq);
+            let nq = self.mrows.len();
+            self.mrows.push(nqs as u64 << 32 | (ql - 1) as u64);
+            let r = self.useful_rec(drs, drn, nq);
+            self.mcells.truncate(wm_c);
+            self.mrows.truncate(wm_r);
+            self.pats.truncate(wm_p);
+            self.seen.truncate(wm_s);
+            return r;
         }
         // complete head set: useful iff useful under some constructor
-        for s in 0..seen.len() {
-            let rep = seen[s];
-            let arity = self.pats.at(rep as usize).sub_len;
-            let mut nrs = Vector::<Vector<u32>>::new();
-            for r in 0..rs.len() {
-                let row = rs.at(r);
-                let h = row[0];
-                let hp = *self.pats.at(h as usize);
-                let cov = if hp.kind == PC_WILD {
-                    true;
-                } else {
-                    self.head_covers(h, rep) && self.head_covers(rep, h);
-                };
-                if !cov {
-                    continue;
-                }
-                let mut nr = Vector::<u32>::new();
-                if hp.kind == PC_WILD {
-                    for s2 in 0..arity {
-                        let w = self.wild(hp.node);
-                        nr.push(w);
-                    }
-                } else {
-                    for s2 in 0..hp.sub_len {
-                        nr.push(self.subs[(hp.sub_start + s2) as usize]);
-                    }
-                }
-                for c in 1..row.len() {
-                    nr.push(row[c]);
-                }
-                nrs.push(nr);
-            }
-            let mut nq = Vector::<u32>::new();
-            let qn = self.pats.at(q0 as usize).node;
-            for s2 in 0..arity {
-                let w = self.wild(qn);
-                nq.push(w);
-            }
-            for c in 1..q.len() {
-                nq.push(q[c]);
-            }
-            if self.useful_rec(&nrs, &nq) {
+        let seen_end = self.seen.len();
+        let mut s2 = wm_s;
+        while s2 < seen_end {
+            let rep = self.seen[s2];
+            let r = self.useful_ctor(rs, rn, qrow, rep);
+            if r {
+                self.mcells.truncate(wm_c);
+                self.mrows.truncate(wm_r);
+                self.pats.truncate(wm_p);
+                self.seen.truncate(wm_s);
                 return true;
             }
+            self.mcells.truncate(wm_c);
+            self.mrows.truncate(wm_r);
+            self.pats.truncate(wm_p);
+            s2 += 1;
         }
+        self.seen.truncate(wm_s);
         return false;
     }
 
-    // Materialize the current rows (optionally only those before `limit_arm`) into row vectors.
-    fn snapshot(self: &Self, limit_arm: u32, out: &mut Vector<Vector<u32>>) {
+    // Specialize on the QUERY's own constructor q0 and recurse.
+    fn useful_spec(self: &mut Self, rs: usize, rn: usize, qrow: usize, q0: u32) bool {
+        let q = self.mrows[qrow];
+        let qs = (q >> 32) as usize;
+        let ql = (q & 0xFFFFFFFFu64) as usize;
+        let arity = self.pats.at(q0 as usize).sub_len as usize;
+        let nrs = self.mrows.len();
+        let mut nrn: usize = 0;
+        for r in 0..rn {
+            let row = self.mrows[rs + r];
+            let rstart = (row >> 32) as usize;
+            let rlen = (row & 0xFFFFFFFFu64) as usize;
+            let h = self.mcells[rstart];
+            if !self.head_covers(h, q0) {
+                continue;
+            }
+            let hp = *self.pats.at(h as usize);
+            let ns = self.mcells.len();
+            if hp.kind == PC_WILD {
+                for k in 0..arity {
+                    let w = self.wild(hp.node);
+                    self.mcells.push(w);
+                }
+            } else {
+                for k in 0..hp.sub_len {
+                    self.mcells.push(self.subs[(hp.sub_start + k) as usize]);
+                }
+            }
+            for c in 1..rlen {
+                self.mcells.push(self.mcells[rstart + c]);
+            }
+            self.mrows.push(ns as u64 << 32 | (arity + rlen - 1) as u64);
+            nrn += 1;
+        }
+        let qp = *self.pats.at(q0 as usize);
+        let nqs = self.mcells.len();
+        for k in 0..qp.sub_len {
+            self.mcells.push(self.subs[(qp.sub_start + k) as usize]);
+        }
+        for c in 1..ql {
+            self.mcells.push(self.mcells[qs + c]);
+        }
+        let nq = self.mrows.len();
+        self.mrows.push(nqs as u64 << 32 | (arity + ql - 1) as u64);
+        return self.useful_rec(nrs, nrn, nq);
+    }
+
+    // Specialize on head constructor `rep` with a wild-expanded query and recurse.
+    fn useful_ctor(self: &mut Self, rs: usize, rn: usize, qrow: usize, rep: u32) bool {
+        let q = self.mrows[qrow];
+        let qs = (q >> 32) as usize;
+        let ql = (q & 0xFFFFFFFFu64) as usize;
+        let arity = self.pats.at(rep as usize).sub_len as usize;
+        let nrs = self.mrows.len();
+        let mut nrn: usize = 0;
+        for r in 0..rn {
+            let row = self.mrows[rs + r];
+            let rstart = (row >> 32) as usize;
+            let rlen = (row & 0xFFFFFFFFu64) as usize;
+            let h = self.mcells[rstart];
+            let hp = *self.pats.at(h as usize);
+            let cov = if hp.kind == PC_WILD {
+                true;
+            } else {
+                self.head_covers(h, rep) && self.head_covers(rep, h);
+            };
+            if !cov {
+                continue;
+            }
+            let ns = self.mcells.len();
+            if hp.kind == PC_WILD {
+                for k in 0..arity {
+                    let w = self.wild(hp.node);
+                    self.mcells.push(w);
+                }
+            } else {
+                for k in 0..hp.sub_len {
+                    self.mcells.push(self.subs[(hp.sub_start + k) as usize]);
+                }
+            }
+            for c in 1..rlen {
+                self.mcells.push(self.mcells[rstart + c]);
+            }
+            self.mrows.push(ns as u64 << 32 | (arity + rlen - 1) as u64);
+            nrn += 1;
+        }
+        let qn = self.pats.at(self.mcells[qs] as usize).node;
+        let nqs = self.mcells.len();
+        for k in 0..arity {
+            let w = self.wild(qn);
+            self.mcells.push(w);
+        }
+        for c in 1..ql {
+            self.mcells.push(self.mcells[qs + c]);
+        }
+        let nq = self.mrows.len();
+        self.mrows.push(nqs as u64 << 32 | (arity + ql - 1) as u64);
+        return self.useful_rec(nrs, nrn, nq);
+    }
+
+    // Copy the recorded arm rows (those before `limit_arm`) into the arena as the root matrix.
+    fn snapshot_arena(self: &mut Self, limit_arm: u32) usize {
+        let mut n: usize = 0;
         for r in 0..self.rows.len() {
-            let row = self.rows.at(r);
+            let row = *self.rows.at(r);
             if row.arm >= limit_arm {
                 continue;
             }
-            let mut nr = Vector::<u32>::new();
+            let ns = self.mcells.len();
             for c in 0..row.len {
-                nr.push(self.cols[(row.start + c) as usize]);
+                self.mcells.push(self.cols[(row.start + c) as usize]);
             }
-            out.push(nr);
+            self.mrows.push(ns as u64 << 32 | row.len as u64);
+            n += 1;
         }
+        return n;
+    }
+
+    // Run one usefulness query for probe pattern `probe` against rows before `limit_arm`.
+    fn query(self: &mut Self, probe: u32, limit_arm: u32) bool {
+        let wm_c = self.mcells.len();
+        let wm_r = self.mrows.len();
+        let rs = self.mrows.len();
+        let rn = self.snapshot_arena(limit_arm);
+        let nqs = self.mcells.len();
+        self.mcells.push(probe);
+        let nq = self.mrows.len();
+        self.mrows.push(nqs as u64 << 32 | 1);
+        let r = self.useful_rec(rs, rn, nq);
+        self.mcells.truncate(wm_c);
+        self.mrows.truncate(wm_r);
+        return r;
     }
 
     /// Is a wildcard still useful after every recorded row? (true = the match is NOT exhaustive.)
@@ -798,12 +892,8 @@ extend PatCx {
         if self.overflow {
             return false;
         }
-        let mut rs = Vector::<Vector<u32>>::new();
-        self.snapshot(0xFFFFFFFF, &mut rs);
-        let mut q = Vector::<u32>::new();
         let w = self.wild(NODE_NONE);
-        q.push(w);
-        return self.useful_rec(&rs, &q) && !self.overflow;
+        return self.query(w, 0xFFFFFFFF) && !self.overflow;
     }
 
     /// Is enum variant `vd` (ordinal `ord`) still reachable after every recorded row?
@@ -830,11 +920,7 @@ extend PatCx {
             },
         );
         let probe = self.pats.len() as u32 - 1;
-        let mut rs = Vector::<Vector<u32>>::new();
-        self.snapshot(0xFFFFFFFF, &mut rs);
-        let mut q = Vector::<u32>::new();
-        q.push(probe);
-        return self.useful_rec(&rs, &q) && !self.overflow;
+        return self.query(probe, 0xFFFFFFFF) && !self.overflow;
     }
 
     /// Is arm `arm`'s pattern `pid` reachable given every earlier recorded row? (Earlier guarded
@@ -845,12 +931,8 @@ extend PatCx {
         }
         let mut alts = Vector::<u32>::new();
         self.normalize(pid, &mut alts);
-        let mut rs = Vector::<Vector<u32>>::new();
-        self.snapshot(arm, &mut rs);
         for i in 0..alts.len() {
-            let mut q = Vector::<u32>::new();
-            q.push(alts[i]);
-            if self.useful_rec(&rs, &q) {
+            if self.query(alts[i], arm) {
                 return true;
             }
         }

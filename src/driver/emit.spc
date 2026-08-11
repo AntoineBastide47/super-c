@@ -2367,6 +2367,33 @@ fn emitted_inst_diff(p: &mut loader::Package) {
     }
     let dt = unsafe shim::sc_ticks_ms() - t0;
     eprint("inst-emit: attribution: {} pair-missing (agg known), {} instance-missing\n", miss_pair, miss_inst);
+    // owner-emits homes: computed from anchors, verified anchor-independent across every pool
+    let mut homed: u32 = 0;
+    let mut hmiss: u32 = 0;
+    g.compute_homes(&mut homed, &mut hmiss);
+    let mut deps = Vector::<u32>::new();
+    g.module_deps(&mut deps);
+    let mut anchored: u32 = 0;
+    let mut derived: u32 = 0;
+    for r in 0..g.recs.len() {
+        let rec = g.recs.at(r);
+        if rec.kind != ig::IG_AGG {
+            continue;
+        }
+        if rec.aty != TYPE_NONE {
+            anchored += 1;
+        } else {
+            derived += 1;
+        }
+    }
+    eprint(
+        "inst-home: {} homes computed, {} anchor mismatches, {} dep edges; aggs {} pool-anchored + {} derived\n",
+        homed,
+        hmiss,
+        deps.len(),
+        anchored,
+        derived,
+    );
     eprint(
         "inst-emit: {} emitted fn instances, {} missing from the graph, {} graph records, {} ms{}\n",
         total,

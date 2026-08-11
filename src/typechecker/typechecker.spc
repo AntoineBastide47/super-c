@@ -54,7 +54,6 @@ pub type Regions32 = Array<u32, 32>;
 // Field-chain scratch for resolving a store slot's lifetime through nested aggregates.
 pub type Nodes8 = Array<NodeId, 8>;
 pub type Spans8 = Array<tok::Span, 8>;
-pub type Cover4 = Array<u64, 4>;
 pub type Buf128 = Array<char, 128>;
 pub type NodeArr16 = Array<NodeId, 16>;
 
@@ -8554,7 +8553,9 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    fn iter_elem_type(self: &mut Self, it: TypeId) TypeId {
+    // `forid` receives the selected `next` (call_info) and its substituted Option return type
+    // (type_args) -- the facts Core IR lowering replays instead of re-deriving the protocol.
+    fn iter_elem_type(self: &mut Self, forid: NodeId, it: TypeId) TypeId {
         let mut im: ModuleId = 0;
         let mut idl = NODE_NONE;
         let mut gp = Defs8 {};
@@ -8598,6 +8599,9 @@ extend TypeChecker {
         if rt.kind == TypeKind::TYPE_INSTANCE {
             let oi = *self.cur_ast().instance(rt.as_data.inst);
             if oi.n >= 1 {
+                unsafe self.cur_ast().call_info.insert(forid, nx.module as u64 << 40 | nx.node as u64 << 8);
+                let tt = ret;
+                self.cur_ast().set_type_args(forid, &tt, 1);
                 return oi.args[0];
             }
         }
@@ -11394,137 +11398,32 @@ extend TypeChecker {
         self.check_stmt(ifd.else_branch);
     }
 
-    fn pattern_irrefutable(self: &Self, id: NodeId) bool {
-        if id == NODE_NONE {
-            return true;
-        }
-        let a = self.cur_ast();
-        let p = a.at_const(id);
-        if p.kind == NodeKind::NODE_PATTERN_WILDCARD || p.kind == NodeKind::NODE_IDENTIFIER {
-            return true;
-        }
-        if p.kind == NodeKind::NODE_PATTERN_NAME || p.kind == NodeKind::NODE_PATTERN_TUPLE || p.kind == NodeKind::NODE_PATTERN_STRUCT {
-            let nameId = p.as_data.pattern.name;
-            if nameId != NODE_NONE {
-                let d = a.resolution_def(nameId);
-                if d.node != NODE_NONE && self.mod_ast(d.module).at_const(d.node).kind == NodeKind::NODE_VARIANT {
-                    return false;
-                }
-            }
-            if p.kind == NodeKind::NODE_PATTERN_NAME {
-                return true;
-            }
-            let children = p.as_data.pattern.children;
-            for i in 0..children.len {
-                if !self.pattern_irrefutable(unsafe a.list(children)[i as usize]) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        if p.kind == NodeKind::NODE_PATTERN_FIELD {
-            let children = p.as_data.pattern.children;
-            for i in 0..children.len {
-                if !self.pattern_irrefutable(unsafe a.list(children)[i as usize]) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        if p.kind == NodeKind::NODE_PATTERN_OR {
-            let children = p.as_data.pattern.children;
-            for i in 0..children.len {
-                if self.pattern_irrefutable(unsafe a.list(children)[i as usize]) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        return false;
-    }
-    fn pattern_covered_variant(self: &Self, id: NodeId) NodeId {
-        let a = self.cur_ast();
-        let p = a.at_const(id);
-        if p.kind != NodeKind::NODE_PATTERN_NAME && p.kind != NodeKind::NODE_PATTERN_TUPLE && p.kind != NodeKind::NODE_PATTERN_STRUCT {
-            return NODE_NONE;
-        }
-        let nameId = p.as_data.pattern.name;
-        if nameId == NODE_NONE {
-            return NODE_NONE;
-        }
-        let d = a.resolution_def(nameId);
-        if d.node == NODE_NONE || self.mod_ast(d.module).at_const(d.node).kind != NodeKind::NODE_VARIANT {
-            return NODE_NONE;
-        }
-        let children = p.as_data.pattern.children;
-        for i in 0..children.len {
-            if !self.pattern_irrefutable(unsafe a.list(children)[i as usize]) {
-                return NODE_NONE;
-            }
-        }
-        return d.node;
-    }
-    fn match_arm_coverage(
-        self: &Self,
-        pid: NodeId,
-        emod: ModuleId,
-        has_ea: bool,
-        variants: NodeList,
-        covered: *mut u64,
-        catchall: *mut bool,
-        tcov: *mut bool,
-        fcov: *mut bool,
-    ) {
+    // Does this pattern match every value (wildcard or pure binding, through or-alternatives)?
+    // Matrix-consistent: a variant name or `@`-bound subpattern is NOT a catch-all.
+    fn pat_catchall(self: &Self, pid: NodeId) bool {
         if pid == NODE_NONE {
-            return;
+            return false;
         }
         let a = self.cur_ast();
         let p = a.at_const(pid);
+        if p.kind == NodeKind::NODE_PATTERN_WILDCARD || p.kind == NodeKind::NODE_IDENTIFIER {
+            return true;
+        }
+        if p.kind == NodeKind::NODE_PATTERN_NAME && p.as_data.pattern.children.len == 0 {
+            let d = a.resolution_def(p.as_data.pattern.name);
+            return d.node == NODE_NONE || self.mod_ast(d.module).at_const(d.node).kind != NodeKind::NODE_VARIANT;
+        }
         if p.kind == NodeKind::NODE_PATTERN_OR {
-            let children = p.as_data.pattern.children;
-            for i in 0..children.len {
-                self.match_arm_coverage(
-                    unsafe a.list(children)[i as usize],
-                    emod,
-                    has_ea,
-                    variants,
-                    covered,
-                    catchall,
-                    tcov,
-                    fcov,
-                );
+            let ch = p.as_data.pattern.children;
+            for i in 0..ch.len {
+                if self.pat_catchall(unsafe a.list(ch)[i as usize]) {
+                    return true;
+                }
             }
-            return;
         }
-        if self.pattern_irrefutable(pid) {
-            unsafe *catchall = true;
-            return;
-        }
-        if p.kind == NodeKind::NODE_PATTERN_LITERAL {
-            let v = a.at_const(p.as_data.single.value);
-            if v.kind == NodeKind::NODE_LITERAL && v.as_data.literal.token_type == TokenType::True {
-                unsafe *tcov = true;
-            } else if v.kind == NodeKind::NODE_LITERAL && v.as_data.literal.token_type == TokenType::False {
-                unsafe *fcov = true;
-            }
-            return;
-        }
-        let var = self.pattern_covered_variant(pid);
-        if var == NODE_NONE || !has_ea {
-            return;
-        }
-        let ea = self.mod_ast(emod);
-        let mut i: u32 = 0;
-        while i < variants.len && i < MATCH_MAX_VARIANTS {
-            if unsafe ea.list(variants)[i as usize] == var {
-                let idx = (i >> 6) as usize;
-                let cur = unsafe covered[idx];
-                unsafe covered[idx] = cur | 1u64 << (i & 63) as u64;
-                return;
-            }
-            i = i + 1;
-        }
+        return false;
     }
+
     // The shared pattern matrix (pattern::pattern) decides coverage; the legacy
     // walker below stays as the budget-overflow fallback, so adversarial or-expansions keep the old
     // verdicts. Messages are unchanged.
@@ -11541,13 +11440,15 @@ extend TypeChecker {
         let mut gn2: i32 = 0;
         let agok2 = self.aggregate_of(base, &mut emod2, &mut edecl2, &mut gp2, &mut ga2, &mut gn2);
         let is_enum2 = agok2 && self.mod_ast(emod2).at_const(edecl2).kind == NodeKind::NODE_ENUM;
-        // Fast path: the allocation-free legacy walk accepts the dominant shapes (catch-alls,
-        // whole-variant covers, both bools). It only ever under-approximates, so an accept is
-        // final; the matrix arbitrates the would-reject remainder (deep payload splits).
-        if self.legacy_exhaustive(id, scrut, false) {
-            return;
-        }
+        // Short-circuit: an unguarded catch-all arm (wildcard or pure binding) makes the matrix
+        // verdict trivially "exhaustive" -- skip building it.
         let arms2 = a.at_const(id).as_data.match_expr.arms;
+        for i in 0..arms2.len {
+            let arm = a.at_const(unsafe a.list(arms2)[i as usize]);
+            if arm.as_data.match_arm.guard == NODE_NONE && self.pat_catchall(arm.as_data.match_arm.pattern) {
+                return;
+            }
+        }
         let mut cx = pat::PatCx::new(self.package, a, self.source);
         for i in 0..arms2.len {
             let arm = a.at_const(unsafe a.list(arms2)[i as usize]);
@@ -11597,7 +11498,8 @@ extend TypeChecker {
                 }
             }
         }
-        let _ = self.legacy_exhaustive(id, scrut, true);
+        // budget overflow (adversarial or-expansion): the matrix answers conservatively --
+        // assume exhaustive rather than error on a switch it could not analyze
     }
 
     // Matrix usefulness marks the first arm no value can reach (earlier GUARDED arms
@@ -11622,84 +11524,6 @@ extend TypeChecker {
                 cx.add_arm(arm.pattern, i);
             }
         }
-    }
-
-    // The pre-matrix coverage walk: catch-alls, whole-variant bit sets, and the bool pair. Returns
-    // true when it proves the switch exhaustive (a sound under-approximation of the matrix).
-    // `report` emits the legacy diagnostics -- the matrix-overflow path only.
-    fn legacy_exhaustive(self: &mut Self, id: NodeId, scrut: TypeId, report: bool) bool {
-        if scrut == TYPE_NONE {
-            return true;
-        }
-        let a = self.cur_ast();
-        let base = self.strip(scrut);
-        let mut emod: ModuleId = 0;
-        let mut edecl = NODE_NONE;
-        let mut gp = Defs8 {};
-        let mut ga = Tys8 {};
-        let mut gn: i32 = 0;
-        let agok = self.aggregate_of(base, &mut emod, &mut edecl, &mut gp, &mut ga, &mut gn);
-        let is_enum = agok && self.mod_ast(emod).at_const(edecl).kind == NodeKind::NODE_ENUM;
-        let mut variants = NodeList { start: 0, len: 0 };
-        if is_enum {
-            variants = self.mod_ast(emod).at_const(edecl).as_data.aggregate.members;
-        }
-        let mut covered = Cover4 {};
-        let mut catchall = false;
-        let mut tcov = false;
-        let mut fcov = false;
-        let arms = a.at_const(id).as_data.match_expr.arms;
-        for i in 0..arms.len {
-            let arm = a.at_const(unsafe a.list(arms)[i as usize]);
-            if arm.as_data.match_arm.guard == NODE_NONE {
-                self.match_arm_coverage(
-                    arm.as_data.match_arm.pattern,
-                    emod,
-                    is_enum,
-                    variants,
-                    &mut covered[0],
-                    &mut catchall,
-                    &mut tcov,
-                    &mut fcov,
-                );
-            }
-        }
-        if catchall {
-            return true;
-        }
-        let sp = a.at_const(a.at_const(id).as_data.match_expr.value).span;
-        if is_enum && variants.len <= MATCH_MAX_VARIANTS {
-            let mut nmiss: u32 = 0;
-            for k in 0..variants.len {
-                if (covered[(k >> 6) as usize] & 1u64 << (k & 63) as u64) == 0 {
-                    nmiss = nmiss + 1;
-                }
-            }
-            if nmiss == 0 {
-                return true;
-            }
-            if report {
-                let mut s2 = "s".ptr() as *const char;
-                if nmiss == 1 {
-                    s2 = "".ptr() as *const char;
-                }
-                self.errors.emit(
-                    sp.start,
-                    sp.end - sp.start,
-                    format("switch is not exhaustive: missing {} variant{}", nmiss, diag::cstr(s2)),
-                );
-                self.errors.note(format("match every variant or add a '_' arm"));
-            }
-            return false;
-        }
-        if base == Ast::builtin(BuiltinType::BT_BOOL) && tcov && fcov {
-            return true;
-        }
-        if report {
-            self.errors.emit(sp.start, sp.end - sp.start, format("switch is not exhaustive"));
-            self.errors.note(format("add a '_' arm to cover the remaining values"));
-        }
-        return false;
     }
 
     // ---- region variables (phase 1: allocation + slot counting; the solver consumes these later) ----
@@ -13879,7 +13703,7 @@ extend TypeChecker {
                 elem = self.range_instance_elem(it);
             }
             if elem == TYPE_NONE && it != TYPE_NONE {
-                elem = self.iter_elem_type(it);
+                elem = self.iter_elem_type(id, it);
             }
             if elem == TYPE_NONE && it != TYPE_NONE {
                 let sp = self.cur_ast().at_const(iter).span;

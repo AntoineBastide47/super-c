@@ -126,7 +126,6 @@ pub const IN_ZEROED: u8 = 6;
 pub const IN_REFLECT: u8 = 7; // angle-3 compatibility: reflection binder/projection forms
 pub const IN_ASM_OPERAND: u8 = 8;
 pub const IN_NEW: u8 = 9; // heap allocation of the initializer operand (`new T { .. }`)
-pub const IN_TRY_ERR: u8 = 10; // `?` error path: convert + rewrap the error operand for the return slot
 
 pub struct Rvalue {
     pub kind: u8,

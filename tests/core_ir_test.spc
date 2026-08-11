@@ -232,3 +232,26 @@ fn typed_facts_boundary() {
     let take_fn = find_fn(&p, "take");
     assert(f.lifetimes(take_fn).len != 0 || a.lifetime_decls.len() != 0, "lifetime declarations reachable");
 }
+
+@test
+fn question_lowers_explicitly() {
+    let p = typed_package(
+        "fn g(o: Option<i32>) Option<i32> { let v = o?; return Option::<i32>::Some(v + 1); }\nfn main() i32 { let _ = g(Option::<i32>::Some(1)); return 0; }",
+    );
+    let out = lowered(&p, "g");
+    assert(has(&out, "discr "), "the carrier discriminant is read");
+    assert(has(&out, ".variant"), "the payload is a downcast projection");
+    assert(has(&out, "agg3"), "the error path rewraps through variant construction");
+    assert(has(&out, "return"), "the error path returns");
+}
+
+@test
+fn iterator_for_lowers_to_next_calls() {
+    let p = typed_package(
+        "fn f(v: &Vector<i32>) i32 { let mut s = 0; for x in v.iter() { s += *x; } return s; }\nfn main() i32 { let v = Vector::<i32>::new(); let _ = f(&v); return 0; }",
+    );
+    let out = lowered(&p, "f");
+    assert(has(&out, "call m"), "the selected next runs as a call terminator");
+    assert(has(&out, "discr "), "one discriminant read per iteration");
+    assert(has(&out, ".variant"), "the element loads through a downcast");
+}

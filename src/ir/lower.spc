@@ -816,7 +816,20 @@ extend Lowerer {
             }
         }
         if self.f.node(d.iterable).kind != NodeKind::NODE_RANGE {
-            let ik = self.f.ty(self.f.node_type(d.iterable)).kind;
+            // iterator protocol: the checker recorded the selected `next` and its Option return
+            switch self.f.call_info(id) {
+                Some(ci) => {
+                    self.lower_for_iter(id, DefId { module: ci_module(ci), node: ci_decl(ci) });
+                    return;
+                },
+                None => {},
+            };
+            let ity = self.f.node_type(d.iterable);
+            let ik = self.f.ty(ity).kind;
+            if ik == TypeKind::TYPE_INSTANCE && self.is_range_instance(ity) {
+                self.lower_for_range_value(id);
+                return;
+            }
             if ik == TypeKind::TYPE_ARRAY || ik == TypeKind::TYPE_SLICE || ik == TypeKind::TYPE_INSTANCE {
                 self.lower_for_indexed(id);
                 return;
@@ -919,6 +932,287 @@ extend Lowerer {
     // `for` over an indexable sequence (array, slice, sequence value): an index loop over RV_LEN
     // with an explicit element load per iteration -- the uniform sequence model until
     // instance-aware lowering specializes it per concrete carrier.
+    // Is `t` an instance of the prelude Range struct?
+    fn is_range_instance(self: &Self, t: TypeId) bool {
+        let y = *self.f.ty(t);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *self.f.instance(y.as_data.inst);
+        let hit = unsafe (&*self.pkg).prelude_lookup("Range", true);
+        return hit.node != NODE_NONE && it.module == hit.mid && it.decl == hit.node;
+    }
+
+    // The declared field ordinal + decl of `name` on struct `sd`; -1 when absent.
+    fn field_of(self: &Self, sd: DefId, name: str, decl: &mut NodeId) i64 {
+        let a = unsafe &*(&*self.pkg).module_ast_const(sd.module);
+        let src = unsafe (&*self.pkg).modules.at(sd.module as usize).source.as_str();
+        let ms = a.at_const(sd.node).as_data.aggregate.members;
+        for i in 0..ms.len {
+            let fid = unsafe a.list(ms)[i as usize];
+            if a.at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let sp = a.at_const(a.at_const(fid).as_data.field.name).as_data.name.text;
+            if src.slice(sp.start as usize, sp.end as usize) == name {
+                *decl = fid;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // `for x in r` over a prelude Range VALUE: x from r.start while (r.inclusive ? x <= r.end
+    // : x < r.end), stepping by one -- the emitter's established range-value semantics.
+    fn lower_for_range_value(self: &mut Self, id: NodeId) {
+        let d = self.f.node(id).as_data.for_stmt;
+        let sp = self.f.node(id).span;
+        let rpl = self.lower_place(d.iterable);
+        if rpl == ir::IR_NONE {
+            return;
+        }
+        let rty = self.body.places.at(rpl as usize).ty;
+        let it = *self.f.instance(self.f.ty(rty).as_data.inst);
+        let sd = DefId { module: it.module, node: it.decl };
+        let elem = self.f.node_type(id);
+        let bt = Ast::builtin(BuiltinType::BT_BOOL);
+        let mut f_start = NODE_NONE;
+        let mut f_end = NODE_NONE;
+        let mut f_inc = NODE_NONE;
+        let o_start = self.field_of(sd, "start", &mut f_start);
+        let o_end = self.field_of(sd, "end", &mut f_end);
+        let o_inc = self.field_of(sd, "inclusive", &mut f_inc);
+        if o_start < 0 || o_end < 0 || o_inc < 0 {
+            self.fail_at("range-fields", id);
+            return;
+        }
+        let l = self.body.add_local(
+            ir::LocalDecl {
+                ty: elem,
+                storage: ir::LS_USER,
+                is_mutable: true,
+                span: sp,
+                decl: id,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+        );
+        self.bind(id, l);
+        if d.binding != NODE_NONE {
+            self.bind(d.binding, l);
+        }
+        let xpl = self.place_of_local(l);
+        let spl = self.place_project(
+            rpl,
+            ir::Projection { kind: ir::PJ_FIELD, data: o_start as u32, sub: f_start, ty: elem },
+        );
+        let sop = self.copy_op(spl);
+        let rv0 = self.rv_use(sop, elem);
+        self.assign(xpl, rv0, sp);
+        let head = self.open_block();
+        let body_b = self.open_block();
+        let step = self.open_block();
+        let exit = self.open_block();
+        self.seal(self.goto_term(head, sp), head);
+        // cond = (inclusive && x <= end) || (!inclusive && x < end)
+        let epl = self.place_project(
+            rpl,
+            ir::Projection { kind: ir::PJ_FIELD, data: o_end as u32, sub: f_end, ty: elem },
+        );
+        let ipl = self.place_project(rpl, ir::Projection { kind: ir::PJ_FIELD, data: o_inc as u32, sub: f_inc, ty: bt });
+        let le_op = self.lower_cmp2(xpl, epl, tt::TokenType::LessThanEqual, sp);
+        let lt_op = self.lower_cmp2(xpl, epl, tt::TokenType::LessThan, sp);
+        let inc_op = self.copy_op(ipl);
+        let ninc = self.temp(bt, sp);
+        let npl = self.place_of_local(ninc);
+        self.assign(
+            npl,
+            ir::Rvalue {
+                kind: ir::RV_UNARY,
+                a: inc_op,
+                b: tt::TokenType::Bang as u32,
+                c: 0,
+                target: bt,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+            sp,
+        );
+        let inc_op2 = self.copy_op(ipl);
+        let a1 = self.bool_and(inc_op2, le_op, sp);
+        let nop = self.copy_op(npl);
+        let a2 = self.bool_and(nop, lt_op, sp);
+        let cond = self.bool_or(a1, a2, sp);
+        self.branch_bool(cond, body_b, exit, sp);
+        self.loops.push(
+            LoopCtx { label: d.label, brk: exit, cont: step, defer_depth: self.defers.len(), result: ir::IR_NONE },
+        );
+        self.lower_stmt(d.body);
+        let _ = self.loops.pop();
+        self.seal(self.goto_term(step, sp), step);
+        let xop = self.copy_op(xpl);
+        let one = self.const_op(
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: elem,
+                val: 1,
+                raw: sp,
+                item: DefId { module: 0, node: NODE_NONE },
+                targ_start: 0,
+                targ_len: 0,
+            },
+        );
+        self.assign(
+            xpl,
+            ir::Rvalue {
+                kind: ir::RV_BINARY,
+                a: xop,
+                b: one,
+                c: tt::TokenType::Plus as u8,
+                target: elem,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+            sp,
+        );
+        self.seal(self.goto_term(head, sp), exit);
+    }
+
+    fn lower_cmp2(self: &mut Self, l: ir::PlaceId, r: ir::PlaceId, rel: tt::TokenType, sp: tok::Span) ir::OperandId {
+        let rop = self.copy_op(r);
+        return self.cmp_test(l, rop, rel, sp);
+    }
+
+    fn bool_and(self: &mut Self, a: ir::OperandId, b: ir::OperandId, sp: tok::Span) ir::OperandId {
+        return self.bool_bin(a, b, tt::TokenType::AmpersandAmpersand, sp);
+    }
+
+    fn bool_or(self: &mut Self, a: ir::OperandId, b: ir::OperandId, sp: tok::Span) ir::OperandId {
+        return self.bool_bin(a, b, tt::TokenType::PipePipe, sp);
+    }
+
+    fn bool_bin(self: &mut Self, a: ir::OperandId, b: ir::OperandId, op: tt::TokenType, sp: tok::Span) ir::OperandId {
+        let bt = Ast::builtin(BuiltinType::BT_BOOL);
+        let t = self.temp(bt, sp);
+        let pl = self.place_of_local(t);
+        self.assign(
+            pl,
+            ir::Rvalue {
+                kind: ir::RV_BINARY,
+                a: a,
+                b: b,
+                c: op as u8,
+                target: bt,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+            sp,
+        );
+        return self.copy_op(pl);
+    }
+
+    // `for x in it` over an Iterator: the checker-selected `next` runs per iteration; the loop
+    // continues while it yields the payload variant. This is the real protocol -- one call
+    // terminator, one discriminant read, one downcast per iteration.
+    fn lower_for_iter(self: &mut Self, id: NodeId, next_def: DefId) {
+        let d = self.f.node(id).as_data.for_stmt;
+        let sp = self.f.node(id).span;
+        let it_pl = self.lower_place(d.iterable);
+        if it_pl == ir::IR_NONE {
+            return;
+        }
+        let mu = self.f.generic_args(id);
+        if mu == null || unsafe mu.n == 0 {
+            self.fail_at("iter-opt-type", id);
+            return;
+        }
+        let opt_ty = unsafe mu.args[0];
+        let elem = self.f.node_type(id);
+        let mut ok_ord: i64 = -1;
+        let mut vd = DefId { module: 0, node: NODE_NONE };
+        self.carrier_ok_variant(opt_ty, &mut ok_ord, &mut vd);
+        if ok_ord < 0 {
+            self.fail_at("iter-carrier", id);
+            return;
+        }
+        let l = self.body.add_local(
+            ir::LocalDecl {
+                ty: elem,
+                storage: ir::LS_USER,
+                is_mutable: true,
+                span: sp,
+                decl: id,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+        );
+        self.bind(id, l);
+        if d.binding != NODE_NONE {
+            self.bind(d.binding, l);
+        }
+        let t = self.temp(opt_ty, sp);
+        let tpl = self.place_of_local(t);
+        let head = self.open_block();
+        let body_b = self.open_block();
+        let exit = self.open_block();
+        self.seal(self.goto_term(head, sp), head);
+        // t = it.next()
+        let recv = self.copy_op(it_pl);
+        let start = self.body.oper_pool.len() as u32;
+        self.body.oper_pool.push(recv);
+        let dstart = self.body.dest_pool.len() as u32;
+        self.body.dest_pool.push(tpl);
+        let mut tm = self.term0(ir::TM_CALL, sp);
+        tm.callee = next_def;
+        tm.a = ir::IR_NONE;
+        tm.args_start = start;
+        tm.args_len = 1;
+        tm.dests_start = dstart;
+        tm.dests_len = 1;
+        let cont = self.open_block();
+        tm.t0 = cont;
+        self.seal(tm, cont);
+        let ut = Ast::builtin(BuiltinType::BT_U32);
+        let dt = self.temp(ut, sp);
+        let dp = self.place_of_local(dt);
+        self.assign(
+            dp,
+            ir::Rvalue {
+                kind: ir::RV_DISCRIMINANT,
+                a: tpl,
+                b: 0,
+                c: 0,
+                target: ut,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+            sp,
+        );
+        let oop = self.const_op(
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: ut,
+                val: ok_ord,
+                raw: sp,
+                item: DefId { module: 0, node: NODE_NONE },
+                targ_start: 0,
+                targ_len: 0,
+            },
+        );
+        let cond = self.eq_test(dp, oop, sp);
+        self.branch_bool(cond, body_b, exit, sp);
+        // x = downcast(t, Some).f0
+        let ppl = self.place_project(
+            tpl,
+            ir::Projection { kind: ir::PJ_DOWNCAST, data: ok_ord as u32, sub: vd.node, ty: opt_ty },
+        );
+        let fpl = self.place_project(ppl, ir::Projection { kind: ir::PJ_FIELD, data: 0, sub: NODE_NONE, ty: elem });
+        let eop = self.copy_op(fpl);
+        let xpl = self.place_of_local(l);
+        let erv = self.rv_use(eop, elem);
+        self.assign(xpl, erv, sp);
+        self.loops.push(
+            LoopCtx { label: d.label, brk: exit, cont: head, defer_depth: self.defers.len(), result: ir::IR_NONE },
+        );
+        self.lower_stmt(d.body);
+        let _ = self.loops.pop();
+        self.seal(self.goto_term(head, sp), exit);
+    }
+
     fn lower_for_indexed(self: &mut Self, id: NodeId) {
         let d = self.f.node(id).as_data.for_stmt;
         let sp = self.f.node(id).span;
@@ -1452,22 +1746,57 @@ extend Lowerer {
         tsw.sw_len = 1;
         tsw.t0 = err_b;
         self.seal(tsw, err_b);
+        // error path: read the error payload (Err has one; None has none), convert it through the
+        // checker-selected `from` when the error types differ, and rewrap it as the RETURN type's
+        // error variant into slot 0
         if self.body.returns != 0 {
-            let rop = self.copy_op(vpl);
+            let vty = self.body.places.at(vpl as usize).ty;
+            let mut err_ord: i64 = -1;
+            let mut evd = DefId { module: 0, node: NODE_NONE };
+            let mut has_payload = false;
+            self.carrier_err_variant(vty, &mut err_ord, &mut evd, &mut has_payload);
             let rt = self.body.locals.at(0).ty;
-            let rpl = self.place_of_local(0);
+            let mut rok: i64 = -1;
+            let mut rov = DefId { module: 0, node: NODE_NONE };
+            self.carrier_ok_variant(rt, &mut rok, &mut rov);
+            let mut rerr: i64 = -1;
+            let mut rev = DefId { module: 0, node: NODE_NONE };
+            let mut rpay = false;
+            self.carrier_err_variant(rt, &mut rerr, &mut rev, &mut rpay);
+            if err_ord < 0 || rerr < 0 {
+                self.fail_at("question-variants", id);
+                return ir::IR_NONE;
+            }
             let start = self.body.oper_pool.len() as u32;
-            self.body.oper_pool.push(rop);
+            let mut n: u32 = 0;
+            if has_payload && rpay {
+                let epl0 = self.place_project(
+                    vpl,
+                    ir::Projection { kind: ir::PJ_DOWNCAST, data: err_ord as u32, sub: evd.node, ty: vty },
+                );
+                let ety = self.payload_type(evd);
+                let epl = self.place_project(
+                    epl0,
+                    ir::Projection { kind: ir::PJ_FIELD, data: 0, sub: NODE_NONE, ty: ety },
+                );
+                let mut eop = self.copy_op(epl);
+                let conv = self.f.res(id);
+                if conv.node != NODE_NONE {
+                    let cty = self.payload_type(rev);
+                    let cstart = self.body.oper_pool.len() as u32;
+                    self.body.oper_pool.push(eop);
+                    eop = self.emit_call(conv, ir::IR_NONE, cstart, 1, 0, 0, cty, sp);
+                    if eop == ir::IR_NONE {
+                        return ir::IR_NONE;
+                    }
+                }
+                self.body.oper_pool.push(eop);
+                n = 1;
+            }
+            let rpl = self.place_of_local(0);
             self.assign(
                 rpl,
-                ir::Rvalue {
-                    kind: ir::RV_INTRINSIC,
-                    a: start,
-                    b: 1,
-                    c: ir::IN_TRY_ERR,
-                    target: rt,
-                    item: DefId { module: 0, node: NODE_NONE },
-                },
+                ir::Rvalue { kind: ir::RV_AGGREGATE, a: start, b: n, c: ir::AGG_VARIANT, target: rt, item: rev },
                 sp,
             );
         }
@@ -1484,6 +1813,53 @@ extend Lowerer {
         );
         let fpl = self.place_project(ppl, ir::Projection { kind: ir::PJ_FIELD, data: 0, sub: NODE_NONE, ty: ty });
         return self.copy_op(fpl);
+    }
+
+    // The error/none variant (None/Err) of a `?` carrier, its ordinal, and whether it carries a
+    // payload; plus the declared type of a variant's first payload slot.
+    fn carrier_err_variant(self: &Self, t: TypeId, ord: &mut i64, vd: &mut DefId, has_payload: &mut bool) {
+        *ord = -1;
+        *has_payload = false;
+        let y = *self.f.ty(t);
+        let mut em: ModuleId = 0;
+        let mut ed = NODE_NONE;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.f.instance(y.as_data.inst);
+            em = it.module;
+            ed = it.decl;
+        } else if y.kind == TypeKind::TYPE_ENUM {
+            em = y.module;
+            ed = y.as_data.decl;
+        }
+        if ed == NODE_NONE {
+            return;
+        }
+        let a = unsafe &*(&*self.pkg).module_ast_const(em);
+        if a.at_const(ed).kind != NodeKind::NODE_ENUM {
+            return;
+        }
+        let src = unsafe (&*self.pkg).modules.at(em as usize).source.as_str();
+        let ms = a.at_const(ed).as_data.aggregate.members;
+        for j in 0..ms.len {
+            let vn = unsafe a.list(ms)[j as usize];
+            let nsp = a.at_const(a.at_const(vn).as_data.variant.name).as_data.name.text;
+            let nm = src.slice(nsp.start as usize, nsp.end as usize);
+            if nm == "None" || nm == "Err" {
+                *ord = j;
+                *vd = DefId { module: em, node: vn };
+                *has_payload = a.at_const(vn).as_data.variant.payload.len != 0;
+                return;
+            }
+        }
+    }
+
+    fn payload_type(self: &Self, vd: DefId) TypeId {
+        let a = unsafe &*(&*self.pkg).module_ast_const(vd.module);
+        let pl = a.at_const(vd.node).as_data.variant.payload;
+        if pl.len == 0 {
+            return TYPE_NONE;
+        }
+        return a.type_of(unsafe a.list(pl)[0]);
     }
 
     // The payload-carrying "ok" variant (Some/Ok) of a `?` carrier type, by ordinal + decl.

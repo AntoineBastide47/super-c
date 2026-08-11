@@ -1343,7 +1343,7 @@ extend tc::TypeChecker {
             return 0;
         }
         if self.mod_ast(m).at_const(tyn).kind == NodeKind::NODE_REFERENCE_TYPE {
-            out[0] = self.tc_ref_typenode_lt(tyn);
+            out[0] = self.tc_lt_name_in(m, self.mod_ast(m).at_const(tyn).as_data.indirect_type.lifetime);
             return 1;
         }
         return self.tc_collect_lt_args(m, tyn, out);
@@ -1376,9 +1376,11 @@ extend tc::TypeChecker {
     }
 
     /// The lifetime a return TYPE node denotes overall (first slot), for call-site precision.
-    pub fn tc_return_dest_lifetime(self: &mut Self, ret_tyn: NodeId) tok::Span {
+    /// `m` is the module whose ast `ret_tyn` indexes -- the CALLEE's for a cross-module call; a
+    /// foreign id read against the caller's pool answers from unrelated storage (or past its end).
+    pub fn tc_return_dest_lifetime(self: &mut Self, m: ModuleId, ret_tyn: NodeId) tok::Span {
         let mut dest = Spans8 {};
-        let n = self.tc_collect_slot_lts(self.cur_module(), ret_tyn, &mut dest);
+        let n = self.tc_collect_slot_lts(m, ret_tyn, &mut dest);
         if n > 0 {
             return dest[0];
         }
@@ -3708,7 +3710,7 @@ extend tc::TypeChecker {
             return;
         }
         let fa = self.mod_ast(md.module);
-        let dest = self.tc_return_dest_lifetime(ret_tyn);
+        let dest = self.tc_return_dest_lifetime(md.module, ret_tyn);
         // Elided return with exactly one input reference: that reference flows (elision rule 1).
         let mut nref: i32 = 0;
         let mut only_ref: i32 = -1;

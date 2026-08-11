@@ -37,6 +37,11 @@ pub struct InstRec {
     pub args_len: u32,
     pub hash: u64,
     pub expanded: bool,
+    /// Pool anchor: the module + TypeId where this instance was first seen as a real pool type
+    /// (TYPE_NONE = derived through substitution/cross product only). Homes compute from it.
+    pub amod: ModuleId,
+    pub aty: TypeId,
+    pub home: ModuleId, // owner-emits home (anchored records; 0xFFFF = not computed)
 }
 
 /// One extend targeting a declaration (built once; aggregate expansion walks its methods).
@@ -188,6 +193,9 @@ extend InstGraph {
                         args_len: args.len() as u32,
                         hash: h,
                         expanded: false,
+                        amod: 0,
+                        aty: TYPE_NONE,
+                        home: 0xFFFF,
                     },
                 );
                 let id = self.recs.len() as u32 - 1;
@@ -420,59 +428,15 @@ extend InstGraph {
             args.push(self.argkey_subst(a, unsafe it.args[i], frame));
         }
         let mut fresh = false;
-        let _ = self.add(IG_AGG, DefId { module: it.module, node: it.decl }, &args, &mut fresh);
+        let id = self.add(IG_AGG, DefId { module: it.module, node: it.decl }, &args, &mut fresh);
+        if self.recs.at(id as usize).aty == TYPE_NONE && a.type_concrete(t) {
+            // a pool-concrete spelling anchors the record (frames leave symbolic types unanchored)
+            self.recs[id as usize].amod = a.module;
+            self.recs[id as usize].aty = t;
+        }
     }
 
     // ---- body walking -----------------------------------------------------------------------------
-
-    // Iterator-protocol `for` loops intern Option<Elem> at typecheck; the uniform index-loop
-    // lowering never surfaces it. Until that lowering carries the selected `next` as a typed fact,
-    // scan the function's span for instance-iterable `for` nodes and note their Option instance.
-    fn note_for_options(self: &mut Self, a: &Ast, fnode: NodeId, frame: &Vector<Subst>) {
-        let fsp = a.at_const(fnode).span;
-        let hit = unsafe (&*self.pkg).prelude_lookup("Option", true);
-        if hit.node == NODE_NONE {
-            return;
-        }
-        for n in 0..a.nodes.len() {
-            let nd = a.at_const(n as NodeId);
-            if nd.kind != NodeKind::NODE_FOR || nd.span.start < fsp.start || nd.span.end > fsp.end {
-                continue;
-            }
-            let itn = nd.as_data.for_stmt.iterable;
-            let mut ity = a.type_of(itn);
-            let mut guard = 0;
-            while guard < 4 && ity != TYPE_NONE {
-                let y = *a.type_at(ity);
-                if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
-                    ity = y.as_data.elem;
-                } else {
-                    break;
-                }
-                guard += 1;
-            }
-            if ity == TYPE_NONE || a.type_at(ity).kind != TypeKind::TYPE_INSTANCE {
-                continue;
-            }
-            // ranges/slices lower structurally; every other instance runs the iterator protocol
-            let elem = a.type_of(n as NodeId);
-            if elem == TYPE_NONE || !self.concrete_subst(a, elem, frame, 0) {
-                continue;
-            }
-            let mut args = Vector::<ArgKey>::new();
-            args.push(self.argkey_subst(a, elem, frame));
-            let mut fresh = false;
-            let _ = self.add(IG_AGG, DefId { module: hit.mid, node: hit.node }, &args, &mut fresh);
-            // by-ref protocols yield Option<&Elem> while the binding derefs to Elem: note the
-            // reference form as well (key composed exactly as type_skey keys a shared reference)
-            let ek = self.skey_subst(a, elem, frame, 0);
-            let rk = mix(mix(mix(14695981039346656037u64, TypeKind::TYPE_REFERENCE as u64), 0), ek);
-            let mut args2 = Vector::<ArgKey>::new();
-            args2.push(ArgKey { skey: rk, val: 0, has_val: false });
-            let mut fresh2 = false;
-            let _ = self.add(IG_AGG, DefId { module: hit.mid, node: hit.node }, &args2, &mut fresh2);
-        }
-    }
 
     // Walk one lowered body under `frame`: every type it stores, every resolved call, every item
     // constant. Fresh generic-fn instances queue their own expansion.
@@ -864,7 +828,6 @@ extend InstGraph {
             let mut lw = irl::Lowerer::new(self.pkg, r.def.module, r.def.node);
             if lw.lower_fn(r.def.node) {
                 self.walk_body(&lw.body, da, &frame);
-                self.note_for_options(da, r.def.node, &frame);
                 self.expand_closures(&mut lw, r.def.module, &frame);
             }
         }
@@ -1207,11 +1170,93 @@ extend InstGraph {
         self.run();
     }
 
+    /// Owner-emits homes for every anchored aggregate record (the loader's established rules),
+    /// then verify anchor-independence: recompute the home from EVERY pool that holds the
+    /// instance and count disagreements. Returns (computed, mismatches) through the out params.
+    pub fn compute_homes(self: &mut Self, computed: &mut u32, mismatches: &mut u32) {
+        let p = unsafe &*self.pkg;
+        *computed = 0;
+        *mismatches = 0;
+        for r in 0..self.recs.len() {
+            let rec = *self.recs.at(r);
+            if rec.kind != IG_AGG || rec.aty == TYPE_NONE {
+                continue;
+            }
+            let a = unsafe &*p.module_ast_const(rec.amod);
+            let y = *a.type_at(rec.aty);
+            if y.kind != TypeKind::TYPE_INSTANCE {
+                continue;
+            }
+            let it = *a.instance(y.as_data.inst);
+            self.recs[r].home = p.instance_home_mid(rec.amod, &it);
+            *computed += 1;
+        }
+        // anchor-independence: every pool spelling of a record must agree on the home
+        for m in 0..p.modules.len() {
+            if !p.modules.at(m).has_ast {
+                continue;
+            }
+            let a = unsafe &*p.module_ast_const(m as ModuleId);
+            for ii in 0..a.instances.len() {
+                let it = *a.instance(ii as u32);
+                let da = unsafe &*p.module_ast_const(it.module);
+                let dk = da.at_const(it.decl).kind;
+                if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM {
+                    continue;
+                }
+                let mut args = Vector::<ArgKey>::new();
+                let mut conc = true;
+                for k in 0..it.n {
+                    if !a.type_concrete(unsafe it.args[k]) {
+                        conc = false;
+                    }
+                    args.push(argkey_of(a, unsafe it.args[k]));
+                }
+                if !conc {
+                    continue;
+                }
+                let mut fresh = false;
+                let id = self.add(IG_AGG, DefId { module: it.module, node: it.decl }, &args, &mut fresh);
+                if fresh {
+                    continue;
+                }
+                let h = p.instance_home_mid(m as ModuleId, &it);
+                if self.recs.at(id as usize).home == 0xFFFF {
+                    // a frame-derived record meets its pool spelling here: home lands now
+                    self.recs[id as usize].home = h;
+                    *computed += 1;
+                } else if h != self.recs.at(id as usize).home {
+                    *mismatches += 1;
+                }
+            }
+        }
+    }
+
+    /// Module-dependency edges from the final records (plan: sorted adjacency, not an n*n matrix):
+    /// one (anchor-module, home) edge per anchored record, deduped and sorted.
+    pub fn module_deps(self: &mut Self, out: &mut Vector<u32>) {
+        for r in 0..self.recs.len() {
+            let rec = self.recs.at(r);
+            if rec.kind != IG_AGG || rec.aty == TYPE_NONE || rec.home == 0xFFFF || rec.amod == rec.home {
+                continue;
+            }
+            out.push(rec.amod as u32 << 16 | rec.home as u32);
+        }
+        out.sort();
+        let mut w: usize = 0;
+        for i in 0..out.len() {
+            if w == 0 || out[i] != out[w - 1] {
+                out.set(w, out[i]);
+                w += 1;
+            }
+        }
+        out.truncate(w);
+    }
+
     fn seed_body(self: &mut Self, m: ModuleId, fnode: NodeId, a: &Ast, empty: &Vector<Subst>) {
         let mut lw = irl::Lowerer::new(self.pkg, m, fnode);
         if lw.lower_fn(fnode) {
             self.walk_body(&lw.body, a, empty);
-            self.note_for_options(a, fnode, empty);
             self.expand_closures(&mut lw, m, empty);
         }
     }
