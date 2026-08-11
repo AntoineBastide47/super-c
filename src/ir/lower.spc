@@ -1577,12 +1577,13 @@ extend Lowerer {
             };
             let t = self.temp(ty, sp);
             let pl = self.place_of_local(t);
+            let measured = self.f.node_type(self.f.node(id).as_data.single.value);
             self.assign(
                 pl,
                 ir::Rvalue {
                     kind: ir::RV_INTRINSIC,
                     a: self.body.oper_pool.len() as u32,
-                    b: 0,
+                    b: measured,
                     c: ik,
                     target: ty,
                     item: DefId { module: 0, node: NODE_NONE },

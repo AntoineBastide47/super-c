@@ -1519,6 +1519,8 @@ extend Gen {
         } else if rv.kind == ir::RV_BINARY {
             self.op_read(rv.a, entry, s.span);
             self.op_read(rv.b, entry, s.span);
+        } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF) {
+            // no operands: `b` is the measured type
         } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_INTRINSIC {
             for i in 0..rv.b {
                 let opid = self.body().oper_pool[(rv.a + i) as usize];

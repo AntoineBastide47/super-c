@@ -570,6 +570,12 @@ extend ConstEval {
     }
 
     // ---- memo ----
+    /// The memo slot's kind for `(m, id)` (comparison consumers: CONST_AGG_OK marks a non-scalar
+    /// success that `eval` reports as none).
+    pub const fn memo_kind(self: &Self, m: ModuleId, id: NodeId) u8 {
+        return self.slot_get(m, id).kind;
+    }
+
     const fn slot_get(self: &Self, m: ModuleId, id: NodeId) ConstValue {
         if m as usize >= self.vals.len() {
             return ce_none();

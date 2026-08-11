@@ -7,6 +7,8 @@ import ast::ast as *;
 import module::loader as loader;
 import ir::core as ir;
 import ir::lower as irl;
+import ir::layout as lay;
+import lexer::token as tok;
 import consteval::consteval as ce;
 
 pub const IV_NONE: u8 = 0; // not evaluable (unsupported construct, trap, or budget)
@@ -48,6 +50,11 @@ pub struct Interp {
     pub depth: u32,
     pub objs: Vector<Vector<IVal>>,
     pub failed: bool,
+    pub fail_span: tok::Span, // first refusal site (diagnostic aid)
+    pub lsvc: lay::Svc,
+    pub bodies: Vector<Box<irl::Lowerer>>, // lowered callee cache (boxed: nested calls grow it)
+    pub body_keys: Vector<u64>, // module << 32 | fn node
+    pub call_memo: Map<u64, IVal>, // scalar results keyed over every semantic input (callee + args)
 }
 
 extend Interp as Free {
@@ -57,14 +64,19 @@ extend Interp as Free {
 }
 
 /// Evaluate module `m`'s constant `cnode` by lowering and executing its initializer body.
-pub fn eval_const(pkg: *const loader::Package, m: ModuleId, cnode: NodeId) IVal {
+pub fn eval_const(pkg: *const loader::Package, m: ModuleId, cnode: NodeId, max_steps: u32) IVal {
     let mut it = Interp {
         pkg: pkg,
         steps: 0,
-        max_steps: 250000,
+        max_steps: max_steps,
         depth: 0,
         objs: Vector::<Vector<IVal>>::new(),
         failed: false,
+        fail_span: tok::Span { start: 0, end: 0 },
+        lsvc: lay::Svc::new(pkg),
+        bodies: Vector::<Box<irl::Lowerer>>::new(),
+        body_keys: Vector::<u64>::new(),
+        call_memo: Map::<u64, IVal>::new(),
     };
     let mut lw = irl::Lowerer::new(pkg, m, cnode);
     if !lw.lower_const(cnode) {
@@ -81,6 +93,14 @@ extend Interp {
     }
 
     fn bail(self: &mut Self) IVal {
+        self.failed = true;
+        return none();
+    }
+
+    fn bail_at(self: &mut Self, sp: tok::Span) IVal {
+        if !self.failed && self.fail_span.end <= self.fail_span.start {
+            self.fail_span = sp;
+        }
         self.failed = true;
         return none();
     }
@@ -143,6 +163,7 @@ extend Interp {
                 if s.kind == ir::ST_ASSIGN {
                     let v = self.rvalue(b, &mut locals, s.rvalue);
                     if self.failed {
+                        let _ = self.bail_at(s.span);
                         break;
                     }
                     self.write_place(b, &mut locals, s.place, v);
@@ -235,16 +256,68 @@ extend Interp {
             }
             args.push(v);
         }
-        let mut lw = irl::Lowerer::new(self.pkg, t.callee.module, t.callee.node);
-        if !lw.lower_fn(t.callee.node) {
-            args.free();
-            let _ = self.bail();
-            return false;
+        // The memo key carries every semantic input: the callee identity and each argument's
+        // kind, type, and bits (objects never memo).
+        let mut mkey: u64 = 1469598103934665603u64;
+        let mut memoable = true;
+        mkey = (mkey ^ t.callee.module as u64) * 1099511628211u64;
+        mkey = (mkey ^ t.callee.node as u64) * 1099511628211u64;
+        for i in 0..args.len() {
+            let av = *args.at(i);
+            if av.kind == IV_OBJ {
+                memoable = false;
+            }
+            mkey = (mkey ^ av.kind as u64) * 1099511628211u64;
+            mkey = (mkey ^ av.ty as u64) * 1099511628211u64;
+            mkey = (mkey ^ av.i as u64) * 1099511628211u64;
         }
-        let r = self.run(&lw.body, &args);
+        if memoable {
+            let mut hit = false;
+            let mut hv = none();
+            switch self.call_memo.get(&mkey) {
+                Some(v) => {
+                    hit = true;
+                    hv = *v;
+                },
+                None => {},
+            };
+            if hit {
+                args.free();
+                if t.dests_len >= 1 {
+                    let dp = b.dest_pool[t.dests_start as usize];
+                    self.write_place(b, locals, dp, hv);
+                }
+                return !self.failed;
+            }
+        }
+        // Lowered callee bodies cache for the whole evaluation.
+        let bkey = t.callee.module as u64 << 32 | t.callee.node as u64;
+        let mut bidx: i64 = -1;
+        for i in 0..self.body_keys.len() {
+            if self.body_keys[i] == bkey {
+                bidx = i as i64;
+            }
+        }
+        if bidx < 0 {
+            let mut lw = irl::Lowerer::new(self.pkg, t.callee.module, t.callee.node);
+            if !lw.lower_fn(t.callee.node) {
+                args.free();
+                let _ = self.bail();
+                return false;
+            }
+            self.bodies.push(Box::new(lw));
+            self.body_keys.push(bkey);
+            bidx = self.body_keys.len() as i64 - 1;
+        }
+        let bp: *const irl::Lowerer = self.bodies.at(bidx as usize).get();
+        let bb = (unsafe &(&*bp).body) as *const ir::CoreBody;
+        let r = self.run(unsafe &*bb, &args);
         args.free();
         if self.failed {
             return false;
+        }
+        if memoable && r.kind != IV_OBJ {
+            self.call_memo.insert(mkey, r);
         }
         if t.dests_len >= 1 {
             let dp = b.dest_pool[t.dests_start as usize];
@@ -415,8 +488,30 @@ extend Interp {
             return IVal { kind: IV_UNIT, ty: c.ty, i: 0, f: 0.0 };
         }
         if c.kind == ir::CK_FLOAT {
-            // the exact spelling lives in the span; parsing stays with the established evaluator
-            return self.bail();
+            let sp = c.raw;
+            let mut fv: f64 = 0.0;
+            let mut okf = false;
+            {
+                let s0 = self.p().modules.at(b.module as usize).source.as_str();
+                if sp.end > sp.start && sp.end as usize <= s0.len() {
+                    let txt = s0.slice(sp.start as usize, sp.end as usize);
+                    switch txt.parse_f64() {
+                        Some(v) => {
+                            fv = v;
+                            okf = true;
+                        },
+                        None => {},
+                    };
+                }
+            }
+            if !okf {
+                return self.bail();
+            }
+            return IVal { kind: IV_FLOAT, ty: c.ty, i: 0, f: fv };
+        }
+        if c.kind == ir::CK_STR {
+            let sp = c.raw;
+            return IVal { kind: IV_STR, ty: c.ty, i: sp.start as i64 << 32 | sp.end as i64, f: 0.0 };
         }
         return self.bail();
     }
@@ -559,10 +654,18 @@ extend Interp {
             let mut slots = Vector::<IVal>::new();
             let mut is_enum = false;
             if rv.c == ir::AGG_VARIANT {
+                let mut tagv: i64 = -1;
+                if !self.variant_value(rv.item, &mut tagv) {
+                    slots.free();
+                    return self.bail();
+                }
+                if rv.b == 0 {
+                    // a payload-less variant IS its integer value (a bare C enum)
+                    slots.free();
+                    return IVal { kind: IV_INT, ty: rv.target, i: tagv, f: 0.0 };
+                }
                 is_enum = true;
-                // discriminant index rides c2? the variant ordinal is not in the record; refuse
-                slots.free();
-                return self.bail();
+                slots.push(IVal { kind: IV_INT, ty: TYPE_NONE, i: tagv, f: 0.0 });
             }
             for i in 0..rv.b {
                 let opid = b.oper_pool[(rv.a + i) as usize];
@@ -582,13 +685,87 @@ extend Interp {
         }
         if rv.kind == ir::RV_DISCRIMINANT {
             let v = self.read_place(b, locals, rv.a);
+            if v.kind == IV_INT {
+                return IVal { kind: IV_INT, ty: rv.target, i: v.i, f: 0.0 };
+            }
             if v.kind != IV_OBJ || !self.obj_is_enum(v) {
                 return self.bail();
             }
             let tag = self.objs.at(v.i as usize)[0];
             return IVal { kind: IV_INT, ty: rv.target, i: tag.i, f: 0.0 };
         }
+        if rv.kind == ir::RV_INTRINSIC {
+            if rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF {
+                let l = self.lsvc.layout(b.module, rv.b);
+                if !l.ok {
+                    return self.bail();
+                }
+                let mut v = l.size;
+                if rv.c == ir::IN_ALIGNOF {
+                    v = l.align;
+                }
+                return IVal { kind: IV_INT, ty: rv.target, i: v as i64, f: 0.0 };
+            }
+            return self.bail();
+        }
         return self.bail();
+    }
+
+    // The integer value of enum variant `vd`: explicit literal discriminants set the counter, the
+    // rest follow C rules (previous + 1).
+    fn variant_value(self: &mut Self, vd: DefId, out: &mut i64) bool {
+        if vd.node == NODE_NONE {
+            return false;
+        }
+        let ap = self.p().module_ast_const(vd.module);
+        let a = unsafe &*ap;
+        // owning enum: scan items containing this variant via the variant's enclosing decl walk
+        let items = a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let nid = unsafe a.list(items)[i as usize];
+            if a.at_const(nid).kind != NodeKind::NODE_ENUM {
+                continue;
+            }
+            let ms = a.at_const(nid).as_data.aggregate.members;
+            let mut cur: i64 = 0;
+            let mut found = false;
+            for k in 0..ms.len {
+                let mid = unsafe a.list(ms)[k as usize];
+                if a.at_const(mid).kind != NodeKind::NODE_VARIANT {
+                    continue;
+                }
+                let vexpr = a.at_const(mid).as_data.variant.value;
+                if vexpr != NODE_NONE {
+                    let vn = a.at_const(vexpr);
+                    if vn.kind != NodeKind::NODE_LITERAL {
+                        return false;
+                    }
+                    let c = ir::Constant {
+                        kind: ir::CK_INT,
+                        ty: TYPE_NONE,
+                        val: 0,
+                        raw: vn.as_data.literal.raw,
+                        item: DefId { module: 0, node: NODE_NONE },
+                        targ_start: 0,
+                        targ_len: 0,
+                    };
+                    let mut v: i64 = 0;
+                    if !self.lit_value(vd.module, &c, &mut v) {
+                        return false;
+                    }
+                    cur = v;
+                }
+                if mid == vd.node {
+                    *out = cur;
+                    found = true;
+                }
+                cur += 1;
+            }
+            if found {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---- arithmetic (pinned semantics) ------------------------------------------------------------

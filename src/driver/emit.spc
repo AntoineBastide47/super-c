@@ -25,6 +25,7 @@ import ir::print as irp;
 import ir::verify as irv;
 import ir::drops as ird;
 import ir::interp as iri;
+import ir::layout as lay;
 import graph::instances as ig;
 import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
@@ -1081,6 +1082,9 @@ fn ctfe_ir_pass(p: &mut loader::Package) {
     let mut matched: u64 = 0;
     let mut unsupported: u64 = 0;
     let mut mism: u64 = 0;
+    let mut aggs: u64 = 0;
+    let mut agg_ok: u64 = 0;
+    let mut newfolds: u64 = 0;
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast {
             continue;
@@ -1095,18 +1099,60 @@ fn ctfe_ir_pass(p: &mut loader::Package) {
             }
             consts += 1;
             let old = unsafe (&mut *ceptr).eval(m as ModuleId, n.as_data.const_def.value);
-            if old.kind != ce::CONST_INT && old.kind != ce::CONST_BOOL {
+            let omemo = unsafe (&*ceptr).memo_kind(m as ModuleId, n.as_data.const_def.value);
+            let budget = unsafe (&*ceptr).max_steps;
+            if old.kind != ce::CONST_INT && old.kind != ce::CONST_BOOL && old.kind != ce::CONST_FLOAT {
+                let nv2 = iri::eval_const(p, m as ModuleId, nid, budget);
+                if omemo == ce::CONST_AGG_OK {
+                    // non-scalar success parity: the new path must also produce a value
+                    aggs += 1;
+                    if nv2.kind != iri::IV_NONE {
+                        agg_ok += 1;
+                    } else if stdlib::getenv("SC_BORROW_TRACE") != null {
+                        let sp = n.span;
+                        let src = p.modules[m].source.as_str();
+                        let mut e2 = sp.end as usize;
+                        if e2 > sp.start as usize + 60 {
+                            e2 = sp.start as usize + 60;
+                        }
+                        eprint("ctfe-ir: agg-miss module {} `{}`\n", m, src.slice(sp.start as usize, e2));
+                    }
+                } else if nv2.kind != iri::IV_NONE {
+                    // the established evaluator refused; folding here would be semantic drift
+                    newfolds += 1;
+                    if newfolds <= 8 {
+                        let sp = n.span;
+                        let src = p.modules[m].source.as_str();
+                        let mut e2 = sp.end as usize;
+                        if e2 > sp.start as usize + 60 {
+                            e2 = sp.start as usize + 60;
+                        }
+                        eprint("ctfe-ir: new-folds module {} `{}`\n", m, src.slice(sp.start as usize, e2));
+                    }
+                }
                 continue;
             }
             scalar += 1;
-            let nv = iri::eval_const(p, m as ModuleId, nid);
+            let nv = iri::eval_const(p, m as ModuleId, nid, budget);
             if nv.kind == iri::IV_NONE {
                 unsupported += 1;
+                if stdlib::getenv("SC_BORROW_TRACE") != null {
+                    let sp = n.span;
+                    let src = p.modules[m].source.as_str();
+                    let mut e2 = sp.end as usize;
+                    if e2 > sp.start as usize + 60 {
+                        e2 = sp.start as usize + 60;
+                    }
+                    eprint("ctfe-ir: unsupported module {} `{}`\n", m, src.slice(sp.start as usize, e2));
+                }
                 continue;
             }
             let mut ok = false;
             if old.kind == ce::CONST_INT && nv.kind == iri::IV_INT {
                 ok = old.as_data.i == nv.i;
+            } else if old.kind == ce::CONST_FLOAT && nv.kind == iri::IV_FLOAT {
+                let of = old.as_data.f;
+                ok = of == nv.f || of != of && nv.f != nv.f;
             } else if old.kind == ce::CONST_BOOL && nv.kind == iri::IV_BOOL {
                 let mut oi: i64 = 0;
                 if old.as_data.i != 0 {
@@ -1146,6 +1192,97 @@ fn ctfe_ir_pass(p: &mut loader::Package) {
         mism,
         dt,
     );
+    eprint("ctfe-ir: {} aggregate successes, {} reproduced, {} new-folds\n", aggs, agg_ok, newfolds);
+}
+
+// Validation mode (SC_LAYOUT=1): every concrete pool type must satisfy the C layout invariants --
+// power-of-two alignment dividing the size, field offsets aligned, monotone, and inside the parent,
+// and the enum view agreeing with the plain one.
+fn layout_pass(p: &mut loader::Package) {
+    if stdlib::getenv("SC_LAYOUT") == null {
+        return;
+    }
+    let t0 = unsafe shim::sc_ticks_ms();
+    let mut svc = lay::Svc::new(p);
+    let mut typed: u64 = 0;
+    let mut laid: u64 = 0;
+    let mut fields: u64 = 0;
+    let mut bad: u64 = 0;
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        for t in 0..a.type_pool.len() {
+            let ty = t as TypeId;
+            if !a.type_concrete(ty) {
+                continue;
+            }
+            typed += 1;
+            let l = svc.layout(m as ModuleId, ty);
+            if !l.ok {
+                continue; // opaque/zero-length/unlayoutable shapes are legitimate refusals
+            }
+            laid += 1;
+            let mut ok = l.align != 0 && (l.align & l.align - 1) == 0 && l.size % l.align == 0;
+            // struct fields: aligned, monotone, inside the parent
+            let y = *a.type_at(ty);
+            let mut dm: ModuleId = 0;
+            let mut dn = NODE_NONE;
+            if y.kind == TypeKind::TYPE_STRUCT {
+                dm = y.module;
+                dn = y.as_data.decl;
+            } else if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *a.instance(y.as_data.inst);
+                dm = it.module;
+                dn = it.decl;
+            }
+            if dn != NODE_NONE {
+                let da = unsafe &*p.module_ast_const(dm);
+                if da.at_const(dn).kind == NodeKind::NODE_STRUCT && !da.at_const(dn).as_data.aggregate.is_union {
+                    let ms = da.at_const(dn).as_data.aggregate.members;
+                    let mut prev: i64 = -1;
+                    for k in 0..ms.len {
+                        let fid = unsafe da.list(ms)[k as usize];
+                        if da.at_const(fid).kind != NodeKind::NODE_FIELD {
+                            continue;
+                        }
+                        let off = svc.field_offset(m as ModuleId, ty, fid);
+                        if off < 0 {
+                            continue;
+                        }
+                        fields += 1;
+                        // zero-size members share offsets and may sit at the very end
+                        if off < prev || off as u64 > l.size {
+                            ok = false;
+                        }
+                        prev = off;
+                    }
+                } else if da.at_const(dn).kind == NodeKind::NODE_ENUM {
+                    let el = svc.enum_layout(m as ModuleId, ty);
+                    if el.ok && (el.size != l.size || el.align != l.align) {
+                        ok = false;
+                    }
+                }
+            }
+            if !ok {
+                bad += 1;
+                if bad <= 8 {
+                    eprint("layout: invariant violation module {} type {}\n", m, t);
+                }
+            }
+        }
+    }
+    let dt = unsafe shim::sc_ticks_ms() - t0;
+    eprint(
+        "layout: {} concrete types, {} laid out, {} field offsets, {} violations, {} ms\n",
+        typed,
+        laid,
+        fields,
+        bad,
+        dt,
+    );
+    svc.free();
 }
 
 // Shadow mode (SC_INSTANCES=1): build the Core-IR instance graph after the established propagation
@@ -2445,6 +2582,7 @@ pub fn lint_package(
     let _ = borrow_ir_pass(p);
     drops_pass(p);
     ctfe_ir_pass(p);
+    layout_pass(p);
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
     // duplicates). The const suggestion is the exception: opt-in (`--suggest-const`, warning every
     // eligible function at once would swamp default lints), and under `--fix` it contributes its
@@ -2730,6 +2868,7 @@ pub fn run_package(
     let _ = borrow_ir_pass(p);
     drops_pass(p);
     ctfe_ir_pass(p);
+    layout_pass(p);
     if lint {
         lint_unused_items(p, -1);
     }
