@@ -83,6 +83,8 @@ pub struct Constant {
     pub val: i64,
     pub raw: tok::Span,
     pub item: DefId,
+    pub targ_start: u32, // CK_ITEM: bound generic arguments in CoreBody.targ_pool
+    pub targ_len: u32,
 }
 
 /// Rvalue kinds.
@@ -173,6 +175,8 @@ pub struct Terminator {
     pub sw_len: u32,
     pub t0: BlockId, // primary successor (goto/normal/success/otherwise)
     pub callee: DefId, // TM_CALL resolved target; node == NODE_NONE for fn-value calls (a = operand)
+    pub targs_start: u32, // TM_CALL: the checker's bound generic arguments (CoreBody.targ_pool)
+    pub targs_len: u32,
     pub is_variadic: bool,
     pub span: tok::Span,
 }
@@ -203,6 +207,7 @@ pub struct CoreBody {
     pub oper_pool: Vector<OperandId>, // argument/aggregate operand ranges
     pub dest_pool: Vector<PlaceId>, // call destination ranges
     pub switch_pool: Vector<u64>, // TM_SWITCH pairs: value<<32 | target (values are u32-encoded)
+    pub targ_pool: Vector<TypeId>, // generic-argument ranges for calls and item constants
     pub entry: BlockId,
 }
 
@@ -225,6 +230,7 @@ extend CoreBody {
             oper_pool: Vector::<OperandId>::new(),
             dest_pool: Vector::<PlaceId>::new(),
             switch_pool: Vector::<u64>::new(),
+            targ_pool: Vector::<TypeId>::new(),
             entry: 0,
         };
     }
@@ -239,7 +245,7 @@ extend CoreBody {
         b += self.operands.capacity() * sizeof(Operand);
         b += self.rvalues.capacity() * sizeof(Rvalue);
         b += self.constants.capacity() * sizeof(Constant);
-        b += self.oper_pool.capacity() * 4 + self.dest_pool.capacity() * 4 + self.switch_pool.capacity() * 8;
+        b += self.oper_pool.capacity() * 4 + self.dest_pool.capacity() * 4 + self.switch_pool.capacity() * 8 + self.targ_pool.capacity() * 4;
         return b;
     }
 
@@ -265,6 +271,8 @@ extend CoreBody {
                     sw_len: 0,
                     t0: IR_NONE,
                     callee: DefId { module: 0, node: NODE_NONE },
+                    targs_start: 0,
+                    targs_len: 0,
                     is_variadic: false,
                     span: tok::Span { start: 0, end: 0 },
                 },
@@ -288,5 +296,6 @@ extend CoreBody as Free {
         self.oper_pool.free();
         self.dest_pool.free();
         self.switch_pool.free();
+        self.targ_pool.free();
     }
 }

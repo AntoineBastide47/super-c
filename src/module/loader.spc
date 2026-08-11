@@ -128,6 +128,10 @@ pub struct Package {
     /// functions join the unused-item candidates instead of rooting the reachability graph. Set only
     /// for whole-program lints of manifests without a [lib] target (and for script builds).
     pub lint_pub: bool,
+    /// SC_INSTANCES shadow export: codegen's record_inst appends every emitted fn instance here
+    /// (serial emission only -- forked workers would drop their halves). Off (empty) otherwise.
+    pub shadow_on: bool,
+    pub shadow_insts: Vector<ShadowInst>,
     /// In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
     /// overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
     /// (realpath'd) absolute paths preferred -- overlay_index falls back to a raw compare for files not on
@@ -155,6 +159,15 @@ extend ParseResult as Free {
         self.ast.free();
         self.tokens.free();
     }
+}
+
+/// One fn instance codegen recorded for emission, exported under the SC_INSTANCES shadow gate:
+/// the generic declaration plus the package-stable skeys of its concrete arguments. `n == 0xFF`
+/// marks a record with a symbolic argument (skipped by the diff).
+pub struct ShadowInst {
+    pub def: DefId,
+    pub n: u8,
+    pub keys: [u64; 8],
 }
 
 /// A module-qualified declaration hit: the decl's NodeId within module `mid`. `node == NODE_NONE` means miss.
@@ -761,6 +774,8 @@ extend Package {
             dir_cache: DirCache::new(),
             lint_set: Vector::<bool>::new(),
             lint_pub: false,
+            shadow_on: false,
+            shadow_insts: Vector::<ShadowInst>::new(),
             overlay_files: Vector::<String>::new(),
             overlay_texts: Vector::<String>::new(),
         };
@@ -1769,6 +1784,7 @@ extend Package as Free {
         self.cg_scratch.free();
         self.dir_cache.free();
         self.lint_set.free();
+        self.shadow_insts.free();
         self.overlay_files.free();
         self.overlay_texts.free();
     }

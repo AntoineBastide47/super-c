@@ -12,6 +12,7 @@ import lexer::token_type as *;
 import ast::ast as *;
 import driver_shim as shim;
 import module::loader as loader;
+import graph::instances as ig;
 import consteval::consteval as ce;
 import utils::errors as diag;
 
@@ -2896,6 +2897,18 @@ extend Codegen {
         self.ninsts = k + 1;
         if !collide {
             self.inst_idx.insert(key, k as u32);
+        }
+        if self.package != null && unsafe self.package.shadow_on {
+            let mut sh = loader::ShadowInst { def: fn2, n: n as u8, keys: [0; 8] };
+            for j in 0..n {
+                let at = unsafe args[j as usize];
+                if !self.cur_ast().type_concrete(at) {
+                    sh.n = 0xFF;
+                    break;
+                }
+                unsafe sh.keys[j as usize] = ig::skey_norm(unsafe &*self.cur_ast(), at, 0);
+            }
+            unsafe self.package.shadow_insts.push(sh);
         }
     }
     // Does pool type `t` transitively mention a TYPE_GENERIC? Memoized in genty (0 unknown /
@@ -15235,6 +15248,45 @@ extend Codegen {
             self.emit_generic_conformance_macros(nid);
         }
     }
+    // SC_INSTANCES export: one emitted method-instance record -- receiver-instance args first,
+    // then the method's own bound args (the instance graph keys methods the same way).
+    fn shadow_method(self: &mut Self, def: DefId, ra: *const TypeId, rn: u8, ta: *const TypeId, tn: u8) {
+        if self.package == null || !unsafe self.package.shadow_on {
+            return;
+        }
+        let mut sh = loader::ShadowInst { def: def, n: 0, keys: [0; 8] };
+        let pool = unsafe self.cur_ast().type_pool.len();
+        let mut k: u8 = 0;
+        for i in 0..rn {
+            if k >= 8 {
+                break;
+            }
+            let t = unsafe ra[i as usize];
+            if t as usize >= pool || !self.cur_ast().type_concrete(t) {
+                sh.n = 0xFF;
+                unsafe self.package.shadow_insts.push(sh);
+                return;
+            }
+            unsafe sh.keys[k as usize] = ig::skey_norm(unsafe &*self.cur_ast(), t, 0);
+            k += 1;
+        }
+        for i in 0..tn {
+            if k >= 8 {
+                break;
+            }
+            let t = unsafe ta[i as usize];
+            if t as usize >= pool || !self.cur_ast().type_concrete(t) {
+                sh.n = 0xFF;
+                unsafe self.package.shadow_insts.push(sh);
+                return;
+            }
+            unsafe sh.keys[k as usize] = ig::skey_norm(unsafe &*self.cur_ast(), t, 0);
+            k += 1;
+        }
+        sh.n = k;
+        unsafe self.package.shadow_insts.push(sh);
+    }
+
     fn emit_inst_methods(
         self: &mut Self,
         it: &TyInstance,
@@ -15335,6 +15387,9 @@ extend Codegen {
                     if !with_body {
                         self.emit_ret_struct_named(mid, &nm[0]);
                     }
+                    if with_body {
+                        self.shadow_method(mdef, &it.args[0], it.n, null, 0);
+                    }
                     self.emit_function(mid, DefId { module: 0, node: NODE_NONE }, false, with_body, &nm[0], stat);
                     self.nsubst = 0;
                     continue;
@@ -15391,6 +15446,24 @@ extend Codegen {
                     }
                     if !with_body {
                         self.emit_ret_struct_named(mid, &snm[0]);
+                    }
+                    if with_body {
+                        // reintern the targs into the emitting pool first (skeys are pool-local reads)
+                        let mut sta = TyArgs8 {};
+                        for gg in 0..minst.n {
+                            sta[gg as usize] = if mi_src == self.cur_ast() {
+                                unsafe minst.targs[gg as usize];
+                            } else {
+                                unsafe self.cur_ast().reintern(unsafe &*mi_src, minst.targs[gg as usize]);
+                            };
+                        }
+                        self.shadow_method(
+                            DefId { module: self.cur_module(), node: mid },
+                            &it.args[0],
+                            it.n,
+                            &sta[0],
+                            minst.n,
+                        );
                     }
                     self.emit_function(
                         mid,
@@ -15456,6 +15529,21 @@ extend Codegen {
                         self.subst[0].concrete = tty;
                         if !with_body {
                             self.emit_ret_struct_named(rid, &dnm[0]);
+                        }
+                        if with_body {
+                            // keys must come from the CURRENT pool: `tty` was reinterned across the
+                            // owner swap, `it.args` still index the pre-swap pool
+                            let sty = *self.cur_ast().type_at(tty);
+                            if sty.kind == TypeKind::TYPE_INSTANCE {
+                                let sit = *self.cur_ast().instance(sty.as_data.inst);
+                                self.shadow_method(
+                                    DefId { module: itrait.module, node: rid },
+                                    &sit.args[0],
+                                    sit.n,
+                                    null,
+                                    0,
+                                );
+                            }
                         }
                         self.emit_function(rid, DefId { module: 0, node: NODE_NONE }, false, with_body, &dnm[0], stat2);
                         self.nsubst = 0;

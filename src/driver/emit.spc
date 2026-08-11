@@ -23,6 +23,7 @@ import ir::core as irc;
 import ir::lower as irl;
 import ir::print as irp;
 import ir::verify as irv;
+import graph::instances as ig;
 import utils::errors as diag;
 import driver::util as *;
 
@@ -534,6 +535,133 @@ fn core_ir_pass(p: &mut loader::Package) u32 {
         dt,
     );
     return st.failed as u32;
+}
+
+// Shadow mode (SC_INSTANCES=1): build the Core-IR instance graph after the established propagation
+// and compare aggregate-instantiation sets both ways (package-stable keys). Report-only; the old
+// propagation stays authoritative until drop-glue edges join the graph.
+fn instance_graph_shadow(p: &mut loader::Package) {
+    if stdlib::getenv("SC_INSTANCES") == null {
+        return;
+    }
+    let t0 = unsafe shim::sc_ticks_ms();
+    let mut g = ig::InstGraph::new(p);
+    g.collect();
+    let mut old = ig::InstGraph::new(p);
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        for i in 0..a.instances.len() {
+            let it = *a.instance(i as u32);
+            let da = unsafe &*p.module_ast_const(it.module);
+            let dk = da.at_const(it.decl).kind;
+            if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM {
+                continue;
+            }
+            let mut args = Vector::<ig::ArgKey>::new();
+            let mut conc = true;
+            for k in 0..it.n {
+                if !a.type_concrete(unsafe it.args[k]) {
+                    conc = false;
+                }
+                args.push(ig::argkey_of(a, unsafe it.args[k]));
+            }
+            if !conc {
+                continue;
+            }
+            let mut fresh = false;
+            let _ = old.add(ig::IG_AGG, DefId { module: it.module, node: it.decl }, &args, &mut fresh);
+        }
+    }
+    let new_n = g.recs.len();
+    let old_n = old.recs.len();
+    let mut n_fn: u32 = 0;
+    let mut n_m: u32 = 0;
+    for r in 0..new_n {
+        if g.recs.at(r).kind == ig::IG_FN {
+            n_fn += 1;
+        } else if g.recs.at(r).kind == ig::IG_METHOD {
+            n_m += 1;
+        }
+    }
+    eprint("inst-graph: kinds: {} fn, {} method\n", n_fn, n_m);
+    let mut missing: u32 = 0;
+    let mut extra: u32 = 0;
+    let mut aggs_new: u32 = 0;
+    for r in 0..new_n {
+        if g.recs.at(r).kind == ig::IG_AGG {
+            aggs_new += 1;
+        }
+    }
+    for r in 0..old_n {
+        let rec = *old.recs.at(r);
+        let mut args = Vector::<ig::ArgKey>::new();
+        for k in 0..rec.args_len {
+            args.push(*old.keys.at((rec.args_start + k) as usize));
+        }
+        let mut fresh = false;
+        let _ = g.add(ig::IG_AGG, rec.def, &args, &mut fresh);
+        if fresh {
+            missing += 1;
+            if stdlib::getenv("SC_INSTANCES_ALL") != null || missing <= 24 {
+                let da = unsafe &*p.module_ast_const(rec.def.module);
+                let nsp = da.at_const(da.at_const(rec.def.node).as_data.aggregate.name).as_data.name.text;
+                let dsrc = p.modules.at(rec.def.module as usize).source.as_str();
+                eprint(
+                    "inst-graph: missing {} m{} n{} ({} args)\n",
+                    dsrc.slice(nsp.start as usize, nsp.end as usize),
+                    rec.def.module,
+                    rec.def.node,
+                    rec.args_len,
+                );
+            }
+        }
+    }
+    for r in 0..new_n {
+        let rec = *g.recs.at(r);
+        if rec.kind != ig::IG_AGG {
+            continue;
+        }
+        let mut args = Vector::<ig::ArgKey>::new();
+        for k in 0..rec.args_len {
+            args.push(*g.keys.at((rec.args_start + k) as usize));
+        }
+        let mut fresh = false;
+        let _ = old.add(ig::IG_AGG, rec.def, &args, &mut fresh);
+        if fresh {
+            extra += 1;
+            if extra <= 24 {
+                let da = unsafe &*p.module_ast_const(rec.def.module);
+                let nsp = da.at_const(da.at_const(rec.def.node).as_data.aggregate.name).as_data.name.text;
+                let dsrc = p.modules.at(rec.def.module as usize).source.as_str();
+                eprint(
+                    "inst-graph: extra {} m{} n{} ({} args)\n",
+                    dsrc.slice(nsp.start as usize, nsp.end as usize),
+                    rec.def.module,
+                    rec.def.node,
+                    rec.args_len,
+                );
+            }
+        }
+    }
+    let dt = unsafe shim::sc_ticks_ms() - t0;
+    eprint(
+        "inst-graph: {} old aggs, {} new aggs, {} missing, {} extra, {} records, {} bodies, {} ms{}\n",
+        old_n,
+        aggs_new,
+        missing,
+        extra,
+        new_n,
+        g.bodies,
+        dt,
+        if g.overflow {
+            " (BUDGET OVERFLOW)";
+        } else {
+            "";
+        },
+    );
 }
 
 fn borrowck_module(p: &mut loader::Package, i: usize) bool {
@@ -1996,6 +2124,8 @@ pub fn run_package(
     }
     loader::package_propagate_instances(p);
     mark_extern_privates(p);
+    instance_graph_shadow(p);
+    p.shadow_on = stdlib::getenv("SC_INSTANCES") != null;
 
     let testing = topts != null && unsafe topts.enabled;
     let mut plan = TestPlan::new(n);
@@ -2076,8 +2206,8 @@ pub fn run_package(
     }
     // Fork is pathological under ASan (each child COW-faults the whole shadow), so a sanitized
     // binary keeps the serial path; SC_SERIAL_EMIT=1 forces it for A/B byte-diffs.
-    if unsafe shim::sc_asan() != 0 || stdlib::getenv("SC_SERIAL_EMIT") != null {
-        w = 1;
+    if unsafe shim::sc_asan() != 0 || stdlib::getenv("SC_SERIAL_EMIT") != null || p.shadow_on {
+        w = 1; // shadow export: forked workers would drop their record_inst halves
     }
     // One Codegen per TU, alive across both passes, so codegen_emit reuses the header pass's
     // collect_insts (the fused loop's behavior).
@@ -2160,5 +2290,93 @@ pub fn run_package(
     // Report-only: post-codegen arena growth must stay inside the documented allowlist (the strict
     // tables are still compared; see ast::facts for what each later stage removes).
     let _ = facts_verify(p, &wms, facts::FACTS_AFTER_CODEGEN, "codegen");
+    if p.shadow_on {
+        emitted_inst_diff(p);
+    }
     return rc;
+}
+
+// The exit-gate comparison: every fn instance codegen actually RECORDED FOR EMISSION must exist in
+// the Core-IR instance graph (the graph may legitimately hold more -- codegen prunes per-TU).
+// Symbolic records (n == 0xFF) belong to enclosing generic bodies and are skipped: their concrete
+// forms re-record under each substitution.
+fn emitted_inst_diff(p: &mut loader::Package) {
+    let t0 = unsafe shim::sc_ticks_ms();
+    let mut g = ig::InstGraph::new(p);
+    g.collect();
+    let mut total: u32 = 0;
+    let mut missing: u32 = 0;
+    let mut miss_pair: u32 = 0;
+    let mut miss_inst: u32 = 0;
+    for i in 0..p.shadow_insts.len() {
+        let sh = *p.shadow_insts.at(i);
+        if sh.n == 0xFF {
+            continue;
+        }
+        total += 1;
+        let mut args = Vector::<ig::ArgKey>::new();
+        for k in 0..sh.n {
+            args.push(ig::ArgKey { skey: unsafe sh.keys[k as usize], val: 0, has_val: false });
+        }
+        let mut fresh = false;
+        let _ = g.add(ig::IG_FN, sh.def, &args, &mut fresh);
+        if fresh {
+            // not an IG_FN record; an IG_METHOD record with the same keys also proves discovery
+            let mut fresh2 = false;
+            let _ = g.add(ig::IG_METHOD, sh.def, &args, &mut fresh2);
+            fresh = fresh2;
+        }
+        if fresh {
+            missing += 1;
+            // attribution: is the receiver instance itself known? (key prefix as an AGG record)
+            let mut agg_known = false;
+            for r in 0..g.recs.len() {
+                let gr = *g.recs.at(r);
+                if gr.kind != ig::IG_AGG || gr.args_len as usize > args.len() {
+                    continue;
+                }
+                let mut eq = gr.args_len != 0;
+                for k in 0..gr.args_len {
+                    if g.keys.at((gr.args_start + k) as usize).skey != args.at(k as usize).skey {
+                        eq = false;
+                    }
+                }
+                if eq {
+                    agg_known = true;
+                }
+            }
+            if agg_known {
+                miss_pair += 1;
+            } else {
+                miss_inst += 1;
+            }
+            if stdlib::getenv("SC_INSTANCES_ALL") != null || missing <= 24 {
+                let da = unsafe &*p.module_ast_const(sh.def.module);
+                let nsp = da.at_const(da.at_const(sh.def.node).as_data.function.name).as_data.name.text;
+                let dsrc = p.modules.at(sh.def.module as usize).source.as_str();
+                let _ = da;
+                eprint(
+                    "inst-emit: missing {} m{} n{} ({} args)\n",
+                    dsrc.slice(nsp.start as usize, nsp.end as usize),
+                    sh.def.module,
+                    sh.def.node,
+                    sh.n,
+                );
+            }
+        }
+    }
+    let dt = unsafe shim::sc_ticks_ms() - t0;
+    eprint("inst-emit: attribution: {} pair-missing (agg known), {} instance-missing\n", miss_pair, miss_inst);
+    eprint(
+        "inst-emit: {} emitted fn instances, {} missing from the graph, {} graph records, {} ms{}\n",
+        total,
+        missing,
+        g.recs.len(),
+        dt,
+        if g.overflow {
+            " (BUDGET OVERFLOW)";
+        } else {
+            "";
+        },
+    );
 }

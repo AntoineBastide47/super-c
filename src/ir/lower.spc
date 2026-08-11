@@ -149,6 +149,8 @@ extend Lowerer {
             sw_len: 0,
             t0: ir::IR_NONE,
             callee: DefId { module: 0, node: NODE_NONE },
+            targs_start: 0,
+            targs_len: 0,
             is_variadic: false,
             span: sp,
         };
@@ -217,7 +219,15 @@ extend Lowerer {
 
     fn unit_op(self: &mut Self, ty: TypeId, sp: tok::Span) ir::OperandId {
         return self.const_op(
-            ir::Constant { kind: ir::CK_UNIT, ty: ty, val: 0, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
+            ir::Constant {
+                kind: ir::CK_UNIT,
+                ty: ty,
+                val: 0,
+                raw: sp,
+                item: DefId { module: 0, node: NODE_NONE },
+                targ_start: 0,
+                targ_len: 0,
+            },
         );
     }
 
@@ -881,7 +891,15 @@ extend Lowerer {
         // step: i = i + 1
         let iop2 = self.copy_op(ipl);
         let one = self.const_op(
-            ir::Constant { kind: ir::CK_INT, ty: ity, val: 1, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: ity,
+                val: 1,
+                raw: sp,
+                item: DefId { module: 0, node: NODE_NONE },
+                targ_start: 0,
+                targ_len: 0,
+            },
         );
         self.assign(
             ipl,
@@ -920,7 +938,15 @@ extend Lowerer {
         let il = self.temp(ut, sp);
         let idx_pl = self.place_of_local(il);
         let zero = self.const_op(
-            ir::Constant { kind: ir::CK_INT, ty: ut, val: 0, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: ut,
+                val: 0,
+                raw: sp,
+                item: DefId { module: 0, node: NODE_NONE },
+                targ_start: 0,
+                targ_len: 0,
+            },
         );
         let rz = self.rv_use(zero, ut);
         self.assign(idx_pl, rz, sp);
@@ -976,7 +1002,15 @@ extend Lowerer {
         self.seal(self.goto_term(step, sp), step);
         let iop3 = self.copy_op(idx_pl);
         let one = self.const_op(
-            ir::Constant { kind: ir::CK_INT, ty: ut, val: 1, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: ut,
+                val: 1,
+                raw: sp,
+                item: DefId { module: 0, node: NODE_NONE },
+                targ_start: 0,
+                targ_len: 0,
+            },
         );
         self.assign(
             idx_pl,
@@ -1229,7 +1263,9 @@ extend Lowerer {
             let ty = self.f.node_type(outer);
             let sp = self.f.node(outer).span;
             if d.node != NODE_NONE {
-                return self.const_op(ir::Constant { kind: ir::CK_ITEM, ty: ty, val: 0, raw: sp, item: d });
+                return self.const_op(
+                    ir::Constant { kind: ir::CK_ITEM, ty: ty, val: 0, raw: sp, item: d, targ_start: 0, targ_len: 0 },
+                );
             }
         }
         return self.lower_expr(inner);
@@ -1242,28 +1278,48 @@ extend Lowerer {
         let no = DefId { module: 0, node: NODE_NONE };
         let w = self.f.wide_lit(id);
         if w != null {
-            return self.const_op(ir::Constant { kind: ir::CK_WIDE, ty: ty, val: 0, raw: d.raw, item: no });
+            return self.const_op(
+                ir::Constant { kind: ir::CK_WIDE, ty: ty, val: 0, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
+            );
         }
         let t = d.token_type;
         if t == tt::TokenType::True {
-            return self.const_op(ir::Constant { kind: ir::CK_BOOL, ty: ty, val: 1, raw: d.raw, item: no });
+            return self.const_op(
+                ir::Constant { kind: ir::CK_BOOL, ty: ty, val: 1, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
+            );
         }
         if t == tt::TokenType::False {
-            return self.const_op(ir::Constant { kind: ir::CK_BOOL, ty: ty, val: 0, raw: d.raw, item: no });
+            return self.const_op(
+                ir::Constant { kind: ir::CK_BOOL, ty: ty, val: 0, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
+            );
         }
         if t == tt::TokenType::StringLiteral || t == tt::TokenType::MatchertextLiteral || t == tt::TokenType::RawStringLiteral || t == tt::TokenType::ByteStringLiteral {
-            return self.const_op(ir::Constant { kind: ir::CK_STR, ty: ty, val: 0, raw: d.raw, item: no });
+            return self.const_op(
+                ir::Constant { kind: ir::CK_STR, ty: ty, val: 0, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
+            );
         }
         if t == tt::TokenType::FloatLiteral {
-            return self.const_op(ir::Constant { kind: ir::CK_FLOAT, ty: ty, val: 0, raw: d.raw, item: no });
+            return self.const_op(
+                ir::Constant { kind: ir::CK_FLOAT, ty: ty, val: 0, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
+            );
         }
         if t == tt::TokenType::Null {
-            return self.const_op(ir::Constant { kind: ir::CK_INT, ty: ty, val: 0, raw: d.raw, item: no });
+            return self.const_op(
+                ir::Constant { kind: ir::CK_INT, ty: ty, val: 0, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
+            );
         }
         // Integer/char literals: the exact value is CTFE's business; the span keeps the
         // spelling, `val` carries the common decimal fast path.
         return self.const_op(
-            ir::Constant { kind: ir::CK_INT, ty: ty, val: parse_dec(self.src, d.raw), raw: d.raw, item: no },
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: ty,
+                val: parse_dec(self.src, d.raw),
+                raw: d.raw,
+                item: no,
+                targ_start: 0,
+                targ_len: 0,
+            },
         );
     }
 
@@ -1375,7 +1431,15 @@ extend Lowerer {
             sp,
         );
         let oop = self.const_op(
-            ir::Constant { kind: ir::CK_INT, ty: ut, val: ok_ord, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: ut,
+                val: ok_ord,
+                raw: sp,
+                item: DefId { module: 0, node: NODE_NONE },
+                targ_start: 0,
+                targ_len: 0,
+            },
         );
         let cond = self.eq_test(dp, oop, sp);
         let ok_b = self.open_block();
@@ -1545,7 +1609,21 @@ extend Lowerer {
             self.body.oper_pool.push(rop);
             n += 1;
         }
-        return self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, ty, sp);
+        return self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, 0, 0, ty, sp);
+    }
+
+    // Copy the checker's bound generic arguments for `node` into targ_pool; returns the count
+    // (the range starts at the pool length the caller sampled first).
+    fn copy_targs(self: &mut Self, node: NodeId) u32 {
+        let mu = self.f.generic_args(node);
+        if mu == null {
+            return 0;
+        }
+        let n = unsafe mu.n;
+        for i in 0..n {
+            self.body.targ_pool.push(unsafe mu.args[i as usize]);
+        }
+        return n;
     }
 
     // Shared call emission: args already in oper_pool[start, start+n); returns the result operand.
@@ -1555,6 +1633,8 @@ extend Lowerer {
         callee_op: ir::OperandId,
         start: u32,
         n: u32,
+        targs_start: u32,
+        targs_len: u32,
         ty: TypeId,
         sp: tok::Span,
     ) ir::OperandId {
@@ -1569,6 +1649,8 @@ extend Lowerer {
         tm.args_len = n;
         tm.dests_start = dstart;
         tm.dests_len = 1;
+        tm.targs_start = targs_start;
+        tm.targs_len = targs_len;
         let cont = self.open_block();
         tm.t0 = cont;
         self.seal(tm, cont);
@@ -1625,7 +1707,9 @@ extend Lowerer {
         }
         // Arguments were evaluated in order but interleave with nested calls appending to the pool;
         // re-collect the recorded operands contiguously.
-        return self.emit_call_scattered(target, callee_op, start, n, ty, sp);
+        let ts = self.body.targ_pool.len() as u32;
+        let tn = self.copy_targs(id);
+        return self.emit_call_scattered(target, callee_op, start, n, ts, tn, ty, sp);
     }
 
     fn intrinsic_value(self: &mut Self, ik: u8, ty: TypeId, sp: tok::Span) ir::OperandId {
@@ -1675,6 +1759,8 @@ extend Lowerer {
         callee_op: ir::OperandId,
         start: u32,
         n: u32,
+        targs_start: u32,
+        targs_len: u32,
         ty: TypeId,
         sp: tok::Span,
     ) ir::OperandId {
@@ -1689,7 +1775,7 @@ extend Lowerer {
             kept += 1;
             i += 1;
         }
-        return self.emit_call(callee, callee_op, fresh, kept, ty, sp);
+        return self.emit_call(callee, callee_op, fresh, kept, targs_start, targs_len, ty, sp);
     }
 
     fn lower_assignment(self: &mut Self, id: NodeId) ir::OperandId {
@@ -1717,6 +1803,8 @@ extend Lowerer {
                     ir::IR_NONE,
                     start,
                     2,
+                    0,
+                    0,
                     lt,
                     sp,
                 );
@@ -2112,10 +2200,14 @@ extend Lowerer {
     }
 
     // An item in value position: functions become item constants, constants/statics become places.
-    fn item_value(self: &mut Self, _id: NodeId, d: DefId, ty: TypeId, sp: tok::Span) ir::OperandId {
+    fn item_value(self: &mut Self, id: NodeId, d: DefId, ty: TypeId, sp: tok::Span) ir::OperandId {
         let dk = self.decl_kind(d);
         if dk == NodeKind::NODE_FUNCTION {
-            return self.const_op(ir::Constant { kind: ir::CK_ITEM, ty: ty, val: 0, raw: sp, item: d });
+            let ts = self.body.targ_pool.len() as u32;
+            let tn = self.copy_targs(id);
+            return self.const_op(
+                ir::Constant { kind: ir::CK_ITEM, ty: ty, val: 0, raw: sp, item: d, targ_start: ts, targ_len: tn },
+            );
         }
         if dk == NodeKind::NODE_VARIANT {
             // unit variant construction
@@ -2219,7 +2311,7 @@ extend Lowerer {
                     let rop = self.copy_op(base);
                     let start = self.body.oper_pool.len() as u32;
                     self.body.oper_pool.push(rop);
-                    let res = self.emit_call(m, ir::IR_NONE, start, 1, rt, sp);
+                    let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, rt, sp);
                     if res == ir::IR_NONE {
                         return ir::IR_NONE;
                     }
@@ -2394,7 +2486,15 @@ extend Lowerer {
             sp,
         );
         let ord_op = self.const_op(
-            ir::Constant { kind: ir::CK_INT, ty: ut, val: ord, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: ut,
+                val: ord,
+                raw: sp,
+                item: DefId { module: 0, node: NODE_NONE },
+                targ_start: 0,
+                targ_len: 0,
+            },
         );
         let cond = self.eq_test(dp, ord_op, sp);
         *payload = self.place_project(
