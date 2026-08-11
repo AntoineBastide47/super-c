@@ -402,9 +402,15 @@ extend Lowerer {
         self.body.entry = self.open_block();
         self.cur = self.body.entry;
         self.run_start = 0;
+        // Argument storage ends at every function exit, after all scope locals (registration
+        // precedes the body scope, so reverse dead order frees them last).
+        for i in 0..params.len {
+            self.scope_locals.push(rets.len + i);
+        }
         self.scope_enter();
         self.lower_stmt(fd.body);
         self.scope_exit();
+        self.emit_deads_down_to(0);
         // Fall-off return (void functions; a returning tail already sealed the block).
         let t = self.term0(ir::TM_RETURN, sp);
         let end = self.open_block();
@@ -476,6 +482,9 @@ extend Lowerer {
         self.body.entry = self.open_block();
         self.cur = self.body.entry;
         self.run_start = 0;
+        for i in 0..params.len + caps.len {
+            self.scope_locals.push(rets.len + i);
+        }
         self.scope_enter();
         if cd.expr_body && self.body.returns != 0 {
             let pl = self.place_of_local(0);
@@ -484,6 +493,7 @@ extend Lowerer {
             self.lower_stmt(cd.body);
         }
         self.scope_exit();
+        self.emit_deads_down_to(0);
         let t = self.term0(ir::TM_RETURN, sp);
         let end = self.open_block();
         self.seal(t, end);
@@ -2844,6 +2854,7 @@ extend Lowerer {
             let arm = unsafe self.f.list(d.arms)[i as usize];
             let ad = self.f.node(arm).as_data.match_arm;
             let next_arm = self.open_block();
+            self.scope_enter();
             self.lower_pattern_test(ad.pattern, vpl, next_arm);
             if self.err.len() != 0 {
                 return false;
@@ -2861,6 +2872,7 @@ extend Lowerer {
             } else {
                 self.lower_stmt(ad.body);
             }
+            self.scope_exit();
             if self.err.len() != 0 {
                 return false;
             }
@@ -3507,12 +3519,15 @@ extend Lowerer {
             self.cur = armb[i as usize];
             self.run_start = self.body.statements.len() as u32;
             let ad = self.f.node(unsafe self.f.list(d.arms)[i as usize]).as_data.match_arm;
+            // Arm bindings live in the arm's own scope: payload storage ends at the arm's end.
+            self.scope_enter();
             self.pattern_bind_total(ad.pattern, vpl);
             if dest != ir::IR_NONE {
                 self.lower_value_into(ad.body, dest);
             } else {
                 self.lower_stmt(ad.body);
             }
+            self.scope_exit();
             if self.err.len() != 0 {
                 return;
             }

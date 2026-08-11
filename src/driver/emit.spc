@@ -23,6 +23,7 @@ import ir::core as irc;
 import ir::lower as irl;
 import ir::print as irp;
 import ir::verify as irv;
+import ir::drops as ird;
 import graph::instances as ig;
 import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
@@ -784,6 +785,284 @@ fn borrow_ir_pass(p: &mut loader::Package) u32 {
     return (st.move_errs + st.loan_errs + st.ref_diffs) as u32;
 }
 
+// Comparison mode (SC_DROPS=1): elaborate destruction over every lowered body, rewrite the bodies
+// with explicit drop terminators (verified), and stash the schedule; after (serial) codegen the
+// emitter's recorded free sequence must match it per function.
+struct DropsStats {
+    pub bodies: u64,
+    pub skipped: u64,
+    pub drops: u64,
+    pub cond: u64,
+    pub fields: u64,
+    pub planned_fns: u64,
+}
+
+fn drops_body(p: &mut loader::Package, ow: &mut bfx::Owner, m: usize, node: NodeId, st: &mut DropsStats) {
+    let mut lw = irl::Lowerer::new(p, m as ModuleId, node);
+    if !lw.lower_fn(node) {
+        st.skipped += 1;
+        return;
+    }
+    st.bodies += 1;
+    let forest = bmp::MoveForest::build(&lw.body);
+    let bfacts = bfx::generate(ow, &lw.body, &forest);
+    let cfg = bdf::build_cfg(&lw.body);
+    let mv = bdf::solve_moves(&lw.body, &forest, &bfacts, &cfg);
+    let sched = ird::elaborate(ow, &lw.body, &forest, &bfacts, &mv);
+    let mut plan = false;
+    {
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        if a.at_const(node).kind == NodeKind::NODE_FUNCTION && a.at_const(node).as_data.function.generics.len == 0 {
+            plan = sched.concrete;
+        }
+    }
+    let mut ordered = Vector::<u64>::new(); // stmt << 33 | cond << 32 | decl
+    for d in 0..sched.drops.len() {
+        let da = *sched.drops.at(d);
+        let dty = lw.body.locals.at(da.local as usize).ty;
+        p.drop_tys.push(m as u64 << 32 | dty as u64);
+        st.drops += 1;
+        if da.kind == ird::DK_COND {
+            st.cond += 1;
+        }
+        if da.kind == ird::DK_FIELD {
+            st.fields += 1;
+            continue;
+        }
+        if plan {
+            let decl = lw.body.locals.at(da.local as usize).decl;
+            let mut cond: u64 = 0;
+            if da.kind == ird::DK_COND {
+                cond = 1;
+            }
+            ordered.push(da.stmt as u64 << 33 | cond << 32 | decl as u64);
+        }
+    }
+    // Statements append in lowering (= source) order; block indexes do not.
+    for i in 1..ordered.len() {
+        let v = ordered[i];
+        let mut j = i;
+        while j > 0 && ordered[j - 1] > v {
+            ordered.set(j, ordered[j - 1]);
+            j -= 1;
+        }
+        ordered.set(j, v);
+    }
+    for i in 0..ordered.len() {
+        let v = ordered[i];
+        p.drop_plan.push(
+            loader::DropRec {
+                mid: m as ModuleId,
+                fnode: node,
+                decl: (v & 0xFFFFFFFFu64) as NodeId,
+                cond: (v >> 32 & 1u64) as u8,
+            },
+        );
+    }
+    ordered.free();
+    if plan {
+        st.planned_fns += 1;
+    }
+    // The rewrite must stay verifiable Core IR.
+    ird::insert_drops(&mut lw.body, &sched);
+    let tp = unsafe (&*p.module_ast_const(m as ModuleId)).type_pool.len();
+    let v = irv::verify(&lw.body, tp);
+    if v.len() != 0 {
+        eprint("drops: module {} node {}: verify after insertion: {}\n", m, node, v);
+    }
+}
+
+fn drops_pass(p: &mut loader::Package) {
+    if stdlib::getenv("SC_DROPS") == null {
+        return;
+    }
+    p.drops_on = true;
+    let t0 = unsafe shim::sc_ticks_ms();
+    let mut ow = bfx::Owner::new(p);
+    let mut st = DropsStats { bodies: 0, skipped: 0, drops: 0, cond: 0, fields: 0, planned_fns: 0 };
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let items = a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let nid = unsafe a.list(items)[i as usize];
+            let n = a.at_const(nid);
+            if n.kind == NodeKind::NODE_FUNCTION {
+                if !n.as_data.function.is_extern && n.as_data.function.body != NODE_NONE {
+                    drops_body(p, &mut ow, m, nid, &mut st);
+                }
+            } else if n.kind == NodeKind::NODE_EXTEND {
+                let inner = n.as_data.extend_def.items;
+                for j in 0..inner.len {
+                    let iid = unsafe a.list(inner)[j as usize];
+                    let it = a.at_const(iid);
+                    if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.body != NODE_NONE {
+                        drops_body(p, &mut ow, m, iid, &mut st);
+                    }
+                }
+            }
+        }
+    }
+    let dt = unsafe shim::sc_ticks_ms() - t0;
+    eprint(
+        "drops: {} bodies ({} skipped), {} drops ({} cond, {} field), {} planned fns, {} ms\n",
+        st.bodies,
+        st.skipped,
+        st.drops,
+        st.cond,
+        st.fields,
+        st.planned_fns,
+        dt,
+    );
+    ow.free();
+}
+
+// Compare the emitter's recorded free sequence against the elaboration schedule, per function.
+fn drops_compare(p: &loader::Package) {
+    let mut fns = Vector::<u64>::new();
+    for i in 0..p.drop_plan.len() {
+        let r = p.drop_plan.at(i);
+        let key = r.mid as u64 << 32 | r.fnode as u64;
+        let mut have = false;
+        for k in 0..fns.len() {
+            if fns[k] == key {
+                have = true;
+            }
+        }
+        if !have {
+            fns.push(key);
+        }
+    }
+    let mut compared: u64 = 0;
+    let mut mismatched: u64 = 0;
+    let mut shown: u32 = 0;
+    for k in 0..fns.len() {
+        let key = fns[k];
+        let mid = (key >> 32) as ModuleId;
+        let fnode = (key & 0xFFFFFFFFu64) as NodeId;
+        // The emitter only logs functions it actually emitted (dead code prunes).
+        let mut old_n: usize = 0;
+        for i in 0..p.drop_log.len() {
+            if p.drop_log.at(i).mid == mid && p.drop_log.at(i).fnode == fnode {
+                old_n += 1;
+            }
+        }
+        if old_n == 0 {
+            continue;
+        }
+        compared += 1;
+        // The emitter guards a binding with ONE flag for the whole function, so it may emit a
+        // guarded free where exact per-point analysis omits (the flag is false there) or keeps an
+        // unconditional drop (the flag is true there). Both are behaviorally identical; only an
+        // UNGUARDED emitter free the plan lacks, a plan entry the emitter lacks, or an order
+        // difference is a real mismatch.
+        let mut bad = false;
+        let mut oi: usize = 0;
+        for i in 0..p.drop_plan.len() {
+            let pr = *p.drop_plan.at(i);
+            if pr.mid != mid || pr.fnode != fnode {
+                continue;
+            }
+            // A pattern-bound payload's destruction reaches the emitter as a scrutinee-temp
+            // free (which the recorder cannot attribute); such plan entries are soft.
+            let mut soft = false;
+            {
+                let a2 = unsafe &*p.module_ast_const(mid);
+                let dk = a2.at_const(pr.decl).kind;
+                if dk != NodeKind::NODE_LET && dk != NodeKind::NODE_PARAMETER {
+                    soft = true;
+                }
+            }
+            let mut hit = false;
+            let save = oi;
+            while oi < p.drop_log.len() && !hit {
+                let orr = *p.drop_log.at(oi);
+                oi += 1;
+                if orr.mid != mid || orr.fnode != fnode {
+                    continue;
+                }
+                if orr.decl == pr.decl && (pr.cond == 0 || orr.cond == 1) {
+                    hit = true;
+                } else if orr.cond == 1 {
+                    continue; // guarded free of a value the plan knows is gone here
+                } else if soft {
+                    oi = save;
+                    hit = true; // unmatched soft entry: leave the emitter record for its own match
+                } else {
+                    bad = true;
+                    hit = true;
+                }
+            }
+            if !hit && !soft {
+                bad = true;
+            }
+        }
+        // The emitter also prints frees on unreachable lexical exits (after an endless loop);
+        // a leftover free of a binding the plan already destroyed elsewhere is benign.
+        while oi < p.drop_log.len() {
+            let orr = *p.drop_log.at(oi);
+            oi += 1;
+            if orr.mid != mid || orr.fnode != fnode || orr.cond != 0 {
+                continue;
+            }
+            let mut planned = false;
+            for i in 0..p.drop_plan.len() {
+                let pr = *p.drop_plan.at(i);
+                if pr.mid == mid && pr.fnode == fnode && pr.decl == orr.decl {
+                    planned = true;
+                }
+            }
+            if !planned {
+                bad = true;
+            }
+        }
+        if bad {
+            mismatched += 1;
+            if shown < 12 {
+                shown += 1;
+                eprint("drops: mismatch module {} fn {} (emitter {} frees)\n", mid, fnode, old_n);
+                let src = p.modules.at(mid as usize).source.as_str();
+                let a = unsafe &*p.module_ast_const(mid);
+                eprint("  emitter:");
+                for i in 0..p.drop_log.len() {
+                    let r = *p.drop_log.at(i);
+                    if r.mid == mid && r.fnode == fnode {
+                        let sp = a.at_const(r.decl).span;
+                        let mut e2 = sp.end as usize;
+                        if e2 > sp.start as usize + 16 {
+                            e2 = sp.start as usize + 16;
+                        }
+                        eprint(" [{}]{}c{}", r.decl, src.slice(sp.start as usize, e2), r.cond);
+                    }
+                }
+                eprint("\n  plan:   ");
+                for i in 0..p.drop_plan.len() {
+                    let r = *p.drop_plan.at(i);
+                    if r.mid == mid && r.fnode == fnode {
+                        let sp = a.at_const(r.decl).span;
+                        let mut e2 = sp.end as usize;
+                        if e2 > sp.start as usize + 16 {
+                            e2 = sp.start as usize + 16;
+                        }
+                        eprint(" [{}]{}c{}", r.decl, src.slice(sp.start as usize, e2), r.cond);
+                    }
+                }
+                eprint("\n");
+            }
+        }
+    }
+    eprint(
+        "drops: {} fns compared, {} mismatched, {} emitter records, {} planned\n",
+        compared,
+        mismatched,
+        p.drop_log.len(),
+        p.drop_plan.len(),
+    );
+    fns.free();
+}
+
 // Shadow mode (SC_INSTANCES=1): build the Core-IR instance graph after the established propagation
 // and compare aggregate-instantiation sets both ways (package-stable keys). Report-only; the old
 // propagation stays authoritative until drop-glue edges join the graph.
@@ -794,6 +1073,14 @@ fn instance_graph_shadow(p: &mut loader::Package) {
     let t0 = unsafe shim::sc_ticks_ms();
     let mut g = ig::InstGraph::new(p);
     g.collect();
+    // Scheduled destruction roots (SC_DROPS ran earlier) join the graph; collection reruns to a
+    // fixed point so glue-reachable instances are first-class records.
+    if p.drop_tys.len() != 0 {
+        let before = g.recs.len();
+        g.demand_drops();
+        g.run();
+        eprint("inst-graph: drop roots {} -> {} new records\n", p.drop_tys.len(), g.recs.len() - before);
+    }
     let mut old = ig::InstGraph::new(p);
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast {
@@ -2071,6 +2358,7 @@ pub fn lint_package(
         return 1;
     }
     let _ = borrow_ir_pass(p);
+    drops_pass(p);
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
     // duplicates). The const suggestion is the exception: opt-in (`--suggest-const`, warning every
     // eligible function at once would swamp default lints), and under `--fix` it contributes its
@@ -2354,6 +2642,7 @@ pub fn run_package(
         return 1;
     }
     let _ = borrow_ir_pass(p);
+    drops_pass(p);
     if lint {
         lint_unused_items(p, -1);
     }
@@ -2375,6 +2664,7 @@ pub fn run_package(
     mark_extern_privates(p);
     instance_graph_shadow(p);
     p.shadow_on = stdlib::getenv("SC_INSTANCES") != null;
+    p.drops_on = stdlib::getenv("SC_DROPS") != null;
 
     let testing = topts != null && unsafe topts.enabled;
     let mut plan = TestPlan::new(n);
@@ -2455,7 +2745,7 @@ pub fn run_package(
     }
     // Fork is pathological under ASan (each child COW-faults the whole shadow), so a sanitized
     // binary keeps the serial path; SC_SERIAL_EMIT=1 forces it for A/B byte-diffs.
-    if unsafe shim::sc_asan() != 0 || stdlib::getenv("SC_SERIAL_EMIT") != null || p.shadow_on {
+    if unsafe shim::sc_asan() != 0 || stdlib::getenv("SC_SERIAL_EMIT") != null || p.shadow_on || p.drops_on {
         w = 1; // shadow export: forked workers would drop their record_inst halves
     }
     // One Codegen per TU, alive across both passes, so codegen_emit reuses the header pass's
@@ -2541,6 +2831,9 @@ pub fn run_package(
     let _ = facts_verify(p, &wms, facts::FACTS_AFTER_CODEGEN, "codegen");
     if p.shadow_on {
         emitted_inst_diff(p);
+    }
+    if p.drops_on {
+        drops_compare(p);
     }
     return rc;
 }

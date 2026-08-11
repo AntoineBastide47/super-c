@@ -198,6 +198,47 @@ fn bit_clear(v: &mut Vector<u64>, i: u32) {
     v.set(w, v[w] & ~(1u64 << (i & 63) as u64));
 }
 
+/// Apply one init/move event to caller-held state rows (the transfer function, reporting-free).
+pub fn apply_event(
+    forest: &mp::MoveForest,
+    ev: &bf::Event,
+    scratch: &mut Vector<u32>,
+    sub: &mut Vector<u32>,
+    mi: &mut Vector<u64>,
+    di: &mut Vector<u64>,
+    mm: &mut Vector<u64>,
+) {
+    forest.subtree(ev.path, scratch, sub);
+    if ev.kind == bf::EV_ASSIGN {
+        for i in 0..sub.len() {
+            bit_set(mi, sub[i]);
+            bit_set(di, sub[i]);
+            bit_clear(mm, sub[i]);
+        }
+        let mut p = forest.paths.at(ev.path as usize).parent;
+        while p != mp::MP_NONE {
+            bit_set(mi, p);
+            p = forest.paths.at(p as usize).parent;
+        }
+        return;
+    }
+    if ev.kind == bf::EV_DEAD {
+        for i in 0..sub.len() {
+            bit_clear(mi, sub[i]);
+            bit_clear(di, sub[i]);
+            bit_clear(mm, sub[i]);
+        }
+        return;
+    }
+    if ev.kind == bf::EV_MOVE {
+        for i in 0..sub.len() {
+            bit_clear(mi, sub[i]);
+            bit_clear(di, sub[i]);
+            bit_set(mm, sub[i]);
+        }
+    }
+}
+
 extend FlowCtx {
     // Apply one event to the scratch state; when `report` is set, emit errors against it.
     fn step(

@@ -864,6 +864,7 @@ pub struct Codegen<'a> {
     pub tmp: u32,
     pub current_ret: [char; 128],
     pub current_fn_ret_node: NodeId,
+    pub drop_fn: NodeId, // recorder context: the non-generic fn body being emitted (NODE_NONE = off)
     pub package: *mut loader::Package,
     pub mangle: bool,
     pub multifile: bool,
@@ -9976,6 +9977,16 @@ extend Codegen {
         if self.cg_free_silent_at(bid, self.cur_ret) {
             return; // moved out by this return, or already gone by this point
         }
+        if self.drop_fn != NODE_NONE && self.package != null {
+            let mut cond: u8 = 0;
+            if self.cg_is_cond_moved(bid) {
+                cond = 1;
+            }
+            let mp = self.package;
+            unsafe {
+                mp.drop_log.push(loader::DropRec { mid: self.cur_module(), fnode: self.drop_fn, decl: bid, cond: cond });
+            }
+        }
         if self.cg_is_cond_moved(bid) {
             let mut fl = Buf32 {};
             cg_move_flag(&mut fl[0], 32, bid);
@@ -14323,6 +14334,10 @@ extend Codegen {
         }
 
         if with_body && f.body != NODE_NONE {
+            self.drop_fn = NODE_NONE;
+            if self.package != null && unsafe (&*self.package).drops_on && f.generics.len == 0 && self.nsubst == 0 {
+                self.drop_fn = fn_id;
+            }
             self.emit_str(" ");
             self.defer_top = 0;
             self.loop_defer_base = 0;

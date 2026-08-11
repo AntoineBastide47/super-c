@@ -492,6 +492,51 @@ extend Owner {
         return r;
     }
 
+    /// The field declarations and member types of a struct (or struct instance) value; false for
+    /// every other shape. Types are the OWNER module's recorded member types (`om`).
+    pub fn agg_fields(
+        self: &mut Self,
+        mid: ModuleId,
+        ty: TypeId,
+        decls: &mut Vector<NodeId>,
+        tys: &mut Vector<TypeId>,
+        om_out: &mut ModuleId,
+    ) bool {
+        decls.clear();
+        tys.clear();
+        let y = *self.ast_of(mid).type_at(ty);
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT {
+            om = y.module;
+            od = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_of(mid).instance(y.as_data.inst);
+            om = it.module;
+            od = it.decl;
+        } else {
+            return false;
+        }
+        let dn = *self.ast_of(om).at_const(od);
+        if dn.kind != NodeKind::NODE_STRUCT || dn.as_data.aggregate.is_union {
+            return false;
+        }
+        {
+            let oa = self.ast_of(om);
+            let ms = dn.as_data.aggregate.members;
+            for i in 0..ms.len {
+                let mid2 = unsafe oa.list(ms)[i as usize];
+                let mn = *oa.at_const(mid2);
+                if mn.kind == NodeKind::NODE_FIELD {
+                    decls.push(mid2);
+                    tys.push(oa.type_of(mn.as_data.field.ty));
+                }
+            }
+        }
+        *om_out = om;
+        return true;
+    }
+
     /// Can a value of `(mid, ty)` hold a tracked borrow? References and borrowed dyn values do;
     /// aggregates and closures do when a member/capture does. Raw pointers, `str`, and slice views
     /// (pointer-field structs) do not: their fields are handles, not tracked borrows.

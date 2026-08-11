@@ -132,6 +132,10 @@ pub struct Package {
     /// (serial emission only -- forked workers would drop their halves). Off (empty) otherwise.
     pub shadow_on: bool,
     pub shadow_insts: Vector<ShadowInst>,
+    pub drops_on: bool, // record the emitter's free insertions (drop-elaboration comparison)
+    pub drop_log: Vector<DropRec>, // emitter-side free sequence, in emission order
+    pub drop_plan: Vector<DropRec>, // elaboration-side schedule, in body order
+    pub drop_tys: Vector<u64>, // scheduled drop root types (module << 32 | TypeId): graph glue roots
     /// In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
     /// overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
     /// (realpath'd) absolute paths preferred -- overlay_index falls back to a raw compare for files not on
@@ -164,6 +168,16 @@ extend ParseResult as Free {
 /// One fn instance codegen recorded for emission, exported under the SC_INSTANCES shadow gate:
 /// the generic declaration plus the package-stable skeys of its concrete arguments. `n == 0xFF`
 /// marks a record with a symbolic argument (skipped by the diff).
+/// One recorded destruction: binding `decl` freed inside function `fnode` of `mid` (`cond` = the
+/// free is guarded by a move flag). Both the emitter and drop elaboration append these under the
+/// comparison gate.
+pub struct DropRec {
+    pub mid: ModuleId,
+    pub fnode: NodeId,
+    pub decl: NodeId,
+    pub cond: u8,
+}
+
 pub struct ShadowInst {
     pub def: DefId,
     pub n: u8,
@@ -776,6 +790,10 @@ extend Package {
             lint_pub: false,
             shadow_on: false,
             shadow_insts: Vector::<ShadowInst>::new(),
+            drops_on: false,
+            drop_log: Vector::<DropRec>::new(),
+            drop_plan: Vector::<DropRec>::new(),
+            drop_tys: Vector::<u64>::new(),
             overlay_files: Vector::<String>::new(),
             overlay_texts: Vector::<String>::new(),
         };
@@ -1766,6 +1784,9 @@ extend Package {
 extend Package as Free {
     pub fn free(self: &mut Self) {
         self.modules.free();
+        self.drop_log.free();
+        self.drop_plan.free();
+        self.drop_tys.free();
         self.root_dir.free();
         self.gen_root.free();
         self.std_root.free();

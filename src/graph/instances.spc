@@ -1099,6 +1099,20 @@ extend InstGraph {
 
     /// Seed every concrete body in the package (functions, methods, constant initializers) and run
     /// the expansion worklist to its fixed point.
+    /// Feed every scheduled destruction root type into the graph (glue roots): the aggregate
+    /// records and their `free` methods then join through the normal demand rules.
+    pub fn demand_drops(self: &mut Self) {
+        let p = unsafe &*self.pkg;
+        let empty = Vector::<Subst>::new();
+        for i in 0..p.drop_tys.len() {
+            let rec = p.drop_tys[i];
+            let mid = (rec >> 32) as ModuleId;
+            let ty = (rec & 0xFFFFFFFFu64) as TypeId;
+            let a = unsafe &*p.module_ast_const(mid);
+            self.note_type(a, ty, &empty, 0);
+        }
+    }
+
     pub fn collect(self: &mut Self) {
         let p = unsafe &*self.pkg;
         let empty = Vector::<Subst>::new();

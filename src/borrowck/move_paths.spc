@@ -103,6 +103,20 @@ extend MoveForest {
         return id;
     }
 
+    /// The existing child of `parent` naming field `fdecl` (member places carry field identity in
+    /// `sub`), or MP_NONE when that field was never mentioned.
+    pub fn field_child(self: &Self, parent: u32, fdecl: NodeId) u32 {
+        let key = elem_key(ir::PJ_FIELD, ir::IR_NONE, fdecl);
+        let mut c = self.paths.at(parent as usize).first_child;
+        while c != MP_NONE {
+            if self.paths.at(c as usize).elem == key {
+                return c;
+            }
+            c = self.paths.at(c as usize).next_sibling;
+        }
+        return MP_NONE;
+    }
+
     /// Visit `p` and every descendant (iterative; `scratch` is the caller's reusable stack).
     pub fn subtree(self: &Self, p: u32, scratch: &mut Vector<u32>, out: &mut Vector<u32>) {
         out.clear();
