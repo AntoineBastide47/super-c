@@ -4,6 +4,7 @@ import math;
 import lexer::token as tok;
 import lexer::token_type as *;
 import ast::ast as *;
+import ir::layout as lay;
 import module::loader as loader;
 import utils::errors as diag;
 
@@ -153,21 +154,7 @@ pub type Buf32 = Array<u8, 32>;
 
 // --- layout engine structs ----------------------------------------------------------------------
 
-pub struct LayoutEnv {
-    pub parent: *const LayoutEnv,
-    pub pmod: ModuleId,
-    pub params: *const NodeId,
-    pub argm: ModuleId,
-    pub args: [TypeId; 8],
-    pub n: u8,
-}
-
-pub struct LayoutAcc {
-    pub size: u64,
-    pub align: u64,
-    pub packed: bool,
-    pub is_union: bool,
-}
+pub type LayoutEnv = lay::LayoutEnv;
 
 // --- object store -------------------------------------------------------------------------------
 
@@ -305,6 +292,7 @@ pub struct CeFoldErr {
 
 pub struct ConstEval<'a> {
     pub pkg: *mut loader::Package,
+    pub lsvc: lay::Svc, // the target layout service (every size/align/offset answer)
     pub vals: Vector<Vector<ConstValue>>, // [module][node] memo tables
     pub nmods: usize,
     pub depth: u32,
@@ -389,13 +377,13 @@ pub struct OvfRes {
 
 // --- scalar helpers (no ce state) ---------------------------------------------------------------
 
-const fn bt_signed(b: BuiltinType) bool {
+pub const fn bt_signed(b: BuiltinType) bool {
     return b == BuiltinType::BT_I8 || b == BuiltinType::BT_I16 || b == BuiltinType::BT_I32 || b == BuiltinType::BT_I64 || b == BuiltinType::BT_ISIZE;
 }
 const fn bt_unsigned(b: BuiltinType) bool {
     return b == BuiltinType::BT_U8 || b == BuiltinType::BT_U16 || b == BuiltinType::BT_U32 || b == BuiltinType::BT_U64 || b == BuiltinType::BT_USIZE || b == BuiltinType::BT_CHAR;
 }
-const fn bt_bits(b: BuiltinType) i32 {
+pub const fn bt_bits(b: BuiltinType) i32 {
     if b == BuiltinType::BT_BOOL || b == BuiltinType::BT_CHAR || b == BuiltinType::BT_I8 || b == BuiltinType::BT_U8 {
         return 8;
     }
@@ -408,7 +396,7 @@ const fn bt_bits(b: BuiltinType) i32 {
     return 64;
 }
 
-const fn wrap_to(b: BuiltinType, v: i64) i64 {
+pub const fn wrap_to(b: BuiltinType, v: i64) i64 {
     let bits = bt_bits(b);
     if bits == 64 {
         return v;
@@ -421,7 +409,7 @@ const fn wrap_to(b: BuiltinType, v: i64) i64 {
     return u as i64;
 }
 
-const fn fits(b: BuiltinType, v: i64) bool {
+pub const fn fits(b: BuiltinType, v: i64) bool {
     return wrap_to(b, v) == v;
 }
 
@@ -465,6 +453,7 @@ extend ConstEval {
         let count = unsafe pkg.modules.len();
         let mut ce = ConstEval {
             pkg: pkg,
+            lsvc: lay::Svc::new(pkg),
             vals: Vector::<Vector<ConstValue>>::new(),
             nmods: count,
             depth: 0,
@@ -847,200 +836,13 @@ extend ConstEval {
         return false;
     }
 
-    // Accumulate one field into `acc`; false = unfoldable.
-    fn acc_field(self: &mut Self, acc: *mut LayoutAcc, m: ModuleId, ft: TypeId, env: *const LayoutEnv, depth: i32) bool {
-        let fl = self.layout_of(m, ft, env, depth);
-        if !fl.ok {
-            return false;
-        }
-        let mut fa = fl.align;
-        if unsafe acc.packed {
-            fa = 1;
-        }
-        if unsafe acc.is_union {
-            if fl.size > unsafe acc.size {
-                unsafe acc.size = fl.size;
-            }
-        } else {
-            unsafe acc.size = round_up(unsafe acc.size, fa) + fl.size;
-        }
-        if fa > unsafe acc.align {
-            unsafe acc.align = fa;
-        }
-        return true;
-    }
-
-    fn aggregate_layout(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv, depth: i32) Layout {
-        let a = self.ast_ptr(dm);
-        let dkind = a.at_const(dn).kind;
-        if dkind == NodeKind::NODE_ENUM {
-            let ms = a.at_const(dn).as_data.aggregate.members;
-            let mut payload = false;
-            for i in 0..ms.len {
-                let mid = unsafe a.list(ms)[i as usize];
-                if a.at_const(mid).as_data.variant.payload.len > 0 {
-                    payload = true;
-                }
-            }
-            if !payload {
-                return Layout { ok: true, size: 4, align: 4 };
-            }
-            let mut un = LayoutAcc { is_union: true };
-            for i in 0..ms.len {
-                let mid = unsafe a.list(ms)[i as usize];
-                let pl = a.at_const(mid).as_data.variant.payload;
-                if pl.len == 0 {
-                    continue;
-                }
-                let struct_payload = a.at_const(mid).as_data.variant.struct_payload;
-                let mut vs = LayoutAcc {};
-                for k in 0..pl.len {
-                    let pid = unsafe a.list(pl)[k as usize];
-                    let mut tn = pid;
-                    if struct_payload {
-                        tn = a.at_const(pid).as_data.field.ty;
-                    }
-                    if !self.acc_field(&mut vs, dm, self.ce_type(dm, tn), env, depth) {
-                        return Layout { ok: false };
-                    }
-                }
-                vs.size = round_up(vs.size, vs.align);
-                if vs.size > un.size {
-                    un.size = vs.size;
-                }
-                if vs.align > un.align {
-                    un.align = vs.align;
-                }
-            }
-            let ssize = round_up(4, un.align) + un.size;
-            let mut salign: u64 = 4;
-            if un.align > salign {
-                salign = un.align;
-            }
-            return Layout { ok: true, size: round_up(ssize, salign), align: salign };
-        }
-        if dkind != NodeKind::NODE_STRUCT {
-            return Layout { ok: false };
-        }
-        let is_union = a.at_const(dn).as_data.aggregate.is_union;
-        let is_tuple = a.at_const(dn).as_data.aggregate.is_tuple;
-        let mut acc = LayoutAcc { is_union: is_union };
-        acc.packed = self.ce_attr(dm, dn, AttrKind::ATTR_PACKED) != null;
-        let fs = a.at_const(dn).as_data.aggregate.members;
-        for i in 0..fs.len {
-            let fid = unsafe a.list(fs)[i as usize];
-            let fkind = a.at_const(fid).kind;
-            if !is_tuple && fkind != NodeKind::NODE_FIELD {
-                continue;
-            }
-            let mut ftn = fid;
-            if !is_tuple {
-                ftn = a.at_const(fid).as_data.field.ty;
-            }
-            let ft = self.ce_type(dm, ftn);
-            if ft == TYPE_NONE {
-                return Layout { ok: false };
-            }
-            if !self.acc_field(&mut acc, dm, ft, env, depth) {
-                return Layout { ok: false };
-            }
-        }
-        let al = self.ce_attr(dm, dn, AttrKind::ATTR_ALIGN);
-        if al != null && unsafe al.arg != 0 {
-            if (unsafe al.arg) as u64 > acc.align {
-                acc.align = unsafe al.arg;
-            }
-        }
-        if acc.align == 0 {
-            acc.align = 1;
-        }
-        return Layout { ok: true, size: round_up(acc.size, acc.align), align: acc.align };
-    }
-
+    // The target layout service owns every size/alignment rule; this stage only adapts its record.
     fn layout_of(self: &mut Self, m: ModuleId, t: TypeId, env: *const LayoutEnv, depth: i32) Layout {
-        if depth > CE_MAX_DEPTH || t == TYPE_NONE {
-            return Layout { ok: false };
-        }
-        if !self.has_ast(m) {
-            return Layout { ok: false };
-        }
-        let a = self.ast_ptr(m);
-        let y = *a.type_at(t);
-        if y.kind == TypeKind::TYPE_BUILTIN {
-            let b = y.as_data.builtin;
-            if b == BuiltinType::BT_BOOL || b == BuiltinType::BT_CHAR || b == BuiltinType::BT_I8 || b == BuiltinType::BT_U8 {
-                return Layout { ok: true, size: 1, align: 1 };
-            }
-            if b == BuiltinType::BT_I16 || b == BuiltinType::BT_U16 {
-                return Layout { ok: true, size: 2, align: 2 };
-            }
-            if b == BuiltinType::BT_I32 || b == BuiltinType::BT_U32 || b == BuiltinType::BT_F32 {
-                return Layout { ok: true, size: 4, align: 4 };
-            }
-            if b == BuiltinType::BT_ISIZE || b == BuiltinType::BT_USIZE {
-                let w = self.ptr_width();
-                return Layout { ok: true, size: w, align: w };
-            }
-            if b == BuiltinType::BT_I64 || b == BuiltinType::BT_U64 || b == BuiltinType::BT_F64 {
-                return Layout { ok: true, size: 8, align: 8 };
-            }
-            if b == BuiltinType::BT_C32 {
-                return Layout { ok: true, size: 8, align: 4 };
-            }
-            if b == BuiltinType::BT_C64 {
-                return Layout { ok: true, size: 16, align: 8 };
-            }
-            return Layout { ok: false };
-        }
-        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_FUNCTION {
-            let w = self.ptr_width();
-            return Layout { ok: true, size: w, align: w };
-        }
-        if y.kind == TypeKind::TYPE_ARRAY {
-            if y.as_data.arr.len == 0 {
-                return Layout { ok: false };
-            }
-            let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
-            if !el.ok {
-                return Layout { ok: false };
-            }
-            return Layout { ok: true, size: el.size * y.as_data.arr.len as u64, align: el.align };
-        }
-        if y.kind == TypeKind::TYPE_GENERIC {
-            let mut e = env;
-            while e != null {
-                for i in 0..unsafe e.n {
-                    if unsafe e.pmod == y.module && unsafe e.params[i as usize] == y.as_data.decl {
-                        return self.layout_of(unsafe e.argm, unsafe e.args[i as usize], unsafe e.parent, depth + 1);
-                    }
-                }
-                e = unsafe e.parent;
-            }
-            return Layout { ok: false };
-        }
-        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
-            return self.aggregate_layout(y.module, y.as_data.decl, null, depth + 1);
-        }
-        if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *a.instance(y.as_data.inst);
-            if !self.has_ast(it.module) {
-                return Layout { ok: false };
-            }
-            let da = self.ast_ptr(it.module);
-            let gens = da.at_const(it.decl).as_data.aggregate.generics;
-            let mut frame = LayoutEnv { parent: env, pmod: it.module, params: da.list(gens), argm: m, n: 0 };
-            let mut i: u32 = 0;
-            while i < gens.len && i as u8 < it.n && frame.n < 8 {
-                unsafe frame.args[frame.n as usize] = unsafe it.args[i as usize];
-                frame.n = frame.n + 1;
-                i = i + 1;
-            }
-            return self.aggregate_layout(it.module, it.decl, &frame, depth + 1);
-        }
-        return Layout { ok: false };
+        let r = self.lsvc.layout_of(m, t, env, depth);
+        return Layout { ok: r.ok, size: r.size, align: r.align };
     }
 
-    /// Size/align of (m,t) under the 64-bit C data model; not-ok = not layoutable (opaque, unbound
+    /// Size/align of (m,t) under the TARGET data model; not-ok = not layoutable (opaque, unbound
     /// generic, zero-length array).
     pub fn layout(self: &mut Self, m: ModuleId, t: TypeId) Layout {
         return self.layout_of(m, t, null, 0);
@@ -1104,13 +906,6 @@ extend ConstEval {
     /// pointer, reference, function value and `usize`/`isize` is half the size it is elsewhere. The
     /// layout model feeds both compile-time `sizeof` and the emitted `_Static_assert`s, so a host-shaped
     /// answer here makes the generated C reject itself.
-    const fn ptr_width(self: &Self) u64 {
-        if self.pkg != null && unsafe self.pkg.arch == 2 {
-            return 4; // wasm32
-        }
-        return 8;
-    }
-
     fn ce_layout_f(self: &mut Self, f: *mut CeFrame, m: ModuleId, t: TypeId) Layout {
         if f == null {
             return self.layout_of(m, t, null, 0);

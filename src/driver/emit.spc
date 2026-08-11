@@ -24,6 +24,7 @@ import ir::lower as irl;
 import ir::print as irp;
 import ir::verify as irv;
 import ir::drops as ird;
+import ir::interp as iri;
 import graph::instances as ig;
 import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
@@ -1061,6 +1062,90 @@ fn drops_compare(p: &loader::Package) {
         p.drop_plan.len(),
     );
     fns.free();
+}
+
+// Comparison mode (SC_CTFE_IR=1): execute every constant initializer on Core IR and compare
+// scalar folds against the established AST evaluator. Aggregates and features the interpreter
+// refuses count as coverage gaps, never as matches.
+fn ctfe_ir_pass(p: &mut loader::Package) {
+    if stdlib::getenv("SC_CTFE_IR") == null {
+        return;
+    }
+    let ceptr = p.ceval as *mut ce::ConstEval;
+    if ceptr == null {
+        return;
+    }
+    let t0 = unsafe shim::sc_ticks_ms();
+    let mut consts: u64 = 0;
+    let mut scalar: u64 = 0;
+    let mut matched: u64 = 0;
+    let mut unsupported: u64 = 0;
+    let mut mism: u64 = 0;
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let items = a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let nid = unsafe a.list(items)[i as usize];
+            let n = a.at_const(nid);
+            if n.kind != NodeKind::NODE_CONST || n.as_data.const_def.is_extern || n.as_data.const_def.value == NODE_NONE {
+                continue;
+            }
+            consts += 1;
+            let old = unsafe (&mut *ceptr).eval(m as ModuleId, n.as_data.const_def.value);
+            if old.kind != ce::CONST_INT && old.kind != ce::CONST_BOOL {
+                continue;
+            }
+            scalar += 1;
+            let nv = iri::eval_const(p, m as ModuleId, nid);
+            if nv.kind == iri::IV_NONE {
+                unsupported += 1;
+                continue;
+            }
+            let mut ok = false;
+            if old.kind == ce::CONST_INT && nv.kind == iri::IV_INT {
+                ok = old.as_data.i == nv.i;
+            } else if old.kind == ce::CONST_BOOL && nv.kind == iri::IV_BOOL {
+                let mut oi: i64 = 0;
+                if old.as_data.i != 0 {
+                    oi = 1;
+                }
+                ok = oi == nv.i;
+            }
+            if ok {
+                matched += 1;
+            } else {
+                mism += 1;
+                if mism <= 12 {
+                    let sp = n.span;
+                    let src = p.modules[m].source.as_str();
+                    let mut e2 = sp.end as usize;
+                    if e2 > sp.start as usize + 40 {
+                        e2 = sp.start as usize + 40;
+                    }
+                    eprint(
+                        "ctfe-ir: mismatch module {} `{}`: old {} new {}\n",
+                        m,
+                        src.slice(sp.start as usize, e2),
+                        old.as_data.i,
+                        nv.i,
+                    );
+                }
+            }
+        }
+    }
+    let dt = unsafe shim::sc_ticks_ms() - t0;
+    eprint(
+        "ctfe-ir: {} consts, {} scalar, {} matched, {} unsupported, {} mismatched, {} ms\n",
+        consts,
+        scalar,
+        matched,
+        unsupported,
+        mism,
+        dt,
+    );
 }
 
 // Shadow mode (SC_INSTANCES=1): build the Core-IR instance graph after the established propagation
@@ -2359,6 +2444,7 @@ pub fn lint_package(
     }
     let _ = borrow_ir_pass(p);
     drops_pass(p);
+    ctfe_ir_pass(p);
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
     // duplicates). The const suggestion is the exception: opt-in (`--suggest-const`, warning every
     // eligible function at once would swamp default lints), and under `--fix` it contributes its
@@ -2643,6 +2729,7 @@ pub fn run_package(
     }
     let _ = borrow_ir_pass(p);
     drops_pass(p);
+    ctfe_ir_pass(p);
     if lint {
         lint_unused_items(p, -1);
     }
