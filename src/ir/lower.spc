@@ -344,8 +344,10 @@ extend Lowerer {
 
     // The cached LS_STATIC_REF local naming item `d` (globals, statics, constants read as places).
     fn item_local(self: &mut Self, d: DefId, ty: TypeId, sp: tok::Span) ir::LocalId {
+        // keyed by the FULL DefId: node ids collide across modules
         for i in 0..self.item_locals.len() {
-            if self.item_locals[i].decl == d.node {
+            let li = self.item_locals[i].local as usize;
+            if self.item_locals[i].decl == d.node && self.body.locals.at(li).item.module == d.module {
                 return self.item_locals[i].local;
             }
         }
@@ -445,6 +447,24 @@ extend Lowerer {
             );
         }
         self.body.returns = rets.len;
+        if rets.len == 0 && cd.expr_body {
+            // an expr-body closure with no written return list still returns its body's INFERRED
+            // type (comparators etc); a unit body keeps zero return slots
+            let bt = self.f.node_type(cd.body);
+            if bt != TYPE_NONE && !(self.f.ty(bt).kind == TypeKind::TYPE_BUILTIN && self.f.ty(bt).as_data.builtin == BuiltinType::BT_VOID) {
+                let _ = self.body.add_local(
+                    ir::LocalDecl {
+                        ty: bt,
+                        storage: ir::LS_RET,
+                        is_mutable: true,
+                        span: sp,
+                        decl: NODE_NONE,
+                        item: DefId { module: 0, node: NODE_NONE },
+                    },
+                );
+                self.body.returns = 1;
+            }
+        }
         let params = cd.params;
         for i in 0..params.len {
             let pn = unsafe self.f.list(params)[i as usize];
@@ -2224,6 +2244,21 @@ extend Lowerer {
         let ty = self.f.node_type(id);
         let sp = self.f.node(id).span;
         let ck = self.f.node(d.callee).kind;
+        // `Some(x)`: a payload variant CONSTRUCTOR call is aggregate construction, not a call
+        {
+            let vd = self.path_res(d.callee);
+            if vd.node != NODE_NONE && self.decl_kind(vd) == NodeKind::NODE_VARIANT {
+                let mut argv = Vector::<ir::OperandId>::new();
+                for i in 0..d.args.len {
+                    let op = self.lower_expr(unsafe self.f.list(d.args)[i as usize]);
+                    if op == ir::IR_NONE {
+                        return ir::IR_NONE;
+                    }
+                    argv.push(op);
+                }
+                return self.finish_aggregate(ir::AGG_VARIANT, vd, &argv, ty, sp);
+            }
+        }
         // Method call: receiver first, then arguments; the selected target comes from call_info.
         let ci = self.f.call_info(id);
         let mut target = DefId { module: 0, node: NODE_NONE };
@@ -3017,6 +3052,44 @@ extend Lowerer {
         let base = self.lower_place_or_spill(d.object);
         if base == ir::IR_NONE {
             return ir::IR_NONE;
+        }
+        if self.f.node(d.index).kind == NodeKind::NODE_RANGE {
+            // `s[lo..hi]` slicing stays STRUCTURAL: bounds lower directly (start first), so
+            // end-openness survives without a Range value
+            let rd = self.f.node(d.index).as_data.pattern_range;
+            let mut sop = ir::IR_NONE;
+            if rd.start != NODE_NONE {
+                sop = self.lower_expr(rd.start);
+                if sop == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+            }
+            let mut eop = ir::IR_NONE;
+            if rd.end != NODE_NONE {
+                eop = self.lower_expr(rd.end);
+                if eop == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+            }
+            let mut fl: u8 = 0;
+            if rd.inclusive {
+                fl = 1;
+            }
+            let t = self.temp(ty, sp);
+            let pl = self.place_of_local(t);
+            self.assign(
+                pl,
+                ir::Rvalue {
+                    kind: ir::RV_SLICE,
+                    a: base,
+                    b: sop,
+                    c: fl,
+                    target: ty,
+                    item: DefId { module: 0, node: eop },
+                },
+                sp,
+            );
+            return pl;
         }
         let iop = self.lower_expr(d.index);
         if iop == ir::IR_NONE {

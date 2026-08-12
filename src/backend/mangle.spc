@@ -225,9 +225,12 @@ pub struct Mangler {
     // Per-module short-prefix verdict memo: 0 unknown / 1 full path / 2 short. A pure function of
     // the package's module path list, so every TU agrees.
     short_ok: Vector<u8>,
+    /// Instance suffix appended to closure symbols while a generic body instance emits (closures
+    /// hoist per instantiation; the bare name would collide across instances in one TU).
+    pub clos_sfx: String,
     /// Substitution stack for per-instance spelling: generic-param decl -> a CONCRETE pool type
     /// (module + TypeId, usually the instance's anchor pool). Innermost binding wins.
-    subs: Vector<MSub>,
+    pub subs: Vector<MSub>,
 }
 
 /// One substitution binding: param decl `(pm, pnode)` resolves to pool type `(am, at)`.
@@ -242,6 +245,7 @@ extend Mangler as Free {
     pub fn free(self: &mut Self) {
         self.short_ok.free();
         self.subs.free();
+        self.clos_sfx.free();
     }
 }
 
@@ -260,6 +264,7 @@ extend Mangler {
             ph_global: p.prelude_lookup("Global", true),
             short_ok: Vector::<u8>::new(),
             subs: Vector::<MSub>::new(),
+            clos_sfx: String::new(),
         };
     }
 
@@ -273,6 +278,55 @@ extend Mangler {
     }
     pub fn pop_subs(self: &mut Self, n: usize) {
         self.subs.truncate(self.subs.len() - n);
+    }
+
+    /// Fold a canonical const-generic expression under the substitution stack: every referenced
+    /// parameter must bind to a TYPE_CONST. False when a parameter is unbound or non-const.
+    pub fn fold_cexpr(self: &Self, pm: ModuleId, t: TypeId, out_val: &mut i64) bool {
+        let a = self.p().module_ast_const(pm);
+        let y = *a.type_at(t);
+        let l = *a.const_lin_at(y.as_data.inst);
+        let mut v = l.k;
+        for i in 0..l.n {
+            let c = unsafe l.c[i as usize];
+            if c == 0 {
+                continue;
+            }
+            let pd = unsafe l.p[i as usize];
+            let mut bam: ModuleId = 0;
+            let mut bat = TYPE_NONE;
+            let mut found = false;
+            let mut k = self.subs.len();
+            while k > 0 {
+                k -= 1;
+                let sb = *self.subs.at(k);
+                if sb.pm == pd.module && sb.pnode == pd.node {
+                    bam = sb.am;
+                    bat = sb.at;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return false;
+            }
+            let mut rm = bam;
+            let mut rt = bat;
+            if !self.resolve(bam, bat, &mut rm, &mut rt) {
+                return false;
+            }
+            let by = *self.p().module_ast_const(rm).type_at(rt);
+            if by.kind != TypeKind::TYPE_CONST {
+                return false;
+            }
+            v += by.as_data.value * c;
+        }
+        if lin_div_of(&l) != 1 {
+            let folded = ConstLin { k: v, n: 0, div: l.div };
+            v = lin_value(&folded);
+        }
+        *out_val = v;
+        return true;
     }
 
     // Innermost-wins resolution of `(pm, t)` through the substitution stack: TYPE_GENERIC hops to
@@ -386,6 +440,9 @@ extend Mangler {
         self.modpfx(m, out);
         out.push_str("closure_");
         out.push_u64(id);
+        if self.clos_sfx.len() != 0 {
+            out.push_string(&self.clos_sfx);
+        }
     }
 
     /// The symbol-alphabet spelling of pool type `(pm, t)`. False when `t` is outside the frozen
@@ -476,7 +533,12 @@ extend Mangler {
             return false; // unbound params never name symbols
         }
         if y.kind == TypeKind::TYPE_CONST_EXPR {
-            return false; // const-expr folding under a frame is not frozen yet
+            let mut v: i64 = 0;
+            if !self.fold_cexpr(pm, t, &mut v) {
+                return false;
+            }
+            out.push_i64(v);
+            return true;
         }
         out.push_str("v");
         return true;
@@ -756,6 +818,11 @@ extend Mangler {
         }
         let a = self.p().module_ast_const(fm);
         let fname = a.at_const(a.at_const(fnode).as_data.function.name).as_data.name.text;
+        if a.at_const(fnode).as_data.function.is_extern {
+            // an extern function IS its C symbol: never prefixed, never suffixed
+            self.ident(fm, fname, out);
+            return true;
+        }
         let src = self.p().modules.at(fm as usize).source.as_str();
         let ftxt = src.slice(fname.start as usize, fname.end as usize);
         let is_main = target.node == NODE_NONE && ftxt == "main";
@@ -818,6 +885,45 @@ extend Mangler {
             }
         }
         return DefId { module: m, node: NODE_NONE };
+    }
+
+    /// The generics list of the extend owning `fnode` (empty when free-standing).
+    pub fn extend_generics(self: &mut Self, m: ModuleId, fnode: NodeId) NodeList {
+        let a = self.p().module_ast_const(m);
+        let items = unsafe a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe a.list(items)[i as usize];
+            if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
+                continue;
+            }
+            let ms = a.at_const(iid).as_data.extend_def.items;
+            for j in 0..ms.len {
+                if unsafe a.list(ms)[j as usize] == fnode {
+                    return a.at_const(iid).as_data.extend_def.generics;
+                }
+            }
+        }
+        return NodeList { start: 0, len: 0 };
+    }
+
+    /// The interface declaring member `fnode` (its default body emits per conforming type), or
+    /// NODE_NONE when the function is not an interface member.
+    pub fn in_interface(self: &mut Self, m: ModuleId, fnode: NodeId) NodeId {
+        let a = self.p().module_ast_const(m);
+        let items = unsafe a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let iid = unsafe a.list(items)[i as usize];
+            if a.at_const(iid).kind != NodeKind::NODE_INTERFACE {
+                continue;
+            }
+            let ms = a.at_const(iid).as_data.interface_def.items;
+            for j in 0..ms.len {
+                if unsafe a.list(ms)[j as usize] == fnode {
+                    return iid;
+                }
+            }
+        }
+        return NODE_NONE;
     }
 
     /// Does the extend that owns `fnode` declare generic parameters (its methods emit per receiver
@@ -891,6 +997,155 @@ extend Mangler {
             return n.as_data.name.text;
         }
         return tok::Span { start: 0, end: 0 };
+    }
+
+    /// The C symbol of the method named `mname` extending resolved aggregate `(rm, rt)`, when one
+    /// exists: instance receivers spell `<InstName>__<m>`, concrete ones the frozen fn symbol.
+    pub fn method_by_name(self: &mut Self, rm: ModuleId, rt: TypeId, mname: str, out: &mut String) bool {
+        let a = self.p().module_ast_const(rm);
+        let y = *a.type_at(rt);
+        let mut dm = y.module;
+        let mut dd = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            dd = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *a.instance(y.as_data.inst);
+            dm = it.module;
+            dd = it.decl;
+        }
+        if dd == NODE_NONE {
+            if y.kind == TypeKind::TYPE_BUILTIN {
+                // builtin receivers: their extends live in the prelude
+                let bt = y.as_data.builtin as i32;
+                for pm2 in 0..self.p().modules.len() {
+                    if !self.p().modules.at(pm2).prelude {
+                        continue;
+                    }
+                    let pa = self.p().module_ast_const(pm2 as ModuleId);
+                    let pits = unsafe pa.at_const(pa.root).as_data.program.items;
+                    let psrc = self.p().modules.at(pm2).source.as_str();
+                    for i2 in 0..pits.len {
+                        let iid2 = unsafe pa.list(pits)[i2 as usize];
+                        let it2 = pa.at_const(iid2);
+                        if it2.kind != NodeKind::NODE_EXTEND || it2.as_data.extend_def.target_type == NODE_NONE {
+                            continue;
+                        }
+                        let tg2 = pa.resolution_def(it2.as_data.extend_def.target_type);
+                        if tg2.node == NODE_NONE || self.p().builtin_of_decl(tg2.module, tg2.node) != bt {
+                            continue;
+                        }
+                        let ms2 = it2.as_data.extend_def.items;
+                        for j2 in 0..ms2.len {
+                            let mid2 = unsafe pa.list(ms2)[j2 as usize];
+                            let mn2 = pa.at_const(mid2);
+                            if mn2.kind != NodeKind::NODE_FUNCTION {
+                                continue;
+                            }
+                            let s3 = pa.at_const(mn2.as_data.function.name).as_data.name.text;
+                            if psrc.slice(s3.start as usize, s3.end as usize) == mname {
+                                return self.fn_sym(pm2 as ModuleId, mid2, tg2, true, out);
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+        let da = self.p().module_ast_const(dm);
+        let items = unsafe da.at_const(da.root).as_data.program.items;
+        let dsrc = self.p().modules.at(dm as usize).source.as_str();
+        for i in 0..items.len {
+            let iid = unsafe da.list(items)[i as usize];
+            let itn = da.at_const(iid);
+            if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE {
+                continue;
+            }
+            let tg = da.resolution_def(itn.as_data.extend_def.target_type);
+            if tg.module != dm || tg.node != dd {
+                continue;
+            }
+            let ms = itn.as_data.extend_def.items;
+            for j in 0..ms.len {
+                let mid = unsafe da.list(ms)[j as usize];
+                let mn = da.at_const(mid);
+                if mn.kind != NodeKind::NODE_FUNCTION {
+                    continue;
+                }
+                let s2 = da.at_const(mn.as_data.function.name).as_data.name.text;
+                if dsrc.slice(s2.start as usize, s2.end as usize) == mname {
+                    if y.kind == TypeKind::TYPE_INSTANCE {
+                        let it2 = *a.instance(y.as_data.inst);
+                        if !self.inst_name(rm, &it2, out) {
+                            return false;
+                        }
+                        out.push_str("__");
+                        out.push_str(mname);
+                        return true;
+                    }
+                    return self.fn_sym(dm, mid, DefId { module: dm, node: dd }, true, out);
+                }
+            }
+        }
+        return false;
+    }
+
+    /// The destructor call target for resolved aggregate type `(rm, rt)`: the user `free` method
+    /// when one extends the declaration, else the derived per-TU glue `<name>__free__d`.
+    pub fn free_target(self: &mut Self, rm: ModuleId, rt: TypeId, out: &mut String) bool {
+        let a = self.p().module_ast_const(rm);
+        let y = *a.type_at(rt);
+        let mut dm = y.module;
+        let mut dd = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            dd = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *a.instance(y.as_data.inst);
+            dm = it.module;
+            dd = it.decl;
+        }
+        if dd == NODE_NONE {
+            return false;
+        }
+        // plan-time scan: a `free` method in any extend of the declaration (its own module)
+        let da = self.p().module_ast_const(dm);
+        let items = unsafe da.at_const(da.root).as_data.program.items;
+        let dsrc = self.p().modules.at(dm as usize).source.as_str();
+        for i in 0..items.len {
+            let iid = unsafe da.list(items)[i as usize];
+            let itn = da.at_const(iid);
+            if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE {
+                continue;
+            }
+            let tg = da.resolution_def(itn.as_data.extend_def.target_type);
+            if tg.module != dm || tg.node != dd {
+                continue;
+            }
+            let ms = itn.as_data.extend_def.items;
+            for j in 0..ms.len {
+                let mid = unsafe da.list(ms)[j as usize];
+                let mn = da.at_const(mid);
+                if mn.kind != NodeKind::NODE_FUNCTION {
+                    continue;
+                }
+                let s2 = da.at_const(mn.as_data.function.name).as_data.name.text;
+                if dsrc.slice(s2.start as usize, s2.end as usize) == "free" {
+                    if y.kind == TypeKind::TYPE_INSTANCE {
+                        let it2 = *a.instance(y.as_data.inst);
+                        if !self.inst_name(rm, &it2, out) {
+                            return false;
+                        }
+                        out.push_str("__free");
+                        return true;
+                    }
+                    return self.fn_sym(dm, mid, DefId { module: dm, node: dd }, true, out);
+                }
+            }
+        }
+        if !self.type_m(rm, rt, out) {
+            return false;
+        }
+        out.push_str("__free__d");
+        return true;
     }
 
     /// The C constant naming variant `variant` of enum `decl` in module `m`: RAW source spans

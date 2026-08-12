@@ -1125,6 +1125,30 @@ pub fn println(_fmt: str, ...) {}
 pub fn eprint(_fmt: str, ...) {} // like print/println, written to stderr
 pub fn eprintln(_fmt: str, ...) {}
 
+// The print family's desugar tails: consume the rendered buffer (write, then free) so the
+// checker-built sugar block owns no live String at its end.
+pub fn sugar_print(f: String) {
+    f.print();
+    f.free();
+}
+pub fn sugar_println(f: String) {
+    f.println();
+    f.free();
+}
+pub fn sugar_eprint(f: String) {
+    f.eprint();
+    f.free();
+}
+pub fn sugar_eprintln(f: String) {
+    f.eprintln();
+    f.free();
+}
+// `format_into`'s desugar tail: append the rendered piece into the destination buffer, consuming it.
+pub fn sugar_format_into(dst: &mut String, f: String) {
+    dst.push_string(&f);
+    f.free();
+}
+
 // Like `format`, but APPENDS the rendered output into this buffer instead of returning a new String --
 // zero allocation (reuses the buffer's capacity). It is a METHOD so the receiver's `&mut` borrow defers
 // past the argument evaluation (a free-fn `&mut dst` arg would collide with `self.X` format args).

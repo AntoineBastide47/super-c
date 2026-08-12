@@ -687,6 +687,9 @@ extend Interp {
             }
             return IVal { kind: IV_OBJ, ty: rv.target, i: self.objs.len() as i64 - 1, f: tag };
         }
+        if rv.kind == ir::RV_SLICE {
+            return self.bail(); // view slicing never folds
+        }
         if rv.kind == ir::RV_DISCRIMINANT {
             let v = self.read_place(b, locals, rv.a);
             if v.kind == IV_INT {

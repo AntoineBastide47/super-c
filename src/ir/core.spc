@@ -102,6 +102,10 @@ pub const RV_DISCRIMINANT: u8 = 9; // a = PlaceId
 pub const RV_DYN: u8 = 10; // dynamic-interface construction; a = OperandId, b = alloc TypeId
 pub const RV_CLOSURE: u8 = 11; // a = capture operand range start, b = len, item = closure body owner
 pub const RV_INTRINSIC: u8 = 12; // a = operand range start, b = len (IN_SIZEOF/IN_ALIGNOF: the measured TypeId), c = IntrinsicKind
+/// Structural view slicing `base[lo..hi]`: a = the container PLACE, b = start OperandId (IR_NONE =
+/// from 0), item.node = end OperandId (IR_NONE = to the container's length), c bit0 = inclusive.
+/// Kept structural so end-openness survives (a materialized Range value cannot express it).
+pub const RV_SLICE: u8 = 13;
 
 /// Cast kinds (RV_CAST.b).
 pub const CAST_NUMERIC: u8 = 0;

@@ -1440,6 +1440,485 @@ fn cemit_tu_pass(p: &mut loader::Package) {
         let it = *items.at(i);
         let _ = em.emit_agg(&it);
     }
+    // Demand-driven monomorphization: emit every concrete standalone body with demand collection
+    // on, then drain the queue -- each demanded instance re-emits the generic Core body under its
+    // recorded substitution chain. The drained symbol set is the closed instance set the old
+    // propagation computed, derived from Core IR alone.
+    let mut cem = cbe::CEmit::new(p);
+    cem.collect_demand = true;
+    let mut lw_cache = Map::<u64, u64>::new();
+    let mut lws = Vector::<irl::Lowerer>::new();
+    let mut seeds: u64 = 0;
+    let mut seed_skip: u64 = 0;
+    let mut clos_ok: u64 = 0;
+    let mut clos_skip: u64 = 0;
+    let mut bodies_all = String::new();
+    let mut protos = String::new();
+    let mut envs_all = String::new();
+    let mut have_main = false;
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let its = a.at_const(a.root).as_data.program.items;
+        let mut cands = Vector::<NodeId>::new();
+        for i in 0..its.len {
+            let nid = unsafe a.list(its)[i as usize];
+            let n = a.at_const(nid);
+            if n.kind == NodeKind::NODE_FUNCTION {
+                cands.push(nid);
+            } else if n.kind == NodeKind::NODE_EXTEND {
+                let ms = n.as_data.extend_def.items;
+                for j in 0..ms.len {
+                    let mid2 = unsafe a.list(ms)[j as usize];
+                    if a.at_const(mid2).kind == NodeKind::NODE_FUNCTION {
+                        cands.push(mid2);
+                    }
+                }
+            }
+        }
+        for i in 0..cands.len() {
+            let nid = cands[i];
+            let n = a.at_const(nid);
+            if n.as_data.function.is_extern || n.as_data.function.body == NODE_NONE {
+                continue;
+            }
+            let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
+            if !lw.lower_fn(nid) {
+                lw.free();
+                continue;
+            }
+            if lw.body.is_generic || cem.mg.in_generic_extend(m as ModuleId, nid) {
+                lw.free();
+                continue;
+            }
+            let mut sym = String::new();
+            let tgt = cem.mg.method_target(m as ModuleId, nid);
+            if !cem.mg.fn_sym(m as ModuleId, nid, tgt, true, &mut sym) {
+                sym.free();
+                lw.free();
+                continue;
+            }
+            if sym.as_str() == "assert" || sym.as_str() == "assert_eq" || sym.as_str() == "assert_ne" {
+                sym.free();
+                lw.free();
+                continue; // desugared builtins; the C names collide with <assert.h>'s macro
+            }
+            cem.out.clear();
+            let is_main = sym.as_str() == "main";
+            if is_main {
+                sym.truncate(0);
+                sym.push_str("__sc_user_main"); // the argv wrapper below owns the C `main`
+            }
+            if cem.emit_fn(&lw.body, sym.as_str()) {
+                seeds += 1;
+                if is_main {
+                    have_main = true;
+                }
+                {
+                    proto_of(&cem.out, &mut protos);
+                    bodies_all.push_string(&cem.out);
+                }
+                for c2 in 0..lw.closures.len() {
+                    let cn = lw.closures[c2];
+                    let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
+                    let mut csym = String::new();
+                    cem.mg.closure_sym(m as ModuleId, cn, &mut csym);
+                    let mut envs = String::new();
+                    cem.out.clear();
+                    if cl.lower_closure_body(cn) && cem.emit_closure(
+                        &cl.body,
+                        m as ModuleId,
+                        cn,
+                        csym.as_str(),
+                        &mut envs,
+                    ) {
+                        clos_ok += 1;
+                        envs_all.push_string(&envs);
+                        proto_of(&cem.out, &mut protos);
+                        bodies_all.push_string(&cem.out);
+                    } else {
+                        clos_skip += 1;
+                    }
+                    envs.free();
+                    csym.free();
+                    cl.free();
+                }
+            } else {
+                seed_skip += 1;
+            }
+            sym.free();
+            lw.free();
+        }
+        cands.free();
+    }
+    let mut done = Map::<u64, u64>::new();
+    let mut inst_ok: u64 = 0;
+    let mut inst_skip: u64 = 0;
+    let mut glue_ok: u64 = 0;
+    let mut glue_skip: u64 = 0;
+    let mut gi9: usize = 0;
+    let mut reasons = Vector::<str<'static>>::new();
+    let mut rcounts = Vector::<u64>::new();
+    let mut qi: usize = 0;
+    while (qi < cem.demand.len() || gi9 < cem.glue.len()) && qi < 200000 {
+        // derived destructors drain alongside instances (each may enqueue the other)
+        while gi9 < cem.glue.len() {
+            cem.out.clear();
+            if cem.emit_glue(gi9) {
+                glue_ok += 1;
+                proto_of(&cem.out, &mut protos);
+                bodies_all.push_string(&cem.out);
+            } else {
+                glue_skip += 1;
+            }
+            gi9 += 1;
+        }
+        if qi >= cem.demand.len() {
+            continue;
+        }
+        let d_def = cem.demand.at(qi).def;
+        let ds = cem.demand.at(qi).sym.as_str();
+        let mut dk = 1469598103934665603u64;
+        for k in 0..ds.len() {
+            dk = (dk ^ ds.byte_at(k) as u64) * 1099511628211u64;
+        }
+        let seen = switch done.get(&dk) {
+            Some(_v) => true,
+            None => false,
+        };
+        if seen {
+            qi += 1;
+            continue;
+        }
+        done.insert(dk, 1);
+        let d_sym = cem.demand.at(qi).sym.clone();
+        let mut d_subs = Vector::<mbe::MSub>::new();
+        for i2 in 0..cem.demand.at(qi).subs.len() {
+            d_subs.push(*cem.demand.at(qi).subs.at(i2));
+        }
+        qi += 1;
+        let key = d_def.module as u64 << 32 | d_def.node as u64;
+        let li = switch lw_cache.get(&key) {
+            Some(v) => *v,
+            None => {
+                let mut lw = irl::Lowerer::new(p, d_def.module, d_def.node);
+                let okl = lw.lower_fn(d_def.node);
+                let mut slot = 0xFFFFFFFFFFFFFFFFu64;
+                if okl {
+                    slot = lws.len() as u64;
+                    lws.push(lw);
+                } else {
+                    eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw.err);
+                    lw.free();
+                }
+                lw_cache.insert(key, slot);
+                slot;
+            },
+        };
+        if li == 0xFFFFFFFFFFFFFFFFu64 {
+            inst_skip += 1;
+            d_sym.free();
+            d_subs.free();
+            continue;
+        }
+        let d_sfx = cem.demand.at(qi - 1).sfx.clone();
+        cem.mg.subs.truncate(0);
+        for i2 in 0..d_subs.len() {
+            let sb = *d_subs.at(i2);
+            cem.mg.push_sub(sb.pm, sb.pnode, sb.am, sb.at);
+        }
+        cem.mg.clos_sfx.truncate(0);
+        cem.mg.clos_sfx.push_string(&d_sfx);
+        cem.out.clear();
+        if cem.emit_fn(&lws.at(li as usize).body, d_sym.as_str()) {
+            inst_ok += 1;
+            proto_of(&cem.out, &mut protos);
+            bodies_all.push_string(&cem.out);
+            for c2 in 0..lws.at(li as usize).closures.len() {
+                let cn = lws.at(li as usize).closures[c2];
+                let mut cl = irl::Lowerer::new(p, d_def.module, cn);
+                let mut csym = String::new();
+                cem.mg.closure_sym(d_def.module, cn, &mut csym);
+                let mut envs = String::new();
+                cem.out.clear();
+                if cl.lower_closure_body(cn) && cem.emit_closure(&cl.body, d_def.module, cn, csym.as_str(), &mut envs) {
+                    clos_ok += 1;
+                    envs_all.push_string(&envs);
+                    proto_of(&cem.out, &mut protos);
+                    bodies_all.push_string(&cem.out);
+                } else {
+                    clos_skip += 1;
+                }
+                envs.free();
+                csym.free();
+                cl.free();
+            }
+        } else {
+            inst_skip += 1;
+
+            let mut found = false;
+            for r2 in 0..reasons.len() {
+                if reasons[r2] == cem.err {
+                    rcounts.set(r2, rcounts[r2] + 1);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                reasons.push(cem.err);
+                rcounts.push(1);
+            }
+        }
+        cem.mg.subs.truncate(0);
+        cem.mg.clos_sfx.truncate(0);
+        d_sfx.free();
+        d_sym.free();
+        d_subs.free();
+    }
+    eprint(
+        "cemit-tu-inst: {} seeds ({} skipped), {} instances, {} inst-skipped, {} demanded, {} closures ({} skipped), {} glue ({} skipped)\n",
+        seeds,
+        seed_skip,
+        inst_ok,
+        inst_skip,
+        cem.demand.len(),
+        clos_ok,
+        clos_skip,
+        glue_ok,
+        glue_skip,
+    );
+    for r2 in 0..reasons.len() {
+        eprint("cemit-tu-inst-miss: {} x{}\n", reasons[r2], rcounts[r2]);
+    }
+    // const/static definitions: each referenced item folds through the Core IR interpreter
+    let mut const_defs = String::new();
+    {
+        let mut cd_ok: u64 = 0;
+        let mut cd_skip: u64 = 0;
+        for ci in 0..cem.stat_items.len() {
+            let em2 = cem.stat_items.at(ci).em;
+            let cdef = cem.stat_items.at(ci).def;
+            let csym = cem.stat_items.at(ci).sym.clone();
+            let cda = unsafe &*p.module_ast_const(cdef.module);
+            let cdn = cda.at_const(cdef.node);
+            if cdn.kind != NodeKind::NODE_CONST || cdn.as_data.const_def.is_extern || cdn.as_data.const_def.value == NODE_NONE {
+                cd_skip += 1;
+                csym.free();
+                continue;
+            }
+            if cem.mg.method_target(cdef.module, cdef.node).node != NODE_NONE {
+                cd_skip += 1; // associated consts fold under Self frames -- not through this path yet
+                csym.free();
+                continue;
+            }
+            if stdlib::getenv("SC_CONST_DBG") != null {
+                eprint("const-eval: {}\n", csym.as_str());
+            }
+            let v = iri::eval_const(p, cdef.module, cdef.node, 1u32 << 20);
+            if stdlib::getenv("SC_CONST_DBG") != null {
+                eprint("const-eval-done: kind {}\n", v.kind);
+            }
+            let cty = cem.stat_items.at(ci).ty;
+            // array-of-string consts render from their literal initializer directly
+            if v.kind == iri::IV_OBJ || v.kind == iri::IV_NONE {
+                let vn0 = cda.at_const(cdn.as_data.const_def.value);
+                if vn0.kind == NodeKind::NODE_ARRAY_LITERAL {
+                    let mut line2 = String::new();
+                    let mut is_slice2 = false;
+                    let mut ety2 = TYPE_NONE;
+                    {
+                        let ea2 = unsafe &*p.module_ast_const(em2);
+                        let ty2 = *ea2.type_at(cty);
+                        if ty2.kind == TypeKind::TYPE_INSTANCE {
+                            let it2 = *ea2.instance(ty2.as_data.inst);
+                            if it2.n > 0 {
+                                is_slice2 = true; // slice-view consts: a hidden data array + the view
+                                ety2 = it2.args[0];
+                            }
+                        }
+                    }
+                    let mut ok2 = true;
+                    let mut ecty = String::new();
+                    if is_slice2 {
+                        ok2 = cem.mg.ctype(em2, ety2, "", &mut ecty);
+                        if ok2 {
+                            line2.push_str("static const ");
+                            line2.push_string(&ecty);
+                            line2.push_str(" ");
+                            line2.push_string(&csym);
+                            line2.push_str("__data[] = { ");
+                        }
+                    } else {
+                        ok2 = cem.mg.ctype(em2, cty, csym.as_str(), &mut line2);
+                        if ok2 {
+                            line2.push_str(" = { ");
+                        }
+                    }
+                    if ok2 {
+                        let els = vn0.as_data.array_literal.elements;
+                        let csrc2 = p.modules[cdef.module as usize].source.as_str();
+                        for e2 in 0..els.len {
+                            let eid = unsafe cda.list(els)[e2 as usize];
+                            if e2 != 0 {
+                                line2.push_str(", ");
+                            }
+                            if !render_const_elem(cda, csrc2, eid, &mut line2) {
+                                ok2 = false;
+                                break;
+                            }
+                        }
+                        line2.push_str(" };\n");
+                        if is_slice2 {
+                            let mut view2 = String::new();
+                            if cem.mg.ctype(em2, cty, csym.as_str(), &mut view2) {
+                                line2.push_string(&view2);
+                                line2.push_str(" = { ");
+                                line2.push_string(&csym);
+                                line2.push_str("__data, sizeof(");
+                                line2.push_string(&csym);
+                                line2.push_str("__data) / sizeof(");
+                                line2.push_string(&ecty);
+                                line2.push_str(") };\n");
+                            } else {
+                                ok2 = false;
+                            }
+                            view2.free();
+                        }
+                    }
+                    ecty.free();
+                    if ok2 {
+                        const_defs.push_string(&line2);
+                        cd_ok += 1;
+                        line2.free();
+                        csym.free();
+                        continue;
+                    }
+                    line2.free();
+                }
+            }
+            let mut line = String::new();
+            let mut okc = v.kind == iri::IV_INT || v.kind == iri::IV_BOOL || v.kind == iri::IV_FLOAT || v.kind == iri::IV_STR;
+            if okc {
+                okc = cem.mg.ctype(em2, cty, csym.as_str(), &mut line);
+                if stdlib::getenv("SC_CONST_DBG") != null {
+                    eprint("const-ctype-done: {}\n", okc);
+                }
+            }
+            if okc {
+                line.push_str(" = ");
+                if v.kind == iri::IV_INT {
+                    if v.i < 0 && line.len() != 0 && line.as_str().byte_at(0) == b'u' {
+                        line.push_u64(v.i as u64);
+                        line.push_str("ULL");
+                    } else if v.i as u64 == 0x8000000000000000u64 {
+                        line.push_str("(-9223372036854775807LL - 1)"); // C has no i64::MIN literal
+                    } else {
+                        line.push_i64(v.i);
+                    }
+                } else if v.kind == iri::IV_BOOL {
+                    line.push_str(
+                        if v.i != 0 {
+                            "true";
+                        } else {
+                            "false";
+                        },
+                    );
+                } else if v.kind == iri::IV_FLOAT {
+                    line.push_f64(v.f);
+                } else {
+                    let csrc = p.modules[cdef.module as usize].source.as_str();
+                    let mut a0 = (v.i >> 32) as usize;
+                    let mut b0 = (v.i & 0xFFFFFFFF) as usize;
+                    let mut mtext = false;
+                    if b0 > csrc.len() || a0 >= b0 {
+                        cd_skip += 1;
+                        line.free();
+                        csym.free();
+                        continue;
+                    }
+                    if b0 > a0 + 3 && csrc.byte_at(a0) == b'M' && csrc.byte_at(a0 + 1) == 34 && csrc.byte_at(a0 + 2) == b'(' {
+                        a0 += 3;
+                        b0 -= 2; // `)"` suffix
+                        mtext = true;
+                    } else if b0 > a0 + 1 && csrc.byte_at(a0) == 34 && csrc.byte_at(b0 - 1) == 34 {
+                        a0 += 1;
+                        b0 -= 1;
+                    }
+                    let mut esc = String::new();
+                    if mtext {
+                        cbe::push_c_escaped(csrc.slice(a0, b0), &mut esc);
+                    } else {
+                        esc.push_str(csrc.slice(a0, b0));
+                    }
+                    line.push_str("{ (const uint8_t *)\"");
+                    line.push_string(&esc);
+                    line.push_str("\", sizeof(\"");
+                    line.push_string(&esc);
+                    line.push_str("\") - 1 }");
+                    esc.free();
+                }
+                line.push_str(";\n");
+                const_defs.push_string(&line);
+                cd_ok += 1;
+            } else {
+                cd_skip += 1;
+            }
+            line.free();
+            csym.free();
+            let _ = em2;
+        }
+        eprint("cemit-consts: {} defined, {} skipped\n", cd_ok, cd_skip);
+    }
+    // the fusion gate: every definition, prototype and body in ONE syntax-checked TU
+    {
+        let mut fuse = String::from_str(
+            "#include \"raw/super_rt.h\"\n#include <math.h>\n#include <pthread.h>\ntypedef struct { const uint8_t *ptr; size_t len; } SCslice;\n#pragma GCC diagnostic ignored \"-Wunused-but-set-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-variable\"\n",
+        );
+        fuse.push_string(&em.out);
+        fuse.push_str(
+            "static bool __sc_str_eq(str a, str b) { return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0); }\n",
+        );
+        fuse.push_string(&cem.extern_protos);
+        fuse.push_string(&cem.aux);
+        fuse.push_string(&envs_all);
+        fuse.push_string(&cem.stat_decls);
+        fuse.push_string(&const_defs);
+        fuse.push_string(&protos);
+        fuse.push_string(&bodies_all);
+        if have_main {
+            fuse.push_str(
+                "static Vector__str __sc_argv_to_vector(int argc, char **argv) {\n  Vector__str out = (Vector__str){0};\n  if (argc > 0) {\n    out.alloc = (Global){};\n    out.ptr = (str *)Global__alloc(&out.alloc, sizeof(str) * (size_t)argc, _Alignof(str));\n    out.len = (size_t)argc;\n    out.cap = (size_t)argc;\n    for (int i = 0; i < argc; i++) { out.ptr[i] = str__from_cstr(argv[i]); }\n  }\n  return out;\n}\nint main(int argc, char **argv) { return __sc_user_main(__sc_argv_to_vector(argc, argv)); }\n",
+            );
+        }
+        let ff = stdio::fopen("build/cemit_fuse.c", "wb");
+        let mut frc: i32 = -1;
+        if ff != null {
+            let fs = fuse.as_str();
+            let _ = unsafe stdio::fwrite(fs.ptr(), 1, fs.len(), ff);
+            unsafe stdio::fclose(ff);
+            frc = unsafe shim::sc_run(
+                "cc -std=c11 -Wall -Werror -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration -Wno-uninitialized -Wno-sometimes-uninitialized -fsyntax-only build/cemit_fuse.c".ptr() as *const char,
+                null,
+                null,
+                null,
+                null,
+            );
+        }
+        eprint("cemit-fuse: {} KiB, cc {}\n", fuse.len() / 1024, frc);
+        fuse.free();
+    }
+    const_defs.free();
+    reasons.free();
+    rcounts.free();
+    bodies_all.free();
+    protos.free();
+    envs_all.free();
+    done.free();
+    lw_cache.free();
+    lws.free();
+    cem.free();
     let mut tu = String::from_str(
         "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdarg.h>\n#include <complex.h>\n#include <stdio.h>\n#include <pthread.h>\ntypedef struct { const uint8_t *ptr; size_t len; } SCslice;\n",
     );
@@ -1472,6 +1951,60 @@ fn cemit_tu_pass(p: &mut loader::Package) {
     items.free();
     em.free();
     g.free();
+}
+
+// A literal const-initializer element as C: string literals become str views, integers copy
+// their digits, struct literals recurse positionally. Anything else refuses.
+fn render_const_elem(a: &Ast, src: str, eid: NodeId, out: &mut String) bool {
+    let n = a.at_const(eid);
+    if n.kind == NodeKind::NODE_LITERAL {
+        let rsp = n.as_data.literal.raw;
+        let mut a2 = rsp.start as usize;
+        let mut b2 = rsp.end as usize;
+        if b2 > a2 + 1 && src.byte_at(a2) == 34 && src.byte_at(b2 - 1) == 34 {
+            a2 += 1;
+            b2 -= 1;
+            out.push_str("{ (const uint8_t *)\"");
+            out.push_str(src.slice(a2, b2));
+            out.push_str("\", sizeof(\"");
+            out.push_str(src.slice(a2, b2));
+            out.push_str("\") - 1 }");
+            return true;
+        }
+        out.push_str(src.slice(a2, b2));
+        return true;
+    }
+    if n.kind == NodeKind::NODE_STRUCT_INITIALIZER {
+        out.push_str("{ ");
+        let fls = n.as_data.struct_initializer.fields;
+        for i in 0..fls.len {
+            if i != 0 {
+                out.push_str(", ");
+            }
+            let fi = unsafe a.list(fls)[i as usize];
+            if !render_const_elem(a, src, a.at_const(fi).as_data.field_initializer.value, out) {
+                return false;
+            }
+        }
+        out.push_str(" }");
+        return true;
+    }
+    return false;
+}
+
+// The single-line signature prefix of an emitted function body, as a prototype.
+fn proto_of(body: &String, out: &mut String) {
+    let bs = body.as_str();
+    let n = bs.len();
+    let mut i: usize = 0;
+    while i + 1 < n {
+        if bs.byte_at(i) == 32 && bs.byte_at(i + 1) == 123 {
+            break;
+        }
+        i += 1;
+    }
+    out.push_str(bs.slice(0, i));
+    out.push_str(";\n");
 }
 
 // Shadow mode (SC_INSTANCES=1): build the Core-IR instance graph after the established propagation

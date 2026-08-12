@@ -42,6 +42,14 @@ pub struct InstRec {
     pub amod: ModuleId,
     pub aty: TypeId,
     pub home: ModuleId, // owner-emits home (anchored records; 0xFFFF = not computed)
+    /// Argument anchor for FN/METHOD records: the pool whose REAL TypeIds first spelled this
+    /// instance concretely -- what per-instance emission binds its substitution env from.
+    /// `arty` = the receiver instance type (METHOD only), `aargs` = the fn's/method's own bound
+    /// argument types. False = seen only under substitution frames.
+    pub anchored: bool,
+    pub amod2: ModuleId,
+    pub arty: TypeId,
+    pub aargs: [TypeId; 8],
 }
 
 /// One extend targeting a declaration (built once; aggregate expansion walks its methods).
@@ -601,7 +609,24 @@ extend InstGraph {
         }
         let mut fresh = false;
         let id = self.add(IG_METHOD, t.callee, &key, &mut fresh);
-        let _ = id;
+        if !self.recs.at(id as usize).anchored && t.targs_len <= 8 && a.type_concrete(rt) {
+            let mut all = true;
+            for i in 0..t.targs_len {
+                if !a.type_concrete(b.targ_pool[(t.targs_start + i) as usize]) {
+                    all = false;
+                }
+            }
+            if all {
+                let mut rc2 = *self.recs.at(id as usize);
+                rc2.anchored = true;
+                rc2.amod2 = a.module;
+                rc2.arty = rt;
+                for i in 0..t.targs_len {
+                    unsafe rc2.aargs[i as usize] = b.targ_pool[(t.targs_start + i) as usize];
+                }
+                self.recs.set(id as usize, rc2);
+            }
+        }
     }
 
     // A resolved call/value use of a generic function with bound arguments.
@@ -615,7 +640,24 @@ extend InstGraph {
             args.push(self.argkey_subst(a, t, frame));
         }
         let mut fresh = false;
-        let _ = self.add(IG_FN, callee, &args, &mut fresh);
+        let id = self.add(IG_FN, callee, &args, &mut fresh);
+        if !self.recs.at(id as usize).anchored && tn <= 8 {
+            let mut all = true;
+            for i in 0..tn {
+                if !a.type_concrete(b.targ_pool[(ts + i) as usize]) {
+                    all = false;
+                }
+            }
+            if all {
+                let mut rc2 = *self.recs.at(id as usize);
+                rc2.anchored = true;
+                rc2.amod2 = a.module;
+                for i in 0..tn {
+                    unsafe rc2.aargs[i as usize] = b.targ_pool[(ts + i) as usize];
+                }
+                self.recs.set(id as usize, rc2);
+            }
+        }
     }
 
     // Expand queued records to a fixed point, alternating the worklist with the demand cross
@@ -763,7 +805,13 @@ extend InstGraph {
                     args.push(*self.keys.at((rec.args_start + k) as usize));
                 }
                 let mut fresh = false;
-                let _ = self.add(IG_METHOD, md, &args, &mut fresh);
+                let id = self.add(IG_METHOD, md, &args, &mut fresh);
+                if !self.recs.at(id as usize).anchored && rec.aty != TYPE_NONE {
+                    // the receiver AGG anchor is the demanded method's receiver too
+                    self.recs[id as usize].anchored = true;
+                    self.recs[id as usize].amod2 = rec.amod;
+                    self.recs[id as usize].arty = rec.aty;
+                }
             }
         }
     }
@@ -840,7 +888,12 @@ extend InstGraph {
                         args.push(*self.keys.at((rec.args_start + k) as usize));
                     }
                     let mut fresh = false;
-                    let _ = self.add(IG_METHOD, DefId { module: iface.module, node: imid }, &args, &mut fresh);
+                    let id = self.add(IG_METHOD, DefId { module: iface.module, node: imid }, &args, &mut fresh);
+                    if !self.recs.at(id as usize).anchored && rec.aty != TYPE_NONE {
+                        self.recs[id as usize].anchored = true;
+                        self.recs[id as usize].amod2 = rec.amod;
+                        self.recs[id as usize].arty = rec.aty;
+                    }
                 }
             }
         }

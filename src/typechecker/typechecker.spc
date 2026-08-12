@@ -8973,6 +8973,13 @@ extend TypeChecker {
     // lowering. Template diagnostics live here now; every error path leaves the node as the
     // (already reported) call, which nothing downstream runs on.
     fn tc_check_format(self: &mut Self, id: NodeId) TypeId {
+        return self.tc_check_format_p(id, 0);
+    }
+
+    // `pkind`: 0 = `format()` (block value = the String); 1..4 = the print family
+    // (print/println/eprint/eprintln) -- the block tail CALLS the matching String method instead,
+    // so the print expansion is settled here once and every later stage sees plain calls.
+    fn tc_check_format_p(self: &mut Self, id: NodeId, pkind: u32) TypeId {
         let sh = self.package.prelude_lookup("String", true);
         let gh = self.package.prelude_lookup("Global", true);
         let mut sa = Tys8 {};
@@ -9014,7 +9021,12 @@ extend TypeChecker {
         } else {
             tok::Span { start: rawsp.start + 1, end: rawsp.end - 1 };
         };
-        let kw = self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee).span;
+        let mut kw = self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee).span;
+        if pkind == 5 {
+            // member callee: the synthetic local's ident must be the METHOD name alone
+            let mm = self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee).as_data.member.member;
+            kw = self.cur_ast().at_const(mm).span;
+        }
         // Template segments decode verbatim for BOTH raw and matchertext templates, and `{{`/`}}`
         // collapsing applies to every format template, so they ride as raw segments. (Matchertext
         // segment literals are reserved for NODE_INTERP, where braces stay plain matchers.)
@@ -9153,7 +9165,50 @@ extend TypeChecker {
             let sl = self.tc_lit(seg, endc, seg_tt, true);
             self.tc_fmt_push(letf, kw, "sugar_fmt_str", sl, NODE_NONE);
         }
-        let tail = self.tc_expr_stmt(self.tc_local_use(kw, letf), kw);
+        let mut tail = NODE_NONE;
+        if pkind == 0 {
+            tail = self.tc_expr_stmt(self.tc_local_use(kw, letf), kw);
+        } else if pkind == 5 {
+            // `buf.format_into(fmt, ...)`: absorb the rendered piece into `&mut buf`
+            let recv = self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee).as_data.member.object;
+            // a receiver that is ALREADY a mutable reference passes through unwrapped
+            let rvt = self.type_at(self.cur_ast().type_of(recv)).kind;
+            let mut rref = recv;
+            if rvt != TypeKind::TYPE_REFERENCE && rvt != TypeKind::TYPE_POINTER {
+                rref = self.tc_add_node(
+                    Node {
+                        kind: NodeKind::NODE_UNARY,
+                        span: kw,
+                        as_data: NodeAs {
+                            unary: UnaryData {
+                                op: TokenType::Ampersand,
+                                operand: recv,
+                                qualifier: TypeQualifier::TYPE_QUAL_MUT,
+                            },
+                        },
+                    },
+                );
+            }
+            let mut sa2 = Nodes8 {};
+            sa2[0] = rref;
+            sa2[1] = self.tc_local_use(kw, letf);
+            let pcall = self.tc_shim_call("sugar_format_into", kw, &sa2[0], 2);
+            tail = self.tc_expr_stmt(pcall, kw);
+        } else {
+            // the consuming print tails write and free the buffer in one move
+            let mut shim2: str = "sugar_print";
+            if pkind == 2 {
+                shim2 = "sugar_println";
+            } else if pkind == 3 {
+                shim2 = "sugar_eprint";
+            } else if pkind == 4 {
+                shim2 = "sugar_eprintln";
+            }
+            let mut sa2 = Nodes8 {};
+            sa2[0] = self.tc_local_use(kw, letf);
+            let pcall = self.tc_shim_call(shim2, kw, &sa2[0], 1);
+            tail = self.tc_expr_stmt(pcall, kw);
+        }
         self.cur_ast().push(tail);
         let stmts = self.cur_ast().commit(mark);
         self.cur_ast().at(id).kind = NodeKind::NODE_BLOCK;
@@ -9620,6 +9675,19 @@ extend TypeChecker {
                 if span_is(self.mod_src(ad.module), anm, "format") {
                     return self.tc_check_format(id);
                 }
+                let mut pkind: u32 = 0;
+                if span_is(self.mod_src(ad.module), anm, "print") {
+                    pkind = 1;
+                } else if span_is(self.mod_src(ad.module), anm, "println") {
+                    pkind = 2;
+                } else if span_is(self.mod_src(ad.module), anm, "eprint") {
+                    pkind = 3;
+                } else if span_is(self.mod_src(ad.module), anm, "eprintln") {
+                    pkind = 4;
+                }
+                if pkind != 0 {
+                    return self.tc_check_format_p(id, pkind);
+                }
             }
         }
         // dyn_cast::<T>(d): compiler intrinsic -- vtable type-id compare, Option<&T> result
@@ -9838,6 +9906,9 @@ extend TypeChecker {
             ) || span_is(self.mod_src(fmod), fnm, "eprint") || span_is(self.mod_src(fmod), fnm, "eprintln");
             if fmt_builtin {
                 self.mark_format_helpers();
+            }
+            if fmt_builtin && span_is(self.mod_src(fmod), fnm, "format_into") && pck == NodeKind::NODE_MEMBER {
+                return self.tc_check_format_p(id, 5);
             }
         }
         let mut skip: u32 = 0;

@@ -2132,6 +2132,41 @@ extend Gen {
                     }
                 }
             }
+        } else if rv.kind == ir::RV_SLICE {
+            // structural slicing reads the container and yields a VIEW: origin flows from the
+            // container, and a carrying view of a non-carrying container pins it (the same rule
+            // as the projected-copy path above)
+            let bpl = self.place_of(rv.a);
+            self.live_use(bpl.base);
+            self.f.accesses.push(Access { place: rv.a, local: BF_NONE, kind: ACC_READ, point: entry, span: s.span });
+            if rv.b != ir::IR_NONE {
+                self.op_read(rv.b, entry, s.span);
+            }
+            if rv.item.node != ir::IR_NONE {
+                self.op_read(rv.item.node, entry, s.span);
+            }
+            let aor = self.origin_of_place(rv.a);
+            self.subset(aor, dor, entry);
+            if dor != BF_NONE {
+                let bty = self.body().locals.at(bpl.base as usize).ty;
+                if bty != TYPE_NONE && !self.base_is_raw(rv.a) && !self.through_deref(rv.a) && self.owner().carries(
+                    self.body().module,
+                    rv.target,
+                ) && !self.owner().carries(self.body().module, bty) {
+                    self.f.loans.push(
+                        Loan {
+                            view: false,
+                            pin: true,
+                            place: rv.a,
+                            kind: LK_SHARED,
+                            origin: dor,
+                            issued_at: exit,
+                            activated_at: BF_NONE,
+                            span: s.span,
+                        },
+                    );
+                }
+            }
         } else if rv.kind == ir::RV_BINARY {
             self.op_read(rv.a, entry, s.span);
             self.op_read(rv.b, entry, s.span);
