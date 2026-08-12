@@ -16,8 +16,12 @@ pub const BE_CONFLICT: u8 = 0; // access invalidates a loan that is still requir
 pub const BE_ESCAPE: u8 = 1; // borrow of body-local storage escapes through a placeholder
 pub const BE_PLACEHOLDER: u8 = 2; // placeholder flows into another without a declared relation
 
+/// BorrowErr.acc for a conflict caused by storage death (the borrowed local leaves scope).
+pub const ACC_DEAD: u8 = 5;
+
 pub struct BorrowErr {
     pub kind: u8,
+    pub acc: u8, // BE_CONFLICT: the invalidating access kind (bf::ACC_* or ACC_DEAD)
     pub loan: u32,
     pub point: u32,
     pub span: tok::Span, // the invalidating access (or escape site)
@@ -310,6 +314,10 @@ extend Solver {
         for a in 0..f.accesses.len() {
             let ac = *f.accesses.at(a);
             if ac.place == bf::BF_NONE {
+                // Destruction of an owned carrier OBSERVES its stored borrows: a point-level use.
+                if ac.local != bf::BF_NONE && f.observed[ac.local as usize] {
+                    uses.push(ac.point as u64 << 32 | ac.local as u64);
+                }
                 continue;
             }
             let pl = *self.body().places.at(ac.place as usize);
@@ -495,22 +503,41 @@ extend Solver {
         return (*self.oreach.at(from as usize * self.owords as usize + (to / 64) as usize) >> (to & 63) as u64 & 1u64) != 0;
     }
 
+    /// Conservative origin reachability over subsets + universal flows (the prepass relation).
+    /// Production wording uses it to tell a returned borrow from a store-through-out-param escape.
+    pub const fn origin_reaches(self: &Self, from: u32, to: u32) bool {
+        return from == to || self.prereach(from, to);
+    }
+
+    // A whole-local rebind at (origin `o`, stmt entry `p`): flows already in `o` end before the
+    // write; a subset ENTERING `o` at `p` lands past it (the incoming value survives its own store).
+    pub const fn cut_at(self: &Self, o: u32, p: u32) bool {
+        let f = unsafe &*self.f;
+        let key = o as u64 << 32 | p as u64;
+        for i in 0..f.cuts.len() {
+            if f.cuts[i] == key {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ---- loans-in-scope dataflow ------------------------------------------------------------------
 
     fn scope_flow(self: &mut Self) {
         let f = unsafe &*self.f;
         let c = unsafe &*self.c;
-        let bd = unsafe &*self.b;
         let nb = c.nblocks;
         self.scope = ls::LoanMat::new(f.loans.len() as u32, nb);
         let mut scratch = Vector::<u64>::new();
         let mut queued = Vector::<bool>::new();
         let mut queue = Vector::<u32>::new();
-        for _i in 0..nb {
-            queued.push(false);
+        // Every block runs at least once: a block's own issues must reach its successors even when
+        // its entry row never changes from the empty initial state.
+        for i in 0..nb {
+            queued.push(true);
+            queue.push(nb - 1 - i);
         }
-        queue.push(bd.entry);
-        queued.set(bd.entry as usize, true);
         while queue.len() != 0 {
             let bi = queue[queue.len() - 1];
             let _ = queue.pop();
@@ -613,6 +640,9 @@ extend Solver {
         }
         self.work.clear();
         let lo = *f.loans.at(li as usize);
+        // A loan never flows into the origin of the local it borrows: `&mut p` handed onward must
+        // not pin `p` through p's OWN origin (the invariance backlink would self-contain it).
+        let self_org = f.local_origin[self.body().places.at(lo.place as usize).base as usize];
         self.work.push(lo.origin as u64 << 32 | lo.issued_at as u64);
         let mut succs = Vector::<u32>::new();
         while self.work.len() != 0 {
@@ -637,8 +667,12 @@ extend Solver {
             // Subset edges at this point, plus omnipresent flows into universals.
             for i in self.sub_pt_start[p as usize]..self.sub_pt_start[p as usize + 1] {
                 let e = *f.subsets.at(self.sub_by_point[i as usize] as usize);
-                if e.from == o {
-                    self.work.push(e.to as u64 << 32 | p as u64);
+                if e.from == o && (self_org == bf::BF_NONE || e.to != self_org) {
+                    let mut tp = p;
+                    if self.cut_at(e.to, p) {
+                        tp = p + 1;
+                    }
+                    self.work.push(e.to as u64 << 32 | tp as u64);
                 }
             }
             for u2 in 0..f.uni_flows.len() {
@@ -646,10 +680,13 @@ extend Solver {
                     self.work.push((f.uni_flows[u2] & 0xFFFFFFFFu64) << 32 | p as u64);
                 }
             }
-            // Liveness edges along the CFG (universal origins always flow).
+            // Liveness edges along the CFG (universal origins always flow, rebind cuts sever).
             self.point_succs(p, &mut succs);
             for s in 0..succs.len() {
                 let q = succs[s];
+                if q == p + 1 && self.cut_at(o, p) {
+                    continue;
+                }
                 if o < f.nuniversal || self.origin_live_at(o, q) {
                     self.work.push(o as u64 << 32 | q as u64);
                 }
@@ -702,7 +739,14 @@ extend Solver {
                 let lo = *f.loans.at(li);
                 if ac.place == bf::BF_NONE {
                     // Whole-local access: the borrowed storage dies. A loan THROUGH a dereference
-                    // borrows foreign storage and merely becomes unreachable (its kill handles it).
+                    // borrows foreign storage and merely becomes unreachable (its kill handles it),
+                    // and a loan on a VIEW value aliases what the view points at, not this storage.
+                    if lo.view {
+                        continue;
+                    }
+                    if lo.pin && f.moved_whole[self.body().places.at(lo.place as usize).base as usize] {
+                        continue; // the pinned container's ownership travelled with a move
+                    }
                     let pl = *self.body().places.at(lo.place as usize);
                     if pl.base != ac.local {
                         continue;
@@ -723,6 +767,14 @@ extend Solver {
                     if !self.kind_conflicts(&lo, &ac) {
                         continue;
                     }
+                    if lo.pin && (ac.kind == bf::ACC_MOVE || ac.kind == bf::ACC_FREE) && self.body().places.at(
+                        ac.place as usize,
+                    ).proj_len == 0 {
+                        // Element views ride a whole-container move (heap storage is stable) --
+                        // the walk accepts this, so the pin must too.
+                        continue;
+                    }
+
                     if !bf::places_conflict(self.body(), lo.place, ac.place) {
                         continue;
                     }
@@ -739,12 +791,50 @@ extend Solver {
                 if !self.req_at(row, ac.point) {
                     continue;
                 }
+                let mut overwrite = false;
+                if ac.kind == bf::ACC_WRITE {
+                    // Does this write KILL the loan (it overwrites the borrowed storage)? Then the
+                    // conflict exists only if the loan is still wanted past this statement
+                    // (`rel = rel.slice(..)` re-owns; `x = 2; *r` still dangles).
+                    for kk in 0..f.kills.len() {
+                        let kl = *f.kills.at(kk);
+                        if kl.loan == li as u32 && kl.point == ac.point {
+                            overwrite = true;
+                        }
+                    }
+                }
+                if ac.kind == bf::ACC_ACT || overwrite {
+                    // Two-phase activation (and an overwriting kill) tolerates loans whose LAST
+                    // requirement is this statement itself. Same-pair liveness injection reaches
+                    // point + 1, so "later" starts past the pair.
+                    let mut later = false;
+                    let mut q = ac.point + 2;
+                    while q < f.npoints {
+                        if self.req_at(row, q) {
+                            later = true;
+                            break;
+                        }
+                        q += 1;
+                    }
+                    if !later {
+                        continue;
+                    }
+                }
                 let mut sp = ac.span;
+                let mut ak = ac.kind;
                 if ac.place == bf::BF_NONE {
                     sp = lo.span; // point at the borrow that outlives its storage
+                    ak = ACC_DEAD;
                 }
                 self.errs.push(
-                    BorrowErr { kind: BE_CONFLICT, loan: li as u32, point: ac.point, span: sp, loan_span: lo.span },
+                    BorrowErr {
+                        kind: BE_CONFLICT,
+                        acc: ak,
+                        loan: li as u32,
+                        point: ac.point,
+                        span: sp,
+                        loan_span: lo.span,
+                    },
                 );
             }
         }
@@ -758,6 +848,12 @@ extend Solver {
         let bd = unsafe &*self.b;
         for li in 0..f.loans.len() {
             let lo = *f.loans.at(li);
+            if lo.view {
+                continue; // a borrow OF a view chains to the view's own origin, not local storage
+            }
+            if lo.pin && f.moved_whole[self.body().places.at(lo.place as usize).base as usize] {
+                continue; // a moved container carries its pinned views with it
+            }
             let pl = *bd.places.at(lo.place as usize);
             let st = bd.locals.at(pl.base as usize).storage;
             if st == ir::LS_STATIC_REF {
@@ -783,7 +879,8 @@ extend Solver {
                 continue;
             }
             let row = self.required(li as u32);
-            // The flood marked universal-held points; find one at a return terminator.
+            // The flood marked universal-held points; find one at a return terminator. Rebind cuts
+            // already stop flows a reassignment ended (`r = &x; r = p; return r` escapes p, not x).
             for bi in 0..c.nblocks {
                 let t = bd.blocks.at(bi as usize).term;
                 if t.kind != ir::TM_RETURN {
@@ -792,7 +889,14 @@ extend Solver {
                 let p = f.block_base[bi as usize] + bd.blocks.at(bi as usize).stmt_len * 2;
                 if self.req_at(row, p) || self.req_at(row, p + 1) {
                     self.errs.push(
-                        BorrowErr { kind: BE_ESCAPE, loan: li as u32, point: p, span: lo.span, loan_span: lo.span },
+                        BorrowErr {
+                            kind: BE_ESCAPE,
+                            acc: 0,
+                            loan: li as u32,
+                            point: p,
+                            span: lo.span,
+                            loan_span: lo.span,
+                        },
                     );
                     break;
                 }
@@ -848,6 +952,7 @@ extend Solver {
                         self.errs.push(
                             BorrowErr {
                                 kind: BE_PLACEHOLDER,
+                                acc: 0,
                                 loan: bf::BF_NONE,
                                 point: 0,
                                 span: f.uni_name[u as usize],
@@ -952,6 +1057,7 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
             req.push(0u64);
         }
         let mut work = Vector::<u64>::new();
+        let self_org = f.local_origin[b.places.at(lo.place as usize).base as usize];
         work.push(lo.origin as u64 << 32 | lo.issued_at as u64);
         let mut succs = Vector::<u32>::new();
         while work.len() != 0 {
@@ -969,8 +1075,12 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
             }
             for i in 0..f.subsets.len() {
                 let e = *f.subsets.at(i);
-                if e.point == p && e.from == o {
-                    work.push(e.to as u64 << 32 | p as u64);
+                if e.point == p && e.from == o && (self_org == bf::BF_NONE || e.to != self_org) {
+                    let mut tp = p;
+                    if sv.cut_at(e.to, p) {
+                        tp = p + 1;
+                    }
+                    work.push(e.to as u64 << 32 | tp as u64);
                 }
             }
             for u2 in 0..f.uni_flows.len() {
@@ -981,6 +1091,9 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
             sv.point_succs(p, &mut succs);
             for s in 0..succs.len() {
                 let q = succs[s];
+                if q == p + 1 && sv.cut_at(o, p) {
+                    continue;
+                }
                 if o < f.nuniversal || sv.origin_live_at(o, q) {
                     work.push(o as u64 << 32 | q as u64);
                 }

@@ -37,6 +37,7 @@ pub struct LocalDecl {
 pub const PJ_DEREF: u8 = 0;
 pub const PJ_FIELD: u8 = 1; // data = stable field index, sub = field decl NodeId
 pub const PJ_INDEX_CONST: u8 = 2; // data = constant index
+pub const PJ_UNION_FIELD: u32 = 0xFFFFFFFE; // PJ_FIELD data marker: union member (fields alias)
 pub const PJ_INDEX_OP: u8 = 3; // data = OperandId of the dynamic index
 pub const PJ_DOWNCAST: u8 = 4; // data = variant index, sub = variant decl NodeId
 

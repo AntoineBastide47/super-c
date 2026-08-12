@@ -180,6 +180,7 @@ pub struct DropRec {
 
 pub struct ShadowInst {
     pub def: DefId,
+    pub tu: ModuleId, // the translation unit whose emission recorded it (per-TU plan order oracle)
     pub n: u8,
     pub keys: [u64; 8],
 }

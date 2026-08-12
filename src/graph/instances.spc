@@ -149,6 +149,78 @@ extend InstGraph {
         return true;
     }
 
+    /// Probe-only record lookup (never inserts): IG_NONE when the instance was never discovered.
+    pub const fn lookup(self: &Self, kind: u8, def: DefId, args: &Vector<ArgKey>) u32 {
+        if self.index.len() == 0 {
+            return IG_NONE;
+        }
+        let mut h = mix(mix(1469598103934665603u64, kind), def.module);
+        h = mix(h, def.node);
+        for i in 0..args.len() {
+            h = mix(h, args.at(i).skey);
+        }
+        let mask = self.index.len() - 1;
+        let mut i = h as usize & mask;
+        loop {
+            let cur = self.index[i];
+            if cur == IG_NONE {
+                return IG_NONE;
+            }
+            let r = self.recs.at(cur as usize);
+            if r.hash == h && r.kind == kind && r.def.module == def.module && r.def.node == def.node && r.args_len as usize == args.len() {
+                let mut eq = true;
+                for k in 0..r.args_len {
+                    if self.keys.at((r.args_start + k) as usize).skey != args.at(k as usize).skey {
+                        eq = false;
+                    }
+                }
+                if eq {
+                    return cur;
+                }
+            }
+            i = i + 1 & mask;
+        }
+    }
+
+    /// The per-TU emission plan: record ids ordered by the ESTABLISHED emitter's own discovery
+    /// sequence for `tu` (the order oracle the first backend switch must preserve), followed by
+    /// graph-only records homed to `tu` (drop glue and the like) in record order. `unmapped` counts
+    /// emitted instances the graph never discovered -- the coverage gate requires zero. Homes must
+    /// be computed first.
+    pub fn plan_tu(self: &Self, p: &loader::Package, tu: ModuleId, out: &mut Vector<u32>, unmapped: &mut u32) {
+        let mut planned = Vector::<bool>::new();
+        for _r in 0..self.recs.len() {
+            planned.push(false);
+        }
+        for i in 0..p.shadow_insts.len() {
+            let sh = *p.shadow_insts.at(i);
+            if sh.tu != tu || sh.n == 0xFF {
+                continue;
+            }
+            let mut args = Vector::<ArgKey>::new();
+            for k in 0..sh.n {
+                args.push(ArgKey { skey: unsafe sh.keys[k as usize], val: 0, has_val: false });
+            }
+            let mut id = self.lookup(IG_FN, sh.def, &args);
+            if id == IG_NONE {
+                id = self.lookup(IG_METHOD, sh.def, &args);
+            }
+            args.free();
+            if id == IG_NONE {
+                *unmapped += 1;
+            } else if !planned[id as usize] {
+                planned.set(id as usize, true);
+                out.push(id);
+            }
+        }
+        for r in 0..self.recs.len() {
+            if !planned[r] && self.recs.at(r).home == tu && (self.recs.at(r).kind == IG_FN || self.recs.at(r).kind == IG_METHOD) {
+                out.push(r as u32);
+            }
+        }
+        planned.free();
+    }
+
     // Intern a record; returns its id and whether it was new. Hash + equality use skeys only (the
     // value is derived data riding along for frame evaluation).
     pub fn add(self: &mut Self, kind: u8, def: DefId, args: &Vector<ArgKey>, fresh: &mut bool) u32 {

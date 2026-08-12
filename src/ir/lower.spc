@@ -1442,6 +1442,50 @@ extend Lowerer {
         if id == NODE_NONE || self.err.len() != 0 {
             return ir::IR_NONE;
         }
+        // `&place` coerced to a raw pointer is an address, not a borrow that decays: emit RV_ADDR
+        // under the coerced type so no loan outlives the borrow expression.
+        {
+            let mut aop = NODE_NONE;
+            let mut pty = TYPE_NONE;
+            let n = self.f.node(id);
+            if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == tt::TokenType::Ampersand {
+                let co = self.f.coercion(id);
+                if co != null && unsafe co.method.node == NODE_NONE {
+                    let target = unsafe co.target;
+                    if target != TYPE_NONE && self.f.ty(target).kind == TypeKind::TYPE_POINTER {
+                        aop = n.as_data.unary.operand;
+                        pty = target;
+                    }
+                }
+            }
+            if aop != NODE_NONE {
+                let sp = self.f.node(id).span;
+                let apl = self.lower_place(aop);
+                if apl == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                let rt = self.f.node_type(id);
+                let mut mu: u32 = 0;
+                if rt != TYPE_NONE && self.f.ty(rt).kind == TypeKind::TYPE_REFERENCE && self.f.ty(rt).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                    mu = 1;
+                }
+                let t2 = self.temp(pty, sp);
+                let pl2 = self.place_of_local(t2);
+                self.assign(
+                    pl2,
+                    ir::Rvalue {
+                        kind: ir::RV_ADDR,
+                        a: apl,
+                        b: mu,
+                        c: 0,
+                        target: pty,
+                        item: DefId { module: 0, node: NODE_NONE },
+                    },
+                    sp,
+                );
+                return self.copy_op(pl2);
+            }
+        }
         let base = self.lower_expr_base(id);
         if base == ir::IR_NONE {
             return ir::IR_NONE;
@@ -1516,6 +1560,53 @@ extend Lowerer {
         }
         if k == NodeKind::NODE_CAST {
             let d = self.f.node(id).as_data.cast;
+            // `&place as *T` is a raw address, not a borrow that then decays: lower it as RV_ADDR
+            // so no loan pins the place through the pointer's lifetime.
+            if ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_POINTER {
+                let mut e = d.expression;
+                loop {
+                    let en = self.f.node(e);
+                    if en.kind == NodeKind::NODE_UNARY && (en.as_data.unary.op == tt::TokenType::Move || en.as_data.unary.op == tt::TokenType::Unsafe) {
+                        e = en.as_data.unary.operand;
+                    } else {
+                        break;
+                    }
+                }
+                let mut aop = NODE_NONE;
+                {
+                    let en = self.f.node(e);
+                    if en.kind == NodeKind::NODE_UNARY && en.as_data.unary.op == tt::TokenType::Ampersand && self.f.coercion(
+                        e,
+                    ) == null {
+                        aop = en.as_data.unary.operand;
+                    }
+                }
+                if aop != NODE_NONE {
+                    let apl = self.lower_place(aop);
+                    if apl != ir::IR_NONE {
+                        let rt = self.f.node_type(e);
+                        let mut mu: u32 = 0;
+                        if rt != TYPE_NONE && self.f.ty(rt).kind == TypeKind::TYPE_REFERENCE && self.f.ty(rt).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                            mu = 1;
+                        }
+                        let t2 = self.temp(ty, sp);
+                        let pl2 = self.place_of_local(t2);
+                        self.assign(
+                            pl2,
+                            ir::Rvalue {
+                                kind: ir::RV_ADDR,
+                                a: apl,
+                                b: mu,
+                                c: 0,
+                                target: ty,
+                                item: DefId { module: 0, node: NODE_NONE },
+                            },
+                            sp,
+                        );
+                        return self.copy_op(pl2);
+                    }
+                }
+            }
             let op = self.lower_expr(d.expression);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
@@ -1718,18 +1809,16 @@ extend Lowerer {
             } else {
                 0;
             };
+            // `&x` typed as a raw pointer (pointer-position typing) is an address, not a borrow.
+            let mut rk = ir::RV_REF;
+            if ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_POINTER {
+                rk = ir::RV_ADDR;
+            }
             let t = self.temp(ty, sp);
             let tp = self.place_of_local(t);
             self.assign(
                 tp,
-                ir::Rvalue {
-                    kind: ir::RV_REF,
-                    a: pl,
-                    b: mutable,
-                    c: 0,
-                    target: ty,
-                    item: DefId { module: 0, node: NODE_NONE },
-                },
+                ir::Rvalue { kind: rk, a: pl, b: mutable, c: 0, target: ty, item: DefId { module: 0, node: NODE_NONE } },
                 sp,
             );
             return self.copy_op(tp);
@@ -2140,6 +2229,25 @@ extend Lowerer {
         }
         if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "zeroed") {
             return self.intrinsic_value(ir::IN_ZEROED, ty, sp);
+        }
+        // `d.free()` on a dyn value has no resolved method: destruction IS the call. Lower it as
+        // an explicit drop so the analyses see the consume and the backend prints glue.
+        if target.node == NODE_NONE && ck == NodeKind::NODE_MEMBER && !self.f.node(d.callee).as_data.member.path && d.args.len == 0 {
+            let mem = self.f.node(d.callee).as_data.member.member;
+            let msp = self.f.node(mem).as_data.name.text;
+            if (msp.end - msp.start) as usize == 4 && self.src.slice(msp.start as usize, msp.end as usize) == "free" {
+                let obj = self.f.node(d.callee).as_data.member.object;
+                let opl = self.lower_place_or_spill(obj);
+                if opl == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                let mut tm = self.term0(ir::TM_DROP, sp);
+                tm.a = opl;
+                let cont = self.open_block();
+                tm.t0 = cont;
+                self.seal(tm, cont);
+                return self.unit_op(ty, sp);
+            }
         }
         let mut argv = Vector::<ir::OperandId>::new();
         let mut callee_op = ir::IR_NONE;
@@ -2575,10 +2683,10 @@ extend Lowerer {
     // A capture entry names the captured binding's decl (identifier node resolving to it).
     fn cap_decl(self: &mut Self, c: NodeId) NodeId {
         let d = self.f.res(c);
-        if d.module == self.module {
+        if d.module == self.module && d.node != NODE_NONE {
             return d.node;
         }
-        return NODE_NONE;
+        return c; // the checker records the captured DECL itself, not a reference to it
     }
 
     // The resolution of a path-shaped expression: the node's own, else the member name's, else the
@@ -2780,7 +2888,33 @@ extend Lowerer {
             }
         }
         let fd = self.f.res(d.member);
-        return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: ir::IR_NONE, sub: fd.node, ty: ty });
+        // Union members overlap: the marker data value makes place conflicts treat every field
+        // pair of the same union as the same storage.
+        let mut fdata = ir::IR_NONE;
+        {
+            let bty2 = self.body.places.at(base as usize).ty;
+            if bty2 != TYPE_NONE {
+                let y = *self.f.ty(bty2);
+                let mut dm: ModuleId = 0;
+                let mut dn = NODE_NONE;
+                if y.kind == TypeKind::TYPE_STRUCT {
+                    dm = y.module;
+                    dn = y.as_data.decl;
+                } else if y.kind == TypeKind::TYPE_INSTANCE {
+                    let it = *self.f.instance(y.as_data.inst);
+                    dm = it.module;
+                    dn = it.decl;
+                }
+                if dn != NODE_NONE {
+                    let da = unsafe &*(&*self.pkg).module_ast_const(dm);
+                    let nd = da.at_const(dn);
+                    if nd.kind == NodeKind::NODE_STRUCT && nd.as_data.aggregate.is_union {
+                        fdata = ir::PJ_UNION_FIELD;
+                    }
+                }
+            }
+        }
+        return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: fdata, sub: fd.node, ty: ty });
     }
 
     fn lower_index_place(self: &mut Self, id: NodeId) ir::PlaceId {
@@ -2811,6 +2945,29 @@ extend Lowerer {
         let iop = self.lower_expr(d.index);
         if iop == ir::IR_NONE {
             return ir::IR_NONE;
+        }
+        // A plain-decimal constant index keeps its value in the projection: `a[0]` and `a[1]` name
+        // disjoint storage, so simultaneous `&mut` borrows of distinct slots stay legal.
+        {
+            let op = *self.body.operands.at(iop as usize);
+            if op.kind == ir::OP_CONST {
+                let cn = *self.body.constants.at(op.data as usize);
+                if cn.kind == ir::CK_INT && cn.raw.end > cn.raw.start {
+                    let mut dec = true;
+                    for i in cn.raw.start..cn.raw.end {
+                        let ch = self.src[i as usize];
+                        if ch < b'0' || ch > b'9' {
+                            dec = false;
+                        }
+                    }
+                    if dec && cn.val >= 0 {
+                        return self.place_project(
+                            base,
+                            ir::Projection { kind: ir::PJ_INDEX_CONST, data: cn.val as u32, sub: 0, ty: ty },
+                        );
+                    }
+                }
+            }
         }
         return self.place_project(base, ir::Projection { kind: ir::PJ_INDEX_OP, data: iop, sub: 0, ty: ty });
     }

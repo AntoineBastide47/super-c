@@ -38,6 +38,7 @@ fn t_typecheck(p: &mut loader::Package, i: usize) bool {
     let len = m.source.len();
     let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    t.bc_mode = 1; // modules are checked in load order here; the Core IR path needs the typed package
     p.set_override(i as ModuleId, t.ast.get());
     t.check();
     if !t.has_errors() {

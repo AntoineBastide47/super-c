@@ -43,6 +43,7 @@ fn t_old(p: &mut loader::Package, i: usize, last: bool, old_errs: &mut Vector<u3
     let len = m.source.len();
     let a = replace(&mut m.ast, Ast::new(0));
     let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    t.bc_mode = 1; // the comparison baseline is the AST walk, whatever the production default
     p.set_override(i as ModuleId, t.ast.get());
     t.check();
     let tc_clean = !t.has_errors();
@@ -231,10 +232,47 @@ fn diff_scope_dangle() {
 
 @test
 fn diff_out_param_store() {
-    both_reject_same_line(
-        "fn f(out: &mut &i32) { let x = 1;\n*out = &x;\n}\nfn main() i32 { let g = 5; let mut slot: &i32 = &g; f(&mut slot); return *slot; }",
-        "f",
-    );
+    // Store-through-out-param escapes belong to the walk's declared-lifetime checks in BOTH modes;
+    // the parity bar is the PRODUCTION pipeline, so compare full borrowck old vs new.
+    let src = "fn f(out: &mut &i32) { let x = 1;\n*out = &x;\n}\nfn main() i32 { let g = 5; let mut slot: &i32 = &g; f(&mut slot); return *slot; }";
+    let mut old_errs = Vector::<u32>::new();
+    let mut p = typed_both(src, &mut old_errs);
+    assert(old_errs.len() != 0, "the established walk rejects");
+    let mut new_errs = Vector::<u32>::new();
+    prod_verdict(&mut p, &mut new_errs);
+    assert(new_errs.len() != 0, "the production Core IR mode rejects");
+    let usrc = p.modules.at(p.modules.len() - 1).source.as_str();
+    let mut hit = false;
+    for o in 0..old_errs.len() {
+        for n in 0..new_errs.len() {
+            if line_of(usrc, old_errs[o]) == line_of(usrc, new_errs[n]) {
+                hit = true;
+            }
+        }
+    }
+    assert(hit, "a primary error line coincides");
+    old_errs.free();
+    new_errs.free();
+}
+
+// Run the full PRODUCTION borrowck (Core IR mode) over the user module; error offsets land in `out`.
+fn prod_verdict(p: &mut loader::Package, out: &mut Vector<u32>) {
+    let pkg = p as *mut loader::Package;
+    let i = p.modules.len() - 1;
+    let m = &mut p.modules[i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let a = replace(&mut m.ast, Ast::new(0));
+    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    t.bc_mode = 2;
+    p.set_override(i as ModuleId, t.ast.get());
+    t.borrowck();
+    p.clear_override(i as ModuleId);
+    for e in 0..t.errors.errors.len() {
+        out.push(t.errors.errors.at(e).start);
+    }
+    let back = t.take_ast();
+    p.modules[i].ast = back;
 }
 
 // ---- reviewed differences -------------------------------------------------------------------------

@@ -2900,7 +2900,7 @@ extend Codegen {
             self.inst_idx.insert(key, k as u32);
         }
         if self.package != null && unsafe self.package.shadow_on {
-            let mut sh = loader::ShadowInst { def: fn2, n: n as u8, keys: [0; 8] };
+            let mut sh = loader::ShadowInst { def: fn2, tu: self.cur_module(), n: n as u8, keys: [0; 8] };
             for j in 0..n {
                 let at = unsafe args[j as usize];
                 if !self.cur_ast().type_concrete(at) {

@@ -246,6 +246,8 @@ pub struct TypeChecker<'a> {
     pub lint: bool,
     pub free_derive_memo: Map<u64, u64>, // (module<<32|decl) -> 1 = not owning, 2 = derives Free (non-generic only)
     pub bc_free_recv: bool, // marking a `.free()` receiver: destruction, exempt from the ref-move rejection
+    pub bc_quiet: bool, // the Core IR analysis owns this function's flow diagnostics; the walk stays silent
+    pub bc_mode: u8, // flow-walk selector: 0 = env default, 1 = force the AST walk, 2 = force Core IR
     pub derive_busy: Vector<u64>, // derive-recursion guard (value cycles are infinite-size errors anyway)
     pub mut_used: Vector<NodeId>, // bindings whose mutability was actually required (unnecessary-mut lint)
     pub loop_stack: [LoopEntry; 32],
@@ -531,6 +533,8 @@ extend TypeChecker {
             lint: false,
             free_derive_memo: Map::<u64, u64>::new(),
             bc_free_recv: false,
+            bc_quiet: false,
+            bc_mode: 0,
             derive_busy: Vector::<u64>::new(),
             mut_used: Vector::<NodeId>::new(),
             nloops: 0,

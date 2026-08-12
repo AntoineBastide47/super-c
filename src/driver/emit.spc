@@ -26,6 +26,7 @@ import ir::verify as irv;
 import ir::drops as ird;
 import ir::interp as iri;
 import ir::layout as lay;
+import backend::cemit as cbe;
 import graph::instances as ig;
 import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
@@ -1283,6 +1284,64 @@ fn layout_pass(p: &mut loader::Package) {
         dt,
     );
     svc.free();
+}
+
+// Coverage mode (SC_CEMIT=1): run the streaming C emitter over every lowered body, count the
+// emittable subset, and verify two serial emissions hash identically.
+fn cemit_pass(p: &mut loader::Package) {
+    if stdlib::getenv("SC_CEMIT") == null {
+        return;
+    }
+    let t0 = unsafe shim::sc_ticks_ms();
+    let mut em = cbe::CEmit::new(p);
+    let mut bodies: u64 = 0;
+    let mut emitted: u64 = 0;
+    let mut bytes: u64 = 0;
+    let mut h1: u64 = 1469598103934665603u64;
+    let mut h2: u64 = 1469598103934665603u64;
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let items = a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let nid = unsafe a.list(items)[i as usize];
+            let n = a.at_const(nid);
+            if n.kind != NodeKind::NODE_FUNCTION || n.as_data.function.is_extern || n.as_data.function.body == NODE_NONE {
+                continue;
+            }
+            let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
+            if !lw.lower_fn(nid) {
+                continue;
+            }
+            bodies += 1;
+            let mut sym = String::new();
+            cbe::fn_symbol(m as ModuleId, nid, &mut sym);
+            em.out.clear();
+            if em.emit_fn(&lw.body, sym.as_str()) {
+                emitted += 1;
+                bytes += em.out.len() as u64;
+                let s1 = em.out.as_str();
+                for k in 0..s1.len() {
+                    h1 = (h1 ^ s1.byte_at(k) as u64) * 1099511628211u64;
+                }
+                em.out.clear();
+                let _ = em.emit_fn(&lw.body, sym.as_str());
+                let s2 = em.out.as_str();
+                for k in 0..s2.len() {
+                    h2 = (h2 ^ s2.byte_at(k) as u64) * 1099511628211u64;
+                }
+            }
+            sym.free();
+        }
+    }
+    let dt = unsafe shim::sc_ticks_ms() - t0;
+    let mut det = "identical";
+    if h1 != h2 {
+        det = "DIVERGENT";
+    }
+    eprint("cemit: {} bodies, {} emitted, {} KiB, serial hashes {}, {} ms\n", bodies, emitted, bytes / 1024, det, dt);
 }
 
 // Shadow mode (SC_INSTANCES=1): build the Core-IR instance graph after the established propagation
@@ -2583,6 +2642,7 @@ pub fn lint_package(
     drops_pass(p);
     ctfe_ir_pass(p);
     layout_pass(p);
+    cemit_pass(p);
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
     // duplicates). The const suggestion is the exception: opt-in (`--suggest-const`, warning every
     // eligible function at once would swamp default lints), and under `--fix` it contributes its
@@ -2869,6 +2929,7 @@ pub fn run_package(
     drops_pass(p);
     ctfe_ir_pass(p);
     layout_pass(p);
+    cemit_pass(p);
     if lint {
         lint_unused_items(p, -1);
     }
@@ -3173,5 +3234,37 @@ fn emitted_inst_diff(p: &mut loader::Package) {
         } else {
             "";
         },
+    );
+    // Per-TU emission plans: the established emitter's own per-TU discovery sequence mapped onto
+    // graph records (the order the backend switch preserves), plus graph-only homed records. The
+    // gate is zero unmapped entries.
+    let mut plan_entries: u32 = 0;
+    let mut plan_extra: u32 = 0;
+    let mut plan_unmapped: u32 = 0;
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let mut tu_plan = Vector::<u32>::new();
+        let mut um: u32 = 0;
+        g.plan_tu(p, m as ModuleId, &mut tu_plan, &mut um);
+        let mut mapped: u32 = 0;
+        for i in 0..p.shadow_insts.len() {
+            if p.shadow_insts.at(i).tu == m as ModuleId && p.shadow_insts.at(i).n != 0xFF {
+                mapped += 1;
+            }
+        }
+        plan_entries += tu_plan.len() as u32;
+        if tu_plan.len() as u32 + um > mapped {
+            plan_extra += tu_plan.len() as u32 + um - mapped;
+        }
+        plan_unmapped += um;
+        tu_plan.free();
+    }
+    eprint(
+        "inst-plan: {} planned entries across TUs ({} graph-only), {} unmapped emitted instances\n",
+        plan_entries,
+        plan_extra,
+        plan_unmapped,
     );
 }
