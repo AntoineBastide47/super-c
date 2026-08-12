@@ -669,6 +669,10 @@ extend Interp {
             }
             for i in 0..rv.b {
                 let opid = b.oper_pool[(rv.a + i) as usize];
+                if opid == ir::IR_NONE {
+                    slots.push(none()); // omitted member (zero-fill); reads bail conservatively
+                    continue;
+                }
                 let v = self.operand(b, locals, opid);
                 if self.failed {
                     slots.free();

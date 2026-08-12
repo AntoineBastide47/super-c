@@ -1571,6 +1571,10 @@ extend Codegen {
         }
         let sym = self.mangle_type_s(t);
         self.copy_sym(&sym, out, cap);
+        if cacheable && self.package != null && unsafe self.package.mangle_on {
+            let rec = loader::MangleRec { kind: 0, m: self.cur_module(), t: t, it: TyInstance {}, sym: sym.clone() };
+            unsafe self.package.mangle_log.push(rec);
+        }
         if cacheable {
             let mp = (self as *const Codegen) as *mut Codegen;
             unsafe {
@@ -1804,6 +1808,25 @@ extend Codegen {
         unsafe stdio::snprintf(out, cap, "%s__%s".ptr() as *const char, &sm[0], &stem[0]);
     }
     fn spec_name(self: &mut Self, fn2: DefId, args: *const TypeId, n: i32, out: *mut char, cap: usize) {
+        self.spec_name_inner(fn2, args, n, out, cap);
+        if self.package != null && unsafe self.package.mangle_on && self.ast == self.home_ast && self.nsubst == 0 && !self.macro_mode && n <= 8 {
+            let mut conc = true;
+            for i in 0..n {
+                if !self.cur_ast().type_concrete(unsafe args[i as usize]) {
+                    conc = false;
+                }
+            }
+            if conc {
+                let mut it = TyInstance { module: fn2.module, decl: fn2.node, n: n as u8, args: [TYPE_NONE; 8] };
+                for i in 0..n {
+                    unsafe it.args[i as usize] = unsafe args[i as usize];
+                }
+                let rec = loader::MangleRec { kind: 3, m: self.cur_module(), it: it, sym: String::from_cstr(out) };
+                unsafe self.package.mangle_log.push(rec);
+            }
+        }
+    }
+    fn spec_name_inner(self: &mut Self, fn2: DefId, args: *const TypeId, n: i32, out: *mut char, cap: usize) {
         let mut at = self.render_qualified(
             fn2.module,
             self.mod_ast(fn2.module).at_const(fn2.node).as_data.function.name,
@@ -1896,6 +1919,10 @@ extend Codegen {
         }
         let sym = self.inst_name_s(it);
         self.copy_sym(&sym, out, cap);
+        if cacheable && self.package != null && unsafe self.package.mangle_on {
+            let rec = loader::MangleRec { kind: 1, m: self.cur_module(), t: TYPE_NONE, it: *it, sym: sym.clone() };
+            unsafe self.package.mangle_log.push(rec);
+        }
         if cacheable {
             let mp = (self as *const Codegen) as *mut Codegen;
             unsafe {
@@ -4040,6 +4067,21 @@ extend Codegen {
     }
 
     fn render_type_id(self: &mut Self, t: TypeId, decl: *const char, out: *mut char, cap: usize) {
+        self.render_type_id_inner(t, decl, out, cap);
+        if self.package != null && unsafe self.package.mangle_on && self.ast == self.home_ast && self.nsubst == 0 && !self.macro_mode && self.type_is_concrete(
+            t,
+        ) {
+            let rec = loader::MangleRec {
+                kind: 4,
+                m: self.cur_module(),
+                t: t,
+                decl: String::from_cstr(decl),
+                sym: String::from_cstr(out),
+            };
+            unsafe self.package.mangle_log.push(rec);
+        }
+    }
+    fn render_type_id_inner(self: &mut Self, t: TypeId, decl: *const char, out: *mut char, cap: usize) {
         let ty = *self.type_at(t);
         if ty.kind == TypeKind::TYPE_BUILTIN {
             buf_join3(&mut self.trunc, out, cap, builtin_c(ty.as_data.builtin), sep(decl), decl);
@@ -13792,6 +13834,24 @@ extend Codegen {
     }
 
     fn function_name(self: &mut Self, fn_id: NodeId, target: DefId, out: *mut char, cap: usize, prefixed: bool) {
+        self.function_name_inner(fn_id, target, out, cap, prefixed);
+        if self.package != null && unsafe self.package.mangle_on && self.ast == self.home_ast && self.nsubst == 0 && !self.macro_mode {
+            let mut fl: u8 = 0;
+            if prefixed {
+                fl = 1;
+            }
+            let rec = loader::MangleRec {
+                kind: 2,
+                flags: fl,
+                m: self.cur_module(),
+                node: fn_id,
+                target: target,
+                sym: String::from_cstr(out),
+            };
+            unsafe self.package.mangle_log.push(rec);
+        }
+    }
+    fn function_name_inner(self: &mut Self, fn_id: NodeId, target: DefId, out: *mut char, cap: usize, prefixed: bool) {
         if self.cg_symbol_override(self.cur_module(), fn_id, out, cap) {
             return;
         }

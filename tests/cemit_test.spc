@@ -111,7 +111,8 @@ fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit)
     for i in 0..bodies.len() {
         let node = bodies.at(i).body.owner.node;
         let mut sym = String::new();
-        cb::fn_symbol(u, node, &mut sym);
+        let tgt = em.mg.method_target(u, node);
+        assert(em.mg.fn_sym(u, node, tgt, true, &mut sym), "symbol renders");
         let ok = em.emit_fn(&bodies.at(i).body, sym.as_str());
         assert(ok, "body emits");
         sym.free();
@@ -120,9 +121,11 @@ fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit)
 }
 
 // Write the buffer + a `main` returning `expect_expr`, compile strict C11, run, return exit code.
-fn compile_run(em: &cb::CEmit, main_body: str) i32 {
+fn compile_run(em: &cb::CEmit, main_body: str, tag: str) i32 {
     let mut path = String::new();
-    path.push_str("build/cemit_probe.c");
+    path.push_str("build/cemit_probe_");
+    path.push_str(tag);
+    path.push_str(".c");
     let f = stdio::fopen(path.as_str(), "wb");
     assert(f != null, "probe file opens");
     let s = em.out.as_str();
@@ -130,16 +133,21 @@ fn compile_run(em: &cb::CEmit, main_body: str) i32 {
     let mb = main_body;
     let _ = unsafe stdio::fwrite(mb.ptr(), 1, mb.len(), f);
     unsafe stdio::fclose(f);
-    let rc = unsafe shim::sc_run(
-        "cc -std=c11 -Wall -Werror -o build/cemit_probe build/cemit_probe.c".ptr() as *const char,
-        null,
-        null,
-        null,
-        null,
-    );
+    let mut cmd = String::new();
+    cmd.push_str("cc -std=c11 -Wall -Werror -o build/cemit_probe_");
+    cmd.push_str(tag);
+    cmd.push_str(" ");
+    cmd.push_string(&path);
+    let rc = unsafe shim::sc_run(cmd.cstr(), null, null, null, null);
+    cmd.free();
     assert(rc == 0, "strict C11 compile");
     path.free();
-    return unsafe shim::sc_exec("build/cemit_probe".ptr() as *const char);
+    let mut bin = String::new();
+    bin.push_str("build/cemit_probe_");
+    bin.push_str(tag);
+    let ec = unsafe shim::sc_exec(bin.cstr());
+    bin.free();
+    return ec;
 }
 
 @test
@@ -150,18 +158,13 @@ fn arithmetic_and_branches_behave() {
     let mut em = cb::CEmit::new(&p);
     let names: [str; 2] = ["collatz_steps", "mix"];
     emit_tu(&p, &names[0], 2, &mut em);
-    let u = (p.modules.len() - 1) as ModuleId;
     let mut m1 = String::new();
     m1.push_str("int main(void) {\n");
     // collatz(27) = 111; mix(45, 17) = ((45*3-17) ^ (17<<2)) then abs, % 251
-    m1.push_str("  if (");
-    cb::fn_symbol(u, find_fn(&p, "collatz_steps"), &mut m1);
-    m1.push_str("(27ULL) != 111ULL) return 1;\n");
+    m1.push_str("  if (collatz_steps(27ULL) != 111ULL) return 1;\n");
     m1.push_str("  int32_t acc = 45 * 3 - 17; acc = acc ^ (17 << 2); if (acc < 0) acc = -acc;\n");
-    m1.push_str("  if (");
-    cb::fn_symbol(u, find_fn(&p, "mix"), &mut m1);
-    m1.push_str("(45, 17) != acc % 251) return 2;\n  return 0;\n}\n");
-    let rc = compile_run(&em, m1.as_str());
+    m1.push_str("  if (mix(45, 17) != acc % 251) return 2;\n  return 0;\n}\n");
+    let rc = compile_run(&em, m1.as_str(), "arith");
     assert(rc == 0, "emitted C behaves");
     m1.free();
 }
@@ -174,14 +177,11 @@ fn calls_and_recursion_behave() {
     let mut em = cb::CEmit::new(&p);
     let names: [str; 2] = ["gcd", "lcm"];
     emit_tu(&p, &names[0], 2, &mut em);
-    let u = (p.modules.len() - 1) as ModuleId;
     let mut m1 = String::new();
-    m1.push_str("int main(void) {\n  if (");
-    cb::fn_symbol(u, find_fn(&p, "gcd"), &mut m1);
-    m1.push_str("(1071ULL, 462ULL) != 21ULL) return 1;\n  if (");
-    cb::fn_symbol(u, find_fn(&p, "lcm"), &mut m1);
-    m1.push_str("(21ULL, 6ULL) != 42ULL) return 2;\n  return 0;\n}\n");
-    let rc = compile_run(&em, m1.as_str());
+    m1.push_str(
+        "int main(void) {\n  if (gcd(1071ULL, 462ULL) != 21ULL) return 1;\n  if (lcm(21ULL, 6ULL) != 42ULL) return 2;\n  return 0;\n}\n",
+    );
+    let rc = compile_run(&em, m1.as_str(), "calls");
     assert(rc == 0, "emitted calls behave");
     m1.free();
 }

@@ -27,6 +27,8 @@ import ir::drops as ird;
 import ir::interp as iri;
 import ir::layout as lay;
 import backend::cemit as cbe;
+import backend::mangle as mbe;
+import backend::tu as tbe;
 import graph::instances as ig;
 import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
@@ -1299,25 +1301,53 @@ fn cemit_pass(p: &mut loader::Package) {
     let mut bytes: u64 = 0;
     let mut h1: u64 = 1469598103934665603u64;
     let mut h2: u64 = 1469598103934665603u64;
+    let mut generic: u64 = 0;
+    let mut reasons = Vector::<str<'static>>::new();
+    let mut rcounts = Vector::<u64>::new();
+    let mut cands = Vector::<NodeId>::new();
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast {
             continue;
         }
         let a = unsafe &*p.module_ast_const(m as ModuleId);
         let items = a.at_const(a.root).as_data.program.items;
+        cands.truncate(0);
         for i in 0..items.len {
             let nid = unsafe a.list(items)[i as usize];
             let n = a.at_const(nid);
-            if n.kind != NodeKind::NODE_FUNCTION || n.as_data.function.is_extern || n.as_data.function.body == NODE_NONE {
+            if n.kind == NodeKind::NODE_FUNCTION {
+                cands.push(nid);
+            } else if n.kind == NodeKind::NODE_EXTEND {
+                let ms = n.as_data.extend_def.items;
+                for j in 0..ms.len {
+                    let mid2 = unsafe a.list(ms)[j as usize];
+                    if a.at_const(mid2).kind == NodeKind::NODE_FUNCTION {
+                        cands.push(mid2);
+                    }
+                }
+            }
+        }
+        for i in 0..cands.len() {
+            let nid = cands[i];
+            let n = a.at_const(nid);
+            if n.as_data.function.is_extern || n.as_data.function.body == NODE_NONE {
                 continue;
             }
             let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
             if !lw.lower_fn(nid) {
                 continue;
             }
+            if lw.body.is_generic || em.mg.in_generic_extend(m as ModuleId, nid) {
+                generic += 1; // generic-extend methods emit per receiver instance, not standalone
+                continue;
+            }
             bodies += 1;
             let mut sym = String::new();
-            cbe::fn_symbol(m as ModuleId, nid, &mut sym);
+            let tgt = em.mg.method_target(m as ModuleId, nid);
+            if !em.mg.fn_sym(m as ModuleId, nid, tgt, true, &mut sym) {
+                sym.free();
+                continue;
+            }
             em.out.clear();
             if em.emit_fn(&lw.body, sym.as_str()) {
                 emitted += 1;
@@ -1332,16 +1362,116 @@ fn cemit_pass(p: &mut loader::Package) {
                 for k in 0..s2.len() {
                     h2 = (h2 ^ s2.byte_at(k) as u64) * 1099511628211u64;
                 }
+            } else {
+                let mut found = false;
+                for r in 0..reasons.len() {
+                    if reasons[r] == em.err {
+                        rcounts.set(r, rcounts[r] + 1);
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    reasons.push(em.err);
+                    rcounts.push(1);
+                }
             }
             sym.free();
         }
     }
+    cands.free();
     let dt = unsafe shim::sc_ticks_ms() - t0;
     let mut det = "identical";
     if h1 != h2 {
         det = "DIVERGENT";
     }
-    eprint("cemit: {} bodies, {} emitted, {} KiB, serial hashes {}, {} ms\n", bodies, emitted, bytes / 1024, det, dt);
+    eprint(
+        "cemit: {} bodies ({} generic skipped), {} emitted, {} KiB, serial hashes {}, {} ms\n",
+        bodies,
+        generic,
+        emitted,
+        bytes / 1024,
+        det,
+        dt,
+    );
+    for r in 0..reasons.len() {
+        eprint("cemit-miss: {} x{}\n", reasons[r], rcounts[r]);
+    }
+    reasons.free();
+    rcounts.free();
+}
+
+// SC_CEMIT_TU=1: the backend's declaration layer over the whole package -- every concrete
+// aggregate plus every anchored instance from a fresh graph, forward typedefs then dependency-first
+// definitions -- gated by a strict-C11 syntax-only compile of the emitted scratch TU.
+fn cemit_tu_pass(p: &mut loader::Package) {
+    if stdlib::getenv("SC_CEMIT_TU") == null {
+        return;
+    }
+    let t0 = unsafe shim::sc_ticks_ms();
+    let mut g = ig::InstGraph::new(p);
+    g.collect();
+    let mut em = tbe::TuEmit::new(p);
+    let mut items = Vector::<tbe::AggItem>::new();
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let its = a.at_const(a.root).as_data.program.items;
+        for i in 0..its.len {
+            let nid = unsafe a.list(its)[i as usize];
+            let n = a.at_const(nid);
+            if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && n.as_data.aggregate.generics.len == 0 {
+                items.push(tbe::AggItem { m: m as ModuleId, decl: nid, amod: m as ModuleId, aty: TYPE_NONE });
+            }
+        }
+    }
+    for r in 0..g.recs.len() {
+        let rec = g.recs.at(r);
+        if rec.kind == ig::IG_AGG && rec.aty != TYPE_NONE {
+            items.push(tbe::AggItem { m: rec.def.module, decl: rec.def.node, amod: rec.amod, aty: rec.aty });
+        }
+    }
+    for i in 0..items.len() {
+        em.emit_fwd(items.at(i));
+    }
+    for i in 0..items.len() {
+        let it = *items.at(i);
+        let _ = em.emit_agg(&it);
+    }
+    let mut tu = String::from_str(
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdarg.h>\n#include <complex.h>\n#include <stdio.h>\n#include <pthread.h>\ntypedef struct { const uint8_t *ptr; size_t len; } SCslice;\n",
+    );
+    tu.push_string(&em.out);
+    let f = stdio::fopen("build/cemit_tu.c", "wb");
+    let mut rc: i32 = -1;
+    if f != null {
+        let s = tu.as_str();
+        let _ = unsafe stdio::fwrite(s.ptr(), 1, s.len(), f);
+        unsafe stdio::fclose(f);
+        rc = unsafe shim::sc_run(
+            "cc -std=c11 -Wall -Werror -fsyntax-only build/cemit_tu.c".ptr() as *const char,
+            null,
+            null,
+            null,
+            null,
+        );
+    }
+    let dt = unsafe shim::sc_ticks_ms() - t0;
+    eprint(
+        "cemit-tu: {} items, {} emitted, {} skipped, {} KiB, cc {}, {} ms\n",
+        items.len(),
+        em.emitted,
+        em.skipped,
+        tu.len() / 1024,
+        rc,
+        dt,
+    );
+    tu.free();
+    items.free();
+    em.free();
+    g.free();
 }
 
 // Shadow mode (SC_INSTANCES=1): build the Core-IR instance graph after the established propagation
@@ -2930,6 +3060,7 @@ pub fn run_package(
     ctfe_ir_pass(p);
     layout_pass(p);
     cemit_pass(p);
+    cemit_tu_pass(p);
     if lint {
         lint_unused_items(p, -1);
     }
@@ -2952,6 +3083,7 @@ pub fn run_package(
     instance_graph_shadow(p);
     p.shadow_on = stdlib::getenv("SC_INSTANCES") != null;
     p.drops_on = stdlib::getenv("SC_DROPS") != null;
+    p.mangle_on = stdlib::getenv("SC_MANGLE") != null;
 
     let testing = topts != null && unsafe topts.enabled;
     let mut plan = TestPlan::new(n);
@@ -3032,7 +3164,7 @@ pub fn run_package(
     }
     // Fork is pathological under ASan (each child COW-faults the whole shadow), so a sanitized
     // binary keeps the serial path; SC_SERIAL_EMIT=1 forces it for A/B byte-diffs.
-    if unsafe shim::sc_asan() != 0 || stdlib::getenv("SC_SERIAL_EMIT") != null || p.shadow_on || p.drops_on {
+    if unsafe shim::sc_asan() != 0 || stdlib::getenv("SC_SERIAL_EMIT") != null || p.shadow_on || p.drops_on || p.mangle_on {
         w = 1; // shadow export: forked workers would drop their record_inst halves
     }
     // One Codegen per TU, alive across both passes, so codegen_emit reuses the header pass's
@@ -3122,7 +3254,50 @@ pub fn run_package(
     if p.drops_on {
         drops_compare(p);
     }
+    if p.mangle_on {
+        mangle_diff(p);
+    }
     return rc;
+}
+
+// The mangling-freeze comparison: replay every symbol render the established emitter recorded
+// through the frozen backend mangler and demand identical bytes. Records outside the frozen
+// subset (dyn stems today) count as skipped, never as agreement.
+fn mangle_diff(p: &mut loader::Package) {
+    let mut mg = mbe::Mangler::new(p);
+    let mut replayed: usize = 0;
+    let mut skipped: usize = 0;
+    let mut bad: usize = 0;
+    let mut s = String::new();
+    for i in 0..p.mangle_log.len() {
+        let r = p.mangle_log.at(i);
+        s.truncate(0);
+        let ok = if r.kind == 0 {
+            mg.type_m(r.m, r.t, &mut s);
+        } else if r.kind == 1 {
+            mg.inst_name(r.m, &r.it, &mut s);
+        } else if r.kind == 2 {
+            mg.fn_sym(r.m, r.node, r.target, (r.flags & 1) != 0, &mut s);
+        } else if r.kind == 3 {
+            mg.spec_sym(r.m, DefId { module: r.it.module, node: r.it.decl }, &r.it.args[0], r.it.n, &mut s);
+        } else {
+            mg.ctype(r.m, r.t, r.decl.as_str(), &mut s);
+        };
+        if !ok {
+            skipped += 1;
+            continue;
+        }
+        replayed += 1;
+        if s.as_str() != r.sym.as_str() {
+            bad += 1;
+            if bad <= 8 {
+                eprint("mangle-diff: module {} type {}: old `{}` new `{}`\n", r.m, r.t, r.sym.as_str(), s.as_str());
+            }
+        }
+    }
+    s.free();
+    mg.free();
+    eprint("mangle: {} records, {} replayed, {} skipped, {} mismatched\n", p.mangle_log.len(), replayed, skipped, bad);
 }
 
 // The exit-gate comparison: every fn instance codegen actually RECORDED FOR EMISSION must exist in

@@ -132,6 +132,10 @@ pub struct Package {
     /// (serial emission only -- forked workers would drop their halves). Off (empty) otherwise.
     pub shadow_on: bool,
     pub shadow_insts: Vector<ShadowInst>,
+    /// SC_MANGLE replay export: codegen's mangle_type records each replayable render here
+    /// (serial emission only, like shadow_insts). Off (empty) otherwise.
+    pub mangle_on: bool,
+    pub mangle_log: Vector<MangleRec>,
     pub drops_on: bool, // record the emitter's free insertions (drop-elaboration comparison)
     pub drop_log: Vector<DropRec>, // emitter-side free sequence, in emission order
     pub drop_plan: Vector<DropRec>, // elaboration-side schedule, in body order
@@ -183,6 +187,24 @@ pub struct ShadowInst {
     pub tu: ModuleId, // the translation unit whose emission recorded it (per-TU plan order oracle)
     pub n: u8,
     pub keys: [u64; 8],
+}
+
+/// One replayable symbol render the established emitter produced, spelled `sym`: pool type `(m, t)`
+/// (kind 0), instance `it` with pool-`m` argument TypeIds (kind 1), function symbol `node` with
+/// resolved extend target `target` (kind 2, flags bit 0 = prefixed), or specialization with
+/// `it.{module,decl}` = the generic fn and `it.args` its resolved pool-`m` arguments (kind 3).
+/// Recorded only under an empty substitution frame on the home pool, so the spelling is a pure
+/// function of the pool and the frozen mangler must reproduce it exactly.
+pub struct MangleRec {
+    pub kind: u8,
+    pub flags: u8,
+    pub m: ModuleId,
+    pub t: TypeId,
+    pub node: NodeId,
+    pub target: DefId,
+    pub it: TyInstance,
+    pub decl: String, // kind 4: the C declarator the type was rendered around
+    pub sym: String,
 }
 
 /// A module-qualified declaration hit: the decl's NodeId within module `mid`. `node == NODE_NONE` means miss.
@@ -791,6 +813,8 @@ extend Package {
             lint_pub: false,
             shadow_on: false,
             shadow_insts: Vector::<ShadowInst>::new(),
+            mangle_on: false,
+            mangle_log: Vector::<MangleRec>::new(),
             drops_on: false,
             drop_log: Vector::<DropRec>::new(),
             drop_plan: Vector::<DropRec>::new(),
@@ -1807,6 +1831,7 @@ extend Package as Free {
         self.dir_cache.free();
         self.lint_set.free();
         self.shadow_insts.free();
+        self.mangle_log.free();
         self.overlay_files.free();
         self.overlay_texts.free();
     }

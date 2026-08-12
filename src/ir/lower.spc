@@ -1766,8 +1766,18 @@ extend Lowerer {
             );
         }
         if t == tt::TokenType::StringLiteral || t == tt::TokenType::MatchertextLiteral || t == tt::TokenType::RawStringLiteral || t == tt::TokenType::ByteStringLiteral {
+            // val = the literal token kind: quoted spellings copy verbatim into C, raw
+            // (matchertext) spellings must re-escape byte-wise
             return self.const_op(
-                ir::Constant { kind: ir::CK_STR, ty: ty, val: 0, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
+                ir::Constant {
+                    kind: ir::CK_STR,
+                    ty: ty,
+                    val: t as i64,
+                    raw: d.raw,
+                    item: no,
+                    targ_start: 0,
+                    targ_len: 0,
+                },
             );
         }
         if t == tt::TokenType::FloatLiteral {
@@ -2401,17 +2411,61 @@ extend Lowerer {
         let d = self.f.node(id).as_data.struct_initializer;
         let ty = self.f.node_type(id);
         let sp = self.f.node(id).span;
-        let mut argv = Vector::<ir::OperandId>::new();
-        for i in 0..d.fields.len {
-            let fi = unsafe self.f.list(d.fields)[i as usize];
-            let v = self.f.node(fi).as_data.field_initializer.value;
-            let op = self.lower_expr(v);
-            if op == ir::IR_NONE {
-                return ir::IR_NONE;
+        let mut sd = self.f.res(id);
+        if sd.node == NODE_NONE && ty != TYPE_NONE {
+            let y = *self.f.ty(ty);
+            if y.kind == TypeKind::TYPE_STRUCT {
+                sd = DefId { module: y.module, node: y.as_data.decl };
+            } else if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *self.f.instance(y.as_data.inst);
+                sd = DefId { module: it.module, node: it.decl };
             }
-            argv.push(op);
         }
-        return self.finish_aggregate(ir::AGG_STRUCT, self.f.res(id), &argv, ty, sp);
+        // Values evaluate in SOURCE order (temps), but the operand list is normalized to DECL
+        // order with IR_NONE holes for omitted members -- consumers index it by member position,
+        // and omitted members zero-fill (the established emitter's designated-init semantics).
+        let mut argv = Vector::<ir::OperandId>::new();
+        if sd.node != NODE_NONE {
+            let da = unsafe &*(&*self.pkg).module_ast_const(sd.module);
+            let dsrc = unsafe (&*self.pkg).modules.at(sd.module as usize).source.as_str();
+            let members = da.at_const(sd.node).as_data.aggregate.members;
+            for _i in 0..members.len {
+                argv.push(ir::IR_NONE);
+            }
+            for i in 0..d.fields.len {
+                let fi = unsafe self.f.list(d.fields)[i as usize];
+                let fnm = self.f.node(self.f.node(fi).as_data.field_initializer.name).as_data.name.text;
+                let ntxt = self.src.slice(fnm.start as usize, fnm.end as usize);
+                let op = self.lower_expr(self.f.node(fi).as_data.field_initializer.value);
+                if op == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                let mut idx: i64 = -1;
+                for j in 0..members.len {
+                    let fid = unsafe da.list(members)[j as usize];
+                    let ms = da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text;
+                    if dsrc.slice(ms.start as usize, ms.end as usize) == ntxt {
+                        idx = j;
+                        break;
+                    }
+                }
+                if idx < 0 {
+                    self.fail_at("struct-field", id);
+                    return ir::IR_NONE;
+                }
+                argv.set(idx as usize, op);
+            }
+        } else {
+            for i in 0..d.fields.len {
+                let fi = unsafe self.f.list(d.fields)[i as usize];
+                let op = self.lower_expr(self.f.node(fi).as_data.field_initializer.value);
+                if op == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                argv.push(op);
+            }
+        }
+        return self.finish_aggregate(ir::AGG_STRUCT, sd, &argv, ty, sp);
     }
 
     fn finish_aggregate(self: &mut Self, agg: u8, item: DefId, ops: &Vector<ir::OperandId>, ty: TypeId, sp: tok::Span) ir::OperandId {
@@ -2484,21 +2538,43 @@ extend Lowerer {
         let d = self.f.node(id).as_data.pattern_range;
         let ty = self.f.node_type(id);
         let sp = self.f.node(id).span;
+        // fixed decl-order slots {start, end, inclusive}: absent bounds are IR_NONE holes
+        // (zero-fill), the inclusivity flag is a synthesized constant -- Core IR keeps it
         let mut argv = Vector::<ir::OperandId>::new();
+        let mut sop = ir::IR_NONE;
         if d.start != NODE_NONE {
-            let op = self.lower_expr(d.start);
-            if op == ir::IR_NONE {
+            sop = self.lower_expr(d.start);
+            if sop == ir::IR_NONE {
                 return ir::IR_NONE;
             }
-            argv.push(op);
         }
+        let mut eop = ir::IR_NONE;
         if d.end != NODE_NONE {
-            let op = self.lower_expr(d.end);
-            if op == ir::IR_NONE {
+            eop = self.lower_expr(d.end);
+            if eop == ir::IR_NONE {
                 return ir::IR_NONE;
             }
-            argv.push(op);
         }
+        argv.push(sop);
+        argv.push(eop);
+        let bt = Ast::builtin(BuiltinType::BT_BOOL);
+        let mut iv: i64 = 0;
+        if d.inclusive {
+            iv = 1;
+        }
+        argv.push(
+            self.const_op(
+                ir::Constant {
+                    kind: ir::CK_BOOL,
+                    ty: bt,
+                    val: iv,
+                    raw: tok::Span { start: 0, end: 0 },
+                    item: DefId { module: 0, node: NODE_NONE },
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            ),
+        );
         return self.finish_aggregate(ir::AGG_STRUCT, DefId { module: 0, node: NODE_NONE }, &argv, ty, sp);
     }
 

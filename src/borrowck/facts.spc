@@ -2140,6 +2140,9 @@ extend Gen {
         } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_INTRINSIC {
             for i in 0..rv.b {
                 let opid = self.body().oper_pool[(rv.a + i) as usize];
+                if opid == ir::IR_NONE {
+                    continue; // omitted struct member: no operand, C zero-fills
+                }
                 self.op_read(opid, entry, s.span);
                 if rv.kind == ir::RV_AGGREGATE {
                     let op = *self.body().operands.at(opid as usize);
