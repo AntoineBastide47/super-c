@@ -231,6 +231,18 @@ pub struct Mangler {
     /// Substitution stack for per-instance spelling: generic-param decl -> a CONCRETE pool type
     /// (module + TypeId, usually the instance's anchor pool). Innermost binding wins.
     pub subs: Vector<MSub>,
+    /// Every TYPE_DYN whose C spelling was rendered: the backend drains this into `SC_DYN_<stem>`
+    /// typedef blocks (the fat value + vtable types every dyn spelling presumes).
+    pub dyn_reqs: Vector<DynReq>,
+    /// `@emit_macro` template mode: an UNRESOLVED generic param spells as its own name in C types
+    /// and as `<paste>_SCM_<name>` in mangles (byte 1 marks a `##` for the template rewriter).
+    pub macro_on: bool,
+}
+
+/// One dyn spelling site: the pool the TYPE_DYN lives in.
+pub struct DynReq {
+    pub pm: ModuleId,
+    pub t: TypeId,
 }
 
 /// One substitution binding: param decl `(pm, pnode)` resolves to pool type `(am, at)`.
@@ -246,6 +258,7 @@ extend Mangler as Free {
         self.short_ok.free();
         self.subs.free();
         self.clos_sfx.free();
+        self.dyn_reqs.free();
     }
 }
 
@@ -265,6 +278,8 @@ extend Mangler {
             short_ok: Vector::<u8>::new(),
             subs: Vector::<MSub>::new(),
             clos_sfx: String::new(),
+            dyn_reqs: Vector::<DynReq>::new(),
+            macro_on: false,
         };
     }
 
@@ -530,6 +545,12 @@ extend Mangler {
             if self.resolve(pm, t, &mut rm, &mut rt) {
                 return self.type_m(rm, rt, out);
             }
+            if self.macro_on {
+                out.push_byte(1);
+                out.push_str("_SCM_");
+                self.generic_param_name(&y, out);
+                return true;
+            }
             return false; // unbound params never name symbols
         }
         if y.kind == TypeKind::TYPE_CONST_EXPR {
@@ -542,6 +563,19 @@ extend Mangler {
         }
         out.push_str("v");
         return true;
+    }
+
+    /// The source name of the generic-param decl behind an unresolved TYPE_GENERIC.
+    fn generic_param_name(self: &mut Self, y: &Ty, out: &mut String) {
+        let da = self.p().module_ast_const(y.module);
+        let pn = da.at_const(y.as_data.decl);
+        self.ident(y.module, da.at_const(pn.as_data.generic_param.name).as_data.name.text, out);
+    }
+
+    /// True when `(pm, t)` is the prelude `Global` allocator type (the trailing-arg elision rule).
+    pub fn is_global(self: &Self, pm: ModuleId, t: TypeId) bool {
+        let y = *self.p().module_ast_const(pm).type_at(t);
+        return y.kind == TypeKind::TYPE_STRUCT && y.module == self.ph_global.mid && y.as_data.decl == self.ph_global.node;
     }
 
     /// The dyn family's shared stem: the qualified interface (or the structural `dynfn` signature
@@ -1320,6 +1354,7 @@ extend Mangler {
             if ok {
                 nm.push_str("__dyn");
                 self.join_decl(nm.as_str(), decl, out);
+                self.dyn_reqs.push(DynReq { pm: pm, t: t });
             }
             nm.free();
             return ok;
@@ -1329,6 +1364,13 @@ extend Mangler {
             let mut rt = TYPE_NONE;
             if self.resolve(pm, t, &mut rm, &mut rt) {
                 return self.ctype(rm, rt, decl, out);
+            }
+            if self.macro_on {
+                let mut nm = String::new();
+                self.generic_param_name(&y, &mut nm);
+                self.join_decl(nm.as_str(), decl, out);
+                nm.free();
+                return true;
             }
         }
         // TYPE_NEVER, TYPE_ERROR, unbound TYPE_GENERIC and every remaining kind spell as `void`.

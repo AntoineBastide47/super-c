@@ -1564,6 +1564,10 @@ extend Gen {
             let exit = entry + 1;
             if t.kind == ir::TM_SWITCH || t.kind == ir::TM_ASSERT {
                 self.op_read(t.a, entry, t.span);
+                // an assert's optional message operand is read, never moved
+                for i2 in 0..t.args_len {
+                    self.op_read(self.body().oper_pool[(t.args_start + i2) as usize], entry, t.span);
+                }
             } else if t.kind == ir::TM_CALL {
                 if t.callee.node == NODE_NONE && t.a != ir::IR_NONE {
                     self.calling = true;
@@ -2170,8 +2174,8 @@ extend Gen {
         } else if rv.kind == ir::RV_BINARY {
             self.op_read(rv.a, entry, s.span);
             self.op_read(rv.b, entry, s.span);
-        } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF) {
-            // no operands: `b` is the measured type
+        } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO) {
+            // no operands: `b` is the measured/described type
         } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_INTRINSIC {
             for i in 0..rv.b {
                 let opid = self.body().oper_pool[(rv.a + i) as usize];

@@ -40,6 +40,19 @@ pub struct CEmit {
     pub extern_protos: String,
     extern_seen: Map<u64, u64>,
     cur_name: String, // the symbol being emitted (multi-return pack sites name its ret struct)
+    /// `SC_DYN_<stem>` typedef blocks (vtable + fat value + inline free) for every dyn stem any
+    /// spelling touched; assembled between forward typedefs and aggregate definitions.
+    pub dyn_defs: String,
+    dyn_def_seen: Map<u64, u64>,
+    /// Per-coercion thunks (static) + vtable definitions (extern const): exactly one TU owns them.
+    pub dyn_tabs: String,
+    dyn_tab_seen: Map<u64, u64>,
+    /// `extern const <stem>__vt <pair>__vtbl;` for every referenced vtable (every TU sees these).
+    pub dyn_decls: String,
+    /// `type_info::<T>()` sites: each names an exported descriptor group the driver evaluates
+    /// through the CTFE static graph and defines once (`__sc_ti__<mangle>`).
+    pub ti_reqs: Vector<StatRef>,
+    ti_seen: Map<u64, u64>,
 }
 
 /// One referenced const/static item: its declaration, C symbol, and the module whose prefix
@@ -79,6 +92,13 @@ extend CEmit as Free {
         self.glue_seen.free();
         self.extern_protos.free();
         self.extern_seen.free();
+        self.dyn_defs.free();
+        self.dyn_def_seen.free();
+        self.dyn_tabs.free();
+        self.dyn_tab_seen.free();
+        self.dyn_decls.free();
+        self.ti_reqs.free();
+        self.ti_seen.free();
     }
 }
 
@@ -102,6 +122,13 @@ extend CEmit {
             glue_seen: Map::<u64, u64>::new(),
             extern_protos: String::new(),
             extern_seen: Map::<u64, u64>::new(),
+            dyn_defs: String::new(),
+            dyn_def_seen: Map::<u64, u64>::new(),
+            dyn_tabs: String::new(),
+            dyn_tab_seen: Map::<u64, u64>::new(),
+            dyn_decls: String::new(),
+            ti_reqs: Vector::<StatRef>::new(),
+            ti_seen: Map::<u64, u64>::new(),
         };
     }
 
@@ -664,7 +691,8 @@ extend CEmit {
         let mut rt = String::new();
         let ok0 = self.ty_c(b.module, rty, "", &mut rt);
         if ok0 {
-            self.out.push_str("static ");
+            // extern: dyn-fn thunks in the instance TU call hoisted closures by name, and each
+            // closure emits exactly once (its symbol carries module + node + instance suffix)
             self.out.push_string(&rt);
             self.out.push_str(" ");
             self.out.push_str(sym);
@@ -996,6 +1024,18 @@ extend CEmit {
                 return self.emit_struct_store_arrays(b, s, &rv0);
             }
         }
+        // a capturing closure erased to `dyn fn` boxes its env first: statement-level emission
+        {
+            let rv0 = *b.rvalues.at(s.rvalue as usize);
+            if rv0.kind == ir::RV_DYN {
+                let mut omD = b.module;
+                let mut otD = b.operands.at(rv0.a as usize).ty;
+                self.rty(b, b.operands.at(rv0.a as usize).ty, &mut omD, &mut otD);
+                if self.p().module_ast_const(omD).type_at(otD).kind == TypeKind::TYPE_FUNCTION {
+                    return self.emit_dyn_env_store(b, s, &rv0, omD, otD);
+                }
+            }
+        }
         // a store whose source is a NEVER-typed temp sits on a dead path: emit nothing
         {
             let rv0 = *b.rvalues.at(s.rvalue as usize);
@@ -1072,6 +1112,79 @@ extend CEmit {
         }
         lhs.free();
         rhs.free();
+        return ok;
+    }
+
+    // A capturing closure erased to `dyn fn`: box the env on the Global heap, then build the fat
+    // value. The pair's `__free` only deallocates the env, so owning captures refuse.
+    fn emit_dyn_env_store(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        s: &ir::Statement,
+        rv: &ir::Rvalue,
+        om: ModuleId,
+        ot: TypeId,
+    ) bool {
+        let oy = *self.p().module_ast_const(om).type_at(ot);
+        let cd = self.p().module_ast_const(oy.module).at_const(oy.as_data.decl);
+        if cd.kind != NodeKind::NODE_CLOSURE || cd.as_data.closure.captures.len == 0 {
+            return self.fail("dyn-fnval");
+        }
+        {
+            let ca = self.p().module_ast_const(oy.module);
+            let caps = cd.as_data.closure.captures;
+            for i in 0..caps.len {
+                let cid = unsafe ca.list(caps)[i as usize];
+                let cty = ca.type_of(cid);
+                if cty != TYPE_NONE {
+                    let mut crm = oy.module;
+                    let mut crt = cty;
+                    if self.mg.resolve(oy.module, cty, &mut crm, &mut crt) && self.is_destructible(crm, crt, 0) {
+                        return self.fail("dyn-env-free");
+                    }
+                }
+            }
+        }
+        let mut dm = b.module;
+        let mut dt = rv.target;
+        self.rty(b, rv.target, &mut dm, &mut dt);
+        let mut envc = String::new();
+        let mut tc = String::new();
+        let mut pair = String::new();
+        let mut lhs = String::new();
+        let mut opv = String::new();
+        let mut ok = self.mg.ctype(om, ot, "", &mut envc) && self.ty_c(b.module, rv.target, "", &mut tc) && self.emit_place(
+            b,
+            s.place,
+            &mut lhs,
+        ) && self.emit_operand(b, rv.a, &mut opv);
+        if ok {
+            ok = self.dyn_pair(dm, dt, om, ot, true, &mut pair);
+        }
+        if ok {
+            self.out.push_str("  { Global __g = (Global){}; ");
+            self.out.push_string(&envc);
+            self.out.push_str(" *__dp = (");
+            self.out.push_string(&envc);
+            self.out.push_str(" *)Global__alloc(&__g, sizeof(");
+            self.out.push_string(&envc);
+            self.out.push_str("), _Alignof(");
+            self.out.push_string(&envc);
+            self.out.push_str(")); *__dp = ");
+            self.out.push_string(&opv);
+            self.out.push_str("; ");
+            self.out.push_string(&lhs);
+            self.out.push_str(" = ((");
+            self.out.push_string(&tc);
+            self.out.push_str("){ .data = __dp, .vt = &");
+            self.out.push_string(&pair);
+            self.out.push_str("__vtbl }); }\n");
+        }
+        envc.free();
+        tc.free();
+        pair.free();
+        lhs.free();
+        opv.free();
         return ok;
     }
 
@@ -1632,6 +1745,680 @@ extend CEmit {
         return TyInstance { decl: NODE_NONE };
     }
 
+    /// The symbol an interface-member call on RESOLVED receiver `(rm6, rt6)` dispatches to: a
+    /// CUSTOM impl when one exists (bound dispatch resolves per instantiation), else the
+    /// per-target default-method instantiation, whose body is demanded under `Self -> receiver`.
+    fn iface_target_sym(self: &mut Self, rm6: ModuleId, rt6: TypeId, callee: DefId, dst: &mut String) bool {
+        let mut sym = String::new();
+        {
+            let ca8 = self.p().module_ast_const(callee.module);
+            let msp8 = ca8.at_const(ca8.at_const(callee.node).as_data.function.name).as_data.name.text;
+            let msrc8 = self.p().modules.at(callee.module as usize).source.as_str();
+            let mname8 = msrc8.slice(msp8.start as usize, msp8.end as usize);
+            let mut impl_sym = String::new();
+            if self.mg.method_by_name(rm6, rt6, mname8, &mut impl_sym) {
+                dst.push_string(&impl_sym);
+                impl_sym.free();
+                sym.free();
+                return true;
+            }
+            impl_sym.free();
+        }
+        let y7 = *self.p().module_ast_const(rm6).type_at(rt6);
+        if y7.kind == TypeKind::TYPE_BUILTIN {
+            self.mg.modpfx(callee.module, &mut sym);
+            if !self.mg.type_m(rm6, rt6, &mut sym) {
+                sym.free();
+                return self.fail("iface-default-recv");
+            }
+        } else if y7.kind == TypeKind::TYPE_INSTANCE {
+            let it7 = *self.p().module_ast_const(rm6).instance(y7.as_data.inst);
+            if !self.mg.inst_name(rm6, &it7, &mut sym) {
+                sym.free();
+                return self.fail("iface-default-inst");
+            }
+        } else {
+            self.mg.modpfx(callee.module, &mut sym);
+            let da7 = self.p().module_ast_const(y7.module);
+            self.mg.ident(
+                y7.module,
+                da7.at_const(da7.at_const(y7.as_data.decl).as_data.aggregate.name).as_data.name.text,
+                &mut sym,
+            );
+        }
+        sym.push_str("__");
+        let ca7 = self.p().module_ast_const(callee.module);
+        self.mg.ident(
+            callee.module,
+            ca7.at_const(ca7.at_const(callee.node).as_data.function.name).as_data.name.text,
+            &mut sym,
+        );
+        // demand the default BODY under `Self -> receiver` (the interface DECL NODE is Self's
+        // binding key -- the extend-frame convention)
+        if self.collect_demand {
+            let fd7 = ca7.at_const(callee.node);
+            if fd7.kind == NodeKind::NODE_FUNCTION && !fd7.as_data.function.is_extern && fd7.as_data.function.body != NODE_NONE {
+                let idecl = self.mg.in_interface(callee.module, callee.node);
+                let mut snap = Vector::<mbe::MSub>::new();
+                for i7 in 0..self.mg.subs.len() {
+                    snap.push(*self.mg.subs.at(i7));
+                }
+                snap.push(mbe::MSub { pm: callee.module, pnode: idecl, am: rm6, at: rt6 });
+                self.demand.push(Demand { def: callee, sym: sym.clone(), subs: snap, sfx: String::new() });
+            }
+        }
+        dst.push_string(&sym);
+        sym.free();
+        return true;
+    }
+
+    // ---- dyn: fat values, vtables, thunks --------------------------------------------------------
+
+    /// One vtable member declarator: `<ret> (*<name>)(void *self[, <param types>])`. `all_params`
+    /// keeps every param (structural `dyn fn` stems); interfaces skip param 0 (the receiver).
+    fn dyn_sig(self: &mut Self, dm: ModuleId, ps: NodeList, rs: NodeList, all_params: bool, name: str, o: &mut String) bool {
+        let da = self.p().module_ast_const(dm);
+        let mut ret = String::new();
+        let mut ok = true;
+        if rs.len == 0 {
+            ret.push_str("void");
+        } else if rs.len == 1 {
+            let r0 = unsafe da.list(rs)[0];
+            let rn = da.at_const(r0);
+            let mut tn = r0;
+            if rn.kind == NodeKind::NODE_PARAMETER {
+                tn = rn.as_data.parameter.ty;
+            }
+            ok = self.mg.ctype(dm, da.type_of(tn), "", &mut ret);
+        } else {
+            ok = false; // multi-return never dyn-dispatches (fn-pointer rule)
+        }
+        if ok {
+            o.push_string(&ret);
+            o.push_str(" (*");
+            o.push_str(name);
+            o.push_str(")(void *self");
+            let start: u32 = if all_params {
+                0;
+            } else {
+                1;
+            };
+            for i in start..ps.len {
+                if !ok {
+                    break;
+                }
+                let pid = unsafe da.list(ps)[i as usize];
+                o.push_str(", ");
+                ok = self.mg.ctype(dm, da.type_of(pid), "", o);
+            }
+            o.push_str(")");
+        }
+        ret.free();
+        if !ok {
+            return self.fail("dyn-sig");
+        }
+        return true;
+    }
+
+    /// Ensure the `SC_DYN_<stem>` typedef block (vtable struct + fat value + inline free) is in
+    /// `dyn_defs`. Interface vtables carry `__free`/`tid` then every self-taking member in decl
+    /// order (defaults included); structural `dyn fn` vtables carry `__free` then `call`.
+    pub fn dyn_request(self: &mut Self, pm: ModuleId, t: TypeId) bool {
+        let y = *self.p().module_ast_const(pm).type_at(t);
+        if y.kind != TypeKind::TYPE_DYN {
+            return self.fail("dyn-req");
+        }
+        let mut stem = String::new();
+        if !self.mg.dyn_stem(pm, &y, &mut stem) {
+            stem.free();
+            return self.fail("dyn-stem");
+        }
+        let mut h = 1469598103934665603u64;
+        {
+            let ss = stem.as_str();
+            for k in 0..ss.len() {
+                h = (h ^ ss.byte_at(k) as u64) * 1099511628211u64;
+            }
+        }
+        let seen = switch self.dyn_def_seen.get(&h) {
+            Some(_v) => true,
+            None => false,
+        };
+        if seen {
+            stem.free();
+            return true;
+        }
+        self.dyn_def_seen.insert(h, 1);
+        let a = self.p().module_ast_const(pm);
+        let it = *a.instance(y.as_data.inst);
+        let da = self.p().module_ast_const(it.module);
+        let dn = da.at_const(it.decl);
+        let mut o = String::new();
+        o.push_str("#ifndef SC_DYN_");
+        o.push_string(&stem);
+        o.push_str("\n#define SC_DYN_");
+        o.push_string(&stem);
+        o.push_str("\ntypedef struct ");
+        o.push_string(&stem);
+        o.push_str("__vt {\n    void (*__free)(void *self);\n");
+        let mut ok = true;
+        if dn.kind == NodeKind::NODE_FUNCTION_TYPE {
+            o.push_str("    ");
+            ok = self.dyn_sig(
+                it.module,
+                dn.as_data.function_type.params,
+                dn.as_data.function_type.returns,
+                true,
+                "call",
+                &mut o,
+            );
+            o.push_str(";\n");
+        } else {
+            o.push_str("    const char *tid;\n");
+            // a generic interface's params bind to the dyn instance's args for signature spelling
+            let gs = dn.as_data.interface_def.generics;
+            let mut nb: usize = 0;
+            let mut gi: u32 = 0;
+            while gi < gs.len && gi as u8 < it.n {
+                self.mg.push_sub(it.module, unsafe da.list(gs)[gi as usize], pm, unsafe it.args[gi as usize]);
+                nb += 1;
+                gi += 1;
+            }
+            let ms = dn.as_data.interface_def.items;
+            for i in 0..ms.len {
+                if !ok {
+                    break;
+                }
+                let mid = unsafe da.list(ms)[i as usize];
+                let mn = da.at_const(mid);
+                if mn.kind != NodeKind::NODE_FUNCTION || mn.as_data.function.params.len == 0 {
+                    continue; // receiver-less members never dyn-dispatch
+                }
+                o.push_str("    ");
+                let mut nm = String::new();
+                self.mg.ident(it.module, da.at_const(mn.as_data.function.name).as_data.name.text, &mut nm);
+                ok = self.dyn_sig(
+                    it.module,
+                    mn.as_data.function.params,
+                    mn.as_data.function.returns,
+                    false,
+                    nm.as_str(),
+                    &mut o,
+                );
+                nm.free();
+                o.push_str(";\n");
+            }
+            self.mg.pop_subs(nb);
+        }
+        o.push_str("} ");
+        o.push_string(&stem);
+        o.push_str("__vt;\ntypedef struct ");
+        o.push_string(&stem);
+        o.push_str("__dyn { void *data; const ");
+        o.push_string(&stem);
+        o.push_str("__vt *vt; } ");
+        o.push_string(&stem);
+        o.push_str("__dyn;\nstatic inline void ");
+        o.push_string(&stem);
+        o.push_str("__dyn_free(");
+        o.push_string(&stem);
+        o.push_str("__dyn *const d) { d->vt->__free(d->data); }\n#endif\n");
+        if ok {
+            self.dyn_defs.push_string(&o);
+        }
+        o.free();
+        stem.free();
+        return ok;
+    }
+
+    /// Thunks + the vtable definition for one coercion pair (source type -> dyn stem); `own` makes
+    /// the vtable's `__free` destroy and deallocate the heap payload. Appends `<pair>` to `pair`.
+    fn dyn_pair(self: &mut Self, pm: ModuleId, dt: TypeId, srm: ModuleId, srt: TypeId, own: bool, pair: &mut String) bool {
+        let y = *self.p().module_ast_const(pm).type_at(dt);
+        if y.kind != TypeKind::TYPE_DYN || !self.dyn_request(pm, dt) {
+            return self.fail("dyn-req");
+        }
+        let mut stem = String::new();
+        if !self.mg.dyn_stem(pm, &y, &mut stem) {
+            stem.free();
+            return self.fail("dyn-stem");
+        }
+        let mut src = String::new();
+        if !self.mg.type_m(srm, srt, &mut src) {
+            src.free();
+            stem.free();
+            return self.fail("dyn-src");
+        }
+        pair.push_string(&src);
+        pair.push_str("__");
+        pair.push_string(&stem);
+        let mut h = 1469598103934665603u64;
+        {
+            let ps2 = pair.as_str();
+            for k in 0..ps2.len() {
+                h = (h ^ ps2.byte_at(k) as u64) * 1099511628211u64;
+            }
+        }
+        let seen = switch self.dyn_tab_seen.get(&h) {
+            Some(_v) => true,
+            None => false,
+        };
+        if seen {
+            src.free();
+            stem.free();
+            return true;
+        }
+        self.dyn_tab_seen.insert(h, 1);
+        let sy = *self.p().module_ast_const(srm).type_at(srt);
+        let is_clos = sy.kind == TypeKind::TYPE_FUNCTION;
+        let mut srcc = String::new();
+        let mut ok = self.mg.ctype(srm, srt, "", &mut srcc);
+        let a = self.p().module_ast_const(pm);
+        let it = *a.instance(y.as_data.inst);
+        let da = self.p().module_ast_const(it.module);
+        let dn = da.at_const(it.decl);
+        let mut tabs = String::new();
+        let mut slots = String::new();
+        if ok && dn.kind == NodeKind::NODE_FUNCTION_TYPE {
+            // one `call` thunk into the hoisted closure body (env passed as the erased data)
+            if !is_clos {
+                ok = self.fail("dyn-fnval");
+            }
+            if ok {
+                let cd = self.p().module_ast_const(sy.module).at_const(sy.as_data.decl);
+                if cd.kind != NodeKind::NODE_CLOSURE || cd.as_data.closure.captures.len == 0 {
+                    ok = self.fail("dyn-fnval");
+                }
+            }
+            if ok {
+                ok = self.dyn_thunk(
+                    it.module,
+                    NODE_NONE,
+                    dn.as_data.function_type.params,
+                    dn.as_data.function_type.returns,
+                    true,
+                    "call",
+                    pair.as_str(),
+                    srcc.as_str(),
+                    srm,
+                    srt,
+                    &mut tabs,
+                );
+                slots.push_str(", ");
+                slots.push_string(pair);
+                slots.push_str("__call");
+            }
+        } else if ok {
+            slots.push_str(", \"");
+            slots.push_string(&src);
+            slots.push_str("\"");
+            let gs = dn.as_data.interface_def.generics;
+            let mut nb: usize = 0;
+            let mut gi: u32 = 0;
+            while gi < gs.len && gi as u8 < it.n {
+                self.mg.push_sub(it.module, unsafe da.list(gs)[gi as usize], pm, unsafe it.args[gi as usize]);
+                nb += 1;
+                gi += 1;
+            }
+            let ms = dn.as_data.interface_def.items;
+            for i in 0..ms.len {
+                if !ok {
+                    break;
+                }
+                let mid = unsafe da.list(ms)[i as usize];
+                let mn = da.at_const(mid);
+                if mn.kind != NodeKind::NODE_FUNCTION || mn.as_data.function.params.len == 0 {
+                    continue;
+                }
+                let mut nm = String::new();
+                self.mg.ident(it.module, da.at_const(mn.as_data.function.name).as_data.name.text, &mut nm);
+                ok = self.dyn_thunk(
+                    it.module,
+                    mid,
+                    mn.as_data.function.params,
+                    mn.as_data.function.returns,
+                    false,
+                    nm.as_str(),
+                    pair.as_str(),
+                    srcc.as_str(),
+                    srm,
+                    srt,
+                    &mut tabs,
+                );
+                if ok {
+                    // the thunk body dispatches like a direct call would (custom impl or default)
+                    slots.push_str(", ");
+                    slots.push_string(pair);
+                    slots.push_str("__");
+                    slots.push_string(&nm);
+                }
+                nm.free();
+            }
+            self.mg.pop_subs(nb);
+        }
+        let mut fslot = String::from_str("0");
+        if ok && own {
+            fslot.truncate(0);
+            fslot.push_string(pair);
+            fslot.push_str("____free");
+            tabs.push_str("static void ");
+            tabs.push_string(&fslot);
+            tabs.push_str("(void *__self) {\n");
+            if self.is_destructible(srm, srt, 0) {
+                let mut fe = String::new();
+                ok = self.free_expr(srm, srt, &mut fe);
+                if ok {
+                    tabs.push_str("    ");
+                    tabs.push_string(&fe);
+                    tabs.push_str("((");
+                    tabs.push_string(&srcc);
+                    tabs.push_str(" *)__self);\n");
+                }
+                fe.free();
+            }
+            tabs.push_str("    Global __g = (Global){};\n    Global__dealloc(&__g, __self, sizeof(");
+            tabs.push_string(&srcc);
+            tabs.push_str("), _Alignof(");
+            tabs.push_string(&srcc);
+            tabs.push_str("));\n}\n");
+        }
+        if ok {
+            tabs.push_str("const ");
+            tabs.push_string(&stem);
+            tabs.push_str("__vt ");
+            tabs.push_string(pair);
+            tabs.push_str("__vtbl = { ");
+            tabs.push_string(&fslot);
+            tabs.push_string(&slots);
+            tabs.push_str(" };\n");
+            self.dyn_tabs.push_string(&tabs);
+            self.dyn_decls.push_str("extern const ");
+            self.dyn_decls.push_string(&stem);
+            self.dyn_decls.push_str("__vt ");
+            self.dyn_decls.push_string(pair);
+            self.dyn_decls.push_str("__vtbl;\n");
+        }
+        fslot.free();
+        slots.free();
+        tabs.free();
+        srcc.free();
+        src.free();
+        stem.free();
+        return ok;
+    }
+
+    // The declared single return type of `fnid` (pool `m`), or TYPE_NONE.
+    fn fn_ret_ty(self: &Self, m: ModuleId, fnid: NodeId) TypeId {
+        let a = self.p().module_ast_const(m);
+        let rs = a.at_const(fnid).as_data.function.returns;
+        if rs.len != 1 {
+            return TYPE_NONE;
+        }
+        let r0 = unsafe a.list(rs)[0];
+        let rn = a.at_const(r0);
+        let mut tn = r0;
+        if rn.kind == NodeKind::NODE_PARAMETER {
+            tn = rn.as_data.parameter.ty;
+        }
+        return a.type_of(tn);
+    }
+
+    /// One `--test` wrapper: `void __sc_test_w_<m>_<node>(void *__genv)` constructing the fixture
+    /// when the case wants one, calling the case, then tearing the fixture down (user teardown
+    /// first, then the type's own free -- the established wrapper shape).
+    pub fn emit_test_wrapper(
+        self: &mut Self,
+        tm: ModuleId,
+        func: NodeId,
+        wants: u8,
+        fx_init: NodeId,
+        fx_free: NodeId,
+        genv_m: ModuleId,
+        genv_init: NodeId,
+    ) bool {
+        self.err = "";
+        let mut fname = String::new();
+        let tgt = self.mg.method_target(tm, func);
+        if !self.mg.fn_sym(tm, func, tgt, true, &mut fname) {
+            fname.free();
+            return self.fail("test-sym");
+        }
+        self.out.push_str("void __sc_test_w_");
+        self.out.push_u64(tm);
+        self.out.push_str("_");
+        self.out.push_u64(func);
+        self.out.push_str("(void *__genv) {\n  (void)__genv;\n");
+        let mut ok = true;
+        let mut fxt = TYPE_NONE;
+        if (wants & 1) != 0 {
+            fxt = self.fn_ret_ty(tm, fx_init);
+            if fxt == TYPE_NONE {
+                ok = self.fail("test-fx");
+            }
+            if ok {
+                let mut dl = String::new();
+                ok = self.mg.ctype(tm, fxt, "__fx", &mut dl);
+                if ok {
+                    let mut isym = String::new();
+                    ok = self.mg.fn_sym(tm, fx_init, self.mg.method_target(tm, fx_init), true, &mut isym);
+                    if ok {
+                        self.out.push_str("  ");
+                        self.out.push_string(&dl);
+                        self.out.push_str(" = ");
+                        self.out.push_string(&isym);
+                        self.out.push_str("();\n");
+                    }
+                    isym.free();
+                }
+                dl.free();
+            }
+        }
+        if ok {
+            self.out.push_str("  ");
+            self.out.push_string(&fname);
+            self.out.push_str("(");
+            if (wants & 1) != 0 {
+                self.out.push_str("&__fx");
+            }
+            if (wants & 2) != 0 {
+                if (wants & 1) != 0 {
+                    self.out.push_str(", ");
+                }
+                let gt = self.fn_ret_ty(genv_m, genv_init);
+                let mut gc = String::new();
+                ok = gt != TYPE_NONE && self.mg.ctype(genv_m, gt, "", &mut gc);
+                if ok {
+                    self.out.push_str("(const ");
+                    self.out.push_string(&gc);
+                    self.out.push_str(" *)__genv");
+                } else {
+                    let _ = self.fail("test-genv");
+                }
+                gc.free();
+            }
+            self.out.push_str(");\n");
+        }
+        if ok && (wants & 1) != 0 && fx_free != NODE_NONE {
+            let mut fsym = String::new();
+            ok = self.mg.fn_sym(tm, fx_free, self.mg.method_target(tm, fx_free), true, &mut fsym);
+            if ok {
+                self.out.push_str("  ");
+                self.out.push_string(&fsym);
+                self.out.push_str("(&__fx);\n");
+            }
+            fsym.free();
+        }
+        if ok && (wants & 1) != 0 && self.is_destructible(tm, fxt, 0) {
+            let mut fe = String::new();
+            ok = self.free_expr(tm, fxt, &mut fe);
+            if ok {
+                self.out.push_str("  ");
+                self.out.push_string(&fe);
+                self.out.push_str("(&__fx);\n");
+            }
+            fe.free();
+        }
+        self.out.push_str("}\n");
+        fname.free();
+        return ok;
+    }
+
+    /// The global-env hooks: `__sc_test_genv_init` keeps the env in a static cell; `_free` runs the
+    /// user teardown then the type's own free.
+    pub fn emit_test_genv(self: &mut Self, gm: ModuleId, ginit: NodeId, gfree: NodeId) bool {
+        self.err = "";
+        let gt = self.fn_ret_ty(gm, ginit);
+        if gt == TYPE_NONE {
+            return self.fail("test-genv");
+        }
+        let mut gdecl = String::new();
+        let mut gc = String::new();
+        let mut isym = String::new();
+        let mut ok = self.mg.ctype(gm, gt, "__sc_genv", &mut gdecl) && self.mg.ctype(gm, gt, "", &mut gc) && self.mg.fn_sym(
+            gm,
+            ginit,
+            self.mg.method_target(gm, ginit),
+            true,
+            &mut isym,
+        );
+        if ok {
+            self.out.push_str("void *__sc_test_genv_init(void) { static ");
+            self.out.push_string(&gdecl);
+            self.out.push_str("; __sc_genv = ");
+            self.out.push_string(&isym);
+            self.out.push_str("(); return &__sc_genv; }\n");
+            self.out.push_str("void __sc_test_genv_free(void *__p) {\n  (void)__p;\n");
+            if gfree != NODE_NONE {
+                let mut fsym = String::new();
+                ok = self.mg.fn_sym(gm, gfree, self.mg.method_target(gm, gfree), true, &mut fsym);
+                if ok {
+                    self.out.push_str("  ");
+                    self.out.push_string(&fsym);
+                    self.out.push_str("((");
+                    self.out.push_string(&gc);
+                    self.out.push_str(" *)__p);\n");
+                }
+                fsym.free();
+            }
+            if ok && self.is_destructible(gm, gt, 0) {
+                let mut fe = String::new();
+                ok = self.free_expr(gm, gt, &mut fe);
+                if ok {
+                    self.out.push_str("  ");
+                    self.out.push_string(&fe);
+                    self.out.push_str("((");
+                    self.out.push_string(&gc);
+                    self.out.push_str(" *)__p);\n");
+                }
+                fe.free();
+            }
+            self.out.push_str("}\n");
+        }
+        gdecl.free();
+        gc.free();
+        isym.free();
+        if !ok && self.err.len() == 0 {
+            return self.fail("test-genv");
+        }
+        return ok;
+    }
+
+    /// One dispatch thunk: `static <ret> <pair>__<name>(void *__self, ...) { [return] <impl>((<srcc> *)__self, ...); }`.
+    /// Interface thunks number args by source param index (`_a1`...); `dyn fn` thunks from `_a0`.
+    fn dyn_thunk(
+        self: &mut Self,
+        dm: ModuleId,
+        mid: NodeId,
+        ps: NodeList,
+        rs: NodeList,
+        all_params: bool,
+        name: str,
+        pair: str,
+        srcc: str,
+        srm: ModuleId,
+        srt: TypeId,
+        tabs: &mut String,
+    ) bool {
+        let da = self.p().module_ast_const(dm);
+        let mut ret = String::new();
+        let mut ok = true;
+        let mut is_void = false;
+        if rs.len == 0 {
+            ret.push_str("void");
+            is_void = true;
+        } else if rs.len == 1 {
+            let r0 = unsafe da.list(rs)[0];
+            let rn = da.at_const(r0);
+            let mut tn = r0;
+            if rn.kind == NodeKind::NODE_PARAMETER {
+                tn = rn.as_data.parameter.ty;
+            }
+            ok = self.mg.ctype(dm, da.type_of(tn), "", &mut ret);
+        } else {
+            ok = false;
+        }
+        let mut head = String::new();
+        let start: u32 = if all_params {
+            0;
+        } else {
+            1;
+        };
+        if ok {
+            head.push_str("static ");
+            head.push_string(&ret);
+            head.push_str(" ");
+            head.push_str(pair);
+            head.push_str("__");
+            head.push_str(name);
+            head.push_str("(void *__self");
+            for i in start..ps.len {
+                if !ok {
+                    break;
+                }
+                let pid = unsafe da.list(ps)[i as usize];
+                head.push_str(", ");
+                let mut an = String::from_str("_a");
+                an.push_u64(i);
+                ok = self.mg.ctype(dm, da.type_of(pid), an.as_str(), &mut head);
+                an.free();
+            }
+        }
+        let sy = *self.p().module_ast_const(srm).type_at(srt);
+        if ok {
+            head.push_str(") { ");
+            if !is_void {
+                head.push_str("return ");
+            }
+            if sy.kind == TypeKind::TYPE_FUNCTION {
+                let mut cs = String::new();
+                self.mg.closure_sym(sy.module, sy.as_data.decl, &mut cs);
+                head.push_string(&cs);
+                head.push_str("((const ");
+                head.push_str(srcc);
+                head.push_str(" *)__self");
+                cs.free();
+            } else if mid == NODE_NONE {
+                ok = self.fail("dyn-thunk");
+            } else {
+                ok = self.iface_target_sym(srm, srt, DefId { module: dm, node: mid }, &mut head);
+                head.push_str("((");
+                head.push_str(srcc);
+                head.push_str(" *)__self");
+            }
+            for i in start..ps.len {
+                head.push_str(", _a");
+                head.push_u64(i);
+            }
+            head.push_str("); }\n");
+        }
+        if ok {
+            tabs.push_string(&head);
+        }
+        head.free();
+        ret.free();
+        return ok;
+    }
+
     fn callee_sym(
         self: &mut Self,
         b: &ir::CoreBody,
@@ -1679,68 +2466,8 @@ extend CEmit {
                 sym.free();
                 return self.fail("iface-default-recv");
             }
-            // a CUSTOM impl on the receiver wins over the interface default (bound dispatch
-            // resolves per instantiation)
-            {
-                let ca8 = self.p().module_ast_const(callee.module);
-                let msp8 = ca8.at_const(ca8.at_const(callee.node).as_data.function.name).as_data.name.text;
-                let msrc8 = self.p().modules.at(callee.module as usize).source.as_str();
-                let mname8 = msrc8.slice(msp8.start as usize, msp8.end as usize);
-                let mut impl_sym = String::new();
-                if self.mg.method_by_name(rm6, rt6, mname8, &mut impl_sym) {
-                    dst.push_string(&impl_sym);
-                    impl_sym.free();
-                    sym.free();
-                    return true;
-                }
-                impl_sym.free();
-            }
-            let y7 = *self.p().module_ast_const(rm6).type_at(rt6);
-            if y7.kind == TypeKind::TYPE_BUILTIN {
-                self.mg.modpfx(callee.module, &mut sym);
-                if !self.mg.type_m(rm6, rt6, &mut sym) {
-                    sym.free();
-                    return self.fail("iface-default-recv");
-                }
-            } else if y7.kind == TypeKind::TYPE_INSTANCE {
-                let it7 = *self.p().module_ast_const(rm6).instance(y7.as_data.inst);
-                if !self.mg.inst_name(rm6, &it7, &mut sym) {
-                    sym.free();
-                    return self.fail("iface-default-inst");
-                }
-            } else {
-                self.mg.modpfx(callee.module, &mut sym);
-                let da7 = self.p().module_ast_const(y7.module);
-                self.mg.ident(
-                    y7.module,
-                    da7.at_const(da7.at_const(y7.as_data.decl).as_data.aggregate.name).as_data.name.text,
-                    &mut sym,
-                );
-            }
-            sym.push_str("__");
-            let ca7 = self.p().module_ast_const(callee.module);
-            self.mg.ident(
-                callee.module,
-                ca7.at_const(ca7.at_const(callee.node).as_data.function.name).as_data.name.text,
-                &mut sym,
-            );
-            // demand the default BODY under `Self -> receiver` (the interface DECL NODE is Self's
-            // binding key -- the extend-frame convention)
-            if self.collect_demand {
-                let fd7 = ca7.at_const(callee.node);
-                if fd7.kind == NodeKind::NODE_FUNCTION && !fd7.as_data.function.is_extern && fd7.as_data.function.body != NODE_NONE {
-                    let idecl = self.mg.in_interface(callee.module, callee.node);
-                    let mut snap = Vector::<mbe::MSub>::new();
-                    for i7 in 0..self.mg.subs.len() {
-                        snap.push(*self.mg.subs.at(i7));
-                    }
-                    snap.push(mbe::MSub { pm: callee.module, pnode: idecl, am: rm6, at: rt6 });
-                    self.demand.push(Demand { def: callee, sym: sym.clone(), subs: snap, sfx: String::new() });
-                }
-            }
-            dst.push_string(&sym);
             sym.free();
-            return true;
+            return self.iface_target_sym(rm6, rt6, callee, dst);
         }
         let is_minst = self.mg.in_generic_extend(callee.module, callee.node);
         let mut rit = TyInstance { decl: NODE_NONE };
@@ -2095,6 +2822,42 @@ extend CEmit {
                 ts.free();
                 return ok;
             }
+            if k == ir::IN_TYPE_INFO as u32 {
+                if rv.b == TYPE_NONE {
+                    return self.fail("type-info");
+                }
+                let mut rm = b.module;
+                let mut rt = rv.b;
+                self.rty(b, rv.b, &mut rm, &mut rt);
+                let mut mg9 = String::new();
+                if !self.mg.type_m(rm, rt, &mut mg9) {
+                    mg9.free();
+                    return self.fail("type-info");
+                }
+                let mut sym = String::from_str("__sc_ti__");
+                sym.push_string(&mg9);
+                let mut h = 1469598103934665603u64;
+                {
+                    let ss = sym.as_str();
+                    for k2 in 0..ss.len() {
+                        h = (h ^ ss.byte_at(k2) as u64) * 1099511628211u64;
+                    }
+                }
+                let fresh = switch self.ti_seen.get(&h) {
+                    Some(_v) => false,
+                    None => true,
+                };
+                if fresh {
+                    self.ti_seen.insert(h, 1);
+                    self.ti_reqs.push(
+                        StatRef { em: rm, def: DefId { module: 0, node: NODE_NONE }, sym: sym.clone(), ty: rt },
+                    );
+                }
+                dst.push_string(&sym);
+                sym.free();
+                mg9.free();
+                return true;
+            }
             if k == ir::IN_ZEROED as u32 {
                 let mut ts = String::new();
                 let ok = self.ty_c(b.module, rv.target, "", &mut ts);
@@ -2151,6 +2914,76 @@ extend CEmit {
                 ok = self.emit_operand(b, b.oper_pool[(rv.a + i) as usize], dst);
             }
             dst.push_str(" }");
+            return ok;
+        }
+        if rv.kind == ir::RV_DYN {
+            // borrowed erasure: the operand is already a pointer. Owned erasures (Box payloads,
+            // boxed closure envs) are statement-level (emit_stmt intercepts them).
+            let oty = b.operands.at(rv.a as usize).ty;
+            let mut om = b.module;
+            let mut ot = oty;
+            self.rty(b, oty, &mut om, &mut ot);
+            let oy = *self.p().module_ast_const(om).type_at(ot);
+            let mut dm = b.module;
+            let mut dt = rv.target;
+            self.rty(b, rv.target, &mut dm, &mut dt);
+            let mut tc = String::new();
+            let mut pair = String::new();
+            let mut ok = self.ty_c(b.module, rv.target, "", &mut tc);
+            if ok && (oy.kind == TypeKind::TYPE_REFERENCE || oy.kind == TypeKind::TYPE_POINTER) {
+                let mut em = om;
+                let mut et = oy.as_data.elem;
+                if !self.mg.resolve(om, oy.as_data.elem, &mut em, &mut et) {
+                    ok = self.fail("dyn-src");
+                }
+                if ok {
+                    ok = self.dyn_pair(dm, dt, em, et, false, &mut pair);
+                }
+                if ok {
+                    dst.push_str("((");
+                    dst.push_string(&tc);
+                    dst.push_str("){ .data = (void *)");
+                    ok = self.emit_operand(b, rv.a, dst);
+                    dst.push_str(", .vt = &");
+                    dst.push_string(&pair);
+                    dst.push_str("__vtbl })");
+                }
+            } else if ok {
+                // owned Box source: the payload pointer moves into the fat value
+                let mut boxed = false;
+                if oy.kind == TypeKind::TYPE_INSTANCE {
+                    let a9 = self.p().module_ast_const(om);
+                    let it9 = *a9.instance(oy.as_data.inst);
+                    let d9 = self.p().module_ast_const(it9.module);
+                    let n9 = d9.at_const(d9.at_const(it9.decl).as_data.aggregate.name).as_data.name.text;
+                    let s9 = self.p().modules.at(it9.module as usize).source.as_str();
+                    if s9.slice(n9.start as usize, n9.end as usize) == "Box" && it9.n > 0 {
+                        let mut em = om;
+                        let mut et = it9.args[0];
+                        if !self.mg.resolve(om, it9.args[0], &mut em, &mut et) {
+                            ok = self.fail("dyn-src");
+                        }
+                        if ok {
+                            ok = self.dyn_pair(dm, dt, em, et, true, &mut pair);
+                        }
+                        boxed = ok;
+                        if ok {
+                            dst.push_str("((");
+                            dst.push_string(&tc);
+                            dst.push_str("){ .data = (void *)(");
+                            ok = self.emit_operand(b, rv.a, dst);
+                            dst.push_str(").ptr, .vt = &");
+                            dst.push_string(&pair);
+                            dst.push_str("__vtbl })");
+                        }
+                    }
+                }
+                if ok && !boxed {
+                    ok = self.fail("dyn-owned");
+                }
+            }
+            tc.free();
+            pair.free();
             return ok;
         }
         return self.fail("rvalue");
@@ -2723,6 +3556,18 @@ extend CEmit {
     // The C expression that frees resolved type `(rm, rt)` (a callable symbol); also records the
     // demand/glue the call needs.
     fn free_expr(self: &mut Self, rm: ModuleId, rt: TypeId, out: &mut String) bool {
+        let yd = *self.p().module_ast_const(rm).type_at(rt);
+        if yd.kind == TypeKind::TYPE_DYN {
+            // owned dyn destroys through the stem's guarded inline helper
+            if !self.dyn_request(rm, rt) {
+                return false;
+            }
+            if !self.mg.dyn_stem(rm, &yd, out) {
+                return self.fail("dyn-stem");
+            }
+            out.push_str("__dyn_free");
+            return true;
+        }
         if !self.mg.free_target(rm, rt, out) {
             return false;
         }
@@ -2741,7 +3586,8 @@ extend CEmit {
         let mut head = String::new();
         let ok0 = self.ty_c(rm, rt, "", &mut head);
         if ok0 {
-            self.out.push_str("static void ");
+            // extern: drop sites in every TU spell this symbol; the instance TU defines it once
+            self.out.push_str("void ");
             self.out.push_string(&sym);
             self.out.push_str("(");
             self.out.push_string(&head);
@@ -2999,7 +3845,22 @@ extend CEmit {
             if t.dests_len > 1 {
                 return self.emit_multi_call(b, t);
             }
-            if self.collect_demand {
+            // an interface-member call whose receiver is a dyn value dispatches through the
+            // vtable: no symbol, no call-site prototype
+            let mut dyn_recv = ir::IR_NONE;
+            if t.callee.node != NODE_NONE && t.args_len > 0 && self.mg.in_interface(t.callee.module, t.callee.node) != NODE_NONE {
+                let a0 = b.oper_pool[t.args_start as usize];
+                let mut om0 = b.module;
+                let mut ot0 = b.operands.at(a0 as usize).ty;
+                self.rty(b, b.operands.at(a0 as usize).ty, &mut om0, &mut ot0);
+                if self.p().module_ast_const(om0).type_at(ot0).kind == TypeKind::TYPE_DYN {
+                    dyn_recv = a0;
+                    if !self.dyn_request(om0, ot0) {
+                        return false;
+                    }
+                }
+            }
+            if self.collect_demand && dyn_recv == ir::IR_NONE {
                 self.collect_extern_proto(b, t);
             }
             let mut line = String::new();
@@ -3019,21 +3880,42 @@ extend CEmit {
                     line.push_str(" = ");
                 }
             }
-            // a capturing closure value calls its hoisted function with the env first
+            // a capturing closure value calls its hoisted function with the env first; a dyn fn
+            // value dispatches through its vtable's `call` slot
             let mut env_first = false;
+            let mut dyn_val = false;
             if ok && t.callee.node == NODE_NONE {
                 let cop = *b.operands.at(t.a as usize);
-                let cy = *self.p().module_ast_const(b.module).type_at(cop.ty);
-                if cy.kind == TypeKind::TYPE_FUNCTION {
+                let mut cmV = b.module;
+                let mut ctV = cop.ty;
+                self.rty(b, cop.ty, &mut cmV, &mut ctV);
+                let cy = *self.p().module_ast_const(cmV).type_at(ctV);
+                if cy.kind == TypeKind::TYPE_DYN {
+                    if !self.dyn_request(cmV, ctV) {
+                        return false;
+                    }
+                    ok = self.emit_operand(b, t.a, &mut line);
+                    line.push_str(".vt->call");
+                    dyn_val = true;
+                } else if cy.kind == TypeKind::TYPE_FUNCTION {
                     let cd = self.p().module_ast_const(cy.module).at_const(cy.as_data.decl);
                     if cd.kind == NodeKind::NODE_CLOSURE && cd.as_data.closure.captures.len != 0 {
                         self.mg.closure_sym(cy.module, cy.as_data.decl, &mut line);
                         env_first = true;
                     }
                 }
-                if !env_first {
+                if !env_first && !dyn_val {
                     ok = self.emit_operand(b, t.a, &mut line);
                 }
+            } else if ok && dyn_recv != ir::IR_NONE {
+                ok = self.emit_operand(b, dyn_recv, &mut line);
+                line.push_str(".vt->");
+                let ca0 = self.p().module_ast_const(t.callee.module);
+                self.mg.ident(
+                    t.callee.module,
+                    ca0.at_const(ca0.at_const(t.callee.node).as_data.function.name).as_data.name.text,
+                    &mut line,
+                );
             } else if ok {
                 let mut rty2 = TYPE_NONE;
                 if t.args_len > 0 {
@@ -3054,9 +3936,22 @@ extend CEmit {
                         line.push_str(", ");
                     }
                 }
+                if dyn_val {
+                    ok = self.emit_operand(b, t.a, &mut line);
+                    line.push_str(".data");
+                    if t.args_len != 0 {
+                        line.push_str(", ");
+                    }
+                }
                 for i in 0..t.args_len {
                     if !ok {
                         break;
+                    }
+                    if dyn_recv != ir::IR_NONE && i == 0 {
+                        // the erased receiver: its data pointer takes the self slot
+                        ok = self.emit_operand(b, dyn_recv, &mut line);
+                        line.push_str(".data");
+                        continue;
                     }
                     if i != 0 {
                         line.push_str(", ");
@@ -3078,7 +3973,64 @@ extend CEmit {
             line.free();
             return ok;
         }
+        if t.kind == ir::TM_ASSERT {
+            let mut cnd = String::new();
+            let mut msgv = String::new();
+            let mut ok = self.emit_operand(b, t.a, &mut cnd);
+            if ok && t.args_len != 0 {
+                ok = self.emit_operand(b, b.oper_pool[t.args_start as usize], &mut msgv);
+            }
+            if ok {
+                let msrc = self.p().modules.at(b.module as usize).source.as_str();
+                self.out.push_str("  if (!(");
+                self.out.push_string(&cnd);
+                self.out.push_str(")) { ");
+                if t.args_len != 0 {
+                    self.out.push_str("const str __scm = ");
+                    self.out.push_string(&msgv);
+                    self.out.push_str("; ");
+                }
+                self.out.push_str("fprintf(stderr, \"assertion failed: `");
+                push_pct_c_escaped(msrc.slice(t.span.start as usize, t.span.end as usize), &mut self.out);
+                self.out.push_str("`");
+                if t.args_len != 0 {
+                    self.out.push_str(": %.*s");
+                }
+                self.out.push_str("\\n  at ");
+                push_pct_c_escaped(self.p().modules.at(b.module as usize).file.as_str(), &mut self.out);
+                self.out.push_str(":");
+                let mut ln: u64 = 1;
+                for k in 0..t.span.start as usize {
+                    if msrc.byte_at(k) == 10 {
+                        ln += 1;
+                    }
+                }
+                self.out.push_u64(ln);
+                self.out.push_str("\\n\"");
+                if t.args_len != 0 {
+                    self.out.push_str(", (int)__scm.len, (const char *)__scm.ptr");
+                }
+                self.out.push_str("); fflush(stderr); abort(); }\n  goto bb_");
+                self.out.push_u64(t.t0);
+                self.out.push_str(";\n");
+            }
+            cnd.free();
+            msgv.free();
+            return ok;
+        }
         return self.fail("terminator");
+    }
+}
+
+// push_c_escaped for printf format strings: `%` doubles so source text never reads as a conversion.
+pub fn push_pct_c_escaped(txt: str, dst: &mut String) {
+    for i in 0..txt.len() {
+        let b = txt.byte_at(i);
+        if b == 37 {
+            dst.push_str("%%");
+        } else {
+            push_c_escaped(txt.slice(i, i + 1), dst);
+        }
     }
 }
 

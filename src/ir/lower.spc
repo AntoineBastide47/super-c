@@ -2270,10 +2270,31 @@ extend Lowerer {
         };
         // `type_info::<T>()` / `zeroed::<T>()`: compiler intrinsics, not resolved functions.
         if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "type_info") {
-            return self.intrinsic_value(ir::IN_TYPE_INFO, ty, sp);
+            // the subject type rides in `b` so the backend can name the exported descriptor
+            let mu = self.f.type_args(id);
+            let mut bt9 = TYPE_NONE;
+            if mu != null && unsafe mu.n != 0 {
+                bt9 = unsafe mu.args[0];
+            }
+            return self.intrinsic_value(ir::IN_TYPE_INFO, bt9, ty, sp);
         }
         if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "zeroed") {
-            return self.intrinsic_value(ir::IN_ZEROED, ty, sp);
+            return self.intrinsic_value(ir::IN_ZEROED, 0, ty, sp);
+        }
+        // assert family: compiler builtins -- lower to TM_ASSERT so the backend bakes the failing
+        // expression's text and location (the std placeholder bodies are never called). The
+        // typechecker records no call_info for them, so the callee resolves through its identifier.
+        if d.args.len >= 1 {
+            let mut adef = target;
+            if adef.node == NODE_NONE && self.f.node(d.callee).kind == NodeKind::NODE_IDENTIFIER {
+                adef = self.f.res(d.callee);
+            }
+            if adef.node != NODE_NONE {
+                let ak = self.assert_kind(adef);
+                if ak != 0 {
+                    return self.lower_assert(id, ak, ty, sp);
+                }
+            }
         }
         // `d.free()` on a dyn value has no resolved method: destruction IS the call. Lower it as
         // an explicit drop so the analyses see the consume and the backend prints glue.
@@ -2327,7 +2348,7 @@ extend Lowerer {
         return self.emit_call(target, callee_op, start, n, ts, tn, ty, sp);
     }
 
-    fn intrinsic_value(self: &mut Self, ik: u8, ty: TypeId, sp: tok::Span) ir::OperandId {
+    fn intrinsic_value(self: &mut Self, ik: u8, bv: TypeId, ty: TypeId, sp: tok::Span) ir::OperandId {
         let t = self.temp(ty, sp);
         let pl = self.place_of_local(t);
         self.assign(
@@ -2335,7 +2356,7 @@ extend Lowerer {
             ir::Rvalue {
                 kind: ir::RV_INTRINSIC,
                 a: self.body.oper_pool.len() as u32,
-                b: 0,
+                b: bv,
                 c: ik,
                 target: ty,
                 item: DefId { module: 0, node: NODE_NONE },
@@ -2346,6 +2367,100 @@ extend Lowerer {
     }
 
     // An unresolved callee spelling a compiler intrinsic name (behind an optional specialization).
+    // 1 assert / 2 assert_eq / 3 assert_ne when `t` is the prelude's builtin placeholder (the
+    // typechecker's own gate: a prelude-module function with one of the three names).
+    fn assert_kind(self: &Self, t: DefId) u8 {
+        let p = unsafe &*self.pkg;
+        if !p.modules.at(t.module as usize).prelude {
+            return 0;
+        }
+        let a = unsafe &*p.module_ast_const(t.module);
+        let n = a.at_const(t.node);
+        if n.kind != NodeKind::NODE_FUNCTION {
+            return 0;
+        }
+        let sp2 = a.at_const(n.as_data.function.name).as_data.name.text;
+        let nm = p.modules.at(t.module as usize).source.as_str().slice(sp2.start as usize, sp2.end as usize);
+        if nm == "assert" {
+            return 1;
+        }
+        if nm == "assert_eq" {
+            return 2;
+        }
+        if nm == "assert_ne" {
+            return 3;
+        }
+        return 0;
+    }
+
+    // `assert(cond[, msg])` asserts the condition directly (the span = the condition's text);
+    // eq/ne compare through a bool temp (RV_BINARY dispatches str/struct equality downstream) and
+    // carry the whole call as their text. The optional message rides the terminator's arg range.
+    fn lower_assert(self: &mut Self, id: NodeId, ak: u8, ty: TypeId, sp: tok::Span) ir::OperandId {
+        let d = self.f.node(id).as_data.call;
+        let a0 = unsafe self.f.list(d.args)[0];
+        let mut cond = ir::IR_NONE;
+        let mut msg = ir::IR_NONE;
+        let mut tsp = self.f.node(a0).span;
+        if ak == 1 {
+            cond = self.lower_expr(a0);
+            if d.args.len >= 2 {
+                msg = self.lower_expr(unsafe self.f.list(d.args)[1]);
+                if msg == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+            }
+        } else {
+            if d.args.len < 2 {
+                self.fail_at("assert-args", id);
+                return ir::IR_NONE;
+            }
+            let l = self.lower_expr(a0);
+            let r = self.lower_expr(unsafe self.f.list(d.args)[1]);
+            if l == ir::IR_NONE || r == ir::IR_NONE {
+                return ir::IR_NONE;
+            }
+            tsp = self.f.node(id).span;
+            let bt = Ast::builtin(BuiltinType::BT_BOOL);
+            let ct = self.temp(bt, sp);
+            let cpl = self.place_of_local(ct);
+            let tokv: u8 = if ak == 2 {
+                tt::TokenType::EqualEqual as u8;
+            } else {
+                tt::TokenType::BangEqual as u8;
+            };
+            self.assign(
+                cpl,
+                ir::Rvalue {
+                    kind: ir::RV_BINARY,
+                    a: l,
+                    b: r,
+                    c: tokv,
+                    target: bt,
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
+                sp,
+            );
+            cond = self.copy_op(cpl);
+        }
+        if cond == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let mut tm = self.term0(ir::TM_ASSERT, tsp);
+        tm.a = cond;
+        if msg != ir::IR_NONE {
+            let mut mv = Vector::<ir::OperandId>::new();
+            mv.push(msg);
+            tm.args_start = self.pool_ops(&mv);
+            tm.args_len = 1;
+            mv.free();
+        }
+        let cont = self.open_block();
+        tm.t0 = cont;
+        self.seal(tm, cont);
+        return self.unit_op(ty, sp);
+    }
+
     fn is_intrinsic_callee(self: &Self, callee: NodeId, name: str) bool {
         let mut c = callee;
         if self.f.node(c).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {

@@ -66,6 +66,11 @@ extend TypedFacts {
         return self.a().resolution_def(n);
     }
 
+    /// The type args recorded for `n` (turbofish/inference), or null.
+    pub const fn type_args(self: &Self, n: NodeId) *const MonoUse {
+        return self.a().type_args(n);
+    }
+
     /// The call target + ABI data the type checker selected at call node `n`
     /// ((fmod << 40 | fdecl << 8 | skip) -- the record borrowck replays), or None.
     pub const fn call_info(self: &Self, n: NodeId) Option<u64> {

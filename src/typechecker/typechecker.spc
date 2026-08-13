@@ -9042,7 +9042,14 @@ extend TypeChecker {
                 kind: NodeKind::NODE_LET,
                 span: kw,
                 as_data: NodeAs {
-                    let_stmt: LetData { name: self.tc_ident(kw), ty: NODE_NONE, value: newc, is_mutable: true },
+                    // every segment/placeholder append reassigns the binding; an empty template
+                    // appends nothing, so `mut` would lint as unneeded
+                    let_stmt: LetData {
+                        name: self.tc_ident(kw),
+                        ty: NODE_NONE,
+                        value: newc,
+                        is_mutable: content.start < content.end,
+                    },
                 },
             },
         );
