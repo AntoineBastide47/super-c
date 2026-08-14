@@ -15,7 +15,6 @@ import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
 import consteval::consteval as ce;
-import codegen::codegen as cg;
 import utils::errors as diag;
 import driver::util as *;
 

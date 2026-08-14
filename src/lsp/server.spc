@@ -455,8 +455,6 @@ extend PubSet {
         for i in 0..self.uris.len() {
             if self.uris.at(i).as_str() == uri.as_str() {
                 self.arrs.set(i, arr);
-                let u = uri;
-                u.free();
                 return;
             }
         }

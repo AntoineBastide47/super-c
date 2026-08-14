@@ -14,7 +14,8 @@ import ast::parser as par;
 import resolver::resolver as res;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
-import codegen::codegen as cg;
+import driver::emit as demit;
+import driver::test as dtest;
 import module::loader as loader;
 import consteval::consteval as ce;
 import driver_shim as shim;
@@ -353,29 +354,37 @@ pub fn compile_c(src: str) CompiledC {
         out.errors = rr.errors;
         return out;
     }
-    loader::package_propagate_instances(&mut p);
-    let f = unsafe tmpfile();
-    if f == null {
+    for i in 0..n {
+        h_borrowck(&mut p, i, uidx, &mut rr);
+    }
+    if rr.errors != 0 {
+        out.errors = rr.errors;
+        return out;
+    }
+    // Whole-package emission through the production backend: every shared header plus every TU,
+    // concatenated so prelude definitions (`str`, monomorphized Slice/Box, ...) are inspectable.
+    let tplan = dtest::TestPlan::new(n);
+    let mut o = demit::CemitOut::new(n);
+    demit::cemit_package(&mut p, false, &tplan, null, &mut o);
+    if o.skips != 0 {
+        out.errors = o.skips as usize;
+        return out;
+    }
+    let mut code = String::new();
+    code.push_string(&o.types_h);
+    code.push_string(&o.protos_h);
+    for t in 0..n {
+        code.push_string(o.tus.at(t));
+    }
+    code.push_string(&o.inst_c);
+    let buf = (unsafe stdlib::malloc(code.len() + 1)) as *mut char;
+    if buf == null {
         out.errors = 1;
         return out;
     }
-    // Emit EVERY module's header + .c (like tests/test_harness.h's sc_codegen concatenation), so prelude
-    // definitions (`str`, monomorphized Slice/Box, ...) are inspectable, not just the user snippet.
-    for mi in 0..n {
-        let msrc = p.modules[mi].source.as_str().ptr() as *const char;
-        let mslen = p.modules[mi].source.len();
-        let ma = (&mut p.modules[mi].ast) as *mut Ast; // codegen borrows the ast in place
-        let cgpkg = (&mut p) as *mut loader::Package;
-        let mut c = cg::Codegen::new(ma, str::from_raw(msrc as *const u8, mslen), cgpkg);
-        c.set_multifile(true);
-        c.codegen_emit_header(f);
-        c.codegen_emit(f);
-        if mi == uidx && c.has_errors() {
-            out.errors = c.errors.errors.len();
-        }
-    }
-    out.code = read_stream(f);
-    unsafe stdio::fclose(f);
+    unsafe cstring::memcpy(buf, code.as_ptr(), code.len());
+    unsafe buf[code.len()] = 0 as char;
+    out.code = buf;
     return out;
 }
 

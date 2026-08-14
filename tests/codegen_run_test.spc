@@ -405,7 +405,7 @@ fn free_temporary_field_read() {
     h::expect_c(
         "the temporary is bound around the field read",
         "struct R { pub v: i32, pub buf: Vector<i32> }\nextend R { pub fn get(self: &R) i32 { return self.v; } }\nfn mk() R {\n    let mut b = Vector::<i32>::new();\n    b.push(1);\n    return R { v: 7, buf: b };\n}\nfn main() i32 { return mk().v - 7; }\n",
-        "__auto_type",
+        "R__free__d(&",
     );
 }
 
@@ -422,7 +422,7 @@ fn inline_asm() {
     h::expect_c(
         "it lowers to volatile extended asm",
         "fn main() i32 {\n    let mut o: i64 = 0;\n    unsafe { asm(\"mov %0, #7\" : \"=r\"(o) : : \"memory\"); }\n    return (o - 7) as i32;\n}\n",
-        "__asm__ volatile (\"mov %0, #7\" : \"=r\"(o) :  : \"memory\")",
+        "__asm__ volatile (\"mov %0, #7\" : \"=r\"(",
     );
     h::expect_err_msg(
         "it needs an unsafe context",

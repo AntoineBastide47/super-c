@@ -1925,8 +1925,6 @@ extend Parser {
             }
             self.ast.push(ext);
         }
-        gid_copy.free();
-        gsp_copy.free();
         self.derive_ifaces.clear();
     }
 

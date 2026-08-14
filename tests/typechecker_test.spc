@@ -2810,7 +2810,7 @@ fn owning_constants() {
     h::expect_c(
         "its bytes live in the constant itself",
         "const S: String = String::from_str(\"hi\");\nfn main() i32 { return (S.len() as i32) - 2; }\n",
-        ".small = { .data = { 104U, 105U",
+        ".small = { .data = { 104, 105",
     );
     h::expect_exit(
         "a union constant keeps the member it was written through",

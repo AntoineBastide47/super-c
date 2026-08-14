@@ -1129,24 +1129,19 @@ pub fn eprintln(_fmt: str, ...) {}
 // checker-built sugar block owns no live String at its end.
 pub fn sugar_print(f: String) {
     f.print();
-    f.free();
 }
 pub fn sugar_println(f: String) {
     f.println();
-    f.free();
 }
 pub fn sugar_eprint(f: String) {
     f.eprint();
-    f.free();
 }
 pub fn sugar_eprintln(f: String) {
     f.eprintln();
-    f.free();
 }
 // `format_into`'s desugar tail: append the rendered piece into the destination buffer, consuming it.
 pub fn sugar_format_into(dst: &mut String, f: String) {
     dst.push_string(&f);
-    f.free();
 }
 
 // Like `format`, but APPENDS the rendered output into this buffer instead of returning a new String --

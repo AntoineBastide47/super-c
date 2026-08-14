@@ -17,7 +17,6 @@ import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
 import consteval::consteval as ce;
-import codegen::codegen as cg;
 import utils::errors as diag;
 import driver::util as *;
 import driver::extc as *;
@@ -42,7 +41,7 @@ fn run_file(
     cflags: str,
 ) i32 {
     let mut p = loader::package_load(path, std_dir, bootstrap_tags, target);
-    p.arch = arch; // --arch= (else the host) is the axis `@arch` gates on
+    p.arch = arch;
     // A standalone script is a binary with no test suite to count as callers: unreachable pub
     // functions are dead weight. Project trees get this from the whole-workspace lint instead,
     // where @test roots keep test-only helpers alive.
@@ -56,7 +55,7 @@ fn run_file(
     if p.ok {
         let mut ceval = ce::ConstEval::new(&mut p, ce_steps, ce_mem);
         p.ceval = &mut ceval;
-        rc = run_package(&mut p, topts, out_bin, target, lint, cflags, null, 0);
+        rc = run_package(&mut p, topts, out_bin, target, lint, cflags, null);
     }
     return rc;
 }
@@ -643,7 +642,7 @@ enum Mode {
     MODE_BUILD, // `super-c build [<root.spc>] [-o out]`: emit + link a program (or build.toml)
     MODE_RELEASE, // `super-c release [<root.spc>] [-o out]`: emit + link a release profile program (or build.toml)
     MODE_FMT, // `super-c fmt [--check] [<path>...| -]` (no path: the whole project)
-    MODE_LINT, // `super-c lint [--fix] [--suggest-const] [<path>...]` (no path: the whole project)
+    MODE_LINT, // `super-c lint [--fix] [--const] [<path>...]` (no path: the whole project)
     MODE_COMMAND, // `super-c command <name>`: run a build.toml [command.NAME]
     MODE_RUN, // `super-c run [--profile=P]`: build the project, then execute its binary (cargo run)
     MODE_CLEAN, // `super-c clean`: drop build.toml outputs
@@ -658,51 +657,21 @@ enum Mode {
 
 fn subcommand(arg: str) Mode {
     return switch arg {
-        "build" => {
-            Mode::MODE_BUILD;
-        },
-        "release" => {
-            Mode::MODE_RELEASE;
-        },
-        "fmt" => {
-            Mode::MODE_FMT;
-        },
-        "lint" => {
-            Mode::MODE_LINT;
-        },
-        "run" => {
-            Mode::MODE_RUN;
-        },
-        "command" => {
-            Mode::MODE_COMMAND;
-        },
-        "clean" => {
-            Mode::MODE_CLEAN;
-        },
-        "test" => {
-            Mode::MODE_TEST;
-        },
-        "bench" => {
-            Mode::MODE_BENCH;
-        },
-        "lsp" => {
-            Mode::MODE_LSP;
-        },
-        "new" => {
-            Mode::MODE_NEW;
-        },
-        "init" => {
-            Mode::MODE_INIT;
-        },
-        "vendor" => {
-            Mode::MODE_VENDOR;
-        },
-        "bindgen" => {
-            Mode::MODE_BINDGEN;
-        },
-        _ => {
-            Mode::MODE_DEFAULT;
-        },
+        "build" => Mode::MODE_BUILD,
+        "release" => Mode::MODE_RELEASE,
+        "fmt" => Mode::MODE_FMT,
+        "lint" => Mode::MODE_LINT,
+        "run" => Mode::MODE_RUN,
+        "command" => Mode::MODE_COMMAND,
+        "clean" => Mode::MODE_CLEAN,
+        "test" => Mode::MODE_TEST,
+        "bench" => Mode::MODE_BENCH,
+        "lsp" => Mode::MODE_LSP,
+        "new" => Mode::MODE_NEW,
+        "init" => Mode::MODE_INIT,
+        "vendor" => Mode::MODE_VENDOR,
+        "bindgen" => Mode::MODE_BINDGEN,
+        _ => Mode::MODE_DEFAULT,
     };
 }
 
@@ -875,7 +844,7 @@ fn main(argv: Vector<str>) i32 {
     };
     let mut fmt_check = false; // fmt --check: report unformatted files, write nothing
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
-    let mut lint_sc = false; // lint --suggest-const: warn on functions the deep CTFE scan proves always evaluable
+    let mut lint_sc = false; // lint --const: warn on functions the deep CTFE scan proves always evaluable
     let mut bench_norun = false; // bench --no-run: build the bench binary only
     let mut extra = Vector::<usize>::new(); // argv indices of extra `fmt`/`lint` paths
     let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null, shard: 0, shards: 0 };
@@ -971,7 +940,7 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 if common_flag(&mut co, arg) {} else if arg == "--fix" {
                     lint_fix = true;
-                } else if arg == "--suggest-const" {
+                } else if arg == "--const" {
                     lint_sc = true;
                 } else if arg.starts_with("--") {
                     co.bad = true;
@@ -1205,7 +1174,7 @@ OPTIONS:
     --no-lint              disable the on-by-default lints during a build
     --check                fmt: report unformatted files, write nothing
     --fix                  lint: apply machine-applicable fixes and re-lint
-    --suggest-const        lint: also flag functions that could be 'const fn'
+    --const        lint: also flag functions that could be 'const fn'
     --no-run               bench: build the bench binary but do not run it
     --dir=D                vendor: project root vendored into (default: the current directory)
     --ref=R                vendor: branch, tag or commit to pin (git sources)
@@ -1258,10 +1227,6 @@ OPTIONS:
             bg_paths.push(String::from_str(argv[*extra.at(k)]));
         }
         let rc = bindgen::run(&bg_paths, out_bin, bg_link, bg_header, &bg_incs, &bg_from, &bg_cflags, bo.cc);
-        bg_paths.free();
-        bg_incs.free();
-        bg_from.free();
-        bg_cflags.free();
         return rc;
     }
     if mode == Mode::MODE_INIT {

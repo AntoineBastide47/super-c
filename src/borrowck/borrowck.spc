@@ -35,7 +35,6 @@ extend tc::TypeChecker {
             file = unsafe self.package.modules[self.cur_module() as usize].file.as_str();
         }
         self.errors.finalize(self.source, file);
-        ow.free();
     }
 
     pub fn bc_item(self: &mut Self, id: NodeId, ow: &mut bfx::Owner) {
@@ -2838,9 +2837,8 @@ extend tc::TypeChecker {
             let mut irres = Vector::<bfi::FlowErr>::new();
             self.bc_ir_analyze(ow, &irbodies, &mut irres);
             self.bc_ir_emit(&mut irres);
-            irres.free();
         }
-        irbodies.free();
+
         self.bc_quiet = false;
         for mi in 0..self.nmoved {
             self.ms_bit_clear(unsafe self.moved[mi as usize]);

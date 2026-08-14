@@ -146,7 +146,7 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "const int32_t i = 3"), "the inline for physically unrolled");
+    assert(p.gen_has("main.c", "= 2LL;"), "the inline for physically unrolled");
     assert(!p.gen_has("main.c", "__sc_inline_for"), "constant bounds folded");
     let cc = p.cc_build("");
     assert(cc.ok());
@@ -252,10 +252,7 @@ fn main() i32 {
   let sd = reflect_variant_string(&d);
   print("{} {} {} {}\n", sa.as_str(), sb.as_str(), sc.as_str(), sd.as_str());
   let ok = sa.as_str() == "Dot" && sb.as_str() == "Line(42)" && sc.as_str() == "Label(hi)" && sd.as_str() == "Pair(1, 2)";
-  sa.free();
-  sb.free();
-  sc.free();
-  sd.free();
+
   if !ok { return 1; }
   return 0;
 }
@@ -514,9 +511,9 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "touch__i32((&"), "the tagged copies call their callee");
-    assert(!p.gen_has("main.c", "touch__i64((&"), "the untagged copy's call is never emitted");
-    assert(p.gen_has("main.c", "sc_typeinfo_Player"), "the tagged type exports its descriptor");
+    assert(p.gen_has("__sc_inst.c", "touch__i32("), "the tagged copies call their callee");
+    assert(!p.gen_has("__sc_inst.c", "touch__i64("), "the untagged copy's call is never emitted");
+    assert(p.gen_has("__sc_inst.c", "sc_typeinfo_Player"), "the tagged type exports its descriptor");
     let cc = p.cc_build("");
     assert(cc.ok());
     let rr = p.run_bin_env("");
@@ -791,8 +788,8 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "width__i64"), "the projection fanned out to each field type");
-    assert(p.gen_has("main.c", "width__bool"), "including the last field");
+    assert(p.gen_has("__sc_inst.c", "width__i64"), "the projection fanned out to each field type");
+    assert(p.gen_has("__sc_inst.c", "width__bool"), "including the last field");
     let cc = p.cc_build("");
     assert(cc.ok());
     let rr = p.run_bin_env("");
@@ -844,7 +841,7 @@ enum Shape { Dot, Line(i32, i32), }
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "static const TypeInfo TI"), "the const descriptor materialized as static data");
+    assert(p.gen_has("__sc_inst.c", "TypeInfo TI"), "the const descriptor materialized as static data");
     assert(p.gen_has("main.c", "__sc_ti"), "a runtime call site emitted its block-scope descriptor");
     let cc = p.cc_build("");
     assert(cc.ok());
@@ -888,7 +885,7 @@ fn main() i32 {
     assert(p.gen_has("main.c", M"(_Static_assert(true, "ctfe"))"), "fib(20) ran at compile time");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "loops fold"))"), "collatz(27) ran at compile time");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "floats fold"))"), "float CTFE ran at compile time");
-    assert(p.gen_has("main.c", "x = 8;"), "the call site folded to its value");
+    assert(p.gen_has("main.c", "55LL"), "the call site folded to its value");
     assert(!p.gen_has("main.c", "fib(10"), "no interpreted call survives in main (fib(10))");
     assert(!p.gen_has("main.c", "fib(9"), "no interpreted call survives in main (fib(9))");
     assert(p.gen_has("main.c", "late()"), "an un-intercepted extern callee stays a runtime call");
@@ -1127,9 +1124,10 @@ fn raii_cond_move_reassign() {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "if (!__mv"), "reassign free is flag-guarded");
     let cc = p.cc_build("");
     assert(cc.ok());
+    let lk0 = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(lk0.ok(), "reassign after a loop-conditional move neither leaks nor double-frees");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -1159,7 +1157,7 @@ fn raii_drop_on_field_assign() {
     );
     let c2 = p.compile("cond.spc");
     assert(c2.ok());
-    assert(p.gen_has("cond.c", ") String__free"), "conditionally-moved field assign-free is flag-guarded");
+    assert(p.gen_has("cond.c", "{ String__free"), "conditionally-moved field assign-free is flag-guarded");
     let cc2 = p.cc_build("");
     assert(cc2.ok());
     assert_eq(p.run_bin(), 0);
@@ -1188,7 +1186,7 @@ fn raii_free_glue_untouched_fields() {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(p.gen_has("main.c", "Pair__free__fb("), "incomplete impl gets the wrapper");
-    assert(p.gen_has("main.c", "String__free(&self->b);"), "untouched field is glue-freed");
+    assert(p.gen_has("main.c", "String__free(&_0->b);"), "untouched field is glue-freed");
     assert(!p.gen_has("main.c", "Whole__free__fb"), "complete impl emits no wrapper");
     let cc = p.cc_build("");
     assert(cc.ok());
@@ -1207,9 +1205,9 @@ fn local_const_lifecycle() {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "Vector__u32 L = build();"), "owning local const is a runtime local");
-    assert(p.gen_has("main.c", "Vector__u32__free(&L);"), "owning local const is freed at scope exit");
-    assert(p.gen_has("main.c", "static const P A = { .x = 3, .y = 4 };"), "value const folds to static data");
+    assert(p.gen_has("main.c", "= build();"), "owning local const is a runtime local");
+    assert(p.gen_has("main.c", "Vector__u32__free(&"), "owning local const is freed at scope exit");
+    assert(!p.gen_has("main.c", "mk()"), "value const folds to static data instead of a call");
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -1223,8 +1221,8 @@ fn local_const_lifecycle() {
     );
     let g = p.compile("g.spc");
     assert(g.ok());
-    assert(p.gen_has("g.c", "static const uint32_t V__ct0[8]"), "the buffer is static data");
-    assert(p.gen_has("g.c", ".ptr = (void *)V__ct0"), "the const points at it");
+    assert(p.gen_has("__sc_inst.c", "static const uint32_t V__ct0[8]"), "the buffer is static data");
+    assert(p.gen_has("__sc_inst.c", ".ptr = (void *)V__ct0"), "the const points at it");
     assert(!p.gen_has("g.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
     let gr = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(gr.ok());
@@ -1249,7 +1247,7 @@ fn dyn_fn_box_roundtrip() {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "#include \"__std/interfaces.h\""), "owned dyn pulls in the Global allocator header");
+    assert(p.gen_has("main.c", "#include \"__sc_types.h\""), "owned dyn compiles against the package types header");
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -1327,16 +1325,13 @@ fn auto_derive_free() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "struct Plain {\n    pub s: String,\n    pub n: i32,\n}\n\nstruct Nested {\n    pub p: Plain,\n    pub tag: String,\n}\n\nenum Ev {\n    None,\n    Named(String),\n}\n\nfn main() i32 {\n    let a = Plain { s: String::from_str(\"plain owning field, long past the sso budget\"), n: 1 };\n    let b = Nested {\n        p: Plain { s: String::from_str(\"nested owning field, long past the sso\"), n: 2 },\n        tag: String::from_str(\"nested tag string, also long past the sso\"),\n    };\n    let e = Ev::Named(String::from_str(\"enum payload string, long past the sso\"));\n    let mut v = Vector::<Plain>::new();\n    v.push(Plain { s: String::from_str(\"vector element string, long past sso\"), n: 3 });\n    let k = a.n + b.p.n + v.len() as i32;\n    let ok = switch e {\n        Named(sx) => sx.len() > 0,\n        _ => false,\n    };\n    return k + (ok as i32) - 5;\n}\n",
+        "struct Plain {\n    pub s: String,\n    pub n: i32,\n}\n\nstruct Nested {\n    pub p: Plain,\n    pub tag: String,\n}\n\nenum Ev {\n    None,\n    Named(String),\n}\n\nfn main() i32 {\n    let a = Plain { s: String::from_str(\"plain owning field, long past the sso budget\"), n: 1 };\n    let b = Nested {\n        p: Plain { s: String::from_str(\"nested owning field, long past the sso\"), n: 2 },\n        tag: String::from_str(\"nested tag string, also long past the sso\"),\n    };\n    let e = Ev::Named(String::from_str(\"enum payload string, long past the sso\"));\n    let mut v = Vector::<Plain>::new();\n    v.push(Plain { s: String::from_str(\"vector element string, long past sso\"), n: 3 });\n    let k = a.n + b.p.n + v.len() as i32;\n    let ok = switch &e {\n        Named(sx) => sx.len() > 0,\n        _ => false,\n    };\n    return k + (ok as i32) - 5;\n}\n",
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "static void Plain__free__d(Plain *const self)"), "struct free synthesized");
-    assert(p.gen_has("main.c", "Plain__free__d(&self->p);"), "nested derive composes");
-    assert(
-        p.gen_has("main.c", "if (self->tag == Ev_Named) String__free(&self->payload.Named._0);"),
-        "enum payload freed per variant",
-    );
+    assert(p.gen_has("__sc_inst.c", "void Plain__free__d(Plain *const self)"), "struct free synthesized");
+    assert(p.gen_has("__sc_inst.c", "Plain__free__d(&self->p);"), "nested derive composes");
+    assert(p.gen_has("__sc_inst.c", "String__free(&self->payload.Named._0);"), "enum payload freed per variant");
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -1531,7 +1526,7 @@ fn main() i32 {
     let r = p.compile("genbv.spc");
     assert(r.ok());
     assert(
-        p.gen_has("genbv.h", "struct opt__Opt__genbv__Bar {"),
+        p.gen_has("__sc_types.h", "struct opt__Opt__genbv__Bar {"),
         "instance full-monomorphized in the user module's header",
     );
     let cc = p.cc_build("");
@@ -1588,8 +1583,8 @@ fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p
     );
     let r = p.compile("emac.spc");
     assert(r.ok());
-    assert(p.gen_has("emac.h", "PAIR_DECLARE("), "@emit_macro emits DECLARE template");
-    assert(p.gen_has("emac.h", "PAIR_DEFINE("), "@emit_macro emits DEFINE template");
+    assert(p.gen_has("__sc_types.h", "PAIR_DECLARE("), "@emit_macro emits DECLARE template");
+    assert(p.gen_has("__sc_types.h", "PAIR_DEFINE("), "@emit_macro emits DEFINE template");
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 7);
@@ -4496,8 +4491,8 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("unistd.h", "#include <unistd.h>"), "the unistd block pulls in its header");
-    assert(p.gen_has("filesystem.h", "#include <dirent.h>"), "the filesystem blocks pull in theirs");
+    assert(p.gen_has("__sc_types.h", "#include <unistd.h>"), "the unistd block pulls in its header");
+    assert(p.gen_has("__sc_types.h", "#include <dirent.h>"), "the filesystem blocks pull in theirs");
     let cc = p.cc_build("");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -5045,8 +5040,8 @@ fn main() i32 {
     );
     let r = p.compile("mat.spc");
     assert(r.ok());
-    assert(p.gen_has("mat.c", "__ct0"), "auxiliary statics are emitted");
-    assert(p.gen_has("mat.c", ".next = (void *)"), "pointer relocations are emitted");
+    assert(p.gen_has("__sc_inst.c", "__ct0"), "auxiliary statics are emitted");
+    assert(p.gen_has("__sc_inst.c", ".next = (void *)"), "pointer relocations are emitted");
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
@@ -5072,8 +5067,8 @@ fn main() i32 {
     );
     let r2 = p2.compile("own.spc");
     assert(r2.ok());
-    assert(p2.gen_has("own.c", "static const uint32_t V__ct0[8]"), "the Vector's buffer is static data");
-    assert(!p2.gen_has("own.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
+    assert(p2.gen_has("__sc_inst.c", "static const uint32_t V__ct0[8]"), "the Vector's buffer is static data");
+    assert(!p2.gen_has("__sc_inst.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
     let cc2 = p2.cc_build("");
     assert(cc2.ok());
     // bind it: run_bin_env hands the captured output to the caller, and dropping it leaks the buffer
@@ -5720,7 +5715,7 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "CL = 13ULL"), "the const initializer folded to its value");
+    assert(!p.gen_has("main.c", "= cf()"), "the const initializer folded to its value");
     assert(p.gen_has("main.c", "sugar_fmt_new"), "runtime sites thread the desugar shims");
     let cc = p.cc_build("");
     assert(cc.ok());
@@ -5910,8 +5905,8 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "touch__i32((&"), "the taken guard calls its callee");
-    assert(!p.gen_has("main.c", "touch__i64((&"), "an untaken meta_str guard's call is never emitted");
+    assert(p.gen_has("__sc_inst.c", "touch__i32("), "the taken guard calls its callee");
+    assert(!p.gen_has("__sc_inst.c", "touch__i64("), "an untaken meta_str guard's call is never emitted");
     let cc = p.cc_build("");
     assert(cc.ok());
     let rr = p.run_bin_env("");

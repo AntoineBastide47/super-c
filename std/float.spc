@@ -706,7 +706,6 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             d10 = 0 - d10;
         }
         out.push_u64(d10 as u64);
-        digits.free();
         return out;
     }
 

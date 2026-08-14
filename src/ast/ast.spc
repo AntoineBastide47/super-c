@@ -783,8 +783,21 @@ pub fn lin_subst(
             continue;
         }
         if by.kind == TypeKind::TYPE_CONST_EXPR {
+            // Occurs-check: the payload is spelled in the OUTER scope, where `d` names the
+            // caller's own parameter -- substituting d inside its own binding compounds the
+            // width once per recursion (`F -> {F+96}` must widen exactly once).
+            let mut fp = Vector::<DefId>::new();
+            let mut fa = Vector::<TypeId>::new();
+            for j in 0..n {
+                let pj = unsafe params[j as usize];
+                if pj.module == d.module && pj.node == d.node {
+                    continue;
+                }
+                fp.push(pj);
+                fa.push(unsafe args[j as usize]);
+            }
             let mut inner = ConstLin { k: 0, n: 0 };
-            if !lin_subst(dst, dst, by.as_data.inst, params, args, n, &mut inner, depth + 1) {
+            if !lin_subst(dst, dst, by.as_data.inst, fp.as_ptr(), fa.as_ptr(), fp.len() as i32, &mut inner, depth + 1) {
                 return false;
             }
             if lin_is_concrete(&inner) {
@@ -1169,19 +1182,6 @@ extend Ast {
         }
     }
 
-    /// Roll a BORROWED module's type arena back to a watermark taken before the borrow. Codegen swaps to
-    /// another module's ast to expand its generics; everything interned there is scratch, because the
-    /// results it keeps are reinterned into its own pool and the instances are re-homed by propagation.
-    /// Instances and types must roll back TOGETHER: a truncated instance list under a pool that kept
-    /// growing leaves types naming instances that no longer exist, and the next pass to read one either
-    /// runs off the end of the list or, once it has refilled, silently reads a different instance.
-    /// Sound because the intern index tolerates entries past the pool (see `intern_type`) and codegen
-    /// never writes the type side table, so nothing outside the borrow can name what is dropped.
-    pub fn restore_arena(self: &mut Self, ntypes: usize, ninstances: usize) {
-        self.instances.truncate(ninstances);
-        self.type_pool.truncate(ntypes);
-    }
-
     pub fn init_types(self: &mut Self) {
         self.types.clear();
         self.types.reserve(self.nodes.len());
@@ -1430,48 +1430,6 @@ extend Ast {
         return self.intern_type(Ty { kind: TypeKind::TYPE_CONST, module: 0, as_data: TyAs { value: v } });
     }
 
-    /// Records a method instantiation; returns false if it was already recorded. `n` is clamped to
-    /// 8. Safety: `targs` must point at `n` readable TypeIds.
-    pub fn add_method_inst(self: &mut Self, instance: TypeId, method: NodeId, targs: *const TypeId, n: u8) bool {
-        let mut m = n;
-        if m > 8 {
-            m = 8;
-        }
-        let mut mi = MethodInst { instance: instance, method: method, n: m };
-        for j in 0..m {
-            unsafe mi.targs[j] = unsafe targs[j];
-        }
-        if self.method_inst_index.len() == 0 || (self.mi_ix_used as usize + 1) * 4 >= self.method_inst_index.len() * 3 {
-            self.mi_ix_used = Ast::ix_rebuild(&mut self.method_inst_index, self.method_insts.len()) as u32;
-            for id in 0..self.method_insts.len() {
-                let mask = self.method_inst_index.len() - 1;
-                let mut i = self.method_insts.at(id).hash() as usize & mask;
-                while self.method_inst_index[i] != 0xFFFFFFFFu32 {
-                    i = i + 1 & mask;
-                }
-                self.method_inst_index.set(i, id as u32);
-            }
-        }
-        let mask = self.method_inst_index.len() - 1;
-        let ixp = self.method_inst_index.as_ptr();
-        let pp = self.method_insts.as_ptr();
-        let pn = self.method_insts.len();
-        let mut i = mi.hash() as usize & mask;
-        loop {
-            let cur = unsafe ixp[i];
-            if cur == 0xFFFFFFFFu32 {
-                self.method_inst_index.set(i, self.method_insts.len() as u32);
-                self.mi_ix_used = self.mi_ix_used + 1;
-                self.method_insts.push(mi);
-                return true;
-            }
-            if cur as usize < pn && unsafe pp[cur as usize] == mi {
-                return false;
-            }
-            i = i + 1 & mask;
-        }
-    }
-
     /// Record a decl's lifetime params (no-op for the overwhelmingly common empty case).
     pub fn set_lifetimes(self: &mut Self, owner: NodeId, list: NodeList) {
         if list.len == 0 {
@@ -1606,29 +1564,6 @@ extend Ast {
             None => {},
         };
         return null;
-    }
-
-    pub fn clear_coerce(self: &mut Self, node: NodeId) {
-        self.coerce_at.remove(&node);
-    }
-
-    pub const fn coerce_count(self: &Self) usize {
-        return self.coerces.len();
-    }
-
-    pub const fn coerce_at_index(self: &Self, i: usize) &CoerceUse {
-        return self.coerces.at(i);
-    }
-
-    /// Is entry `idx` the one its node currently points at? False for an entry superseded by a re-check.
-    pub const fn coerce_current(self: &Self, node: NodeId, idx: usize) bool {
-        switch self.coerce_at.get(&node) {
-            Some(i) => {
-                return (*i) as usize == idx;
-            },
-            None => {},
-        };
-        return false;
     }
 
     pub fn add_dyn_use(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId) {

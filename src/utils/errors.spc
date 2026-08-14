@@ -6,7 +6,6 @@
 // LintFix rows are the structured suggestion store: machine-applicable repairs for `lint --fix`
 // (kind 3 carries generated text via `fix_texts`); `fixable_errs` counts errors carrying one, so
 // --fix may apply despite errors only when EVERY error is fixable.
-import stdlib;
 import string;
 
 /// Per-category cap on recorded diagnostics; emit/warn silently drop rows past it.
@@ -66,12 +65,6 @@ pub struct Errors {
     pub fix_texts: Vector<String>, // generated insertion payloads for kind-3 fixes
     pub fixable_errs: u32, // errors carrying a machine fix -- `lint --fix` may proceed when EVERY error is fixable
     pub seq: u32, // next emission sequence
-}
-
-/// Aborts the process with an out-of-memory message; never returns.
-pub fn oom() {
-    eprint("fatal: out of memory\n");
-    unsafe stdlib::abort();
 }
 
 /// A borrowed `str` view of a NUL-terminated C string (for routing a raw C string through `format(...)`).
@@ -512,6 +505,5 @@ pub fn render_site(source: str, file: str, off: u32, span: u32) String {
     }
     let mut out = String::new();
     push_loc_block(&mut out, source, &line_starts, off, span, file);
-    line_starts.free();
     return out;
 }

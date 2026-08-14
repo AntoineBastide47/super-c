@@ -161,8 +161,6 @@ fn both_reject_same_line(src: str, name: str) {
         }
     }
     assert(hit, "a primary error line coincides");
-    old_errs.free();
-    new_errs.free();
 }
 
 // ---- coinciding rejections ------------------------------------------------------------------------
@@ -251,8 +249,6 @@ fn diff_out_param_store() {
         }
     }
     assert(hit, "a primary error line coincides");
-    old_errs.free();
-    new_errs.free();
 }
 
 // Run the full PRODUCTION borrowck (Core IR mode) over the user module; error offsets land in `out`.
@@ -292,8 +288,6 @@ fn diff_partial_move_reviewed() {
     let mut new_errs = Vector::<u32>::new();
     new_verdict(&p, "main", &mut new_errs);
     assert(new_errs.len() != 0, "the loan analysis rejects the whole-value use");
-    old_errs.free();
-    new_errs.free();
 }
 
 @test
@@ -311,10 +305,7 @@ fn diff_return_field_move_reviewed() {
     let mut new_errs = Vector::<u32>::new();
     new_verdict(&p, "f", &mut new_errs);
     assert(new_errs.len() == 0, "the loan analysis tracks the partial move");
-    old_errs.free();
-    new_errs.free();
 }
-
 // ---- acceptance parity ----------------------------------------------------------------------------
 
 @test
@@ -330,6 +321,4 @@ fn diff_closure_capture_accepted() {
     let mut new_errs = Vector::<u32>::new();
     new_verdict(&p, "main", &mut new_errs);
     assert(new_errs.len() == 0, "the loan analysis accepts");
-    old_errs.free();
-    new_errs.free();
 }

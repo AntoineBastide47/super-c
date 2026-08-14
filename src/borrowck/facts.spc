@@ -31,6 +31,7 @@ pub const EV_ASSIGN: u8 = 0; // path fully (re)initialized
 pub const EV_MOVE: u8 = 1; // path moved out
 pub const EV_USE: u8 = 2; // path read (init required)
 pub const EV_DEAD: u8 = 3; // local storage ends (path = local root)
+pub const EV_MOVE_CUT: u8 = 4; // moved THROUGH a reference (unsafe ref-take): drops-visible only
 
 pub struct Loan {
     pub view: bool, // the borrowed place is itself a borrow-carrying VALUE (a view): reborrow,
@@ -194,12 +195,12 @@ extend Owner {
         return unsafe &*self.p().module_ast_const(m);
     }
 
-    fn src_of(self: &Self, m: ModuleId) str<'static> {
+    const fn src_of(self: &Self, m: ModuleId) str<'static> {
         let s = self.p().modules.at(m as usize).source.as_str();
         return str::from_raw(s.ptr(), s.len());
     }
 
-    fn span_text_is(self: &Self, m: ModuleId, sp: tok::Span, what: str) bool {
+    const fn span_text_is(self: &Self, m: ModuleId, sp: tok::Span, what: str) bool {
         let s = self.src_of(m);
         if sp.end <= sp.start || sp.end as usize > s.len() {
             return false;
@@ -262,8 +263,6 @@ extend Owner {
                 },
             };
         }
-        keys.free();
-        vals.free();
     }
 
     fn free_extend_of(self: &mut Self, tmod: ModuleId, tdecl: NodeId) DefId {
@@ -370,7 +369,6 @@ extend Owner {
                 let fa = self.ast_of(y.module);
                 let fnn = *fa.at_const(y.as_data.decl);
                 if fnn.kind != NodeKind::NODE_CLOSURE {
-                    cap_tys.free();
                     return false;
                 }
                 let caps = fnn.as_data.closure.captures;
@@ -391,7 +389,6 @@ extend Owner {
                     break;
                 }
             }
-            cap_tys.free();
             return r;
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
@@ -430,7 +427,6 @@ extend Owner {
             }
             i = i + 1;
         }
-        gid_list.free();
         return r;
     }
 
@@ -461,7 +457,6 @@ extend Owner {
                     sub.push(OwnSubst { pmod: om, pdecl: gid_list[g], amod: mid, aty: unsafe it.args[g] });
                 }
             }
-            gid_list.free();
         } else {
             om = y.module;
             od = y.as_data.decl;
@@ -472,17 +467,14 @@ extend Owner {
         let dn = *self.ast_of(om).at_const(od);
         let is_enum = dn.kind == NodeKind::NODE_ENUM;
         if dn.kind != NodeKind::NODE_STRUCT && !is_enum {
-            sub.free();
             return false;
         }
         if !is_enum && dn.as_data.aggregate.is_union {
-            sub.free();
             return false;
         }
         let key = om as u64 << 32 | od as u64;
         for b in 0..self.busy.len() {
             if self.busy[b] == key {
-                sub.free();
                 return false;
             }
         }
@@ -518,9 +510,7 @@ extend Owner {
                 r = true;
             }
         }
-        mtys.free();
-        sub.free();
-        let _ = self.busy.pop();
+        self.busy.pop();
         return r;
     }
 
@@ -597,11 +587,9 @@ extend Owner {
                 let fa = self.ast_of(y.module);
                 let fnn = *fa.at_const(y.as_data.decl);
                 if fnn.kind != NodeKind::NODE_CLOSURE {
-                    cap_tys.free();
                     return false;
                 }
                 if fnn.as_data.closure.mut_caps != 0 {
-                    cap_tys.free();
                     return true;
                 }
                 let caps = fnn.as_data.closure.captures;
@@ -618,7 +606,6 @@ extend Owner {
                     break;
                 }
             }
-            cap_tys.free();
             return r;
         }
         let mut om: ModuleId = 0;
@@ -697,7 +684,6 @@ extend Owner {
                     break;
                 }
             }
-            mtys.free();
         }
         if cacheable {
             let mut enc: u64 = 1;
@@ -826,7 +812,7 @@ extend Gen {
         return unsafe &*self.mf;
     }
 
-    fn owner(self: &Self) &mut Owner {
+    const fn owner(self: &Self) &mut Owner {
         return unsafe &mut *self.ow;
     }
 
@@ -878,7 +864,7 @@ extend Gen {
         return self.lt_name(a, a.at_const(tyn).as_data.indirect_type.lifetime);
     }
 
-    fn name_eq(self: &Self, a: tok::Span, bsp: tok::Span) bool {
+    const fn name_eq(self: &Self, a: tok::Span, bsp: tok::Span) bool {
         if a.end <= a.start || bsp.end <= bsp.start || a.end - a.start != bsp.end - bsp.start {
             return false;
         }
@@ -1015,8 +1001,6 @@ extend Gen {
                 let v = self.universal_for(bounds[i]);
                 self.f.known_subsets.push(u as u64 << 32 | v as u64);
             }
-            names.free();
-            bounds.free();
         }
         // Inference origins: one per borrow-carrying local.
         for l in 0..nlocals {
@@ -1062,7 +1046,7 @@ extend Gen {
 
     // A place rooted in a raw pointer belongs to the unsafe world: accesses are recorded, but no
     // tracked loan ever forms on it.
-    fn base_is_raw(self: &Self, pid: ir::PlaceId) bool {
+    const fn base_is_raw(self: &Self, pid: ir::PlaceId) bool {
         let base = self.place_of(pid).base;
         let ty = self.body().locals.at(base as usize).ty;
         if ty == TYPE_NONE {
@@ -1139,14 +1123,28 @@ extend Gen {
             return;
         }
         let owned = self.owner().owns(self.body().module, pl.ty) && !self.calling;
-        if owned && path != mp::MP_NONE {
-            let mut ak = ACC_MOVE;
-            if self.in_caps {
-                ak = ACC_CAP;
+        if owned {
+            // a move THROUGH a reference has no full path: it lands on the nearest tracked
+            // ancestor (the cut), so overwrite guards learn the maybe-moved state AND the drop
+            // rewriter can clear the guard flag at this point
+            let mut mpath = path;
+            if mpath == mp::MP_NONE {
+                mpath = self.forest().place_cut[op.data as usize];
             }
-            self.f.events.push(Event { kind: EV_MOVE, path: path, point: point, span: sp });
-            self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ak, point: point, span: sp });
-            return;
+            if mpath != mp::MP_NONE {
+                let mut ak = ACC_MOVE;
+                if self.in_caps {
+                    ak = ACC_CAP;
+                }
+                let ek = if mpath == path {
+                    EV_MOVE;
+                } else {
+                    EV_MOVE_CUT; // through-a-reference: invisible to the checker, real to drops
+                };
+                self.f.events.push(Event { kind: ek, path: mpath, point: point, span: sp });
+                self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ak, point: point, span: sp });
+                return;
+            }
         }
         // A plain copy of a `&mut` place consumes the binding (exclusivity); passing one to a call
         // reborrows instead, so only RV_USE operands take this branch.
@@ -1242,7 +1240,6 @@ extend Gen {
             let a = self.owner().ast_of(callee.module);
             let nd = a.at_const(callee.node);
             if nd.kind != NodeKind::NODE_FUNCTION {
-                tys.free();
                 return;
             }
             let ps = nd.as_data.function.params;
@@ -1273,7 +1270,6 @@ extend Gen {
             }
         }
         self.owner().kinds_memo.insert(kkey, kst2 as u64 << 16 | tys.len() as u64);
-        tys.free();
     }
 
     // Can values of `ty` STORE borrows by type -- declared lifetime params, or borrow-carrying
@@ -1738,12 +1734,9 @@ extend Gen {
                                         self.subset(aor, tor, entry);
                                     }
                                 }
-                                itok.free();
                             }
                         }
-                        jtok.free();
                     }
-                    ptyn.free();
                 }
                 // A `&mut self` receiver whose pointee holds borrows is a STORE TARGET: argument
                 // borrows can land in the container (`v.push(&x)`), so they flow into the
@@ -1836,9 +1829,7 @@ extend Gen {
                                 if tie3 {
                                     self.subset(aor, tor, entry);
                                 }
-                                itok3.free();
                             }
-                            jtok0.free();
                         }
                     }
                 }
@@ -1917,7 +1908,6 @@ extend Gen {
                                     }
                                 }
                             }
-                            itok2.free();
                         }
                         if tie {
                             let aor = self.origin_of_place(op.data);
@@ -1927,8 +1917,6 @@ extend Gen {
                         }
                     }
                 }
-                rtok.free();
-                kinds.free();
             } else if t.kind == ir::TM_RETURN {
                 let nrets = self.body().returns;
                 for r in 0..nrets {

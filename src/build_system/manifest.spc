@@ -315,7 +315,6 @@ pub fn load(path: str) Option<Manifest> {
     }
     let src = src_opt.unwrap();
     let (m, errs) = parse_check(src.as_str(), path);
-    errs.free();
     return m;
 }
 

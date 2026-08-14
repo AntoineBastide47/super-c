@@ -86,9 +86,7 @@ pub fn reflect_string<T>(v: &T) String {
 }
 
 fn reflect_fmt_field<V: Format>(out: &mut String, x: &V) {
-    let fs = x.fmt();
-    out.push_str(fs.as_str());
-    fs.free();
+    out.push_str(x.fmt().as_str());
 }
 
 /// FNV-1a over every field's own `Hash`, in declaration order. Two values of one type hash equal

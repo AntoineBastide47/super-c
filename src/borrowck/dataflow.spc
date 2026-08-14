@@ -91,7 +91,6 @@ pub fn build_cfg(b: &ir::CoreBody) Cfg {
             cnt.set(t, cnt[t] + 1);
         }
     }
-    cnt.free();
     return c;
 }
 
@@ -153,8 +152,6 @@ pub fn solve_liveness(f: &bf::BodyFacts, c: &Cfg) Liveness {
             }
         }
     }
-    queued.free();
-    queue.free();
     return lv;
 }
 
@@ -184,7 +181,7 @@ struct FlowCtx {
     pub mm: Vector<u64>,
 }
 
-fn bit_get(v: &Vector<u64>, i: u32) bool {
+const fn bit_get(v: &Vector<u64>, i: u32) bool {
     return (*v.at((i / 64) as usize) >> (i & 63) as u64 & 1u64) != 0;
 }
 
@@ -230,7 +227,7 @@ pub fn apply_event(
         }
         return;
     }
-    if ev.kind == bf::EV_MOVE {
+    if ev.kind == bf::EV_MOVE || ev.kind == bf::EV_MOVE_CUT {
         for i in 0..sub.len() {
             bit_clear(mi, sub[i]);
             bit_clear(di, sub[i]);
@@ -441,10 +438,5 @@ pub fn solve_moves(b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts,
             ctx.step(forest, &ev, &mut scratch, &mut sub, true, &mut mf.errs);
         }
     }
-    reached.free();
-    queued.free();
-    queue.free();
-    scratch.free();
-    sub.free();
     return mf;
 }

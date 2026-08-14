@@ -131,6 +131,10 @@ pub const IN_ZEROED: u8 = 6;
 pub const IN_REFLECT: u8 = 7; // angle-3 compatibility: reflection binder/projection forms
 pub const IN_ASM_OPERAND: u8 = 8;
 pub const IN_NEW: u8 = 9; // heap allocation of the initializer operand (`new T { .. }`)
+// Inline assembly: `item` names the NODE_ASM (template/constraints/clobbers read from the AST);
+// operands are the outputs' places (as copies) then the input values, in source order.
+pub const IN_ASM: u8 = 10;
+pub const IN_SAFEPOINT: u8 = 11; // loop-body preemption marker; printed only for runtime-using programs
 
 pub struct Rvalue {
     pub kind: u8,
@@ -200,6 +204,9 @@ pub struct CoreBody {
     pub args: u32,
     pub returns: u32,
     pub is_generic: bool, // generic bodies may carry symbolic types (verifier rule 15)
+    /// The body contains an UNEXPANDED reflection binder (`inline for .. in fields(..)` whose
+    /// owner stayed symbolic): instances must RE-LOWER with the demand env, never share this body.
+    pub has_reflect: bool,
     pub locals: Vector<LocalDecl>,
     pub blocks: Vector<BasicBlock>,
     pub statements: Vector<Statement>,
@@ -223,6 +230,7 @@ extend CoreBody {
             args: 0,
             returns: 0,
             is_generic: false,
+            has_reflect: false,
             locals: Vector::<LocalDecl>::new(),
             blocks: Vector::<BasicBlock>::new(),
             statements: Vector::<Statement>::new(),

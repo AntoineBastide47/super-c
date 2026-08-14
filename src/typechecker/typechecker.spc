@@ -1806,9 +1806,28 @@ extend TypeChecker {
                     }
                     if by.kind == TypeKind::TYPE_CONST_EXPR {
                         // The binding is itself an expression: fold ITS form in, which is what composes
-                        // `dbl(dbl(x))` into one width rather than leaving two nested ones.
+                        // `dbl(dbl(x))` into one width rather than leaving two nested ones. The bound
+                        // param itself is EXCLUDED inside its own payload (outer-scope spelling;
+                        // `F -> {F+96}` widens exactly once).
+                        let mut fp = Vector::<DefId>::new();
+                        let mut fa = Vector::<TypeId>::new();
+                        for j in 0..n {
+                            let pj = unsafe params[j as usize];
+                            if pj.module == d.module && pj.node == d.node {
+                                continue;
+                            }
+                            fp.push(pj);
+                            fa.push(unsafe args[j as usize]);
+                        }
                         let mut inner = ConstLin { k: 0, n: 0 };
-                        if !self.tc_lin_subst(by.as_data.inst, params, args, n, &mut inner, depth + 1) {
+                        if !self.tc_lin_subst(
+                            by.as_data.inst,
+                            fp.as_ptr(),
+                            fa.as_ptr(),
+                            fp.len() as i32,
+                            &mut inner,
+                            depth + 1,
+                        ) {
                             return false;
                         }
                         if lin_is_concrete(&inner) {
@@ -4684,7 +4703,6 @@ extend TypeChecker {
                             self.tc_conf_ob_check(owner3, ob.iface, itype, rn, iface.module);
                         }
                     }
-                    seen3.free();
                 }
             }
         }
@@ -9516,6 +9534,14 @@ extend TypeChecker {
         let a = self.cur_ast();
         let callee_id = a.at_const(id).as_data.call.callee;
         let pck = a.at_const(callee_id).kind;
+        // The method-name node, captured while the callee is definitely a member: a later stage may
+        // rewrite the callee node in place (its `as_data` becomes another variant), after which
+        // re-reading `.as_data.member.member` off it would misread the union and yield a stray id.
+        let cmem = if pck == NodeKind::NODE_MEMBER {
+            a.at_const(callee_id).as_data.member.member;
+        } else {
+            NODE_NONE;
+        };
         let mut callee = TYPE_NONE;
         // Binder metadata reads -- `f.has_meta("k")` / `f.meta_bool` / `f.meta_int` / `f.meta_str`
         // on a fields/variants/payloads binder: per-copy CONSTANTS the emitter (and the binder-const
@@ -9528,7 +9554,7 @@ extend TypeChecker {
                 if blid != NODE_NONE && a.at_const(blid).kind == NodeKind::NODE_INLINE_FOR && a.type_of(blid) != TYPE_NONE && self.type_at(
                     a.type_of(blid),
                 ).kind == TypeKind::TYPE_FIELD_PROJECTION {
-                    let mnm = self.name_span(a.at_const(callee_id).as_data.member.member);
+                    let mnm = self.name_span(cmem);
                     let is_has = span_is(self.source, mnm, "has_meta");
                     let is_b = span_is(self.source, mnm, "meta_bool");
                     let is_i = span_is(self.source, mnm, "meta_int");
@@ -9584,7 +9610,7 @@ extend TypeChecker {
         }
         // `x.free()` intrinsic no-op check
         if pck == NodeKind::NODE_MEMBER && !a.at_const(callee_id).as_data.member.path && a.at_const(id).as_data.call.args.len == 0 {
-            let mem = a.at_const(callee_id).as_data.member.member;
+            let mem = cmem;
             if span_is(self.mod_src(self.cur_module()), a.at_const(mem).as_data.name.text, "free") {
                 let obj = a.at_const(callee_id).as_data.member.object;
                 let rt = self.check_expr(obj);
@@ -9616,7 +9642,7 @@ extend TypeChecker {
         if pck == NodeKind::NODE_MEMBER && a.at_const(callee_id).as_data.member.path {
             self.expected = want;
             callee = self.check_expr(callee_id);
-            let vd = a.resolution_def(a.at_const(callee_id).as_data.member.member);
+            let vd = a.resolution_def(cmem);
             if vd.node != NODE_NONE && self.mod_ast(vd.module).at_const(vd.node).kind == NodeKind::NODE_VARIANT {
                 return self.check_variant_call(id, vd.module, vd.node, callee);
             }
@@ -9625,7 +9651,7 @@ extend TypeChecker {
             self.call_args = a.at_const(id).as_data.call.args;
             callee = self.check_member(callee_id, true);
             self.call_args = NodeList { start: 0, len: 0 };
-            let fd = a.resolution_def(a.at_const(callee_id).as_data.member.member);
+            let fd = a.resolution_def(cmem);
             if fd.node != NODE_NONE && (fd.module == self.cur_module() || self.package != null && fd.module as usize < self.pkg_count()) && self.mod_ast(
                 fd.module,
             ).at_const(fd.node).kind == NodeKind::NODE_FIELD {
@@ -9635,7 +9661,7 @@ extend TypeChecker {
             callee = self.check_expr(callee_id);
         }
         if pck == NodeKind::NODE_MEMBER {
-            let md = a.resolution_def(a.at_const(callee_id).as_data.member.member);
+            let md = a.resolution_def(cmem);
             let addressable = md.module == self.cur_module() || self.package != null && md.module as usize < self.pkg_count();
             if md.node != NODE_NONE && addressable && self.mod_ast(md.module).at_const(md.node).kind == NodeKind::NODE_FUNCTION {
                 self.tc_check_test_ref(md, a.at_const(id).span);
@@ -9921,7 +9947,7 @@ extend TypeChecker {
         let mut skip: u32 = 0;
         let cn_path = a.at_const(callee_id).as_data.member.path;
         if named && pck == NodeKind::NODE_MEMBER && !cn_path && params.len > 0 {
-            let md = a.resolution_def(a.at_const(callee_id).as_data.member.member);
+            let md = a.resolution_def(cmem);
             if md.node != NODE_NONE && self.mod_ast(md.module).at_const(md.node).kind == NodeKind::NODE_FUNCTION {
                 skip = 1;
             }

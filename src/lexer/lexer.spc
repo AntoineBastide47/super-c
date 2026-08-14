@@ -12,32 +12,27 @@ pub const UINT32_MAX: u32 = 0xFFFFFFFFu32;
 pub const USIZE_MAX: usize = 0xFFFFFFFFFFFFFFFFu64 as usize;
 
 // Read-ahead sentinel padding a lexed source buffer MUST carry past its logical end (all NUL): the loader
-// pads every module source (String::pad_nul) so the lexer's scan loops (identifier/whitespace) can drop
-// their per-byte bounds check and rely on the trailing NUL to terminate. Only 1 byte is strictly required.
+// pads every module source (String::pad_nul) so the lexer's scan loops drop their per-byte bounds check
+// and rely on the trailing NUL to terminate. Fixed lookahead reads at most 4 bytes past the end.
 pub const SOURCE_PAD: usize = 8;
 
 // Per-byte character-class flags, indexed by byte value (see build_char_class). Held BY VALUE in each Lexer
 // so there is no global mutable state (the compiler lexes many sources, possibly concurrently in-process).
-pub const CC_ID_START: u8 = 1u8;
-pub const CC_ID_PART: u8 = 2u8;
-pub const CC_DIGIT: u8 = 4u8;
-pub const CC_HEX: u8 = 8u8;
-pub const CC_WS: u8 = 16u8;
+pub const CC_ID_START: u8 = 1;
+pub const CC_ID_PART: u8 = 2;
+pub const CC_DIGIT: u8 = 4;
+pub const CC_HEX: u8 = 8;
+pub const CC_WS: u8 = 16;
 pub type CharClass = Array<u8, 256>;
 
-fn build_char_class() CharClass {
+const fn build_char_class() CharClass {
     let mut c = CharClass {};
-    let mut i: usize = 0;
-    while i < 256 {
-        let b = i as u8;
-        let is_lower = b >= b'a' && b <= b'z';
-        let is_upper = b >= b'A' && b <= b'Z';
-        let is_digit = b >= b'0' && b <= b'9';
-        let mut fl: u8 = 0u8;
-        if b == b'_' || is_lower || is_upper {
+    for b in 0..255u8 {
+        let mut fl = 0u8;
+        if b == b'_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' {
             fl = fl | CC_ID_START | CC_ID_PART;
         }
-        if is_digit {
+        if b >= b'0' && b <= b'9' {
             fl = fl | CC_ID_PART | CC_DIGIT | CC_HEX;
         }
         if b >= b'a' && b <= b'f' || b >= b'A' && b <= b'F' {
@@ -46,8 +41,7 @@ fn build_char_class() CharClass {
         if b == b' ' || b == b'\t' || b == b'\n' || b == b'\x0b' || b == b'\x0c' || b == b'\r' {
             fl = fl | CC_WS;
         }
-        c[i] = fl;
-        i = i + 1;
+        c[b as usize] = fl;
     }
     return c;
 }
@@ -154,16 +148,10 @@ fn add_match(l: &mut Lexer, expected: u8, matched: TokenType, unmatched: TokenTy
 }
 
 const fn peek_byte(l: &Lexer) u8 {
-    if is_eof(l) {
-        return EOF_CH;
-    }
     return l.bytes.byte_at(l.current);
 }
 
 const fn peek_next(l: &Lexer) u8 {
-    if l.current + 1 >= l.bytes.len() {
-        return EOF_CH;
-    }
     return l.bytes.byte_at(l.current + 1);
 }
 
@@ -171,7 +159,7 @@ const fn match_byte(l: &mut Lexer, expected: u8) bool {
     if peek_byte(l) != expected {
         return false;
     }
-    l.current = l.current + 1;
+    l.current += 1;
     return true;
 }
 
@@ -187,6 +175,7 @@ fn lexer_error_at(l: &mut Lexer, at: usize, len: usize, message: str) {
 
 // Decodes one UTF-8 scalar starting at `current` (first byte `b`). Any malformed sequence sets
 // *size to 0 and returns 0 UNDIAGNOSED -- the caller owns the error report.
+@c.cold
 fn decode_at_b(l: &Lexer, b: u8, current: usize, size: &mut usize) u32 {
     let mut minimum: u32 = 0x10000;
     let mut width: usize = 4;
@@ -205,10 +194,6 @@ fn decode_at_b(l: &Lexer, b: u8, current: usize, size: &mut usize) u32 {
     } else if b >= 0xF0u8 && b <= 0xF4u8 {
         cp = b & 0x07u8;
     } else {
-        *size = 0;
-        return 0;
-    }
-    if current + width > l.bytes.len() {
         *size = 0;
         return 0;
     }
@@ -403,24 +388,25 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
 }
 
 fn identifier(l: &mut Lexer) {
-    // Scan the [_A-Za-z0-9] run via the class table. No bounds check: the trailing-NUL sentinel (SOURCE_PAD)
-    // is not id-part, so the run stops at (or before) len -- exactly the old boundary.
     let mut i = l.current;
     while (l.class[l.bytes.byte_at(i) as usize] & CC_ID_PART) != 0u8 {
-        i = i + 1;
+        i += 1;
     }
     l.current = i;
+
     let identifier_len = i - l.start;
     if identifier_len == 1 && l.bytes.byte_at(l.start) == b'_' {
         add_token(l, TokenType::Underscore);
         return;
     }
+
     let mut kind = TokenType::Identifier;
-    if 2 <= identifier_len && identifier_len <= 13 {
+    if 2 <= identifier_len && identifier_len <= 9 || identifier_len == 13 {
         kind = keywords(unsafe (l.bytes.ptr() + l.start), identifier_len);
     }
+
     // Contextual for-modifiers: `inline`/`parallel` fuse to a modifier token ONLY when the next word
-    // is `for` -- they cannot be plain keywords (std::parallel is a module path). The peek crosses
+    // is `for` since they cannot be plain keywords (std::parallel is a module path). The peek crosses
     // whitespace but not comments; the token itself spans only the modifier word, so the `for` that
     // follows lexes normally and the grammar stays LL(1).
     if kind == TokenType::Identifier && (identifier_len == 6 || identifier_len == 8) {
@@ -429,11 +415,10 @@ fn identifier(l: &mut Lexer) {
         if inl || identifier_len == 8 && memeq(p, "parallel") {
             let mut j = i;
             while (l.class[l.bytes.byte_at(j) as usize] & CC_WS) != 0u8 {
-                j = j + 1;
+                j += 1;
             }
-            if l.bytes.byte_at(j) == b'f' && l.bytes.byte_at(j + 1) == b'o' && l.bytes.byte_at(j + 2) == b'r' && (l.class[l.bytes.byte_at(
-                j + 3,
-            ) as usize] & CC_ID_PART) == 0u8 {
+            let p = unsafe (l.bytes.ptr() + j);
+            if memeq(p, "for") && (l.class[l.bytes.byte_at(j + 3) as usize] & CC_ID_PART) == 0u8 {
                 kind = if inl {
                     TokenType::InlineFor;
                 } else {
@@ -442,46 +427,48 @@ fn identifier(l: &mut Lexer) {
             }
         }
     }
+
     add_token(l, kind);
 }
 
+@c.cold
 fn validate_utf8_at(l: &mut Lexer, i: &mut usize) bool {
     let mut size: usize = 0;
     decode_at_b(l, l.bytes.byte_at(*i), *i, &mut size);
     if size == 0 {
         lexer_error_at(l, *i, 1, "source is not valid UTF-8");
-        *i = *i + 1;
+        *i += 1;
         return false;
     }
-    *i = *i + size;
+    *i += size;
     return true;
 }
 
 fn whitespace(l: &mut Lexer) {
-    // Skip a maximal run of whitespace bytes via the class table. No bounds check: the trailing-NUL sentinel
-    // is not WS, so the run stops at (or before) len. '\r' and '\n' are both WS, so advancing one byte at a
-    // time is identical to the old explicit CRLF handling.
     let mut i = l.current;
     while (l.class[l.bytes.byte_at(i) as usize] & CC_WS) != 0u8 {
-        i = i + 1;
+        i += 1;
     }
     l.current = i;
 }
 
 fn line_comment(l: &mut Lexer) {
     let mut i = l.current;
-    while i < l.bytes.len() {
+    loop {
         let b = l.bytes.byte_at(i);
         if b == b'\n' || b == b'\r' {
             break;
         }
         if b == b'\0' {
+            if i >= l.bytes.len() {
+                break;
+            }
             lexer_error_at(l, i, 1, "NUL byte is not allowed in comments");
-            i = i + 1;
+            i += 1;
         } else if b >= 0x80u8 {
             validate_utf8_at(l, &mut i);
         } else {
-            i = i + 1;
+            i += 1;
         }
     }
     l.current = i;
@@ -490,43 +477,46 @@ fn line_comment(l: &mut Lexer) {
 fn block_comment(l: &mut Lexer) {
     let mut i = l.current;
     let mut depth: usize = 1;
-    while i < l.bytes.len() {
+    loop {
         let b = l.bytes.byte_at(i);
-        if b == b'/' && i + 1 < l.bytes.len() && l.bytes.byte_at(i + 1) == b'*' {
+        if b == b'/' && l.bytes.byte_at(i + 1) == b'*' {
             depth = depth + 1;
-            i = i + 2;
-        } else if b == b'*' && i + 1 < l.bytes.len() && l.bytes.byte_at(i + 1) == b'/' {
-            i = i + 2;
-            depth = depth - 1;
+            i += 2;
+        } else if b == b'*' && l.bytes.byte_at(i + 1) == b'/' {
+            i += 2;
+            depth -= 1;
             if depth == 0 {
                 l.current = i;
                 return;
             }
         } else if b == b'\0' {
+            if i >= l.bytes.len() {
+                break;
+            }
             lexer_error_at(l, i, 1, "NUL byte is not allowed in comments");
-            i = i + 1;
+            i += 1;
         } else if b >= 0x80u8 {
             validate_utf8_at(l, &mut i);
         } else {
-            i = i + 1;
+            i += 1;
         }
     }
     l.current = i;
-    let start = l.start;
-    lexer_error_at(l, start, 2, "unterminated block comment");
+    lexer_error_at(l, l.start, 2, "unterminated block comment");
 }
 
 // Scans one escape sequence (the '\' already consumed) and returns its scalar value. UINT32_MAX =
 // malformed, ALREADY diagnosed here -- callers must not double-report, only mark the literal bad.
 fn escape(l: &mut Lexer, byte_character: bool) u32 {
     if is_eof(l) {
-        let current = l.current;
-        lexer_error_at(l, current, 0, "unterminated escape sequence");
+        lexer_error_at(l, l.current, 0, "unterminated escape sequence");
         return UINT32_MAX;
     }
+
     let at = l.current - 1;
     let escaped = l.bytes.byte_at(l.current);
-    l.current = l.current + 1;
+    l.current += 1;
+
     if escaped == b'n' {
         return 10;
     }
@@ -549,17 +539,15 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
         return 0;
     }
     if escaped == b'x' {
-        if l.current + 2 <= l.bytes.len() && is_hex(l.bytes.byte_at(l.current)) && is_hex(
-            l.bytes.byte_at(l.current + 1),
-        ) {
+        if is_hex(l.bytes.byte_at(l.current)) && is_hex(l.bytes.byte_at(l.current + 1)) {
             let value = (hex_value(l.bytes.byte_at(l.current)) << 4 | hex_value(l.bytes.byte_at(l.current + 1))) as u32;
-            l.current = l.current + 2;
+            l.current += 2;
             return value;
         }
-        let err_len = l.current - at;
-        lexer_error_at(l, at, err_len, "\\x escape requires exactly two hexadecimal digits");
-        while l.current < l.bytes.len() && l.current < at + 4 && is_hex(l.bytes.byte_at(l.current)) {
-            l.current = l.current + 1;
+
+        lexer_error_at(l, at, l.current - at, "\\x escape requires exactly two hexadecimal digits");
+        while l.current < at + 4 && is_hex(l.bytes.byte_at(l.current)) {
+            l.current += 1;
         }
         return UINT32_MAX;
     }
@@ -567,17 +555,15 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
         if byte_character {
             if match_byte(l, b'{') {
                 while is_hex(peek_byte(l)) {
-                    l.current = l.current + 1;
+                    l.current += 1;
                 }
                 match_byte(l, b'}');
             }
-            let err_len = l.current - at;
-            lexer_error_at(l, at, err_len, "Unicode escapes are not allowed in byte character literals");
+            lexer_error_at(l, at, l.current - at, "Unicode escapes are not allowed in byte character literals");
             return UINT32_MAX;
         }
         if !match_byte(l, b'{') {
-            let err_len = l.current - at;
-            lexer_error_at(l, at, err_len, "Unicode escape must use \\u{...} syntax");
+            lexer_error_at(l, at, l.current - at, "Unicode escape must use \\u{...} syntax");
             return UINT32_MAX;
         }
         let mut value: u32 = 0;
@@ -586,36 +572,34 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
             if digits < 6 {
                 value = value << 4 | hex_value(peek_byte(l)) as u32;
             }
-            digits = digits + 1;
-            l.current = l.current + 1;
+            digits += 1;
+            l.current += 1;
         }
         if digits == 0 || digits > 6 || !match_byte(l, b'}') {
-            let err_len = l.current - at;
-            lexer_error_at(l, at, err_len, "Unicode escape requires 1 to 6 hexadecimal digits");
+            lexer_error_at(l, at, l.current - at, "Unicode escape requires 1 to 6 hexadecimal digits");
             return UINT32_MAX;
         }
         if value > 0x10FFFF || value >= 0xD800 && value <= 0xDFFF {
-            let err_len = l.current - at;
-            lexer_error_at(l, at, err_len, "Unicode escape is not a valid Unicode scalar value");
+            lexer_error_at(l, at, l.current - at, "Unicode escape is not a valid Unicode scalar value");
             return UINT32_MAX;
         }
         return value;
     }
-    let err_len = l.current - at;
-    lexer_error_at(l, at, err_len, "unknown escape sequence");
+    lexer_error_at(l, at, l.current - at, "unknown escape sequence");
     return UINT32_MAX;
 }
 
 fn string_lit(l: &mut Lexer, kind: TokenType) {
     let mut i = l.current;
-    while i < l.bytes.len() {
+    loop {
         let b = l.bytes.byte_at(i);
-        i = i + 1;
+        i += 1;
         if b == b'"' {
             l.current = i;
             add_token(l, kind);
             return;
         }
+
         if b == b'\\' {
             l.current = i;
             escape(l, false);
@@ -626,21 +610,24 @@ fn string_lit(l: &mut Lexer, kind: TokenType) {
             // resync just past the next '"' (or EOF) so the rest of the line cannot cascade errors
             while l.current < l.bytes.len() {
                 let recovery = l.bytes.byte_at(l.current);
-                l.current = l.current + 1;
+                l.current += 1;
                 if recovery == b'"' {
                     break;
                 }
             }
             return;
         } else if b == b'\0' {
+            if i > l.bytes.len() {
+                l.current = i - 1;
+                lexer_error(l, "unterminated string literal");
+                return;
+            }
             lexer_error_at(l, i - 1, 1, "NUL byte is not allowed in string literals");
         } else if b >= 0x80u8 {
-            i = i - 1;
+            i -= 1;
             validate_utf8_at(l, &mut i);
         }
     }
-    l.current = i;
-    lexer_error(l, "unterminated string literal");
 }
 
 // After a '\'': true when an identifier run follows WITHOUT a closing '\'' -- a label/lifetime
@@ -655,7 +642,7 @@ fn label_ahead(l: &Lexer) bool {
         return false;
     }
     while i < l.bytes.len() && is_id_part_byte(l.bytes.byte_at(i)) {
-        i = i + 1;
+        i += 1;
     }
     return i >= l.bytes.len() || l.bytes.byte_at(i) != b'\'';
 }
@@ -666,7 +653,7 @@ fn character(l: &mut Lexer, byte_character: bool) {
     let mut invalid_byte = false; // b'..' held a multi-byte scalar; diagnosed only at the closing quote
     while !is_eof(l) {
         let b = l.bytes.byte_at(l.current);
-        l.current = l.current + 1;
+        l.current += 1;
         if b == b'\'' {
             if !malformed && count != 1 {
                 if byte_character {
@@ -684,33 +671,33 @@ fn character(l: &mut Lexer, byte_character: bool) {
             }
             return;
         }
+
         if b == b'\n' || b == b'\r' {
-            l.current = l.current - 1;
+            l.current -= 1;
             lexer_error(l, "unterminated character literal");
             return;
         }
+
         if b == b'\0' {
-            let at = l.current - 1;
-            lexer_error_at(l, at, 1, "NUL byte is not allowed in character literals");
-            count = count + 1;
+            lexer_error_at(l, l.current - 1, 1, "NUL byte is not allowed in character literals");
+            count += 1;
         } else if b == b'\\' {
             if escape(l, byte_character) == UINT32_MAX {
                 malformed = true;
             } else {
-                count = count + 1;
+                count += 1;
             }
         } else if b < 0x80u8 {
-            count = count + 1;
+            count += 1;
         } else {
             let mut size: usize = 0;
             decode_at_b(l, b, l.current - 1, &mut size);
             if size == 0 {
-                let at = l.current - 1;
-                lexer_error_at(l, at, 1, "source is not valid UTF-8");
+                lexer_error_at(l, l.current - 1, 1, "source is not valid UTF-8");
                 malformed = true;
             } else {
-                l.current = l.current + size - 1;
-                count = count + 1;
+                l.current += size - 1;
+                count += 1;
                 invalid_byte = byte_character;
             }
         }
@@ -742,7 +729,7 @@ fn matchertext_ahead(l: &Lexer) bool {
     let mut i = l.current;
     let mut dn: usize = 0;
     while i < l.bytes.len() && is_mt_open(l.bytes.byte_at(i)) {
-        i = i + 1;
+        i += 1;
         dn = dn + 1;
     }
     let mut k = dn;
@@ -751,7 +738,7 @@ fn matchertext_ahead(l: &Lexer) bool {
         if i >= l.bytes.len() || l.bytes.byte_at(i) != mt_closer(l.bytes.byte_at(l.current + k)) {
             return false;
         }
-        i = i + 1;
+        i += 1;
     }
     return i < l.bytes.len() && l.bytes.byte_at(i) == b'"';
 }
@@ -797,7 +784,7 @@ fn mt_scan_template(l: &mut Lexer, first: bool) {
         let b = l.bytes.byte_at(i);
         if b == b'\0' {
             lexer_error_at(l, i, 1, "NUL byte is not allowed in matchertext literals");
-            i = i + 1;
+            i += 1;
         } else if b >= 0x80u8 {
             validate_utf8_at(l, &mut i);
         } else if is_mt_open(b) {
@@ -815,7 +802,7 @@ fn mt_scan_template(l: &mut Lexer, first: bool) {
                 return;
             }
             l.mt_stack.push(b);
-            i = i + 1;
+            i += 1;
         } else if is_mt_close(b) {
             if l.mt_stack.len() == base + 1 {
                 if b == mt_closer(l.mt_stack[base]) {
@@ -838,17 +825,17 @@ fn mt_scan_template(l: &mut Lexer, first: bool) {
                     return;
                 }
                 lexer_error_at(l, i, 1, "mismatched matchers in matchertext literal");
-                i = i + 1;
+                i += 1;
             } else {
                 let o = l.mt_stack[l.mt_stack.len() - 1];
                 let _ = l.mt_stack.pop();
                 if b != mt_closer(o) {
                     lexer_error_at(l, i, 1, "mismatched matchers in matchertext literal");
                 }
-                i = i + 1;
+                i += 1;
             }
         } else {
-            i = i + 1;
+            i += 1;
         }
     }
     l.current = i;
@@ -867,7 +854,7 @@ fn matchertext(l: &mut Lexer) {
     let mut i = l.current;
     let mut dn: usize = 0;
     while is_mt_open(l.bytes.byte_at(i)) {
-        i = i + 1;
+        i += 1;
         dn = dn + 1;
     }
     let mut k = dn;
@@ -877,11 +864,11 @@ fn matchertext(l: &mut Lexer) {
         if l.bytes.byte_at(i) != mt_closer(l.bytes.byte_at(dpos + k)) {
             ok = false;
         }
-        i = i + 1;
+        i += 1;
     }
     if !ok || l.bytes.byte_at(i) != b'"' {
         while i < l.bytes.len() && l.bytes.byte_at(i) != b'"' {
-            i = i + 1;
+            i += 1;
         }
         lexer_error_at(
             l,
@@ -893,7 +880,7 @@ fn matchertext(l: &mut Lexer) {
         string_lit(l, TokenType::StringLiteral);
         return;
     }
-    i = i + 1;
+    i += 1;
     let o = l.bytes.byte_at(i);
     if !is_mt_open(o) {
         lexer_error_at(l, i, 1, "matchertext content must be delimited by '(', '[', or '{' inside the quotes");
@@ -910,7 +897,7 @@ fn matchertext(l: &mut Lexer) {
 // Matcher-token hooks for interpolation holes: while the innermost frame is paused in a hole,
 // open matchers deepen it and a close matcher at hole level must spell the closing delimiter
 // sequence, which resumes the paused template.
-fn mt_hole_open(l: &mut Lexer) {
+const fn mt_hole_open(l: &mut Lexer) {
     let fi = l.mt.len() - 1;
     l.mt[fi].hole_depth = l.mt[fi].hole_depth + 1;
 }
@@ -938,14 +925,14 @@ fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(
     while i < l.bytes.len() {
         let b = l.bytes.byte_at(i);
         if pred(b) {
-            i = i + 1;
+            i += 1;
         } else if b == b'_' {
             let prev = i > component_start && pred(l.bytes.byte_at(i - 1));
             let next = i + 1 < l.bytes.len() && pred(l.bytes.byte_at(i + 1));
             if (!prev || !next) && unsafe *error_at == USIZE_MAX {
                 unsafe *error_at = i;
             }
-            i = i + 1;
+            i += 1;
         } else {
             break;
         }
@@ -1003,8 +990,9 @@ fn number(l: &mut Lexer) {
             radix = 2;
             digit = is_bin;
         }
+
         if radix != 10 {
-            l.current = l.current + 1;
+            l.current += 1;
             let component_start = l.current;
             let mut saw_digit = false;
             let mut i = l.current;
@@ -1042,7 +1030,7 @@ fn number(l: &mut Lexer) {
                         }
                     }
                 }
-                i = i + 1;
+                i += 1;
             }
             l.current = i;
             if !saw_digit && error_at == USIZE_MAX {
@@ -1054,20 +1042,20 @@ fn number(l: &mut Lexer) {
             let mut hex_float = false;
             if radix == 16 && error_at == USIZE_MAX && peek_byte(l) == b'.' && is_hex(peek_next(l)) {
                 hex_float = true;
-                l.current = l.current + 1;
+                l.current += 1;
                 while is_hex(peek_byte(l)) {
-                    l.current = l.current + 1;
+                    l.current += 1;
                 }
             }
             if radix == 16 && error_at == USIZE_MAX && (peek_byte(l) == b'p' || peek_byte(l) == b'P') {
                 hex_float = true;
-                l.current = l.current + 1;
+                l.current += 1;
                 if peek_byte(l) == b'+' || peek_byte(l) == b'-' {
-                    l.current = l.current + 1;
+                    l.current += 1;
                 }
                 let exp_start = l.current;
                 while is_dec(peek_byte(l)) {
-                    l.current = l.current + 1;
+                    l.current += 1;
                 }
                 if l.current == exp_start {
                     error_at = exp_start;
@@ -1075,7 +1063,7 @@ fn number(l: &mut Lexer) {
                 } else if is_id_part_byte(peek_byte(l)) {
                     let sfx = l.current;
                     while is_id_part_byte(peek_byte(l)) {
-                        l.current = l.current + 1;
+                        l.current += 1;
                     }
                     if num_suffix_kind(unsafe (l.bytes.ptr() + sfx), l.current - sfx) != 1 {
                         error_at = sfx;
@@ -1097,13 +1085,13 @@ fn number(l: &mut Lexer) {
                         error = "octal and binary floating-point literals are not supported";
                     }
                 }
-                l.current = l.current + 1;
+                l.current += 1;
                 while !is_eof(l) {
                     let b = peek_byte(l);
                     if !is_id_part_byte(b) && b != b'.' && b != b'+' && b != b'-' {
                         break;
                     }
-                    l.current = l.current + 1;
+                    l.current += 1;
                 }
             }
             if error_at != USIZE_MAX {
@@ -1126,7 +1114,7 @@ fn number(l: &mut Lexer) {
     // decimal fraction -- but a second '.' means '1..2' is a range, so back off
     if peek_byte(l) == b'.' && peek_next(l) != b'.' {
         is_float = true;
-        l.current = l.current + 1;
+        l.current += 1;
         let fraction_start = l.current;
         digits(l, fraction_start, &mut error_at, is_dec);
         if error_at != USIZE_MAX && error.len() == 0 {
@@ -1135,9 +1123,9 @@ fn number(l: &mut Lexer) {
     }
     if peek_byte(l) == b'e' || peek_byte(l) == b'E' {
         is_float = true;
-        l.current = l.current + 1;
+        l.current += 1;
         if peek_byte(l) == b'+' || peek_byte(l) == b'-' {
-            l.current = l.current + 1;
+            l.current += 1;
         }
         let exponent_start = l.current;
         digits(l, exponent_start, &mut error_at, is_dec);
@@ -1152,7 +1140,7 @@ fn number(l: &mut Lexer) {
     if is_id_part_byte(peek_byte(l)) {
         let sfx_start = l.current;
         while is_id_part_byte(peek_byte(l)) {
-            l.current = l.current + 1;
+            l.current += 1;
         }
         let k = num_suffix_kind(unsafe (l.bytes.ptr() + sfx_start), l.current - sfx_start);
         if k < 0 {
@@ -1183,7 +1171,7 @@ fn number(l: &mut Lexer) {
 fn scan_token(l: &mut Lexer) {
     let c = l.bytes.byte_at(l.current);
     if c < 0x80u8 {
-        l.current = l.current + 1;
+        l.current += 1;
     }
     switch c {
         b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\n' | b'\r' => {
@@ -1370,7 +1358,7 @@ fn scan_token(l: &mut Lexer) {
         '\'' => {
             if label_ahead(l) {
                 while is_id_part_byte(peek_byte(l)) {
-                    l.current = l.current + 1;
+                    l.current += 1;
                 }
                 add_token(l, TokenType::Label);
                 return;
@@ -1392,10 +1380,10 @@ fn scan_token(l: &mut Lexer) {
         },
         'b' => {
             if peek_byte(l) == b'\'' {
-                l.current = l.current + 1;
+                l.current += 1;
                 character(l, true);
             } else if peek_byte(l) == b'"' {
-                l.current = l.current + 1;
+                l.current += 1;
                 string_lit(l, TokenType::ByteStringLiteral);
             } else {
                 identifier(l);
@@ -1403,8 +1391,7 @@ fn scan_token(l: &mut Lexer) {
             return;
         },
         '#' => {
-            let start = l.start;
-            lexer_error_at(l, start, 1, "'#' is not valid in Super-C source; Super-C has no preprocessor");
+            lexer_error_at(l, l.start, 1, "'#' is not valid in Super-C source; Super-C has no preprocessor");
             return;
         },
         '@' => {
@@ -1412,18 +1399,15 @@ fn scan_token(l: &mut Lexer) {
             return;
         },
         '$' => {
-            let start = l.start;
-            lexer_error_at(l, start, 1, "'$' is reserved");
+            lexer_error_at(l, l.start, 1, "'$' is reserved");
             return;
         },
         '`' => {
-            let start = l.start;
-            lexer_error_at(l, start, 1, "'`' is reserved");
+            lexer_error_at(l, l.start, 1, "'`' is reserved");
             return;
         },
         b'\0' => {
-            let start = l.start;
-            lexer_error_at(l, start, 1, "NUL byte is not allowed in source");
+            lexer_error_at(l, l.start, 1, "NUL byte is not allowed in source");
             return;
         },
         'a'..='z' | 'A'..='Z' | '_' => {
@@ -1435,21 +1419,18 @@ fn scan_token(l: &mut Lexer) {
                 let mut size: usize = 0;
                 let cp = decode_at_b(l, c, l.current, &mut size);
                 if size == 0 {
-                    let start = l.start;
-                    lexer_error_at(l, start, 1, "source is not valid UTF-8");
-                    l.current = l.current + 1;
+                    lexer_error_at(l, l.start, 1, "source is not valid UTF-8");
+                    l.current += 1;
                 } else {
-                    l.current = l.current + size;
-                    let start = l.start;
+                    l.current += size;
                     if cp == 0xFEFF {
-                        lexer_error_at(l, start, size, "UTF-8 BOM is allowed only at the start of a file");
+                        lexer_error_at(l, l.start, size, "UTF-8 BOM is allowed only at the start of a file");
                     } else {
-                        lexer_error_at(l, start, size, "identifiers may contain only ASCII letters, digits, and '_'");
+                        lexer_error_at(l, l.start, size, "identifiers may contain only ASCII letters, digits, and '_'");
                     }
                 }
             } else {
-                let start = l.start as u32;
-                l.errors.emit(start, 1, format("unexpected character '{}'", c as char));
+                l.errors.emit(l.start as u32, 1, format("unexpected character '{}'", c as char));
             }
         },
     };

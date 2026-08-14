@@ -114,17 +114,20 @@ fn schedule(p: &loader::Package, name: str) DropCounts {
     let mv = bdf::solve_moves(&lw.body, &forest, &bfacts, &cfg);
     let sched = ird::elaborate(&mut ow, &lw.body, &forest, &bfacts, &mv);
     let mut c = DropCounts { uncond: 0, cond: 0, fields: 0 };
+    let mut overs: u32 = 0;
     for d in 0..sched.drops.len() {
         let k = sched.drops.at(d).kind;
         if k == ird::DK_UNCOND {
             c.uncond += 1;
         } else if k == ird::DK_COND {
             c.cond += 1;
+        } else if k == ird::DK_OVER || k == ird::DK_OVERC {
+            overs += 1;
         } else {
             c.fields += 1;
         }
     }
-    ird::insert_drops(&mut lw.body, &sched);
+    ird::insert_drops(&mut lw.body, &sched, &forest);
     let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
     assert(irv::verify(&lw.body, tp).len() == 0, "rewritten body verifies");
     // Explicit drop terminators exist for every whole-value entry.
@@ -134,7 +137,8 @@ fn schedule(p: &loader::Package, name: str) DropCounts {
             drops_in_ir += 1;
         }
     }
-    assert(drops_in_ir == c.uncond + c.cond, "one Drop terminator per whole-value entry");
+    // whole-value, overwrite AND still-owned-field entries all rewrite to explicit terminators
+    assert(drops_in_ir == c.uncond + c.cond + overs + c.fields, "one Drop terminator per schedule entry");
     return c;
 }
 

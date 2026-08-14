@@ -90,7 +90,7 @@ extend InstGraph as Free {
     }
 }
 
-fn mix(h: u64, v: u64) u64 {
+const fn mix(h: u64, v: u64) u64 {
     return skey_mix(h, v);
 }
 
@@ -122,15 +122,6 @@ pub fn skey_norm(a: &Ast, t: TypeId, depth: i32) u64 {
     };
 }
 
-/// The frame-free ArgKey of a pool type: its normalized skey, plus the value for a folded const.
-pub fn argkey_of(a: &Ast, t: TypeId) ArgKey {
-    let y = *a.type_at(t);
-    if y.kind == TypeKind::TYPE_CONST {
-        return ArgKey { skey: skey_norm(a, t, 0), val: y.as_data.value, has_val: true };
-    }
-    return ArgKey { skey: skey_norm(a, t, 0), val: 0, has_val: false };
-}
-
 extend InstGraph {
     pub fn new(pkg: *const loader::Package) InstGraph {
         return InstGraph {
@@ -147,7 +138,7 @@ extend InstGraph {
         };
     }
 
-    fn spend(self: &mut Self, n: u32) bool {
+    const fn spend(self: &mut Self, n: u32) bool {
         if self.budget < n {
             self.budget = 0;
             self.overflow = true;
@@ -155,78 +146,6 @@ extend InstGraph {
         }
         self.budget -= n;
         return true;
-    }
-
-    /// Probe-only record lookup (never inserts): IG_NONE when the instance was never discovered.
-    pub const fn lookup(self: &Self, kind: u8, def: DefId, args: &Vector<ArgKey>) u32 {
-        if self.index.len() == 0 {
-            return IG_NONE;
-        }
-        let mut h = mix(mix(1469598103934665603u64, kind), def.module);
-        h = mix(h, def.node);
-        for i in 0..args.len() {
-            h = mix(h, args.at(i).skey);
-        }
-        let mask = self.index.len() - 1;
-        let mut i = h as usize & mask;
-        loop {
-            let cur = self.index[i];
-            if cur == IG_NONE {
-                return IG_NONE;
-            }
-            let r = self.recs.at(cur as usize);
-            if r.hash == h && r.kind == kind && r.def.module == def.module && r.def.node == def.node && r.args_len as usize == args.len() {
-                let mut eq = true;
-                for k in 0..r.args_len {
-                    if self.keys.at((r.args_start + k) as usize).skey != args.at(k as usize).skey {
-                        eq = false;
-                    }
-                }
-                if eq {
-                    return cur;
-                }
-            }
-            i = i + 1 & mask;
-        }
-    }
-
-    /// The per-TU emission plan: record ids ordered by the ESTABLISHED emitter's own discovery
-    /// sequence for `tu` (the order oracle the first backend switch must preserve), followed by
-    /// graph-only records homed to `tu` (drop glue and the like) in record order. `unmapped` counts
-    /// emitted instances the graph never discovered -- the coverage gate requires zero. Homes must
-    /// be computed first.
-    pub fn plan_tu(self: &Self, p: &loader::Package, tu: ModuleId, out: &mut Vector<u32>, unmapped: &mut u32) {
-        let mut planned = Vector::<bool>::new();
-        for _r in 0..self.recs.len() {
-            planned.push(false);
-        }
-        for i in 0..p.shadow_insts.len() {
-            let sh = *p.shadow_insts.at(i);
-            if sh.tu != tu || sh.n == 0xFF {
-                continue;
-            }
-            let mut args = Vector::<ArgKey>::new();
-            for k in 0..sh.n {
-                args.push(ArgKey { skey: unsafe sh.keys[k as usize], val: 0, has_val: false });
-            }
-            let mut id = self.lookup(IG_FN, sh.def, &args);
-            if id == IG_NONE {
-                id = self.lookup(IG_METHOD, sh.def, &args);
-            }
-            args.free();
-            if id == IG_NONE {
-                *unmapped += 1;
-            } else if !planned[id as usize] {
-                planned.set(id as usize, true);
-                out.push(id);
-            }
-        }
-        for r in 0..self.recs.len() {
-            if !planned[r] && self.recs.at(r).home == tu && (self.recs.at(r).kind == IG_FN || self.recs.at(r).kind == IG_METHOD) {
-                out.push(r as u32);
-            }
-        }
-        planned.free();
     }
 
     // Intern a record; returns its id and whether it was new. Hash + equality use skeys only (the
@@ -959,7 +878,7 @@ extend InstGraph {
     }
 
     // The declaration an extend targets (the path node's resolution, else its last part's).
-    fn ext_target(self: &Self, a: &Ast, ext: NodeId) DefId {
+    const fn ext_target(self: &Self, a: &Ast, ext: NodeId) DefId {
         let tt = a.at_const(ext).as_data.extend_def.target_type;
         if tt == NODE_NONE {
             return DefId { module: 0, node: NODE_NONE };
@@ -1041,7 +960,7 @@ extend InstGraph {
     }
 
     // The interface an extend conforms to, resolved (module-qualified); node NODE_NONE when plain.
-    fn ext_interface(self: &Self, a: &Ast, ext: NodeId) DefId {
+    const fn ext_interface(self: &Self, a: &Ast, ext: NodeId) DefId {
         let it = a.at_const(ext).as_data.extend_def.interface_type;
         if it == NODE_NONE {
             return DefId { module: 0, node: NODE_NONE };
@@ -1224,20 +1143,6 @@ extend InstGraph {
 
     /// Seed every concrete body in the package (functions, methods, constant initializers) and run
     /// the expansion worklist to its fixed point.
-    /// Feed every scheduled destruction root type into the graph (glue roots): the aggregate
-    /// records and their `free` methods then join through the normal demand rules.
-    pub fn demand_drops(self: &mut Self) {
-        let p = unsafe &*self.pkg;
-        let empty = Vector::<Subst>::new();
-        for i in 0..p.drop_tys.len() {
-            let rec = p.drop_tys[i];
-            let mid = (rec >> 32) as ModuleId;
-            let ty = (rec & 0xFFFFFFFFu64) as TypeId;
-            let a = unsafe &*p.module_ast_const(mid);
-            self.note_type(a, ty, &empty, 0);
-        }
-    }
-
     pub fn collect(self: &mut Self) {
         let p = unsafe &*self.pkg;
         let empty = Vector::<Subst>::new();
@@ -1307,89 +1212,6 @@ extend InstGraph {
             }
         }
         self.run();
-    }
-
-    /// Owner-emits homes for every anchored aggregate record (the loader's established rules),
-    /// then verify anchor-independence: recompute the home from EVERY pool that holds the
-    /// instance and count disagreements. Returns (computed, mismatches) through the out params.
-    pub fn compute_homes(self: &mut Self, computed: &mut u32, mismatches: &mut u32) {
-        let p = unsafe &*self.pkg;
-        *computed = 0;
-        *mismatches = 0;
-        for r in 0..self.recs.len() {
-            let rec = *self.recs.at(r);
-            if rec.kind != IG_AGG || rec.aty == TYPE_NONE {
-                continue;
-            }
-            let a = unsafe &*p.module_ast_const(rec.amod);
-            let y = *a.type_at(rec.aty);
-            if y.kind != TypeKind::TYPE_INSTANCE {
-                continue;
-            }
-            let it = *a.instance(y.as_data.inst);
-            self.recs[r].home = p.instance_home_mid(rec.amod, &it);
-            *computed += 1;
-        }
-        // anchor-independence: every pool spelling of a record must agree on the home
-        for m in 0..p.modules.len() {
-            if !p.modules.at(m).has_ast {
-                continue;
-            }
-            let a = unsafe &*p.module_ast_const(m as ModuleId);
-            for ii in 0..a.instances.len() {
-                let it = *a.instance(ii as u32);
-                let da = unsafe &*p.module_ast_const(it.module);
-                let dk = da.at_const(it.decl).kind;
-                if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM {
-                    continue;
-                }
-                let mut args = Vector::<ArgKey>::new();
-                let mut conc = true;
-                for k in 0..it.n {
-                    if !a.type_concrete(unsafe it.args[k]) {
-                        conc = false;
-                    }
-                    args.push(argkey_of(a, unsafe it.args[k]));
-                }
-                if !conc {
-                    continue;
-                }
-                let mut fresh = false;
-                let id = self.add(IG_AGG, DefId { module: it.module, node: it.decl }, &args, &mut fresh);
-                if fresh {
-                    continue;
-                }
-                let h = p.instance_home_mid(m as ModuleId, &it);
-                if self.recs.at(id as usize).home == 0xFFFF {
-                    // a frame-derived record meets its pool spelling here: home lands now
-                    self.recs[id as usize].home = h;
-                    *computed += 1;
-                } else if h != self.recs.at(id as usize).home {
-                    *mismatches += 1;
-                }
-            }
-        }
-    }
-
-    /// Module-dependency edges from the final records (plan: sorted adjacency, not an n*n matrix):
-    /// one (anchor-module, home) edge per anchored record, deduped and sorted.
-    pub fn module_deps(self: &mut Self, out: &mut Vector<u32>) {
-        for r in 0..self.recs.len() {
-            let rec = self.recs.at(r);
-            if rec.kind != IG_AGG || rec.aty == TYPE_NONE || rec.home == 0xFFFF || rec.amod == rec.home {
-                continue;
-            }
-            out.push(rec.amod as u32 << 16 | rec.home as u32);
-        }
-        out.sort();
-        let mut w: usize = 0;
-        for i in 0..out.len() {
-            if w == 0 || out[i] != out[w - 1] {
-                out.set(w, out[i]);
-                w += 1;
-            }
-        }
-        out.truncate(w);
     }
 
     fn seed_body(self: &mut Self, m: ModuleId, fnode: NodeId, a: &Ast, empty: &Vector<Subst>) {

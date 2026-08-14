@@ -11,7 +11,7 @@ import typechecker::typechecker as tc;
 import consteval::consteval as ce;
 import ir::lower as irl;
 import ir::verify as irv;
-import backend::cemit as cb;
+import emit::cemit as cb;
 
 fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let pkg = p as *const loader::Package;
@@ -115,9 +115,7 @@ fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit)
         assert(em.mg.fn_sym(u, node, tgt, true, &mut sym), "symbol renders");
         let ok = em.emit_fn(&bodies.at(i).body, sym.as_str());
         assert(ok, "body emits");
-        sym.free();
     }
-    bodies.free();
 }
 
 // Write the buffer + a `main` returning `expect_expr`, compile strict C11, run, return exit code.
@@ -139,14 +137,11 @@ fn compile_run(em: &cb::CEmit, main_body: str, tag: str) i32 {
     cmd.push_str(" ");
     cmd.push_string(&path);
     let rc = unsafe shim::sc_run(cmd.cstr(), null, null, null, null);
-    cmd.free();
     assert(rc == 0, "strict C11 compile");
-    path.free();
     let mut bin = String::new();
     bin.push_str("build/cemit_probe_");
     bin.push_str(tag);
     let ec = unsafe shim::sc_exec(bin.cstr());
-    bin.free();
     return ec;
 }
 
@@ -166,7 +161,6 @@ fn arithmetic_and_branches_behave() {
     m1.push_str("  if (mix(45, 17) != acc % 251) return 2;\n  return 0;\n}\n");
     let rc = compile_run(&em, m1.as_str(), "arith");
     assert(rc == 0, "emitted C behaves");
-    m1.free();
 }
 
 @test
@@ -183,7 +177,6 @@ fn calls_and_recursion_behave() {
     );
     let rc = compile_run(&em, m1.as_str(), "calls");
     assert(rc == 0, "emitted calls behave");
-    m1.free();
 }
 
 @test

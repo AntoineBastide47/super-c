@@ -20,7 +20,10 @@ import lexer::token_type as tt;
 import ast::ast as *;
 import ast::facts as facts;
 import module::loader as loader;
+import stdlib;
 import ir::core as ir;
+import ir::layout as lay;
+import consteval::consteval as ce;
 import pattern::pattern as pat;
 
 /// One binding in scope: the declaring node (LET name / parameter / pattern name) -> its local.
@@ -39,6 +42,27 @@ struct LoopCtx {
     pub result: ir::PlaceId, // `break value` destination for loop expressions; IR_NONE when none
 }
 
+/// One instance-env binding for substitution-aware lowering: generic param decl `(pm, pnode)`
+/// resolves to pool type `(am, at)` (a copy of the backend demand chain, innermost last).
+pub struct LSub {
+    pub pm: ModuleId,
+    pub pnode: NodeId,
+    pub am: ModuleId,
+    pub at: TypeId,
+}
+
+// One active reflection-binder copy: `inline for f in fields/variants/payloads(..)` re-lowers its
+// body once per copy with this frame on the stack; member reads on `f` resolve through it.
+struct ProjFrame {
+    pub binder: NodeId,
+    pub idx: i64,
+    pub vidx: i64, // payloads mode: the OUTER variants binder's current variant
+    pub mode: u8, // 0 fields / 1 variants / 2 payloads
+    pub sub0: ir::PlaceId,
+    pub sub1: ir::PlaceId,
+    pub owner_st: TypeId, // the concrete owner, reinterned into THIS module's pool
+}
+
 pub struct Lowerer {
     pub f: facts::TypedFacts,
     pub pkg: *const loader::Package,
@@ -47,6 +71,10 @@ pub struct Lowerer {
     pub body: ir::CoreBody,
     pub err: str<'static>, // first unsupported-construct reason ("" = ok)
     pub err_node: NodeId, // the node that failed (diagnostic snippet in the SC_CORE_IR report)
+    /// The instance env for substitution-aware lowering (reflection expansion needs the CONCRETE
+    /// owner); empty for the shared generic pre-pass.
+    pub env: Vector<LSub>,
+    proj_frames: Vector<ProjFrame>,
     binds: Vector<Binding>,
     loops: Vector<LoopCtx>,
     defers: Vector<NodeId>, // active defer statement nodes, innermost last
@@ -80,6 +108,8 @@ extend Lowerer {
             body: ir::CoreBody::new(DefId { module: module, node: owner }, module),
             err: "",
             err_node: NODE_NONE,
+            env: Vector::<LSub>::new(),
+            proj_frames: Vector::<ProjFrame>::new(),
             binds: Vector::<Binding>::new(),
             loops: Vector::<LoopCtx>::new(),
             defers: Vector::<NodeId>::new(),
@@ -94,13 +124,13 @@ extend Lowerer {
         };
     }
 
-    fn fail(self: &mut Self, why: str<'static>) {
+    const fn fail(self: &mut Self, why: str<'static>) {
         if self.err.len() == 0 {
             self.err = why;
         }
     }
 
-    fn fail_at(self: &mut Self, why: str<'static>, node: NodeId) {
+    const fn fail_at(self: &mut Self, why: str<'static>, node: NodeId) {
         if self.err.len() == 0 {
             self.err = why;
             self.err_node = node;
@@ -114,7 +144,7 @@ extend Lowerer {
     }
 
     // Seal the open block with `t` and continue in `next` (its statement run starts now).
-    fn seal(self: &mut Self, t: ir::Terminator, next: ir::BlockId) {
+    const fn seal(self: &mut Self, t: ir::Terminator, next: ir::BlockId) {
         let b = self.cur as usize;
         if !self.body.blocks[b].sealed {
             self.body.blocks[b].stmt_start = self.run_start;
@@ -127,7 +157,7 @@ extend Lowerer {
     }
 
     // Seal an untouched (empty) block with `unreachable` without moving the write cursor.
-    fn seal_dead(self: &mut Self, b: ir::BlockId, sp: tok::Span) {
+    const fn seal_dead(self: &mut Self, b: ir::BlockId, sp: tok::Span) {
         if !self.body.blocks[b as usize].sealed {
             self.body.blocks[b as usize].stmt_start = self.body.statements.len() as u32;
             self.body.blocks[b as usize].stmt_len = 0;
@@ -136,7 +166,7 @@ extend Lowerer {
         }
     }
 
-    fn goto_term(self: &Self, to: ir::BlockId, sp: tok::Span) ir::Terminator {
+    const fn goto_term(self: &Self, to: ir::BlockId, sp: tok::Span) ir::Terminator {
         let mut t = self.term0(ir::TM_GOTO, sp);
         t.t0 = to;
         return t;
@@ -242,7 +272,7 @@ extend Lowerer {
         return self.body.operands.len() as u32 - 1;
     }
 
-    fn rv_use(self: &Self, op: ir::OperandId, ty: TypeId) ir::Rvalue {
+    const fn rv_use(self: &Self, op: ir::OperandId, ty: TypeId) ir::Rvalue {
         return ir::Rvalue {
             kind: ir::RV_USE,
             a: op,
@@ -390,7 +420,7 @@ extend Lowerer {
             let pd = self.f.node(pn).as_data.parameter;
             let l = self.body.add_local(
                 ir::LocalDecl {
-                    ty: self.f.node_type(pn),
+                    ty: self.nty(pn),
                     storage: ir::LS_ARG,
                     is_mutable: pd.is_mutable,
                     span: self.f.node(pn).span,
@@ -437,7 +467,7 @@ extend Lowerer {
             let rn = unsafe self.f.list(rets)[i as usize];
             let _ = self.body.add_local(
                 ir::LocalDecl {
-                    ty: self.f.node_type(rn),
+                    ty: self.nty(rn),
                     storage: ir::LS_RET,
                     is_mutable: true,
                     span: sp,
@@ -450,7 +480,7 @@ extend Lowerer {
         if rets.len == 0 && cd.expr_body {
             // an expr-body closure with no written return list still returns its body's INFERRED
             // type (comparators etc); a unit body keeps zero return slots
-            let bt = self.f.node_type(cd.body);
+            let bt = self.nty(cd.body);
             if bt != TYPE_NONE && !(self.f.ty(bt).kind == TypeKind::TYPE_BUILTIN && self.f.ty(bt).as_data.builtin == BuiltinType::BT_VOID) {
                 let _ = self.body.add_local(
                     ir::LocalDecl {
@@ -470,7 +500,7 @@ extend Lowerer {
             let pn = unsafe self.f.list(params)[i as usize];
             let l = self.body.add_local(
                 ir::LocalDecl {
-                    ty: self.f.node_type(pn),
+                    ty: self.nty(pn),
                     storage: ir::LS_ARG,
                     is_mutable: false,
                     span: self.f.node(pn).span,
@@ -486,7 +516,7 @@ extend Lowerer {
             let decl = self.cap_decl(c);
             let l = self.body.add_local(
                 ir::LocalDecl {
-                    ty: self.f.node_type(c),
+                    ty: self.nty(c),
                     storage: ir::LS_ARG,
                     is_mutable: true,
                     span: self.f.node(c).span,
@@ -496,6 +526,11 @@ extend Lowerer {
             );
             if decl != NODE_NONE {
                 self.bind(decl, l);
+            }
+            if c != decl {
+                // a pattern-shorthand capture: body identifiers resolve to the SHORTHAND ident,
+                // which itself resolves to the binding -- both spellings name this local
+                self.bind(c, l);
             }
         }
         self.body.args = params.len + caps.len;
@@ -527,7 +562,7 @@ extend Lowerer {
     pub fn lower_const(self: &mut Self, cnode: NodeId) bool {
         let cd = self.f.node(cnode).as_data.const_def;
         let sp = self.f.node(cnode).span;
-        let ty = self.f.node_type(cnode);
+        let ty = self.nty(cnode);
         let _ = self.body.add_local(
             ir::LocalDecl {
                 ty: ty,
@@ -561,7 +596,7 @@ extend Lowerer {
 
     // A return slot's declared type: returns are PARAMETER nodes (named) or bare type nodes.
     fn ret_slot_type(self: &mut Self, rn: NodeId) TypeId {
-        return self.f.node_type(rn);
+        return self.nty(rn);
     }
 
     // ---- statements -------------------------------------------------------------------------------
@@ -586,7 +621,24 @@ extend Lowerer {
             self.lower_let(id);
         } else if k == NodeKind::NODE_EXPRESSION_STATEMENT {
             let v = self.f.node(id).as_data.single.value;
-            let _ = self.lower_expr(v);
+            let op = self.lower_expr(v);
+            // A fully discarded result still OWNS its value: register the fresh dest temp for
+            // scope-exit drop so an owning call result (`foo();`) is not leaked. Drop elaboration
+            // skips non-owning types, and only unregistered temporaries are touched.
+            if op != ir::IR_NONE {
+                let o = *self.body.operands.at(op as usize);
+                if o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE {
+                    let pl0 = *self.body.places.at(o.data as usize);
+                    if pl0.proj_len == 0 && self.body.locals.at(pl0.base as usize).storage == ir::LS_TEMP && self.body.locals.at(
+                        pl0.base as usize,
+                    ).decl == NODE_NONE {
+                        let mut ld0 = *self.body.locals.at(pl0.base as usize);
+                        ld0.decl = id;
+                        self.body.locals.set(pl0.base as usize, ld0);
+                        self.scope_locals.push(pl0.base);
+                    }
+                }
+            }
         } else if k == NodeKind::NODE_RETURN {
             self.lower_return(id);
         } else if k == NodeKind::NODE_IF {
@@ -609,12 +661,97 @@ extend Lowerer {
             let _ = self.lower_match(id, ir::IR_NONE);
         } else if k == NodeKind::NODE_ASM {
             self.lower_asm(id);
-        } else if k == NodeKind::NODE_STATIC_ASSERT || k == NodeKind::NODE_CONST || k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_TYPE_ALIAS {
+        } else if k == NodeKind::NODE_CONST {
+            // A LOCAL const folds to static data only when its initializer is const-evaluable
+            // (a `const fn` call or a value expression). An initializer calling a PLAIN fn makes
+            // it a RUNTIME local: evaluated here, owned here, freed at scope exit.
+            let cdf = self.f.node(id).as_data.const_def;
+            let mut runtime = false;
+            if cdf.value != NODE_NONE && self.f.node(cdf.value).kind == NodeKind::NODE_CALL {
+                let cal = self.f.node(cdf.value).as_data.call;
+                let mut fd9 = self.f.res(cal.callee);
+                if fd9.node == NODE_NONE {
+                    fd9 = self.path_res(cal.callee);
+                }
+                if fd9.node != NODE_NONE {
+                    let fa9 = unsafe &*(&*self.pkg).module_ast_const(fd9.module);
+                    if fa9.at_const(fd9.node).kind == NodeKind::NODE_FUNCTION && !fa9.at_const(fd9.node).as_data.function.is_const {
+                        runtime = true;
+                    }
+                }
+            }
+            if runtime {
+                let vop = self.lower_expr(cdf.value);
+                if vop != ir::IR_NONE {
+                    let ty9 = self.nty(cdf.value);
+                    let l9 = self.body.add_local(
+                        ir::LocalDecl {
+                            ty: ty9,
+                            storage: ir::LS_USER,
+                            is_mutable: false,
+                            span: self.f.node(id).span,
+                            decl: id,
+                            item: DefId { module: 0, node: NODE_NONE },
+                        },
+                    );
+                    self.bind(id, l9);
+                    self.bind(cdf.name, l9);
+                    self.user_local_live(l9, self.f.node(id).span);
+                    let pl9 = self.place_of_local(l9);
+                    let rv9 = self.rv_use(vop, ty9);
+                    self.assign(pl9, rv9, self.f.node(id).span);
+                }
+            }
+        } else if k == NodeKind::NODE_STATIC_ASSERT || k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_TYPE_ALIAS {
             // Item statements: local consts fold at CTFE; nested items own their own bodies.
         } else {
             // Everything else is an expression in statement position.
             let _ = self.lower_expr(id);
         }
+    }
+
+    // Inline assembly: outputs lower as places (copies carry the place id), inputs as values;
+    // template/constraints/clobbers stay in the AST the backend re-reads through `item`.
+    fn lower_asm(self: &mut Self, id: NodeId) {
+        let d = self.f.node(id).as_data.asm_stmt;
+        let sp = self.f.node(id).span;
+        let mut argv = Vector::<ir::OperandId>::new();
+        let mut i: u32 = 0;
+        while i + 1 < d.outputs.len {
+            let pe = unsafe self.f.list(d.outputs)[(i + 1) as usize];
+            let pl = self.lower_place_or_spill(pe);
+            if pl == ir::IR_NONE {
+                return;
+            }
+            argv.push(self.copy_op(pl));
+            i += 2;
+        }
+        i = 0;
+        while i + 1 < d.inputs.len {
+            let ve = unsafe self.f.list(d.inputs)[(i + 1) as usize];
+            let op = self.lower_expr(ve);
+            if op == ir::IR_NONE {
+                return;
+            }
+            argv.push(op);
+            i += 2;
+        }
+        let start = self.pool_ops(&argv);
+        let ut = Ast::builtin(BuiltinType::BT_VOID);
+        let t = self.temp(ut, sp);
+        let pl9 = self.place_of_local(t);
+        self.assign(
+            pl9,
+            ir::Rvalue {
+                kind: ir::RV_INTRINSIC,
+                a: start,
+                b: argv.len() as u32,
+                c: ir::IN_ASM,
+                target: ut,
+                item: DefId { module: self.module, node: id },
+            },
+            sp,
+        );
     }
 
     fn lower_let(self: &mut Self, id: NodeId) {
@@ -637,7 +774,7 @@ extend Lowerer {
             self.pattern_bind(ld.name, vpl, fail);
             return;
         }
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let l = self.body.add_local(
             ir::LocalDecl {
                 ty: ty,
@@ -758,6 +895,19 @@ extend Lowerer {
     fn lower_if_stmt(self: &mut Self, id: NodeId) {
         let d = self.f.node(id).as_data.if_stmt;
         let sp = self.f.node(id).span;
+        if self.proj_frames.len() != 0 {
+            let bc = self.binder_cond(d.condition);
+            if bc >= 0 {
+                // binder-const branch: only the taken side lowers, so the untaken side's
+                // calls are never demanded
+                if bc == 1 {
+                    self.lower_stmt(d.then_branch);
+                } else if d.else_branch != NODE_NONE {
+                    self.lower_stmt(d.else_branch);
+                }
+                return;
+            }
+        }
         let cop = self.lower_expr(d.condition);
         if cop == ir::IR_NONE {
             return;
@@ -772,6 +922,26 @@ extend Lowerer {
             self.lower_stmt(d.else_branch);
         }
         self.seal(self.goto_term(join, sp), join);
+    }
+
+    // A preemption safepoint marker at the top of a loop body; the backend prints it only for
+    // programs that use the coroutine runtime, and never inside std::parallel itself.
+    fn loop_safepoint(self: &mut Self, sp: tok::Span) {
+        let ut = Ast::builtin(BuiltinType::BT_VOID);
+        let t = self.temp(ut, sp);
+        let pl = self.place_of_local(t);
+        self.assign(
+            pl,
+            ir::Rvalue {
+                kind: ir::RV_INTRINSIC,
+                a: 0,
+                b: 0,
+                c: ir::IN_SAFEPOINT,
+                target: ut,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+            sp,
+        );
     }
 
     fn lower_while(self: &mut Self, id: NodeId) {
@@ -807,6 +977,7 @@ extend Lowerer {
                 result: ir::IR_NONE,
             },
         );
+        self.loop_safepoint(sp);
         self.lower_stmt(d.body);
         let _ = self.loops.pop();
         if d.is_do {
@@ -827,10 +998,1042 @@ extend Lowerer {
         }
     }
 
+    // ---- reflection binder expansion --------------------------------------------------------------
+
+    // Resolve a SELF-pool type through the instance env (innermost-wins); the result may live in
+    // another module's pool.
+    fn env_resolve(self: &Self, t: TypeId, rm: &mut ModuleId, rt: &mut TypeId) bool {
+        let mut cm = self.module;
+        let mut ct = t;
+        let mut guard = 0;
+        while guard < 16 {
+            let y = *unsafe (&*(&*self.pkg).module_ast_const(cm)).type_at(ct);
+            if y.kind != TypeKind::TYPE_GENERIC {
+                *rm = cm;
+                *rt = ct;
+                return true;
+            }
+            let mut hit = false;
+            let mut i = self.env.len();
+            while i > 0 {
+                i -= 1;
+                let sb = *self.env.at(i);
+                if sb.pm == y.module && sb.pnode == y.as_data.decl {
+                    cm = sb.am;
+                    ct = sb.at;
+                    hit = true;
+                    break;
+                }
+            }
+            if !hit {
+                return false;
+            }
+            guard += 1;
+        }
+        return false;
+    }
+
+    // Reintern a foreign-pool type into THIS module's pool (identity when already local).
+    fn reintern_ty(self: &mut Self, rm: ModuleId, rt: TypeId) TypeId {
+        if rm == self.module || rt == TYPE_NONE {
+            return rt;
+        }
+        let oa = unsafe &*(&*self.pkg).module_ast_const(rm);
+        let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+        return sa.reintern(oa, rt);
+    }
+
+    // Rebuild `t` (SELF pool) with `pm`'s params replaced by `args` (SELF pool) -- the projection
+    // field-type substitution for instance owners.
+    fn proj_ty_map(self: &mut Self, t: TypeId, pm: ModuleId, params: NodeList, args: *const TypeId, n: u32) TypeId {
+        let y = *self.f.ty(t);
+        let da = unsafe &*(&*self.pkg).module_ast_const(pm);
+        if y.kind == TypeKind::TYPE_GENERIC {
+            for i in 0..n {
+                if y.module == pm && unsafe da.list(params)[i as usize] == y.as_data.decl {
+                    return unsafe args[i as usize];
+                }
+            }
+            return t;
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            let e = self.proj_ty_map(y.as_data.elem, pm, params, args, n);
+            if e == y.as_data.elem {
+                return t;
+            }
+            let mut nt = y;
+            nt.as_data.elem = e;
+            let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+            return sa.intern_type(nt);
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let src = *self.f.instance(y.as_data.inst);
+            let mut na: [TypeId; 8] = [[0] = TYPE_NONE];
+            let mut changed = false;
+            for i in 0..src.n {
+                unsafe na[i as usize] = self.proj_ty_map(unsafe src.args[i as usize], pm, params, args, n);
+                if unsafe na[i as usize] != unsafe src.args[i as usize] {
+                    changed = true;
+                }
+            }
+            if changed {
+                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                return sa.intern_instance(src.module, src.decl, &na[0], src.n);
+            }
+            return t;
+        }
+        return t;
+    }
+
+    // The concrete aggregate behind the SELF-pool owner type: decl module/node, or NODE_NONE.
+    const fn proj_owner_decl(self: &Self, owner: TypeId, out_m: &mut ModuleId) NodeId {
+        let y = *self.f.ty(owner);
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            *out_m = y.module;
+            return y.as_data.decl;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.f.instance(y.as_data.inst);
+            *out_m = it.module;
+            return it.decl;
+        }
+        return NODE_NONE;
+    }
+
+    // The k-th FIELD node of the (struct) owner; NODE_NONE past the end.
+    fn proj_field_node(self: &Self, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
+        let dn = self.proj_owner_decl(owner, out_m);
+        if dn == NODE_NONE {
+            return NODE_NONE;
+        }
+        let da = unsafe &*(&*self.pkg).module_ast_const(*out_m);
+        if da.at_const(dn).kind != NodeKind::NODE_STRUCT {
+            return NODE_NONE;
+        }
+        let ag = da.at_const(dn).as_data.aggregate;
+        let mut k: i64 = 0;
+        for i in 0..ag.members.len {
+            let fid = unsafe da.list(ag.members)[i as usize];
+            if !ag.is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            if k == idx {
+                return fid;
+            }
+            k += 1;
+        }
+        return NODE_NONE;
+    }
+
+    // The k-th VARIANT node of the (enum) owner; NODE_NONE past the end.
+    const fn proj_variant_node(self: &Self, owner: TypeId, idx: i64, out_m: &mut ModuleId) NodeId {
+        let dn = self.proj_owner_decl(owner, out_m);
+        if dn == NODE_NONE {
+            return NODE_NONE;
+        }
+        let da = unsafe &*(&*self.pkg).module_ast_const(*out_m);
+        if da.at_const(dn).kind != NodeKind::NODE_ENUM {
+            return NODE_NONE;
+        }
+        let ag = da.at_const(dn).as_data.aggregate;
+        if idx < 0 || idx >= ag.members.len as i64 {
+            return NODE_NONE;
+        }
+        return unsafe da.list(ag.members)[idx as usize];
+    }
+
+    // The k-th field's TYPE under the owner's instance args, in THIS pool; TYPE_NONE = unprojectable.
+    fn proj_field_ty(self: &mut Self, owner: TypeId, idx: i64) TypeId {
+        let mut dm: ModuleId = 0;
+        let fid = self.proj_field_node(owner, idx, &mut dm);
+        if fid == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let da = unsafe &*(&*self.pkg).module_ast_const(dm);
+        let mut ftn = fid;
+        if da.at_const(fid).kind == NodeKind::NODE_FIELD {
+            ftn = da.at_const(fid).as_data.field.ty;
+        }
+        let ftl = da.type_of(ftn);
+        if ftl == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        let mut ft = self.reintern_ty(dm, ftl);
+        let y = *self.f.ty(owner);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.f.instance(y.as_data.inst);
+            let gda = unsafe &*(&*self.pkg).module_ast_const(it.module);
+            let gens = gda.at_const(it.decl).as_data.aggregate.generics;
+            let mut gn = gens.len;
+            if gn > it.n as u32 {
+                gn = it.n;
+            }
+            ft = self.proj_ty_map(ft, it.module, gens, &it.args[0], gn);
+        }
+        return ft;
+    }
+
+    // The innermost active frame for `binder`, or -1.
+    fn proj_frame_of(self: &Self, binder: NodeId) i64 {
+        let mut i = self.proj_frames.len();
+        while i > 0 {
+            i -= 1;
+            if self.proj_frames.at(i).binder == binder {
+                return i as i64;
+            }
+        }
+        return 0 - 1;
+    }
+
+    // The concrete type of the ACTIVE copy behind a projection-typed spelling: `f.value`'s type,
+    // structurally (through refs/pointers/instances). Identity while no frame is active.
+    fn proj_subst_ty(self: &mut Self, t: TypeId) TypeId {
+        if t == TYPE_NONE || self.proj_frames.len() == 0 {
+            return t;
+        }
+        let y = *self.f.ty(t);
+        if y.kind == TypeKind::TYPE_FIELD_PROJECTION {
+            let fi = self.proj_frame_of(y.as_data.proj.binder);
+            if fi < 0 {
+                return t;
+            }
+            let fr = *self.proj_frames.at(fi as usize);
+            let vt = if fr.mode == 0 {
+                self.proj_field_ty(fr.owner_st, fr.idx);
+            } else if fr.mode == 1 {
+                self.proj_payload_ty(fr.owner_st, fr.idx, 0);
+            } else {
+                self.proj_payload_ty(fr.owner_st, fr.vidx, fr.idx);
+            };
+            if vt == TYPE_NONE {
+                return t;
+            }
+            return vt;
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
+            let e = self.proj_subst_ty(y.as_data.elem);
+            if e == y.as_data.elem {
+                return t;
+            }
+            let mut nt = y;
+            nt.as_data.elem = e;
+            let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+            return sa.intern_type(nt);
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let src = *self.f.instance(y.as_data.inst);
+            let mut na: [TypeId; 8] = [[0] = TYPE_NONE];
+            let mut changed = false;
+            for i in 0..src.n {
+                unsafe na[i as usize] = self.proj_subst_ty(unsafe src.args[i as usize]);
+                if unsafe na[i as usize] != unsafe src.args[i as usize] {
+                    changed = true;
+                }
+            }
+            if changed {
+                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                return sa.intern_instance(src.module, src.decl, &na[0], src.n);
+            }
+            return t;
+        }
+        return t;
+    }
+
+    // Every node-type read routes through the active-copy substitution.
+    fn nty(self: &mut Self, id: NodeId) TypeId {
+        let t = self.f.node_type(id);
+        return self.proj_subst_ty(t);
+    }
+
+    // The type of variant `vidx`'s payload entry `k`, in THIS pool (instance args applied).
+    fn proj_payload_ty(self: &mut Self, owner: TypeId, vidx: i64, k: i64) TypeId {
+        let mut dm: ModuleId = 0;
+        let vid = self.proj_variant_node(owner, vidx, &mut dm);
+        if vid == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let da = unsafe &*(&*self.pkg).module_ast_const(dm);
+        let pls = da.at_const(vid).as_data.variant.payload;
+        if k < 0 || k >= pls.len as i64 {
+            return TYPE_NONE;
+        }
+        let pe = unsafe da.list(pls)[k as usize];
+        let mut ptn = pe;
+        if da.at_const(pe).kind == NodeKind::NODE_FIELD {
+            ptn = da.at_const(pe).as_data.field.ty;
+        }
+        let ptl = da.type_of(ptn);
+        if ptl == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        let mut pt = self.reintern_ty(dm, ptl);
+        let y = *self.f.ty(owner);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.f.instance(y.as_data.inst);
+            let gda = unsafe &*(&*self.pkg).module_ast_const(it.module);
+            let gens = gda.at_const(it.decl).as_data.aggregate.generics;
+            let mut gn = gens.len;
+            if gn > it.n as u32 {
+                gn = it.n;
+            }
+            pt = self.proj_ty_map(pt, it.module, gens, &it.args[0], gn);
+        }
+        return pt;
+    }
+
+    // The C-visible tag value of variant `idx`: the declaration index for payload enums, the
+    // (possibly explicit) enum constant value for bare ones.
+    fn proj_tag_val(self: &Self, owner: TypeId, idx: i64) i64 {
+        let mut dm: ModuleId = 0;
+        let dn = self.proj_owner_decl(owner, &mut dm);
+        if dn == NODE_NONE {
+            return idx;
+        }
+        return self.tag_of_decl(dm, dn, idx);
+    }
+
+    // The C tag value of variant `idx` within enum declaration `dn` of module `dm`: the ordinal
+    // for payload enums (tag = declaration index), the explicit discriminant for bare ones.
+    fn tag_of_decl(self: &Self, dm: ModuleId, dn: NodeId, idx: i64) i64 {
+        let da = unsafe &*(&*self.pkg).module_ast_const(dm);
+        let ms = da.at_const(dn).as_data.aggregate.members;
+        let mut has_pay = false;
+        for i in 0..ms.len {
+            let vid = unsafe da.list(ms)[i as usize];
+            if da.at_const(vid).kind == NodeKind::NODE_VARIANT && da.at_const(vid).as_data.variant.payload.len != 0 {
+                has_pay = true;
+            }
+        }
+        if has_pay {
+            return idx;
+        }
+        let mut cur: i64 = 0 - 1;
+        let mut i: i64 = 0;
+        while i <= idx && i < ms.len as i64 {
+            let vid = unsafe da.list(ms)[i as usize];
+            let vv = da.at_const(vid).as_data.variant.value;
+            let mut set = false;
+            if vv != NODE_NONE && unsafe (&*self.pkg).ceval != null {
+                let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+                let cv = cev.eval(dm, vv);
+                if cv.kind == ce::CONST_INT {
+                    cur = cv.as_data.i;
+                    set = true;
+                }
+            }
+            if !set {
+                cur += 1;
+            }
+            i += 1;
+        }
+        return cur;
+    }
+
+    // A member access on a reflection binder: resolved through the innermost active copy frame.
+    fn lower_proj_member_place(self: &mut Self, id: NodeId, blid: NodeId) ir::PlaceId {
+        let fi = self.proj_frame_of(blid);
+        if fi < 0 {
+            self.fail_at("binder-escape", id);
+            return ir::IR_NONE;
+        }
+        let fr = *self.proj_frames.at(fi as usize);
+        let md = self.f.node(id).as_data.member;
+        let nsp = self.f.node(md.member).as_data.name.text;
+        let name = self.src.slice(nsp.start as usize, nsp.end as usize);
+        let sp = self.f.node(id).span;
+        let mut ty = self.nty(id);
+        if name == "index" {
+            if ty == TYPE_NONE {
+                ty = Ast::builtin(BuiltinType::BT_USIZE);
+            }
+            let op = self.const_op(
+                ir::Constant {
+                    kind: ir::CK_INT,
+                    ty: ty,
+                    val: fr.idx,
+                    raw: sp,
+                    item: DefId { module: 0, node: NODE_NONE },
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+            return self.spill(op, sp);
+        }
+        if fr.mode != 1 && (name == "size" || name == "kind" || name == "offset") {
+            let fty = if fr.mode == 0 {
+                self.proj_field_ty(fr.owner_st, fr.idx);
+            } else {
+                self.proj_payload_ty(fr.owner_st, fr.vidx, fr.idx);
+            };
+            if fty == TYPE_NONE {
+                self.fail_at("binder-escape", id);
+                return ir::IR_NONE;
+            }
+            let mut v: i64 = -1;
+            let mut svc = lay::Svc::new(self.pkg);
+            if name == "size" {
+                let l = svc.layout(self.module, fty);
+                if l.ok {
+                    v = l.size as i64;
+                }
+            } else if name == "offset" {
+                let mut dmf: ModuleId = 0;
+                let fid = if fr.mode == 0 {
+                    self.proj_field_node(fr.owner_st, fr.idx, &mut dmf);
+                } else {
+                    NODE_NONE;
+                };
+                if fid != NODE_NONE {
+                    v = svc.field_offset(self.module, fr.owner_st, fid);
+                }
+            } else {
+                let pk9 = unsafe &*self.pkg;
+                let sh = pk9.prelude_lookup("str", true);
+                let lh = pk9.prelude_lookup("Slice", true);
+                if pk9.ceval != null && sh.node != NODE_NONE && lh.node != NODE_NONE {
+                    let cev = unsafe &mut *(pk9.ceval as *mut ce::ConstEval);
+                    v = cev.ce_ti_tag(self.module, fty, sh.mid, sh.node, lh.mid, lh.node);
+                    if v < 0 {
+                        v = 0;
+                    }
+                }
+            }
+            svc.free();
+            if v < 0 {
+                self.fail_at("binder-layout", id);
+                return ir::IR_NONE;
+            }
+            if ty == TYPE_NONE {
+                ty = Ast::builtin(BuiltinType::BT_USIZE);
+            }
+            let op = self.const_op(
+                ir::Constant {
+                    kind: ir::CK_INT,
+                    ty: ty,
+                    val: v,
+                    raw: sp,
+                    item: DefId { module: 0, node: NODE_NONE },
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+            return self.spill(op, sp);
+        }
+        if fr.mode == 1 && (name == "tag" || name == "payload") {
+            let mut dmv: ModuleId = 0;
+            let vid = self.proj_variant_node(fr.owner_st, fr.idx, &mut dmv);
+            if vid == NODE_NONE {
+                self.fail_at("binder-escape", id);
+                return ir::IR_NONE;
+            }
+            let mut v: i64 = fr.idx;
+            if name == "tag" {
+                v = self.proj_tag_val(fr.owner_st, fr.idx);
+            } else {
+                let dav = unsafe &*(&*self.pkg).module_ast_const(dmv);
+                v = dav.at_const(vid).as_data.variant.payload.len;
+            }
+            if ty == TYPE_NONE {
+                ty = Ast::builtin(BuiltinType::BT_I32);
+            }
+            let op = self.const_op(
+                ir::Constant {
+                    kind: ir::CK_INT,
+                    ty: ty,
+                    val: v,
+                    raw: sp,
+                    item: DefId { module: 0, node: NODE_NONE },
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+            return self.spill(op, sp);
+        }
+        if name == "name" {
+            let mut dmn: ModuleId = 0;
+            let mut nid2 = NODE_NONE;
+            if fr.mode == 1 {
+                nid2 = self.proj_variant_node(fr.owner_st, fr.idx, &mut dmn);
+            } else if fr.mode == 2 {
+                let pv = self.proj_variant_node(fr.owner_st, fr.vidx, &mut dmn);
+                if pv != NODE_NONE {
+                    let dap = unsafe &*(&*self.pkg).module_ast_const(dmn);
+                    let pls = dap.at_const(pv).as_data.variant.payload;
+                    if fr.idx < pls.len as i64 {
+                        nid2 = unsafe dap.list(pls)[fr.idx as usize];
+                    }
+                }
+            } else {
+                nid2 = self.proj_field_node(fr.owner_st, fr.idx, &mut dmn);
+            }
+            if nid2 == NODE_NONE {
+                self.fail_at("binder-escape", id);
+                return ir::IR_NONE;
+            }
+            let dan = unsafe &*(&*self.pkg).module_ast_const(dmn);
+            let nk = dan.at_const(nid2).kind;
+            let span2 = if nk == NodeKind::NODE_FIELD {
+                dan.at_const(dan.at_const(nid2).as_data.field.name).as_data.name.text;
+            } else if nk == NodeKind::NODE_VARIANT {
+                dan.at_const(dan.at_const(nid2).as_data.variant.name).as_data.name.text;
+            } else {
+                tok::Span { start: 0, end: 0 };
+            };
+            if span2.end <= span2.start {
+                self.fail_at("binder-name", id);
+                return ir::IR_NONE;
+            }
+            let op = self.const_op(
+                ir::Constant {
+                    kind: ir::CK_STR,
+                    ty: ty,
+                    val: tt::TokenType::RawStringLiteral as i64,
+                    raw: span2,
+                    item: DefId { module: dmn, node: nid2 },
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+            return self.spill(op, sp);
+        }
+        if fr.mode == 1 && (name == "is_active" || name == "other_active") {
+            let mut dmv: ModuleId = 0;
+            let vid = self.proj_variant_node(fr.owner_st, fr.idx, &mut dmv);
+            if vid == NODE_NONE {
+                self.fail_at("binder-escape", id);
+                return ir::IR_NONE;
+            }
+            let mut sub = fr.sub0;
+            if name == "other_active" && fr.sub1 != ir::IR_NONE {
+                sub = fr.sub1;
+            }
+            let mut pay = ir::IR_NONE;
+            let cond = self.variant_test(sub, DefId { module: dmv, node: vid }, sp, &mut pay);
+            if cond == ir::IR_NONE {
+                return ir::IR_NONE;
+            }
+            return self.spill(cond, sp);
+        }
+        if name == "value" || name == "other" {
+            let mut sub = fr.sub0;
+            if name == "other" && fr.sub1 != ir::IR_NONE {
+                sub = fr.sub1;
+            }
+            let base = self.place_project(sub, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: fr.owner_st });
+            if fr.mode == 0 {
+                let mut dmf: ModuleId = 0;
+                let fid = self.proj_field_node(fr.owner_st, fr.idx, &mut dmf);
+                let fty = self.proj_field_ty(fr.owner_st, fr.idx);
+                if fid == NODE_NONE || fty == TYPE_NONE {
+                    self.fail_at("binder-escape", id);
+                    return ir::IR_NONE;
+                }
+                let mut dmo: ModuleId = 0;
+                let odn = self.proj_owner_decl(fr.owner_st, &mut dmo);
+                let dao = unsafe &*(&*self.pkg).module_ast_const(dmo);
+                let mut fdata: u32 = 0;
+                if dao.at_const(odn).kind == NodeKind::NODE_STRUCT && dao.at_const(odn).as_data.aggregate.is_union {
+                    fdata = ir::PJ_UNION_FIELD;
+                }
+                let daf = unsafe &*(&*self.pkg).module_ast_const(dmf);
+                let fsub = if daf.at_const(fid).kind == NodeKind::NODE_FIELD {
+                    fid;
+                } else {
+                    NODE_NONE; // tuple member: positional `_k`
+                };
+                let fdata2 = if fsub == NODE_NONE {
+                    fr.idx as u32;
+                } else {
+                    fdata;
+                };
+                return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: fdata2, sub: fsub, ty: fty });
+            }
+            // variants .value (single payload) / payloads .value: downcast then the payload member
+            let vk = if fr.mode == 1 {
+                fr.idx;
+            } else {
+                fr.vidx;
+            };
+            let pk = if fr.mode == 1 {
+                0 as i64;
+            } else {
+                fr.idx;
+            };
+            let mut dmv: ModuleId = 0;
+            let vid = self.proj_variant_node(fr.owner_st, vk, &mut dmv);
+            let pty = self.proj_payload_ty(fr.owner_st, vk, pk);
+            if vid == NODE_NONE || pty == TYPE_NONE {
+                self.fail_at("binder-escape", id);
+                return ir::IR_NONE;
+            }
+            let dcast = self.place_project(
+                base,
+                ir::Projection { kind: ir::PJ_DOWNCAST, data: vk as u32, sub: vid, ty: fr.owner_st },
+            );
+            let dav = unsafe &*(&*self.pkg).module_ast_const(dmv);
+            let pls = dav.at_const(vid).as_data.variant.payload;
+            let pe = unsafe dav.list(pls)[pk as usize];
+            let psub = if dav.at_const(pe).kind == NodeKind::NODE_FIELD {
+                pe;
+            } else {
+                NODE_NONE;
+            };
+            return self.place_project(dcast, ir::Projection { kind: ir::PJ_FIELD, data: pk as u32, sub: psub, ty: pty });
+        }
+        self.fail_at("binder-member", id);
+        return ir::IR_NONE;
+    }
+
+    // A binder metadata CALL's per-copy value: -1 = not a metadata call; 0 = bool (`out` 0/1),
+    // 1 = int (`out`), 2 = string (`out` = the metas index or -1; `out_dm`/`out_node` the decl).
+    fn meta_call_val(self: &mut Self, id: NodeId, out: &mut i64, out_dm: &mut ModuleId, out_node: &mut NodeId) i32 {
+        if self.f.node(id).kind != NodeKind::NODE_CALL {
+            return -1;
+        }
+        let d = self.f.node(id).as_data.call;
+        if self.f.node(d.callee).kind != NodeKind::NODE_MEMBER {
+            return -1;
+        }
+        let cn = *self.f.node(d.callee);
+        if cn.as_data.member.path || cn.as_data.member.object == NODE_NONE {
+            return -1;
+        }
+        let mobj = cn.as_data.member.object;
+        if self.f.node(mobj).kind != NodeKind::NODE_IDENTIFIER {
+            return -1;
+        }
+        let blid = unsafe (&*self.f.ast).resolution(mobj);
+        if blid == NODE_NONE || self.f.node(blid).kind != NodeKind::NODE_INLINE_FOR {
+            return -1;
+        }
+        let fi = self.proj_frame_of(blid);
+        if fi < 0 {
+            return -1;
+        }
+        let nsp = self.f.node(cn.as_data.member.member).as_data.name.text;
+        let name = self.src.slice(nsp.start as usize, nsp.end as usize);
+        let is_has = name == "has_meta";
+        let is_b = name == "meta_bool";
+        let is_i = name == "meta_int";
+        let is_s = name == "meta_str";
+        if !is_has && !is_b && !is_i && !is_s {
+            return -1;
+        }
+        if d.args.len != 1 {
+            return -1;
+        }
+        let a0 = unsafe self.f.list(d.args)[0];
+        if self.f.node(a0).kind != NodeKind::NODE_LITERAL {
+            return -1;
+        }
+        let ksp = self.f.node(a0).span;
+        let key = self.src.slice((ksp.start + 1) as usize, (ksp.end - 1) as usize);
+        let fr = *self.proj_frames.at(fi as usize);
+        let mut dm: ModuleId = 0;
+        let mut node = NODE_NONE;
+        if fr.mode == 2 {
+            let vid = self.proj_variant_node(fr.owner_st, fr.vidx, &mut dm);
+            if vid != NODE_NONE {
+                let dap = unsafe &*(&*self.pkg).module_ast_const(dm);
+                let pls = dap.at_const(vid).as_data.variant.payload;
+                if fr.idx < pls.len as i64 {
+                    node = unsafe dap.list(pls)[fr.idx as usize];
+                }
+            }
+        } else if fr.mode == 1 {
+            node = self.proj_variant_node(fr.owner_st, fr.idx, &mut dm);
+        } else {
+            node = self.proj_field_node(fr.owner_st, fr.idx, &mut dm);
+        }
+        let mut mi: i64 = -1;
+        let mut ma = MetaAttr {
+            owner: NODE_NONE,
+            vkind: 0,
+            ival: 0,
+            key: tok::Span::empty(),
+            vspan: tok::Span::empty(),
+        };
+        if node != NODE_NONE {
+            let da = unsafe &*(&*self.pkg).module_ast_const(dm);
+            let dsrc = unsafe (&*self.pkg).modules.at(dm as usize).source.as_str();
+            for i in 0..da.metas.len() {
+                let m2 = *da.metas.at(i);
+                if m2.owner == node && dsrc.slice(m2.key.start as usize, m2.key.end as usize) == key {
+                    mi = i as i64;
+                    ma = m2;
+                    break;
+                }
+            }
+        }
+        *out_dm = dm;
+        *out_node = node;
+        if is_s {
+            *out = mi;
+            return 2;
+        }
+        if is_has {
+            *out = if mi >= 0 {
+                1;
+            } else {
+                0;
+            };
+            return 0;
+        }
+        if is_b {
+            *out = if mi >= 0 && ma.vkind == 0 && ma.ival != 0 {
+                1;
+            } else {
+                0;
+            };
+            return 0;
+        }
+        *out = if mi >= 0 && ma.vkind == 1 {
+            ma.ival;
+        } else {
+            0;
+        };
+        return 1;
+    }
+
+    // `f.has_meta("k")` / `f.meta_bool` / `f.meta_int` / `f.meta_str`: per-copy constants read
+    // from the declaring module's @reflect table. IR_NONE = not a metadata call (caller proceeds).
+    fn lower_meta_call(self: &mut Self, id: NodeId, ty: TypeId, sp: tok::Span) ir::OperandId {
+        let mut v: i64 = 0;
+        let mut dm: ModuleId = 0;
+        let mut node = NODE_NONE;
+        let k = self.meta_call_val(id, &mut v, &mut dm, &mut node);
+        if k < 0 {
+            return ir::IR_NONE;
+        }
+        if k == 2 {
+            let mut rsp = tok::Span::empty();
+            if v >= 0 {
+                let da = unsafe &*(&*self.pkg).module_ast_const(dm);
+                let ma = *da.metas.at(v as usize);
+                if ma.vkind == 2 {
+                    rsp = ma.vspan;
+                }
+            }
+            return self.const_op(
+                ir::Constant {
+                    kind: ir::CK_STR,
+                    ty: ty,
+                    val: tt::TokenType::RawStringLiteral as i64,
+                    raw: rsp,
+                    item: DefId { module: dm, node: node },
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+        }
+        let cty = if ty != TYPE_NONE {
+            ty;
+        } else if k == 1 {
+            Ast::builtin(BuiltinType::BT_I64);
+        } else {
+            Ast::builtin(BuiltinType::BT_BOOL);
+        };
+        return self.const_op(
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: cty,
+                val: v,
+                raw: sp,
+                item: DefId { module: 0, node: NODE_NONE },
+                targ_start: 0,
+                targ_len: 0,
+            },
+        );
+    }
+
+    // -1 unknown, else 0/1: binder-const conditions decided for the copy being lowered --
+    // metadata predicates, `!c`, comparisons of index/tag/payload/meta_int against foldable
+    // integers, and meta_str against a string literal. The untaken branch is never lowered, so
+    // its calls are never demanded (the emission contract reflect tests pin).
+    fn binder_cond(self: &mut Self, cond: NodeId) i32 {
+        let k = self.f.node(cond).kind;
+        if k == NodeKind::NODE_CALL {
+            let mut mv: i64 = 0;
+            let mut mdm: ModuleId = 0;
+            let mut mnode = NODE_NONE;
+            if self.meta_call_val(cond, &mut mv, &mut mdm, &mut mnode) == 0 {
+                return if mv != 0 {
+                    1;
+                } else {
+                    0;
+                };
+            }
+            return -1;
+        }
+        if k == NodeKind::NODE_UNARY && self.f.node(cond).as_data.unary.op == tt::TokenType::Bang {
+            let inner = self.binder_cond(self.f.node(cond).as_data.unary.operand);
+            if inner >= 0 {
+                return 1 - inner;
+            }
+            return -1;
+        }
+        if k != NodeKind::NODE_BINARY {
+            return -1;
+        }
+        let b = self.f.node(cond).as_data.binary;
+        {
+            let mut mmv: i64 = 0;
+            let mut mdm2: ModuleId = 0;
+            let mut mn2 = NODE_NONE;
+            let mut mside = b.left;
+            let mut mk2 = self.meta_call_val(mside, &mut mmv, &mut mdm2, &mut mn2);
+            if mk2 < 0 {
+                mside = b.right;
+                mk2 = self.meta_call_val(mside, &mut mmv, &mut mdm2, &mut mn2);
+            }
+            if mk2 == 0 || mk2 == 1 {
+                let mlit = if mside == b.left {
+                    b.right;
+                } else {
+                    b.left;
+                };
+                return self.binder_cond_cmp(cond, mmv, mlit, mside == b.left);
+            }
+            if mk2 == 2 && (b.op == tt::TokenType::EqualEqual || b.op == tt::TokenType::BangEqual) {
+                let mlit2 = if mside == b.left {
+                    b.right;
+                } else {
+                    b.left;
+                };
+                let ln = *self.f.node(mlit2);
+                if ln.kind == NodeKind::NODE_LITERAL && ln.as_data.literal.token_type == tt::TokenType::StringLiteral {
+                    let want = self.src.slice((ln.span.start + 1) as usize, (ln.span.end - 1) as usize);
+                    let mut eqv = false;
+                    if mmv >= 0 {
+                        let da3 = unsafe &*(&*self.pkg).module_ast_const(mdm2);
+                        let ma3 = *da3.metas.at(mmv as usize);
+                        if ma3.vkind == 2 {
+                            let dsrc3 = unsafe (&*self.pkg).modules.at(mdm2 as usize).source.as_str();
+                            eqv = dsrc3.slice(ma3.vspan.start as usize, ma3.vspan.end as usize) == want;
+                        }
+                    } else {
+                        eqv = want.len() == 0; // a missing key reads ""
+                    }
+                    if b.op == tt::TokenType::BangEqual {
+                        eqv = !eqv;
+                    }
+                    return if eqv {
+                        1;
+                    } else {
+                        0;
+                    };
+                }
+                return -1;
+            }
+        }
+        let mut mem = b.left;
+        let mut lit = b.right;
+        if self.f.node(mem).kind != NodeKind::NODE_MEMBER {
+            mem = b.right;
+            lit = b.left;
+        }
+        if self.f.node(mem).kind != NodeKind::NODE_MEMBER || self.f.node(mem).as_data.member.path {
+            return -1;
+        }
+        let obj = self.f.node(mem).as_data.member.object;
+        if self.f.node(obj).kind != NodeKind::NODE_IDENTIFIER {
+            return -1;
+        }
+        let lid = unsafe (&*self.f.ast).resolution(obj);
+        if lid == NODE_NONE || self.f.node(lid).kind != NodeKind::NODE_INLINE_FOR {
+            return -1;
+        }
+        let fi = self.proj_frame_of(lid);
+        if fi < 0 {
+            return -1;
+        }
+        let fr = *self.proj_frames.at(fi as usize);
+        let msp = self.f.node(self.f.node(mem).as_data.member.member).as_data.name.text;
+        let mname = self.src.slice(msp.start as usize, msp.end as usize);
+        let mut mv: i64 = 0;
+        if mname == "index" || fr.mode == 1 && mname == "tag" {
+            mv = if fr.mode == 1 && mname == "tag" {
+                self.proj_tag_val(fr.owner_st, fr.idx);
+            } else {
+                fr.idx;
+            };
+        } else if fr.mode == 1 && mname == "payload" {
+            let mut dmx: ModuleId = 0;
+            let vid = self.proj_variant_node(fr.owner_st, fr.idx, &mut dmx);
+            if vid == NODE_NONE {
+                return -1;
+            }
+            let dax = unsafe &*(&*self.pkg).module_ast_const(dmx);
+            mv = dax.at_const(vid).as_data.variant.payload.len;
+        } else {
+            return -1;
+        }
+        return self.binder_cond_cmp(cond, mv, lit, mem == b.left);
+    }
+
+    // The shared tail of the binder-const `if` fold: the constant side `mv` against the literal
+    // side, honoring operand order for the ordered comparisons.
+    fn binder_cond_cmp(self: &mut Self, cond: NodeId, mv: i64, lit: NodeId, mem_left: bool) i32 {
+        if unsafe (&*self.pkg).ceval == null {
+            return -1;
+        }
+        let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+        let cv = cev.eval(self.module, lit);
+        if cv.kind != ce::CONST_INT {
+            return -1;
+        }
+        let lv = cv.as_data.i;
+        let op = self.f.node(cond).as_data.binary.op;
+        let mut r = false;
+        if op == tt::TokenType::EqualEqual {
+            r = mv == lv;
+        } else if op == tt::TokenType::BangEqual {
+            r = mv != lv;
+        } else if op == tt::TokenType::LessThan {
+            r = if mem_left {
+                mv < lv;
+            } else {
+                lv < mv;
+            };
+        } else if op == tt::TokenType::GreaterThan {
+            r = if mem_left {
+                mv > lv;
+            } else {
+                lv > mv;
+            };
+        } else if op == tt::TokenType::LessThanEqual {
+            r = if mem_left {
+                mv <= lv;
+            } else {
+                lv <= mv;
+            };
+        } else if op == tt::TokenType::GreaterThanEqual {
+            r = if mem_left {
+                mv >= lv;
+            } else {
+                lv >= mv;
+            };
+        } else {
+            return -1;
+        }
+        return if r {
+            1;
+        } else {
+            0;
+        };
+    }
+
+    // Expand `inline for <bind> in fields/variants/payloads(..)` over the CONCRETE owner: the body
+    // lowers once per copy with a frame on the stack. False = owner symbolic (caller falls back).
+    fn expand_binder(self: &mut Self, id: NodeId) bool {
+        let d = self.f.node(id).as_data.for_stmt;
+        let pt = self.nty(id);
+        if pt == TYPE_NONE || self.f.ty(pt).kind != TypeKind::TYPE_FIELD_PROJECTION {
+            if stdlib::getenv("SC_PROJ_DBG") != null {
+                eprintln("proj: no-proj-type node {} pt {}", id, pt);
+            }
+            return false;
+        }
+        let cd = self.f.node(d.iterable).as_data.call;
+        let csp = self.f.node(cd.callee).as_data.name.text;
+        let cname = self.src.slice(csp.start as usize, csp.end as usize);
+        let mut mode: u8 = 0;
+        if cname == "variants" {
+            mode = 1;
+        } else if cname == "payloads" {
+            mode = 2;
+        }
+        let mut orm = self.module;
+        let mut ort = self.f.ty(pt).as_data.proj.owner;
+        if !self.env_resolve(self.f.ty(pt).as_data.proj.owner, &mut orm, &mut ort) {
+            if stdlib::getenv("SC_PROJ_DBG") != null {
+                eprintln("proj: owner-unresolved node {} env {}", id, self.env.len());
+            }
+            return false;
+        }
+        let owner = self.reintern_ty(orm, ort);
+        let mut dm0: ModuleId = 0;
+        if self.proj_owner_decl(owner, &mut dm0) == NODE_NONE {
+            if stdlib::getenv("SC_PROJ_DBG") != null {
+                eprintln("proj: owner-not-agg node {} kind {}", id, self.f.ty(owner).kind as u32);
+            }
+            return false;
+        }
+        let mut sub0 = ir::IR_NONE;
+        let mut sub1 = ir::IR_NONE;
+        let sp = self.f.node(id).span;
+        if mode == 2 {
+            // payloads(v): shares the OUTER variants binder's subjects and current variant
+            let pav = unsafe self.f.list(cd.args)[0];
+            let outer = unsafe (&*self.f.ast).resolution(pav);
+            let ofi = self.proj_frame_of(outer);
+            if ofi < 0 {
+                return false;
+            }
+            sub0 = self.proj_frames.at(ofi as usize).sub0;
+            sub1 = self.proj_frames.at(ofi as usize).sub1;
+            let vk = self.proj_frames.at(ofi as usize).idx;
+            let mut dmv: ModuleId = 0;
+            let vid = self.proj_variant_node(owner, vk, &mut dmv);
+            if vid == NODE_NONE {
+                return false;
+            }
+            let dav = unsafe &*(&*self.pkg).module_ast_const(dmv);
+            let np = dav.at_const(vid).as_data.variant.payload.len;
+            let mut k: i64 = 0;
+            while k < np as i64 {
+                self.proj_frames.push(
+                    ProjFrame { binder: id, idx: k, vidx: vk, mode: 2, sub0: sub0, sub1: sub1, owner_st: owner },
+                );
+                self.lower_stmt(d.body);
+                let _ = self.proj_frames.pop();
+                if self.err.len() != 0 {
+                    return true; // consumed (error recorded)
+                }
+                k += 1;
+            }
+            return true;
+        }
+        for i in 0..cd.args.len {
+            let a = unsafe self.f.list(cd.args)[i as usize];
+            let op = self.lower_expr(a);
+            if op == ir::IR_NONE {
+                return true; // consumed (error recorded)
+            }
+            let pl = self.spill(op, sp);
+            if i == 0 {
+                sub0 = pl;
+            } else {
+                sub1 = pl;
+            }
+        }
+        let mut k: i64 = 0;
+        loop {
+            let mut dmk: ModuleId = 0;
+            let nk = if mode == 1 {
+                self.proj_variant_node(owner, k, &mut dmk);
+            } else {
+                self.proj_field_node(owner, k, &mut dmk);
+            };
+            if nk == NODE_NONE {
+                break;
+            }
+            self.proj_frames.push(
+                ProjFrame { binder: id, idx: k, vidx: 0, mode: mode, sub0: sub0, sub1: sub1, owner_st: owner },
+            );
+            self.lower_stmt(d.body);
+            let _ = self.proj_frames.pop();
+            if self.err.len() != 0 {
+                return true;
+            }
+            k += 1;
+        }
+        return true;
+    }
+
     // `for` over a range literal lowers to an index loop. `inline for` over `fields`/`variants`/
-    // `payloads` binders (angle 3) stays a compatibility intrinsic: the binder's operands feed one
-    // IN_REFLECT assignment to the binding, and the body lowers once with normal semantics --
-    // substitution-aware instance lowering replaces this with real per-field expansion.
+    // `payloads` binders: the CONCRETE-owner path expands per copy (expand_binder); a symbolic
+    // owner keeps the IN_REFLECT placeholder and flags the body for per-instance re-lowering.
     fn lower_for(self: &mut Self, id: NodeId) {
         let d = self.f.node(id).as_data.for_stmt;
         let sp = self.f.node(id).span;
@@ -846,7 +2049,11 @@ extend Lowerer {
                 None => {},
             };
             if !resolved && self.f.res(cd.callee).node == NODE_NONE {
-                let ity = self.f.node_type(id);
+                if self.expand_binder(id) {
+                    return;
+                }
+                self.body.has_reflect = true;
+                let ity = self.nty(id);
                 let mut argv = Vector::<ir::OperandId>::new();
                 for i in 0..cd.args.len {
                     let a = unsafe self.f.list(cd.args)[i as usize];
@@ -899,7 +2106,7 @@ extend Lowerer {
                 },
                 None => {},
             };
-            let ity = self.f.node_type(d.iterable);
+            let ity = self.nty(d.iterable);
             let ik = self.f.ty(ity).kind;
             if ik == TypeKind::TYPE_INSTANCE && self.is_range_instance(ity) {
                 self.lower_for_range_value(id);
@@ -913,16 +2120,90 @@ extend Lowerer {
             return;
         }
         let rd = self.f.node(d.iterable).as_data.pattern_range;
-        let ity = self.f.node_type(id);
-        let sop = self.lower_expr(rd.start);
+        let ity = self.nty(id);
+        if self.f.node(id).kind == NodeKind::NODE_INLINE_FOR && unsafe (&*self.pkg).ceval != null {
+            // physical unroll: the checker guarantees inline-for bounds are compile-time constants
+            let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+            let cl = cev.eval(self.module, rd.start);
+            let ch = cev.eval(self.module, rd.end);
+            if cl.kind == ce::CONST_INT && ch.kind == ce::CONST_INT {
+                let lo = cl.as_data.i;
+                let mut hi = ch.as_data.i;
+                if rd.inclusive {
+                    hi += 1;
+                }
+                let mut v = lo;
+                while v < hi {
+                    let l = self.body.add_local(
+                        ir::LocalDecl {
+                            ty: ity,
+                            storage: ir::LS_USER,
+                            is_mutable: false,
+                            span: sp,
+                            decl: id,
+                            item: DefId { module: 0, node: NODE_NONE },
+                        },
+                    );
+                    self.bind(id, l);
+                    if d.binding != NODE_NONE {
+                        self.bind(d.binding, l);
+                    }
+                    self.user_local_live(l, sp);
+                    let cvo = self.const_op(
+                        ir::Constant {
+                            kind: ir::CK_INT,
+                            ty: ity,
+                            val: v,
+                            raw: sp,
+                            item: DefId { module: 0, node: NODE_NONE },
+                            targ_start: 0,
+                            targ_len: 0,
+                        },
+                    );
+                    let rvc = self.rv_use(cvo, ity);
+                    self.assign(self.place_of_local(l), rvc, sp);
+                    self.lower_stmt(d.body);
+                    if self.err.len() != 0 {
+                        return;
+                    }
+                    v += 1;
+                }
+                return;
+            }
+        }
+        // `..e` counts from zero; `s..` has no bound check (exit only via break)
+        let sop: ir::OperandId = if rd.start != NODE_NONE {
+            self.lower_expr(rd.start);
+        } else {
+            self.const_op(
+                ir::Constant {
+                    kind: ir::CK_INT,
+                    ty: ity,
+                    val: 0,
+                    raw: sp,
+                    item: DefId { module: 0, node: NODE_NONE },
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+        };
         if sop == ir::IR_NONE {
             return;
         }
-        let eop = self.lower_expr(rd.end);
-        if eop == ir::IR_NONE {
-            return;
+        let mut epl = ir::IR_NONE;
+        let mut ecst = ir::IR_NONE;
+        if rd.end != NODE_NONE {
+            let eop = self.lower_expr(rd.end);
+            if eop == ir::IR_NONE {
+                return;
+            }
+            let eo = *self.body.operands.at(eop as usize);
+            if eo.kind == ir::OP_CONST {
+                ecst = eo.data;
+            } else {
+                epl = self.spill(eop, sp);
+            }
         }
-        let epl = self.spill(eop, sp);
         // induction variable = the user binding
         let l = self.body.add_local(
             ir::LocalDecl {
@@ -947,30 +2228,39 @@ extend Lowerer {
         let step = self.open_block();
         let exit = self.open_block();
         self.seal(self.goto_term(head, sp), head);
-        let iop = self.copy_op(ipl);
-        let eop2 = self.copy_op(epl);
-        let bt = Ast::builtin(BuiltinType::BT_BOOL);
-        let ct = self.temp(bt, sp);
-        let cpl = self.place_of_local(ct);
-        let cmp_op: u32 = if rd.inclusive {
-            tt::TokenType::LessThanEqual as u32;
+        if rd.end == NODE_NONE {
+            self.seal(self.goto_term(body_b, sp), body_b);
         } else {
-            tt::TokenType::LessThan as u32;
-        };
-        self.assign(
-            cpl,
-            ir::Rvalue {
-                kind: ir::RV_BINARY,
-                a: iop,
-                b: eop2,
-                c: cmp_op as u8,
-                target: bt,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-            sp,
-        );
-        let cop = self.copy_op(cpl);
-        self.branch_bool(cop, body_b, exit, sp);
+            let iop = self.copy_op(ipl);
+            let eop2: ir::OperandId = if ecst != ir::IR_NONE {
+                let c2 = *self.body.constants.at(ecst as usize);
+                self.const_op(c2);
+            } else {
+                self.copy_op(epl);
+            };
+            let bt = Ast::builtin(BuiltinType::BT_BOOL);
+            let ct = self.temp(bt, sp);
+            let cpl = self.place_of_local(ct);
+            let cmp_op: u32 = if rd.inclusive {
+                tt::TokenType::LessThanEqual as u32;
+            } else {
+                tt::TokenType::LessThan as u32;
+            };
+            self.assign(
+                cpl,
+                ir::Rvalue {
+                    kind: ir::RV_BINARY,
+                    a: iop,
+                    b: eop2,
+                    c: cmp_op as u8,
+                    target: bt,
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
+                sp,
+            );
+            let cop = self.copy_op(cpl);
+            self.branch_bool(cop, body_b, exit, sp);
+        }
         self.loops.push(
             LoopCtx {
                 label: d.label,
@@ -981,6 +2271,7 @@ extend Lowerer {
                 result: ir::IR_NONE,
             },
         );
+        self.loop_safepoint(sp);
         self.lower_stmt(d.body);
         let _ = self.loops.pop();
         self.seal(self.goto_term(step, sp), step);
@@ -1057,7 +2348,7 @@ extend Lowerer {
         let rty = self.body.places.at(rpl as usize).ty;
         let it = *self.f.instance(self.f.ty(rty).as_data.inst);
         let sd = DefId { module: it.module, node: it.decl };
-        let elem = self.f.node_type(id);
+        let elem = self.nty(id);
         let bt = Ast::builtin(BuiltinType::BT_BOOL);
         let mut f_start = NODE_NONE;
         let mut f_end = NODE_NONE;
@@ -1136,6 +2427,7 @@ extend Lowerer {
                 result: ir::IR_NONE,
             },
         );
+        self.loop_safepoint(sp);
         self.lower_stmt(d.body);
         let _ = self.loops.pop();
         self.seal(self.goto_term(step, sp), step);
@@ -1214,7 +2506,7 @@ extend Lowerer {
             return;
         }
         let opt_ty = unsafe mu.args[0];
-        let elem = self.f.node_type(id);
+        let elem = self.nty(id);
         let mut ok_ord: i64 = -1;
         let mut vd = DefId { module: 0, node: NODE_NONE };
         self.carrier_ok_variant(opt_ty, &mut ok_ord, &mut vd);
@@ -1307,6 +2599,7 @@ extend Lowerer {
                 result: ir::IR_NONE,
             },
         );
+        self.loop_safepoint(sp);
         self.lower_stmt(d.body);
         let _ = self.loops.pop();
         self.seal(self.goto_term(head, sp), exit);
@@ -1319,7 +2612,7 @@ extend Lowerer {
         if ipl == ir::IR_NONE {
             return;
         }
-        let elem_ty = self.f.node_type(id);
+        let elem_ty = self.nty(id);
         let ut = Ast::builtin(BuiltinType::BT_USIZE);
         let ll = self.temp(ut, sp);
         let lpl = self.place_of_local(ll);
@@ -1398,6 +2691,7 @@ extend Lowerer {
                 result: ir::IR_NONE,
             },
         );
+        self.loop_safepoint(sp);
         self.lower_stmt(d.body);
         let _ = self.loops.pop();
         self.seal(self.goto_term(step, sp), step);
@@ -1426,31 +2720,6 @@ extend Lowerer {
             sp,
         );
         self.seal(self.goto_term(head, sp), exit);
-    }
-
-    fn lower_asm(self: &mut Self, id: NodeId) {
-        let d = self.f.node(id).as_data.asm_stmt;
-        let sp = self.f.node(id).span;
-        let mut argv = Vector::<ir::OperandId>::new();
-        for i in 0..d.outputs.len {
-            let e = unsafe self.f.list(d.outputs)[i as usize];
-            let op = self.lower_expr(e);
-            if op == ir::IR_NONE {
-                return;
-            }
-            argv.push(op);
-        }
-        for i in 0..d.inputs.len {
-            let e = unsafe self.f.list(d.inputs)[i as usize];
-            let op = self.lower_expr(e);
-            if op == ir::IR_NONE {
-                return;
-            }
-            argv.push(op);
-        }
-        let start = self.pool_ops(&argv);
-        let n = argv.len() as u32;
-        self.stmt(ir::Statement { kind: ir::ST_ASM, place: ir::IR_NONE, rvalue: ir::IR_NONE, a: start, b: n, span: sp });
     }
 
     // ---- expressions ------------------------------------------------------------------------------
@@ -1484,7 +2753,7 @@ extend Lowerer {
                 if apl == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
-                let rt = self.f.node_type(id);
+                let rt = self.nty(id);
                 let mut mu: u32 = 0;
                 if rt != TYPE_NONE && self.f.ty(rt).kind == TypeKind::TYPE_REFERENCE && self.f.ty(rt).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
                     mu = 1;
@@ -1517,6 +2786,23 @@ extend Lowerer {
         let sp = self.f.node(id).span;
         let mut op = base;
         let co = self.f.coercion(id);
+        if co != null && self.f.wide_lit(id) != null {
+            // a wide literal already CARRIES the target-width limbs: the widening `from` shim
+            // would truncate through its scalar parameter, so the constant retypes instead
+            let target = unsafe co.target;
+            let wi = unsafe (&*(&*self.pkg).module_ast_const(self.body.module)).wide_lit_of(id);
+            return self.const_op(
+                ir::Constant {
+                    kind: ir::CK_WIDE,
+                    ty: target,
+                    val: wi,
+                    raw: sp,
+                    item: DefId { module: 0, node: NODE_NONE },
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+        }
         if co != null {
             let target = unsafe co.target;
             let method = unsafe co.method;
@@ -1555,7 +2841,7 @@ extend Lowerer {
     fn lower_expr_base(self: &mut Self, id: NodeId) ir::OperandId {
         let k = self.f.node(id).kind;
         let sp = self.f.node(id).span;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         if k == NodeKind::NODE_LITERAL {
             return self.lower_literal(id);
         }
@@ -1567,6 +2853,28 @@ extend Lowerer {
             return self.copy_op(pl);
         }
         if k == NodeKind::NODE_UNARY {
+            // `unsafe`/`move` are transparent over places: keep the operand's PLACE-ness (a
+            // `&mut` receiver must mutate the real location, not a value temp)
+            let uop0 = self.f.node(id).as_data.unary.op;
+            if uop0 == tt::TokenType::Unsafe || uop0 == tt::TokenType::Move {
+                let mut inner0 = self.f.node(id).as_data.unary.operand;
+                loop {
+                    let inn = self.f.node(inner0);
+                    if inn.kind == NodeKind::NODE_UNARY && (inn.as_data.unary.op == tt::TokenType::Unsafe || inn.as_data.unary.op == tt::TokenType::Move) {
+                        inner0 = inn.as_data.unary.operand;
+                        continue;
+                    }
+                    break;
+                }
+                let ik = self.f.node(inner0).kind;
+                if ik == NodeKind::NODE_IDENTIFIER || ik == NodeKind::NODE_MEMBER || ik == NodeKind::NODE_INDEX {
+                    let pl = self.lower_place(id);
+                    if pl == ir::IR_NONE {
+                        return ir::IR_NONE;
+                    }
+                    return self.copy_op(pl);
+                }
+            }
             return self.lower_unary(id);
         }
         if k == NodeKind::NODE_BINARY {
@@ -1604,7 +2912,7 @@ extend Lowerer {
                 if aop != NODE_NONE {
                     let apl = self.lower_place(aop);
                     if apl != ir::IR_NONE {
-                        let rt = self.f.node_type(e);
+                        let rt = self.nty(e);
                         let mut mu: u32 = 0;
                         if rt != TYPE_NONE && self.f.ty(rt).kind == TypeKind::TYPE_REFERENCE && self.f.ty(rt).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
                             mu = 1;
@@ -1688,7 +2996,7 @@ extend Lowerer {
             };
             let t = self.temp(ty, sp);
             let pl = self.place_of_local(t);
-            let measured = self.f.node_type(self.f.node(id).as_data.single.value);
+            let measured = self.nty(self.f.node(id).as_data.single.value);
             self.assign(
                 pl,
                 ir::Rvalue {
@@ -1719,12 +3027,17 @@ extend Lowerer {
         }
         if k == NodeKind::NODE_NEW {
             let nd = self.f.node(id).as_data.new_expr;
-            let iop = self.lower_expr(nd.initializer);
-            if iop == ir::IR_NONE {
-                return ir::IR_NONE;
+            let mut start = 0 as u32;
+            let mut n9 = 0 as u32;
+            if nd.initializer != NODE_NONE {
+                let iop = self.lower_expr(nd.initializer);
+                if iop == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                start = self.body.oper_pool.len() as u32;
+                self.body.oper_pool.push(iop);
+                n9 = 1;
             }
-            let start = self.body.oper_pool.len() as u32;
-            self.body.oper_pool.push(iop);
             let t = self.temp(ty, sp);
             let pl = self.place_of_local(t);
             self.assign(
@@ -1732,7 +3045,7 @@ extend Lowerer {
                 ir::Rvalue {
                     kind: ir::RV_INTRINSIC,
                     a: start,
-                    b: 1,
+                    b: n9,
                     c: ir::IN_NEW,
                     target: ty,
                     item: DefId { module: 0, node: NODE_NONE },
@@ -1751,12 +3064,19 @@ extend Lowerer {
         let k = self.f.node(inner).kind;
         if k == NodeKind::NODE_IDENTIFIER || k == NodeKind::NODE_TYPE_PATH || k == NodeKind::NODE_MEMBER {
             // The wrapper's own type/resolution stand for the specialized value.
-            let d = self.f.res(outer);
-            let ty = self.f.node_type(outer);
+            let mut d = self.f.res(outer);
+            if d.node == NODE_NONE {
+                d = self.f.res(inner); // resolutions land on the inner name for value turbofish
+            }
+            let ty = self.nty(outer);
             let sp = self.f.node(outer).span;
             if d.node != NODE_NONE {
+                // a specialized fn VALUE (`job_entry::<F>`) carries its type args: the emitter
+                // suffixes the symbol and demands the instance from them
+                let ts = self.body.targ_pool.len() as u32;
+                let tn = self.copy_targs(outer);
                 return self.const_op(
-                    ir::Constant { kind: ir::CK_ITEM, ty: ty, val: 0, raw: sp, item: d, targ_start: 0, targ_len: 0 },
+                    ir::Constant { kind: ir::CK_ITEM, ty: ty, val: 0, raw: sp, item: d, targ_start: ts, targ_len: tn },
                 );
             }
         }
@@ -1765,13 +3085,15 @@ extend Lowerer {
 
     fn lower_literal(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.literal;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let _sp = self.f.node(id).span;
         let no = DefId { module: 0, node: NODE_NONE };
         let w = self.f.wide_lit(id);
         if w != null {
+            // `val` carries the wide_lits pool INDEX (the emitter reads the limbs back by it)
+            let wi = unsafe (&*(&*self.pkg).module_ast_const(self.body.module)).wide_lit_of(id);
             return self.const_op(
-                ir::Constant { kind: ir::CK_WIDE, ty: ty, val: 0, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
+                ir::Constant { kind: ir::CK_WIDE, ty: ty, val: wi, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
             );
         }
         let t = d.token_type;
@@ -1786,13 +3108,19 @@ extend Lowerer {
             );
         }
         if t == tt::TokenType::StringLiteral || t == tt::TokenType::MatchertextLiteral || t == tt::TokenType::RawStringLiteral || t == tt::TokenType::ByteStringLiteral {
-            // val = the literal token kind: quoted spellings copy verbatim into C, raw
-            // (matchertext) spellings must re-escape byte-wise
+            // val = the literal token kind (low byte) plus the format-SEGMENT flag (bit 8):
+            // quoted spellings copy verbatim into C, raw (matchertext) spellings re-escape
+            // byte-wise, and segments collapse their doubled braces
+            let segf: i64 = if d.seg {
+                256;
+            } else {
+                0;
+            };
             return self.const_op(
                 ir::Constant {
                     kind: ir::CK_STR,
                     ty: ty,
-                    val: t as i64,
+                    val: t as i64 | segf,
                     raw: d.raw,
                     item: no,
                     targ_start: 0,
@@ -1808,6 +3136,20 @@ extend Lowerer {
         if t == tt::TokenType::Null {
             return self.const_op(
                 ir::Constant { kind: ir::CK_INT, ty: ty, val: 0, raw: d.raw, item: no, targ_start: 0, targ_len: 0 },
+            );
+        }
+        // Char/byte-char literals: `val` IS the decoded code point (the C spelling prints it).
+        if t == tt::TokenType::CharacterLiteral || t == tt::TokenType::ByteCharacterLiteral {
+            return self.const_op(
+                ir::Constant {
+                    kind: ir::CK_INT,
+                    ty: ty,
+                    val: decode_char(self.src, d.raw),
+                    raw: d.raw,
+                    item: no,
+                    targ_start: 0,
+                    targ_len: 0,
+                },
             );
         }
         // Integer/char literals: the exact value is CTFE's business; the span keeps the
@@ -1827,7 +3169,7 @@ extend Lowerer {
 
     fn lower_unary(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.unary;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         if d.op == tt::TokenType::Ampersand || d.op == tt::TokenType::AmpersandAmpersand {
             let pl = self.lower_place(d.operand);
@@ -1862,6 +3204,55 @@ extend Lowerer {
         }
         if d.op == tt::TokenType::Question {
             return self.lower_question(id, d.operand);
+        }
+        // A negative wide literal records its (two's-complemented) limbs on the UNARY node.
+        if self.f.wide_lit(id) != null {
+            let wi = unsafe (&*(&*self.pkg).module_ast_const(self.body.module)).wide_lit_of(id);
+            return self.const_op(
+                ir::Constant {
+                    kind: ir::CK_WIDE,
+                    ty: ty,
+                    val: wi,
+                    raw: sp,
+                    item: DefId { module: 0, node: NODE_NONE },
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+        }
+        // A negative integer literal folds to ONE constant; a spelled value too wide for the
+        // checker's default i32 carries in i64 (the old emitter's textual `-...LL` behavior).
+        if d.op == tt::TokenType::Minus && self.f.node(d.operand).kind == NodeKind::NODE_LITERAL {
+            let mut mag: i64 = 0;
+            let lit_ok = lit_int_value(self.src, self.f.node(d.operand).as_data.literal.raw, &mut mag);
+            let lop = self.lower_expr(d.operand);
+            if lit_ok && lop != ir::IR_NONE {
+                let o9 = *self.body.operands.at(lop as usize);
+                if o9.kind == ir::OP_CONST {
+                    let c9 = *self.body.constants.at(o9.data as usize);
+                    if c9.kind == ir::CK_INT {
+                        let v9 = 0 - mag;
+                        let mut ty9 = ty;
+                        if (v9 < -2147483648 || v9 > 2147483647) && ty9 != TYPE_NONE {
+                            let yv = *self.f.ty(ty9);
+                            if yv.kind == TypeKind::TYPE_BUILTIN && (yv.as_data.builtin == BuiltinType::BT_I32 || yv.as_data.builtin == BuiltinType::BT_I16 || yv.as_data.builtin == BuiltinType::BT_I8) {
+                                ty9 = Ast::builtin(BuiltinType::BT_I64);
+                            }
+                        }
+                        return self.const_op(
+                            ir::Constant {
+                                kind: ir::CK_INT,
+                                ty: ty9,
+                                val: v9,
+                                raw: sp,
+                                item: DefId { module: 0, node: NODE_NONE },
+                                targ_start: 0,
+                                targ_len: 0,
+                            },
+                        );
+                    }
+                }
+            }
         }
         // Overloaded unary (`-` via Neg, `!` via Not) resolves through op_method like binaries.
         switch self.f.op_method(id) {
@@ -1901,7 +3292,7 @@ extend Lowerer {
     // the return slot through the IN_TRY_ERR compatibility intrinsic (the `From` conversion and
     // rewrap stay CTFE/codegen-owned) and returns through the pending defers.
     fn lower_question(self: &mut Self, id: NodeId, operand: NodeId) ir::OperandId {
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let vop = self.lower_expr(operand);
         if vop == ir::IR_NONE {
@@ -2059,7 +3450,7 @@ extend Lowerer {
         }
     }
 
-    fn payload_type(self: &Self, vd: DefId) TypeId {
+    const fn payload_type(self: &Self, vd: DefId) TypeId {
         let a = unsafe &*(&*self.pkg).module_ast_const(vd.module);
         let pl = a.at_const(vd.node).as_data.variant.payload;
         if pl.len == 0 {
@@ -2105,7 +3496,7 @@ extend Lowerer {
 
     fn lower_binary(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.binary;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         if d.op == tt::TokenType::AmpersandAmpersand || d.op == tt::TokenType::PipePipe {
             // result = lhs; if (deciding) result = rhs
@@ -2132,7 +3523,16 @@ extend Lowerer {
                 tm.t0 = join;
                 self.seal(tm, rhs_b);
             }
+            // the RHS only runs on the deciding path: a failed fold there is not an error
+            if unsafe (&*self.pkg).ceval != null {
+                let cev9 = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+                cev9.record_pause += 1;
+            }
             let rop = self.lower_expr(d.right);
+            if unsafe (&*self.pkg).ceval != null {
+                let cev9 = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+                cev9.record_pause -= 1;
+            }
             if rop == ir::IR_NONE {
                 return ir::IR_NONE;
             }
@@ -2174,7 +3574,7 @@ extend Lowerer {
 
     // An operator method call (binary/compound/unary overloads): receiver is the left operand.
     fn lower_op_call(self: &mut Self, id: NodeId, m: ModuleId, decl: NodeId, lhs: NodeId, rhs: NodeId) ir::OperandId {
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let lop = self.lower_expr(lhs);
         if lop == ir::IR_NONE {
@@ -2203,7 +3603,8 @@ extend Lowerer {
         }
         let n = unsafe mu.n;
         for i in 0..n {
-            self.body.targ_pool.push(unsafe mu.args[i as usize]);
+            let ta = self.proj_subst_ty(unsafe mu.args[i as usize]);
+            self.body.targ_pool.push(ta);
         }
         return n;
     }
@@ -2241,9 +3642,15 @@ extend Lowerer {
 
     fn lower_call(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.call;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let ck = self.f.node(d.callee).kind;
+        if ck == NodeKind::NODE_MEMBER {
+            let op9 = self.lower_meta_call(id, ty, sp);
+            if op9 != ir::IR_NONE {
+                return op9;
+            }
+        }
         // `Some(x)`: a payload variant CONSTRUCTOR call is aggregate construction, not a call
         {
             let vd = self.path_res(d.callee);
@@ -2268,6 +3675,55 @@ extend Lowerer {
             },
             None => {},
         };
+        // A callee IDENTIFIER bound to a local (fn-pointer LET/param) calls the VALUE, whatever
+        // call_info recorded (the checker may pin the provenance decl; the pointer decides).
+        if target.node != NODE_NONE && ck == NodeKind::NODE_IDENTIFIER {
+            let rd0 = self.f.res(d.callee);
+            if rd0.module == self.module && rd0.node != NODE_NONE && self.local_of(rd0.node) != ir::IR_NONE {
+                target = DefId { module: 0, node: NODE_NONE };
+            }
+        }
+        // Emit-time implicit CTFE (the old backend's fold pass): a scalar call whose arguments
+        // look compile-time constant runs through the evaluator -- success folds the call to its
+        // value, a `const fn` failure records a fold error the driver promotes.
+        if !self.body.is_generic && ty != TYPE_NONE && unsafe (&*self.pkg).ceval != null {
+            let cev8 = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+            if cev8.record_folds {
+                let mut ct8 = target;
+                if ct8.node == NODE_NONE {
+                    ct8 = self.path_res(d.callee);
+                }
+                if ct8.node != NODE_NONE && self.decl_kind(ct8) == NodeKind::NODE_FUNCTION {
+                    let ta8 = unsafe &*(&*self.pkg).module_ast_const(ct8.module);
+                    let fd8 = ta8.at_const(ct8.node).as_data.function;
+                    // scalar results only (the fold-worthwhile gate): wide-value const fns fall
+                    // back to runtime calls without complaint
+                    let y8 = *self.f.ty(ty);
+                    let scalar8 = y8.kind == TypeKind::TYPE_BUILTIN && y8.as_data.builtin != BuiltinType::BT_VOID && y8.as_data.builtin != BuiltinType::BT_VALIST && y8.as_data.builtin != BuiltinType::BT_C32 && y8.as_data.builtin != BuiltinType::BT_C64;
+                    if scalar8 && !fd8.is_extern && fd8.body != NODE_NONE && self.maybe_const(id) {
+                        let v8 = cev8.eval(self.module, id);
+                        if v8.kind == ce::CONST_INT || v8.kind == ce::CONST_BOOL {
+                            let ck8: u8 = if v8.kind == ce::CONST_BOOL {
+                                ir::CK_BOOL;
+                            } else {
+                                ir::CK_INT;
+                            };
+                            return self.const_op(
+                                ir::Constant {
+                                    kind: ck8,
+                                    ty: ty,
+                                    val: v8.as_data.i,
+                                    raw: sp,
+                                    item: DefId { module: 0, node: NODE_NONE },
+                                    targ_start: 0,
+                                    targ_len: 0,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
         // `type_info::<T>()` / `zeroed::<T>()`: compiler intrinsics, not resolved functions.
         if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "type_info") {
             // the subject type rides in `b` so the backend can name the exported descriptor
@@ -2323,6 +3779,19 @@ extend Lowerer {
             if rop == ir::IR_NONE {
                 return ir::IR_NONE;
             }
+            if self.f.node(recv).kind == NodeKind::NODE_CALL {
+                // a call-result RECEIVER temporary owns its value: scope-drop it after use
+                let o9 = *self.body.operands.at(rop as usize);
+                if o9.kind == ir::OP_COPY || o9.kind == ir::OP_MOVE {
+                    let pl9 = *self.body.places.at(o9.data as usize);
+                    if pl9.proj_len == 0 && self.body.locals.at(pl9.base as usize).storage == ir::LS_TEMP {
+                        let mut ld9 = *self.body.locals.at(pl9.base as usize);
+                        ld9.decl = recv; // drops key on a decl
+                        self.body.locals.set(pl9.base as usize, ld9);
+                        self.scope_locals.push(pl9.base);
+                    }
+                }
+            }
             argv.push(rop);
         } else if target.node == NODE_NONE {
             // fn-value call (closure, fn pointer): the callee is an operand
@@ -2342,7 +3811,39 @@ extend Lowerer {
             argv.push(op);
         }
         let ts = self.body.targ_pool.len() as u32;
-        let tn = self.copy_targs(id);
+        let mut tn = self.copy_targs(id);
+        if tn == 0 {
+            // `Type::<Args>::assoc()`: the bound args ride the CALLEE (or its qualifying path),
+            // not the call node
+            tn = self.copy_targs(d.callee);
+            if tn == 0 && self.f.node(d.callee).kind == NodeKind::NODE_MEMBER {
+                let ob9 = self.f.node(d.callee).as_data.member.object;
+                tn = self.copy_targs(ob9);
+                if tn == 0 {
+                    // the qualifier is a TYPE whose recorded type IS the receiver instance:
+                    // its arguments are the bound generics (turbofish spellings resolve through
+                    // the specialization's inner expression)
+                    let mut rq9 = ob9;
+                    if self.f.node(rq9).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                        rq9 = self.f.node(rq9).as_data.specialization.expression;
+                    }
+                    let od9 = self.f.res(rq9);
+                    let mut is_ty9 = false;
+                    if od9.node != NODE_NONE {
+                        let ok9 = self.decl_kind(od9);
+                        is_ty9 = ok9 == NodeKind::NODE_STRUCT || ok9 == NodeKind::NODE_ENUM || ok9 == NodeKind::NODE_TYPE_ALIAS;
+                    }
+                    let oty9 = self.nty(ob9);
+                    if is_ty9 && oty9 != TYPE_NONE && self.f.ty(oty9).kind == TypeKind::TYPE_INSTANCE {
+                        let it9 = *self.f.instance(self.f.ty(oty9).as_data.inst);
+                        for k9 in 0..it9.n {
+                            self.body.targ_pool.push(unsafe it9.args[k9 as usize]);
+                        }
+                        tn = it9.n;
+                    }
+                }
+            }
+        }
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
         return self.emit_call(target, callee_op, start, n, ts, tn, ty, sp);
@@ -2369,7 +3870,7 @@ extend Lowerer {
     // An unresolved callee spelling a compiler intrinsic name (behind an optional specialization).
     // 1 assert / 2 assert_eq / 3 assert_ne when `t` is the prelude's builtin placeholder (the
     // typechecker's own gate: a prelude-module function with one of the three names).
-    fn assert_kind(self: &Self, t: DefId) u8 {
+    const fn assert_kind(self: &Self, t: DefId) u8 {
         let p = unsafe &*self.pkg;
         if !p.modules.at(t.module as usize).prelude {
             return 0;
@@ -2401,6 +3902,8 @@ extend Lowerer {
         let a0 = unsafe self.f.list(d.args)[0];
         let mut cond = ir::IR_NONE;
         let mut msg = ir::IR_NONE;
+        let mut lsave = ir::IR_NONE;
+        let mut rsave = ir::IR_NONE;
         let mut tsp = self.f.node(a0).span;
         if ak == 1 {
             cond = self.lower_expr(a0);
@@ -2420,6 +3923,8 @@ extend Lowerer {
             if l == ir::IR_NONE || r == ir::IR_NONE {
                 return ir::IR_NONE;
             }
+            lsave = l;
+            rsave = r;
             tsp = self.f.node(id).span;
             let bt = Ast::builtin(BuiltinType::BT_BOOL);
             let ct = self.temp(bt, sp);
@@ -2453,7 +3958,43 @@ extend Lowerer {
             mv.push(msg);
             tm.args_start = self.pool_ops(&mv);
             tm.args_len = 1;
-            mv.free();
+        }
+        if ak != 1 {
+            // assert_eq/ne diagnostics: [left value, right value, left spelling, right spelling];
+            // sw_len records the flavor so the failure prints ` == ` vs ` != `
+            let a1n = unsafe self.f.list(d.args)[1];
+            let no9 = DefId { module: 0, node: NODE_NONE };
+            let bt9 = Ast::builtin(BuiltinType::BT_BOOL);
+            let lsc = self.const_op(
+                ir::Constant {
+                    kind: ir::CK_STR,
+                    ty: bt9,
+                    val: tt::TokenType::RawStringLiteral as i64,
+                    raw: self.f.node(a0).span,
+                    item: no9,
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+            let rsc = self.const_op(
+                ir::Constant {
+                    kind: ir::CK_STR,
+                    ty: bt9,
+                    val: tt::TokenType::RawStringLiteral as i64,
+                    raw: self.f.node(a1n).span,
+                    item: no9,
+                    targ_start: 0,
+                    targ_len: 0,
+                },
+            );
+            let mut av = Vector::<ir::OperandId>::new();
+            av.push(lsave);
+            av.push(rsave);
+            av.push(lsc);
+            av.push(rsc);
+            tm.args_start = self.pool_ops(&av);
+            tm.args_len = 4;
+            tm.sw_len = ak;
         }
         let cont = self.open_block();
         tm.t0 = cont;
@@ -2461,7 +4002,7 @@ extend Lowerer {
         return self.unit_op(ty, sp);
     }
 
-    fn is_intrinsic_callee(self: &Self, callee: NodeId, name: str) bool {
+    const fn is_intrinsic_callee(self: &Self, callee: NodeId, name: str) bool {
         let mut c = callee;
         if self.f.node(c).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
             c = self.f.node(c).as_data.specialization.expression;
@@ -2488,7 +4029,7 @@ extend Lowerer {
 
     fn lower_assignment(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.binary;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let pl = self.lower_place(d.left);
         if pl == ir::IR_NONE {
@@ -2559,9 +4100,18 @@ extend Lowerer {
 
     fn lower_struct_init(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.struct_initializer;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let mut sd = self.f.res(id);
+        if self.f.node(d.ty).kind == NodeKind::NODE_TYPE_PATH {
+            let parts = self.f.node(d.ty).as_data.type_path.parts;
+            if parts.len >= 2 {
+                let vd9 = self.f.res(unsafe self.f.list(parts)[(parts.len - 1) as usize]);
+                if vd9.node != NODE_NONE && self.decl_kind(vd9) == NodeKind::NODE_VARIANT {
+                    sd = vd9;
+                }
+            }
+        }
         if sd.node == NODE_NONE && ty != TYPE_NONE {
             let y = *self.f.ty(ty);
             if y.kind == TypeKind::TYPE_STRUCT {
@@ -2575,10 +4125,15 @@ extend Lowerer {
         // order with IR_NONE holes for omitted members -- consumers index it by member position,
         // and omitted members zero-fill (the established emitter's designated-init semantics).
         let mut argv = Vector::<ir::OperandId>::new();
+        let is_var = sd.node != NODE_NONE && self.decl_kind(sd) == NodeKind::NODE_VARIANT;
         if sd.node != NODE_NONE {
             let da = unsafe &*(&*self.pkg).module_ast_const(sd.module);
             let dsrc = unsafe (&*self.pkg).modules.at(sd.module as usize).source.as_str();
-            let members = da.at_const(sd.node).as_data.aggregate.members;
+            let members = if is_var {
+                da.at_const(sd.node).as_data.variant.payload;
+            } else {
+                da.at_const(sd.node).as_data.aggregate.members;
+            };
             for _i in 0..members.len {
                 argv.push(ir::IR_NONE);
             }
@@ -2615,6 +4170,9 @@ extend Lowerer {
                 argv.push(op);
             }
         }
+        if is_var {
+            return self.finish_aggregate(ir::AGG_VARIANT, sd, &argv, ty, sp);
+        }
         return self.finish_aggregate(ir::AGG_STRUCT, sd, &argv, ty, sp);
     }
 
@@ -2632,7 +4190,7 @@ extend Lowerer {
 
     fn lower_array_or_tuple(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.array_literal;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let k = self.f.node(id).kind;
         if k == NodeKind::NODE_ARRAY_LITERAL && d.repeat {
@@ -2663,30 +4221,69 @@ extend Lowerer {
             return self.copy_op(pl);
         }
         let mut argv = Vector::<ir::OperandId>::new();
+        let mut cur: i64 = 0;
+        let mut designated = false;
         for i in 0..d.elements.len {
             let mut e = unsafe self.f.list(d.elements)[i as usize];
             if self.f.node(e).kind == NodeKind::NODE_FIELD_INITIALIZER {
-                // designated array initializer `[idx] = value`: the designator is a constant, the
-                // element operand is the value
+                // designated array initializer `[idx] = value`: the designator folds to the SLOT,
+                // later elements continue from it (C semantics); omitted slots zero-fill
+                let ie = self.f.node(e).as_data.field_initializer.name;
+                let mut iv: i64 = -1;
+                if unsafe (&*self.pkg).ceval != null {
+                    let cevA = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+                    let cvA = cevA.eval(self.module, ie);
+                    if cvA.kind == ce::CONST_INT {
+                        iv = cvA.as_data.i;
+                    }
+                }
+                if iv < 0 {
+                    self.fail_at("array-designator", id);
+                    return ir::IR_NONE;
+                }
+                cur = iv;
+                designated = true;
                 e = self.f.node(e).as_data.field_initializer.value;
             }
             let op = self.lower_expr(e);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
             }
-            argv.push(op);
+            while argv.len() as i64 <= cur {
+                argv.push(ir::IR_NONE);
+            }
+            argv.set(cur as usize, op);
+            cur += 1;
         }
         let agg: u8 = if k == NodeKind::NODE_TUPLE {
             ir::AGG_TUPLE;
         } else {
             ir::AGG_ARRAY;
         };
-        return self.finish_aggregate(agg, DefId { module: 0, node: NODE_NONE }, &argv, ty, sp);
+        let mut aty = ty;
+        if designated && k == NodeKind::NODE_ARRAY_LITERAL && ty != TYPE_NONE {
+            let y = *self.f.ty(ty);
+            if y.kind == TypeKind::TYPE_ARRAY {
+                if y.as_data.arr.len as i64 > argv.len() as i64 {
+                    while argv.len() as i64 < y.as_data.arr.len as i64 {
+                        argv.push(ir::IR_NONE);
+                    }
+                } else if y.as_data.arr.len as i64 < argv.len() as i64 {
+                    // designators reached past the recorded length: the literal's C temp must
+                    // span every written slot
+                    let mut nt = y;
+                    nt.as_data.arr.len = argv.len() as u32;
+                    let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                    aty = sa.intern_type(nt);
+                }
+            }
+        }
+        return self.finish_aggregate(agg, DefId { module: 0, node: NODE_NONE }, &argv, aty, sp);
     }
 
     fn lower_range(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.pattern_range;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         // fixed decl-order slots {start, end, inclusive}: absent bounds are IR_NONE holes
         // (zero-fill), the inclusivity flag is a synthesized constant -- Core IR keeps it
@@ -2730,7 +4327,7 @@ extend Lowerer {
 
     fn lower_if_expr(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.if_stmt;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let t = self.temp(ty, sp);
         let pl = self.place_of_local(t);
@@ -2828,7 +4425,7 @@ extend Lowerer {
 
     fn lower_va(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.va_op;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let ik: u8 = if d.op == VA_START {
             ir::IN_VA_START;
@@ -2872,13 +4469,16 @@ extend Lowerer {
     }
 
     fn lower_closure(self: &mut Self, id: NodeId) ir::OperandId {
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let caps = self.f.captures(id);
         let mut argv = Vector::<ir::OperandId>::new();
         for i in 0..caps.len {
             let c = unsafe self.f.list(caps)[i as usize];
-            let l = self.local_of(self.cap_decl(c));
+            let mut l = self.local_of(self.cap_decl(c));
+            if l == ir::IR_NONE {
+                l = self.local_of(c); // pattern-shorthand: the binding hangs off the capture node
+            }
             if l == ir::IR_NONE {
                 continue;
             }
@@ -2907,12 +4507,65 @@ extend Lowerer {
     }
 
     // A capture entry names the captured binding's decl (identifier node resolving to it).
-    fn cap_decl(self: &mut Self, c: NodeId) NodeId {
+    const fn cap_decl(self: &mut Self, c: NodeId) NodeId {
         let d = self.f.res(c);
         if d.module == self.module && d.node != NODE_NONE {
             return d.node;
         }
         return c; // the checker records the captured DECL itself, not a reference to it
+    }
+
+    // Syntactically constant-looking (the emit-time fold gate): literals, consts, and closed
+    // expressions over them -- anything else makes an eval attempt pure waste.
+    fn maybe_const(self: &Self, id: NodeId) bool {
+        if id == NODE_NONE {
+            return true;
+        }
+        let n = *self.f.node(id);
+        let k = n.kind;
+        if k == NodeKind::NODE_LITERAL || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF {
+            return true;
+        }
+        if k == NodeKind::NODE_BINARY {
+            return self.maybe_const(n.as_data.binary.left) && self.maybe_const(n.as_data.binary.right);
+        }
+        if k == NodeKind::NODE_UNARY {
+            return self.maybe_const(n.as_data.unary.operand);
+        }
+        if k == NodeKind::NODE_CAST {
+            return self.maybe_const(n.as_data.cast.expression);
+        }
+        if k == NodeKind::NODE_INDEX {
+            return self.maybe_const(n.as_data.index.object) && self.maybe_const(n.as_data.index.index);
+        }
+        if k == NodeKind::NODE_CALL {
+            if !self.maybe_const(n.as_data.call.callee) {
+                return false;
+            }
+            for i in 0..n.as_data.call.args.len {
+                if !self.maybe_const(unsafe self.f.list(n.as_data.call.args)[i as usize]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if k == NodeKind::NODE_IDENTIFIER || k == NodeKind::NODE_MEMBER && n.as_data.member.path {
+            let d = self.path_res(id);
+            if d.node == NODE_NONE {
+                return true;
+            }
+            let dk = self.decl_kind(d);
+            if dk == NodeKind::NODE_FUNCTION || dk == NodeKind::NODE_VARIANT {
+                return true;
+            }
+            if dk == NodeKind::NODE_CONST {
+                let da = unsafe &*(&*self.pkg).module_ast_const(d.module);
+                let cd = da.at_const(d.node).as_data.const_def;
+                return cd.value != NODE_NONE && !cd.is_static_mut;
+            }
+            return false;
+        }
+        return false;
     }
 
     // The resolution of a path-shaped expression: the node's own, else the member name's, else the
@@ -2944,7 +4597,7 @@ extend Lowerer {
     }
 
     fn lower_path_value(self: &mut Self, id: NodeId) ir::OperandId {
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let d = self.path_res(id);
         if d.node == NODE_NONE {
@@ -2995,7 +4648,7 @@ extend Lowerer {
         return self.copy_op(pl);
     }
 
-    fn decl_kind(self: &Self, d: DefId) NodeKind {
+    const fn decl_kind(self: &Self, d: DefId) NodeKind {
         if d.node == NODE_NONE {
             return NodeKind::NODE_NONE_KIND;
         }
@@ -3018,7 +4671,7 @@ extend Lowerer {
             }
         }
         let k = self.f.node(id).kind;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         if k == NodeKind::NODE_IDENTIFIER {
             let d = self.f.res(id);
@@ -3044,15 +4697,50 @@ extend Lowerer {
             return self.place_of_local(l2);
         }
         if k == NodeKind::NODE_MEMBER {
+            let md0 = self.f.node(id).as_data.member;
+            if !md0.path && md0.object != NODE_NONE && self.f.node(md0.object).kind == NodeKind::NODE_IDENTIFIER {
+                let blid = unsafe (&*self.f.ast).resolution(md0.object);
+                if blid != NODE_NONE && self.f.node(blid).kind == NodeKind::NODE_INLINE_FOR && self.proj_frame_of(blid) >= 0 {
+                    // an ACTIVE copy frame resolves the binder member; the frameless (symbolic
+                    // owner) pre-pass lowers it as a plain member -- that body is never emitted
+                    return self.lower_proj_member_place(id, blid);
+                }
+            }
             return self.lower_member_place(id);
         }
         if k == NodeKind::NODE_INDEX {
             return self.lower_index_place(id);
         }
         if k == NodeKind::NODE_UNARY && self.f.node(id).as_data.unary.op == tt::TokenType::Star {
-            let base = self.lower_place_or_spill(self.f.node(id).as_data.unary.operand);
+            let mut base = self.lower_place_or_spill(self.f.node(id).as_data.unary.operand);
             if base == ir::IR_NONE {
                 return ir::IR_NONE;
+            }
+            // `*x` on a Deref type calls the recorded impl (exactly as `x.method()` does); the
+            // call's type is the impl's declared `&Target` return
+            let du = self.f.derefs(id);
+            if du != null {
+                let steps = unsafe du.n;
+                for s in 0..steps {
+                    let m = unsafe du.method[s as usize];
+                    let rt = unsafe du.recv[s as usize];
+                    if m.node != NODE_NONE {
+                        let mut rt2 = self.deref_ret_ty(m, self.body.places.at(base as usize).ty);
+                        if rt2 == TYPE_NONE {
+                            rt2 = rt;
+                        }
+                        let rop = self.copy_op(base);
+                        let start = self.body.oper_pool.len() as u32;
+                        self.body.oper_pool.push(rop);
+                        let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, rt2, sp);
+                        if res == ir::IR_NONE {
+                            return ir::IR_NONE;
+                        }
+                        base = self.spill(res, sp);
+                    } else {
+                        base = self.place_project(base, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: rt });
+                    }
+                }
             }
             return self.place_project(base, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: ty });
         }
@@ -3061,6 +4749,23 @@ extend Lowerer {
         if op == ir::IR_NONE {
             return ir::IR_NONE;
         }
+        if k == NodeKind::NODE_CALL {
+            // a call-result temporary used as a place still OWNS its value: the dest temp is
+            // the place, registered for scope-exit drop (a field read must not leak the owner)
+            let o = *self.body.operands.at(op as usize);
+            if o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE {
+                let pl0 = *self.body.places.at(o.data as usize);
+                if pl0.proj_len == 0 && self.body.locals.at(pl0.base as usize).storage == ir::LS_TEMP {
+                    let mut ld0 = *self.body.locals.at(pl0.base as usize);
+                    ld0.decl = id; // drops key on a decl
+                    self.body.locals.set(pl0.base as usize, ld0);
+                    // scope-tracked WITHOUT a live marker: the value initialized before this
+                    // point, and only the scope-end dead matters for drop elaboration
+                    self.scope_locals.push(pl0.base);
+                    return o.data;
+                }
+            }
+        }
         return self.spill(op, sp);
     }
 
@@ -3068,12 +4773,69 @@ extend Lowerer {
         return self.lower_place(id);
     }
 
+    // The SUBSTITUTED `&Target` a deref impl returns for receiver type `recv` (self pool): the
+    // declared `&T` with the enclosing extend's generics bound by the receiver instance's args.
+    fn deref_ret_ty(self: &mut Self, m: DefId, recv: TypeId) TypeId {
+        let fa = unsafe &*(&*self.pkg).module_ast_const(m.module);
+        let fr = fa.at_const(m.node).as_data.function.returns;
+        if fr.len == 0 {
+            return TYPE_NONE;
+        }
+        let rtn = fa.type_of(unsafe fa.list(fr)[0]);
+        if rtn == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        let rr = self.reintern_ty(m.module, rtn);
+        let mut rv = recv;
+        let mut g = 0;
+        while g < 2 && self.f.ty(rv).kind == TypeKind::TYPE_REFERENCE {
+            rv = self.f.ty(rv).as_data.elem;
+            g += 1;
+        }
+        let y = *self.f.ty(rv);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return rr;
+        }
+        let it = *self.f.instance(y.as_data.inst);
+        let items = fa.at_const(fa.root).as_data.program.items;
+        for i in 0..items.len {
+            let nid = unsafe fa.list(items)[i as usize];
+            if fa.at_const(nid).kind != NodeKind::NODE_EXTEND {
+                continue;
+            }
+            let ms = fa.at_const(nid).as_data.extend_def.items;
+            let mut has = false;
+            for j in 0..ms.len {
+                if unsafe fa.list(ms)[j as usize] == m.node {
+                    has = true;
+                    break;
+                }
+            }
+            if !has {
+                continue;
+            }
+            let gens = fa.at_const(nid).as_data.extend_def.generics;
+            let mut n = gens.len;
+            if n > it.n as u32 {
+                n = it.n;
+            }
+            return self.proj_ty_map(rr, m.module, gens, &it.args[0], n);
+        }
+        return rr;
+    }
+
     fn lower_member_place(self: &mut Self, id: NodeId) ir::PlaceId {
         let d = self.f.node(id).as_data.member;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         if d.path {
-            // Path member (Enum::Variant, Type::CONST): an item, not a projection.
+            // Path member (Enum::Variant, Type::CONST): an item, not a projection. A static
+            // resolves to its OWN place (writes must reach the global, never a spilled copy).
+            let pd = self.path_res(id);
+            if pd.node != NODE_NONE && self.decl_kind(pd) == NodeKind::NODE_CONST {
+                let l2 = self.item_local(pd, ty, sp);
+                return self.place_of_local(l2);
+            }
             let op = self.lower_path_value(id);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
@@ -3084,18 +4846,26 @@ extend Lowerer {
         if base == ir::IR_NONE {
             return ir::IR_NONE;
         }
-        // Auto-deref chain recorded on the member: apply user/builtin derefs before the field.
-        let du = self.f.derefs(id);
+        // Auto-deref chain recorded on the member (coercions) or its NAME node (the field/method
+        // Deref walk keys the chain on member.member): apply user/builtin derefs before the field.
+        let mut du = self.f.derefs(id);
+        if du == null {
+            du = self.f.derefs(d.member);
+        }
         if du != null {
             let steps = unsafe du.n;
             for s in 0..steps {
                 let m = unsafe du.method[s as usize];
                 let rt = unsafe du.recv[s as usize];
                 if m.node != NODE_NONE {
+                    let mut rt2 = self.deref_ret_ty(m, self.body.places.at(base as usize).ty);
+                    if rt2 == TYPE_NONE {
+                        rt2 = rt;
+                    }
                     let rop = self.copy_op(base);
                     let start = self.body.oper_pool.len() as u32;
                     self.body.oper_pool.push(rop);
-                    let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, rt, sp);
+                    let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, rt2, sp);
                     if res == ir::IR_NONE {
                         return ir::IR_NONE;
                     }
@@ -3145,7 +4915,7 @@ extend Lowerer {
 
     fn lower_index_place(self: &mut Self, id: NodeId) ir::PlaceId {
         let d = self.f.node(id).as_data.index;
-        let ty = self.f.node_type(id);
+        let ty = self.nty(id);
         let sp = self.f.node(id).span;
         switch self.f.op_method(id) {
             Some(m) => {
@@ -3358,11 +5128,12 @@ extend Lowerer {
             },
             sp,
         );
+        // the C tag carries a bare enum's explicit discriminant, not its ordinal
         let ord_op = self.const_op(
             ir::Constant {
                 kind: ir::CK_INT,
                 ty: ut,
-                val: ord,
+                val: self.tag_of_decl(vd.module, en, ord),
                 raw: sp,
                 item: DefId { module: 0, node: NODE_NONE },
                 targ_start: 0,
@@ -3529,12 +5300,16 @@ extend Lowerer {
                     continue;
                 }
                 let subp = unsafe self.f.list(fpd.children)[0];
-                let fd = self.f.res(fpd.name);
-                let fty = self.f.node_type(subp);
-                let fpl = self.place_project(
-                    base,
-                    ir::Projection { kind: ir::PJ_FIELD, data: i, sub: fd.node, ty: fty },
-                );
+                let mut fsub = NODE_NONE;
+                if fpd.name != NODE_NONE {
+                    let fd = self.f.res(fpd.name);
+                    // only a real FIELD decl names the member; anything else is positional `._i`
+                    if fd.node != NODE_NONE && self.decl_kind(fd) == NodeKind::NODE_FIELD {
+                        fsub = fd.node;
+                    }
+                }
+                let fty = self.nty(subp);
+                let fpl = self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: i, sub: fsub, ty: fty });
                 self.lower_pattern_test(subp, fpl, on_fail);
                 if self.err.len() != 0 {
                     return;
@@ -3610,22 +5385,32 @@ extend Lowerer {
         if path.parent != pat::P_NONE || path.downcast >= 0 || path.fdecl != NODE_NONE || path.pat != NODE_NONE {
             let mut ty = self.body.places.at(base as usize).ty;
             if path.pat != NODE_NONE {
-                let pt = self.f.node_type(path.pat);
+                let pt = self.nty(path.pat);
                 if pt != TYPE_NONE {
                     ty = pt;
                 }
             }
             if path.downcast >= 0 {
                 let bty = self.body.places.at(base as usize).ty;
+                // the VARIANT's declared payload entry is the member's authoritative type (the
+                // pattern node may carry the ENUM via expected-type spill)
+                let pt2 = self.proj_payload_ty(bty, path.downcast, path.field);
+                if pt2 != TYPE_NONE {
+                    ty = pt2;
+                }
                 base = self.place_project(
                     base,
                     ir::Projection { kind: ir::PJ_DOWNCAST, data: path.downcast as u32, sub: path.vdecl.node, ty: bty },
                 );
             }
-            base = self.place_project(
-                base,
-                ir::Projection { kind: ir::PJ_FIELD, data: path.field, sub: path.fdecl, ty: ty },
-            );
+            let mut fsub2 = path.fdecl;
+            if fsub2 != NODE_NONE {
+                let fdk = self.decl_kind(DefId { module: self.module, node: fsub2 });
+                if fdk != NodeKind::NODE_FIELD {
+                    fsub2 = NODE_NONE; // positional payload member: `._i`
+                }
+            }
+            base = self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: path.field, sub: fsub2, ty: ty });
         }
         cache.set(pid as usize, base);
         return base;
@@ -3694,7 +5479,7 @@ extend Lowerer {
                     }
                     let subp = unsafe self.f.list(fpd.children)[0];
                     let fd = self.f.res(fpd.name);
-                    let fty = self.f.node_type(subp);
+                    let fty = self.nty(subp);
                     let fpl = self.place_project(
                         base,
                         ir::Projection { kind: ir::PJ_FIELD, data: i, sub: fd.node, ty: fty },
@@ -3782,9 +5567,25 @@ extend Lowerer {
             } else {
                 n.edge_len - 1;
             };
+            // the C tag carries a bare enum's explicit discriminant, not its ordinal
+            let mut own = self.body.places.at(pl as usize).ty;
+            let mut pg = 0;
+            while k0 == pat::PC_VARIANT && pg < 4 {
+                let yk = self.f.ty(own).kind;
+                if yk != TypeKind::TYPE_REFERENCE && yk != TypeKind::TYPE_POINTER {
+                    break;
+                }
+                own = self.f.ty(own).as_data.elem;
+                pg += 1;
+            }
             for e in 0..pairs {
                 let ep = cx.pats.at(t.edges.at((n.edge_start + e) as usize).pat as usize);
-                self.body.switch_pool.push(ep.val as u64 << 32 | blocks[e as usize] as u64);
+                let cv: i64 = if k0 == pat::PC_VARIANT {
+                    self.proj_tag_val(own, ep.val);
+                } else {
+                    ep.val;
+                };
+                self.body.switch_pool.push((cv as u64 & 0xFFFFFFFF) << 32 | blocks[e as usize] as u64);
             }
             tm.sw_len = pairs;
             tm.t0 = dflt;
@@ -3984,7 +5785,7 @@ extend Lowerer {
     }
 
     // A range-pattern bound is a PATTERN_LITERAL wrapper or a bare expression.
-    fn pattern_bound(self: &Self, b: NodeId) NodeId {
+    const fn pattern_bound(self: &Self, b: NodeId) NodeId {
         if self.f.node(b).kind == NodeKind::NODE_PATTERN_LITERAL {
             return self.f.node(b).as_data.single.value;
         }
@@ -3992,7 +5793,19 @@ extend Lowerer {
     }
 
     fn tuple_field(self: &mut Self, base: ir::PlaceId, i: u32, c: NodeId) ir::PlaceId {
-        let cty = self.f.node_type(c);
+        let mut cty = self.nty(c);
+        // behind a DOWNCAST the pattern node's type may carry the ENUM (expected-type spill):
+        // the VARIANT's declared payload entry is the authoritative member type
+        let bp = *self.body.places.at(base as usize);
+        if bp.proj_len != 0 {
+            let lp = *self.body.projections.at((bp.proj_start + bp.proj_len - 1) as usize);
+            if lp.kind == ir::PJ_DOWNCAST {
+                let pt = self.proj_payload_ty(lp.ty, lp.data, i);
+                if pt != TYPE_NONE {
+                    cty = pt;
+                }
+            }
+        }
         return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: i, sub: NODE_NONE, ty: cty });
     }
 
@@ -4081,6 +5894,86 @@ const fn compound_base_op(op: tt::TokenType) u32 {
 
 // Decimal fast path for integer literal spellings; 0 for hex/underscored/suffixed forms (the span
 // keeps the exact spelling for CTFE).
+// The code point of a `'x'` / `b'x'` literal (the pattern matrix owns the decode rules).
+fn decode_char(src: str, sp: tok::Span) i64 {
+    let mut v: i64 = 0;
+    if pat::char_of(src, sp, &mut v) {
+        return v;
+    }
+    return 0;
+}
+
+// An integer literal's exact magnitude (dec/hex, `_` separators, [iu]NN suffix stripped);
+// false when the spelling is not a plain integer or overflows i64.
+fn lit_int_value(src: str, sp: tok::Span, out: &mut i64) bool {
+    let mut i = sp.start as usize;
+    let mut e = sp.end as usize;
+    if e > src.len() || e <= i {
+        return false;
+    }
+    // strip a type suffix: trailing [iu] digits
+    let mut k = i;
+    while k < e {
+        let b = src[k];
+        if b == b'i' || b == b'u' {
+            let mut j = k + 1;
+            let mut dig = true;
+            while j < e {
+                if src[j] < b'0' || src[j] > b'9' {
+                    dig = false;
+                    break;
+                }
+                j += 1;
+            }
+            if dig && j == e && k > i {
+                e = k;
+                break;
+            }
+        }
+        k += 1;
+    }
+    let hex = e - i > 2 && src[i] == b'0' && (src[i + 1] | 32) == b'x';
+    if hex {
+        i += 2;
+    }
+    let mut v: i64 = 0;
+    let mut any = false;
+    while i < e {
+        let b = src[i];
+        if b == b'_' {
+            i += 1;
+            continue;
+        }
+        let mut dv: i64 = -1;
+        if b >= b'0' && b <= b'9' {
+            dv = b - b'0';
+        } else if hex && (b | 32) >= b'a' && (b | 32) <= b'f' {
+            dv = (b | 32) - b'a' + 10;
+        }
+        if dv < 0 {
+            return false;
+        }
+        if hex {
+            if v > 576460752303423487 {
+                return false;
+            }
+            v = v * 16 + dv;
+        } else {
+            if v > 922337203685477579 {
+                return false;
+            }
+            v = v * 10 + dv;
+        }
+        any = true;
+        i += 1;
+    }
+    if !any {
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
 fn parse_dec(src: str, sp: tok::Span) i64 {
     let mut v: i64 = 0;
     let mut i = sp.start as usize;

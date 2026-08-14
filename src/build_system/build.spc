@@ -1215,7 +1215,7 @@ fn engine_build(
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
     p.ceval = &mut ceval;
-    let rc = run_package(&mut p, null, "", target, lint, "", &mut sink, jobs);
+    let rc = run_package(&mut p, null, "", target, lint, "", &mut sink);
     if rc != 0 {
         stream.drain(true); // reap what is in flight; abandon what has not started
         return rc;
@@ -2120,20 +2120,7 @@ pub fn manifest_test(
     let pkg = (&mut p) as *mut loader::Package;
     let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
     p.ceval = &mut ceval;
-    return run_package(
-        &mut p,
-        topts,
-        "",
-        target,
-        false,
-        "",
-        null,
-        if jobs_override != 0 {
-            jobs_override;
-        } else {
-            m.jobs;
-        },
-    );
+    return run_package(&mut p, topts, "", target, false, "", null);
 }
 
 // Every .spc under <bench-dir>, as `import <bench-dir>::<path>;` lines. Returns how many were found.

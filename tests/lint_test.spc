@@ -51,7 +51,7 @@ fn redundant_cast_lint_covers_all_implicits() {
     assert(!r.out_has("'&mut i32' converts to '*mut i32'")); // the unannotated-let cast is load-bearing: quiet
 }
 
-// `--suggest-const`: the deep (all-paths) CTFE scan flags functions provably evaluable at compile
+// `--const`: the deep (all-paths) CTFE scan flags functions provably evaluable at compile
 // time -- through branches, matches and statically-resolved method calls -- and stays silent on
 // loops, extern calls, recursion, and declared `const fn`s. Off by default (no warning without the
 // flag).
@@ -63,7 +63,7 @@ fn const_suggestion_lint() {
         "struct P {\n    pub x: i32,\n}\n\nextend P {\n    fn norm(self: Self) i32 {\n        if self.x < 0 {\n            return -self.x;\n        }\n        return self.x;\n    }\n}\n\nfn branchy(a: i32) i32 {\n    if a > 10 {\n        return a - 10;\n    }\n    return 10 - a;\n}\n\nfn use_method(p: P) i32 {\n    return p.norm();\n}\n\nconst fn already(a: i32) i32 {\n    return a + 1;\n}\n\nfn looping(n: i32) i32 {\n    let mut s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n}\n\nfn prints(a: i32) i32 {\n    println(\"{}\", a);\n    return a;\n}\n\nfn rec(n: i32) i32 {\n    if n <= 1 {\n        return 1;\n    }\n    return n * rec(n - 1);\n}\n\nfn main() i32 {\n    let p = P { x: 3 };\n    return branchy(4) + use_method(p) + already(1) + looping(2) + prints(0) + rec(2) - 21;\n}\n",
     );
     let root = str::from_cstr(p.rootp());
-    let mut args = String::from_str("lint --suggest-const \"");
+    let mut args = String::from_str("lint --const \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
     let r = p.run_raw(args.as_str());
@@ -86,7 +86,7 @@ fn const_suggestion_lint() {
     assert(!d.out_has("can be declared 'const fn'"));
 
     // `--fix` inserts `const ` before the `fn` keyword; the re-lint fixpoint then reports nothing
-    let mut fargs = String::from_str("lint --fix --suggest-const \"");
+    let mut fargs = String::from_str("lint --fix --const \"");
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
     let fx = p.run_raw(fargs.as_str());

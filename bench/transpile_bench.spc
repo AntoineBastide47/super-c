@@ -3,18 +3,18 @@
 // transitively imports (the entire lexer/ast/parser/resolver/typechecker/consteval/codegen/loader stack,
 // plus the std prelude + ffi bindings it uses). Each iteration runs the real transpile pipeline in process
 // -- parse (lex+parse every module, via the loader) -> resolve-all -> typecheck-all (+ deferred asserts)
-// -> propagate instances -> codegen-all (emit every module's header + .c to a real file) -- and times each
-// phase with CPU time. It mirrors main.spc's run_package (minus the C link step). Codegen writes through a
-// FILE exactly as a build does, so what is reported is what codegen costs. The benchmark
+// -> borrowck-all -> emit the whole package to C through the streaming backend (shared headers + every TU +
+// the instance TU, written to a real file) -- and times each phase with CPU time. It mirrors main.spc's
+// run_package (minus the C link step). Emission writes through a FILE exactly as a build does. The benchmark
 // binary IS the self-hosted compiler, so `make bench` measures the compiler transpiling its own source.
 import module::loader as loader;
 import lexer::lexer as lexer;
 import resolver::resolver as res;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
-import codegen::codegen as cg;
 import consteval::consteval as ce;
 import driver::emit as demit;
+import driver::test as dtest;
 import ast::ast as *;
 import bench::bench_shim as shim;
 import std::testing::bench as bench;
@@ -260,30 +260,27 @@ fn transpile_once() Timing {
     let h3b = unsafe shim::sc_alloc_count();
     let y3b = unsafe shim::sc_alloc_bytes();
 
-    loader::package_propagate_instances(&mut p);
-    let a3p = time::cpu_seconds();
-    let c3p = unsafe shim::sc_cpu_cycles();
-    let h3p = unsafe shim::sc_alloc_count();
-    let y3p = unsafe shim::sc_alloc_bytes();
+    // The streaming backend collects instances during emission -- there is no separate propagation phase.
+    let a3p = a3b;
+    let c3p = c3b;
+    let h3p = h3b;
+    let y3p = y3b;
 
     let f = sink_open();
-    i = 0;
-    while i < n {
-        let ma = (&mut p.modules[i].ast) as *mut Ast;
-        let src = p.modules[i].source.as_str().ptr() as *const char;
-        let slen = p.modules[i].source.len();
-        let pkg2 = (&mut p) as *mut loader::Package; // consumed on use -> fresh cast per Codegen::new
-        let mut c = cg::Codegen::new(ma, str::from_raw(src as *const u8, slen), pkg2);
-        c.set_multifile(true);
-        c.adopt_buf(replace(&mut p.cg_scratch, String::new()));
-        let th0 = time::cpu_seconds();
-        c.codegen_emit_header(f);
-        let th1 = time::cpu_seconds();
-        c.codegen_emit(f);
-        r.cg_header = r.cg_header + (th1 - th0);
-        r.cg_source = r.cg_source + (time::cpu_seconds() - th1);
-        p.cg_scratch = c.take_buf();
-        i = i + 1;
+    {
+        let tplan = dtest::TestPlan::new(n);
+        let mut o = demit::CemitOut::new(n);
+        demit::cemit_package(&mut p, false, &tplan, null, &mut o);
+        // write the whole package to the sink FILE exactly as a build does, so out_bytes is real
+        unsafe stdio::fwrite(o.types_h.as_ptr(), 1, o.types_h.len(), f);
+        unsafe stdio::fwrite(o.protos_h.as_ptr(), 1, o.protos_h.len(), f);
+        for m in 0..n {
+            let tu = o.tus.at(m);
+            unsafe stdio::fwrite(tu.as_ptr(), 1, tu.len(), f);
+        }
+        unsafe stdio::fwrite(o.inst_c.as_ptr(), 1, o.inst_c.len(), f);
+        r.cg_source = time::cpu_seconds() - a3p;
+        o.free();
     }
     r.out_bytes = sink_close(f);
     let a4 = time::cpu_seconds();

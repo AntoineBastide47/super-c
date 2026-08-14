@@ -156,11 +156,10 @@ fn analyze(p: &loader::Package, name: str) BorrowOut {
             out.placeholders += 1;
         }
     }
-    seen.free();
     return out;
 }
 
-fn clean(o: &BorrowOut) bool {
+const fn clean(o: &BorrowOut) bool {
     return o.moves == 0 && o.conflicts == 0 && o.escapes == 0 && o.placeholders == 0;
 }
 
@@ -409,7 +408,6 @@ fn many_loans_scale() {
     let p = typed_package(src.as_str());
     let o = analyze(&p, "main");
     assert(clean(&o), "dense loan set accepted");
-    src.free();
 }
 
 @test

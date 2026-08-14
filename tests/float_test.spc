@@ -294,7 +294,6 @@ fn decimal_text_round_trips() {
                 assert(false);
             },
         };
-        s.free();
     }
     switch Float::<11, 52>::from_str("0.1") {
         Some(v) => {
@@ -306,10 +305,8 @@ fn decimal_text_round_trips() {
     };
     let so = f16::from_f64(1.5).to_string();
     assert(so.as_str() == "1.5e+0");
-    so.free();
     let sz = f16::zero().to_string();
     assert(sz.as_str() == "0");
-    sz.free();
     switch f16::from_str("nan") {
         Some(v) => {
             assert(v.is_nan());
@@ -339,7 +336,6 @@ fn decimal_text_round_trips() {
             assert(false);
         },
     };
-    ts.free();
 }
 
 // The remainder and the integer-rounding family, bit-for-bit against libm at the f64 format over the

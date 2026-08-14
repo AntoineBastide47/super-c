@@ -701,7 +701,6 @@ fn parse_enum_body(lx: &mut Lexer, c: &mut Collected, tag: str, dump: str) {
         if known {
             e.vals.push(EnumVal { name: nm, value: next });
         } else {
-            nm.free();
             e.partial = true;
         }
         next = next + 1;
@@ -785,7 +784,7 @@ fn parse_record_body(lx: &mut Lexer, c: &mut Collected, tag: str, is_union: bool
             let mut ps = Vector::<Param>::new();
             let mut adim: i64 = -1;
             let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut ps, &mut va, false, &mut adim, dump);
-            ps.free();
+
             if lx.at_punct(b':') {
                 r.ok = false; // a bitfield: its width is not a field type
                 lx.advance();
@@ -809,8 +808,6 @@ fn parse_record_body(lx: &mut Lexer, c: &mut Collected, tag: str, is_union: bool
                 r.fields.push(Field { name: fname, ty: rt });
             }
             any = true;
-            nm.free();
-            ty.free();
             skip_noise(lx);
             if lx.at_punct(b',') {
                 lx.advance();
@@ -818,7 +815,7 @@ fn parse_record_body(lx: &mut Lexer, c: &mut Collected, tag: str, is_union: bool
             }
             break;
         }
-        base.free();
+
         let _ = any;
         if lx.at_punct(b';') {
             lx.advance();
@@ -948,7 +945,6 @@ fn parse_specs(
                 ty.ok = false; // an anonymous struct has no name to refer to
             }
             named = true;
-            tag.free();
             break;
         }
         // The type is complete -- this identifier starts the declarator. `unsigned long n` counts as
@@ -981,7 +977,6 @@ fn parse_specs(
             if !c.aliases.at(ai as usize).ok {
                 ty.ok = false;
             }
-            sub.free();
         } else {
             ty.ok = false;
             ty.base.push_str(t);
@@ -1024,7 +1019,6 @@ fn parse_specs(
             ty.ok = false;
         }
     }
-    prim.free();
     return ty;
 }
 
@@ -1122,9 +1116,6 @@ fn parse_declarator(
             let mut out = ctype_new();
             out.ok = ty.ok && !va;
             out.fnsig.push_string(&sig);
-            sig.free();
-            ps.free();
-            ty.free();
             return out;
         }
         unsafe *is_fn = true;
@@ -1132,7 +1123,6 @@ fn parse_declarator(
         for i in 0..ps.len() {
             params.push(Param { name: String::from_str(ps[i].name.as_str()), ty: String::from_str(ps[i].ty.as_str()) });
         }
-        ps.free();
     }
     // An array PARAMETER is a pointer -- that is C's own rule. An array FIELD is not: dropping its extent
     // would change the record's layout, so the bound is carried out and the field keeps `[T; N]`.
@@ -1202,7 +1192,7 @@ fn parse_params(lx: &mut Lexer, c: &mut Collected, out: &mut Vector<Param>, vari
         let mut sub = Vector::<Param>::new();
         let mut adim: i64 = -1;
         let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut sub, &mut va2, true, &mut adim, dump);
-        sub.free();
+
         // `(void)` is an empty parameter list, not a parameter.
         let void_only = nm.len() == 0 && ty.ptr == 0 && ty.fnsig.len() == 0 && ty.base.as_str() == "void";
         if !void_only {
@@ -1221,9 +1211,7 @@ fn parse_params(lx: &mut Lexer, c: &mut Collected, out: &mut Vector<Param>, vari
             out.push(Param { name: pname, ty: rendered });
             idx = idx + 1;
         }
-        nm.free();
-        ty.free();
-        base.free();
+
         skip_noise(lx);
         if lx.at_punct(b',') {
             lx.advance();
@@ -1304,10 +1292,8 @@ fn parse_unit(lx: &mut Lexer, c: &mut Collected, want: str, extra: &Vector<Strin
                 if isfn && mine && !td && !st && nm.len() != 0 {
                     c.skipped = c.skipped + 1;
                 }
-                ps.free();
             }
-            nm.free();
-            ty.free();
+
             skip_noise(lx);
             if lx.at_punct(b',') {
                 lx.advance();
@@ -1315,8 +1301,7 @@ fn parse_unit(lx: &mut Lexer, c: &mut Collected, want: str, extra: &Vector<Strin
             }
             break;
         }
-        base.free();
-        here.free();
+
         if lx.at_punct(b'{') {
             lx.skip_group(b'{', b'}');
         } else if lx.at_punct(b';') {
@@ -1392,8 +1377,6 @@ fn same_origin(a: str, want: str, extra: &Vector<String>) bool {
     let mut sa = String::from_str(a);
     let mut sw = String::from_str(want);
     let same = unsafe shim::sc_same_file(sa.cstr(), sw.cstr()) == 1;
-    sa.free();
-    sw.free();
     return same;
 }
 
@@ -1556,14 +1539,12 @@ fn ex_ident(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i
         if got && raw.len() != 0 {
             let mut sub = false;
             let v = ce_eval(raw.as_str(), c, e, dump, depth + 1, &mut sub);
-            raw.free();
             if sub {
                 return v;
             }
             x.ok = false;
             return 0;
         }
-        raw.free();
     }
     x.ok = false;
     return 0;
@@ -1609,7 +1590,6 @@ fn ex_primary(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth:
         // A cast (`(int)x`) or a call reaches here as an identifier followed by something unexpected;
         // both are refused by the caller when the expression does not end cleanly.
         let v = ex_ident(x, c, e, dump, depth, nm.as_str());
-        nm.free();
         return v;
     }
     x.ok = false;
@@ -2069,9 +2049,7 @@ fn collect_consts(c: &mut Collected, header: str, dump: str) {
             cd.name.push_str(c.enums[i].vals[j].name.as_str());
             cd.value.format_into("{}", c.enums[i].vals[j].value);
             let taken = name_taken(c, c.consts.len(), cd.name.as_str());
-            if taken {
-                cd.free();
-            } else {
+            if taken {} else {
                 c.consts.push(cd);
             }
         }
@@ -2080,7 +2058,6 @@ fn collect_consts(c: &mut Collected, header: str, dump: str) {
     switch loader::read_file(header) {
         Some(src) => {
             header_macro_names(src.as_str(), &mut names);
-            src.free();
         },
         None => {},
     };
@@ -2095,13 +2072,9 @@ fn collect_consts(c: &mut Collected, header: str, dump: str) {
             );
             if ok {
                 c.consts.push(cd);
-            } else {
-                cd.free();
-            }
+            } else {}
         }
-        raw.free();
     }
-    names.free();
 }
 
 fn emit(c: &Collected, header: str, spelling: str, link: str, out: &mut String) {
@@ -2262,7 +2235,6 @@ fn run_one(
             Some(t) => {
                 c.widths = read_widths(t.as_str());
                 mdump.push_string(&t);
-                t.free();
             },
             None => {},
         };
@@ -2287,8 +2259,6 @@ fn run_one(
                 let mut out = String::new();
                 emit(&c, hdr.as_str(), spelling.as_str(), link, &mut out);
                 rc = write_out(out.as_str(), out_path, c.fns.len(), c.skipped);
-                out.free();
-                text.free();
             },
             None => {
                 unsafe stdio::fputs(
@@ -2300,15 +2270,6 @@ fn run_one(
         };
     }
     let _ = unsafe shim::sc_unlink(ipath.cstr());
-    cmd.free();
-    mcmd.free();
-    mdump.free();
-    ipath.free();
-    mpath.free();
-    spelling.free();
-    hdr.free();
-    cc.free();
-    c.free();
     return rc;
 }
 
@@ -2458,12 +2419,9 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) i32 {
             leaf.push_str(".spc");
             let full = join_path(o.as_str(), leaf.as_str());
             jobs.push(Job { path: child, spelling: crel, out: full });
-            o.free();
-            leaf.free();
             continue;
         }
     }
-    names.free();
     return rc;
 }
 
@@ -2517,7 +2475,6 @@ pub fn run(
         let p = paths[i].as_str();
         let mut pp = String::from_str(p);
         let isdir = unsafe shim::sc_stat_isdir(pp.cstr()) == 1;
-        pp.free();
         if isdir {
             if out_dir.len() == 0 {
                 unsafe stdio::fputs(
@@ -2545,8 +2502,6 @@ pub fn run(
             leaf.push_str(".spc");
             let full = join_path(out_dir, leaf.as_str());
             o.push_string(&full);
-            full.free();
-            leaf.free();
         }
         jobs.push(Job { path: String::from_str(p), spelling: sp, out: o });
     }
@@ -2569,7 +2524,6 @@ pub fn run(
             if od.len() != 0 {
                 let mut odp = String::from_str(od);
                 let _ = unsafe shim::sc_mkdir_p(odp.cstr());
-                odp.free();
             }
             if run_one(
                 jobs[i].path.as_str(),
@@ -2594,7 +2548,5 @@ pub fn run(
             );
         }
     }
-    jobs.free();
-    cc.free();
     return rc;
 }

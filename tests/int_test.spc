@@ -20,7 +20,6 @@ fn reads_like_a_builtin_integer() {
     let sum = wide + 2;
     let s = sum.to_string();
     assert(s.as_str() == "18446744073709551617");
-    s.free();
     // signed, including a negative literal
     let neg: i128 = -5;
     assert(neg < i128::zero());
@@ -87,7 +86,6 @@ fn partial_limb_widths() {
     assert(m16.checked_add(&one16).is_none());
     let s16 = m16.to_string();
     assert(s16.as_str() == "65535");
-    s16.free();
     // 100-bit: the carry crosses limb 0 into the partial limb, and overflow detection sees bit 100
     let big = UInt::<100>::max();
     let one100 = UInt::<100>::one();
@@ -102,12 +100,10 @@ fn partial_limb_widths() {
     let q = big.divmod(&three, &mut r100);
     let qs = q.to_string();
     assert(qs.as_str() == "422550200076076467165567735125");
-    qs.free();
     let f = UInt::<100>::from_u64(0xFFFFFFFFFFFFFFFF);
     let p = f.full_mul(&f);
     let ps = p.to_string();
     assert(ps.as_str() == "340282366920938463426481119284349108225");
-    ps.free();
     // signed 20-bit: the sign bit sits mid-limb, and every signed operation reads it there
     let m = Int::<20>::from_i64(-3);
     assert_eq(m.to_i64(), -3i64);
@@ -167,7 +163,6 @@ fn multiplication_spans_limbs() {
     let p = a * b;
     let s = p.to_string();
     assert(s.as_str() == "1000000016000000063");
-    s.free();
     // A product that needs the second limb, checked by dividing it back out.
     let big = u128::from_u64(0xFFFFFFFFFFFFFFFF);
     let two = u128::from_u64(2);
@@ -182,7 +177,6 @@ fn multiplication_spans_limbs() {
     assert(sq.is_some());
     let sqs = sq.unwrap().to_string();
     assert(sqs.as_str() == "340282366920938463426481119284349108225");
-    sqs.free();
     assert(u128::max().checked_mul(&two).is_none());
 }
 
@@ -194,7 +188,6 @@ fn division_and_remainder() {
     let r = a % b;
     let qs = q.to_string();
     assert(qs.as_str() == "142857142857142857");
-    qs.free();
     assert_eq(r.to_u64(), 1u64);
     // q * b + r == a
     assert(q * b + r == a);
@@ -274,7 +267,6 @@ fn signed_negative_values_round_trip() {
     let p = a * b;
     let s = p.to_string();
     assert(s.as_str() == "-1234567898765432019864197523");
-    s.free();
     let mut r = i128::zero();
     let q = p.divmod(&b, &mut r);
     assert(q == a);
@@ -315,13 +307,11 @@ fn text_round_trips_at_every_width() {
     let m = u256::max();
     let mx = m.to_string();
     assert(mx.as_str() == "115792089237316195423570985008687907853269984665640564039457584007913129639935");
-    mx.free();
     let s = "-670390396497129854978701249910292306373968291029619668886178072186088201503677348840093714908345229483";
     switch i512::from_str(s) {
         Some(v) => {
             let back = v.to_string();
             assert(back.as_str() == s);
-            back.free();
         },
         None => {
             assert(false);
@@ -334,7 +324,6 @@ fn text_round_trips_at_every_width() {
     assert(u128::from_str("12x").is_none());
     let z = u128::zero().to_string();
     assert(z.as_str() == "0");
-    z.free();
 }
 
 @test
@@ -349,7 +338,6 @@ fn conformances() {
     assert(a.clone() == a);
     let f = a.fmt();
     assert(f.as_str() == "5");
-    f.free();
     // and they work as Map keys, which is what Hash + Eq are for
     let mut m = Map::<u128, i32>::new();
     m.insert(a, 7);
@@ -361,7 +349,6 @@ fn conformances() {
             assert(false);
         },
     };
-    m.free();
 }
 
 @test(should_panic)
@@ -399,14 +386,12 @@ fn widening_and_full_multiplication() {
     assert_eq(u128::bits() * 2, 256);
     let s = p.to_string();
     assert(s.as_str() == "115792089237316195423570985008687907852589419931798687112530834793049593217025");
-    s.free();
     // and a width the aliases do not name, to show the expression is computed rather than looked up
     let b = UInt::<192>::from_u64(0xFFFFFFFFFFFFFFFF);
     let w = b.full_mul(&b);
     assert_eq(UInt::<384>::limbs(), 6);
     let ws = w.to_string();
     assert(ws.as_str() == "340282366920938463426481119284349108225");
-    ws.free();
 }
 
 // Widening composes: the result of one full product feeds the next, and the width the signature promises
@@ -422,7 +407,6 @@ fn widening_composes_across_widths() {
     let q = square_twice(&a); // u128 -> u256 -> u512
     let s = q.to_string();
     assert(s.as_str() == "115792089237316195398462578067141184799968521174335529155754622898352762650625");
-    s.free();
 }
 
 // The 128-bit width is the one that routes through the C compiler's native 128-bit type where one
@@ -467,8 +451,6 @@ fn native_128_path_matches_the_limb_code() {
             let s1 = a.to_string();
             let s2 = w.to_string();
             assert(s1.as_str() == s2.as_str());
-            s1.free();
-            s2.free();
         }
     }
 }
@@ -625,12 +607,10 @@ fn bytes_and_radix_text() {
     let v = u128::from_str("340282366920938463463374607431768211455").unwrap(); // 2^128 - 1
     let hex = v.to_string_radix(16);
     assert(hex.as_str() == "ffffffffffffffffffffffffffffffff");
-    hex.free();
     let two = u128::from_u64(2);
     let bin = two.pow(100).to_string_radix(2);
     assert_eq(bin.len(), 101);
     assert(bin.as_str().byte_at(0) == b'1');
-    bin.free();
     assert(u128::from_str_radix("ffffffffffffffffffffffffffffffff", 16).unwrap() == v);
     assert(u128::from_str_radix("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", 16).unwrap() == v);
     assert(u128::from_str_radix("100000000000000000000000000000000", 16).is_none()); // one too wide
@@ -643,7 +623,6 @@ fn bytes_and_radix_text() {
     let sm = i128::from_i64(-255);
     let sh = sm.to_string_radix(16);
     assert(sh.as_str() == "-ff");
-    sh.free();
 }
 
 // Integer literals wider than 64 bits, admitted wherever the context expects UInt<N>/Int<N>: the

@@ -4,8 +4,6 @@ Super-C is a small, statically-typed systems language that **compiles to readabl
 (RAII, memory safety, first class coroutines, compile time execution, ...), with C's portability and performance model.
 The transpiler lowers everything to ordinary C99/C11 that Clang, GCC, or MSVC then turns into a native binary.
 
-Super-C is not a C dialect. It is its own language that uses C as a compilation target.
-
 ## Pipeline
 
 ```text
@@ -15,8 +13,10 @@ Super-C source (.spc)
     -> resolver       (name binding, scopes, modules)
     -> desugar        (lowers sugar keywords like `launch` to core nodes; no other pass sees them)
     -> typechecker    (type inference, generics, monomorphization; always-on compile-time evaluation)
-    -> borrow checker (moves, aliasing, lifetimes -- a dedicated pass over the typed AST)
-    -> codegen        (readable C: build/ tree of .h/.c, RAII frees inserted)
+    -> borrow checker (moves, aliasing, lifetimes: a typed-AST pass plus a Core IR loan analysis)
+    -> Core IR        (the typed body lowered to a compact control-flow IR; drop elaboration,
+                       verified layout, and compile-time evaluation all run on it)
+    -> C emitter      (streaming Core IR -> readable per-module C: build/ tree of .h/.c, RAII frees inserted)
     -> cc / clang / gcc
     -> native binary
 ```
@@ -70,7 +70,7 @@ The rest of the toolchain:
 * `super-c lint [--fix]` — default-on lints (unused imports/members/labels, unnecessary `mut` or
   `unsafe`, unreachable statements and arms, dead stores, discarded pure results, redundant casts,
   owning unions without a `free`, ...); `--fix` applies the machine fixes — including generated
-  code — and re-lints to a fixpoint. `--suggest-const` flags functions the CTFE interpreter proves
+  code — and re-lints to a fixpoint. `--const` flags functions the CTFE interpreter proves
   always evaluable.
 * `super-c lsp` — a language server (diagnostics as you type, hover, go-to-definition, references,
   rename, completion, formatting, quick fixes); `editors/vscode/` wires it up.
@@ -745,7 +745,7 @@ The strictness rules:
   exit (like a non-`mut` `let`); moving it out is rejected (a `const` stays put), so it never
   double-frees. Owning containers remain fully usable *inside* compile-time evaluation.
 
-Running `super-c lint --suggest-const` indicates all functions the compiler has proven to be const evaluatable.
+Running `super-c lint --const` indicates all functions the compiler has proven to be const evaluatable.
 Running it with `--fix` makes all those functions const and saves some compilation time as the compiler won't reprove them.
 
 ## Concurrency

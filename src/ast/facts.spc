@@ -176,7 +176,7 @@ pub struct FactsWatermark {
 }
 
 /// Snapshot module `a`'s semantic-table lengths.
-pub fn watermark(a: &Ast) FactsWatermark {
+pub const fn watermark(a: &Ast) FactsWatermark {
     return FactsWatermark {
         nodes: a.nodes.len(),
         children: a.children.len(),

@@ -49,7 +49,7 @@ pub struct Stats {
     pub scratch_bytes: u64,
 }
 
-pub fn stats_zero() Stats {
+pub const fn stats_zero() Stats {
     return Stats {
         origins: 0,
         universals: 0,
@@ -71,7 +71,7 @@ pub fn stats_zero() Stats {
     };
 }
 
-pub fn stats_add(a: &mut Stats, b: &Stats) {
+pub const fn stats_add(a: &mut Stats, b: &Stats) {
     a.origins += b.origins;
     a.universals += b.universals;
     a.loans += b.loans;
@@ -242,7 +242,7 @@ extend Solver {
             self.sub_by_point.set(cur[p as usize] as usize, i as u32);
             cur.set(p as usize, cur[p as usize] + 1);
         }
-        cur.free();
+
         // Loan issues and kills bucketed per block.
         let nb = c.nblocks;
         let mut ic = Vector::<u32>::new();
@@ -290,8 +290,6 @@ extend Solver {
             );
             kc.set(blk, kc[blk] + 1);
         }
-        ic.free();
-        kc.free();
     }
 
     // Statement-exact liveness points for every inference origin, from one backward replay of each
@@ -436,11 +434,7 @@ extend Solver {
                     cur.set(k, cur[k] & ~dset[k] | uset[k]);
                 }
             }
-            dset.free();
-            uset.free();
         }
-        cur.free();
-        uses.free();
     }
 
     const fn origin_live_at(self: &Self, o: u32, p: u32) bool {
@@ -551,9 +545,6 @@ extend Solver {
                 }
             }
         }
-        scratch.free();
-        queued.free();
-        queue.free();
     }
 
     // Replay block `bi` from its entry row; stop AFTER applying facts at points <= `upto`
@@ -692,7 +683,6 @@ extend Solver {
                 }
             }
         }
-        succs.free();
         return row;
     }
 
@@ -838,7 +828,6 @@ extend Solver {
                 );
             }
         }
-        scratch.free();
     }
 
     // A loan of storage this body owns must never reach a placeholder that is live at a return.
@@ -1013,7 +1002,6 @@ extend Solver {
                 }
             }
         }
-        succs.free();
         return found;
     }
 }
@@ -1102,10 +1090,6 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
         for w in 0..pwords {
             r.required.push(req[w as usize]);
         }
-        seen.free();
-        req.free();
-        work.free();
-        succs.free();
     }
     // The error list comes from the optimized solver run above (same facts, same rules); the
     // comparison value of this path is the independently computed `required` sets.

@@ -897,9 +897,9 @@ extend<const BITS: usize> UInt<BITS> {
             while x >= two64 {
                 x = x / two64;
                 sh = sh + 1;
-            }
-            if sh * 64 >= BITS {
-                return UInt::<BITS>::max();
+                if sh * 64 >= BITS {
+                    return UInt::<BITS>::max(); // saturates ±inf too: that divide never grounds
+                }
             }
             let chunk = x as u64;
             r = r + UInt::<BITS>::from_u64(chunk).shl(sh * 64);
@@ -1211,7 +1211,6 @@ extend<const BITS: usize> UInt<BITS> {
             i = i - 1;
             out.push_byte(digits.as_str().byte_at(i));
         }
-        digits.free();
         return out;
     }
 
@@ -1275,7 +1274,6 @@ extend<const BITS: usize> UInt<BITS> {
             i = i - 1;
             out.push_byte(digits.as_str().byte_at(i));
         }
-        digits.free();
         return out;
     }
 
@@ -2039,7 +2037,6 @@ extend<const BITS: usize> Int<BITS> {
         let mut out = String::from_str("-");
         let digits = mag.to_string();
         out.push_str(digits.as_str());
-        digits.free();
         return out;
     }
 
@@ -2085,7 +2082,6 @@ extend<const BITS: usize> Int<BITS> {
         let mut out = String::from_str("-");
         let digits = mag.to_string_radix(radix);
         out.push_str(digits.as_str());
-        digits.free();
         return out;
     }
 

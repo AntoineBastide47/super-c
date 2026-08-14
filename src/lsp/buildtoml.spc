@@ -24,13 +24,10 @@ extend TomlDiag as Free {
 pub fn diagnostics(src: str) Vector<TomlDiag> {
     let mut out = Vector::<TomlDiag>::new();
     let (m, errs) = bsys::parse_check(src, "");
-    m.free(); // the manifest itself is not wanted here, only its verdict
     for i in 0..errs.errors.len() {
         let d = errs.errors.at(i);
         out.push(TomlDiag { start: d.start, len: d.len, msg: d.msg.clone() });
     }
-    let e = errs;
-    e.free();
     return out;
 }
 
@@ -182,8 +179,6 @@ pub fn completions(src: str, at: usize) Vector<Item> {
             out.push(Item { label: String::from_str(k.name), doc: String::from_str(k.doc) });
         }
     }
-    let s2 = sec;
-    s2.free();
     return out;
 }
 
@@ -214,8 +209,6 @@ pub fn hover(src: str, at: usize) String {
             doc.push_str(k.doc);
         }
     }
-    let s2 = sec;
-    s2.free();
     return doc;
 }
 

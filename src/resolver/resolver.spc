@@ -12,7 +12,7 @@ import desugar::desugar as desugar;
 import utils::errors as diag;
 
 /// Most type parameters one generic item may declare. Monomorphization stores an instance's type arguments
-/// inline (`codegen::CgInst.args`, `codegen::TyArgs8`), so this must not exceed those arrays.
+/// inline in fixed 8-wide arrays, so this must not exceed that width.
 pub const MAX_TYPE_PARAMS: u32 = 8;
 
 /// Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.

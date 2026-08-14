@@ -80,7 +80,6 @@ extend tc::TypeChecker {
             }
             i += 1;
         }
-        cns.free();
         return ok;
     }
 
@@ -90,7 +89,6 @@ extend tc::TypeChecker {
         for b in 0..bodies.len() {
             self.bc_ir_body(ow, &bodies.at(b).body, &mut seen, out);
         }
-        seen.free();
     }
 
     fn bc_ir_push(
@@ -104,8 +102,6 @@ extend tc::TypeChecker {
         let key = cat as u64 << 32 | sp.start as u64;
         for k in 0..seen.len() {
             if seen[k] == key {
-                let m2 = msg;
-                m2.free();
                 return;
             }
         }
@@ -205,8 +201,6 @@ extend tc::TypeChecker {
             }
             // BE_PLACEHOLDER stays with the walk's signature-level lifetime checks.
         }
-        escaping.free();
-        cap_spans.free();
     }
 
     fn bc_ir_conflict(

@@ -127,6 +127,80 @@ extend PatCx as Free {
 }
 
 // Decimal literal fast path (sign included); ok=false for any other spelling.
+/// The code point of a `'x'` / `b'x'` literal (escape rules mirror the checker's decode).
+pub fn char_of(src: str, sp: tok::Span, out: &mut i64) bool {
+    if sp.end <= sp.start + 2 {
+        return false;
+    }
+    let mut i = sp.start + 1;
+    if src[sp.start as usize] == b'b' {
+        i = i + 1;
+    }
+    if i >= sp.end {
+        return false;
+    }
+    if src[i as usize] != b'\\' {
+        *out = src[i as usize];
+        return true;
+    }
+    if i + 1 >= sp.end {
+        return false;
+    }
+    let e = src[(i + 1) as usize];
+    if e == b'n' {
+        *out = 10;
+        return true;
+    }
+    if e == b't' {
+        *out = 9;
+        return true;
+    }
+    if e == b'r' {
+        *out = 13;
+        return true;
+    }
+    if e == b'0' {
+        *out = 0;
+        return true;
+    }
+    if e == b'\\' {
+        *out = 92;
+        return true;
+    }
+    if e == 39 {
+        *out = 39;
+        return true;
+    }
+    if e == 34 {
+        *out = 34;
+        return true;
+    }
+    if e == b'x' {
+        let mut v: i64 = 0;
+        let mut k = i + 2;
+        while k < sp.end - 1 {
+            let c = src[k as usize];
+            let d: i64 = if c >= b'0' && c <= b'9' {
+                c - b'0';
+            } else if c >= b'a' && c <= b'f' {
+                c - b'a' + 10;
+            } else if c >= b'A' && c <= b'F' {
+                c - b'A' + 10;
+            } else {
+                -1;
+            };
+            if d < 0 {
+                return false;
+            }
+            v = v * 16 + d;
+            k = k + 1;
+        }
+        *out = v;
+        return true;
+    }
+    return false;
+}
+
 fn dec_of(src: str, sp: tok::Span, out: &mut i64) bool {
     let mut i = sp.start as usize;
     let mut neg = false;
@@ -174,7 +248,7 @@ extend PatCx {
         };
     }
 
-    fn spend(self: &mut Self, n: u32) bool {
+    const fn spend(self: &mut Self, n: u32) bool {
         if self.budget < n {
             self.budget = 0;
             self.overflow = true;
@@ -222,7 +296,7 @@ extend PatCx {
     }
 
     // The payload arity of variant `vd`.
-    fn variant_arity(self: &Self, vd: DefId) u32 {
+    const fn variant_arity(self: &Self, vd: DefId) u32 {
         let a = unsafe &*(&*self.pkg).module_ast_const(vd.module);
         return a.at_const(vd.node).as_data.variant.payload.len;
     }
@@ -287,16 +361,30 @@ extend PatCx {
             let mut hi: i64 = 0;
             let lo_ok = rd.start != NODE_NONE && self.bound_dec(rd.start, &mut lo);
             let hi_ok = rd.end != NODE_NONE && self.bound_dec(rd.end, &mut hi);
+            // bounds the matrix cannot value (const paths, hex, open ends) key the range by its
+            // NODE with the arity-2 sentinel: it covers nothing and equals only itself -- garbage
+            // (0,0) bounds once merged every char range into one edge
+            let opaque = !(lo_ok && hi_ok);
             self.pats.push(
                 NPat {
                     kind: PC_RANGE,
-                    val: lo,
-                    hi: hi,
+                    val: if opaque {
+                        pid;
+                    } else {
+                        lo;
+                    },
+                    hi: if opaque {
+                        pid;
+                    } else {
+                        hi;
+                    },
                     decl: DefId { module: 0, node: NODE_NONE },
                     node: pid,
                     sub_start: 0,
                     sub_len: 0,
-                    arity: if rd.inclusive && lo_ok && hi_ok {
+                    arity: if opaque {
+                        2;
+                    } else if rd.inclusive {
                         1;
                     } else {
                         0;
@@ -366,7 +454,7 @@ extend PatCx {
         out.push(self.pats.len() as u32 - 1);
     }
 
-    fn decl_kind(self: &Self, d: DefId) NodeKind {
+    const fn decl_kind(self: &Self, d: DefId) NodeKind {
         if d.node == NODE_NONE {
             return NodeKind::NODE_NONE_KIND;
         }
@@ -382,7 +470,11 @@ extend PatCx {
         if self.f.node(v).kind != NodeKind::NODE_LITERAL {
             return false;
         }
-        return dec_of(self.src, self.f.node(v).as_data.literal.raw, out);
+        let ld = self.f.node(v).as_data.literal;
+        if ld.token_type == tt::TokenType::CharacterLiteral || ld.token_type == tt::TokenType::ByteCharacterLiteral {
+            return char_of(self.src, ld.raw, out);
+        }
+        return dec_of(self.src, ld.raw, out);
     }
 
     fn norm_literal(self: &mut Self, pid: NodeId, out: &mut Vector<u32>) {
@@ -580,7 +672,7 @@ extend PatCx {
     }
 
     // Does constructor pattern `q` fall inside row-head `r` (r covers q)?
-    fn head_covers(self: &Self, r: u32, q: u32) bool {
+    const fn head_covers(self: &Self, r: u32, q: u32) bool {
         let rp = self.pats.at(r as usize);
         let qp = self.pats.at(q as usize);
         if rp.kind == PC_WILD {
@@ -1190,7 +1282,7 @@ extend PatCx {
     }
 
     // The declared field node a constructor's slot `f` reads (named payloads/structs), or NONE.
-    fn slot_field_decl(self: &Self, p: &NPat, f: u32) NodeId {
+    const fn slot_field_decl(self: &Self, p: &NPat, f: u32) NodeId {
         if p.kind == PC_STRUCT && p.decl.node != NODE_NONE {
             let a = unsafe &*(&*self.pkg).module_ast_const(p.decl.module);
             let ms = a.at_const(p.decl.node).as_data.aggregate.members;
@@ -1209,7 +1301,7 @@ extend PatCx {
     }
 
     // A pattern node whose checked type describes slot `f` (for the lowerer's place types).
-    fn slot_pat_node(self: &Self, p: &NPat, f: u32) NodeId {
+    const fn slot_pat_node(self: &Self, p: &NPat, f: u32) NodeId {
         if f < p.sub_len {
             let sub = self.subs[(p.sub_start + f) as usize];
             return self.pats.at(sub as usize).node;

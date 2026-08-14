@@ -16,7 +16,7 @@ import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
 import consteval::consteval as ce;
-import codegen::codegen as cg;
+import driver::rt_c as rtc;
 import utils::errors as diag;
 
 /// A 4096-byte path scratch buffer; `PathBuf {}` partial init zero-fills the array.
@@ -29,9 +29,6 @@ pub type Buf128 = Array<char, 128>;
 // ---------------------------------------------------------------------------------------------------------
 pub const fn mod_ast_c(p: &loader::Package, m: ModuleId) *const Ast {
     return &p.modules[m as usize].ast;
-}
-pub const fn mod_ast_m(p: &mut loader::Package, m: ModuleId) *mut Ast {
-    return &mut p.modules[m as usize].ast;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -207,14 +204,14 @@ pub fn write_super_rt(gen_dir: str) {
     let f = open_out(path.as_str());
     if f != null {
         unsafe stdio::fputs("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n".ptr() as *const char, f);
-        unsafe stdio::fputs(cg::super_rt_includes(), f);
+        unsafe stdio::fputs(rtc::super_rt_includes(), f);
         unsafe stdio::fputs("#endif\n".ptr() as *const char, f);
         unsafe stdio::fclose(f);
     }
     let cpath = build_out_path(gen_dir, "super_rt", ".c");
     let cf = open_out(cpath.as_str());
     if cf != null {
-        unsafe stdio::fputs(cg::super_rt_source(), cf);
+        unsafe stdio::fputs(rtc::super_rt_source(), cf);
         unsafe stdio::fclose(cf);
     }
 }

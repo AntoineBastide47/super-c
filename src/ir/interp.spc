@@ -92,12 +92,12 @@ extend Interp {
         return unsafe &*self.pkg;
     }
 
-    fn bail(self: &mut Self) IVal {
+    const fn bail(self: &mut Self) IVal {
         self.failed = true;
         return none();
     }
 
-    fn bail_at(self: &mut Self, sp: tok::Span) IVal {
+    const fn bail_at(self: &mut Self, sp: tok::Span) IVal {
         if !self.failed && self.fail_span.end <= self.fail_span.start {
             self.fail_span = sp;
         }
@@ -105,7 +105,7 @@ extend Interp {
         return none();
     }
 
-    fn spend(self: &mut Self) bool {
+    const fn spend(self: &mut Self) bool {
         self.steps += 1;
         if self.steps > self.max_steps {
             self.failed = true;
@@ -115,7 +115,7 @@ extend Interp {
     }
 
     // The builtin behind `(m, t)` (BT_NONE-like refusal encoded as bool).
-    fn bt_of(self: &Self, m: ModuleId, t: TypeId, out: &mut BuiltinType) bool {
+    const fn bt_of(self: &Self, m: ModuleId, t: TypeId, out: &mut BuiltinType) bool {
         if t == TYPE_NONE {
             return false;
         }
@@ -219,7 +219,7 @@ extend Interp {
             }
         }
         self.depth -= 1;
-        locals.free();
+
         if self.failed {
             return none();
         }
@@ -251,7 +251,6 @@ extend Interp {
             let opid = b.oper_pool[(t.args_start + i) as usize];
             let v = self.operand(b, locals, opid);
             if self.failed {
-                args.free();
                 return false;
             }
             args.push(v);
@@ -282,7 +281,6 @@ extend Interp {
                 None => {},
             };
             if hit {
-                args.free();
                 if t.dests_len >= 1 {
                     let dp = b.dest_pool[t.dests_start as usize];
                     self.write_place(b, locals, dp, hv);
@@ -301,7 +299,6 @@ extend Interp {
         if bidx < 0 {
             let mut lw = irl::Lowerer::new(self.pkg, t.callee.module, t.callee.node);
             if !lw.lower_fn(t.callee.node) {
-                args.free();
                 let _ = self.bail();
                 return false;
             }
@@ -312,7 +309,7 @@ extend Interp {
         let bp: *const irl::Lowerer = self.bodies.at(bidx as usize).get();
         let bb = (unsafe &(&*bp).body) as *const ir::CoreBody;
         let r = self.run(unsafe &*bb, &args);
-        args.free();
+
         if self.failed {
             return false;
         }
@@ -656,12 +653,10 @@ extend Interp {
             if rv.c == ir::AGG_VARIANT {
                 let mut tagv: i64 = -1;
                 if !self.variant_value(rv.item, &mut tagv) {
-                    slots.free();
                     return self.bail();
                 }
                 if rv.b == 0 {
                     // a payload-less variant IS its integer value (a bare C enum)
-                    slots.free();
                     return IVal { kind: IV_INT, ty: rv.target, i: tagv, f: 0.0 };
                 }
                 is_enum = true;
@@ -675,7 +670,6 @@ extend Interp {
                 }
                 let v = self.operand(b, locals, opid);
                 if self.failed {
-                    slots.free();
                     return none();
                 }
                 slots.push(v);
@@ -702,6 +696,10 @@ extend Interp {
             return IVal { kind: IV_INT, ty: rv.target, i: tag.i, f: 0.0 };
         }
         if rv.kind == ir::RV_INTRINSIC {
+            if rv.c == ir::IN_SAFEPOINT {
+                // a runtime preemption marker: nothing to evaluate
+                return IVal { kind: IV_UNIT, ty: rv.target, i: 0, f: 0.0 };
+            }
             if rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF {
                 let l = self.lsvc.layout(b.module, rv.b);
                 if !l.ok {
@@ -805,7 +803,7 @@ extend Interp {
         return self.bail();
     }
 
-    fn cmp_result(self: &Self, v: bool, target: TypeId) IVal {
+    const fn cmp_result(self: &Self, v: bool, target: TypeId) IVal {
         let mut i: i64 = 0;
         if v {
             i = 1;
@@ -813,11 +811,11 @@ extend Interp {
         return IVal { kind: IV_BOOL, ty: target, i: i, f: 0.0 };
     }
 
-    fn int_result(self: &Self, v: i64, tb: BuiltinType, target: TypeId) IVal {
+    const fn int_result(self: &Self, v: i64, tb: BuiltinType, target: TypeId) IVal {
         return IVal { kind: IV_INT, ty: target, i: ce::wrap_to(tb, v), f: 0.0 };
     }
 
-    fn bool_op(self: &mut Self, a: bool, c: bool, tok: u32, target: TypeId) IVal {
+    const fn bool_op(self: &mut Self, a: bool, c: bool, tok: u32, target: TypeId) IVal {
         let t = (tok as u8) as TokenType;
         if t == TokenType::AmpersandAmpersand || t == TokenType::Ampersand {
             return self.cmp_result(a && c, target);
@@ -834,7 +832,7 @@ extend Interp {
         return self.bail();
     }
 
-    fn int_op(
+    const fn int_op(
         self: &mut Self,
         a: i64,
         c: i64,
@@ -946,7 +944,7 @@ extend Interp {
         return self.bail();
     }
 
-    fn unary(self: &mut Self, v: IVal, tok: u8, m: ModuleId, target: TypeId) IVal {
+    const fn unary(self: &mut Self, v: IVal, tok: u8, m: ModuleId, target: TypeId) IVal {
         let t = tok as TokenType;
         if v.kind == IV_BOOL && t == TokenType::Bang {
             let mut i: i64 = 1;
@@ -974,7 +972,7 @@ extend Interp {
         return self.bail();
     }
 
-    fn cast(self: &mut Self, v: IVal, m: ModuleId, target: TypeId) IVal {
+    const fn cast(self: &mut Self, v: IVal, m: ModuleId, target: TypeId) IVal {
         let mut tb = BuiltinType::BT_I64;
         if !self.bt_of(m, target, &mut tb) {
             return self.bail();

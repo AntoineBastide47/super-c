@@ -848,12 +848,6 @@ extend ConstEval {
         return Layout { ok: r.ok, size: r.size, align: r.align };
     }
 
-    /// Size/align of (m,t) under the TARGET data model; not-ok = not layoutable (opaque, unbound
-    /// generic, zero-length array).
-    pub fn layout(self: &mut Self, m: ModuleId, t: TypeId) Layout {
-        return self.layout_of(m, t, null, 0);
-    }
-
     // ---- type utilities ----
 
     // Resolve (m,t) through the frame's substitution while it names a generic param (one hop resolves).
@@ -2551,7 +2545,6 @@ extend ConstEval {
                 let ft = self.ce_type(dm2, ftn);
                 let fl = self.layout_of(dm2, ft, envp, 1);
                 if ft == TYPE_NONE || !fl.ok {
-                    fobjs.free();
                     return out;
                 }
                 let mut fa = fl.align;
@@ -2585,7 +2578,6 @@ extend ConstEval {
                 }
                 let fv = self.ce_ti_member(strm, strn, tim, sty, kty, fity, fname, off, fl.size, -1, ftag as u64);
                 if fv.kind != CV_AGG {
-                    fobjs.free();
                     return out;
                 }
                 if mety != TYPE_NONE && !self.ce_ti_attach_meta(
@@ -2603,7 +2595,6 @@ extend ConstEval {
                     mty,
                     mesz,
                 ) {
-                    fobjs.free();
                     return out;
                 }
                 fobjs.push(fv);
@@ -2646,7 +2637,6 @@ extend ConstEval {
                     if vval != NODE_NONE {
                         let e = self.eval(dm2, vval);
                         if e.kind != CONST_INT {
-                            vobjs.free();
                             return out;
                         }
                         next = e.as_data.i;
@@ -2673,7 +2663,6 @@ extend ConstEval {
                     da2.at_const(vid).as_data.variant.payload.len,
                 );
                 if vv.kind != CV_AGG {
-                    vobjs.free();
                     return out;
                 }
                 if mety != TYPE_NONE && !self.ce_ti_attach_meta(
@@ -2691,7 +2680,6 @@ extend ConstEval {
                     mty,
                     mesz,
                 ) {
-                    vobjs.free();
                     return out;
                 }
                 vobjs.push(vv);
@@ -2799,7 +2787,6 @@ extend ConstEval {
                     }
                 }
                 if fail {
-                    hobjs.free();
                     return out;
                 }
                 nmeths = hobjs.len() as u32;
@@ -2953,7 +2940,6 @@ extend ConstEval {
             }
             let o = self.ce_obj_new(self.ce_field_count(mem, men));
             if o == 0 {
-                objs.free();
                 return cv_nil();
             }
             unsafe self.obj_ptr(o).dm = mem;
@@ -2964,7 +2950,6 @@ extend ConstEval {
                 sv = self.ce_ti_str(strm, strn, tim, sty, src.slice(ma.vspan.start as usize, ma.vspan.end as usize));
             }
             if nmv.kind != CV_AGG || sv.kind != CV_AGG {
-                objs.free();
                 return cv_nil();
             }
             unsafe self.obj_ptr(o).slots.set(i_name as usize, nmv);
@@ -6454,7 +6439,7 @@ extend ConstEval {
     }
 
     // The scalar value a payload-less enum SUBJECT holds (directly, or through the pointed cell).
-    fn ce_tagless_subject(self: &Self, sub: CeVal) CeVal {
+    const fn ce_tagless_subject(self: &Self, sub: CeVal) CeVal {
         if sub.kind == CV_INT {
             return sub;
         }
@@ -9261,33 +9246,6 @@ extend ConstEval {
         return r;
     }
 
-    /// The `fields.len`/`variants.len` (`want` 0/1) of T's descriptor, computed by the same build
-    /// the descriptor itself gets so the two can never disagree; -1 when T has none. Codegen's
-    /// inline-for bound fold is the caller -- the T it resolved through its substitution frames is
-    /// exactly what CTFE alone cannot see.
-    pub fn type_info_count(self: &mut Self, m: ModuleId, id: NodeId, am: ModuleId, at: TypeId, want: i32) i64 {
-        if id == NODE_NONE || m as usize >= self.nmods || self.depth != 0 || self.nframes != 0 {
-            return -1;
-        }
-        self.steps = 0;
-        self.trap = "";
-        self.trap_kind = CE_TRAP_NONE;
-        self.trap_nframes = 0;
-        self.trap_in_constfn = false;
-        self.ce_objs_reset();
-        self.depth = 1;
-        let r0 = self.ce_type_info_of(null, m, id, am, at);
-        self.depth = 0;
-        self.ce_objs_reset();
-        if !r0.ok {
-            return -1;
-        }
-        if want == 0 {
-            return self.ti_nfields;
-        }
-        return self.ti_nvars;
-    }
-
     /// `type_info::<T>()` at a RUNTIME use site: build and capture the descriptor for the concrete
     /// (am, at) codegen resolved through its substitution frames. Unmemoized -- the same call node
     /// emits once per monomorphized instance, each with its own T, so the (module, node) memo
@@ -9311,29 +9269,6 @@ extend ConstEval {
         self.ce_objs_reset();
         self.depth = 1;
         let r0 = self.ce_type_info_decl(null, m, tih.mid, tih.node, rty, am, at);
-        self.depth = 0;
-        if !r0.ok || r0.n != 1 || r0.vals[0].kind != CV_AGG {
-            self.ce_objs_reset();
-            return bad;
-        }
-        let r = self.ce_capture(r0.vals[0]);
-        self.ce_objs_reset();
-        return r;
-    }
-
-    pub fn eval_type_info_static(self: &mut Self, m: ModuleId, id: NodeId, am: ModuleId, at: TypeId) StaticRes {
-        let bad = StaticRes { ok: false, root: 0 };
-        if id == NODE_NONE || m as usize >= self.nmods || self.depth != 0 || self.nframes != 0 {
-            return bad;
-        }
-        self.steps = 0;
-        self.trap = "";
-        self.trap_kind = CE_TRAP_NONE;
-        self.trap_nframes = 0;
-        self.trap_in_constfn = false;
-        self.ce_objs_reset();
-        self.depth = 1;
-        let r0 = self.ce_type_info_of(null, m, id, am, at);
         self.depth = 0;
         if !r0.ok || r0.n != 1 || r0.vals[0].kind != CV_AGG {
             self.ce_objs_reset();
