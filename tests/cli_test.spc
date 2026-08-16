@@ -26,6 +26,21 @@ fn compiles_file() {
     assert_eq(p.run_bin(), 7);
 }
 
+// The readable language tour is also a broad end-to-end emission fixture. It must survive the full
+// frontend, C11 with all warnings as errors, execution, and the native leak checker. The ZST in this
+// demo cannot use -pedantic-errors until Phase 10.5 removes empty C structs.
+@test
+fn language_demo_emits_valid_c() {
+    let p = cli::proj_new();
+    assert(p.copyfile("main.spc", "examples/language_demo.spc"), "language demo is present");
+    let compile = p.compile("main.spc");
+    assert(compile.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(run.ok());
+}
+
 // A second module's enums used across the boundary: value return, payload-less match, payload construction
 // and match. Drives the multi-file build/ tree (subdirs) through cc + run.
 @test
@@ -1175,6 +1190,24 @@ fn raii_drop_on_field_assign() {
 
 // Transpiler-inserted auto-free of untouched fields: a Free impl's body runs, then every owning
 // Free-typed field it never referenced is freed by generated glue (early returns covered by the
+// A tuple struct's untouched owning members get the same wrapper glue, spelled positionally `_i`.
+@test
+fn raii_free_glue_tuple_fields() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "struct Pair(String, String);\n\nextend Pair as Free {\n    pub fn free(self: &mut Pair) {\n        self.0.free();\n    }\n}\n\nfn main() i32 {\n    let mut q = Pair(String::from_str(\"abcdefghijklmnopqrstuvwxyz\"), String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\"));\n    return q.0.len() as i32 + q.1.len() as i32 - 58;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("main.c", "Pair__free__fb("), "partial tuple impl gets the wrapper");
+    assert(p.gen_has("main.c", "String__free(&self->_1);"), "untouched tuple member is glue-freed by position");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(lk.ok()); // _1 is freed by the glue -- no leak under the fatal gate
+}
+
 // wrapper form). Complete impls emit without a wrapper; raw-pointer fields are borrows and exempt.
 @test
 fn raii_free_glue_untouched_fields() {
@@ -1186,7 +1219,7 @@ fn raii_free_glue_untouched_fields() {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(p.gen_has("main.c", "Pair__free__fb("), "incomplete impl gets the wrapper");
-    assert(p.gen_has("main.c", "String__free(&_0->b);"), "untouched field is glue-freed");
+    assert(p.gen_has("main.c", "String__free(&self->b);"), "untouched field is glue-freed");
     assert(!p.gen_has("main.c", "Whole__free__fb"), "complete impl emits no wrapper");
     let cc = p.cc_build("");
     assert(cc.ok());

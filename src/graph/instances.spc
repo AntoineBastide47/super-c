@@ -915,12 +915,18 @@ extend InstGraph {
             }
             ai += 1;
         }
+        let is_tuple = n.as_data.aggregate.is_tuple;
         let ms = n.as_data.aggregate.members;
         for i in 0..ms.len {
             let mid = unsafe a.list(ms)[i as usize];
             let mk = a.at_const(mid).kind;
-            if mk == NodeKind::NODE_FIELD {
-                let tnode = a.at_const(mid).as_data.field.ty;
+            // tuple members are bare type nodes; named members carry their type in field.ty
+            if mk == NodeKind::NODE_FIELD || is_tuple {
+                let tnode = if mk == NodeKind::NODE_FIELD {
+                    a.at_const(mid).as_data.field.ty;
+                } else {
+                    mid;
+                };
                 let mut t = a.type_of(mid);
                 if t == TYPE_NONE && tnode != NODE_NONE {
                     t = a.type_of(tnode);

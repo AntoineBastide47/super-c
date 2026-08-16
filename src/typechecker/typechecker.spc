@@ -4938,12 +4938,16 @@ extend TypeChecker {
             return false;
         }
         let a = self.mod_ast(om);
+        let is_tuple = dn.as_data.aggregate.is_tuple;
         let ms = dn.as_data.aggregate.members;
         let mids = a.list(ms);
         for i in 0..ms.len {
-            let mn = *a.at_const(unsafe mids[i as usize]);
-            if !is_enum && mn.kind == NodeKind::NODE_FIELD {
-                if !self.tc_member_marker(om, mn.as_data.field.ty, &gp[0], &ga[0], gn, sync, depth) {
+            let mid = unsafe mids[i as usize];
+            let mn = *a.at_const(mid);
+            // tuple members are bare type nodes; named members carry their type in field.ty
+            if !is_enum && (mn.kind == NodeKind::NODE_FIELD || is_tuple) {
+                let tn = if_node(mn.kind == NodeKind::NODE_FIELD, mn.as_data.field.ty, mid);
+                if !self.tc_member_marker(om, tn, &gp[0], &ga[0], gn, sync, depth) {
                     return false;
                 }
             } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
@@ -5100,13 +5104,16 @@ extend TypeChecker {
         }
         self.derive_busy.push(key);
         let mut owns = false;
+        let is_tuple = dn.as_data.aggregate.is_tuple;
         let ms = dn.as_data.aggregate.members;
         let mids = a.list(ms);
         for i in 0..ms.len {
             let mid = unsafe mids[i as usize];
             let mn = *a.at_const(mid);
-            if !is_enum && mn.kind == NodeKind::NODE_FIELD {
-                if self.tc_member_owns(om, mn.as_data.field.ty, gp, ga, gn) {
+            // tuple members are bare type nodes; named members carry their type in field.ty
+            if !is_enum && (mn.kind == NodeKind::NODE_FIELD || is_tuple) {
+                let tn = if_node(mn.kind == NodeKind::NODE_FIELD, mn.as_data.field.ty, mid);
+                if self.tc_member_owns(om, tn, gp, ga, gn) {
                     owns = true;
                 }
             } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
@@ -5156,13 +5163,19 @@ extend TypeChecker {
         if dn.kind != NodeKind::NODE_STRUCT {
             return false; // an enum carries a tag; a union is as big as its widest member
         }
+        let is_tuple = dn.as_data.aggregate.is_tuple;
         let ms = dn.as_data.aggregate.members;
         for i in 0..ms.len {
             let fid = unsafe self.mod_ast(om).list(ms)[i as usize];
-            if self.mod_ast(om).at_const(fid).kind != NodeKind::NODE_FIELD {
+            if !is_tuple && self.mod_ast(om).at_const(fid).kind != NodeKind::NODE_FIELD {
                 continue;
             }
-            let ft = self.subst_type(self.decl_type_in(om, fid), &gp[0], &ga[0], gn);
+            let ft0 = if is_tuple {
+                self.lower_type_in(om, fid);
+            } else {
+                self.decl_type_in(om, fid);
+            };
+            let ft = self.subst_type(ft0, &gp[0], &ga[0], gn);
             if !self.tc_type_is_zero_sized(ft, depth + 1) {
                 return false;
             }
@@ -5195,13 +5208,19 @@ extend TypeChecker {
         if self.mod_ast(om).at_const(od).kind != NodeKind::NODE_STRUCT {
             return TYPE_NONE;
         }
+        let is_tuple = self.mod_ast(om).at_const(od).as_data.aggregate.is_tuple;
         let ms = self.mod_ast(om).at_const(od).as_data.aggregate.members;
         for i in 0..ms.len {
             let fid = unsafe self.mod_ast(om).list(ms)[i as usize];
-            if self.mod_ast(om).at_const(fid).kind != NodeKind::NODE_FIELD {
+            if !is_tuple && self.mod_ast(om).at_const(fid).kind != NodeKind::NODE_FIELD {
                 continue;
             }
-            let ft = self.subst_type(self.decl_type_in(om, fid), &gp[0], &ga[0], gn);
+            let ft0 = if is_tuple {
+                self.lower_type_in(om, fid);
+            } else {
+                self.decl_type_in(om, fid);
+            };
+            let ft = self.subst_type(ft0, &gp[0], &ga[0], gn);
             if ft == TYPE_NONE {
                 continue;
             }
@@ -9874,32 +9893,41 @@ extend TypeChecker {
                 ct = *self.type_at(callee);
             }
         }
-        if ct.kind == TypeKind::TYPE_STRUCT {
-            let sd = self.mod_ast(ct.module).at_const(ct.as_data.decl);
-            if sd.kind == NodeKind::NODE_STRUCT && sd.as_data.aggregate.is_tuple {
-                let sm = ct.module;
-                let sdecl = ct.as_data.decl;
-                let members = sd.as_data.aggregate.members;
-                if args.len != members.len {
-                    let mut s2 = "s".ptr() as *const char;
-                    if members.len == 1 {
-                        s2 = "".ptr() as *const char;
+        // Tuple-struct constructor `Wrap(a, b)` (and the generic `Pair::<A, B>(a, b)`): positional
+        // aggregate construction, not a call. aggregate_of covers both the plain struct and its
+        // instances, binding the element types under the instance's generic args.
+        if ct.kind == TypeKind::TYPE_STRUCT || ct.kind == TypeKind::TYPE_INSTANCE {
+            let mut tmod: ModuleId = 0;
+            let mut tdecl = NODE_NONE;
+            let mut tgp = Defs8 {};
+            let mut tga = Tys8 {};
+            let mut tgn: i32 = 0;
+            if self.aggregate_of(callee, &mut tmod, &mut tdecl, &mut tgp, &mut tga, &mut tgn) {
+                let sd = self.mod_ast(tmod).at_const(tdecl);
+                if sd.kind == NodeKind::NODE_STRUCT && sd.as_data.aggregate.is_tuple {
+                    let members = sd.as_data.aggregate.members;
+                    if args.len != members.len {
+                        let mut s2 = "s".ptr() as *const char;
+                        if members.len == 1 {
+                            s2 = "".ptr() as *const char;
+                        }
+                        self.errors.emit(
+                            sp.start,
+                            sp.end - sp.start,
+                            format("tuple struct takes {} element{}, got {}", members.len, diag::cstr(s2), args.len),
+                        );
+                        return TYPE_NONE;
                     }
-                    self.errors.emit(
-                        sp.start,
-                        sp.end - sp.start,
-                        format("tuple struct takes {} element{}, got {}", members.len, diag::cstr(s2), args.len),
-                    );
-                    return TYPE_NONE;
-                }
-                for k in 0..args.len {
-                    let et = self.lower_type_in(sm, unsafe self.mod_ast(sm).list(members)[k as usize]);
-                    let aid = unsafe a.list(args)[k as usize];
-                    if !self.compatible(et, aid) {
-                        self.err_mismatch(aid, et);
+                    for k in 0..args.len {
+                        let mt = self.lower_type_in(tmod, unsafe self.mod_ast(tmod).list(members)[k as usize]);
+                        let et = self.subst_type(mt, &tgp[0], &tga[0], tgn);
+                        let aid = unsafe a.list(args)[k as usize];
+                        if !self.compatible(et, aid) {
+                            self.err_mismatch(aid, et);
+                        }
                     }
+                    return callee;
                 }
-                return self.named_type_of(sm, sdecl);
             }
         }
         if ct.kind != TypeKind::TYPE_FUNCTION {

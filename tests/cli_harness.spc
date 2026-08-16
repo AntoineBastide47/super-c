@@ -287,6 +287,20 @@ extend Proj {
         }
     }
 
+    // Copy a repository file into this isolated project. This keeps large end-to-end fixtures in
+    // normal source files instead of duplicating them inside matchertext literals.
+    pub fn copyfile(self: &Proj, rel: str, source: str) bool {
+        let mut path = Path512 {};
+        unsafe stdio::snprintf(&mut path[0], 512, "%.*s".ptr() as *const char, source.len() as i32, source.ptr());
+        let content = slurp(&path[0]);
+        if content == null {
+            return false;
+        }
+        self.mkfile(rel, str::from_cstr(content));
+        unsafe stdlib::free(content);
+        return true;
+    }
+
     // Compile <root>/mainrel with the given extra flags (compile-only mode: emits <root>/build/, no link).
     pub fn compile_flags(self: &Proj, flags: str, mainrel: str) CliResult {
         let mut base = Cmd8192 {};

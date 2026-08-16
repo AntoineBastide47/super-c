@@ -328,11 +328,13 @@ extend Interp {
     // Field ordinal of decl `sub` inside its aggregate (payload fields ride the variant slot walk).
     fn field_ordinal(self: &Self, dm: ModuleId, owner: NodeId, sub: NodeId) i64 {
         let a = unsafe &*self.p().module_ast_const(dm);
+        let is_tuple = a.at_const(owner).as_data.aggregate.is_tuple;
         let ms = a.at_const(owner).as_data.aggregate.members;
         let mut ord: i64 = 0;
         for i in 0..ms.len {
             let fid = unsafe a.list(ms)[i as usize];
-            if a.at_const(fid).kind != NodeKind::NODE_FIELD {
+            // tuple members are bare type nodes; named members are NODE_FIELD
+            if !is_tuple && a.at_const(fid).kind != NodeKind::NODE_FIELD {
                 continue;
             }
             if fid == sub {

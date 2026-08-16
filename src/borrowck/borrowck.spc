@@ -169,12 +169,21 @@ extend tc::TypeChecker {
     }
 
     pub fn tc_check_field_lifetimes(self: &mut Self, decl: NodeId, members: NodeList) {
+        let is_tuple = self.cur_ast().at_const(decl).as_data.aggregate.is_tuple;
         for i in 0..members.len {
             let mid = unsafe self.cur_ast().list(members)[i as usize];
-            if self.cur_ast().at_const(mid).kind != NodeKind::NODE_FIELD {
+            // tuple members are bare type nodes; named members carry their type in field.ty
+            let tn = if self.cur_ast().at_const(mid).kind == NodeKind::NODE_FIELD {
+                self.cur_ast().at_const(mid).as_data.field.ty;
+            } else if is_tuple {
+                mid;
+            } else {
+                NODE_NONE;
+            };
+            if tn == NODE_NONE {
                 continue;
             }
-            self.tc_check_ref_lifetime_named(decl, self.cur_ast().at_const(mid).as_data.field.ty, 0);
+            self.tc_check_ref_lifetime_named(decl, tn, 0);
         }
     }
 
@@ -1800,18 +1809,19 @@ extend tc::TypeChecker {
         }
         self.variance_wip.insert(key, true);
         let mut packed: u64 = 0;
+        let is_tuple = self.mod_ast(dd.module).at_const(dd.node).as_data.aggregate.is_tuple;
         let members = self.mod_ast(dd.module).at_const(dd.node).as_data.aggregate.members;
         for i in 0..members.len {
             let mid = unsafe self.mod_ast(dd.module).list(members)[i as usize];
             let mk = self.mod_ast(dd.module).at_const(mid).kind;
-            if mk == NodeKind::NODE_FIELD {
-                packed = self.variance_walk(
-                    dd,
-                    self.mod_ast(dd.module).at_const(mid).as_data.field.ty,
-                    V_COVARIANT,
-                    packed,
-                    0,
-                );
+            // tuple members are bare type nodes; named members carry the type in field.ty
+            if mk == NodeKind::NODE_FIELD || is_tuple {
+                let tn = if mk == NodeKind::NODE_FIELD {
+                    self.mod_ast(dd.module).at_const(mid).as_data.field.ty;
+                } else {
+                    mid;
+                };
+                packed = self.variance_walk(dd, tn, V_COVARIANT, packed, 0);
             } else if mk == NodeKind::NODE_VARIANT {
                 let pl = self.mod_ast(dd.module).at_const(mid).as_data.variant.payload;
                 for p in 0..pl.len {
@@ -2645,13 +2655,18 @@ extend tc::TypeChecker {
         if ma.lifetimes_of(od).len != 0 {
             return true; // `struct S<'a>` borrows by construction
         }
+        let is_tuple = ma.at_const(od).as_data.aggregate.is_tuple;
         let members = ma.at_const(od).as_data.aggregate.members;
         for i in 0..members.len {
             let mid = unsafe ma.list(members)[i as usize];
-            if ma.at_const(mid).kind != NodeKind::NODE_FIELD {
-                continue;
-            }
-            let fnode = ma.at_const(mid).as_data.field.ty;
+            // tuple members are bare type nodes; named members carry the type in field.ty
+            let fnode = if ma.at_const(mid).kind == NodeKind::NODE_FIELD {
+                ma.at_const(mid).as_data.field.ty;
+            } else if is_tuple {
+                mid;
+            } else {
+                NODE_NONE;
+            };
             if fnode == NODE_NONE {
                 continue;
             }

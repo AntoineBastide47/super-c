@@ -1111,8 +1111,9 @@ fn number(l: &mut Lexer) {
     if error_at != USIZE_MAX {
         error = "invalid numeric separator";
     }
-    // decimal fraction -- but a second '.' means '1..2' is a range, so back off
-    if peek_byte(l) == b'.' && peek_next(l) != b'.' {
+    // decimal fraction -- a digit must follow the '.', else '1..2' is a range and 'x.0.len' is a
+    // tuple-index member access (`0.len`), never a fraction
+    if peek_byte(l) == b'.' && is_dec(peek_next(l)) {
         is_float = true;
         l.current += 1;
         let fraction_start = l.current;

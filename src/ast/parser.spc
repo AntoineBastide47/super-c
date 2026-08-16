@@ -1085,7 +1085,7 @@ extend Parser {
             let types = self.parse_comma_types(TokenType::RightParen);
             self.expect(TokenType::RightParen, "')'");
             self.expect(TokenType::Semicolon, "';'");
-            return self.ast.add(
+            let __tdecl = self.ast.add(
                 Node {
                     kind: NodeKind::NODE_STRUCT,
                     span: Span::new(start, self.previous_end()),
@@ -1102,6 +1102,8 @@ extend Parser {
                     },
                 },
             );
+            self.ast.set_lifetimes(__tdecl, lifetimes);
+            return __tdecl;
         }
         self.expect(TokenType::LeftBrace, "'{'");
         let fields = self.parse_fields();

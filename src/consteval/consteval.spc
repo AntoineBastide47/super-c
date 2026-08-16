@@ -1112,7 +1112,11 @@ extend ConstEval {
 
     fn ce_field_count(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let a = self.ast_ptr(dm);
-        let ms = a.at_const(dn).as_data.aggregate.members;
+        let agg = a.at_const(dn).as_data.aggregate;
+        let ms = agg.members;
+        if agg.is_tuple {
+            return ms.len; // tuple members are bare type nodes, one slot each
+        }
         let mut n: u32 = 0;
         for i in 0..ms.len {
             let mid = unsafe a.list(ms)[i as usize];
@@ -5280,9 +5284,15 @@ extend ConstEval {
     }
 
     fn ev_tuple(self: &mut Self, f: *mut CeFrame, m: ModuleId, id: NodeId) CeVal {
-        let a = self.ast_ptr(m);
-        let elements = a.at_const(id).as_data.array_literal.elements;
+        let elements = self.ast_ptr(m).at_const(id).as_data.array_literal.elements;
         let rt = self.ce_type(m, id);
+        return self.ce_agg_from(f, m, elements, rt);
+    }
+
+    // Build a CV_AGG whose positional slots are the evaluated `elements`, typed `rt`. Shared by the
+    // anonymous `(a, b)` tuple and the tuple-struct constructor call `P(a, b)`.
+    fn ce_agg_from(self: &mut Self, f: *mut CeFrame, m: ModuleId, elements: NodeList, rt: TypeId) CeVal {
+        let a = self.ast_ptr(m);
         let rr = self.ce_recv_of(f, m, rt);
         if !rr.ok || rr.r.dn == NODE_NONE {
             return cv_nil();
@@ -8306,6 +8316,21 @@ extend ConstEval {
             "type_info",
         ) {
             return self.ce_type_info(f, m, id);
+        }
+        // `P(a, b)` where P is a tuple struct: positional aggregate construction, not a call.
+        {
+            let cd = a.resolution_def(callee);
+            if cd.node != NODE_NONE && cd.module as usize < self.nmods && self.ast_ptr(cd.module).at_const(cd.node).kind == NodeKind::NODE_STRUCT && self.ast_ptr(
+                cd.module,
+            ).at_const(cd.node).as_data.aggregate.is_tuple {
+                let v = self.ce_agg_from(f, m, a.at_const(id).as_data.call.args, self.ce_type(m, id));
+                if v.kind == CV_NIL_K {
+                    return Rets { ok: false, n: 0 };
+                }
+                let mut ret = Rets { ok: true, n: 1 };
+                ret.vals[0] = v;
+                return ret;
+            }
         }
         let call_args = a.at_const(id).as_data.call.args;
         let nargs = call_args.len;

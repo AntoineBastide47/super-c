@@ -487,8 +487,14 @@ extend Owner {
             for i in 0..ms.len {
                 let mid2 = unsafe oa.list(ms)[i as usize];
                 let mn = *oa.at_const(mid2);
-                if !is_enum && mn.kind == NodeKind::NODE_FIELD {
-                    mtys.push(oa.type_of(mn.as_data.field.ty));
+                // tuple members are bare type nodes; named members are NODE_FIELD
+                if !is_enum && (mn.kind == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple) {
+                    let tn9 = if mn.kind == NodeKind::NODE_FIELD {
+                        mn.as_data.field.ty;
+                    } else {
+                        mid2;
+                    };
+                    mtys.push(oa.type_of(tn9));
                 } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
                     let pids = oa.list(mn.as_data.variant.payload);
                     for k in 0..mn.as_data.variant.payload.len {
@@ -545,11 +551,16 @@ extend Owner {
         }
         {
             let oa = self.ast_of(om);
+            let is_tuple = dn.as_data.aggregate.is_tuple;
             let ms = dn.as_data.aggregate.members;
             for i in 0..ms.len {
                 let mid2 = unsafe oa.list(ms)[i as usize];
                 let mn = *oa.at_const(mid2);
-                if mn.kind == NodeKind::NODE_FIELD {
+                // tuple members are bare type nodes named `_i`; named members are NODE_FIELD
+                if is_tuple {
+                    decls.push(mid2);
+                    tys.push(oa.type_of(mid2));
+                } else if mn.kind == NodeKind::NODE_FIELD {
                     decls.push(mid2);
                     tys.push(oa.type_of(mn.as_data.field.ty));
                 }
@@ -661,8 +672,14 @@ extend Owner {
                 for i in 0..ms.len {
                     let mid2 = unsafe oa.list(ms)[i as usize];
                     let mn = *oa.at_const(mid2);
-                    if !is_enum && mn.kind == NodeKind::NODE_FIELD {
-                        mtys.push(oa.type_of(mn.as_data.field.ty));
+                    // tuple members are bare type nodes; named members are NODE_FIELD
+                    if !is_enum && (mn.kind == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple) {
+                        let tn9 = if mn.kind == NodeKind::NODE_FIELD {
+                            mn.as_data.field.ty;
+                        } else {
+                            mid2;
+                        };
+                        mtys.push(oa.type_of(tn9));
                     } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
                         let pids = oa.list(mn.as_data.variant.payload);
                         for k in 0..mn.as_data.variant.payload.len {

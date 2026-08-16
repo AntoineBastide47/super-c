@@ -405,14 +405,21 @@ extend Svc {
             return 0;
         }
         let packed = self.attr(dm, dn, AttrKind::ATTR_PACKED) != null;
+        let is_tuple = ast.at_const(dn).as_data.aggregate.is_tuple;
         let fs = ast.at_const(dn).as_data.aggregate.members;
         let mut off: u64 = 0;
         for i in 0..fs.len {
             let fid = unsafe ast.list(fs)[i as usize];
-            if ast.at_const(fid).kind != NodeKind::NODE_FIELD {
+            // tuple members are bare type nodes; named members carry their type in field.ty
+            if !is_tuple && ast.at_const(fid).kind != NodeKind::NODE_FIELD {
                 continue;
             }
-            let ft = self.mtype(dm, ast.at_const(fid).as_data.field.ty);
+            let ftn = if is_tuple {
+                fid;
+            } else {
+                ast.at_const(fid).as_data.field.ty;
+            };
+            let ft = self.mtype(dm, ftn);
             let fl = self.layout_of(dm, ft, env, 1);
             if !fl.ok {
                 return -1;

@@ -132,7 +132,9 @@ fn compile_run(em: &cb::CEmit, main_body: str, tag: str) i32 {
     let _ = unsafe stdio::fwrite(mb.ptr(), 1, mb.len(), f);
     unsafe stdio::fclose(f);
     let mut cmd = String::new();
-    cmd.push_str("cc -std=c11 -Wall -Werror -o build/cemit_probe_");
+    // -pedantic-errors: the emitted subset is portable C11, no GNU extensions (the ZST empty-struct
+    // path is not exercised by these snippets).
+    cmd.push_str("cc -std=c11 -pedantic-errors -Wall -Werror -o build/cemit_probe_");
     cmd.push_str(tag);
     cmd.push_str(" ");
     cmd.push_string(&path);
@@ -203,4 +205,75 @@ fn portable_subset_is_strict() {
     emit_tu(&p, &names[0], 1, &mut em);
     assert(!em.out.contains("__auto_type"), "no __auto_type");
     assert(!em.out.contains("({"), "no statement expressions");
+    // And prove it: the emitted TU compiles under -std=c11 -pedantic-errors -Werror (compile_run).
+    let mut m1 = String::new();
+    m1.push_str("int main(void) { return f(11) - 20; }\n");
+    assert_eq(compile_run(&em, m1.as_str(), "pedantic"), 0);
+}
+
+// The number of `return ` statements in the emitted TU.
+fn count_returns(s: str) usize {
+    let mut n = 0 as usize;
+    let mut i = 0 as usize;
+    while i + 7 <= s.len() {
+        if s.slice(i, i + 7) == "return " {
+            n += 1;
+        }
+        i += 1;
+    }
+    return n;
+}
+
+// The Phase-10 readability contract, checked on ONE isolated function (no prelude noise): structured
+// control, no basic-block labels or gotos, no dead sentinels, no return-slot copy. These assert on
+// the emitted text only; behavior for the same shapes is covered by codegen_test / the run tests.
+@test
+fn structured_shape_isolated() {
+    // A straight-line owning body: one call, then a direct forwarded return of the moved parameter.
+    let p1 = typed_package(
+        "pub struct S { pub n: i32 }\npub fn bump(s: &mut S, v: i32) { s.n = s.n + v; }\npub fn sugar(s: S, v: i32) S { let mut r = s; bump(&mut r, v); return r; }\nfn main() i32 { return 0; }",
+    );
+    let mut e1 = cb::CEmit::new(&p1);
+    let n1: [str; 1] = ["sugar"];
+    emit_tu(&p1, &n1[0], 1, &mut e1);
+    assert(e1.out.contains("S sugar(S s,"), "the parameter keeps its source name");
+    assert(e1.out.contains("&s"), "the coalesced parameter is operated on in place");
+    assert(e1.out.contains("return s;"), "the owning value returns directly");
+    assert(!e1.out.contains("goto "), "straight-line body has no goto");
+    assert(!e1.out.contains("bb_"), "straight-line body has no basic-block label");
+    assert(!e1.out.contains("abort()"), "no dead abort sentinel");
+    assert(!e1.out.contains("_0 ="), "no return-slot copy");
+    assert_eq(count_returns(e1.out.as_str()), 1);
+
+    // An if / early return followed by a tail return: structured if, exactly two returns, no goto.
+    let p2 = typed_package(
+        "pub fn choose(n: i32) i32 { if n == 0 { return 100; } return 0; }\nfn main() i32 { return 0; }",
+    );
+    let mut e2 = cb::CEmit::new(&p2);
+    let n2: [str; 1] = ["choose"];
+    emit_tu(&p2, &n2[0], 1, &mut e2);
+    assert(e2.out.contains("if ("), "the branch is a structured if");
+    assert(e2.out.contains("return 100LL;"), "the early arm forwards its value");
+    assert(!e2.out.contains("goto "), "no goto in a reducible branch");
+    assert(!e2.out.contains("abort()"), "no dead abort");
+    assert_eq(count_returns(e2.out.as_str()), 2);
+
+    // A discriminant match is a native C switch, not a goto chain.
+    let p3 = typed_package(
+        "pub enum C { Red, Green, Blue }\npub fn tag(c: C) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn main() i32 { return 0; }",
+    );
+    let mut e3 = cb::CEmit::new(&p3);
+    let n3: [str; 1] = ["tag"];
+    emit_tu(&p3, &n3[0], 1, &mut e3);
+    assert(e3.out.contains("switch ("), "the match is a native switch");
+    assert(e3.out.contains("case 1:"), "a case tests the tag value");
+    assert(!e3.out.contains("goto "), "no goto in the switch");
+
+    // A never-read local is a dead store: no declaration, no assignment.
+    let p4 = typed_package("pub fn dead() i32 { let unused: i32 = 9; return 0; }\nfn main() i32 { return 0; }");
+    let mut e4 = cb::CEmit::new(&p4);
+    let n4: [str; 1] = ["dead"];
+    emit_tu(&p4, &n4[0], 1, &mut e4);
+    assert(!e4.out.contains("unused"), "the never-read local is not declared");
+    assert(!e4.out.contains("9LL"), "its pure store is dropped");
 }

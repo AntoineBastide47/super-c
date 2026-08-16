@@ -1,12 +1,15 @@
 // The streaming C backend's function emitter: one verified Core body at a time into one reusable
 // buffer, strict C11 portable output -- explicit temporaries, no GNU statement expressions, no
-// `__auto_type`. Locals spell as their stable `LocalId` (`_N`), blocks as `BlockId` labels
-// (`bb_N`), so two serial runs are byte-identical by construction. Types and symbols come from the
-// frozen mangler (emit::mangle); the emitter consumes ONLY Core IR and pool reads for spelling:
-// it never resolves overloads, searches extends at emission time, infers, interns, or evaluates
-// syntax. Bodies outside the currently emittable subset refuse with a reason instead of guessing.
+// `__auto_type`. Locals spell as their stable `LocalId` (`_N`). Control flow is reconstructed by
+// `emit::cflow` into structured `if`/`switch`/`while` (the goto layout with `BlockId` labels
+// `bb_N` is the fallback for CFGs that do not structure cleanly); either way emission is a pure
+// function of the Core body, so two serial runs are byte-identical by construction. Types and
+// symbols come from the frozen mangler (emit::mangle); the emitter consumes ONLY Core IR and pool
+// reads for spelling: it never resolves overloads, searches extends at emission time, infers,
+// interns, or evaluates syntax. Bodies outside the emittable subset refuse with a reason.
 import ast::ast as *;
 import emit::mangle as mbe;
+import emit::cflow as cfl;
 import consteval::consteval as ce;
 import ir::core as ir;
 import lexer::token as tok;
@@ -78,6 +81,27 @@ pub struct CEmit {
     /// Extern fns whose `extern "C" "<header>"` block ships real prototypes: the include supplies
     /// them, so a call-site proto would conflict. Keyed (module << 32 | node), driver-filled.
     pub ext_backed: Set<u64>,
+    /// Reusable per-function scratch for structured emission: blocks already spelled, and blocks a
+    /// forward goto targets (their label prints when the block is reached). Cleared per body.
+    sx_emitted: Vector<bool>,
+    sx_lbl: Vector<bool>,
+    /// Set by emit_region when it returned by reaching its follow (control can continue past the
+    /// region), cleared when it returned by a terminator/transfer. A switch case reads it to decide
+    /// whether a trailing `break;` is reachable.
+    sx_fell: bool,
+    /// Set during the label-planning pass when the structure would need a `goto` (a cross edge or a
+    /// secondary merge the region tree cannot place). Its presence makes the whole body fall back to
+    /// the goto layout, so structured output never emits an unplaceable jump.
+    sx_goto: bool,
+    /// Per-body local spelling, rebuilt by setup_locals. `sx_coal[l]` is the local `l` coalesces
+    /// into (itself when it does not): a transparent `_dst = move _src` where the source is used
+    /// nowhere else shares one C variable. `sx_name[l]` is the C identifier for local `l` -- the
+    /// preserved user name (keyword/collision-disambiguated) or `_N` for temps and return slots.
+    sx_coal: Vector<u32>,
+    sx_name: Vector<String>,
+    /// `sx_used[l]` is false when local `l` is referenced nowhere in the body; its declaration is
+    /// then dropped (a dead temporary the plan requires we not emit).
+    sx_used: Vector<bool>,
 }
 
 /// One referenced const/static item: its declaration, C symbol, and the module whose prefix
@@ -143,6 +167,11 @@ extend CEmit as Free {
         self.ti_reqs.free();
         self.ti_seen.free();
         self.ext_backed.free();
+        self.sx_emitted.free();
+        self.sx_lbl.free();
+        self.sx_coal.free();
+        self.sx_name.free();
+        self.sx_used.free();
     }
 }
 
@@ -185,6 +214,13 @@ extend CEmit {
             ti_reqs: Vector::<StatRef>::new(),
             ti_seen: Map::<u64, u64>::new(),
             ext_backed: Set::<u64>::new(),
+            sx_emitted: Vector::<bool>::new(),
+            sx_lbl: Vector::<bool>::new(),
+            sx_fell: false,
+            sx_goto: false,
+            sx_coal: Vector::<u32>::new(),
+            sx_name: Vector::<String>::new(),
+            sx_used: Vector::<bool>::new(),
         };
     }
 
@@ -307,7 +343,7 @@ extend CEmit {
             return 0 - 1;
         }
         let pj = *b.projections.at((pl.proj_start + pl.proj_len - 1) as usize);
-        if pj.kind != ir::PJ_FIELD || pj.sub == NODE_NONE {
+        if pj.kind != ir::PJ_FIELD {
             return 0 - 1;
         }
         let prev = if pl.proj_len >= 2 {
@@ -335,10 +371,23 @@ extend CEmit {
         }
         let dm = self.agg_module_res(rm, rt);
         let da = self.p().module_ast_const(dm);
-        if da.at_const(pj.sub).kind != NodeKind::NODE_FIELD {
-            return 0 - 1;
-        }
-        let ftn = da.at_const(pj.sub).as_data.field.ty;
+        // named field: sub is the NODE_FIELD; tuple member: sub is NODE_NONE and data is the index
+        let ftn = if pj.sub != NODE_NONE {
+            if da.at_const(pj.sub).kind != NodeKind::NODE_FIELD {
+                return 0 - 1;
+            }
+            da.at_const(pj.sub).as_data.field.ty;
+        } else {
+            let decl = self.agg_decl_res(rm, rt);
+            if decl == NODE_NONE {
+                return 0 - 1;
+            }
+            let ms = da.at_const(decl).as_data.aggregate.members;
+            if pj.data >= ms.len {
+                return 0 - 1;
+            }
+            unsafe da.list(ms)[pj.data as usize];
+        };
         let ftl = da.type_of(ftn);
         if ftl == TYPE_NONE {
             return 0 - 1;
@@ -636,6 +685,8 @@ extend CEmit {
         self.cur_name.truncate(0);
         self.cur_name.push_str(name);
         self.arr_ret = false;
+        self.cap_on = false; // a plain function has no captured locals
+        self.setup_locals(b);
         let mut ok0 = true;
         if self.fn_attrs.len() != 0 {
             self.out.push_string(&self.fn_attrs);
@@ -708,8 +759,8 @@ extend CEmit {
                 self.out.push_str(", ");
             }
             let l = (b.returns + i) as usize;
-            let mut nm = String::from_str("_");
-            nm.push_u64(l as u64);
+            let mut nm = String::new();
+            self.lspell(l as u32, &mut nm);
             // a `mut` fixed-array VALUE param: C hands a pointer to the caller's array, so the
             // body works on an entry copy (writes must not reach the caller)
             {
@@ -737,32 +788,454 @@ extend CEmit {
         self.out.push_str(") {\n");
         for k in 0..arrcp.len() {
             let l = arrcp[k];
-            let mut nm2 = String::from_str("_");
-            nm2.push_u64(l);
+            let mut nm2 = String::new();
+            self.lspell(l, &mut nm2);
             let mut ts2 = String::new();
             if !self.ty_c(b.module, b.locals.at(l as usize).ty, nm2.as_str(), &mut ts2) {
                 return false;
             }
             self.out.push_str("  ");
             self.out.push_string(&ts2);
-            self.out.push_str(";\n  memcpy(&_");
-            self.out.push_u64(l);
-            self.out.push_str(", _");
-            self.out.push_u64(l);
-            self.out.push_str("_p, sizeof(_");
-            self.out.push_u64(l);
+            self.out.push_str(";\n  memcpy(&");
+            self.out.push_string(&nm2);
+            self.out.push_str(", ");
+            self.out.push_string(&nm2);
+            self.out.push_str("_p, sizeof(");
+            self.out.push_string(&nm2);
             self.out.push_str("));\n");
         }
         return self.emit_body_core(b);
     }
 
+    // A name that would collide with the `_N` temp spelling: `_` followed by only digits.
+    const fn templike(s: str) bool {
+        if s.len() < 2 || s.byte_at(0) != 95 {
+            return false;
+        }
+        for i in 1..s.len() {
+            let c = s.byte_at(i);
+            if c < 48 || c > 57 {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Count one reference to place `pid`'s base into refs (and a definition into defs when it is a
+    // whole-local assignment target).
+    fn count_place(
+        self: &Self,
+        b: &ir::CoreBody,
+        pid: ir::PlaceId,
+        is_def: bool,
+        refs: &mut Vector<u32>,
+        defs: &mut Vector<u32>,
+    ) {
+        let pl = *b.places.at(pid as usize);
+        refs.set(pl.base as usize, *refs.at(pl.base as usize) + 1);
+        if is_def && pl.proj_len == 0 {
+            defs.set(pl.base as usize, *defs.at(pl.base as usize) + 1);
+        }
+    }
+
+    // Per-body reference and definition counts over every operand (all copy/move sources) plus the
+    // places statements and terminators name directly. It never under-counts a use, so a coalesce
+    // guarded by `refs[src] == 1` is always safe.
+    fn count_locals(self: &Self, b: &ir::CoreBody, refs: &mut Vector<u32>, defs: &mut Vector<u32>) {
+        for o in 0..b.operands.len() {
+            let op = *b.operands.at(o);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                self.count_place(b, op.data, false, refs, defs);
+            }
+        }
+        for si in 0..b.statements.len() {
+            let s = *b.statements.at(si);
+            if s.kind == ir::ST_ASSIGN {
+                self.count_place(b, s.place, true, refs, defs);
+                let rv = *b.rvalues.at(s.rvalue as usize);
+                if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
+                    self.count_place(b, rv.a, false, refs, defs);
+                }
+            } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
+                self.count_place(b, s.place, false, refs, defs);
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind == ir::TM_DROP {
+                self.count_place(b, t.a, false, refs, defs);
+            } else if t.kind == ir::TM_CALL {
+                for d in 0..t.dests_len {
+                    self.count_place(b, b.dest_pool[(t.dests_start + d) as usize], true, refs, defs);
+                }
+            }
+        }
+    }
+
+    // A rvalue with no side effect: its store can be dropped when the destination is never read.
+    const fn pure_rvalue(k: u8) bool {
+        return k == ir::RV_USE || k == ir::RV_UNARY || k == ir::RV_BINARY || k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_LEN || k == ir::RV_DISCRIMINANT || k == ir::RV_REPEAT || k == ir::RV_AGGREGATE;
+    }
+
+    // Read count (uses that are not whole-local writes; a taken address counts as a read) and the
+    // hard-write flag (a whole-local write whose value must land somewhere: a call destination or a
+    // side-effecting rvalue). A local with neither reads nor a hard write is dead -- no declaration,
+    // and its pure stores are dropped. Reads over-count (safe: it only keeps more locals live).
+    fn count_rw(self: &Self, b: &ir::CoreBody, reads: &mut Vector<u32>, hardw: &mut Vector<bool>) {
+        for o in 0..b.operands.len() {
+            let op = *b.operands.at(o);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                let base = b.places.at(op.data as usize).base as usize;
+                reads.set(base, *reads.at(base) + 1);
+            }
+        }
+        for si in 0..b.statements.len() {
+            let s = *b.statements.at(si);
+            if s.kind == ir::ST_ASSIGN {
+                let pl = *b.places.at(s.place as usize);
+                let rv = *b.rvalues.at(s.rvalue as usize);
+                if pl.proj_len != 0 {
+                    reads.set(pl.base as usize, *reads.at(pl.base as usize) + 1);
+                } else if !CEmit::pure_rvalue(rv.kind) {
+                    hardw.set(pl.base as usize, true);
+                }
+                if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
+                    let rb = b.places.at(rv.a as usize).base as usize;
+                    reads.set(rb, *reads.at(rb) + 1);
+                }
+            } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
+                reads.set(
+                    b.places.at(s.place as usize).base as usize,
+                    *reads.at(b.places.at(s.place as usize).base as usize) + 1,
+                );
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind == ir::TM_DROP {
+                reads.set(
+                    b.places.at(t.a as usize).base as usize,
+                    *reads.at(b.places.at(t.a as usize).base as usize) + 1,
+                );
+                if t.args_len == 1 {
+                    // a guarded drop reads its move flag (a local carried on args_start, not a place)
+                    reads.set(t.args_start as usize, *reads.at(t.args_start as usize) + 1);
+                }
+            } else if t.kind == ir::TM_CALL {
+                for d in 0..t.dests_len {
+                    let pl = *b.places.at(b.dest_pool[(t.dests_start + d) as usize] as usize);
+                    if pl.proj_len != 0 {
+                        reads.set(pl.base as usize, *reads.at(pl.base as usize) + 1);
+                    } else {
+                        hardw.set(pl.base as usize, true);
+                    }
+                }
+            }
+        }
+    }
+
+    // Reserve the source name of item `node` (a referenced function/const/type/variant): a local
+    // reusing it would hide the global.
+    fn reserve_item(self: &mut Self, m: ModuleId, node: NodeId, out: &mut Set<u64>) {
+        if node == NODE_NONE {
+            return;
+        }
+        let a = self.p().module_ast_const(m);
+        let nd = a.at_const(node);
+        let mut nn = NODE_NONE;
+        if nd.kind == NodeKind::NODE_FUNCTION {
+            nn = nd.as_data.function.name;
+        } else if nd.kind == NodeKind::NODE_CONST {
+            nn = nd.as_data.const_def.name;
+        } else if nd.kind == NodeKind::NODE_STRUCT || nd.kind == NodeKind::NODE_ENUM {
+            nn = nd.as_data.aggregate.name;
+        } else if nd.kind == NodeKind::NODE_VARIANT {
+            nn = nd.as_data.variant.name;
+        }
+        if nn == NODE_NONE {
+            return;
+        }
+        let sp = a.at_const(nn).as_data.name.text;
+        let mut s = String::new();
+        self.mg.ident(m, sp, &mut s);
+        out.insert(ident_hash(s.as_str()));
+    }
+
+    // Rebuild the per-body local spelling: transparent-move coalescing, then preserved user names.
+    // `_dst = move _src` where the source is used nowhere else and the destination is defined only
+    // there shares one C variable (`_dst` never declares, its assignment never emits). Named user
+    // parameters and locals keep their source spelling, C keywords and collisions disambiguated;
+    // temporaries and return slots stay `_N`.
+    fn setup_locals(self: &mut Self, b: &ir::CoreBody) {
+        let n = b.locals.len();
+        self.sx_coal.clear();
+        self.sx_name.clear(); // frees each String, keeps the Vector's capacity across functions
+        for l in 0..n {
+            self.sx_coal.push(l as u32);
+        }
+        let mut refs = Vector::<u32>::new();
+        let mut defs = Vector::<u32>::new();
+        for _l in 0..n {
+            refs.push(0);
+            defs.push(0);
+        }
+        self.count_locals(b, &mut refs, &mut defs);
+        for si in 0..b.statements.len() {
+            let s = *b.statements.at(si);
+            if s.kind != ir::ST_ASSIGN {
+                continue;
+            }
+            let pl = *b.places.at(s.place as usize);
+            if pl.proj_len != 0 || pl.base as usize < b.returns as usize {
+                continue;
+            }
+            let dstore = b.locals.at(pl.base as usize).storage;
+            if dstore != ir::LS_USER && dstore != ir::LS_TEMP {
+                continue;
+            }
+            let rv = *b.rvalues.at(s.rvalue as usize);
+            if rv.kind != ir::RV_USE {
+                continue;
+            }
+            let op = *b.operands.at(rv.a as usize);
+            if op.kind != ir::OP_MOVE && op.kind != ir::OP_COPY {
+                continue;
+            }
+            let sp = *b.places.at(op.data as usize);
+            if sp.proj_len != 0 || sp.base == pl.base {
+                continue;
+            }
+            // Coalesce only a parameter moved into a local: an argument is a well-defined input with
+            // no producing statement to lose, and (with `refs[src] == 1`) it is read only here, so
+            // the local and the parameter share one storage safely. Temp-into-temp moves are left
+            // alone -- a temp can be written through a pointer or an elided initializer, where the
+            // aliasing would drop a declaration.
+            if b.locals.at(sp.base as usize).storage != ir::LS_ARG {
+                continue;
+            }
+            // A closure capture is an argument too, but it spells `__env->name`, not a plain local;
+            // aliasing a local onto it would lose that env indirection.
+            if self.cap_on && sp.base >= self.cap_base {
+                continue;
+            }
+            // `refs[src] == 1` means the parameter is read only here, so it is dead afterwards and
+            // sharing its storage is safe whether the read was a move or a copy.
+            if *defs.at(pl.base as usize) != 1 || *refs.at(sp.base as usize) != 1 {
+                continue;
+            }
+            if b.locals.at(pl.base as usize).ty != b.locals.at(sp.base as usize).ty {
+                continue;
+            }
+            self.sx_coal.set(pl.base as usize, sp.base);
+        }
+        for l in 0..n {
+            let mut r = l as u32;
+            let mut g: usize = 0;
+            while *self.sx_coal.at(r as usize) != r && g <= n {
+                r = *self.sx_coal.at(r as usize);
+                g += 1;
+            }
+            self.sx_coal.set(l, r);
+        }
+        // Every C ordinary-namespace identifier the body references is reserved: a local that reused
+        // one would hide it and silently change what a later use means. Collected: the typedef names
+        // of every local type, every enum-variant constant the body constructs, and the source names
+        // of every function/const/static/type item it names. Over-approximation is safe (it only
+        // suffixes more names); the set is a hash set, so collection and lookup are near-linear.
+        let mut reserved = Set::<u64>::new();
+        for l in 0..n {
+            let ty = b.locals.at(l).ty;
+            if ty != TYPE_NONE {
+                let mut cs = String::new();
+                if self.mg.ctype(b.module, ty, "", &mut cs) {
+                    collect_idents(cs.as_str(), &mut reserved);
+                }
+            }
+            if b.locals.at(l).storage == ir::LS_STATIC_REF {
+                let it = b.locals.at(l).item;
+                self.reserve_item(it.module, it.node, &mut reserved);
+            }
+        }
+        for ri in 0..b.rvalues.len() {
+            let rv = *b.rvalues.at(ri);
+            if rv.kind == ir::RV_AGGREGATE && rv.c == ir::AGG_VARIANT {
+                let edecl = self.agg_decl(b, rv.target);
+                if edecl != NODE_NONE {
+                    let am = self.agg_module(b, rv.target);
+                    let mut tag = String::new();
+                    self.mg.enum_tag(am, edecl, rv.item.node, &mut tag);
+                    reserved.insert(ident_hash(tag.as_str()));
+                }
+            }
+        }
+        for ci in 0..b.constants.len() {
+            let c = *b.constants.at(ci);
+            if c.kind == ir::CK_ITEM {
+                self.reserve_item(c.item.module, c.item.node, &mut reserved);
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
+                // Reserve the EXACT emitted call symbol -- the mangled name a generic/method/interface
+                // /cross-module call spells (e.g. `id__i32`), which a source name alone misses.
+                let mut rty2 = TYPE_NONE;
+                if t.args_len > 0 {
+                    rty2 = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
+                }
+                let mut dty2 = TYPE_NONE;
+                if t.dests_len == 1 {
+                    dty2 = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
+                }
+                let mut sym = String::new();
+                let saved = self.collect_demand;
+                self.collect_demand = false;
+                let ok = self.callee_sym(b, t.callee, t.targs_start, t.targs_len, rty2, dty2, &mut sym);
+                self.collect_demand = saved;
+                if ok {
+                    reserved.insert(ident_hash(sym.as_str()));
+                }
+            }
+        }
+        // Names: preserve user identifiers, disambiguating keywords, type names, and collisions; the
+        // `_<id>` fallback is always free because only local `id` itself ever spells `_<id>`. Already-
+        // assigned names live in a hash set, so the whole pass is near-linear.
+        let mut assigned = Set::<u64>::new();
+        for l in 0..n {
+            let mut nm = String::new();
+            if *self.sx_coal.at(l) == l as u32 && l >= b.returns as usize {
+                let st = b.locals.at(l).storage;
+                if st != ir::LS_TEMP && st != ir::LS_STATIC_REF {
+                    let decl = b.locals.at(l).decl;
+                    if decl != NODE_NONE {
+                        let sp = self.mg.decl_name_span(b.module, decl);
+                        if sp.end > sp.start {
+                            self.mg.ident(b.module, sp, &mut nm);
+                            if CEmit::templike(nm.as_str()) || ident_in(nm.as_str(), &reserved) || assigned.contains(
+                                &ident_hash(nm.as_str()),
+                            ) {
+                                nm.push_str("_");
+                                nm.push_u64(l as u64);
+                                // the suffixed name must clear BOTH sets: `<name>_<id>` can itself be
+                                // a reserved symbol or an earlier local's name
+                                if ident_in(nm.as_str(), &reserved) || assigned.contains(&ident_hash(nm.as_str())) {
+                                    nm.truncate(0);
+                                }
+                            }
+                            if nm.len() != 0 {
+                                assigned.insert(ident_hash(nm.as_str()));
+                            }
+                        }
+                    }
+                }
+            }
+            self.sx_name.push(nm);
+        }
+        assigned.free();
+        // Liveness for declaration + dead-store removal: a local needs a declaration when it is read
+        // (a taken address counts) or written by something that must land in it (a call result or a
+        // side-effecting rvalue). Neither -> dead: no declaration, and its pure stores are dropped.
+        let mut reads = Vector::<u32>::new();
+        let mut hardw = Vector::<bool>::new();
+        for _l in 0..n {
+            reads.push(0);
+            hardw.push(false);
+        }
+        self.count_rw(b, &mut reads, &mut hardw);
+        self.sx_used.clear();
+        for l in 0..n {
+            self.sx_used.push(*reads.at(l) != 0 || *hardw.at(l));
+        }
+        reads.free();
+        hardw.free();
+        reserved.free();
+        refs.free();
+        defs.free();
+    }
+
+    // The C spelling of local `l` for the body most recently emitted through `emit_fn`: its coalesce
+    // target's preserved name, or `_<id>`. A driver synthesizing a wrapper reads the receiver name
+    // here instead of parsing emitted text.
+    pub fn local_cname(self: &Self, l: u32, dst: &mut String) {
+        self.lspell(l, dst);
+    }
+
+    // Append the C spelling of local `l`: its coalesce target's preserved name, or `_<id>`.
+    fn lspell(self: &Self, l: u32, dst: &mut String) {
+        let c = *self.sx_coal.at(l as usize);
+        let nm = self.sx_name.at(c as usize);
+        if nm.len() != 0 {
+            dst.push_string(nm);
+        } else {
+            dst.push_str("_");
+            dst.push_u64(c);
+        }
+    }
+
+    // Whether this assignment became a no-op self-copy after coalescing (its declaration and store
+    // are both elided).
+    fn is_coalesced_store(self: &Self, b: &ir::CoreBody, s: &ir::Statement) bool {
+        if s.kind != ir::ST_ASSIGN {
+            return false;
+        }
+        let pl = *b.places.at(s.place as usize);
+        if pl.proj_len != 0 {
+            return false;
+        }
+        let rv = *b.rvalues.at(s.rvalue as usize);
+        if rv.kind != ir::RV_USE {
+            return false;
+        }
+        let op = *b.operands.at(rv.a as usize);
+        if op.kind != ir::OP_MOVE && op.kind != ir::OP_COPY {
+            return false;
+        }
+        let sp = *b.places.at(op.data as usize);
+        if sp.proj_len != 0 {
+            return false;
+        }
+        return *self.sx_coal.at(pl.base as usize) == *self.sx_coal.at(sp.base as usize);
+    }
+
+    // A store to a dead local (never read, no declaration): its pure rvalue has no side effect, so
+    // the whole statement is dropped. Whole-local writes only; the local's liveness (sx_used) already
+    // accounts for reads and hard writes, so `!sx_used` here guarantees the rvalue is pure.
+    fn is_dead_store(self: &Self, b: &ir::CoreBody, s: &ir::Statement) bool {
+        if s.kind != ir::ST_ASSIGN {
+            return false;
+        }
+        let pl = *b.places.at(s.place as usize);
+        if pl.proj_len != 0 || pl.base as usize < b.returns as usize {
+            return false;
+        }
+        let st = b.locals.at(pl.base as usize).storage;
+        if st == ir::LS_ARG || st == ir::LS_STATIC_REF {
+            return false;
+        }
+        if *self.sx_coal.at(pl.base as usize) != pl.base {
+            return false; // coalesced: handled by is_coalesced_store
+        }
+        return !*self.sx_used.at(pl.base as usize);
+    }
+
     // Locals, labels, blocks and the closing brace -- shared by plain functions and closures.
     fn emit_body_core(self: &mut Self, b: &ir::CoreBody) bool {
+        let cf = cfl::CFlow::build(b);
+        let ret_dead = !self.ret_slot_live(b, &cf);
         // every non-argument local declares up front, explicitly typed; unit locals carry no C
         for l in 0..b.locals.len() {
             let st = b.locals.at(l).storage;
             if st == ir::LS_ARG {
                 continue;
+            }
+            if *self.sx_coal.at(l) != l as u32 {
+                continue; // coalesced into another local; shares its declaration
+            }
+            if l >= b.returns as usize && !*self.sx_used.at(l) {
+                continue; // referenced nowhere: a dead temporary, not declared
+            }
+            if l == 0 && ret_dead {
+                continue; // return-slot forwarding made `_0` dead; drop its declaration
             }
             if b.locals.at(l).ty == TYPE_NONE {
                 // untyped temps recover their type from whatever writes them (rvalue target or a
@@ -862,8 +1335,8 @@ extend CEmit {
                             return self.fail("open-array");
                         }
                     }
-                    let mut nm2 = String::from_str("_");
-                    nm2.push_u64(l as u64);
+                    let mut nm2 = String::new();
+                    self.lspell(l as u32, &mut nm2);
                     nm2.push_str("[");
                     nm2.push_u64(n);
                     nm2.push_str("]");
@@ -900,8 +1373,8 @@ extend CEmit {
             if st == ir::LS_STATIC_REF {
                 continue; // reads spell the item's own symbol; the local never declares
             }
-            let mut nm = String::from_str("_");
-            nm.push_u64(l as u64);
+            let mut nm = String::new();
+            self.lspell(l as u32, &mut nm);
             let mut ts = String::new();
             let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
             if ok {
@@ -914,53 +1387,505 @@ extend CEmit {
                 return false;
             }
         }
-        // labels only where a goto lands (strict builds reject unused labels)
-        let mut targeted = Vector::<bool>::new();
-        for _i in 0..b.blocks.len() {
-            targeted.push(false);
+        let mut ok2 = false;
+        if cf.simple && self.plan_structured(b, &cf) {
+            ok2 = self.emit_structured(b, &cf);
+        } else {
+            ok2 = self.emit_layout(b, &cf);
         }
-        for bi in 0..b.blocks.len() {
-            let t = b.blocks.at(bi).term;
-            if t.t0 != ir::IR_NONE && t.t0 as usize < b.blocks.len() {
-                targeted.set(t.t0 as usize, true);
-            }
-            if t.kind == ir::TM_SWITCH {
-                for k in 0..t.sw_len {
-                    let tgt = (b.switch_pool[(t.sw_start + k) as usize] & 0xFFFFFFFFu64) as usize;
-                    if tgt < b.blocks.len() {
-                        targeted.set(tgt, true);
-                    }
-                }
-            }
-        }
-        let mut ok2 = true;
-        for bi in 0..b.blocks.len() {
-            if !ok2 {
-                break;
-            }
-            if targeted[bi] {
-                self.out.push_str("bb_");
-                self.out.push_u64(bi as u64);
-                self.out.push_str(": ;\n");
-            }
-            let blk = *b.blocks.at(bi);
-            for si in 0..blk.stmt_len {
-                let s = *b.statements.at((blk.stmt_start + si) as usize);
-                if !self.emit_stmt(b, &s) {
-                    ok2 = false;
-                    break;
-                }
-            }
-            if ok2 && !self.emit_term(b, &blk.term) {
-                ok2 = false;
-            }
-        }
-
         if !ok2 {
             return false;
         }
         self.out.push_str("}\n");
         return self.err.len() == 0;
+    }
+
+    // Emit reachable blocks in reverse-postorder: a label only where a goto lands, fall-through
+    // when the sole successor is the next block, one goto otherwise. Unreachable blocks, the dead
+    // fall-off sentinels, and jump-to-next chains never appear. Structured `if`/`switch`/loops are
+    // layered on this by emit_body_core's structural pass; this is the goto-correct fallback.
+    fn emit_layout(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+        let m = cf.order.len();
+        let mut need = Vector::<bool>::new();
+        for _i in 0..b.blocks.len() {
+            need.push(false);
+        }
+        for i in 0..m {
+            let x = *cf.order.at(i);
+            let next = if i + 1 < m {
+                *cf.order.at(i + 1);
+            } else {
+                cfl::NONE;
+            };
+            let t = b.blocks.at(x as usize).term;
+            if t.kind == ir::TM_SWITCH {
+                for k in 0..t.sw_len {
+                    need.set(cf.succ(b, x, k) as usize, true);
+                }
+                let ot = cf.succ(b, x, t.sw_len);
+                if ot != next {
+                    need.set(ot as usize, true);
+                }
+            } else if t.kind != ir::TM_RETURN && t.kind != ir::TM_UNREACHABLE {
+                let s = cf.succ(b, x, 0);
+                if s != next {
+                    need.set(s as usize, true);
+                }
+            }
+        }
+        let mut ok = true;
+        for i in 0..m {
+            if !ok {
+                break;
+            }
+            let x = *cf.order.at(i);
+            let next = if i + 1 < m {
+                *cf.order.at(i + 1);
+            } else {
+                cfl::NONE;
+            };
+            if *need.at(x as usize) {
+                self.out.push_str("bb_");
+                self.out.push_u64(x);
+                self.out.push_str(": ;\n");
+            }
+            let blk = *b.blocks.at(x as usize);
+            if !self.emit_block_content(b, &blk) {
+                ok = false;
+                break;
+            }
+            if blk.term.kind == ir::TM_SWITCH {
+                if !self.emit_switch_gotos(b, cf, x) {
+                    ok = false;
+                    break;
+                }
+                let ot = cf.succ(b, x, blk.term.sw_len);
+                if ot != next {
+                    self.out.push_str("  goto bb_");
+                    self.out.push_u64(ot);
+                    self.out.push_str(";\n");
+                }
+            } else if blk.term.kind != ir::TM_RETURN && blk.term.kind != ir::TM_UNREACHABLE {
+                let s = cf.succ(b, x, 0);
+                if s != next {
+                    self.out.push_str("  goto bb_");
+                    self.out.push_u64(s);
+                    self.out.push_str(";\n");
+                }
+            }
+        }
+        need.free();
+        return ok;
+    }
+
+    // The per-arm equality tests of a switch terminator: `if ((disc) == value) goto bb_target;`.
+    fn emit_switch_gotos(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32) bool {
+        let t = b.blocks.at(x as usize).term;
+        let mut d = String::new();
+        if !self.emit_operand(b, t.a, &mut d) {
+            return false;
+        }
+        for k in 0..t.sw_len {
+            let pair = b.switch_pool[(t.sw_start + k) as usize];
+            self.out.push_str("  if ((");
+            self.out.push_string(&d);
+            self.out.push_str(") == ");
+            self.out.push_u64(pair >> 32);
+            self.out.push_str(") goto bb_");
+            self.out.push_u64(cf.succ(b, x, k));
+            self.out.push_str(";\n");
+        }
+        return true;
+    }
+
+    // The block-relative index of a `_0 = <operand>` statement that can forward straight to
+    // `return <operand>` -- the last real statement of a single-value return block, skipping trailing
+    // storage/nop markers. IR_NONE when the block is not that exact shape.
+    fn ret_fwd_idx(self: &Self, b: &ir::CoreBody, blk: &ir::BasicBlock) u32 {
+        if blk.term.kind != ir::TM_RETURN || b.returns != 1 || self.arr_ret {
+            return ir::IR_NONE;
+        }
+        if self.is_unit(b, b.locals.at(0).ty) {
+            return ir::IR_NONE;
+        }
+        let mut i = blk.stmt_len;
+        while i > 0 {
+            let k = b.statements.at((blk.stmt_start + i - 1) as usize).kind;
+            if k == ir::ST_STORAGE_LIVE || k == ir::ST_STORAGE_DEAD || k == ir::ST_NOP {
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+        if i == 0 {
+            return ir::IR_NONE;
+        }
+        let idx = i - 1;
+        let s = *b.statements.at((blk.stmt_start + idx) as usize);
+        if s.kind != ir::ST_ASSIGN {
+            return ir::IR_NONE;
+        }
+        let pl = *b.places.at(s.place as usize);
+        if pl.base != 0 || pl.proj_len != 0 {
+            return ir::IR_NONE;
+        }
+        let rv = *b.rvalues.at(s.rvalue as usize);
+        if rv.kind != ir::RV_USE {
+            return ir::IR_NONE;
+        }
+        let op = *b.operands.at(rv.a as usize);
+        if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+            if b.places.at(op.data as usize).base == 0 {
+                return ir::IR_NONE; // the slot reads itself; leave the copy in place
+            }
+        }
+        return idx;
+    }
+
+    // Whether the single return slot `_0` is still referenced after return-slot forwarding. When
+    // every return forwards its value directly, the slot's declaration is dead and must be dropped
+    // (it would otherwise trip -Werror=unused-variable). Conservative: any read, any non-forwarded
+    // write, or any `return _0` keeps it live.
+    fn ret_slot_live(self: &Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+        if b.returns != 1 || self.arr_ret || self.is_unit(b, b.locals.at(0).ty) {
+            return true;
+        }
+        for o in 0..b.operands.len() {
+            let op = *b.operands.at(o);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                if b.places.at(op.data as usize).base == 0 {
+                    return true;
+                }
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            if !*cf.reach.at(bi) {
+                continue; // unreachable blocks (the fall-off return sentinel) never emit
+            }
+            let blk = *b.blocks.at(bi);
+            let skip = self.ret_fwd_idx(b, &blk);
+            if blk.term.kind == ir::TM_RETURN && skip == ir::IR_NONE {
+                return true;
+            }
+            for si in 0..blk.stmt_len {
+                if si == skip {
+                    continue;
+                }
+                let s = *b.statements.at((blk.stmt_start + si) as usize);
+                if s.kind == ir::ST_ASSIGN && b.places.at(s.place as usize).base == 0 {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Emit a block's statements and terminator effect, applying return-slot forwarding. Shared by the
+    // structured driver and the goto layout so both spell the same body.
+    fn emit_block_content(self: &mut Self, b: &ir::CoreBody, blk: &ir::BasicBlock) bool {
+        let skip = self.ret_fwd_idx(b, blk);
+        for si in 0..blk.stmt_len {
+            if si == skip {
+                continue;
+            }
+            let s = *b.statements.at((blk.stmt_start + si) as usize);
+            if !self.emit_stmt(b, &s) {
+                return false;
+            }
+        }
+        if skip != ir::IR_NONE {
+            let rv = *b.rvalues.at(b.statements.at((blk.stmt_start + skip) as usize).rvalue as usize);
+            let mut ov = String::new();
+            if !self.emit_operand(b, rv.a, &mut ov) {
+                return false;
+            }
+            self.out.push_str("  return ");
+            self.out.push_string(&ov);
+            self.out.push_str(";\n");
+            return true;
+        }
+        return self.emit_term_effect(b, &blk.term);
+    }
+
+    // Reconstruct structured C over a reducible, simple-loop CFG: straight-line runs, `if`/`else`,
+    // native `switch`, and `while` loops with `break`/`continue`. Any control the structure cannot
+    // express directly (a header that is a multi-way switch, a cross exit) becomes a forward `goto`
+    // whose label prints when its block is reached. The goto layout is the fallback for CFGs that
+    // are not simple; both are behavior-equivalent.
+    // Label-planning pass: walk the region tree with no output or statement side effects. Returns
+    // true when the body structures with no goto (so the real pass is safe), leaving self.sx_lbl
+    // marking any block that still needs a label. A false result sends the body to the goto layout.
+    fn plan_structured(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+        self.sx_emitted.clear();
+        self.sx_lbl.clear();
+        for _i in 0..b.blocks.len() {
+            self.sx_emitted.push(false);
+            self.sx_lbl.push(false);
+        }
+        self.sx_goto = false;
+        let _ = self.emit_region(b, cf, cf.entry, cfl::NONE, cfl::NONE, cfl::NONE, true);
+        return !self.sx_goto;
+    }
+
+    // Real structured pass; run only after plan_structured returned true (no goto needed).
+    fn emit_structured(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+        for i in 0..b.blocks.len() {
+            self.sx_emitted.set(i, false);
+        }
+        return self.emit_region(b, cf, cf.entry, cfl::NONE, cfl::NONE, cfl::NONE, false);
+    }
+
+    const fn w(self: &mut Self, dry: bool, s: str) {
+        if !dry {
+            self.out.push_str(s);
+        }
+    }
+
+    const fn wu(self: &mut Self, dry: bool, x: u64) {
+        if !dry {
+            self.out.push_u64(x);
+        }
+    }
+
+    const fn ws(self: &mut Self, dry: bool, s: &String) {
+        if !dry {
+            self.out.push_string(s);
+        }
+    }
+
+    // Emit the region entered at `entry`, falling through when it reaches `stop`; `brk`/`cont` are
+    // the enclosing loop's break/continue block targets (NONE outside a loop). Sets self.sx_fell to
+    // whether control left by fall-through (vs a terminator or transfer). In `dry` mode it makes the
+    // identical control decisions but writes no C and runs no statement side effects.
+    fn emit_region(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        entry: u32,
+        stop: u32,
+        brk: u32,
+        cont: u32,
+        dry: bool,
+    ) bool {
+        let mut node = entry;
+        loop {
+            if node == stop {
+                self.sx_fell = true;
+                return true;
+            }
+            if node == cont {
+                self.w(dry, "  continue;\n");
+                self.sx_fell = false;
+                return true;
+            }
+            if node == brk {
+                self.w(dry, "  break;\n");
+                self.sx_fell = false;
+                return true;
+            }
+            if *self.sx_emitted.at(node as usize) || !cf.dominates(entry, node) {
+                self.sx_goto = true;
+                self.w(dry, "  goto bb_");
+                self.wu(dry, node);
+                self.w(dry, ";\n");
+                self.sx_lbl.set(node as usize, true);
+                self.sx_fell = false;
+                return true;
+            }
+            if *cf.is_header.at(node as usize) {
+                if !self.emit_loop(b, cf, node, dry) {
+                    return false;
+                }
+                let lf = *cf.loop_follow.at(node as usize);
+                if lf == cfl::NONE {
+                    self.sx_fell = false;
+                    return true;
+                }
+                node = lf;
+                continue;
+            }
+            self.sx_emitted.set(node as usize, true);
+            if *self.sx_lbl.at(node as usize) {
+                self.w(dry, "bb_");
+                self.wu(dry, node);
+                self.w(dry, ": ;\n");
+            }
+            let blk = *b.blocks.at(node as usize);
+            if !dry {
+                if !self.emit_block_content(b, &blk) {
+                    return false;
+                }
+            }
+            if blk.term.kind == ir::TM_RETURN || blk.term.kind == ir::TM_UNREACHABLE {
+                self.sx_fell = false;
+                return true;
+            }
+            if blk.term.kind == ir::TM_SWITCH {
+                let f = *cf.follow.at(node as usize);
+                if !self.emit_branch(b, cf, node, f, stop, brk, cont, dry) {
+                    return false;
+                }
+                if f == cfl::NONE {
+                    return true;
+                }
+                node = f;
+                continue;
+            }
+            node = cf.succ(b, node, 0);
+        }
+    }
+
+    // A switch terminator as an `if`/`else` (or `else if` chain), or a native C `switch` when the
+    // arms are >= 2 integer cases outside any loop (so a case `break` cannot escape a loop). Arms
+    // stop at the branch join `f`, or at the region stop when the arms do not rejoin.
+    fn emit_branch(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        x: u32,
+        f: u32,
+        rstop: u32,
+        brk: u32,
+        cont: u32,
+        dry: bool,
+    ) bool {
+        let arm_stop = if f != cfl::NONE {
+            f;
+        } else {
+            rstop;
+        };
+        let t = b.blocks.at(x as usize).term;
+        let mut d = String::new();
+        if !dry && !self.emit_operand(b, t.a, &mut d) {
+            return false;
+        }
+        if t.sw_len >= 2 && brk == cfl::NONE && cont == cfl::NONE {
+            self.w(dry, "  switch (");
+            self.ws(dry, &d);
+            self.w(dry, ") {\n");
+            let mut fell = false;
+            for k in 0..t.sw_len {
+                self.w(dry, "  case ");
+                self.wu(dry, b.switch_pool[(t.sw_start + k) as usize] >> 32);
+                self.w(dry, ": {\n");
+                if !self.emit_region(b, cf, cf.succ(b, x, k), arm_stop, brk, cont, dry) {
+                    return false;
+                }
+                if self.sx_fell {
+                    self.w(dry, "  break;\n");
+                    fell = true;
+                }
+                self.w(dry, "  }\n");
+            }
+            self.w(dry, "  default: {\n");
+            if !self.emit_region(b, cf, cf.succ(b, x, t.sw_len), arm_stop, brk, cont, dry) {
+                return false;
+            }
+            if self.sx_fell {
+                self.w(dry, "  break;\n");
+                fell = true;
+            }
+            self.w(dry, "  }\n  }\n");
+            self.sx_fell = fell;
+            return true;
+        }
+        let mut fell = false;
+        for k in 0..t.sw_len {
+            if k == 0 {
+                self.w(dry, "  if ((");
+            } else {
+                self.w(dry, " else if ((");
+            }
+            self.ws(dry, &d);
+            self.w(dry, ") == ");
+            self.wu(dry, b.switch_pool[(t.sw_start + k) as usize] >> 32);
+            self.w(dry, ") {\n");
+            if !self.emit_region(b, cf, cf.succ(b, x, k), arm_stop, brk, cont, dry) {
+                return false;
+            }
+            if self.sx_fell {
+                fell = true;
+            }
+            self.w(dry, "  }");
+        }
+        let ot = cf.succ(b, x, t.sw_len);
+        if ot != arm_stop {
+            self.w(dry, " else {\n");
+            if !self.emit_region(b, cf, ot, arm_stop, brk, cont, dry) {
+                return false;
+            }
+            if self.sx_fell {
+                fell = true;
+            }
+            self.w(dry, "  }\n");
+        } else {
+            self.w(dry, "\n");
+            fell = true;
+        }
+        self.sx_fell = fell;
+        return true;
+    }
+
+    // A loop header as `while (1) { <header>; if (cond) { body } else break; }`: the body's stop is
+    // the header, so a natural back-edge falls through to the closing brace (re-iterates) and only a
+    // real `break`/`continue` spells one. An unconditional header is an infinite `while (1)`.
+    fn emit_loop(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow, h: u32, dry: bool) bool {
+        self.sx_emitted.set(h as usize, true);
+        if *self.sx_lbl.at(h as usize) {
+            self.w(dry, "bb_");
+            self.wu(dry, h);
+            self.w(dry, ": ;\n");
+        }
+        let lf = *cf.loop_follow.at(h as usize);
+        let blk = *b.blocks.at(h as usize);
+        let t = blk.term;
+        self.w(dry, "  while (1) {\n");
+        if !dry {
+            for si in 0..blk.stmt_len {
+                let s = *b.statements.at((blk.stmt_start + si) as usize);
+                if !self.emit_stmt(b, &s) {
+                    return false;
+                }
+            }
+            if !self.emit_term_effect(b, &t) {
+                return false;
+            }
+        }
+        if t.kind == ir::TM_SWITCH && t.sw_len == 1 {
+            let mut d = String::new();
+            if !dry && !self.emit_operand(b, t.a, &mut d) {
+                return false;
+            }
+            self.w(dry, "  if ((");
+            self.ws(dry, &d);
+            self.w(dry, ") == ");
+            self.wu(dry, b.switch_pool[t.sw_start as usize] >> 32);
+            self.w(dry, ") {\n");
+            if !self.emit_region(b, cf, cf.succ(b, h, 0), h, lf, h, dry) {
+                return false;
+            }
+            self.w(dry, "  }");
+            let exit_tgt = cf.succ(b, h, 1);
+            if exit_tgt == lf {
+                self.w(dry, " else {\n  break;\n  }\n");
+            } else {
+                self.w(dry, " else {\n");
+                if !self.emit_region(b, cf, exit_tgt, h, lf, h, dry) {
+                    return false;
+                }
+                self.w(dry, "  }\n");
+            }
+        } else if t.kind == ir::TM_SWITCH {
+            if !self.emit_branch(b, cf, h, cfl::NONE, h, lf, h, dry) {
+                return false;
+            }
+        } else if t.kind != ir::TM_RETURN && t.kind != ir::TM_UNREACHABLE {
+            if !self.emit_region(b, cf, cf.succ(b, h, 0), h, lf, h, dry) {
+                return false;
+            }
+        }
+        self.w(dry, "  }\n");
+        return true;
     }
 
     /// Emit a closure body: `<ret> <sym>(<sym>_env *const __env, <params...>)` with
@@ -1007,6 +1932,7 @@ extend CEmit {
         }
         self.cap_base = b.returns + np;
         self.cap_on = ncaps != 0;
+        self.setup_locals(b);
         for k in 0..ncaps {
             let decl = unsafe ca.list(cd.captures)[k as usize];
             let csp = self.mg.decl_name_span(cm, decl);
@@ -1088,8 +2014,8 @@ extend CEmit {
                 self.out.push_str(", ");
             }
             let l = (b.returns + i) as usize;
-            let mut nm = String::from_str("_");
-            nm.push_u64(l as u64);
+            let mut nm = String::new();
+            self.lspell(l as u32, &mut nm);
             let mut ts = String::new();
             let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
             if ok {
@@ -1286,6 +2212,7 @@ extend CEmit {
         }
         let am = self.agg_module(b, rv.target);
         let sa = self.p().module_ast_const(am);
+        let is_tuple = sa.at_const(sdecl).as_data.aggregate.is_tuple;
         let ms = sa.at_const(sdecl).as_data.aggregate.members;
         if ms.len != rv.b {
             return self.fail("agg-arity");
@@ -1314,7 +2241,12 @@ extend CEmit {
                 }
                 let fid = unsafe sa.list(ms)[i as usize];
                 let mut fnm = String::new();
-                self.mg.ident(am, sa.at_const(sa.at_const(fid).as_data.field.name).as_data.name.text, &mut fnm);
+                if is_tuple {
+                    fnm.push_str("_");
+                    fnm.push_u64(i);
+                } else {
+                    self.mg.ident(am, sa.at_const(sa.at_const(fid).as_data.field.name).as_data.name.text, &mut fnm);
+                }
                 let op = *b.operands.at(opid as usize);
                 let mut rm = b.module;
                 let mut rt = op.ty;
@@ -1361,6 +2293,12 @@ extend CEmit {
     fn emit_stmt(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement) bool {
         if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
             return true; // markers carry no C
+        }
+        if self.is_dead_store(b, s) {
+            return true; // store to a never-read local: the pure rvalue has no side effect
+        }
+        if self.is_coalesced_store(b, s) {
+            return true; // `_dst = move _src` collapsed: both spell the same C variable
         }
         if s.kind != ir::ST_ASSIGN {
             return self.fail("stmt");
@@ -1458,7 +2396,10 @@ extend CEmit {
             if rv0.kind == ir::RV_REPEAT {
                 return self.emit_repeat_stores(b, s, &rv0);
             }
-            if rv0.kind == ir::RV_AGGREGATE && rv0.c == ir::AGG_STRUCT && self.agg_has_array_field(b, &rv0) {
+            if rv0.kind == ir::RV_AGGREGATE && (rv0.c == ir::AGG_STRUCT || rv0.c == ir::AGG_TUPLE) && self.agg_has_array_field(
+                b,
+                &rv0,
+            ) {
                 return self.emit_struct_store_arrays(b, s, &rv0);
             }
         }
@@ -1949,8 +2890,7 @@ extend CEmit {
             cur.push_str("__env->");
             cur.push_string(self.cap_names.at((pl.base - self.cap_base) as usize));
         } else {
-            cur.push_str("_");
-            cur.push_u64(pl.base);
+            self.lspell(pl.base, &mut cur);
         }
         let mut pre = b.locals.at(pl.base as usize).ty;
         let mut ok = true;
@@ -2246,6 +3186,9 @@ extend CEmit {
                 src;
             };
             let mut raw0 = src9.slice(c.raw.start as usize, c.raw.end as usize);
+            if tk9 == tt::TokenType::ByteStringLiteral as i64 && raw0.len() >= 1 && raw0.byte_at(0) == b'b' {
+                raw0 = raw0.slice(1, raw0.len()); // strip the `b` prefix; the quotes fall to the next check
+            }
             if raw0.len() >= 2 && raw0.byte_at(0) == 34 && raw0.byte_at(raw0.len() - 1) == 34 {
                 raw0 = raw0.slice(1, raw0.len() - 1); // some spans keep their quotes
             } else if raw0.len() >= 5 && raw0.byte_at(0) == b'M' && raw0.byte_at(1) == 34 && raw0.byte_at(
@@ -2275,7 +3218,9 @@ extend CEmit {
             }
             let mut esc = String::new();
             if plain {
-                esc.push_str(raw0);
+                // quoted/byte-string bodies carry Super-C escapes: decode to bytes, then re-escape
+                // for C (a verbatim copy mis-spells `\xNN`, greedy in C, and the C-invalid `\u{...}`)
+                push_sc_str_c(raw0, &mut esc);
             } else {
                 push_c_escaped(raw0, &mut esc);
             }
@@ -4233,6 +5178,22 @@ extend CEmit {
                 dst.push_u64(y.as_data.arr.len);
                 return true;
             }
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                let dai = self.p().module_ast_const(rm);
+                let it = *dai.instance(y.as_data.inst);
+                let iai = self.p().module_ast_const(it.module);
+                let ns = iai.at_const(iai.at_const(it.decl).as_data.aggregate.name).as_data.name.text;
+                let nm = self.p().modules.at(it.module as usize).source.as_str().slice(
+                    ns.start as usize,
+                    ns.end as usize,
+                );
+                if nm == "Slice" || nm == "SliceMut" {
+                    dst.push_str("(");
+                    let ok = self.emit_place(b, rv.a, dst);
+                    dst.push_str(").len");
+                    return ok;
+                }
+            }
             return self.fail("len");
         }
         if rv.kind == ir::RV_DISCRIMINANT {
@@ -4999,10 +5960,12 @@ extend CEmit {
             }
         }
         let mut res = false;
+        let is_tuple = da.at_const(decl).as_data.aggregate.is_tuple;
         for i in 0..ms2.len {
             let fid = unsafe da.list(ms2)[i as usize];
             let fk = da.at_const(fid).kind;
-            if fk == NodeKind::NODE_FIELD {
+            // tuple members are bare type nodes; type_of reads either uniformly
+            if fk == NodeKind::NODE_FIELD || is_tuple {
                 let fty = da.type_of(fid);
                 if fty != TYPE_NONE {
                     let mut frm = am;
@@ -5167,12 +6130,14 @@ extend CEmit {
                 body.push_str("  default: break;\n  }\n");
             }
         } else {
+            let is_tuple = da.at_const(decl).as_data.aggregate.is_tuple;
             for i in 0..ms.len {
                 if !ok {
                     break;
                 }
                 let fid = unsafe da.list(ms)[i as usize];
-                if da.at_const(fid).kind != NodeKind::NODE_FIELD {
+                // tuple members are bare type nodes named `_i`; named members are NODE_FIELD
+                if !is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
                     continue;
                 }
                 let fty = da.type_of(fid);
@@ -5188,7 +6153,12 @@ extend CEmit {
                 ok = self.free_expr(frm, frt, &mut fsym);
                 if ok {
                     let mut fnm = String::new();
-                    self.mg.ident(am, da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text, &mut fnm);
+                    if is_tuple {
+                        fnm.push_str("_");
+                        fnm.push_u64(i);
+                    } else {
+                        self.mg.ident(am, da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text, &mut fnm);
+                    }
                     body.push_str("  ");
                     body.push_string(&fsym);
                     body.push_str("(&self->");
@@ -5205,11 +6175,11 @@ extend CEmit {
         return ok;
     }
 
-    fn emit_term(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
+    // The side effect of a terminator -- a drop's free, a call's statement, an assert's check, a
+    // return's value, an unreachable abort -- with NO control transfer: the structured driver owns
+    // every goto, break, continue, and fall-through. GOTO and SWITCH carry no effect here.
+    fn emit_term_effect(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
         if t.kind == ir::TM_GOTO {
-            self.out.push_str("  goto bb_");
-            self.out.push_u64(t.t0);
-            self.out.push_str(";\n");
             return true;
         }
         if t.kind == ir::TM_DROP {
@@ -5236,9 +6206,7 @@ extend CEmit {
                     self.out.push_string(&pv);
                     self.out.push_str(".data);");
                     self.out.push_str(if_s(t.args_len == 1, " }", ""));
-                    self.out.push_str("\n  goto bb_");
-                    self.out.push_u64(t.t0);
-                    self.out.push_str(";\n");
+                    self.out.push_str("\n");
                 }
                 return ok;
             }
@@ -5266,9 +6234,7 @@ extend CEmit {
                         self.out.push_string(&pv9);
                         self.out.push_str(");");
                         self.out.push_str(if_s(t.args_len == 1, " }", ""));
-                        self.out.push_str("\n  goto bb_");
-                        self.out.push_u64(t.t0);
-                        self.out.push_str(";\n");
+                        self.out.push_str("\n");
                     }
                     return ok9;
                 }
@@ -5276,9 +6242,6 @@ extend CEmit {
             if y.kind == TypeKind::TYPE_FUNCTION {
                 // a closure value's captures are freed by ITS OWN body on the (exactly-once) call
                 // -- a drop of the value itself owns nothing further
-                self.out.push_str("  goto bb_");
-                self.out.push_u64(t.t0);
-                self.out.push_str(";\n");
                 return true;
             }
             if y.kind != TypeKind::TYPE_BUILTIN && y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
@@ -5303,15 +6266,10 @@ extend CEmit {
                     self.out.push_string(&pv);
                     self.out.push_str(");");
                     self.out.push_str(if_s(t.args_len == 1, " }", ""));
-                    self.out.push_str("\n  goto bb_");
-                    self.out.push_u64(t.t0);
-                    self.out.push_str(";\n");
+                    self.out.push_str("\n");
                 }
                 return ok;
             }
-            self.out.push_str("  goto bb_");
-            self.out.push_u64(t.t0);
-            self.out.push_str(";\n");
             return true;
         }
         if t.kind == ir::TM_RETURN {
@@ -5416,34 +6374,11 @@ extend CEmit {
             push_fmt_escaped(file, &mut self.out);
             self.out.push_str(":");
             self.out.push_u64(line);
-            self.out.push_str("\\n\"); fflush(stderr); abort(); }\n  goto bb_");
-            self.out.push_u64(t.t0);
-            self.out.push_str(";\n");
+            self.out.push_str("\\n\"); fflush(stderr); abort(); }\n");
             return true;
         }
         if t.kind == ir::TM_SWITCH {
-            let mut d = String::new();
-            let ok = self.emit_operand(b, t.a, &mut d);
-            for k in 0..t.sw_len {
-                if !ok {
-                    break;
-                }
-                let pair = b.switch_pool[(t.sw_start + k) as usize];
-                self.out.push_str("  if ((");
-                self.out.push_string(&d);
-                self.out.push_str(") == ");
-                self.out.push_u64(pair >> 32);
-                self.out.push_str(") goto bb_");
-                self.out.push_u64(pair & 0xFFFFFFFFu64);
-                self.out.push_str(";\n");
-            }
-
-            if ok {
-                self.out.push_str("  goto bb_");
-                self.out.push_u64(t.t0);
-                self.out.push_str(";\n");
-            }
-            return ok;
+            return true;
         }
         if t.kind == ir::TM_CALL {
             if t.dests_len > 1 {
@@ -5585,15 +6520,11 @@ extend CEmit {
                 self.out.push_string(&line);
                 self.out.push_str("); memcpy(");
                 self.out.push_string(&dplace);
-                self.out.push_str(", __ar._a, sizeof(__ar._a)); }\n  goto bb_");
-                self.out.push_u64(t.t0);
-                self.out.push_str(";\n");
+                self.out.push_str(", __ar._a, sizeof(__ar._a)); }\n");
             } else if ok {
                 self.out.push_str("  ");
                 self.out.push_string(&line);
-                self.out.push_str(");\n  goto bb_");
-                self.out.push_u64(t.t0);
-                self.out.push_str(";\n");
+                self.out.push_str(");\n");
             }
             return ok;
         }
@@ -5634,14 +6565,47 @@ extend CEmit {
                 if t.args_len != 0 {
                     self.out.push_str(", (int)__scm.len, (const char *)__scm.ptr");
                 }
-                self.out.push_str("); fflush(stderr); abort(); }\n  goto bb_");
-                self.out.push_u64(t.t0);
-                self.out.push_str(";\n");
+                self.out.push_str("); fflush(stderr); abort(); }\n");
             }
             return ok;
         }
         return self.fail("terminator");
     }
+}
+
+// FNV-1a hash of an identifier -- the key of the reserved-name set (dedup + O(1) lookup).
+const fn ident_hash(s: str) u64 {
+    let mut h = 1469598103934665603u64;
+    for i in 0..s.len() {
+        h = (h ^ s.byte_at(i) as u64) * 1099511628211u64;
+    }
+    return h;
+}
+
+// Insert every maximal C-identifier run in `s` into `out` (the typedef names inside a spelled type).
+fn collect_idents(s: str, out: &mut Set<u64>) {
+    let mut i = 0 as usize;
+    while i < s.len() {
+        let c = s.byte_at(i);
+        if c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c == 95 {
+            let start = i;
+            while i < s.len() {
+                let d = s.byte_at(i);
+                if d >= 48 && d <= 57 || d >= 65 && d <= 90 || d >= 97 && d <= 122 || d == 95 {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.insert(ident_hash(s.slice(start, i)));
+        } else {
+            i += 1;
+        }
+    }
+}
+
+const fn ident_in(nm: str, v: &Set<u64>) bool {
+    return v.contains(&ident_hash(nm));
 }
 
 // push_c_escaped for printf format strings: `%` doubles so source text never reads as a conversion.
@@ -5701,6 +6665,81 @@ pub fn push_c_escaped(txt: str, dst: &mut String) {
             dst.push_byte(48 + (b & 7));
         }
     }
+}
+
+const fn hexv(b: u8) u32 {
+    if b >= 48 && b <= 57 {
+        return b - 48;
+    }
+    if b >= 97 && b <= 102 {
+        return b - 97 + 10;
+    }
+    if b >= 65 && b <= 70 {
+        return b - 65 + 10;
+    }
+    return 0;
+}
+
+fn push_utf8(cp: u32, dst: &mut String) {
+    if cp < 0x80 {
+        dst.push_byte(cp as u8);
+    } else if cp < 0x800 {
+        dst.push_byte((0xC0 | cp >> 6) as u8);
+        dst.push_byte((0x80 | cp & 0x3F) as u8);
+    } else if cp < 0x10000 {
+        dst.push_byte((0xE0 | cp >> 12) as u8);
+        dst.push_byte((0x80 | cp >> 6 & 0x3F) as u8);
+        dst.push_byte((0x80 | cp & 0x3F) as u8);
+    } else {
+        dst.push_byte((0xF0 | cp >> 18) as u8);
+        dst.push_byte((0x80 | cp >> 12 & 0x3F) as u8);
+        dst.push_byte((0x80 | cp >> 6 & 0x3F) as u8);
+        dst.push_byte((0x80 | cp & 0x3F) as u8);
+    }
+}
+
+// A Super-C quoted/byte-string body (escapes intact) into a C string-literal body: decode each
+// escape to its byte(s) -- `\xNN` is EXACTLY two hex digits and `\u{H..}` a codepoint (UTF-8) --
+// then C-escape the raw bytes so C reads back the same value. A verbatim copy mis-handles both.
+fn push_sc_str_c(raw: str, dst: &mut String) {
+    let mut bytes = String::new();
+    let mut i: usize = 0;
+    while i < raw.len() {
+        let b = raw.byte_at(i);
+        if b != 92 || i + 1 >= raw.len() {
+            bytes.push_byte(b);
+            i += 1;
+            continue;
+        }
+        let e = raw.byte_at(i + 1);
+        i += 2;
+        if e == b'n' {
+            bytes.push_byte(10);
+        } else if e == b'r' {
+            bytes.push_byte(13);
+        } else if e == b't' {
+            bytes.push_byte(9);
+        } else if e == b'0' {
+            bytes.push_byte(0);
+        } else if e == b'x' && i + 1 < raw.len() {
+            bytes.push_byte((hexv(raw.byte_at(i)) << 4 | hexv(raw.byte_at(i + 1))) as u8);
+            i += 2;
+        } else if e == b'u' && i < raw.len() && raw.byte_at(i) == b'{' {
+            i += 1;
+            let mut cp: u32 = 0;
+            while i < raw.len() && raw.byte_at(i) != b'}' {
+                cp = cp << 4 | hexv(raw.byte_at(i));
+                i += 1;
+            }
+            if i < raw.len() {
+                i += 1;
+            }
+            push_utf8(cp, &mut bytes);
+        } else {
+            bytes.push_byte(e); // `\\`, `\"`, `\'`: the escaped byte itself
+        }
+    }
+    push_c_escaped(bytes.as_str(), dst);
 }
 
 const fn if_s(c: bool, a: str<'static>, b: str<'static>) str<'static> {

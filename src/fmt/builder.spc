@@ -633,6 +633,18 @@ fn b_type(b: &mut Builder, id: NodeId) d::DocId {
             }
         },
         NODE_DYN_TYPE => {
+            // `&dyn T` / `&mut dyn T` fold the borrow into the dyn node as its qualifier; bare `dyn T`
+            // (as in `Box<dyn T>`) carries TYPE_QUAL_NONE.
+            if n.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_NONE {
+                v.push(b.p.txt("&"));
+                if n.as_data.indirect_type.lifetime != NODE_NONE {
+                    v.push(node_text(b, n.as_data.indirect_type.lifetime));
+                    v.push(b.p.txt(" "));
+                }
+                if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
+                    v.push(b.p.txt("mut "));
+                }
+            }
             v.push(b.p.txt("dyn "));
             v.push(b_type(b, n.as_data.indirect_type.ty));
         },
@@ -1861,10 +1873,10 @@ fn b_item(b: &mut Builder, id: NodeId) d::DocId {
             v.push(node_text(b, a.name));
             b_generics_lt(b, b.ast.lifetimes_of(id), a.generics, &mut v);
             if a.is_tuple {
+                // tuple members are bare type nodes, not NODE_FIELD -- render each directly
                 let mut fz = Vector::<d::DocId>::new();
                 for i in 0..a.members.len {
-                    let fd = nd(b, list_at(b, a.members, i)).as_data.field;
-                    fz.push(b_type(b, fd.ty));
+                    fz.push(b_type(b, list_at(b, a.members, i)));
                 }
                 v.push(b_comma_list(b, "(", &fz, ")", false));
                 v.push(b.p.txt(";"));

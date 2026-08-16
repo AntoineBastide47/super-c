@@ -75,6 +75,14 @@ const fn bit(v: &Vector<u64>, i: u32) bool {
 }
 
 /// Classify every storage-death point of `b` against the move/init solution.
+// A tuple member's fdecl is a bare type node (not NODE_FIELD); its move path is keyed positionally.
+fn tuple_member_child(ow: &bf::Owner, forest: &mp::MoveForest, root: u32, m: ModuleId, fdecl: NodeId, idx: u32) u32 {
+    if fdecl != NODE_NONE && unsafe (&*(&*ow.pkg).module_ast_const(m)).at_const(fdecl).kind != NodeKind::NODE_FIELD {
+        return forest.tuple_child(root, idx);
+    }
+    return forest.field_child(root, fdecl);
+}
+
 pub fn elaborate(
     ow: &mut bf::Owner,
     b: &ir::CoreBody,
@@ -217,7 +225,7 @@ pub fn elaborate(
                         let mut fom: ModuleId = 0;
                         if ow.agg_fields(b.module, lty, &mut fdecls, &mut ftys, &mut fom) {
                             for fi in 0..fdecls.len() {
-                                let child = forest.field_child(root, fdecls[fi]);
+                                let child = tuple_member_child(ow, forest, root, fom, fdecls[fi], fi as u32);
                                 let mut live = child == mp::MP_NONE;
                                 if child != mp::MP_NONE {
                                     live = bit(&di, child);
@@ -265,7 +273,7 @@ pub fn elaborate(
                                 let mut fd2 = NODE_NONE;
                                 if have2 {
                                     for fi2 in 0..fdecls2.len() {
-                                        if forest.field_child(root, fdecls2[fi2]) == sub[i] {
+                                        if tuple_member_child(ow, forest, root, fom2, fdecls2[fi2], fi2 as u32) == sub[i] {
                                             fd2 = fdecls2[fi2];
                                             break;
                                         }
@@ -478,11 +486,18 @@ pub fn insert_drops(b: &mut ir::CoreBody, sched: &Schedule, forest: &mp::MoveFor
             if over {
                 ty = b.places.at(pths[c] as usize).ty;
             } else if kinds[c] == DK_FIELD {
-                // the still-owned field: one PJ_FIELD projection reconstructed from the move path
+                // the still-owned field: one PJ_FIELD projection reconstructed from the move-path
+                // key -- bits 32..55 are the original `data` (a tuple member's positional index),
+                // the low 32 the original `sub` (a named field's decl, or NODE_NONE for a tuple)
                 let mp0 = *forest.paths.at(pths[c] as usize);
                 ty = mp0.ty;
                 b.projections.push(
-                    ir::Projection { kind: ir::PJ_FIELD, data: (mp0.elem & 0xFFFFFFFFu64) as u32, sub: fdls[c], ty: ty },
+                    ir::Projection {
+                        kind: ir::PJ_FIELD,
+                        data: (mp0.elem >> 32 & 0xFFFFFFu64) as u32,
+                        sub: (mp0.elem & 0xFFFFFFFFu64) as u32,
+                        ty: ty,
+                    },
                 );
                 b.places.push(ir::Place { base: l, proj_start: b.projections.len() as u32 - 1, proj_len: 1, ty: ty });
             } else if !over {

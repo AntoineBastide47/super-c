@@ -13,7 +13,7 @@ fi
 # 2) Full lint, once per supported target (@platform gates differ); any warning fails the check.
 for target in macos linux windows; do
     printf 'check: lint (--target=%s)\n' "$target"
-    if ! SC_LEAK_CHECK=fatal ./super-c lint src std ffi tests bench ci --target="$target"; then
+    if ! SC_LEAK_CHECK=fatal ./super-c lint src std ffi tests bench ci examples --target="$target"; then
         printf 'check: FAILED -- lint warnings above (--target=%s) must be fixed (or try: ./super-c lint --fix <file>)\n' "$target" >&2
         exit 1
     fi

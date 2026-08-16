@@ -507,3 +507,95 @@ fn const_generic_array_length_inferred() {
         0,
     );
 }
+
+@test
+fn tuple_structs_byte_strings_and_slice_for() {
+    // tuple-struct construction lowers to positional aggregate init; reads spell `._N` in C
+    h::expect_exit(
+        "tuple struct positional fields",
+        "struct Wrap(i32, bool);\nfn main() i32 { let w = Wrap(30, true); let mut r = w.0; if w.1 { r += 5; } return r - 35; }\n",
+        0,
+    );
+    // generic tuple struct: element types bind under the instance's generic args
+    h::expect_exit(
+        "generic tuple struct",
+        "struct Pair<A, B>(A, B);\nfn main() i32 { let p = Pair::<i32, i32>(9, 4); return p.0 - p.1 - 5; }\n",
+        0,
+    );
+    // `for value in slice` reads the length through the slice's runtime `.len`, not a static count
+    h::expect_exit(
+        "for value in slice",
+        "fn main() i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let mut t = 0;\n    for v in s { t += v; }\n    return t - 10;\n}\n",
+        0,
+    );
+    // byte-string literal: the `b` prefix is stripped and the bytes re-emit as a valid C string view
+    h::expect_exit(
+        "byte string literal",
+        "fn main() i32 { let b = b\"AB\"; return (b[0] as i32) + (b[1] as i32) - 131; }\n",
+        0,
+    );
+    // tuple index then method: `0.len` must lex as an index access, not a malformed float
+    h::expect_exit(
+        "tuple index chained method",
+        "struct Words([]i32);\nfn main() i32 { let a: [i32; 3] = [4, 5, 6]; let w = Words(a[0..3]); return w.0.len() as i32 - 3; }\n",
+        0,
+    );
+    // a tuple struct wrapping an owner gets an auto-derived destructor; the leak gate would fail if
+    // the field were skipped. The string must be long enough to HEAP-allocate (past SSO), or a leak
+    // of the field would be invisible.
+    h::expect_exit(
+        "tuple struct frees its owner",
+        "struct Owned(String);\nfn main() i32 { let o = Owned(String::from_str(\"abcdefghijklmnopqrstuvwxyz0123456789\")); return o.0.len() as i32 - 36; }\n",
+        0,
+    );
+    // escape decoding: `\\xNN` is exactly two hex digits (C would read `\\x41B` greedily); `\\u{..}`
+    // becomes UTF-8 bytes (C rejects the syntax outright)
+    h::expect_exit(
+        "byte-string escapes decode to bytes",
+        "fn main() i32 { let b = b\"\\x41B\"; let u = b\"\\u{41}\"; return (b[0] as i32) + (b[1] as i32) + (u[0] as i32) - 196; }\n",
+        0,
+    );
+    // a tuple-struct constructor folds at compile time (a `const`/`static_assert` requires it)
+    h::expect_exit(
+        "tuple struct const-evaluates",
+        "struct Pt(i32, i32);\nconst C: Pt = Pt(20, 22);\nstatic_assert(C.0 + C.1 == 42, \"tuple const eval\");\nfn main() i32 { return C.0 + C.1 - 42; }\n",
+        0,
+    );
+    // zeroed::<TupleStruct>() must allocate one slot per positional member (a field-count of 0 wrote
+    // out of bounds and crashed the compiler)
+    h::expect_exit(
+        "zeroed tuple struct",
+        "struct Zt(i32, i32);\nconst Z: Zt = unsafe zeroed::<Zt>();\nstatic_assert(Z.0 == 0 && Z.1 == 0, \"zeroed tuple\");\nfn main() i32 { return Z.0 + Z.1; }\n",
+        0,
+    );
+    // a fixed-array tuple member: constructing it needs the array-store path, and coercing `w.0` to a
+    // slice needs the positional array-length recovery (both were struct-only)
+    h::expect_exit(
+        "tuple struct fixed-array member coerces to slice",
+        "struct Wrap([i32; 3]);\nfn sum(s: []i32) i32 { return s[0] + s[1] + s[2]; }\nfn main() i32 { let w = Wrap([1, 2, 3]); return sum(w.0) - 6; }\n",
+        0,
+    );
+}
+
+@test
+fn tuple_struct_reference_field_obeys_lifetimes() {
+    // a reference stored in a tuple member is subject to the same stored-borrow rule as a named field
+    h::expect_err_msg(
+        "reference tuple member needs a named lifetime",
+        "struct RefT(&i32);\nfn main() i32 { return 0; }\n",
+        "must name a lifetime",
+    );
+    // and a borrow of a local must not escape through a tuple constructor
+    h::expect_err_msg(
+        "tuple constructor cannot leak a local borrow",
+        "struct RefT<'a>(&'a i32);\nfn bad<'a>() RefT<'a> { let x = 5; return RefT::<'a>(&x); }\nfn main() i32 { return 0; }\n",
+        "does not outlive",
+    );
+    // a tuple struct is recognized as Free when a member owns, so moving one member out is rejected
+    // exactly as for a named struct (else the destructor double-frees at scope exit)
+    h::expect_err_msg(
+        "tuple partial move rejected like a named field",
+        "struct Two(String, String);\nfn main() i32 { let t = Two(String::from_str(\"aaaaaaaaaaaaaaaaaaaaaaaaaa\"), String::from_str(\"bbbbbbbbbbbbbbbbbbbbbbbbbb\")); let a = t.0; return a.len() as i32; }\n",
+        "cannot move a field out of a value implementing Free",
+    );
+}

@@ -72,7 +72,7 @@ jobs:
           cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
           echo "CC=gcc" >> "$GITHUB_ENV"
           echo "BINEXT=.exe" >> "$GITHUB_ENV"
-          echo "SC_CSTD=-std=gnu11 -D_POSIX_C_SOURCE=200809L" >> "$GITHUB_ENV"
+          echo "SC_CSTD=-std=gnu11 -D_POSIX_C_SOURCE=200809L -g -fno-omit-frame-pointer" >> "$GITHUB_ENV"
           command -v ccache >/dev/null 2>&1 || choco install -y --no-progress ccache
 
       - name: Exclude work dirs from Defender
@@ -105,6 +105,26 @@ jobs:
           bin="super-c${BINEXT:-}"
           [ -f "./$bin" ] || mv "./super-c" "./$bin"
           test -x "./$bin"
+
+      - name: Reproduce and symbolize the cross_module_generic_by_value crash
+        run: |
+          set +e
+          bin="super-c${BINEXT:-}"
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          mkdir -p repro/opt
+          echo 'cHViIGVudW0gT3B0PFQ+IHsgU29tZShUKSwgTm9uZSB9CmV4dGVuZDxUPiBPcHQ8VD4gewogIHB1YiBmbiB1bndyYXBfb3Ioc2VsZjogJk9wdDxUPiwgZDogVCkgVCB7IHJldHVybiBzd2l0Y2ggc2VsZiB7IFNvbWUodikgPT4gKnYsIE5vbmUgPT4gZCwgfTsgfQogIHB1YiBmbiBtYXA8VT4oc2VsZjogJk9wdDxUPiwgZjogZm4oVCkgVSkgT3B0PFU+IHsKICAgIHJldHVybiBzd2l0Y2ggc2VsZiB7IFNvbWUodikgPT4gT3B0Ojo8VT46OlNvbWUoZigqdikpLCBOb25lID0+IE9wdDo6PFU+OjpOb25lLCB9OyB9Cn0K' | base64 -d > repro/opt/opt.spc
+          echo 'aW1wb3J0IG9wdDo6b3B0OwpleHRlcm4gIkMiIHsgZm4gZXhpdChjb2RlOiBpMzIpIHZvaWQ7IH0Kc3RydWN0IEJhciB7IHB1YiB4OiBpMzIgfQpmbiBieChiOiBCYXIpIGkzMiB7IHJldHVybiBiLng7IH0KZm4gbWFpbigpIGkzMiB7CiAgbGV0IG8gPSBvcHQ6Om9wdDo6T3B0Ojo8QmFyPjo6U29tZShCYXIgeyB4OiAzMCB9KTsKICBsZXQgYSA9IG8udW53cmFwX29yKEJhciB7IHg6IDAgfSkueDsKICBsZXQgbSA9IG8ubWFwKGJ4KS51bndyYXBfb3IoMCk7CiAgdW5zYWZlIGV4aXQoYSArIG0pOyB9Cg==' | base64 -d > repro/genbv.spc
+          echo "===== source ====="; cat repro/genbv.spc
+          echo "===== running the compile (expect the crash + trace) ====="
+          "./$bin" build repro/genbv.spc -o repro/gv ${cstd:+"$cstd"} 2>&1 | tee trace.txt
+          echo "===== symbolizing trace offsets with addr2line ====="
+          command -v addr2line || true
+          grep -oE '\+0x[0-9a-fA-F]+' trace.txt | sed 's/^+//' | while read -r off; do
+            printf '%s -> ' "$off"
+            addr2line -f -p -e "./$bin" "$off" 2>/dev/null || echo '(no symbol)'
+          done
+          echo "===== isolated test ====="
+          SC_LEAK_CHECK=fatal "./$bin" test --test-filter=cross_module_generic_by_value ${cstd:+"$cstd"} 2>&1 | tail -40 || true
 
       - name: Run the test suite
         run: |

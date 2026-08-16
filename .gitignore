@@ -34,7 +34,8 @@
 **/.DS_Store
 build
 super-c
-examples
+examples/*
+!examples/language_demo.spc
 todos.md
 profile.json.gz
 stage*-super-c

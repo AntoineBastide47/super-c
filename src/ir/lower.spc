@@ -3651,10 +3651,15 @@ extend Lowerer {
                 return op9;
             }
         }
-        // `Some(x)`: a payload variant CONSTRUCTOR call is aggregate construction, not a call
+        // `Some(x)`: a payload variant CONSTRUCTOR call is aggregate construction, not a call.
+        // `Wrap(a, b)` for a tuple struct is likewise positional aggregate construction, not a call.
         {
             let vd = self.path_res(d.callee);
-            if vd.node != NODE_NONE && self.decl_kind(vd) == NodeKind::NODE_VARIANT {
+            let vk = self.decl_kind(vd);
+            let is_tuple_ctor = vk == NodeKind::NODE_STRUCT && unsafe (&*(&*self.pkg).module_ast_const(vd.module)).at_const(
+                vd.node,
+            ).as_data.aggregate.is_tuple;
+            if vd.node != NODE_NONE && (vk == NodeKind::NODE_VARIANT || is_tuple_ctor) {
                 let mut argv = Vector::<ir::OperandId>::new();
                 for i in 0..d.args.len {
                     let op = self.lower_expr(unsafe self.f.list(d.args)[i as usize]);
@@ -3663,7 +3668,12 @@ extend Lowerer {
                     }
                     argv.push(op);
                 }
-                return self.finish_aggregate(ir::AGG_VARIANT, vd, &argv, ty, sp);
+                let agg: u8 = if is_tuple_ctor {
+                    ir::AGG_TUPLE;
+                } else {
+                    ir::AGG_VARIANT;
+                };
+                return self.finish_aggregate(agg, vd, &argv, ty, sp);
             }
         }
         // Method call: receiver first, then arguments; the selected target comes from call_info.
@@ -4887,6 +4897,7 @@ extend Lowerer {
         // Union members overlap: the marker data value makes place conflicts treat every field
         // pair of the same union as the same storage.
         let mut fdata = ir::IR_NONE;
+        let mut fsub = fd.node;
         {
             let bty2 = self.body.places.at(base as usize).ty;
             if bty2 != TYPE_NONE {
@@ -4906,11 +4917,22 @@ extend Lowerer {
                     let nd = da.at_const(dn);
                     if nd.kind == NodeKind::NODE_STRUCT && nd.as_data.aggregate.is_union {
                         fdata = ir::PJ_UNION_FIELD;
+                    } else if nd.kind == NodeKind::NODE_STRUCT && nd.as_data.aggregate.is_tuple {
+                        // tuple member: the resolution pins the positional TYPE node, not a NODE_FIELD;
+                        // emit it as `._<index>` from its ordinal in the member list
+                        let ms = nd.as_data.aggregate.members;
+                        for mi in 0..ms.len {
+                            if unsafe da.list(ms)[mi as usize] == fd.node {
+                                fsub = NODE_NONE;
+                                fdata = mi;
+                                break;
+                            }
+                        }
                     }
                 }
             }
         }
-        return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: fdata, sub: fd.node, ty: ty });
+        return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: fdata, sub: fsub, ty: ty });
     }
 
     fn lower_index_place(self: &mut Self, id: NodeId) ir::PlaceId {

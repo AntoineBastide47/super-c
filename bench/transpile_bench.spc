@@ -15,6 +15,7 @@ import borrowck::borrowck as bck;
 import consteval::consteval as ce;
 import driver::emit as demit;
 import driver::test as dtest;
+import driver::util as dutil;
 import ast::ast as *;
 import bench::bench_shim as shim;
 import std::testing::bench as bench;
@@ -36,6 +37,9 @@ const ROOT: str = "src/main.spc";
 const STD_DIR: str = "std";
 const WARMUP: i32 = 1;
 const ITERS: i32 = 100;
+// The cc phase runs as a child process and compiles the whole emitted package -- orders of magnitude
+// slower than an in-process transpile, so it gets its own small iteration count.
+const CC_ITERS: i32 = 3;
 
 // The codegen sink: a real file, on every platform. Codegen writes through a FILE, and this benchmark
 // exists to report what codegen costs -- so the sink is the one codegen actually uses in a build rather
@@ -94,10 +98,7 @@ pub struct Timing {
     pub resolve: f64,
     pub typecheck: f64,
     pub borrowck: f64,
-    pub propagate: f64,
     pub codegen: f64,
-    pub cg_header: f64,
-    pub cg_source: f64,
     pub src_bytes: usize,
     pub src_lines: usize,
     pub out_bytes: usize,
@@ -110,21 +111,18 @@ pub struct Timing {
     pub cyc_resolve: i64,
     pub cyc_typecheck: i64,
     pub cyc_borrowck: i64,
-    pub cyc_propagate: i64,
     pub cyc_codegen: i64,
     pub alc_lex: i64,
     pub alc_parse: i64,
     pub alc_resolve: i64,
     pub alc_typecheck: i64,
     pub alc_borrowck: i64,
-    pub alc_propagate: i64,
     pub alc_codegen: i64,
     pub byt_lex: i64,
     pub byt_parse: i64,
     pub byt_resolve: i64,
     pub byt_typecheck: i64,
     pub byt_borrowck: i64,
-    pub byt_propagate: i64,
     pub byt_codegen: i64,
     pub heap_bytes: i64,
 }
@@ -163,6 +161,88 @@ fn typecheck_one(p: &mut loader::Package, i: usize) {
     p.modules[i].ast = back;
 }
 
+// Overwrite `dir/base` with `s` (the emitted C is ASCII, so a byte copy is exact).
+fn write_c(dir: str, base: str, s: str) {
+    let mut path = String::from_str(dir);
+    path.push_str("/");
+    path.push_str(base);
+    let f = stdio::fopen(path.as_str(), "wb");
+    if f != null {
+        unsafe stdio::fwrite(s.ptr(), 1, s.len(), f);
+        unsafe stdio::fclose(f);
+    }
+}
+
+// Transpile the compiler once and write the emitted package into `dir` for the cc phase to compile.
+// Files land FLAT -- every TU beside the two shared headers -- mirroring the SC_CEMIT_TU lane, so each
+// TU's `#include "__sc_types.h"` resolves in place. Fills `names` with the .c basenames (super_rt first)
+// and returns the total emitted C size in bytes.
+fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
+    let mut p = loader::package_load(ROOT, STD_DIR.ptr() as *const char, false, unsafe dshim::sc_host_platform());
+    let n = p.modules.len();
+    let pkg = (&mut p) as *mut loader::Package;
+    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
+    p.ceval = &mut ceval;
+    let mut i: usize = 0;
+    while i < n {
+        resolve_one(&mut p, i);
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        typecheck_one(&mut p, i);
+        i = i + 1;
+    }
+    ceval.flush_asserts(ignore_assert, null);
+    let _ = demit::borrowck_all(&mut p);
+
+    let tplan = dtest::TestPlan::new(n);
+    let mut o = demit::CemitOut::new(n);
+    demit::cemit_package(&mut p, false, &tplan, null, &mut o);
+
+    dutil::write_super_rt(dir);
+    write_c(dir, "__sc_types.h", o.types_h.as_str());
+    write_c(dir, "__sc_protos.h", o.protos_h.as_str());
+    names.push(String::from_str("super_rt.c"));
+    let mut bytes: usize = 0;
+    for t in 0..n + 1 {
+        let is_inst = t == n;
+        let src9 = if is_inst {
+            o.inst_c.as_str();
+        } else {
+            o.tus.at(t).as_str();
+        };
+        if src9.len() == 0 {
+            continue;
+        }
+        bytes = bytes + src9.len();
+        let mut base = String::new();
+        if is_inst {
+            base.push_str("__sc_inst");
+        } else {
+            let mp = p.modules[t].path.as_str();
+            for k in 0..mp.len() {
+                let c2 = mp.byte_at(k);
+                let okc = c2 >= b'a' && c2 <= b'z' || c2 >= b'A' && c2 <= b'Z' || c2 >= b'0' && c2 <= b'9';
+                base.push_byte(
+                    if okc {
+                        c2;
+                    } else {
+                        b'_';
+                    },
+                );
+            }
+        }
+        base.push_str(".c");
+        let mut body = String::from_str("#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n");
+        body.push_str(src9);
+        write_c(dir, base.as_str(), body.as_str());
+        names.push(base);
+    }
+    o.free();
+    return bytes;
+}
+
 // One full transpile of the compiler, timed per phase.
 fn transpile_once() Timing {
     let mut r = Timing {
@@ -171,10 +251,7 @@ fn transpile_once() Timing {
         resolve: 0.0,
         typecheck: 0.0,
         borrowck: 0.0,
-        propagate: 0.0,
         codegen: 0.0,
-        cg_header: 0.0,
-        cg_source: 0.0,
         src_bytes: 0,
         src_lines: 0,
         out_bytes: 0,
@@ -187,21 +264,18 @@ fn transpile_once() Timing {
         cyc_resolve: 0,
         cyc_typecheck: 0,
         cyc_borrowck: 0,
-        cyc_propagate: 0,
         cyc_codegen: 0,
         alc_lex: 0,
         alc_parse: 0,
         alc_resolve: 0,
         alc_typecheck: 0,
         alc_borrowck: 0,
-        alc_propagate: 0,
         alc_codegen: 0,
         byt_lex: 0,
         byt_parse: 0,
         byt_resolve: 0,
         byt_typecheck: 0,
         byt_borrowck: 0,
-        byt_propagate: 0,
         byt_codegen: 0,
         heap_bytes: 0,
     };
@@ -260,12 +334,6 @@ fn transpile_once() Timing {
     let h3b = unsafe shim::sc_alloc_count();
     let y3b = unsafe shim::sc_alloc_bytes();
 
-    // The streaming backend collects instances during emission -- there is no separate propagation phase.
-    let a3p = a3b;
-    let c3p = c3b;
-    let h3p = h3b;
-    let y3p = y3b;
-
     let f = sink_open();
     {
         let tplan = dtest::TestPlan::new(n);
@@ -279,7 +347,6 @@ fn transpile_once() Timing {
             unsafe stdio::fwrite(tu.as_ptr(), 1, tu.len(), f);
         }
         unsafe stdio::fwrite(o.inst_c.as_ptr(), 1, o.inst_c.len(), f);
-        r.cg_source = time::cpu_seconds() - a3p;
         o.free();
     }
     r.out_bytes = sink_close(f);
@@ -326,26 +393,22 @@ fn transpile_once() Timing {
     r.resolve = a2 - a1;
     r.typecheck = a3 - a2;
     r.borrowck = a3b - a3;
-    r.propagate = a3p - a3b;
-    r.codegen = a4 - a3p;
+    r.codegen = a4 - a3b;
     r.cyc_parse = c1 - c0;
     r.cyc_resolve = c2 - c1;
     r.cyc_typecheck = c3 - c2;
     r.cyc_borrowck = c3b - c3;
-    r.cyc_propagate = c3p - c3b;
-    r.cyc_codegen = c4 - c3p;
+    r.cyc_codegen = c4 - c3b;
     r.alc_parse = h1 - h0;
     r.alc_resolve = h2 - h1;
     r.alc_typecheck = h3 - h2;
     r.alc_borrowck = h3b - h3;
-    r.alc_propagate = h3p - h3b;
-    r.alc_codegen = h4 - h3p;
+    r.alc_codegen = h4 - h3b;
     r.byt_parse = y1 - y0;
     r.byt_resolve = y2 - y1;
     r.byt_typecheck = y3 - y2;
     r.byt_borrowck = y3b - y3;
-    r.byt_propagate = y3p - y3b;
-    r.byt_codegen = y4 - y3p;
+    r.byt_codegen = y4 - y3b;
     r.heap_bytes = y4 - y0;
     return r;
 }
@@ -398,21 +461,16 @@ fn run_report() i32 {
     let mut sr: f64 = 0.0;
     let mut st: f64 = 0.0;
     let mut sl: f64 = 0.0;
-    let mut sg: f64 = 0.0;
     let mut sc_f: f64 = 0.0;
-    let mut sch: f64 = 0.0;
-    let mut scs: f64 = 0.0;
     let mut scy_l: i64 = 0;
     let mut scy_p: i64 = 0;
     let mut scy_r: i64 = 0;
     let mut scy_t: i64 = 0;
-    let mut scy_g: i64 = 0;
     let mut scy_cf: i64 = 0;
     let mut sal_l: i64 = 0;
     let mut sal_p: i64 = 0;
     let mut sal_r: i64 = 0;
     let mut sal_t: i64 = 0;
-    let mut sal_g: i64 = 0;
     let mut sal_cf: i64 = 0;
     let mut sb: f64 = 0.0;
     let mut scy_b: i64 = 0;
@@ -422,7 +480,6 @@ fn run_report() i32 {
     let mut sby_r: i64 = 0;
     let mut sby_t: i64 = 0;
     let mut sby_b: i64 = 0;
-    let mut sby_g: i64 = 0;
     let mut sby_cf: i64 = 0;
     let mut sheap: i64 = 0;
     let mut totals = Vector::<f64>::with_capacity(ITERS as usize);
@@ -434,34 +491,28 @@ fn run_report() i32 {
         st = st + t.typecheck;
         sb = sb + t.borrowck;
         sl = sl + t.lex;
-        sg = sg + t.propagate;
         scy_l = scy_l + t.cyc_lex;
         scy_p = scy_p + t.cyc_parse;
         scy_r = scy_r + t.cyc_resolve;
         scy_t = scy_t + t.cyc_typecheck;
         scy_b = scy_b + t.cyc_borrowck;
-        scy_g = scy_g + t.cyc_propagate;
         sal_l = sal_l + t.alc_lex;
         sal_p = sal_p + t.alc_parse;
         sal_r = sal_r + t.alc_resolve;
         sal_t = sal_t + t.alc_typecheck;
         sal_b = sal_b + t.alc_borrowck;
-        sal_g = sal_g + t.alc_propagate;
         sby_l = sby_l + t.byt_lex;
         sby_p = sby_p + t.byt_parse;
         sby_r = sby_r + t.byt_resolve;
         sby_t = sby_t + t.byt_typecheck;
         sby_b = sby_b + t.byt_borrowck;
-        sby_g = sby_g + t.byt_propagate;
         sheap = sheap + t.heap_bytes;
-        let total = t.parse + t.resolve + t.typecheck + t.borrowck + t.propagate + t.codegen;
+        let total = t.parse + t.resolve + t.typecheck + t.borrowck + t.codegen;
         sc_f = sc_f + t.codegen;
         scy_cf = scy_cf + t.cyc_codegen;
         sal_cf = sal_cf + t.alc_codegen;
         sby_cf = sby_cf + t.byt_codegen;
         totals.push(total);
-        sch = sch + t.cg_header;
-        scs = scs + t.cg_source;
         k = k + 1;
     }
     let fi = ITERS as f64;
@@ -471,10 +522,7 @@ fn run_report() i32 {
     let at = st / fi * 1000.0;
     let ab = sb / fi * 1000.0;
     let al = sl / fi * 1000.0;
-    let ag = sg / fi * 1000.0;
-    let avg_total = ap + ar + at + ab + ag + ac;
-    let ach = sch / fi * 1000.0;
-    let acs = scs / fi * 1000.0;
+    let avg_total = ap + ar + at + ab + ac;
     let srcf = warm.src_bytes as f64; // source MB/s for an avg-ms figure = srcf / ms / 1000
     let linesf = warm.src_lines as f64; // lines/sec in thousands (kloc/s) for an avg-ms figure = linesf / ms
     // Per-phase CPU cycles at the same boundaries as the ms timings;
@@ -485,9 +533,8 @@ fn run_report() i32 {
     let mr = scy_r as f64 / fi / 1e6;
     let mt = scy_t as f64 / fi / 1e6;
     let mb = scy_b as f64 / fi / 1e6;
-    let mg = scy_g as f64 / fi / 1e6;
     let mc = scy_cf as f64 / fi / 1e6;
-    let mtot = mp + mr + mt + mb + mg + mc;
+    let mtot = mp + mr + mt + mb + mc;
     // Heap allocations (malloc/calloc/realloc calls by the compiler's own code) per iteration, in
     // thousands. All-zero when the shim has no counting on this platform.
     let kal = sal_l as f64 / fi / 1e3;
@@ -495,18 +542,16 @@ fn run_report() i32 {
     let kar = sal_r as f64 / fi / 1e3;
     let kat = sal_t as f64 / fi / 1e3;
     let kab = sal_b as f64 / fi / 1e3;
-    let kag = sal_g as f64 / fi / 1e3;
     let kac = sal_cf as f64 / fi / 1e3;
-    let katot = kap + kar + kat + kab + kag + kac;
+    let katot = kap + kar + kat + kab + kac;
     // Bytes requested from the allocator per phase, per iteration, in MiB.
     let mbl = sby_l as f64 / fi / 1048576.0;
     let mbp = sby_p as f64 / fi / 1048576.0;
     let mbr = sby_r as f64 / fi / 1048576.0;
     let mbt = sby_t as f64 / fi / 1048576.0;
     let mbb = sby_b as f64 / fi / 1048576.0;
-    let mbg = sby_g as f64 / fi / 1048576.0;
     let mbc = sby_cf as f64 / fi / 1048576.0;
-    let mbtot = mbp + mbr + mbt + mbb + mbg + mbc;
+    let mbtot = mbp + mbr + mbt + mbb + mbc;
 
     unsafe stdio::printf(
         "  %-11s %9s %9s %9s %9s %9s %9s %8s\n".ptr() as *const char,
@@ -575,17 +620,6 @@ fn run_report() i32 {
     );
     unsafe stdio::printf(
         "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
-        "propagate".ptr() as *const char,
-        ag,
-        srcf / ag / 1000.0,
-        linesf / ag,
-        mg,
-        kag,
-        mbg,
-        ag / avg_total * 100.0,
-    );
-    unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
         "codegen".ptr() as *const char,
         ac,
         srcf / ac / 1000.0,
@@ -607,7 +641,6 @@ fn run_report() i32 {
         mtot / avg_total,
     );
 
-    unsafe stdio::printf("  codegen split: headers %.2f ms + sources %.2f ms\n".ptr() as *const char, ach, acs);
     // The best end-to-end run, scanned rather than indexed: nothing sorts `totals`.
     let mut best = totals[0];
     for i in 1..totals.len() {
@@ -626,6 +659,56 @@ fn run_report() i32 {
         "  heap: %.1f MiB requested per iteration;  peak RSS %.1f MiB\n".ptr() as *const char,
         sheap as f64 / fi / (1024.0 * 1024.0),
         rss as f64 / (1024.0 * 1024.0),
+    );
+
+    // The cc phase, on its own AFTER emit and never folded into codegen: emit the package to a scratch tree
+    // once, then compile it with the C compiler. cc is a child process, so it is timed on the monotonic wall
+    // clock (a child's CPU time never lands in this process's getrusage) rather than cpu_seconds like the
+    // in-process phases. Compile-only (`-c`): pure C-front-end/codegen cost, no link and no missing @c.source
+    // symbols to satisfy.
+    let mut ccdir = String::from_str(str::from_cstr(unsafe dshim::sc_tmpdir()));
+    ccdir.push_str("/sc_bench_cc");
+    let _ = unsafe dshim::sc_rm_rf(ccdir.cstr());
+    let _ = unsafe dshim::sc_mkdir_p(ccdir.cstr());
+    let mut names = Vector::<String>::new();
+    let cbytes = emit_package_to_dir(ccdir.as_str(), &mut names);
+    let mut cmd = String::new();
+    if unsafe dshim::sc_host_platform() == 0 {
+        cmd.push_str("cd /d \"");
+    } else {
+        cmd.push_str("cd \"");
+    }
+    cmd.push_str(ccdir.as_str());
+    cmd.push_str("\" && cc -std=c11 -D_POSIX_C_SOURCE=200809L -c");
+    for i in 0..names.len() {
+        cmd.push_str(" ");
+        cmd.push_string(names.at(i));
+    }
+    let mut scc: i64 = 0;
+    let mut crc: i32 = 0;
+    let mut kk: i32 = 0;
+    while kk < CC_ITERS {
+        let t0 = unsafe dshim::sc_ticks_ms();
+        crc = unsafe dshim::sc_run(cmd.cstr(), null, null, null, null);
+        scc = scc + (unsafe dshim::sc_ticks_ms() - t0);
+        kk = kk + 1;
+    }
+    let _ = unsafe dshim::sc_rm_rf(ccdir.cstr());
+    let acc = scc as f64 / CC_ITERS as f64;
+    if crc != 0 {
+        unsafe stdio::fprintf(
+            stdio::stderr(),
+            "  cc: compile FAILED (rc %d) -- timing below is unreliable\n".ptr() as *const char,
+            crc,
+        );
+    }
+    unsafe stdio::printf(
+        "  cc (compile-only): %.1f ms avg over %d;  %zu C files, %.1f KiB C -> objects, %.1f MB/s\n".ptr() as *const char,
+        acc,
+        CC_ITERS,
+        names.len(),
+        cbytes as f64 / 1024.0,
+        cbytes as f64 / acc / 1000.0,
     );
     return 0;
 }

@@ -1644,7 +1644,7 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                 sym.truncate(0);
                 sym.push_str("__sc_user_main"); // the argv wrapper below owns the C `main`
             }
-            let mut gfs = Vector::<NodeId>::new();
+            let mut gfs = Vector::<String>::new();
             let mut gts = Vector::<TypeId>::new();
             let is_glue = cemit_free_glue_fields(p, &mut cem, m as ModuleId, nid, &mut gfs, &mut gts);
             if is_glue {
@@ -1681,16 +1681,14 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                     }
                     wr.push_str(sig.slice(0, cut));
                     wr.push_str(sig.slice(cut + 4, sig.len()));
-                    // locals order ret-slots-then-args: a void free's receiver is `_0`
-                    let selfp = if lw.body.returns == 0 {
-                        "_0";
-                    } else {
-                        "_1";
-                    };
+                    // The receiver is the first argument (locals are return-slots then args): ask the
+                    // emitter for its C spelling -- it may preserve the source name (`self`) over `_N`.
+                    let mut selfp = String::new();
+                    cem.local_cname(lw.body.returns, &mut selfp);
                     wr.push_str("\n  ");
                     wr.push_str(sym.as_str());
                     wr.push_str("(");
-                    wr.push_str(selfp);
+                    wr.push_string(&selfp);
                     wr.push_str(");\n");
                     let mut wok = true;
                     for gi in 0..gfs.len() {
@@ -1706,13 +1704,9 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                             wr.push_str("  ");
                             wr.push_string(&fe9);
                             wr.push_str("(&");
-                            wr.push_str(selfp);
+                            wr.push_string(&selfp);
                             wr.push_str("->");
-                            cem.mg.ident(
-                                m as ModuleId,
-                                a.at_const(a.at_const(gfs[gi]).as_data.field.name).as_data.name.text,
-                                &mut wr,
-                            );
+                            wr.push_string(&gfs[gi]);
                             wr.push_str(");\n");
                         }
                     }
@@ -3394,7 +3388,7 @@ fn cemit_free_glue_fields(
     cem: &mut cbe::CEmit,
     m: ModuleId,
     fnid: NodeId,
-    out_f: &mut Vector<NodeId>,
+    out_f: &mut Vector<String>,
     out_t: &mut Vector<TypeId>,
 ) bool {
     let tgt = cem.mg.method_target(m, fnid);
@@ -3416,14 +3410,21 @@ fn cemit_free_glue_fields(
         return false;
     }
     let bsp = a.at_const(f.body).span;
+    let is_tuple = tn.as_data.aggregate.is_tuple;
     let ms = tn.as_data.aggregate.members;
     for i in 0..ms.len {
         let fid = unsafe a.list(ms)[i as usize];
         let fnode = a.at_const(fid);
-        if fnode.kind != NodeKind::NODE_FIELD {
+        // tuple members are bare type nodes; named members are NODE_FIELD
+        if !is_tuple && fnode.kind != NodeKind::NODE_FIELD {
             continue;
         }
-        let ft = a.type_of(fnode.as_data.field.ty);
+        let ftn = if is_tuple {
+            fid;
+        } else {
+            fnode.as_data.field.ty;
+        };
+        let ft = a.type_of(ftn);
         if ft == TYPE_NONE {
             continue;
         }
@@ -3446,7 +3447,14 @@ fn cemit_free_glue_fields(
             }
         }
         if !touched {
-            out_f.push(fid);
+            let mut fname = String::new();
+            if is_tuple {
+                fname.push_str("_");
+                fname.push_u64(i);
+            } else {
+                cem.mg.ident(m, a.at_const(fnode.as_data.field.name).as_data.name.text, &mut fname);
+            }
+            out_f.push(fname);
             out_t.push(ft);
         }
     }
@@ -3504,14 +3512,47 @@ fn cemit_main_wrapper(out: &mut String, argv: bool) {
 fn proto_of(body: &String, out: &mut String) {
     let bs = body.as_str();
     let n = bs.len();
-    let mut i: usize = 0;
+    // A shared declaration must not carry optimization-only specifiers: an `inline` prototype whose
+    // TU has no definition is flagged (`-Werror` inline-never-defined), and `__attribute__((always_
+    // inline, ...))` needs the `inline` keyword it would then lose. The definition keeps them; the
+    // `_Noreturn` specifier and return type follow this prefix and stay.
+    let mut start: usize = 0;
+    loop {
+        if start + 7 <= n && bs.slice(start, start + 7) == "inline " {
+            start += 7;
+        } else if start + 13 <= n && bs.slice(start, start + 13) == "__attribute__" {
+            let mut j = start + 13;
+            let mut depth: i32 = 0;
+            let mut began = false;
+            while j < n {
+                let c = bs.byte_at(j);
+                if c == 40 {
+                    depth += 1;
+                    began = true;
+                } else if c == 41 {
+                    depth -= 1;
+                }
+                j += 1;
+                if began && depth == 0 {
+                    break;
+                }
+            }
+            while j < n && bs.byte_at(j) == 32 {
+                j += 1;
+            }
+            start = j;
+        } else {
+            break;
+        }
+    }
+    let mut i = start;
     while i + 1 < n {
         if bs.byte_at(i) == 32 && bs.byte_at(i + 1) == 123 {
             break;
         }
         i += 1;
     }
-    out.push_str(bs.slice(0, i));
+    out.push_str(bs.slice(start, i));
     out.push_str(";\n");
 }
 

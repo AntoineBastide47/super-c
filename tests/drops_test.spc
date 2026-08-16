@@ -189,6 +189,19 @@ fn partial_move_field_drops() {
 }
 
 @test
+fn tuple_partial_move_field_drops() {
+    // The tuple analogue of partial_move_field_drops: a tuple member's move path is keyed
+    // positionally, so the still-owned member must resolve through `tuple_child` (a named-key
+    // lookup misses it, leaving the MOVED member falsely live -- a second drop, i.e. a double free).
+    let p = typed_package(
+        "struct T(String, String);\nfn takes(s: String) { s.free(); }\nfn main() i32 { let t = T(String::new(), String::new()); takes(t.0); return 0; }",
+    );
+    let c = schedule(&p, "main");
+    assert(c.fields == 1, "exactly the unmoved tuple member drops");
+    assert(c.uncond == 0 && c.cond == 0, "no whole-value drop after a partial tuple move");
+}
+
+@test
 fn match_arm_payload() {
     // A by-value payload binding consumed in one arm drops there and nowhere else.
     let p = typed_package(

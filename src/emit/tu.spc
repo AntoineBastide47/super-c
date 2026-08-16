@@ -269,14 +269,16 @@ extend TuEmit {
         }
         body.push_str(nm);
         body.push_str(" {\n");
+        let is_tuple = n.as_data.aggregate.is_tuple;
         let ms = n.as_data.aggregate.members;
         for i in 0..ms.len {
             let fid = unsafe da.list(ms)[i as usize];
-            if da.at_const(fid).kind != NodeKind::NODE_FIELD {
+            // tuple members are bare type nodes named positionally `_i`; named members are NODE_FIELD
+            if !is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
                 continue;
             }
             let mut fty = da.type_of(fid);
-            if fty == TYPE_NONE {
+            if fty == TYPE_NONE && !is_tuple {
                 fty = da.type_of(da.at_const(fid).as_data.field.ty);
             }
             if fty == TYPE_NONE {
@@ -286,7 +288,12 @@ extend TuEmit {
                 return false;
             }
             let mut fnm = String::new();
-            self.mg.ident(it.m, da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text, &mut fnm);
+            if is_tuple {
+                fnm.push_str("_");
+                fnm.push_u64(i);
+            } else {
+                self.mg.ident(it.m, da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text, &mut fnm);
+            }
             body.push_str("  ");
             // a `[T; N]` field interns len-0 in the generic pool (the length is symbolic, and a
             // len-0 array's frozen spelling is a POINTER): recover N from the annotation's length
@@ -429,7 +436,11 @@ extend TuEmit {
 
     fn field_arr_len(self: &mut Self, m: ModuleId, fid: NodeId, len_out: &mut u64) bool {
         let da = self.p().module_ast_const(m);
-        let tn = da.at_const(fid).as_data.field.ty;
+        let tn = if da.at_const(fid).kind == NodeKind::NODE_FIELD {
+            da.at_const(fid).as_data.field.ty;
+        } else {
+            fid; // tuple member: the node is already the type annotation
+        };
         if tn == NODE_NONE || da.at_const(tn).kind != NodeKind::NODE_ARRAY_TYPE {
             return false;
         }

@@ -14,7 +14,69 @@ const REFS: str = "struct P { pub x: i32, }\nfn reads(r: &P) i32 { return r.x; }
 
 const EXTERN: str = "extern \"C\" {\n  fn putchar(c: i32) i32;\n}\nfn main() i32 { let r: i32 = unsafe putchar(72); }\n";
 
-const STR: str = "fn f(s: str) usize { return s.len(); }\nfn main() i32 { let g: str = \"hi\"; return 0; }\n";
+const STR: str = "fn f(s: str) usize { return s.len(); }\nfn main() i32 { let g: str = \"hi\"; return f(g) as i32; }\n";
+
+// The streaming backend reconstructs structured C (if/else, native switch, while) from Core IR and
+// forwards return slots, instead of the raw block/goto CFG. These assertions pin the readable shape.
+const STRUCT: str = "fn f(n: i32) i32 { if n > 0 { return 1; } return 0; }\nfn g(n: i32) i32 { let mut s: i32 = 0; let mut i: i32 = 0; while i < n { s = s + i; i = i + 1; } return s; }\nfn main() i32 { return f(1) + g(3) - 4; }\n";
+
+// `expect_c` scans the whole program including any prelude functions that use the goto-layout
+// fallback, so it cannot assert the absence of `goto bb_`; these pin the structured SHAPES the
+// backend now produces, plus behavior. (The whole-program goto reduction is measured separately.)
+@test
+fn structured_backend() {
+    h::expect_c("branches emit structured if", STRUCT, "if (");
+    h::expect_c("loops emit a structured while", STRUCT, "while (1)");
+    h::expect_c("an early return forwards its value", STRUCT, "return 1LL;");
+    h::expect_exit("structured straight-line + branch + loop behave", STRUCT, 0);
+
+    // sugar_fmt_str: one call, then a direct forwarded return of the owning value.
+    let SUGAR: str = "struct S { pub n: i32 }\nextend S { fn bump(self: &mut S, v: i32) { self.n = self.n + v; } }\nfn sugar(s: S, v: i32) S { let mut r = s; r.bump(v); return r; }\nfn main() i32 { let a = sugar(S { n: 1 }, 2); return a.n - 3; }\n";
+    h::expect_c("the owning parameter is coalesced and returned directly", SUGAR, "return s;");
+    h::expect_exit("owning-value forwarding behaves", SUGAR, 0);
+
+    // A discriminant match lowers to a native C switch, not a goto chain.
+    let ENUM: str = "enum C { Red, Green, Blue }\nfn f(c: C) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn main() i32 { return f(C::Green) - 2; }\n";
+    h::expect_c("discriminant match is a native switch", ENUM, "switch (");
+    h::expect_c("switch case on the tag", ENUM, "case 1:");
+    h::expect_exit("native switch behaves", ENUM, 0);
+
+    // An early return inside a loop stays fully structured (a while plus an inner if).
+    let EARLY: str = "fn e(n: i32) i32 { let mut i: i32 = 0; while i < n { if i == 5 { return i; } i = i + 1; } return -1; }\nfn main() i32 { return e(10) - 5; }\n";
+    h::expect_c("early-return-in-loop is structured", EARLY, "while (1)");
+    h::expect_exit("early-return-in-loop behaves", EARLY, 0);
+
+    // A parameter named after a type in scope must not hide the typedef -- the whole TU stays legal
+    // C and behaves (the emitter disambiguates the variable name).
+    let COLLIDE: str = "struct Node { pub v: i32 }\nfn take(Node: i32, n: Node) i32 { return Node + n.v; }\nfn main() i32 { return take(2, Node { v: 3 }) - 5; }\n";
+    h::expect_exit("a variable named after a type stays legal C", COLLIDE, 0);
+
+    // A parameter named after an enum constant the body constructs must not hide it: the emitted
+    // `return C::Red` still reads the constant, not the parameter.
+    let ECOLLIDE: str = "enum C { Red, Green }\nfn pick(C_Red: i32) C { return C::Red; }\nfn main() i32 { return pick(1) as i32; }\n";
+    h::expect_exit("a variable named after an enum constant stays correct", ECOLLIDE, 0);
+
+    // A parameter named after the MANGLED symbol of a generic call (`id__i32`) must not hide it.
+    let GCOLLIDE: str = "fn id<T>(x: T) T { return x; }\nfn collide(id__i32: i32) i32 { return id::<i32>(7) + id__i32; }\nfn main() i32 { return collide(1) - 8; }\n";
+    h::expect_exit("a variable named after a mangled call symbol stays correct", GCOLLIDE, 0);
+
+    // Both the name AND its `_1` suffix are reserved (a generic call plus a real `id__i32_1`): the
+    // parameter must fall all the way back to `_N`, hiding neither symbol.
+    let GCOLLIDE2: str = "fn id<T>(x: T) T { return x; }\nfn id__i32_1(x: i32) i32 { return x + 1; }\nfn collide(id__i32: i32) i32 { return id::<i32>(7) + id__i32_1(id__i32); }\nfn main() i32 { return collide(1) - 9; }\n";
+    h::expect_exit("a doubly-colliding variable falls back to a temp name", GCOLLIDE2, 0);
+
+    // A never-read local is a dead store: dropping it must preserve behavior. (The structural check
+    // -- that neither declaration nor assignment is emitted -- is in cemit_test on an isolated
+    // function, since the whole program includes the -Wunused pragma text.)
+    let DEADL: str = "fn dead() i32 { let unused: i32 = 9; return 0; }\nfn main() i32 { return dead(); }\n";
+    h::expect_exit("dropping the dead store preserves behavior", DEADL, 0);
+
+    // A labeled multi-level break is not simple: the body uses the goto layout as its fallback, and
+    // still runs correctly.
+    let IRRED: str = "fn f(n: i32) i32 { let mut s: i32 = 0; 'outer: for i in 0..n { for j in 0..n { if i + j == 3 { break 'outer; } s = s + 1; } } return s; }\nfn main() i32 { return f(3) - 5; }\n";
+    h::expect_c("labeled multi-level control uses the goto fallback", IRRED, "goto ");
+    h::expect_exit("the goto-fallback body still behaves", IRRED, 0);
+}
 
 @test
 fn broad() {
@@ -22,7 +84,7 @@ fn broad() {
     h::expect_c("struct decl", BROAD, "struct Point");
     h::expect_c("struct field", BROAD, "int32_t x;");
     h::expect_c("method proto", BROAD, "Point__get(");
-    h::expect_c("method call self", BROAD, "Point__get(&_");
+    h::expect_c("method call self", BROAD, "Point__get(&p");
     h::expect_c(
         "associated new call",
         "struct String {}\nextend String { fn new() String { return String {}; } }\nfn f() String { return String::new(); }\n",
@@ -30,13 +92,13 @@ fn broad() {
     );
     h::expect_c("struct initializer", BROAD, "(Point){ .x = 1");
     h::expect_c("if statement", BROAD, "if (");
-    h::expect_c("loops lower to labeled blocks", BROAD, "goto bb_");
+    h::expect_c("loops emit a structured while", BROAD, "while (1)");
     h::expect_c("new", BROAD, "malloc(sizeof(int32_t))");
 }
 
 @test
 fn control() {
-    h::expect_c("loop back-edge", CONTROL, "goto bb_");
+    h::expect_c("for lowers to a structured while", CONTROL, "while (1)");
     h::expect_c("switch lowered to if", CONTROL, "if (");
     h::expect_c("switch literal test", CONTROL, " == ");
 }
@@ -66,7 +128,7 @@ fn switch_ranges() {
 @test
 fn pointer_arith() {
     h::expect_c("pointer offset", "fn f(p: *i32) i32 { return unsafe *(p + 1); }\n", "+ 1LL)");
-    h::expect_c("pointer difference", "fn f(a: *i32, b: *i32) isize { return unsafe (a - b); }\n", "(_1 - _2)");
+    h::expect_c("pointer difference", "fn f(a: *i32, b: *i32) isize { return unsafe (a - b); }\n", "(a - b)");
 }
 
 @test
@@ -113,7 +175,7 @@ fn externs() {
     );
     h::expect_c(
         "string literal stays str view by default",
-        "fn main() i32 { let s: str = \"zq9\"; return 0; }\n",
+        "fn main() i32 { let s: str = \"zq9\"; return s.len() as i32; }\n",
         "(str){ (const uint8_t *)\"zq9\"",
     );
 
@@ -198,7 +260,7 @@ fn if_expression() {
     let SRC: str = "fn f(n: i32) i32 { let x: i32 = if n > 0 { 1; } else { 2; }; return x; }\n";
     h::expect_c("then arm assigns the result temp", SRC, "= 1LL;");
     h::expect_c("else arm assigns the result temp", SRC, "= 2LL;");
-    h::expect_c("the chain branches", SRC, "goto bb_");
+    h::expect_c("the chain branches structurally", SRC, "if (");
 }
 
 @test

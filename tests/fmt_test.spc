@@ -266,6 +266,25 @@ fn golden_lifetimes() {
     expect_fmt("interface Lend{type Item<'a>;}", "interface Lend {\n    type Item<'a>;\n}\n");
 }
 
+// `&dyn T` / `&mut dyn T` fold the borrow into the dyn node as its qualifier, so the printer must
+// restore the `&` (with `mut`); a bare `dyn T` (as under `Box<dyn T>`) carries no borrow. Dropping
+// the `&` would silently change `&dyn A` into an owned `dyn A`.
+// Tuple-struct members are bare TYPE nodes, not NODE_FIELD; the printer must render each type
+// directly. Reading them as fields spelled garbage (a mis-cast node id).
+@test
+fn golden_tuple_struct() {
+    expect_fmt("struct Rgb(i32,i32,i32);", "struct Rgb(i32, i32, i32);\n");
+    expect_fmt("pub struct Boxed<T>(T);", "pub struct Boxed<T>(T);\n");
+}
+
+@test
+fn golden_dyn_reference() {
+    expect_fmt(
+        "interface A{fn f(self:&Self)i32;}\nfn s(v:&dyn A)i32{return v.f();}\nfn m(v:&mut dyn A)i32{return v.f();}\nfn b(v:Box<dyn A>)i32{return v.f();}",
+        "interface A {\n    fn f(self: &Self) i32;\n}\nfn s(v: &dyn A) i32 {\n    return v.f();\n}\nfn m(v: &mut dyn A) i32 {\n    return v.f();\n}\nfn b(v: Box<dyn A>) i32 {\n    return v.f();\n}\n",
+    );
+}
+
 // A `mut` binding inside a pattern is semantics, not style: the printer works from the pattern's
 // span, and a span that started at the identifier silently REWROTE `Some(mut x)` to `Some(x)` --
 // formatting then changed what the program means.
