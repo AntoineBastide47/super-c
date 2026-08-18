@@ -270,6 +270,9 @@ pub struct TypeChecker<'a> {
     // Per-interned-type `tc_type_is_free` result: -1 unknown, 0 no, 1 yes. Free-ness is a stable fact of
     // a concrete type (extends are parse-time facts), so the full result caches by TypeId.
     pub type_free_memo: Vector<i8>,
+    // Per (TypeId, depth 0..4) `tc_type_carries_borrow` result, same encoding; only computations
+    // that never touched a TYPE_FUNCTION are cached (closure answers move under the walk).
+    pub carries_borrow_memo: Vector<i8>,
     // TC-8: (module<<32|method) -> enclosing extend/interface item (NODE_NONE misses included).
     pub encl_ext_memo: Map<u64, NodeId>,
     pub encl_trait_memo: Map<u64, NodeId>,
@@ -548,6 +551,7 @@ extend TypeChecker {
             moved_bits: Vector::<u64>::new(),
             free_ext_memo: Map::<u64, u64>::new(),
             type_free_memo: Vector::<i8>::new(),
+            carries_borrow_memo: Vector::<i8>::new(),
             encl_ext_memo: Map::<u64, NodeId>::new(),
             encl_trait_memo: Map::<u64, NodeId>::new(),
             dynfn_list: Vector::<TypeId>::new(),
@@ -14979,6 +14983,7 @@ extend TypeChecker as Free {
         self.moved_bits.free();
         self.free_ext_memo.free();
         self.type_free_memo.free();
+        self.carries_borrow_memo.free();
         self.encl_ext_memo.free();
         self.encl_trait_memo.free();
         self.method_memo.free();

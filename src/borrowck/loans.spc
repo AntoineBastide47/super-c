@@ -116,6 +116,95 @@ pub struct Solver {
     pub visit_dirty: Vector<u32>, // words set in `visit` this query, so clearing is O(touched) not O(vwords)
     pub work: Vector<u64>, // flood worklist: origin << 32 | point
     pub succs: Vector<u32>, // reused point-successor scratch for the flood
+    // Reused per-stage scratch (truncated at each use), so a body allocates none of it after warmup.
+    s_cur32: Vector<u32>, // index_points: counting-sort cursors
+    s_ic: Vector<u32>, // index_points: per-block issue counts
+    s_kc: Vector<u32>, // index_points: per-block kill counts
+    s_uses: Vector<u64>, // origin_live_points: point<<32|local records
+    s_cur64: Vector<u64>, // origin_live_points block state / conflicts replay row
+    s_dset: Vector<u64>, // origin_live_points: per-pair defs
+    s_uset: Vector<u64>, // origin_live_points: per-pair uses
+    s_flow: Vector<u64>, // scope_flow: transfer scratch row
+    s_flow_queued: Vector<bool>,
+    s_flow_queue: Vector<u32>,
+    s_lo_start: Vector<u32>, // origin_live_points: per-local CSR into s_lo_flat of inference origins
+    s_lo_flat: Vector<u32>,
+    s_lb_start: Vector<u32>, // conflicts: per-local CSR into s_lb_flat of loans by place base
+    s_lb_flat: Vector<u32>,
+}
+
+// Index of the single set bit `b` (de Bruijn multiply; the standard BitScanForward table).
+const TZ64_TAB: [u8; 64] = [
+    0,
+    1,
+    48,
+    2,
+    57,
+    49,
+    28,
+    3,
+    61,
+    58,
+    50,
+    42,
+    38,
+    29,
+    17,
+    4,
+    62,
+    55,
+    59,
+    36,
+    53,
+    51,
+    43,
+    22,
+    45,
+    39,
+    33,
+    30,
+    24,
+    18,
+    12,
+    5,
+    63,
+    47,
+    56,
+    27,
+    60,
+    41,
+    37,
+    16,
+    54,
+    35,
+    52,
+    21,
+    44,
+    32,
+    23,
+    11,
+    46,
+    26,
+    40,
+    15,
+    34,
+    20,
+    31,
+    10,
+    25,
+    14,
+    19,
+    9,
+    13,
+    8,
+    7,
+    6,
+];
+fn tz64(b: u64) usize {
+    // The de Bruijn multiply deliberately wraps; only the top 6 bits of the product matter.
+    let p = b * 0x03F79D71B4CB0A89u64;
+    let tab: []u8 = TZ64_TAB;
+    return tab[(p >> 58) as usize] as usize;
 }
 
 extend Solver as Free {
@@ -137,6 +226,20 @@ extend Solver as Free {
         self.visit_dirty.free();
         self.work.free();
         self.succs.free();
+        self.s_cur32.free();
+        self.s_ic.free();
+        self.s_kc.free();
+        self.s_uses.free();
+        self.s_cur64.free();
+        self.s_dset.free();
+        self.s_uset.free();
+        self.s_flow.free();
+        self.s_flow_queued.free();
+        self.s_flow_queue.free();
+        self.s_lo_start.free();
+        self.s_lo_flat.free();
+        self.s_lb_start.free();
+        self.s_lb_flat.free();
     }
 }
 
@@ -167,6 +270,20 @@ extend Solver {
             visit_dirty: Vector::<u32>::new(),
             work: Vector::<u64>::new(),
             succs: Vector::<u32>::new(),
+            s_cur32: Vector::<u32>::new(),
+            s_ic: Vector::<u32>::new(),
+            s_kc: Vector::<u32>::new(),
+            s_uses: Vector::<u64>::new(),
+            s_cur64: Vector::<u64>::new(),
+            s_dset: Vector::<u64>::new(),
+            s_uset: Vector::<u64>::new(),
+            s_flow: Vector::<u64>::new(),
+            s_flow_queued: Vector::<bool>::new(),
+            s_flow_queue: Vector::<u32>::new(),
+            s_lo_start: Vector::<u32>::new(),
+            s_lo_flat: Vector::<u32>::new(),
+            s_lb_start: Vector::<u32>::new(),
+            s_lb_flat: Vector::<u32>::new(),
         };
     }
 
@@ -178,8 +295,10 @@ extend Solver {
         self.errs.truncate(0);
         self.point_block.truncate(0);
         self.sub_by_point.truncate(0);
-        self.sub_pt_start.truncate(0);
-        self.live_pts.truncate(0);
+        // sub_pt_start keeps its length across bodies: index_points re-sizes and re-zeroes it
+        // through raw stores, and every reader runs after that pass.
+        // live_pts keeps its length across bodies: origin_live_points re-sizes and re-zeroes it
+        // through raw stores, and every reader runs after that pass.
         self.oreach.truncate(0);
         self.req_cache.truncate(0);
         self.req_have.truncate(0);
@@ -221,6 +340,29 @@ extend Solver {
             if f.loans.at(l).activated_at != bf::BF_NONE {
                 s.stats.activation_facts += 1;
             }
+        }
+        // Zero loans: conflict, scope, and escape analysis have nothing to feed (each of their
+        // errors names a loan). Only a flow into a DECLARED return-lifetime placeholder can still
+        // error, so run the signature-relation stages (whose flood reads origin liveness) exactly
+        // when one exists and skip everything otherwise.
+        if f.loans.len() == 0 {
+            // `placeholders` pairs distinct universals, so a lone universal cannot error.
+            let mut ph = f.nuniversal > 1;
+            if ph {
+                ph = false;
+                for r in 0..f.ret_origin.len() {
+                    if !f.ret_elided[r] {
+                        ph = true;
+                    }
+                }
+            }
+            if ph {
+                s.index_points();
+                s.origin_live_points();
+                s.prepass();
+                s.placeholders();
+            }
+            return;
         }
         s.index_points();
         s.origin_live_points();
@@ -268,8 +410,17 @@ extend Solver {
         self.stats.cfg_edges = c.succ.len() as u64;
         // Subsets sorted by point (counting sort: two passes over the fact vector).
         let n = f.subsets.len();
-        for _p in 0..f.npoints + 1 {
+        // Grows only past the high-water mark, then re-zeroes through raw stores (see MoveFlow).
+        let sneed = (f.npoints + 1) as usize;
+        while self.sub_pt_start.len() < sneed {
             self.sub_pt_start.push(0);
+        }
+        self.sub_pt_start.truncate(sneed);
+        unsafe {
+            let zs = self.sub_pt_start.as_ptr() as *mut u32;
+            for i in 0..sneed {
+                *(zs + i) = 0;
+            }
         }
         for i in 0..n {
             let p = f.subsets.at(i).point;
@@ -278,44 +429,44 @@ extend Solver {
         for p in 0..f.npoints {
             self.sub_pt_start.set(p as usize + 1, self.sub_pt_start[p as usize + 1] + self.sub_pt_start[p as usize]);
         }
-        let mut cur = Vector::<u32>::new();
+        self.s_cur32.truncate(0);
         for p in 0..f.npoints {
-            cur.push(self.sub_pt_start[p as usize]);
+            self.s_cur32.push(self.sub_pt_start[p as usize]);
         }
         for _i in 0..n {
             self.sub_by_point.push(0);
         }
         for i in 0..n {
-            let p = f.subsets.at(i).point;
-            self.sub_by_point.set(cur[p as usize] as usize, i as u32);
-            cur.set(p as usize, cur[p as usize] + 1);
+            let p = f.subsets.at(i).point as usize;
+            self.sub_by_point.set(self.s_cur32[p] as usize, i as u32);
+            self.s_cur32.set(p, self.s_cur32[p] + 1);
         }
 
         // Loan issues and kills bucketed per block.
         let nb = c.nblocks;
-        let mut ic = Vector::<u32>::new();
-        let mut kc = Vector::<u32>::new();
+        self.s_ic.truncate(0);
+        self.s_kc.truncate(0);
         for _i in 0..nb {
-            ic.push(0);
-            kc.push(0);
+            self.s_ic.push(0);
+            self.s_kc.push(0);
         }
         for l in 0..f.loans.len() {
-            let blk = self.point_block[f.loans.at(l).issued_at as usize];
-            ic.set(blk as usize, ic[blk as usize] + 1);
+            let blk = self.point_block[f.loans.at(l).issued_at as usize] as usize;
+            self.s_ic.set(blk, self.s_ic[blk] + 1);
         }
         for k in 0..f.kills.len() {
-            let blk = self.point_block[f.kills.at(k).point as usize];
-            kc.set(blk as usize, kc[blk as usize] + 1);
+            let blk = self.point_block[f.kills.at(k).point as usize] as usize;
+            self.s_kc.set(blk, self.s_kc[blk] + 1);
         }
         let mut ia: u32 = 0;
         let mut ka: u32 = 0;
         for bi in 0..nb {
             self.issue_start.push(ia);
             self.kill_start.push(ka);
-            ia += ic[bi as usize];
-            ka += kc[bi as usize];
-            ic.set(bi as usize, 0);
-            kc.set(bi as usize, 0);
+            ia += self.s_ic[bi as usize];
+            ka += self.s_kc[bi as usize];
+            self.s_ic.set(bi as usize, 0);
+            self.s_kc.set(bi as usize, 0);
         }
         self.issue_start.push(ia);
         self.kill_start.push(ka);
@@ -327,16 +478,16 @@ extend Solver {
         }
         for l in 0..f.loans.len() {
             let blk = self.point_block[f.loans.at(l).issued_at as usize] as usize;
-            self.issues_blk.set((self.issue_start[blk] + ic[blk]) as usize, l as u32);
-            ic.set(blk, ic[blk] + 1);
+            self.issues_blk.set((self.issue_start[blk] + self.s_ic[blk]) as usize, l as u32);
+            self.s_ic.set(blk, self.s_ic[blk] + 1);
         }
         for k in 0..f.kills.len() {
             let blk = self.point_block[f.kills.at(k).point as usize] as usize;
             self.kills_blk.set(
-                (self.kill_start[blk] + kc[blk]) as usize,
+                (self.kill_start[blk] + self.s_kc[blk]) as usize,
                 f.kills.at(k).point as u64 << 32 | f.kills.at(k).loan as u64,
             );
-            kc.set(blk, kc[blk] + 1);
+            self.s_kc.set(blk, self.s_kc[blk] + 1);
         }
     }
 
@@ -352,11 +503,22 @@ extend Solver {
             self.pwords = 1;
         }
         let ninf = f.norigins - f.nuniversal;
-        for _i in 0..ninf * self.pwords {
+        // Grows only past the high-water mark, then re-zeroes through raw stores (see MoveFlow).
+        let lneed = (ninf * self.pwords) as usize;
+        while self.live_pts.len() < lneed {
             self.live_pts.push(0u64);
         }
+        self.live_pts.truncate(lneed);
+        unsafe {
+            let zl = self.live_pts.as_ptr() as *mut u64;
+            for i in 0..lneed {
+                *(zl + i) = 0u64;
+            }
+        }
         // Per-point use/def of locals, derived from accesses (a full write defines, all else uses).
-        let mut uses = Vector::<u64>::new(); // point << 32 | local, sorted by point via counting
+        // The four scratch vectors swap out of their reused Solver slots and back at the end.
+        let mut uses = replace(&mut self.s_uses, Vector::<u64>::new()); // point << 32 | local, sorted by point
+        uses.truncate(0);
         for a in 0..f.accesses.len() {
             let ac = *f.accesses.at(a);
             if ac.place == bf::BF_NONE {
@@ -388,10 +550,56 @@ extend Solver {
             uses.set(j, v);
         }
         let lw = f.lwords as usize;
-        let mut cur = Vector::<u64>::new();
+        // Invert origin_local into a per-local CSR: each statement pair then touches only the
+        // origins whose local is live there (found by scanning the live-word bits), instead of
+        // testing every inference origin per pair -- the old O(pairs * norigins) hot spot.
+        let nl = bd.locals.len();
+        self.s_lo_start.truncate(0);
+        for _i in 0..nl + 1 {
+            self.s_lo_start.push(0);
+        }
+        for o in f.nuniversal..f.norigins {
+            let l = f.origin_local[o as usize];
+            if l != bf::BF_NONE {
+                self.s_lo_start.set(l as usize + 1, self.s_lo_start[l as usize + 1] + 1);
+            }
+        }
+        for i in 0..nl {
+            self.s_lo_start.set(i + 1, self.s_lo_start[i + 1] + self.s_lo_start[i]);
+        }
+        self.s_cur32.truncate(0);
+        for i in 0..nl {
+            self.s_cur32.push(self.s_lo_start[i]);
+        }
+        self.s_lo_flat.truncate(0);
+        for _i in 0..self.s_lo_start[nl] {
+            self.s_lo_flat.push(0);
+        }
+        for o in f.nuniversal..f.norigins {
+            let l = f.origin_local[o as usize] as usize;
+            if l as u32 != bf::BF_NONE {
+                self.s_lo_flat.set(self.s_cur32[l] as usize, o);
+                self.s_cur32.set(l, self.s_cur32[l] + 1);
+            }
+        }
+        // Statement pairs backward (entry, exit). A definition is LIVE at both points of its own
+        // statement -- loans and subsets injected there must flow onward -- and dead before it.
+        // dset/uset live outside the block loop (the pair loop re-zeroes them) so a body allocates
+        // them once, not per block.
+        let mut cur = replace(&mut self.s_cur64, Vector::<u64>::new());
+        let mut dset = replace(&mut self.s_dset, Vector::<u64>::new());
+        let mut uset = replace(&mut self.s_uset, Vector::<u64>::new());
+        // s_cur32 is free again after the CSR fill above; reuse it as the pair's dirty-word list.
+        let mut dirty = replace(&mut self.s_cur32, Vector::<u32>::new());
+        cur.truncate(0);
+        dset.truncate(0);
+        uset.truncate(0);
         for _i in 0..lw {
             cur.push(0u64);
+            dset.push(0u64);
+            uset.push(0u64);
         }
+        let mut ub: usize = 0; // running cursor into `uses` (blocks ascend, so it only moves forward)
         for bi in 0..c.nblocks {
             let base = f.block_base[bi as usize];
             let mut end = f.npoints;
@@ -407,49 +615,36 @@ extend Solver {
                     cur.set((r / 64) as usize, cur[(r / 64) as usize] | 1u64 << (r & 63));
                 }
             }
-            // Find this block's slice of `uses` (binary search on the sorted vector).
-            let mut lo: usize = 0;
-            let mut hi = uses.len();
-            while lo < hi {
-                let mid = (lo + hi) / 2;
-                if (uses[mid] >> 32 & 0x7FFFFFFFu64) < base as u64 {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
+            // Blocks ascend and pairs descend while `uses` is point-sorted, so two monotone cursors
+            // replace the per-block and per-pair binary searches: each use record is visited once.
+            while ub < uses.len() && (uses[ub] >> 32 & 0x7FFFFFFFu64) < base as u64 {
+                ub += 1;
             }
-            let first = lo;
-            // Statement pairs backward (entry, exit). A definition is LIVE at both points of its own
-            // statement -- loans and subsets injected there must flow onward -- and dead before it.
-            let mut dset = Vector::<u64>::new();
-            let mut uset = Vector::<u64>::new();
-            for _i in 0..lw {
-                dset.push(0u64);
-                uset.push(0u64);
+            let first = ub;
+            while ub < uses.len() && (uses[ub] >> 32 & 0x7FFFFFFFu64) < end as u64 {
+                ub += 1;
             }
+            let mut wpos = ub;
             let mut p = end;
+            // dset/uset are all-zero at every pair entry: the fill below records the words it
+            // touches and the pair's tail re-zeroes exactly those, so the per-pair cost follows
+            // the pair's accesses instead of the full row width.
             while p > base + 1 {
                 let hi2 = p - 1;
                 let lo2 = p - 2;
                 p -= 2;
-                for k in 0..lw {
-                    dset.set(k, 0u64);
-                    uset.set(k, 0u64);
+                // Every use's point falls in exactly one pair; the window walks left as pairs descend.
+                let mut wlo = wpos;
+                while wlo > first && (uses[wlo - 1] >> 32 & 0x7FFFFFFFu64) >= lo2 as u64 {
+                    wlo -= 1;
                 }
-                // Lower bound of this pair's accesses inside the block slice.
-                let mut a0 = first;
-                let mut a1 = uses.len();
-                while a0 < a1 {
-                    let mid = (a0 + a1) / 2;
-                    if (uses[mid] >> 32 & 0x7FFFFFFFu64) < lo2 as u64 {
-                        a0 = mid + 1;
-                    } else {
-                        a1 = mid;
-                    }
-                }
-                let mut i = a0;
-                while i < uses.len() && (uses[i] >> 32 & 0x7FFFFFFFu64) <= hi2 as u64 {
+                dirty.truncate(0);
+                let mut i = wlo;
+                while i < wpos {
                     let l = (uses[i] & 0xFFFFFFFFu64) as usize;
+                    if (dset[l / 64] | uset[l / 64]) == 0 {
+                        dirty.push((l / 64) as u32);
+                    }
                     if uses[i] >> 63 != 0 {
                         dset.set(l / 64, dset[l / 64] | 1u64 << (l & 63) as u64);
                     } else {
@@ -457,32 +652,45 @@ extend Solver {
                     }
                     i += 1;
                 }
+                wpos = wlo;
                 // Record at both points: live-after plus this statement's uses and definitions.
-                for o in f.nuniversal..f.norigins {
-                    let l = f.origin_local[o as usize];
-                    if l == bf::BF_NONE {
-                        continue;
-                    }
-                    let w = (l / 64) as usize;
-                    let bit = 1u64 << (l & 63) as u64;
-                    if ((cur[w] | uset[w] | dset[w]) & bit) != 0 {
-                        let row = ((o - f.nuniversal) * self.pwords) as usize;
-                        self.live_pts.set(
-                            row + (lo2 / 64) as usize,
-                            self.live_pts[row + (lo2 / 64) as usize] | 1u64 << (lo2 & 63) as u64,
-                        );
-                        self.live_pts.set(
-                            row + (hi2 / 64) as usize,
-                            self.live_pts[row + (hi2 / 64) as usize] | 1u64 << (hi2 & 63) as u64,
-                        );
+                for k in 0..lw {
+                    let mut m = cur[k] | uset[k] | dset[k];
+                    while m != 0 {
+                        let l = k * 64 + tz64(m & 0u64 - m);
+                        m = m & m - 1u64;
+                        if l >= nl {
+                            continue;
+                        }
+                        for oi in self.s_lo_start[l]..self.s_lo_start[l + 1] {
+                            let o = self.s_lo_flat[oi as usize];
+                            let row = ((o - f.nuniversal) * self.pwords) as usize;
+                            self.live_pts.set(
+                                row + (lo2 / 64) as usize,
+                                self.live_pts[row + (lo2 / 64) as usize] | 1u64 << (lo2 & 63) as u64,
+                            );
+                            self.live_pts.set(
+                                row + (hi2 / 64) as usize,
+                                self.live_pts[row + (hi2 / 64) as usize] | 1u64 << (hi2 & 63) as u64,
+                            );
+                        }
                     }
                 }
-                // live-before = (live-after - defs) | uses.
-                for k in 0..lw {
+                // live-before = (live-after - defs) | uses; untouched words have empty defs/uses,
+                // so only the dirty words can change -- fold their re-zeroing into the same pass.
+                for di in 0..dirty.len() {
+                    let k = dirty[di] as usize;
                     cur.set(k, cur[k] & ~dset[k] | uset[k]);
+                    dset.set(k, 0u64);
+                    uset.set(k, 0u64);
                 }
             }
         }
+        self.s_uses = uses;
+        self.s_cur64 = cur;
+        self.s_dset = dset;
+        self.s_uset = uset;
+        self.s_cur32 = dirty;
     }
 
     const fn origin_live_at(self: &Self, o: u32, p: u32) bool {
@@ -571,14 +779,33 @@ extend Solver {
         let c = unsafe &*self.c;
         let nb = c.nblocks;
         self.scope.reset_to(f.loans.len() as u32, nb);
-        let mut scratch = Vector::<u64>::new();
-        let mut queued = Vector::<bool>::new();
-        let mut queue = Vector::<u32>::new();
+        // Reused scratch, swapped out of the Solver slots and back at the end.
+        let mut scratch = replace(&mut self.s_flow, Vector::<u64>::new());
+        let mut queued = replace(&mut self.s_flow_queued, Vector::<bool>::new());
+        let mut queue = replace(&mut self.s_flow_queue, Vector::<u32>::new());
+        scratch.truncate(0);
+        queued.truncate(0);
+        queue.truncate(0);
         // Every block runs at least once: a block's own issues must reach its successors even when
-        // its entry row never changes from the empty initial state.
-        for i in 0..nb {
-            queued.push(true);
-            queue.push(nb - 1 - i);
+        // its entry row never changes. Seed so the LIFO pops visit reachable blocks in exact RPO --
+        // loans flow forward, so each sees converged predecessors on its first visit (the liveness
+        // seed's mirror) -- with unreachable blocks after them (same converged state as before).
+        for _i in 0..nb {
+            queued.push(false);
+        }
+        for i in 0..c.rpo.len() {
+            queued.set(c.rpo[i] as usize, true);
+        }
+        for bi in 0..nb {
+            if !queued[bi as usize] {
+                queue.push(bi); // popped after the RPO run
+            }
+        }
+        for i in 0..c.rpo.len() {
+            queue.push(c.rpo[c.rpo.len() - 1 - i]);
+        }
+        for bi in 0..nb {
+            queued.set(bi as usize, true);
         }
         while queue.len() != 0 {
             let bi = queue[queue.len() - 1];
@@ -593,6 +820,9 @@ extend Solver {
                 }
             }
         }
+        self.s_flow = scratch;
+        self.s_flow_queued = queued;
+        self.s_flow_queue = queue;
     }
 
     // Replay block `bi` from its entry row; stop AFTER applying facts at points <= `upto`
@@ -779,10 +1009,61 @@ extend Solver {
 
     fn conflicts(self: &mut Self) {
         let f = unsafe &*self.f;
-        let mut scratch = Vector::<u64>::new();
-        for a in 0..f.accesses.len() {
+        let mut scratch = replace(&mut self.s_flow, Vector::<u64>::new());
+        let na = f.accesses.len();
+        let nl = f.loans.len();
+        // Every conflict needs the loan and the access to share a base local (the whole-local
+        // branch tests it, places_conflict demands it), so bucket loans by base and sweep only
+        // the access's own bucket: O(accesses + same-base pairs) instead of accesses * loans.
+        // Bucket order is ascending loan id -- the exact subsequence the full sweep visited.
+        let bucketed = na * nl >= 1024;
+        if bucketed {
+            let nlc = self.body().locals.len();
+            self.s_lb_start.truncate(0);
+            self.s_ic.truncate(0);
+            self.s_lb_flat.truncate(0);
+            for _i in 0..nlc + 1 {
+                self.s_lb_start.push(0);
+            }
+            for l in 0..nl {
+                let base = self.body().places.at(f.loans.at(l).place as usize).base as usize;
+                self.s_lb_start.set(base + 1, self.s_lb_start[base + 1] + 1);
+            }
+            for i in 0..nlc {
+                self.s_lb_start.set(i + 1, self.s_lb_start[i + 1] + self.s_lb_start[i]);
+                self.s_ic.push(self.s_lb_start[i]);
+            }
+            for _i in 0..nl {
+                self.s_lb_flat.push(0);
+            }
+            for l in 0..nl {
+                let base = self.body().places.at(f.loans.at(l).place as usize).base as usize;
+                self.s_lb_flat.set(self.s_ic[base] as usize, l as u32);
+                self.s_ic.set(base, self.s_ic[base] + 1);
+            }
+        }
+        for a in 0..na {
             let ac = *f.accesses.at(a);
-            for li in 0..f.loans.len() {
+            let mut it0: usize = 0;
+            let mut it1 = nl;
+            if bucketed {
+                let base = if ac.place == bf::BF_NONE {
+                    ac.local as usize;
+                } else {
+                    self.body().places.at(ac.place as usize).base as usize;
+                };
+                if base + 1 >= self.s_lb_start.len() {
+                    continue; // no local -> no loan shares its base
+                }
+                it0 = self.s_lb_start[base] as usize;
+                it1 = self.s_lb_start[base + 1] as usize;
+            }
+            for it in it0..it1 {
+                let li = if bucketed {
+                    self.s_lb_flat[it] as usize;
+                } else {
+                    it;
+                };
                 let lo = *f.loans.at(li);
                 if ac.place == bf::BF_NONE {
                     // Whole-local access: the borrowed storage dies. A loan THROUGH a dereference
@@ -885,6 +1166,7 @@ extend Solver {
                 );
             }
         }
+        self.s_flow = scratch;
     }
 
     // A loan of storage this body owns must never reach a placeholder that is live at a return.

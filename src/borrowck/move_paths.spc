@@ -22,6 +22,10 @@ pub struct MoveForest {
     pub local_root: Vector<u32>, // per local: root path id (every local gets one)
     pub place_path: Vector<u32>, // per PlaceId: exact tracked path, or MP_NONE (cut by deref/index)
     pub place_cut: Vector<u32>, // per PlaceId: nearest tracked ANCESTOR path before the cut, or MP_NONE
+    // Dense per-path mirrors of the two fields the event replay reads: the hot loops touch these
+    // one-bit/4-byte rows instead of pulling a 32-byte MovePath record per event.
+    pub leaf: Vector<u64>, // bit per path: no tracked children
+    pub parent: Vector<u32>, // per path: parent id (MP_NONE for a root)
 }
 
 extend MoveForest as Free {
@@ -30,6 +34,8 @@ extend MoveForest as Free {
         self.local_root.free();
         self.place_path.free();
         self.place_cut.free();
+        self.leaf.free();
+        self.parent.free();
     }
 }
 
@@ -46,6 +52,8 @@ extend MoveForest {
             local_root: Vector::<u32>::new(),
             place_path: Vector::<u32>::new(),
             place_cut: Vector::<u32>::new(),
+            leaf: Vector::<u64>::new(),
+            parent: Vector::<u32>::new(),
         };
     }
 
@@ -74,6 +82,10 @@ extend MoveForest {
             );
             f.local_root.push(f.paths.len() as u32 - 1);
         }
+        // Event packs the path id into 24 bits; check the root block too (child() checks growth).
+        if f.paths.len() > 0xFFFFFF {
+            panic("move-path id overflows the 24-bit Event encoding");
+        }
         for p in 0..b.places.len() {
             let pl = *b.places.at(p);
             let mut cur = f.local_root[pl.base as usize];
@@ -91,6 +103,19 @@ extend MoveForest {
             f.place_path.push(cur);
             f.place_cut.push(cut);
         }
+        // Mirror the replay-hot fields into dense rows (one pass; the tree is final here).
+        f.leaf.truncate(0);
+        f.parent.truncate(0);
+        for _i in 0..(f.paths.len() + 63) / 64 {
+            f.leaf.push(0u64);
+        }
+        for p in 0..f.paths.len() {
+            let mp = f.paths.at(p);
+            f.parent.push(mp.parent);
+            if mp.first_child == MP_NONE {
+                f.leaf.set(p / 64, f.leaf[p / 64] | 1u64 << (p & 63) as u64);
+            }
+        }
     }
 
     // The child of `parent` for canonical element `elem`, created on first mention.
@@ -107,6 +132,10 @@ extend MoveForest {
         self.paths.push(
             MovePath { base: base, parent: parent, first_child: MP_NONE, next_sibling: MP_NONE, elem: elem, ty: ty },
         );
+        // Event packs the path id into 24 bits; this is the single growth point past the roots.
+        if self.paths.len() > 0xFFFFFF {
+            panic("move-path id overflows the 24-bit Event encoding");
+        }
         let id = self.paths.len() as u32 - 1;
         if last == MP_NONE {
             self.paths[parent as usize].first_child = id;
@@ -142,6 +171,11 @@ extend MoveForest {
             c = self.paths.at(c as usize).next_sibling;
         }
         return MP_NONE;
+    }
+
+    /// True when `p` tracks no sub-places (its subtree is itself); a dense-bit read, replay-hot.
+    pub const fn is_leaf(self: &Self, p: u32) bool {
+        return (*self.leaf.at((p / 64) as usize) >> (p & 63) as u64 & 1u64) != 0;
     }
 
     /// Visit `p` and every descendant (iterative; `scratch` is the caller's reusable stack).

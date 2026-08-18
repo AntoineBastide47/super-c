@@ -29,27 +29,19 @@ pub struct ArgKey {
     pub has_val: bool,
 }
 
-/// One discovered instance: the declaration plus its argument keys (flat pool range).
+/// One discovered instance: the declaration plus its argument keys (flat pool range). Packed to
+/// 32 bytes (two records per cache line) -- expansion and pairing iterate `recs` by value.
 pub struct InstRec {
-    pub kind: u8,
+    pub hash: u64,
     pub def: DefId,
     pub args_start: u32,
     pub args_len: u32,
-    pub hash: u64,
-    pub expanded: bool,
     /// Pool anchor: the module + TypeId where this instance was first seen as a real pool type
-    /// (TYPE_NONE = derived through substitution/cross product only). Homes compute from it.
-    pub amod: ModuleId,
+    /// (TYPE_NONE = derived through substitution/cross product only).
     pub aty: TypeId,
-    pub home: ModuleId, // owner-emits home (anchored records; 0xFFFF = not computed)
-    /// Argument anchor for FN/METHOD records: the pool whose REAL TypeIds first spelled this
-    /// instance concretely -- what per-instance emission binds its substitution env from.
-    /// `arty` = the receiver instance type (METHOD only), `aargs` = the fn's/method's own bound
-    /// argument types. False = seen only under substitution frames.
-    pub anchored: bool,
-    pub amod2: ModuleId,
-    pub arty: TypeId,
-    pub aargs: [TypeId; 8],
+    pub amod: ModuleId,
+    pub kind: u8,
+    pub expanded: bool,
 }
 
 /// One extend targeting a declaration (built once; aggregate expansion walks its methods).
@@ -68,6 +60,16 @@ struct Subst {
     pub key: ArgKey,
 }
 
+/// Per kept body: the walk-relevant items, extracted once. A body's locals and rvalues repeat the
+/// same interned TypeIds heavily, and generic bodies re-walk once per instantiation frame -- the
+/// framed walks iterate this ~10x smaller list instead of the whole body.
+struct WalkCache {
+    pub built: bool,
+    pub tys: Vector<TypeId>, // unique local/rvalue types, first-occurrence order
+    pub consts: Vector<u32>, // CK_ITEM constant ids carrying bound targs
+    pub calls: Vector<u32>, // block ids whose terminator is a resolved TM_CALL
+}
+
 pub struct InstGraph {
     pub pkg: *const loader::Package,
     pub recs: Vector<InstRec>,
@@ -76,6 +78,26 @@ pub struct InstGraph {
     ix_used: u32,
     cursor: usize, // worklist: recs[cursor..] await expansion
     exts: Vector<ExtRow>, // every extend in the package, keyed by its target declaration
+    // membership indexes over `exts` and the package's interfaces: expansion asks per call site,
+    // so owner lookups must not rescan the extend/item lists
+    ext_of: Map<u64, u64>, // (module << 32 | fnode) -> owning extend node (rows of `exts` only)
+    iface_of: Map<u64, u64>, // (module << 32 | fnode) -> owning interface node
+    // per-module TypeIds already fully walked by note_type under an EMPTY frame: bodies name the
+    // same interned types over and over, and a completed depth-0 walk covers every revisit
+    noted: Vector<Vector<bool>>,
+    /// One lowering per declaration, shared by every frame that walks it (lowering ignores the
+    /// frame; only walking applies it). The emitter takes these bodies instead of re-lowering.
+    /// `kept_ix` maps (module << 32 | node) to a `kept` index; 0xFFFFFFFFFFFFFFFF = lowering failed.
+    pub kept: Vector<irl::Lowerer>,
+    pub kept_ix: Map<u64, u64>,
+    // The argument keys of the record being interned: every add() reads this buffer, so the hot
+    // walk never allocates a per-record key vector.
+    argbuf: Vector<ArgKey>,
+    /// The shared scratch Lowerer: every body lowers through its (capacity-retaining) pools, and
+    /// only an exact-size compact copy lands in `kept` -- no growth chains, no retained slack.
+    low: irl::Lowerer,
+    wcache: Vector<WalkCache>, // parallel to `kept`
+    wt_seen: Map<u64, u64>, // scratch: TypeIds already in the cache being built
     pub bodies: u64, // walked body count (roots + expansions)
     pub overflow: bool, // budget exhausted; the report marks itself partial
     budget: u32,
@@ -87,6 +109,15 @@ extend InstGraph as Free {
         self.keys.free();
         self.index.free();
         self.exts.free();
+        self.ext_of.free();
+        self.iface_of.free();
+        self.noted.free();
+        self.kept.free();
+        self.kept_ix.free();
+        self.argbuf.free();
+        self.low.free();
+        self.wcache.free();
+        self.wt_seen.free();
     }
 }
 
@@ -132,6 +163,15 @@ extend InstGraph {
             ix_used: 0,
             cursor: 0,
             exts: Vector::<ExtRow>::new(),
+            ext_of: Map::<u64, u64>::new(),
+            iface_of: Map::<u64, u64>::new(),
+            noted: Vector::<Vector<bool>>::new(),
+            kept: Vector::<irl::Lowerer>::new(),
+            kept_ix: Map::<u64, u64>::new(),
+            argbuf: Vector::<ArgKey>::new(),
+            low: irl::Lowerer::new(pkg, 0, NODE_NONE),
+            wcache: Vector::<WalkCache>::new(),
+            wt_seen: Map::<u64, u64>::new(),
             bodies: 0,
             overflow: false,
             budget: 64000000,
@@ -148,13 +188,14 @@ extend InstGraph {
         return true;
     }
 
-    // Intern a record; returns its id and whether it was new. Hash + equality use skeys only (the
-    // value is derived data riding along for frame evaluation).
-    pub fn add(self: &mut Self, kind: u8, def: DefId, args: &Vector<ArgKey>, fresh: &mut bool) u32 {
+    // Intern the record whose argument keys sit in `argbuf`; returns its id and whether it was
+    // new. Hash + equality use skeys only (the value is derived data riding along for frame
+    // evaluation).
+    pub fn add(self: &mut Self, kind: u8, def: DefId, fresh: &mut bool) u32 {
         let mut h = mix(mix(1469598103934665603u64, kind), def.module);
         h = mix(h, def.node);
-        for i in 0..args.len() {
-            h = mix(h, args.at(i).skey);
+        for i in 0..self.argbuf.len() {
+            h = mix(h, self.argbuf.at(i).skey);
         }
         if self.index.len() == 0 || (self.ix_used as usize + 1) * 4 >= self.index.len() * 3 {
             let mut cap: usize = 64;
@@ -181,20 +222,19 @@ extend InstGraph {
             let cur = self.index[i];
             if cur == IG_NONE {
                 let start = self.keys.len() as u32;
-                for k in 0..args.len() {
-                    self.keys.push(*args.at(k));
+                for k in 0..self.argbuf.len() {
+                    self.keys.push(*self.argbuf.at(k));
                 }
                 self.recs.push(
                     InstRec {
-                        kind: kind,
+                        hash: h,
                         def: def,
                         args_start: start,
-                        args_len: args.len() as u32,
-                        hash: h,
-                        expanded: false,
-                        amod: 0,
+                        args_len: self.argbuf.len() as u32,
                         aty: TYPE_NONE,
-                        home: 0xFFFF,
+                        amod: 0,
+                        kind: kind,
+                        expanded: false,
                     },
                 );
                 let id = self.recs.len() as u32 - 1;
@@ -204,10 +244,10 @@ extend InstGraph {
                 return id;
             }
             let r = self.recs.at(cur as usize);
-            if r.hash == h && r.kind == kind && r.def.module == def.module && r.def.node == def.node && r.args_len as usize == args.len() {
+            if r.hash == h && r.kind == kind && r.def.module == def.module && r.def.node == def.node && r.args_len as usize == self.argbuf.len() {
                 let mut eq = true;
                 for k in 0..r.args_len {
-                    if self.keys.at((r.args_start + k) as usize).skey != args.at(k as usize).skey {
+                    if self.keys.at((r.args_start + k) as usize).skey != self.argbuf.at(k as usize).skey {
                         eq = false;
                     }
                 }
@@ -375,8 +415,35 @@ extend InstGraph {
     }
 
     // Register every concrete aggregate instantiation inside `t` (nested arguments included).
+    // A completed empty-frame depth-0 walk of `t` covers every later occurrence (a nested revisit
+    // truncates no deeper than the depth-0 walk did), so revisits skip in O(1).
     fn note_type(self: &mut Self, a: &Ast, t: TypeId, frame: &Vector<Subst>, depth: i32) {
-        if t == TYPE_NONE || depth > 8 || !self.spend(1) {
+        if t == TYPE_NONE || depth > 8 {
+            return;
+        }
+        let memo = frame.len() == 0;
+        if memo {
+            if self.noted.len() == 0 {
+                for _i in 0..(unsafe &*self.pkg).modules.len() {
+                    self.noted.push(Vector::<bool>::new());
+                }
+            }
+            let seen = self.noted.at(a.module as usize);
+            if t as usize < seen.len() && *seen.at(t as usize) {
+                return;
+            }
+        }
+        self.note_type_walk(a, t, frame, depth);
+        if memo && depth == 0 {
+            while self.noted[a.module as usize].len() <= t as usize {
+                self.noted[a.module as usize].push(false);
+            }
+            self.noted[a.module as usize].set(t as usize, true);
+        }
+    }
+
+    fn note_type_walk(self: &mut Self, a: &Ast, t: TypeId, frame: &Vector<Subst>, depth: i32) {
+        if !self.spend(1) {
             return;
         }
         let y = *a.type_at(t);
@@ -391,10 +458,11 @@ extend InstGraph {
                 p2.prelude_lookup("Slice", true);
             };
             if hit.node != NODE_NONE && self.concrete_subst(a, y.as_data.elem, frame, depth + 1) {
-                let mut args = Vector::<ArgKey>::new();
-                args.push(self.argkey_subst(a, y.as_data.elem, frame));
+                let k0 = self.argkey_subst(a, y.as_data.elem, frame);
+                self.argbuf.truncate(0);
+                self.argbuf.push(k0);
                 let mut fresh = false;
-                let _ = self.add(IG_AGG, DefId { module: hit.mid, node: hit.node }, &args, &mut fresh);
+                let _ = self.add(IG_AGG, DefId { module: hit.mid, node: hit.node }, &mut fresh);
             }
             return;
         }
@@ -419,15 +487,16 @@ extend InstGraph {
         if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM {
             return;
         }
-        let mut args = Vector::<ArgKey>::new();
+        self.argbuf.truncate(0);
         for i in 0..it.n {
             if !self.concrete_subst(a, unsafe it.args[i], frame, depth + 1) {
                 return;
             }
-            args.push(self.argkey_subst(a, unsafe it.args[i], frame));
+            let k0 = self.argkey_subst(a, unsafe it.args[i], frame);
+            self.argbuf.push(k0);
         }
         let mut fresh = false;
-        let id = self.add(IG_AGG, DefId { module: it.module, node: it.decl }, &args, &mut fresh);
+        let id = self.add(IG_AGG, DefId { module: it.module, node: it.decl }, &mut fresh);
         if self.recs.at(id as usize).aty == TYPE_NONE && a.type_concrete(t) {
             // a pool-concrete spelling anchors the record (frames leave symbolic types unanchored)
             self.recs[id as usize].amod = a.module;
@@ -471,19 +540,10 @@ extend InstGraph {
     fn note_method(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) {
         // the method's enclosing extend, if it is generic
         let ma = unsafe &*(&*self.pkg).module_ast_const(t.callee.module);
-        let mut ext = NODE_NONE;
-        for x in 0..self.exts.len() {
-            let row = self.exts.at(x);
-            if row.emod != t.callee.module {
-                continue;
-            }
-            let ed = ma.at_const(row.enode).as_data.extend_def;
-            for j in 0..ed.items.len {
-                if unsafe ma.list(ed.items)[j as usize] == t.callee.node {
-                    ext = row.enode;
-                }
-            }
-        }
+        let ext = switch self.ext_of.get(&skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64)) {
+            Some(v) => (*v) as NodeId,
+            None => NODE_NONE,
+        };
         if ext == NODE_NONE {
             return;
         }
@@ -512,71 +572,39 @@ extend InstGraph {
         }
         let it = *a.instance(a.type_at(rt).as_data.inst);
         // method key = receiver-instance args, then the method's own bound args (bail on symbolic)
-        let mut key = Vector::<ArgKey>::new();
+        self.argbuf.truncate(0);
         for i in 0..it.n {
             if !self.concrete_subst(a, unsafe it.args[i], frame, 0) {
                 return;
             }
-            key.push(self.argkey_subst(a, unsafe it.args[i], frame));
+            let k0 = self.argkey_subst(a, unsafe it.args[i], frame);
+            self.argbuf.push(k0);
         }
         for i in 0..t.targs_len {
             let ty2 = b.targ_pool[(t.targs_start + i) as usize];
             if !self.concrete_subst(a, ty2, frame, 0) {
                 return;
             }
-            key.push(self.argkey_subst(a, ty2, frame));
+            let k1 = self.argkey_subst(a, ty2, frame);
+            self.argbuf.push(k1);
         }
         let mut fresh = false;
-        let id = self.add(IG_METHOD, t.callee, &key, &mut fresh);
-        if !self.recs.at(id as usize).anchored && t.targs_len <= 8 && a.type_concrete(rt) {
-            let mut all = true;
-            for i in 0..t.targs_len {
-                if !a.type_concrete(b.targ_pool[(t.targs_start + i) as usize]) {
-                    all = false;
-                }
-            }
-            if all {
-                let mut rc2 = *self.recs.at(id as usize);
-                rc2.anchored = true;
-                rc2.amod2 = a.module;
-                rc2.arty = rt;
-                for i in 0..t.targs_len {
-                    unsafe rc2.aargs[i as usize] = b.targ_pool[(t.targs_start + i) as usize];
-                }
-                self.recs.set(id as usize, rc2);
-            }
-        }
+        let _ = self.add(IG_METHOD, t.callee, &mut fresh);
     }
 
     // A resolved call/value use of a generic function with bound arguments.
     fn note_call(self: &mut Self, a: &Ast, callee: DefId, b: &ir::CoreBody, ts: u32, tn: u32, frame: &Vector<Subst>) {
-        let mut args = Vector::<ArgKey>::new();
+        self.argbuf.truncate(0);
         for i in 0..tn {
             let t = b.targ_pool[(ts + i) as usize];
             if !self.concrete_subst(a, t, frame, 0) {
                 return; // still symbolic here; the enclosing instantiation walks it bound
             }
-            args.push(self.argkey_subst(a, t, frame));
+            let k0 = self.argkey_subst(a, t, frame);
+            self.argbuf.push(k0);
         }
         let mut fresh = false;
-        let id = self.add(IG_FN, callee, &args, &mut fresh);
-        if !self.recs.at(id as usize).anchored && tn <= 8 {
-            let mut all = true;
-            for i in 0..tn {
-                if !a.type_concrete(b.targ_pool[(ts + i) as usize]) {
-                    all = false;
-                }
-            }
-            if all {
-                let mut rc2 = *self.recs.at(id as usize);
-                rc2.anchored = true;
-                rc2.amod2 = a.module;
-                for i in 0..tn {
-                    unsafe rc2.aargs[i as usize] = b.targ_pool[(ts + i) as usize];
-                }
-                self.recs.set(id as usize, rc2);
-            }
-        }
+        let _ = self.add(IG_FN, callee, &mut fresh);
     }
 
     // Expand queued records to a fixed point, alternating the worklist with the demand cross
@@ -602,18 +630,15 @@ extend InstGraph {
     fn cross_demand(self: &mut Self) {
         // demanded method decls, deduped
         let mut dm = Vector::<DefId>::new();
+        let mut dseen = Set::<u64>::new();
         for r in 0..self.recs.len() {
             let rec = self.recs.at(r);
             if rec.kind != IG_METHOD {
                 continue;
             }
-            let mut dup = false;
-            for i in 0..dm.len() {
-                if dm.at(i).module == rec.def.module && dm.at(i).node == rec.def.node {
-                    dup = true;
-                }
-            }
-            if !dup {
+            let dk = skey_mix(0, rec.def.module as u64 << 32 | rec.def.node as u64);
+            if !dseen.contains(&dk) {
+                dseen.insert(dk);
                 dm.push(rec.def);
             }
         }
@@ -626,7 +651,11 @@ extend InstGraph {
             let row = p.method_used.at(m);
             for n in 0..row.len() {
                 if row[n] {
-                    dm.push(DefId { module: m as ModuleId, node: n as NodeId });
+                    let dk = skey_mix(0, m as u64 << 32 | n as u64);
+                    if !dseen.contains(&dk) {
+                        dseen.insert(dk);
+                        dm.push(DefId { module: m as ModuleId, node: n as NodeId });
+                    }
                 }
             }
         }
@@ -646,13 +675,9 @@ extend InstGraph {
                 }
                 let nsp = a.at_const(it.as_data.function.name).as_data.name.text;
                 if conforming || src.slice(nsp.start as usize, nsp.end as usize) == "free" {
-                    let mut dup = false;
-                    for i in 0..dm.len() {
-                        if dm.at(i).module == row.emod && dm.at(i).node == iid {
-                            dup = true;
-                        }
-                    }
-                    if !dup {
+                    let dk = skey_mix(0, row.emod as u64 << 32 | iid as u64);
+                    if !dseen.contains(&dk) {
+                        dseen.insert(dk);
                         dm.push(DefId { module: row.emod, node: iid });
                     }
                 }
@@ -697,8 +722,27 @@ extend InstGraph {
                 }
             }
         }
-        self.cross_defaults();
-        let nrec = self.recs.len();
+        // AGG rec ids grouped per declaration (ascending), so each pairing walks only its
+        // target's group; METHOD adds below never change AGG membership.
+        let mut gk = Map::<u64, u64>::new();
+        let mut groups = Vector::<Vector<u32>>::new();
+        for r in 0..self.recs.len() {
+            let rec = self.recs.at(r);
+            if rec.kind != IG_AGG {
+                continue;
+            }
+            let key = skey_mix(0, rec.def.module as u64 << 32 | rec.def.node as u64);
+            let gi = switch gk.get(&key) {
+                Some(v) => *v,
+                None => {
+                    gk.insert(key, groups.len() as u64);
+                    groups.push(Vector::<u32>::new());
+                    groups.len() as u64 - 1;
+                },
+            };
+            groups[gi as usize].push(r as u32);
+        }
+        self.cross_defaults(&gk, &groups);
         for d in 0..dm.len() {
             let md = *dm.at(d);
             let ext = self.enclosing_extend(md);
@@ -714,23 +758,22 @@ extend InstGraph {
             if target.node == NODE_NONE {
                 continue;
             }
-            for r in 0..nrec {
-                let rec = *self.recs.at(r);
-                if rec.kind != IG_AGG || rec.def.module != target.module || rec.def.node != target.node {
-                    continue;
-                }
-                let mut args = Vector::<ArgKey>::new();
+            let gi = switch gk.get(&skey_mix(0, target.module as u64 << 32 | target.node as u64)) {
+                Some(v) => (*v) as i64,
+                None => (-1) as i64,
+            };
+            if gi < 0 {
+                continue;
+            }
+            for k9 in 0..groups[gi as usize].len() {
+                let rec = *self.recs.at(groups[gi as usize][k9] as usize);
+                self.argbuf.truncate(0);
                 for k in 0..rec.args_len {
-                    args.push(*self.keys.at((rec.args_start + k) as usize));
+                    let k0 = *self.keys.at((rec.args_start + k) as usize);
+                    self.argbuf.push(k0);
                 }
                 let mut fresh = false;
-                let id = self.add(IG_METHOD, md, &args, &mut fresh);
-                if !self.recs.at(id as usize).anchored && rec.aty != TYPE_NONE {
-                    // the receiver AGG anchor is the demanded method's receiver too
-                    self.recs[id as usize].anchored = true;
-                    self.recs[id as usize].amod2 = rec.amod;
-                    self.recs[id as usize].arty = rec.aty;
-                }
+                let _ = self.add(IG_METHOD, md, &mut fresh);
             }
         }
     }
@@ -738,8 +781,7 @@ extend InstGraph {
     // Interface default bodies: every extend that conforms `Target as Iface` emits one copy of each
     // default-bodied interface method per Target instance -- record those pairs so the emitted-set
     // diff can find them (def = the INTERFACE's method decl, keys = the instance args).
-    fn cross_defaults(self: &mut Self) {
-        let nrec = self.recs.len();
+    fn cross_defaults(self: &mut Self, gk: &Map<u64, u64>, groups: &Vector<Vector<u32>>) {
         for x in 0..self.exts.len() {
             let row = *self.exts.at(x);
             let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
@@ -789,30 +831,23 @@ extend InstGraph {
                     continue;
                 }
                 // pair with every instance of the extend's target
-                for r in 0..nrec {
-                    let rec = *self.recs.at(r);
-                    if rec.kind != IG_AGG {
-                        continue;
-                    }
-                    let mut tmatch = false;
-                    let tg = self.ext_target(a, row.enode);
-                    if tg.module == rec.def.module && tg.node == rec.def.node {
-                        tmatch = true;
-                    }
-                    if !tmatch {
-                        continue;
-                    }
-                    let mut args = Vector::<ArgKey>::new();
+                let tg = self.ext_target(a, row.enode);
+                let gi = switch gk.get(&skey_mix(0, tg.module as u64 << 32 | tg.node as u64)) {
+                    Some(v) => (*v) as i64,
+                    None => (-1) as i64,
+                };
+                if gi < 0 {
+                    continue;
+                }
+                for r9 in 0..groups[gi as usize].len() {
+                    let rec = *self.recs.at(groups[gi as usize][r9] as usize);
+                    self.argbuf.truncate(0);
                     for k in 0..rec.args_len {
-                        args.push(*self.keys.at((rec.args_start + k) as usize));
+                        let k0 = *self.keys.at((rec.args_start + k) as usize);
+                        self.argbuf.push(k0);
                     }
                     let mut fresh = false;
-                    let id = self.add(IG_METHOD, DefId { module: iface.module, node: imid }, &args, &mut fresh);
-                    if !self.recs.at(id as usize).anchored && rec.aty != TYPE_NONE {
-                        self.recs[id as usize].anchored = true;
-                        self.recs[id as usize].amod2 = rec.amod;
-                        self.recs[id as usize].arty = rec.aty;
-                    }
+                    let _ = self.add(IG_METHOD, DefId { module: iface.module, node: imid }, &mut fresh);
                 }
             }
         }
@@ -869,10 +904,17 @@ extend InstGraph {
                 }
                 ai += 1;
             }
-            let mut lw = irl::Lowerer::new(self.pkg, r.def.module, r.def.node);
-            if lw.lower_fn(r.def.node) {
-                self.walk_body(&lw.body, da, &frame);
-                self.expand_closures(&mut lw, r.def.module, &frame);
+            let bi = self.body_idx(r.def.module, r.def.node, false);
+            if bi >= 0 {
+                self.walk_kept(bi, da, &frame);
+                let mut cls = Vector::<NodeId>::new();
+                {
+                    let bp = self.kept.at(bi as usize) as *const irl::Lowerer;
+                    for c in 0..(unsafe &*bp).closures.len() {
+                        cls.push((unsafe &*bp).closures[c]);
+                    }
+                }
+                self.expand_closures(&cls, r.def.module, &frame);
             }
         }
     }
@@ -948,21 +990,11 @@ extend InstGraph {
 
     // The interface a method decl belongs to, or NODE_NONE.
     fn enclosing_interface(self: &Self, d: DefId) NodeId {
-        let a = unsafe &*(&*self.pkg).module_ast_const(d.module);
-        let items = a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let nid = unsafe a.list(items)[i as usize];
-            if a.at_const(nid).kind != NodeKind::NODE_INTERFACE {
-                continue;
-            }
-            let ms = a.at_const(nid).as_data.interface_def.items;
-            for j in 0..ms.len {
-                if unsafe a.list(ms)[j as usize] == d.node {
-                    return nid;
-                }
-            }
-        }
-        return NODE_NONE;
+        let hit = switch self.iface_of.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
+            Some(v) => (*v) as NodeId,
+            None => NODE_NONE,
+        };
+        return hit;
     }
 
     // The interface an extend conforms to, resolved (module-qualified); node NODE_NONE when plain.
@@ -1049,23 +1081,18 @@ extend InstGraph {
 
     // The generic extend a method decl belongs to, or NODE_NONE.
     fn enclosing_extend(self: &Self, d: DefId) NodeId {
-        let a = unsafe &*(&*self.pkg).module_ast_const(d.module);
-        for x in 0..self.exts.len() {
-            let row = self.exts.at(x);
-            if row.emod != d.module {
-                continue;
-            }
-            let ed = a.at_const(row.enode).as_data.extend_def;
-            if ed.generics.len == 0 {
-                continue;
-            }
-            for j in 0..ed.items.len {
-                if unsafe a.list(ed.items)[j as usize] == d.node {
-                    return row.enode;
-                }
-            }
+        let ext = switch self.ext_of.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
+            Some(v) => (*v) as NodeId,
+            None => NODE_NONE,
+        };
+        if ext == NODE_NONE {
+            return NODE_NONE;
         }
-        return NODE_NONE;
+        let a = unsafe &*(&*self.pkg).module_ast_const(d.module);
+        if a.at_const(ext).as_data.extend_def.generics.len == 0 {
+            return NODE_NONE;
+        }
+        return ext;
     }
 
     // Walk a demanded method's body: the receiver-instance keys bind the extend's params (through
@@ -1121,28 +1148,132 @@ extend InstGraph {
         if fd.body == NODE_NONE {
             return;
         }
-        let mut lw = irl::Lowerer::new(self.pkg, r.def.module, r.def.node);
-        if lw.lower_fn(r.def.node) {
-            self.walk_body(&lw.body, a, &frame);
-            self.expand_closures(&mut lw, r.def.module, &frame);
+        let bi = self.body_idx(r.def.module, r.def.node, false);
+        if bi >= 0 {
+            self.walk_kept(bi, a, &frame);
+            let mut cls = Vector::<NodeId>::new();
+            {
+                let bp = self.kept.at(bi as usize) as *const irl::Lowerer;
+                for c in 0..(unsafe &*bp).closures.len() {
+                    cls.push((unsafe &*bp).closures[c]);
+                }
+            }
+            self.expand_closures(&cls, r.def.module, &frame);
         }
     }
 
-    fn expand_closures(self: &mut Self, lw: &mut irl::Lowerer, m: ModuleId, frame: &Vector<Subst>) {
-        let a = unsafe &*(&*self.pkg).module_ast_const(m);
-        for c in 0..lw.closures.len() {
-            let cn = lw.closures[c];
-            let mut cl = irl::Lowerer::new(self.pkg, m, cn);
-            if cl.lower_closure_body(cn) {
-                self.walk_body(&cl.body, a, frame);
-                // nested closures append to cl.closures; one level at a time keeps this bounded
-                for c2 in 0..cl.closures.len() {
-                    let cn2 = cl.closures[c2];
-                    let mut cl2 = irl::Lowerer::new(self.pkg, m, cn2);
-                    if cl2.lower_closure_body(cn2) {
-                        self.walk_body(&cl2.body, a, frame);
-                    }
+    // The `kept` index of `(m, node)`'s lowering, lowering it on first demand; -1 = cannot lower.
+    fn body_idx(self: &mut Self, m: ModuleId, node: NodeId, closure: bool) i64 {
+        let key = skey_mix(0, m as u64 << 32 | node as u64);
+        let hit = switch self.kept_ix.get(&key) {
+            Some(v) => (*v) as i64,
+            None => (-2) as i64,
+        };
+        if hit != -2 {
+            return hit;
+        }
+        self.low.retarget(m);
+        let ok = if closure {
+            self.low.lower_closure_body(node);
+        } else {
+            self.low.lower_fn(node);
+        };
+        let mut slot = (-1) as i64;
+        if ok {
+            let mut klw = irl::Lowerer::new(self.pkg, m, node);
+            klw.adopt(&self.low);
+            slot = self.kept.len() as i64;
+            self.kept.push(klw);
+            self.wcache.push(
+                WalkCache {
+                    built: false,
+                    tys: Vector::<TypeId>::new(),
+                    consts: Vector::<u32>::new(),
+                    calls: Vector::<u32>::new(),
+                },
+            );
+        }
+        self.kept_ix.insert(key, slot as u64);
+        return slot;
+    }
+
+    // Walk kept body `ki` under `frame` through its walk cache (built on first use).
+    fn walk_kept(self: &mut Self, ki: i64, a: &Ast, frame: &Vector<Subst>) {
+        let bp = self.kept.at(ki as usize) as *const irl::Lowerer;
+        if !self.wcache.at(ki as usize).built {
+            self.wt_seen.clear();
+            let b = unsafe &bp.body;
+            for i in 0..b.locals.len() {
+                let t = b.locals.at(i).ty;
+                if t != TYPE_NONE && !self.wt_seen.contains_key(&(t as u64)) {
+                    self.wt_seen.insert(t, 1);
+                    self.wcache[ki as usize].tys.push(t);
                 }
+            }
+            for i in 0..b.rvalues.len() {
+                let t = b.rvalues.at(i).target;
+                if t != TYPE_NONE && !self.wt_seen.contains_key(&(t as u64)) {
+                    self.wt_seen.insert(t, 1);
+                    self.wcache[ki as usize].tys.push(t);
+                }
+            }
+            for i in 0..b.constants.len() {
+                let c = b.constants.at(i);
+                if c.kind == ir::CK_ITEM && c.targ_len != 0 {
+                    self.wcache[ki as usize].consts.push(i as u32);
+                }
+            }
+            for i in 0..b.blocks.len() {
+                let t = b.blocks.at(i).term;
+                if t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
+                    self.wcache[ki as usize].calls.push(i as u32);
+                }
+            }
+            self.wcache[ki as usize].built = true;
+        }
+        self.bodies += 1;
+        let b = unsafe &bp.body;
+        let wp = self.wcache.at(ki as usize) as *const WalkCache;
+        for i in 0..(unsafe &*wp).tys.len() {
+            self.note_type(a, *(unsafe &*wp).tys.at(i), frame, 0);
+        }
+        for i in 0..(unsafe &*wp).consts.len() {
+            let c = *b.constants.at((*(unsafe &*wp).consts.at(i)) as usize);
+            self.note_call(a, c.item, b, c.targ_start, c.targ_len, frame);
+        }
+        for i in 0..(unsafe &*wp).calls.len() {
+            let t = b.blocks.at((*(unsafe &*wp).calls.at(i)) as usize).term;
+            if t.targs_len != 0 {
+                self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame);
+            }
+            self.note_method(a, &t, b, frame);
+        }
+    }
+
+    fn expand_closures(self: &mut Self, cls: &Vector<NodeId>, m: ModuleId, frame: &Vector<Subst>) {
+        let a = unsafe &*(&*self.pkg).module_ast_const(m);
+        for c in 0..cls.len() {
+            let ci = self.body_idx(m, cls[c], true);
+            if ci < 0 {
+                continue;
+            }
+            // nested closures append to the cached lowering's list; one level at a time keeps
+            // this bounded. Raw borrow: walk_body never touches `kept`, but body_idx below can
+            // grow it, so the nested ids are copied out first.
+            self.walk_kept(ci, a, frame);
+            let mut nested = Vector::<NodeId>::new();
+            {
+                let bp = self.kept.at(ci as usize) as *const irl::Lowerer;
+                for c2 in 0..(unsafe &*bp).closures.len() {
+                    nested.push((unsafe &*bp).closures[c2]);
+                }
+            }
+            for c2 in 0..nested.len() {
+                let ci2 = self.body_idx(m, nested[c2], true);
+                if ci2 < 0 {
+                    continue;
+                }
+                self.walk_kept(ci2, a, frame);
             }
         }
     }
@@ -1166,6 +1297,29 @@ extend InstGraph {
                 let d = self.ext_target(a, nid);
                 if d.node != NODE_NONE {
                     self.exts.push(ExtRow { dmod: d.module, ddecl: d.node, emod: m as ModuleId, enode: nid });
+                    let ms = a.at_const(nid).as_data.extend_def.items;
+                    for j in 0..ms.len {
+                        let mid = unsafe a.list(ms)[j as usize];
+                        self.ext_of.insert(skey_mix(0, m as u64 << 32 | mid as u64), nid);
+                    }
+                }
+            }
+        }
+        for m in 0..p.modules.len() {
+            if !p.modules.at(m).has_ast {
+                continue;
+            }
+            let a = unsafe &*p.module_ast_const(m as ModuleId);
+            let items = a.at_const(a.root).as_data.program.items;
+            for i in 0..items.len {
+                let nid = unsafe a.list(items)[i as usize];
+                if a.at_const(nid).kind != NodeKind::NODE_INTERFACE {
+                    continue;
+                }
+                let ms = a.at_const(nid).as_data.interface_def.items;
+                for j in 0..ms.len {
+                    let mid = unsafe a.list(ms)[j as usize];
+                    self.iface_of.insert(skey_mix(0, m as u64 << 32 | mid as u64), nid);
                 }
             }
         }
@@ -1221,10 +1375,18 @@ extend InstGraph {
     }
 
     fn seed_body(self: &mut Self, m: ModuleId, fnode: NodeId, a: &Ast, empty: &Vector<Subst>) {
-        let mut lw = irl::Lowerer::new(self.pkg, m, fnode);
-        if lw.lower_fn(fnode) {
-            self.walk_body(&lw.body, a, empty);
-            self.expand_closures(&mut lw, m, empty);
+        let bi = self.body_idx(m, fnode, false);
+        if bi < 0 {
+            return;
         }
+        self.walk_kept(bi, a, empty);
+        let mut cls = Vector::<NodeId>::new();
+        {
+            let bp = self.kept.at(bi as usize) as *const irl::Lowerer;
+            for c in 0..(unsafe &*bp).closures.len() {
+                cls.push((unsafe &*bp).closures[c]);
+            }
+        }
+        self.expand_closures(&cls, m, empty);
     }
 }

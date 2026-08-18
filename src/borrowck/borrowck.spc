@@ -2607,9 +2607,40 @@ extend tc::TypeChecker {
     }
 
     pub fn tc_type_carries_borrow(self: &mut Self, ty: TypeId, depth: i32) bool {
+        let mut pure = true;
+        return self.tc_carries_borrow_rec(ty, depth, &mut pure);
+    }
+
+    // Memoized per (ty, depth) -- the depth cutoff makes results depth-dependent -- but ONLY for
+    // computations whose recursion never touched a TYPE_FUNCTION: a closure's answer reads the
+    // capture analysis' mut_caps bits and the current module, both of which change under the walk.
+    fn tc_carries_borrow_rec(self: &mut Self, ty: TypeId, depth: i32, pure: &mut bool) bool {
         if ty == TYPE_NONE || depth > 4 {
             return false;
         }
+        let slot = ty as usize * 5 + depth as usize;
+        while self.carries_borrow_memo.len() <= slot {
+            self.carries_borrow_memo.push((0 - 1) as i8);
+        }
+        let c = *self.carries_borrow_memo.at(slot);
+        if c >= 0 {
+            return c != 0;
+        }
+        let mut p2 = true;
+        let r = self.tc_carries_borrow_impl(ty, depth, &mut p2);
+        if p2 {
+            let mut cv: i8 = 0;
+            if r {
+                cv = 1;
+            }
+            self.carries_borrow_memo.set(slot, cv);
+        } else {
+            *pure = false;
+        }
+        return r;
+    }
+
+    fn tc_carries_borrow_impl(self: &mut Self, ty: TypeId, depth: i32, pure: &mut bool) bool {
         if self.type_at(ty).kind == TypeKind::TYPE_REFERENCE {
             return true;
         }
@@ -2618,6 +2649,7 @@ extend tc::TypeChecker {
         // analysis turned into an implicit `&mut`, i.e. a mutated capture) is a borrow of the enclosing
         // frame, and a closure holding one is not `'static` no matter what its signature says.
         if self.type_at(ty).kind == TypeKind::TYPE_FUNCTION {
+            *pure = false; // capture state and the current module change under the walk
             let fmod = self.type_at(ty).module;
             if fmod != self.cur_module() {
                 return false; // a foreign closure cannot have captured one of our locals
@@ -2633,7 +2665,7 @@ extend tc::TypeChecker {
             let cids = self.cur_ast().list(cl.captures);
             for ci in 0..cl.captures.len {
                 let cty = self.cur_ast().type_of(unsafe cids[ci as usize]);
-                if self.tc_type_carries_borrow(cty, depth + 1) {
+                if self.tc_carries_borrow_rec(cty, depth + 1, pure) {
                     return true;
                 }
             }
@@ -2648,7 +2680,7 @@ extend tc::TypeChecker {
             return false;
         }
         for gi in 0..gn {
-            if self.tc_type_carries_borrow(ga[gi as usize], depth + 1) {
+            if self.tc_carries_borrow_rec(ga[gi as usize], depth + 1, pure) {
                 return true;
             }
         }
@@ -2674,7 +2706,7 @@ extend tc::TypeChecker {
             if ma.at_const(fnode).kind == NodeKind::NODE_REFERENCE_TYPE {
                 return true;
             }
-            if self.tc_type_carries_borrow(self.lower_type_in(om, fnode), depth + 1) {
+            if self.tc_carries_borrow_rec(self.lower_type_in(om, fnode), depth + 1, pure) {
                 return true;
             }
         }
@@ -2841,7 +2873,7 @@ extend tc::TypeChecker {
         // lowered bodies against the final side tables and emit in place of the silenced walk.
         let mut irbodies = Vector::<irl::Lowerer>::new();
         if self.bc_flow_new() {
-            self.bc_quiet = self.bc_ir_lower(id, &mut irbodies);
+            self.bc_quiet = self.bc_ir_lower(id, ctx, &mut irbodies);
         }
         self.region_reset(id);
         for pi in 0..fnd.params.len {
@@ -2853,6 +2885,17 @@ extend tc::TypeChecker {
             let mut irres = Vector::<bfi::FlowErr>::new();
             self.bc_ir_analyze(ow, &irbodies, ctx, &mut irres);
             self.bc_ir_emit(&mut irres);
+        }
+        // Recycle the spent Lowerers (and their CoreBody pools) instead of freeing them.
+        loop {
+            switch irbodies.pop() {
+                Some(lw) => {
+                    ctx.lower_pool.push(lw);
+                },
+                _ => {
+                    break;
+                },
+            };
         }
 
         self.bc_quiet = false;

@@ -83,6 +83,9 @@ pub struct Lowerer {
     scope_local_marks: Vector<usize>, // per open scope: scope_locals length at entry
     item_locals: Vector<Binding>, // cached LS_STATIC_REF locals per referenced item decl node
     pub closures: Vector<NodeId>, // closure nodes queued for their own lowering
+    // Reusable u32 buffers (argument lists, match work lists): call/aggregate lowering builds one
+    // per expression, so the pool keeps their capacity across the whole body and package.
+    u32_pool: Vector<Vector<u32>>,
     cur: ir::BlockId,
     run_start: u32, // statements index where the open block's run began
     ret_locals: u32, // first return-slot local
@@ -118,10 +121,69 @@ extend Lowerer {
             scope_local_marks: Vector::<usize>::new(),
             item_locals: Vector::<Binding>::new(),
             closures: Vector::<NodeId>::new(),
+            u32_pool: Vector::<Vector<u32>>::new(),
             cur: 0,
             run_start: 0,
             ret_locals: 0,
         };
+    }
+
+    fn avget(self: &mut Self) Vector<u32> {
+        let v9 = switch self.u32_pool.pop() {
+            Some(v) => v,
+            None => Vector::<u32>::new(),
+        };
+        return v9;
+    }
+
+    fn avput(self: &mut Self, v: Vector<u32>) {
+        let mut v9 = v;
+        v9.truncate(0);
+        self.u32_pool.push(v9);
+    }
+
+    /// Re-target a reused Lowerer at another module, keeping every pool's heap capacity: the
+    /// instance graph lowers the whole package through one scratch Lowerer. Clears any staged
+    /// instance `env` (scratch lowerings are always env-free).
+    pub fn retarget(self: &mut Self, module: ModuleId) {
+        let p = unsafe &*self.pkg;
+        self.f = facts::TypedFacts::of(p.module_ast_const(module));
+        self.module = module;
+        let sp = p.modules.at(module as usize).source.as_str();
+        self.src = str::from_raw(sp.ptr(), sp.len());
+        self.env.truncate(0);
+    }
+
+    /// Take an exact-size copy of `src`'s finished product (body + queued closure ids): the graph
+    /// keeps compact bodies while lowering through one shared scratch Lowerer.
+    pub fn adopt(self: &mut Self, src: &Lowerer) {
+        self.body = ir::CoreBody::compact_from(&src.body);
+        self.closures.truncate(0);
+        self.closures.reserve(src.closures.len());
+        for i in 0..src.closures.len() {
+            self.closures.push(src.closures[i]);
+        }
+    }
+
+    // Reset every per-body pool and cursor so one Lowerer lowers many bodies back to back, keeping
+    // heap capacity. Module context (f/pkg/src) and a caller-staged instance `env` survive. A fresh
+    // Lowerer passes through as a no-op, so single-use callers are unchanged.
+    fn begin_body(self: &mut Self, owner: NodeId) {
+        self.body.clear(DefId { module: self.module, node: owner }, self.module);
+        self.err = "";
+        self.err_node = NODE_NONE;
+        self.proj_frames.truncate(0);
+        self.binds.truncate(0);
+        self.loops.truncate(0);
+        self.defers.truncate(0);
+        self.scope_defers.truncate(0);
+        self.scope_locals.truncate(0);
+        self.scope_local_marks.truncate(0);
+        self.item_locals.truncate(0);
+        self.closures.truncate(0);
+        self.cur = 0;
+        self.run_start = 0;
+        self.ret_locals = 0;
     }
 
     const fn fail(self: &mut Self, why: str<'static>) {
@@ -393,6 +455,7 @@ extend Lowerer {
     /// Lower function/method `fnode`. Returns false (with `err` set) when a construct is not yet
     /// supported; the produced body is then incomplete and must be discarded.
     pub fn lower_fn(self: &mut Self, fnode: NodeId) bool {
+        self.begin_body(fnode);
         let fd = self.f.node(fnode).as_data.function;
         self.body.is_generic = fd.generics.len != 0;
         let sp = self.f.node(fnode).span;
@@ -460,6 +523,7 @@ extend Lowerer {
     /// Lower a closure's body: parameters then captures become argument locals (captures bind their
     /// ORIGINAL declaring nodes, so the body's uses resolve to them).
     pub fn lower_closure_body(self: &mut Self, cnode: NodeId) bool {
+        self.begin_body(cnode);
         let cd = self.f.node(cnode).as_data.closure;
         let sp = self.f.node(cnode).span;
         let rets = cd.returns;
@@ -715,7 +779,7 @@ extend Lowerer {
     fn lower_asm(self: &mut Self, id: NodeId) {
         let d = self.f.node(id).as_data.asm_stmt;
         let sp = self.f.node(id).span;
-        let mut argv = Vector::<ir::OperandId>::new();
+        let mut argv = self.avget();
         let mut i: u32 = 0;
         while i + 1 < d.outputs.len {
             let pe = unsafe self.f.list(d.outputs)[(i + 1) as usize];
@@ -752,6 +816,7 @@ extend Lowerer {
             },
             sp,
         );
+        self.avput(argv);
     }
 
     fn lower_let(self: &mut Self, id: NodeId) {
@@ -2156,7 +2221,7 @@ extend Lowerer {
                 }
                 self.body.has_reflect = true;
                 let ity = self.nty(id);
-                let mut argv = Vector::<ir::OperandId>::new();
+                let mut argv = self.avget();
                 for i in 0..cd.args.len {
                     let a = unsafe self.f.list(cd.args)[i as usize];
                     let op = self.lower_expr(a);
@@ -2167,6 +2232,7 @@ extend Lowerer {
                 }
                 let fresh = self.pool_ops(&argv);
                 let kept = argv.len() as u32;
+                self.avput(argv);
                 let l = self.body.add_local(
                     ir::LocalDecl {
                         ty: ity,
@@ -3688,7 +3754,7 @@ extend Lowerer {
         if lop == ir::IR_NONE {
             return ir::IR_NONE;
         }
-        let mut argv = Vector::<ir::OperandId>::new();
+        let mut argv = self.avget();
         argv.push(lop);
         if rhs != NODE_NONE {
             let rop = self.lower_expr(rhs);
@@ -3699,6 +3765,7 @@ extend Lowerer {
         }
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
+        self.avput(argv);
         return self.emit_call(DefId { module: m, node: decl }, ir::IR_NONE, start, n, 0, 0, ty, sp);
     }
 
@@ -3768,7 +3835,7 @@ extend Lowerer {
                 vd.node,
             ).as_data.aggregate.is_tuple;
             if vd.node != NODE_NONE && (vk == NodeKind::NODE_VARIANT || is_tuple_ctor) {
-                let mut argv = Vector::<ir::OperandId>::new();
+                let mut argv = self.avget();
                 for i in 0..d.args.len {
                     let op = self.lower_expr(unsafe self.f.list(d.args)[i as usize]);
                     if op == ir::IR_NONE {
@@ -3781,7 +3848,9 @@ extend Lowerer {
                 } else {
                     ir::AGG_VARIANT;
                 };
-                return self.finish_aggregate(agg, vd, &argv, ty, sp);
+                let r9 = self.finish_aggregate(agg, vd, &argv, ty, sp);
+                self.avput(argv);
+                return r9;
             }
         }
         // Method call: receiver first, then arguments; the selected target comes from call_info.
@@ -3889,7 +3958,7 @@ extend Lowerer {
                 return self.unit_op(ty, sp);
             }
         }
-        let mut argv = Vector::<ir::OperandId>::new();
+        let mut argv = self.avget();
         let mut callee_op = ir::IR_NONE;
         if ck == NodeKind::NODE_MEMBER && !self.f.node(d.callee).as_data.member.path && target.node != NODE_NONE {
             let recv = self.f.node(d.callee).as_data.member.object;
@@ -3964,6 +4033,7 @@ extend Lowerer {
         }
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
+        self.avput(argv);
         return self.emit_call(target, callee_op, start, n, ts, tn, ty, sp);
     }
 
@@ -4072,10 +4142,11 @@ extend Lowerer {
         let mut tm = self.term0(ir::TM_ASSERT, tsp);
         tm.a = cond;
         if msg != ir::IR_NONE {
-            let mut mv = Vector::<ir::OperandId>::new();
+            let mut mv = self.avget();
             mv.push(msg);
             tm.args_start = self.pool_ops(&mv);
             tm.args_len = 1;
+            self.avput(mv);
         }
         if ak != 1 {
             // assert_eq/ne diagnostics: [left value, right value, left spelling, right spelling];
@@ -4105,7 +4176,7 @@ extend Lowerer {
                     targ_len: 0,
                 },
             );
-            let mut av = Vector::<ir::OperandId>::new();
+            let mut av = self.avget();
             av.push(lsave);
             av.push(rsave);
             av.push(lsc);
@@ -4113,6 +4184,7 @@ extend Lowerer {
             tm.args_start = self.pool_ops(&av);
             tm.args_len = 4;
             tm.sw_len = ak;
+            self.avput(av);
         }
         let cont = self.open_block();
         tm.t0 = cont;
@@ -4161,10 +4233,11 @@ extend Lowerer {
                 if rop == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
-                let mut argv = Vector::<ir::OperandId>::new();
+                let mut argv = self.avget();
                 argv.push(lop);
                 argv.push(rop);
                 let start = self.pool_ops(&argv);
+                self.avput(argv);
                 let lt = self.body.places.at(pl as usize).ty;
                 let res = self.emit_call(
                     DefId { module: (m >> 32) as ModuleId, node: (m & 0xFFFFFFFFu64) as NodeId },
@@ -4242,7 +4315,7 @@ extend Lowerer {
         // Values evaluate in SOURCE order (temps), but the operand list is normalized to DECL
         // order with IR_NONE holes for omitted members -- consumers index it by member position,
         // and omitted members zero-fill (the established emitter's designated-init semantics).
-        let mut argv = Vector::<ir::OperandId>::new();
+        let mut argv = self.avget();
         let is_var = sd.node != NODE_NONE && self.decl_kind(sd) == NodeKind::NODE_VARIANT;
         if sd.node != NODE_NONE {
             let da = unsafe &*(&*self.pkg).module_ast_const(sd.module);
@@ -4289,9 +4362,13 @@ extend Lowerer {
             }
         }
         if is_var {
-            return self.finish_aggregate(ir::AGG_VARIANT, sd, &argv, ty, sp);
+            let rv9 = self.finish_aggregate(ir::AGG_VARIANT, sd, &argv, ty, sp);
+            self.avput(argv);
+            return rv9;
         }
-        return self.finish_aggregate(ir::AGG_STRUCT, sd, &argv, ty, sp);
+        let rs9 = self.finish_aggregate(ir::AGG_STRUCT, sd, &argv, ty, sp);
+        self.avput(argv);
+        return rs9;
     }
 
     fn finish_aggregate(self: &mut Self, agg: u8, item: DefId, ops: &Vector<ir::OperandId>, ty: TypeId, sp: tok::Span) ir::OperandId {
@@ -4338,7 +4415,7 @@ extend Lowerer {
             );
             return self.copy_op(pl);
         }
-        let mut argv = Vector::<ir::OperandId>::new();
+        let mut argv = self.avget();
         let mut cur: i64 = 0;
         let mut designated = false;
         for i in 0..d.elements.len {
@@ -4396,7 +4473,9 @@ extend Lowerer {
                 }
             }
         }
-        return self.finish_aggregate(agg, DefId { module: 0, node: NODE_NONE }, &argv, aty, sp);
+        let ra9 = self.finish_aggregate(agg, DefId { module: 0, node: NODE_NONE }, &argv, aty, sp);
+        self.avput(argv);
+        return ra9;
     }
 
     fn lower_range(self: &mut Self, id: NodeId) ir::OperandId {
@@ -4405,7 +4484,7 @@ extend Lowerer {
         let sp = self.f.node(id).span;
         // fixed decl-order slots {start, end, inclusive}: absent bounds are IR_NONE holes
         // (zero-fill), the inclusivity flag is a synthesized constant -- Core IR keeps it
-        let mut argv = Vector::<ir::OperandId>::new();
+        let mut argv = self.avget();
         let mut sop = ir::IR_NONE;
         if d.start != NODE_NONE {
             sop = self.lower_expr(d.start);
@@ -4440,7 +4519,9 @@ extend Lowerer {
                 },
             ),
         );
-        return self.finish_aggregate(ir::AGG_STRUCT, DefId { module: 0, node: NODE_NONE }, &argv, ty, sp);
+        let rr9 = self.finish_aggregate(ir::AGG_STRUCT, DefId { module: 0, node: NODE_NONE }, &argv, ty, sp);
+        self.avput(argv);
+        return rr9;
     }
 
     fn lower_if_expr(self: &mut Self, id: NodeId) ir::OperandId {
@@ -4552,7 +4633,7 @@ extend Lowerer {
         } else {
             ir::IN_VA_END;
         };
-        let mut argv = Vector::<ir::OperandId>::new();
+        let mut argv = self.avget();
         if d.ap != NODE_NONE {
             let op = self.lower_expr(d.ap);
             if op == ir::IR_NONE {
@@ -4569,6 +4650,7 @@ extend Lowerer {
         }
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
+        self.avput(argv);
         let t = self.temp(ty, sp);
         let pl = self.place_of_local(t);
         self.assign(
@@ -4590,7 +4672,7 @@ extend Lowerer {
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
         let caps = self.f.captures(id);
-        let mut argv = Vector::<ir::OperandId>::new();
+        let mut argv = self.avget();
         for i in 0..caps.len {
             let c = unsafe self.f.list(caps)[i as usize];
             let mut l = self.local_of(self.cap_decl(c));
@@ -4607,6 +4689,7 @@ extend Lowerer {
         self.closures.push(id);
         let fresh = self.pool_ops(&argv);
         let kept = argv.len() as u32;
+        self.avput(argv);
         let t = self.temp(ty, sp);
         let pl = self.place_of_local(t);
         self.assign(
@@ -4758,8 +4841,10 @@ extend Lowerer {
         }
         if dk == NodeKind::NODE_VARIANT {
             // unit variant construction
-            let argv = Vector::<ir::OperandId>::new();
-            return self.finish_aggregate(ir::AGG_VARIANT, d, &argv, ty, sp);
+            let argv = self.avget();
+            let ru9 = self.finish_aggregate(ir::AGG_VARIANT, d, &argv, ty, sp);
+            self.avput(argv);
+            return ru9;
         }
         let l = self.item_local(d, ty, sp);
         let pl = self.place_of_local(l);

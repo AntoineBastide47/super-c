@@ -252,6 +252,16 @@ pub struct Mangler {
     pub agg_on: bool,
     pub agg_reqs: Vector<AggReq>,
     agg_seen: Map<u64, u64>,
+    // fnode -> owning extend/interface, per module, built on first query: symbol resolution asks
+    // per CALL SITE, so membership must be a lookup, not a rescan of the module's item list.
+    own_built: Vector<bool>,
+    own_idx: Map<u64, u64>, // (module << 32 | fnode) -> (extend << 32 | interface)
+    ovl_memo: Map<u64, u64>, // overload_count keyed by (cur, tmod, tdecl, name) hash
+    last_edge: u64, // the used_mods edge just recorded: spellings cluster, so most repeat it
+    /// Spelling capture for memoized renders: while on, modpfx logs every module it spells so a
+    /// cache hit can replay the used_mods edges exactly (under the hit's own mark_ctx).
+    pub edge_log_on: bool,
+    pub edge_log: Vector<ModuleId>,
 }
 
 /// One recorded instance spelling: replaying `it` under `subs` re-derives the same C name.
@@ -295,6 +305,10 @@ extend Mangler as Free {
         self.agg_reqs.free();
         self.agg_seen.free();
         self.used_mods.free();
+        self.own_built.free();
+        self.own_idx.free();
+        self.ovl_memo.free();
+        self.edge_log.free();
     }
 }
 
@@ -323,7 +337,50 @@ extend Mangler {
             agg_on: false,
             agg_reqs: Vector::<AggReq>::new(),
             agg_seen: Map::<u64, u64>::new(),
+            own_built: Vector::<bool>::new(),
+            own_idx: Map::<u64, u64>::new(),
+            ovl_memo: Map::<u64, u64>::new(),
+            last_edge: 0xFFFFFFFFFFFFFFFFu64,
+            edge_log_on: false,
+            edge_log: Vector::<ModuleId>::new(),
         };
+    }
+
+    // The packed owner record of `fnode` (module `m`): extend node in the high half, interface
+    // node in the low half, zero halves = not a member.
+    fn owner_of(self: &mut Self, m: ModuleId, fnode: NodeId) u64 {
+        if self.own_built.len() == 0 {
+            for _i in 0..self.p().modules.len() {
+                self.own_built.push(false);
+            }
+        }
+        if !self.own_built[m as usize] {
+            self.own_built.set(m as usize, true);
+            let a = self.p().module_ast_const(m);
+            let items = unsafe a.at_const(a.root).as_data.program.items;
+            for i in 0..items.len {
+                let iid = unsafe a.list(items)[i as usize];
+                let k = a.at_const(iid).kind;
+                if k == NodeKind::NODE_EXTEND {
+                    let ms = a.at_const(iid).as_data.extend_def.items;
+                    for j in 0..ms.len {
+                        let mid = unsafe a.list(ms)[j as usize];
+                        self.own_idx.insert(skey_mix(0, m as u64 << 32 | mid as u64), iid as u64 << 32);
+                    }
+                } else if k == NodeKind::NODE_INTERFACE {
+                    let ms = a.at_const(iid).as_data.interface_def.items;
+                    for j in 0..ms.len {
+                        let mid = unsafe a.list(ms)[j as usize];
+                        self.own_idx.insert(skey_mix(0, m as u64 << 32 | mid as u64), iid);
+                    }
+                }
+            }
+        }
+        let rec = switch self.own_idx.get(&skey_mix(0, m as u64 << 32 | fnode as u64)) {
+            Some(v) => *v,
+            None => 0u64,
+        };
+        return rec;
     }
 
     const fn p(self: &Self) &loader::Package {
@@ -546,7 +603,27 @@ extend Mangler {
     }
 
     /// `""` | `<seg>__` | `<a>__<b>__` -- the module prefix of every prefixed symbol.
+    /// Record the cross-TU edge for module `m` exactly as spelling it would (replay path for
+    /// memoized renders).
+    pub fn mark_used(self: &mut Self, m: ModuleId) {
+        if m as i64 != self.mark_ctx {
+            let src = if self.mark_ctx < 0 {
+                65534u64;
+            } else {
+                self.mark_ctx as u64;
+            };
+            let edge = src << 32 | m as u64;
+            if edge != self.last_edge {
+                self.last_edge = edge;
+                self.used_mods.insert(edge, 1);
+            }
+        }
+    }
+
     pub fn modpfx(self: &mut Self, m: ModuleId, out: &mut String) {
+        if self.edge_log_on {
+            self.edge_log.push(m);
+        }
         if m as i64 != self.mark_ctx {
             // a cross-TU symbol spelling: record the (spelling TU -> owner module) edge so the
             // writer can prune TUs no KEPT TU references (65534 = the shared instance TU)
@@ -555,7 +632,11 @@ extend Mangler {
             } else {
                 self.mark_ctx as u64;
             };
-            self.used_mods.insert(src << 32 | m as u64, 1);
+            let edge = src << 32 | m as u64;
+            if edge != self.last_edge {
+                self.last_edge = edge;
+                self.used_mods.insert(edge, 1);
+            }
         }
         if !self.mangle || self.p().modules.at(m as usize).prelude {
             return;
@@ -889,6 +970,20 @@ extend Mangler {
     // compromise for overload counting without a package-wide walk. `name` is a span in `nmod`.
     fn overload_count(self: &mut Self, cur: ModuleId, tmod: ModuleId, tdecl: NodeId, nmod: ModuleId, name: tok::Span) i32 {
         let ntxt = self.p().modules.at(nmod as usize).source.as_str().slice(name.start as usize, name.end as usize);
+        let mut key = 1469598103934665603u64;
+        key = (key ^ cur as u64) * 1099511628211u64;
+        key = (key ^ tmod as u64) * 1099511628211u64;
+        key = (key ^ tdecl as u64) * 1099511628211u64;
+        for i in 0..ntxt.len() {
+            key = (key ^ ntxt.byte_at(i) as u64) * 1099511628211u64;
+        }
+        let hit = switch self.ovl_memo.get(&key) {
+            Some(v) => (*v) as i64,
+            None => (-1) as i64,
+        };
+        if hit >= 0 {
+            return hit as i32;
+        }
         let mut n: i32 = 0;
         let mut ns = 2;
         if tmod == cur {
@@ -926,6 +1021,7 @@ extend Mangler {
                 }
             }
         }
+        self.ovl_memo.insert(key, n as u64);
         return n;
     }
 
@@ -933,25 +1029,8 @@ extend Mangler {
     // method name through different interface instantiations, the symbol carries the interface
     // name and its type arguments. `from`/`try_from` keep the param-derived conv suffix instead.
     fn iface_suffix(self: &mut Self, fm: ModuleId, fnode: NodeId, out: &mut String) bool {
+        let ext = (self.owner_of(fm, fnode) >> 32) as NodeId;
         let a = self.p().module_ast_const(fm);
-        let items = unsafe a.at_const(a.root).as_data.program.items;
-        let mut ext = NODE_NONE;
-        for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
-                continue;
-            }
-            let ms = a.at_const(iid).as_data.extend_def.items;
-            for j in 0..ms.len {
-                if unsafe a.list(ms)[j as usize] == fnode {
-                    ext = iid;
-                    break;
-                }
-            }
-            if ext != NODE_NONE {
-                break;
-            }
-        }
         if ext == NODE_NONE {
             return true;
         }
@@ -1054,83 +1133,40 @@ extend Mangler {
     /// The resolved extend target of method `fnode` in module `m`, or `node == NODE_NONE` when the
     /// function is free-standing. Plan-time item scan.
     pub fn method_target(self: &mut Self, m: ModuleId, fnode: NodeId) DefId {
-        let a = self.p().module_ast_const(m);
-        let items = unsafe a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
-                continue;
-            }
-            let ms = a.at_const(iid).as_data.extend_def.items;
-            for j in 0..ms.len {
-                if unsafe a.list(ms)[j as usize] == fnode {
-                    if a.at_const(iid).as_data.extend_def.target_type == NODE_NONE {
-                        return DefId { module: m, node: NODE_NONE };
-                    }
-                    return a.resolution_def(a.at_const(iid).as_data.extend_def.target_type);
-                }
-            }
+        let ext = (self.owner_of(m, fnode) >> 32) as NodeId;
+        if ext == NODE_NONE {
+            return DefId { module: m, node: NODE_NONE };
         }
-        return DefId { module: m, node: NODE_NONE };
+        let a = self.p().module_ast_const(m);
+        if a.at_const(ext).as_data.extend_def.target_type == NODE_NONE {
+            return DefId { module: m, node: NODE_NONE };
+        }
+        return a.resolution_def(a.at_const(ext).as_data.extend_def.target_type);
     }
 
     /// The generics list of the extend owning `fnode` (empty when free-standing).
     pub fn extend_generics(self: &mut Self, m: ModuleId, fnode: NodeId) NodeList {
-        let a = self.p().module_ast_const(m);
-        let items = unsafe a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
-                continue;
-            }
-            let ms = a.at_const(iid).as_data.extend_def.items;
-            for j in 0..ms.len {
-                if unsafe a.list(ms)[j as usize] == fnode {
-                    return a.at_const(iid).as_data.extend_def.generics;
-                }
-            }
+        let ext = (self.owner_of(m, fnode) >> 32) as NodeId;
+        if ext == NODE_NONE {
+            return NodeList { start: 0, len: 0 };
         }
-        return NodeList { start: 0, len: 0 };
+        return self.p().module_ast_const(m).at_const(ext).as_data.extend_def.generics;
     }
 
     /// The interface declaring member `fnode` (its default body emits per conforming type), or
     /// NODE_NONE when the function is not an interface member.
     pub fn in_interface(self: &mut Self, m: ModuleId, fnode: NodeId) NodeId {
-        let a = self.p().module_ast_const(m);
-        let items = unsafe a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            if a.at_const(iid).kind != NodeKind::NODE_INTERFACE {
-                continue;
-            }
-            let ms = a.at_const(iid).as_data.interface_def.items;
-            for j in 0..ms.len {
-                if unsafe a.list(ms)[j as usize] == fnode {
-                    return iid;
-                }
-            }
-        }
-        return NODE_NONE;
+        return (self.owner_of(m, fnode) & 0xFFFFFFFF) as NodeId;
     }
 
     /// Does the extend that owns `fnode` declare generic parameters (its methods emit per receiver
     /// instance, outside the frozen non-generic symbol families)?
     pub fn in_generic_extend(self: &mut Self, m: ModuleId, fnode: NodeId) bool {
-        let a = self.p().module_ast_const(m);
-        let items = unsafe a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
-                continue;
-            }
-            let ms = a.at_const(iid).as_data.extend_def.items;
-            for j in 0..ms.len {
-                if unsafe a.list(ms)[j as usize] == fnode {
-                    return a.at_const(iid).as_data.extend_def.generics.len != 0;
-                }
-            }
+        let ext = (self.owner_of(m, fnode) >> 32) as NodeId;
+        if ext == NODE_NONE {
+            return false;
         }
-        return false;
+        return self.p().module_ast_const(m).at_const(ext).as_data.extend_def.generics.len != 0;
     }
 
     /// The C symbol of const/static item `cnode` (module `m`) read from a TU of module `em`:

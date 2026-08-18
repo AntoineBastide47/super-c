@@ -124,13 +124,13 @@ pub fn elaborate(
             // Entry-point events (reads, moves) land before this statement's own effect.
             while ev < ev_end && facts.events.at(ev as usize).point < exit {
                 let e = *facts.events.at(ev as usize);
-                if e.kind == bf::EV_MOVE || e.kind == bf::EV_MOVE_CUT {
+                if e.kind() == bf::EV_MOVE || e.kind() == bf::EV_MOVE_CUT {
                     // FIELD moves clear the root local's guard flag too: an overwrite drop of a
                     // conditionally-moved FIELD must not free what the branch moved out
                     sched.moves.push(
                         DropAt {
-                            local: forest.paths.at(e.path as usize).base,
-                            path: e.path,
+                            local: forest.paths.at(e.path() as usize).base,
+                            path: e.path(),
                             kind: 0,
                             stmt: sx as u32,
                             block: bi as u32,
@@ -296,13 +296,13 @@ pub fn elaborate(
             }
             while ev < ev_end && facts.events.at(ev as usize).point <= exit {
                 let e = *facts.events.at(ev as usize);
-                if e.kind == bf::EV_MOVE || e.kind == bf::EV_MOVE_CUT {
+                if e.kind() == bf::EV_MOVE || e.kind() == bf::EV_MOVE_CUT {
                     // FIELD moves clear the root local's guard flag too: an overwrite drop of a
                     // conditionally-moved FIELD must not free what the branch moved out
                     sched.moves.push(
                         DropAt {
-                            local: forest.paths.at(e.path as usize).base,
-                            path: e.path,
+                            local: forest.paths.at(e.path() as usize).base,
+                            path: e.path(),
                             kind: 0,
                             stmt: sx as u32,
                             block: bi as u32,
@@ -317,11 +317,11 @@ pub fn elaborate(
         // terminator-point moves (call arguments): the consume lands after the block's statements
         while ev < ev_end {
             let e = *facts.events.at(ev as usize);
-            if e.kind == bf::EV_MOVE || e.kind == bf::EV_MOVE_CUT {
+            if e.kind() == bf::EV_MOVE || e.kind() == bf::EV_MOVE_CUT {
                 sched.moves.push(
                     DropAt {
-                        local: forest.paths.at(e.path as usize).base,
-                        path: e.path,
+                        local: forest.paths.at(e.path() as usize).base,
+                        path: e.path(),
                         kind: 0,
                         stmt: 0xFFFFFFFFu32,
                         block: bi as u32,

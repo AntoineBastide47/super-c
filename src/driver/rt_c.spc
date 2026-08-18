@@ -526,30 +526,32 @@ void *sc_lk_realloc(void *__p, size_t __n) {
     }
   }
   /* The registry key is an ADDRESS, and an address survives the realloc that invalidates the pointer
-     holding it: reading `__p` again after this call is undefined (and GCC's -Wuse-after-free says so). */
+     holding it: reading `__p` again after this call is undefined (and GCC's -Wuse-after-free says so).
+     The lock is held ACROSS the realloc: the moment it returns, the old block is free for another
+     thread to receive from malloc, so releasing between the call and the bookkeeping lets that
+     thread's fresh entry at the same address be marked freed here -- a false use-after-free later. */
   const uintptr_t __pa = (uintptr_t)__p;
+  int track = sc_lk_on();
+  if (track) sc_lk_acquire();
   void *q = (realloc)(__p, __n);
-  if (q != NULL && sc_lk_on()) {
+  if (q != NULL && track && sc_lk_state >= 2) {
     sc_lk_ent e;
     sc_lk_capture(&e, q, __n);
-    sc_lk_acquire();
-    if (sc_lk_state >= 2) {
-      sc_lk_ent *old = __pa != 0 ? sc_lk_find((void *)__pa) : NULL;
-      int was_tracked = 0;
-      if (old != NULL && old->st == 1) {
-        sc_lk_bytes -= old->size;
-        sc_lk_live--;
-        size_t osz = old->size;
-        void *op = old->ptr;
-        sc_lk_capture(old, op, osz); /* the realloc consumed it: record this site */
-        old->st = 2;
-        was_tracked = 1;
-      }
-      /* memory the tracker never saw (a foreign allocator) stays untracked */
-      if ((was_tracked || __pa == 0) && !sc_lk_insert(&e)) sc_lk_disable();
+    sc_lk_ent *old = __pa != 0 ? sc_lk_find((void *)__pa) : NULL;
+    int was_tracked = 0;
+    if (old != NULL && old->st == 1) {
+      sc_lk_bytes -= old->size;
+      sc_lk_live--;
+      size_t osz = old->size;
+      void *op = old->ptr;
+      sc_lk_capture(old, op, osz); /* the realloc consumed it: record this site */
+      old->st = 2;
+      was_tracked = 1;
     }
-    sc_lk_release();
+    /* memory the tracker never saw (a foreign allocator) stays untracked */
+    if ((was_tracked || __pa == 0) && !sc_lk_insert(&e)) sc_lk_disable();
   }
+  if (track) sc_lk_release();
   return q;
 }
 void sc_lk_free(void *__p) {

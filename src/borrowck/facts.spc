@@ -65,11 +65,28 @@ pub struct KillAt {
     pub point: u32,
 }
 
+/// One init/move fact, packed to 16 bytes: replays stream millions of these, so `kind` rides in
+/// `pk`'s top byte over the 24-bit path id (move-path creation checks the id fits).
 pub struct Event {
-    pub kind: u8,
-    pub path: u32,
+    pub pk: u32, // kind << 24 | path; build with `ev()`, read via kind()/path()
     pub point: u32,
     pub span: tok::Span,
+}
+
+static_assert(sizeof(Event) == 16, "Event is deliberately packed to a quarter cache line");
+
+pub const fn ev(kind: u8, path: u32, point: u32, span: tok::Span) Event {
+    return Event { pk: kind as u32 << 24 | path, point: point, span: span };
+}
+
+extend Event {
+    pub const fn kind(self: &Self) u8 {
+        return (self.pk >> 24) as u8;
+    }
+
+    pub const fn path(self: &Self) u32 {
+        return self.pk & 0xFFFFFF;
+    }
 }
 
 pub struct BodyFacts {
@@ -91,6 +108,12 @@ pub struct BodyFacts {
     pub kills: Vector<KillAt>,
     pub events: Vector<Event>,
     pub ev_start: Vector<u32>, // per block: first event (+ one sentinel entry at the end)
+    // The state-CHANGING events only (assign/dead/move), same order and block ranges: the move/init
+    // fixpoint's silent replays stream these, skipping the read events that dominate the full list.
+    // A block with no entry here has an identity transfer even when it is full of reads.
+    pub mev: Vector<Event>,
+    pub mev_start: Vector<u32>,
+    pub rep_blk: Vector<bool>, // per block: any USE/MOVE/MOVE_CUT event (the reporting replay can say something)
     pub freed: Vector<u32>, // move paths consumed by an explicit `.free()` (wording refinement)
     pub observed: Vector<bool>, // per local: owned carrier whose destruction observes stored borrows
     pub moved_whole: Vector<bool>, // per local: some path moves the WHOLE local (ownership travels)
@@ -117,6 +140,9 @@ extend BodyFacts as Free {
         self.kills.free();
         self.events.free();
         self.ev_start.free();
+        self.mev.free();
+        self.mev_start.free();
+        self.rep_blk.free();
         self.freed.free();
         self.observed.free();
         self.moved_whole.free();
@@ -767,6 +793,9 @@ extend BodyFacts {
             kills: Vector::<KillAt>::new(),
             events: Vector::<Event>::new(),
             ev_start: Vector::<u32>::new(),
+            mev: Vector::<Event>::new(),
+            mev_start: Vector::<u32>::new(),
+            rep_blk: Vector::<bool>::new(),
             freed: Vector::<u32>::new(),
             observed: Vector::<bool>::new(),
             moved_whole: Vector::<bool>::new(),
@@ -798,6 +827,9 @@ extend BodyFacts {
         self.kills.truncate(0);
         self.events.truncate(0);
         self.ev_start.truncate(0);
+        self.mev.truncate(0);
+        self.mev_start.truncate(0);
+        self.rep_blk.truncate(0);
         self.freed.truncate(0);
         self.observed.truncate(0);
         self.moved_whole.truncate(0);
@@ -1176,7 +1208,7 @@ extend Gen {
                 } else {
                     EV_MOVE_CUT; // through-a-reference: invisible to the checker, real to drops
                 };
-                self.f.events.push(Event { kind: ek, path: mpath, point: point, span: sp });
+                self.push_ev(ek, mpath, point, sp);
                 self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ak, point: point, span: sp });
                 return;
             }
@@ -1186,7 +1218,7 @@ extend Gen {
         if self.plain_copy && path != mp::MP_NONE && pl.ty != TYPE_NONE {
             let y = *self.owner().ast_of(self.body().module).type_at(pl.ty);
             if y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                self.f.events.push(Event { kind: EV_MOVE, path: path, point: point, span: sp });
+                self.push_ev(EV_MOVE, path, point, sp);
                 self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ACC_MOVE, point: point, span: sp });
                 return;
             }
@@ -1196,7 +1228,7 @@ extend Gen {
             upath = self.forest().place_cut[op.data as usize];
         }
         if upath != mp::MP_NONE {
-            self.f.events.push(Event { kind: EV_USE, path: upath, point: point, span: sp });
+            self.push_ev(EV_USE, upath, point, sp);
         }
         self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ACC_READ, point: point, span: sp });
     }
@@ -1224,13 +1256,13 @@ extend Gen {
         }
         let path = self.forest().place_path[pid as usize];
         if path != mp::MP_NONE {
-            self.f.events.push(Event { kind: EV_ASSIGN, path: path, point: point, span: sp });
+            self.push_ev(EV_ASSIGN, path, point, sp);
         } else {
             // Writing through a dereference READS the pointer: a moved `&mut` used as a store
             // target must still be a use-after-move.
             let upath = self.forest().place_cut[pid as usize];
             if upath != mp::MP_NONE && pl.proj_len != 0 {
-                self.f.events.push(Event { kind: EV_USE, path: upath, point: point - 1, span: sp });
+                self.push_ev(EV_USE, upath, point - 1, sp);
             }
         }
         self.f.accesses.push(Access { place: pid, local: BF_NONE, kind: ACC_WRITE, point: point, span: sp });
@@ -1502,7 +1534,7 @@ extend Gen {
             upath = self.forest().place_cut[pid as usize];
         }
         if upath != mp::MP_NONE {
-            self.f.events.push(Event { kind: EV_USE, path: upath, point: entry, span: sp });
+            self.push_ev(EV_USE, upath, entry, sp);
         }
         let mut ak = ACC_READ;
         if k == 2 {
@@ -1550,9 +1582,16 @@ extend Gen {
             self.cur_block = bi as u32;
             let ne = self.f.events.len() as u32;
             self.f.ev_start.push(ne);
-            self.seen.clear();
-            for _w in 0..lw {
+            self.f.mev_start.push(self.f.mev.len() as u32);
+            self.f.rep_blk.push(false);
+            while self.seen.len() < lw as usize {
                 self.seen.push(0u64);
+            }
+            unsafe {
+                let zs = self.seen.as_ptr() as *mut u64;
+                for i in 0..lw as usize {
+                    *(zs + i) = 0u64;
+                }
             }
             let blk = *self.body().blocks.at(bi);
             for si in 0..blk.stmt_len {
@@ -1569,7 +1608,7 @@ extend Gen {
                     self.assign_sites.push(KillSite { place: s.place, local: BF_NONE, point: exit });
                 } else if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
                     let root = self.forest().local_root[s.a as usize];
-                    self.f.events.push(Event { kind: EV_DEAD, path: root, point: exit, span: s.span });
+                    self.push_ev(EV_DEAD, root, exit, s.span);
                     self.assign_sites.push(KillSite { place: BF_NONE, local: s.a, point: exit });
                     if s.kind == ir::ST_STORAGE_DEAD {
                         // An owned carrier's destruction observes what it stores (`Free` runs), so
@@ -1584,7 +1623,7 @@ extend Gen {
                 } else if s.kind == ir::ST_DEINIT {
                     let path = self.forest().place_path[s.place as usize];
                     if path != mp::MP_NONE {
-                        self.f.events.push(Event { kind: EV_DEAD, path: path, point: exit, span: s.span });
+                        self.push_ev(EV_DEAD, path, exit, s.span);
                     }
                 } else if s.kind == ir::ST_ASM {
                     self.op_range_read(s.a, s.b, entry, s.span);
@@ -1653,7 +1692,7 @@ extend Gen {
                     if implicit && frees && i == 0 && kinds[0] == 2 && self.forest().place_path[op.data as usize] != mp::MP_NONE {
                         let path = self.forest().place_path[op.data as usize];
                         self.live_use(self.place_of(op.data).base);
-                        self.f.events.push(Event { kind: EV_MOVE, path: path, point: entry, span: t.span });
+                        self.push_ev(EV_MOVE, path, entry, t.span);
                         self.f.accesses.push(
                             Access { place: op.data, local: BF_NONE, kind: ACC_FREE, point: entry, span: t.span },
                         );
@@ -1971,7 +2010,7 @@ extend Gen {
                     self.live_use(self.place_of(t.a).base);
                     let path = self.forest().place_path[t.a as usize];
                     if path != mp::MP_NONE {
-                        self.f.events.push(Event { kind: EV_MOVE, path: path, point: entry, span: t.span });
+                        self.push_ev(EV_MOVE, path, entry, t.span);
                     }
                     self.f.accesses.push(
                         Access { place: t.a, local: BF_NONE, kind: ACC_FREE, point: entry, span: t.span },
@@ -1981,6 +2020,19 @@ extend Gen {
         }
         let ne = self.f.events.len() as u32;
         self.f.ev_start.push(ne);
+        self.f.mev_start.push(self.f.mev.len() as u32);
+    }
+
+    // Push one event, mirroring it into the fixpoint's mutating stream and the block's report flag
+    // as it lands, so no later pass re-reads the whole stream.
+    fn push_ev(self: &mut Self, kind: u8, path: u32, point: u32, sp: tok::Span) {
+        self.f.events.push(ev(kind, path, point, sp));
+        if kind == EV_ASSIGN || kind == EV_DEAD || kind == EV_MOVE {
+            self.f.mev.push(ev(kind, path, point, sp));
+        }
+        if kind == EV_USE || kind == EV_MOVE || kind == EV_MOVE_CUT {
+            self.f.rep_blk.set(self.cur_block as usize, true);
+        }
     }
 
     fn stmt_assign(self: &mut Self, s: &ir::Statement, entry: u32, exit: u32) {
@@ -2014,11 +2066,11 @@ extend Gen {
                     upath = self.forest().place_cut[src as usize];
                 }
                 if upath != mp::MP_NONE {
-                    self.f.events.push(Event { kind: EV_USE, path: upath, point: entry, span: s.span });
+                    self.push_ev(EV_USE, upath, entry, s.span);
                 }
             } else if path != mp::MP_NONE {
                 // `&mut x` passed onward may initialize x through the callee.
-                self.f.events.push(Event { kind: EV_ASSIGN, path: path, point: exit, span: s.span });
+                self.push_ev(EV_ASSIGN, path, exit, s.span);
             }
             let mut kind = LK_SHARED;
             if rv.b == 1 {
@@ -2233,8 +2285,8 @@ extend Gen {
         }
         for e in 0..self.f.events.len() {
             let ev = *self.f.events.at(e);
-            if ev.kind == EV_MOVE {
-                let mp2 = *self.forest().paths.at(ev.path as usize);
+            if ev.kind() == EV_MOVE {
+                let mp2 = *self.forest().paths.at(ev.path() as usize);
                 if mp2.parent == mp::MP_NONE {
                     self.f.moved_whole.set(mp2.base as usize, true);
                 }
@@ -2242,49 +2294,108 @@ extend Gen {
         }
         let na = self.assign_sites.len();
         let nl = self.f.loans.len();
-        for a in 0..na {
-            let site = *self.assign_sites.at(a);
+        if na * nl >= 1024 {
+            // Loans bucketed by their place's base local: a site can only kill loans on its own
+            // base (kill_covers demands equal bases), so the na*nl sweep shrinks to the matches.
+            // Bucket order is ascending loan id -- exactly the subsequence the sweep pushed.
+            let nlc = self.body().locals.len();
+            let mut lb_start = Vector::<u32>::new();
+            let mut lb_flat = Vector::<u32>::new();
+            let mut curp = Vector::<u32>::new();
+            for _i in 0..nlc + 1 {
+                lb_start.push(0);
+            }
             for l in 0..nl {
-                let lp = self.f.loans.at(l).place;
-                if site.local != BF_NONE {
-                    if self.place_of(lp).base == site.local {
+                let base = self.place_of(self.f.loans.at(l).place).base as usize;
+                lb_start.set(base + 1, lb_start[base + 1] + 1);
+            }
+            for i in 0..nlc {
+                lb_start.set(i + 1, lb_start[i + 1] + lb_start[i]);
+                curp.push(lb_start[i]);
+            }
+            for _i in 0..nl {
+                lb_flat.push(0);
+            }
+            for l in 0..nl {
+                let base = self.place_of(self.f.loans.at(l).place).base as usize;
+                lb_flat.set(curp[base] as usize, l as u32);
+                curp.set(base, curp[base] + 1);
+            }
+            for a in 0..na {
+                let site = *self.assign_sites.at(a);
+                let base = if site.local != BF_NONE {
+                    site.local as usize;
+                } else {
+                    self.place_of(site.place).base as usize;
+                };
+                for li in lb_start[base]..lb_start[base + 1] {
+                    let l = lb_flat[li as usize];
+                    if site.local != BF_NONE || self.kill_covers(site.place, self.f.loans.at(l as usize).place) {
+                        self.f.kills.push(KillAt { loan: l, point: site.point });
+                    }
+                }
+            }
+        } else {
+            for a in 0..na {
+                let site = *self.assign_sites.at(a);
+                for l in 0..nl {
+                    let lp = self.f.loans.at(l).place;
+                    if site.local != BF_NONE {
+                        if self.place_of(lp).base == site.local {
+                            self.f.kills.push(KillAt { loan: l as u32, point: site.point });
+                        }
+                    } else if self.kill_covers(site.place, lp) {
                         self.f.kills.push(KillAt { loan: l as u32, point: site.point });
                     }
-                } else if self.kill_covers(site.place, lp) {
-                    self.f.kills.push(KillAt { loan: l as u32, point: site.point });
                 }
             }
         }
-        // Reserved loans activate at the first later read of the holder temp.
+        // Reserved loans activate at the first later read of the holder temp. The pre-activation
+        // access list is point-sorted (the walk emits blocks and statements in order; ACC_ACT
+        // records appended below stay past the snapshot), so a lower bound plus a short forward
+        // scan replaces the full sweeps -- the first ascending match IS the earliest point.
         let nacc = self.f.accesses.len();
         for l in 0..nl {
             if self.f.loans.at(l).kind != LK_RESERVED {
                 continue;
             }
             let ip = self.f.loans.at(l).issued_at;
+            let mut lo2: usize = 0;
+            let mut hi2 = nacc;
+            while lo2 < hi2 {
+                let mid = (lo2 + hi2) / 2;
+                if self.f.accesses.at(mid).point < ip {
+                    lo2 = mid + 1;
+                } else {
+                    hi2 = mid;
+                }
+            }
             let mut holder = BF_NONE;
-            for a in 0..nacc {
+            let mut a = lo2;
+            while a < nacc && self.f.accesses.at(a).point == ip {
                 let ac = *self.f.accesses.at(a);
-                if ac.point == ip && ac.kind == ACC_WRITE && self.place_of(ac.place).proj_len == 0 {
+                if ac.kind == ACC_WRITE && ac.place != BF_NONE && self.place_of(ac.place).proj_len == 0 {
                     holder = self.place_of(ac.place).base;
                     break;
                 }
+                a += 1;
             }
             if holder == BF_NONE {
                 continue;
             }
             let mut act = BF_NONE;
-            for a in 0..nacc {
+            a = lo2;
+            while a < nacc {
                 let ac = *self.f.accesses.at(a);
                 // A `&mut` holder temp is consumed (ACC_MOVE) when it lands in a user binding; that
                 // copy is the activation read.
                 if (ac.kind == ACC_READ || ac.kind == ACC_MOVE) && ac.place != BF_NONE && ac.point > ip && self.place_of(
                     ac.place,
                 ).base == holder {
-                    if act == BF_NONE || ac.point < act {
-                        act = ac.point;
-                    }
+                    act = ac.point;
+                    break;
                 }
+                a += 1;
             }
             self.f.loans[l].activated_at = act;
             if act != BF_NONE {

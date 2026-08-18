@@ -33,6 +33,9 @@ pub struct BorrowCtx {
     pub solver: bln::Solver,
     pub cap_spans: Vector<u32>,
     pub escaping: Vector<u32>,
+    /// Spent Lowerers recycled across bodies: lower_fn/lower_closure_body re-seed on entry, so a
+    /// pooled entry only donates its heap capacity. Same-module only (BorrowCtx is per-module).
+    pub lower_pool: Vector<irl::Lowerer>,
 }
 
 extend BorrowCtx {
@@ -46,8 +49,48 @@ extend BorrowCtx {
             solver: bln::Solver::empty(),
             cap_spans: Vector::<u32>::new(),
             escaping: Vector::<u32>::new(),
+            lower_pool: Vector::<irl::Lowerer>::new(),
         };
     }
+}
+
+// A Lowerer for `owner`: recycled from the pool when one is spent, else freshly built.
+fn bc_lw_take(ctx: &mut BorrowCtx, pkg: *const loader::Package, m: ModuleId, owner: NodeId) irl::Lowerer {
+    switch ctx.lower_pool.pop() {
+        Some(lw) => {
+            return lw;
+        },
+        _ => {},
+    };
+    return irl::Lowerer::new(pkg, m, owner);
+}
+
+/// Run the six analysis stages for `body` into `ctx` (reset-and-refill keeps vector capacity
+/// across bodies). Returns true when any move or borrow error was recorded -- the wording pass
+/// (or the module's serial replay) then has something to say. Pure over the frozen `body`, the
+/// package's read-only ASTs, and the two private accumulators, so workers may run it concurrently.
+pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBody) bool {
+    ctx.forest.build_into(body);
+    bfx::generate_into(ow, body, &ctx.forest, &mut ctx.facts);
+    ctx.cfg.build_into(body);
+    // Boundary liveness only feeds the loan solver's origin-liveness stage, which runs for
+    // loan-bearing bodies and for declared return-lifetime placeholders (the solver's
+    // zero-loan gate, mirrored); leave the stale rows unread otherwise.
+    let mut lv_need = ctx.facts.loans.len() != 0;
+    if !lv_need && ctx.facts.nuniversal > 1 {
+        for r in 0..ctx.facts.ret_origin.len() {
+            if !ctx.facts.ret_elided[r] {
+                lv_need = true;
+            }
+        }
+    }
+    if lv_need {
+        ctx.cfg.build_preds(); // liveness is the only predecessor consumer
+        ctx.liveness.build_into(&ctx.facts, &ctx.cfg);
+    }
+    ctx.moves.build_into(body, &ctx.forest, &ctx.facts, &ctx.cfg);
+    ctx.solver.build_into(body, &ctx.facts, &ctx.cfg, &ctx.liveness);
+    return ctx.moves.errs.len() != 0 || ctx.solver.errs.len() != 0;
 }
 
 // Walk-parity wording. The categories keep loop replays and defer duplication deduplicated.
@@ -80,12 +123,14 @@ extend tc::TypeChecker {
     }
 
     /// Lower `fnid` and its closures BEFORE the walk (whose capture analysis the facts read).
-    /// False = a body did not lower; the caller runs the noisy walk instead.
-    pub fn bc_ir_lower(self: &mut Self, fnid: NodeId, bodies: &mut Vector<irl::Lowerer>) bool {
+    /// False = a body did not lower; the caller runs the noisy walk instead. Lowerers come from
+    /// `ctx.lower_pool` when available (entry re-seeds them), so steady state allocates nothing.
+    pub fn bc_ir_lower(self: &mut Self, fnid: NodeId, ctx: &mut BorrowCtx, bodies: &mut Vector<irl::Lowerer>) bool {
         let pkg = self.package as *const loader::Package;
         let m = self.cur_module();
-        let mut lw = irl::Lowerer::new(pkg, m, fnid);
+        let mut lw = bc_lw_take(ctx, pkg, m, fnid);
         if !lw.lower_fn(fnid) {
+            ctx.lower_pool.push(lw);
             return false;
         }
         let mut cns = Vector::<NodeId>::new();
@@ -97,13 +142,14 @@ extend tc::TypeChecker {
         let mut i: usize = 0;
         while i < cns.len() {
             let cn = cns[i];
-            let mut cl = irl::Lowerer::new(pkg, m, cn);
+            let mut cl = bc_lw_take(ctx, pkg, m, cn);
             if cl.lower_closure_body(cn) {
                 for c2 in 0..cl.closures.len() {
                     cns.push(cl.closures[c2]);
                 }
                 bodies.push(cl);
             } else {
+                ctx.lower_pool.push(cl);
                 ok = false;
             }
             i += 1;
@@ -152,21 +198,18 @@ extend tc::TypeChecker {
         seen: &mut Vector<u64>,
         out: &mut Vector<FlowErr>,
     ) {
-        // Reset-and-refill each stage into the reusable context (keeps vector capacity across bodies).
-        ctx.forest.build_into(body);
-        bfx::generate_into(ow, body, &ctx.forest, &mut ctx.facts);
-        ctx.cfg.build_into(body);
-        ctx.liveness.build_into(&ctx.facts, &ctx.cfg);
-        ctx.moves.build_into(body, &ctx.forest, &ctx.facts, &ctx.cfg);
-        ctx.solver.build_into(body, &ctx.facts, &ctx.cfg, &ctx.liveness);
-        // Capture sites: a move-of-moved AT a closure creation is worded as a capture.
+        let _ = bc_run_stages(ow, ctx, body);
+        // Capture sites: a move-of-moved AT a closure creation is worded as a capture. Only the
+        // move-error wording below reads them, so scan the body only when an error exists at all.
         ctx.cap_spans.truncate(0);
-        for bi in 0..body.blocks.len() {
-            let blk = *body.blocks.at(bi);
-            for si in 0..blk.stmt_len {
-                let s = *body.statements.at((blk.stmt_start + si) as usize);
-                if s.kind == ir::ST_ASSIGN && body.rvalues.at(s.rvalue as usize).kind == ir::RV_CLOSURE {
-                    ctx.cap_spans.push(s.span.start);
+        if ctx.moves.errs.len() != 0 {
+            for bi in 0..body.blocks.len() {
+                let blk = *body.blocks.at(bi);
+                for si in 0..blk.stmt_len {
+                    let s = *body.statements.at((blk.stmt_start + si) as usize);
+                    if s.kind == ir::ST_ASSIGN && body.rvalues.at(s.rvalue as usize).kind == ir::RV_CLOSURE {
+                        ctx.cap_spans.push(s.span.start);
+                    }
                 }
             }
         }

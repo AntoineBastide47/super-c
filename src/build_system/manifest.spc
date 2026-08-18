@@ -229,7 +229,9 @@ fn add_builtin_profiles(m: &mut Manifest) {
     }
     if m.profile_index("bench") < 0 {
         let mut p = Profile::new("bench");
-        push_flags(&mut p.cflags, "-O2 -g -fno-omit-frame-pointer -flto=auto");
+        // Optimization parity with `release` (-O3 -DNDEBUG): the bench should measure the compiler
+        // users actually run. -g and frame pointers stay so samply profiles remain readable.
+        push_flags(&mut p.cflags, "-O3 -DNDEBUG -g -fno-omit-frame-pointer -flto=auto");
         push_flags(&mut p.ldflags, "-flto=auto");
         m.profiles.push(p);
     }

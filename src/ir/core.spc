@@ -136,13 +136,15 @@ pub const IN_NEW: u8 = 9; // heap allocation of the initializer operand (`new T 
 pub const IN_ASM: u8 = 10;
 pub const IN_SAFEPOINT: u8 = 11; // loop-body preemption marker; printed only for runtime-using programs
 
+// Field order packs to 24 bytes (kind/c share the item's tail padding); bodies hold one record
+// per expression, so the two byte flags sit last.
 pub struct Rvalue {
-    pub kind: u8,
     pub a: u32,
     pub b: u32,
-    pub c: u8,
     pub target: TypeId, // result type
     pub item: DefId, // selected method/decl when the kind carries one
+    pub kind: u8,
+    pub c: u8,
 }
 
 /// Statement kinds.
@@ -172,8 +174,8 @@ pub const TM_DROP: u8 = 4; // place; t0 = successor
 pub const TM_ASSERT: u8 = 5; // a = condition OperandId; t0 = success
 pub const TM_UNREACHABLE: u8 = 6;
 
+// Field order packs to 64 bytes (one record per cache line); the byte flags ride the tail padding.
 pub struct Terminator {
-    pub kind: u8,
     pub a: u32, // per kind (see above)
     pub args_start: u32, // TM_CALL: argument operand range
     pub args_len: u32,
@@ -182,11 +184,12 @@ pub struct Terminator {
     pub sw_start: u32, // TM_SWITCH: (value, target) pair range in switch pool
     pub sw_len: u32,
     pub t0: BlockId, // primary successor (goto/normal/success/otherwise)
-    pub callee: DefId, // TM_CALL resolved target; node == NODE_NONE for fn-value calls (a = operand)
     pub targs_start: u32, // TM_CALL: the checker's bound generic arguments (CoreBody.targ_pool)
     pub targs_len: u32,
-    pub is_variadic: bool,
+    pub callee: DefId, // TM_CALL resolved target; node == NODE_NONE for fn-value calls (a = operand)
     pub span: tok::Span,
+    pub kind: u8,
+    pub is_variadic: bool,
 }
 
 /// One basic block: a statement range plus exactly one terminator.
@@ -245,6 +248,90 @@ extend CoreBody {
             targ_pool: Vector::<TypeId>::new(),
             entry: 0,
         };
+    }
+
+    /// Re-seed for a fresh body, keeping every pool's heap capacity so the next lowering refills
+    /// instead of reallocating. Callers that reuse one Lowerer across bodies rely on this.
+    pub fn clear(self: &mut Self, owner: DefId, module: ModuleId) {
+        self.owner = owner;
+        self.module = module;
+        self.args = 0;
+        self.returns = 0;
+        self.is_generic = false;
+        self.has_reflect = false;
+        self.locals.truncate(0);
+        self.blocks.truncate(0);
+        self.statements.truncate(0);
+        self.places.truncate(0);
+        self.projections.truncate(0);
+        self.operands.truncate(0);
+        self.rvalues.truncate(0);
+        self.constants.truncate(0);
+        self.oper_pool.truncate(0);
+        self.dest_pool.truncate(0);
+        self.switch_pool.truncate(0);
+        self.targ_pool.truncate(0);
+        self.entry = 0;
+    }
+
+    /// An exact-size deep copy: every pool reserves its final length, so a kept body carries no
+    /// growth slack and costs one allocation per non-empty pool.
+    pub fn compact_from(src: &CoreBody) CoreBody {
+        let mut out = CoreBody::new(src.owner, src.module);
+        out.args = src.args;
+        out.returns = src.returns;
+        out.is_generic = src.is_generic;
+        out.has_reflect = src.has_reflect;
+        out.entry = src.entry;
+        out.locals.reserve(src.locals.len());
+        for i in 0..src.locals.len() {
+            out.locals.push(*src.locals.at(i));
+        }
+        out.blocks.reserve(src.blocks.len());
+        for i in 0..src.blocks.len() {
+            out.blocks.push(*src.blocks.at(i));
+        }
+        out.statements.reserve(src.statements.len());
+        for i in 0..src.statements.len() {
+            out.statements.push(*src.statements.at(i));
+        }
+        out.places.reserve(src.places.len());
+        for i in 0..src.places.len() {
+            out.places.push(*src.places.at(i));
+        }
+        out.projections.reserve(src.projections.len());
+        for i in 0..src.projections.len() {
+            out.projections.push(*src.projections.at(i));
+        }
+        out.operands.reserve(src.operands.len());
+        for i in 0..src.operands.len() {
+            out.operands.push(*src.operands.at(i));
+        }
+        out.rvalues.reserve(src.rvalues.len());
+        for i in 0..src.rvalues.len() {
+            out.rvalues.push(*src.rvalues.at(i));
+        }
+        out.constants.reserve(src.constants.len());
+        for i in 0..src.constants.len() {
+            out.constants.push(*src.constants.at(i));
+        }
+        out.oper_pool.reserve(src.oper_pool.len());
+        for i in 0..src.oper_pool.len() {
+            out.oper_pool.push(*src.oper_pool.at(i));
+        }
+        out.dest_pool.reserve(src.dest_pool.len());
+        for i in 0..src.dest_pool.len() {
+            out.dest_pool.push(*src.dest_pool.at(i));
+        }
+        out.switch_pool.reserve(src.switch_pool.len());
+        for i in 0..src.switch_pool.len() {
+            out.switch_pool.push(*src.switch_pool.at(i));
+        }
+        out.targ_pool.reserve(src.targ_pool.len());
+        for i in 0..src.targ_pool.len() {
+            out.targ_pool.push(*src.targ_pool.at(i));
+        }
+        return out;
     }
 
     /// Retained bytes across every pool (capacity, the number that reaches RSS).

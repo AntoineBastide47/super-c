@@ -1371,10 +1371,55 @@ fn cemit_inst_asserts(
     }
 }
 
+// The FNV of every `struct <name> {` spelling in `text`: layout asserts probe once per aggregate
+// per module, so definition membership must be a set lookup, not a header-wide substring scan.
+fn struct_def_names(text: str, out: &mut Set<u64>) {
+    let n = text.len();
+    let mut i: usize = 0;
+    while i + 7 <= n {
+        if text.byte_at(i) == b's' && text.slice(i, i + 7) == "struct " {
+            let mut j = i + 7;
+            let s0 = j;
+            while j < n {
+                let c = text.byte_at(j);
+                let idc = c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_';
+                if !idc {
+                    break;
+                }
+                j += 1;
+            }
+            if j > s0 && j + 2 <= n && text.byte_at(j) == b' ' && text.byte_at(j + 1) == b'{' {
+                let mut h = 1469598103934665603u64;
+                for k in s0..j {
+                    h = (h ^ text.byte_at(k) as u64) * 1099511628211u64;
+                }
+                out.insert(h);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+const fn struct_def_hit(defined: &Set<u64>, nm: str) bool {
+    let mut h = 1469598103934665603u64;
+    for k in 0..nm.len() {
+        h = (h ^ nm.byte_at(k) as u64) * 1099511628211u64;
+    }
+    return defined.contains(&h);
+}
+
 // Layout-model verification asserts for module `m`: sizeof/_Alignof of every concrete aggregate
 // (extern aggregates especially -- their layout is a CLAIM about a C header) checked against the
 // layout service, so the C compiler proves the model on every target.
-fn cemit_layout_asserts(p: &mut loader::Package, cem: &mut cbe::CEmit, m: ModuleId, defined: &String, out: &mut String) {
+fn cemit_layout_asserts(
+    p: &mut loader::Package,
+    cem: &mut cbe::CEmit,
+    m: ModuleId,
+    defined: &Set<u64>,
+    out: &mut String,
+) {
     let mut svc = lay::Svc::new(p);
     let mut decls = Vector::<NodeId>::new();
     let mut exts = Vector::<NodeId>::new();
@@ -1446,12 +1491,7 @@ fn cemit_layout_asserts(p: &mut loader::Package, cem: &mut cbe::CEmit, m: Module
         }
         if !is_ext {
             // demand-driven emission: only aggregates the plan actually DEFINED can be sized
-            let mut probe = String::from_str("struct ");
-            probe.push_string(&nm);
-            probe.push_str(" {");
-            let have = defined.contains(probe.as_str());
-            probe.free();
-            if !have {
+            if !struct_def_hit(defined, nm.as_str()) {
                 continue;
             }
         }
@@ -1484,12 +1524,7 @@ fn cemit_layout_asserts(p: &mut loader::Package, cem: &mut cbe::CEmit, m: Module
             if !cem.mg.ctype(m, t, "", &mut nm) {
                 continue;
             }
-            let mut probe = String::from_str("struct ");
-            probe.push_string(&nm);
-            probe.push_str(" {");
-            let have = defined.contains(probe.as_str());
-            probe.free();
-            if !have {
+            if !struct_def_hit(defined, nm.as_str()) {
                 continue;
             }
             out.push_str("_Static_assert(sizeof(");
@@ -1510,6 +1545,49 @@ fn cemit_layout_asserts(p: &mut loader::Package, cem: &mut cbe::CEmit, m: Module
         out.push_str("\n");
     }
     svc.free();
+}
+
+// Take the graph's cached lowering of `(m, nid)` into `lw_out` -- the graph lowered every body it
+// walked exactly once -- lowering in place only when the cache has no live entry. A taken slot is
+// removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
+fn cemit_take_body(
+    g: &mut ig::InstGraph,
+    p: *const loader::Package,
+    m: ModuleId,
+    nid: NodeId,
+    lw_out: &mut irl::Lowerer,
+) bool {
+    let key = skey_mix(0, m as u64 << 32 | nid as u64);
+    let ki = switch g.kept_ix.get(&key) {
+        Some(v) => (*v) as i64,
+        None => (-2) as i64,
+    };
+    if ki >= 0 {
+        *lw_out = replace(&mut g.kept[ki as usize], irl::Lowerer::new(p, m, nid));
+        let _ = g.kept_ix.remove(&key);
+        return true;
+    }
+    return lw_out.lower_fn(nid);
+}
+
+fn cemit_take_closure(
+    g: &mut ig::InstGraph,
+    p: *const loader::Package,
+    m: ModuleId,
+    cn: NodeId,
+    lw_out: &mut irl::Lowerer,
+) bool {
+    let key = skey_mix(0, m as u64 << 32 | cn as u64);
+    let ki = switch g.kept_ix.get(&key) {
+        Some(v) => (*v) as i64,
+        None => (-2) as i64,
+    };
+    if ki >= 0 {
+        *lw_out = replace(&mut g.kept[ki as usize], irl::Lowerer::new(p, m, cn));
+        let _ = g.kept_ix.remove(&key);
+        return true;
+    }
+    return lw_out.lower_closure_body(cn);
 }
 
 pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, live: *const bool, o: &mut CemitOut) {
@@ -1571,12 +1649,28 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
     let mut dow = bfx::Owner::new(p);
     let mut lw_cache = Map::<u64, u64>::new();
     let mut lws = Vector::<irl::Lowerer>::new();
+    // closure lowerings, drops applied, shared by the seed and instance loops (a demanded generic
+    // body re-emits its closures per instantiation; the lowering is instantiation-independent)
+    let mut cl_cache = Map::<u64, u64>::new();
+    let mut clws = Vector::<irl::Lowerer>::new();
     let mut seeds: u64 = 0;
     let mut seed_skip: u64 = 0;
     let mut clos_ok: u64 = 0;
     let mut clos_skip: u64 = 0;
     let mut bodies_all = String::new();
     let mut protos = String::new();
+    // pre-size the two whole-package accumulators from the corpus (emitted C runs ~10 bytes per
+    // AST node): one sized request instead of a doubling-growth chain over multi-MB buffers
+    {
+        let mut est_nodes: usize = 0;
+        for m in 0..p.modules.len() {
+            if p.modules[m].has_ast {
+                est_nodes += p.modules[m].ast.nodes.len();
+            }
+        }
+        bodies_all.reserve(est_nodes * 10);
+        protos.reserve(est_nodes);
+    }
     let mut envs_all = String::new();
     let mut env_bodies = Vector::<String>::new();
     let mut env_names = Vector::<u64>::new();
@@ -1622,11 +1716,14 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
             if !testing && cemit_is_test_item(a, nid) {
                 continue; // test-family items exist only under --test
             }
+            if cem.mg.in_generic_extend(m as ModuleId, nid) {
+                continue; // its instances are demand-emitted; leave the cached body for them
+            }
             let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
-            if !lw.lower_fn(nid) {
+            if !cemit_take_body(&mut g, p, m as ModuleId, nid, &mut lw) {
                 continue;
             }
-            if lw.body.is_generic || cem.mg.in_generic_extend(m as ModuleId, nid) {
+            if lw.body.is_generic {
                 continue;
             }
             cemit_apply_drops(&mut dow, &mut lw);
@@ -1726,19 +1823,32 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                 while cqi < clsq.len() {
                     let cn = clsq[cqi];
                     cqi += 1;
-                    let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
+                    let ckey = skey_mix(0, m as u64 << 32 | cn as u64);
+                    let ci = switch cl_cache.get(&ckey) {
+                        Some(v) => *v,
+                        None => {
+                            let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
+                            let mut slot = 0xFFFFFFFFFFFFFFFFu64;
+                            if cemit_take_closure(&mut g, p, m as ModuleId, cn, &mut cl) {
+                                cemit_apply_drops(&mut dow, &mut cl);
+                                slot = clws.len() as u64;
+                                clws.push(cl);
+                            }
+                            cl_cache.insert(ckey, slot);
+                            slot;
+                        },
+                    };
                     let mut csym = String::new();
                     cem.mg.closure_sym(m as ModuleId, cn, &mut csym);
                     let mut envs = String::new();
                     cem.out.clear();
-                    let cok = cl.lower_closure_body(cn);
+                    let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
                     if cok {
-                        cemit_apply_drops(&mut dow, &mut cl);
-                        for x2 in 0..cl.closures.len() {
-                            clsq.push(cl.closures[x2]); // closures nest: emit the inner ones too
+                        for x2 in 0..clws.at(ci as usize).closures.len() {
+                            clsq.push(clws.at(ci as usize).closures[x2]); // closures nest: emit the inner ones too
                         }
                     }
-                    if cok && cem.emit_closure(&cl.body, m as ModuleId, cn, csym.as_str(), &mut envs) {
+                    if cok && cem.emit_closure(&clws.at(ci as usize).body, m as ModuleId, cn, csym.as_str(), &mut envs) {
                         clos_ok += 1;
                         {
                             if envs.len() != 0 {
@@ -1872,12 +1982,12 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
             d_subs.push(*cem.demand.at(qi).subs.at(i2));
         }
         qi += 1;
-        let key = d_def.module as u64 << 32 | d_def.node as u64;
+        let key = skey_mix(0, d_def.module as u64 << 32 | d_def.node as u64);
         let li = switch lw_cache.get(&key) {
             Some(v) => *v,
             None => {
                 let mut lw = irl::Lowerer::new(p, d_def.module, d_def.node);
-                let okl = lw.lower_fn(d_def.node);
+                let okl = cemit_take_body(&mut g, p, d_def.module, d_def.node, &mut lw);
                 let mut slot = 0xFFFFFFFFFFFFFFFFu64;
                 if okl {
                     cemit_apply_drops(&mut dow, &mut lw);
@@ -1950,19 +2060,32 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
             while cqi < clsq.len() {
                 let cn = clsq[cqi];
                 cqi += 1;
-                let mut cl = irl::Lowerer::new(p, d_def.module, cn);
+                let ckey = skey_mix(0, d_def.module as u64 << 32 | cn as u64);
+                let ci = switch cl_cache.get(&ckey) {
+                    Some(v) => *v,
+                    None => {
+                        let mut cl = irl::Lowerer::new(p, d_def.module, cn);
+                        let mut slot = 0xFFFFFFFFFFFFFFFFu64;
+                        if cemit_take_closure(&mut g, p, d_def.module, cn, &mut cl) {
+                            cemit_apply_drops(&mut dow, &mut cl);
+                            slot = clws.len() as u64;
+                            clws.push(cl);
+                        }
+                        cl_cache.insert(ckey, slot);
+                        slot;
+                    },
+                };
                 let mut csym = String::new();
                 cem.mg.closure_sym(d_def.module, cn, &mut csym);
                 let mut envs = String::new();
                 cem.out.clear();
-                let cok = cl.lower_closure_body(cn);
+                let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
                 if cok {
-                    cemit_apply_drops(&mut dow, &mut cl);
-                    for x2 in 0..cl.closures.len() {
-                        clsq.push(cl.closures[x2]); // closures nest: emit the inner ones too
+                    for x2 in 0..clws.at(ci as usize).closures.len() {
+                        clsq.push(clws.at(ci as usize).closures[x2]); // closures nest: emit the inner ones too
                     }
                 }
-                if cok && cem.emit_closure(&cl.body, d_def.module, cn, csym.as_str(), &mut envs) {
+                if cok && cem.emit_closure(&clws.at(ci as usize).body, d_def.module, cn, csym.as_str(), &mut envs) {
                     clos_ok += 1;
                     {
                         if envs.len() != 0 {
@@ -2604,6 +2727,9 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
         let mut th = String::from_str(
             "#ifndef SC_CEMIT_TYPES_H\n#define SC_CEMIT_TYPES_H\n#include \"super_rt.h\"\n#include <math.h>\n#include <pthread.h>\ntypedef struct { const uint8_t *ptr; size_t len; } SCslice;\n#pragma GCC diagnostic ignored \"-Wunused-but-set-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-function\"\n#pragma GCC diagnostic ignored \"-Wunused-parameter\"\n#pragma GCC diagnostic ignored \"-Wunused-label\"\n",
         );
+        th.reserve(
+            ext_incs.len() + em.fwd2.len() + cem.env_fwd.len() + cem.dyn_defs.len() + em.out.len() + macros_out.len() + cem.aux.len() + envs_all.len() + 256,
+        );
         th.push_string(&ext_incs);
         th.push_string(&em.fwd2);
         th.push_string(&cem.env_fwd);
@@ -2619,6 +2745,7 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
         th.push_string(&envs_all);
         th.push_str("#endif\n");
         let mut phh = String::from_str("#ifndef SC_CEMIT_PROTOS_H\n#define SC_CEMIT_PROTOS_H\n");
+        phh.reserve(cem.extern_protos.len() + cem.stat_decls.len() + cem.dyn_decls.len() + ps.len() + 64);
         phh.push_string(&cem.extern_protos);
         phh.push_string(&cem.stat_decls);
         phh.push_string(&cem.dyn_decls);
@@ -2631,19 +2758,41 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
         phh.push_str("#endif\n");
         o.types_h = th;
         o.protos_h = phh;
+        let mut sdefs = Set::<u64>::new();
+        struct_def_names(o.types_h.as_str(), &mut sdefs);
+        // chunk indexes per TU (the instance TU last), one pass over the chunk list: the per-TU
+        // assembly below then touches only its own chunks and reserves its buffers exactly
+        let mut tu_chunks = Vector::<Vector<u32>>::new();
+        for _i in 0..p.modules.len() + 1 {
+            tu_chunks.push(Vector::<u32>::new());
+        }
+        for i in 0..chunk_mod.len() {
+            let w = if chunk_mod[i] == 65534 {
+                p.modules.len();
+            } else {
+                chunk_mod[i] as usize;
+            };
+            tu_chunks[w].push(i as u32);
+        }
         for t in 0..p.modules.len() + 1 {
             let is_inst = t == p.modules.len();
-            let want = if is_inst {
-                65534u64;
-            } else {
-                t as u64;
-            };
             let mut lp = String::new();
             let mut lb = String::new();
-            for i in 0..chunk_mod.len() {
-                if chunk_mod[i] != want {
-                    continue;
+            {
+                let mut bb: usize = 0;
+                for k in 0..tu_chunks[t].len() {
+                    let i = tu_chunks[t][k] as usize;
+                    let b1 = if i + 1 < chunk_off.len() {
+                        chunk_off[i + 1] as usize;
+                    } else {
+                        bs.len();
+                    };
+                    bb += b1 - chunk_off[i] as usize;
                 }
+                lb.reserve(bb);
+            }
+            for k in 0..tu_chunks[t].len() {
+                let i = tu_chunks[t][k] as usize;
                 let pl = ps.slice(poff[i] as usize, poff[i + 1] as usize);
                 if pl.len() >= 7 && pl.slice(0, 7) == "static " {
                     lp.push_str(pl);
@@ -2662,6 +2811,13 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                 continue;
             }
             let mut tu2 = String::new();
+            {
+                let mut cap2 = lp.len() + lb.len() + 2048;
+                if is_inst {
+                    cap2 += cem.blk_defs.len() + const_defs.len() + static_defs.len() + cem.dyn_tabs.len();
+                }
+                tu2.reserve(cap2);
+            }
             tu2.push_string(&lp);
             if !is_inst && p.modules[t].has_ast {
                 // folded module-level static_asserts leave their record in the C (parity with
@@ -2683,7 +2839,7 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                     }
                     tu2.push_str(");\n");
                 }
-                cemit_layout_asserts(p, &mut cem, t as ModuleId, &o.types_h, &mut tu2);
+                cemit_layout_asserts(p, &mut cem, t as ModuleId, &sdefs, &mut tu2);
             }
             if is_inst {
                 tu2.push_string(&cem.blk_defs);
@@ -3306,7 +3462,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, backed: &mut Set
             for j in 0..eb.items.len {
                 let fnid = unsafe a.list(eb.items)[j as usize];
                 if a.at_const(fnid).kind == NodeKind::NODE_FUNCTION {
-                    backed.insert(m as u64 << 32 | fnid as u64);
+                    backed.insert(skey_mix(0, m as u64 << 32 | fnid as u64));
                 }
             }
             let hs = a.at_const(eb.header).span;

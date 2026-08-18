@@ -123,6 +123,34 @@ pub struct CEmit {
     /// One induction update moved into the active C `for` clause.
     sx_skip_place: u32,
     sx_skip_rvalue: u32,
+    // Newline offsets of every module source (CSR: per-module ranges into one pool), built on the
+    // first assert line lookup: line numbers must not rescan the source per assert site.
+    line_pool: Vector<u32>,
+    line_off: Vector<u64>,
+    // Plain concrete-call symbols per (fm, fnode), valid for one mark_ctx (cleared on change so
+    // cross-TU used_mods edges still record once per spelling TU). Every body re-spells the same
+    // callees; the mangle walk must not repeat per call site.
+    sym_memo: Map<u64, String>,
+    sym_memo_ctx: i64,
+    // Reusable spelling buffers: the statement/place emitters build every C fragment in a
+    // temporary String, so the pool keeps their capacity across the whole emission.
+    scratch: Vector<String>,
+    // Reusable per-function CFG analyses (a CFlow rebuilds in place without allocating).
+    cf_pool: Vector<cfl::CFlow>,
+    // setup_locals' reserved/assigned identifier sets, cleared per body (capacity retained).
+    sx_reserved: Map<u64, u64>,
+    sx_assigned: Map<u64, u64>,
+    // Fingerprints of demands already queued: many call sites raise the identical
+    // (sym, chain, sfx) demand, and a duplicate can never emit anything the first did not.
+    demand_seen: Set<u64>,
+    // Per (module, TypeId): the reserved-set ident hashes of the type's C spelling plus the
+    // modules the spelling records used_mods edges for (CSR pools; empty-env spellings only).
+    // setup_locals spells every local's type per body -- this makes revisits two pool scans.
+    ti_memo2: Map<u64, u64>,
+    tid_start: Vector<u32>,
+    tmod_start: Vector<u32>,
+    tid_pool: Vector<u64>,
+    tmod_pool: Vector<ModuleId>,
 }
 
 /// One referenced const/static item: its declaration, C symbol, and the module whose prefix
@@ -198,6 +226,19 @@ extend CEmit as Free {
         self.sx_declared.free();
         self.sx_call_fwd.free();
         self.sx_call_str.free();
+        self.line_pool.free();
+        self.line_off.free();
+        self.sym_memo.free();
+        self.scratch.free();
+        self.cf_pool.free();
+        self.sx_reserved.free();
+        self.sx_assigned.free();
+        self.demand_seen.free();
+        self.ti_memo2.free();
+        self.tid_start.free();
+        self.tmod_start.free();
+        self.tid_pool.free();
+        self.tmod_pool.free();
     }
 }
 
@@ -255,7 +296,127 @@ extend CEmit {
             sx_declared: Vector::<bool>::new(),
             sx_skip_place: ir::IR_NONE,
             sx_skip_rvalue: ir::IR_NONE,
+            line_pool: Vector::<u32>::new(),
+            line_off: Vector::<u64>::new(),
+            sym_memo: Map::<u64, String>::new(),
+            sym_memo_ctx: -2,
+            scratch: Vector::<String>::new(),
+            cf_pool: Vector::<cfl::CFlow>::new(),
+            sx_reserved: Map::<u64, u64>::new(),
+            sx_assigned: Map::<u64, u64>::new(),
+            demand_seen: Set::<u64>::new(),
+            ti_memo2: Map::<u64, u64>::new(),
+            tid_start: Vector::<u32>::new(),
+            tmod_start: Vector::<u32>::new(),
+            tid_pool: Vector::<u64>::new(),
+            tmod_pool: Vector::<ModuleId>::new(),
         };
+    }
+
+    fn cfget(self: &mut Self) cfl::CFlow {
+        let c9 = switch self.cf_pool.pop() {
+            Some(c) => c,
+            None => cfl::CFlow::new_empty(),
+        };
+        return c9;
+    }
+
+    fn cfput(self: &mut Self, cf: cfl::CFlow) {
+        self.cf_pool.push(cf);
+    }
+
+    fn sget(self: &mut Self) String {
+        let s9 = switch self.scratch.pop() {
+            Some(s) => s,
+            None => String::new(),
+        };
+        return s9;
+    }
+
+    fn sput(self: &mut Self, s: String) {
+        let mut s9 = s;
+        s9.clear();
+        self.scratch.push(s9);
+    }
+
+    // Feed local type `(m, t)`'s C-spelling identifiers into the reserved set, through the
+    // per-type cache when the substitution env is empty (edges replay via the logged modules).
+    fn reserve_local_ty(self: &mut Self, m: ModuleId, t: TypeId) {
+        if self.mg.subs.len() != 0 {
+            let mut cs = self.sget();
+            if self.mg.ctype(m, t, "", &mut cs) {
+                collect_idents(cs.as_str(), &mut self.sx_reserved);
+            }
+            self.sput(cs);
+            return;
+        }
+        if self.tid_start.len() == 0 {
+            self.tid_start.push(0);
+            self.tmod_start.push(0);
+        }
+        let key = skey_mix(0, m as u64 << 32 | t as u64);
+        let hit = switch self.ti_memo2.get(&key) {
+            Some(v) => (*v) as i64,
+            None => (-1) as i64,
+        };
+        if hit >= 0 {
+            let ei = hit as usize;
+            for k in *self.tid_start.at(ei)..*self.tid_start.at(ei + 1) {
+                self.sx_reserved.insert(*self.tid_pool.at(k as usize), 1);
+            }
+            for k in *self.tmod_start.at(ei)..*self.tmod_start.at(ei + 1) {
+                self.mg.mark_used(*self.tmod_pool.at(k as usize));
+            }
+            return;
+        }
+        let ei = self.tid_start.len() - 1;
+        self.mg.edge_log.truncate(0);
+        self.mg.edge_log_on = true;
+        let mut cs = self.sget();
+        let okc = self.mg.ctype(m, t, "", &mut cs);
+        self.mg.edge_log_on = false;
+        if okc {
+            let h0 = self.tid_pool.len();
+            collect_ident_hashes(cs.as_str(), &mut self.tid_pool);
+            for k in h0..self.tid_pool.len() {
+                self.sx_reserved.insert(*self.tid_pool.at(k), 1);
+            }
+        }
+        self.sput(cs);
+        for k in 0..self.mg.edge_log.len() {
+            self.tmod_pool.push(*self.mg.edge_log.at(k));
+        }
+        self.tid_start.push(self.tid_pool.len() as u32);
+        self.tmod_start.push(self.tmod_pool.len() as u32);
+        self.ti_memo2.insert(key, ei as u64);
+    }
+
+    // 1-based line of byte offset `pos` in module `m`'s source (newlines strictly before `pos`).
+    fn src_line(self: &mut Self, m: ModuleId, pos: u64) u64 {
+        if self.line_off.len() == 0 {
+            for mi in 0..self.p().modules.len() {
+                self.line_off.push(self.line_pool.len() as u64);
+                let src = self.p().modules.at(mi).source.as_str();
+                for k in 0..src.len() {
+                    if src.byte_at(k) == 10 {
+                        self.line_pool.push(k as u32);
+                    }
+                }
+            }
+            self.line_off.push(self.line_pool.len() as u64);
+        }
+        let s = self.line_off[m as usize] as usize;
+        let mut lo = s;
+        let mut hi = self.line_off[m as usize + 1] as usize;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.line_pool[mid] as u64 < pos {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return 1 + (lo - s) as u64;
     }
 
     const fn p(self: &Self) &loader::Package {
@@ -970,7 +1131,7 @@ extend CEmit {
 
     // Reserve the source name of item `node` (a referenced function/const/type/variant): a local
     // reusing it would hide the global.
-    fn reserve_item(self: &mut Self, m: ModuleId, node: NodeId, out: &mut Set<u64>) {
+    fn reserve_item(self: &mut Self, m: ModuleId, node: NodeId) {
         if node == NODE_NONE {
             return;
         }
@@ -990,9 +1151,10 @@ extend CEmit {
             return;
         }
         let sp = a.at_const(nn).as_data.name.text;
-        let mut s = String::new();
+        let mut s = self.sget();
         self.mg.ident(m, sp, &mut s);
-        out.insert(ident_hash(s.as_str()));
+        self.sx_reserved.insert(ident_hash(s.as_str()), 1);
+        self.sput(s);
     }
 
     fn same_local_type(self: &Self, b: &ir::CoreBody, a: TypeId, c: TypeId) bool {
@@ -1089,6 +1251,10 @@ extend CEmit {
         let mut defs = Vector::<u32>::new();
         let mut uses = Vector::<u32>::new();
         let mut coal_root = Vector::<bool>::new();
+        refs.reserve(n);
+        defs.reserve(n);
+        uses.reserve(n);
+        coal_root.reserve(n);
         for _l in 0..n {
             refs.push(0);
             defs.push(0);
@@ -1215,18 +1381,15 @@ extend CEmit {
         // of every local type, every enum-variant constant the body constructs, and the source names
         // of every function/const/static/type item it names. Over-approximation is safe (it only
         // suffixes more names); the set is a hash set, so collection and lookup are near-linear.
-        let mut reserved = Set::<u64>::new();
+        self.sx_reserved.clear();
         for l in 0..n {
             let ty = b.locals.at(l).ty;
             if ty != TYPE_NONE {
-                let mut cs = String::new();
-                if self.mg.ctype(b.module, ty, "", &mut cs) {
-                    collect_idents(cs.as_str(), &mut reserved);
-                }
+                self.reserve_local_ty(b.module, ty);
             }
             if b.locals.at(l).storage == ir::LS_STATIC_REF {
                 let it = b.locals.at(l).item;
-                self.reserve_item(it.module, it.node, &mut reserved);
+                self.reserve_item(it.module, it.node);
             }
         }
         for ri in 0..b.rvalues.len() {
@@ -1235,16 +1398,17 @@ extend CEmit {
                 let edecl = self.agg_decl(b, rv.target);
                 if edecl != NODE_NONE {
                     let am = self.agg_module(b, rv.target);
-                    let mut tag = String::new();
+                    let mut tag = self.sget();
                     self.mg.enum_tag(am, edecl, rv.item.node, &mut tag);
-                    reserved.insert(ident_hash(tag.as_str()));
+                    self.sx_reserved.insert(ident_hash(tag.as_str()), 1);
+                    self.sput(tag);
                 }
             }
         }
         for ci in 0..b.constants.len() {
             let c = *b.constants.at(ci);
             if c.kind == ir::CK_ITEM {
-                self.reserve_item(c.item.module, c.item.node, &mut reserved);
+                self.reserve_item(c.item.module, c.item.node);
             }
         }
         for bi in 0..b.blocks.len() {
@@ -1260,20 +1424,21 @@ extend CEmit {
                 if t.dests_len == 1 {
                     dty2 = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
                 }
-                let mut sym = String::new();
+                let mut sym = self.sget();
                 let saved = self.collect_demand;
                 self.collect_demand = false;
                 let ok = self.callee_sym(b, t.callee, t.targs_start, t.targs_len, rty2, dty2, &mut sym);
                 self.collect_demand = saved;
                 if ok {
-                    reserved.insert(ident_hash(sym.as_str()));
+                    self.sx_reserved.insert(ident_hash(sym.as_str()), 1);
                 }
+                self.sput(sym);
             }
         }
         // Names: preserve user identifiers, disambiguating keywords, type names, and collisions; the
         // `_<id>` fallback is always free because only local `id` itself ever spells `_<id>`. Already-
         // assigned names live in a hash set, so the whole pass is near-linear.
-        let mut assigned = Set::<u64>::new();
+        self.sx_assigned.clear();
         for l in 0..n {
             let mut nm = String::new();
             if *self.sx_coal.at(l) == l as u32 && l >= b.returns as usize {
@@ -1284,19 +1449,21 @@ extend CEmit {
                         let sp = self.mg.decl_name_span(b.module, decl);
                         if sp.end > sp.start {
                             self.mg.ident(b.module, sp, &mut nm);
-                            if CEmit::templike(nm.as_str()) || ident_in(nm.as_str(), &reserved) || assigned.contains(
+                            if CEmit::templike(nm.as_str()) || ident_in(nm.as_str(), &self.sx_reserved) || self.sx_assigned.contains_key(
                                 &ident_hash(nm.as_str()),
                             ) {
                                 nm.push_str("_");
                                 nm.push_u64(l as u64);
                                 // the suffixed name must clear BOTH sets: `<name>_<id>` can itself be
                                 // a reserved symbol or an earlier local's name
-                                if ident_in(nm.as_str(), &reserved) || assigned.contains(&ident_hash(nm.as_str())) {
+                                if ident_in(nm.as_str(), &self.sx_reserved) || self.sx_assigned.contains_key(
+                                    &ident_hash(nm.as_str()),
+                                ) {
                                     nm.truncate(0);
                                 }
                             }
                             if nm.len() != 0 {
-                                assigned.insert(ident_hash(nm.as_str()));
+                                self.sx_assigned.insert(ident_hash(nm.as_str()), 1);
                             }
                         }
                     }
@@ -1310,6 +1477,8 @@ extend CEmit {
         // side-effecting rvalue). Neither -> dead: no declaration, and its pure stores are dropped.
         let mut reads = Vector::<u32>::new();
         let mut hardw = Vector::<bool>::new();
+        reads.reserve(n);
+        hardw.reserve(n);
         for _l in 0..n {
             reads.push(0);
             hardw.push(false);
@@ -2391,11 +2560,18 @@ extend CEmit {
 
     // Locals, labels, blocks and the closing brace -- shared by plain functions and closures.
     fn emit_body_core(self: &mut Self, b: &ir::CoreBody) bool {
-        let cf = cfl::CFlow::build(b);
-        self.compute_loop_inline(b, &cf);
-        self.compute_fusion(b, &cf);
-        self.compute_call_fwd(b, &cf);
-        let ret_dead = !self.ret_slot_live(b, &cf);
+        let mut cf = self.cfget();
+        cf.build_into(b);
+        let ok9 = self.emit_body_core_cf(b, &cf);
+        self.cfput(cf);
+        return ok9;
+    }
+
+    fn emit_body_core_cf(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+        self.compute_loop_inline(b, cf);
+        self.compute_fusion(b, cf);
+        self.compute_call_fwd(b, cf);
+        let ret_dead = !self.ret_slot_live(b, cf);
         // every non-argument local declares up front, explicitly typed; unit locals carry no C
         for l in 0..b.locals.len() {
             let st = b.locals.at(l).storage;
@@ -2556,25 +2732,26 @@ extend CEmit {
             if st == ir::LS_STATIC_REF {
                 continue; // reads spell the item's own symbol; the local never declares
             }
-            let mut nm = String::new();
+            let mut nm = self.sget();
             self.lspell(l as u32, &mut nm);
-            let mut ts = String::new();
+            let mut ts = self.sget();
             let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
             if ok {
                 self.out.push_str("  ");
                 self.out.push_string(&ts);
                 self.out.push_str(";\n");
             }
-
+            self.sput(nm);
+            self.sput(ts);
             if !ok {
                 return false;
             }
         }
         let mut ok2 = false;
-        if cf.reducible && self.plan_structured(b, &cf) {
-            ok2 = self.emit_structured(b, &cf);
+        if cf.reducible && self.plan_structured(b, cf) {
+            ok2 = self.emit_structured(b, cf);
         } else {
-            ok2 = self.emit_layout(b, &cf);
+            ok2 = self.emit_layout(b, cf);
         }
         if !ok2 {
             return false;
@@ -4560,18 +4737,19 @@ extend CEmit {
         let pl0 = *b.places.at(s.place as usize);
         let root0 = *self.sx_coal.at(pl0.base as usize);
         let fuse_decl = pl0.proj_len == 0 && *self.sx_fuse.at(root0 as usize) && !*self.sx_declared.at(root0 as usize);
-        let mut lhs = String::new();
-        let mut rhs = String::new();
+        let mut lhs = self.sget();
+        let mut rhs = self.sget();
         let ok = self.emit_place(b, s.place, &mut lhs) && self.emit_rvalue(b, s.rvalue, &mut rhs);
         if ok {
             self.out.push_str("  ");
             if fuse_decl {
                 self.sx_declared.set(root0 as usize, true);
-                let mut decl = String::new();
+                let mut decl = self.sget();
                 if !self.ty_c(b.module, b.locals.at(root0 as usize).ty, lhs.as_str(), &mut decl) {
                     return false;
                 }
                 self.out.push_string(&decl);
+                self.sput(decl);
             } else {
                 self.out.push_string(&lhs);
             }
@@ -4579,6 +4757,8 @@ extend CEmit {
             self.out.push_string(&rhs);
             self.out.push_str(";\n");
         }
+        self.sput(lhs);
+        self.sput(rhs);
         return ok;
     }
 
@@ -4867,7 +5047,7 @@ extend CEmit {
     // rvalue then spells without the `&`.
     fn emit_place_lim(self: &mut Self, b: &ir::CoreBody, pid: ir::PlaceId, lim: u32, dst: &mut String) bool {
         let pl = *b.places.at(pid as usize);
-        let mut cur = String::new();
+        let mut cur = self.sget();
         if *self.sx_call_fwd.at(pl.base as usize) {
             cur.push_str("(");
             cur.push_string(self.sx_call_str.at(pl.base as usize));
@@ -4966,10 +5146,11 @@ extend CEmit {
                 if nxt == ir::PJ_FIELD || nxt == ir::PJ_DOWNCAST {
                     pend_arrow = true;
                 } else {
-                    let mut w = String::from_str("(*");
+                    let mut w = self.sget();
+                    w.push_str("(*");
                     w.push_string(&cur);
                     w.push_str(")");
-                    cur = w;
+                    self.sput(replace(&mut cur, w));
                 }
             } else if pj.kind == ir::PJ_FIELD {
                 let mut arrow = pend_arrow;
@@ -5028,17 +5209,18 @@ extend CEmit {
                     if !hop {
                         break; // raw pointer arithmetic subscripts the pointer itself
                     }
-                    let mut w2 = String::from_str("(*");
+                    let mut w2 = self.sget();
+                    w2.push_str("(*");
                     w2.push_string(&cur);
                     w2.push_str(")");
-                    cur = w2;
+                    self.sput(replace(&mut cur, w2));
                     rm2 = nm2;
                     rt2 = nt2;
                     g2 += 1;
                 }
                 let a2 = self.p().module_ast_const(rm2);
                 let mut chk = false; // length-carrying views bounds-check every subscript
-                let mut base_txt = String::new();
+                let mut base_txt = self.sget();
                 if a2.type_at(rt2).kind == TypeKind::TYPE_INSTANCE {
                     let it2 = *a2.instance(a2.type_at(rt2).as_data.inst);
                     let da2 = self.p().module_ast_const(it2.module);
@@ -5074,6 +5256,7 @@ extend CEmit {
                     cur.push_str(".len)");
                 }
                 cur.push_str("]");
+                self.sput(base_txt);
             } else if pj.kind == ir::PJ_DOWNCAST {
                 let mut arrow = pend_arrow;
                 pend_arrow = false;
@@ -5156,16 +5339,18 @@ extend CEmit {
                     stored_ref = k9 == TypeKind::TYPE_REFERENCE || k9 == TypeKind::TYPE_POINTER;
                 }
                 if !stored_ref {
-                    let mut w = String::from_str("(&");
+                    let mut w = self.sget();
+                    w.push_str("(&");
                     w.push_string(&cur);
                     w.push_str(")");
-                    cur = w;
+                    self.sput(replace(&mut cur, w));
                 }
             }
         }
         if ok {
             dst.push_string(&cur);
         }
+        self.sput(cur);
         return ok;
     }
 
@@ -7108,6 +7293,32 @@ extend CEmit {
                 );
             }
         } else {
+            if targs_len == 0 {
+                // plain concrete call: no targ suffix, no demand record -- the symbol depends
+                // only on the declaration (and mark_ctx, for the cross-TU edge), so memoize
+                if self.sym_memo_ctx != self.mg.mark_ctx {
+                    self.sym_memo.clear();
+                    self.sym_memo_ctx = self.mg.mark_ctx;
+                }
+                let mk = skey_mix(0, callee.module as u64 << 32 | callee.node as u64);
+                let hit9 = switch self.sym_memo.get(&mk) {
+                    Some(s) => {
+                        dst.push_str(s.as_str());
+                        true;
+                    },
+                    None => false,
+                };
+                if hit9 {
+                    return true;
+                }
+                let tgt0 = self.mg.method_target(callee.module, callee.node);
+                if !self.mg.fn_sym(callee.module, callee.node, tgt0, true, &mut sym) {
+                    return self.fail("callee-sym");
+                }
+                self.sym_memo.insert(mk, sym.clone());
+                dst.push_string(&sym);
+                return true;
+            }
             let tgt = self.mg.method_target(callee.module, callee.node);
             if !self.mg.fn_sym(callee.module, callee.node, tgt, true, &mut sym) {
                 ok = self.fail("callee-sym");
@@ -7128,6 +7339,42 @@ extend CEmit {
             let ca = self.p().module_ast_const(callee.module);
             let fd = ca.at_const(callee.node);
             if fd.kind == NodeKind::NODE_FUNCTION && !fd.as_data.function.is_extern && fd.as_data.function.body != NODE_NONE {
+                // fingerprint of what the snapshot + suffix WOULD hold (env, receiver, targs):
+                // duplicates skip the clone/snapshot entirely
+                let mut dk9 = 1469598103934665603u64;
+                {
+                    let ss9 = sym.as_str();
+                    for k9 in 0..ss9.len() {
+                        dk9 = (dk9 ^ ss9.byte_at(k9) as u64) * 1099511628211u64;
+                    }
+                    for k9 in 0..self.mg.subs.len() {
+                        let sb9 = *self.mg.subs.at(k9);
+                        dk9 = (dk9 ^ (sb9.pm as u64 << 32 | sb9.pnode as u64)) * 1099511628211u64;
+                        dk9 = (dk9 ^ (sb9.am as u64 << 32 | sb9.at as u64)) * 1099511628211u64;
+                        dk9 = (dk9 ^ sb9.lim as u64) * 1099511628211u64;
+                    }
+                    if is_minst {
+                        dk9 = (dk9 ^ (rpm as u64 << 32 | rit.module as u64)) * 1099511628211u64;
+                        dk9 = (dk9 ^ (rit.decl as u64 << 32 | rit.n as u64)) * 1099511628211u64;
+                        for k9 in 0..rit.n {
+                            dk9 = (dk9 ^ (unsafe rit.args[k9 as usize]) as u64) * 1099511628211u64;
+                        }
+                    }
+                    dk9 = (dk9 ^ (b.module as u64 << 32 | targs_len as u64)) * 1099511628211u64;
+                    for k9 in 0..targs_len {
+                        dk9 = (dk9 ^ b.targ_pool[(targs_start + k9) as usize] as u64) * 1099511628211u64;
+                    }
+                    if recv_targs {
+                        dk9 = (dk9 ^ 1) * 1099511628211u64;
+                    }
+                }
+                if self.demand_seen.contains(&dk9) {
+                    if ok {
+                        dst.push_string(&sym);
+                    }
+                    return ok;
+                }
+                self.demand_seen.insert(dk9);
                 let mut snap = Vector::<mbe::MSub>::new();
                 for i in 0..self.mg.subs.len() {
                     snap.push(*self.mg.subs.at(i));
@@ -8100,7 +8347,7 @@ extend CEmit {
         if !fd.as_data.function.is_extern {
             return;
         }
-        if self.ext_backed.contains(&(t.callee.module as u64 << 32 | t.callee.node as u64)) {
+        if self.ext_backed.contains(&skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64)) {
             return; // the extern block's header ships the real prototype
         }
         let mut sym = String::new();
@@ -8602,7 +8849,7 @@ extend CEmit {
             self.rty(b, pl.ty, &mut rm, &mut rt);
             let y = *self.p().module_ast_const(rm).type_at(rt);
             if y.kind == TypeKind::TYPE_DYN {
-                let mut pv = String::new();
+                let mut pv = self.sget();
                 let ok = self.emit_place(b, t.a, &mut pv);
                 if ok {
                     self.out.push_str("  ");
@@ -8619,6 +8866,7 @@ extend CEmit {
                     self.out.push_str(if_s(t.args_len == 1, " }", ""));
                     self.out.push_str("\n");
                 }
+                self.sput(pv);
                 return ok;
             }
             if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
@@ -8656,14 +8904,15 @@ extend CEmit {
                 return true;
             }
             if y.kind != TypeKind::TYPE_BUILTIN && y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
-                let mut fs = String::new();
+                let mut fs = self.sget();
                 if !self.mg.free_target(rm, rt, &mut fs) {
+                    self.sput(fs);
                     return self.fail("drop");
                 }
                 if self.collect_demand {
                     self.note_free(rm, rt, fs.as_str());
                 }
-                let mut pv = String::new();
+                let mut pv = self.sget();
                 let ok = self.emit_place(b, t.a, &mut pv);
                 if ok {
                     self.out.push_str("  ");
@@ -8679,6 +8928,8 @@ extend CEmit {
                     self.out.push_str(if_s(t.args_len == 1, " }", ""));
                     self.out.push_str("\n");
                 }
+                self.sput(fs);
+                self.sput(pv);
                 return ok;
             }
             return true;
@@ -8735,16 +8986,7 @@ extend CEmit {
             }
             let src = self.p().modules.at(b.module as usize).source.as_str();
             let file = self.p().modules.at(b.module as usize).file.as_str();
-            let mut line: u64 = 1;
-            {
-                let mut i9 = 0 as usize;
-                while i9 < t.span.start as usize && i9 < src.len() {
-                    if src.byte_at(i9) == 10 {
-                        line += 1;
-                    }
-                    i9 += 1;
-                }
-            }
+            let line = self.src_line(b.module, t.span.start);
             let mut handled = false;
             if !self.emit_forwarded_assert(b, t, line, &mut handled) {
                 return false;
@@ -8832,10 +9074,10 @@ extend CEmit {
             if self.collect_demand && dyn_recv == ir::IR_NONE {
                 self.collect_extern_proto(b, t);
             }
-            let mut line = String::new();
+            let mut line = self.sget();
             let mut ok = true;
             let mut arrdst = false; // fixed-array dest: `{ <sym>_ret __ar = f(..); memcpy(dst, __ar._a, ..); }`
-            let mut dplace = String::new();
+            let mut dplace = self.sget();
             // a forwarded destination: this call spells `f(..)` at its single read instead of storing
             // to a temporary, so it emits nothing here and builds the expression into sx_call_str.
             let mut fwd_r = ir::IR_NONE;
@@ -8867,10 +9109,10 @@ extend CEmit {
                 } else if want {
                     let pl = *b.places.at(dp as usize);
                     let root = *self.sx_coal.at(pl.base as usize);
-                    let mut lhs = String::new();
+                    let mut lhs = self.sget();
                     ok = self.emit_place(b, dp, &mut lhs);
                     if ok && pl.proj_len == 0 && *self.sx_fuse.at(root as usize) && !*self.sx_declared.at(root as usize) {
-                        let mut decl = String::new();
+                        let mut decl = self.sget();
                         let lty = b.locals.at(root as usize).ty;
                         if lty == TYPE_NONE {
                             ok = self.untyped_ret_struct(b, root, &mut decl);
@@ -8885,9 +9127,11 @@ extend CEmit {
                             self.sx_declared.set(root as usize, true);
                             line.push_string(&decl);
                         }
+                        self.sput(decl);
                     } else {
                         line.push_string(&lhs);
                     }
+                    self.sput(lhs);
                     line.push_str(" = ");
                 }
             }
@@ -8969,9 +9213,10 @@ extend CEmit {
                         line.push_str(", ");
                     }
                     let opid2 = b.oper_pool[(t.args_start + i) as usize];
-                    let mut av2 = String::new();
+                    let mut av2 = self.sget();
                     ok = self.emit_call_arg(b, t.callee, i, opid2, &mut av2);
                     line.push_string(&av2);
+                    self.sput(av2);
                 }
             }
             if ok && fwd_r != ir::IR_NONE {
@@ -8998,6 +9243,8 @@ extend CEmit {
                 self.out.push_string(&line);
                 self.out.push_str(");\n");
             }
+            self.sput(line);
+            self.sput(dplace);
             return ok;
         }
         if t.kind == ir::TM_ASSERT {
@@ -9026,12 +9273,7 @@ extend CEmit {
                 self.out.push_str("\\n  at ");
                 push_pct_c_escaped(self.p().modules.at(b.module as usize).file.as_str(), &mut self.out);
                 self.out.push_str(":");
-                let mut ln: u64 = 1;
-                for k in 0..t.span.start as usize {
-                    if msrc.byte_at(k) == 10 {
-                        ln += 1;
-                    }
-                }
+                let ln = self.src_line(b.module, t.span.start);
                 self.out.push_u64(ln);
                 self.out.push_str("\\n\"");
                 if t.args_len != 0 {
@@ -9055,7 +9297,7 @@ const fn ident_hash(s: str) u64 {
 }
 
 // Insert every maximal C-identifier run in `s` into `out` (the typedef names inside a spelled type).
-fn collect_idents(s: str, out: &mut Set<u64>) {
+fn collect_idents(s: str, out: &mut Map<u64, u64>) {
     let mut i = 0 as usize;
     while i < s.len() {
         let c = s.byte_at(i);
@@ -9069,15 +9311,37 @@ fn collect_idents(s: str, out: &mut Set<u64>) {
                     break;
                 }
             }
-            out.insert(ident_hash(s.slice(start, i)));
+            out.insert(ident_hash(s.slice(start, i)), 1);
         } else {
             i += 1;
         }
     }
 }
 
-const fn ident_in(nm: str, v: &Set<u64>) bool {
-    return v.contains(&ident_hash(nm));
+const fn ident_in(nm: str, v: &Map<u64, u64>) bool {
+    return v.contains_key(&ident_hash(nm));
+}
+
+// collect_idents, but into a flat pool (the per-type reserved cache).
+fn collect_ident_hashes(s: str, out: &mut Vector<u64>) {
+    let mut i = 0 as usize;
+    while i < s.len() {
+        let c = s.byte_at(i);
+        if c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c == 95 {
+            let start = i;
+            while i < s.len() {
+                let d = s.byte_at(i);
+                if d >= 48 && d <= 57 || d >= 65 && d <= 90 || d >= 97 && d <= 122 || d == 95 {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(ident_hash(s.slice(start, i)));
+        } else {
+            i += 1;
+        }
+    }
 }
 
 // push_c_escaped for printf format strings: `%` doubles so source text never reads as a conversion.
