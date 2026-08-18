@@ -54,7 +54,16 @@ extend CFlow as Free {
 // A block that only forwards: no statements, an unconditional goto. Predecessors thread through it.
 fn trivial(b: &ir::CoreBody, x: u32) bool {
     let blk = b.blocks.at(x as usize);
-    return blk.stmt_len == 0 && blk.term.kind == ir::TM_GOTO;
+    if blk.term.kind != ir::TM_GOTO {
+        return false;
+    }
+    for i in 0..blk.stmt_len {
+        let k = b.statements.at((blk.stmt_start + i) as usize).kind;
+        if k != ir::ST_STORAGE_LIVE && k != ir::ST_STORAGE_DEAD && k != ir::ST_NOP {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Raw successor edge count (switch: one per arm plus the otherwise edge).
@@ -64,17 +73,49 @@ fn n_succ(b: &ir::CoreBody, x: u32) u32 {
         return 0;
     }
     if t.kind == ir::TM_SWITCH {
+        if const_switch_edge(b, x) != NONE {
+            return 1;
+        }
         return t.sw_len + 1;
     }
     return 1;
+}
+
+// A literal switch has one live edge. Removing its dead edges here keeps them out of reachability,
+// dominance, loop discovery, and the final C layout.
+fn const_switch_edge(b: &ir::CoreBody, x: u32) u32 {
+    let t = b.blocks.at(x as usize).term;
+    if t.kind != ir::TM_SWITCH {
+        return NONE;
+    }
+    let op = *b.operands.at(t.a as usize);
+    if op.kind != ir::OP_CONST {
+        return NONE;
+    }
+    let c = *b.constants.at(op.data as usize);
+    if c.kind != ir::CK_INT && c.kind != ir::CK_BOOL {
+        return NONE;
+    }
+    for k in 0..t.sw_len {
+        if (b.switch_pool[(t.sw_start + k) as usize] >> 32) as u32 == c.val as u32 {
+            return k;
+        }
+    }
+    return t.sw_len;
 }
 
 // Raw k-th successor block (pre-threading).
 fn raw_succ(b: &ir::CoreBody, x: u32, k: u32) u32 {
     let t = b.blocks.at(x as usize).term;
     if t.kind == ir::TM_SWITCH {
-        if k < t.sw_len {
-            return (b.switch_pool[(t.sw_start + k) as usize] & 0xFFFFFFFFu64) as u32;
+        let ce = const_switch_edge(b, x);
+        let sk = if ce == NONE {
+            k;
+        } else {
+            ce;
+        };
+        if sk < t.sw_len {
+            return (b.switch_pool[(t.sw_start + sk) as usize] & 0xFFFFFFFFu64) as u32;
         }
         return t.t0;
     }

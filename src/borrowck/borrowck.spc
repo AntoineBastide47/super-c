@@ -24,11 +24,12 @@ extend tc::TypeChecker {
     /// current module, then finalize its diagnostics.
     pub fn borrowck(self: &mut Self) {
         let mut ow = bfx::Owner::new(self.package);
+        let mut ctx = bfi::BorrowCtx::new(); // one reusable borrow pipeline for every body in the module
         let a = self.cur_ast();
         let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
             let id = unsafe a.list(items)[i as usize];
-            self.bc_item(id, &mut ow);
+            self.bc_item(id, &mut ow, &mut ctx);
         }
         let mut file: str = "";
         if self.package != null && self.cur_module() as usize < self.pkg_count() {
@@ -37,13 +38,13 @@ extend tc::TypeChecker {
         self.errors.finalize(self.source, file);
     }
 
-    pub fn bc_item(self: &mut Self, id: NodeId, ow: &mut bfx::Owner) {
+    pub fn bc_item(self: &mut Self, id: NodeId, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
         let a = self.cur_ast();
         let nk = a.at_const(id).kind;
         switch nk {
             NODE_FUNCTION => {
                 self.tc_check_elision(id);
-                self.bc_fn(id, ow);
+                self.bc_fn(id, ow, ctx);
             },
             NODE_STRUCT | NODE_ENUM => {
                 self.tc_check_field_lifetimes(id, a.at_const(id).as_data.aggregate.members);
@@ -51,7 +52,7 @@ extend tc::TypeChecker {
             NODE_EXTEND => {
                 let ms = a.at_const(id).as_data.extend_def.items;
                 for j in 0..ms.len {
-                    self.bc_item(unsafe a.list(ms)[j as usize], ow);
+                    self.bc_item(unsafe a.list(ms)[j as usize], ow, ctx);
                 }
             },
             _ => {},
@@ -2816,7 +2817,7 @@ extend tc::TypeChecker {
     // types anything.
     /// Flow-check one function: reset every per-function fact (moves, uninit, freed, borrows,
     /// scopes, regions, error watermark) and walk the body in evaluation order.
-    pub fn bc_fn(self: &mut Self, id: NodeId, ow: &mut bfx::Owner) {
+    pub fn bc_fn(self: &mut Self, id: NodeId, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
         let a = self.cur_ast();
         let fnd = a.at_const(id).as_data.function;
         if fnd.body == NODE_NONE {
@@ -2850,7 +2851,7 @@ extend tc::TypeChecker {
         self.bc_stmt(fnd.body);
         if self.bc_quiet {
             let mut irres = Vector::<bfi::FlowErr>::new();
-            self.bc_ir_analyze(ow, &irbodies, &mut irres);
+            self.bc_ir_analyze(ow, &irbodies, ctx, &mut irres);
             self.bc_ir_emit(&mut irres);
         }
 

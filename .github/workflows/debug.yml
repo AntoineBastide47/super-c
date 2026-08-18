@@ -72,7 +72,7 @@ jobs:
           cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
           echo "CC=gcc" >> "$GITHUB_ENV"
           echo "BINEXT=.exe" >> "$GITHUB_ENV"
-          echo "SC_CSTD=-std=gnu11 -D_POSIX_C_SOURCE=200809L -g -fno-omit-frame-pointer" >> "$GITHUB_ENV"
+          echo "SC_CSTD=-std=gnu11 -D_POSIX_C_SOURCE=200809L -g1" >> "$GITHUB_ENV"
           command -v ccache >/dev/null 2>&1 || choco install -y --no-progress ccache
 
       - name: Exclude work dirs from Defender
@@ -115,14 +115,34 @@ jobs:
           echo 'cHViIGVudW0gT3B0PFQ+IHsgU29tZShUKSwgTm9uZSB9CmV4dGVuZDxUPiBPcHQ8VD4gewogIHB1YiBmbiB1bndyYXBfb3Ioc2VsZjogJk9wdDxUPiwgZDogVCkgVCB7IHJldHVybiBzd2l0Y2ggc2VsZiB7IFNvbWUodikgPT4gKnYsIE5vbmUgPT4gZCwgfTsgfQogIHB1YiBmbiBtYXA8VT4oc2VsZjogJk9wdDxUPiwgZjogZm4oVCkgVSkgT3B0PFU+IHsKICAgIHJldHVybiBzd2l0Y2ggc2VsZiB7IFNvbWUodikgPT4gT3B0Ojo8VT46OlNvbWUoZigqdikpLCBOb25lID0+IE9wdDo6PFU+OjpOb25lLCB9OyB9Cn0K' | base64 -d > repro/opt/opt.spc
           echo 'aW1wb3J0IG9wdDo6b3B0OwpleHRlcm4gIkMiIHsgZm4gZXhpdChjb2RlOiBpMzIpIHZvaWQ7IH0Kc3RydWN0IEJhciB7IHB1YiB4OiBpMzIgfQpmbiBieChiOiBCYXIpIGkzMiB7IHJldHVybiBiLng7IH0KZm4gbWFpbigpIGkzMiB7CiAgbGV0IG8gPSBvcHQ6Om9wdDo6T3B0Ojo8QmFyPjo6U29tZShCYXIgeyB4OiAzMCB9KTsKICBsZXQgYSA9IG8udW53cmFwX29yKEJhciB7IHg6IDAgfSkueDsKICBsZXQgbSA9IG8ubWFwKGJ4KS51bndyYXBfb3IoMCk7CiAgdW5zYWZlIGV4aXQoYSArIG0pOyB9Cg==' | base64 -d > repro/genbv.spc
           echo "===== source ====="; cat repro/genbv.spc
-          echo "===== running the compile (expect the crash + trace) ====="
-          "./$bin" build repro/genbv.spc -o repro/gv ${cstd:+"$cstd"} 2>&1 | tee trace.txt
+          echo "===== running the compile up to 8x (layout-sensitive: may be flaky) ====="
+          : > trace.txt
+          crashed=0
+          for i in $(seq 1 8); do
+            out=$("./$bin" build repro/genbv.spc -o repro/gv ${cstd:+"$cstd"} 2>&1)
+            echo "--- attempt $i (exit ${PIPESTATUS[0]:-?}) ---"
+            echo "$out"
+            if echo "$out" | grep -q 'trace: +0x'; then echo "$out" > trace.txt; crashed=1; break; fi
+          done
           echo "===== symbolizing trace offsets with addr2line ====="
           command -v addr2line || true
           grep -oE '\+0x[0-9a-fA-F]+' trace.txt | sed 's/^+//' | while read -r off; do
             printf '%s -> ' "$off"
             addr2line -f -p -e "./$bin" "$off" 2>/dev/null || echo '(no symbol)'
           done
+          echo "===== live backtrace under gdb (does not change the build) ====="
+          if command -v gdb >/dev/null 2>&1; then
+            for i in $(seq 1 8); do
+              gdb -batch -nx \
+                -ex 'set pagination off' -ex 'handle SIGSEGV SIGABRT stop nopass' \
+                -ex 'run' -ex 'echo \n===GDB-BT===\n' -ex 'thread apply all bt' -ex 'quit' \
+                --args "./$bin" build repro/genbv.spc -o repro/gv ${cstd:+"$cstd"} 2>&1 \
+                | sed -n '/===GDB-BT===/,$p' | head -60
+              echo "--- gdb attempt $i done ---"
+            done
+          else
+            echo "gdb not available"
+          fi
           echo "===== isolated test ====="
           SC_LEAK_CHECK=fatal "./$bin" test --test-filter=cross_module_generic_by_value ${cstd:+"$cstd"} 2>&1 | tail -40 || true
 

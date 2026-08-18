@@ -22,6 +22,34 @@ pub struct FlowErr {
     pub msg: String,
 }
 
+// Reusable owner of the per-body borrow pipeline: one instance is built once per analyze pass and
+// reset-and-refilled for every body, so vector capacity is kept instead of reallocated 1873+ times.
+pub struct BorrowCtx {
+    pub forest: bmp::MoveForest,
+    pub facts: bfx::BodyFacts,
+    pub cfg: bdf::Cfg,
+    pub liveness: bdf::Liveness,
+    pub moves: bdf::MoveFlow,
+    pub solver: bln::Solver,
+    pub cap_spans: Vector<u32>,
+    pub escaping: Vector<u32>,
+}
+
+extend BorrowCtx {
+    pub fn new() BorrowCtx {
+        return BorrowCtx {
+            forest: bmp::MoveForest::empty(),
+            facts: bfx::BodyFacts::empty(),
+            cfg: bdf::Cfg::empty(),
+            liveness: bdf::Liveness::empty(),
+            moves: bdf::MoveFlow::empty(),
+            solver: bln::Solver::empty(),
+            cap_spans: Vector::<u32>::new(),
+            escaping: Vector::<u32>::new(),
+        };
+    }
+}
+
 // Walk-parity wording. The categories keep loop replays and defer duplication deduplicated.
 const CAT_UNINIT: u8 = 0;
 const CAT_MOVED: u8 = 1;
@@ -84,10 +112,16 @@ extend tc::TypeChecker {
     }
 
     /// Analyze the pre-lowered bodies AFTER the walk ran (mut-capture bits are now final).
-    pub fn bc_ir_analyze(self: &mut Self, ow: &mut bfx::Owner, bodies: &Vector<irl::Lowerer>, out: &mut Vector<FlowErr>) {
+    pub fn bc_ir_analyze(
+        self: &mut Self,
+        ow: &mut bfx::Owner,
+        bodies: &Vector<irl::Lowerer>,
+        ctx: &mut BorrowCtx,
+        out: &mut Vector<FlowErr>,
+    ) {
         let mut seen = Vector::<u64>::new();
         for b in 0..bodies.len() {
-            self.bc_ir_body(ow, &bodies.at(b).body, &mut seen, out);
+            self.bc_ir_body(ow, &bodies.at(b).body, ctx, &mut seen, out);
         }
     }
 
@@ -114,28 +148,30 @@ extend tc::TypeChecker {
         self: &mut Self,
         ow: &mut bfx::Owner,
         body: &ir::CoreBody,
+        ctx: &mut BorrowCtx,
         seen: &mut Vector<u64>,
         out: &mut Vector<FlowErr>,
     ) {
-        let forest = bmp::MoveForest::build(body);
-        let bfacts = bfx::generate(ow, body, &forest);
-        let cfg = bdf::build_cfg(body);
-        let lv = bdf::solve_liveness(&bfacts, &cfg);
-        let mv = bdf::solve_moves(body, &forest, &bfacts, &cfg);
-        let mut sv = bln::solve(body, &bfacts, &cfg, &lv);
+        // Reset-and-refill each stage into the reusable context (keeps vector capacity across bodies).
+        ctx.forest.build_into(body);
+        bfx::generate_into(ow, body, &ctx.forest, &mut ctx.facts);
+        ctx.cfg.build_into(body);
+        ctx.liveness.build_into(&ctx.facts, &ctx.cfg);
+        ctx.moves.build_into(body, &ctx.forest, &ctx.facts, &ctx.cfg);
+        ctx.solver.build_into(body, &ctx.facts, &ctx.cfg, &ctx.liveness);
         // Capture sites: a move-of-moved AT a closure creation is worded as a capture.
-        let mut cap_spans = Vector::<u32>::new();
+        ctx.cap_spans.truncate(0);
         for bi in 0..body.blocks.len() {
             let blk = *body.blocks.at(bi);
             for si in 0..blk.stmt_len {
                 let s = *body.statements.at((blk.stmt_start + si) as usize);
                 if s.kind == ir::ST_ASSIGN && body.rvalues.at(s.rvalue as usize).kind == ir::RV_CLOSURE {
-                    cap_spans.push(s.span.start);
+                    ctx.cap_spans.push(s.span.start);
                 }
             }
         }
-        for e in 0..mv.errs.len() {
-            let er = *mv.errs.at(e);
+        for e in 0..ctx.moves.errs.len() {
+            let er = *ctx.moves.errs.at(e);
             if er.kind == bdf::ME_UNINIT {
                 self.bc_ir_push(out, seen, CAT_UNINIT, er.span, format("use of possibly uninitialized value"));
             } else if er.kind == bdf::ME_PARTIAL {
@@ -145,16 +181,16 @@ extend tc::TypeChecker {
                 let mut freed = false;
                 let mut fp = er.path;
                 while fp != bmp::MP_NONE {
-                    for f in 0..bfacts.freed.len() {
-                        if bfacts.freed[f] == fp {
+                    for f in 0..ctx.facts.freed.len() {
+                        if ctx.facts.freed[f] == fp {
                             freed = true;
                         }
                     }
-                    fp = forest.paths.at(fp as usize).parent;
+                    fp = ctx.forest.paths.at(fp as usize).parent;
                 }
                 let mut cap = false;
-                for c in 0..cap_spans.len() {
-                    if cap_spans[c] == er.span.start {
+                for c in 0..ctx.cap_spans.len() {
+                    if ctx.cap_spans[c] == er.span.start {
                         cap = true;
                     }
                 }
@@ -175,19 +211,19 @@ extend tc::TypeChecker {
         }
         // An escaping loan's storage-death conflict is the same defect seen from the other end;
         // the return-site report subsumes it.
-        let mut escaping = Vector::<u32>::new();
-        for e in 0..sv.errs.len() {
-            if sv.errs.at(e).kind == bln::BE_ESCAPE {
-                escaping.push(sv.errs.at(e).loan);
+        ctx.escaping.truncate(0);
+        for e in 0..ctx.solver.errs.len() {
+            if ctx.solver.errs.at(e).kind == bln::BE_ESCAPE {
+                ctx.escaping.push(ctx.solver.errs.at(e).loan);
             }
         }
-        for e in 0..sv.errs.len() {
-            let er = *sv.errs.at(e);
+        for e in 0..ctx.solver.errs.len() {
+            let er = *ctx.solver.errs.at(e);
             if er.kind == bln::BE_CONFLICT {
                 if er.acc == bln::ACC_DEAD {
                     let mut esc = false;
-                    for k in 0..escaping.len() {
-                        if escaping[k] == er.loan {
+                    for k in 0..ctx.escaping.len() {
+                        if ctx.escaping[k] == er.loan {
                             esc = true;
                         }
                     }
@@ -195,9 +231,9 @@ extend tc::TypeChecker {
                         continue;
                     }
                 }
-                self.bc_ir_conflict(body, &bfacts, &er, seen, out);
+                self.bc_ir_conflict(body, &ctx.facts, &er, seen, out);
             } else if er.kind == bln::BE_ESCAPE {
-                self.bc_ir_escape(body, &bfacts, &mut sv, &er, seen, out);
+                self.bc_ir_escape(body, &ctx.facts, &mut ctx.solver, &er, seen, out);
             }
             // BE_PLACEHOLDER stays with the walk's signature-level lifetime checks.
         }

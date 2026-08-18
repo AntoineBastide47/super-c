@@ -239,7 +239,6 @@ fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
         write_c(dir, base.as_str(), body.as_str());
         names.push(base);
     }
-    o.free();
     return bytes;
 }
 
@@ -347,7 +346,6 @@ fn transpile_once() Timing {
             unsafe stdio::fwrite(tu.as_ptr(), 1, tu.len(), f);
         }
         unsafe stdio::fwrite(o.inst_c.as_ptr(), 1, o.inst_c.len(), f);
-        o.free();
     }
     r.out_bytes = sink_close(f);
     let a4 = time::cpu_seconds();

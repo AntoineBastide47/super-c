@@ -350,7 +350,7 @@ fn attributes() {
 
     let EX: str = "extern \"C\" { fn putchar(c: i32) i32; }\n@c.export(\"sc_init\")\nfn init() i32 { unsafe putchar(0); return 0; }\nfn main() i32 { return init(); }\n";
     h::expect_c("export defines the exact symbol", EX, "int32_t sc_init(void)");
-    h::expect_c("export rewrites the call site", EX, "= sc_init()");
+    h::expect_c("export rewrites the call site", EX, "return sc_init()");
     h::expect_c_absent("export elides the Super-C name", EX, " init(");
 
     h::expect_c(

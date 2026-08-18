@@ -102,6 +102,27 @@ pub struct CEmit {
     /// `sx_used[l]` is false when local `l` is referenced nowhere in the body; its declaration is
     /// then dropped (a dead temporary the plan requires we not emit).
     sx_used: Vector<bool>,
+    /// `sx_inline[l]` is the rvalue that defines a single-use pure temporary whose sole read is
+    /// adjacent to its definition (nothing runs between them): the definition statement is skipped
+    /// and the rvalue is spelled directly at the read, so `_t = a + b; x = _t;` reads `x = a + b;`.
+    /// IR_NONE when local `l` is not inlined. Set by setup_locals; consumed by emit_operand.
+    sx_inline: Vector<u32>,
+    /// `sx_fuse[l]` is true when local `l` declares at its initializing write instead of up front:
+    /// its first write is a plain whole-local store that dominates every access, so `int32_t t; t = 0;`
+    /// becomes `int32_t t = 0;`. Set per body from the CFG; `sx_declared[l]` records that the fused
+    /// declaration has been emitted (later writes to `l` then spell a plain assignment).
+    sx_fuse: Vector<bool>,
+    sx_declared: Vector<bool>,
+    /// A single-return call whose result is used exactly once, in the continuation block with nothing
+    /// effectful before the use, forwards into that use: `_r = f(..); return _r;` reads `return f(..);`.
+    /// `sx_call_fwd[l]` marks such a destination; the call terminator writes its `f(..)` spelling into
+    /// `sx_call_str[l]` (emitting nothing itself), which the single read then spells in place.
+    sx_call_fwd: Vector<bool>,
+    sx_call_str: Vector<String>,
+    assert_helpers: u8,
+    /// One induction update moved into the active C `for` clause.
+    sx_skip_place: u32,
+    sx_skip_rvalue: u32,
 }
 
 /// One referenced const/static item: its declaration, C symbol, and the module whose prefix
@@ -172,6 +193,11 @@ extend CEmit as Free {
         self.sx_coal.free();
         self.sx_name.free();
         self.sx_used.free();
+        self.sx_inline.free();
+        self.sx_fuse.free();
+        self.sx_declared.free();
+        self.sx_call_fwd.free();
+        self.sx_call_str.free();
     }
 }
 
@@ -221,6 +247,14 @@ extend CEmit {
             sx_coal: Vector::<u32>::new(),
             sx_name: Vector::<String>::new(),
             sx_used: Vector::<bool>::new(),
+            sx_inline: Vector::<u32>::new(),
+            sx_call_fwd: Vector::<bool>::new(),
+            sx_call_str: Vector::<String>::new(),
+            assert_helpers: 0,
+            sx_fuse: Vector::<bool>::new(),
+            sx_declared: Vector::<bool>::new(),
+            sx_skip_place: ir::IR_NONE,
+            sx_skip_rvalue: ir::IR_NONE,
         };
     }
 
@@ -961,6 +995,84 @@ extend CEmit {
         out.insert(ident_hash(s.as_str()));
     }
 
+    fn same_local_type(self: &Self, b: &ir::CoreBody, a: TypeId, c: TypeId) bool {
+        let mut am = b.module;
+        let mut at = a;
+        self.rty(b, a, &mut am, &mut at);
+        let mut cm = b.module;
+        let mut ct = c;
+        self.rty(b, c, &mut cm, &mut ct);
+        if am == cm && at == ct {
+            return true;
+        }
+        let ay = *self.p().module_ast_const(am).type_at(at);
+        let cy = *self.p().module_ast_const(cm).type_at(ct);
+        if ay.kind != TypeKind::TYPE_ARRAY || cy.kind != TypeKind::TYPE_ARRAY || ay.as_data.arr.len != cy.as_data.arr.len {
+            return false;
+        }
+        let mut aem = am;
+        let mut aet = ay.as_data.elem;
+        let _ = self.mg.resolve(am, ay.as_data.elem, &mut aem, &mut aet);
+        let mut cem = cm;
+        let mut cet = cy.as_data.elem;
+        let _ = self.mg.resolve(cm, cy.as_data.elem, &mut cem, &mut cet);
+        return aem == cem && aet == cet;
+    }
+
+    fn coal_type_compatible(self: &Self, b: &ir::CoreBody, dst: TypeId, src: TypeId, slocal: u32) bool {
+        if self.same_local_type(b, dst, src) {
+            return true;
+        }
+        let mut dm = b.module;
+        let mut dt = dst;
+        self.rty(b, dst, &mut dm, &mut dt);
+        let mut sm = b.module;
+        let mut st = src;
+        self.rty(b, src, &mut sm, &mut st);
+        let dy = *self.p().module_ast_const(dm).type_at(dt);
+        let sy = *self.p().module_ast_const(sm).type_at(st);
+        if dy.kind != TypeKind::TYPE_ARRAY || sy.kind != TypeKind::TYPE_ARRAY || dy.as_data.arr.len == 0 || self.filled_len(
+            b,
+            slocal,
+        ) > dy.as_data.arr.len as u64 {
+            return false;
+        }
+        let mut dem = dm;
+        let mut det = dy.as_data.elem;
+        let _ = self.mg.resolve(dm, dy.as_data.elem, &mut dem, &mut det);
+        let mut sem = sm;
+        let mut set = sy.as_data.elem;
+        let _ = self.mg.resolve(sm, sy.as_data.elem, &mut sem, &mut set);
+        return dem == sem && det == set;
+    }
+
+    // The source is defined immediately before this copy, apart from storage markers.
+    fn adjacent_copy_source(self: &Self, b: &ir::CoreBody, copy: usize, source: u32) bool {
+        for bi in 0..b.blocks.len() {
+            let blk = *b.blocks.at(bi);
+            let start = blk.stmt_start as usize;
+            let end = start + blk.stmt_len as usize;
+            if copy < start || copy >= end {
+                continue;
+            }
+            let mut i = copy;
+            while i > start {
+                i -= 1;
+                let s = *b.statements.at(i);
+                if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+                    continue;
+                }
+                if s.kind != ir::ST_ASSIGN {
+                    return false;
+                }
+                let pl = *b.places.at(s.place as usize);
+                return pl.base == source && pl.proj_len == 0;
+            }
+            return false;
+        }
+        return false;
+    }
+
     // Rebuild the per-body local spelling: transparent-move coalescing, then preserved user names.
     // `_dst = move _src` where the source is used nowhere else and the destination is defined only
     // there shares one C variable (`_dst` never declares, its assignment never emits). Named user
@@ -975,11 +1087,22 @@ extend CEmit {
         }
         let mut refs = Vector::<u32>::new();
         let mut defs = Vector::<u32>::new();
+        let mut uses = Vector::<u32>::new();
+        let mut coal_root = Vector::<bool>::new();
         for _l in 0..n {
             refs.push(0);
             defs.push(0);
+            uses.push(0);
+            coal_root.push(false);
         }
         self.count_locals(b, &mut refs, &mut defs);
+        for o in 0..b.operands.len() {
+            let op = *b.operands.at(o);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                let base = b.places.at(op.data as usize).base as usize;
+                uses.set(base, *uses.at(base) + 1);
+            }
+        }
         for si in 0..b.statements.len() {
             let s = *b.statements.at(si);
             if s.kind != ir::ST_ASSIGN {
@@ -1005,28 +1128,78 @@ extend CEmit {
             if sp.proj_len != 0 || sp.base == pl.base {
                 continue;
             }
-            // Coalesce only a parameter moved into a local: an argument is a well-defined input with
-            // no producing statement to lose, and (with `refs[src] == 1`) it is read only here, so
-            // the local and the parameter share one storage safely. Temp-into-temp moves are left
-            // alone -- a temp can be written through a pointer or an elided initializer, where the
-            // aliasing would drop a declaration.
-            if b.locals.at(sp.base as usize).storage != ir::LS_ARG {
-                continue;
-            }
+            let ss = b.locals.at(sp.base as usize).storage;
+            let tempish = sp.base as usize >= b.returns as usize && ss != ir::LS_ARG && ss != ir::LS_STATIC_REF && b.locals.at(
+                sp.base as usize,
+            ).decl == NODE_NONE;
+            let user_source = ss == ir::LS_USER && b.locals.at(sp.base as usize).decl != NODE_NONE && !b.locals.at(
+                sp.base as usize,
+            ).is_mutable && dstore == ir::LS_TEMP;
+            let binding_source = ss == ir::LS_USER && dstore == ir::LS_USER && b.locals.at(pl.base as usize).is_mutable && self.adjacent_copy_source(
+                b,
+                si,
+                sp.base,
+            );
+            let ddecl = b.locals.at(pl.base as usize).decl;
+            let inline_pattern_dest = dstore == ir::LS_USER && ddecl != NODE_NONE && self.p().module_ast_const(b.module).at_const(
+                ddecl,
+            ).kind == NodeKind::NODE_PATTERN_NAME && *defs.at(pl.base as usize) == 1 && *uses.at(pl.base as usize) == 1;
             // A closure capture is an argument too, but it spells `__env->name`, not a plain local;
             // aliasing a local onto it would lose that env indirection.
-            if self.cap_on && sp.base >= self.cap_base {
+            if self.cap_on && ss == ir::LS_ARG && sp.base >= self.cap_base {
                 continue;
             }
-            // `refs[src] == 1` means the parameter is read only here, so it is dead afterwards and
-            // sharing its storage is safe whether the read was a move or a copy.
-            if *defs.at(pl.base as usize) != 1 || *refs.at(sp.base as usize) != 1 {
+            if !binding_source && *defs.at(pl.base as usize) != 1 {
                 continue;
             }
-            if b.locals.at(pl.base as usize).ty != b.locals.at(sp.base as usize).ty {
+            if ss == ir::LS_ARG && *refs.at(sp.base as usize) != 1 {
                 continue;
             }
-            self.sx_coal.set(pl.base as usize, sp.base);
+            // A temporary is counted once at its definition and once at this sole read.
+            if tempish && (*defs.at(sp.base as usize) != 1 || *uses.at(sp.base as usize) != 1) {
+                continue;
+            }
+            if user_source && (*defs.at(sp.base as usize) != 1 || *uses.at(sp.base as usize) != 1) {
+                continue;
+            }
+            if binding_source && (*defs.at(sp.base as usize) != 1 || *uses.at(sp.base as usize) != 1 || *refs.at(
+                sp.base as usize,
+            ) != 2) {
+                continue;
+            }
+            if ss != ir::LS_ARG && !tempish && !user_source && !binding_source {
+                continue;
+            }
+            let dty = b.locals.at(pl.base as usize).ty;
+            let sty = b.locals.at(sp.base as usize).ty;
+            let mut types_ok = dty != TYPE_NONE && (sty == TYPE_NONE || self.coal_type_compatible(b, dty, sty, sp.base));
+            if dty == TYPE_NONE && sty == TYPE_NONE {
+                let mut ds = String::new();
+                let mut ssym = String::new();
+                types_ok = self.untyped_ret_struct(b, pl.base, &mut ds) && self.untyped_ret_struct(
+                    b,
+                    sp.base,
+                    &mut ssym,
+                ) && ds.as_str() == ssym.as_str();
+            }
+            if !types_ok {
+                continue;
+            }
+            if dty != TYPE_NONE && self.is_unit(b, dty) {
+                continue;
+            }
+            if binding_source {
+                self.sx_coal.set(sp.base as usize, pl.base);
+                coal_root.set(pl.base as usize, true);
+            } else if ss == ir::LS_ARG {
+                self.sx_coal.set(pl.base as usize, sp.base);
+            } else if user_source {
+                self.sx_coal.set(pl.base as usize, sp.base);
+                coal_root.set(sp.base as usize, true);
+            } else if tempish && !inline_pattern_dest && *refs.at(pl.base as usize) > *defs.at(pl.base as usize) {
+                self.sx_coal.set(sp.base as usize, pl.base);
+                coal_root.set(pl.base as usize, true);
+            }
         }
         for l in 0..n {
             let mut r = l as u32;
@@ -1131,7 +1304,7 @@ extend CEmit {
             }
             self.sx_name.push(nm);
         }
-        assigned.free();
+
         // Liveness for declaration + dead-store removal: a local needs a declaration when it is read
         // (a taken address counts) or written by something that must land in it (a call result or a
         // side-effecting rvalue). Neither -> dead: no declaration, and its pure stores are dropped.
@@ -1146,11 +1319,8 @@ extend CEmit {
         for l in 0..n {
             self.sx_used.push(*reads.at(l) != 0 || *hardw.at(l));
         }
-        reads.free();
-        hardw.free();
-        reserved.free();
-        refs.free();
-        defs.free();
+
+        self.compute_inline(b, &coal_root);
     }
 
     // The C spelling of local `l` for the body most recently emitted through `emit_fn`: its coalesce
@@ -1174,7 +1344,7 @@ extend CEmit {
 
     // Whether this assignment became a no-op self-copy after coalescing (its declaration and store
     // are both elided).
-    fn is_coalesced_store(self: &Self, b: &ir::CoreBody, s: &ir::Statement) bool {
+    const fn is_coalesced_store(self: &Self, b: &ir::CoreBody, s: &ir::Statement) bool {
         if s.kind != ir::ST_ASSIGN {
             return false;
         }
@@ -1200,7 +1370,7 @@ extend CEmit {
     // A store to a dead local (never read, no declaration): its pure rvalue has no side effect, so
     // the whole statement is dropped. Whole-local writes only; the local's liveness (sx_used) already
     // accounts for reads and hard writes, so `!sx_used` here guarantees the rvalue is pure.
-    fn is_dead_store(self: &Self, b: &ir::CoreBody, s: &ir::Statement) bool {
+    const fn is_dead_store(self: &Self, b: &ir::CoreBody, s: &ir::Statement) bool {
         if s.kind != ir::ST_ASSIGN {
             return false;
         }
@@ -1218,9 +1388,1013 @@ extend CEmit {
         return !*self.sx_used.at(pl.base as usize);
     }
 
+    // Two places name the same storage: identical base and identical projection sequence. A dynamic
+    // index compares by its operand id (a conservative match -- distinct ids that happen to hold the
+    // same value read as different, which only forgoes a rewrite).
+    fn places_equal(self: &Self, b: &ir::CoreBody, a: u32, c: u32) bool {
+        let pa = *b.places.at(a as usize);
+        let pc = *b.places.at(c as usize);
+        if pa.base != pc.base || pa.proj_len != pc.proj_len {
+            return false;
+        }
+        for i in 0..pa.proj_len {
+            let ja = *b.projections.at((pa.proj_start + i) as usize);
+            let jc = *b.projections.at((pc.proj_start + i) as usize);
+            if ja.kind != jc.kind || ja.data != jc.data || ja.sub != jc.sub {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The C compound-assignment spelling for a binary operator token, or "" when the operator has no
+    // `op=` form (comparisons, logical, equality).
+    const fn compound_op(t: tt::TokenType) str<'static> {
+        if t == tt::TokenType::Plus {
+            return "+=";
+        }
+        if t == tt::TokenType::Minus {
+            return "-=";
+        }
+        if t == tt::TokenType::Star {
+            return "*=";
+        }
+        if t == tt::TokenType::Slash {
+            return "/=";
+        }
+        if t == tt::TokenType::Percent {
+            return "%=";
+        }
+        if t == tt::TokenType::Ampersand {
+            return "&=";
+        }
+        if t == tt::TokenType::Pipe {
+            return "|=";
+        }
+        if t == tt::TokenType::Caret {
+            return "^=";
+        }
+        if t == tt::TokenType::LeftShift {
+            return "<<=";
+        }
+        if t == tt::TokenType::RightShift {
+            return ">>=";
+        }
+        return "";
+    }
+
+    // `x = x op y` reads better as `x op= y`, and evaluates the destination once. Applies only to the
+    // scalar C-operator path (aggregates dispatch through a method) when the binary's left operand is
+    // the destination place itself. Returns whether it emitted the statement.
+    fn try_compound_assign(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement) bool {
+        if s.kind != ir::ST_ASSIGN {
+            return false;
+        }
+        let pl = *b.places.at(s.place as usize);
+        // See through a store of an inlined temporary (`x = _t` where `_t = x op y`): the binary
+        // reaches the store directly, so the compound form still applies.
+        let mut rvid = s.rvalue;
+        let rv0 = *b.rvalues.at(rvid as usize);
+        if rv0.kind == ir::RV_USE {
+            let op = *b.operands.at(rv0.a as usize);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                let p = *b.places.at(op.data as usize);
+                if p.proj_len == 0 && *self.sx_inline.at(p.base as usize) != ir::IR_NONE {
+                    rvid = *self.sx_inline.at(p.base as usize);
+                }
+            }
+        }
+        let rv = *b.rvalues.at(rvid as usize);
+        if rv.kind != ir::RV_BINARY || !self.is_scalar(b, pl.ty) {
+            return false;
+        }
+        let opstr = CEmit::compound_op(rv.c as tt::TokenType);
+        if opstr.len() == 0 {
+            return false;
+        }
+        let la = *b.operands.at(rv.a as usize);
+        if la.kind != ir::OP_COPY && la.kind != ir::OP_MOVE {
+            return false;
+        }
+        if !self.places_equal(b, s.place, la.data) {
+            return false;
+        }
+        // Committed: a later failure sets self.err rather than returning false, so the caller does not
+        // re-run the general path and double emit_place's collection side effects.
+        let mut lhs = String::new();
+        let mut rhs = String::new();
+        let mut bm = b.module;
+        let mut bt = TYPE_NONE;
+        let bref = self.bin_op_ty(b, rv.b, &mut bm, &mut bt);
+        if self.emit_place(b, s.place, &mut lhs) && self.emit_op_d(b, rv.b, bref, &mut rhs) {
+            self.out.push_str("  ");
+            self.out.push_string(&lhs);
+            self.out.push_str(" ");
+            self.out.push_str(opstr);
+            self.out.push_str(" ");
+            self.out.push_string(&rhs);
+            self.out.push_str(";\n");
+        }
+        return true;
+    }
+
+    // The whole-local definition of an inlined temporary: its statement is skipped, the rvalue
+    // reappears at the single read (emit_operand). Whole-local writes only.
+    const fn is_inlined_store(self: &Self, b: &ir::CoreBody, s: &ir::Statement) bool {
+        if s.kind != ir::ST_ASSIGN {
+            return false;
+        }
+        let pl = *b.places.at(s.place as usize);
+        return pl.proj_len == 0 && *self.sx_inline.at(pl.base as usize) != ir::IR_NONE;
+    }
+
+    // A scalar type -- builtin (int/bool/float), pointer, or reference. Only scalar temporaries
+    // inline: an aggregate operand is taken by address in the equality/ordering/overload dispatch
+    // paths, and C forbids the address of a materialized rvalue. Scalars are never address-taken in
+    // a statement right-hand side or switch discriminant, so folding them is always spellable.
+    fn is_scalar(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let mut rm = b.module;
+        let mut rt = t;
+        self.rty(b, t, &mut rm, &mut rt);
+        let y = *self.p().module_ast_const(rm).type_at(rt);
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
+            return true;
+        }
+        return y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin != BuiltinType::BT_VOID;
+    }
+
+    // Pure, scalar rvalue kinds whose result is a self-contained C expression (parenthesized or
+    // atomic), so folding one into its single use never reorders evaluation or breaks precedence.
+    const fn inlinable_def_kind(k: u8) bool {
+        return k == ir::RV_USE || k == ir::RV_UNARY || k == ir::RV_BINARY || k == ir::RV_CAST || k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_LEN || k == ir::RV_DISCRIMINANT;
+    }
+
+    // Whether operand `opid` reads local `l` through no projection (a whole-local copy/move).
+    const fn op_is_bare_local(self: &Self, b: &ir::CoreBody, opid: u32, l: u32) bool {
+        if opid == ir::IR_NONE || opid as usize >= b.operands.len() {
+            return false;
+        }
+        let op = *b.operands.at(opid as usize);
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return false;
+        }
+        let pl = *b.places.at(op.data as usize);
+        return pl.proj_len == 0 && pl.base == l;
+    }
+
+    // A call returning a pointer/reference can also fold through one direct dereference: `_p = f();
+    // x = *_p` becomes `x = *f()`. No field/index chain is accepted here.
+    const fn op_is_deref_local(self: &Self, b: &ir::CoreBody, opid: u32, l: u32) bool {
+        if opid == ir::IR_NONE || opid as usize >= b.operands.len() {
+            return false;
+        }
+        let op = *b.operands.at(opid as usize);
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return false;
+        }
+        let pl = *b.places.at(op.data as usize);
+        return pl.base == l && pl.proj_len == 1 && b.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF;
+    }
+
+    const fn op_is_call_use(self: &Self, b: &ir::CoreBody, opid: u32, l: u32) bool {
+        return self.op_is_bare_local(b, opid, l) || self.op_is_deref_local(b, opid, l);
+    }
+
+    // Whether rvalue `rid` reads local `l` as a bare operand -- the adjacency probe for the one
+    // statement that immediately follows an inline candidate's definition.
+    fn rvalue_reads_local_bare(self: &Self, b: &ir::CoreBody, rid: u32, l: u32) bool {
+        let rv = *b.rvalues.at(rid as usize);
+        if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_REPEAT || rv.kind == ir::RV_DYN {
+            return self.op_is_bare_local(b, rv.a, l);
+        }
+        if rv.kind == ir::RV_BINARY {
+            return self.op_is_bare_local(b, rv.a, l) || self.op_is_bare_local(b, rv.b, l);
+        }
+        if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_CLOSURE {
+            // b is a genuine operand count here (RV_INTRINSIC overloads b as a TypeId, so it is
+            // excluded -- a temp used only inside an intrinsic stays declared, which is safe)
+            for i in 0..rv.b {
+                if self.op_is_bare_local(b, b.oper_pool[(rv.a + i) as usize], l) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return false;
+    }
+
+    fn rvalue_reads_call_use(self: &Self, b: &ir::CoreBody, rid: u32, l: u32) bool {
+        let rv = *b.rvalues.at(rid as usize);
+        if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_REPEAT || rv.kind == ir::RV_DYN {
+            return self.op_is_call_use(b, rv.a, l);
+        }
+        if rv.kind == ir::RV_BINARY {
+            return self.op_is_call_use(b, rv.a, l) || self.op_is_call_use(b, rv.b, l);
+        }
+        return false;
+    }
+
+    // Whether operand `opid` reads local `base` through any projection (a whole or field/element read).
+    const fn op_reads_base(self: &Self, b: &ir::CoreBody, opid: u32, base: u32) bool {
+        if opid == ir::IR_NONE || opid as usize >= b.operands.len() {
+            return false;
+        }
+        let op = *b.operands.at(opid as usize);
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return false;
+        }
+        return b.places.at(op.data as usize).base == base;
+    }
+
+    // Whether an inlinable-kind rvalue reads local `base` (as an operand or the place it projects
+    // from). Used to test whether a statement between a temp's definition and its use writes one of
+    // the definition's inputs.
+    fn rvalue_reads_base(self: &Self, b: &ir::CoreBody, rid: u32, base: u32) bool {
+        let rv = *b.rvalues.at(rid as usize);
+        if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
+            return self.op_reads_base(b, rv.a, base);
+        }
+        if rv.kind == ir::RV_BINARY {
+            return self.op_reads_base(b, rv.a, base) || self.op_reads_base(b, rv.b, base);
+        }
+        if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
+            return b.places.at(rv.a as usize).base == base;
+        }
+        if rv.kind == ir::RV_AGGREGATE {
+            for i in 0..rv.b {
+                if self.op_reads_base(b, b.oper_pool[(rv.a + i) as usize], base) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return false;
+    }
+
+    // Whether an operand reads through a projection (dereference, field, or index) -- i.e. it reads
+    // memory rather than a whole local value.
+    const fn op_is_projected(self: &Self, b: &ir::CoreBody, opid: u32) bool {
+        if opid == ir::IR_NONE || opid as usize >= b.operands.len() {
+            return false;
+        }
+        let op = *b.operands.at(opid as usize);
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return false;
+        }
+        return b.places.at(op.data as usize).proj_len > 0;
+    }
+
+    // Whether an inlinable-kind rvalue reads memory (any projected operand or projected place-read).
+    // A memory-reading definition cannot be folded across a store that might alias that memory.
+    fn rvalue_reads_mem(self: &Self, b: &ir::CoreBody, rid: u32) bool {
+        let rv = *b.rvalues.at(rid as usize);
+        if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
+            return self.op_is_projected(b, rv.a);
+        }
+        if rv.kind == ir::RV_BINARY {
+            return self.op_is_projected(b, rv.a) || self.op_is_projected(b, rv.b);
+        }
+        if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
+            return b.places.at(rv.a as usize).proj_len > 0;
+        }
+        if rv.kind == ir::RV_AGGREGATE {
+            for i in 0..rv.b {
+                if self.op_is_projected(b, b.oper_pool[(rv.a + i) as usize]) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return false;
+    }
+
+    // Whether statement `s`, sitting between a single-use temp's definition (rvalue `def_rv`, which
+    // reads memory iff `reads_mem`) and its read, leaves that definition's value unchanged -- so the
+    // definition may fold past it. Safe when: a marker; or a pure whole/projected store that neither
+    // writes an input the definition reads nor writes memory the definition depends on. Any effecting
+    // statement (asm, allocation, discriminant/deinit against a memory-reading definition) blocks it.
+    fn inline_safe_between(self: &Self, b: &ir::CoreBody, s: &ir::Statement, def_rv: u32, reads_mem: bool) bool {
+        if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+            return true;
+        }
+        if s.kind == ir::ST_ASM {
+            return false;
+        }
+        if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
+            if reads_mem {
+                return false;
+            }
+            return !self.rvalue_reads_base(b, def_rv, b.places.at(s.place as usize).base);
+        }
+        if s.kind != ir::ST_ASSIGN {
+            return false;
+        }
+        if b.rvalues.at(s.rvalue as usize).kind == ir::RV_INTRINSIC {
+            return false; // asm/new/safepoint carry an effect
+        }
+        let pl = *b.places.at(s.place as usize);
+        if self.rvalue_reads_base(b, def_rv, pl.base) {
+            return false; // writes a local the definition reads
+        }
+        if pl.proj_len != 0 && reads_mem {
+            return false; // a projected store may alias the definition's memory
+        }
+        return true;
+    }
+
+    // Select single-use pure temporaries whose one read is adjacent to their definition (nothing
+    // executes between them) so the definition can be dropped and its rvalue spelled at the read.
+    // Conservative by construction: any projected use, taken address, extra write, non-pure producer,
+    // or non-adjacent read leaves the local as an ordinary declared temporary. Near-linear: one
+    // operand pass, one statement/terminator pass, then a bounded per-candidate look-ahead.
+    fn compute_inline(self: &mut Self, b: &ir::CoreBody, coal_root: &Vector<bool>) {
+        let n = b.locals.len();
+        self.sx_inline.clear();
+        for _l in 0..n {
+            self.sx_inline.push(ir::IR_NONE);
+        }
+        let mut bare_read = Vector::<u32>::new();
+        let mut ndef = Vector::<u32>::new();
+        let mut blocked = Vector::<bool>::new();
+        let mut def_rv = Vector::<u32>::new();
+        let mut def_blk = Vector::<u32>::new();
+        let mut def_idx = Vector::<u32>::new();
+        for _l in 0..n {
+            bare_read.push(0);
+            ndef.push(0);
+            blocked.push(false);
+            def_rv.push(ir::IR_NONE);
+            def_blk.push(ir::IR_NONE);
+            def_idx.push(0);
+        }
+        for o in 0..b.operands.len() {
+            let op = *b.operands.at(o);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                let pl = *b.places.at(op.data as usize);
+                if pl.proj_len == 0 {
+                    bare_read.set(pl.base as usize, *bare_read.at(pl.base as usize) + 1);
+                } else {
+                    blocked.set(pl.base as usize, true);
+                }
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let blk = *b.blocks.at(bi);
+            for si in 0..blk.stmt_len {
+                let s = *b.statements.at((blk.stmt_start + si) as usize);
+                if s.kind == ir::ST_ASSIGN {
+                    let pl = *b.places.at(s.place as usize);
+                    let rv = *b.rvalues.at(s.rvalue as usize);
+                    if pl.proj_len == 0 {
+                        // a non-array struct/tuple/variant literal folds too (spelled as one compound
+                        // literal at its read); array-bearing aggregates keep their element-wise store
+                        let agg_ok = rv.kind == ir::RV_AGGREGATE && (rv.c == ir::AGG_STRUCT || rv.c == ir::AGG_TUPLE || rv.c == ir::AGG_VARIANT) && !self.agg_has_array_field(
+                            b,
+                            &rv,
+                        );
+                        if CEmit::inlinable_def_kind(rv.kind) || agg_ok {
+                            ndef.set(pl.base as usize, *ndef.at(pl.base as usize) + 1);
+                            def_rv.set(pl.base as usize, s.rvalue);
+                            def_blk.set(pl.base as usize, bi as u32);
+                            def_idx.set(pl.base as usize, si);
+                        } else {
+                            blocked.set(pl.base as usize, true);
+                        }
+                    } else {
+                        blocked.set(pl.base as usize, true);
+                    }
+                    if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
+                        blocked.set(b.places.at(rv.a as usize).base as usize, true);
+                    }
+                } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
+                    blocked.set(b.places.at(s.place as usize).base as usize, true);
+                } else if s.kind == ir::ST_ASM {
+                    for i in 0..s.b {
+                        let op = *b.operands.at(b.oper_pool[(s.a + i) as usize] as usize);
+                        if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                            blocked.set(b.places.at(op.data as usize).base as usize, true);
+                        }
+                    }
+                }
+            }
+            let t = blk.term;
+            if t.kind == ir::TM_DROP {
+                blocked.set(b.places.at(t.a as usize).base as usize, true);
+                if t.args_len == 1 {
+                    blocked.set(t.args_start as usize, true);
+                }
+            } else if t.kind == ir::TM_CALL {
+                for d in 0..t.dests_len {
+                    blocked.set(b.places.at(b.dest_pool[(t.dests_start + d) as usize] as usize).base as usize, true);
+                }
+            }
+        }
+        for l in 0..n {
+            let ls = b.locals.at(l).storage;
+            let dn0 = b.locals.at(l).decl;
+            let pattern = dn0 != NODE_NONE && self.p().module_ast_const(b.module).at_const(dn0).kind == NodeKind::NODE_PATTERN_NAME;
+            if ls != ir::LS_TEMP && !(ls == ir::LS_USER && (!b.locals.at(l).is_mutable || pattern)) {
+                continue;
+            }
+            if *self.sx_coal.at(l) != l as u32 || l < b.returns as usize {
+                continue;
+            }
+            if *coal_root.at(l) {
+                continue;
+            }
+            if *blocked.at(l) || *ndef.at(l) != 1 || *bare_read.at(l) != 1 {
+                continue;
+            }
+            // a closure capture spells `__env->name`, never a plain local; never fold it. Captures
+            // are the trailing arguments [cap_base, returns+args); temporaries come after and DO fold.
+            if self.cap_on && l as u32 >= self.cap_base && l as u32 < b.returns + b.args {
+                continue;
+            }
+            // An aggregate operand is taken by address in the equality/ordering/overload dispatch and
+            // by-reference call paths, and C forbids the address of a materialized rvalue; so an
+            // aggregate temporary folds only into a whole-value copy (`x = _agg`, including a return
+            // slot store), never into a comparison, a discriminant test, or a call argument. Scalars
+            // are never address-taken in those spots and fold anywhere.
+            let scalar = self.is_scalar(b, b.locals.at(l).ty);
+            let bd = *def_blk.at(l);
+            let di = *def_idx.at(l);
+            let blk = *b.blocks.at(bd as usize);
+            let drv = *def_rv.at(l);
+            let reads_mem = self.rvalue_reads_mem(b, drv);
+            // Fold the definition forward to its single read, stepping over statements that provably
+            // leave the definition's value intact (they neither write an input nor alias its memory).
+            // The read is a later statement's operand or the block's switch discriminant; any statement
+            // that could change the definition halts the search and the temp stays declared.
+            let mut ok = true;
+            let mut inlined = false;
+            let mut sk = di + 1;
+            while sk < blk.stmt_len {
+                let s2 = *b.statements.at((blk.stmt_start + sk) as usize);
+                if s2.kind == ir::ST_ASSIGN && self.rvalue_reads_local_bare(b, s2.rvalue, l as u32) {
+                    if scalar || b.rvalues.at(s2.rvalue as usize).kind == ir::RV_USE {
+                        self.sx_inline.set(l, drv);
+                    }
+                    inlined = true; // the sole read; stop whether or not it was a foldable position
+                    break;
+                }
+                if !self.inline_safe_between(b, &s2, drv, reads_mem) {
+                    ok = false;
+                    break;
+                }
+                sk += 1;
+            }
+            if !inlined && ok && scalar && (blk.term.kind == ir::TM_SWITCH || blk.term.kind == ir::TM_ASSERT) && self.op_is_bare_local(
+                b,
+                blk.term.a,
+                l as u32,
+            ) {
+                self.sx_inline.set(l, drv);
+            }
+        }
+        // Multi-return slots (locals 0..returns) are read only by the synthesized carrier
+        // `(name_ret){ ._0 = _0, .. }`, never as an operand, so the loop above skips them. A slot with
+        // one pure definition and no operand reads folds into that carrier field -- provided its
+        // definition reaches the return with nothing overwriting its inputs. Single-return `_0` is
+        // left alone (return-slot forwarding owns it).
+        if b.returns > 1 {
+            for l in 0..b.returns as usize {
+                if *blocked.at(l) || *ndef.at(l) != 1 || *bare_read.at(l) != 0 {
+                    continue;
+                }
+                let bd = *def_blk.at(l);
+                if bd == ir::IR_NONE || b.blocks.at(bd as usize).term.kind != ir::TM_RETURN {
+                    continue;
+                }
+                let drv = *def_rv.at(l);
+                let reads_mem = self.rvalue_reads_mem(b, drv);
+                let blk = *b.blocks.at(bd as usize);
+                let mut ok = true;
+                let mut sk = *def_idx.at(l) + 1;
+                while sk < blk.stmt_len {
+                    let s = *b.statements.at((blk.stmt_start + sk) as usize);
+                    if !self.inline_safe_between(b, &s, drv, reads_mem) {
+                        ok = false;
+                        break;
+                    }
+                    sk += 1;
+                }
+                if ok {
+                    self.sx_inline.set(l, drv);
+                }
+            }
+        }
+    }
+
+    // Inline a single-use slice/array length into a loop comparison when its source is not written
+    // in that loop. Re-evaluating `value.len` is then equivalent and removes the bound temporary.
+    fn compute_loop_inline(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) {
+        for h in 0..b.blocks.len() {
+            if !*cf.is_header.at(h) {
+                continue;
+            }
+            let t = b.blocks.at(h).term;
+            if t.kind != ir::TM_SWITCH {
+                continue;
+            }
+            let cop = *b.operands.at(t.a as usize);
+            if cop.kind != ir::OP_COPY && cop.kind != ir::OP_MOVE {
+                continue;
+            }
+            let cp = *b.places.at(cop.data as usize);
+            if cp.proj_len != 0 || *self.sx_inline.at(cp.base as usize) == ir::IR_NONE {
+                continue;
+            }
+            let crv = *b.rvalues.at((*self.sx_inline.at(cp.base as usize)) as usize);
+            if crv.kind != ir::RV_BINARY {
+                continue;
+            }
+            let ro = *b.operands.at(crv.b as usize);
+            if ro.kind != ir::OP_COPY && ro.kind != ir::OP_MOVE {
+                continue;
+            }
+            let rp = *b.places.at(ro.data as usize);
+            let bound = rp.base as usize;
+            if rp.proj_len != 0 || bound < b.returns as usize || *self.sx_inline.at(bound) != ir::IR_NONE {
+                continue;
+            }
+            let mut nuse: u32 = 0;
+            for oi in 0..b.operands.len() {
+                let op = *b.operands.at(oi);
+                if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && b.places.at(op.data as usize).base as usize == bound {
+                    nuse += 1;
+                }
+            }
+            if nuse != 1 {
+                continue;
+            }
+            let mut def = ir::IR_NONE;
+            let mut def_block = cfl::NONE;
+            let mut source = ir::IR_NONE;
+            for bi in 0..b.blocks.len() {
+                let bb = *b.blocks.at(bi);
+                for si in 0..bb.stmt_len {
+                    let s = *b.statements.at((bb.stmt_start + si) as usize);
+                    if s.kind != ir::ST_ASSIGN {
+                        continue;
+                    }
+                    let dp = *b.places.at(s.place as usize);
+                    if dp.proj_len != 0 || dp.base as usize != bound {
+                        continue;
+                    }
+                    let rv = *b.rvalues.at(s.rvalue as usize);
+                    if def != ir::IR_NONE || rv.kind != ir::RV_LEN {
+                        def = ir::IR_NONE;
+                        def_block = cfl::NONE;
+                        break;
+                    }
+                    def = s.rvalue;
+                    def_block = bi as u32;
+                    source = b.places.at(rv.a as usize).base;
+                }
+                if def == ir::IR_NONE && def_block == cfl::NONE {
+                    continue;
+                }
+            }
+            if def == ir::IR_NONE || !cf.dominates(def_block, h as u32) {
+                continue;
+            }
+            let mut changed = false;
+            for bi in 0..b.blocks.len() {
+                if *cf.loop_of.at(bi) != h as u32 {
+                    continue;
+                }
+                let bb = *b.blocks.at(bi);
+                for si in 0..bb.stmt_len {
+                    let s = *b.statements.at((bb.stmt_start + si) as usize);
+                    if s.kind == ir::ST_ASSIGN && b.places.at(s.place as usize).base == source {
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                self.sx_inline.set(bound, def);
+            }
+        }
+    }
+
+    // A type with an ordinary single-declarator C spelling, so `T name = init;` is well-formed:
+    // excludes arrays (special extent syntax, and C forbids array assignment), the unit/void and
+    // never placeholders, and untyped temps (their type recovers at declaration).
+    fn simple_decl_type(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let mut rm = b.module;
+        let mut rt = t;
+        self.rty(b, t, &mut rm, &mut rt);
+        let y = *self.p().module_ast_const(rm).type_at(rt);
+        if y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_ARRAY && y.as_data.arr.len == 0 {
+            return false;
+        }
+        return !(y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID);
+    }
+
+    // An rvalue whose store emits through the general `lhs = rhs;` path as a single C initializer, so
+    // its declaration can fuse. Excludes array literals, repeats, array-bearing aggregates, `new`,
+    // dynamic-env construction, and other multi-statement stores.
+    fn fusable_init_rvalue(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+        let k = rv.kind;
+        if k == ir::RV_USE || k == ir::RV_BINARY || k == ir::RV_UNARY || k == ir::RV_CAST || k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_LEN || k == ir::RV_DISCRIMINANT || k == ir::RV_SLICE {
+            return true;
+        }
+        if k == ir::RV_AGGREGATE && (rv.c == ir::AGG_STRUCT || rv.c == ir::AGG_TUPLE || rv.c == ir::AGG_VARIANT) {
+            return !self.agg_has_array_field(b, rv);
+        }
+        if k == ir::RV_AGGREGATE && rv.c == ir::AGG_ARRAY {
+            return true;
+        }
+        if k == ir::RV_INTRINSIC && rv.c as u32 == ir::IN_NEW as u32 {
+            return true;
+        }
+        if k == ir::RV_CLOSURE {
+            return true;
+        }
+        return false;
+    }
+
+    // Domination probe over one written place: if local `p.base` is a fusion candidate whose init
+    // block does not dominate the writing block `bi`, the fused declaration would not dominate that
+    // write, so the candidate is withdrawn.
+    fn dom_check_place(
+        self: &Self,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        pid: u32,
+        bi: u32,
+        init_blk: &Vector<u32>,
+        out: &mut Vector<bool>,
+    ) {
+        let base = (*self.sx_coal.at(b.places.at(pid as usize).base as usize)) as usize;
+        if *init_blk.at(base) != cfl::NONE && !cf.dominates(*init_blk.at(base), bi) {
+            out.set(base, true);
+        }
+    }
+
+    // Choose locals that declare at their initializing write. A candidate's first write must be a
+    // whole-local store with a single-initializer rvalue, and that write's block must dominate every
+    // WRITE to the local -- which, with the checker's definite-init guarantee, also dominates every
+    // read (a read the init did not dominate would need a write the init did not dominate). So the
+    // fused declaration is in scope and has run before any use on every path. Two near-linear passes:
+    // first write per local, then a write-domination sweep.
+    fn compute_fusion(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) {
+        let n = b.locals.len();
+        self.sx_fuse.clear();
+        self.sx_declared.clear();
+        for _l in 0..n {
+            self.sx_fuse.push(false);
+            self.sx_declared.push(false);
+        }
+        let mut init_blk = Vector::<u32>::new();
+        let mut seen = Vector::<bool>::new();
+        let mut bad = Vector::<bool>::new();
+        let mut nread = Vector::<u32>::new();
+        let mut direct_array = Vector::<bool>::new();
+        for _l in 0..n {
+            init_blk.push(cfl::NONE);
+            seen.push(false);
+            bad.push(false);
+            nread.push(0);
+            direct_array.push(false);
+        }
+        // Pass 1: first write per local, in emission (reverse-postorder) order.
+        for oi in 0..cf.order.len() {
+            let bi = *cf.order.at(oi);
+            let blk = *b.blocks.at(bi as usize);
+            for si in 0..blk.stmt_len {
+                let s = *b.statements.at((blk.stmt_start + si) as usize);
+                let mut wl = ir::IR_NONE;
+                let mut ok_init = false;
+                let mut is_array_init = false;
+                if s.kind == ir::ST_ASSIGN {
+                    let pl = *b.places.at(s.place as usize);
+                    let rv0 = *b.rvalues.at(s.rvalue as usize);
+                    wl = *self.sx_coal.at(pl.base as usize);
+                    ok_init = pl.proj_len == 0 && self.fusable_init_rvalue(b, &rv0);
+                    is_array_init = rv0.kind == ir::RV_AGGREGATE && rv0.c == ir::AGG_ARRAY;
+                } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
+                    wl = b.places.at(s.place as usize).base;
+                } else if s.kind == ir::ST_ASM {
+                    // an asm output writes a local through a form the fused declaration cannot host
+                    for i in 0..s.b {
+                        let op = *b.operands.at(b.oper_pool[(s.a + i) as usize] as usize);
+                        if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                            bad.set(b.places.at(op.data as usize).base as usize, true);
+                        }
+                    }
+                }
+                if wl != ir::IR_NONE && !*seen.at(wl as usize) {
+                    seen.set(wl as usize, true);
+                    if ok_init {
+                        init_blk.set(wl as usize, bi);
+                        direct_array.set(wl as usize, is_array_init);
+                    } else {
+                        bad.set(wl as usize, true);
+                    }
+                }
+            }
+            let t = blk.term;
+            if t.kind == ir::TM_CALL {
+                for d in 0..t.dests_len {
+                    let dp = b.dest_pool[(t.dests_start + d) as usize];
+                    let pl = *b.places.at(dp as usize);
+                    let wl = *self.sx_coal.at(pl.base as usize);
+                    if !*seen.at(wl as usize) {
+                        seen.set(wl as usize, true);
+                        let mut call_init = t.dests_len == 1 && pl.proj_len == 0;
+                        if call_init && pl.ty == TYPE_NONE {
+                            let mut rs = String::new();
+                            call_init = self.untyped_ret_struct(b, wl, &mut rs);
+                        } else if call_init {
+                            call_init = self.simple_decl_type(b, pl.ty);
+                        }
+                        if call_init && pl.ty != TYPE_NONE {
+                            let mut rm = b.module;
+                            let mut rt = pl.ty;
+                            self.rty(b, pl.ty, &mut rm, &mut rt);
+                            call_init = self.p().module_ast_const(rm).type_at(rt).kind != TypeKind::TYPE_ARRAY;
+                        }
+                        if call_init {
+                            init_blk.set(wl as usize, bi);
+                        } else {
+                            bad.set(wl as usize, true);
+                        }
+                    }
+                }
+            }
+        }
+        // Pass 2: every WRITE must be dominated by its local's init block (definite-init then extends
+        // this to reads); tally reads. Writes are whole/projected assigns, discriminant/deinit stores,
+        // and call destinations.
+        for oi in 0..cf.order.len() {
+            let bi = *cf.order.at(oi);
+            let blk = *b.blocks.at(bi as usize);
+            for si in 0..blk.stmt_len {
+                let s = *b.statements.at((blk.stmt_start + si) as usize);
+                if s.kind == ir::ST_ASSIGN || s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
+                    self.dom_check_place(b, cf, s.place, bi, &init_blk, &mut bad);
+                }
+            }
+            let t = blk.term;
+            if t.kind == ir::TM_CALL {
+                for d in 0..t.dests_len {
+                    self.dom_check_place(b, cf, b.dest_pool[(t.dests_start + d) as usize], bi, &init_blk, &mut bad);
+                }
+            }
+        }
+        for o in 0..b.operands.len() {
+            let op = *b.operands.at(o);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                let rb = *self.sx_coal.at(b.places.at(op.data as usize).base as usize);
+                nread.set(rb as usize, *nread.at(rb as usize) + 1);
+            }
+        }
+        for l in 0..n {
+            let st = b.locals.at(l).storage;
+            if st != ir::LS_USER && st != ir::LS_TEMP {
+                continue;
+            }
+            if *self.sx_coal.at(l) != l as u32 || l < b.returns as usize {
+                continue;
+            }
+            if *self.sx_inline.at(l) != ir::IR_NONE || *bad.at(l) || *init_blk.at(l) == cfl::NONE {
+                continue;
+            }
+            // A general initializer must sit outside every loop because C dominance does not imply
+            // lexical scope across a loop exit. A range-loop index is scoped to that loop and may
+            // declare at its initializer even when the loop is nested.
+            if *cf.loop_of.at((*init_blk.at(l)) as usize) != cfl::NONE {
+                let decl = b.locals.at(l).decl;
+                if decl == NODE_NONE || self.p().module_ast_const(b.module).at_const(decl).kind != NodeKind::NODE_FOR {
+                    continue;
+                }
+            }
+            let mut decl_ok = self.simple_decl_type(b, b.locals.at(l).ty);
+            if b.locals.at(l).ty == TYPE_NONE {
+                let mut rs = String::new();
+                decl_ok = self.untyped_ret_struct(b, l as u32, &mut rs);
+            }
+            if *nread.at(l) == 0 || !decl_ok {
+                continue;
+            }
+            {
+                let mut rmA = b.module;
+                let mut rtA = b.locals.at(l).ty;
+                self.rty(b, b.locals.at(l).ty, &mut rmA, &mut rtA);
+                if self.p().module_ast_const(rmA).type_at(rtA).kind == TypeKind::TYPE_ARRAY && !*direct_array.at(l) {
+                    continue;
+                }
+            }
+            if self.cap_on && l as u32 >= self.cap_base {
+                continue;
+            }
+            self.sx_fuse.set(l, true);
+        }
+    }
+
+    // Whether a statement produces C output (so it "runs" between a forwarded call and its use).
+    fn stmt_emits(self: &Self, b: &ir::CoreBody, s: &ir::Statement) bool {
+        if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+            return false;
+        }
+        if self.is_dead_store(b, s) || self.is_coalesced_store(b, s) || self.is_inlined_store(b, s) {
+            return false;
+        }
+        if s.kind == ir::ST_ASSIGN && b.places.at(s.place as usize).ty != TYPE_NONE && self.is_unit(
+            b,
+            b.places.at(s.place as usize).ty,
+        ) {
+            return false;
+        }
+        return true;
+    }
+
+    // Forward a single-return call result into its one use. `_r = f(..)` (a call terminator) followed
+    // by a use of `_r` in the continuation block, with nothing emitted between them, folds to spelling
+    // `f(..)` at the use -- `return _r;` becomes `return f(..);`, `x = _r;` becomes `x = f(..);`, and a
+    // condition `_r != 5` becomes `f(..) != 5`. The call still executes at the same point (nothing runs
+    // between), and the continuation's sole predecessor is this call, so no path skips it.
+    fn compute_call_fwd(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) {
+        let n = b.locals.len();
+        self.sx_call_fwd.clear();
+        self.sx_call_str.clear();
+        for _l in 0..n {
+            self.sx_call_fwd.push(false);
+            self.sx_call_str.push(String::new());
+        }
+        let mut bare = Vector::<u32>::new();
+        let mut deref = Vector::<u32>::new();
+        let mut bad = Vector::<bool>::new();
+        let mut ncall = Vector::<u32>::new();
+        for _l in 0..n {
+            bare.push(0);
+            deref.push(0);
+            bad.push(false);
+            ncall.push(0);
+        }
+        for o in 0..b.operands.len() {
+            let op = *b.operands.at(o);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                let pl = *b.places.at(op.data as usize);
+                if pl.proj_len == 0 {
+                    bare.set(pl.base as usize, *bare.at(pl.base as usize) + 1);
+                } else if pl.proj_len == 1 && b.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF {
+                    deref.set(pl.base as usize, *deref.at(pl.base as usize) + 1);
+                } else {
+                    bad.set(pl.base as usize, true);
+                }
+            }
+        }
+        for si in 0..b.statements.len() {
+            let s = *b.statements.at(si);
+            if s.kind == ir::ST_ASSIGN {
+                if !self.is_coalesced_store(b, &s) {
+                    bad.set(b.places.at(s.place as usize).base as usize, true); // any other store defeats the single-def call dest
+                }
+                let rv = *b.rvalues.at(s.rvalue as usize);
+                if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
+                    bad.set(b.places.at(rv.a as usize).base as usize, true);
+                }
+            } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
+                bad.set(b.places.at(s.place as usize).base as usize, true);
+            } else if s.kind == ir::ST_ASM {
+                for i in 0..s.b {
+                    let op = *b.operands.at(b.oper_pool[(s.a + i) as usize] as usize);
+                    if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                        bad.set(b.places.at(op.data as usize).base as usize, true);
+                    }
+                }
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind == ir::TM_DROP {
+                bad.set(b.places.at(t.a as usize).base as usize, true);
+            } else if t.kind == ir::TM_CALL {
+                for d in 0..t.dests_len {
+                    let dp = *b.places.at(b.dest_pool[(t.dests_start + d) as usize] as usize);
+                    if dp.proj_len == 0 {
+                        ncall.set(dp.base as usize, *ncall.at(dp.base as usize) + 1);
+                    } else {
+                        bad.set(dp.base as usize, true);
+                    }
+                }
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            if !*cf.reach.at(bi) {
+                continue;
+            }
+            let t = b.blocks.at(bi).term;
+            if t.kind != ir::TM_CALL || t.dests_len != 1 {
+                continue;
+            }
+            let dp = *b.places.at(b.dest_pool[t.dests_start as usize] as usize);
+            let r = dp.base;
+            let root = *self.sx_coal.at(r as usize);
+            if dp.proj_len != 0 || r as usize < b.returns as usize {
+                continue;
+            }
+            let cont = cf.succ(b, bi as u32, 0);
+            let cblk = *b.blocks.at(cont as usize);
+            let assert_use = self.assert_call_use(b, &cblk, root);
+            let uses = *bare.at(root as usize) + *deref.at(root as usize);
+            if *ncall.at(r as usize) != 1 || *bad.at(r as usize) || *bad.at(root as usize) || uses != 1 && !(assert_use && uses == 2) {
+                continue;
+            }
+            if self.is_unit(b, b.locals.at(root as usize).ty) {
+                continue;
+            }
+            // a fixed-array result stores through a `_ret` carrier + memcpy, not a plain expression
+            {
+                let mut rmA = b.module;
+                let mut rtA = b.locals.at(root as usize).ty;
+                self.rty(b, b.locals.at(root as usize).ty, &mut rmA, &mut rtA);
+                let ya = *self.p().module_ast_const(rmA).type_at(rtA);
+                if ya.kind == TypeKind::TYPE_ARRAY && ya.as_data.arr.len != 0 {
+                    continue;
+                }
+            }
+            // an aggregate result is taken by address in the equality/ordering/overload dispatch, and
+            // C forbids the address of a call rvalue; fold it only into a whole-value copy or return.
+            let scalar = self.is_scalar(b, b.locals.at(root as usize).ty);
+            // the use must sit in the continuation with nothing emitted before it
+            let mut before = false;
+            let mut used = false;
+            for si in 0..cblk.stmt_len {
+                let s = *b.statements.at((cblk.stmt_start + si) as usize);
+                if s.kind == ir::ST_ASSIGN && self.rvalue_reads_call_use(b, s.rvalue, root) {
+                    // A use that emits no statement cannot receive the forwarded call. Keep the call
+                    // as its own statement so its side effect remains, then elide the unused copy.
+                    if !self.stmt_emits(b, &s) {
+                        if assert_use && self.is_inlined_store(b, &s) {
+                            used = true;
+                        } else {
+                            before = true;
+                        }
+                        break;
+                    }
+                    used = scalar || b.rvalues.at(s.rvalue as usize).kind == ir::RV_USE;
+                    before = !used; // the sole read, but not a foldable position -> keep the temp
+                    break;
+                }
+                if self.stmt_emits(b, &s) {
+                    before = true;
+                    break;
+                }
+            }
+            if !used && !before && scalar {
+                let ct = cblk.term;
+                if (ct.kind == ir::TM_SWITCH || ct.kind == ir::TM_ASSERT) && self.op_is_bare_local(b, ct.a, root) {
+                    used = true;
+                }
+            }
+            if used && !before {
+                self.sx_call_fwd.set(r as usize, true);
+                self.sx_call_fwd.set(root as usize, true);
+            }
+        }
+    }
+
+    fn assert_call_use(self: &Self, b: &ir::CoreBody, blk: &ir::BasicBlock, l: u32) bool {
+        let t = blk.term;
+        if t.kind != ir::TM_ASSERT || t.args_len != 4 {
+            return false;
+        }
+        let mut diag: u32 = 0;
+        for i in 0..2 {
+            if self.op_is_call_use(b, b.oper_pool[(t.args_start + i as u32) as usize], l) {
+                diag += 1;
+            }
+        }
+        if diag != 1 {
+            return false;
+        }
+        for i in 0..blk.stmt_len {
+            let s = *b.statements.at((blk.stmt_start + i) as usize);
+            if s.kind == ir::ST_ASSIGN && self.rvalue_reads_call_use(b, s.rvalue, l) {
+                return self.is_inlined_store(b, &s);
+            }
+            if self.stmt_emits(b, &s) {
+                return false;
+            }
+        }
+        return false;
+    }
+
     // Locals, labels, blocks and the closing brace -- shared by plain functions and closures.
     fn emit_body_core(self: &mut Self, b: &ir::CoreBody) bool {
         let cf = cfl::CFlow::build(b);
+        self.compute_loop_inline(b, &cf);
+        self.compute_fusion(b, &cf);
+        self.compute_call_fwd(b, &cf);
         let ret_dead = !self.ret_slot_live(b, &cf);
         // every non-argument local declares up front, explicitly typed; unit locals carry no C
         for l in 0..b.locals.len() {
@@ -1233,6 +2407,15 @@ extend CEmit {
             }
             if l >= b.returns as usize && !*self.sx_used.at(l) {
                 continue; // referenced nowhere: a dead temporary, not declared
+            }
+            if *self.sx_inline.at(l) != ir::IR_NONE {
+                continue; // single-use pure temp: inlined at its read, no declaration
+            }
+            if *self.sx_fuse.at(l) {
+                continue; // declares at its initializing write instead of up front
+            }
+            if *self.sx_call_fwd.at(l) {
+                continue; // a forwarded call result: its call spells `f(..)` at the read, no storage
             }
             if l == 0 && ret_dead {
                 continue; // return-slot forwarding made `_0` dead; drop its declaration
@@ -1388,13 +2571,16 @@ extend CEmit {
             }
         }
         let mut ok2 = false;
-        if cf.simple && self.plan_structured(b, &cf) {
+        if cf.reducible && self.plan_structured(b, &cf) {
             ok2 = self.emit_structured(b, &cf);
         } else {
             ok2 = self.emit_layout(b, &cf);
         }
         if !ok2 {
             return false;
+        }
+        if b.returns == 1 && self.is_unit(b, b.locals.at(0).ty) && self.out.as_str().ends_with("  return;\n") {
+            self.out.truncate(self.out.len() - 10);
         }
         self.out.push_str("}\n");
         return self.err.len() == 0;
@@ -1407,24 +2593,104 @@ extend CEmit {
     fn emit_layout(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
         let m = cf.order.len();
         let mut need = Vector::<bool>::new();
+        let mut skip = Vector::<bool>::new();
+        let mut chain_default = Vector::<u32>::new();
+        let mut chain_target = Vector::<u32>::new();
+        let mut chain_kind = Vector::<u8>::new();
         for _i in 0..b.blocks.len() {
             need.push(false);
+            skip.push(false);
+            chain_default.push(cfl::NONE);
+            chain_target.push(cfl::NONE);
+            chain_kind.push(0);
+        }
+        // Pattern OR arms lower as a chain of one-case switches. Merge a chain only when every
+        // continuation has one predecessor and emits no statement.
+        for i in 0..m {
+            let x = *cf.order.at(i);
+            if *skip.at(x as usize) {
+                continue;
+            }
+            let t = b.blocks.at(x as usize).term;
+            if t.kind != ir::TM_SWITCH || t.sw_len != 1 {
+                continue;
+            }
+            let target = cf.succ(b, x, 0);
+            let mut cur = x;
+            let mut d = cf.succ(b, cur, 1);
+            while *cf.preds.at(d as usize) == 1 && self.block_output_empty(b, d) {
+                let dt = b.blocks.at(d as usize).term;
+                if dt.kind != ir::TM_SWITCH || dt.sw_len != 1 || cf.succ(b, d, 0) != target {
+                    break;
+                }
+                skip.set(d as usize, true);
+                cur = d;
+                d = cf.succ(b, cur, 1);
+            }
+            if cur != x {
+                chain_default.set(x as usize, d);
+                chain_target.set(x as usize, target);
+                chain_kind.set(x as usize, 1);
+            }
+        }
+        // Inclusive ranges lower as two true-edge comparisons with the same false edge.
+        for i in 0..m {
+            let x = *cf.order.at(i);
+            if *skip.at(x as usize) {
+                continue;
+            }
+            let t = b.blocks.at(x as usize).term;
+            if t.kind != ir::TM_SWITCH || t.sw_len != 1 {
+                continue;
+            }
+            let mid = cf.succ(b, x, 0);
+            if *cf.preds.at(mid as usize) != 1 || !self.block_output_empty(b, mid) {
+                continue;
+            }
+            let mt = b.blocks.at(mid as usize).term;
+            let fail = cf.succ(b, x, 1);
+            if mt.kind == ir::TM_SWITCH && mt.sw_len == 1 && cf.succ(b, mid, 1) == fail {
+                skip.set(mid as usize, true);
+                chain_default.set(x as usize, fail);
+                chain_target.set(x as usize, cf.succ(b, mid, 0));
+                chain_kind.set(x as usize, 2);
+            }
         }
         for i in 0..m {
             let x = *cf.order.at(i);
-            let next = if i + 1 < m {
-                *cf.order.at(i + 1);
+            if *skip.at(x as usize) {
+                continue;
+            }
+            let mut ni = i + 1;
+            while ni < m && *skip.at((*cf.order.at(ni)) as usize) {
+                ni += 1;
+            }
+            let next = if ni < m {
+                *cf.order.at(ni);
             } else {
                 cfl::NONE;
             };
             let t = b.blocks.at(x as usize).term;
             if t.kind == ir::TM_SWITCH {
-                for k in 0..t.sw_len {
-                    need.set(cf.succ(b, x, k) as usize, true);
-                }
-                let ot = cf.succ(b, x, t.sw_len);
-                if ot != next {
-                    need.set(ot as usize, true);
+                let mut cs = cfl::NONE;
+                if self.const_switch_succ(b, cf, x, &mut cs) {
+                    if cs != next {
+                        need.set(cs as usize, true);
+                    }
+                } else if *chain_default.at(x as usize) != cfl::NONE {
+                    need.set((*chain_target.at(x as usize)) as usize, true);
+                    let ot = *chain_default.at(x as usize);
+                    if ot != next {
+                        need.set(ot as usize, true);
+                    }
+                } else {
+                    for k in 0..t.sw_len {
+                        need.set(cf.succ(b, x, k) as usize, true);
+                    }
+                    let ot = cf.succ(b, x, t.sw_len);
+                    if ot != next {
+                        need.set(ot as usize, true);
+                    }
                 }
             } else if t.kind != ir::TM_RETURN && t.kind != ir::TM_UNREACHABLE {
                 let s = cf.succ(b, x, 0);
@@ -1439,8 +2705,15 @@ extend CEmit {
                 break;
             }
             let x = *cf.order.at(i);
-            let next = if i + 1 < m {
-                *cf.order.at(i + 1);
+            if *skip.at(x as usize) {
+                continue;
+            }
+            let mut ni = i + 1;
+            while ni < m && *skip.at((*cf.order.at(ni)) as usize) {
+                ni += 1;
+            }
+            let next = if ni < m {
+                *cf.order.at(ni);
             } else {
                 cfl::NONE;
             };
@@ -1455,15 +2728,38 @@ extend CEmit {
                 break;
             }
             if blk.term.kind == ir::TM_SWITCH {
-                if !self.emit_switch_gotos(b, cf, x) {
-                    ok = false;
-                    break;
-                }
-                let ot = cf.succ(b, x, blk.term.sw_len);
-                if ot != next {
-                    self.out.push_str("  goto bb_");
-                    self.out.push_u64(ot);
-                    self.out.push_str(";\n");
+                let mut cs = cfl::NONE;
+                if self.const_switch_succ(b, cf, x, &mut cs) {
+                    if cs != next {
+                        self.out.push_str("  goto bb_");
+                        self.out.push_u64(cs);
+                        self.out.push_str(";\n");
+                    }
+                } else {
+                    let cd = *chain_default.at(x as usize);
+                    if cd != cfl::NONE {
+                        if *chain_kind.at(x as usize) == 1 {
+                            ok = self.emit_switch_or_chain(b, cf, x, *chain_target.at(x as usize), cd);
+                        } else {
+                            ok = self.emit_switch_and_pair(b, cf, x, *chain_target.at(x as usize), cd);
+                        }
+                    } else {
+                        ok = self.emit_switch_gotos(b, cf, x);
+                    }
+                    if !ok {
+                        ok = false;
+                        break;
+                    }
+                    let ot = if cd != cfl::NONE {
+                        cd;
+                    } else {
+                        cf.succ(b, x, blk.term.sw_len);
+                    };
+                    if ot != next {
+                        self.out.push_str("  goto bb_");
+                        self.out.push_u64(ot);
+                        self.out.push_str(";\n");
+                    }
                 }
             } else if blk.term.kind != ir::TM_RETURN && blk.term.kind != ir::TM_UNREACHABLE {
                 let s = cf.succ(b, x, 0);
@@ -1474,8 +2770,99 @@ extend CEmit {
                 }
             }
         }
-        need.free();
+
         return ok;
+    }
+
+    fn block_output_empty(self: &Self, b: &ir::CoreBody, x: u32) bool {
+        let blk = *b.blocks.at(x as usize);
+        for i in 0..blk.stmt_len {
+            if self.stmt_emits(b, b.statements.at((blk.stmt_start + i) as usize)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn emit_switch_or_chain(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32, target: u32, end: u32) bool {
+        let mut cur = x;
+        self.out.push_str("  if (");
+        loop {
+            let t = b.blocks.at(cur as usize).term;
+            let mut d = String::new();
+            if !self.emit_operand(b, t.a, &mut d) {
+                return false;
+            }
+            if cur != x {
+                self.out.push_str(" || ");
+            }
+            self.push_case_test(
+                false,
+                self.is_bool(b, b.operands.at(t.a as usize).ty),
+                &d,
+                b.switch_pool[t.sw_start as usize] >> 32,
+            );
+            let next = cf.succ(b, cur, 1);
+            if next == end {
+                break;
+            }
+            cur = next;
+        }
+        self.out.push_str(") goto bb_");
+        self.out.push_u64(target);
+        self.out.push_str(";\n");
+        return true;
+    }
+
+    fn emit_switch_and_pair(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32, target: u32, end: u32) bool {
+        let mut cur = x;
+        self.out.push_str("  if (");
+        for i in 0..2 {
+            let t = b.blocks.at(cur as usize).term;
+            let mut d = String::new();
+            if !self.emit_operand(b, t.a, &mut d) {
+                return false;
+            }
+            if i != 0 {
+                self.out.push_str(" && ");
+            }
+            self.push_case_test(
+                false,
+                self.is_bool(b, b.operands.at(t.a as usize).ty),
+                &d,
+                b.switch_pool[t.sw_start as usize] >> 32,
+            );
+            if i == 0 {
+                cur = cf.succ(b, cur, 0);
+            }
+        }
+        self.out.push_str(") goto bb_");
+        self.out.push_u64(target);
+        self.out.push_str(";\n");
+        return cf.succ(b, cur, 1) == end;
+    }
+
+    fn const_switch_succ(self: &Self, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32, out: &mut u32) bool {
+        let t = b.blocks.at(x as usize).term;
+        if t.kind != ir::TM_SWITCH {
+            return false;
+        }
+        let op = *b.operands.at(t.a as usize);
+        if op.kind != ir::OP_CONST {
+            return false;
+        }
+        let c = *b.constants.at(op.data as usize);
+        if c.kind != ir::CK_INT && c.kind != ir::CK_BOOL {
+            return false;
+        }
+        for k in 0..t.sw_len {
+            if (b.switch_pool[(t.sw_start + k) as usize] >> 32) as u32 == c.val as u32 {
+                *out = cf.succ(b, x, k);
+                return true;
+            }
+        }
+        *out = cf.succ(b, x, t.sw_len);
+        return true;
     }
 
     // The per-arm equality tests of a switch terminator: `if ((disc) == value) goto bb_target;`.
@@ -1485,15 +2872,23 @@ extend CEmit {
         if !self.emit_operand(b, t.a, &mut d) {
             return false;
         }
-        for k in 0..t.sw_len {
+        let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
+        let mut k: u32 = 0;
+        while k < t.sw_len {
             let pair = b.switch_pool[(t.sw_start + k) as usize];
-            self.out.push_str("  if ((");
-            self.out.push_string(&d);
-            self.out.push_str(") == ");
-            self.out.push_u64(pair >> 32);
+            self.out.push_str("  if (");
+            self.push_case_test(false, isb, &d, pair >> 32);
+            let target = cf.succ(b, x, k);
+            let mut j = k + 1;
+            while j < t.sw_len && cf.succ(b, x, j) == target {
+                self.out.push_str(" || ");
+                self.push_case_test(false, isb, &d, b.switch_pool[(t.sw_start + j) as usize] >> 32);
+                j += 1;
+            }
             self.out.push_str(") goto bb_");
-            self.out.push_u64(cf.succ(b, x, k));
+            self.out.push_u64(target);
             self.out.push_str(";\n");
+            k = j;
         }
         return true;
     }
@@ -1530,13 +2925,18 @@ extend CEmit {
             return ir::IR_NONE;
         }
         let rv = *b.rvalues.at(s.rvalue as usize);
-        if rv.kind != ir::RV_USE {
+        if rv.kind == ir::RV_INTRINSIC || rv.kind == ir::RV_REPEAT || rv.kind == ir::RV_AGGREGATE && rv.c == ir::AGG_ARRAY || !self.fusable_init_rvalue(
+            b,
+            &rv,
+        ) {
             return ir::IR_NONE;
         }
-        let op = *b.operands.at(rv.a as usize);
-        if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-            if b.places.at(op.data as usize).base == 0 {
-                return ir::IR_NONE; // the slot reads itself; leave the copy in place
+        if rv.kind == ir::RV_USE {
+            let op = *b.operands.at(rv.a as usize);
+            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                if b.places.at(op.data as usize).base == 0 {
+                    return ir::IR_NONE; // the slot reads itself; leave the copy in place
+                }
             }
         }
         return idx;
@@ -1594,9 +2994,8 @@ extend CEmit {
             }
         }
         if skip != ir::IR_NONE {
-            let rv = *b.rvalues.at(b.statements.at((blk.stmt_start + skip) as usize).rvalue as usize);
             let mut ov = String::new();
-            if !self.emit_operand(b, rv.a, &mut ov) {
+            if !self.emit_rvalue(b, b.statements.at((blk.stmt_start + skip) as usize).rvalue, &mut ov) {
                 return false;
             }
             self.out.push_str("  return ");
@@ -1624,7 +3023,15 @@ extend CEmit {
         }
         self.sx_goto = false;
         let _ = self.emit_region(b, cf, cf.entry, cfl::NONE, cfl::NONE, cfl::NONE, true);
-        return !self.sx_goto;
+        if self.sx_goto {
+            return false;
+        }
+        for i in 0..b.blocks.len() {
+            if *self.sx_lbl.at(i) && !*self.sx_emitted.at(i) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // Real structured pass; run only after plan_structured returned true (no goto needed).
@@ -1651,6 +3058,91 @@ extend CEmit {
         if !dry {
             self.out.push_string(s);
         }
+    }
+
+    // A boolean-valued type: its switch discriminant carries only 0/1, so a one-case test reads as
+    // the value itself (`cond`) or its negation (`!(cond)`) rather than `(cond) == 1`.
+    fn is_bool(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let mut rm = b.module;
+        let mut rt = t;
+        self.rty(b, t, &mut rm, &mut rt);
+        let y = *self.p().module_ast_const(rm).type_at(rt);
+        return y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_BOOL;
+    }
+
+    // The condition text without one redundant enclosing paren pair. An inlined comparison already
+    // wraps itself in `(...)`; the surrounding `if (...)`/`while (...)` would then spell `((x == y))`,
+    // which -Wparentheses-equality rejects. Returns the inner text when `s` is exactly one balanced
+    // `( .. )` group (and contains no string literal, whose bytes could unbalance the scan), else `s`.
+    fn unwrap_parens(s: &String, out: &mut String) {
+        let ss = s.as_str();
+        let n = ss.len();
+        let mut wrapped = n >= 2 && ss.byte_at(0) == 40 && ss.byte_at(n - 1) == 41;
+        if wrapped {
+            let mut depth = 0;
+            for i in 0..n {
+                let c = ss.byte_at(i);
+                if c == 34 {
+                    wrapped = false;
+                    break;
+                }
+                if c == 40 {
+                    depth += 1;
+                } else if c == 41 {
+                    depth -= 1;
+                    if depth == 0 && i + 1 != n {
+                        wrapped = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if wrapped {
+            out.push_str(ss.slice(1, n - 1));
+        } else {
+            out.push_string(s);
+        }
+    }
+
+    // Append one switch-case test on the already-spelled discriminant `d`: a boolean discriminant
+    // reads as `d` (value 1) or `!d` (value 0); any other discriminant as `(d) == value`. `d` for a
+    // true case drops one redundant paren layer so an inlined comparison does not double up.
+    fn push_case_test(self: &mut Self, dry: bool, is_bool: bool, d: &String, value: u64) {
+        if is_bool && value == 1 {
+            if !dry {
+                let mut u = String::new();
+                CEmit::unwrap_parens(d, &mut u);
+                self.out.push_string(&u);
+            }
+        } else if is_bool && value == 0 {
+            self.w(dry, "!");
+            self.ws(dry, d);
+        } else {
+            self.w(dry, "(");
+            self.ws(dry, d);
+            self.w(dry, ") == ");
+            self.wu(dry, value);
+        }
+    }
+
+    // A labeled break may leave nested loops for the follow of an enclosing loop. This is a safe
+    // forward goto; no other cross-region transfer is accepted by the structured plan.
+    fn outer_break_target(self: &Self, cf: &cfl::CFlow, current: u32, target: u32) bool {
+        if current == cfl::NONE || target == cfl::NONE || *cf.rpo.at(target as usize) <= *cf.rpo.at(current as usize) {
+            return false;
+        }
+        for h in 0..cf.n {
+            if h != current && *cf.is_header.at(h as usize) && *cf.loop_follow.at(h as usize) == target && cf.dominates(
+                h,
+                current,
+            ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Emit the region entered at `entry`, falling through when it reaches `stop`; `brk`/`cont` are
@@ -1680,6 +3172,14 @@ extend CEmit {
             }
             if node == brk {
                 self.w(dry, "  break;\n");
+                self.sx_fell = false;
+                return true;
+            }
+            if self.outer_break_target(cf, cont, node) {
+                self.w(dry, "  goto bb_");
+                self.wu(dry, node);
+                self.w(dry, ";\n");
+                self.sx_lbl.set(node as usize, true);
                 self.sx_fell = false;
                 return true;
             }
@@ -1721,6 +3221,11 @@ extend CEmit {
                 return true;
             }
             if blk.term.kind == ir::TM_SWITCH {
+                let mut cs = cfl::NONE;
+                if self.const_switch_succ(b, cf, node, &mut cs) {
+                    node = cs;
+                    continue;
+                }
                 let f = *cf.follow.at(node as usize);
                 if !self.emit_branch(b, cf, node, f, stop, brk, cont, dry) {
                     return false;
@@ -1789,16 +3294,76 @@ extend CEmit {
             self.sx_fell = fell;
             return true;
         }
+        let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
+        if !dry && t.sw_len == 1 {
+            let mark = self.out.len();
+            self.out.push_str("  if (");
+            self.push_case_test(false, isb, &d, b.switch_pool[t.sw_start as usize] >> 32);
+            self.out.push_str(") {\n");
+            let body_mark = self.out.len();
+            if !self.emit_region(b, cf, cf.succ(b, x, 0), arm_stop, brk, cont, false) {
+                return false;
+            }
+            let true_fell = self.sx_fell;
+            let ot = cf.succ(b, x, 1);
+            if true_fell && self.out.len() == body_mark {
+                self.out.truncate(mark);
+                if ot == arm_stop {
+                    self.sx_fell = true;
+                    return true;
+                }
+                self.out.push_str("  if (");
+                if !self.push_case_test_negated(b, &t, isb, &d, b.switch_pool[t.sw_start as usize] >> 32) {
+                    return false;
+                }
+                self.out.push_str(") {\n");
+                if !self.emit_region(b, cf, ot, arm_stop, brk, cont, false) {
+                    return false;
+                }
+                self.out.push_str("  }\n");
+                self.sx_fell = true;
+                return true;
+            }
+            self.out.push_str("  }");
+            let mut fell = true_fell;
+            if ot != arm_stop {
+                if !true_fell {
+                    self.out.push_str("\n");
+                    if !self.emit_region(b, cf, ot, arm_stop, brk, cont, false) {
+                        return false;
+                    }
+                    return true;
+                }
+                let else_mark = self.out.len();
+                self.out.push_str(" else {\n");
+                let else_body = self.out.len();
+                if !self.emit_region(b, cf, ot, arm_stop, brk, cont, false) {
+                    return false;
+                }
+                if self.sx_fell {
+                    fell = true;
+                }
+                if self.sx_fell && self.out.len() == else_body {
+                    self.out.truncate(else_mark);
+                    self.out.push_str("\n");
+                } else {
+                    self.out.push_str("  }\n");
+                }
+            } else {
+                self.out.push_str("\n");
+                fell = true;
+            }
+            self.sx_fell = fell;
+            return true;
+        }
         let mut fell = false;
         for k in 0..t.sw_len {
             if k == 0 {
-                self.w(dry, "  if ((");
+                self.w(dry, "  if (");
             } else {
-                self.w(dry, " else if ((");
+                self.w(dry, " else if (");
             }
-            self.ws(dry, &d);
-            self.w(dry, ") == ");
-            self.wu(dry, b.switch_pool[(t.sw_start + k) as usize] >> 32);
+            self.push_case_test(dry, isb, &d, b.switch_pool[(t.sw_start + k) as usize] >> 32);
             self.w(dry, ") {\n");
             if !self.emit_region(b, cf, cf.succ(b, x, k), arm_stop, brk, cont, dry) {
                 return false;
@@ -1810,14 +3375,21 @@ extend CEmit {
         }
         let ot = cf.succ(b, x, t.sw_len);
         if ot != arm_stop {
+            let else_mark = self.out.len();
             self.w(dry, " else {\n");
+            let else_body = self.out.len();
             if !self.emit_region(b, cf, ot, arm_stop, brk, cont, dry) {
                 return false;
             }
             if self.sx_fell {
                 fell = true;
             }
-            self.w(dry, "  }\n");
+            if !dry && self.sx_fell && self.out.len() == else_body {
+                self.out.truncate(else_mark);
+                self.out.push_str("\n");
+            } else {
+                self.w(dry, "  }\n");
+            }
         } else {
             self.w(dry, "\n");
             fell = true;
@@ -1826,9 +3398,244 @@ extend CEmit {
         return true;
     }
 
-    // A loop header as `while (1) { <header>; if (cond) { body } else break; }`: the body's stop is
-    // the header, so a natural back-edge falls through to the closing brace (re-iterates) and only a
-    // real `break`/`continue` spells one. An unconditional header is an infinite `while (1)`.
+    fn push_case_test_negated(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        t: &ir::Terminator,
+        is_bool: bool,
+        d: &String,
+        value: u64,
+    ) bool {
+        if is_bool && value == 1 {
+            let mut n = String::new();
+            if !self.emit_cond_negated(b, t.a, &mut n) {
+                return false;
+            }
+            self.out.push_string(&n);
+        } else if is_bool && value == 0 {
+            let mut u = String::new();
+            CEmit::unwrap_parens(d, &mut u);
+            self.out.push_string(&u);
+        } else {
+            self.out.push_str("(");
+            self.out.push_string(d);
+            self.out.push_str(") != ");
+            self.out.push_u64(value);
+        }
+        return true;
+    }
+
+    // Whether a loop header carries no per-iteration statement -- every statement is a marker or is
+    // elided (dead, coalesced, inlined, or unit). Such a header is pure condition evaluation, so it
+    // reconstructs as a native `while (cond)` instead of `while (1) { if (cond) .. else break; }`.
+    fn header_empty(self: &Self, b: &ir::CoreBody, h: u32) bool {
+        let blk = *b.blocks.at(h as usize);
+        for si in 0..blk.stmt_len {
+            let s = *b.statements.at((blk.stmt_start + si) as usize);
+            if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+                continue;
+            }
+            if self.is_dead_store(b, &s) || self.is_coalesced_store(b, &s) || self.is_inlined_store(b, &s) {
+                continue;
+            }
+            if s.kind == ir::ST_ASSIGN && b.places.at(s.place as usize).ty != TYPE_NONE && self.is_unit(
+                b,
+                b.places.at(s.place as usize).ty,
+            ) {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // Find a unique `i = i +/- 1` back-edge update for a Boolean comparison header.
+    fn counted_loop_step(
+        self: &Self,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        h: u32,
+        index_out: &mut u32,
+        place: &mut u32,
+        rvalue: &mut u32,
+        step: &mut String,
+    ) bool {
+        let t = b.blocks.at(h as usize).term;
+        let cop = *b.operands.at(t.a as usize);
+        if cop.kind != ir::OP_COPY && cop.kind != ir::OP_MOVE {
+            return false;
+        }
+        let cp = *b.places.at(cop.data as usize);
+        if cp.proj_len != 0 || *self.sx_inline.at(cp.base as usize) == ir::IR_NONE {
+            return false;
+        }
+        let crv = *b.rvalues.at((*self.sx_inline.at(cp.base as usize)) as usize);
+        if crv.kind != ir::RV_BINARY {
+            return false;
+        }
+        let ct = crv.c as tt::TokenType;
+        if ct != tt::TokenType::LessThan && ct != tt::TokenType::LessThanEqual && ct != tt::TokenType::GreaterThan && ct != tt::TokenType::GreaterThanEqual {
+            return false;
+        }
+        let lo = *b.operands.at(crv.a as usize);
+        if lo.kind != ir::OP_COPY && lo.kind != ir::OP_MOVE {
+            return false;
+        }
+        let lp = *b.places.at(lo.data as usize);
+        if lp.proj_len != 0 {
+            return false;
+        }
+        let index = lp.base;
+        let mut found = false;
+        for bi in 0..b.blocks.len() {
+            if !*cf.reach.at(bi) || bi as u32 == h {
+                continue;
+            }
+            let bb = *b.blocks.at(bi);
+            if bb.term.kind != ir::TM_GOTO || cf.succ(b, bi as u32, 0) != h {
+                continue;
+            }
+            let mut si = bb.stmt_len;
+            while si > 0 {
+                si -= 1;
+                let s = *b.statements.at((bb.stmt_start + si) as usize);
+                if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+                    continue;
+                }
+                if s.kind != ir::ST_ASSIGN {
+                    break;
+                }
+                let dp = *b.places.at(s.place as usize);
+                let rv = *b.rvalues.at(s.rvalue as usize);
+                if dp.proj_len != 0 || dp.base != index || rv.kind != ir::RV_BINARY || !self.op_is_bare_local(
+                    b,
+                    rv.a,
+                    index,
+                ) {
+                    break;
+                }
+                let ot = rv.c as tt::TokenType;
+                if ot != tt::TokenType::Plus && ot != tt::TokenType::Minus {
+                    break;
+                }
+                let ro = *b.operands.at(rv.b as usize);
+                if ro.kind != ir::OP_CONST {
+                    break;
+                }
+                let c = *b.constants.at(ro.data as usize);
+                if c.kind != ir::CK_INT || c.val != 1 {
+                    break;
+                }
+                if found {
+                    return false;
+                }
+                found = true;
+                *index_out = index;
+                *place = s.place;
+                *rvalue = s.rvalue;
+                self.lspell(index, step);
+                step.push_str(if_s(ot == tt::TokenType::Plus, "++", "--"));
+                break;
+            }
+        }
+        return found;
+    }
+
+    // Move an immediately preceding fused zero-initializer into a counted `for` header.
+    fn take_loop_init(self: &mut Self, b: &ir::CoreBody, index: u32, init: &mut String) bool {
+        let local = *b.locals.at(index as usize);
+        if local.decl != NODE_NONE && self.p().module_ast_const(b.module).at_const(local.decl).kind == NodeKind::NODE_LET {
+            return false;
+        }
+        if !*self.sx_fuse.at(index as usize) || !*self.sx_declared.at(index as usize) {
+            return false;
+        }
+        let mut rid = ir::IR_NONE;
+        for si in 0..b.statements.len() {
+            let s = *b.statements.at(si);
+            if s.kind != ir::ST_ASSIGN {
+                continue;
+            }
+            let pl = *b.places.at(s.place as usize);
+            if pl.proj_len != 0 || pl.base != index {
+                continue;
+            }
+            let rv = *b.rvalues.at(s.rvalue as usize);
+            if rv.kind != ir::RV_USE {
+                continue;
+            }
+            let op = *b.operands.at(rv.a as usize);
+            if op.kind != ir::OP_CONST || b.constants.at(op.data as usize).kind != ir::CK_INT || b.constants.at(
+                op.data as usize,
+            ).val != 0 || rid != ir::IR_NONE {
+                return false;
+            }
+            rid = s.rvalue;
+        }
+        if rid == ir::IR_NONE {
+            return false;
+        }
+        let mut name = String::new();
+        self.lspell(index, &mut name);
+        let mut decl = String::new();
+        let mut rhs = String::new();
+        if !self.ty_c(b.module, local.ty, name.as_str(), &mut decl) || !self.emit_rvalue(b, rid, &mut rhs) {
+            return false;
+        }
+        let mut line = String::from_str("  ");
+        line.push_string(&decl);
+        line.push_str(" = ");
+        line.push_string(&rhs);
+        line.push_str(";\n");
+        if self.out.len() < line.len() {
+            return false;
+        }
+        let start = self.out.len() - line.len();
+        for i in 0..line.len() {
+            if self.out.as_str().byte_at(start + i) != line.as_str().byte_at(i) {
+                return false;
+            }
+        }
+        self.out.truncate(start);
+        init.push_string(&decl);
+        init.push_str(" = ");
+        init.push_string(&rhs);
+        return true;
+    }
+
+    fn do_loop_latch(self: &Self, b: &ir::CoreBody, cf: &cfl::CFlow, h: u32, out: &mut u32) bool {
+        if b.blocks.at(h as usize).term.kind != ir::TM_GOTO {
+            return false;
+        }
+        let lf = *cf.loop_follow.at(h as usize);
+        let mut found = cfl::NONE;
+        for p in 0..cf.n {
+            if !*cf.reach.at(p as usize) || *cf.loop_of.at(p as usize) != h {
+                continue;
+            }
+            let t = b.blocks.at(p as usize).term;
+            if t.kind != ir::TM_SWITCH || t.sw_len != 1 || !self.header_empty(b, p) {
+                continue;
+            }
+            let raw_case = (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32;
+            let case_t = *cf.thread.at(raw_case as usize);
+            let other = *cf.thread.at(t.t0 as usize);
+            if !(case_t == h && other == lf || case_t == lf && other == h) {
+                continue;
+            }
+            if found != cfl::NONE {
+                return false;
+            }
+            found = p;
+        }
+        *out = found;
+        return found != cfl::NONE;
+    }
+
+    // A loop header as `while (cond) { body }` when it only tests a condition, otherwise
+    // `while (1) { <header>; if (cond) { body } else break; }`: the body's stop is the header, so a
+    // natural back-edge falls through to the closing brace (re-iterates) and only a real
+    // `break`/`continue` spells one. An unconditional header is an infinite `while (1)`.
     fn emit_loop(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow, h: u32, dry: bool) bool {
         self.sx_emitted.set(h as usize, true);
         if *self.sx_lbl.at(h as usize) {
@@ -1839,6 +3646,91 @@ extend CEmit {
         let lf = *cf.loop_follow.at(h as usize);
         let blk = *b.blocks.at(h as usize);
         let t = blk.term;
+        let mut latch = cfl::NONE;
+        if self.do_loop_latch(b, cf, h, &mut latch) {
+            self.sx_emitted.set(latch as usize, true);
+            self.w(dry, "  do {\n");
+            if !dry && !self.emit_block_content(b, &blk) {
+                return false;
+            }
+            if !self.emit_region(b, cf, cf.succ(b, h, 0), latch, lf, latch, dry) {
+                return false;
+            }
+            let lt = b.blocks.at(latch as usize).term;
+            let mut d = String::new();
+            if !dry && !self.emit_operand(b, lt.a, &mut d) {
+                return false;
+            }
+            self.w(dry, "  } while (");
+            let raw_case = (b.switch_pool[lt.sw_start as usize] & 0xFFFFFFFFu64) as u32;
+            let case_t = *cf.thread.at(raw_case as usize);
+            let isb = self.is_bool(b, b.operands.at(lt.a as usize).ty);
+            if case_t == h {
+                self.push_case_test(dry, isb, &d, b.switch_pool[lt.sw_start as usize] >> 32);
+            } else if !dry && !self.push_case_test_negated(b, &lt, isb, &d, b.switch_pool[lt.sw_start as usize] >> 32) {
+                return false;
+            }
+            self.w(dry, ");\n");
+            return true;
+        }
+        // A single-test header whose false edge leaves the loop and whose body carries no code before
+        // the test reads as a direct `while (cond)`. The condition arm (succ 0) is the body; the
+        // otherwise arm is the loop exit.
+        if t.kind == ir::TM_SWITCH && t.sw_len == 1 && self.header_empty(b, h) {
+            let body = cf.succ(b, h, 0);
+            let exit_tgt = cf.succ(b, h, 1);
+            if exit_tgt == lf && body != lf {
+                let mut d = String::new();
+                if !dry && !self.emit_operand(b, t.a, &mut d) {
+                    return false;
+                }
+                let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
+                let mut loop_index = ir::IR_NONE;
+                let mut skip_place = ir::IR_NONE;
+                let mut skip_rvalue = ir::IR_NONE;
+                let mut step = String::new();
+                let counted = self.counted_loop_step(
+                    b,
+                    cf,
+                    h,
+                    &mut loop_index,
+                    &mut skip_place,
+                    &mut skip_rvalue,
+                    &mut step,
+                );
+                let mut init = String::new();
+                let took_init = counted && !dry && self.take_loop_init(b, loop_index, &mut init);
+                if counted {
+                    self.w(dry, "  for (");
+                    if took_init {
+                        self.ws(dry, &init);
+                    }
+                    self.w(dry, "; ");
+                } else {
+                    self.w(dry, "  while (");
+                }
+                self.push_case_test(dry, isb, &d, b.switch_pool[t.sw_start as usize] >> 32);
+                if counted {
+                    self.w(dry, "; ");
+                    self.ws(dry, &step);
+                }
+                self.w(dry, ") {\n");
+                let old_place = self.sx_skip_place;
+                let old_rvalue = self.sx_skip_rvalue;
+                if counted {
+                    self.sx_skip_place = skip_place;
+                    self.sx_skip_rvalue = skip_rvalue;
+                }
+                let body_ok = self.emit_region(b, cf, body, h, lf, h, dry);
+                self.sx_skip_place = old_place;
+                self.sx_skip_rvalue = old_rvalue;
+                if !body_ok {
+                    return false;
+                }
+                self.w(dry, "  }\n");
+                return true;
+            }
+        }
         self.w(dry, "  while (1) {\n");
         if !dry {
             for si in 0..blk.stmt_len {
@@ -1856,10 +3748,9 @@ extend CEmit {
             if !dry && !self.emit_operand(b, t.a, &mut d) {
                 return false;
             }
-            self.w(dry, "  if ((");
-            self.ws(dry, &d);
-            self.w(dry, ") == ");
-            self.wu(dry, b.switch_pool[t.sw_start as usize] >> 32);
+            let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
+            self.w(dry, "  if (");
+            self.push_case_test(dry, isb, &d, b.switch_pool[t.sw_start as usize] >> 32);
             self.w(dry, ") {\n");
             if !self.emit_region(b, cf, cf.succ(b, h, 0), h, lf, h, dry) {
                 return false;
@@ -2290,15 +4181,79 @@ extend CEmit {
         return ok;
     }
 
+    // A fixed-array literal whose temporary was coalesced with its final local can initialize that
+    // local directly. C array assignment is illegal, so this must run at the declaration point.
+    fn emit_array_init(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+        let pl = *b.places.at(s.place as usize);
+        if pl.proj_len != 0 {
+            return false;
+        }
+        let root = *self.sx_coal.at(pl.base as usize);
+        if !*self.sx_fuse.at(root as usize) || *self.sx_declared.at(root as usize) {
+            return false;
+        }
+        let mut name = String::new();
+        self.lspell(root, &mut name);
+        let mut decl = String::new();
+        if !self.ty_c(b.module, b.locals.at(root as usize).ty, name.as_str(), &mut decl) {
+            return false;
+        }
+        self.sx_declared.set(root as usize, true);
+        self.out.push_str("  ");
+        self.out.push_string(&decl);
+        self.out.push_str(" = { ");
+        let mut ok = true;
+        let mut sparse = false;
+        for i in 0..rv.b {
+            if b.oper_pool[(rv.a + i) as usize] == ir::IR_NONE {
+                sparse = true;
+                break;
+            }
+        }
+        let mut emitted: u32 = 0;
+        for i in 0..rv.b {
+            let op = b.oper_pool[(rv.a + i) as usize];
+            if op == ir::IR_NONE {
+                continue;
+            }
+            if emitted != 0 {
+                self.out.push_str(", ");
+            }
+            if sparse {
+                self.out.push_str("[");
+                self.out.push_u64(i);
+                self.out.push_str("] = ");
+            }
+            let mut value = String::new();
+            ok = self.emit_operand(b, op, &mut value);
+            self.out.push_string(&value);
+            if !ok {
+                break;
+            }
+            emitted += 1;
+        }
+        if emitted == 0 {
+            self.out.push_str("0");
+        }
+        self.out.push_str(" };\n");
+        return ok;
+    }
+
     fn emit_stmt(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement) bool {
         if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
             return true; // markers carry no C
+        }
+        if s.kind == ir::ST_ASSIGN && s.place == self.sx_skip_place && s.rvalue == self.sx_skip_rvalue {
+            return true;
         }
         if self.is_dead_store(b, s) {
             return true; // store to a never-read local: the pure rvalue has no side effect
         }
         if self.is_coalesced_store(b, s) {
             return true; // `_dst = move _src` collapsed: both spell the same C variable
+        }
+        if self.is_inlined_store(b, s) {
+            return true; // single-use pure temp: its rvalue reappears at the read
         }
         if s.kind != ir::ST_ASSIGN {
             return self.fail("stmt");
@@ -2334,6 +4289,17 @@ extend CEmit {
         {
             let rv0 = *b.rvalues.at(s.rvalue as usize);
             if rv0.kind == ir::RV_AGGREGATE && rv0.c == ir::AGG_ARRAY {
+                let pl9 = *b.places.at(s.place as usize);
+                let root9 = *self.sx_coal.at(pl9.base as usize);
+                let mut rm9 = b.module;
+                let mut rt9 = b.locals.at(root9 as usize).ty;
+                self.rty(b, rt9, &mut rm9, &mut rt9);
+                let root_array = self.p().module_ast_const(rm9).type_at(rt9).kind == TypeKind::TYPE_ARRAY;
+                if root_array && pl9.proj_len == 0 && *self.sx_fuse.at(root9 as usize) && !*self.sx_declared.at(
+                    root9 as usize,
+                ) {
+                    return self.emit_array_init(b, s, &rv0);
+                }
                 // an array literal COERCED to a slice view: `(Slice__T){ (T[N]){..}, N }` -- the
                 // compound literal lives to the end of the enclosing block, like the old emitter's
                 let mut rmS = b.module;
@@ -2360,7 +4326,19 @@ extend CEmit {
                         ) && self.mg.ctype(rmS, itS.args[0], "", &mut et9);
                         if ok9 {
                             self.out.push_str("  ");
-                            self.out.push_string(&lhs9);
+                            let fuse9 = pl9.proj_len == 0 && *self.sx_fuse.at(root9 as usize) && !*self.sx_declared.at(
+                                root9 as usize,
+                            );
+                            if fuse9 {
+                                let mut decl9 = String::new();
+                                ok9 = self.ty_c(b.module, b.locals.at(root9 as usize).ty, lhs9.as_str(), &mut decl9);
+                                if ok9 {
+                                    self.sx_declared.set(root9 as usize, true);
+                                    self.out.push_string(&decl9);
+                                }
+                            } else {
+                                self.out.push_string(&lhs9);
+                            }
                             self.out.push_str(" = (");
                             self.out.push_string(&cast9);
                             self.out.push_str("){ .ptr = (");
@@ -2368,21 +4346,37 @@ extend CEmit {
                             self.out.push_str("[");
                             self.out.push_u64(rv0.b);
                             self.out.push_str("]){ ");
+                            let mut sparse9 = false;
+                            for i9 in 0..rv0.b {
+                                if b.oper_pool[(rv0.a + i9) as usize] == ir::IR_NONE {
+                                    sparse9 = true;
+                                    break;
+                                }
+                            }
+                            let mut emitted9: u32 = 0;
                             for i9 in 0..rv0.b {
                                 if !ok9 {
                                     break;
                                 }
-                                if i9 != 0 {
-                                    self.out.push_str(", ");
-                                }
                                 let op9 = b.oper_pool[(rv0.a + i9) as usize];
                                 if op9 == ir::IR_NONE {
-                                    self.out.push_str("0");
-                                } else {
-                                    let mut ev9 = String::new();
-                                    ok9 = self.emit_operand(b, op9, &mut ev9);
-                                    self.out.push_string(&ev9);
+                                    continue;
                                 }
+                                if emitted9 != 0 {
+                                    self.out.push_str(", ");
+                                }
+                                if sparse9 {
+                                    self.out.push_str("[");
+                                    self.out.push_u64(i9);
+                                    self.out.push_str("] = ");
+                                }
+                                let mut ev9 = String::new();
+                                ok9 = self.emit_operand(b, op9, &mut ev9);
+                                self.out.push_string(&ev9);
+                                emitted9 += 1;
+                            }
+                            if emitted9 == 0 {
+                                self.out.push_str("0");
                             }
                             self.out.push_str(" }, .len = ");
                             self.out.push_u64(rv0.b);
@@ -2429,7 +4423,21 @@ extend CEmit {
                     }
                 }
                 self.out.push_str("  ");
-                self.out.push_string(&lhs);
+                let plN = *b.places.at(s.place as usize);
+                let rootN = *self.sx_coal.at(plN.base as usize);
+                let fuseN = plN.proj_len == 0 && *self.sx_fuse.at(rootN as usize) && !*self.sx_declared.at(
+                    rootN as usize,
+                );
+                if fuseN {
+                    self.sx_declared.set(rootN as usize, true);
+                    let mut declN = String::new();
+                    if !self.ty_c(b.module, b.locals.at(rootN as usize).ty, lhs.as_str(), &mut declN) {
+                        return false;
+                    }
+                    self.out.push_string(&declN);
+                } else {
+                    self.out.push_string(&lhs);
+                }
                 self.out.push_str(" = malloc(sizeof(");
                 self.out.push_string(&es);
                 self.out.push_str("));\n");
@@ -2546,12 +4554,27 @@ extend CEmit {
                 return ok2;
             }
         }
+        if self.try_compound_assign(b, s) {
+            return self.err.len() == 0;
+        }
+        let pl0 = *b.places.at(s.place as usize);
+        let root0 = *self.sx_coal.at(pl0.base as usize);
+        let fuse_decl = pl0.proj_len == 0 && *self.sx_fuse.at(root0 as usize) && !*self.sx_declared.at(root0 as usize);
         let mut lhs = String::new();
         let mut rhs = String::new();
         let ok = self.emit_place(b, s.place, &mut lhs) && self.emit_rvalue(b, s.rvalue, &mut rhs);
         if ok {
             self.out.push_str("  ");
-            self.out.push_string(&lhs);
+            if fuse_decl {
+                self.sx_declared.set(root0 as usize, true);
+                let mut decl = String::new();
+                if !self.ty_c(b.module, b.locals.at(root0 as usize).ty, lhs.as_str(), &mut decl) {
+                    return false;
+                }
+                self.out.push_string(&decl);
+            } else {
+                self.out.push_string(&lhs);
+            }
             self.out.push_str(" = ");
             self.out.push_string(&rhs);
             self.out.push_str(";\n");
@@ -2803,7 +4826,12 @@ extend CEmit {
 
     // Member access through a pointer/reference wraps the deref the chain omitted (the checker's
     // auto-deref); updates the tracked pre-type to the pointee.
-    fn place_autoderef(self: &Self, b: &ir::CoreBody, pre: &mut TypeId, cur: &mut String) {
+    // Peel pointer/reference indirection ahead of a member access, leaving `pre` at the aggregate.
+    // Returns true when at least one level was peeled, so the caller spells the final access with `->`
+    // (which folds in that last dereference); the outer levels wrap as `(*..)`. False -> a direct
+    // value member spelled with `.`.
+    fn place_field_arrow(self: &Self, b: &ir::CoreBody, pre: &mut TypeId, cur: &mut String) bool {
+        let mut levels = 0;
         let mut g = 0;
         while g < 4 {
             let mut rm = b.module;
@@ -2811,22 +4839,40 @@ extend CEmit {
             self.rty(b, *pre, &mut rm, &mut rt);
             let y = *self.p().module_ast_const(rm).type_at(rt);
             if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
-                return;
+                break;
             }
+            *pre = y.as_data.elem;
+            levels += 1;
+            g += 1;
+        }
+        if levels == 0 {
+            return false;
+        }
+        for _k in 0..levels - 1 {
             let mut w = String::from_str("(*");
             w.push_string(cur);
             w.push_str(")");
             cur.truncate(0);
             cur.push_string(&w);
-            *pre = y.as_data.elem;
-            g += 1;
         }
+        return true;
     }
 
     fn emit_place(self: &mut Self, b: &ir::CoreBody, pid: ir::PlaceId, dst: &mut String) bool {
+        return self.emit_place_lim(b, pid, b.places.at(pid as usize).proj_len, dst);
+    }
+
+    // Emit a place applying only its first `lim` projections. `&*p` collapses to `p` by emitting the
+    // dereferenced place with its trailing deref dropped (lim = proj_len - 1), which the address-of
+    // rvalue then spells without the `&`.
+    fn emit_place_lim(self: &mut Self, b: &ir::CoreBody, pid: ir::PlaceId, lim: u32, dst: &mut String) bool {
         let pl = *b.places.at(pid as usize);
         let mut cur = String::new();
-        if b.locals.at(pl.base as usize).storage == ir::LS_STATIC_REF {
+        if *self.sx_call_fwd.at(pl.base as usize) {
+            cur.push_str("(");
+            cur.push_string(self.sx_call_str.at(pl.base as usize));
+            cur.push_str(")");
+        } else if b.locals.at(pl.base as usize).storage == ir::LS_STATIC_REF {
             let item = b.locals.at(pl.base as usize).item;
             // a CONST-GENERIC parameter bound by the active instantiation is a literal, not a symbol
             let mut folded = false;
@@ -2902,22 +4948,42 @@ extend CEmit {
         let mut last_fidx: u32 = 0xFFFFFFFFu32;
         let mut last_after_dc = false;
         let mut dc_pre = TYPE_NONE; // the enum INSTANCE the downcast peeled (binds payload generics)
-        for i in 0..pl.proj_len {
+        let mut pend_arrow = false; // a deferred deref whose member access folds it into `->`
+        for i in 0..lim {
             if !ok {
                 break;
             }
             let pre0 = pre;
             let pj = *b.projections.at((pl.proj_start + i) as usize);
             if pj.kind == ir::PJ_DEREF {
-                let mut w = String::from_str("(*");
-                w.push_string(&cur);
-                w.push_str(")");
-                cur = w;
-            } else if pj.kind == ir::PJ_FIELD {
-                if !prev_dc {
-                    self.place_autoderef(b, &mut pre, &mut cur);
+                // `(*p).f` reads worse than `p->f`: when this deref feeds directly into a member
+                // access, defer it so the field/downcast spells the arrow instead of wrapping `(*..)`.
+                let nxt = if i + 1 < lim {
+                    b.projections.at((pl.proj_start + i + 1) as usize).kind;
+                } else {
+                    0 as u8;
+                };
+                if nxt == ir::PJ_FIELD || nxt == ir::PJ_DOWNCAST {
+                    pend_arrow = true;
+                } else {
+                    let mut w = String::from_str("(*");
+                    w.push_string(&cur);
+                    w.push_str(")");
+                    cur = w;
                 }
-                cur.push_str(".");
+            } else if pj.kind == ir::PJ_FIELD {
+                let mut arrow = pend_arrow;
+                pend_arrow = false;
+                if !arrow && !prev_dc {
+                    arrow = self.place_field_arrow(b, &mut pre, &mut cur);
+                }
+                cur.push_str(
+                    if arrow {
+                        "->";
+                    } else {
+                        ".";
+                    },
+                );
                 if pj.sub == NODE_NONE {
                     // positional payload/tuple member: the emitted C names it `_<index>`
                     cur.push_str("_");
@@ -3009,8 +5075,18 @@ extend CEmit {
                 }
                 cur.push_str("]");
             } else if pj.kind == ir::PJ_DOWNCAST {
-                self.place_autoderef(b, &mut pre, &mut cur);
-                cur.push_str(".payload.");
+                let mut arrow = pend_arrow;
+                pend_arrow = false;
+                if !arrow {
+                    arrow = self.place_field_arrow(b, &mut pre, &mut cur);
+                }
+                cur.push_str(
+                    if arrow {
+                        "->payload.";
+                    } else {
+                        ".payload.";
+                    },
+                );
                 let am = self.agg_module(b, pre);
                 let fa = self.p().module_ast_const(am);
                 self.mg.ident(am, fa.at_const(fa.at_const(pj.sub).as_data.variant.name).as_data.name.text, &mut cur);
@@ -3096,6 +5172,14 @@ extend CEmit {
     fn emit_operand(self: &mut Self, b: &ir::CoreBody, opid: ir::OperandId, dst: &mut String) bool {
         let op = *b.operands.at(opid as usize);
         if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+            let pl = *b.places.at(op.data as usize);
+            if pl.proj_len == 0 && *self.sx_inline.at(pl.base as usize) != ir::IR_NONE {
+                return self.emit_rvalue(b, *self.sx_inline.at(pl.base as usize), dst);
+            }
+            if pl.proj_len == 0 && *self.sx_call_fwd.at(pl.base as usize) {
+                dst.push_string(self.sx_call_str.at(pl.base as usize));
+                return true;
+            }
             return self.emit_place(b, op.data, dst);
         }
         if op.kind != ir::OP_CONST {
@@ -4352,8 +6436,295 @@ extend CEmit {
         return true;
     }
 
+    fn const_operand_i64(self: &Self, b: &ir::CoreBody, opid: ir::OperandId, out: &mut i64, depth: u32) bool {
+        if depth > 8 || opid == ir::IR_NONE {
+            return false;
+        }
+        let op = *b.operands.at(opid as usize);
+        if op.kind == ir::OP_CONST {
+            let c = *b.constants.at(op.data as usize);
+            if c.kind == ir::CK_INT || c.kind == ir::CK_BOOL {
+                *out = c.val;
+                return true;
+            }
+            return false;
+        }
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return false;
+        }
+        let pl = *b.places.at(op.data as usize);
+        if pl.proj_len != 0 || *self.sx_inline.at(pl.base as usize) == ir::IR_NONE {
+            return false;
+        }
+        return self.const_rvalue_i64(b, *self.sx_inline.at(pl.base as usize), out, depth + 1);
+    }
+
+    fn const_rvalue_i64(self: &Self, b: &ir::CoreBody, rid: ir::RvalueId, out: &mut i64, depth: u32) bool {
+        if depth > 8 {
+            return false;
+        }
+        let rv = *b.rvalues.at(rid as usize);
+        if rv.kind == ir::RV_USE || rv.kind == ir::RV_CAST {
+            return self.const_operand_i64(b, rv.a, out, depth + 1);
+        }
+        if rv.kind == ir::RV_UNARY && rv.b as u8 == tt::TokenType::Bang as u8 {
+            let mut a: i64 = 0;
+            if self.const_operand_i64(b, rv.a, &mut a, depth + 1) {
+                *out = if a == 0 {
+                    1;
+                } else {
+                    0;
+                };
+                return true;
+            }
+            return false;
+        }
+        if rv.kind != ir::RV_BINARY {
+            return false;
+        }
+        let mut a: i64 = 0;
+        let mut c: i64 = 0;
+        if !self.const_operand_i64(b, rv.a, &mut a, depth + 1) || !self.const_operand_i64(b, rv.b, &mut c, depth + 1) {
+            return false;
+        }
+        let t = rv.c as tt::TokenType;
+        if t == tt::TokenType::EqualEqual {
+            *out = if a == c {
+                1;
+            } else {
+                0;
+            };
+        } else if t == tt::TokenType::BangEqual {
+            *out = if a != c {
+                1;
+            } else {
+                0;
+            };
+        } else if t == tt::TokenType::LessThan {
+            *out = if a < c {
+                1;
+            } else {
+                0;
+            };
+        } else if t == tt::TokenType::LessThanEqual {
+            *out = if a <= c {
+                1;
+            } else {
+                0;
+            };
+        } else if t == tt::TokenType::GreaterThan {
+            *out = if a > c {
+                1;
+            } else {
+                0;
+            };
+        } else if t == tt::TokenType::GreaterThanEqual {
+            *out = if a >= c {
+                1;
+            } else {
+                0;
+            };
+        } else if t == tt::TokenType::AmpersandAmpersand {
+            *out = if a != 0 && c != 0 {
+                1;
+            } else {
+                0;
+            };
+        } else if t == tt::TokenType::PipePipe {
+            *out = if a != 0 || c != 0 {
+                1;
+            } else {
+                0;
+            };
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    fn assert_holds_const(self: &Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
+        let mut v: i64 = 0;
+        return t.kind == ir::TM_ASSERT && self.const_operand_i64(b, t.a, &mut v, 0) && v != 0;
+    }
+
+    fn assert_helper_kind(self: &Self, b: &ir::CoreBody, opid: ir::OperandId) u8 {
+        let mut rm = b.module;
+        let mut rt = b.operands.at(opid as usize).ty;
+        self.rty(b, rt, &mut rm, &mut rt);
+        let y = *self.p().module_ast_const(rm).type_at(rt);
+        if y.kind != TypeKind::TYPE_BUILTIN {
+            return 0;
+        }
+        let bt = y.as_data.builtin;
+        if bt == BuiltinType::BT_BOOL {
+            return 4;
+        }
+        if bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64 {
+            return 3;
+        }
+        if bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_U16 || bt == BuiltinType::BT_U32 || bt == BuiltinType::BT_U64 || bt == BuiltinType::BT_USIZE {
+            return 2;
+        }
+        if bt == BuiltinType::BT_CHAR || bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_I32 || bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_ISIZE {
+            return 1;
+        }
+        return 0;
+    }
+
+    fn ensure_assert_helper(self: &mut Self, kind: u8) {
+        let bit = 1u8 << kind;
+        if (self.assert_helpers & bit) != 0u8 {
+            return;
+        }
+        self.assert_helpers |= bit;
+        if kind == 1 {
+            self.aux.push_str(
+                "static inline void __sc_assert_i64(int64_t l, int64_t r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %lld\\n  right: %lld\\n  at %s:%llu\\n\", e, (long long)l, (long long)r, f, n); fflush(stderr); abort(); } }\n",
+            );
+        } else if kind == 2 {
+            self.aux.push_str(
+                "static inline void __sc_assert_u64(uint64_t l, uint64_t r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %llu\\n  right: %llu\\n  at %s:%llu\\n\", e, (unsigned long long)l, (unsigned long long)r, f, n); fflush(stderr); abort(); } }\n",
+            );
+        } else if kind == 3 {
+            self.aux.push_str(
+                "static inline void __sc_assert_f64(double l, double r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %g\\n  right: %g\\n  at %s:%llu\\n\", e, l, r, f, n); fflush(stderr); abort(); } }\n",
+            );
+        } else if kind == 4 {
+            self.aux.push_str(
+                "static inline void __sc_assert_bool(bool l, bool r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %s\\n  right: %s\\n  at %s:%llu\\n\", e, l ? \"true\" : \"false\", r ? \"true\" : \"false\", f, n); fflush(stderr); abort(); } }\n",
+            );
+        }
+    }
+
+    fn emit_forwarded_assert(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, line: u64, handled: &mut bool) bool {
+        *handled = false;
+        if t.args_len != 4 {
+            return true;
+        }
+        let lo = b.oper_pool[t.args_start as usize];
+        let ro = b.oper_pool[(t.args_start + 1) as usize];
+        let mut forwarded = false;
+        let lop = *b.operands.at(lo as usize);
+        if lop.kind == ir::OP_COPY || lop.kind == ir::OP_MOVE {
+            let pl = *b.places.at(lop.data as usize);
+            forwarded = (pl.proj_len == 0 || pl.proj_len == 1 && b.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF) && *self.sx_call_fwd.at(
+                pl.base as usize,
+            );
+        }
+        if !forwarded {
+            let rop = *b.operands.at(ro as usize);
+            if rop.kind == ir::OP_COPY || rop.kind == ir::OP_MOVE {
+                let pl = *b.places.at(rop.data as usize);
+                forwarded = (pl.proj_len == 0 || pl.proj_len == 1 && b.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF) && *self.sx_call_fwd.at(
+                    pl.base as usize,
+                );
+            }
+        }
+        let kind = self.assert_helper_kind(b, lo);
+        if !forwarded || kind == 0 || self.assert_helper_kind(b, ro) != kind {
+            return true;
+        }
+        let mut lv = String::new();
+        let mut rv = String::new();
+        if !self.emit_operand(b, lo, &mut lv) || !self.emit_operand(b, ro, &mut rv) {
+            return false;
+        }
+        self.ensure_assert_helper(kind);
+        self.out.push_str("  __sc_assert_");
+        self.out.push_str(
+            if kind == 1 {
+                "i64";
+            } else if kind == 2 {
+                "u64";
+            } else if kind == 3 {
+                "f64";
+            } else {
+                "bool";
+            },
+        );
+        self.out.push_str("(");
+        self.out.push_string(&lv);
+        self.out.push_str(", ");
+        self.out.push_string(&rv);
+        self.out.push_str(", ");
+        self.out.push_str(if_s(t.sw_len == 2, "true", "false"));
+        self.out.push_str(", \"");
+        let src = self.p().modules.at(b.module as usize).source.as_str();
+        let lsp = *b.constants.at(b.operands.at(b.oper_pool[(t.args_start + 2) as usize] as usize).data as usize);
+        let rsp = *b.constants.at(b.operands.at(b.oper_pool[(t.args_start + 3) as usize] as usize).data as usize);
+        push_c_escaped(src.slice(lsp.raw.start as usize, lsp.raw.end as usize), &mut self.out);
+        self.out.push_str(if_s(t.sw_len == 2, " == ", " != "));
+        push_c_escaped(src.slice(rsp.raw.start as usize, rsp.raw.end as usize), &mut self.out);
+        self.out.push_str("\", \"");
+        push_c_escaped(self.p().modules.at(b.module as usize).file.as_str(), &mut self.out);
+        self.out.push_str("\", ");
+        self.out.push_u64(line);
+        self.out.push_str(");\n");
+        *handled = true;
+        return true;
+    }
+
     // `  left:  <value>` diagnostics for a failed assert_eq/ne, formatted per operand type;
     // unprintable types skip the line rather than fail the emission.
+    // Emit the negation of a boolean operand into `dst`. When the operand is an inlined comparison,
+    // its operator folds -- `!(a == b)` reads as `a != b` -- so a failing-assert test spells the
+    // relation directly. Equality flips for any type; ordering flips only for non-float operands
+    // (a NaN makes `!(x < y)` and `x >= y` differ). Anything else falls back to `!(operand)`.
+    fn emit_cond_negated(self: &mut Self, b: &ir::CoreBody, opid: ir::OperandId, dst: &mut String) bool {
+        let op = *b.operands.at(opid as usize);
+        if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+            let pl = *b.places.at(op.data as usize);
+            if pl.proj_len == 0 && *self.sx_inline.at(pl.base as usize) != ir::IR_NONE {
+                let rv = *b.rvalues.at((*self.sx_inline.at(pl.base as usize)) as usize);
+                if rv.kind == ir::RV_BINARY {
+                    let mut rm = b.module;
+                    let mut rt = TYPE_NONE;
+                    let aref = self.bin_op_ty(b, rv.a, &mut rm, &mut rt);
+                    if !self.is_str_ty(rm, rt) && !self.op_dispatch_agg(rm, rt) {
+                        let yk = *self.p().module_ast_const(rm).type_at(rt);
+                        let is_float = yk.kind == TypeKind::TYPE_BUILTIN && (yk.as_data.builtin == BuiltinType::BT_F32 || yk.as_data.builtin == BuiltinType::BT_F64);
+                        let t = rv.c as tt::TokenType;
+                        let mut fop: str<'static> = "";
+                        if t == tt::TokenType::EqualEqual {
+                            fop = "!=";
+                        } else if t == tt::TokenType::BangEqual {
+                            fop = "==";
+                        } else if !is_float {
+                            if t == tt::TokenType::LessThan {
+                                fop = ">=";
+                            } else if t == tt::TokenType::GreaterThan {
+                                fop = "<=";
+                            } else if t == tt::TokenType::LessThanEqual {
+                                fop = ">";
+                            } else if t == tt::TokenType::GreaterThanEqual {
+                                fop = "<";
+                            }
+                        }
+                        if fop.len() != 0 {
+                            // no enclosing parentheses: the caller wraps this in `if (..)`, and a
+                            // second pair around an equality would trip -Wparentheses-equality
+                            let mut bm = b.module;
+                            let mut bt = TYPE_NONE;
+                            let bref = self.bin_op_ty(b, rv.b, &mut bm, &mut bt);
+                            let mut ok = self.emit_op_d(b, rv.a, aref, dst);
+                            dst.push_str(" ");
+                            dst.push_str(fop);
+                            dst.push_str(" ");
+                            if ok {
+                                ok = self.emit_op_d(b, rv.b, bref, dst);
+                            }
+                            return ok;
+                        }
+                    }
+                }
+            }
+        }
+        dst.push_str("!(");
+        let ok = self.emit_operand(b, opid, dst);
+        dst.push_str(")");
+        return ok;
+    }
+
     fn assert_value_line(self: &mut Self, b: &ir::CoreBody, label: str, opid: ir::OperandId) bool {
         let mut ev = String::new();
         if !self.emit_operand(b, opid, &mut ev) {
@@ -4874,6 +7245,29 @@ extend CEmit {
         return ok;
     }
 
+    fn ref_cast_needed(self: &mut Self, b: &ir::CoreBody, target: TypeId, place: ir::PlaceId) bool {
+        if target == TYPE_NONE {
+            return false;
+        }
+        let mut tm = b.module;
+        let mut tt9 = target;
+        self.rty(b, target, &mut tm, &mut tt9);
+        let ty = *self.p().module_ast_const(tm).type_at(tt9);
+        if ty.kind != TypeKind::TYPE_REFERENCE && ty.kind != TypeKind::TYPE_POINTER {
+            return true;
+        }
+        if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+            return true;
+        }
+        let mut em = tm;
+        let mut et = ty.as_data.elem;
+        let _ = self.mg.resolve(tm, ty.as_data.elem, &mut em, &mut et);
+        let mut pm = b.module;
+        let mut pt = b.places.at(place as usize).ty;
+        self.rty(b, pt, &mut pm, &mut pt);
+        return em != pm || et != pt;
+    }
+
     fn emit_rvalue(self: &mut Self, b: &ir::CoreBody, rid: ir::RvalueId, dst: &mut String) bool {
         let rv = *b.rvalues.at(rid as usize);
         if rv.kind == ir::RV_USE {
@@ -4885,7 +7279,7 @@ extend CEmit {
         if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
             // cast to the recorded result type: u8 buffers reborrowed as char pointers (and
             // const-ness adjustments) are checker-approved
-            if rv.target != TYPE_NONE {
+            if rv.kind == ir::RV_ADDR || self.ref_cast_needed(b, rv.target, rv.a) {
                 let mut ts = String::new();
                 let ok0 = self.ty_c(b.module, rv.target, "", &mut ts);
                 if ok0 {
@@ -4896,6 +7290,12 @@ extend CEmit {
                 if !ok0 {
                     return false;
                 }
+            }
+            // `&*p` is `p`: a place ending in a dereference cancels the address-of, so emit the place
+            // with its trailing deref dropped and no `&`.
+            let rpl = *b.places.at(rv.a as usize);
+            if rpl.proj_len != 0 && b.projections.at((rpl.proj_start + rpl.proj_len - 1) as usize).kind == ir::PJ_DEREF {
+                return self.emit_place_lim(b, rv.a, rpl.proj_len - 1, dst);
             }
             dst.push_str("&");
             return self.emit_place(b, rv.a, dst);
@@ -5224,14 +7624,25 @@ extend CEmit {
                 return self.fail("discr");
             }
             let am = self.agg_module_res(rm0, rt0);
-            for _d in 0..derefs {
+            // a payload enum's tag reads through `->` on the last dereference: `self->tag`, not
+            // `(*self).tag`. A bare enum has no member, so its value stays a plain dereference.
+            let payload = self.enum_has_payload(am, decl);
+            let arrow = payload && derefs >= 1;
+            let outer = if arrow {
+                derefs - 1;
+            } else {
+                derefs;
+            };
+            for _d in 0..outer {
                 dst.push_str("(*");
             }
             let ok = self.emit_place(b, rv.a, dst);
-            for _d in 0..derefs {
+            for _d in 0..outer {
                 dst.push_str(")");
             }
-            if ok && self.enum_has_payload(am, decl) {
+            if ok && arrow {
+                dst.push_str("->tag");
+            } else if ok && payload {
                 dst.push_str(".tag");
             }
             return ok;
@@ -6294,8 +8705,17 @@ extend CEmit {
                     }
                     self.out.push_str("._");
                     self.out.push_u64(r);
-                    self.out.push_str(" = _");
-                    self.out.push_u64(r);
+                    self.out.push_str(" = ");
+                    if *self.sx_inline.at(r as usize) != ir::IR_NONE {
+                        let mut ev = String::new();
+                        if !self.emit_rvalue(b, *self.sx_inline.at(r as usize), &mut ev) {
+                            return false;
+                        }
+                        self.out.push_string(&ev);
+                    } else {
+                        self.out.push_str("_");
+                        self.out.push_u64(r);
+                    }
                 }
                 self.out.push_str(" };\n");
             } else if self.noret {
@@ -6310,10 +8730,8 @@ extend CEmit {
             return true;
         }
         if t.kind == ir::TM_ASSERT {
-            let mut cond = String::new();
-            let mut ok = self.emit_operand(b, t.a, &mut cond);
-            if !ok {
-                return false;
+            if self.assert_holds_const(b, t) {
+                return true;
             }
             let src = self.p().modules.at(b.module as usize).source.as_str();
             let file = self.p().modules.at(b.module as usize).file.as_str();
@@ -6327,9 +8745,21 @@ extend CEmit {
                     i9 += 1;
                 }
             }
-            self.out.push_str("  if (!(");
+            let mut handled = false;
+            if !self.emit_forwarded_assert(b, t, line, &mut handled) {
+                return false;
+            }
+            if handled {
+                return true;
+            }
+            let mut cond = String::new();
+            let mut ok = self.emit_cond_negated(b, t.a, &mut cond);
+            if !ok {
+                return false;
+            }
+            self.out.push_str("  if (");
             self.out.push_string(&cond);
-            self.out.push_str(")) { ");
+            self.out.push_str(") { ");
             if t.args_len == 4 {
                 // assert_eq/ne: expression spellings ride as CK_STR constants [2] and [3]
                 let lsp = *b.constants.at(
@@ -6406,7 +8836,16 @@ extend CEmit {
             let mut ok = true;
             let mut arrdst = false; // fixed-array dest: `{ <sym>_ret __ar = f(..); memcpy(dst, __ar._a, ..); }`
             let mut dplace = String::new();
-            if t.dests_len == 1 {
+            // a forwarded destination: this call spells `f(..)` at its single read instead of storing
+            // to a temporary, so it emits nothing here and builds the expression into sx_call_str.
+            let mut fwd_r = ir::IR_NONE;
+            if t.dests_len == 1 && b.places.at(b.dest_pool[t.dests_start as usize] as usize).proj_len == 0 {
+                let rb = b.places.at(b.dest_pool[t.dests_start as usize] as usize).base;
+                if *self.sx_call_fwd.at(rb as usize) {
+                    fwd_r = rb;
+                }
+            }
+            if t.dests_len == 1 && fwd_r == ir::IR_NONE {
                 let dp = b.dest_pool[t.dests_start as usize];
                 let dty = b.places.at(dp as usize).ty;
                 let mut want = !self.is_unit(b, dty);
@@ -6426,7 +8865,29 @@ extend CEmit {
                 if want && arrdst {
                     ok = self.emit_place(b, dp, &mut dplace);
                 } else if want {
-                    ok = self.emit_place(b, dp, &mut line);
+                    let pl = *b.places.at(dp as usize);
+                    let root = *self.sx_coal.at(pl.base as usize);
+                    let mut lhs = String::new();
+                    ok = self.emit_place(b, dp, &mut lhs);
+                    if ok && pl.proj_len == 0 && *self.sx_fuse.at(root as usize) && !*self.sx_declared.at(root as usize) {
+                        let mut decl = String::new();
+                        let lty = b.locals.at(root as usize).ty;
+                        if lty == TYPE_NONE {
+                            ok = self.untyped_ret_struct(b, root, &mut decl);
+                            if ok {
+                                decl.push_str("_ret ");
+                                decl.push_string(&lhs);
+                            }
+                        } else {
+                            ok = self.ty_c(b.module, lty, lhs.as_str(), &mut decl);
+                        }
+                        if ok {
+                            self.sx_declared.set(root as usize, true);
+                            line.push_string(&decl);
+                        }
+                    } else {
+                        line.push_string(&lhs);
+                    }
                     line.push_str(" = ");
                 }
             }
@@ -6513,7 +8974,18 @@ extend CEmit {
                     line.push_string(&av2);
                 }
             }
-            if ok && arrdst {
+            if ok && fwd_r != ir::IR_NONE {
+                // `line` is `f(args` (no destination, no closing paren): close it and stash it for the
+                // single read to spell. The call itself emits nothing here.
+                line.push_str(")");
+                let mut stored = String::new();
+                stored.push_string(&line);
+                let root = *self.sx_coal.at(fwd_r as usize);
+                if root != fwd_r {
+                    self.sx_call_str.set(root as usize, stored.clone());
+                }
+                self.sx_call_str.set(fwd_r as usize, stored);
+            } else if ok && arrdst {
                 self.out.push_str("  { ");
                 self.out.push_str(line.as_str().slice(0, cs_len));
                 self.out.push_str("_ret __ar = ");
@@ -6531,15 +9003,15 @@ extend CEmit {
         if t.kind == ir::TM_ASSERT {
             let mut cnd = String::new();
             let mut msgv = String::new();
-            let mut ok = self.emit_operand(b, t.a, &mut cnd);
+            let mut ok = self.emit_cond_negated(b, t.a, &mut cnd);
             if ok && t.args_len != 0 {
                 ok = self.emit_operand(b, b.oper_pool[t.args_start as usize], &mut msgv);
             }
             if ok {
                 let msrc = self.p().modules.at(b.module as usize).source.as_str();
-                self.out.push_str("  if (!(");
+                self.out.push_str("  if (");
                 self.out.push_string(&cnd);
-                self.out.push_str(")) { ");
+                self.out.push_str(") { ");
                 if t.args_len != 0 {
                     self.out.push_str("const str __scm = ");
                     self.out.push_string(&msgv);

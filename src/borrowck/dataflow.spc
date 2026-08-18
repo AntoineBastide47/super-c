@@ -25,6 +25,7 @@ pub struct Cfg {
     pub succ_start: Vector<u32>, // per block (+ sentinel)
     pub pred: Vector<u32>,
     pub pred_start: Vector<u32>,
+    s_cnt: Vector<u32>, // reused per-block counting scratch for the predecessor inversion
 }
 
 extend Cfg as Free {
@@ -33,65 +34,86 @@ extend Cfg as Free {
         self.succ_start.free();
         self.pred.free();
         self.pred_start.free();
+        self.s_cnt.free();
+    }
+}
+
+extend Cfg {
+    pub fn empty() Cfg {
+        return Cfg {
+            nblocks: 0,
+            succ: Vector::<u32>::new(),
+            succ_start: Vector::<u32>::new(),
+            pred: Vector::<u32>::new(),
+            pred_start: Vector::<u32>::new(),
+            s_cnt: Vector::<u32>::new(),
+        };
     }
 }
 
 pub fn build_cfg(b: &ir::CoreBody) Cfg {
-    let n = b.blocks.len() as u32;
-    let mut c = Cfg {
-        nblocks: n,
-        succ: Vector::<u32>::new(),
-        succ_start: Vector::<u32>::new(),
-        pred: Vector::<u32>::new(),
-        pred_start: Vector::<u32>::new(),
-    };
-    for bi in 0..n {
-        c.succ_start.push(c.succ.len() as u32);
-        let t = b.blocks.at(bi as usize).term;
-        if t.kind == ir::TM_GOTO || t.kind == ir::TM_CALL || t.kind == ir::TM_ASSERT || t.kind == ir::TM_DROP {
-            if t.t0 != ir::IR_NONE {
-                c.succ.push(t.t0);
-            }
-        } else if t.kind == ir::TM_SWITCH {
-            for i in 0..t.sw_len {
-                let tgt = (b.switch_pool[(t.sw_start + i) as usize] & 0xFFFFFFFFu64) as u32;
-                c.succ.push(tgt);
-            }
-            if t.t0 != ir::IR_NONE {
-                c.succ.push(t.t0);
-            }
-        }
-    }
-    c.succ_start.push(c.succ.len() as u32);
-    // Invert for predecessors (two passes: counts, then fill).
-    let mut cnt = Vector::<u32>::new();
-    for _i in 0..n {
-        cnt.push(0);
-    }
-    for bi in 0..n {
-        for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
-            let t = c.succ[s as usize];
-            cnt.set(t as usize, cnt[t as usize] + 1);
-        }
-    }
-    let mut acc: u32 = 0;
-    for bi in 0..n {
-        c.pred_start.push(acc);
-        acc += cnt[bi as usize];
-        cnt.set(bi as usize, 0);
-    }
-    c.pred_start.push(acc);
-    for _i in 0..acc {
-        c.pred.push(0);
-    }
-    for bi in 0..n {
-        for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
-            let t = c.succ[s as usize] as usize;
-            c.pred.set((c.pred_start[t] + cnt[t]) as usize, bi);
-            cnt.set(t, cnt[t] + 1);
-        }
-    }
+    let mut c = Cfg::empty();
+    c.build_into(b);
     return c;
+}
+
+extend Cfg {
+    // Reset-and-fill in place, keeping vector capacity across bodies (the reusable-context path).
+    pub fn build_into(self: &mut Self, b: &ir::CoreBody) {
+        let c = self; // keep the body below identical to the by-value builder
+        let n = b.blocks.len() as u32;
+        c.nblocks = n;
+        c.succ.truncate(0);
+        c.succ_start.truncate(0);
+        c.pred.truncate(0);
+        c.pred_start.truncate(0);
+        for bi in 0..n {
+            c.succ_start.push(c.succ.len() as u32);
+            let t = b.blocks.at(bi as usize).term;
+            if t.kind == ir::TM_GOTO || t.kind == ir::TM_CALL || t.kind == ir::TM_ASSERT || t.kind == ir::TM_DROP {
+                if t.t0 != ir::IR_NONE {
+                    c.succ.push(t.t0);
+                }
+            } else if t.kind == ir::TM_SWITCH {
+                for i in 0..t.sw_len {
+                    let tgt = (b.switch_pool[(t.sw_start + i) as usize] & 0xFFFFFFFFu64) as u32;
+                    c.succ.push(tgt);
+                }
+                if t.t0 != ir::IR_NONE {
+                    c.succ.push(t.t0);
+                }
+            }
+        }
+        c.succ_start.push(c.succ.len() as u32);
+        // Invert for predecessors (two passes: counts, then fill).
+        c.s_cnt.truncate(0);
+        for _i in 0..n {
+            c.s_cnt.push(0);
+        }
+        for bi in 0..n {
+            for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
+                let t = c.succ[s as usize];
+                c.s_cnt.set(t as usize, c.s_cnt[t as usize] + 1);
+            }
+        }
+        let mut acc: u32 = 0;
+        for bi in 0..n {
+            c.pred_start.push(acc);
+            acc += c.s_cnt[bi as usize];
+            c.s_cnt.set(bi as usize, 0);
+        }
+        c.pred_start.push(acc);
+        for _i in 0..acc {
+            c.pred.push(0);
+        }
+        for bi in 0..n {
+            for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
+                let t = c.succ[s as usize] as usize;
+                c.pred.set((c.pred_start[t] + c.s_cnt[t]) as usize, bi);
+                c.s_cnt.set(t, c.s_cnt[t] + 1);
+            }
+        }
+    }
 }
 
 /// Backward local liveness at block boundaries from the generator's use/def summaries.
@@ -99,60 +121,95 @@ pub struct Liveness {
     pub words: u32,
     pub live_in: Vector<u64>, // per block * words
     pub live_out: Vector<u64>,
+    s_queue: Vector<u32>, // reused work queue / queued-flags for the fixpoint
+    s_queued: Vector<bool>,
 }
 
 extend Liveness as Free {
     pub fn free(self: &mut Self) {
         self.live_in.free();
         self.live_out.free();
+        self.s_queue.free();
+        self.s_queued.free();
+    }
+}
+
+extend Liveness {
+    pub fn empty() Liveness {
+        return Liveness {
+            words: 0,
+            live_in: Vector::<u64>::new(),
+            live_out: Vector::<u64>::new(),
+            s_queue: Vector::<u32>::new(),
+            s_queued: Vector::<bool>::new(),
+        };
     }
 }
 
 pub fn solve_liveness(f: &bf::BodyFacts, c: &Cfg) Liveness {
-    let w = f.lwords;
-    let mut lv = Liveness { words: w, live_in: Vector::<u64>::new(), live_out: Vector::<u64>::new() };
-    for _i in 0..c.nblocks * w {
-        lv.live_in.push(0u64);
-        lv.live_out.push(0u64);
-    }
-    let mut queued = Vector::<bool>::new();
-    let mut queue = Vector::<u32>::new();
-    for bi in 0..c.nblocks {
-        queued.push(true);
-        queue.push(c.nblocks - 1 - bi);
-    }
-    while queue.len() != 0 {
-        let bi = queue[queue.len() - 1];
-        let _ = queue.pop();
-        queued.set(bi as usize, false);
-        let base = (bi * w) as usize;
-        let mut changed = false;
-        for k in 0..w {
-            let mut o: u64 = 0;
-            for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
-                o = o | lv.live_in[(c.succ[s as usize] * w + k) as usize];
-            }
-            if o != lv.live_out[base + k as usize] {
-                lv.live_out.set(base + k as usize, o);
-                changed = true;
-            }
-            let inw = f.luse[base + k as usize] | o & ~f.ldef[base + k as usize];
-            if inw != lv.live_in[base + k as usize] {
-                lv.live_in.set(base + k as usize, inw);
-                changed = true;
-            }
+    let mut lv = Liveness::empty();
+    lv.build_into(f, c);
+    return lv;
+}
+
+extend Liveness {
+    pub fn build_into(self: &mut Self, f: &bf::BodyFacts, c: &Cfg) {
+        let lv = self;
+        let w = f.lwords;
+        lv.words = w;
+        lv.live_in.truncate(0);
+        lv.live_out.truncate(0);
+        for _i in 0..c.nblocks * w {
+            lv.live_in.push(0u64);
+            lv.live_out.push(0u64);
         }
-        if changed {
-            for p in c.pred_start[bi as usize]..c.pred_start[bi as usize + 1] {
-                let pb = c.pred[p as usize];
-                if !queued[pb as usize] {
-                    queued.set(pb as usize, true);
-                    queue.push(pb);
+        lv.s_queued.truncate(0);
+        lv.s_queue.truncate(0);
+        for bi in 0..c.nblocks {
+            lv.s_queued.push(true);
+            lv.s_queue.push(c.nblocks - 1 - bi);
+        }
+        // Rows are sized once above; every `base/succ*w + k` is `< nblocks*w = row.len()`, so the
+        // per-word inner loop indexes unchecked (super-c has no BCE pass, so this drops it by hand).
+        let pin = lv.live_in.as_ptr() as *mut u64;
+        let pout = lv.live_out.as_ptr() as *mut u64;
+        let puse = f.luse.as_ptr();
+        let pdef = f.ldef.as_ptr();
+        while lv.s_queue.len() != 0 {
+            let bi = lv.s_queue[lv.s_queue.len() - 1];
+            let _ = lv.s_queue.pop();
+            lv.s_queued.set(bi as usize, false);
+            let base = (bi * w) as usize;
+            let mut changed = false;
+            for k in 0..w {
+                let mut o: u64 = 0;
+                for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
+                    o = o | unsafe *(pin + (c.succ[s as usize] * w + k) as usize);
+                }
+                unsafe {
+                    let bk = base + k as usize;
+                    if o != *(pout + bk) {
+                        *(pout + bk) = o;
+                        changed = true;
+                    }
+                    let inw = *(puse + bk) | o & ~*(pdef + bk);
+                    if inw != *(pin + bk) {
+                        *(pin + bk) = inw;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                for p in c.pred_start[bi as usize]..c.pred_start[bi as usize + 1] {
+                    let pb = c.pred[p as usize];
+                    if !lv.s_queued[pb as usize] {
+                        lv.s_queued.set(pb as usize, true);
+                        lv.s_queue.push(pb);
+                    }
                 }
             }
         }
     }
-    return lv;
 }
 
 // ---- init/move solver -----------------------------------------------------------------------------
@@ -164,6 +221,12 @@ pub struct MoveFlow {
     pub di: Vector<u64>, // block-entry definitely-init
     pub mm: Vector<u64>, // block-entry maybe-moved
     pub errs: Vector<MoveErr>,
+    s_reached: Vector<bool>, // reused per-block reached markers + work queue for the fixpoint
+    s_queue: Vector<u32>,
+    s_queued: Vector<bool>,
+    s_ctx: FlowCtx, // reused per-block scratch state (mi/di/mm) applied during event replay
+    s_scratch: Vector<u32>, // reused move-forest DFS stack + subtree buffer
+    s_sub: Vector<u32>,
 }
 
 extend MoveFlow as Free {
@@ -172,6 +235,14 @@ extend MoveFlow as Free {
         self.di.free();
         self.mm.free();
         self.errs.free();
+        self.s_reached.free();
+        self.s_queue.free();
+        self.s_queued.free();
+        self.s_ctx.mi.free();
+        self.s_ctx.di.free();
+        self.s_ctx.mm.free();
+        self.s_scratch.free();
+        self.s_sub.free();
     }
 }
 
@@ -181,18 +252,29 @@ struct FlowCtx {
     pub mm: Vector<u64>,
 }
 
+// Unchecked bit ops on a dataflow row. Precondition (held everywhere they are called): `i` is a
+// move-path id < npaths and `v` holds ceil(npaths/64) words, so `w = i/64 < v.len()`. The super-c
+// compiler has no bounds-check-elimination pass, so it emits a guard the id<npaths<->word-count
+// invariant makes redundant; this hot inner loop drops it by hand until BCE lands.
 const fn bit_get(v: &Vector<u64>, i: u32) bool {
-    return (*v.at((i / 64) as usize) >> (i & 63) as u64 & 1u64) != 0;
+    let w = (i / 64) as usize;
+    return (unsafe *(v.as_ptr() + w) >> (i & 63) as u64 & 1u64) != 0;
 }
 
-fn bit_set(v: &mut Vector<u64>, i: u32) {
+const fn bit_set(v: &mut Vector<u64>, i: u32) {
     let w = (i / 64) as usize;
-    v.set(w, v[w] | 1u64 << (i & 63) as u64);
+    unsafe {
+        let p = v.as_ptr() as *mut u64 + w;
+        *p = *p | 1u64 << (i & 63) as u64;
+    }
 }
 
-fn bit_clear(v: &mut Vector<u64>, i: u32) {
+const fn bit_clear(v: &mut Vector<u64>, i: u32) {
     let w = (i / 64) as usize;
-    v.set(w, v[w] & ~(1u64 << (i & 63) as u64));
+    unsafe {
+        let p = v.as_ptr() as *mut u64 + w;
+        *p = *p & ~(1u64 << (i & 63) as u64);
+    }
 }
 
 /// Apply one init/move event to caller-held state rows (the transfer function, reporting-free).
@@ -247,7 +329,14 @@ extend FlowCtx {
         report: bool,
         errs: &mut Vector<MoveErr>,
     ) {
-        forest.subtree(ev.path, scratch, sub);
+        // Leaf paths (no tracked sub-places) are the overwhelming majority; inline their one-element
+        // subtree here so the hot replay skips the out-of-line, cross-TU `subtree` call.
+        if forest.paths.at(ev.path as usize).first_child == mp::MP_NONE {
+            sub.clear();
+            sub.push(ev.path);
+        } else {
+            forest.subtree(ev.path, scratch, sub);
+        }
         if ev.kind == bf::EV_ASSIGN {
             for i in 0..sub.len() {
                 bit_set(&mut self.mi, sub[i]);
@@ -317,126 +406,183 @@ extend FlowCtx {
     }
 }
 
+extend MoveFlow {
+    pub fn empty() MoveFlow {
+        return MoveFlow {
+            npaths: 0,
+            words: 0,
+            mi: Vector::<u64>::new(),
+            di: Vector::<u64>::new(),
+            mm: Vector::<u64>::new(),
+            errs: Vector::<MoveErr>::new(),
+            s_reached: Vector::<bool>::new(),
+            s_queue: Vector::<u32>::new(),
+            s_queued: Vector::<bool>::new(),
+            s_ctx: FlowCtx { mi: Vector::<u64>::new(), di: Vector::<u64>::new(), mm: Vector::<u64>::new() },
+            s_scratch: Vector::<u32>::new(),
+            s_sub: Vector::<u32>::new(),
+        };
+    }
+}
+
 pub fn solve_moves(b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) MoveFlow {
-    let npaths = forest.paths.len() as u32;
-    let mut w = (npaths + 63) / 64;
-    if w == 0 {
-        w = 1;
-    }
-    let mut mf = MoveFlow {
-        npaths: npaths,
-        words: w,
-        mi: Vector::<u64>::new(),
-        di: Vector::<u64>::new(),
-        mm: Vector::<u64>::new(),
-        errs: Vector::<MoveErr>::new(),
-    };
-    // Entry states: nothing reachable yet except the entry block, whose arguments and item-storage
-    // roots are fully initialized. Unreached blocks start all-empty and fill by union/intersection
-    // as predecessors reach them, so the DI intersection needs a reached marker to avoid treating
-    // untouched blocks as "everything definite".
-    for _i in 0..c.nblocks * w {
-        mf.mi.push(0u64);
-        mf.di.push(0u64);
-        mf.mm.push(0u64);
-    }
-    let mut reached = Vector::<bool>::new();
-    for _i in 0..c.nblocks {
-        reached.push(false);
-    }
-    let mut ctx = FlowCtx { mi: Vector::<u64>::new(), di: Vector::<u64>::new(), mm: Vector::<u64>::new() };
-    for _i in 0..w {
-        ctx.mi.push(0u64);
-        ctx.di.push(0u64);
-        ctx.mm.push(0u64);
-    }
-    // Seed the entry block.
-    let mut scratch = Vector::<u32>::new();
-    let mut sub = Vector::<u32>::new();
-    for l in 0..b.locals.len() {
-        let st = b.locals.at(l).storage;
-        let is_ret = l as u32 < b.returns;
-        if (st == ir::LS_ARG || st == ir::LS_STATIC_REF) && !is_ret {
-            let root = forest.local_root[l];
-            forest.subtree(root, &mut scratch, &mut sub);
-            for i in 0..sub.len() {
-                let base = (b.entry * w) as usize;
-                let word = (sub[i] / 64) as usize;
-                mf.mi.set(base + word, mf.mi[base + word] | 1u64 << (sub[i] & 63) as u64);
-                mf.di.set(base + word, mf.di[base + word] | 1u64 << (sub[i] & 63) as u64);
+    let mut mf = MoveFlow::empty();
+    mf.build_into(b, forest, f, c);
+    return mf;
+}
+
+extend MoveFlow {
+    pub fn build_into(self: &mut Self, b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) {
+        let mf = self;
+        let npaths = forest.paths.len() as u32;
+        let mut w = (npaths + 63) / 64;
+        if w == 0 {
+            w = 1;
+        }
+        mf.npaths = npaths;
+        mf.words = w;
+        mf.mi.truncate(0);
+        mf.di.truncate(0);
+        mf.mm.truncate(0);
+        mf.errs.truncate(0);
+        // Entry states: nothing reachable yet except the entry block, whose arguments and item-storage
+        // roots are fully initialized. Unreached blocks start all-empty and fill by union/intersection
+        // as predecessors reach them, so the DI intersection needs a reached marker to avoid treating
+        // untouched blocks as "everything definite".
+        for _i in 0..c.nblocks * w {
+            mf.mi.push(0u64);
+            mf.di.push(0u64);
+            mf.mm.push(0u64);
+        }
+        mf.s_reached.truncate(0);
+        for _i in 0..c.nblocks {
+            mf.s_reached.push(false);
+        }
+        mf.s_ctx.mi.truncate(0);
+        mf.s_ctx.di.truncate(0);
+        mf.s_ctx.mm.truncate(0);
+        for _i in 0..w {
+            mf.s_ctx.mi.push(0u64);
+            mf.s_ctx.di.push(0u64);
+            mf.s_ctx.mm.push(0u64);
+        }
+        // Seed the entry block.
+        mf.s_scratch.truncate(0);
+        mf.s_sub.truncate(0);
+        for l in 0..b.locals.len() {
+            let st = b.locals.at(l).storage;
+            let is_ret = l as u32 < b.returns;
+            if (st == ir::LS_ARG || st == ir::LS_STATIC_REF) && !is_ret {
+                let root = forest.local_root[l];
+                forest.subtree(root, &mut mf.s_scratch, &mut mf.s_sub);
+                for i in 0..mf.s_sub.len() {
+                    let base = (b.entry * w) as usize;
+                    let word = (mf.s_sub[i] / 64) as usize;
+                    mf.mi.set(base + word, mf.mi[base + word] | 1u64 << (mf.s_sub[i] & 63) as u64);
+                    mf.di.set(base + word, mf.di[base + word] | 1u64 << (mf.s_sub[i] & 63) as u64);
+                }
             }
         }
-    }
-    reached.set(b.entry as usize, true);
-    let mut queued = Vector::<bool>::new();
-    let mut queue = Vector::<u32>::new();
-    for _i in 0..c.nblocks {
-        queued.push(false);
-    }
-    queue.push(b.entry);
-    queued.set(b.entry as usize, true);
-    while queue.len() != 0 {
-        let bi = queue[0];
-        // Pop from the front to keep propagation roughly topological; swap-with-last keeps it O(1).
-        queue.set(0, queue[queue.len() - 1]);
-        let _ = queue.pop();
-        queued.set(bi as usize, false);
-        let base = (bi * w) as usize;
-        for k in 0..w as usize {
-            ctx.mi.set(k, mf.mi[base + k]);
-            ctx.di.set(k, mf.di[base + k]);
-            ctx.mm.set(k, mf.mm[base + k]);
+        mf.s_reached.set(b.entry as usize, true);
+        mf.s_queued.truncate(0);
+        mf.s_queue.truncate(0);
+        for _i in 0..c.nblocks {
+            mf.s_queued.push(false);
         }
-        for e in f.ev_start[bi as usize]..f.ev_start[bi as usize + 1] {
-            let ev = *f.events.at(e as usize);
-            ctx.step(forest, &ev, &mut scratch, &mut sub, false, &mut mf.errs);
-        }
-        for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
-            let t = c.succ[s as usize];
-            let tb = (t * w) as usize;
-            let mut changed = false;
-            if !reached[t as usize] {
-                reached.set(t as usize, true);
+        mf.s_queue.push(b.entry);
+        mf.s_queued.set(b.entry as usize, true);
+        // Raw row pointers: mf.mi/di/mm and ctx.mi/di/mm are sized once above and never grow inside
+        // the fixpoint (errors only accumulate in the reporting pass), so these stay valid. Every
+        // `base/tb + k` is `< nblocks*w = row.len()`, so the per-word inner loops index unchecked.
+        let pmi = mf.mi.as_ptr() as *mut u64;
+        let pdi = mf.di.as_ptr() as *mut u64;
+        let pmm = mf.mm.as_ptr() as *mut u64;
+        let qmi = mf.s_ctx.mi.as_ptr() as *mut u64;
+        let qdi = mf.s_ctx.di.as_ptr() as *mut u64;
+        let qmm = mf.s_ctx.mm.as_ptr() as *mut u64;
+        while mf.s_queue.len() != 0 {
+            let bi = mf.s_queue[0];
+            // Pop from the front to keep propagation roughly topological; swap-with-last keeps it O(1).
+            mf.s_queue.set(0, mf.s_queue[mf.s_queue.len() - 1]);
+            let _ = mf.s_queue.pop();
+            mf.s_queued.set(bi as usize, false);
+            let base = (bi * w) as usize;
+            // A block with no move events has an identity transfer, so its exit state IS its entry
+            // row -- skip the copy-to-ctx and the event pass, and propagate straight from mf's row.
+            let mut smi = pmi;
+            let mut sdi = pdi;
+            let mut smm = pmm;
+            let mut soff = base;
+            if f.ev_start[bi as usize] != f.ev_start[bi as usize + 1] {
                 for k in 0..w as usize {
-                    mf.mi.set(tb + k, ctx.mi[k]);
-                    mf.di.set(tb + k, ctx.di[k]);
-                    mf.mm.set(tb + k, ctx.mm[k]);
-                }
-                changed = true;
-            } else {
-                for k in 0..w as usize {
-                    let mi2 = mf.mi[tb + k] | ctx.mi[k];
-                    let di2 = mf.di[tb + k] & ctx.di[k];
-                    let mm2 = mf.mm[tb + k] | ctx.mm[k];
-                    if mi2 != mf.mi[tb + k] || di2 != mf.di[tb + k] || mm2 != mf.mm[tb + k] {
-                        mf.mi.set(tb + k, mi2);
-                        mf.di.set(tb + k, di2);
-                        mf.mm.set(tb + k, mm2);
-                        changed = true;
+                    unsafe {
+                        *(qmi + k) = *(pmi + base + k);
+                        *(qdi + k) = *(pdi + base + k);
+                        *(qmm + k) = *(pmm + base + k);
                     }
                 }
+                for e in f.ev_start[bi as usize]..f.ev_start[bi as usize + 1] {
+                    let ev = *f.events.at(e as usize);
+                    mf.s_ctx.step(forest, &ev, &mut mf.s_scratch, &mut mf.s_sub, false, &mut mf.errs);
+                }
+                smi = qmi;
+                sdi = qdi;
+                smm = qmm;
+                soff = 0;
             }
-            if changed && !queued[t as usize] {
-                queued.set(t as usize, true);
-                queue.push(t);
+            for s in c.succ_start[bi as usize]..c.succ_start[bi as usize + 1] {
+                let t = c.succ[s as usize];
+                let tb = (t * w) as usize;
+                let mut changed = false;
+                if !mf.s_reached[t as usize] {
+                    mf.s_reached.set(t as usize, true);
+                    for k in 0..w as usize {
+                        unsafe {
+                            *(pmi + tb + k) = *(smi + soff + k);
+                            *(pdi + tb + k) = *(sdi + soff + k);
+                            *(pmm + tb + k) = *(smm + soff + k);
+                        }
+                    }
+                    changed = true;
+                } else {
+                    for k in 0..w as usize {
+                        unsafe {
+                            let mi2 = *(pmi + tb + k) | *(smi + soff + k);
+                            let di2 = *(pdi + tb + k) & *(sdi + soff + k);
+                            let mm2 = *(pmm + tb + k) | *(smm + soff + k);
+                            if mi2 != *(pmi + tb + k) || mm2 != *(pmm + tb + k) || di2 != *(pdi + tb + k) {
+                                *(pmi + tb + k) = mi2;
+                                *(pdi + tb + k) = di2;
+                                *(pmm + tb + k) = mm2;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                if changed && !mf.s_queued[t as usize] {
+                    mf.s_queued.set(t as usize, true);
+                    mf.s_queue.push(t);
+                }
+            }
+        }
+        // Reporting pass: replay every reached block once against its fixpoint entry state. A block
+        // with no events replays nothing, so skip its row copy entirely.
+        for bi in 0..c.nblocks {
+            if !mf.s_reached[bi as usize] || f.ev_start[bi as usize] == f.ev_start[bi as usize + 1] {
+                continue;
+            }
+            let base = (bi * w) as usize;
+            for k in 0..w as usize {
+                unsafe {
+                    *(qmi + k) = *(pmi + base + k);
+                    *(qdi + k) = *(pdi + base + k);
+                    *(qmm + k) = *(pmm + base + k);
+                }
+            }
+            for e in f.ev_start[bi as usize]..f.ev_start[bi as usize + 1] {
+                let ev = *f.events.at(e as usize);
+                mf.s_ctx.step(forest, &ev, &mut mf.s_scratch, &mut mf.s_sub, true, &mut mf.errs);
             }
         }
     }
-    // Reporting pass: replay every reached block once against its fixpoint entry state.
-    for bi in 0..c.nblocks {
-        if !reached[bi as usize] {
-            continue;
-        }
-        let base = (bi * w) as usize;
-        for k in 0..w as usize {
-            ctx.mi.set(k, mf.mi[base + k]);
-            ctx.di.set(k, mf.di[base + k]);
-            ctx.mm.set(k, mf.mm[base + k]);
-        }
-        for e in f.ev_start[bi as usize]..f.ev_start[bi as usize + 1] {
-            let ev = *f.events.at(e as usize);
-            ctx.step(forest, &ev, &mut scratch, &mut sub, true, &mut mf.errs);
-        }
-    }
-    return mf;
 }

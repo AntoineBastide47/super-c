@@ -2610,9 +2610,11 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
         th.push_string(&cem.dyn_defs);
         th.push_str(em.out.as_str());
         th.push_string(&macros_out);
-        th.push_str(
-            "static inline bool __sc_str_eq(str a, str b) { return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0); }\n",
-        );
+        if em.out.contains("struct str {") {
+            th.push_str(
+                "static inline bool __sc_str_eq(str a, str b) { return a.len == b.len && (a.len == 0 || memcmp(a.ptr, b.ptr, a.len) == 0); }\n",
+            );
+        }
         th.push_string(&cem.aux);
         th.push_string(&envs_all);
         th.push_str("#endif\n");
@@ -4907,11 +4909,11 @@ pub fn run_package(
     let mut lm = Vector::<ModuleId>::new();
     for oi in 0..n {
         let mi = unsafe order[oi];
-        let mut lv = live == null || unsafe live[mi as usize];
-        if !lv {
-            lv = co.tus.at(mi as usize).len() != 0 && *keep_mod.at(mi as usize);
+        let has_wrap = co.have_main && !testing && mi as u64 == co.main_mod;
+        if co.tus.at(mi as usize).len() == 0 && !has_wrap {
+            continue;
         }
-        if !lv {
+        if live != null && !unsafe live[mi as usize] && !*keep_mod.at(mi as usize) {
             continue;
         }
         lm.push(mi);
@@ -4955,16 +4957,16 @@ pub fn run_package(
             }
             sink_notify(sink, keep.at(base_c + k).as_str(), 1);
         }
-        let ip = build_out_path(root, "__sc_inst", ".c");
-        {
+        if co.inst_c.len() != 0 {
+            let ip = build_out_path(root, "__sc_inst", ".c");
             let mut ic = String::from_str("#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n");
             ic.push_string(&co.inst_c);
             if !cemit_write(ip.as_str(), &ic) {
                 err = true;
             }
+            sink_notify(sink, ip.as_str(), 1);
+            keep.push(ip);
         }
-        sink_notify(sink, ip.as_str(), 1);
-        keep.push(ip);
     }
     unsafe stdlib::free(order);
     if live != null {

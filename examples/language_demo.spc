@@ -64,11 +64,11 @@ interface Area {
 }
 
 extend Point {
-    pub fn moved(self: &Point, dx: i32, dy: i32) Point {
+    pub const fn moved(self: &Point, dx: i32, dy: i32) Point {
         return Point { x: self.x + dx, y: self.y + dy };
     }
 
-    pub fn add(self: &Point, other: &Point) Point {
+    pub const fn add(self: &Point, other: &Point) Point {
         return Point { x: self.x + other.x, y: self.y + other.y };
     }
 }
@@ -85,18 +85,18 @@ extend Point as Deref<i32> {
     }
 }
 
-fn identity<T>(value: T) T {
+const fn identity<T>(value: T) T {
     return value;
 }
 
-fn greater<'a>(left: &'a i32, right: &'a i32) &'a i32 {
+const fn greater(left: &'a i32, right: &'a i32) &'a i32 {
     if *left > *right {
         return left;
     }
     return right;
 }
 
-fn make_pair<A, B>(first: A, second: B) Pair<A, B> {
+const fn make_pair<A, B>(first: A, second: B) Pair<A, B> {
     return Pair::<A, B> { first: first, second: second };
 }
 
@@ -116,11 +116,11 @@ fn field_count<T>() usize {
     return count;
 }
 
-fn divmod(divisor: i32, value: i32) (i32, i32) {
+const fn divmod(divisor: i32, value: i32) (i32, i32) {
     return value / divisor, value % divisor;
 }
 
-fn shape_area(shape: Shape) i32 {
+const fn shape_area(shape: Shape) i32 {
     return switch shape {
         Dot => 0,
         Circle(radius) => radius * radius * 3,
@@ -150,14 +150,14 @@ fn apply_generic<F: fn(i32) i32>(function: F, value: i32) i32 {
     return function(value);
 }
 
-fn checked(value: i32) Result<i32, i32> {
+const fn checked(value: i32) Result<i32, i32> {
     if value < 0 {
         return Result::<i32, i32>::Err(value);
     }
     return Result::<i32, i32>::Ok(value + 1);
 }
 
-fn checked_twice(value: i32) Result<i32, i32> {
+const fn checked_twice(value: i32) Result<i32, i32> {
     let next = checked(value)?;
     return Result::<i32, i32>::Ok(next * 2);
 }
@@ -200,7 +200,7 @@ fn loop_forms() i32 {
     return total + yielded;
 }
 
-unsafe fn raw_read_twice(pointer: *const i32) i32 {
+unsafe const fn raw_read_twice(pointer: *const i32) i32 {
     return *pointer + pointer[0];
 }
 
@@ -251,7 +251,7 @@ fn sum_by_value(values: []i32) i32 {
 }
 
 @c.inline
-fn attributed(value: i32) i32 {
+const fn attributed(value: i32) i32 {
     return value;
 }
 

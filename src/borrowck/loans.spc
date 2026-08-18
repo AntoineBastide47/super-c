@@ -113,7 +113,9 @@ pub struct Solver {
     pub kills_blk: Vector<u64>, // per block: kill records (point << 32 | loan), sorted
     pub kill_start: Vector<u32>,
     pub visit: Vector<u64>, // flood scratch: (origin, point) visited bits
+    pub visit_dirty: Vector<u32>, // words set in `visit` this query, so clearing is O(touched) not O(vwords)
     pub work: Vector<u64>, // flood worklist: origin << 32 | point
+    pub succs: Vector<u32>, // reused point-successor scratch for the flood
 }
 
 extend Solver as Free {
@@ -132,61 +134,107 @@ extend Solver as Free {
         self.kills_blk.free();
         self.kill_start.free();
         self.visit.free();
+        self.visit_dirty.free();
         self.work.free();
+        self.succs.free();
+    }
+}
+
+extend Solver {
+    pub fn empty() Solver {
+        return Solver {
+            b: null,
+            f: null,
+            c: null,
+            lv: null,
+            errs: Vector::<BorrowErr>::new(),
+            stats: stats_zero(),
+            point_block: Vector::<u32>::new(),
+            sub_by_point: Vector::<u32>::new(),
+            sub_pt_start: Vector::<u32>::new(),
+            live_pts: Vector::<u64>::new(),
+            pwords: 0,
+            oreach: Vector::<u64>::new(),
+            owords: 0,
+            req_cache: Vector::<u64>::new(),
+            req_have: Vector::<bool>::new(),
+            scope: ls::LoanMat::new(0, 0),
+            issues_blk: Vector::<u32>::new(),
+            issue_start: Vector::<u32>::new(),
+            kills_blk: Vector::<u64>::new(),
+            kill_start: Vector::<u32>::new(),
+            visit: Vector::<u64>::new(),
+            visit_dirty: Vector::<u32>::new(),
+            work: Vector::<u64>::new(),
+            succs: Vector::<u32>::new(),
+        };
+    }
+
+    // Truncate every vector (keeping heap capacity) and clear scalars/stats/scope, for reuse.
+    pub fn reset(self: &mut Self) {
+        self.stats = stats_zero();
+        self.pwords = 0;
+        self.owords = 0;
+        self.errs.truncate(0);
+        self.point_block.truncate(0);
+        self.sub_by_point.truncate(0);
+        self.sub_pt_start.truncate(0);
+        self.live_pts.truncate(0);
+        self.oreach.truncate(0);
+        self.req_cache.truncate(0);
+        self.req_have.truncate(0);
+        self.issues_blk.truncate(0);
+        self.issue_start.truncate(0);
+        self.kills_blk.truncate(0);
+        self.kill_start.truncate(0);
+        self.visit.truncate(0);
+        self.visit_dirty.truncate(0);
+        self.work.truncate(0);
+        self.succs.truncate(0);
+        self.scope.reset_to(0, 0);
     }
 }
 
 pub fn solve(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) Solver {
-    let mut s = Solver {
-        b: b,
-        f: f,
-        c: c,
-        lv: lv,
-        errs: Vector::<BorrowErr>::new(),
-        stats: stats_zero(),
-        point_block: Vector::<u32>::new(),
-        sub_by_point: Vector::<u32>::new(),
-        sub_pt_start: Vector::<u32>::new(),
-        live_pts: Vector::<u64>::new(),
-        pwords: 0,
-        oreach: Vector::<u64>::new(),
-        owords: 0,
-        req_cache: Vector::<u64>::new(),
-        req_have: Vector::<bool>::new(),
-        scope: ls::LoanMat::new(0, 0),
-        issues_blk: Vector::<u32>::new(),
-        issue_start: Vector::<u32>::new(),
-        kills_blk: Vector::<u64>::new(),
-        kill_start: Vector::<u32>::new(),
-        visit: Vector::<u64>::new(),
-        work: Vector::<u64>::new(),
-    };
-    s.stats.origins = f.norigins;
-    s.stats.universals = f.nuniversal;
-    s.stats.loans = f.loans.len() as u64;
-    s.stats.points = f.npoints;
-    s.stats.subset_facts = f.subsets.len() as u64;
-    s.stats.issue_facts = f.loans.len() as u64;
-    s.stats.kill_facts = f.kills.len() as u64;
-    s.stats.access_facts = f.accesses.len() as u64;
-    for l in 0..f.loans.len() {
-        if f.loans.at(l).activated_at != bf::BF_NONE {
-            s.stats.activation_facts += 1;
+    let mut s = Solver::empty();
+    s.build_into(b, f, c, lv);
+    return s;
+}
+
+extend Solver {
+    pub fn build_into(self: &mut Self, b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) {
+        let s = self;
+        s.reset();
+        s.b = b;
+        s.f = f;
+        s.c = c;
+        s.lv = lv;
+        s.stats.origins = f.norigins;
+        s.stats.universals = f.nuniversal;
+        s.stats.loans = f.loans.len() as u64;
+        s.stats.points = f.npoints;
+        s.stats.subset_facts = f.subsets.len() as u64;
+        s.stats.issue_facts = f.loans.len() as u64;
+        s.stats.kill_facts = f.kills.len() as u64;
+        s.stats.access_facts = f.accesses.len() as u64;
+        for l in 0..f.loans.len() {
+            if f.loans.at(l).activated_at != bf::BF_NONE {
+                s.stats.activation_facts += 1;
+            }
+        }
+        s.index_points();
+        s.origin_live_points();
+        s.prepass();
+        s.scope_flow();
+        s.conflicts();
+        s.escapes();
+        s.placeholders();
+        s.stats.loanset_bytes = s.scope.retained_bytes() as u64;
+        s.stats.scratch_bytes = (s.visit.capacity() * 8 + s.live_pts.capacity() * 8 + s.req_cache.capacity() * 8) as u64;
+        if s.errs.len() == 0 {
+            s.stats.clean_bodies = 1;
         }
     }
-    s.index_points();
-    s.origin_live_points();
-    s.prepass();
-    s.scope_flow();
-    s.conflicts();
-    s.escapes();
-    s.placeholders();
-    s.stats.loanset_bytes = s.scope.retained_bytes() as u64;
-    s.stats.scratch_bytes = (s.visit.capacity() * 8 + s.live_pts.capacity() * 8 + s.req_cache.capacity() * 8) as u64;
-    if s.errs.len() == 0 {
-        s.stats.clean_bodies = 1;
-    }
-    return s;
 }
 
 extend Solver {
@@ -522,7 +570,7 @@ extend Solver {
         let f = unsafe &*self.f;
         let c = unsafe &*self.c;
         let nb = c.nblocks;
-        self.scope = ls::LoanMat::new(f.loans.len() as u32, nb);
+        self.scope.reset_to(f.loans.len() as u32, nb);
         let mut scratch = Vector::<u64>::new();
         let mut queued = Vector::<bool>::new();
         let mut queue = Vector::<u32>::new();
@@ -625,17 +673,22 @@ extend Solver {
         self.stats.queries += 1;
         self.req_have.set(li as usize, true);
         let vwords = ((f.norigins as u64 * f.npoints as u64 + 63) / 64) as usize;
-        self.visit.clear();
-        for _i in 0..vwords {
+        // Keep `visit` sized once per body and clear only the words the previous query set: the flood
+        // touches at most `steps` words, so this is O(touched) instead of O(norigins*npoints/64).
+        while self.visit.len() < vwords {
             self.visit.push(0u64);
         }
+        for d in 0..self.visit_dirty.len() {
+            self.visit.set(self.visit_dirty[d] as usize, 0u64);
+        }
+        self.visit_dirty.truncate(0);
         self.work.clear();
         let lo = *f.loans.at(li as usize);
         // A loan never flows into the origin of the local it borrows: `&mut p` handed onward must
         // not pin `p` through p's OWN origin (the invariance backlink would self-contain it).
         let self_org = f.local_origin[self.body().places.at(lo.place as usize).base as usize];
         self.work.push(lo.origin as u64 << 32 | lo.issued_at as u64);
-        let mut succs = Vector::<u32>::new();
+        let mut succs = replace(&mut self.succs, Vector::<u32>::new());
         while self.work.len() != 0 {
             let node = self.work[self.work.len() - 1];
             let _ = self.work.pop();
@@ -646,6 +699,9 @@ extend Solver {
             let msk = 1u64 << (bit & 63);
             if (self.visit[w] & msk) != 0 {
                 continue;
+            }
+            if self.visit[w] == 0 {
+                self.visit_dirty.push(w as u32);
             }
             self.visit.set(w, self.visit[w] | msk);
             self.stats.steps += 1;
@@ -683,6 +739,7 @@ extend Solver {
                 }
             }
         }
+        self.succs = succs; // return the reused scratch to the solver, keeping its capacity
         return row;
     }
 
@@ -976,6 +1033,9 @@ extend Solver {
             let msk = 1u64 << (bit & 63);
             if (self.visit[w] & msk) != 0 {
                 continue;
+            }
+            if self.visit[w] == 0 {
+                self.visit_dirty.push(w as u32);
             }
             self.visit.set(w, self.visit[w] | msk);
             self.stats.steps += 1;

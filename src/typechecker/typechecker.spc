@@ -267,6 +267,9 @@ pub struct TypeChecker<'a> {
     // Same shape as codegen's CG-3 memo; the first full scan already interned everything the
     // repeat scans would, so pool order is unchanged.
     pub free_ext_memo: Map<u64, u64>,
+    // Per-interned-type `tc_type_is_free` result: -1 unknown, 0 no, 1 yes. Free-ness is a stable fact of
+    // a concrete type (extends are parse-time facts), so the full result caches by TypeId.
+    pub type_free_memo: Vector<i8>,
     // TC-8: (module<<32|method) -> enclosing extend/interface item (NODE_NONE misses included).
     pub encl_ext_memo: Map<u64, NodeId>,
     pub encl_trait_memo: Map<u64, NodeId>,
@@ -544,6 +547,7 @@ extend TypeChecker {
             last_use_built: false,
             moved_bits: Vector::<u64>::new(),
             free_ext_memo: Map::<u64, u64>::new(),
+            type_free_memo: Vector::<i8>::new(),
             encl_ext_memo: Map::<u64, NodeId>::new(),
             encl_trait_memo: Map::<u64, NodeId>::new(),
             dynfn_list: Vector::<TypeId>::new(),
@@ -4535,7 +4539,6 @@ extend TypeChecker {
                             psp.end - psp.start,
                         );
                         self.errors.note(format("the other conformance is declared here\n{}", site.as_str()));
-                        site.free();
                         self.errors.note(
                             format(
                                 "a type conforms to an interface once across the whole package; remove one of the two",
@@ -5271,6 +5274,23 @@ extend TypeChecker {
         if ty == TYPE_NONE {
             return false;
         }
+        while self.type_free_memo.len() <= ty as usize {
+            self.type_free_memo.push((0 - 1) as i8);
+        }
+        let c = *self.type_free_memo.at(ty as usize);
+        if c >= 0 {
+            return c != 0;
+        }
+        let r = self.tc_type_is_free_impl(ty);
+        let mut cv: i8 = 0;
+        if r {
+            cv = 1;
+        }
+        self.type_free_memo.set(ty as usize, cv);
+        return r;
+    }
+
+    fn tc_type_is_free_impl(self: &mut Self, ty: TypeId) bool {
         let y0 = *self.type_at(ty);
         if y0.kind == TypeKind::TYPE_FUNCTION {
             return self.fn_owns(ty);
@@ -7496,7 +7516,6 @@ extend TypeChecker {
                 let psp = self.cur_ast().at_const(pit).span;
                 let site = diag::render_site(self.source, pf, psp.start, psp.end - psp.start);
                 self.errors.note(format("the first conformance is declared here\n{}", site.as_str()));
-                site.free();
                 self.errors.note(
                     format(
                         "a type conforms to an interface once; merge the items into the first 'extend', or remove one",
@@ -14959,6 +14978,7 @@ extend TypeChecker as Free {
         self.last_use.free();
         self.moved_bits.free();
         self.free_ext_memo.free();
+        self.type_free_memo.free();
         self.encl_ext_memo.free();
         self.encl_trait_memo.free();
         self.method_memo.free();

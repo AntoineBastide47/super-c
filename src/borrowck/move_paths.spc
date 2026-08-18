@@ -40,13 +40,27 @@ const fn elem_key(kind: u8, data: u32, sub: u32) u64 {
 }
 
 extend MoveForest {
-    pub fn build(b: &ir::CoreBody) MoveForest {
-        let mut f = MoveForest {
+    pub fn empty() MoveForest {
+        return MoveForest {
             paths: Vector::<MovePath>::new(),
             local_root: Vector::<u32>::new(),
             place_path: Vector::<u32>::new(),
             place_cut: Vector::<u32>::new(),
         };
+    }
+
+    pub fn build(b: &ir::CoreBody) MoveForest {
+        let mut f = MoveForest::empty();
+        f.build_into(b);
+        return f;
+    }
+
+    pub fn build_into(self: &mut Self, b: &ir::CoreBody) {
+        let f = self;
+        f.paths.truncate(0);
+        f.local_root.truncate(0);
+        f.place_path.truncate(0);
+        f.place_cut.truncate(0);
         for l in 0..b.locals.len() {
             f.paths.push(
                 MovePath {
@@ -77,7 +91,6 @@ extend MoveForest {
             f.place_path.push(cur);
             f.place_cut.push(cut);
         }
-        return f;
     }
 
     // The child of `parent` for canonical element `elem`, created on first mention.
@@ -134,6 +147,12 @@ extend MoveForest {
     /// Visit `p` and every descendant (iterative; `scratch` is the caller's reusable stack).
     pub fn subtree(self: &Self, p: u32, scratch: &mut Vector<u32>, out: &mut Vector<u32>) {
         out.clear();
+        // Fast path for a leaf path (a scalar local, or any move path with no tracked children):
+        // the subtree is just the node itself, so skip the worklist DFS. This is the common case.
+        if self.paths.at(p as usize).first_child == MP_NONE {
+            out.push(p);
+            return;
+        }
         scratch.clear();
         scratch.push(p);
         while scratch.len() != 0 {

@@ -448,6 +448,26 @@ const fn mul_ovf(a: i64, b: i64) OvfRes {
 // --- ConstEval methods --------------------------------------------------------------------------
 
 extend ConstEval {
+    /// The field/tuple-member count of an aggregate declaration -- the value of a
+    /// `type_info::<T>().fields.len` reflection projection, which the lowerer folds to unroll an
+    /// `inline for` over a concrete type's fields.
+    pub fn field_count_of(self: &Self, dm: ModuleId, dn: NodeId) u32 {
+        return self.ce_field_count(dm, dn);
+    }
+
+    /// The variant count of an enum declaration -- the value of `type_info::<T>().variants.len`.
+    pub fn variant_count_of(self: &Self, dm: ModuleId, dn: NodeId) u32 {
+        let a = self.ast_ptr(dm);
+        let ms = a.at_const(dn).as_data.aggregate.members;
+        let mut n: u32 = 0;
+        for i in 0..ms.len {
+            if a.at_const(unsafe a.list(ms)[i as usize]).kind == NodeKind::NODE_VARIANT {
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+
     /// 0 for either budget selects the default; max_mem_bytes is converted to CeVal slots.
     pub fn new<'a>(pkg: *mut loader::Package, max_steps: u32, max_mem_bytes: u64) ConstEval<'a> {
         let count = unsafe pkg.modules.len();

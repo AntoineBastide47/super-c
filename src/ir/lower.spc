@@ -2031,6 +2031,108 @@ extend Lowerer {
         return true;
     }
 
+    // The compile-time value of an inline-for range bound. Raw const evaluation handles literals and
+    // ordinary consts; a const-generic parameter (`0..N`) is symbolic there until an instance binds
+    // it, so this resolves the referenced parameter through the instance env to its TYPE_CONST value.
+    // Returns whether `out` was set.
+    fn eval_bound(self: &mut Self, node: NodeId, out: &mut i64) bool {
+        if node == NODE_NONE {
+            return false;
+        }
+        let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+        let cv = cev.eval(self.module, node);
+        if cv.kind == ce::CONST_INT {
+            *out = cv.as_data.i;
+            return true;
+        }
+        let d = self.f.res(node);
+        if d.node != NODE_NONE {
+            let mut i = self.env.len();
+            while i > 0 {
+                i -= 1;
+                let sb = *self.env.at(i);
+                if sb.pm == d.module && sb.pnode == d.node {
+                    let y = *unsafe (&*(&*self.pkg).module_ast_const(sb.am)).type_at(sb.at);
+                    if y.kind == TypeKind::TYPE_CONST {
+                        *out = y.as_data.value;
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        }
+        return self.fold_reflect_bound(node, out);
+    }
+
+    // Whether identifier node `id` spells `name`.
+    fn node_name_eq(self: &Self, id: NodeId, name: str) bool {
+        let sp = self.f.node(id).as_data.name.text;
+        if sp.end <= sp.start {
+            return false;
+        }
+        return self.src.slice(sp.start as usize, sp.end as usize) == name;
+    }
+
+    // Fold a `type_info::<T>().fields.len` bound to its field count. At an instance the type argument
+    // resolves through the env to a concrete aggregate, so the field count is a compile-time constant
+    // that unrolls the inline-for without materializing the runtime TypeInfo record.
+    fn fold_reflect_bound(self: &mut Self, node: NodeId, out: &mut i64) bool {
+        let n = *self.f.node(node);
+        if n.kind != NodeKind::NODE_MEMBER {
+            return false;
+        }
+        let md = n.as_data.member;
+        if !self.node_name_eq(md.member, "len") {
+            return false;
+        }
+        let objn = *self.f.node(md.object);
+        if objn.kind != NodeKind::NODE_MEMBER {
+            return false;
+        }
+        let md2 = objn.as_data.member;
+        let is_fields = self.node_name_eq(md2.member, "fields");
+        if !is_fields && !self.node_name_eq(md2.member, "variants") {
+            return false;
+        }
+        let call = *self.f.node(md2.object);
+        if call.kind != NodeKind::NODE_CALL {
+            return false;
+        }
+        if !self.is_intrinsic_callee(call.as_data.call.callee, "type_info") {
+            return false;
+        }
+        let mu = self.f.type_args(md2.object);
+        if mu == null || unsafe mu.n == 0 {
+            return false;
+        }
+        let mut tm = self.module;
+        let mut tt = unsafe mu.args[0];
+        if !self.env_resolve(tt, &mut tm, &mut tt) {
+            return false;
+        }
+        let y = *unsafe (&*(&*self.pkg).module_ast_const(tm)).type_at(tt);
+        let mut dm = tm;
+        let mut dn = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            dm = y.module;
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (&*(&*self.pkg).module_ast_const(tm)).instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+        }
+        if dn == NODE_NONE {
+            return false;
+        }
+        let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+        *out = if is_fields {
+            cev.field_count_of(dm, dn);
+        } else {
+            cev.variant_count_of(dm, dn);
+        };
+        return true;
+    }
+
     // `for` over a range literal lowers to an index loop. `inline for` over `fields`/`variants`/
     // `payloads` binders: the CONCRETE-owner path expands per copy (expand_binder); a symbolic
     // owner keeps the IN_REFLECT placeholder and flags the body for per-instance re-lowering.
@@ -2122,13 +2224,19 @@ extend Lowerer {
         let rd = self.f.node(d.iterable).as_data.pattern_range;
         let ity = self.nty(id);
         if self.f.node(id).kind == NodeKind::NODE_INLINE_FOR && unsafe (&*self.pkg).ceval != null {
-            // physical unroll: the checker guarantees inline-for bounds are compile-time constants
-            let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
-            let cl = cev.eval(self.module, rd.start);
-            let ch = cev.eval(self.module, rd.end);
-            if cl.kind == ce::CONST_INT && ch.kind == ce::CONST_INT {
-                let lo = cl.as_data.i;
-                let mut hi = ch.as_data.i;
+            // Physical unroll: inline-for bounds are compile-time constants. A const-generic bound
+            // (`0..N`) is symbolic during the generic pre-pass and resolves only once an instance
+            // binds N, so eval_bound consults the instance env; an open start counts from zero. When a
+            // bound stays symbolic here the body is flagged for per-instance re-lowering (the emitter
+            // re-lowers has_reflect bodies with the demand env, where this then unrolls).
+            let mut lo: i64 = 0;
+            let mut hi: i64 = 0;
+            let lok = rd.start == NODE_NONE || self.eval_bound(rd.start, &mut lo);
+            let hok = self.eval_bound(rd.end, &mut hi);
+            if !(lok && hok) {
+                self.body.has_reflect = true;
+            }
+            if lok && hok {
                 if rd.inclusive {
                     hi += 1;
                 }

@@ -16,16 +16,24 @@ extend LoanMat as Free {
 
 extend LoanMat {
     pub fn new(nloans: u32, rows: u32) LoanMat {
+        let mut m = LoanMat { nloans: 0, words: 1, pool: Vector::<u64>::new() };
+        m.reset_to(nloans, rows);
+        return m;
+    }
+
+    // Re-size in place, keeping `pool`'s heap capacity across bodies (the reusable-context path).
+    pub fn reset_to(self: &mut Self, nloans: u32, rows: u32) {
         let mut w = (nloans + 63) / 64;
         if w == 0 {
             w = 1;
         }
-        let mut m = LoanMat { nloans: nloans, words: w, pool: Vector::<u64>::new() };
-        m.pool.reserve((rows * w) as usize);
+        self.nloans = nloans;
+        self.words = w;
+        self.pool.truncate(0);
+        self.pool.reserve((rows * w) as usize);
         for _i in 0..rows * w {
-            m.pool.push(0u64);
+            self.pool.push(0u64);
         }
-        return m;
     }
 
     /// Copy a row into caller scratch (statement replay works on the scratch row).

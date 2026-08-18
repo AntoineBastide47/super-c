@@ -145,8 +145,11 @@ pub struct Owner {
     pub pkg: *const loader::Package,
     free_ext: Map<u64, u64>, // (tmod << 32 | tdecl) -> extend (emod << 32 | enode) + 1; absent = none
     ext_built: bool,
-    owns_memo: Map<u64, u64>, // (mid << 32 | ty) -> 1 no / 2 yes (concrete types only)
-    carry_memo: Map<u64, u64>,
+    // owns/carries are pure functions of (mid, ty) on concrete types, and type ids are dense per
+    // module, so a `[mid][ty]` byte array replaces the u64-keyed hashmap on these very hot recursive
+    // queries (the single biggest borrowck cost was the Map probe). -1 = unknown, 0 = no, 1 = yes.
+    owns_arr: Vector<Vector<i8>>,
+    carry_arr: Vector<Vector<i8>>,
     busy: Vector<u64>,
     // Per-callee and per-type-node caches: call boundaries re-read the same signatures constantly.
     pub callee_flags: Map<u64, u64>, // (mod << 32 | node) -> 4 | self << 0 | free << 1
@@ -159,8 +162,8 @@ pub struct Owner {
 extend Owner as Free {
     pub fn free(self: &mut Self) {
         self.free_ext.free();
-        self.owns_memo.free();
-        self.carry_memo.free();
+        self.owns_arr.free();
+        self.carry_arr.free();
         self.busy.free();
         self.callee_flags.free();
         self.kinds_memo.free();
@@ -170,14 +173,41 @@ extend Owner as Free {
     }
 }
 
+// Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
+fn cache_get(arr: &mut Vector<Vector<i8>>, mid: ModuleId, ty: TypeId) i8 {
+    while arr.len() <= mid as usize {
+        arr.push(Vector::<i8>::new());
+    }
+    let row = arr.index_mut(mid as usize);
+    while row.len() <= ty as usize {
+        row.push((0 - 1) as i8);
+    }
+    return *row.at(ty as usize);
+}
+
+fn cache_set(arr: &mut Vector<Vector<i8>>, mid: ModuleId, ty: TypeId, r: bool) {
+    while arr.len() <= mid as usize {
+        arr.push(Vector::<i8>::new());
+    }
+    let row = arr.index_mut(mid as usize);
+    while row.len() <= ty as usize {
+        row.push((0 - 1) as i8);
+    }
+    let mut cv: i8 = 0;
+    if r {
+        cv = 1;
+    }
+    row.set(ty as usize, cv);
+}
+
 extend Owner {
     pub fn new(pkg: *const loader::Package) Owner {
         return Owner {
             pkg: pkg,
             free_ext: Map::<u64, u64>::new(),
             ext_built: false,
-            owns_memo: Map::<u64, u64>::new(),
-            carry_memo: Map::<u64, u64>::new(),
+            owns_arr: Vector::<Vector<i8>>::new(),
+            carry_arr: Vector::<Vector<i8>>::new(),
             busy: Vector::<u64>::new(),
             callee_flags: Map::<u64, u64>::new(),
             kinds_memo: Map::<u64, u64>::new(),
@@ -328,29 +358,16 @@ extend Owner {
             }
             return self.param_has_free_bound(y.module, y.as_data.decl);
         }
-        let key = mid as u64 << 32 | ty as u64;
         let cacheable = frame.len() == 0 && self.ast_of(mid).type_concrete(ty);
         if cacheable {
-            let mut have = false;
-            let mut hit = false;
-            switch self.owns_memo.get(&key) {
-                Some(v) => {
-                    have = true;
-                    hit = *v == 2u64;
-                },
-                None => {},
-            };
-            if have {
-                return hit;
+            let c = cache_get(&mut self.owns_arr, mid, ty);
+            if c >= 0 {
+                return c != 0;
             }
         }
         let r = self.owns_raw(mid, &y, frame, depth);
         if cacheable {
-            let mut enc: u64 = 1;
-            if r {
-                enc = 2;
-            }
-            self.owns_memo.insert(key, enc);
+            cache_set(&mut self.owns_arr, mid, ty, r);
         }
         return r;
     }
@@ -645,20 +662,11 @@ extend Owner {
         if od != NODE_NONE && self.ast_of(om).lifetimes_of(od).len != 0 {
             return true;
         }
-        let key = mid as u64 << 32 | ty as u64;
         let cacheable = self.ast_of(mid).type_concrete(ty);
         if cacheable {
-            let mut have = false;
-            let mut hit = false;
-            switch self.carry_memo.get(&key) {
-                Some(v) => {
-                    have = true;
-                    hit = *v == 2u64;
-                },
-                None => {},
-            };
-            if have {
-                return hit;
+            let c = cache_get(&mut self.carry_arr, mid, ty);
+            if c >= 0 {
+                return c != 0;
             }
         }
         let dn = *self.ast_of(om).at_const(od);
@@ -703,11 +711,7 @@ extend Owner {
             }
         }
         if cacheable {
-            let mut enc: u64 = 1;
-            if r {
-                enc = 2;
-            }
-            self.carry_memo.insert(key, enc);
+            cache_set(&mut self.carry_arr, mid, ty, r);
         }
         return r;
     }
@@ -742,12 +746,9 @@ const fn no_span() tok::Span {
     return tok::Span { start: 0, end: 0 };
 }
 
-pub fn generate(ow: &mut Owner, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts {
-    let mut g = Gen {
-        ow: ow,
-        b: b,
-        mf: mf,
-        f: BodyFacts {
+extend BodyFacts {
+    pub fn empty() BodyFacts {
+        return BodyFacts {
             npoints: 0,
             block_base: Vector::<u32>::new(),
             norigins: 0,
@@ -773,7 +774,54 @@ pub fn generate(ow: &mut Owner, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts
             lwords: 0,
             luse: Vector::<u64>::new(),
             ldef: Vector::<u64>::new(),
-        },
+        };
+    }
+
+    // Truncate every vector (keeping heap capacity) and clear scalars, for reuse across bodies.
+    pub fn reset(self: &mut Self) {
+        self.npoints = 0;
+        self.norigins = 0;
+        self.nuniversal = 0;
+        self.lwords = 0;
+        self.block_base.truncate(0);
+        self.local_origin.truncate(0);
+        self.origin_local.truncate(0);
+        self.uni_name.truncate(0);
+        self.arg_universal.truncate(0);
+        self.ret_origin.truncate(0);
+        self.ret_elided.truncate(0);
+        self.known_subsets.truncate(0);
+        self.uni_flows.truncate(0);
+        self.loans.truncate(0);
+        self.subsets.truncate(0);
+        self.accesses.truncate(0);
+        self.kills.truncate(0);
+        self.events.truncate(0);
+        self.ev_start.truncate(0);
+        self.freed.truncate(0);
+        self.observed.truncate(0);
+        self.moved_whole.truncate(0);
+        self.cuts.truncate(0);
+        self.luse.truncate(0);
+        self.ldef.truncate(0);
+    }
+}
+
+pub fn generate(ow: &mut Owner, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts {
+    let mut f = BodyFacts::empty();
+    generate_into(ow, b, mf, &mut f);
+    return f;
+}
+
+// Fill `dst` in place, reusing its vector capacity across bodies (the reusable-context path). The
+// generator owns a BodyFacts by value, so `dst`'s reset storage is moved in, filled, and moved back.
+pub fn generate_into(ow: &mut Owner, b: &ir::CoreBody, mf: &mp::MoveForest, dst: &mut BodyFacts) {
+    dst.reset();
+    let mut g = Gen {
+        ow: ow,
+        b: b,
+        mf: mf,
+        f: replace(dst, BodyFacts::empty()),
         assign_sites: Vector::<KillSite>::new(),
         cur_block: 0,
         in_caps: false,
@@ -785,39 +833,9 @@ pub fn generate(ow: &mut Owner, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts
     g.build_origins();
     g.walk();
     g.finish();
-    // Swap the result out whole: a partial move would leave the generator's scratch fields
-    // (assign_sites, seen) unfreed.
-    let out = replace(
-        &mut g.f,
-        BodyFacts {
-            npoints: 0,
-            block_base: Vector::<u32>::new(),
-            norigins: 0,
-            nuniversal: 0,
-            local_origin: Vector::<u32>::new(),
-            origin_local: Vector::<u32>::new(),
-            uni_name: Vector::<tok::Span>::new(),
-            arg_universal: Vector::<u32>::new(),
-            ret_origin: Vector::<u32>::new(),
-            ret_elided: Vector::<bool>::new(),
-            known_subsets: Vector::<u64>::new(),
-            uni_flows: Vector::<u64>::new(),
-            loans: Vector::<Loan>::new(),
-            subsets: Vector::<SubsetAt>::new(),
-            accesses: Vector::<Access>::new(),
-            kills: Vector::<KillAt>::new(),
-            events: Vector::<Event>::new(),
-            ev_start: Vector::<u32>::new(),
-            freed: Vector::<u32>::new(),
-            observed: Vector::<bool>::new(),
-            moved_whole: Vector::<bool>::new(),
-            cuts: Vector::<u64>::new(),
-            lwords: 0,
-            luse: Vector::<u64>::new(),
-            ldef: Vector::<u64>::new(),
-        },
-    );
-    return out;
+    // Hand the filled facts back to `dst`; the throwaway empty returns to `g.f`, freed when `g` drops
+    // (a partial move would leave the generator's scratch fields assign_sites/seen unfreed).
+    replace(dst, replace(&mut g.f, BodyFacts::empty()));
 }
 
 extend Gen {
