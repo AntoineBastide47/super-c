@@ -83,6 +83,10 @@ pub struct Lowerer {
     scope_local_marks: Vector<usize>, // per open scope: scope_locals length at entry
     item_locals: Vector<Binding>, // cached LS_STATIC_REF locals per referenced item decl node
     pub closures: Vector<NodeId>, // closure nodes queued for their own lowering
+    pub mut_binds: Vector<NodeId>, // decls mutated in this CLOSURE body (walk's mut_caps peel)
+    pub unsafe_spans: Vector<u64>, // start<<32|end per unsafe expr; licenses the IR free-move rules
+    pub tape: Vector<u64>, // borrowck replay events (ir::TP_*), in walk order; muted inside desugars
+    tape_mute: u32,
     // Reusable u32 buffers (argument lists, match work lists): call/aggregate lowering builds one
     // per expression, so the pool keeps their capacity across the whole body and package.
     u32_pool: Vector<Vector<u32>>,
@@ -121,6 +125,10 @@ extend Lowerer {
             scope_local_marks: Vector::<usize>::new(),
             item_locals: Vector::<Binding>::new(),
             closures: Vector::<NodeId>::new(),
+            mut_binds: Vector::<NodeId>::new(),
+            unsafe_spans: Vector::<u64>::new(),
+            tape: Vector::<u64>::new(),
+            tape_mute: 0,
             u32_pool: Vector::<Vector<u32>>::new(),
             cur: 0,
             run_start: 0,
@@ -181,9 +189,73 @@ extend Lowerer {
         self.scope_local_marks.truncate(0);
         self.item_locals.truncate(0);
         self.closures.truncate(0);
+        self.mut_binds.truncate(0);
+        self.unsafe_spans.truncate(0);
+        self.tape.truncate(0);
+        self.tape_mute = 0;
         self.cur = 0;
         self.run_start = 0;
         self.ret_locals = 0;
+    }
+
+    // The walk's capture-mutation peel (tc_mark_capture_mut): member/index and move/unsafe wrappers
+    // peel to an identifier, a deref stops it. Recorded per CLOSURE body so the flow pass can set
+    // mut_caps bits on every enclosing closure that captures the binding.
+    fn note_mut_bind(self: &mut Self, expr0: NodeId) {
+        let ow = self.body.owner.node;
+        if ow == NODE_NONE || self.f.node(ow).kind != NodeKind::NODE_CLOSURE {
+            return;
+        }
+        let mut expr = expr0;
+        loop {
+            let n = self.f.node(expr);
+            if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == tt::TokenType::Move || n.as_data.unary.op == tt::TokenType::Unsafe) {
+                expr = n.as_data.unary.operand;
+            } else if n.kind == NodeKind::NODE_MEMBER && !n.as_data.member.path {
+                expr = n.as_data.member.object;
+            } else if n.kind == NodeKind::NODE_INDEX {
+                expr = n.as_data.index.object;
+            } else {
+                break;
+            }
+        }
+        if self.f.node(expr).kind != NodeKind::NODE_IDENTIFIER {
+            return;
+        }
+        let d = self.f.res(expr);
+        if d.module == self.module && d.node != NODE_NONE {
+            self.mut_binds.push(d.node);
+        }
+    }
+
+    fn tp(self: &mut Self, k: u8, aux: u32, node: NodeId) {
+        if self.tape_mute == 0 {
+            self.tape.push(k as u64 << 56 | aux as u64 << 32 | node as u64);
+        }
+    }
+
+    fn note_unsafe(self: &mut Self, id: NodeId) {
+        let sp = self.f.node(id).span;
+        self.unsafe_spans.push(sp.start as u64 << 32 | sp.end as u64);
+    }
+
+    // Mark `op` as a USER consumption (see CoreBody.user_moves) when it reads a place: the borrow
+    // checker's free-move rules fire only on these, never on pattern/spill plumbing reads. Whether
+    // the read MOVES is the type's business (Gen derives it from ownership), so both operand kinds
+    // qualify here.
+    fn mark_user_move(self: &mut Self, op: ir::OperandId) {
+        if op == ir::IR_NONE {
+            return;
+        }
+        let k = self.body.operands.at(op as usize).kind;
+        if k != ir::OP_MOVE && k != ir::OP_COPY {
+            return;
+        }
+        let w = (op / 64) as usize;
+        while self.body.user_moves.len() <= w {
+            self.body.user_moves.push(0u64);
+        }
+        self.body.user_moves.set(w, self.body.user_moves[w] | 1u64 << (op & 63) as u64);
     }
 
     const fn fail(self: &mut Self, why: str<'static>) {
@@ -411,12 +483,14 @@ extend Lowerer {
     // Emit defer bodies (innermost first) down to `base` WITHOUT popping (early exits leave the
     // scope stack intact for the code that follows the branch point).
     fn emit_defers_down_to(self: &mut Self, base: usize) {
+        self.tape_mute += 1;
         let mut i = self.defers.len();
         while i > base {
             i -= 1;
             let d = self.defers[i];
             self.lower_stmt(self.f.node(d).as_data.single.value);
         }
+        self.tape_mute -= 1;
     }
 
     fn bind(self: &mut Self, decl: NodeId, l: ir::LocalId) {
@@ -672,6 +746,7 @@ extend Lowerer {
         let k = self.f.node(id).kind;
         let _sp = self.f.node(id).span;
         if k == NodeKind::NODE_BLOCK {
+            self.tp(ir::TP_SCOPE_PUSH, 0, id);
             self.scope_enter();
             let stmts = self.f.node(id).as_data.block.statements;
             for i in 0..stmts.len {
@@ -679,13 +754,17 @@ extend Lowerer {
                 if self.err.len() != 0 {
                     return;
                 }
+                self.tp(ir::TP_NLL, i, id);
             }
+            self.tp(ir::TP_SCOPE_POP, 0, id);
             self.scope_exit();
         } else if k == NodeKind::NODE_LET {
             self.lower_let(id);
         } else if k == NodeKind::NODE_EXPRESSION_STATEMENT {
             let v = self.f.node(id).as_data.single.value;
+            self.tp(ir::TP_MARK_PUSH, 0, id);
             let op = self.lower_expr(v);
+            self.tp(ir::TP_MARK_POP, 0, id);
             // A fully discarded result still OWNS its value: register the fresh dest temp for
             // scope-exit drop so an owning call result (`foo();`) is not leaked. Drop elaboration
             // skips non-owning types, and only unregistered temporaries are touched.
@@ -720,6 +799,7 @@ extend Lowerer {
         } else if k == NodeKind::NODE_CONTINUE {
             self.lower_continue(id);
         } else if k == NodeKind::NODE_DEFER {
+            self.tp(ir::TP_DEFER, 0, self.f.node(id).as_data.single.value);
             self.defers.push(id);
         } else if k == NodeKind::NODE_MATCH {
             let _ = self.lower_match(id, ir::IR_NONE);
@@ -730,6 +810,12 @@ extend Lowerer {
             // (a `const fn` call or a value expression). An initializer calling a PLAIN fn makes
             // it a RUNTIME local: evaluated here, owned here, freed at scope exit.
             let cdf = self.f.node(id).as_data.const_def;
+            if cdf.value != NODE_NONE {
+                self.tp(ir::TP_MARK_PUSH, 0, id);
+                self.tp(ir::TP_WALK_EXPR, 0, cdf.value);
+                self.tp(ir::TP_MARK_POP, 0, id);
+            }
+            self.tape_mute += 1;
             let mut runtime = false;
             if cdf.value != NODE_NONE && self.f.node(cdf.value).kind == NodeKind::NODE_CALL {
                 let cal = self.f.node(cdf.value).as_data.call;
@@ -766,6 +852,7 @@ extend Lowerer {
                     self.assign(pl9, rv9, self.f.node(id).span);
                 }
             }
+            self.tape_mute -= 1;
         } else if k == NodeKind::NODE_STATIC_ASSERT || k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_TYPE_ALIAS {
             // Item statements: local consts fold at CTFE; nested items own their own bodies.
         } else {
@@ -823,6 +910,7 @@ extend Lowerer {
         let ld = self.f.node(id).as_data.let_stmt;
         let sp = self.f.node(id).span;
         let nk = self.f.node(ld.name).kind;
+        self.tp(ir::TP_MARK_PUSH, 0, id);
         if nk != NodeKind::NODE_IDENTIFIER {
             // Destructuring let (`let (a, b) = ..`, `let Some(x) = ..`): bind through the pattern
             // machinery against the value.
@@ -834,9 +922,16 @@ extend Lowerer {
             if vop == ir::IR_NONE {
                 return;
             }
+            self.mark_user_move(vop);
             let vpl = self.spill(vop, sp);
             let fail = ir::IR_NONE;
             self.pattern_bind(ld.name, vpl, fail);
+            let tk: u8 = if nk == NodeKind::NODE_PATTERN_TUPLE {
+                ir::TP_LET_TUPLE;
+            } else {
+                ir::TP_LET;
+            };
+            self.tp(tk, 0, id);
             return;
         }
         let ty = self.nty(id);
@@ -853,31 +948,40 @@ extend Lowerer {
         self.bind(id, l);
         self.bind(ld.name, l);
         self.user_local_live(l, sp);
+        if ld.value == NODE_NONE {
+            self.body.has_uninit_decl = true; // split init: only this form can use-before-init
+        }
         if ld.value != NODE_NONE {
             let op = self.lower_expr(ld.value);
             if op == ir::IR_NONE {
                 return;
             }
+            self.mark_user_move(op);
             let pl = self.place_of_local(l);
             let rv = self.rv_use(op, ty);
             self.assign(pl, rv, sp);
         }
+        self.tp(ir::TP_LET, 0, id);
     }
 
     fn lower_return(self: &mut Self, id: NodeId) {
         let rd = self.f.node(id).as_data.return_stmt;
         let sp = self.f.node(id).span;
+        self.tp(ir::TP_MARK_PUSH, 0, id);
         for i in 0..rd.values.len {
             let v = unsafe self.f.list(rd.values)[i as usize];
             let op = self.lower_expr(v);
             if op == ir::IR_NONE {
                 return;
             }
+            self.mark_user_move(op);
+            self.tp(ir::TP_RET_VAL, i, v);
             let pl = self.place_of_local(i);
             let ty = self.body.locals.at(i as usize).ty;
             let rv = self.rv_use(op, ty);
             self.assign(pl, rv, sp);
         }
+        self.tp(ir::TP_RET_POST, 0, id);
         self.emit_defers_down_to(0);
         self.emit_deads_down_to(0);
         let t = self.term0(ir::TM_RETURN, sp);
@@ -973,7 +1077,9 @@ extend Lowerer {
                 return;
             }
         }
+        self.tp(ir::TP_MARK_PUSH, 0, id);
         let cop = self.lower_expr(d.condition);
+        self.tp(ir::TP_MARK_POP, 0, id);
         if cop == ir::IR_NONE {
             return;
         }
@@ -981,11 +1087,14 @@ extend Lowerer {
         let els_b = self.open_block();
         let join = self.open_block();
         self.branch_bool(cop, then_b, els_b, sp);
+        self.tp(ir::TP_FLOW_SAVE, 0, id);
         self.lower_stmt(d.then_branch);
+        self.tp(ir::TP_FLOW_ELSE, 0, id);
         self.seal(self.goto_term(join, sp), els_b);
         if d.else_branch != NODE_NONE {
             self.lower_stmt(d.else_branch);
         }
+        self.tp(ir::TP_FLOW_JOIN, 0, id);
         self.seal(self.goto_term(join, sp), join);
     }
 
@@ -1012,6 +1121,13 @@ extend Lowerer {
     fn lower_while(self: &mut Self, id: NodeId) {
         let d = self.f.node(id).as_data.while_stmt;
         let sp = self.f.node(id).span;
+        self.tp(ir::TP_LOOP_PUSH, 0, id);
+        if d.is_do && d.condition != NODE_NONE {
+            // the walk checks a do-while condition FIRST; the lowered tail below is muted
+            self.tp(ir::TP_MARK_PUSH, 0, id);
+            self.tp(ir::TP_WALK_EXPR, 0, d.condition);
+            self.tp(ir::TP_MARK_POP, 0, id);
+        }
         let head = self.open_block();
         let body_b = self.open_block();
         let exit = self.open_block();
@@ -1023,7 +1139,9 @@ extend Lowerer {
         if !d.is_do {
             // head: evaluate the condition (an infinite `loop` has no condition node)
             if d.condition != NODE_NONE {
+                self.tp(ir::TP_MARK_PUSH, 0, id);
                 let cop = self.lower_expr(d.condition);
+                self.tp(ir::TP_MARK_POP, 0, id);
                 if cop == ir::IR_NONE {
                     return;
                 }
@@ -1043,13 +1161,22 @@ extend Lowerer {
             },
         );
         self.loop_safepoint(sp);
+        let ar9: u32 = if d.is_do || d.condition == NODE_NONE {
+            1;
+        } else {
+            0;
+        };
+        self.tp(ir::TP_BODY_START, ar9, id);
         self.lower_stmt(d.body);
+        self.tp(ir::TP_BODY_END, 0, id);
         let _ = self.loops.pop();
         if d.is_do {
             // tail: condition decides back-edge vs exit; `head` is the continue target
             self.seal(self.goto_term(head, sp), head);
             if d.condition != NODE_NONE {
+                self.tape_mute += 1;
                 let cop = self.lower_expr(d.condition);
+                self.tape_mute -= 1;
                 if cop == ir::IR_NONE {
                     return;
                 }
@@ -1061,6 +1188,7 @@ extend Lowerer {
         } else {
             self.seal(self.goto_term(head, sp), exit);
         }
+        self.tp(ir::TP_LOOP_POP, 0, id);
     }
 
     // ---- reflection binder expansion --------------------------------------------------------------
@@ -2216,7 +2344,11 @@ extend Lowerer {
                 None => {},
             };
             if !resolved && self.f.res(cd.callee).node == NODE_NONE {
+                // binder/reflect expansion re-lowers the body per iteration; the walk sees one loop
+                self.tp(ir::TP_WALK_STMT, 0, id);
+                self.tape_mute += 1;
                 if self.expand_binder(id) {
+                    self.tape_mute -= 1;
                     return;
                 }
                 self.body.has_reflect = true;
@@ -2262,6 +2394,7 @@ extend Lowerer {
                     sp,
                 );
                 self.lower_stmt(d.body);
+                self.tape_mute -= 1;
                 return;
             }
         }
@@ -2269,7 +2402,11 @@ extend Lowerer {
             // iterator protocol: the checker recorded the selected `next` and its Option return
             switch self.f.call_info(id) {
                 Some(ci) => {
+                    self.tp(ir::TP_LOOP_PUSH, 1, id);
+                    self.tp(ir::TP_MARK_PUSH, 0, id);
                     self.lower_for_iter(id, DefId { module: ci_module(ci), node: ci_decl(ci) });
+                    self.tp(ir::TP_MARK_POP, 0, id);
+                    self.tp(ir::TP_LOOP_POP, 0, id);
                     return;
                 },
                 None => {},
@@ -2277,11 +2414,19 @@ extend Lowerer {
             let ity = self.nty(d.iterable);
             let ik = self.f.ty(ity).kind;
             if ik == TypeKind::TYPE_INSTANCE && self.is_range_instance(ity) {
+                self.tp(ir::TP_LOOP_PUSH, 1, id);
+                self.tp(ir::TP_MARK_PUSH, 0, id);
                 self.lower_for_range_value(id);
+                self.tp(ir::TP_MARK_POP, 0, id);
+                self.tp(ir::TP_LOOP_POP, 0, id);
                 return;
             }
             if ik == TypeKind::TYPE_ARRAY || ik == TypeKind::TYPE_SLICE || ik == TypeKind::TYPE_INSTANCE {
+                self.tp(ir::TP_LOOP_PUSH, 1, id);
+                self.tp(ir::TP_MARK_PUSH, 0, id);
                 self.lower_for_indexed(id);
+                self.tp(ir::TP_MARK_POP, 0, id);
+                self.tp(ir::TP_LOOP_POP, 0, id);
                 return;
             }
             self.fail_at("for-iterable", id);
@@ -2303,6 +2448,9 @@ extend Lowerer {
                 self.body.has_reflect = true;
             }
             if lok && hok {
+                // physical unroll: the body lowers once per iteration; the walk sees one loop
+                self.tp(ir::TP_WALK_STMT, 0, id);
+                self.tape_mute += 1;
                 if rd.inclusive {
                     hi += 1;
                 }
@@ -2342,10 +2490,13 @@ extend Lowerer {
                     }
                     v += 1;
                 }
+                self.tape_mute -= 1;
                 return;
             }
         }
         // `..e` counts from zero; `s..` has no bound check (exit only via break)
+        self.tp(ir::TP_LOOP_PUSH, 1, id);
+        self.tp(ir::TP_MARK_PUSH, 0, id);
         let sop: ir::OperandId = if rd.start != NODE_NONE {
             self.lower_expr(rd.start);
         } else {
@@ -2446,7 +2597,9 @@ extend Lowerer {
             },
         );
         self.loop_safepoint(sp);
+        self.tp(ir::TP_BODY_START, 0, id);
         self.lower_stmt(d.body);
+        self.tp(ir::TP_BODY_END, 0, id);
         let _ = self.loops.pop();
         self.seal(self.goto_term(step, sp), step);
         // step: i = i + 1
@@ -2475,6 +2628,8 @@ extend Lowerer {
             sp,
         );
         self.seal(self.goto_term(head, sp), exit);
+        self.tp(ir::TP_MARK_POP, 0, id);
+        self.tp(ir::TP_LOOP_POP, 0, id);
     }
 
     // `for` over an indexable sequence (array, slice, sequence value): an index loop over RV_LEN
@@ -2602,7 +2757,9 @@ extend Lowerer {
             },
         );
         self.loop_safepoint(sp);
+        self.tp(ir::TP_BODY_START, 0, id);
         self.lower_stmt(d.body);
+        self.tp(ir::TP_BODY_END, 0, id);
         let _ = self.loops.pop();
         self.seal(self.goto_term(step, sp), step);
         let xop = self.copy_op(xpl);
@@ -2774,7 +2931,9 @@ extend Lowerer {
             },
         );
         self.loop_safepoint(sp);
+        self.tp(ir::TP_BODY_START, 0, id);
         self.lower_stmt(d.body);
+        self.tp(ir::TP_BODY_END, 0, id);
         let _ = self.loops.pop();
         self.seal(self.goto_term(head, sp), exit);
     }
@@ -2866,7 +3025,9 @@ extend Lowerer {
             },
         );
         self.loop_safepoint(sp);
+        self.tp(ir::TP_BODY_START, 0, id);
         self.lower_stmt(d.body);
+        self.tp(ir::TP_BODY_END, 0, id);
         let _ = self.loops.pop();
         self.seal(self.goto_term(step, sp), step);
         let iop3 = self.copy_op(idx_pl);
@@ -3031,10 +3192,16 @@ extend Lowerer {
             // `&mut` receiver must mutate the real location, not a value temp)
             let uop0 = self.f.node(id).as_data.unary.op;
             if uop0 == tt::TokenType::Unsafe || uop0 == tt::TokenType::Move {
+                if uop0 == tt::TokenType::Unsafe {
+                    self.note_unsafe(id);
+                }
                 let mut inner0 = self.f.node(id).as_data.unary.operand;
                 loop {
                     let inn = self.f.node(inner0);
                     if inn.kind == NodeKind::NODE_UNARY && (inn.as_data.unary.op == tt::TokenType::Unsafe || inn.as_data.unary.op == tt::TokenType::Move) {
+                        if inn.as_data.unary.op == tt::TokenType::Unsafe {
+                            self.note_unsafe(inner0);
+                        }
                         inner0 = inn.as_data.unary.operand;
                         continue;
                     }
@@ -3062,6 +3229,10 @@ extend Lowerer {
         }
         if k == NodeKind::NODE_CAST {
             let d = self.f.node(id).as_data.cast;
+            // the walk erases the borrow on any ref -> ptr cast
+            let er9 = ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_POINTER && self.nty(d.expression) != TYPE_NONE && self.f.ty(
+                self.nty(d.expression),
+            ).kind == TypeKind::TYPE_REFERENCE;
             // `&place as *T` is a raw address, not a borrow that then decays: lower it as RV_ADDR
             // so no loan pins the place through the pointer's lifetime.
             if ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_POINTER {
@@ -3069,6 +3240,9 @@ extend Lowerer {
                 loop {
                     let en = self.f.node(e);
                     if en.kind == NodeKind::NODE_UNARY && (en.as_data.unary.op == tt::TokenType::Move || en.as_data.unary.op == tt::TokenType::Unsafe) {
+                        if en.as_data.unary.op == tt::TokenType::Unsafe {
+                            self.note_unsafe(e);
+                        }
                         e = en.as_data.unary.operand;
                     } else {
                         break;
@@ -3105,6 +3279,9 @@ extend Lowerer {
                             },
                             sp,
                         );
+                        if er9 {
+                            self.tp(ir::TP_CAST_ERASE, 0, d.expression);
+                        }
                         return self.copy_op(pl2);
                     }
                 }
@@ -3127,6 +3304,9 @@ extend Lowerer {
                 },
                 sp,
             );
+            if er9 {
+                self.tp(ir::TP_CAST_ERASE, 0, d.expression);
+            }
             return self.copy_op(pl);
         }
         if k == NodeKind::NODE_STRUCT_INITIALIZER {
@@ -3350,6 +3530,9 @@ extend Lowerer {
             if pl == ir::IR_NONE {
                 return ir::IR_NONE;
             }
+            if d.op == tt::TokenType::Ampersand {
+                self.tp(ir::TP_REF, 0, id);
+            }
             let mutable: u32 = if d.qualifier == TypeQualifier::TYPE_QUAL_MUT {
                 1;
             } else {
@@ -3359,6 +3542,9 @@ extend Lowerer {
             let mut rk = ir::RV_REF;
             if ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_POINTER {
                 rk = ir::RV_ADDR;
+            }
+            if rk == ir::RV_REF && ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_REFERENCE && self.f.ty(ty).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                self.note_mut_bind(d.operand);
             }
             let t = self.temp(ty, sp);
             let tp = self.place_of_local(t);
@@ -3841,6 +4027,7 @@ extend Lowerer {
                     if op == ir::IR_NONE {
                         return ir::IR_NONE;
                     }
+                    self.mark_user_move(op);
                     argv.push(op);
                 }
                 let agg: u8 = if is_tuple_ctor {
@@ -3890,6 +4077,7 @@ extend Lowerer {
                     if scalar8 && !fd8.is_extern && fd8.body != NODE_NONE && self.maybe_const(id) {
                         let v8 = cev8.eval(self.module, id);
                         if v8.kind == ce::CONST_INT || v8.kind == ce::CONST_BOOL {
+                            self.tp(ir::TP_WALK_EXPR, 0, id); // folded: the walk still sees the call
                             let ck8: u8 = if v8.kind == ce::CONST_BOOL {
                                 ir::CK_BOOL;
                             } else {
@@ -3950,6 +4138,7 @@ extend Lowerer {
                 if opl == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
+                self.tp(ir::TP_CALL, 1, id);
                 let mut tm = self.term0(ir::TM_DROP, sp);
                 tm.a = opl;
                 let cont = self.open_block();
@@ -3979,6 +4168,23 @@ extend Lowerer {
                     }
                 }
             }
+            // A by-value receiver is a USER consumption (the walk's check_call_receiver move);
+            // Deref-adapted receivers are borrowed through the impl instead.
+            let fa1 = unsafe &*(&*self.pkg).module_ast_const(target.module);
+            let tf1 = fa1.at_const(target.node);
+            if tf1.kind == NodeKind::NODE_FUNCTION && tf1.as_data.function.params.len >= 1 {
+                let p1 = unsafe fa1.list(tf1.as_data.function.params)[0];
+                let pt1 = fa1.at_const(p1).as_data.parameter.ty;
+                let mut ptk1 = NodeKind::NODE_NONE_KIND;
+                if pt1 != NODE_NONE {
+                    ptk1 = fa1.at_const(pt1).kind;
+                }
+                if ptk1 != NodeKind::NODE_POINTER_TYPE && ptk1 != NodeKind::NODE_REFERENCE_TYPE && self.f.derefs(
+                    self.f.node(d.callee).as_data.member.member,
+                ) == null {
+                    self.mark_user_move(rop);
+                }
+            }
             argv.push(rop);
         } else if target.node == NODE_NONE {
             // fn-value call (closure, fn pointer): the callee is an operand
@@ -3989,14 +4195,17 @@ extend Lowerer {
         } else {
             // direct call: nothing to evaluate for the callee
         }
+        self.tp(ir::TP_CALL_MARK, 0, id);
         for i in 0..d.args.len {
             let a = unsafe self.f.list(d.args)[i as usize];
             let op = self.lower_expr(a);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
             }
+            self.mark_user_move(op);
             argv.push(op);
         }
+        self.tp(ir::TP_CALL, 0, id);
         let ts = self.body.targ_pool.len() as u32;
         let mut tn = self.copy_targs(id);
         if tn == 0 {
@@ -4221,6 +4430,8 @@ extend Lowerer {
         let d = self.f.node(id).as_data.binary;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
+        self.note_mut_bind(d.left);
+        self.tp(ir::TP_ASSIGN_PRE, 0, id);
         let pl = self.lower_place(d.left);
         if pl == ir::IR_NONE {
             return ir::IR_NONE;
@@ -4254,6 +4465,7 @@ extend Lowerer {
                 }
                 let rv = self.rv_use(res, lt);
                 self.assign(pl, rv, sp);
+                self.tp(ir::TP_ASSIGN_POST, 0, id);
                 return self.unit_op(ty, sp);
             },
             None => {},
@@ -4262,6 +4474,7 @@ extend Lowerer {
         if rop == ir::IR_NONE {
             return ir::IR_NONE;
         }
+        self.mark_user_move(rop);
         let lt = self.body.places.at(pl as usize).ty;
         if d.op == tt::TokenType::Equal {
             let rv = self.rv_use(rop, lt);
@@ -4286,6 +4499,7 @@ extend Lowerer {
             let rv = self.rv_use(cop, lt);
             self.assign(pl, rv, sp);
         }
+        self.tp(ir::TP_ASSIGN_POST, 0, id);
         return self.unit_op(ty, sp);
     }
 
@@ -4336,6 +4550,7 @@ extend Lowerer {
                 if op == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
+                self.mark_user_move(op);
                 let mut idx: i64 = -1;
                 for j in 0..members.len {
                     let fid = unsafe da.list(members)[j as usize];
@@ -4358,6 +4573,7 @@ extend Lowerer {
                 if op == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
+                self.mark_user_move(op);
                 argv.push(op);
             }
         }
@@ -4441,6 +4657,7 @@ extend Lowerer {
                 e = self.f.node(e).as_data.field_initializer.value;
             }
             let op = self.lower_expr(e);
+            self.mark_user_move(op);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
             }
@@ -4530,7 +4747,9 @@ extend Lowerer {
         let sp = self.f.node(id).span;
         let t = self.temp(ty, sp);
         let pl = self.place_of_local(t);
+        self.tp(ir::TP_MARK_PUSH, 0, id);
         let cop = self.lower_expr(d.condition);
+        self.tp(ir::TP_MARK_POP, 0, id);
         if cop == ir::IR_NONE {
             return ir::IR_NONE;
         }
@@ -4538,11 +4757,14 @@ extend Lowerer {
         let els_b = self.open_block();
         let join = self.open_block();
         self.branch_bool(cop, then_b, els_b, sp);
+        self.tp(ir::TP_FLOW_SAVE, 0, id);
         self.lower_value_into(d.then_branch, pl);
+        self.tp(ir::TP_FLOW_ELSE, 0, id);
         self.seal(self.goto_term(join, sp), els_b);
         if d.else_branch != NODE_NONE {
             self.lower_value_into(d.else_branch, pl);
         }
+        self.tp(ir::TP_FLOW_JOIN, 0, id);
         self.seal(self.goto_term(join, sp), join);
         return self.copy_op(pl);
     }
@@ -4570,6 +4792,7 @@ extend Lowerer {
     // A block with no value-producing tail still writes `dest` (unit), so every consumer of the
     // destination reads initialized storage.
     fn lower_value_block(self: &mut Self, id: NodeId, dest: ir::PlaceId) {
+        self.tp(ir::TP_SCOPE_PUSH, 0, id);
         self.scope_enter();
         let stmts = self.f.node(id).as_data.block.statements;
         let ty = self.body.places.at(dest as usize).ty;
@@ -4578,7 +4801,9 @@ extend Lowerer {
             let s = unsafe self.f.list(stmts)[i as usize];
             if i == stmts.len - 1 && self.f.node(s).kind == NodeKind::NODE_EXPRESSION_STATEMENT {
                 let v = self.f.node(s).as_data.single.value;
+                self.tp(ir::TP_MARK_PUSH, 0, s);
                 let op = self.lower_expr(v);
+                self.tp(ir::TP_MARK_POP, 0, s);
                 if op == ir::IR_NONE {
                     return;
                 }
@@ -4591,6 +4816,7 @@ extend Lowerer {
             if self.err.len() != 0 {
                 return;
             }
+            self.tp(ir::TP_NLL, i, id);
         }
         if !wrote {
             let sp = self.f.node(id).span;
@@ -4598,10 +4824,12 @@ extend Lowerer {
             let rv = self.rv_use(uop, ty);
             self.assign(dest, rv, sp);
         }
+        self.tp(ir::TP_SCOPE_POP, 0, id);
         self.scope_exit();
     }
 
     fn lower_loop_expr(self: &mut Self, id: NodeId, result: ir::PlaceId) {
+        self.tape_mute += 1; // the walk has no value-position loop case: nothing replays
         let d = self.f.node(id).as_data.while_stmt;
         let sp = self.f.node(id).span;
         let head = self.open_block();
@@ -4620,6 +4848,7 @@ extend Lowerer {
         self.lower_stmt(d.body);
         let _ = self.loops.pop();
         self.seal(self.goto_term(head, sp), exit);
+        self.tape_mute -= 1;
     }
 
     fn lower_va(self: &mut Self, id: NodeId) ir::OperandId {
@@ -4686,6 +4915,7 @@ extend Lowerer {
             let op = self.copy_op(pl);
             argv.push(op);
         }
+        self.tp(ir::TP_CLOSURE, 0, id);
         self.closures.push(id);
         let fresh = self.pool_ops(&argv);
         let kept = argv.len() as u32;
@@ -4869,6 +5099,9 @@ extend Lowerer {
         if self.f.node(id).kind == NodeKind::NODE_UNARY {
             let uop = self.f.node(id).as_data.unary.op;
             if uop == tt::TokenType::Unsafe || uop == tt::TokenType::Move {
+                if uop == tt::TokenType::Unsafe {
+                    self.note_unsafe(id);
+                }
                 let inner = self.f.node(id).as_data.unary.operand;
                 return self.lower_place(inner);
             }
@@ -5175,6 +5408,7 @@ extend Lowerer {
             if rd.inclusive {
                 fl = 1;
             }
+            self.tp(ir::TP_SLICE, 0, id);
             let t = self.temp(ty, sp);
             let pl = self.place_of_local(t);
             self.assign(
@@ -5228,11 +5462,25 @@ extend Lowerer {
     fn lower_match(self: &mut Self, id: NodeId, dest: ir::PlaceId) bool {
         let d = self.f.node(id).as_data.match_expr;
         let sp = self.f.node(id).span;
+        self.tp(ir::TP_MARK_PUSH, 0, id);
         let vop = self.lower_expr(d.value);
         if vop == ir::IR_NONE {
             return false;
         }
+        let sty = self.nty(d.value);
+        if sty != TYPE_NONE {
+            let sk = self.f.ty(sty).kind;
+            if sk != TypeKind::TYPE_REFERENCE && sk != TypeKind::TYPE_POINTER {
+                self.mark_user_move(vop); // by-value scrutinee consumes like any other user move
+            }
+        }
         let vpl = self.spill(vop, sp);
+        let ax9: u32 = if dest != ir::IR_NONE {
+            1;
+        } else {
+            0;
+        };
+        self.tp(ir::TP_MATCH_PRE, ax9, id);
         // Guard-free matches lower through the shared decision tree, so no place is
         // retested once its constructor is known. Guarded matches (and or-patterns that bind, or a
         // budget overflow) keep the sequential arm chain below -- guards run after their arm's
@@ -5253,6 +5501,7 @@ extend Lowerer {
             let tree = cx.build_tree();
             if tree.ok {
                 self.lower_match_tree(id, dest, vpl, &cx, &tree);
+                self.tp(ir::TP_MATCH_POST, 0, id);
                 return self.err.len() == 0;
             }
         }
@@ -5262,6 +5511,7 @@ extend Lowerer {
             let ad = self.f.node(arm).as_data.match_arm;
             let next_arm = self.open_block();
             self.scope_enter();
+            self.tp(ir::TP_ARM, i, arm);
             self.lower_pattern_test(ad.pattern, vpl, next_arm);
             if self.err.len() != 0 {
                 return false;
@@ -5279,12 +5529,14 @@ extend Lowerer {
             } else {
                 self.lower_stmt(ad.body);
             }
+            self.tp(ir::TP_ARM_END, i, arm);
             self.scope_exit();
             if self.err.len() != 0 {
                 return false;
             }
             self.seal(self.goto_term(join, sp), next_arm);
         }
+        self.tp(ir::TP_MATCH_POST, 0, id);
         // no arm matched: exhaustiveness says unreachable
         let u = self.term0(ir::TM_UNREACHABLE, sp);
         self.seal(u, join);
@@ -5956,15 +6208,18 @@ extend Lowerer {
         for i in 0..d.arms.len {
             self.cur = armb[i as usize];
             self.run_start = self.body.statements.len() as u32;
-            let ad = self.f.node(unsafe self.f.list(d.arms)[i as usize]).as_data.match_arm;
+            let arm9 = unsafe self.f.list(d.arms)[i as usize];
+            let ad = self.f.node(arm9).as_data.match_arm;
             // Arm bindings live in the arm's own scope: payload storage ends at the arm's end.
             self.scope_enter();
+            self.tp(ir::TP_ARM, i, arm9);
             self.pattern_bind_total(ad.pattern, vpl);
             if dest != ir::IR_NONE {
                 self.lower_value_into(ad.body, dest);
             } else {
                 self.lower_stmt(ad.body);
             }
+            self.tp(ir::TP_ARM_END, i, arm9);
             self.scope_exit();
             if self.err.len() != 0 {
                 return;

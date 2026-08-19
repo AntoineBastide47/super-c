@@ -1,6 +1,7 @@
 // build.toml schema: maps parsed TOML items onto the Build manifest, applies defaults (built-in
 // debug/dev/release/bench profiles), and validates. Unknown sections/keys are hard errors so typos
 // never silently no-op.
+import stdio;
 import driver_shim as shim;
 import build_system::toml as toml;
 import module::loader as loader;
@@ -232,7 +233,27 @@ fn add_builtin_profiles(m: &mut Manifest) {
         // Optimization parity with `release` (-O3 -DNDEBUG): the bench should measure the compiler
         // users actually run. -g and frame pointers stay so samply profiles remain readable.
         push_flags(&mut p.cflags, "-O3 -DNDEBUG -g -fno-omit-frame-pointer -flto=auto");
+        // Profile-guided optimization when local training data exists (build with --profile=pgogen,
+        // run a self-transpile under LLVM_PROFILE_FILE, merge with llvm-profdata). Clang hard-errors
+        // on a missing profile file, so the flag only appears when the file is present.
+        let pf = stdio::fopen("build/pgo.profdata", "rb");
+        if pf != null {
+            let _ = unsafe stdio::fclose(pf);
+            push_flags(
+                &mut p.cflags,
+                "-fprofile-use=build/pgo.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin",
+            );
+        }
         push_flags(&mut p.ldflags, "-flto=auto");
+        m.profiles.push(p);
+    }
+    // PGO training build: instrument, run a representative workload (a self-transpile) under
+    // LLVM_PROFILE_FILE, merge the raw profiles with llvm-profdata into build/pgo.profdata, and the
+    // bench profile above picks it up on its next build.
+    if m.profile_index("pgogen") < 0 {
+        let mut p = Profile::new("pgogen");
+        push_flags(&mut p.cflags, "-O2 -fprofile-generate -flto=auto");
+        push_flags(&mut p.ldflags, "-fprofile-generate -flto=auto");
         m.profiles.push(p);
     }
     // ThreadSanitizer. Its own profile and NEVER part of `release`: TSan costs 5-15x runtime and several

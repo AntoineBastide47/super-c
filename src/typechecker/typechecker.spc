@@ -248,6 +248,10 @@ pub struct TypeChecker<'a> {
     pub bc_free_recv: bool, // marking a `.free()` receiver: destruction, exempt from the ref-move rejection
     pub bc_quiet: bool, // the Core IR analysis owns this function's flow diagnostics; the walk stays silent
     pub bc_mode: u8, // flow-walk selector: 0 = env default, 1 = force the AST walk, 2 = force Core IR
+    pub bc_tape: u8, // quiet-walk selector: 0 = env default, 1 = full walk, 2 = tape replay
+    // Unsafe-expression span ranges (start<<32|end) the walk records per function; the Core IR
+    // free-move rules consult them in place of the walk's unsafe_depth.
+    pub bc_unsafe_spans: Vector<u64>,
     pub derive_busy: Vector<u64>, // derive-recursion guard (value cycles are infinite-size errors anyway)
     pub mut_used: Vector<NodeId>, // bindings whose mutability was actually required (unnecessary-mut lint)
     pub loop_stack: [LoopEntry; 32],
@@ -541,6 +545,8 @@ extend TypeChecker {
             bc_free_recv: false,
             bc_quiet: false,
             bc_mode: 0,
+            bc_tape: 0,
+            bc_unsafe_spans: Vector::<u64>::new(),
             derive_busy: Vector::<u64>::new(),
             mut_used: Vector::<NodeId>::new(),
             nloops: 0,

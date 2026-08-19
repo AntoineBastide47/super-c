@@ -730,6 +730,21 @@ extend MoveFlow {
                 continue;
             }
             let base = (bi * w) as usize;
+            if f.easy_blk[bi as usize] {
+                // Easy block (assigns + root-leaf uses only): a use can only error if its path's
+                // entry maybe-moved bit is set or its entry definitely-init bit is clear -- the
+                // block's own assigns strictly improve both. Clean entry bits are proof; a dirty
+                // word falls through to the exact replay.
+                let lb = (bi * f.lwords) as usize;
+                let mut bad: u64 = 0;
+                for k in 0..f.lwords as usize {
+                    let um = f.easy_use[lb + k];
+                    bad = bad | mf.mm[base + k] & um | um & ~mf.di[base + k];
+                }
+                if bad == 0 {
+                    continue;
+                }
+            }
             for k in 0..w as usize {
                 unsafe {
                     *(qmi + k) = *(pmi + base + k);

@@ -1033,60 +1033,38 @@ extend CEmit {
         }
     }
 
-    // Per-body reference and definition counts over every operand (all copy/move sources) plus the
-    // places statements and terminators name directly. It never under-counts a use, so a coalesce
-    // guarded by `refs[src] == 1` is always safe.
-    fn count_locals(self: &Self, b: &ir::CoreBody, refs: &mut Vector<u32>, defs: &mut Vector<u32>) {
-        for o in 0..b.operands.len() {
-            let op = *b.operands.at(o);
-            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                self.count_place(b, op.data, false, refs, defs);
-            }
-        }
-        for si in 0..b.statements.len() {
-            let s = *b.statements.at(si);
-            if s.kind == ir::ST_ASSIGN {
-                self.count_place(b, s.place, true, refs, defs);
-                let rv = *b.rvalues.at(s.rvalue as usize);
-                if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
-                    self.count_place(b, rv.a, false, refs, defs);
-                }
-            } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
-                self.count_place(b, s.place, false, refs, defs);
-            }
-        }
-        for bi in 0..b.blocks.len() {
-            let t = b.blocks.at(bi).term;
-            if t.kind == ir::TM_DROP {
-                self.count_place(b, t.a, false, refs, defs);
-            } else if t.kind == ir::TM_CALL {
-                for d in 0..t.dests_len {
-                    self.count_place(b, b.dest_pool[(t.dests_start + d) as usize], true, refs, defs);
-                }
-            }
-        }
-    }
-
     // A rvalue with no side effect: its store can be dropped when the destination is never read.
     const fn pure_rvalue(k: u8) bool {
         return k == ir::RV_USE || k == ir::RV_UNARY || k == ir::RV_BINARY || k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_LEN || k == ir::RV_DISCRIMINANT || k == ir::RV_REPEAT || k == ir::RV_AGGREGATE;
     }
 
-    // Read count (uses that are not whole-local writes; a taken address counts as a read) and the
-    // hard-write flag (a whole-local write whose value must land somewhere: a call destination or a
-    // side-effecting rvalue). A local with neither reads nor a hard write is dead -- no declaration,
-    // and its pure stores are dropped. Reads over-count (safe: it only keeps more locals live).
-    fn count_rw(self: &Self, b: &ir::CoreBody, reads: &mut Vector<u32>, hardw: &mut Vector<bool>) {
+    // One pass over the body for every per-local counter: reference/definition counts (never
+    // under-counting a use, so a coalesce guarded by `refs[src] == 1` is safe), use counts, read
+    // counts (a taken address counts; over-counting only keeps more locals live), and the
+    // hard-write flag (a whole-local write whose value must land: a call destination or a
+    // side-effecting rvalue). A local with no reads and no hard write is dead.
+    fn count_all(
+        self: &Self,
+        b: &ir::CoreBody,
+        refs: &mut Vector<u32>,
+        defs: &mut Vector<u32>,
+        uses: &mut Vector<u32>,
+        reads: &mut Vector<u32>,
+        hardw: &mut Vector<bool>,
+    ) {
         for o in 0..b.operands.len() {
             let op = *b.operands.at(o);
             if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                self.count_place(b, op.data, false, refs, defs);
                 let base = b.places.at(op.data as usize).base as usize;
+                uses.set(base, *uses.at(base) + 1);
                 reads.set(base, *reads.at(base) + 1);
             }
         }
         for si in 0..b.statements.len() {
             let s = *b.statements.at(si);
             if s.kind == ir::ST_ASSIGN {
+                self.count_place(b, s.place, true, refs, defs);
                 let pl = *b.places.at(s.place as usize);
                 let rv = *b.rvalues.at(s.rvalue as usize);
                 if pl.proj_len != 0 {
@@ -1095,10 +1073,12 @@ extend CEmit {
                     hardw.set(pl.base as usize, true);
                 }
                 if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
+                    self.count_place(b, rv.a, false, refs, defs);
                     let rb = b.places.at(rv.a as usize).base as usize;
                     reads.set(rb, *reads.at(rb) + 1);
                 }
             } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
+                self.count_place(b, s.place, false, refs, defs);
                 reads.set(
                     b.places.at(s.place as usize).base as usize,
                     *reads.at(b.places.at(s.place as usize).base as usize) + 1,
@@ -1108,6 +1088,7 @@ extend CEmit {
         for bi in 0..b.blocks.len() {
             let t = b.blocks.at(bi).term;
             if t.kind == ir::TM_DROP {
+                self.count_place(b, t.a, false, refs, defs);
                 reads.set(
                     b.places.at(t.a as usize).base as usize,
                     *reads.at(b.places.at(t.a as usize).base as usize) + 1,
@@ -1118,6 +1099,7 @@ extend CEmit {
                 }
             } else if t.kind == ir::TM_CALL {
                 for d in 0..t.dests_len {
+                    self.count_place(b, b.dest_pool[(t.dests_start + d) as usize], true, refs, defs);
                     let pl = *b.places.at(b.dest_pool[(t.dests_start + d) as usize] as usize);
                     if pl.proj_len != 0 {
                         reads.set(pl.base as usize, *reads.at(pl.base as usize) + 1);
@@ -1251,24 +1233,23 @@ extend CEmit {
         let mut defs = Vector::<u32>::new();
         let mut uses = Vector::<u32>::new();
         let mut coal_root = Vector::<bool>::new();
+        let mut reads = Vector::<u32>::new();
+        let mut hardw = Vector::<bool>::new();
         refs.reserve(n);
         defs.reserve(n);
         uses.reserve(n);
         coal_root.reserve(n);
+        reads.reserve(n);
+        hardw.reserve(n);
         for _l in 0..n {
             refs.push(0);
             defs.push(0);
             uses.push(0);
             coal_root.push(false);
+            reads.push(0);
+            hardw.push(false);
         }
-        self.count_locals(b, &mut refs, &mut defs);
-        for o in 0..b.operands.len() {
-            let op = *b.operands.at(o);
-            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                let base = b.places.at(op.data as usize).base as usize;
-                uses.set(base, *uses.at(base) + 1);
-            }
-        }
+        self.count_all(b, &mut refs, &mut defs, &mut uses, &mut reads, &mut hardw);
         for si in 0..b.statements.len() {
             let s = *b.statements.at(si);
             if s.kind != ir::ST_ASSIGN {
@@ -1475,15 +1456,6 @@ extend CEmit {
         // Liveness for declaration + dead-store removal: a local needs a declaration when it is read
         // (a taken address counts) or written by something that must land in it (a call result or a
         // side-effecting rvalue). Neither -> dead: no declaration, and its pure stores are dropped.
-        let mut reads = Vector::<u32>::new();
-        let mut hardw = Vector::<bool>::new();
-        reads.reserve(n);
-        hardw.reserve(n);
-        for _l in 0..n {
-            reads.push(0);
-            hardw.push(false);
-        }
-        self.count_rw(b, &mut reads, &mut hardw);
         self.sx_used.clear();
         for l in 0..n {
             self.sx_used.push(*reads.at(l) != 0 || *hardw.at(l));
@@ -4737,22 +4709,34 @@ extend CEmit {
         let pl0 = *b.places.at(s.place as usize);
         let root0 = *self.sx_coal.at(pl0.base as usize);
         let fuse_decl = pl0.proj_len == 0 && *self.sx_fuse.at(root0 as usize) && !*self.sx_declared.at(root0 as usize);
+        if !fuse_decl {
+            // the pieces appear in output order, so they spell straight into the output buffer
+            // (a failed statement leaves partial text; every failure path discards the body)
+            let mut o = replace(&mut self.out, String::new());
+            o.push_str("  ");
+            let mut ok = self.emit_place(b, s.place, &mut o);
+            if ok {
+                o.push_str(" = ");
+                ok = self.emit_rvalue(b, s.rvalue, &mut o);
+            }
+            if ok {
+                o.push_str(";\n");
+            }
+            self.out = o;
+            return ok;
+        }
         let mut lhs = self.sget();
         let mut rhs = self.sget();
         let ok = self.emit_place(b, s.place, &mut lhs) && self.emit_rvalue(b, s.rvalue, &mut rhs);
         if ok {
             self.out.push_str("  ");
-            if fuse_decl {
-                self.sx_declared.set(root0 as usize, true);
-                let mut decl = self.sget();
-                if !self.ty_c(b.module, b.locals.at(root0 as usize).ty, lhs.as_str(), &mut decl) {
-                    return false;
-                }
-                self.out.push_string(&decl);
-                self.sput(decl);
-            } else {
-                self.out.push_string(&lhs);
+            self.sx_declared.set(root0 as usize, true);
+            let mut decl = self.sget();
+            if !self.ty_c(b.module, b.locals.at(root0 as usize).ty, lhs.as_str(), &mut decl) {
+                return false;
             }
+            self.out.push_string(&decl);
+            self.sput(decl);
             self.out.push_str(" = ");
             self.out.push_string(&rhs);
             self.out.push_str(";\n");
@@ -5045,15 +5029,16 @@ extend CEmit {
     // Emit a place applying only its first `lim` projections. `&*p` collapses to `p` by emitting the
     // dereferenced place with its trailing deref dropped (lim = proj_len - 1), which the address-of
     // rvalue then spells without the `&`.
-    fn emit_place_lim(self: &mut Self, b: &ir::CoreBody, pid: ir::PlaceId, lim: u32, dst: &mut String) bool {
-        let pl = *b.places.at(pid as usize);
-        let mut cur = self.sget();
-        if *self.sx_call_fwd.at(pl.base as usize) {
-            cur.push_str("(");
-            cur.push_string(self.sx_call_str.at(pl.base as usize));
-            cur.push_str(")");
-        } else if b.locals.at(pl.base as usize).storage == ir::LS_STATIC_REF {
-            let item = b.locals.at(pl.base as usize).item;
+    // The base spelling of local `base` straight into `dst`: forwarded-call parens, static/const
+    // symbols (with the demand-time stub record), captured-env members, or the local's C name.
+    fn emit_place_base(self: &mut Self, b: &ir::CoreBody, base: u32, dst: &mut String) bool {
+        let d0 = dst.len();
+        if *self.sx_call_fwd.at(base as usize) {
+            dst.push_str("(");
+            dst.push_string(self.sx_call_str.at(base as usize));
+            dst.push_str(")");
+        } else if b.locals.at(base as usize).storage == ir::LS_STATIC_REF {
+            let item = b.locals.at(base as usize).item;
             // a CONST-GENERIC parameter bound by the active instantiation is a literal, not a symbol
             let mut folded = false;
             {
@@ -5069,21 +5054,23 @@ extend CEmit {
                         };
                         let mut cv8: i64 = 0;
                         if self.mg.fold_cval_at(sb8.am, sb8.at, &mut cv8, kl8) {
-                            cur.push_i64(cv8);
+                            dst.push_i64(cv8);
                             folded = true;
                             break;
                         }
                     }
                 }
             }
-            if !folded && (item.node == NODE_NONE || !self.mg.const_sym(b.module, item.module, item.node, &mut cur)) {
+            if !folded && (item.node == NODE_NONE || !self.mg.const_sym(b.module, item.module, item.node, dst)) {
                 return self.fail("static-sym");
             }
             if self.collect_demand && !folded {
                 let mut h = 1469598103934665603u64;
-                let cs = cur.as_str();
-                for k in 0..cs.len() {
-                    h = (h ^ cs.byte_at(k) as u64) * 1099511628211u64;
+                {
+                    let cs = dst.as_str();
+                    for k in d0..cs.len() {
+                        h = (h ^ cs.byte_at(k) as u64) * 1099511628211u64;
+                    }
                 }
                 let fresh = switch self.stat_seen.get(&h) {
                     Some(_v) => false,
@@ -5096,27 +5083,44 @@ extend CEmit {
                     if !hdr_owned {
                         // extern-block statics skip the stub: the backing header declares them
                         // (with qualifiers a re-declaration here could contradict)
+                        let mut symb = self.sget();
+                        symb.push_str(dst.as_str().slice(d0, dst.len()));
                         let mut sd = String::from_str("extern ");
-                        if self.ty_c(b.module, b.locals.at(pl.base as usize).ty, cur.as_str(), &mut sd) {
+                        if self.ty_c(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
                             sd.push_str(";\n");
                             self.stat_decls.push_string(&sd);
                             self.stat_items.push(
                                 StatRef {
                                     em: b.module,
                                     def: item,
-                                    sym: cur.clone(),
-                                    ty: b.locals.at(pl.base as usize).ty,
+                                    sym: symb.clone(),
+                                    ty: b.locals.at(base as usize).ty,
                                 },
                             );
                         }
+                        self.sput(symb);
                     }
                 }
             }
-        } else if self.cap_on && pl.base >= self.cap_base && pl.base as usize < self.cap_base as usize + self.cap_names.len() {
-            cur.push_str("__env->");
-            cur.push_string(self.cap_names.at((pl.base - self.cap_base) as usize));
+        } else if self.cap_on && base >= self.cap_base && base as usize < self.cap_base as usize + self.cap_names.len() {
+            dst.push_str("__env->");
+            dst.push_string(self.cap_names.at((base - self.cap_base) as usize));
         } else {
-            self.lspell(pl.base, &mut cur);
+            self.lspell(base, dst);
+        }
+        return true;
+    }
+
+    fn emit_place_lim(self: &mut Self, b: &ir::CoreBody, pid: ir::PlaceId, lim: u32, dst: &mut String) bool {
+        let pl = *b.places.at(pid as usize);
+        if lim == 0 {
+            // no projections, no wraps: the base spells straight into the destination
+            return self.emit_place_base(b, pl.base, dst);
+        }
+        let mut cur = self.sget();
+        if !self.emit_place_base(b, pl.base, &mut cur) {
+            self.sput(cur);
+            return false;
         }
         let mut pre = b.locals.at(pl.base as usize).ty;
         let mut ok = true;
@@ -9074,10 +9078,6 @@ extend CEmit {
             if self.collect_demand && dyn_recv == ir::IR_NONE {
                 self.collect_extern_proto(b, t);
             }
-            let mut line = self.sget();
-            let mut ok = true;
-            let mut arrdst = false; // fixed-array dest: `{ <sym>_ret __ar = f(..); memcpy(dst, __ar._a, ..); }`
-            let mut dplace = self.sget();
             // a forwarded destination: this call spells `f(..)` at its single read instead of storing
             // to a temporary, so it emits nothing here and builds the expression into sx_call_str.
             let mut fwd_r = ir::IR_NONE;
@@ -9087,10 +9087,16 @@ extend CEmit {
                     fwd_r = rb;
                 }
             }
+            // destination analysis up front (no text): the common call then spells straight into
+            // the output buffer, and only stashed/sliced/decl-fused forms build a side line
+            let mut want = false;
+            let mut arrdst = false; // fixed-array dest: `{ <sym>_ret __ar = f(..); memcpy(dst, __ar._a, ..); }`
+            let mut fuse_sub = false;
+            let mut droot: u32 = 0;
             if t.dests_len == 1 && fwd_r == ir::IR_NONE {
                 let dp = b.dest_pool[t.dests_start as usize];
                 let dty = b.places.at(dp as usize).ty;
-                let mut want = !self.is_unit(b, dty);
+                want = !self.is_unit(b, dty);
                 if dty == TYPE_NONE && t.callee.node != NODE_NONE {
                     // untyped dest: the callee's declared return count decides
                     let ca9 = self.p().module_ast_const(t.callee.module);
@@ -9104,119 +9110,142 @@ extend CEmit {
                     let y8 = *self.p().module_ast_const(am8).type_at(at8);
                     arrdst = y8.kind == TypeKind::TYPE_ARRAY && y8.as_data.arr.len != 0;
                 }
-                if want && arrdst {
-                    ok = self.emit_place(b, dp, &mut dplace);
-                } else if want {
+                if want && !arrdst {
                     let pl = *b.places.at(dp as usize);
-                    let root = *self.sx_coal.at(pl.base as usize);
-                    let mut lhs = self.sget();
-                    ok = self.emit_place(b, dp, &mut lhs);
-                    if ok && pl.proj_len == 0 && *self.sx_fuse.at(root as usize) && !*self.sx_declared.at(root as usize) {
-                        let mut decl = self.sget();
-                        let lty = b.locals.at(root as usize).ty;
-                        if lty == TYPE_NONE {
-                            ok = self.untyped_ret_struct(b, root, &mut decl);
+                    droot = *self.sx_coal.at(pl.base as usize);
+                    fuse_sub = pl.proj_len == 0 && *self.sx_fuse.at(droot as usize) && !*self.sx_declared.at(
+                        droot as usize,
+                    );
+                }
+            }
+            let plain = fwd_r == ir::IR_NONE && !arrdst && !fuse_sub;
+            let mut o = replace(&mut self.out, String::new());
+            let mut line = self.sget();
+            let mut dplace = self.sget();
+            let mut ok = true;
+            let mut cs_len: usize = 0;
+            {
+                let sink = if plain {
+                    &mut o;
+                } else {
+                    &mut line;
+                };
+                if plain {
+                    sink.push_str("  ");
+                }
+                if t.dests_len == 1 && fwd_r == ir::IR_NONE {
+                    let dp = b.dest_pool[t.dests_start as usize];
+                    if want && arrdst {
+                        ok = self.emit_place(b, dp, &mut dplace);
+                    } else if want {
+                        if fuse_sub {
+                            let mut lhs = self.sget();
+                            ok = self.emit_place(b, dp, &mut lhs);
                             if ok {
-                                decl.push_str("_ret ");
-                                decl.push_string(&lhs);
+                                let mut decl = self.sget();
+                                let lty = b.locals.at(droot as usize).ty;
+                                if lty == TYPE_NONE {
+                                    ok = self.untyped_ret_struct(b, droot, &mut decl);
+                                    if ok {
+                                        decl.push_str("_ret ");
+                                        decl.push_string(&lhs);
+                                    }
+                                } else {
+                                    ok = self.ty_c(b.module, lty, lhs.as_str(), &mut decl);
+                                }
+                                if ok {
+                                    self.sx_declared.set(droot as usize, true);
+                                    sink.push_string(&decl);
+                                }
+                                self.sput(decl);
                             }
+                            self.sput(lhs);
                         } else {
-                            ok = self.ty_c(b.module, lty, lhs.as_str(), &mut decl);
+                            ok = self.emit_place(b, dp, sink);
                         }
+                        sink.push_str(" = ");
+                    }
+                }
+                // a capturing closure value calls its hoisted function with the env first; a dyn fn
+                // value dispatches through its vtable's `call` slot
+                let mut env_first = false;
+                let mut dyn_val = false;
+                if ok && t.callee.node == NODE_NONE {
+                    let cop = *b.operands.at(t.a as usize);
+                    let mut cmV = b.module;
+                    let mut ctV = cop.ty;
+                    self.rty(b, cop.ty, &mut cmV, &mut ctV);
+                    let cy = *self.p().module_ast_const(cmV).type_at(ctV);
+                    if cy.kind == TypeKind::TYPE_DYN {
+                        ok = self.dyn_request(cmV, ctV);
                         if ok {
-                            self.sx_declared.set(root as usize, true);
-                            line.push_string(&decl);
+                            ok = self.emit_operand(b, t.a, sink);
                         }
-                        self.sput(decl);
-                    } else {
-                        line.push_string(&lhs);
+                        sink.push_str(".vt->call");
+                        dyn_val = true;
+                    } else if cy.kind == TypeKind::TYPE_FUNCTION {
+                        let cd = self.p().module_ast_const(cy.module).at_const(cy.as_data.decl);
+                        if cd.kind == NodeKind::NODE_CLOSURE && cd.as_data.closure.captures.len != 0 {
+                            self.mg.closure_sym(cy.module, cy.as_data.decl, sink);
+                            env_first = true;
+                        }
                     }
-                    self.sput(lhs);
-                    line.push_str(" = ");
+                    if ok && !env_first && !dyn_val {
+                        ok = self.emit_operand(b, t.a, sink);
+                    }
+                } else if ok && dyn_recv != ir::IR_NONE {
+                    ok = self.emit_operand(b, dyn_recv, sink);
+                    sink.push_str(".vt->");
+                    let ca0 = self.p().module_ast_const(t.callee.module);
+                    self.mg.ident(
+                        t.callee.module,
+                        ca0.at_const(ca0.at_const(t.callee.node).as_data.function.name).as_data.name.text,
+                        sink,
+                    );
+                } else if ok {
+                    let mut rty2 = TYPE_NONE;
+                    if t.args_len > 0 {
+                        rty2 = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
+                    }
+                    let mut dty2 = TYPE_NONE;
+                    if t.dests_len == 1 {
+                        dty2 = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
+                    }
+                    ok = self.callee_sym(b, t.callee, t.targs_start, t.targs_len, rty2, dty2, sink);
                 }
-            }
-            // a capturing closure value calls its hoisted function with the env first; a dyn fn
-            // value dispatches through its vtable's `call` slot
-            let mut env_first = false;
-            let mut dyn_val = false;
-            if ok && t.callee.node == NODE_NONE {
-                let cop = *b.operands.at(t.a as usize);
-                let mut cmV = b.module;
-                let mut ctV = cop.ty;
-                self.rty(b, cop.ty, &mut cmV, &mut ctV);
-                let cy = *self.p().module_ast_const(cmV).type_at(ctV);
-                if cy.kind == TypeKind::TYPE_DYN {
-                    if !self.dyn_request(cmV, ctV) {
-                        return false;
+                cs_len = sink.len();
+                if ok {
+                    sink.push_str("(");
+                    if env_first {
+                        sink.push_str("&");
+                        ok = self.emit_operand(b, t.a, sink);
+                        if t.args_len != 0 {
+                            sink.push_str(", ");
+                        }
                     }
-                    ok = self.emit_operand(b, t.a, &mut line);
-                    line.push_str(".vt->call");
-                    dyn_val = true;
-                } else if cy.kind == TypeKind::TYPE_FUNCTION {
-                    let cd = self.p().module_ast_const(cy.module).at_const(cy.as_data.decl);
-                    if cd.kind == NodeKind::NODE_CLOSURE && cd.as_data.closure.captures.len != 0 {
-                        self.mg.closure_sym(cy.module, cy.as_data.decl, &mut line);
-                        env_first = true;
+                    if dyn_val {
+                        ok = self.emit_operand(b, t.a, sink);
+                        sink.push_str(".data");
+                        if t.args_len != 0 {
+                            sink.push_str(", ");
+                        }
                     }
-                }
-                if !env_first && !dyn_val {
-                    ok = self.emit_operand(b, t.a, &mut line);
-                }
-            } else if ok && dyn_recv != ir::IR_NONE {
-                ok = self.emit_operand(b, dyn_recv, &mut line);
-                line.push_str(".vt->");
-                let ca0 = self.p().module_ast_const(t.callee.module);
-                self.mg.ident(
-                    t.callee.module,
-                    ca0.at_const(ca0.at_const(t.callee.node).as_data.function.name).as_data.name.text,
-                    &mut line,
-                );
-            } else if ok {
-                let mut rty2 = TYPE_NONE;
-                if t.args_len > 0 {
-                    rty2 = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
-                }
-                let mut dty2 = TYPE_NONE;
-                if t.dests_len == 1 {
-                    dty2 = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
-                }
-                ok = self.callee_sym(b, t.callee, t.targs_start, t.targs_len, rty2, dty2, &mut line);
-            }
-            let cs_len = line.len();
-            if ok {
-                line.push_str("(");
-                if env_first {
-                    line.push_str("&");
-                    ok = self.emit_operand(b, t.a, &mut line);
-                    if t.args_len != 0 {
-                        line.push_str(", ");
+                    for i in 0..t.args_len {
+                        if !ok {
+                            break;
+                        }
+                        if dyn_recv != ir::IR_NONE && i == 0 {
+                            // the erased receiver: its data pointer takes the self slot
+                            ok = self.emit_operand(b, dyn_recv, sink);
+                            sink.push_str(".data");
+                            continue;
+                        }
+                        if i != 0 {
+                            sink.push_str(", ");
+                        }
+                        let opid2 = b.oper_pool[(t.args_start + i) as usize];
+                        ok = self.emit_call_arg(b, t.callee, i, opid2, sink);
                     }
-                }
-                if dyn_val {
-                    ok = self.emit_operand(b, t.a, &mut line);
-                    line.push_str(".data");
-                    if t.args_len != 0 {
-                        line.push_str(", ");
-                    }
-                }
-                for i in 0..t.args_len {
-                    if !ok {
-                        break;
-                    }
-                    if dyn_recv != ir::IR_NONE && i == 0 {
-                        // the erased receiver: its data pointer takes the self slot
-                        ok = self.emit_operand(b, dyn_recv, &mut line);
-                        line.push_str(".data");
-                        continue;
-                    }
-                    if i != 0 {
-                        line.push_str(", ");
-                    }
-                    let opid2 = b.oper_pool[(t.args_start + i) as usize];
-                    let mut av2 = self.sget();
-                    ok = self.emit_call_arg(b, t.callee, i, opid2, &mut av2);
-                    line.push_string(&av2);
-                    self.sput(av2);
                 }
             }
             if ok && fwd_r != ir::IR_NONE {
@@ -9231,20 +9260,23 @@ extend CEmit {
                 }
                 self.sx_call_str.set(fwd_r as usize, stored);
             } else if ok && arrdst {
-                self.out.push_str("  { ");
-                self.out.push_str(line.as_str().slice(0, cs_len));
-                self.out.push_str("_ret __ar = ");
-                self.out.push_string(&line);
-                self.out.push_str("); memcpy(");
-                self.out.push_string(&dplace);
-                self.out.push_str(", __ar._a, sizeof(__ar._a)); }\n");
+                o.push_str("  { ");
+                o.push_str(line.as_str().slice(0, cs_len));
+                o.push_str("_ret __ar = ");
+                o.push_string(&line);
+                o.push_str("); memcpy(");
+                o.push_string(&dplace);
+                o.push_str(", __ar._a, sizeof(__ar._a)); }\n");
+            } else if ok && plain {
+                o.push_str(");\n");
             } else if ok {
-                self.out.push_str("  ");
-                self.out.push_string(&line);
-                self.out.push_str(");\n");
+                o.push_str("  ");
+                o.push_string(&line);
+                o.push_str(");\n");
             }
             self.sput(line);
             self.sput(dplace);
+            self.out = o;
             return ok;
         }
         if t.kind == ir::TM_ASSERT {

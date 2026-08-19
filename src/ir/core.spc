@@ -90,6 +90,40 @@ pub struct Constant {
 
 /// Rvalue kinds.
 pub const RV_USE: u8 = 0; // a = OperandId
+// Borrowck replay tape events (recorded by the Lowerer at the walk's AST sites; consumed by
+// bc_replay): entry = kind << 56 | aux << 32 | node. Synthetic/desugared lowering never records.
+pub const TP_SCOPE_PUSH: u8 = 1;
+pub const TP_SCOPE_POP: u8 = 2;
+pub const TP_NLL: u8 = 3; // node = block, aux = statement index
+pub const TP_MARK_PUSH: u8 = 4;
+pub const TP_MARK_POP: u8 = 5;
+pub const TP_LET: u8 = 6;
+pub const TP_LET_TUPLE: u8 = 7;
+pub const TP_ASSIGN_PRE: u8 = 8;
+pub const TP_ASSIGN_POST: u8 = 9;
+pub const TP_RET_VAL: u8 = 10; // node = value expr, aux = index
+pub const TP_RET_POST: u8 = 11;
+pub const TP_CALL_MARK: u8 = 12;
+pub const TP_CALL: u8 = 13; // aux 1 = dyn free receiver
+pub const TP_REF: u8 = 14;
+pub const TP_CAST_ERASE: u8 = 15; // node = cast expression operand
+pub const TP_SLICE: u8 = 16;
+pub const TP_CLOSURE: u8 = 17;
+pub const TP_DEFER: u8 = 18; // node = deferred expr
+pub const TP_FLOW_SAVE: u8 = 19;
+pub const TP_FLOW_ELSE: u8 = 20;
+pub const TP_FLOW_JOIN: u8 = 21;
+pub const TP_LOOP_PUSH: u8 = 22; // aux 1 = for loop
+pub const TP_LOOP_POP: u8 = 23;
+pub const TP_BODY_START: u8 = 24; // aux 1 = always runs; for-loops also record the binding depth
+pub const TP_BODY_END: u8 = 25;
+pub const TP_MATCH_PRE: u8 = 26; // aux 1 = value position
+pub const TP_ARM: u8 = 27; // node = arm, aux = arm index
+pub const TP_ARM_END: u8 = 28;
+pub const TP_MATCH_POST: u8 = 29;
+pub const TP_WALK_EXPR: u8 = 30; // escape hatch: replay walks the subtree
+pub const TP_WALK_STMT: u8 = 31;
+
 pub const RV_REF: u8 = 1; // &place; a = PlaceId, b = 1 when mutable
 pub const RV_ADDR: u8 = 2; // raw address of place; a = PlaceId, b = 1 when *mut
 pub const RV_UNARY: u8 = 3; // a = OperandId, b = token op
@@ -210,6 +244,9 @@ pub struct CoreBody {
     /// The body contains an UNEXPANDED reflection binder (`inline for .. in fields(..)` whose
     /// owner stayed symbolic): instances must RE-LOWER with the demand env, never share this body.
     pub has_reflect: bool,
+    // Some `let x: T;` declared a local without a value: only then can a use-before-init exist,
+    // so bodies without it (and without moves) skip the move/init dataflow outright.
+    pub has_uninit_decl: bool,
     pub locals: Vector<LocalDecl>,
     pub blocks: Vector<BasicBlock>,
     pub statements: Vector<Statement>,
@@ -222,6 +259,9 @@ pub struct CoreBody {
     pub dest_pool: Vector<PlaceId>, // call destination ranges
     pub switch_pool: Vector<u64>, // TM_SWITCH pairs: value<<32 | target (values are u32-encoded)
     pub targ_pool: Vector<TypeId>, // generic-argument ranges for calls and item constants
+    // Bit per operand: this OP_MOVE is a USER consumption (let/return/argument/aggregate/assign
+    // positions the walk's move rules check) -- pattern binds, downcasts, and spills stay unmarked.
+    pub user_moves: Vector<u64>,
     pub entry: BlockId,
 }
 
@@ -234,6 +274,7 @@ extend CoreBody {
             returns: 0,
             is_generic: false,
             has_reflect: false,
+            has_uninit_decl: false,
             locals: Vector::<LocalDecl>::new(),
             blocks: Vector::<BasicBlock>::new(),
             statements: Vector::<Statement>::new(),
@@ -246,6 +287,7 @@ extend CoreBody {
             dest_pool: Vector::<PlaceId>::new(),
             switch_pool: Vector::<u64>::new(),
             targ_pool: Vector::<TypeId>::new(),
+            user_moves: Vector::<u64>::new(),
             entry: 0,
         };
     }
@@ -259,6 +301,7 @@ extend CoreBody {
         self.returns = 0;
         self.is_generic = false;
         self.has_reflect = false;
+        self.has_uninit_decl = false;
         self.locals.truncate(0);
         self.blocks.truncate(0);
         self.statements.truncate(0);
@@ -271,6 +314,7 @@ extend CoreBody {
         self.dest_pool.truncate(0);
         self.switch_pool.truncate(0);
         self.targ_pool.truncate(0);
+        self.user_moves.truncate(0);
         self.entry = 0;
     }
 
@@ -396,5 +440,6 @@ extend CoreBody as Free {
         self.dest_pool.free();
         self.switch_pool.free();
         self.targ_pool.free();
+        self.user_moves.free();
     }
 }

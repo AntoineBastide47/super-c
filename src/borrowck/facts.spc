@@ -91,6 +91,7 @@ extend Event {
 
 pub struct BodyFacts {
     pub npoints: u32,
+    pub nmoves: u32, // move/move-cut events in the body: 0 (with no split-init decl) skips MoveFlow
     pub block_base: Vector<u32>, // per block: first point (2 per statement + 2 for the terminator)
     pub norigins: u32,
     pub nuniversal: u32, // origins [0, nuniversal): 0 = 'static, then per-arg/declared placeholders
@@ -114,6 +115,8 @@ pub struct BodyFacts {
     pub mev: Vector<Event>,
     pub mev_start: Vector<u32>,
     pub rep_blk: Vector<bool>, // per block: any USE/MOVE/MOVE_CUT event (the reporting replay can say something)
+    pub easy_blk: Vector<bool>, // per block: only assign/root-leaf-use events, so a clean entry state cannot error
+    pub easy_use: Vector<u64>, // per block x lwords: root-leaf paths the block USES (easy-block clearance mask)
     pub freed: Vector<u32>, // move paths consumed by an explicit `.free()` (wording refinement)
     pub observed: Vector<bool>, // per local: owned carrier whose destruction observes stored borrows
     pub moved_whole: Vector<bool>, // per local: some path moves the WHOLE local (ownership travels)
@@ -143,6 +146,8 @@ extend BodyFacts as Free {
         self.mev.free();
         self.mev_start.free();
         self.rep_blk.free();
+        self.easy_blk.free();
+        self.easy_use.free();
         self.freed.free();
         self.observed.free();
         self.moved_whole.free();
@@ -776,6 +781,7 @@ extend BodyFacts {
     pub fn empty() BodyFacts {
         return BodyFacts {
             npoints: 0,
+            nmoves: 0,
             block_base: Vector::<u32>::new(),
             norigins: 0,
             nuniversal: 0,
@@ -796,6 +802,8 @@ extend BodyFacts {
             mev: Vector::<Event>::new(),
             mev_start: Vector::<u32>::new(),
             rep_blk: Vector::<bool>::new(),
+            easy_blk: Vector::<bool>::new(),
+            easy_use: Vector::<u64>::new(),
             freed: Vector::<u32>::new(),
             observed: Vector::<bool>::new(),
             moved_whole: Vector::<bool>::new(),
@@ -809,6 +817,7 @@ extend BodyFacts {
     // Truncate every vector (keeping heap capacity) and clear scalars, for reuse across bodies.
     pub fn reset(self: &mut Self) {
         self.npoints = 0;
+        self.nmoves = 0;
         self.norigins = 0;
         self.nuniversal = 0;
         self.lwords = 0;
@@ -830,6 +839,8 @@ extend BodyFacts {
         self.mev.truncate(0);
         self.mev_start.truncate(0);
         self.rep_blk.truncate(0);
+        self.easy_blk.truncate(0);
+        self.easy_use.truncate(0);
         self.freed.truncate(0);
         self.observed.truncate(0);
         self.moved_whole.truncate(0);
@@ -1577,6 +1588,7 @@ extend Gen {
         for _i in 0..nb as u32 * lw {
             self.f.luse.push(0u64);
             self.f.ldef.push(0u64);
+            self.f.easy_use.push(0u64);
         }
         for bi in 0..nb {
             self.cur_block = bi as u32;
@@ -1584,6 +1596,7 @@ extend Gen {
             self.f.ev_start.push(ne);
             self.f.mev_start.push(self.f.mev.len() as u32);
             self.f.rep_blk.push(false);
+            self.f.easy_blk.push(true);
             while self.seen.len() < lw as usize {
                 self.seen.push(0u64);
             }
@@ -2023,8 +2036,11 @@ extend Gen {
         self.f.mev_start.push(self.f.mev.len() as u32);
     }
 
-    // Push one event, mirroring it into the fixpoint's mutating stream and the block's report flag
-    // as it lands, so no later pass re-reads the whole stream.
+    // Push one event, mirroring it into the fixpoint's mutating stream and the block's report and
+    // easy flags as it lands, so no later pass re-reads the whole stream. A block stays "easy"
+    // while it holds only assigns (which strictly improve state) and uses of root-leaf paths
+    // (whose error checks reduce to that path's own entry bits) -- the reporting pass can then
+    // clear it against the entry rows in O(words) instead of replaying.
     fn push_ev(self: &mut Self, kind: u8, path: u32, point: u32, sp: tok::Span) {
         self.f.events.push(ev(kind, path, point, sp));
         if kind == EV_ASSIGN || kind == EV_DEAD || kind == EV_MOVE {
@@ -2032,6 +2048,18 @@ extend Gen {
         }
         if kind == EV_USE || kind == EV_MOVE || kind == EV_MOVE_CUT {
             self.f.rep_blk.set(self.cur_block as usize, true);
+        }
+        if kind == EV_MOVE || kind == EV_MOVE_CUT {
+            self.f.nmoves += 1;
+        }
+        if kind != EV_ASSIGN {
+            let fo = self.forest();
+            if kind != EV_USE || fo.parent[path as usize] != mp::MP_NONE || !fo.is_leaf(path) {
+                self.f.easy_blk.set(self.cur_block as usize, false);
+            } else {
+                let slot = (self.cur_block * self.f.lwords + path / 64) as usize;
+                self.f.easy_use.set(slot, self.f.easy_use[slot] | 1u64 << (path & 63) as u64);
+            }
         }
     }
 
