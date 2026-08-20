@@ -205,6 +205,7 @@ extend Owner as Free {
 }
 
 // Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
+@c.always_inline
 fn cache_get(arr: &mut Vector<Vector<i8>>, mid: ModuleId, ty: TypeId) i8 {
     while arr.len() <= mid as usize {
         arr.push(Vector::<i8>::new());
@@ -216,6 +217,7 @@ fn cache_get(arr: &mut Vector<Vector<i8>>, mid: ModuleId, ty: TypeId) i8 {
     return *row.at(ty as usize);
 }
 
+@c.always_inline
 fn cache_set(arr: &mut Vector<Vector<i8>>, mid: ModuleId, ty: TypeId, r: bool) {
     while arr.len() <= mid as usize {
         arr.push(Vector::<i8>::new());
@@ -376,6 +378,17 @@ extend Owner {
         if ty == TYPE_NONE || depth > 12 {
             return false;
         }
+        // Front cache: a generic type is never concrete, so the substitution path stays below.
+        if frame.len() == 0 && self.ast_of(mid).type_concrete(ty) {
+            let c9 = cache_get(&mut self.owns_arr, mid, ty);
+            if c9 >= 0 {
+                return c9 != 0;
+            }
+            let y9 = *self.ast_of(mid).type_at(ty);
+            let r9 = self.owns_raw(mid, &y9, frame, depth);
+            cache_set(&mut self.owns_arr, mid, ty, r9);
+            return r9;
+        }
         let y = *self.ast_of(mid).type_at(ty);
         if y.kind == TypeKind::TYPE_GENERIC {
             for i in 0..frame.len() {
@@ -389,18 +402,7 @@ extend Owner {
             }
             return self.param_has_free_bound(y.module, y.as_data.decl);
         }
-        let cacheable = frame.len() == 0 && self.ast_of(mid).type_concrete(ty);
-        if cacheable {
-            let c = cache_get(&mut self.owns_arr, mid, ty);
-            if c >= 0 {
-                return c != 0;
-            }
-        }
-        let r = self.owns_raw(mid, &y, frame, depth);
-        if cacheable {
-            cache_set(&mut self.owns_arr, mid, ty, r);
-        }
-        return r;
+        return self.owns_raw(mid, &y, frame, depth);
     }
 
     fn owns_raw(self: &mut Self, mid: ModuleId, y: &Ty, frame: &Vector<OwnSubst>, depth: i32) bool {
@@ -629,6 +631,23 @@ extend Owner {
         if ty == TYPE_NONE || depth > 8 {
             return false;
         }
+        // Front cache: mut_caps bits are final before any Owner query runs (bc_ir_lower sets
+        // them), so closure-typed results are stable -- unlike the walk-side memo.
+        let front = self.ast_of(mid).type_concrete(ty);
+        if front {
+            let c = cache_get(&mut self.carry_arr, mid, ty);
+            if c >= 0 {
+                return c != 0;
+            }
+        }
+        let r9 = self.carries_go(mid, ty, depth);
+        if front {
+            cache_set(&mut self.carry_arr, mid, ty, r9);
+        }
+        return r9;
+    }
+
+    fn carries_go(self: &mut Self, mid: ModuleId, ty: TypeId, depth: i32) bool {
         let y = *self.ast_of(mid).type_at(ty);
         if y.kind == TypeKind::TYPE_REFERENCE {
             return true;
@@ -693,13 +712,6 @@ extend Owner {
         if od != NODE_NONE && self.ast_of(om).lifetimes_of(od).len != 0 {
             return true;
         }
-        let cacheable = self.ast_of(mid).type_concrete(ty);
-        if cacheable {
-            let c = cache_get(&mut self.carry_arr, mid, ty);
-            if c >= 0 {
-                return c != 0;
-            }
-        }
         let dn = *self.ast_of(om).at_const(od);
         let mut r = false;
         if dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM {
@@ -740,9 +752,6 @@ extend Owner {
                     break;
                 }
             }
-        }
-        if cacheable {
-            cache_set(&mut self.carry_arr, mid, ty, r);
         }
         return r;
     }
@@ -1188,6 +1197,7 @@ extend Gen {
     }
 
     // A value read of a place: liveness, init/move event, and the matching access.
+    @c.always_inline
     fn op_read(self: &mut Self, opid: ir::OperandId, point: u32, sp: tok::Span) {
         let op = *self.body().operands.at(opid as usize);
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
@@ -1812,7 +1822,11 @@ extend Gen {
                                     for y in 0..jtok.len() {
                                         if itok[x] == jtok[y] {
                                             tie = true;
+                                            break;
                                         }
+                                    }
+                                    if tie {
+                                        break;
                                     }
                                 }
                                 if tie {
@@ -2041,6 +2055,7 @@ extend Gen {
     // while it holds only assigns (which strictly improve state) and uses of root-leaf paths
     // (whose error checks reduce to that path's own entry bits) -- the reporting pass can then
     // clear it against the entry rows in O(words) instead of replaying.
+    @c.always_inline
     fn push_ev(self: &mut Self, kind: u8, path: u32, point: u32, sp: tok::Span) {
         self.f.events.push(ev(kind, path, point, sp));
         if kind == EV_ASSIGN || kind == EV_DEAD || kind == EV_MOVE {

@@ -272,6 +272,7 @@ extend Resolver {
 
     // Symbol-stack lookup. `idx` is the matched symbol's 1-based stack position (0 = not found), used to
     // tell whether a reference inside a closure binds to a variable declared OUTSIDE it (a capture).
+    @c.always_inline
     fn sym_lookup(self: &Self, name: tok::Span, ns: Namespace) SymLookup {
         let hash = name_hash(self.source, name);
         let key = symbol_key(hash, ns as u8);

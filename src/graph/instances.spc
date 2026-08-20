@@ -249,6 +249,7 @@ extend InstGraph {
                 for k in 0..r.args_len {
                     if self.keys.at((r.args_start + k) as usize).skey != self.argbuf.at(k as usize).skey {
                         eq = false;
+                        break;
                     }
                 }
                 if eq {

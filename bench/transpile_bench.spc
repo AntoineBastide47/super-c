@@ -198,7 +198,7 @@ fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
 
     let tplan = dtest::TestPlan::new(n);
     let mut o = demit::CemitOut::new(n);
-    demit::cemit_package(&mut p, false, &tplan, null, &mut o);
+    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o);
 
     dutil::write_super_rt(dir);
     write_c(dir, "__sc_types.h", o.types_h.as_str());
@@ -337,7 +337,7 @@ fn transpile_once() Timing {
     {
         let tplan = dtest::TestPlan::new(n);
         let mut o = demit::CemitOut::new(n);
-        demit::cemit_package(&mut p, false, &tplan, null, &mut o);
+        demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o);
         // write the whole package to the sink FILE exactly as a build does, so out_bytes is real
         unsafe stdio::fwrite(o.types_h.as_ptr(), 1, o.types_h.len(), f);
         unsafe stdio::fwrite(o.protos_h.as_ptr(), 1, o.protos_h.len(), f);

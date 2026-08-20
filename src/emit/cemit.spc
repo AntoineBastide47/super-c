@@ -137,6 +137,21 @@ pub struct CEmit {
     scratch: Vector<String>,
     // Reusable per-function CFG analyses (a CFlow rebuilds in place without allocating).
     cf_pool: Vector<cfl::CFlow>,
+    // Per-body u32/bool scratch arrays for the local-analysis passes (setup_locals, fusion,
+    // call forwarding): reallocating them for every body dominated the emitter's allocator traffic.
+    u32_pool: Vector<Vector<u32>>,
+    bool_pool: Vector<Vector<bool>>,
+    // Per-(module, TypeId) declaration-render memo: `decl_txt[i]` is ty_c's spelling with an empty
+    // name, `decl_mode[i]` how the name joins (0 = space, 1 = direct, 2 = not prefix-form: call
+    // ty_c). Validated per type by comparing against a real ty_c render, so hits are byte-exact.
+    // Edge/reserved-ident safety: setup_locals replays both for every local type before decls.
+    decl_memo: Map<u64, u64>,
+    decl_txt: Vector<String>,
+    decl_mode: Vector<u8>,
+    /// Caller-provided CFG for the next `emit_fn` (null = build internally). The drain loop
+    /// re-emits one lowered body per instantiation; its CFlow is substitution-independent, so the
+    /// driver builds it once per body and lends it here.
+    pub cf_ext: *const cfl::CFlow,
     // setup_locals' reserved/assigned identifier sets, cleared per body (capacity retained).
     sx_reserved: Map<u64, u64>,
     sx_assigned: Map<u64, u64>,
@@ -186,6 +201,21 @@ pub struct Demand {
     pub sfx: String,
 }
 
+// Does the body carry any loop-back-edge safepoint marker? Decides whether the function needs
+// its local preemption tick declared.
+fn body_has_safepoint(b: &ir::CoreBody) bool {
+    for si in 0..b.statements.len() {
+        let s = *b.statements.at(si);
+        if s.kind == ir::ST_ASSIGN {
+            let rv = *b.rvalues.at(s.rvalue as usize);
+            if rv.kind == ir::RV_INTRINSIC && rv.c as u32 == ir::IN_SAFEPOINT as u32 {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 extend CEmit as Free {
     pub fn free(self: &mut Self) {
         self.out.free();
@@ -231,6 +261,11 @@ extend CEmit as Free {
         self.sym_memo.free();
         self.scratch.free();
         self.cf_pool.free();
+        self.u32_pool.free();
+        self.bool_pool.free();
+        self.decl_memo.free();
+        self.decl_txt.free();
+        self.decl_mode.free();
         self.sx_reserved.free();
         self.sx_assigned.free();
         self.demand_seen.free();
@@ -302,6 +337,12 @@ extend CEmit {
             sym_memo_ctx: -2,
             scratch: Vector::<String>::new(),
             cf_pool: Vector::<cfl::CFlow>::new(),
+            u32_pool: Vector::<Vector<u32>>::new(),
+            bool_pool: Vector::<Vector<bool>>::new(),
+            decl_memo: Map::<u64, u64>::new(),
+            decl_txt: Vector::<String>::new(),
+            decl_mode: Vector::<u8>::new(),
+            cf_ext: null,
             sx_reserved: Map::<u64, u64>::new(),
             sx_assigned: Map::<u64, u64>::new(),
             demand_seen: Set::<u64>::new(),
@@ -337,6 +378,33 @@ extend CEmit {
         let mut s9 = s;
         s9.clear();
         self.scratch.push(s9);
+    }
+    fn uget(self: &mut Self) Vector<u32> {
+        let v9 = switch self.u32_pool.pop() {
+            Some(v) => v,
+            None => Vector::<u32>::new(),
+        };
+        return v9;
+    }
+
+    fn uput(self: &mut Self, v: Vector<u32>) {
+        let mut v9 = v;
+        v9.clear();
+        self.u32_pool.push(v9);
+    }
+
+    fn bget(self: &mut Self) Vector<bool> {
+        let v9 = switch self.bool_pool.pop() {
+            Some(v) => v,
+            None => Vector::<bool>::new(),
+        };
+        return v9;
+    }
+
+    fn bput(self: &mut Self, v: Vector<bool>) {
+        let mut v9 = v;
+        v9.clear();
+        self.bool_pool.push(v9);
     }
 
     // Feed local type `(m, t)`'s C-spelling identifiers into the reserved set, through the
@@ -1229,12 +1297,12 @@ extend CEmit {
         for l in 0..n {
             self.sx_coal.push(l as u32);
         }
-        let mut refs = Vector::<u32>::new();
-        let mut defs = Vector::<u32>::new();
-        let mut uses = Vector::<u32>::new();
-        let mut coal_root = Vector::<bool>::new();
-        let mut reads = Vector::<u32>::new();
-        let mut hardw = Vector::<bool>::new();
+        let mut refs = self.uget();
+        let mut defs = self.uget();
+        let mut uses = self.uget();
+        let mut coal_root = self.bget();
+        let mut reads = self.uget();
+        let mut hardw = self.bget();
         refs.reserve(n);
         defs.reserve(n);
         uses.reserve(n);
@@ -1363,15 +1431,32 @@ extend CEmit {
         // of every function/const/static/type item it names. Over-approximation is safe (it only
         // suffixes more names); the set is a hash set, so collection and lookup are near-linear.
         self.sx_reserved.clear();
-        for l in 0..n {
-            let ty = b.locals.at(l).ty;
-            if ty != TYPE_NONE {
-                self.reserve_local_ty(b.module, ty);
+        {
+            // bodies repeat a handful of local types; one replay per distinct type is enough
+            // (reserve_local_ty only inserts into sx_reserved and re-marks used_mods edges --
+            // both idempotent)
+            let mut seen_ty = self.uget();
+            for l in 0..n {
+                let ty = b.locals.at(l).ty;
+                if ty != TYPE_NONE {
+                    let mut dup = false;
+                    for k in 0..seen_ty.len() {
+                        if seen_ty[k] == ty {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if !dup {
+                        seen_ty.push(ty);
+                        self.reserve_local_ty(b.module, ty);
+                    }
+                }
+                if b.locals.at(l).storage == ir::LS_STATIC_REF {
+                    let it = b.locals.at(l).item;
+                    self.reserve_item(it.module, it.node);
+                }
             }
-            if b.locals.at(l).storage == ir::LS_STATIC_REF {
-                let it = b.locals.at(l).item;
-                self.reserve_item(it.module, it.node);
-            }
+            self.uput(seen_ty);
         }
         for ri in 0..b.rvalues.len() {
             let rv = *b.rvalues.at(ri);
@@ -1462,6 +1547,12 @@ extend CEmit {
         }
 
         self.compute_inline(b, &coal_root);
+        self.uput(refs);
+        self.uput(defs);
+        self.uput(uses);
+        self.uput(reads);
+        self.bput(coal_root);
+        self.bput(hardw);
     }
 
     // The C spelling of local `l` for the body most recently emitted through `emit_fn`: its coalesce
@@ -2193,11 +2284,11 @@ extend CEmit {
             self.sx_fuse.push(false);
             self.sx_declared.push(false);
         }
-        let mut init_blk = Vector::<u32>::new();
-        let mut seen = Vector::<bool>::new();
-        let mut bad = Vector::<bool>::new();
-        let mut nread = Vector::<u32>::new();
-        let mut direct_array = Vector::<bool>::new();
+        let mut init_blk = self.uget();
+        let mut seen = self.bget();
+        let mut bad = self.bget();
+        let mut nread = self.uget();
+        let mut direct_array = self.bget();
         for _l in 0..n {
             init_blk.push(cfl::NONE);
             seen.push(false);
@@ -2338,6 +2429,11 @@ extend CEmit {
             }
             self.sx_fuse.set(l, true);
         }
+        self.uput(init_blk);
+        self.uput(nread);
+        self.bput(seen);
+        self.bput(bad);
+        self.bput(direct_array);
     }
 
     // Whether a statement produces C output (so it "runs" between a forwarded call and its use).
@@ -2370,10 +2466,10 @@ extend CEmit {
             self.sx_call_fwd.push(false);
             self.sx_call_str.push(String::new());
         }
-        let mut bare = Vector::<u32>::new();
-        let mut deref = Vector::<u32>::new();
-        let mut bad = Vector::<bool>::new();
-        let mut ncall = Vector::<u32>::new();
+        let mut bare = self.uget();
+        let mut deref = self.uget();
+        let mut bad = self.bget();
+        let mut ncall = self.uget();
         for _l in 0..n {
             bare.push(0);
             deref.push(0);
@@ -2502,6 +2598,10 @@ extend CEmit {
                 self.sx_call_fwd.set(root as usize, true);
             }
         }
+        self.uput(bare);
+        self.uput(deref);
+        self.uput(ncall);
+        self.bput(bad);
     }
 
     fn assert_call_use(self: &Self, b: &ir::CoreBody, blk: &ir::BasicBlock, l: u32) bool {
@@ -2531,7 +2631,92 @@ extend CEmit {
     }
 
     // Locals, labels, blocks and the closing brace -- shared by plain functions and closures.
+    // Declares an OPEN array local ([T] with no length), recovering its extent from the literal
+    // or repeat that fills it. Caller guarantees the resolved type is a zero-length TYPE_ARRAY.
+    fn emit_open_array_decl(self: &mut Self, b: &ir::CoreBody, l0: u32) bool {
+        let l = l0 as usize;
+        let mut rmL = b.module;
+        let mut rtL = b.locals.at(l).ty;
+        self.rty(b, b.locals.at(l).ty, &mut rmL, &mut rtL);
+        let yl = *self.p().module_ast_const(rmL).type_at(rtL);
+        let n = self.filled_len(b, l as u32);
+        let mut zero_len = false;
+        if n == 0 {
+            // an EMPTY array literal fill proves the length really is zero
+            for si9 in 0..b.statements.len() {
+                let s9 = *b.statements.at(si9);
+                if s9.kind != ir::ST_ASSIGN || s9.place == ir::IR_NONE {
+                    continue;
+                }
+                let pl9 = *b.places.at(s9.place as usize);
+                if pl9.base != l as u32 || pl9.proj_len != 0 {
+                    continue;
+                }
+                let rv9 = *b.rvalues.at(s9.rvalue as usize);
+                if rv9.kind == ir::RV_AGGREGATE && rv9.c == ir::AGG_ARRAY && rv9.b == 0 {
+                    zero_len = true;
+                    break;
+                }
+                if rv9.kind == ir::RV_USE {
+                    let o9 = *b.operands.at(rv9.a as usize);
+                    if o9.kind == ir::OP_COPY || o9.kind == ir::OP_MOVE {
+                        let sp9 = *b.places.at(o9.data as usize);
+                        if sp9.proj_len == 0 && self.filled_len(b, sp9.base) == 0 {
+                            // copied from another zero-length array local
+                            zero_len = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if n == 0 && !zero_len {
+            // a DECLARED `[T; 0]` is genuine (the checker interns len 0 for both the
+            // unsized sentinel and true zero): the LET's spelled length decides
+            let dn9 = b.locals.at(l).decl;
+            if dn9 != NODE_NONE {
+                let da9 = self.p().module_ast_const(b.module);
+                if da9.at_const(dn9).kind == NodeKind::NODE_LET {
+                    let tn9 = da9.at_const(dn9).as_data.let_stmt.ty;
+                    if tn9 != NODE_NONE && da9.at_const(tn9).kind == NodeKind::NODE_ARRAY_TYPE {
+                        let ln9 = da9.at_const(tn9).as_data.array_type.length;
+                        if ln9 != NODE_NONE && self.p().ceval != null {
+                            let cev9 = unsafe &mut *(self.p().ceval as *mut ce::ConstEval);
+                            let cv9 = cev9.eval(b.module, ln9);
+                            if cv9.kind == ce::CONST_INT && cv9.as_data.i == 0 {
+                                zero_len = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !zero_len {
+                return self.fail("open-array");
+            }
+        }
+        let mut nm2 = String::new();
+        self.lspell(l as u32, &mut nm2);
+        nm2.push_str("[");
+        nm2.push_u64(n);
+        nm2.push_str("]");
+        let mut ts2 = String::new();
+        let ok3 = self.ty_c(rmL, yl.as_data.arr.elem, nm2.as_str(), &mut ts2);
+        if ok3 {
+            self.out.push_str("  ");
+            self.out.push_string(&ts2);
+            self.out.push_str(";\n");
+        }
+
+        if !ok3 {
+            return false;
+        }
+        return true;
+    }
+
     fn emit_body_core(self: &mut Self, b: &ir::CoreBody) bool {
+        if self.cf_ext != null {
+            return self.emit_body_core_cf(b, unsafe &*self.cf_ext);
+        }
         let mut cf = self.cfget();
         cf.build_into(b);
         let ok9 = self.emit_body_core_cf(b, &cf);
@@ -2544,6 +2729,12 @@ extend CEmit {
         self.compute_fusion(b, cf);
         self.compute_call_fwd(b, cf);
         let ret_dead = !self.ret_slot_live(b, cf);
+        // Preemption tick, function-local so the C compiler can keep it in a register: the TLS
+        // countdown cost a load+store on every loop back-edge. A loop reaching 2048 back-edges
+        // still hits the hook; the cross-call accumulation the TLS tick had was incidental.
+        if body_has_safepoint(b) && self.safepoints_on(b.module) {
+            self.out.push_str("  int32_t __sc_spc = 2048;\n");
+        }
         // every non-argument local declares up front, explicitly typed; unit locals carry no C
         for l in 0..b.locals.len() {
             let st = b.locals.at(l).storage;
@@ -2603,93 +2794,20 @@ extend CEmit {
                 self.out.push_str(";\n");
                 continue;
             }
-            {
-                // an OPEN array local ([T] with no length) recovers its extent from the literal
-                // or repeat that fills it
+            if self.mg.subs.len() != 0 {
+                // substituted bodies re-resolve generic-dependent types per instantiation: the
+                // full per-local path runs, memo-free
                 let mut rmL = b.module;
                 let mut rtL = b.locals.at(l).ty;
                 self.rty(b, b.locals.at(l).ty, &mut rmL, &mut rtL);
                 let yl = *self.p().module_ast_const(rmL).type_at(rtL);
                 if yl.kind == TypeKind::TYPE_ARRAY && yl.as_data.arr.len == 0 {
-                    let n = self.filled_len(b, l as u32);
-                    let mut zero_len = false;
-                    if n == 0 {
-                        // an EMPTY array literal fill proves the length really is zero
-                        for si9 in 0..b.statements.len() {
-                            let s9 = *b.statements.at(si9);
-                            if s9.kind != ir::ST_ASSIGN || s9.place == ir::IR_NONE {
-                                continue;
-                            }
-                            let pl9 = *b.places.at(s9.place as usize);
-                            if pl9.base != l as u32 || pl9.proj_len != 0 {
-                                continue;
-                            }
-                            let rv9 = *b.rvalues.at(s9.rvalue as usize);
-                            if rv9.kind == ir::RV_AGGREGATE && rv9.c == ir::AGG_ARRAY && rv9.b == 0 {
-                                zero_len = true;
-                                break;
-                            }
-                            if rv9.kind == ir::RV_USE {
-                                let o9 = *b.operands.at(rv9.a as usize);
-                                if o9.kind == ir::OP_COPY || o9.kind == ir::OP_MOVE {
-                                    let sp9 = *b.places.at(o9.data as usize);
-                                    if sp9.proj_len == 0 && self.filled_len(b, sp9.base) == 0 {
-                                        // copied from another zero-length array local
-                                        zero_len = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if n == 0 && !zero_len {
-                        // a DECLARED `[T; 0]` is genuine (the checker interns len 0 for both the
-                        // unsized sentinel and true zero): the LET's spelled length decides
-                        let dn9 = b.locals.at(l).decl;
-                        if dn9 != NODE_NONE {
-                            let da9 = self.p().module_ast_const(b.module);
-                            if da9.at_const(dn9).kind == NodeKind::NODE_LET {
-                                let tn9 = da9.at_const(dn9).as_data.let_stmt.ty;
-                                if tn9 != NODE_NONE && da9.at_const(tn9).kind == NodeKind::NODE_ARRAY_TYPE {
-                                    let ln9 = da9.at_const(tn9).as_data.array_type.length;
-                                    if ln9 != NODE_NONE && self.p().ceval != null {
-                                        let cev9 = unsafe &mut *(self.p().ceval as *mut ce::ConstEval);
-                                        let cv9 = cev9.eval(b.module, ln9);
-                                        if cv9.kind == ce::CONST_INT && cv9.as_data.i == 0 {
-                                            zero_len = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if !zero_len {
-                            return self.fail("open-array");
-                        }
-                    }
-                    let mut nm2 = String::new();
-                    self.lspell(l as u32, &mut nm2);
-                    nm2.push_str("[");
-                    nm2.push_u64(n);
-                    nm2.push_str("]");
-                    let mut ts2 = String::new();
-                    let ok3 = self.ty_c(rmL, yl.as_data.arr.elem, nm2.as_str(), &mut ts2);
-                    if ok3 {
-                        self.out.push_str("  ");
-                        self.out.push_string(&ts2);
-                        self.out.push_str(";\n");
-                    }
-
-                    if !ok3 {
+                    if !self.emit_open_array_decl(b, l as u32) {
                         return false;
                     }
                     continue;
                 }
-            }
-            {
-                let mut rmN = b.module;
-                let mut rtN = b.locals.at(l).ty;
-                self.rty(b, b.locals.at(l).ty, &mut rmN, &mut rtN);
-                if self.p().module_ast_const(rmN).type_at(rtN).kind == TypeKind::TYPE_NEVER {
+                if yl.kind == TypeKind::TYPE_NEVER {
                     // never-typed temps only appear on dead paths; a scalar placeholder keeps
                     // their (unreachable) reads compilable
                     self.out.push_str("  int64_t _");
@@ -2697,8 +2815,92 @@ extend CEmit {
                     self.out.push_str(";\n");
                     continue;
                 }
+                if self.is_unit(b, b.locals.at(l).ty) {
+                    continue;
+                }
+                if st == ir::LS_STATIC_REF {
+                    continue; // reads spell the item's own symbol; the local never declares
+                }
+                let mut nm = self.sget();
+                self.lspell(l as u32, &mut nm);
+                let mut ts = self.sget();
+                let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
+                if ok {
+                    self.out.push_str("  ");
+                    self.out.push_string(&ts);
+                    self.out.push_str(";\n");
+                }
+                self.sput(ts);
+                self.sput(nm);
+                if !ok {
+                    return false;
+                }
+                continue;
             }
-            if self.is_unit(b, b.locals.at(l).ty) {
+            // substitution-free: one classification per (module, TypeId) covers the open-array,
+            // never, and unit checks too -- the per-local resolve chain runs once, not per body
+            let dk = skey_mix(0, b.module as u64 << 32 | b.locals.at(l).ty as u64);
+            let slot = switch self.decl_memo.get(&dk) {
+                Some(v) => *v,
+                None => {
+                    let mut t0 = String::new();
+                    let mut md: u8 = 2;
+                    {
+                        let mut rmL = b.module;
+                        let mut rtL = b.locals.at(l).ty;
+                        self.rty(b, b.locals.at(l).ty, &mut rmL, &mut rtL);
+                        let yl = *self.p().module_ast_const(rmL).type_at(rtL);
+                        if yl.kind == TypeKind::TYPE_ARRAY && yl.as_data.arr.len == 0 {
+                            md = 5;
+                        } else if yl.kind == TypeKind::TYPE_NEVER {
+                            md = 4;
+                        } else if self.is_unit(b, b.locals.at(l).ty) {
+                            md = 3;
+                        } else {
+                            let mut tx = String::new();
+                            if self.ty_c(b.module, b.locals.at(l).ty, "", &mut t0) && self.ty_c(
+                                b.module,
+                                b.locals.at(l).ty,
+                                "x",
+                                &mut tx,
+                            ) {
+                                let mut probe = String::from_str(t0.as_str());
+                                probe.push_str("x");
+                                if tx.as_str() == probe.as_str() {
+                                    md = 1;
+                                } else {
+                                    probe.truncate(t0.len());
+                                    probe.push_str(" x");
+                                    if tx.as_str() == probe.as_str() {
+                                        md = 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let ix = self.decl_txt.len() as u64;
+                    self.decl_txt.push(t0);
+                    self.decl_mode.push(md);
+                    self.decl_memo.insert(dk, ix);
+                    ix;
+                },
+            };
+            let md = self.decl_mode[slot as usize];
+            if md == 3 {
+                continue;
+            }
+            if md == 4 {
+                // never-typed temps only appear on dead paths; a scalar placeholder keeps
+                // their (unreachable) reads compilable
+                self.out.push_str("  int64_t _");
+                self.out.push_u64(l as u64);
+                self.out.push_str(";\n");
+                continue;
+            }
+            if md == 5 {
+                if !self.emit_open_array_decl(b, l as u32) {
+                    return false;
+                }
                 continue;
             }
             if st == ir::LS_STATIC_REF {
@@ -2706,15 +2908,26 @@ extend CEmit {
             }
             let mut nm = self.sget();
             self.lspell(l as u32, &mut nm);
-            let mut ts = self.sget();
-            let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
-            if ok {
+            let mut ok = true;
+            if md != 2 {
                 self.out.push_str("  ");
-                self.out.push_string(&ts);
+                self.out.push_string(self.decl_txt.at(slot as usize));
+                if md == 0 {
+                    self.out.push_str(" ");
+                }
+                self.out.push_string(&nm);
                 self.out.push_str(";\n");
+            } else {
+                let mut ts = self.sget();
+                ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
+                if ok {
+                    self.out.push_str("  ");
+                    self.out.push_string(&ts);
+                    self.out.push_str(";\n");
+                }
+                self.sput(ts);
             }
             self.sput(nm);
-            self.sput(ts);
             if !ok {
                 return false;
             }
@@ -4414,7 +4627,7 @@ extend CEmit {
             }
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_SAFEPOINT as u32 {
                 if self.safepoints_on(b.module) {
-                    self.out.push_str("  __sc_safepoint();\n");
+                    self.out.push_str("  if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();\n");
                 }
                 return true;
             }
@@ -5076,6 +5289,16 @@ extend CEmit {
                     Some(_v) => false,
                     None => true,
                 };
+                if self.mg.rec_on && self.mg.rec_dup_once(h ^ 8) {
+                    let mut ev = mbe::RecEv::blank(mbe::RK_STAT);
+                    ev.h = h;
+                    ev.a = b.module;
+                    ev.b = item.module;
+                    ev.c = item.node;
+                    ev.d = b.locals.at(base as usize).ty;
+                    ev.s1.push_str(dst.as_str().slice(d0, dst.len()));
+                    self.mg.rec.push(ev);
+                }
                 if fresh {
                     self.stat_seen.insert(h, 1);
                     let idn = self.p().module_ast_const(item.module).at_const(item.node);
@@ -5692,6 +5915,176 @@ extend CEmit {
         return TyInstance { decl: NODE_NONE };
     }
 
+    /// Journal one demand attempt (see mangle::RecEv). `gate`/`dom` name the dedup gate the live
+    /// site ran (dom 0 = ungated, 1 = demand_seen, 2 = glue_seen); gated dups journal once per
+    /// module so a vanished first claimant is still replayable.
+    fn rec_demand(self: &mut Self, d9: &Demand, gate: u64, dom: u8) {
+        if !self.mg.rec_on {
+            return;
+        }
+        if dom != 0 && !self.mg.rec_dup_once(gate ^ 6) {
+            return;
+        }
+        let mut ev = mbe::RecEv::blank(mbe::RK_DEMAND);
+        ev.h = gate;
+        ev.a = dom;
+        ev.b = d9.def.module;
+        ev.c = d9.def.node;
+        ev.s1 = d9.sym.clone();
+        ev.s2 = d9.sfx.clone();
+        for i in 0..d9.subs.len() {
+            ev.subs.push(*d9.subs.at(i));
+        }
+        self.mg.rec.push(ev);
+    }
+
+    /// Journal replay for the emitter-owned event kinds: each runs the SAME dedup gate its live
+    /// site runs, so replayed and re-emitted modules compose into the exact clean-build queues.
+    /// The caller keeps rec_on off for the whole replay.
+    pub fn tuc_replay(self: &mut Self, ev: &mbe::RecEv) {
+        if ev.kind == mbe::RK_DEMAND {
+            if ev.a == 1 {
+                if self.demand_seen.contains(&ev.h) {
+                    return;
+                }
+                self.demand_seen.insert(ev.h);
+            } else if ev.a == 2 {
+                let hit = switch self.glue_seen.get(&ev.h) {
+                    Some(_v) => true,
+                    None => false,
+                };
+                if hit {
+                    return;
+                }
+                self.glue_seen.insert(ev.h, 1);
+            }
+            let mut snap = Vector::<mbe::MSub>::new();
+            for i in 0..ev.subs.len() {
+                snap.push(*ev.subs.at(i));
+            }
+            self.demand.push(
+                Demand {
+                    def: DefId { module: ev.b as ModuleId, node: ev.c },
+                    sym: ev.s1.clone(),
+                    subs: snap,
+                    sfx: ev.s2.clone(),
+                },
+            );
+            return;
+        }
+        if ev.kind == mbe::RK_GLUE {
+            let hit = switch self.glue_seen.get(&ev.h) {
+                Some(_v) => true,
+                None => false,
+            };
+            if hit {
+                return;
+            }
+            self.glue_seen.insert(ev.h, 1);
+            let mut ge = GlueEnv { subs: Vector::<mbe::MSub>::new() };
+            for i in 0..ev.subs.len() {
+                ge.subs.push(*ev.subs.at(i));
+            }
+            self.glue_envs.push(ge);
+            self.glue.push(
+                StatRef {
+                    em: ev.a as ModuleId,
+                    def: DefId { module: 0, node: NODE_NONE },
+                    sym: ev.s1.clone(),
+                    ty: ev.d,
+                },
+            );
+            return;
+        }
+        if ev.kind == mbe::RK_STAT {
+            let hit = switch self.stat_seen.get(&ev.h) {
+                Some(_v) => true,
+                None => false,
+            };
+            if hit {
+                return;
+            }
+            self.stat_seen.insert(ev.h, 1);
+            let item = DefId { module: ev.b as ModuleId, node: ev.c };
+            let idn = self.p().module_ast_const(item.module).at_const(item.node);
+            if idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern {
+                return; // extern-block statics skip the stub (see the live site)
+            }
+            let mut sd = String::from_str("extern ");
+            if self.ty_c(ev.a as ModuleId, ev.d, ev.s1.as_str(), &mut sd) {
+                sd.push_str(";\n");
+                self.stat_decls.push_string(&sd);
+                self.stat_items.push(StatRef { em: ev.a as ModuleId, def: item, sym: ev.s1.clone(), ty: ev.d });
+            }
+            return;
+        }
+        if ev.kind == mbe::RK_EXT {
+            let hit = switch self.extern_seen.get(&ev.h) {
+                Some(_v) => true,
+                None => false,
+            };
+            if hit {
+                return;
+            }
+            self.extern_seen.insert(ev.h, 1);
+            self.extern_protos.push_string(&ev.s1);
+            return;
+        }
+        if ev.kind == mbe::RK_DYNREQ {
+            let _ = self.dyn_request(ev.a as ModuleId, ev.b);
+            return;
+        }
+        if ev.kind == mbe::RK_DYNTAB {
+            let mut pair9 = String::new();
+            let _ = self.dyn_pair(ev.a as ModuleId, ev.b, ev.c as ModuleId, ev.d, ev.h != 0, &mut pair9);
+            return;
+        }
+        if ev.kind == mbe::RK_TI {
+            let mut mg9 = String::new();
+            if !self.mg.type_m(ev.a as ModuleId, ev.b, &mut mg9) {
+                return;
+            }
+            let mut sym = String::from_str("__sc_ti__");
+            sym.push_string(&mg9);
+            let mut h = 1469598103934665603u64;
+            {
+                let ss = sym.as_str();
+                for k2 in 0..ss.len() {
+                    h = (h ^ ss.byte_at(k2) as u64) * 1099511628211u64;
+                }
+            }
+            let hit = switch self.ti_seen.get(&h) {
+                Some(_v) => true,
+                None => false,
+            };
+            if hit {
+                return;
+            }
+            self.ti_seen.insert(h, 1);
+            self.ti_reqs.push(
+                StatRef { em: ev.a as ModuleId, def: DefId { module: 0, node: NODE_NONE }, sym: sym, ty: ev.b },
+            );
+            return;
+        }
+        if ev.kind == mbe::RK_BLK {
+            let _ = self.blk_wrapper(DefId { module: ev.a as ModuleId, node: ev.b });
+            return;
+        }
+        if ev.kind == mbe::RK_AGG {
+            self.mg.tuc_replay_agg(ev);
+            return;
+        }
+        if ev.kind == mbe::RK_MDYN {
+            self.mg.dyn_reqs.push(mbe::DynReq { pm: ev.a as ModuleId, t: ev.b });
+            return;
+        }
+        if ev.kind == mbe::RK_EDEF {
+            self.env_skip.insert(ev.h, 1);
+            self.env_hashes.push(ev.h);
+            return;
+        }
+    }
+
     /// The symbol an interface-member call on RESOLVED receiver `(rm6, rt6)` dispatches to: a
     /// CUSTOM impl when one exists (bound dispatch resolves per instantiation), else the
     /// per-target default-method instantiation, whose body is demanded under `Self -> receiver`.
@@ -5752,7 +6145,9 @@ extend CEmit {
                 return;
             }
         }
-        self.demand.push(Demand { def: idef, sym: sym.clone(), subs: snap, sfx: sfx });
+        let d9 = Demand { def: idef, sym: sym.clone(), subs: snap, sfx: sfx };
+        self.rec_demand(&d9, 0, 0);
+        self.demand.push(d9);
     }
 
     // Aggregate operands that dispatch operators through methods: structs, instances, and
@@ -5876,7 +6271,9 @@ extend CEmit {
                 }
                 let l7 = snap.len() as u32;
                 snap.push(mbe::MSub { pm: callee.module, pnode: idecl, am: rm6, at: rt6, lim: l7 });
-                self.demand.push(Demand { def: callee, sym: sym.clone(), subs: snap, sfx: String::new() });
+                let d9 = Demand { def: callee, sym: sym.clone(), subs: snap, sfx: String::new() };
+                self.rec_demand(&d9, 0, 0);
+                self.demand.push(d9);
             }
         }
         dst.push_string(&sym);
@@ -5937,6 +6334,12 @@ extend CEmit {
         let y = *self.p().module_ast_const(pm).type_at(t);
         if y.kind != TypeKind::TYPE_DYN {
             return self.fail("dyn-req");
+        }
+        if self.mg.rec_on {
+            let mut ev = mbe::RecEv::blank(mbe::RK_DYNREQ);
+            ev.a = pm;
+            ev.b = t;
+            self.mg.rec.push(ev);
         }
         let mut stem = String::new();
         if !self.mg.dyn_stem(pm, &y, &mut stem) {
@@ -6039,6 +6442,19 @@ extend CEmit {
     /// Thunks + the vtable definition for one coercion pair (source type -> dyn stem); `own` makes
     /// the vtable's `__free` destroy and deallocate the heap payload. Appends `<pair>` to `pair`.
     fn dyn_pair(self: &mut Self, pm: ModuleId, dt: TypeId, srm: ModuleId, srt: TypeId, own: bool, pair: &mut String) bool {
+        if self.mg.rec_on {
+            let mut ev = mbe::RecEv::blank(mbe::RK_DYNTAB);
+            ev.a = pm;
+            ev.b = dt;
+            ev.c = srm;
+            ev.d = srt;
+            ev.h = if own {
+                1u64;
+            } else {
+                0;
+            };
+            self.mg.rec.push(ev);
+        }
         let y = *self.p().module_ast_const(pm).type_at(dt);
         if y.kind != TypeKind::TYPE_DYN || !self.dyn_request(pm, dt) {
             return self.fail("dyn-req");
@@ -6619,7 +7035,9 @@ extend CEmit {
             for i in 0..bp.len() {
                 self.push_bind(&mut snap, callee.module, bp[i], bm[i], bt[i], g0);
             }
-            self.demand.push(Demand { def: callee, sym: sym.clone(), subs: snap, sfx: sfx });
+            let d9 = Demand { def: callee, sym: sym.clone(), subs: snap, sfx: sfx };
+            self.rec_demand(&d9, 0, 0);
+            self.demand.push(d9);
         }
         dst.push_string(&sym);
         return true;
@@ -7012,6 +7430,12 @@ extend CEmit {
     // env typedef + pool trampoline + wrapper for one `@blocking` callee (emitted once, into the
     // shared instance TU; call sites everywhere link against the wrapper).
     fn blk_wrapper(self: &mut Self, d: DefId) bool {
+        if self.mg.rec_on {
+            let mut ev = mbe::RecEv::blank(mbe::RK_BLK);
+            ev.a = d.module;
+            ev.b = d.node;
+            self.mg.rec.push(ev);
+        }
         let key = d.module as u64 << 32 | d.node as u64;
         let hit = switch self.blk_seen.get(&key) {
             Some(_v) => true,
@@ -7372,13 +7796,16 @@ extend CEmit {
                         dk9 = (dk9 ^ 1) * 1099511628211u64;
                     }
                 }
-                if self.demand_seen.contains(&dk9) {
+                let fresh9 = !self.demand_seen.contains(&dk9);
+                if !fresh9 && !self.mg.rec_on {
                     if ok {
                         dst.push_string(&sym);
                     }
                     return ok;
                 }
-                self.demand_seen.insert(dk9);
+                if fresh9 {
+                    self.demand_seen.insert(dk9);
+                }
                 let mut snap = Vector::<mbe::MSub>::new();
                 for i in 0..self.mg.subs.len() {
                     snap.push(*self.mg.subs.at(i));
@@ -7448,7 +7875,11 @@ extend CEmit {
                     }
                 }
                 if sok {
-                    self.demand.push(Demand { def: callee, sym: sym.clone(), subs: snap, sfx: sfx });
+                    let d9 = Demand { def: callee, sym: sym.clone(), subs: snap, sfx: sfx };
+                    self.rec_demand(&d9, dk9, 1);
+                    if fresh9 {
+                        self.demand.push(d9);
+                    }
                 }
             }
         }
@@ -7953,6 +8384,12 @@ extend CEmit {
                     Some(_v) => false,
                     None => true,
                 };
+                if self.mg.rec_on && self.mg.rec_dup_once(h ^ 12) {
+                    let mut ev = mbe::RecEv::blank(mbe::RK_TI);
+                    ev.a = rm;
+                    ev.b = rt;
+                    self.mg.rec.push(ev);
+                }
                 if fresh {
                     self.ti_seen.insert(h, 1);
                     self.ti_reqs.push(
@@ -8374,10 +8811,12 @@ extend CEmit {
             Some(_v) => false,
             None => true,
         };
-        if !fresh {
+        if !fresh && !(self.mg.rec_on && self.mg.rec_dup_once(h ^ 9)) {
             return;
         }
-        self.extern_seen.insert(h, 1);
+        if fresh {
+            self.extern_seen.insert(h, 1);
+        }
         let mut pr = String::from_str("extern ");
         let mut pok = true;
         let mut rty = TYPE_NONE;
@@ -8460,7 +8899,15 @@ extend CEmit {
             pr.push_str(");\n");
         }
         if pok {
-            self.extern_protos.push_string(&pr);
+            if self.mg.rec_on {
+                let mut ev = mbe::RecEv::blank(mbe::RK_EXT);
+                ev.h = h;
+                ev.s1 = pr.clone();
+                self.mg.rec.push(ev);
+            }
+            if fresh {
+                self.extern_protos.push_string(&pr);
+            }
         }
     }
 
@@ -8475,10 +8922,12 @@ extend CEmit {
             Some(_v) => false,
             None => true,
         };
-        if !fresh {
+        if !fresh && !self.mg.rec_on {
             return;
         }
-        self.glue_seen.insert(h, 1);
+        if fresh {
+            self.glue_seen.insert(h, 1);
+        }
         let n = sym.len();
         if n > 9 && sym.slice(n - 9, n) == "__free__d" {
             // the recorded type may still name generics: keep the ACTIVE env for emission
@@ -8486,10 +8935,23 @@ extend CEmit {
             for gi in 0..self.mg.subs.len() {
                 ge.subs.push(*self.mg.subs.at(gi));
             }
-            self.glue_envs.push(ge);
-            self.glue.push(
-                StatRef { em: rm, def: DefId { module: 0, node: NODE_NONE }, sym: String::from_str(sym), ty: rt },
-            );
+            if self.mg.rec_on && self.mg.rec_dup_once(h ^ 7) {
+                let mut ev = mbe::RecEv::blank(mbe::RK_GLUE);
+                ev.h = h;
+                ev.a = rm;
+                ev.d = rt;
+                ev.s1 = String::from_str(sym);
+                for gi in 0..ge.subs.len() {
+                    ev.subs.push(*ge.subs.at(gi));
+                }
+                self.mg.rec.push(ev);
+            }
+            if fresh {
+                self.glue_envs.push(ge);
+                self.glue.push(
+                    StatRef { em: rm, def: DefId { module: 0, node: NODE_NONE }, sym: String::from_str(sym), ty: rt },
+                );
+            }
             return;
         }
         // a user free method: demand its instance body when the receiver is generic
@@ -8565,14 +9027,16 @@ extend CEmit {
                     }
                 }
                 if sok {
-                    self.demand.push(
-                        Demand {
-                            def: DefId { module: it.module, node: mid },
-                            sym: String::from_str(sym),
-                            subs: snap,
-                            sfx: sfx,
-                        },
-                    );
+                    let d9 = Demand {
+                        def: DefId { module: it.module, node: mid },
+                        sym: String::from_str(sym),
+                        subs: snap,
+                        sfx: sfx,
+                    };
+                    self.rec_demand(&d9, h, 2);
+                    if fresh {
+                        self.demand.push(d9);
+                    }
                 } else {}
                 return;
             }

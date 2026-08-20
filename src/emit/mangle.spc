@@ -242,7 +242,10 @@ pub struct Mangler {
     /// and as `<paste>_SCM_<name>` in mangles (byte 1 marks a `##` for the template rewriter).
     pub macro_on: bool,
     // TU-liveness floor: modules whose symbols were spelled outside their own TU (mark_ctx)
-    pub used_mods: Map<u64, u64>,
+    /// Dense (spelling TU -> owner module) edge matrix, (n+1)*n bytes, row n = the shared
+    /// instance TU (mark_ctx -1): modpfx marks an edge per cross-TU spelling, far too hot for a
+    /// hashed set. Sized lazily on the first edge.
+    pub used_mods: Vector<u8>,
     pub mark_ctx: i64,
     /// The impl fn `method_by_name` last resolved (node NONE when none): callers that must
     /// demand the instance body read it back (the return carries only the spelling).
@@ -262,6 +265,73 @@ pub struct Mangler {
     /// cache hit can replay the used_mods edges exactly (under the hit's own mark_ctx).
     pub edge_log_on: bool,
     pub edge_log: Vector<ModuleId>,
+    /// Per-TU emission journal (driver/tuc): while on, every cross-TU-gated attempt the emitter
+    /// makes is logged pre-dedup, so a later build can replay a module's side effects through the
+    /// SAME gates without lowering its bodies. Off during replay and outside the seed loop.
+    pub rec_on: bool,
+    pub rec: Vector<RecEv>,
+    /// Attempts already journaled, keyed (gate key, mark_ctx): a dup attempt must be replayable
+    /// once per module (its first claimant may vanish), and never more.
+    pub rec_dups: Set<u64>,
+}
+
+// RecEv kinds; the payload schema per kind is fixed by its recording site.
+pub const RK_CHUNK: u8 = 1; // s1 = TU chunk text (driver-recorded, replay re-derives the proto)
+pub const RK_ENV: u8 = 2; // h = env name hash, s1 = env struct body
+pub const RK_AUX: u8 = 3; // s1 = `_ret` typedef slice
+pub const RK_EFWD: u8 = 4; // s1 = env forward-typedef slice
+pub const RK_EDEF: u8 = 5; // h = env hash defined by this module (env_skip/env_hashes mark)
+pub const RK_DEMAND: u8 = 6; // b/c = def, s1 = sym, s2 = sfx, subs; h = demand_seen key (0 = ungated)
+pub const RK_GLUE: u8 = 7; // h = gate, a = em, d = ty, s1 = sym, subs = recorded env
+pub const RK_STAT: u8 = 8; // h = gate, a = em, b/c = def, d = ty, s1 = sym
+pub const RK_EXT: u8 = 9; // h = gate, s1 = extern prototype line
+pub const RK_DYNREQ: u8 = 10; // a = pm, b = t (cem.dyn_request call)
+pub const RK_DYNTAB: u8 = 11; // a = pm, b = dyn t, c = srm, d = srt, h = own flag (dyn_pair call)
+pub const RK_TI: u8 = 12; // a = rm, b = rt (type_info descriptor request)
+pub const RK_BLK: u8 = 13; // a/b = blocking callee DefId (blk_wrapper call)
+pub const RK_AGG: u8 = 14; // h = gate, a = pm, b/c/d+xs = TyInstance, subs = spelling env
+pub const RK_MDYN: u8 = 15; // a = pm, b = t (mangler dyn_reqs entry)
+pub const RK_EDGE: u8 = 16; // xs = used_mods row of this module (driver-recorded)
+pub const RK_MAIN: u8 = 17; // a = main_argv (driver-recorded, module holds `main`)
+
+/// One journaled emission side effect. Fields are kind-specific (see RK_*); unused ones stay zero.
+pub struct RecEv {
+    pub kind: u8,
+    pub a: u32,
+    pub b: u32,
+    pub c: u32,
+    pub d: u32,
+    pub h: u64,
+    pub s1: String,
+    pub s2: String,
+    pub subs: Vector<MSub>,
+    pub xs: Vector<u32>,
+}
+
+extend RecEv as Free {
+    pub fn free(self: &mut Self) {
+        self.s1.free();
+        self.s2.free();
+        self.subs.free();
+        self.xs.free();
+    }
+}
+
+extend RecEv {
+    pub fn blank(kind: u8) RecEv {
+        return RecEv {
+            kind: kind,
+            a: 0,
+            b: 0,
+            c: 0,
+            d: 0,
+            h: 0,
+            s1: String::new(),
+            s2: String::new(),
+            subs: Vector::<MSub>::new(),
+            xs: Vector::<u32>::new(),
+        };
+    }
 }
 
 /// One recorded instance spelling: replaying `it` under `subs` re-derives the same C name.
@@ -309,6 +379,8 @@ extend Mangler as Free {
         self.own_idx.free();
         self.ovl_memo.free();
         self.edge_log.free();
+        self.rec.free();
+        self.rec_dups.free();
     }
 }
 
@@ -331,7 +403,7 @@ extend Mangler {
             clos_ids: Vector::<NodeId>::new(),
             dyn_reqs: Vector::<DynReq>::new(),
             macro_on: false,
-            used_mods: Map::<u64, u64>::new(),
+            used_mods: Vector::<u8>::new(),
             mark_ctx: -1,
             last_method_def: DefId { module: 0, node: NODE_NONE },
             agg_on: false,
@@ -343,6 +415,9 @@ extend Mangler {
             last_edge: 0xFFFFFFFFFFFFFFFFu64,
             edge_log_on: false,
             edge_log: Vector::<ModuleId>::new(),
+            rec_on: false,
+            rec: Vector::<RecEv>::new(),
+            rec_dups: Set::<u64>::new(),
         };
     }
 
@@ -615,9 +690,39 @@ extend Mangler {
             let edge = src << 32 | m as u64;
             if edge != self.last_edge {
                 self.last_edge = edge;
-                self.used_mods.insert(edge, 1);
+                self.um_set(src, m);
             }
         }
+    }
+
+    fn um_set(self: &mut Self, src: u64, dst: ModuleId) {
+        let n = self.p().modules.len();
+        if n == 0 {
+            return;
+        }
+        if self.used_mods.len() == 0 {
+            self.used_mods.resize_default((n + 1) * n);
+        }
+        let row = if src == 65534u64 {
+            n;
+        } else {
+            src as usize;
+        };
+        self.used_mods.set(row * n + dst as usize, 1);
+    }
+
+    /// Was a (spelling TU `src` -> module `dst`) edge recorded? `src` 65534 = the instance TU.
+    pub fn um_hit(self: &Self, src: u64, dst: usize) bool {
+        if self.used_mods.len() == 0 {
+            return false;
+        }
+        let n = self.p().modules.len();
+        let row = if src == 65534u64 {
+            n;
+        } else {
+            src as usize;
+        };
+        return *self.used_mods.at(row * n + dst) != 0;
     }
 
     pub fn modpfx(self: &mut Self, m: ModuleId, out: &mut String) {
@@ -635,7 +740,7 @@ extend Mangler {
             let edge = src << 32 | m as u64;
             if edge != self.last_edge {
                 self.last_edge = edge;
-                self.used_mods.insert(edge, 1);
+                self.um_set(src, m);
             }
         }
         if !self.mangle || self.p().modules.at(m as usize).prelude {
@@ -1560,6 +1665,12 @@ extend Mangler {
                 nm.push_str("__dyn");
                 self.join_decl(nm.as_str(), decl, out);
                 self.dyn_reqs.push(DynReq { pm: pm, t: t });
+                if self.rec_on {
+                    let mut ev = RecEv::blank(RK_MDYN);
+                    ev.a = pm;
+                    ev.b = t;
+                    self.rec.push(ev);
+                }
             }
             return ok;
         }
@@ -1625,8 +1736,55 @@ extend Mangler {
                 }
                 self.agg_reqs.push(AggReq { pm: pm, it: *it, subs: sn9 });
             }
+            if self.rec_on && self.rec_dup_once(h9 ^ 14) {
+                let mut ev = RecEv::blank(RK_AGG);
+                ev.h = h9;
+                ev.a = pm;
+                ev.b = it.module;
+                ev.c = it.decl;
+                ev.d = it.n;
+                for k9 in 0..it.n {
+                    ev.xs.push(unsafe it.args[k9 as usize]);
+                }
+                for k9 in 0..self.subs.len() {
+                    ev.subs.push(*self.subs.at(k9));
+                }
+                self.rec.push(ev);
+            }
         }
         return true;
+    }
+
+    /// One journaled dup attempt per (gate key, current module): true the first time only.
+    pub fn rec_dup_once(self: &mut Self, k: u64) bool {
+        let mixed = k * 1099511628211u64 ^ self.mark_ctx as u64;
+        if self.rec_dups.contains(&mixed) {
+            return false;
+        }
+        self.rec_dups.insert(mixed);
+        return true;
+    }
+
+    /// Journal replay of one recorded instance-spelling attempt: the same agg_seen gate the live
+    /// spelling ran, so first-claimant order across cached and re-emitted modules stays exact.
+    pub fn tuc_replay_agg(self: &mut Self, ev: &RecEv) {
+        let hit = switch self.agg_seen.get(&ev.h) {
+            Some(_v) => true,
+            None => false,
+        };
+        if hit {
+            return;
+        }
+        self.agg_seen.insert(ev.h, 1);
+        let mut it = TyInstance { module: ev.b as ModuleId, decl: ev.c, n: ev.d as u8 };
+        for k in 0..it.n {
+            unsafe it.args[k as usize] = ev.xs[k as usize];
+        }
+        let mut sn = Vector::<MSub>::new();
+        for k in 0..ev.subs.len() {
+            sn.push(*ev.subs.at(k));
+        }
+        self.agg_reqs.push(AggReq { pm: ev.a as ModuleId, it: it, subs: sn });
     }
 }
 

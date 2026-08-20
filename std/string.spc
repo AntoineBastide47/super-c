@@ -315,6 +315,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Append the bytes of a `str` (e.g. a string literal).
+    @c.always_inline
     pub fn push_str(self: &mut String<A>, text: str) {
         self.push_bytes(text.ptr(), text.len());
     }

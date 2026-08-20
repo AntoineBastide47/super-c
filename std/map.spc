@@ -106,6 +106,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
 
     /// Insert or overwrite `key` -> `value`. On overwrite the existing key is kept; the duplicate key and the
     /// replaced value are freed (no-ops for non-Free types). Takes ownership of `key` and `value`.
+    @c.always_inline
     pub const fn insert(self: &mut Map<K, V, A>, key: K, value: V) {
         if self.cap == 0 || (self.len + 1) * 4 >= self.cap * 3 {
             // grow past a 0.75 load factor

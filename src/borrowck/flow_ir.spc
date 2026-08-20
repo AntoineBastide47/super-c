@@ -22,6 +22,43 @@ pub struct FlowErr {
     pub msg: String,
 }
 
+// Nesting stacks for the walk-tape replay (one per strictly-nested event family). Pooled in
+// BorrowCtx; pre/acc/ovf are depth-indexed SLOTS (never popped) so FlowState is copied row-wise
+// by save/clear instead of whole-struct by push.
+pub struct RepSt {
+    pub bms: Vector<u32>,
+    pub les: Vector<i32>,
+    pub mbm: Vector<u32>,
+    pub pre: Vector<tc::FlowState>,
+    pub acc: Vector<tc::FlowState>,
+    pub ovf: Vector<u8>,
+    pub seg: Vector<u64>, // start<<32 | nmoved0<<16 | nborrows0
+    pub fdepth: usize,
+}
+
+extend RepSt {
+    pub fn new() RepSt {
+        return RepSt {
+            bms: Vector::<u32>::new(),
+            les: Vector::<i32>::new(),
+            mbm: Vector::<u32>::new(),
+            pre: Vector::<tc::FlowState>::new(),
+            acc: Vector::<tc::FlowState>::new(),
+            ovf: Vector::<u8>::new(),
+            seg: Vector::<u64>::new(),
+            fdepth: 0,
+        };
+    }
+
+    pub fn reset(self: &mut Self) {
+        self.bms.truncate(0);
+        self.les.truncate(0);
+        self.mbm.truncate(0);
+        self.seg.truncate(0);
+        self.fdepth = 0;
+    }
+}
+
 // Reusable owner of the per-body borrow pipeline: one instance is built once per analyze pass and
 // reset-and-refilled for every body, so vector capacity is kept instead of reallocated 1873+ times.
 pub struct BorrowCtx {
@@ -32,6 +69,7 @@ pub struct BorrowCtx {
     pub moves: bdf::MoveFlow,
     pub solver: bln::Solver,
     pub cap_spans: Vector<u32>,
+    pub rep: RepSt,
     pub escaping: Vector<u32>,
     /// Spent Lowerers recycled across bodies: lower_fn/lower_closure_body re-seed on entry, so a
     /// pooled entry only donates its heap capacity. Same-module only (BorrowCtx is per-module).
@@ -48,6 +86,7 @@ extend BorrowCtx {
             moves: bdf::MoveFlow::empty(),
             solver: bln::Solver::empty(),
             cap_spans: Vector::<u32>::new(),
+            rep: RepSt::new(),
             escaping: Vector::<u32>::new(),
             lower_pool: Vector::<irl::Lowerer>::new(),
         };

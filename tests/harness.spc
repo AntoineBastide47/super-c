@@ -365,7 +365,7 @@ pub fn compile_c(src: str) CompiledC {
     // concatenated so prelude definitions (`str`, monomorphized Slice/Box, ...) are inspectable.
     let tplan = dtest::TestPlan::new(n);
     let mut o = demit::CemitOut::new(n);
-    demit::cemit_package(&mut p, false, &tplan, null, &mut o);
+    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o);
     if o.skips != 0 {
         out.errors = o.skips as usize;
         return out;

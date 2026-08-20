@@ -720,6 +720,17 @@ fn profile_bin(m: &mf::Manifest, prof_name: str, target: i32) String {
 // renamed onto it, never written over it: truncating an executable that is currently running corrupts the
 // image the OS is still paging from, and sc_rename knows how to displace a running one on Windows.
 fn install_bin(from: str, to: str) i32 {
+    // byte-compare first: an unchanged binary keeps its mtime (the emit stamp anchors on the
+    // compiler executable's mtime, and downstream tools get make-friendly timestamps)
+    {
+        let cur = loader::read_file(from);
+        if !cur.is_none() {
+            let body = cur.unwrap();
+            if file_eq(to, &body) {
+                return 0;
+            }
+        }
+    }
     let src = stdio::fopen(from, "rb");
     if src == null {
         eprintln("build: cannot read '{}'", from);
@@ -1116,6 +1127,356 @@ fn stream_notify(ctx: *mut void, path: str, kind: i32) {
 // Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
 // the transpiled C lands in <out-dir>/<raw> first.
 // link_kind: 0 = executable, 1 = static library (ar), 2 = shared library (cc -shared).
+// ---------------------------------------------------------------------------------------------------------
+// Emit stamp: skip the whole transpile when no input changed since the last successful emission.
+// The stamp records every input the emitted tree is a function of -- the compiler executable, the
+// emission-relevant options, every loaded module file, the manifest, and every external C input --
+// as (mtime, fnv64, len). A per-module skip would be UNSOUND here (owner-emitted instances and the
+// shared headers make every TU depend on the whole import closure); the whole-package check is
+// exact. mtime is only the fast path: a drifted mtime with matching content still counts as fresh
+// (and refreshes the stamp), so git checkouts do not force rebuilds. SC_NO_EMIT_CACHE disables.
+// ---------------------------------------------------------------------------------------------------------
+
+fn stamp_hash_file(path: str, h_out: &mut u64, len_out: &mut u64) bool {
+    let f = stdio::fopen(path, "rb");
+    if f == null {
+        return false;
+    }
+    let mut buf = Array::<u8, 65536>::new();
+    let mut h = 1469598103934665603u64;
+    let mut tot: u64 = 0;
+    loop {
+        let n = unsafe stdio::fread(&mut buf[0], 1, 65536, f);
+        if n == 0 {
+            break;
+        }
+        tot += n as u64;
+        for i in 0..n {
+            h = (h ^ buf[i] as u64) * 1099511628211u64;
+        }
+    }
+    unsafe stdio::fclose(f);
+    *h_out = h;
+    *len_out = tot;
+    return true;
+}
+
+fn stamp_u64(s: str) u64 {
+    let mut v: u64 = 0;
+    for i in 0..s.len() {
+        let c = s[i];
+        if c < b'0' || c > b'9' {
+            break;
+        }
+        v = v * 10 + (c - b'0') as u64;
+    }
+    return v;
+}
+
+// Field `idx` of a '\t'-separated record; fields past the last separator run to the end.
+fn stamp_field(s: str, idx: usize) str {
+    let mut a: usize = 0;
+    let mut k: usize = 0;
+    for i in 0..s.len() {
+        if s[i] == 9 {
+            if k == idx {
+                return s.slice(a, i);
+            }
+            k += 1;
+            a = i + 1;
+        }
+    }
+    if k == idx {
+        return s.slice(a, s.len());
+    }
+    return s.slice(0, 0);
+}
+
+fn stamp_exe_line(out: &mut String) bool {
+    let mut exe = PathBuf {};
+    if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
+        return false;
+    }
+    let ep = str::from_cstr(&exe[0]);
+    let mt = unsafe shim::sc_mtime(&mut exe[0]);
+    if mt == 0 {
+        return false;
+    }
+    out.push_str("exe\t");
+    out.push_u64(mt as u64);
+    out.push_str("\t");
+    out.push_str(ep);
+    out.push_str("\n");
+    return true;
+}
+
+fn stamp_gen_c_count(gen: str) u64 {
+    let mut rels = Vector::<String>::new();
+    walk_files(gen, gen.len(), &mut rels);
+    let mut n: u64 = 0;
+    for i in 0..rels.len() {
+        if rels.at(i).as_str().ends_with(".c") {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+fn stamp_push_input(out: &mut String, path: str) bool {
+    let mut pp = String::from_str(path);
+    let mt = unsafe shim::sc_mtime(pp.cstr());
+    if mt == 0 {
+        return false;
+    }
+    let mut h: u64 = 0;
+    let mut ln: u64 = 0;
+    if !stamp_hash_file(path, &mut h, &mut ln) {
+        return false;
+    }
+    out.push_str("in\t");
+    out.push_u64(mt as u64);
+    out.push_str("\t");
+    out.push_u64(h);
+    out.push_str("\t");
+    out.push_u64(ln);
+    out.push_str("\t");
+    out.push_str(path);
+    out.push_str("\n");
+    return true;
+}
+
+fn stamp_write_text(path: str, body: &String) {
+    let mut tmp = String::from_str(path);
+    tmp.push_str(".tmp");
+    let f = stdio::fopen(tmp.as_str(), "wb");
+    if f == null {
+        return;
+    }
+    let b = body.as_str();
+    let _ = unsafe stdio::fwrite(b.ptr(), 1, b.len(), f);
+    unsafe stdio::fclose(f);
+    let mut dst = String::from_str(path);
+    let _ = unsafe shim::sc_rename(tmp.cstr(), dst.cstr());
+}
+
+// Record the inputs of a just-completed emission. Written only on full success; an unreadable
+// input aborts the write (no cache beats a wrong one).
+fn stamp_write(
+    path: str,
+    p: &loader::Package,
+    root_dir: str,
+    target: i32,
+    arch: i32,
+    bootstrap: bool,
+    lint: bool,
+    gen: str,
+) {
+    let mut out = String::from_str("sc-emit-stamp v1\n");
+    if !stamp_exe_line(&mut out) {
+        return;
+    }
+    out.push_str("opt\t");
+    out.push_u64(target as u64);
+    out.push_str("\t");
+    out.push_u64(arch as u64 & 0xFF);
+    out.push_str("\t");
+    let b9: u64 = if bootstrap {
+        1;
+    } else {
+        0;
+    };
+    out.push_u64(b9);
+    out.push_str("\t");
+    let l9: u64 = if lint {
+        1;
+    } else {
+        0;
+    };
+    out.push_u64(l9);
+    out.push_str("\t");
+    out.push_u64(stamp_gen_c_count(gen));
+    out.push_str("\t");
+    out.push_str(root_dir);
+    out.push_str("\n");
+    {
+        let mut man = join2(root_dir, "build.toml");
+        if unsafe shim::sc_mtime(man.cstr()) != 0 {
+            if !stamp_push_input(&mut out, man.as_str()) {
+                return;
+            }
+        }
+    }
+    for i in 0..p.modules.len() {
+        let f = p.modules.at(i).file.as_str();
+        if f.len() == 0 {
+            continue;
+        }
+        if !stamp_push_input(&mut out, f) {
+            return;
+        }
+    }
+    for i in 0..p.ext_inputs.len() {
+        if !stamp_push_input(&mut out, p.ext_inputs.at(i).as_str()) {
+            return;
+        }
+    }
+    out.push_str("end\n");
+    stamp_write_text(path, &out);
+}
+
+// Is the recorded emission still exact for the current inputs? On mtime drift with matching
+// content the stamp is refreshed in place so the next check stays on the fast path.
+fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool, lint: bool, gen: str) bool {
+    let body0 = loader::read_file(path);
+    if body0.is_none() {
+        if stdlib::getenv("SC_STAMP_DEBUG") != null {
+            eprintln("stamp: reject #1");
+        }
+        return false;
+    }
+    let body = body0.unwrap();
+    let s = body.as_str();
+    // Second-granularity mtimes cannot distinguish an edit made in the same second the stamp was
+    // written: entries stamped within 2s of the stamp file's own mtime verify by content instead.
+    let mut spb = String::from_str(path);
+    let recent = unsafe shim::sc_mtime(spb.cstr()) - 2;
+    let mut fresh = true;
+    let mut drift = false;
+    let mut saw_end = false;
+    let mut ccount: u64 = 0xFFFFFFFFFFFFFFFFu64;
+    let mut rewritten = String::new();
+    let mut a: usize = 0;
+    let mut lno: usize = 0;
+    for i2 in 0..s.len() + 1 {
+        if i2 != s.len() && s[i2] != b'\n' {
+            continue;
+        }
+        let line = s.slice(a, i2);
+        a = i2 + 1;
+        if line.len() == 0 {
+            continue;
+        }
+        if lno == 0 {
+            if line != "sc-emit-stamp v1" {
+                if stdlib::getenv("SC_STAMP_DEBUG") != null {
+                    eprintln("stamp: reject #2");
+                }
+                return false;
+            }
+            rewritten.push_str(line);
+            rewritten.push_str("\n");
+            lno += 1;
+            continue;
+        }
+        lno += 1;
+        let kind = stamp_field(line, 0);
+        if kind == "exe" {
+            let mut cur = String::new();
+            if !stamp_exe_line(&mut cur) {
+                if stdlib::getenv("SC_STAMP_DEBUG") != null {
+                    eprintln("stamp: reject #3");
+                }
+                return false;
+            }
+            let mut want = String::from_str(line);
+            want.push_str("\n");
+            if cur.as_str() != want.as_str() {
+                if stdlib::getenv("SC_STAMP_DEBUG") != null {
+                    eprintln("stamp: reject #4");
+                }
+                return false;
+            }
+            rewritten.push_string(&cur);
+        } else if kind == "opt" {
+            let wb9: u64 = if bootstrap {
+                1;
+            } else {
+                0;
+            };
+            let wl9: u64 = if lint {
+                1;
+            } else {
+                0;
+            };
+            if stamp_u64(stamp_field(line, 1)) != target as u64 || stamp_u64(stamp_field(line, 2)) != (arch as u64 & 0xFF) || stamp_u64(
+                stamp_field(line, 3),
+            ) != wb9 || stamp_u64(stamp_field(line, 4)) != wl9 || stamp_field(line, 6) != root_dir {
+                if stdlib::getenv("SC_STAMP_DEBUG") != null {
+                    eprintln("stamp: reject #5");
+                }
+                return false;
+            }
+            ccount = stamp_u64(stamp_field(line, 5));
+            rewritten.push_str(line);
+            rewritten.push_str("\n");
+        } else if kind == "in" {
+            let mt0 = stamp_u64(stamp_field(line, 1));
+            let fp = stamp_field(line, 4);
+            let mut pp = String::from_str(fp);
+            let mt = unsafe shim::sc_mtime(pp.cstr());
+            if mt == 0 {
+                if stdlib::getenv("SC_STAMP_DEBUG") != null {
+                    eprintln("stamp: reject #6");
+                }
+                return false;
+            }
+            if mt as u64 == mt0 && mt0 < recent as u64 {
+                rewritten.push_str(line);
+                rewritten.push_str("\n");
+                continue;
+            }
+            let mut h: u64 = 0;
+            let mut ln: u64 = 0;
+            if !stamp_hash_file(fp, &mut h, &mut ln) {
+                if stdlib::getenv("SC_STAMP_DEBUG") != null {
+                    eprintln("stamp: reject #7");
+                }
+                return false;
+            }
+            if h != stamp_u64(stamp_field(line, 2)) || ln != stamp_u64(stamp_field(line, 3)) {
+                fresh = false;
+                break;
+            }
+            if mt as u64 != mt0 {
+                drift = true;
+            }
+            rewritten.push_str("in\t");
+            rewritten.push_u64(mt as u64);
+            rewritten.push_str("\t");
+            rewritten.push_u64(h);
+            rewritten.push_str("\t");
+            rewritten.push_u64(ln);
+            rewritten.push_str("\t");
+            rewritten.push_str(fp);
+            rewritten.push_str("\n");
+        } else if kind == "end" {
+            saw_end = true;
+            rewritten.push_str("end\n");
+        } else {
+            if stdlib::getenv("SC_STAMP_DEBUG") != null {
+                eprintln("stamp: reject #8");
+            }
+            return false;
+        }
+    }
+    if !fresh || !saw_end {
+        if stdlib::getenv("SC_STAMP_DEBUG") != null {
+            eprintln("stamp: reject #9");
+        }
+        return false;
+    }
+    if ccount == 0 || stamp_gen_c_count(gen) != ccount {
+        if stdlib::getenv("SC_STAMP_DEBUG") != null {
+            eprintln("stamp: reject #10");
+        }
+        return false;
+    }
+    if drift {
+        stamp_write_text(path, &rewritten);
+    }
+    return true;
+}
+
 fn engine_build(
     m: &mf::Manifest,
     prof_name: str,
@@ -1205,29 +1566,57 @@ fn engine_build(
     };
     let mut sink = EmitSink { ctx: &mut stream, notify: stream_notify };
 
-    // 1) transpile the closure to <out-dir>/<raw>, streaming each finished TU into the pool
-    let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags, target);
-    p.arch = m.arch; // the instruction-set axis `@arch` gates on
-    if !p.ok {
-        return 1;
+    // 1) transpile the closure to <out-dir>/<raw>, streaming each finished TU into the pool --
+    // unless the emit stamp proves every input unchanged since the last successful emission, in
+    // which case the generated tree is already exact and the pipeline skips straight to cc/link.
+    let stamp_path = join2(pdir.as_str(), ".emit_stamp");
+    let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null;
+    if stdlib::getenv("SC_STAMP_DEBUG") != null {
+        eprintln("stamp: pre-check at {}ms", unsafe shim::sc_ticks_ms() - t0);
     }
-    p.gen_root = srcgen.clone();
-    let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
-    p.ceval = &mut ceval;
-    let rc = run_package(&mut p, null, "", target, lint, "", &mut sink);
-    if rc != 0 {
-        stream.drain(true); // reap what is in flight; abandon what has not started
-        return rc;
+    let skip_emit = cache_on && stamp_fresh(
+        stamp_path.as_str(),
+        root_dir,
+        target,
+        m.arch,
+        bootstrap_tags,
+        lint,
+        gen.as_str(),
+    );
+    if stdlib::getenv("SC_STAMP_DEBUG") != null {
+        eprintln("stamp: checked at {}ms, skip={}", unsafe shim::sc_ticks_ms() - t0, skip_emit);
     }
-    let t_transpile = unsafe shim::sc_ticks_ms();
+    let mut t_transpile = t0;
+    let mut ret: i32 = 0;
+    if !skip_emit {
+        let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags, target);
+        p.arch = m.arch; // the instruction-set axis `@arch` gates on
+        if !p.ok {
+            return 1;
+        }
+        p.gen_root = srcgen.clone();
+        let pkg = (&mut p) as *mut loader::Package;
+        let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
+        p.ceval = &mut ceval;
+        let rc = run_package(&mut p, null, "", target, lint, "", &mut sink);
+        if rc != 0 {
+            stream.drain(true); // reap what is in flight; abandon what has not started
+            return rc;
+        }
+        t_transpile = unsafe shim::sc_ticks_ms();
 
-    // 2) whole-tree content-sync as the safety net: every file was already synced when its
-    // notification arrived, so this is a byte-compare no-op that (a) unlinks gen/ orphans and
-    // (b) surfaces anything the stream never heard about -- planned below off the directory walk.
-    let mut ret = stream.ret;
-    if ret == 0 {
-        ret = sync_tree(srcgen.as_str(), gen.as_str());
+        // 2) whole-tree content-sync as the safety net: every file was already synced when its
+        // notification arrived, so this is a byte-compare no-op that (a) unlinks gen/ orphans and
+        // (b) surfaces anything the stream never heard about -- planned below off the directory walk.
+        ret = stream.ret;
+        if ret == 0 {
+            ret = sync_tree(srcgen.as_str(), gen.as_str());
+        }
+        if ret == 0 && cache_on {
+            stamp_write(stamp_path.as_str(), &p, root_dir, target, m.arch, bootstrap_tags, lint, gen.as_str());
+        }
+    } else {
+        t_transpile = unsafe shim::sc_ticks_ms();
     }
     let t_sync = unsafe shim::sc_ticks_ms();
     let mut t_compile = t_sync;

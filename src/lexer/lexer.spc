@@ -387,6 +387,7 @@ fn keywords(lexeme: *const u8, len: usize) TokenType {
     return TokenType::Identifier;
 }
 
+@c.always_inline
 fn identifier(l: &mut Lexer) {
     let mut i = l.current;
     while (l.class[l.bytes.byte_at(i) as usize] & CC_ID_PART) != 0u8 {
@@ -589,6 +590,7 @@ fn escape(l: &mut Lexer, byte_character: bool) u32 {
     return UINT32_MAX;
 }
 
+@c.always_inline
 fn string_lit(l: &mut Lexer, kind: TokenType) {
     let mut i = l.current;
     loop {
@@ -941,6 +943,7 @@ fn digits(l: &mut Lexer, component_start: usize, error_at: *mut usize, pred: fn(
 }
 
 // 1 = float suffix (f32/f64), 0 = integer suffix, -1 = not a numeric suffix.
+@c.always_inline
 const fn num_suffix_kind(p: *const u8, n: usize) i32 {
     if n == 3 && (memeq(p, "f32") || memeq(p, "f64")) {
         return 1;

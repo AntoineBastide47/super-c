@@ -2066,7 +2066,11 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "__sc_safepoint();"), "a loop in a launching program gets a safepoint");
+    assert(
+        p.gen_has("main.c", "if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();"),
+        "a loop in a launching program gets a safepoint",
+    );
+    assert(p.gen_has("main.c", "int32_t __sc_spc = 2048;"), "the function-local preemption tick is declared");
     let cc = p.cc_build("");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -2087,7 +2091,7 @@ fn main() i32 {
     );
     let r2 = q.compile("main.spc");
     assert(r2.ok());
-    assert(!q.gen_has("main.c", "__sc_safepoint();"), "a program that never launches gets no safepoints");
+    assert(!q.gen_has("main.c", "__sc_spc"), "a program that never launches gets no safepoints");
 }
 
 // Blocking FFI: a worker thread belongs to the scheduler, so a call that blocks it -- a

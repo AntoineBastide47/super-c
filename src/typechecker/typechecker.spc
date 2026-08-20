@@ -602,6 +602,7 @@ extend TypeChecker {
         return unsafe self.cur_ast().module;
     }
 
+    @c.always_inline
     pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if self.package != null && m != self.cur_module() {
             // A stage holding module `m`'s Ast left an empty placeholder in the table. That used to matter
@@ -3327,6 +3328,7 @@ extend TypeChecker {
     }
 
     // ---- extension / method lookup ----
+    @c.always_inline
     fn ext_scopes(self: &mut Self) i32 {
         if self.n_ext_scope < 0 {
             self.ext_scope.clear();
@@ -3347,6 +3349,7 @@ extend TypeChecker {
 
     // Build (once) module `mm`'s list of top-level EXTEND item ids. No type interning happens here, so it is
     // safe to build lazily at any point during type-checking.
+    @c.always_inline
     fn ensure_ext_items(self: &mut Self, mm: ModuleId) {
         let idx = mm as usize;
         while self.ext_items.len() <= idx {
@@ -3419,6 +3422,7 @@ extend TypeChecker {
         return tg;
     }
 
+    @c.always_inline
     fn find_member(self: &Self, m: ModuleId, decl: NodeId, name: tok::Span) NodeId {
         let a = self.mod_ast(m);
         let src = self.mod_src(m);

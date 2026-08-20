@@ -83,14 +83,53 @@ fn tuple_member_child(ow: &bf::Owner, forest: &mp::MoveForest, root: u32, m: Mod
     return forest.field_child(root, fdecl);
 }
 
-pub fn elaborate(
+/// The elaboration's schedule plus every per-body temporary, pooled by the driver: one instance
+/// rebuilds in place per body, so elaboration allocates nothing on the steady state.
+pub struct ElabCtx {
+    pub sched: Schedule,
+    pub mi: Vector<u64>,
+    pub di: Vector<u64>,
+    pub mm: Vector<u64>,
+    pub scratch: Vector<u32>,
+    pub sub: Vector<u32>,
+}
+
+extend ElabCtx {
+    pub fn empty() ElabCtx {
+        return ElabCtx {
+            sched: Schedule { drops: Vector::<DropAt>::new(), moves: Vector::<DropAt>::new(), concrete: true },
+            mi: Vector::<u64>::new(),
+            di: Vector::<u64>::new(),
+            mm: Vector::<u64>::new(),
+            scratch: Vector::<u32>::new(),
+            sub: Vector::<u32>::new(),
+        };
+    }
+}
+
+extend ElabCtx as Free {
+    pub fn free(self: &mut Self) {
+        self.sched.free();
+        self.mi.free();
+        self.di.free();
+        self.mm.free();
+        self.scratch.free();
+        self.sub.free();
+    }
+}
+
+pub fn elaborate_into(
     ow: &mut bf::Owner,
     b: &ir::CoreBody,
     forest: &mp::MoveForest,
     facts: &bf::BodyFacts,
     fl: &df::MoveFlow,
-) Schedule {
-    let mut sched = Schedule { drops: Vector::<DropAt>::new(), moves: Vector::<DropAt>::new(), concrete: true };
+    cx: &mut ElabCtx,
+) {
+    cx.sched.drops.truncate(0);
+    cx.sched.moves.truncate(0);
+    cx.sched.concrete = true;
+    let sched = &mut cx.sched;
     {
         let a = unsafe &*(&*ow.pkg).module_ast_const(b.module);
         for l in 0..b.locals.len() {
@@ -100,11 +139,11 @@ pub fn elaborate(
         }
     }
     let w = fl.words as usize;
-    let mut mi = Vector::<u64>::new();
-    let mut di = Vector::<u64>::new();
-    let mut mm = Vector::<u64>::new();
-    let mut scratch = Vector::<u32>::new();
-    let mut sub = Vector::<u32>::new();
+    let mi = &mut cx.mi;
+    let di = &mut cx.di;
+    let mm = &mut cx.mm;
+    let scratch = &mut cx.scratch;
+    let sub = &mut cx.sub;
     for bi in 0..b.blocks.len() {
         mi.clear();
         di.clear();
@@ -138,7 +177,7 @@ pub fn elaborate(
                         },
                     );
                 }
-                df::apply_event(forest, &e, &mut scratch, &mut sub, &mut mi, &mut di, &mut mm);
+                df::apply_event(forest, &e, scratch, sub, mi, di, mm);
                 ev += 1;
             }
             if s.kind == ir::ST_ASSIGN {
@@ -158,7 +197,7 @@ pub fn elaborate(
                             dp0 = forest.place_cut[s.place as usize];
                         }
                         if dp0 != mp::MP_NONE {
-                            if bit(&di, dp0) && !bit(&mi, dp0) {
+                            if bit(di, dp0) && !bit(mi, dp0) {
                                 sched.drops.push(
                                     DropAt {
                                         local: pl0.base,
@@ -169,7 +208,7 @@ pub fn elaborate(
                                         fdecl: NODE_NONE,
                                     },
                                 );
-                            } else if bit(&mi, dp0) && bit(&di, dp0) {
+                            } else if bit(mi, dp0) && bit(di, dp0) {
                                 sched.drops.push(
                                     DropAt {
                                         local: pl0.base,
@@ -191,18 +230,18 @@ pub fn elaborate(
                 let lty = b.locals.at(l as usize).ty;
                 if decl != NODE_NONE && ow.owns(b.module, lty) {
                     let root = forest.local_root[l as usize];
-                    forest.subtree(root, &mut scratch, &mut sub);
+                    forest.subtree(root, scratch, sub);
                     let mut all_di = true;
                     let mut any_mi = false;
                     let mut sub_moved = false;
                     for i in 0..sub.len() {
-                        if !bit(&di, sub[i]) {
+                        if !bit(di, sub[i]) {
                             all_di = false;
                         }
-                        if bit(&mi, sub[i]) {
+                        if bit(mi, sub[i]) {
                             any_mi = true;
                         }
-                        if sub[i] != root && bit(&mm, sub[i]) {
+                        if sub[i] != root && bit(mm, sub[i]) {
                             sub_moved = true;
                         }
                     }
@@ -217,7 +256,7 @@ pub fn elaborate(
                                 fdecl: NODE_NONE,
                             },
                         );
-                    } else if sub_moved && !bit(&mm, root) {
+                    } else if sub_moved && !bit(mm, root) {
                         // Partially moved (never wholly): every still-owned FIELD drops -- fields
                         // never mentioned have no move path and are owned by construction.
                         let mut fdecls = Vector::<NodeId>::new();
@@ -228,7 +267,7 @@ pub fn elaborate(
                                 let child = tuple_member_child(ow, forest, root, fom, fdecls[fi], fi as u32);
                                 let mut live = child == mp::MP_NONE;
                                 if child != mp::MP_NONE {
-                                    live = bit(&di, child);
+                                    live = bit(di, child);
                                 }
                                 if live && ow.owns(fom, ftys[fi]) {
                                     let mut pth = root;
@@ -248,7 +287,7 @@ pub fn elaborate(
                                 }
                             }
                         }
-                    } else if bit(&di, root) || bit(&mi, root) {
+                    } else if bit(di, root) || bit(mi, root) {
                         // The whole value may or may not still be here: one flag guards it.
                         sched.drops.push(
                             DropAt {
@@ -266,7 +305,7 @@ pub fn elaborate(
                         let mut fom2: ModuleId = 0;
                         let have2 = ow.agg_fields(b.module, lty, &mut fdecls2, &mut ftys2, &mut fom2);
                         for i in 0..sub.len() {
-                            if sub[i] != root && bit(&di, sub[i]) && ow.owns(
+                            if sub[i] != root && bit(di, sub[i]) && ow.owns(
                                 b.module,
                                 forest.paths.at(sub[i] as usize).ty,
                             ) {
@@ -310,7 +349,7 @@ pub fn elaborate(
                         },
                     );
                 }
-                df::apply_event(forest, &e, &mut scratch, &mut sub, &mut mi, &mut di, &mut mm);
+                df::apply_event(forest, &e, scratch, sub, mi, di, mm);
                 ev += 1;
             }
         }
@@ -332,7 +371,6 @@ pub fn elaborate(
             ev += 1;
         }
     }
-    return sched;
 }
 
 /// Rewrite `b` so every scheduled whole-value drop is an explicit `Drop(place)` terminator: the

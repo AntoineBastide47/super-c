@@ -1144,6 +1144,7 @@ extend Ast {
 
     /// Moves the scratch entries pushed since `mark` into `children` and returns their NodeList.
     /// Nested lists work because an inner list commits (draining its scratch tail) first.
+    @c.always_inline
     pub fn commit(self: &mut Self, mark: u32) NodeList {
         let list = NodeList { start: self.children.len() as u32, len: self.scratch.len() as u32 - mark };
         for i in mark as usize..self.scratch.len() {

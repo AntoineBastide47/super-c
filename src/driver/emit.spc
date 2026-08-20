@@ -26,6 +26,7 @@ import ir::drops as ird;
 import ir::interp as iri;
 import ir::layout as lay;
 import emit::cemit as cbe;
+import emit::cflow as cfl;
 import emit::mangle as mbe;
 import emit::tu as tbe;
 import graph::instances as ig;
@@ -35,6 +36,7 @@ import borrowck::dataflow as bdf;
 import borrowck::loans as bln;
 import borrowck::explain as bex;
 import utils::errors as diag;
+import driver::tuc as tuc;
 import driver::util as *;
 
 import driver::extc as *;
@@ -1127,6 +1129,10 @@ pub struct CemitOut {
     pub main_argv: bool,
     pub skips: u64,
     pub edges: Vector<u64>, // (spelling TU << 32 | owner module): cross-TU symbol references
+    /// Next per-TU cache image + its path ("" = caching off): run_package persists it only after a
+    /// fully successful emission, so a failed build never publishes sections it did not finish.
+    pub tuc_img: String,
+    pub tuc_path: String,
 }
 
 extend CemitOut as Free {
@@ -1136,6 +1142,8 @@ extend CemitOut as Free {
         self.tus.free();
         self.inst_c.free();
         self.edges.free();
+        self.tuc_img.free();
+        self.tuc_path.free();
     }
 }
 
@@ -1151,6 +1159,8 @@ extend CemitOut {
             main_argv: false,
             skips: 0,
             edges: Vector::<u64>::new(),
+            tuc_img: String::new(),
+            tuc_path: String::new(),
         };
         for _i in 0..n {
             o.tus.push(String::new());
@@ -1193,7 +1203,9 @@ fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, out: &mut Strin
         }
     }
     if inl || always {
-        out.push_str("inline ");
+        // C11 `extern inline`: the definition still provides the external symbol (plain `inline`
+        // would not -- a non-inlined cross-TU caller then fails to link), and carries the hint.
+        out.push_str("extern inline ");
     }
     let mut g = String::new();
     if always {
@@ -1590,7 +1602,74 @@ fn cemit_take_closure(
     return lw_out.lower_closure_body(cn);
 }
 
-pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, live: *const bool, o: &mut CemitOut) {
+/// Replay one cached module: pool interns first (verified id by id), then the journaled events
+/// through the emitter's live dedup gates. 0 = replayed, 1 = clean reject (nothing landed; emit
+/// live and re-record), 2 = dirty reject (side effects landed; void the section, skip recording).
+fn cemit_tuc_replay(
+    p: &mut loader::Package,
+    cem: &mut cbe::CEmit,
+    m: usize,
+    t: &tuc::Tuc,
+    bodies_all: &mut String,
+    protos: &mut String,
+    chunk_mod: &mut Vector<u64>,
+    chunk_off: &mut Vector<u64>,
+    env_names: &mut Vector<u64>,
+    env_bodies: &mut Vector<String>,
+    have_main: &mut bool,
+    main_mod: &mut u64,
+    main_argv: &mut bool,
+) i32 {
+    let mut rd = tuc::tuc_open(t, m);
+    let a = unsafe &mut *(p.module_ast_const(m as ModuleId) as *mut Ast);
+    let pr = tuc::replay_pool(&mut rd, a);
+    if pr != 0 {
+        return pr;
+    }
+    let nev = tuc::read_count(&mut rd) as usize;
+    let mut ev = mbe::RecEv::blank(0);
+    for _i in 0..nev {
+        if !tuc::read_ev(&mut rd, &mut ev) {
+            return 2;
+        }
+        if ev.kind == mbe::RK_CHUNK {
+            chunk_mod.push(m as u64);
+            chunk_off.push(bodies_all.len() as u64);
+            proto_of(&ev.s1, protos);
+            bodies_all.push_string(&ev.s1);
+        } else if ev.kind == mbe::RK_ENV {
+            env_names.push(ev.h);
+            env_bodies.push(ev.s1.clone());
+        } else if ev.kind == mbe::RK_AUX {
+            cem.aux.push_str(ev.s1.as_str());
+        } else if ev.kind == mbe::RK_EFWD {
+            cem.env_fwd.push_str(ev.s1.as_str());
+        } else if ev.kind == mbe::RK_EDGE {
+            for k in 0..ev.xs.len() {
+                cem.mg.mark_used(ev.xs[k] as ModuleId);
+            }
+        } else if ev.kind == mbe::RK_MAIN {
+            *have_main = true;
+            *main_mod = m as u64;
+            *main_argv = ev.a != 0;
+        } else {
+            cem.tuc_replay(&ev);
+        }
+    }
+    if !rd.ok || rd.at != rd.end {
+        return 2;
+    }
+    return 0;
+}
+
+pub fn cemit_package(
+    p: &mut loader::Package,
+    testing: bool,
+    tplan: &TestPlan,
+    live: *const bool,
+    target: i32,
+    o: &mut CemitOut,
+) {
     let verbose = stdlib::getenv("SC_CEMIT_TU") != null || stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut g = ig::InstGraph::new(p);
     g.collect();
@@ -1646,7 +1725,14 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
     // so call sites never synthesize conflicting protos)
     let mut ext_incs = String::new();
     cemit_extern_includes(p, &mut ext_incs, &mut cem.ext_backed);
-    let mut dow = bfx::Owner::new(p);
+    let mut dow = DropCtx {
+        ow: bfx::Owner::new(p),
+        forest: bmp::MoveForest::empty(),
+        facts: bfx::BodyFacts::empty(),
+        cfg: bdf::Cfg::empty(),
+        mv: bdf::MoveFlow::empty(),
+        el: ird::ElabCtx::empty(),
+    };
     let mut lw_cache = Map::<u64, u64>::new();
     let mut lws = Vector::<irl::Lowerer>::new();
     // closure lowerings, drops applied, shared by the seed and instance loops (a demanded generic
@@ -1681,14 +1767,79 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
     // chunk_mod is the owning TU (65534 = the shared instance TU), chunk_off the bodies_all offset
     let mut chunk_mod = Vector::<u64>::new();
     let mut chunk_off = Vector::<u64>::new();
+    // Per-TU cache: fingerprint every module up front; a hit replays the module's journaled side
+    // effects instead of lowering it, a miss emits live under journaling. Test builds opt out (the
+    // wrapper set would join the fingerprint for little gain).
+    let mut tuc = tuc::tuc_setup(
+        p,
+        live,
+        target,
+        if testing {
+            "";
+        } else {
+            p.gen_root.as_str();
+        },
+    );
+    let mut tuc_pay = String::new();
     for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast {
+        if !p.modules[m].has_ast || live != null && p.modules[m].prelude && !unsafe live[m] {
+            // no seeds (missing AST / unreachable prelude): an empty section keeps the image indexed
+            if tuc.on {
+                tuc_pay.truncate(0);
+                tuc::sec_add(&mut tuc, m, &tuc_pay);
+            }
             continue;
         }
-        if live != null && p.modules[m].prelude && !unsafe live[m] {
-            continue; // an unreachable prelude module seeds nothing (demand-driven output)
-        }
         cem.mg.mark_ctx = m as i64; // symbols the module spells about ITSELF are not cross-TU uses
+        let mut tuc_rec = false;
+        if tuc.on {
+            if tuc.hit[m] {
+                let rr = cemit_tuc_replay(
+                    p,
+                    &mut cem,
+                    m,
+                    &tuc,
+                    &mut bodies_all,
+                    &mut protos,
+                    &mut chunk_mod,
+                    &mut chunk_off,
+                    &mut env_names,
+                    &mut env_bodies,
+                    &mut have_main,
+                    &mut main_mod,
+                    &mut main_argv,
+                );
+                if rr == 0 {
+                    tuc::sec_keep(&mut tuc, m);
+                    continue;
+                }
+                // clean rejects are ordinary churn (another module's typecheck moved this pool);
+                // a DIRTY reject means interns landed before diverging -- warn and void the section
+                if rr == 2 {
+                    eprint("tu-cache: dirty replay reject for `{}`; emitting live\n", p.modules[m].path.as_str());
+                    tuc::sec_void(&mut tuc, m);
+                }
+                tuc_rec = rr == 1;
+            } else {
+                tuc_rec = true;
+            }
+        }
+        let mut tuc_seg0: usize = 0;
+        let mut tuc_t0: usize = 0;
+        let mut tuc_i0: usize = 0;
+        let mut tuc_aux0: usize = 0;
+        let mut tuc_efwd0: usize = 0;
+        let mut tuc_eh0: usize = 0;
+        if tuc_rec {
+            cem.mg.rec_on = true;
+            tuc_seg0 = cem.mg.rec.len();
+            let a0 = unsafe &*p.module_ast_const(m as ModuleId);
+            tuc_t0 = a0.type_pool.len();
+            tuc_i0 = a0.instances.len();
+            tuc_aux0 = cem.aux.len();
+            tuc_efwd0 = cem.env_fwd.len();
+            tuc_eh0 = cem.env_hashes.len();
+        }
         let a = unsafe &*p.module_ast_const(m as ModuleId);
         let its = a.at_const(a.root).as_data.program.items;
         let mut cands = Vector::<NodeId>::new();
@@ -1756,12 +1907,27 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                     have_main = true;
                     main_mod = m as u64;
                     main_argv = n.as_data.function.params.len != 0;
+                    if cem.mg.rec_on {
+                        let mut ev9 = mbe::RecEv::blank(mbe::RK_MAIN);
+                        ev9.a = if main_argv {
+                            1u32;
+                        } else {
+                            0;
+                        };
+                        cem.mg.rec.push(ev9);
+                    }
                 }
                 {
                     chunk_mod.push(m as u64);
                     chunk_off.push(bodies_all.len() as u64);
                     proto_of(&cem.out, &mut protos);
                     bodies_all.push_string(&cem.out);
+                    if cem.mg.rec_on {
+                        let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
+                        ev9.a = chunk_off[chunk_off.len() - 1] as u32;
+                        ev9.b = bodies_all.len() as u32;
+                        cem.mg.rec.push(ev9);
+                    }
                 }
                 if is_glue {
                     // the public wrapper: the sig is the __fb sig without the suffix
@@ -1813,6 +1979,12 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                         chunk_off.push(bodies_all.len() as u64);
                         proto_of(&wr, &mut protos);
                         bodies_all.push_string(&wr);
+                        if cem.mg.rec_on {
+                            let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
+                            ev9.a = chunk_off[chunk_off.len() - 1] as u32;
+                            ev9.b = bodies_all.len() as u32;
+                            cem.mg.rec.push(ev9);
+                        }
                     }
                 }
                 let mut clsq = Vector::<NodeId>::new();
@@ -1863,12 +2035,24 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                                 }
                                 env_names.push(eh9);
                                 env_bodies.push(envs.clone());
+                                if cem.mg.rec_on {
+                                    let mut ev9 = mbe::RecEv::blank(mbe::RK_ENV);
+                                    ev9.h = eh9;
+                                    ev9.s1 = envs.clone();
+                                    cem.mg.rec.push(ev9);
+                                }
                             }
                         }
                         chunk_mod.push(m as u64);
                         chunk_off.push(bodies_all.len() as u64);
                         proto_of(&cem.out, &mut protos);
                         bodies_all.push_string(&cem.out);
+                        if cem.mg.rec_on {
+                            let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
+                            ev9.a = chunk_off[chunk_off.len() - 1] as u32;
+                            ev9.b = bodies_all.len() as u32;
+                            cem.mg.rec.push(ev9);
+                        }
                     } else {
                         clos_skip += 1;
                     }
@@ -1879,6 +2063,41 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                     eprint("seed-emit-fail: `{}` {}\n", sym.as_str(), cem.err);
                 }
             }
+        }
+        if tuc_rec {
+            cem.mg.rec_on = false;
+            // trailing delta events: their accumulators are consumed whole at assembly, so only
+            // their internal order matters
+            if cem.aux.len() > tuc_aux0 {
+                let mut ev9 = mbe::RecEv::blank(mbe::RK_AUX);
+                ev9.s1.push_str(cem.aux.as_str().slice(tuc_aux0, cem.aux.len()));
+                cem.mg.rec.push(ev9);
+            }
+            if cem.env_fwd.len() > tuc_efwd0 {
+                let mut ev9 = mbe::RecEv::blank(mbe::RK_EFWD);
+                ev9.s1.push_str(cem.env_fwd.as_str().slice(tuc_efwd0, cem.env_fwd.len()));
+                cem.mg.rec.push(ev9);
+            }
+            for k9 in tuc_eh0..cem.env_hashes.len() {
+                let mut ev9 = mbe::RecEv::blank(mbe::RK_EDEF);
+                ev9.h = *cem.env_hashes.at(k9);
+                cem.mg.rec.push(ev9);
+            }
+            {
+                let mut ev9 = mbe::RecEv::blank(mbe::RK_EDGE);
+                for dst in 0..p.modules.len() {
+                    if cem.mg.um_hit(m as u64, dst) {
+                        ev9.xs.push(dst as u32);
+                    }
+                }
+                cem.mg.rec.push(ev9);
+            }
+            let a2 = unsafe &*p.module_ast_const(m as ModuleId);
+            tuc_pay.truncate(0);
+            tuc::ser_pool(&mut tuc_pay, a2, tuc_t0, a2.type_pool.len(), tuc_i0, a2.instances.len());
+            tuc::ser_evs(&mut tuc_pay, &cem.mg.rec, tuc_seg0, bodies_all.as_str());
+            tuc::sec_add(&mut tuc, m, &tuc_pay);
+            cem.mg.rec.truncate(tuc_seg0);
         }
     }
     // @test wrappers: per-case runner entry points + the global-env hooks, emitted as ordinary
@@ -1929,6 +2148,9 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
         }
     }
     let mut done = Map::<u64, u64>::new();
+    // per-lowering CFGs, built once and lent to every instantiation's emission (see CEmit.cf_ext)
+    let mut cfs = Vector::<cfl::CFlow>::new();
+    let mut cf_ok = Vector::<bool>::new();
     let mut sa_seen = Map::<u64, u64>::new();
     let mut inst_ok: u64 = 0;
     let mut inst_skip: u64 = 0;
@@ -2042,10 +2264,24 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
         for c2 in 0..lws.at(li2 as usize).closures.len() {
             cem.mg.clos_ids.push(lws.at(li2 as usize).closures[c2]);
         }
+        if li2 == li {
+            while cfs.len() <= li as usize {
+                cfs.push(cfl::CFlow::new_empty());
+                cf_ok.push(false);
+            }
+            if !cf_ok[li as usize] {
+                let cfp = &mut cfs[li as usize];
+                cfp.build_into(&lws.at(li as usize).body);
+                cf_ok.set(li as usize, true);
+            }
+            cem.cf_ext = cfs.at(li as usize);
+        }
         cem.out.clear();
         cem.fn_attrs.truncate(0);
         cemit_fn_attrs(p, d_def.module, d_def.node, &mut cem.fn_attrs);
-        if cem.emit_fn(&lws.at(li2 as usize).body, d_sym.as_str()) {
+        let em_ok9 = cem.emit_fn(&lws.at(li2 as usize).body, d_sym.as_str());
+        cem.cf_ext = null;
+        if em_ok9 {
             done.insert(dk, 1);
             inst_ok += 1;
             chunk_mod.push(65534);
@@ -2774,10 +3010,12 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
             };
             tu_chunks[w].push(i as u32);
         }
+        let mut lp = String::new();
+        let mut lb = String::new();
         for t in 0..p.modules.len() + 1 {
             let is_inst = t == p.modules.len();
-            let mut lp = String::new();
-            let mut lb = String::new();
+            lp.truncate(0);
+            lb.truncate(0);
             {
                 let mut bb: usize = 0;
                 for k in 0..tu_chunks[t].len() {
@@ -2867,11 +3105,7 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
                 src as u64;
             };
             for dst in 0..nm9 {
-                let hit = switch cem.mg.used_mods.get(&(sk << 32 | dst as u64)) {
-                    Some(_v) => true,
-                    None => false,
-                };
-                if hit {
+                if cem.mg.um_hit(sk, dst) {
                     o.edges.push(sk << 32 | dst as u64);
                 }
             }
@@ -2880,6 +3114,10 @@ pub fn cemit_package(p: &mut loader::Package, testing: bool, tplan: &TestPlan, l
     o.have_main = have_main;
     o.main_mod = main_mod;
     o.main_argv = main_argv;
+    if tuc.on {
+        o.tuc_img = tuc.out.clone();
+        o.tuc_path = tuc.path.clone();
+    }
     let _ = fwd_end;
 }
 
@@ -2894,7 +3132,7 @@ fn cemit_tu_pass(p: &mut loader::Package) {
     let mut tplan = TestPlan::new(p.modules.len());
     test_plan_build(p, &mut tplan);
     let mut o = CemitOut::new(p.modules.len());
-    cemit_package(p, true, &tplan, null, &mut o);
+    cemit_package(p, true, &tplan, null, -1, &mut o);
     let _ = unsafe shim::sc_run("mkdir -p build/cemit_mod".ptr() as *const char, null, null, null, null);
     write_super_rt("build/cemit_mod");
     let mut ok9 = cemit_write("build/cemit_mod/__sc_types.h", &o.types_h) && cemit_write(
@@ -3529,13 +3767,24 @@ const fn if_s2(c: bool, a: str<'static>, b: str<'static>) str<'static> {
 // Scope-end destruction for a lane body: elaborate the drop schedule and rewrite the body with
 // drop terminators, exactly as the differential does -- WITHOUT this, emitted programs leak every
 // non-moved owning local (explicit `.free()` calls are the only TM_DROPs lowering itself emits).
-fn cemit_apply_drops(ow: &mut bfx::Owner, lw: &mut irl::Lowerer) {
-    let forest = bmp::MoveForest::build(&lw.body);
-    let bfacts = bfx::generate(ow, &lw.body, &forest);
-    let cfg = bdf::build_cfg(&lw.body);
-    let mv = bdf::solve_moves(&lw.body, &forest, &bfacts, &cfg);
-    let sched = ird::elaborate(ow, &lw.body, &forest, &bfacts, &mv);
-    ird::insert_drops(&mut lw.body, &sched, &forest);
+/// The drop-elaboration analyses, pooled: one instance rebuilds in place per body (capacity kept),
+/// mirroring flow_ir's FlowCtx -- fresh builds per body dominated the elaboration's allocator cost.
+struct DropCtx {
+    pub ow: bfx::Owner,
+    pub forest: bmp::MoveForest,
+    pub facts: bfx::BodyFacts,
+    pub cfg: bdf::Cfg,
+    pub mv: bdf::MoveFlow,
+    pub el: ird::ElabCtx,
+}
+
+fn cemit_apply_drops(dc: &mut DropCtx, lw: &mut irl::Lowerer) {
+    dc.forest.build_into(&lw.body);
+    bfx::generate_into(&mut dc.ow, &lw.body, &dc.forest, &mut dc.facts);
+    dc.cfg.build_into(&lw.body);
+    dc.mv.build_into(&lw.body, &dc.forest, &dc.facts, &dc.cfg);
+    ird::elaborate_into(&mut dc.ow, &lw.body, &dc.forest, &dc.facts, &dc.mv, &mut dc.el);
+    ird::insert_drops(&mut lw.body, &dc.el.sched, &dc.forest);
 }
 
 // The free-glue wrapper fields (frozen `__fb` convention): a CONCRETE struct's selected user
@@ -3676,7 +3925,9 @@ fn proto_of(body: &String, out: &mut String) {
     // `_Noreturn` specifier and return type follow this prefix and stay.
     let mut start: usize = 0;
     loop {
-        if start + 7 <= n && bs.slice(start, start + 7) == "inline " {
+        if start + 7 <= n && bs.slice(start, start + 7) == "extern " {
+            start += 7;
+        } else if start + 7 <= n && bs.slice(start, start + 7) == "inline " {
             start += 7;
         } else if start + 13 <= n && bs.slice(start, start + 13) == "__attribute__" {
             let mut j = start + 13;
@@ -5029,7 +5280,7 @@ pub fn run_package(
     if ceptr != null {
         unsafe ceptr.record_folds = true; // the seed/instance lowering attempts mandatory folds
     }
-    cemit_package(p, testing, &plan, live, &mut co);
+    cemit_package(p, testing, &plan, live, target, &mut co);
     report_fold_errs(p);
     if !p.ok {
         err = true;
@@ -5122,6 +5373,12 @@ pub fn run_package(
             }
             sink_notify(sink, ip.as_str(), 1);
             keep.push(ip);
+        }
+    }
+    // publish the per-TU cache only after a fully successful emission; keep[] shields it from pruning
+    if !err && co.skips == 0 && co.tuc_path.len() != 0 {
+        if cemit_write(co.tuc_path.as_str(), &co.tuc_img) {
+            keep.push(String::from_str(co.tuc_path.as_str()));
         }
     }
     unsafe stdlib::free(order);

@@ -228,6 +228,7 @@ extend Lowerer {
         }
     }
 
+    @c.always_inline
     fn tp(self: &mut Self, k: u8, aux: u32, node: NodeId) {
         if self.tape_mute == 0 {
             self.tape.push(k as u64 << 56 | aux as u64 << 32 | node as u64);
@@ -243,6 +244,7 @@ extend Lowerer {
     // checker's free-move rules fire only on these, never on pattern/spill plumbing reads. Whether
     // the read MOVES is the type's business (Gen derives it from ownership), so both operand kinds
     // qualify here.
+    @c.always_inline
     fn mark_user_move(self: &mut Self, op: ir::OperandId) {
         if op == ir::IR_NONE {
             return;
@@ -1101,6 +1103,15 @@ extend Lowerer {
     // A preemption safepoint marker at the top of a loop body; the backend prints it only for
     // programs that use the coroutine runtime, and never inside std::parallel itself.
     fn loop_safepoint(self: &mut Self, sp: tok::Span) {
+        // Only a body a launched coroutine can execute needs the preemption tick; every other
+        // loop skips the intrinsic (and so the emitted `__sc_safepoint()` and its TLS decrement).
+        let ow9 = self.body.owner;
+        if ow9.node != NODE_NONE {
+            let osp = unsafe (&*(&*self.pkg).module_ast_const(ow9.module)).at_const(ow9.node).span;
+            if !unsafe (&*self.pkg).co_on(ow9.module, osp) {
+                return;
+            }
+        }
         let ut = Ast::builtin(BuiltinType::BT_VOID);
         let t = self.temp(ut, sp);
         let pl = self.place_of_local(t);

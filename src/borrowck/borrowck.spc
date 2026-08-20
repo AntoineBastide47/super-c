@@ -20,32 +20,8 @@ import borrowck::flow_ir as bfi;
 import ir::lower as irl;
 import ir::core as ir;
 
-// Nesting stacks for the tape replay (one per strictly-nested event family).
-pub struct RepSt {
-    pub bms: Vector<u32>,
-    pub les: Vector<i32>,
-    pub mbm: Vector<u32>,
-    pub pre: Vector<FlowState>,
-    pub acc: Vector<FlowState>,
-    pub ovf: Vector<u8>,
-    pub seg: Vector<u64>, // start<<32 | nmoved0<<16 | nborrows0
-}
-
-extend RepSt {
-    pub fn new() RepSt {
-        return RepSt {
-            bms: Vector::<u32>::new(),
-            les: Vector::<i32>::new(),
-            mbm: Vector::<u32>::new(),
-            pre: Vector::<FlowState>::new(),
-            acc: Vector::<FlowState>::new(),
-            ovf: Vector::<u8>::new(),
-            seg: Vector::<u64>::new(),
-        };
-    }
-}
-
-fn rep_bm(st: &mut RepSt) u32 {
+@c.always_inline
+fn rep_bm(st: &mut bfi::RepSt) u32 {
     switch st.bms.pop() {
         Some(v) => {
             return v;
@@ -55,20 +31,34 @@ fn rep_bm(st: &mut RepSt) u32 {
     return 0;
 }
 
-fn rep_flow_push(t: &mut tc::TypeChecker, st: &mut RepSt) {
-    let mut ps: FlowState;
-    t.tc_flow_save(&mut ps);
-    st.pre.push(ps);
-    let mut ac: FlowState;
-    t.tc_flow_clear(&mut ac);
-    st.acc.push(ac);
-    st.ovf.push(0);
+// Depth-slot flow push: existing slots are refilled row-wise (no whole-FlowState copies).
+fn rep_flow_push(t: &mut tc::TypeChecker, st: &mut bfi::RepSt) {
+    let d = st.fdepth;
+    if st.pre.len() <= d {
+        let mut ps: FlowState;
+        t.tc_flow_save(&mut ps);
+        st.pre.push(ps);
+        let mut ac: FlowState;
+        t.tc_flow_clear(&mut ac);
+        st.acc.push(ac);
+        st.ovf.push(0);
+    } else {
+        t.tc_flow_save(&mut st.pre[d]);
+        t.tc_flow_clear(&mut st.acc[d]);
+        st.ovf.set(d, 0);
+    }
+    st.fdepth = d + 1;
 }
 
 extend tc::TypeChecker {
     /// Entry point: run the declaration-level checks and the flow walk over every item of the
     /// current module, then finalize its diagnostics.
     pub fn borrowck(self: &mut Self) {
+        if self.package != null && unsafe (&*self.package).co_state == 0 {
+            // single-threaded phase: the const package pointer is the one place mutated (ceval precedent)
+            unsafe (&mut *self.package).co_compute();
+            unsafe (&*self.package).co_dump();
+        }
         let mut ow = bfx::Owner::new(self.package);
         let mut ctx = bfi::BorrowCtx::new(); // one reusable borrow pipeline for every body in the module
         let a = self.cur_ast();
@@ -558,6 +548,9 @@ extend tc::TypeChecker {
     /// walks node ids in (stmt id, block id) -- a block node is allocated after its children, so that
     /// range is exactly the later statements' subtrees.
     pub fn borrow_nll_drop(self: &mut Self, block_id: NodeId, ids: *const NodeId, si: u32) {
+        if self.nborrows == 0 {
+            return;
+        }
         let mut keep = Keep256 {};
         for k in 0..self.nborrows {
             keep[k as usize] = true;
@@ -2946,8 +2939,9 @@ extend tc::TypeChecker {
             self.region_alloc_for(pid, a.type_of(pid));
         }
         if self.bc_quiet && irbodies.len() != 0 && self.bc_tape_on() {
-            let mut st = RepSt::new();
-            self.bc_replay(&irbodies, 0, 0, irbodies.at(0).tape.len(), &mut st);
+            ctx.rep.reset();
+            let tn = irbodies.at(0).tape.len();
+            self.bc_replay(&irbodies, 0, 0, tn, &mut ctx.rep);
         } else {
             self.bc_stmt(fnd.body);
         }
@@ -2999,25 +2993,35 @@ extend tc::TypeChecker {
     /// Replay the lowerer's event tape in place of the quiet walk: the same helper calls at the
     /// same AST sites, without traversing the expression tree. `st` carries the nesting stacks;
     /// pairs are strictly nested so one stack per family suffices.
-    pub fn bc_replay(self: &mut Self, bodies: &Vector<irl::Lowerer>, bi: usize, lo: usize, hi: usize, st: &mut RepSt) {
+    pub fn bc_replay(
+        self: &mut Self,
+        bodies: &Vector<irl::Lowerer>,
+        bi: usize,
+        lo: usize,
+        hi: usize,
+        st: &mut bfi::RepSt,
+    ) {
         let a = self.cur_ast();
+        let tp9 = bodies.at(bi).tape.as_ptr();
         let mut i = lo;
         while i < hi {
-            let e = bodies.at(bi).tape[i];
+            let e = unsafe tp9[i];
             let k = (e >> 56) as u8;
             let aux = (e >> 32 & 0xFFFFFFu64) as u32;
             let node = (e & 0xFFFFFFFFu64) as NodeId;
-            if k == ir::TP_SCOPE_PUSH {
+            if k == ir::TP_MARK_PUSH || k == ir::TP_CALL_MARK {
+                st.bms.push(self.borrow_mark());
+            } else if k == ir::TP_MARK_POP {
+                self.borrow_release_to(rep_bm(st));
+            } else if k == ir::TP_SCOPE_PUSH {
                 self.scope_depth = self.scope_depth + 1;
             } else if k == ir::TP_SCOPE_POP {
                 self.bc_scope_close();
             } else if k == ir::TP_NLL {
-                let ss = a.at_const(node).as_data.block.statements;
-                self.borrow_nll_drop(node, a.list(ss), aux);
-            } else if k == ir::TP_MARK_PUSH {
-                st.bms.push(self.borrow_mark());
-            } else if k == ir::TP_MARK_POP {
-                self.borrow_release_to(rep_bm(st));
+                if self.nborrows != 0 {
+                    let ss = a.at_const(node).as_data.block.statements;
+                    self.borrow_nll_drop(node, a.list(ss), aux);
+                }
             } else if k == ir::TP_LET {
                 let bm = rep_bm(st);
                 self.bc_let_post(node, bm);
@@ -3040,8 +3044,6 @@ extend tc::TypeChecker {
             } else if k == ir::TP_RET_POST {
                 let bm = rep_bm(st);
                 self.bc_return_post(node, bm);
-            } else if k == ir::TP_CALL_MARK {
-                st.bms.push(self.borrow_mark());
             } else if k == ir::TP_CALL {
                 if aux == 1 {
                     // `d.free()` on a dyn receiver: destruction consumes the value
@@ -3084,7 +3086,7 @@ extend tc::TypeChecker {
             } else if k == ir::TP_FLOW_SAVE {
                 rep_flow_push(self, st);
             } else if k == ir::TP_FLOW_ELSE {
-                let ti = st.acc.len() - 1;
+                let ti = st.fdepth - 1;
                 if !self.tc_stmt_returns(a.at_const(node).as_data.if_stmt.then_branch) && self.tc_flow_collect(
                     &mut st.acc[ti],
                 ) {
@@ -3092,7 +3094,7 @@ extend tc::TypeChecker {
                 }
                 self.tc_flow_set(&st.pre[ti]);
             } else if k == ir::TP_FLOW_JOIN {
-                let ti = st.acc.len() - 1;
+                let ti = st.fdepth - 1;
                 if !self.tc_stmt_returns(a.at_const(node).as_data.if_stmt.else_branch) && self.tc_flow_collect(
                     &mut st.acc[ti],
                 ) {
@@ -3102,9 +3104,7 @@ extend tc::TypeChecker {
                 if st.ovf[ti] != 0 {
                     self.tc_flow_overflow(node);
                 }
-                let _ = st.pre.pop();
-                let _ = st.acc.pop();
-                let _ = st.ovf.pop();
+                st.fdepth = ti;
             } else if k == ir::TP_MATCH_PRE {
                 let bm = rep_bm(st);
                 let scrut = a.at_const(node).as_data.match_expr.value;
@@ -3120,28 +3120,26 @@ extend tc::TypeChecker {
                 rep_flow_push(self, st);
                 st.mbm.push(bm);
             } else if k == ir::TP_ARM {
-                let ti = st.pre.len() - 1;
+                let ti = st.fdepth - 1;
                 self.tc_flow_set(&st.pre[ti]);
                 self.bc_pattern_depths(a.at_const(node).as_data.match_arm.pattern);
             } else if k == ir::TP_ARM_END {
                 let body = a.at_const(node).as_data.match_arm.body;
                 let bt = a.type_of(body);
                 let diverges = self.tc_stmt_returns(body) || bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_NEVER;
-                let ti = st.acc.len() - 1;
+                let ti = st.fdepth - 1;
                 if !diverges && self.tc_flow_collect(&mut st.acc[ti]) {
                     st.ovf.set(ti, 1);
                 }
             } else if k == ir::TP_MATCH_POST {
-                let ti = st.acc.len() - 1;
+                let ti = st.fdepth - 1;
                 if a.at_const(node).as_data.match_expr.arms.len != 0 {
                     self.tc_flow_set(&st.acc[ti]);
                 }
                 if st.ovf[ti] != 0 {
                     self.tc_flow_overflow(node);
                 }
-                let _ = st.pre.pop();
-                let _ = st.acc.pop();
-                let _ = st.ovf.pop();
+                st.fdepth = ti;
                 let mut mb: u32 = 0;
                 switch st.mbm.pop() {
                     Some(v) => {
@@ -4006,19 +4004,19 @@ extend tc::TypeChecker {
     /// borrow/move effects, result reborrows, and the call-boundary lifetime relation. Everything
     /// the walk does after evaluating receiver and arguments; shared with the tape replay.
     pub fn bc_call_post(self: &mut Self, id: NodeId, arg_bm: u32, arg_end: u32) {
-        let a = self.cur_ast();
-        let callee_id = a.at_const(id).as_data.call.callee;
-        let args = a.at_const(id).as_data.call.args;
-        let mut recv_n = NODE_NONE;
-        if a.at_const(callee_id).kind == NodeKind::NODE_MEMBER && !a.at_const(callee_id).as_data.member.path {
-            recv_n = a.at_const(callee_id).as_data.member.object;
-        }
         // callee resolution is the one the typechecker computed for this call node -- recorded there
         // (call_info) so the flow pass never re-derives generic instantiation or receiver skip and can
         // never disagree with it.
         let packed = self.bc_call_info(id);
         if packed == 0u64 {
             return;
+        }
+        let a = self.cur_ast();
+        let callee_id = a.at_const(id).as_data.call.callee;
+        let args = a.at_const(id).as_data.call.args;
+        let mut recv_n = NODE_NONE;
+        if a.at_const(callee_id).kind == NodeKind::NODE_MEMBER && !a.at_const(callee_id).as_data.member.path {
+            recv_n = a.at_const(callee_id).as_data.member.object;
         }
         let md = DefId { module: (packed >> 40) as ModuleId, node: (packed >> 8 & 0xFFFFFFFFu64) as NodeId };
         let skip = (packed & 0xFFu64) as u32;

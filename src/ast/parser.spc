@@ -196,6 +196,7 @@ extend Parser {
         return kind == TokenType::Identifier || kind == TokenType::Underscore || kind == TokenType::Static || kind == TokenType::StaticAssert || kind == TokenType::VaStart || kind == TokenType::VaArg || kind == TokenType::VaEnd;
     }
 
+    @c.always_inline
     pub fn identifier(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             self.error_here("expected identifier");
@@ -245,6 +246,7 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
+    @c.always_inline
     pub fn callable_name(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) && !self.check(
             TokenType::New,
@@ -2732,6 +2734,7 @@ extend Parser {
         return self.parse_unary_mode(ExpressionGrammar::EXPR_FULL);
     }
 
+    @c.always_inline
     fn add_binary(self: &mut Self, left: NodeId, op: TokenType, right: NodeId) NodeId {
         return self.ast.add(
             Node {

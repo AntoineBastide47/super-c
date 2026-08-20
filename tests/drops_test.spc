@@ -112,7 +112,9 @@ fn schedule(p: &loader::Package, name: str) DropCounts {
     let bfacts = bfx::generate(&mut ow, &lw.body, &forest);
     let cfg = bdf::build_cfg(&lw.body);
     let mv = bdf::solve_moves(&lw.body, &forest, &bfacts, &cfg);
-    let sched = ird::elaborate(&mut ow, &lw.body, &forest, &bfacts, &mv);
+    let mut ecx = ird::ElabCtx::empty();
+    ird::elaborate_into(&mut ow, &lw.body, &forest, &bfacts, &mv, &mut ecx);
+    let sched = &ecx.sched;
     let mut c = DropCounts { uncond: 0, cond: 0, fields: 0 };
     let mut overs: u32 = 0;
     for d in 0..sched.drops.len() {
@@ -127,7 +129,7 @@ fn schedule(p: &loader::Package, name: str) DropCounts {
             c.fields += 1;
         }
     }
-    ird::insert_drops(&mut lw.body, &sched, &forest);
+    ird::insert_drops(&mut lw.body, sched, &forest);
     let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
     assert(irv::verify(&lw.body, tp).len() == 0, "rewritten body verifies");
     // Explicit drop terminators exist for every whole-value entry.

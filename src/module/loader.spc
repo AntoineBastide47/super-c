@@ -46,11 +46,18 @@ pub struct Package {
     /// Instruction set `@arch` items are gated against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown.
     /// Defaults to the host the compiler runs on; the driver overwrites it for `--arch=`.
     pub arch: i32,
+    /// The `--bootstrap-tags` flag the ASTs were loaded under: gating changes item sets while
+    /// leaving sources identical, so build caches keyed on sources must include it.
+    pub bootstrap: bool,
     pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
     pub gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
     pub std_root: String, // second import search root (parent of std/); empty = none
     pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub ok: bool, // false if any read/parse/cycle error was reported during loading
+    /// Resolved external C inputs (`@c.source` files and implicit backing-header `.c` siblings),
+    /// recorded by ext_c_collect: the build engine's emit stamp must dirty on their edits, since
+    /// their content is copied into the generated tree at emission time.
+    pub ext_inputs: Vector<String>,
     /// Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
     /// `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
     pub core_module: ModuleId,
@@ -69,6 +76,13 @@ pub struct Package {
     /// their own receiver: keyed by inst_method_key, so a pair is emitted for the instances that reach it
     /// and for no others. Filled by seed_mono_body_instances, read by codegen.
     pub inst_methods: Set<u64>,
+    /// Coroutine-reachability for preemption safepoints: 0 = uncomputed (emit everywhere),
+    /// 1 = computed (only bodies inside co_spans need safepoints), 2 = widened (a coroutine entry
+    /// could not be tracked -- emit everywhere). co_spans[m] holds sorted start<<32|end body spans
+    /// of the functions and closures a `launch`ed coroutine can execute; everything else can never
+    /// starve a worker, so its loops need no safepoint tick.
+    pub co_state: u8,
+    pub co_spans: Vector<Vector<u64>>,
     /// Methods resolved with NO receiver in hand -- the format helpers the print lowering reaches for,
     /// and anything else the compiler names by decl alone. Nothing says which instance wants them, so
     /// every instance does: (module << 32 | node), exempt from the per-instance demand test.
@@ -271,6 +285,7 @@ extend SymTab {
     }
 
     /// The SymbolId already interned for `name`, or SYM_NONE. Byte-exact.
+    @c.always_inline
     pub fn find(self: &Self, name: str) SymbolId {
         return switch self.index.get(&fnv_name(name)) {
             Some(h) => {
@@ -728,16 +743,20 @@ extend Package {
     pub fn new() Package {
         return Package {
             arch: unsafe shim::sc_host_arch(),
+            bootstrap: false,
             modules: Vector::<Module>::new(),
             root_dir: String::new(),
             gen_root: String::new(),
             std_root: String::new(),
             alt_root: String::new(),
             ok: true,
+            ext_inputs: Vector::<String>::new(),
             core_module: 0,
             core_seeded: false,
             method_used: Vector::<Vector<bool>>::new(),
             inst_methods: Set::<u64>::new(),
+            co_state: 0,
+            co_spans: Vector::<Vector<u64>>::new(),
             always_methods: Set::<u64>::new(),
             method_edges: Vector::<u64>::new(),
             edge_seen: Set::<u64>::new(),
@@ -772,6 +791,169 @@ extend Package {
 
     /// Read-only view of module `mid`'s Ast for consumers outside the package (the Core IR
     /// lowerer); honors in-flight overrides like every package-level lookup.
+    /// True when a loop in the body whose span is `osp` (module `m`) can run inside a coroutine
+    /// and therefore needs a preemption safepoint at its backedges.
+    pub fn co_on(self: &Self, m: ModuleId, osp: tok::Span) bool {
+        if self.co_state != 1 {
+            return true;
+        }
+        if m as usize >= self.co_spans.len() {
+            return false;
+        }
+        let row = self.co_spans.at(m as usize);
+        for i in 0..row.len() {
+            let e = row[i];
+            if (e >> 32) as u32 <= osp.start && osp.end <= (e & 0xFFFFFFFFu64) as u32 {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Compute co_spans: seed with the closure/function arguments of `std::parallel::runtime::submit`
+    /// (what `launch` desugars to), then close over direct calls made inside marked spans. A callee
+    /// that cannot be pinned to a declaration (a fn value, a dyn method) widens to everywhere.
+    pub fn co_compute(self: &mut Self) {
+        self.co_state = 1;
+        self.co_spans.truncate(0);
+        for _m in 0..self.modules.len() {
+            self.co_spans.push(Vector::<u64>::new());
+        }
+        let rt = self.find("std::parallel::runtime");
+        if rt < 0 {
+            return; // no coroutine runtime loaded: nothing can launch
+        }
+        let sub = self.glob_lookup(rt as ModuleId, "submit", false);
+        if sub.node == NODE_NONE {
+            return;
+        }
+        // seeds
+        for m in 0..self.modules.len() {
+            let a = unsafe &*self.module_ast_const(m as ModuleId);
+            for ni in 0..a.nodes.len() {
+                let n = a.at_const(ni as NodeId);
+                if n.kind != NodeKind::NODE_CALL {
+                    continue;
+                }
+                let cd = n.as_data.call;
+                let cr = *a.resolutions.at(cd.callee as usize);
+                if cr.module != sub.mid || cr.node != sub.node {
+                    continue;
+                }
+                if cd.args.len < 1 {
+                    continue;
+                }
+                let a0 = unsafe a.list(cd.args)[0];
+                let ak = a.at_const(a0).kind;
+                if ak == NodeKind::NODE_CLOSURE {
+                    self.co_mark(m as ModuleId, a.at_const(a0).span);
+                } else {
+                    let fr = *a.resolutions.at(a0 as usize);
+                    if fr.node != NODE_NONE && unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).kind == NodeKind::NODE_FUNCTION {
+                        let fsp = unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).span;
+                        self.co_mark(fr.module, fsp);
+                    } else {
+                        if stdlib::getenv("SC_CO_DEBUG") != null {
+                            eprint(
+                                "co widen: seed in {} span {}..{}\n",
+                                self.modules.at(m).path.as_str(),
+                                a.at_const(a0).span.start,
+                                a.at_const(a0).span.end,
+                            );
+                        }
+                        self.co_state = 2; // a coroutine entry the tracker cannot pin
+                        return;
+                    }
+                }
+            }
+        }
+        // transitive closure over direct calls made inside marked spans
+        let mut changed = true;
+        while changed && self.co_state == 1 {
+            changed = false;
+            for m in 0..self.modules.len() {
+                if self.co_spans.at(m).len() == 0 {
+                    continue;
+                }
+                let a = unsafe &*self.module_ast_const(m as ModuleId);
+                for ni in 0..a.nodes.len() {
+                    let n = a.at_const(ni as NodeId);
+                    if n.kind != NodeKind::NODE_CALL {
+                        continue;
+                    }
+                    if !self.co_on(m as ModuleId, n.span) {
+                        continue;
+                    }
+                    let cd = n.as_data.call;
+                    let mut t = DefId { module: 0, node: NODE_NONE };
+                    let ni32 = ni as u32;
+                    switch a.call_info.get(&ni32) {
+                        Some(v) => {
+                            t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
+                        },
+                        _ => {},
+                    };
+                    if t.node == NODE_NONE {
+                        t = *a.resolutions.at(cd.callee as usize);
+                    }
+                    if t.node == NODE_NONE {
+                        let ck = a.at_const(cd.callee).kind;
+                        if ck == NodeKind::NODE_MEMBER {
+                            t = *a.resolutions.at(a.at_const(cd.callee).as_data.member.member as usize);
+                        }
+                    }
+                    if t.node == NODE_NONE {
+                        if stdlib::getenv("SC_CO_DEBUG") != null {
+                            eprint(
+                                "co widen: call in {} span {}..{}\n",
+                                self.modules.at(m).path.as_str(),
+                                n.span.start,
+                                n.span.end,
+                            );
+                        }
+                        self.co_state = 2; // fn value or dyn dispatch: cannot pin the callee
+                        return;
+                    }
+                    let ta = unsafe &*self.module_ast_const(t.module);
+                    if ta.at_const(t.node).kind != NodeKind::NODE_FUNCTION {
+                        continue; // ctor/variant/type call: no body to run
+                    }
+                    // The scan stops at the std boundary: std loops are bounded by their inputs
+                    // (containers, strings), so they always return to a marked frame, and a closure
+                    // built in coroutine code is covered lexically by its enclosing marked span.
+                    // std::parallel additionally never emits safepoints at all.
+                    let tp9 = self.modules.at(t.module as usize).path.as_str();
+                    if tp9.starts_with("std") || tp9.starts_with("__std") {
+                        continue;
+                    }
+                    let fsp = ta.at_const(t.node).span;
+                    if !self.co_on(t.module, fsp) {
+                        self.co_mark(t.module, fsp);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn co_dump(self: &Self) {
+        if stdlib::getenv("SC_CO_DEBUG") == null {
+            return;
+        }
+        let mut tot: usize = 0;
+        for m in 0..self.co_spans.len() {
+            if self.co_spans.at(m).len() != 0 {
+                eprint("co marks {}: {}\n", self.modules.at(m).path.as_str(), self.co_spans.at(m).len());
+                tot += self.co_spans.at(m).len();
+            }
+        }
+        eprint("co state {} total {}\n", self.co_state, tot);
+    }
+
+    fn co_mark(self: &mut Self, m: ModuleId, sp: tok::Span) {
+        self.co_spans.index_mut(m as usize).push(sp.start as u64 << 32 | sp.end as u64);
+    }
+
     pub const fn module_ast_const(self: &Self, mid: ModuleId) *const Ast {
         return self.module_ast_ptr(mid);
     }
@@ -1482,6 +1664,7 @@ extend Package {
     /// Find a *public* top-level declaration named `name` in module `mid`: a type when `want_type`,
     /// otherwise a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE. O(1):
     /// a byte-exact symbol probe plus one name-map probe into the package declaration index.
+    @c.always_inline
     pub fn lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
         if !self.modules[mid as usize].has_ast {
             return NODE_NONE;
@@ -1899,6 +2082,7 @@ pub fn package_load_overlaid(
 ) Package {
     let mut p = Package::new();
     p.ok = true;
+    p.bootstrap = bootstrap_tags;
     p.overlay_files = overlay_files;
     p.overlay_texts = overlay_texts;
     p.root_dir = String::from_str(root_dir);

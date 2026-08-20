@@ -184,6 +184,12 @@ static inline __attribute__((unused)) void __sc_safepoint(void) {
   __sc_pre_tick = 2048;
   if (__sc_pre_hook) __sc_pre_hook();
 }
+/* Cold half of the function-local safepoint tick (`__sc_spc` in emitted bodies): runs the hook
+   check and hands back the reset value, so the hot path is one register decrement + branch. */
+static inline __attribute__((unused)) int32_t __sc_preempt_check(void) {
+  if (__sc_pre_hook) __sc_pre_hook();
+  return 2048;
+}
 /* reflection registry (super_rt.c): `@reflect`-tagged concrete types register their exported
    `sc_typeinfo_<name>` descriptor at startup (constructor order). External tools dlopen the binary
    and walk the SAME static descriptors the program reads: __sc_reflect_types yields the registered

@@ -181,6 +181,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
                     continue;
                 }
             }
+            p.ext_inputs.push(String::from_cstr(&rsl[0]));
             ext_c_wrap(root, keep, &mut seen, &mut nsrc, &rsl[0], err);
         }
         // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
@@ -224,6 +225,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
             }
             let mut cabs = PathBuf {};
             if unsafe shim::sc_realpath(&rel[0], &mut cabs[0]) != null {
+                p.ext_inputs.push(String::from_cstr(&cabs[0]));
                 ext_c_wrap(root, keep, &mut seen, &mut nsrc, &cabs[0], err);
             }
         }
