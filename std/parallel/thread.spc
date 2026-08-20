@@ -32,6 +32,11 @@ extend<F: fn move() T, T> ThreadPayload<F, T> {
 
 // Move `value` onto the heap through the global allocator, returning the owning raw pointer.
 const fn heap_alloc<T>(value: T) *mut T {
+    if sizeof(T) == 0 {
+        let p0 = zst_dangling::<T>();
+        unsafe p0[0] = value;
+        return p0; // zero-sized payloads occupy no bytes: sentinel, no allocation
+    }
     let mut g = Global {};
     let p = (unsafe g.alloc(sizeof(T), alignof(T))) as *mut T;
     unsafe p[0] = value;
@@ -47,8 +52,10 @@ fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
     let payload = unsafe {
         pp[0];
     };
-    let mut g = Global {};
-    unsafe g.dealloc(arg, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
+    if sizeof(ThreadPayload<F, T>) != 0 {
+        let mut g = Global {};
+        unsafe g.dealloc(arg, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
+    }
     payload.run();
     return null;
 }
@@ -73,8 +80,10 @@ extend<T> JoinHandle<T> {
         let v = unsafe {
             self.result[0];
         };
-        let mut g = Global {};
-        unsafe g.dealloc(self.result, sizeof(T), alignof(T));
+        if sizeof(T) != 0 {
+            let mut g = Global {};
+            unsafe g.dealloc(self.result, sizeof(T), alignof(T));
+        }
         return v;
     }
 }
@@ -85,10 +94,19 @@ extend<T> JoinHandle<T> {
 /// one) cannot cross the boundary; share through `Arc` and mutate through an atomic or a lock instead.
 /// `F: 'static` is what forbids capturing a borrow of a caller local: the thread may outlive this call.
 pub fn spawn<F: fn move() T + Send + 'static, T>(f: F) JoinHandle<T> {
-    let mut g = Global {};
-    let slot = (unsafe g.alloc(sizeof(T), alignof(T))) as *mut T;
+    let mut slot = zst_dangling::<T>();
+    if sizeof(T) != 0 {
+        let mut g = Global {};
+        slot = (unsafe g.alloc(sizeof(T), alignof(T))) as *mut T;
+    }
     let env = heap_alloc::<ThreadPayload<F, T>>(ThreadPayload::<F, T>::make(f, slot)) as *mut void;
     let mut h: *mut void = null;
     let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, thread_entry::<F, T>, env);
     return JoinHandle::<T>::from_parts(h, slot);
+}
+
+// Non-null, T-aligned, storage-free pointer for zero-sized element buffers (see core::dangling;
+// duplicated privately so the prelude module needs no self-import).
+const fn zst_dangling<T>() *mut T {
+    return alignof(T) as *mut T;
 }

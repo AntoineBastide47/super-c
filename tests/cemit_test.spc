@@ -132,8 +132,8 @@ fn compile_run(em: &cb::CEmit, main_body: str, tag: str) i32 {
     let _ = unsafe stdio::fwrite(mb.ptr(), 1, mb.len(), f);
     unsafe stdio::fclose(f);
     let mut cmd = String::new();
-    // -pedantic-errors: the emitted subset is portable C11, no GNU extensions (the ZST empty-struct
-    // path is not exercised by these snippets).
+    // -pedantic-errors: the emitted output is portable C11, no GNU extensions (ZST storage is
+    // elided, so even zero-sized types spell portably).
     cmd.push_str("cc -std=c11 -pedantic-errors -Wall -Werror -o build/cemit_probe_");
     cmd.push_str(tag);
     cmd.push_str(" ");

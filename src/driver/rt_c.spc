@@ -169,6 +169,10 @@ static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n)
   if (__i >= __n) __sc_panic("index out of bounds");
   return __i;
 }
+/* Pointer distance over a zero-sized element type: bytes cannot encode an element count. */
+static _Noreturn __attribute__((unused)) void __sc_zst_ptrdiff(void) {
+  __sc_panic("pointer distance on a zero-sized element type");
+}
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunused-function"
 #endif

@@ -1079,6 +1079,19 @@ extend Lowerer {
                 return;
             }
         }
+        {
+            let zc = self.zst_cond(d.condition);
+            if zc >= 0 {
+                // `sizeof(T) <op> <const>` folds per instance: the untaken side never lowers --
+                // a ZST container path may not even be spellable for the other instantiation
+                if zc == 1 {
+                    self.lower_stmt(d.then_branch);
+                } else if d.else_branch != NODE_NONE {
+                    self.lower_stmt(d.else_branch);
+                }
+                return;
+            }
+        }
         self.tp(ir::TP_MARK_PUSH, 0, id);
         let cop = self.lower_expr(d.condition);
         self.tp(ir::TP_MARK_POP, 0, id);
@@ -2077,6 +2090,105 @@ extend Lowerer {
 
     // The shared tail of the binder-const `if` fold: the constant side `mv` against the literal
     // side, honoring operand order for the ordered comparisons.
+    /// Fold `sizeof(T) <op> <const-int>` (either side) under the active instance env: sizes are
+    /// per-instance constants, and the untaken side of a ZST container branch may not even be
+    /// spellable C for this instantiation (pointer arithmetic over an incomplete element type).
+    /// -1 = not that shape / not foldable.
+    fn zst_cond(self: &mut Self, cond: NodeId) i32 {
+        let n = *self.f.node(cond);
+        if n.kind != NodeKind::NODE_BINARY {
+            return -1;
+        }
+        let bd = n.as_data.binary;
+        let lk = self.f.node(bd.left).kind;
+        let rk = self.f.node(bd.right).kind;
+        let lm = lk == NodeKind::NODE_SIZEOF || lk == NodeKind::NODE_ALIGNOF;
+        let rm9 = rk == NodeKind::NODE_SIZEOF || rk == NodeKind::NODE_ALIGNOF;
+        if !lm && !rm9 {
+            return -1;
+        }
+        let mn = if lm {
+            bd.left;
+        } else {
+            bd.right;
+        };
+        let ln = if lm {
+            bd.right;
+        } else {
+            bd.left;
+        };
+        let measured = self.nty(self.f.node(mn).as_data.single.value);
+        if measured == TYPE_NONE {
+            return -1;
+        }
+        // only zero comparisons fold: their outcome is a pure function of the args' ZST bits,
+        // which is what lets instantiations share one folded body per bit signature
+        {
+            if unsafe (&*self.pkg).ceval == null {
+                return -1;
+            }
+            let cev0 = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+            let cv0 = cev0.eval(self.module, ln);
+            if cv0.kind != ce::CONST_INT || cv0.as_data.i != 0 {
+                return -1;
+            }
+        }
+        // one LayoutEnv frame per active binding, innermost first (bindings push outer-to-inner)
+        let ne = self.env.len();
+        let mut pnodes = Vector::<NodeId>::new();
+        let mut frames = Vector::<lay::LayoutEnv>::new();
+        pnodes.reserve(ne);
+        frames.reserve(ne);
+        for i in 0..ne {
+            let sb = *self.env.at(ne - 1 - i);
+            pnodes.push(sb.pnode);
+            // no designated literal in field position: the bootstrap release emitter sizes the
+            // field copy by the destination, which over-reads a spelled-short temp
+            let mut fr9 = lay::LayoutEnv {
+                parent: null,
+                pmod: sb.pm,
+                params: pnodes.at(i),
+                argm: sb.am,
+                args: [0; 8],
+                n: 1,
+            };
+            fr9.args[0] = sb.at;
+            frames.push(fr9);
+        }
+        for i in 0..ne {
+            if i + 1 < ne {
+                let pp9: *const lay::LayoutEnv = frames.at(i + 1);
+                frames[i].parent = pp9;
+            }
+        }
+        let head = if ne != 0 {
+            frames.at(0) as *const lay::LayoutEnv;
+        } else {
+            null;
+        };
+        let mut svc = lay::Svc::new(self.pkg);
+        let lo = svc.layout_of(self.module, measured, head, 0);
+        svc.free();
+        if stdlib::getenv("SC_ZC_DBG") != null {
+            eprint("zst-cond: env {} ok {} size {}\n", self.env.len(), lo.ok, lo.size);
+        }
+        if !lo.ok {
+            self.body.has_zst_cond = true; // symbolic here; instances re-lower and fold
+            return -1;
+        }
+        let mk = self.f.node(mn).kind;
+        let mv = if mk == NodeKind::NODE_SIZEOF {
+            lo.size;
+        } else {
+            lo.align;
+        } as i64;
+        let r = self.binder_cond_cmp(cond, mv, ln, lm);
+        if r < 0 {
+            self.body.has_zst_cond = true;
+        }
+        return r;
+    }
+
     fn binder_cond_cmp(self: &mut Self, cond: NodeId, mv: i64, lit: NodeId, mem_left: bool) i32 {
         if unsafe (&*self.pkg).ceval == null {
             return -1;
@@ -4122,6 +4234,15 @@ extend Lowerer {
         }
         if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "zeroed") {
             return self.intrinsic_value(ir::IN_ZEROED, 0, ty, sp);
+        }
+        if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "dangling") {
+            // the pointee rides in `b` so the backend can pick the sentinel alignment
+            let mu = self.f.type_args(id);
+            let mut bt9 = TYPE_NONE;
+            if mu != null && unsafe mu.n != 0 {
+                bt9 = unsafe mu.args[0];
+            }
+            return self.intrinsic_value(ir::IN_DANGLING, bt9, ty, sp);
         }
         // assert family: compiler builtins -- lower to TM_ASSERT so the backend bakes the failing
         // expression's text and location (the std placeholder bodies are never called). The

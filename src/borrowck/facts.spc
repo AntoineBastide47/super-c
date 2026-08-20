@@ -2292,7 +2292,7 @@ extend Gen {
         } else if rv.kind == ir::RV_BINARY {
             self.op_read(rv.a, entry, s.span);
             self.op_read(rv.b, entry, s.span);
-        } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO) {
+        } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING) {
             // no operands: `b` is the measured/described type
         } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_INTRINSIC {
             for i in 0..rv.b {

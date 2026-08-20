@@ -169,6 +169,7 @@ pub const IN_NEW: u8 = 9; // heap allocation of the initializer operand (`new T 
 // operands are the outputs' places (as copies) then the input values, in source order.
 pub const IN_ASM: u8 = 10;
 pub const IN_SAFEPOINT: u8 = 11; // loop-body preemption marker; printed only for runtime-using programs
+pub const IN_DANGLING: u8 = 12; // non-null aligned no-storage pointer (`dangling::<T>()`; ZST buffers)
 
 // Field order packs to 24 bytes (kind/c share the item's tail padding); bodies hold one record
 // per expression, so the two byte flags sit last.
@@ -244,6 +245,9 @@ pub struct CoreBody {
     /// The body contains an UNEXPANDED reflection binder (`inline for .. in fields(..)` whose
     /// owner stayed symbolic): instances must RE-LOWER with the demand env, never share this body.
     pub has_reflect: bool,
+    /// The body contains an unfolded `sizeof(T) <op> <const>` branch: instances re-lower with the
+    /// demand env so the untaken side (a ZST container path or its material twin) never emits.
+    pub has_zst_cond: bool,
     // Some `let x: T;` declared a local without a value: only then can a use-before-init exist,
     // so bodies without it (and without moves) skip the move/init dataflow outright.
     pub has_uninit_decl: bool,
@@ -274,6 +278,7 @@ extend CoreBody {
             returns: 0,
             is_generic: false,
             has_reflect: false,
+            has_zst_cond: false,
             has_uninit_decl: false,
             locals: Vector::<LocalDecl>::new(),
             blocks: Vector::<BasicBlock>::new(),
@@ -301,6 +306,7 @@ extend CoreBody {
         self.returns = 0;
         self.is_generic = false;
         self.has_reflect = false;
+        self.has_zst_cond = false;
         self.has_uninit_decl = false;
         self.locals.truncate(0);
         self.blocks.truncate(0);
@@ -326,6 +332,7 @@ extend CoreBody {
         out.returns = src.returns;
         out.is_generic = src.is_generic;
         out.has_reflect = src.has_reflect;
+        out.has_zst_cond = src.has_zst_cond;
         out.entry = src.entry;
         out.locals.reserve(src.locals.len());
         for i in 0..src.locals.len() {

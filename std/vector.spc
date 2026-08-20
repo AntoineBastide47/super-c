@@ -29,6 +29,13 @@ extend<T, A: Allocator> Vector<T, A> {
     /// Pre-allocates room for `cap` elements through an explicit allocator (no allocation when cap == 0).
     pub const fn with_capacity_in(alloc: A, cap: usize) Vector<T, A> {
         let mut v = Vector::<T, A> { ptr: null, len: 0, cap: 0, alloc: alloc };
+        if sizeof(T) == 0 {
+            // zero-sized elements occupy no bytes: an aligned sentinel and unbounded logical
+            // capacity, with no allocator call (the branch folds away per instantiation)
+            v.ptr = zst_dangling::<T>();
+            v.cap = ~(0 as usize);
+            return v;
+        }
         if cap > 0 {
             v.ptr = (unsafe v.alloc.alloc(cap * sizeof(T), alignof(T))) as *mut T;
             v.cap = cap;
@@ -50,6 +57,12 @@ extend<T, A: Allocator> Vector<T, A> {
 
     /// Guarantees room for `additional` more elements, growing by doubling (amortised O(1) append).
     pub const fn reserve(self: &mut Vector<T, A>, additional: usize) {
+        if sizeof(T) == 0 {
+            assert(additional <= ~(0 as usize) - self.len, "Vector<ZST> length overflow");
+            self.ptr = zst_dangling::<T>();
+            self.cap = ~(0 as usize);
+            return;
+        }
         let needed = self.len + additional;
         if needed <= self.cap {
             return;
@@ -283,6 +296,11 @@ extend<T: Default, A: Allocator> Vector<T, A> {
 extend<T, A: Allocator> Vector<T, A> as Free {
     pub fn free(self: &mut Vector<T, A>) {
         self.clear();
+        if sizeof(T) == 0 {
+            self.ptr = null;
+            self.cap = 0;
+            return; // the sentinel was never allocated
+        }
         unsafe self.alloc.dealloc(self.ptr, self.cap * sizeof(T), alignof(T));
         self.ptr = null;
         self.cap = 0;
@@ -622,4 +640,10 @@ extend<T: Format, A: Allocator> Vector<T, A> as Format {
         s.push_str("]");
         return s;
     }
+}
+
+// Non-null, T-aligned, storage-free pointer for zero-sized element buffers (see core::dangling;
+// duplicated privately so the prelude module needs no self-import).
+const fn zst_dangling<T>() *mut T {
+    return alignof(T) as *mut T;
 }

@@ -1385,6 +1385,14 @@ pub fn forget<T>(value: T) {
     let _ = (&cell) as *const ForgetCell<T>;
 }
 
+/// Non-null, `T`-aligned pointer backed by NO storage: the canonical element pointer for
+/// zero-sized-type buffers (`Vector<ZST>`, `Box<ZST>`). It must never be dereferenced for a
+/// material `T`, never passed to an allocator, and never assumed unique -- distinct zero-sized
+/// values may share it.
+pub const fn dangling<T>() *mut T {
+    return alignof(T) as *mut T;
+}
+
 /// What sort of type `type_info::<T>()` described. `Slice` covers `[]T`/`[]mut T`, `Str` is `str`;
 /// every other named struct instance -- `Vector<T>`, `Box<T>`, user structs -- reports `Struct`.
 pub enum TypeTag {

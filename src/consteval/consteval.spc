@@ -5119,9 +5119,21 @@ extend ConstEval {
             if fi.idx < 0 {
                 return cv_nil();
             }
-            let v = self.ev_rval(f, m, a.at_const(fid).as_data.field_initializer.value);
+            let mut v = self.ev_rval(f, m, a.at_const(fid).as_data.field_initializer.value);
             if v.kind == CV_NIL_K {
                 return cv_nil();
+            }
+            // widen to the field's declared type: a designated array literal keeps its spelled
+            // count, and const indexing must see the zero-filled tail
+            {
+                let mut g = self.ce_recv_frame(&rr.r);
+                let wr = self.ce_rtype(&mut g, rr.r.dm, self.ce_type(rr.r.dm, da.at_const(fi.field).as_data.field.ty));
+                if wr.ok {
+                    let cv = self.ce_coerce(v, wr.m, wr.t);
+                    if cv.kind != CV_NIL_K {
+                        v = cv;
+                    }
+                }
             }
             let cloned = self.ce_clone(v, 0);
             if cloned.kind == CV_NIL_K {
@@ -8125,7 +8137,20 @@ extend ConstEval {
         }
         out.n = unsafe gp.nrets;
         for j in 0..unsafe gp.nrets {
-            unsafe out.vals[j as usize] = unsafe gp.rets[j as usize];
+            let mut v = unsafe gp.rets[j as usize];
+            // widen to the declared return type: a designated array literal keeps its spelled
+            // count, and const indexing at the call site must see the zero-filled tail
+            if !closure && j as u32 < wantret {
+                let rn = unsafe fa.list(fa.at_const(fnode).as_data.function.returns)[j as usize];
+                let wr = self.ce_rtype(gp, fm, self.ce_type(fm, rn));
+                if wr.ok {
+                    let cv = self.ce_coerce(v, wr.m, wr.t);
+                    if cv.kind != CV_NIL_K {
+                        v = cv;
+                    }
+                }
+            }
+            unsafe out.vals[j as usize] = v;
         }
         if cacheable && out.n <= 8 {
             let mut pure = true;
@@ -8336,6 +8361,15 @@ extend ConstEval {
             "type_info",
         ) {
             return self.ce_type_info(f, m, id);
+        }
+        // dangling::<T>(): a runtime sentinel address -- CTFE has no stable value for it, so any
+        // path reaching it stays a runtime computation (the fold simply declines).
+        if ck == NodeKind::NODE_IDENTIFIER && a.resolution_def(callee).node == NODE_NONE && a.resolution(callee) == NODE_NONE && self.ce_span_is(
+            m,
+            a.at_const(callee).as_data.name.text,
+            "dangling",
+        ) {
+            return Rets { ok: false, n: 0 };
         }
         // `P(a, b)` where P is a tuple struct: positional aggregate construction, not a call.
         {

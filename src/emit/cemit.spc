@@ -81,6 +81,12 @@ pub struct CEmit {
     /// Extern fns whose `extern "C" "<header>"` block ships real prototypes: the include supplies
     /// them, so a call-site proto would conflict. Keyed (module << 32 | node), driver-filled.
     pub ext_backed: Set<u64>,
+    /// Aligned ZST sentinels: one program-level byte per alignment an address-observable ZST
+    /// needs (`__sc_zst_<A>`). Every ZST reference of that alignment shares it -- the language
+    /// permits equal addresses. Definitions land in the instance TU, externs in the protos header.
+    pub sent_decls: String,
+    pub sent_defs: String,
+    sent_seen: Map<u64, u64>,
     /// Reusable per-function scratch for structured emission: blocks already spelled, and blocks a
     /// forward goto targets (their label prints when the block is reached). Cleared per body.
     sx_emitted: Vector<bool>,
@@ -246,6 +252,9 @@ extend CEmit as Free {
         self.ti_reqs.free();
         self.ti_seen.free();
         self.ext_backed.free();
+        self.sent_decls.free();
+        self.sent_defs.free();
+        self.sent_seen.free();
         self.sx_emitted.free();
         self.sx_lbl.free();
         self.sx_coal.free();
@@ -316,6 +325,9 @@ extend CEmit {
             ti_reqs: Vector::<StatRef>::new(),
             ti_seen: Map::<u64, u64>::new(),
             ext_backed: Set::<u64>::new(),
+            sent_decls: String::new(),
+            sent_defs: String::new(),
+            sent_seen: Map::<u64, u64>::new(),
             sx_emitted: Vector::<bool>::new(),
             sx_lbl: Vector::<bool>::new(),
             sx_fell: false,
@@ -556,24 +568,6 @@ extend CEmit {
         snap.push(mbe::MSub { pm: pm, pnode: pnode, am: am, at: at, lim: lim });
     }
 
-    // The declared FIELD count of a resolved aggregate (zero-field structs initialize as `{}`).
-    fn agg_field_count(self: &Self, rm: ModuleId, rt: TypeId) u32 {
-        let decl = self.agg_decl_res(rm, rt);
-        if decl == NODE_NONE {
-            return 1;
-        }
-        let am = self.agg_module_res(rm, rt);
-        let a = self.p().module_ast_const(am);
-        let ms = a.at_const(decl).as_data.aggregate.members;
-        let mut n: u32 = 0;
-        for i in 0..ms.len {
-            if a.at_const(unsafe a.list(ms)[i as usize]).kind == NodeKind::NODE_FIELD {
-                n += 1;
-            }
-        }
-        return n;
-    }
-
     // The prelude `str` view type (STRUCT named `str` in a prelude module).
     const fn is_str_ty(self: &Self, rm: ModuleId, rt: TypeId) bool {
         let a = self.p().module_ast_const(rm);
@@ -660,6 +654,51 @@ extend CEmit {
             return yF.as_data.arr.len;
         }
         return 0 - 1;
+    }
+
+    /// Does argument `i` lose its C slot? Only a BY-VALUE zero-sized argument does: when the
+    /// callee's declared param is a reference or pointer (a receiver auto-ref), the slot is a real
+    /// pointer even though the OPERAND is recorded with the value type. Mirrors emit_call_arg's
+    /// param inspection so caller and callee always agree.
+    fn arg_slot_erased(self: &Self, b: &ir::CoreBody, callee0: DefId, i: u32, opid: ir::OperandId) bool {
+        let aty = b.operands.at(opid as usize).ty;
+        if aty == TYPE_NONE || !self.erased(b, aty) {
+            return false;
+        }
+        if callee0.node == NODE_NONE {
+            return true; // fn-value call: reference params carry reference-typed operands
+        }
+        let me = unsafe &mut *((self as *const CEmit) as *mut CEmit);
+        let mut callee = callee0;
+        if me.mg.in_interface(callee0.module, callee0.node) != NODE_NONE && self.mg.last_method_def.node != NODE_NONE {
+            callee = self.mg.last_method_def;
+        }
+        let fa = self.p().module_ast_const(callee.module);
+        let fnn = fa.at_const(callee.node);
+        if fnn.kind != NodeKind::NODE_FUNCTION {
+            return true;
+        }
+        let ps = fnn.as_data.function.params;
+        if i >= ps.len {
+            return true;
+        }
+        let pn = fa.at_const(unsafe fa.list(ps)[i as usize]);
+        if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
+            return true;
+        }
+        let pty = fa.type_of(pn.as_data.parameter.ty);
+        if pty == TYPE_NONE {
+            return true;
+        }
+        let mut pk = fa.type_at(pty).kind;
+        if pk == TypeKind::TYPE_GENERIC {
+            let mut xm = callee.module;
+            let mut xt = pty;
+            if self.mg.resolve(callee.module, pty, &mut xm, &mut xt) {
+                pk = self.p().module_ast_const(xm).type_at(xt).kind;
+            }
+        }
+        return pk != TypeKind::TYPE_REFERENCE && pk != TypeKind::TYPE_POINTER;
     }
 
     fn emit_call_arg(self: &mut Self, b: &ir::CoreBody, callee0: DefId, i: u32, opid: ir::OperandId, dst: &mut String) bool {
@@ -839,6 +878,12 @@ extend CEmit {
         if through_ref {
             return self.emit_operand(b, opid, dst); // an ordinary reference arg passes through
         }
+        if !self.is_unit(b, aty) && self.erased(b, aty) {
+            // a zero-sized receiver/argument taken by reference: no storage exists, so its
+            // auto-ref binds to the aligned sentinel
+            let me3 = unsafe &mut *((self as *const CEmit) as *mut CEmit);
+            return me3.zst_sentinel_ref(rm, rt, dst);
+        }
         dst.push_str("&");
         return self.emit_operand(b, opid, dst);
     }
@@ -857,6 +902,77 @@ extend CEmit {
             return true; // never-typed temps hold no value (their writers do not return)
         }
         return y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID;
+    }
+
+    /// A body value with no C storage: unit-like (no value exists) or zero-sized (the value exists
+    /// but its storage is elided). Both suppress locals, loads, stores, and data movement; a ZST
+    /// additionally keeps its effects and drops, and its references bind to the aligned sentinel.
+    /// Raw-kind fast paths keep the (memoized) resolve+layout off scalar and pointer values.
+    /// Const-shaped because store/decl predicates are: the only mutations are caches.
+    fn erased(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
+        if t == TYPE_NONE {
+            return true;
+        }
+        let y = *self.p().module_ast_const(b.module).type_at(t);
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            return y.as_data.builtin == BuiltinType::BT_VOID;
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_FUNCTION || y.kind == TypeKind::TYPE_DYN {
+            return false;
+        }
+        if y.kind == TypeKind::TYPE_NEVER {
+            return true;
+        }
+        let me = unsafe &mut *((self as *const CEmit) as *mut CEmit);
+        if me.mg.macro_on {
+            return false;
+        }
+        return (me.mg.zclass(b.module, t) & 6) != 0;
+    }
+
+    /// Demand the sentinel byte for `align` and spell its name. One byte per alignment program-
+    /// wide; every ZST reference of that alignment shares its address.
+    pub fn sentinel(self: &mut Self, align: u64, dst: &mut String) {
+        let fresh = switch self.sent_seen.get(&align) {
+            Some(_v) => false,
+            None => true,
+        };
+        if self.mg.rec_on && self.mg.rec_dup_once(align ^ 18) {
+            let mut ev = mbe::RecEv::blank(mbe::RK_ZST);
+            ev.a = align as u32;
+            self.mg.rec.push(ev);
+        }
+        if fresh {
+            self.sent_seen.insert(align, 1);
+            self.sent_decls.push_str("extern unsigned char __sc_zst_");
+            self.sent_decls.push_u64(align);
+            self.sent_decls.push_str(";\n");
+            if align > 1 {
+                self.sent_defs.push_str("_Alignas(");
+                self.sent_defs.push_u64(align);
+                self.sent_defs.push_str(") ");
+            }
+            self.sent_defs.push_str("unsigned char __sc_zst_");
+            self.sent_defs.push_u64(align);
+            self.sent_defs.push_str(";\n");
+        }
+        dst.push_str("__sc_zst_");
+        dst.push_u64(align);
+    }
+
+    /// A reference to a zero-sized value of resolved type `(rm, rt)`: the aligned sentinel as
+    /// `void *` (C converts it implicitly to any object-pointer type, so no per-type cast spelling
+    /// is needed -- ZST loads and stores never dereference it).
+    pub fn zst_sentinel_ref(self: &mut Self, rm: ModuleId, rt: TypeId, dst: &mut String) bool {
+        let lo = self.mg.lay.layout(rm, rt);
+        let mut a9: u64 = 1;
+        if lo.ok && lo.align > 1 {
+            a9 = lo.align;
+        }
+        dst.push_str("((void *)&");
+        self.sentinel(a9, dst);
+        dst.push_str(")");
+        return true;
     }
 
     // Resolve `(b.module, t)` through the substitution env (identity when unbound).
@@ -955,24 +1071,41 @@ extend CEmit {
             self.out.push_string(&self.fn_attrs);
         }
         if b.returns > 1 {
-            // multi-return: `typedef struct { <t> _0; ... } <name>_ret;` + struct-returning sig
-            self.aux.push_str("typedef struct { ");
+            // multi-return: `typedef struct { <t> _0; ... } <name>_ret;` + struct-returning sig.
+            // Zero-sized results take no member (their semantic `_N` names survive on the stored
+            // ones); a pack with NO stored member returns C void.
+            let mut rmat: u32 = 0;
             for r in 0..b.returns {
-                let mut nm = String::from_str("_");
-                nm.push_u64(r);
-                let okr = self.ty_c(b.module, b.locals.at(r as usize).ty, nm.as_str(), &mut self.aux);
-                if !okr {
-                    return false;
+                if !self.erased(b, b.locals.at(r as usize).ty) {
+                    rmat += 1;
                 }
-                self.aux.push_str("; ");
             }
-            self.aux.push_str("} ");
-            self.aux.push_str(name);
-            self.aux.push_str("_ret;\n");
-            self.out.push_str(name);
-            self.out.push_str("_ret ");
-            self.out.push_str(name);
-            self.out.push_str("(");
+            if rmat == 0 {
+                self.out.push_str("void ");
+                self.out.push_str(name);
+                self.out.push_str("(");
+            } else {
+                self.aux.push_str("typedef struct { ");
+                for r in 0..b.returns {
+                    if self.erased(b, b.locals.at(r as usize).ty) {
+                        continue;
+                    }
+                    let mut nm = String::from_str("_");
+                    nm.push_u64(r);
+                    let okr = self.ty_c(b.module, b.locals.at(r as usize).ty, nm.as_str(), &mut self.aux);
+                    if !okr {
+                        return false;
+                    }
+                    self.aux.push_str("; ");
+                }
+                self.aux.push_str("} ");
+                self.aux.push_str(name);
+                self.aux.push_str("_ret;\n");
+                self.out.push_str(name);
+                self.out.push_str("_ret ");
+                self.out.push_str(name);
+                self.out.push_str("(");
+            }
         } else {
             let mut rty = TYPE_NONE;
             if b.returns == 1 {
@@ -1001,7 +1134,11 @@ extend CEmit {
                 self.out.push_str("(");
             } else {
                 let mut rt = String::new();
-                ok0 = self.ty_c(b.module, rty, "", &mut rt);
+                if rty != TYPE_NONE && self.erased(b, rty) {
+                    rt.push_str("void"); // zero-sized results have no C carrier
+                } else {
+                    ok0 = self.ty_c(b.module, rty, "", &mut rt);
+                }
                 if ok0 {
                     if self.noret {
                         self.out.push_str("_Noreturn ");
@@ -1017,11 +1154,16 @@ extend CEmit {
             return false;
         }
         let mut arrcp = Vector::<u32>::new();
+        let mut np9: u32 = 0;
         for i in 0..b.args {
-            if i != 0 {
+            let l = (b.returns + i) as usize;
+            if self.erased(b, b.locals.at(l).ty) {
+                continue; // zero-sized by-value params take no C parameter
+            }
+            if np9 != 0 {
                 self.out.push_str(", ");
             }
-            let l = (b.returns + i) as usize;
+            np9 += 1;
             let mut nm = String::new();
             self.lspell(l as u32, &mut nm);
             // a `mut` fixed-array VALUE param: C hands a pointer to the caller's array, so the
@@ -1045,7 +1187,7 @@ extend CEmit {
                 return false;
             }
         }
-        if b.args == 0 {
+        if np9 == 0 {
             self.out.push_str("void");
         }
         self.out.push_str(") {\n");
@@ -1400,7 +1542,7 @@ extend CEmit {
             if !types_ok {
                 continue;
             }
-            if dty != TYPE_NONE && self.is_unit(b, dty) {
+            if dty != TYPE_NONE && self.erased(b, dty) {
                 continue;
             }
             if binding_source {
@@ -2444,7 +2586,7 @@ extend CEmit {
         if self.is_dead_store(b, s) || self.is_coalesced_store(b, s) || self.is_inlined_store(b, s) {
             return false;
         }
-        if s.kind == ir::ST_ASSIGN && b.places.at(s.place as usize).ty != TYPE_NONE && self.is_unit(
+        if s.kind == ir::ST_ASSIGN && b.places.at(s.place as usize).ty != TYPE_NONE && self.erased(
             b,
             b.places.at(s.place as usize).ty,
         ) {
@@ -2546,7 +2688,7 @@ extend CEmit {
             if *ncall.at(r as usize) != 1 || *bad.at(r as usize) || *bad.at(root as usize) || uses != 1 && !(assert_use && uses == 2) {
                 continue;
             }
-            if self.is_unit(b, b.locals.at(root as usize).ty) {
+            if self.erased(b, b.locals.at(root as usize).ty) {
                 continue;
             }
             // a fixed-array result stores through a `_ret` carrier + memcpy, not a plain expression
@@ -2801,6 +2943,9 @@ extend CEmit {
                 let mut rtL = b.locals.at(l).ty;
                 self.rty(b, b.locals.at(l).ty, &mut rmL, &mut rtL);
                 let yl = *self.p().module_ast_const(rmL).type_at(rtL);
+                if self.erased(b, b.locals.at(l).ty) {
+                    continue;
+                }
                 if yl.kind == TypeKind::TYPE_ARRAY && yl.as_data.arr.len == 0 {
                     if !self.emit_open_array_decl(b, l as u32) {
                         return false;
@@ -2815,7 +2960,7 @@ extend CEmit {
                     self.out.push_str(";\n");
                     continue;
                 }
-                if self.is_unit(b, b.locals.at(l).ty) {
+                if self.erased(b, b.locals.at(l).ty) {
                     continue;
                 }
                 if st == ir::LS_STATIC_REF {
@@ -2850,12 +2995,12 @@ extend CEmit {
                         let mut rtL = b.locals.at(l).ty;
                         self.rty(b, b.locals.at(l).ty, &mut rmL, &mut rtL);
                         let yl = *self.p().module_ast_const(rmL).type_at(rtL);
-                        if yl.kind == TypeKind::TYPE_ARRAY && yl.as_data.arr.len == 0 {
+                        if self.erased(b, b.locals.at(l).ty) {
+                            md = 3; // safe to memoize: this branch only runs substitution-free
+                        } else if yl.kind == TypeKind::TYPE_ARRAY && yl.as_data.arr.len == 0 {
                             md = 5;
                         } else if yl.kind == TypeKind::TYPE_NEVER {
                             md = 4;
-                        } else if self.is_unit(b, b.locals.at(l).ty) {
-                            md = 3;
                         } else {
                             let mut tx = String::new();
                             if self.ty_c(b.module, b.locals.at(l).ty, "", &mut t0) && self.ty_c(
@@ -2941,7 +3086,7 @@ extend CEmit {
         if !ok2 {
             return false;
         }
-        if b.returns == 1 && self.is_unit(b, b.locals.at(0).ty) && self.out.as_str().ends_with("  return;\n") {
+        if b.returns == 1 && self.erased(b, b.locals.at(0).ty) && self.out.as_str().ends_with("  return;\n") {
             self.out.truncate(self.out.len() - 10);
         }
         self.out.push_str("}\n");
@@ -3262,7 +3407,7 @@ extend CEmit {
         if blk.term.kind != ir::TM_RETURN || b.returns != 1 || self.arr_ret {
             return ir::IR_NONE;
         }
-        if self.is_unit(b, b.locals.at(0).ty) {
+        if self.erased(b, b.locals.at(0).ty) {
             return ir::IR_NONE;
         }
         let mut i = blk.stmt_len;
@@ -3309,7 +3454,7 @@ extend CEmit {
     // (it would otherwise trip -Werror=unused-variable). Conservative: any read, any non-forwarded
     // write, or any `return _0` keeps it live.
     fn ret_slot_live(self: &Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
-        if b.returns != 1 || self.arr_ret || self.is_unit(b, b.locals.at(0).ty) {
+        if b.returns != 1 || self.arr_ret || self.erased(b, b.locals.at(0).ty) {
             return true;
         }
         for o in 0..b.operands.len() {
@@ -3800,7 +3945,7 @@ extend CEmit {
             if self.is_dead_store(b, &s) || self.is_coalesced_store(b, &s) || self.is_inlined_store(b, &s) {
                 continue;
             }
-            if s.kind == ir::ST_ASSIGN && b.places.at(s.place as usize).ty != TYPE_NONE && self.is_unit(
+            if s.kind == ir::ST_ASSIGN && b.places.at(s.place as usize).ty != TYPE_NONE && self.erased(
                 b,
                 b.places.at(s.place as usize).ty,
             ) {
@@ -4228,12 +4373,20 @@ extend CEmit {
             env_out.push_str("struct ");
             env_out.push_str(sym);
             env_out.push_str("_env { ");
+            let mut cmat9: usize = 0;
             for k in 0..ncaps {
                 let l = (self.cap_base + k) as usize;
+                if self.erased(b, b.locals.at(l).ty) {
+                    continue; // zero-sized captures take no env storage (reads are erased)
+                }
+                cmat9 += 1;
                 if !self.mg.ctype(b.module, b.locals.at(l).ty, self.cap_names.at(k as usize).as_str(), env_out) {
                     return self.fail("closure-cap-ty");
                 }
                 env_out.push_str("; ");
+            }
+            if cmat9 == 0 {
+                env_out.push_str("unsigned char _sc_zenv; "); // C forbids an empty struct (see tu.spc)
             }
             env_out.push_str("};\n");
         }
@@ -4242,7 +4395,12 @@ extend CEmit {
             rty = b.locals.at(0).ty;
         }
         let mut rt = String::new();
-        let ok0 = self.ty_c(b.module, rty, "", &mut rt);
+        let mut ok0 = true;
+        if rty != TYPE_NONE && self.erased(b, rty) {
+            rt.push_str("void");
+        } else {
+            ok0 = self.ty_c(b.module, rty, "", &mut rt);
+        }
         if ok0 {
             // extern: dyn-fn thunks in the instance TU call hoisted closures by name, and each
             // closure emits exactly once (its symbol carries module + node + instance suffix)
@@ -4252,21 +4410,23 @@ extend CEmit {
             self.out.push_str("(");
             if ncaps != 0 {
                 self.out.push_str(sym);
-                self.out.push_str("_env *const __env");
-                if np != 0 {
-                    self.out.push_str(", ");
-                }
+                self.out.push_str("_env *const __env"); // a following param supplies its own comma
             }
         }
 
         if !ok0 {
             return false;
         }
+        let mut np9: u32 = 0;
         for i in 0..np {
-            if i != 0 {
+            let l = (b.returns + i) as usize;
+            if self.erased(b, b.locals.at(l).ty) {
+                continue; // zero-sized by-value params take no C parameter
+            }
+            if np9 != 0 || ncaps != 0 {
                 self.out.push_str(", ");
             }
-            let l = (b.returns + i) as usize;
+            np9 += 1;
             let mut nm = String::new();
             self.lspell(l as u32, &mut nm);
             let mut ts = String::new();
@@ -4279,7 +4439,7 @@ extend CEmit {
                 return false;
             }
         }
-        if np == 0 && ncaps == 0 {
+        if np9 == 0 && ncaps == 0 {
             self.out.push_str("void");
         }
         self.out.push_str(") {\n");
@@ -4492,6 +4652,12 @@ extend CEmit {
                 if opid == ir::IR_NONE {
                     continue;
                 }
+                {
+                    let aty9 = b.operands.at(opid as usize).ty;
+                    if aty9 != TYPE_NONE && self.erased(b, aty9) {
+                        continue; // zero-sized field: no C member to store
+                    }
+                }
                 let fid = unsafe sa.list(ms)[i as usize];
                 let mut fnm = String::new();
                 if is_tuple {
@@ -4510,16 +4676,18 @@ extend CEmit {
                     // Left out of the compound literal on purpose: C zero-inits any non-designated
                     // field, and the memcpy below fills it. Emitting `.arr = {0}` for an array of
                     // aggregates would trip -Werror=missing-braces on stricter cc lanes.
+                    // sized by the SOURCE: a designated literal's temp carries only the spelled
+                    // elements, and the compound literal already zero-inits the field's tail
+                    let mut srcA = String::new();
+                    ok = self.emit_place(b, op.data, &mut srcA);
                     post.push_str("  memcpy(&");
                     post.push_string(&lhs);
                     post.push_str(".");
                     post.push_string(&fnm);
                     post.push_str(", &");
-                    ok = self.emit_place(b, op.data, &mut post);
+                    post.push_string(&srcA);
                     post.push_str(", sizeof(");
-                    post.push_string(&lhs);
-                    post.push_str(".");
-                    post.push_string(&fnm);
+                    post.push_string(&srcA);
                     post.push_str("));\n");
                     continue;
                 }
@@ -4634,7 +4802,7 @@ extend CEmit {
         }
         // rvalues are effect-free (calls are terminators), so a VOID-typed store carries no C
         // (untyped places are real data whose type recovers at declaration)
-        if b.places.at(s.place as usize).ty != TYPE_NONE && self.is_unit(b, b.places.at(s.place as usize).ty) {
+        if b.places.at(s.place as usize).ty != TYPE_NONE && self.erased(b, b.places.at(s.place as usize).ty) {
             return true;
         }
         // a stored CK_UNIT is the lowerer's "no meaningful value" marker (expression-statement
@@ -5006,11 +5174,17 @@ extend CEmit {
             ok = self.dyn_pair(dm, dt, om, ot, true, &mut pair);
         }
         if ok {
-            self.out.push_str("  { Global __g = (Global){}; ");
+            self.out.push_str("  { ");
             self.out.push_string(&envc);
             self.out.push_str(" *__dp = (");
             self.out.push_string(&envc);
-            self.out.push_str(" *)Global__alloc(&__g, sizeof(");
+            self.out.push_str(" *)Global__alloc((Global *)&");
+            {
+                let mut sn9 = String::new();
+                self.sentinel(1, &mut sn9);
+                self.out.push_string(&sn9);
+            }
+            self.out.push_str(", sizeof(");
             self.out.push_string(&envc);
             self.out.push_str("), _Alignof(");
             self.out.push_string(&envc);
@@ -5285,43 +5459,48 @@ extend CEmit {
                         h = (h ^ cs.byte_at(k) as u64) * 1099511628211u64;
                     }
                 }
-                let fresh = switch self.stat_seen.get(&h) {
-                    Some(_v) => false,
-                    None => true,
-                };
-                if self.mg.rec_on && self.mg.rec_dup_once(h ^ 8) {
-                    let mut ev = mbe::RecEv::blank(mbe::RK_STAT);
-                    ev.h = h;
-                    ev.a = b.module;
-                    ev.b = item.module;
-                    ev.c = item.node;
-                    ev.d = b.locals.at(base as usize).ty;
-                    ev.s1.push_str(dst.as_str().slice(d0, dst.len()));
-                    self.mg.rec.push(ev);
-                }
-                if fresh {
-                    self.stat_seen.insert(h, 1);
-                    let idn = self.p().module_ast_const(item.module).at_const(item.node);
-                    let hdr_owned = idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern;
-                    if !hdr_owned {
-                        // extern-block statics skip the stub: the backing header declares them
-                        // (with qualifiers a re-declaration here could contradict)
-                        let mut symb = self.sget();
-                        symb.push_str(dst.as_str().slice(d0, dst.len()));
-                        let mut sd = String::from_str("extern ");
-                        if self.ty_c(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
-                            sd.push_str(";\n");
-                            self.stat_decls.push_string(&sd);
-                            self.stat_items.push(
-                                StatRef {
-                                    em: b.module,
-                                    def: item,
-                                    sym: symb.clone(),
-                                    ty: b.locals.at(base as usize).ty,
-                                },
-                            );
+                if self.mg.is_zst(b.module, b.locals.at(base as usize).ty) {
+                    // zero-sized const/static: no stub and no definition entry queue (value reads
+                    // are erased; an address binds to the sentinel before this spelling is reached)
+                } else {
+                    let fresh = switch self.stat_seen.get(&h) {
+                        Some(_v) => false,
+                        None => true,
+                    };
+                    if self.mg.rec_on && self.mg.rec_dup_once(h ^ 8) {
+                        let mut ev = mbe::RecEv::blank(mbe::RK_STAT);
+                        ev.h = h;
+                        ev.a = b.module;
+                        ev.b = item.module;
+                        ev.c = item.node;
+                        ev.d = b.locals.at(base as usize).ty;
+                        ev.s1.push_str(dst.as_str().slice(d0, dst.len()));
+                        self.mg.rec.push(ev);
+                    }
+                    if fresh {
+                        self.stat_seen.insert(h, 1);
+                        let idn = self.p().module_ast_const(item.module).at_const(item.node);
+                        let hdr_owned = idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern;
+                        if !hdr_owned {
+                            // extern-block statics skip the stub: the backing header declares them
+                            // (with qualifiers a re-declaration here could contradict)
+                            let mut symb = self.sget();
+                            symb.push_str(dst.as_str().slice(d0, dst.len()));
+                            let mut sd = String::from_str("extern ");
+                            if self.ty_c(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
+                                sd.push_str(";\n");
+                                self.stat_decls.push_string(&sd);
+                                self.stat_items.push(
+                                    StatRef {
+                                        em: b.module,
+                                        def: item,
+                                        sym: symb.clone(),
+                                        ty: b.locals.at(base as usize).ty,
+                                    },
+                                );
+                            }
+                            self.sput(symb);
                         }
-                        self.sput(symb);
                     }
                 }
             }
@@ -5643,11 +5822,14 @@ extend CEmit {
                 if kz == TypeKind::TYPE_STRUCT || kz == TypeKind::TYPE_INSTANCE {
                     // an integer constant carrying an aggregate type is the zeroed value
                     let mut ts = String::new();
+                    if self.erased(b, c.ty) {
+                        return self.fail("zst-zero"); // erased destinations suppress the store
+                    }
                     let okz = self.ty_c(b.module, c.ty, "", &mut ts);
                     if okz {
                         dst.push_str("(");
                         dst.push_string(&ts);
-                        dst.push_str(if_s(self.agg_field_count(rmZ, rtZ) == 0, "){}", "){0}"));
+                        dst.push_str("){0}");
                     }
                     return okz;
                 }
@@ -6083,6 +6265,11 @@ extend CEmit {
             self.env_hashes.push(ev.h);
             return;
         }
+        if ev.kind == mbe::RK_ZST {
+            let mut sc9 = String::new();
+            self.sentinel(ev.a, &mut sc9);
+            return;
+        }
     }
 
     /// The symbol an interface-member call on RESOLVED receiver `(rm6, rt6)` dispatches to: a
@@ -6297,7 +6484,11 @@ extend CEmit {
             if rn.kind == NodeKind::NODE_PARAMETER {
                 tn = rn.as_data.parameter.ty;
             }
-            ok = self.mg.ctype(dm, da.type_of(tn), "", &mut ret);
+            if self.mg.is_zst(dm, da.type_of(tn)) {
+                ret.push_str("void"); // zero-sized results have no C carrier
+            } else {
+                ok = self.mg.ctype(dm, da.type_of(tn), "", &mut ret);
+            }
         } else {
             ok = false; // multi-return never dyn-dispatches (fn-pointer rule)
         }
@@ -6316,6 +6507,9 @@ extend CEmit {
                     break;
                 }
                 let pid = unsafe da.list(ps)[i as usize];
+                if self.mg.is_zst(dm, da.type_of(pid)) {
+                    continue; // zero-sized by-value params take no slot
+                }
                 o.push_str(", ");
                 ok = self.mg.ctype(dm, da.type_of(pid), "", o);
             }
@@ -6590,7 +6784,13 @@ extend CEmit {
                     tabs.push_str(" *)__self);\n");
                 }
             }
-            tabs.push_str("    Global __g = (Global){};\n    Global__dealloc(&__g, __self, sizeof(");
+            tabs.push_str("    Global__dealloc((Global *)&");
+            {
+                let mut sn9 = String::new();
+                self.sentinel(1, &mut sn9);
+                tabs.push_string(&sn9);
+            }
+            tabs.push_str(", __self, sizeof(");
             tabs.push_string(&srcc);
             tabs.push_str("), _Alignof(");
             tabs.push_string(&srcc);
@@ -6810,7 +7010,12 @@ extend CEmit {
             if rn.kind == NodeKind::NODE_PARAMETER {
                 tn = rn.as_data.parameter.ty;
             }
-            ok = self.mg.ctype(dm, da.type_of(tn), "", &mut ret);
+            if self.mg.is_zst(dm, da.type_of(tn)) {
+                ret.push_str("void");
+                is_void = true;
+            } else {
+                ok = self.mg.ctype(dm, da.type_of(tn), "", &mut ret);
+            }
         } else {
             ok = false;
         }
@@ -6833,6 +7038,9 @@ extend CEmit {
                     break;
                 }
                 let pid = unsafe da.list(ps)[i as usize];
+                if self.mg.is_zst(dm, da.type_of(pid)) {
+                    continue; // zero-sized by-value params take no slot (forwarding skips them too)
+                }
                 head.push_str(", ");
                 let mut an = String::from_str("_a");
                 an.push_u64(i);
@@ -6862,6 +7070,10 @@ extend CEmit {
                 head.push_str(" *)__self");
             }
             for i in start..ps.len {
+                let pid = unsafe da.list(ps)[i as usize];
+                if self.mg.is_zst(dm, da.type_of(pid)) {
+                    continue;
+                }
                 head.push_str(", _a");
                 head.push_u64(i);
             }
@@ -7959,6 +8171,19 @@ extend CEmit {
             return self.emit_operand(b, rv.a, dst);
         }
         if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
+            // a reference to a zero-sized value binds to the aligned sentinel -- EXCEPT `&*p`,
+            // which stays the pointer itself (cheaper, and keeps whatever provenance p carried)
+            {
+                let pty9 = b.places.at(rv.a as usize).ty;
+                let rpl9 = *b.places.at(rv.a as usize);
+                let cancels9 = rpl9.proj_len != 0 && b.projections.at((rpl9.proj_start + rpl9.proj_len - 1) as usize).kind == ir::PJ_DEREF;
+                if !cancels9 && pty9 != TYPE_NONE && !self.is_unit(b, pty9) && self.erased(b, pty9) {
+                    let mut rm9 = b.module;
+                    let mut rt9 = pty9;
+                    self.rty(b, pty9, &mut rm9, &mut rt9);
+                    return self.zst_sentinel_ref(rm9, rt9, dst);
+                }
+            }
             // cast to the recorded result type: u8 buffers reborrowed as char pointers (and
             // const-ness adjustments) are checker-approved
             if rv.kind == ir::RV_ADDR || self.ref_cast_needed(b, rv.target, rv.a) {
@@ -8040,6 +8265,35 @@ extend CEmit {
             let mut bm4 = b.module;
             let mut bt4 = TYPE_NONE;
             let bref = self.bin_op_ty(b, rv.b, &mut bm4, &mut bt4);
+            if (t == tt::TokenType::Plus || t == tt::TokenType::Minus) && rt4 != TYPE_NONE {
+                // C pointer arithmetic scales by the COMPLETE element type; a zero-sized element
+                // has none. `p +- n` is `p` (bytes cannot advance); `p - q` cannot yield a count
+                // and traps with its own diagnostic (rule: bytes cannot encode ZST elements).
+                let ya4 = *self.p().module_ast_const(rm4).type_at(rt4);
+                if ya4.kind == TypeKind::TYPE_POINTER {
+                    let mut em4 = rm4;
+                    let mut et4 = ya4.as_data.elem;
+                    if !self.mg.resolve(rm4, ya4.as_data.elem, &mut em4, &mut et4) {
+                        em4 = rm4;
+                        et4 = ya4.as_data.elem;
+                    }
+                    if self.mg.is_zst(em4, et4) {
+                        let yb4k = if bt4 != TYPE_NONE {
+                            self.p().module_ast_const(bm4).type_at(bt4).kind;
+                        } else {
+                            TypeKind::TYPE_ERROR;
+                        };
+                        if t == tt::TokenType::Minus && yb4k == TypeKind::TYPE_POINTER {
+                            dst.push_str("(__sc_zst_ptrdiff(), (intptr_t)0)");
+                            return true;
+                        }
+                        dst.push_str("(");
+                        let okp = self.emit_op_d(b, rv.a, aref, dst);
+                        dst.push_str(")");
+                        return okp;
+                    }
+                }
+            }
             if t == tt::TokenType::EqualEqual || t == tt::TokenType::BangEqual {
                 // pattern tests compare `str` VALUES; C has no struct ==
                 if self.is_str_ty(rm4, rt4) {
@@ -8337,6 +8591,16 @@ extend CEmit {
                     let mut rmZ = b.module;
                     let mut rtZ = rv.b;
                     self.rty(b, rv.b, &mut rmZ, &mut rtZ);
+                    if self.mg.is_zst(rmZ, rtZ) {
+                        // zero-sized types have no complete C type: sizeof/alignof are semantic
+                        if k == ir::IN_SIZEOF as u32 {
+                            dst.push_str("0");
+                        } else {
+                            let loz = self.mg.lay.layout(rmZ, rtZ);
+                            dst.push_u64(if_u64(loz.ok && loz.align > 1, loz.align, 1));
+                        }
+                        return true;
+                    }
                     let yz = *self.p().module_ast_const(rmZ).type_at(rtZ);
                     if yz.kind == TypeKind::TYPE_ARRAY {
                         let mut es = String::new();
@@ -8399,7 +8663,19 @@ extend CEmit {
                 dst.push_string(&sym);
                 return true;
             }
+            if k == ir::IN_DANGLING as u32 {
+                if rv.b == TYPE_NONE {
+                    return self.fail("dangling");
+                }
+                let mut rmD = b.module;
+                let mut rtD = rv.b;
+                self.rty(b, rv.b, &mut rmD, &mut rtD);
+                return self.zst_sentinel_ref(rmD, rtD, dst);
+            }
             if k == ir::IN_ZEROED as u32 {
+                if rv.target != TYPE_NONE && self.erased(b, rv.target) {
+                    return self.fail("zst-zeroed"); // erased destinations suppress the whole store
+                }
                 let mut ts = String::new();
                 let ok = self.ty_c(b.module, rv.target, "", &mut ts);
                 if ok {
@@ -8434,13 +8710,20 @@ extend CEmit {
             dst.push_string(&nm);
             dst.push_str("_env){ ");
             let mut ok = true;
+            let mut ne9: u32 = 0;
             for i in 0..rv.b {
                 if !ok {
                     break;
                 }
-                if i != 0 {
+                let opid9 = b.oper_pool[(rv.a + i) as usize];
+                let aty9 = b.operands.at(opid9 as usize).ty;
+                if aty9 != TYPE_NONE && self.erased(b, aty9) {
+                    continue; // zero-sized captures have no env member (see the env struct)
+                }
+                if ne9 != 0 {
                     dst.push_str(", ");
                 }
+                ne9 += 1;
                 dst.push_str(".");
                 let decl = unsafe ca.list(caps)[i as usize];
                 let csp = self.mg.decl_name_span(cm, decl);
@@ -8450,7 +8733,10 @@ extend CEmit {
                 }
                 self.mg.ident(cm, csp, dst);
                 dst.push_str(" = ");
-                ok = self.emit_operand(b, b.oper_pool[(rv.a + i) as usize], dst);
+                ok = self.emit_operand(b, opid9, dst);
+            }
+            if ne9 == 0 {
+                dst.push_str("0"); // all captures zero-sized: initialize the carrier byte
             }
             dst.push_str(" }");
             return ok;
@@ -8626,7 +8912,14 @@ extend CEmit {
                 dst.push_string(&cast);
                 dst.push_str("){ .tag = ");
                 dst.push_string(&tag);
-                if rv.b != 0 {
+                let mut vmat9: u32 = 0;
+                for i in 0..rv.b {
+                    let aty9 = b.operands.at(b.oper_pool[(rv.a + i) as usize] as usize).ty;
+                    if !(aty9 != TYPE_NONE && self.erased(b, aty9)) {
+                        vmat9 += 1;
+                    }
+                }
+                if vmat9 != 0 {
                     dst.push_str(", .payload.");
                     let ea = self.p().module_ast_const(am);
                     self.mg.ident(
@@ -8635,14 +8928,24 @@ extend CEmit {
                         dst,
                     );
                     dst.push_str(" = { ");
+                    let mut ne9: u32 = 0;
                     for i in 0..rv.b {
                         if !ok {
                             break;
                         }
-                        if i != 0 {
+                        let opid9 = b.oper_pool[(rv.a + i) as usize];
+                        let aty9 = b.operands.at(opid9 as usize).ty;
+                        if aty9 != TYPE_NONE && self.erased(b, aty9) {
+                            continue; // zero-sized payload member: no C storage
+                        }
+                        if ne9 != 0 {
                             dst.push_str(", ");
                         }
-                        ok = self.emit_operand(b, b.oper_pool[(rv.a + i) as usize], dst);
+                        ne9 += 1;
+                        ok = self.emit_operand(b, opid9, dst);
+                    }
+                    if ne9 == 0 {
+                        dst.push_str("0");
                     }
                     dst.push_str(" }");
                 }
@@ -8663,22 +8966,32 @@ extend CEmit {
                 let mut rmE = b.module;
                 let mut rtE = rv.target;
                 self.rty(b, rv.target, &mut rmE, &mut rtE);
-                dst.push_str(if_s(self.agg_field_count(rmE, rtE) == 0, "{}", "{0}"));
+                dst.push_str("{0}"); // a stored member always exists (ZST targets are suppressed upstream)
                 return true;
             }
             dst.push_str("{ ");
             if rv.c == ir::AGG_TUPLE {
+                let mut ne9: u32 = 0;
                 for i in 0..rv.b {
                     if !ok {
                         break;
                     }
-                    if i != 0 {
+                    let opid9 = b.oper_pool[(rv.a + i) as usize];
+                    let aty9 = b.operands.at(opid9 as usize).ty;
+                    if aty9 != TYPE_NONE && self.erased(b, aty9) {
+                        continue; // zero-sized tuple member: no C storage
+                    }
+                    if ne9 != 0 {
                         dst.push_str(", ");
                     }
+                    ne9 += 1;
                     dst.push_str("._");
                     dst.push_u64(i);
                     dst.push_str(" = ");
-                    ok = self.emit_operand(b, b.oper_pool[(rv.a + i) as usize], dst);
+                    ok = self.emit_operand(b, opid9, dst);
+                }
+                if ne9 == 0 {
+                    dst.push_str("0");
                 }
                 dst.push_str(" }");
                 return ok;
@@ -8702,6 +9015,12 @@ extend CEmit {
                 let opid = b.oper_pool[(rv.a + i) as usize];
                 if opid == ir::IR_NONE {
                     continue;
+                }
+                {
+                    let aty9 = b.operands.at(opid as usize).ty;
+                    if aty9 != TYPE_NONE && self.erased(b, aty9) {
+                        continue; // zero-sized field: no C member to initialize
+                    }
                 }
                 if emitted != 0 {
                     dst.push_str(", ");
@@ -8734,19 +9053,35 @@ extend CEmit {
         let mut csym = String::new();
         let mut ok = self.callee_sym(b, t.callee, t.targs_start, t.targs_len, rty2, TYPE_NONE, &mut csym);
         if ok {
+            // zero-sized dests take no unpack (and no carrier member); an all-erased pack has no
+            // `_ret` carrier at all -- the callee returned void
+            let mut dmat9: u32 = 0;
+            for d in 0..t.dests_len {
+                let dty9 = b.places.at(b.dest_pool[(t.dests_start + d) as usize] as usize).ty;
+                if !(dty9 != TYPE_NONE && self.erased(b, dty9)) {
+                    dmat9 += 1;
+                }
+            }
             self.out.push_str("  { ");
-            self.out.push_string(&csym);
-            self.out.push_str("_ret __mr = ");
+            if dmat9 != 0 {
+                self.out.push_string(&csym);
+                self.out.push_str("_ret __mr = ");
+            }
             self.out.push_string(&csym);
             self.out.push_str("(");
+            let mut na9: u32 = 0;
             for i in 0..t.args_len {
                 if !ok {
                     break;
                 }
-                if i != 0 {
+                let opid2 = b.oper_pool[(t.args_start + i) as usize];
+                if self.arg_slot_erased(b, t.callee, i, opid2) {
+                    continue;
+                }
+                if na9 != 0 {
                     self.out.push_str(", ");
                 }
-                let opid2 = b.oper_pool[(t.args_start + i) as usize];
+                na9 += 1;
                 let mut av = String::new();
                 ok = self.emit_call_arg(b, t.callee, i, opid2, &mut av);
                 self.out.push_string(&av);
@@ -8755,6 +9090,10 @@ extend CEmit {
             for d in 0..t.dests_len {
                 if !ok {
                     break;
+                }
+                let dty9 = b.places.at(b.dest_pool[(t.dests_start + d) as usize] as usize).ty;
+                if dty9 != TYPE_NONE && self.erased(b, dty9) {
+                    continue;
                 }
                 let mut dv = String::new();
                 ok = self.emit_place(b, b.dest_pool[(t.dests_start + d) as usize], &mut dv);
@@ -9236,11 +9575,17 @@ extend CEmit {
                         if ok {
                             any.push_str("    ");
                             any.push_string(&fsym);
-                            any.push_str("(&self->payload.");
-                            self.mg.ident(am, da.at_const(vn.as_data.variant.name).as_data.name.text, &mut any);
-                            any.push_str("._");
-                            any.push_u64(k);
-                            any.push_str(");\n");
+                            if self.mg.is_zst(prm, prt) {
+                                any.push_str("(");
+                                let _ = self.zst_sentinel_ref(prm, prt, &mut any);
+                                any.push_str(");\n");
+                            } else {
+                                any.push_str("(&self->payload.");
+                                self.mg.ident(am, da.at_const(vn.as_data.variant.name).as_data.name.text, &mut any);
+                                any.push_str("._");
+                                any.push_u64(k);
+                                any.push_str(");\n");
+                            }
                         }
                     }
                     if ok && any.len() != 0 {
@@ -9278,18 +9623,29 @@ extend CEmit {
                 let mut fsym = String::new();
                 ok = self.free_expr(frm, frt, &mut fsym);
                 if ok {
-                    let mut fnm = String::new();
-                    if is_tuple {
-                        fnm.push_str("_");
-                        fnm.push_u64(i);
-                    } else {
-                        self.mg.ident(am, da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text, &mut fnm);
-                    }
                     body.push_str("  ");
                     body.push_string(&fsym);
-                    body.push_str("(&self->");
-                    body.push_string(&fnm);
-                    body.push_str(");\n");
+                    if self.mg.is_zst(frm, frt) {
+                        // no C member exists: the field's destructor runs on the sentinel
+                        body.push_str("(");
+                        let _ = self.zst_sentinel_ref(frm, frt, &mut body);
+                        body.push_str(");\n");
+                    } else {
+                        let mut fnm = String::new();
+                        if is_tuple {
+                            fnm.push_str("_");
+                            fnm.push_u64(i);
+                        } else {
+                            self.mg.ident(
+                                am,
+                                da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text,
+                                &mut fnm,
+                            );
+                        }
+                        body.push_str("(&self->");
+                        body.push_string(&fnm);
+                        body.push_str(");\n");
+                    }
                 }
             }
         }
@@ -9381,7 +9737,13 @@ extend CEmit {
                     self.note_free(rm, rt, fs.as_str());
                 }
                 let mut pv = self.sget();
-                let ok = self.emit_place(b, t.a, &mut pv);
+                let zdrop = self.mg.is_zst(rm, rt);
+                let ok = if zdrop {
+                    // no storage exists for the dropped value: its destructor runs on the sentinel
+                    self.zst_sentinel_ref(rm, rt, &mut pv);
+                } else {
+                    self.emit_place(b, t.a, &mut pv);
+                };
                 if ok {
                     self.out.push_str("  ");
                     if t.args_len == 1 {
@@ -9390,7 +9752,7 @@ extend CEmit {
                         self.out.push_str(") { ");
                     }
                     self.out.push_string(&fs);
-                    self.out.push_str("(&");
+                    self.out.push_str(if_s(zdrop, "(", "(&"));
                     self.out.push_string(&pv);
                     self.out.push_str(");");
                     self.out.push_str(if_s(t.args_len == 1, " }", ""));
@@ -9409,19 +9771,35 @@ extend CEmit {
                 self.out.push_str("_ret __ar; memcpy(__ar._a, _0, sizeof(__ar._a)); return __ar; }\n");
             } else if b.returns == 1 {
                 // a declared `void` return counts as one UNIT slot: no value to spell
-                if self.is_unit(b, b.locals.at(0).ty) {
+                if self.erased(b, b.locals.at(0).ty) {
                     self.out.push_str("  return;\n");
                 } else {
                     self.out.push_str("  return _0;\n");
                 }
             } else if b.returns > 1 {
+                // zero-sized results have no carrier member (an all-erased pack returned void)
+                let mut rmat9: u32 = 0;
+                for r in 0..b.returns {
+                    if !self.erased(b, b.locals.at(r as usize).ty) {
+                        rmat9 += 1;
+                    }
+                }
+                if rmat9 == 0 {
+                    self.out.push_str("  return;\n");
+                    return true;
+                }
                 self.out.push_str("  return (");
                 self.out.push_string(&self.cur_name);
                 self.out.push_str("_ret){ ");
+                let mut re9: u32 = 0;
                 for r in 0..b.returns {
-                    if r != 0 {
+                    if self.erased(b, b.locals.at(r as usize).ty) {
+                        continue;
+                    }
+                    if re9 != 0 {
                         self.out.push_str(", ");
                     }
+                    re9 += 1;
                     self.out.push_str("._");
                     self.out.push_u64(r);
                     self.out.push_str(" = ");
@@ -9560,7 +9938,7 @@ extend CEmit {
             if t.dests_len == 1 && fwd_r == ir::IR_NONE {
                 let dp = b.dest_pool[t.dests_start as usize];
                 let dty = b.places.at(dp as usize).ty;
-                want = !self.is_unit(b, dty);
+                want = !self.erased(b, dty);
                 if dty == TYPE_NONE && t.callee.node != NODE_NONE {
                     // untyped dest: the callee's declared return count decides
                     let ca9 = self.p().module_ast_const(t.callee.module);
@@ -9680,19 +10058,16 @@ extend CEmit {
                 cs_len = sink.len();
                 if ok {
                     sink.push_str("(");
+                    let mut na9: u32 = 0; // arguments actually spelled (zero-sized ones take no slot)
                     if env_first {
                         sink.push_str("&");
                         ok = self.emit_operand(b, t.a, sink);
-                        if t.args_len != 0 {
-                            sink.push_str(", ");
-                        }
+                        na9 += 1;
                     }
                     if dyn_val {
                         ok = self.emit_operand(b, t.a, sink);
                         sink.push_str(".data");
-                        if t.args_len != 0 {
-                            sink.push_str(", ");
-                        }
+                        na9 += 1;
                     }
                     for i in 0..t.args_len {
                         if !ok {
@@ -9702,12 +10077,17 @@ extend CEmit {
                             // the erased receiver: its data pointer takes the self slot
                             ok = self.emit_operand(b, dyn_recv, sink);
                             sink.push_str(".data");
+                            na9 += 1;
                             continue;
                         }
-                        if i != 0 {
+                        let opid2 = b.oper_pool[(t.args_start + i) as usize];
+                        if self.arg_slot_erased(b, t.callee, i, opid2) {
+                            continue; // zero-sized by-value argument: no C slot (operands are pure)
+                        }
+                        if na9 != 0 {
                             sink.push_str(", ");
                         }
-                        let opid2 = b.oper_pool[(t.args_start + i) as usize];
+                        na9 += 1;
                         ok = self.emit_call_arg(b, t.callee, i, opid2, sink);
                     }
                 }
@@ -9972,6 +10352,13 @@ fn push_sc_str_c(raw: str, dst: &mut String) {
         }
     }
     push_c_escaped(bytes.as_str(), dst);
+}
+
+const fn if_u64(c: bool, a: u64, b: u64) u64 {
+    if c {
+        return a;
+    }
+    return b;
 }
 
 const fn if_s(c: bool, a: str<'static>, b: str<'static>) str<'static> {

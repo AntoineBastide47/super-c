@@ -12,6 +12,7 @@ import ast::ast as *;
 import module::loader as loader;
 import pattern::pattern as pat;
 import consteval::consteval as ce;
+import ir::layout as lay;
 import utils::errors as diag;
 
 pub const TYPE_ALIAS_MAX_DEPTH: u32 = 64;
@@ -9894,6 +9895,39 @@ extend TypeChecker {
                 self.cur_ast().set_type(id, rt3);
                 return rt3;
             }
+            // dangling::<T>(): compiler intrinsic -- a non-null, T-aligned `*mut T` backed by no
+            // storage (the backend's per-alignment sentinel). The portable pointer for zero-sized
+            // element buffers: never dereferenced, never freed.
+            if a.at_const(spx.expression).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(spx.expression).node == NODE_NONE && span_is(
+                self.source,
+                a.at_const(spx.expression).as_data.name.text,
+                "dangling",
+            ) {
+                let sp2 = a.at_const(id).span;
+                let args2 = a.at_const(id).as_data.call.args;
+                if tp_args.len != 1 || args2.len != 0 {
+                    self.errors.emit(
+                        sp2.start,
+                        sp2.end - sp2.start,
+                        format("dangling takes exactly one type argument and no values"),
+                    );
+                    return TYPE_NONE;
+                }
+                let tt = self.resolve_type(unsafe a.list(tp_args)[0]);
+                if tt == TYPE_NONE {
+                    return TYPE_NONE;
+                }
+                self.cur_ast().set_type_args(id, &tt, 1);
+                let rt3 = self.cur_ast().intern_type(
+                    Ty {
+                        kind: TypeKind::TYPE_POINTER,
+                        qualifier: TypeQualifier::TYPE_QUAL_MUT as u8,
+                        as_data: TyAs { elem: tt },
+                    },
+                );
+                self.cur_ast().set_type(id, rt3);
+                return rt3;
+            }
         }
         let args = a.at_const(id).as_data.call.args;
         for i in 0..args.len {
@@ -14408,6 +14442,51 @@ extend TypeChecker {
                         sp.end - sp.start,
                         format("a variadic function needs at least one fixed parameter before '...'"),
                     );
+                }
+                // ISO C has no portable by-value zero-sized object: an extern boundary cannot
+                // carry one. Layout decides (extern fns are never generic), never syntax.
+                if fnd.is_extern {
+                    let mut lsv = lay::Svc::new(self.package);
+                    for i in 0..params.len {
+                        let pid = unsafe a.list(params)[i as usize];
+                        let pn9 = self.cur_ast().at_const(pid);
+                        if pn9.kind != NodeKind::NODE_PARAMETER {
+                            continue;
+                        }
+                        let pt9 = self.cur_ast().type_of(pn9.as_data.parameter.ty);
+                        let lo9 = lsv.layout(self.cur_module(), pt9);
+                        if lo9.ok && lo9.size == 0 {
+                            let sp9 = self.name_span(fnd.name);
+                            self.errors.emit(
+                                sp9.start,
+                                sp9.end - sp9.start,
+                                format(
+                                    "an extern \"C\" function cannot take a zero-sized type by value (C has no representation for it); pass a pointer or a positive-size wrapper",
+                                ),
+                            );
+                            break;
+                        }
+                    }
+                    let rets9 = fnd.returns;
+                    if rets9.len == 1 {
+                        let r9 = unsafe a.list(rets9)[0];
+                        let rn9 = self.cur_ast().at_const(r9);
+                        let rt9 = self.cur_ast().type_of(
+                            if_node(rn9.kind == NodeKind::NODE_PARAMETER, rn9.as_data.parameter.ty, r9),
+                        );
+                        let lo9 = lsv.layout(self.cur_module(), rt9);
+                        if lo9.ok && lo9.size == 0 {
+                            let sp9 = self.name_span(fnd.name);
+                            self.errors.emit(
+                                sp9.start,
+                                sp9.end - sp9.start,
+                                format(
+                                    "an extern \"C\" function cannot return a zero-sized type by value (C has no representation for it); return a pointer or a positive-size wrapper",
+                                ),
+                            );
+                        }
+                    }
+                    lsv.free();
                 }
                 if span_is(self.source, self.name_span(fnd.name), "main") {
                     let rets = fnd.returns;

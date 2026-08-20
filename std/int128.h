@@ -9,6 +9,7 @@
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wpedantic" /* gcc: ISO C does not support __int128 */
 #endif
 #if defined(__SIZEOF_INT128__)
 static inline int sc_has_i128(void) { return 1; }

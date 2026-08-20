@@ -1966,11 +1966,20 @@ pub fn cemit_package(
                         if wok {
                             wr.push_str("  ");
                             wr.push_string(&fe9);
-                            wr.push_str("(&");
-                            wr.push_string(&selfp);
-                            wr.push_str("->");
-                            wr.push_string(&gfs[gi]);
-                            wr.push_str(");\n");
+                            if cem.mg.is_zst(frm9, frt9) {
+                                // the field has no C member: its destructor runs on the sentinel
+                                wr.push_str("(");
+                                let mut zr9 = String::new();
+                                let _ = cem.zst_sentinel_ref(frm9, frt9, &mut zr9);
+                                wr.push_string(&zr9);
+                                wr.push_str(");\n");
+                            } else {
+                                wr.push_str("(&");
+                                wr.push_string(&selfp);
+                                wr.push_str("->");
+                                wr.push_string(&gfs[gi]);
+                                wr.push_str(");\n");
+                            }
                         }
                     }
                     wr.push_str("}\n");
@@ -2231,7 +2240,9 @@ pub fn cemit_package(
         // this instance's compile-time fact -- false is a COMPILE error naming the type argument
         cemit_inst_asserts(p, d_def, &d_subs, dk, &mut sa_seen);
         // a body with an UNEXPANDED reflection binder re-lowers per instance: the demand env
-        // makes the binder's owner concrete, so the copies expand for real
+        // makes the binder's owner concrete, so the copies expand for real. A body whose only
+        // env-dependence is `sizeof(T) <op> 0` branches re-lowers once per ZST-BIT SIGNATURE of
+        // its args -- every material instantiation folds identically and shares one body.
         let mut li2 = li;
         if lws.at(li as usize).body.has_reflect {
             if stdlib::getenv("SC_PROJ_DBG") != null {
@@ -2253,6 +2264,44 @@ pub fn cemit_package(
                 inst_skip += 1;
                 continue;
             }
+        } else if lws.at(li as usize).body.has_zst_cond {
+            let mut zb: u64 = 1;
+            for i2 in 0..d_subs.len() {
+                let sb2 = *d_subs.at(i2);
+                zb = zb << 1 | if cem.mg.is_zst(sb2.am, sb2.at) {
+                    1u64;
+                } else {
+                    0 as u64;
+                };
+            }
+            let zkey = skey_mix(zb, d_def.module as u64 << 32 | d_def.node as u64);
+            let zi = switch lw_cache.get(&zkey) {
+                Some(v) => *v,
+                None => {
+                    let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
+                    for i2 in 0..d_subs.len() {
+                        let sb2 = *d_subs.at(i2);
+                        lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
+                    }
+                    let mut slot2 = 0xFFFFFFFFFFFFFFFFu64;
+                    if lw2.lower_fn(d_def.node) {
+                        cemit_apply_drops(&mut dow, &mut lw2);
+                        slot2 = lws.len() as u64;
+                        lws.push(lw2);
+                    } else {
+                        if verbose {
+                            eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
+                        }
+                    }
+                    lw_cache.insert(zkey, slot2);
+                    slot2;
+                },
+            };
+            if zi == 0xFFFFFFFFFFFFFFFFu64 {
+                inst_skip += 1;
+                continue;
+            }
+            li2 = zi;
         }
         cem.mg.subs.truncate(0);
         for i2 in 0..d_subs.len() {
@@ -2264,17 +2313,19 @@ pub fn cemit_package(
         for c2 in 0..lws.at(li2 as usize).closures.len() {
             cem.mg.clos_ids.push(lws.at(li2 as usize).closures[c2]);
         }
-        if li2 == li {
-            while cfs.len() <= li as usize {
+        {
+            // every lws slot gets a cached CFlow: shared zst-signature bodies and reflect
+            // re-lowers alike (a per-slot build amortizes across their instantiations)
+            while cfs.len() <= li2 as usize {
                 cfs.push(cfl::CFlow::new_empty());
                 cf_ok.push(false);
             }
-            if !cf_ok[li as usize] {
-                let cfp = &mut cfs[li as usize];
-                cfp.build_into(&lws.at(li as usize).body);
-                cf_ok.set(li as usize, true);
+            if !cf_ok[li2 as usize] {
+                let cfp = &mut cfs[li2 as usize];
+                cfp.build_into(&lws.at(li2 as usize).body);
+                cf_ok.set(li2 as usize, true);
             }
-            cem.cf_ext = cfs.at(li as usize);
+            cem.cf_ext = cfs.at(li2 as usize);
         }
         cem.out.clear();
         cem.fn_attrs.truncate(0);
@@ -2408,6 +2459,10 @@ pub fn cemit_package(
         eprint("cemit-tu-inst-miss: {} x{}\n", reasons[r2], rcounts[r2]);
     }
     o.skips += seed_skip + inst_skip + clos_skip + glue_skip + tw_skip;
+    if have_main && main_argv && !testing {
+        let mut sn9 = String::new();
+        cem.sentinel(1, &mut sn9); // the argv wrapper's Global allocator receiver
+    }
     // `@emit_macro` C-reuse templates: `<STEM>_DECLARE/_DEFINE(<params>, NAME)` -- the struct body
     // plus every non-generic method of the type's plain generic extends, emitted through cemit
     // under macro spelling (unresolved params as their names; symbols pasted onto NAME)
@@ -2985,6 +3040,7 @@ pub fn cemit_package(
         phh.push_string(&cem.extern_protos);
         phh.push_string(&cem.stat_decls);
         phh.push_string(&cem.dyn_decls);
+        phh.push_string(&cem.sent_decls);
         for i in 0..chunk_mod.len() {
             let pl = ps.slice(poff[i] as usize, poff[i + 1] as usize);
             if !(pl.len() >= 7 && pl.slice(0, 7) == "static ") {
@@ -3084,6 +3140,7 @@ pub fn cemit_package(
                 tu2.push_string(&const_defs);
                 tu2.push_string(&static_defs);
                 tu2.push_string(&cem.dyn_tabs);
+                tu2.push_string(&cem.sent_defs);
             }
             tu2.push_string(&lb);
             if has_wrap {
@@ -3298,6 +3355,47 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, gi:
 }
 
 // `.field` designator for member index `idx` of aggregate `(dm, dn)` (`._N` for tuples).
+// Is struct slot `idx` a zero-sized field (no C member exists for it)? Resolved under the
+// StaticObj's recorded instance args, mirroring st_field's field-ordinal indexing.
+fn st_field_zst(p: &loader::Package, mg: &mut mbe::Mangler, g: *const ce::StaticObj, idx: u32) bool {
+    let dm = unsafe g.dm;
+    let dn = unsafe g.dn;
+    let a = unsafe &*p.module_ast_const(dm);
+    let ms = a.at_const(dn).as_data.aggregate.members;
+    let is_tuple = a.at_const(dn).as_data.aggregate.is_tuple;
+    let mut fty = TYPE_NONE;
+    let mut fi: u32 = 0;
+    for i in 0..ms.len {
+        let fid = unsafe a.list(ms)[i as usize];
+        if !is_tuple && a.at_const(fid).kind != NodeKind::NODE_FIELD {
+            continue;
+        }
+        if fi == idx {
+            fty = a.type_of(fid);
+            if fty == TYPE_NONE && !is_tuple {
+                fty = a.type_of(a.at_const(fid).as_data.field.ty);
+            }
+            break;
+        }
+        fi += 1;
+    }
+    if fty == TYPE_NONE {
+        return false;
+    }
+    let gens = a.at_const(dn).as_data.aggregate.generics;
+    let mut nb: usize = 0;
+    for i in 0..gens.len {
+        if i as u8 >= unsafe g.nargs {
+            break;
+        }
+        mg.push_sub(dm, unsafe a.list(gens)[i as usize], unsafe g.am[i as usize], unsafe g.at[i as usize]);
+        nb += 1;
+    }
+    let z = mg.is_zst(dm, fty);
+    mg.pop_subs(nb);
+    return z;
+}
+
 fn st_field(p: &loader::Package, mg: &mut mbe::Mangler, dm: ModuleId, dn: NodeId, idx: u32, out: &mut String) {
     let a = unsafe &*p.module_ast_const(dm);
     if a.at_const(dn).as_data.aggregate.is_tuple {
@@ -3548,7 +3646,7 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name
     }
     // SS_STRUCT
     if nslots == 0 {
-        out.push_str("{}");
+        out.push_str("{0}"); // strict C11: an empty initializer list is not C
         return true;
     }
     let uact = unsafe g.uactive;
@@ -3563,15 +3661,23 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name
         return true;
     }
     out.push_str("{ ");
+    let mut ne9: u32 = 0;
     for k in 0..nslots {
-        if k != 0 {
+        if st_field_zst(p, mg, g, k) {
+            continue; // zero-sized field: no C member to initialize
+        }
+        if ne9 != 0 {
             out.push_str(", ");
         }
+        ne9 += 1;
         st_field(p, mg, unsafe g.dm, unsafe g.dn, k, out);
         out.push_str(" = ");
         if !st_slot(p, mg, cev, name, gi, k, out) {
             return false;
         }
+    }
+    if ne9 == 0 {
+        out.push_str("0"); // all fields erased inside a still-material carrier
     }
     out.push_str(" }");
     return true;
@@ -3911,7 +4017,7 @@ fn cemit_main_wrapper(out: &mut String, argv: bool) {
         return;
     }
     out.push_str(
-        "static Vector__str __sc_argv_to_vector(int argc, char **argv) {\n  Vector__str out = (Vector__str){0};\n  if (argc > 0) {\n    out.alloc = (Global){};\n    out.ptr = (str *)Global__alloc(&out.alloc, sizeof(str) * (size_t)argc, _Alignof(str));\n    out.len = (size_t)argc;\n    out.cap = (size_t)argc;\n    for (int i = 0; i < argc; i++) { out.ptr[i] = str__from_cstr(argv[i]); }\n  }\n  return out;\n}\nint main(int argc, char **argv) { return __sc_user_main(__sc_argv_to_vector(argc, argv)); }\n",
+        "static Vector__str __sc_argv_to_vector(int argc, char **argv) {\n  Vector__str out = (Vector__str){0};\n  if (argc > 0) {\n    out.ptr = (str *)Global__alloc((Global *)&__sc_zst_1, sizeof(str) * (size_t)argc, _Alignof(str));\n    out.len = (size_t)argc;\n    out.cap = (size_t)argc;\n    for (int i = 0; i < argc; i++) { out.ptr[i] = str__from_cstr(argv[i]); }\n  }\n  return out;\n}\nint main(int argc, char **argv) { return __sc_user_main(__sc_argv_to_vector(argc, argv)); }\n",
     );
 }
 

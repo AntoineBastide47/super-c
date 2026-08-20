@@ -60,7 +60,7 @@ pub fn verify(b: &ir::CoreBody, type_pool_len: usize) str<'static> {
             if r.a as usize >= b.places.len() {
                 return "rvalue-place-out-of-range";
             }
-        } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_SIZEOF || r.c == ir::IN_ALIGNOF || r.c == ir::IN_TYPE_INFO) {
+        } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_SIZEOF || r.c == ir::IN_ALIGNOF || r.c == ir::IN_TYPE_INFO || r.c == ir::IN_DANGLING) {
             // `b` carries the measured/described TypeId, not an operand count
             if r.b as usize >= type_pool_len {
                 return "intrinsic-type-out-of-range";

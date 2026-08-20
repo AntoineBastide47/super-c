@@ -214,6 +214,20 @@ fn array_repeat_literal() {
     );
 }
 
+// A designated array literal carries only its SPELLED elements; the destination's tail is zero. In a
+// struct-literal field the emitted temp is that short array, so the copy into the field must be sized
+// by the source -- sized by the field, it read past the temp. And the constant evaluator's value for
+// the literal kept the short length through field-init and return positions, so a constant index into
+// the zero tail was reported as out of bounds.
+@test
+fn designated_array_literal_short_tail() {
+    run_exit(
+        "short designated literals in field, binding and return positions; constant reads of the zero tail",
+        "struct Env { pub args: [u32; 8], pub n: u8 }\nfn mk() [u32; 8] { return [[0] = 7]; }\nfn main() i32 {\n  let e = Env { args: [[1] = 5], n: 1 };\n  let local: [u32; 8] = [[2] = 3];\n  let r = mk();\n  unsafe exit((e.args[1] + e.args[7] + local[2] + local[7] + r[0] + r[7]) as i32 + 27);\n}\n",
+        42,
+    );
+}
+
 // An array whose element is a POINTER or a FUNCTION POINTER, and an array binding whose type is inferred.
 // Three separate defects met here. C cannot initialize an array from an array value, so the compound
 // literal every inferred array binding was emitted with (`const T x[N] = (T[N]){..}`) was rejected outright

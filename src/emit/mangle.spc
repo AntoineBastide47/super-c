@@ -5,6 +5,7 @@
 // pool-local types under an empty substitution frame -- resolution happens before naming, never
 // inside it. Renders outside the frozen subset refuse (false) instead of guessing.
 import ast::ast as *;
+import ir::layout as lay;
 import lexer::token as tok;
 import module::loader as loader;
 import consteval::consteval as ce;
@@ -273,6 +274,12 @@ pub struct Mangler {
     /// Attempts already journaled, keyed (gate key, mark_ctx): a dup attempt must be replayable
     /// once per module (its first claimant may vanish), and never more.
     pub rec_dups: Set<u64>,
+    /// Target layout service for ZST decisions (`is_zst`): storage elision is a pure function of
+    /// final layout, never of syntax, so both manglers (TU and body emitters) answer identically.
+    pub lay: lay::Svc,
+    /// Substitution-free classification memo keyed (module << 32 | type): bit0 computed, bit1
+    /// zero-sized, bit2 unit/never. One resolve+layout then serves every emission gate probe.
+    zmemo: Map<u64, u64>,
 }
 
 // RecEv kinds; the payload schema per kind is fixed by its recording site.
@@ -293,6 +300,7 @@ pub const RK_AGG: u8 = 14; // h = gate, a = pm, b/c/d+xs = TyInstance, subs = sp
 pub const RK_MDYN: u8 = 15; // a = pm, b = t (mangler dyn_reqs entry)
 pub const RK_EDGE: u8 = 16; // xs = used_mods row of this module (driver-recorded)
 pub const RK_MAIN: u8 = 17; // a = main_argv (driver-recorded, module holds `main`)
+pub const RK_ZST: u8 = 18; // a = alignment (ZST sentinel demand)
 
 /// One journaled emission side effect. Fields are kind-specific (see RK_*); unused ones stay zero.
 pub struct RecEv {
@@ -381,6 +389,8 @@ extend Mangler as Free {
         self.edge_log.free();
         self.rec.free();
         self.rec_dups.free();
+        self.lay.free();
+        self.zmemo.free();
     }
 }
 
@@ -418,6 +428,8 @@ extend Mangler {
             rec_on: false,
             rec: Vector::<RecEv>::new(),
             rec_dups: Set::<u64>::new(),
+            lay: lay::Svc::new(pkg),
+            zmemo: Map::<u64, u64>::new(),
         };
     }
 
@@ -610,6 +622,60 @@ extend Mangler {
     // its binding's pool; anything else stays put. Returns false when an unbound param remains.
     pub fn resolve(self: &Self, pm: ModuleId, t: TypeId, rm: &mut ModuleId, rt: &mut TypeId) bool {
         return self.resolve_from(pm, t, rm, rt, 0, self.subs.len());
+    }
+
+    /// Substitution-free-memoized classification behind `is_zst`/`erased`: one resolve + one
+    /// (cached) layout query per (module, type). Instance emission (subs active) bypasses the memo
+    /// -- the same pool TypeId legitimately resolves differently per instantiation.
+    pub fn zclass(self: &mut Self, pm: ModuleId, t: TypeId) u64 {
+        let memoable = self.subs.len() == 0;
+        // mixed key: the map hashes u64 identically, and unmixed (module << 32 | type) keys
+        // collide across modules in the masked low bits (probe chains grow with module count)
+        let key = skey_mix(0, pm as u64 << 32 | t as u64);
+        if memoable {
+            switch self.zmemo.get(&key) {
+                Some(v) => {
+                    return *v;
+                },
+                None => {},
+            };
+        }
+        let mut rm = pm;
+        let mut rt = t;
+        if !self.resolve(pm, t, &mut rm, &mut rt) {
+            rm = pm;
+            rt = t;
+        }
+        let y = *self.p().module_ast_const(rm).type_at(rt);
+        let mut v: u64 = 1;
+        if y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID {
+            v = v | 4;
+        } else if y.kind != TypeKind::TYPE_BUILTIN && y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_FUNCTION && y.kind != TypeKind::TYPE_DYN {
+            let lo = self.lay.layout(rm, rt);
+            if lo.ok && lo.size == 0 {
+                v = v | 2;
+            }
+        }
+        if memoable {
+            self.zmemo.insert(key, v);
+        }
+        return v;
+    }
+
+    /// Final-layout zero-sized test under the active substitution env (storage elision is a pure
+    /// function of layout, never syntax). Scalar and pointer kinds can never be zero-sized, so
+    /// only aggregate-shaped types pay for resolution and a (cached) layout query. The answer is
+    /// an ABI decision every emission site must agree on: it is deterministic per concrete type,
+    /// and unresolvable/unlayoutable types uniformly answer material.
+    pub fn is_zst(self: &mut Self, pm: ModuleId, t: TypeId) bool {
+        if t == TYPE_NONE || self.macro_on {
+            return false; // macro templates keep unresolved params: no per-instance layout exists
+        }
+        let k = self.p().module_ast_const(pm).type_at(t).kind;
+        if k == TypeKind::TYPE_BUILTIN || k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_FUNCTION || k == TypeKind::TYPE_DYN {
+            return false;
+        }
+        return (self.zclass(pm, t) & 2) != 0;
     }
 
     // Innermost-wins WITH BACKTRACKING: merged demand chains can bind one param both to a sibling
@@ -1000,14 +1066,11 @@ extend Mangler {
                 anchor = pid;
             }
             let pty = fa.type_of(anchor);
-            if i != 0 {
-                params.push_str(", ");
+            if self.is_zst(y.module, pty) {
+                continue; // zero-sized by-value params take no slot (must match every lowered sig)
             }
-            let mut am2 = y.module;
-            let mut at2 = pty;
-            if !self.resolve(y.module, pty, &mut am2, &mut at2) {
-                am2 = y.module;
-                at2 = pty;
+            if params.len() != 0 {
+                params.push_str(", ");
             }
             if !self.ctype(y.module, pty, "", &mut params) {
                 ok = false;
@@ -1020,7 +1083,7 @@ extend Mangler {
         let mut inner = String::from_str("(*");
         inner.push_str(decl);
         inner.push_str(")(");
-        if ps.len == 0 {
+        if params.len() == 0 {
             inner.push_str("void");
         } else {
             inner.push_string(&params);
@@ -1034,7 +1097,12 @@ extend Mangler {
             if rn.kind == NodeKind::NODE_PARAMETER {
                 rtn = rn.as_data.parameter.ty;
             }
-            ok = self.ctype(y.module, fa.type_of(rtn), inner.as_str(), out);
+            if self.is_zst(y.module, fa.type_of(rtn)) {
+                out.push_str("void ");
+                out.push_string(&inner);
+            } else {
+                ok = self.ctype(y.module, fa.type_of(rtn), inner.as_str(), out);
+            }
         } else if rs.len == 0 {
             let mut rty = TYPE_NONE;
             if body != NODE_NONE {
@@ -1567,6 +1635,19 @@ extend Mangler {
             let mut cp = y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8;
             if y.kind == TypeKind::TYPE_REFERENCE {
                 cp = y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
+            }
+            if el.kind == TypeKind::TYPE_ARRAY && self.is_zst(elm, el.as_data.arr.elem) {
+                // C forbids an array declarator over an incomplete element: a pointer to a
+                // zero-sized-element array spells as a bare data pointer (never dereferenced).
+                let mut inner0 = String::new();
+                inner0.push_str("*");
+                inner0.push_str(decl);
+                if cp {
+                    out.push_str("const ");
+                }
+                out.push_str("void ");
+                out.push_str(inner0.as_str());
+                return true;
             }
             if el.kind == TypeKind::TYPE_ARRAY && el.as_data.arr.len != 0 {
                 // Pointer-to-fixed-array spirals: `(*decl)[N]`, const prefixing the element type.

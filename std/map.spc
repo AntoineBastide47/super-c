@@ -67,8 +67,17 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         let oldvals = self.vals;
         let oldused = self.used;
         let oldcap = self.cap;
-        self.keys = (unsafe self.alloc.alloc(newcap * sizeof(K), alignof(K))) as *mut K;
-        self.vals = (unsafe self.alloc.alloc(newcap * sizeof(V), alignof(V))) as *mut V;
+        // zero-sized keys or values occupy no bytes: the aligned sentinel, no allocator call
+        if sizeof(K) == 0 {
+            self.keys = zst_dangling::<K>();
+        } else {
+            self.keys = (unsafe self.alloc.alloc(newcap * sizeof(K), alignof(K))) as *mut K;
+        }
+        if sizeof(V) == 0 {
+            self.vals = zst_dangling::<V>();
+        } else {
+            self.vals = (unsafe self.alloc.alloc(newcap * sizeof(V), alignof(V))) as *mut V;
+        }
         self.used = (unsafe self.alloc.alloc(newcap, alignof(u8))) as *mut u8;
         unsafe memset(self.used, 0, newcap); // mark every slot empty
         self.cap = newcap;
@@ -83,8 +92,12 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             }
         }
         if oldcap > 0 {
-            unsafe self.alloc.dealloc(oldkeys, oldcap * sizeof(K), alignof(K));
-            unsafe self.alloc.dealloc(oldvals, oldcap * sizeof(V), alignof(V));
+            if sizeof(K) != 0 {
+                unsafe self.alloc.dealloc(oldkeys, oldcap * sizeof(K), alignof(K));
+            }
+            if sizeof(V) != 0 {
+                unsafe self.alloc.dealloc(oldvals, oldcap * sizeof(V), alignof(V));
+            }
             unsafe self.alloc.dealloc(oldused, oldcap, alignof(u8));
         }
     }
@@ -202,8 +215,12 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> as Free {
                 unsafe self.vals[i].free(); // no-op if V isn't Free
             }
         }
-        unsafe self.alloc.dealloc(self.keys, self.cap * sizeof(K), alignof(K));
-        unsafe self.alloc.dealloc(self.vals, self.cap * sizeof(V), alignof(V));
+        if sizeof(K) != 0 {
+            unsafe self.alloc.dealloc(self.keys, self.cap * sizeof(K), alignof(K));
+        }
+        if sizeof(V) != 0 {
+            unsafe self.alloc.dealloc(self.vals, self.cap * sizeof(V), alignof(V));
+        }
         unsafe self.alloc.dealloc(self.used, self.cap, alignof(u8));
         self.keys = null;
         self.vals = null;
@@ -284,4 +301,10 @@ extend<V> MapValues<V> as Iterator<&V> {
         }
         return Option::<&V>::None;
     }
+}
+
+// Non-null, T-aligned, storage-free pointer for zero-sized element buffers (see core::dangling;
+// duplicated privately so the prelude module needs no self-import).
+const fn zst_dangling<T>() *mut T {
+    return alignof(T) as *mut T;
 }

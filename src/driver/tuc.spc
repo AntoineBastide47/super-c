@@ -15,7 +15,7 @@ import driver::util as *;
 import stdlib;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 1;
+const TUC_VER: u32 = 2;
 
 fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;

@@ -20,6 +20,12 @@ extend<T, A: Allocator> Box<T, A> {
     /// Allocate through an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A, value: T) Box<T, A> {
         let mut b = Box::<T, A> { ptr: null, alloc: alloc };
+        if sizeof(T) == 0 {
+            // a zero-sized value occupies no bytes: the aligned sentinel, no allocator call
+            b.ptr = zst_dangling::<T>();
+            unsafe b.ptr[0] = value;
+            return b;
+        }
         b.ptr = (unsafe b.alloc.alloc(sizeof(T), alignof(T))) as *mut T;
         unsafe b.ptr[0] = value;
         return b;
@@ -79,6 +85,10 @@ extend<T, A: Allocator> Box<T, A> as DerefMut<T> {
 extend<T, A: Allocator> Box<T, A> as Free {
     pub fn free(self: &mut Box<T, A>) {
         self.ptr.free(); // free the boxed value (no-op if T isn't Free)
+        if sizeof(T) == 0 {
+            self.ptr = null;
+            return; // the sentinel was never allocated
+        }
         unsafe self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));
         self.ptr = null;
     }
@@ -112,4 +122,10 @@ extend<T: Default, A: Allocator + Default> Box<T, A> as Default {
     pub const fn default() Box<T, A> {
         return Box::<T, A>::new(T::default());
     }
+}
+
+// Non-null, T-aligned, storage-free pointer for zero-sized element buffers (see core::dangling;
+// duplicated privately so the prelude module needs no self-import).
+const fn zst_dangling<T>() *mut T {
+    return alignof(T) as *mut T;
 }

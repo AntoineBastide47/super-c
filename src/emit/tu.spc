@@ -209,6 +209,7 @@ extend TuEmit {
                 body.push_str(nm.as_str());
                 body.push_str(" { ");
                 let mut ok = true;
+                let mut cmat: usize = 0;
                 for k in 0..caps.len {
                     let cdl = unsafe ca.list(caps)[k as usize];
                     let cty = ca.type_of(cdl);
@@ -216,6 +217,10 @@ extend TuEmit {
                         ok = false;
                         break;
                     }
+                    if self.mg.is_zst(y.module, cty) {
+                        continue; // zero-sized captures take no env storage (reads are erased)
+                    }
+                    cmat += 1;
                     if !self.field_dep(y.module, cty) {
                         ok = false;
                         break;
@@ -228,6 +233,12 @@ extend TuEmit {
                         break;
                     }
                     body.push_str("; ");
+                }
+                if cmat == 0 {
+                    // every capture is zero-sized: C cannot define an empty struct, so keep ONE
+                    // byte -- the env is a compiler-internal carrier with no semantic layout, and
+                    // the body emitter must still pass a real env pointer for the captured drops
+                    body.push_str("unsigned char _sc_zenv; ");
                 }
                 body.push_str("};\n");
                 if ok {
@@ -249,9 +260,11 @@ extend TuEmit {
         if n.as_data.aggregate.is_extern {
             return true; // extern aggregates are defined by their backing C header
         }
-        let kw = if_str2(n.as_data.aggregate.is_union, "union ", "struct ");
-        body.push_str(kw);
-        // layout attributes ride the keyword: `struct __attribute__((packed)) X { .. }`
+        let is_union = n.as_data.aggregate.is_union;
+        let is_tuple = n.as_data.aggregate.is_tuple;
+        let ms = n.as_data.aggregate.members;
+        let mut packed = false;
+        let mut align_attr: u64 = 0;
         {
             let dax = unsafe &*self.p().module_ast_const(it.m);
             for k9 in 0..dax.attrs.len() {
@@ -259,22 +272,27 @@ extend TuEmit {
                     continue;
                 }
                 if dax.attrs.at(k9).kind == AttrKind::ATTR_PACKED as u8 {
-                    body.push_str("__attribute__((packed)) ");
+                    packed = true;
                 } else if dax.attrs.at(k9).kind == AttrKind::ATTR_ALIGN as u8 {
-                    body.push_str("__attribute__((aligned(");
-                    body.push_u64(dax.attrs.at(k9).arg);
-                    body.push_str("))) ");
+                    align_attr = dax.attrs.at(k9).arg;
                 }
             }
         }
-        body.push_str(nm);
-        body.push_str(" {\n");
-        let is_tuple = n.as_data.aggregate.is_tuple;
-        let ms = n.as_data.aggregate.members;
+        // Field plan: a zero-sized field takes no C member (storage is a function of final layout,
+        // and strict C11 has no zero-sized object). `keep`: 1 = stored, 0 = elided, 2 = not a
+        // field node. A struct with no stored field is itself zero-sized: no C definition exists
+        // (its forward typedef still supports pointers). Elided fields with alignment > 1 can
+        // shift the semantic offsets flat elision produces, so that rare case takes a dual layout
+        // walk and, on mismatch, explicit padding members (packed layouts ignore alignment, so
+        // they can never diverge).
+        let mut keep = Vector::<u8>::new();
+        let mut mat: usize = 0;
+        let mut zalign_hi = false;
         for i in 0..ms.len {
             let fid = unsafe da.list(ms)[i as usize];
             // tuple members are bare type nodes named positionally `_i`; named members are NODE_FIELD
             if !is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
+                keep.push(2);
                 continue;
             }
             let mut fty = da.type_of(fid);
@@ -284,8 +302,62 @@ extend TuEmit {
             if fty == TYPE_NONE {
                 return false;
             }
+            if self.mg.is_zst(it.m, fty) {
+                keep.push(0);
+                if !packed && !zalign_hi {
+                    let mut rm9 = it.m;
+                    let mut rt9 = fty;
+                    if self.mg.resolve(it.m, fty, &mut rm9, &mut rt9) {
+                        let lo9 = self.mg.lay.layout(rm9, rt9);
+                        zalign_hi = lo9.ok && lo9.align > 1;
+                    }
+                }
+            } else {
+                keep.push(1);
+                mat += 1;
+            }
+        }
+        if mat == 0 {
+            return true; // the aggregate is zero-sized: forward typedef only, no definition
+        }
+        let mut pads = Vector::<u64>::new(); // per-member leading pad bytes (dual-walk mismatch only)
+        let mut tail_pad: u64 = 0;
+        let mut force_align: u64 = 0;
+        if zalign_hi && !self.zst_pad_plan(it, &keep, is_union, align_attr, &mut pads, &mut tail_pad, &mut force_align) {
+            return false; // over-aligned elided field with an unlayoutable sibling: no safe C shape
+        }
+        let kw = if_str2(is_union, "union ", "struct ");
+        body.push_str(kw);
+        // layout attributes ride the keyword: `struct __attribute__((packed)) X { .. }`
+        if packed {
+            body.push_str("__attribute__((packed)) ");
+        }
+        if align_attr != 0 {
+            body.push_str("__attribute__((aligned(");
+            body.push_u64(align_attr);
+            body.push_str("))) ");
+        }
+        body.push_str(nm);
+        body.push_str(" {\n");
+        let mut mi: usize = 0; // stored-member ordinal (pad plan indexes stored members)
+        for i in 0..ms.len {
+            if keep[i as usize] != 1 {
+                continue;
+            }
+            let fid = unsafe da.list(ms)[i as usize];
+            let mut fty = da.type_of(fid);
+            if fty == TYPE_NONE && !is_tuple {
+                fty = da.type_of(da.at_const(fid).as_data.field.ty);
+            }
             if !self.field_dep(it.m, fty) {
                 return false;
+            }
+            if mi < pads.len() && pads[mi] != 0 {
+                body.push_str("  unsigned char _sc_pad");
+                body.push_u64(mi as u64);
+                body.push_str("[");
+                body.push_u64(pads[mi]);
+                body.push_str("];\n");
             }
             let mut fnm = String::new();
             if is_tuple {
@@ -295,6 +367,11 @@ extend TuEmit {
                 self.mg.ident(it.m, da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text, &mut fnm);
             }
             body.push_str("  ");
+            if mi == 0 && force_align != 0 {
+                body.push_str("_Alignas(");
+                body.push_u64(force_align);
+                body.push_str(") ");
+            }
             // a `[T; N]` field interns len-0 in the generic pool (the length is symbolic, and a
             // len-0 array's frozen spelling is a POINTER): recover N from the annotation's length
             // expression under the instance env before the ctype rules see the type
@@ -320,8 +397,123 @@ extend TuEmit {
                 return false;
             }
             body.push_str(";\n");
+            mi += 1;
+        }
+        if tail_pad != 0 {
+            body.push_str("  unsigned char _sc_padt[");
+            body.push_u64(tail_pad);
+            body.push_str("];\n");
         }
         body.push_str("};\n");
+        return true;
+    }
+
+    /// Dual layout walk for the rare shape where an ELIDED field has alignment > 1: compare the
+    /// semantic offsets (all fields) against the natural C offsets of the stored fields alone.
+    /// On divergence, produce leading pads per stored member, a tail pad, and a forced alignment
+    /// so the flat C struct reproduces the semantic layout exactly. False = a sibling field has
+    /// no layout, so the shape cannot be validated.
+    fn zst_pad_plan(
+        self: &mut Self,
+        it: &AggItem,
+        keep: &Vector<u8>,
+        is_union: bool,
+        align_attr: u64,
+        pads: &mut Vector<u64>,
+        tail_pad: &mut u64,
+        force_align: &mut u64,
+    ) bool {
+        let da = self.p().module_ast_const(it.m);
+        let n = da.at_const(it.decl);
+        let is_tuple = n.as_data.aggregate.is_tuple;
+        let ms = n.as_data.aggregate.members;
+        let mut soff: u64 = 0; // semantic running offset (all fields)
+        let mut moff: u64 = 0; // natural C offset (stored fields only)
+        let mut samax: u64 = 1;
+        let mut mamax: u64 = 1;
+        let mut ssize: u64 = 0; // union: max member size
+        let mut msize: u64 = 0;
+        let mut diverged = false;
+        for i in 0..ms.len {
+            if keep[i as usize] == 2 {
+                continue;
+            }
+            let fid = unsafe da.list(ms)[i as usize];
+            let mut fty = da.type_of(fid);
+            if fty == TYPE_NONE && !is_tuple {
+                fty = da.type_of(da.at_const(fid).as_data.field.ty);
+            }
+            let mut rm9 = it.m;
+            let mut rt9 = fty;
+            if !self.mg.resolve(it.m, fty, &mut rm9, &mut rt9) {
+                return false;
+            }
+            let lo = self.mg.lay.layout(rm9, rt9);
+            if !lo.ok {
+                return false;
+            }
+            if is_union {
+                if lo.size > ssize {
+                    ssize = lo.size;
+                }
+                if lo.align > samax {
+                    samax = lo.align;
+                }
+                if keep[i as usize] == 1 {
+                    if lo.size > msize {
+                        msize = lo.size;
+                    }
+                    if lo.align > mamax {
+                        mamax = lo.align;
+                    }
+                }
+                continue;
+            }
+            soff = (soff + lo.align - 1) / lo.align * lo.align;
+            if keep[i as usize] == 1 {
+                moff = (moff + lo.align - 1) / lo.align * lo.align;
+                if moff != soff {
+                    diverged = true;
+                    pads.push(soff - moff);
+                    moff = soff;
+                } else {
+                    pads.push(0);
+                }
+                moff += lo.size;
+                if lo.align > mamax {
+                    mamax = lo.align;
+                }
+            }
+            soff += lo.size;
+            if lo.align > samax {
+                samax = lo.align;
+            }
+        }
+        if align_attr > samax {
+            samax = align_attr;
+        }
+        if align_attr > mamax {
+            mamax = align_attr;
+        }
+        if is_union {
+            soff = ssize;
+            moff = msize;
+        }
+        let stotal = (soff + samax - 1) / samax * samax;
+        let mtotal = (moff + mamax - 1) / mamax * mamax;
+        if !diverged && stotal == mtotal && samax == mamax {
+            pads.truncate(0); // the elided fields never moved anything: flat emission
+            return true;
+        }
+        // with per-member pads the stored fields already sit at their semantic offsets (moff ends
+        // equal to the last stored field's semantic end); an explicit tail brings the total to the
+        // semantic size, and _Alignas on the first member pins the aggregate alignment
+        *force_align = samax;
+        if is_union {
+            *tail_pad = stotal; // a union member must span the FULL semantic size by itself
+        } else if stotal > moff {
+            *tail_pad = stotal - moff;
+        }
         return true;
     }
 
@@ -568,15 +760,22 @@ extend TuEmit {
         let mut q2 = String::new();
         self.mg.qualified(it.m, n.as_data.aggregate.name, &mut q2);
         body.push_string(&q2);
-        body.push_str("Tag tag;\n  union {\n");
+        body.push_str("Tag tag;\n");
+        // the payload union is buffered: when EVERY variant payload is zero-sized the union has no
+        // members, and an empty union is not C -- the enum then defines as `{ Tag tag; }` alone
+        let hold = body.len();
+        body.push_str("  union {\n");
+        let mut upay: usize = 0; // union members actually emitted (all-ZST variants take none)
         for i in 0..ms.len {
             let vid = unsafe da.list(ms)[i as usize];
             let vn = da.at_const(vid);
             if vn.kind != NodeKind::NODE_VARIANT || vn.as_data.variant.payload.len == 0 {
                 continue;
             }
-            body.push_str("    struct { ");
             let pl = vn.as_data.variant.payload;
+            // zero-sized payload members take no C storage; a variant with ONLY zero-sized payload
+            // takes no union member at all (its accesses are erased with it)
+            let mut vmat: usize = 0;
             for k in 0..pl.len {
                 let pid = unsafe da.list(pl)[k as usize];
                 let mut pty = da.type_of(pid);
@@ -585,6 +784,24 @@ extend TuEmit {
                 }
                 if pty == TYPE_NONE {
                     return false;
+                }
+                if !self.mg.is_zst(it.m, pty) {
+                    vmat += 1;
+                }
+            }
+            if vmat == 0 {
+                continue;
+            }
+            upay += 1;
+            body.push_str("    struct { ");
+            for k in 0..pl.len {
+                let pid = unsafe da.list(pl)[k as usize];
+                let mut pty = da.type_of(pid);
+                if pty == TYPE_NONE && da.at_const(pid).kind == NodeKind::NODE_FIELD {
+                    pty = da.type_of(da.at_const(pid).as_data.field.ty);
+                }
+                if self.mg.is_zst(it.m, pty) {
+                    continue;
                 }
                 if !self.field_dep(it.m, pty) {
                     return false;
@@ -606,6 +823,11 @@ extend TuEmit {
             body.push_str("} ");
             self.mg.ident(it.m, da.at_const(vn.as_data.variant.name).as_data.name.text, body);
             body.push_str(";\n");
+        }
+        if upay == 0 {
+            body.truncate(hold);
+            body.push_str("};\n");
+            return true;
         }
         body.push_str("  } payload;\n};\n");
         return true;

@@ -116,7 +116,7 @@ extend Svc {
     }
 
     /// Size/align of `(m, t)` under the target data model; not-ok = not layoutable (opaque, unbound
-    /// generic, zero-length array, recursive by-value cycle).
+    /// generic, recursive by-value cycle).
     pub fn layout(self: &mut Self, m: ModuleId, t: TypeId) Layout {
         return self.layout_of(m, t, null, 0);
     }
@@ -129,7 +129,9 @@ extend Svc {
             return Layout { ok: false };
         }
         let cacheable = env == null && self.a(m).type_concrete(t);
-        let key = m as u64 << 32 | t as u64;
+        // mixed: unmixed (module << 32 | type) keys collide across modules under the identity
+        // u64 hash, and this cache sits on the emitter's storage-elision hot path
+        let key = skey_mix(0, m as u64 << 32 | t as u64);
         if cacheable {
             let mut have = false;
             let mut enc: u64 = 0;
@@ -191,14 +193,25 @@ extend Svc {
             return Layout { ok: true, size: w, align: w };
         }
         if y.kind == TypeKind::TYPE_ARRAY {
-            if y.as_data.arr.len == 0 {
-                return Layout { ok: false };
-            }
             let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
             if !el.ok {
                 return Layout { ok: false };
             }
-            return Layout { ok: true, size: el.size * y.as_data.arr.len as u64, align: el.align };
+            let n = y.as_data.arr.len as u64;
+            if n == 0 {
+                // The pool interns BOTH a true `[T; 0]` and a symbolic generic `[T; N]` with len 0,
+                // so a material element makes the size unknowable here: refuse. A zero-sized
+                // element gives size 0 for EVERY reading, so that case is layoutable (and keeps
+                // the element alignment for enclosing aggregates).
+                if el.size != 0 {
+                    return Layout { ok: false };
+                }
+                return Layout { ok: true, size: 0, align: el.align };
+            }
+            if el.size != 0 && n > 0xFFFFFFFFFFFFFFFFu64 / el.size {
+                return Layout { ok: false }; // length * element overflow: unrepresentable
+            }
+            return Layout { ok: true, size: el.size * n, align: el.align };
         }
         if y.kind == TypeKind::TYPE_GENERIC {
             let mut e = env;

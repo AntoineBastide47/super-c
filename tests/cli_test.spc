@@ -27,15 +27,15 @@ fn compiles_file() {
 }
 
 // The readable language tour is also a broad end-to-end emission fixture. It must survive the full
-// frontend, C11 with all warnings as errors, execution, and the native leak checker. The ZST in this
-// demo cannot use -pedantic-errors until Phase 10.5 removes empty C structs.
+// frontend, strict pedantic C11 with all warnings as errors, execution, and the native leak checker
+// (ZST storage elision removed the last GNU empty-struct dependency).
 @test
 fn language_demo_emits_valid_c() {
     let p = cli::proj_new();
     assert(p.copyfile("main.spc", "examples/language_demo.spc"), "language demo is present");
     let compile = p.compile("main.spc");
     assert(compile.ok());
-    let cc = p.cc_build("");
+    let cc = p.cc_build("-pedantic-errors ");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());

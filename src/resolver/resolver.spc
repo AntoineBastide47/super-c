@@ -652,7 +652,7 @@ extend Resolver {
             self.source,
             name,
             "zeroed",
-        ) {
+        ) || span_is(self.source, name, "dangling") {
             return;
         }
         self.errors.emit(

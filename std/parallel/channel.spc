@@ -42,6 +42,11 @@ extend<T> ChannelState<T> {
     // caller's module).
     pub fn grow(self: &mut ChannelState<T>) {
         let ncap = self.cap * 2;
+        if sizeof(T) == 0 {
+            self.head = 0;
+            self.cap = ncap; // zero-sized items buffer by count alone
+            return;
+        }
         let mut g = Global {};
         let ns = (unsafe g.alloc(ncap * sizeof(T), alignof(T))) as *mut T;
         for i in 0..self.count {
@@ -65,11 +70,11 @@ extend<T> ChannelState<T> as Free {
             let vp = (&mut unsafe self.slots[idx]) as *mut T;
             vp.free();
         }
-        if self.slots != null {
+        if self.slots != null && sizeof(T) != 0 {
             let mut g = Global {};
             unsafe g.dealloc(self.slots, self.cap * sizeof(T), alignof(T));
-            self.slots = null;
         }
+        self.slots = null;
     }
 }
 
@@ -126,8 +131,11 @@ extend<T> Channel<T> {
         } else {
             capacity;
         };
-        let mut g = Global {};
-        let slots = (unsafe g.alloc(cap * sizeof(T), alignof(T))) as *mut T;
+        let mut slots = zst_dangling::<T>();
+        if sizeof(T) != 0 {
+            let mut g = Global {};
+            slots = (unsafe g.alloc(cap * sizeof(T), alignof(T))) as *mut T;
+        }
         let st = ChannelState::<T> {
             slots: slots,
             cap: cap,
@@ -538,4 +546,10 @@ extend<T> Receiver<T> as sync::Selectable {
         let s = unsafe self.inner.get().state.locked_ref();
         return s.count > 0 || s.closed || s.senders == 0;
     }
+}
+
+// Non-null, T-aligned, storage-free pointer for zero-sized element buffers (see core::dangling;
+// duplicated privately so the prelude module needs no self-import).
+const fn zst_dangling<T>() *mut T {
+    return alignof(T) as *mut T;
 }
