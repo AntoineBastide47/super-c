@@ -10,6 +10,7 @@
 import module::loader as loader;
 import lexer::lexer as lexer;
 import resolver::resolver as res;
+import hir::lower as hirl;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
 import consteval::consteval as ce;
@@ -137,13 +138,10 @@ fn resolve_one(p: &mut loader::Package, i: usize) {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut r = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.set_override(i as ModuleId, &mut r.ast);
+    let aptr = (&mut m.ast) as *mut Ast;
+    let mut r = res::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
     r.resolve();
-    p.clear_override(i as ModuleId);
-    let back = r.take_ast();
-    p.modules[i].ast = back;
+    hirl::lower_module(p, i);
 }
 
 // Type-check module `i` in place (mirrors main.spc's typecheck_module).
@@ -152,13 +150,8 @@ fn typecheck_one(p: &mut loader::Package, i: usize) {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.set_override(i as ModuleId, t.ast.get());
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.check();
-    p.clear_override(i as ModuleId);
-    let back = t.take_ast();
-    p.modules[i].ast = back;
 }
 
 // Overwrite `dir/base` with `s` (the emitted C is ASCII, so a byte copy is exact).

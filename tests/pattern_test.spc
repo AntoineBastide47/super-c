@@ -42,13 +42,9 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut r = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.set_override(i as ModuleId, &mut r.ast);
+    let mut r = res::Resolver::new(unsafe &mut *((&mut m.ast) as *mut Ast), str::from_raw(src as *const u8, len), pkg);
     r.resolve();
-    p.clear_override(i as ModuleId);
     let had = r.has_errors();
-    p.modules[i].ast = r.take_ast();
     return !had;
 }
 

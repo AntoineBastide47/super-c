@@ -5,22 +5,15 @@
 // consumer reads these accessors, never the Ast side tables directly, so the tables can move off
 // `Ast` without touching consumers. Nothing here mutates.
 //
-// Permitted post-typecheck mutations of the underlying tables (each removed by a later phase; the
-// driver's SC_FACTS_CHECK mode enforces this list):
-//   1. Borrow checking interns types while replaying call/peel decisions, growing `type_pool`,
-//      `instances`, and `const_lins` ONLY -- it makes no new semantic decision (removed by
-//      the borrow checker reads frozen Core IR instead of re-walking the typed AST).
-//   2. Instance propagation and codegen owner-swap emission append to `type_pool`/`type_index`,
-//      `instances`, `method_insts`, `mono`, `const_lins`, `nodes`/`children`, `resolutions`, and
-//      the per-node `types` array, and codegen truncates `instances` during owner-swap (removed by
-//      instance collection, the streaming backend, and the immutable-syntax switch land).
-//   3. Codegen temporarily removes and restores `coerce_at` entries around operator lowering
-//      (removed with the streaming backend).
-//   4. Deferred const-eval folds intern types while discharging package-level obligations
-//      (removed with the IR const evaluator).
-// Everything else -- resolutions of existing nodes, coercions, deref/dyn selections, call_info,
-// op_method, method_refs, wide literals, attributes, lifetime declarations -- is frozen at
-// type-check completion in EVERY mode.
+// The freeze contract (enforced by the driver's SC_FACTS_CHECK mode after borrow checking AND after
+// codegen): at type-check completion every semantic DECISION table is final -- nodes, children,
+// resolutions, per-node types, coercions, mono/method-instance demands, method_refs, dyn/deref
+// selections, wide literals, attributes, lifetime declarations, call_info, op_method. Every later
+// stage (borrow checking, Core IR lowering, instance planning, const-eval fold discharge, emission)
+// reads this data frozen. The ONE sanctioned mutation is interning: `type_pool`, `instances`, and
+// `const_lins` (with their index tables) grow append-only whenever a later stage interns a
+// substituted or replayed type, and an interned entry is never removed or renumbered -- growth
+// changes no existing answer.
 import ast::ast as *;
 
 /// Read-only view of one module's typed AST. Holds a raw pointer because consumers thread it through
@@ -217,41 +210,36 @@ fn wm_diff(mid: u32, what: str, was: usize, now: usize) u32 {
     return 1;
 }
 
-/// watermark_check modes: which documented allowlist applies.
-pub const FACTS_AFTER_BORROWCK: u8 = 0; // allowlist item 1 only (type_pool/instances growth)
-pub const FACTS_AFTER_CODEGEN: u8 = 1; // allowlist items 1-4 (arena + syntax appends, coercion churn)
-
 /// Compare a stored watermark against module `a`'s current tables; report every difference through
-/// stderr prefixed with `facts-check:`. Returns the number of changed tables OUTSIDE the mode's
-/// documented allowlist (see the module header).
+/// stderr prefixed with `facts-check:`. Returns the number of changed tables. One strict set applies
+/// after EVERY later stage -- borrow checking, lowering, planning, and codegen all read frozen
+/// semantic data; only the intern pools (see the module header) may grow.
 @c.cold
-pub fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32, mode: u8) u32 {
+pub fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32) u32 {
     let mut d: u32 = 0;
-    if mode == FACTS_AFTER_BORROWCK {
-        if a.nodes.len() != w.nodes {
-            d += wm_diff(mid, "nodes", w.nodes, a.nodes.len());
-        }
-        if a.children.len() != w.children {
-            d += wm_diff(mid, "children", w.children, a.children.len());
-        }
-        if a.resolutions.len() != w.resolutions {
-            d += wm_diff(mid, "resolutions", w.resolutions, a.resolutions.len());
-        }
-        if a.types.len() != w.types {
-            d += wm_diff(mid, "types", w.types, a.types.len());
-        }
-        if a.mono.len() != w.mono {
-            d += wm_diff(mid, "mono", w.mono, a.mono.len());
-        }
-        if a.method_insts.len() != w.method_insts {
-            d += wm_diff(mid, "method_insts", w.method_insts, a.method_insts.len());
-        }
-        if a.coerces.len() != w.coerces {
-            d += wm_diff(mid, "coerces", w.coerces, a.coerces.len());
-        }
-        if a.coerce_at.len() != w.coerce_map {
-            d += wm_diff(mid, "coerce_at", w.coerce_map, a.coerce_at.len());
-        }
+    if a.nodes.len() != w.nodes {
+        d += wm_diff(mid, "nodes", w.nodes, a.nodes.len());
+    }
+    if a.children.len() != w.children {
+        d += wm_diff(mid, "children", w.children, a.children.len());
+    }
+    if a.resolutions.len() != w.resolutions {
+        d += wm_diff(mid, "resolutions", w.resolutions, a.resolutions.len());
+    }
+    if a.types.len() != w.types {
+        d += wm_diff(mid, "types", w.types, a.types.len());
+    }
+    if a.coerces.len() != w.coerces {
+        d += wm_diff(mid, "coerces", w.coerces, a.coerces.len());
+    }
+    if a.coerce_at.len() != w.coerce_map {
+        d += wm_diff(mid, "coerce_at", w.coerce_map, a.coerce_at.len());
+    }
+    if a.mono.len() != w.mono {
+        d += wm_diff(mid, "mono", w.mono, a.mono.len());
+    }
+    if a.method_insts.len() != w.method_insts {
+        d += wm_diff(mid, "method_insts", w.method_insts, a.method_insts.len());
     }
     if a.method_refs.len() != w.method_refs {
         d += wm_diff(mid, "method_refs", w.method_refs, a.method_refs.len());

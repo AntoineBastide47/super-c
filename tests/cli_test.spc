@@ -3818,7 +3818,7 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// The `select` keyword end to end: it lowers (src/desugar) to the same `Selector` the test above drives by
+// The `select` keyword end to end: it lowers (src/hir) to the same `Selector` the test above drives by
 // hand, so what is checked here is the LOWERING -- an arm binds exactly what its operation returns, only the
 // winning arm's body runs, a `timeout` arm bounds the wait, a `default` arm makes it never wait at all, the
 // sent value is evaluated only in the branch that won, and a select nested inside an arm body works (the

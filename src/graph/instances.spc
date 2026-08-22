@@ -1060,21 +1060,15 @@ extend InstGraph {
             }
             for j in 0..ed.items.len {
                 let iid = unsafe a.list(ed.items)[j as usize];
-                let it = a.at_const(iid);
-                if it.kind != NodeKind::NODE_FUNCTION {
-                    continue;
-                }
-                let fd = it.as_data.function;
-                if fd.generics.len != 0 {
+                // Signatures come from the package item metadata (params then returns, owner-pool
+                // TypeIds), not from re-walking the item's syntax; non-function items record none.
+                let sg = (unsafe &*self.pkg).item_sig(row.emod, iid);
+                if sg == null || unsafe sg.generic {
                     continue; // generic methods substitute per explicit (instance, targs) pair
                 }
-                for pi in 0..fd.params.len {
-                    let pn = unsafe a.list(fd.params)[pi as usize];
-                    self.note_type(a, a.type_of(pn), &frame, 0);
-                }
-                for ri in 0..fd.returns.len {
-                    let rn = unsafe a.list(fd.returns)[ri as usize];
-                    self.note_type(a, a.type_of(rn), &frame, 0);
+                let sn = (unsafe sg.np) as u32 + (unsafe sg.nr) as u32;
+                for si in 0..sn {
+                    self.note_type(a, (unsafe &*self.pkg).sig_type(unsafe sg.start + si), &frame, 0);
                 }
             }
         }

@@ -1,27 +1,79 @@
-// The desugar pass: lowers "sugar keyword" marker nodes into core-language nodes, after resolve and before
-// typecheck. A sugar node is produced only by the parser, printed only by the formatter, and eliminated
-// here -- typecheck, borrowck, consteval, codegen and lint never see one. Adding a sugar keyword is then a
-// lexer token, a parser marker, one lowering entry here, and a formatter arm; the rest of the compiler stays
-// unaware of it.
+// The AST-to-HIR lowering stage: runs per module after resolution, before typecheck. The tree the
+// checker (and everything after it) consumes is the HIR: the resolved arena with every sugar-keyword
+// marker lowered to core-language nodes. A sugar node is produced only by the parser, seen otherwise
+// only by the formatter and the resolver (whose lint passes run before this stage), and eliminated
+// here -- typecheck, borrowck, consteval and codegen never see one. Adding a sugar keyword is then a
+// lexer token, a parser marker, one lowering entry here, and a formatter arm; the rest of the
+// compiler stays unaware of it.
+//
+// Batch builds lower by MOVE: the parse arena becomes the HIR in place (releasing the syntax tree at
+// zero cost -- nothing after this stage reads pre-lowering syntax; the formatter parses its own).
+// Under SC_KEEP_SYNTAX=1 the module keeps a pristine pre-lowering snapshot in `Module.syntax`, the
+// retention the incremental-query work builds on. Generated nodes get fresh ids appended to the HIR
+// arena; their spans borrow source text that already exists (a keyword's own bytes), so diagnostics
+// and origin mapping stay exact.
 //
 // Two primitives do the work. `lower_to_core_call` turns a marker built as a call to a placeholder callee
-// into a real `NODE_CALL` by seeding the callee's resolution to a std shim (found by module path + name) and
-// flipping the kind -- everything downstream then treats it as an ordinary generic call, so bound checking,
-// monomorphization and emission all come for free. `lower_select` goes further and BUILDS nodes: because
-// resolve has already run, every identifier it creates has its resolution seeded by hand (a std shim, or the
-// synthetic local it declares), and it never invents a name that is not already in the source text.
+// into a real `NODE_CALL` by seeding the callee's resolution to a std shim (a resolved SugarItem value
+// from the package index -- no name lookup happens here) and flipping the kind -- everything downstream
+// then treats it as an ordinary generic call, so bound checking, monomorphization and emission all come
+// for free. `lower_select` goes further and BUILDS nodes: because resolve has already run, every
+// identifier it creates has its resolution seeded by hand (a std shim, or the synthetic local it
+// declares), and it never invents a name that is not already in the source text.
 
 import ast::ast as *;
 import lexer::token as tok;
 import lexer::token_type as tt;
 import module::loader as loader;
+import stdlib;
 
-// The module holding the `select` runtime. Loaded on demand (src/module/loader) when the keyword is used.
-const SELECT_MODULE: str = "std::parallel::selector";
+/// Lower module `i` to HIR. Runs the sugar lowering over the module's resolved arena in place (the
+/// Ast never leaves its slot, so shim lookups that land back on this module read the live tree).
+/// Called unconditionally after resolve -- resolve errors leave markers unresolved, which the
+/// lowering already skips.
+pub fn lower_module(p: &mut loader::Package, i: usize) {
+    if stdlib::getenv("SC_KEEP_SYNTAX") != null {
+        p.modules[i].syntax.free();
+        p.modules[i].syntax = syntax_snapshot(&p.modules[i].ast);
+    }
+    if p.modules[i].ast.sugar_marks == 0 {
+        return; // no markers parsed: the arena already is the HIR
+    }
+    p.ensure_index(); // the SugarItem table below answers from it
+    let aptr = (&mut p.modules[i].ast) as *mut Ast;
+    desugar_ast(unsafe &mut *aptr, p);
+}
+
+// A pristine pre-lowering copy of the pure syntax arenas (no semantic tables: those belong to the HIR).
+fn syntax_snapshot(a: &Ast) Ast {
+    let mut s = Ast::new(0);
+    s.root = a.root;
+    s.module = a.module;
+    s.sugar_marks = a.sugar_marks;
+    s.nodes.clear();
+    s.nodes.reserve(a.nodes.len());
+    for i in 0..a.nodes.len() {
+        s.nodes.push(*a.nodes.at(i));
+    }
+    s.children.reserve(a.children.len());
+    for i in 0..a.children.len() {
+        s.children.push(a.children[i]);
+    }
+    for i in 0..a.attrs.len() {
+        s.attrs.push(*a.attrs.at(i));
+    }
+    for i in 0..a.metas.len() {
+        s.metas.push(*a.metas.at(i));
+    }
+    for i in 0..a.lifetime_decls.len() {
+        s.lifetime_decls.push(*a.lifetime_decls.at(i));
+    }
+    return s;
+}
 
 /// Lower every sugar-keyword marker in `ast` to its core form. `package` resolves the std shims each marker
 /// targets; a null package (or an unresolved shim) leaves the node untouched, so a later pass reports it.
-pub fn desugar_ast(ast: &mut Ast, package: *const loader::Package) {
+fn desugar_ast(ast: &mut Ast, package: *const loader::Package) {
     if package == null {
         return;
     }
@@ -32,7 +84,7 @@ pub fn desugar_ast(ast: &mut Ast, package: *const loader::Package) {
     for i in 0..n {
         let kind = ast.at_const(i as NodeId).kind;
         if kind == NodeKind::NODE_LAUNCH {
-            lower_to_core_call(ast, package, i as NodeId, "std::parallel::runtime", "submit");
+            lower_to_core_call(ast, unsafe (&*package).sugar_item(loader::SugarItem::SI_SUBMIT), i as NodeId);
         } else if kind == NodeKind::NODE_SELECT {
             lower_select(ast, package, i as NodeId);
         } else if kind == NodeKind::NODE_PARALLEL_FOR {
@@ -42,22 +94,17 @@ pub fn desugar_ast(ast: &mut Ast, package: *const loader::Package) {
 }
 
 /// Turn a marker node (SingleData wrapping a `NODE_CALL` with a placeholder callee) into a plain
-/// expression-statement call targeting `module_path::fn_name`: seed the inner call's callee resolution to
-/// that decl, then flip the marker to NODE_EXPRESSION_STATEMENT (same SingleData layout). Reusable by any
-/// sugar keyword that lowers to a single std call in statement position.
-fn lower_to_core_call(ast: &mut Ast, package: *const loader::Package, id: NodeId, module_path: str, fn_name: str) {
-    let inner = ast.at_const(id).as_data.single.value;
-    let callee = ast.at_const(inner).as_data.call.callee;
-    let pkg = unsafe &*package;
-    let mid = pkg.find(module_path);
-    if mid < 0 {
-        return; // shim module not loaded (the conditional load in the loader should have pulled it in)
-    }
-    let hit = pkg.glob_lookup(mid as ModuleId, fn_name, false);
-    if hit.node == NODE_NONE {
+/// expression-statement call targeting the resolved shim `def`: seed the inner call's callee resolution,
+/// then flip the marker to NODE_EXPRESSION_STATEMENT (same SingleData layout). Reusable by any sugar
+/// keyword that lowers to a single std call in statement position. A NODE_NONE def (shim module not
+/// loaded) leaves the marker untouched, so a later pass reports it.
+fn lower_to_core_call(ast: &mut Ast, def: DefId, id: NodeId) {
+    if def.node == NODE_NONE {
         return;
     }
-    ast.resolutions[callee as usize] = DefId { module: hit.mid, node: hit.node };
+    let inner = ast.at_const(id).as_data.single.value;
+    let callee = ast.at_const(inner).as_data.call.callee;
+    ast.set_resolution_def(callee, def);
     ast.at(id).kind = NodeKind::NODE_EXPRESSION_STATEMENT;
 }
 
@@ -82,20 +129,15 @@ fn lower_to_core_call(ast: &mut Ast, package: *const loader::Package, id: NodeId
 // shared, and the sent value is evaluated inside the winning branch, not before the wait.
 fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     let pkg = unsafe &*package;
-    let m = pkg.find(SELECT_MODULE);
-    if m < 0 {
-        return;
-    }
-    let mid = m as ModuleId;
-    let f_new = shim(pkg, mid, "sugar_new");
-    let f_arm_recv = shim(pkg, mid, "sugar_arm_recv");
-    let f_arm_send = shim(pkg, mid, "sugar_arm_send");
-    let f_wait = shim(pkg, mid, "sugar_wait");
-    let f_wait_to = shim(pkg, mid, "sugar_wait_timeout");
-    let f_poll = shim(pkg, mid, "sugar_poll");
-    let f_won = shim(pkg, mid, "sugar_won");
-    let f_recv = shim(pkg, mid, "sugar_recv");
-    let f_send = shim(pkg, mid, "sugar_send");
+    let f_new = pkg.sugar_item(loader::SugarItem::SI_SEL_NEW);
+    let f_arm_recv = pkg.sugar_item(loader::SugarItem::SI_SEL_ARM_RECV);
+    let f_arm_send = pkg.sugar_item(loader::SugarItem::SI_SEL_ARM_SEND);
+    let f_wait = pkg.sugar_item(loader::SugarItem::SI_SEL_WAIT);
+    let f_wait_to = pkg.sugar_item(loader::SugarItem::SI_SEL_WAIT_TIMEOUT);
+    let f_poll = pkg.sugar_item(loader::SugarItem::SI_SEL_POLL);
+    let f_won = pkg.sugar_item(loader::SugarItem::SI_SEL_WON);
+    let f_recv = pkg.sugar_item(loader::SugarItem::SI_SEL_RECV);
+    let f_send = pkg.sugar_item(loader::SugarItem::SI_SEL_SEND);
     if f_new.node == NODE_NONE || f_arm_recv.node == NODE_NONE || f_arm_send.node == NODE_NONE || f_wait.node == NODE_NONE || f_wait_to.node == NODE_NONE || f_poll.node == NODE_NONE || f_won.node == NODE_NONE || f_recv.node == NODE_NONE || f_send.node == NODE_NONE {
         return;
     }
@@ -207,11 +249,7 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
 // all that is left is the call around it and the marker flip to an expression statement.
 fn lower_parallel_for(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     let pkg = unsafe &*package;
-    let m = pkg.find("std::parallel::data");
-    if m < 0 {
-        return;
-    }
-    let f = shim(pkg, m as ModuleId, "range");
+    let f = pkg.sugar_item(loader::SugarItem::SI_PAR_RANGE);
     if f.node == NODE_NONE {
         return;
     }
@@ -221,12 +259,6 @@ fn lower_parallel_for(ast: &mut Ast, package: *const loader::Package, id: NodeId
     let call = call_shim(ast, f, kw, fr.iterable, fr.body);
     ast.at(id).kind = NodeKind::NODE_EXPRESSION_STATEMENT;
     ast.at(id).as_data = NodeAs { single: SingleData { value: call } };
-}
-
-// A free function in the selector module, or a NODE_NONE DefId when it is missing.
-fn shim(pkg: &loader::Package, mid: ModuleId, name: str) DefId {
-    let hit = pkg.glob_lookup(mid, name, false);
-    return DefId { module: hit.mid, node: hit.node };
 }
 
 // Every node this pass builds goes through here: the resolution side table was sized at resolve time, so it

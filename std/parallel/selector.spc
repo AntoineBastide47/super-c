@@ -337,7 +337,7 @@ extend Selector {
 }
 
 // -----------------------------------------------------------------------------------------------------
-// The `select` keyword lowers to these -- see src/desugar. Free functions, not methods: the desugar pass
+// The `select` keyword lowers to these -- see src/hir. Free functions, not methods: the sugar lowering
 // runs after name resolution and can only seed the resolution of a call it builds itself, so every piece
 // the lowered code needs must be reachable as a plain function. Nothing else should call them.
 // -----------------------------------------------------------------------------------------------------

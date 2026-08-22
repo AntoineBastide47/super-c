@@ -8,7 +8,6 @@ import stdlib;
 import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
-import desugar::desugar as desugar;
 import utils::errors as diag;
 
 /// Most type parameters one generic item may declare. Monomorphization stores an instance's type arguments
@@ -44,10 +43,11 @@ extend ClosureScope as Free {
     }
 }
 
-/// Single-module resolver. Owns the module's Ast while running (the driver moves it out of the Package
-/// slot and publishes it with Package::set_override); take_ast hands the annotated Ast back.
+/// Single-module resolver. Mutates the module's Ast IN PLACE through a borrowed reference -- the Ast
+/// never leaves its `Package.modules` slot, so package-level lookups that land back on this module
+/// read the live tree with no override indirection.
 pub struct Resolver<'a> {
-    pub ast: Ast,
+    pub ast: &'a mut Ast,
     pub source: str<'a>,
     pub symbols: Vector<Symbol>, // flat stack of live symbols across all open scopes
     pub symbol_previous: Vector<u32>, // chain links parallel to symbols, encoded as index + 1
@@ -161,7 +161,7 @@ const fn symbol_key(hash: u32, ns: u8) u64 {
 // ---------------------------------------------------------------------------------------------------------
 
 extend Resolver {
-    pub fn new(ast: Ast, source: str, package: *const loader::Package) Resolver {
+    pub fn new<'a>(ast: &'a mut Ast, source: str<'a>, package: *const loader::Package) Resolver<'a> {
         return Resolver {
             ast: ast,
             source: source,
@@ -180,12 +180,6 @@ extend Resolver {
             lint: false,
             lint_decls: Vector::<NodeId>::new(),
         };
-    }
-
-    /// Move the (resolution-annotated) Ast back out, leaving an empty placeholder behind.
-    pub fn take_ast(self: &mut Self) Ast {
-        let out = replace(&mut self.ast, Ast::new(0));
-        return out;
     }
 
     // The i-th element of `list` -- refetched each call so a closure-capture commit that grows ast.children
@@ -1187,7 +1181,7 @@ extend Resolver {
             },
             NODE_LAUNCH => {
                 // Sugar marker wrapping a call: resolve the call's operand(s). The placeholder callee is
-                // seeded by the desugar pass, so it is deliberately not resolved here.
+                // seeded by the HIR lowering, so it is deliberately not resolved here.
                 let inner = self.ast.at_const(id).as_data.single.value;
                 let args = self.ast.at_const(inner).as_data.call.args;
                 for i in 0..args.len {
@@ -1667,8 +1661,6 @@ extend Resolver {
             self.resolve_item(cid);
         }
         self.scope_exit();
-        // Lower sugar-keyword markers (e.g. `launch`) to core nodes before anything downstream runs.
-        desugar::desugar_ast(&mut self.ast, self.package);
         if self.lint {
             self.lint_unused();
             self.lint_dead_stores();
@@ -1987,7 +1979,6 @@ extend Resolver {
 
 extend Resolver as Free {
     pub fn free(self: &mut Self) {
-        self.ast.free();
         self.symbols.free();
         self.symbol_previous.free();
         self.scope_starts.free();

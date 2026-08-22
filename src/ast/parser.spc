@@ -3248,6 +3248,7 @@ extend Parser {
                     kind = NodeKind::NODE_INLINE_FOR;
                 } else if self.check(TokenType::ParallelFor) {
                     kind = NodeKind::NODE_PARALLEL_FOR;
+                    self.ast.sugar_marks += 1;
                 }
                 self.advance();
                 if kind != NodeKind::NODE_FOR {
@@ -3438,7 +3439,7 @@ extend Parser {
             },
             Launch => {
                 // Sugar keyword: `launch <closure>;`. Built as an expression-statement marker wrapping a call
-                // to a placeholder callee (its name is never read). The desugar pass seeds the callee's
+                // to a placeholder callee (its name is never read). The HIR lowering seeds the callee's
                 // resolution to the runtime shim and flips NODE_LAUNCH to NODE_EXPRESSION_STATEMENT before
                 // typecheck, so downstream it is an ordinary `submit(<closure>);` statement.
                 let kwspan = self.raw_peek().span();
@@ -3462,6 +3463,7 @@ extend Parser {
                         as_data: NodeAs { call: CallData { callee: callee, args: args } },
                     },
                 );
+                self.ast.sugar_marks += 1;
                 result = self.ast.add(
                     Node {
                         kind: NodeKind::NODE_LAUNCH,
@@ -3610,6 +3612,7 @@ extend Parser {
                 String::from_str("'select' cannot have both a 'timeout' and a 'default' arm"),
             );
         }
+        self.ast.sugar_marks += 1;
         return self.ast.add(
             Node {
                 kind: NodeKind::NODE_SELECT,

@@ -163,13 +163,13 @@ pub enum NodeKind {
     // Appended at the END so an older bootstrap compiler keeps the established numeric values.
     NODE_LIFETIME,
     // Sugar-keyword marker: produced by the parser, printed by the formatter, and lowered to a core node by
-    // the desugar pass (src/desugar) before typecheck -- no other pass sees it. NODE_LAUNCH carries CallData
+    // the HIR lowering (src/hir) before typecheck -- no other pass sees it. NODE_LAUNCH carries CallData
     // (a placeholder callee + the operand as the sole arg); desugar seeds the callee's resolution to the
     // runtime shim and flips the kind to NODE_CALL.
     NODE_LAUNCH,
     // `select { .. }`: a NODE_SELECT holding NODE_SELECT_ARM children (BlockData). Desugar rewrites the
     // whole thing into a block that builds a `std::parallel::selector::Selector`, arms it, waits, and runs
-    // the winning arm's body -- see src/desugar.
+    // the winning arm's body -- see src/hir.
     NODE_SELECT,
     NODE_SELECT_ARM,
     // `inline for i in a..b { .. }` (ForData): unrolled at emission -- the bounds must fold to
@@ -177,7 +177,7 @@ pub enum NodeKind {
     // like NODE_FOR everywhere; break/continue inside are rejected at typecheck.
     NODE_INLINE_FOR,
     // `parallel for i in a..b { .. }` (ForData): sugar for std::parallel::data::range(a..b, body as
-    // closure); desugared post-resolve (src/desugar), so later passes never see it.
+    // closure); desugared post-resolve (src/hir), so later passes never see it.
     NODE_PARALLEL_FOR,
     // An interpolating matchertext literal `M{}"(a {hole} b)"` (BlockData): children alternate
     // verbatim segment literals (seg=true, MatchertextLiteral) and hole expressions. Typecheck
@@ -1044,10 +1044,10 @@ pub struct Ast {
     pub resolutions: Vector<DefId>,
     pub type_pool: Vector<Ty>,
     // Open-addressing INDEX tables over the pools (0xFFFFFFFF = empty slot): the pool entry itself is
-    // the key, so nothing is stored twice. Every hit VERIFIES the pool entry (codegen truncate()s
-    // `instances` during owner-swap emission, leaving stale ids behind — a stale or out-of-range id
-    // just probes on, self-healing). `*_ix_used` counts occupied slots (staleness included) so the
-    // load-factor rebuild can never be starved by a truncated pool.
+    // the key, so nothing is stored twice. Every hit VERIFIES the pool entry against the live pool
+    // (defensive: an out-of-range or stale id just probes on, self-healing). Pools are append-only
+    // after type checking -- interning never removes or renumbers an entry (the freeze contract in
+    // ast::facts). `*_ix_used` counts occupied slots so the load-factor rebuild is never starved.
     pub type_index: Vector<u32>,
     pub type_ix_used: u32,
     pub types: Vector<u32>,
@@ -1085,6 +1085,9 @@ pub struct Ast {
     pub op_method: Map<u32, u64>,
     pub root: NodeId,
     pub module: ModuleId,
+    /// Number of sugar-keyword marker nodes (`launch`/`select`/`parallel for`) the parser built.
+    /// Zero lets the HIR lowering skip its whole-arena marker scan -- the overwhelmingly common case.
+    pub sugar_marks: u32,
 }
 
 extend Ast {
@@ -1166,7 +1169,7 @@ extend Ast {
         return self.resolutions.len();
     }
 
-    /// Extend the resolution table to cover nodes added since `init_resolutions`. The desugar pass builds
+    /// Extend the resolution table to cover nodes added since `init_resolutions`. The HIR lowering builds
     /// nodes after resolve and seeds their resolutions by hand, so it grows the table as it goes.
     pub fn grow_resolutions(self: &mut Self) {
         while self.resolutions.len() < self.nodes.len() {

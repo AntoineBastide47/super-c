@@ -145,7 +145,9 @@ extend MQKey as Eq {
 /// The per-module checker. Also the state substrate for the borrowck pass, which extends TypeChecker
 /// and re-walks function bodies after check() (Ast.call_info bridges the two).
 pub struct TypeChecker<'a> {
-    pub ast: UnsafeCell<Ast>,
+    /// The module's Ast, mutated IN PLACE in its `Package.modules` slot (never moved out): package
+    /// lookups that land back on this module read the live tree with no override indirection.
+    pub ast: *mut Ast,
     pub source: str<'a>,
     // Private const-evaluator for the parallel borrow-check stage (address of a ce::ConstEval, held
     // as usize so the checker never owns it): the shared Package.ceval single-threads cycle marks and
@@ -489,11 +491,11 @@ const fn hex_digit(c: u8) u32 {
 }
 
 extend TypeChecker {
-    /// Ownership: consumes `ast` (reclaim it with take_ast); `package` is a borrowed raw pointer (may be null).
-    pub fn new(ast: Ast, source: str, package: *mut loader::Package) TypeChecker {
+    /// Ownership: borrows `ast` (the module keeps it); `package` is a borrowed raw pointer (may be null).
+    pub fn new(ast: *mut Ast, source: str, package: *mut loader::Package) TypeChecker {
         let pkg = package as usize; // read the address before the literal's `package:` field moves it
         return TypeChecker {
-            ast: UnsafeCell::<Ast>::new(ast),
+            ast: ast,
             source: source,
             current_returns: NodeList { start: 0, len: 0 },
             current_self: NODE_NONE,
@@ -587,18 +589,12 @@ extend TypeChecker {
         };
     }
 
-    /// Ownership: moves the typed Ast out, leaving an empty placeholder -- the checker is done after this.
-    pub fn take_ast(self: &mut Self) Ast {
-        let out = replace(&mut self.ast, UnsafeCell::<Ast>::new(Ast::new(0))).into_inner();
-        return out;
-    }
-
     // ---- ast / source access (raw pointers) ----
     pub const fn cur_ast(self: &Self) *mut Ast {
-        return self.ast.get();
+        return self.ast;
     }
     // The module id of the AST under check. A by-value read (no lingering borrow of `self`), so it composes
-    // inside expressions that also take `&mut self` -- which a reference through `ast.get_ref()` would not.
+    // inside expressions that also take `&mut self`.
     pub const fn cur_module(self: &Self) ModuleId {
         return unsafe self.cur_ast().module;
     }
@@ -606,16 +602,10 @@ extend TypeChecker {
     @c.always_inline
     pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if self.package != null && m != self.cur_module() {
-            // A stage holding module `m`'s Ast left an empty placeholder in the table. That used to matter
-            // for one module at a time; a stage that checks its modules in parallel has ALL of them in
-            // flight, so a foreign lookup that skipped the override would read an empty Ast.
-            let ov = self.package.override_at(m);
-            if ov != 0 {
-                return ov as *mut Ast;
-            }
+            // Asts live in place in the module table, so the slot IS the live tree.
             return unsafe &mut self.package.modules[m as usize].ast;
         }
-        return self.ast.get();
+        return self.ast;
     }
     pub const fn mod_src(self: &Self, m: ModuleId) str {
         if self.package != null && m != self.cur_module() {
@@ -1344,14 +1334,10 @@ const fn src_at(p: str, off: u32) *const char {
     return (unsafe (p.ptr() + off as usize)) as *const char;
 }
 
-// The Ast to read for module `m`'s decls when rendering against the in-flight ast `a` (mirrors
+// The Ast to read for module `m`'s decls when rendering against the current ast `a` (mirrors
 // TypeChecker::mod_ast): foreign modules come from the package, the current one from `a` itself.
 const fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const Ast {
     if pkg != null && m != unsafe a.module {
-        let ov = pkg.override_at(m); // in-flight Ast when a stage holds it -- see TypeChecker::mod_ast
-        if ov != 0 {
-            return ov as *const Ast;
-        }
         return unsafe &pkg.modules[m as usize].ast;
     }
     return a;
@@ -15031,8 +15017,8 @@ extend TypeChecker {
     }
 
     /// Entry point: types every top-level item, closes concrete generic instances (interning their
-    /// methods' signature types), runs whole-module lints, and finalizes diagnostics. Reclaim the
-    /// typed Ast with take_ast(); the borrowck pass re-walks it from there.
+    /// methods' signature types), runs whole-module lints, and finalizes diagnostics. The typed Ast
+    /// stays in its module slot; the borrowck pass re-walks it from there.
     pub fn check(self: &mut Self) {
         self.cur_ast().init_types();
         let items = self.cur_ast().at_const(unsafe self.cur_ast().root).as_data.program.items;
@@ -15089,9 +15075,6 @@ extend TypeChecker as Free {
         self.outlives.free();
         self.carries_memo.free();
         self.errors.free();
-        // Free the AST through the cell's raw pointer (like Box::free frees its pointee) rather than
-        // invoking UnsafeCell's own drop glue, which a cross-module instance would not have emitted here.
-        self.ast.get().free();
     }
 }
 

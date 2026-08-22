@@ -9,6 +9,7 @@ import ast::ast as *;
 import ast::parser as par;
 import lexer::lexer as lex;
 import resolver::resolver as resolver;
+import hir::lower as hirl;
 import typechecker::typechecker as tc;
 import consteval::consteval as ce;
 import utils::errors as diag;
@@ -194,16 +195,13 @@ fn lsp_resolve_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
+    let aptr = (&mut m.ast) as *mut Ast;
+    let mut r = resolver::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
-    p.set_override(i as ModuleId, &mut r.ast);
     r.resolve();
-    p.clear_override(i as ModuleId);
     let had = r.has_errors();
     drain_errors(&r.errors, i as u32, diags);
-    let back = r.take_ast();
-    p.modules[i].ast = back;
+    hirl::lower_module(p, i);
     return !had;
 }
 
@@ -213,16 +211,11 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
-    p.set_override(i as ModuleId, t.ast.get());
     t.check();
-    p.clear_override(i as ModuleId);
     let had = t.has_errors();
     drain_errors(&t.errors, i as u32, diags);
-    let back = t.take_ast();
-    p.modules[i].ast = back;
     return !had;
 }
 

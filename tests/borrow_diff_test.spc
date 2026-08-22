@@ -21,16 +21,12 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut r = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.set_override(i as ModuleId, &mut r.ast);
+    let mut r = res::Resolver::new(unsafe &mut *((&mut m.ast) as *mut Ast), str::from_raw(src as *const u8, len), pkg);
     r.resolve();
-    p.clear_override(i as ModuleId);
     let had = r.has_errors();
     if had {
         r.log_errors();
     }
-    p.modules[i].ast = r.take_ast();
     return !had;
 }
 
@@ -41,10 +37,8 @@ fn t_old(p: &mut loader::Package, i: usize, last: bool, old_errs: &mut Vector<u3
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.bc_mode = 1; // the comparison baseline is the AST walk, whatever the production default
-    p.set_override(i as ModuleId, t.ast.get());
     t.check();
     let tc_clean = !t.has_errors();
     if tc_clean {
@@ -55,12 +49,10 @@ fn t_old(p: &mut loader::Package, i: usize, last: bool, old_errs: &mut Vector<u3
             old_errs.push(t.errors.errors.at(e).start);
         }
     }
-    p.clear_override(i as ModuleId);
     let had = t.has_errors() && !last;
     if had {
         t.log_errors();
     }
-    p.modules[i].ast = t.take_ast();
     return tc_clean && !had;
 }
 
@@ -258,17 +250,12 @@ fn prod_verdict(p: &mut loader::Package, out: &mut Vector<u32>) {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.bc_mode = 2;
-    p.set_override(i as ModuleId, t.ast.get());
     t.borrowck();
-    p.clear_override(i as ModuleId);
     for e in 0..t.errors.errors.len() {
         out.push(t.errors.errors.at(e).start);
     }
-    let back = t.take_ast();
-    p.modules[i].ast = back;
 }
 
 // ---- reviewed differences -------------------------------------------------------------------------

@@ -24,7 +24,10 @@ pub struct Module {
     pub path: String, // "std::string"; the root module is its file stem (owned)
     pub file: String, // filesystem path the source was read from (owned)
     pub source: String, // file contents (owned; span offsets index into it)
-    pub ast: Ast, // parsed AST (empty + has_ast=false if the file failed to lex/parse)
+    pub ast: Ast, // parsed AST; after hir::lower runs it IS the module's HIR (desugared, resolved)
+    /// Pristine pre-lowering parse tree, retained only under SC_KEEP_SYNTAX=1 (incremental-query
+    /// groundwork): pure syntax arenas, no semantic tables, and nothing in the pipeline writes to it.
+    pub syntax: Ast,
     pub has_ast: bool,
     pub prelude: bool, // part of the auto-imported std prelude
 }
@@ -35,6 +38,7 @@ extend Module as Free {
         self.file.free();
         self.source.free();
         self.ast.free();
+        self.syntax.free();
     }
 }
 
@@ -95,13 +99,6 @@ pub struct Package {
     /// The compile-time evaluator (a *mut consteval::ConstEval, kept opaque here to avoid a type cycle);
     /// owned by the driver, created after load, set before type-checking. Null in library/test use.
     pub ceval: *mut void,
-    /// While a stage (resolver/typechecker/borrowck) holds a module's Ast BY VALUE (moved out of
-    /// `modules[m].ast`), package-level lookups on THAT module must see the held Ast, not the empty
-    /// placeholder left behind. One slot PER MODULE, in lockstep with `modules`: several modules are in
-    /// flight at once when a stage runs in parallel, and each worker writes only its own module's slot --
-    /// disjoint addresses, so publishing needs no lock. Held as `usize` (0 = inactive) because a raw
-    /// pointer to a `Free` pointee is move-tracked and would be moved out of the slot on assignment.
-    pub override_asts: Vector<usize>,
     /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
     /// has any resolution into module `to`. Built once (resolve-final) at the start of instance propagation;
     /// makes module_imports an O(1) query instead of a linear resolutions scan. `mod_refs_ready` gates it
@@ -224,6 +221,16 @@ pub struct SymTab {
     pub chain: Vector<u32>, // SymbolId -> next same-hash SymbolId; SYM_NONE ends the walk
 }
 
+/// One function item's signature record: `start` indexes PkgIndex.sig_types, which holds the `np`
+/// param types then the `nr` return types (owner-pool TypeIds). `generic` marks a generic function,
+/// whose signature types mention its own parameters and substitute per instantiation.
+pub struct ItemSig {
+    pub start: u32,
+    pub np: u16,
+    pub nr: u16,
+    pub generic: bool,
+}
+
 /// Compiler-referenced prelude hooks (`prelude_lookup` with a fixed name), resolved to their decl
 /// once per index build. Append-only.
 pub enum LangItem {
@@ -262,6 +269,55 @@ const LI_NAMES: [str<'static>; LI_COUNT_N] = [
     "Default",
 ];
 
+/// Runtime shims the sugar lowering (hir::lower) seeds call resolutions to: free FUNCTIONS in fixed
+/// std modules, so they resolve by (module path, name) rather than through the prelude scan. Resolved
+/// once per index build; an entry whose module is not loaded stays NODE_NONE and the lowering leaves
+/// its marker untouched (the demand-loading of these modules is keyed on the keyword's use).
+pub enum SugarItem {
+    SI_SUBMIT, // `launch`
+    SI_PAR_RANGE, // `parallel for`
+    SI_SEL_NEW,
+    SI_SEL_ARM_RECV,
+    SI_SEL_ARM_SEND,
+    SI_SEL_WAIT,
+    SI_SEL_WAIT_TIMEOUT,
+    SI_SEL_POLL,
+    SI_SEL_WON,
+    SI_SEL_RECV,
+    SI_SEL_SEND,
+    SI_COUNT,
+}
+
+const SI_COUNT_N: usize = SugarItem::SI_COUNT as usize;
+
+// (module path, function name) per SugarItem, indexed by the enum value.
+const SI_MODULES: [str<'static>; SI_COUNT_N] = [
+    "std::parallel::runtime",
+    "std::parallel::data",
+    "std::parallel::selector",
+    "std::parallel::selector",
+    "std::parallel::selector",
+    "std::parallel::selector",
+    "std::parallel::selector",
+    "std::parallel::selector",
+    "std::parallel::selector",
+    "std::parallel::selector",
+    "std::parallel::selector",
+];
+const SI_NAMES: [str<'static>; SI_COUNT_N] = [
+    "submit",
+    "range",
+    "sugar_new",
+    "sugar_arm_recv",
+    "sugar_arm_send",
+    "sugar_wait",
+    "sugar_wait_timeout",
+    "sugar_poll",
+    "sugar_won",
+    "sugar_recv",
+    "sugar_send",
+];
+
 /// The package declaration index: the immutable package interface built once after every module has
 /// parsed (and rebuilt if a module is appended, e.g. the LSP's batch load). Owns the symbol table,
 /// one ItemMeta per declaration (module order, source order), per-module name maps for O(1) lookup,
@@ -275,7 +331,17 @@ pub struct PkgIndex {
     pub mod_imports: Vector<u32>, // modules+1 offsets into `imports`
     pub scc_of: Vector<u32>, // module -> import-graph SCC id (completion order; deterministic)
     pub lang_items: Vector<LookupHit>, // LangItem -> prelude decl (node == NODE_NONE when absent)
+    pub sugar_items: Vector<LookupHit>, // SugarItem -> std shim fn (node == NODE_NONE when absent)
     pub li_map: Map<u64, u32>, // sym*2 + want_type -> LangItem, the prelude_lookup fast path
+    /// Function-item signatures as package metadata (see ensure_sigs): sig_of keys
+    /// skey_mix(module << 32 | fn node) -- MIXED, u64 maps hash by identity and structured keys
+    /// cluster -- to a `sigs` record whose types live in the `sig_types` CSR pool,
+    /// params first then returns, as TypeIds in the OWNER module's pool. Filled once from the owners'
+    /// typed facts after the whole package is checked; signature queries read this, not the syntax.
+    pub sigs: Vector<ItemSig>,
+    pub sig_types: Vector<TypeId>,
+    pub sig_of: Map<u64, u32>,
+    pub sigs_built: bool,
     pub built_mods: u32, // module count at build time; a later module append invalidates the index
 }
 
@@ -340,7 +406,12 @@ extend PkgIndex {
             mod_imports: Vector::<u32>::new(),
             scc_of: Vector::<u32>::new(),
             lang_items: Vector::<LookupHit>::new(),
+            sugar_items: Vector::<LookupHit>::new(),
             li_map: Map::<u64, u32>::new(),
+            sigs: Vector::<ItemSig>::new(),
+            sig_types: Vector::<TypeId>::new(),
+            sig_of: Map::<u64, u32>::new(),
+            sigs_built: false,
             built_mods: 0,
         };
     }
@@ -356,7 +427,11 @@ extend PkgIndex as Free {
         self.mod_imports.free();
         self.scc_of.free();
         self.lang_items.free();
+        self.sugar_items.free();
         self.li_map.free();
+        self.sigs.free();
+        self.sig_types.free();
+        self.sig_of.free();
     }
 }
 
@@ -762,7 +837,6 @@ extend Package {
             edge_seen: Set::<u64>::new(),
             extern_privates: Set::<u64>::new(),
             ceval: null,
-            override_asts: Vector::<usize>::new(),
             mod_refs: Vector::<u64>::new(),
             mod_refs_w: 0,
             mod_refs_ready: false,
@@ -779,18 +853,13 @@ extend Package {
         };
     }
 
-    // The Ast to read for module `mid` from package-level lookups: the in-flight (moved-out) Ast when a
-    // stage is holding it, else the module's own held Ast. Callers that read a module's Ast for a lookup
-    // during resolve/typecheck must go through this so the current module resolves against the real Ast.
+    // The Ast to read for module `mid` from package-level lookups. Asts live IN PLACE in the module
+    // table for their whole life: a stage mutates its module's Ast through a raw pointer into this
+    // slot, never by moving it out, so this read is always the live tree (no override indirection).
     const fn module_ast_ptr(self: &Self, mid: ModuleId) *const Ast {
-        if mid as usize < self.override_asts.len() && self.override_asts[mid as usize] != 0 {
-            return self.override_asts[mid as usize] as *const Ast;
-        }
         return &self.modules[mid as usize].ast;
     }
 
-    /// Read-only view of module `mid`'s Ast for consumers outside the package (the Core IR
-    /// lowerer); honors in-flight overrides like every package-level lookup.
     /// True when a loop in the body whose span is `osp` (module `m`) can run inside a coroutine
     /// and therefore needs a preemption safepoint at its backedges.
     pub fn co_on(self: &Self, m: ModuleId, osp: tok::Span) bool {
@@ -836,7 +905,7 @@ extend Package {
                     continue;
                 }
                 let cd = n.as_data.call;
-                let cr = *a.resolutions.at(cd.callee as usize);
+                let cr = a.resolution_def(cd.callee);
                 if cr.module != sub.mid || cr.node != sub.node {
                     continue;
                 }
@@ -848,7 +917,7 @@ extend Package {
                 if ak == NodeKind::NODE_CLOSURE {
                     self.co_mark(m as ModuleId, a.at_const(a0).span);
                 } else {
-                    let fr = *a.resolutions.at(a0 as usize);
+                    let fr = a.resolution_def(a0);
                     if fr.node != NODE_NONE && unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).kind == NodeKind::NODE_FUNCTION {
                         let fsp = unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).span;
                         self.co_mark(fr.module, fsp);
@@ -894,12 +963,12 @@ extend Package {
                         _ => {},
                     };
                     if t.node == NODE_NONE {
-                        t = *a.resolutions.at(cd.callee as usize);
+                        t = a.resolution_def(cd.callee);
                     }
                     if t.node == NODE_NONE {
                         let ck = a.at_const(cd.callee).kind;
                         if ck == NodeKind::NODE_MEMBER {
-                            t = *a.resolutions.at(a.at_const(cd.callee).as_data.member.member as usize);
+                            t = a.resolution_def(a.at_const(cd.callee).as_data.member.member);
                         }
                     }
                     if t.node == NODE_NONE {
@@ -954,6 +1023,7 @@ extend Package {
         self.co_spans.index_mut(m as usize).push(sp.start as u64 << 32 | sp.end as u64);
     }
 
+    /// Read-only view of module `mid`'s Ast for consumers outside the package (the Core IR lowerer).
     pub const fn module_ast_const(self: &Self, mid: ModuleId) *const Ast {
         return self.module_ast_ptr(mid);
     }
@@ -971,33 +1041,18 @@ extend Package {
     // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`) and return its id.
     fn add_module(self: &mut Self, path: String, file: String, source: String, ast: Ast, has_ast: bool) i32 {
         let id = self.modules.len() as i32;
-        self.modules.push(Module { path: path, file: file, source: source, ast: ast, has_ast: has_ast, prelude: false });
-        self.override_asts.push(0); // lockstep with `modules`, so a slot always exists to publish into
+        self.modules.push(
+            Module {
+                path: path,
+                file: file,
+                source: source,
+                ast: ast,
+                syntax: Ast::new(0),
+                has_ast: has_ast,
+                prelude: false,
+            },
+        );
         return id;
-    }
-
-    /// Publish the in-flight Ast a stage is holding for module `mid`, so package-level lookups into `mid`
-    /// read it instead of the placeholder left in the module table. Paired with `clear_override`.
-    pub fn set_override(self: &mut Self, mid: ModuleId, a: *mut Ast) {
-        while self.override_asts.len() <= mid as usize {
-            self.override_asts.push(0);
-        }
-        self.override_asts[mid as usize] = a as usize;
-    }
-
-    /// The published in-flight Ast for `mid` as a raw address, or 0 when no stage holds it. `pub` because
-    /// the const-evaluator reaches modules through the package too.
-    pub const fn override_at(self: &Self, mid: ModuleId) usize {
-        if mid as usize >= self.override_asts.len() {
-            return 0;
-        }
-        return self.override_asts[mid as usize];
-    }
-
-    pub const fn clear_override(self: &mut Self, mid: ModuleId) {
-        if mid as usize < self.override_asts.len() {
-            self.override_asts[mid as usize] = 0;
-        }
     }
 
     // Overlay slot naming the same file as `path`: load paths are root-relative, overlay keys canonical
@@ -1387,6 +1442,81 @@ extend Package {
             idx.lang_items.push(hit);
         }
         self.idx = idx;
+        // Sugar-shim table: (module path, fn name) hooks, resolved through the finished index (find
+        // and glob_lookup read self.idx). glob_lookup only warms closure caches; the index tables it
+        // answers from are final above, so resolving after the swap sees exactly the built state.
+        for si in 0..SI_COUNT_N {
+            let mods: []str = SI_MODULES;
+            let names: []str = SI_NAMES;
+            let mut hit = LookupHit { node: NODE_NONE, mid: 0 };
+            let m = self.find(mods[si]);
+            if m >= 0 {
+                hit = self.glob_lookup(m as ModuleId, names[si], false);
+            }
+            self.idx.sugar_items.push(hit);
+        }
+    }
+
+    /// The resolved decl behind a sugar-lowering shim (NODE_NONE DefId when its module is not loaded).
+    pub const fn sugar_item(self: &Self, k: SugarItem) DefId {
+        let h = self.idx.sugar_items.at(k as usize);
+        return DefId { module: h.mid, node: h.node };
+    }
+
+    /// Fill the function-signature metadata from the owners' typed facts: one ItemSig per indexed
+    /// fn/method, its param and return TypeIds copied out of the owner's per-node type table. Runs
+    /// once, after the whole package is type-checked (the driver calls it before instance planning);
+    /// an index rebuild (a module appended later) clears the table, and the next call refills it.
+    pub fn ensure_sigs(self: &mut Self) {
+        self.ensure_index();
+        if self.idx.sigs_built {
+            return;
+        }
+        self.idx.sigs_built = true;
+        for k in 0..self.idx.items.len() {
+            let it = *self.idx.items.at(k);
+            if it.kind != ItemKind::IK_FUNCTION as u8 && it.kind != ItemKind::IK_METHOD as u8 {
+                continue;
+            }
+            let a = unsafe &*self.module_ast_ptr(it.module);
+            // an unchecked module (or a node past its typed range) records nothing: the query
+            // then answers null exactly where the typed facts hold no signature either
+            if it.node as usize >= a.types.len() || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let fd = a.at_const(it.node).as_data.function;
+            let start = self.idx.sig_types.len() as u32;
+            for pi in 0..fd.params.len {
+                self.idx.sig_types.push(a.type_of(unsafe a.list(fd.params)[pi as usize]));
+            }
+            for ri in 0..fd.returns.len {
+                self.idx.sig_types.push(a.type_of(unsafe a.list(fd.returns)[ri as usize]));
+            }
+            self.idx.sig_of.insert(skey_mix(0, it.module as u64 << 32 | it.node as u64), self.idx.sigs.len() as u32);
+            self.idx.sigs.push(
+                ItemSig {
+                    start: start,
+                    np: fd.params.len as u16,
+                    nr: fd.returns.len as u16,
+                    generic: fd.generics.len != 0,
+                },
+            );
+        }
+    }
+
+    /// The signature metadata for fn decl (m, node), or null when none is recorded.
+    pub const fn item_sig(self: &Self, m: ModuleId, node: NodeId) *const ItemSig {
+        switch self.idx.sig_of.get(&skey_mix(0, m as u64 << 32 | node as u64)) {
+            Some(i) => {
+                return self.idx.sigs.at((*i) as usize);
+            },
+            None => {},
+        };
+        return null;
+    }
+
+    pub const fn sig_type(self: &Self, i: u32) TypeId {
+        return self.idx.sig_types[i as usize];
     }
 
     /// Build the index if it does not cover the current module set (cheap check; see build_index).

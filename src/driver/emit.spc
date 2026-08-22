@@ -1,6 +1,6 @@
 // Global-phase pipeline driver over a loaded Package: platform-filters items, runs resolve/typecheck/
-// borrowck per module (each stage moves the module's Ast out and restores it, with Package.override_*
-// bridging package lookups meanwhile), flushes deferred consteval errors, then prunes dead modules from
+// borrowck per module (each stage mutates the module's Ast in place through a raw pointer into its
+// Package slot), flushes deferred consteval errors, then prunes dead modules from
 // the emit set and codegens each live module into <gen_root> in dependency order. Entry points:
 // run_package (build/run/test) and lint_package (report-only lints + `--fix` fix collection).
 import stdio;
@@ -15,6 +15,7 @@ import ast::parser as par;
 import fmt::builder as fbld;
 import module::loader as loader;
 import resolver::resolver as resolver;
+import hir::lower as hirl;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
 import consteval::consteval as ce;
@@ -233,12 +234,10 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut r = resolver::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
+    let aptr = (&mut m.ast) as *mut Ast;
+    let mut r = resolver::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
     r.lint = lint;
-    p.set_override(i as ModuleId, &mut r.ast);
     r.resolve();
-    p.clear_override(i as ModuleId);
     let had = r.has_errors();
     if had || fixes == null && r.errors.has_warnings() {
         r.log_errors();
@@ -252,8 +251,7 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
             fixes.push(f);
         }
     }
-    let back = r.take_ast();
-    p.modules[i].ast = back;
+    hirl::lower_module(p, i);
     return !had;
 }
 
@@ -267,18 +265,13 @@ fn discharge_obligations(p: &mut loader::Package, n: usize) {
         let m = &mut p.modules[i];
         let src = m.source.as_str().ptr() as *const char;
         let len = m.source.len();
-        let a = replace(&mut m.ast, Ast::new(0));
-        let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-        p.set_override(i as ModuleId, t.ast.get());
+        let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
         t.check_cross_module_dup_conformances();
-        p.clear_override(i as ModuleId);
         if t.has_errors() {
             t.errors.finalize(str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
             t.log_errors();
             p.ok = false;
         }
-        let back = t.take_ast();
-        p.modules[i].ast = back;
     }
     // Pass k proves what pass k-1's re-deferrals made provable; the per-module cursors keep any
     // obligation from being run against a caller module twice. Chains are as deep as the module
@@ -297,23 +290,18 @@ fn discharge_obligations(p: &mut loader::Package, n: usize) {
             let m = &mut p.modules[i];
             let src = m.source.as_str().ptr() as *const char;
             let len = m.source.len();
-            let a = replace(&mut m.ast, Ast::new(0));
-            let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-            p.set_override(i as ModuleId, t.ast.get());
+            let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
             if t.discharge_foreign_obligations(starts.as_ptr()) {
                 grew = true;
             }
             if t.discharge_conformance_obligations(starts.as_ptr(), ends.as_ptr()) {
                 grew = true;
             }
-            p.clear_override(i as ModuleId);
             if t.has_errors() {
                 t.errors.finalize(str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
                 t.log_errors();
                 p.ok = false;
             }
-            let back = t.take_ast();
-            p.modules[i].ast = back;
         }
 
         starts = ends;
@@ -335,12 +323,9 @@ fn typecheck_module(
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
-    p.set_override(i as ModuleId, t.ast.get());
     t.check();
-    p.clear_override(i as ModuleId);
     let had = t.has_errors();
     if had || fixes == null && t.errors.has_warnings() {
         t.log_errors();
@@ -369,18 +354,15 @@ fn typecheck_module(
             }
         }
     }
-    let back = t.take_ast();
-    p.modules[i].ast = back;
     return !had;
 }
 
 // Borrow-check module `i`, serially: the pipeline stage after typechecking. A fresh TypeChecker context
 // over the typed AST carries the recorded types and resolutions; only the borrow/move/lifetime analyses
-// run. This is the one-module primitive borrowck_all falls back to; it may not run while any pool is
-// frozen or any other module's checker is live.
+// run. This is the one-module primitive borrowck_all iterates.
 // Dev gate (SC_FACTS_CHECK=1): snapshot every module's semantic-table watermarks right after
-// type checking, assert that borrow checking changed nothing, and report post-codegen arena growth
-// against the documented allowlist (see ast::facts). Off (empty snapshot) without the env var.
+// type checking, then assert -- after borrow checking AND after codegen -- that no later stage
+// changed a semantic decision table (intern pools excepted; see ast::facts). Off without the env var.
 fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) {
     if stdlib::getenv("SC_FACTS_CHECK") == null {
         return;
@@ -391,15 +373,15 @@ fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) 
 }
 
 // Compare the snapshot against the live tables; returns the number of changed tables (0 when the
-// snapshot is empty, i.e. the gate is off). `allow_arenas` selects the codegen allowlist.
-fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, mode: u8, stage: str) u32 {
+// snapshot is empty, i.e. the gate is off). One strict set at every stage; see ast::facts.
+fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, stage: str) u32 {
     if wms.len() == 0 {
         return 0;
     }
     let mut d: u32 = 0;
     for i in 0..p.modules.len() {
         if i < wms.len() {
-            d += facts::watermark_check(&p.modules[i].ast, wms.at(i), i as u32, mode);
+            d += facts::watermark_check(&p.modules[i].ast, wms.at(i), i as u32);
         }
     }
     if d != 0 {
@@ -1671,6 +1653,7 @@ pub fn cemit_package(
     o: &mut CemitOut,
 ) {
     let verbose = stdlib::getenv("SC_CEMIT_TU") != null || stdlib::getenv("SC_CEMIT_STATS") != null;
+    p.ensure_sigs(); // the planner's signature-level propagation reads the package metadata
     let mut g = ig::InstGraph::new(p);
     g.collect();
     let mut em = tbe::TuEmit::new(p);
@@ -4076,28 +4059,17 @@ fn borrowck_module(p: &mut loader::Package, i: usize) bool {
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.set_override(i as ModuleId, t.ast.get());
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.borrowck();
-    p.clear_override(i as ModuleId);
     let had = t.has_errors();
     p.lint_errs = p.lint_errs + t.errors.errors.len() as u32;
     if had {
         t.log_errors();
     }
-    let back = t.take_ast();
-    p.modules[i].ast = back;
     return !had;
 }
 
-// Borrow-check every module, one worker per module on the coroutine pool. The stage is embarrassingly
-// parallel EXCEPT that lowering interns types, so the discipline is: every in-flight Ast is published and
-// every pool frozen serially BEFORE a worker runs (workers never write an override slot, and a frozen
-// pool diverts its own worker's interns into module-local overflow -- see Ast.pool_frozen); each worker
-// folds constants through a private evaluator (shared memo consulted read-only) so cycle marks are never
-// shared; and everything ordered -- merging pools, logging diagnostics, moving Asts back -- happens
-// serially after the join, in module order, so output is byte-identical to the serial stage.
+// Borrow-check every module, serially, in module order.
 pub fn borrowck_all(p: &mut loader::Package) bool {
     let n = p.modules.len();
     let mut ok = true;
@@ -5207,7 +5179,7 @@ pub fn lint_package(
     if !p.ok {
         return 1;
     }
-    if facts_verify(p, &wms, facts::FACTS_AFTER_BORROWCK, "borrowck") != 0 {
+    if facts_verify(p, &wms, "borrowck") != 0 {
         return 1;
     }
     if core_ir_pass(p) != 0 {
@@ -5300,7 +5272,7 @@ pub fn run_package(
     if !p.ok {
         return 1;
     }
-    if facts_verify(p, &wms, facts::FACTS_AFTER_BORROWCK, "borrowck") != 0 {
+    if facts_verify(p, &wms, "borrowck") != 0 {
         return 1;
     }
     if core_ir_pass(p) != 0 {
@@ -5531,8 +5503,8 @@ pub fn run_package(
             };
         }
     }
-    // Report-only: post-codegen arena growth must stay inside the documented allowlist (the strict
-    // tables are still compared; see ast::facts for what each later stage removes).
-    let _ = facts_verify(p, &wms, facts::FACTS_AFTER_CODEGEN, "codegen");
+    // Report-only: emission must have read the semantic tables frozen (intern-pool growth is the one
+    // sanctioned mutation; see ast::facts).
+    let _ = facts_verify(p, &wms, "codegen");
     return rc;
 }

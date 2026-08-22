@@ -12,6 +12,7 @@ import lexer::token as *;
 import ast::ast as *;
 import ast::parser as par;
 import resolver::resolver as res;
+import hir::lower as hirl;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
 import driver::emit as demit;
@@ -551,11 +552,9 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut rr = res::Resolver::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.set_override(i as ModuleId, &mut rr.ast);
+    let aptr = (&mut m.ast) as *mut Ast;
+    let mut rr = res::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
     rr.resolve();
-    p.clear_override(i as ModuleId);
     if i == cap {
         let c = rr.errors.errors.len();
         if c > 0 {
@@ -563,8 +562,7 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
             unsafe copy_msg(&mut out.first[0], rr.errors.rendered_errors.at(0));
         }
     }
-    let back = rr.take_ast();
-    p.modules[i].ast = back;
+    hirl::lower_module(p, i);
 }
 
 // Mirror main.spc's typecheck_module, capturing the user module's diagnostics.
@@ -573,11 +571,8 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.set_override(i as ModuleId, t.ast.get());
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.check();
-    p.clear_override(i as ModuleId);
     if i == cap {
         let c = t.errors.errors.len();
         if c > 0 {
@@ -585,8 +580,6 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
             unsafe copy_msg(&mut out.first[0], t.errors.rendered_errors.at(0));
         }
     }
-    let back = t.take_ast();
-    p.modules[i].ast = back;
 }
 
 // Mirror the driver's borrowck_module: a SEPARATE stage after every module is typed (import cycles
@@ -596,11 +589,8 @@ fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled)
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
-    let a = replace(&mut m.ast, Ast::new(0));
-    let mut t = tc::TypeChecker::new(a, str::from_raw(src as *const u8, len), pkg);
-    p.set_override(i as ModuleId, t.ast.get());
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.borrowck();
-    p.clear_override(i as ModuleId);
     if i == cap {
         let c = t.errors.errors.len();
         if c > 0 {
@@ -608,6 +598,4 @@ fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled)
             unsafe copy_msg(&mut out.first[0], t.errors.rendered_errors.at(0));
         }
     }
-    let back = t.take_ast();
-    p.modules[i].ast = back;
 }

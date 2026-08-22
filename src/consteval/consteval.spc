@@ -514,18 +514,10 @@ extend ConstEval {
     // ---- ast / source access (raw pointers; deref under unsafe, mirroring the C const-view) ----
 
     const fn ast_ptr(self: &Self, m: ModuleId) *const Ast {
-        // While a stage holds module `m`'s Ast (moved out of the slot), read the in-flight Ast it points at.
-        let ov = self.pkg.override_at(m);
-        if ov != 0 {
-            return ov as *const Ast;
-        }
+        // Asts live in place in the module table, so the slot is always the live tree.
         return unsafe &self.pkg.modules[m as usize].ast;
     }
     const fn mut_ast_ptr(self: &Self, m: ModuleId) *mut Ast {
-        let ov = self.pkg.override_at(m);
-        if ov != 0 {
-            return ov as *mut Ast;
-        }
         return unsafe &mut self.pkg.modules[m as usize].ast;
     }
     const fn has_ast(self: &Self, m: ModuleId) bool {
