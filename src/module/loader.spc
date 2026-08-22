@@ -1028,6 +1028,17 @@ extend Package {
         return self.module_ast_ptr(mid);
     }
 
+    /// Approximate owned bytes across the package's retained analyses (the LSP budget's accounting
+    /// unit): per-module sources + arenas, plus the syntax snapshots when kept.
+    pub const fn retained_bytes(self: &Self) usize {
+        let mut b: usize = 0;
+        for i in 0..self.modules.len() {
+            let m = self.modules.at(i);
+            b += m.source.capacity() + m.ast.retained_bytes() + m.syntax.retained_bytes();
+        }
+        return b;
+    }
+
     /// Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
     pub fn find(self: &Self, path: str) i32 {
         for i in 0..self.modules.len() {
@@ -1866,6 +1877,14 @@ extend Package {
             lst.push(clo[i]);
         }
         self.clo_built.set(mid as usize, true);
+    }
+
+    /// `mid`'s cached [mid, transitive imports...] list (built on first use; imports are load-final).
+    /// The LSP's incremental rebuild reads it to decide which modules an edit can reach. NOTE: the
+    /// implicit prelude is NOT in the list -- a prelude edit must be treated as reaching everything.
+    pub fn module_closure(self: &mut Self, mid: ModuleId) *const Vector<ModuleId> {
+        self.ensure_closure(mid);
+        return self.clo_lists.at(mid as usize);
     }
 
     /// lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,

@@ -984,6 +984,39 @@ extend Parser {
         return __decl;
     }
 
+    /// Re-parse ONE function body in place (the LSP's incremental body path): the parser holds the
+    /// module's EXISTING arena and a token stream over the module's NEW source; `at` indexes the
+    /// body's '{' token. Appends the new block's nodes (every old node id stays valid), rebuilding
+    /// the named-return context from the fn's own (id-stable) returns list, and returns the block id
+    /// (NODE_NONE + a recorded error on a malformed body). The caller re-points the fn's body.
+    pub fn reparse_fn_body(self: &mut Self, at: usize, fnid: NodeId) NodeId {
+        self.current = at;
+        let returns = self.ast.at_const(fnid).as_data.function.returns;
+        let mut nnamed: u32 = 0;
+        for i in 0..returns.len {
+            if self.ast.at_const(unsafe self.ast.list(returns)[i as usize]).kind == NodeKind::NODE_PARAMETER {
+                nnamed += 1;
+            }
+        }
+        let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
+        if nnamed != 0 && nnamed == returns.len {
+            for i in 0..returns.len {
+                self.nrets.push(unsafe self.ast.list(returns)[i as usize]);
+            }
+        }
+        let mut body = NODE_NONE;
+        if self.check(TokenType::LeftBrace) {
+            body = self.parse_block();
+        } else {
+            self.error_here("expected function body");
+        }
+        if self.nrets.len() != 0 && body != NODE_NONE {
+            self.bind_named_returns(body);
+        }
+        self.nrets = outer_nrets;
+        return body;
+    }
+
     // Prepend one synthetic `let mut <name>: <ty>;` per named return to `body`'s statements. The
     // let/name spans are the SIGNATURE spans (before the block starts): downstream stages treat them
     // as ordinary uninitialized bindings, and the formatter skips pre-block statements when printing.

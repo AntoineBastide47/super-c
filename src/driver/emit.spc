@@ -4172,39 +4172,45 @@ fn flush_const_err(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) 
 /// parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
 /// target: 0 windows, 1 macos, 2 linux; Attr.arg is the active-set mask (windows=bit0/macos=bit1/linux=bit2).
 pub fn platform_filter(p: &mut loader::Package, target: i32) {
-    let arch = p.arch; // the instruction-set axis rides on the package, so no caller has to thread it
     let n = p.modules.len();
     for mi in 0..n {
-        let m = &mut p.modules[mi];
-        let root = m.ast.root;
-        if m.ast.at_const(root).kind != NodeKind::NODE_PROGRAM {
-            continue;
-        }
-        let items = m.ast.at_const(root).as_data.program.items;
-        let mut w: u32 = 0;
-        for j in 0..items.len {
-            let id = m.ast.children[(items.start + j) as usize];
-            let mut keep = true;
-            {
-                for k in 0..m.ast.attrs.len() {
-                    let at = m.ast.attrs.at(k);
-                    if at.owner == id && at.kind == AttrKind::ATTR_PLATFORM as u8 && (at.arg >> target as u32 & 1u32) == 0 {
-                        keep = false;
-                    }
-                    // `@arch` gates the same way on the instruction set. An unknown host arch (-1)
-                    // keeps every gated item: dropping them all would silently empty the program.
-                    if at.owner == id && at.kind == AttrKind::ATTR_ARCH as u8 && arch >= 0 && (at.arg >> arch as u32 & 1u32) == 0 {
-                        keep = false;
-                    }
+        platform_filter_module(p, mi, target);
+    }
+}
+
+/// Filter one module's item list (idempotent): the LSP's incremental rebuild re-filters just the
+/// reparsed module.
+pub fn platform_filter_module(p: &mut loader::Package, mi: usize, target: i32) {
+    let arch = p.arch; // the instruction-set axis rides on the package, so no caller has to thread it
+    let m = &mut p.modules[mi];
+    let root = m.ast.root;
+    if m.ast.at_const(root).kind != NodeKind::NODE_PROGRAM {
+        return;
+    }
+    let items = m.ast.at_const(root).as_data.program.items;
+    let mut w: u32 = 0;
+    for j in 0..items.len {
+        let id = m.ast.children[(items.start + j) as usize];
+        let mut keep = true;
+        {
+            for k in 0..m.ast.attrs.len() {
+                let at = m.ast.attrs.at(k);
+                if at.owner == id && at.kind == AttrKind::ATTR_PLATFORM as u8 && (at.arg >> target as u32 & 1u32) == 0 {
+                    keep = false;
+                }
+                // `@arch` gates the same way on the instruction set. An unknown host arch (-1)
+                // keeps every gated item: dropping them all would silently empty the program.
+                if at.owner == id && at.kind == AttrKind::ATTR_ARCH as u8 && arch >= 0 && (at.arg >> arch as u32 & 1u32) == 0 {
+                    keep = false;
                 }
             }
-            if keep {
-                m.ast.children[(items.start + w) as usize] = id;
-                w = w + 1;
-            }
         }
-        m.ast.at(root).as_data.program.items.len = w;
+        if keep {
+            m.ast.children[(items.start + w) as usize] = id;
+            w = w + 1;
+        }
     }
+    m.ast.at(root).as_data.program.items.len = w;
 }
 
 // ---------------------------------------------------------------------------------------------------------

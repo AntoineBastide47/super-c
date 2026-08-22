@@ -1,9 +1,13 @@
-// `super-c lsp`: a Language Server Protocol server over stdio. Single-threaded and synchronous -- a full
-// codegen-free recompile of the workspace takes tens of milliseconds at worst (this repo) so every
-// document change rebuilds and republishes diagnostics immediately; no incremental state, no debounce.
+// `super-c lsp`: a Language Server Protocol server over stdio. Single-threaded and synchronous.
+// Document edits update built roots INCREMENTALLY (analysis::recompile: only the edit's import-closure
+// reach re-analyzes, and an edit inside one plain fn body re-analyzes one module); anything outside
+// that domain -- and every open/close/save/config change -- falls back to the full codegen-free
+// recompile. SC_LSP_NO_INCR=1 forces the full path everywhere (identical behavior, the parity mode);
+// SC_LSP_BUDGET_MB bounds retained packages (closed-file roots evict first, open docs pin theirs).
 // The process chdir()s to the workspace root at initialize, so manifest discovery, import rooting and
 // the src/ alt-root convention behave exactly like CLI runs from the project root.
 import stdio;
+import stdlib;
 import driver_shim as shim;
 import lexer::lexer as lex;
 import lexer::token_type as ltt;
@@ -161,15 +165,23 @@ extend Server {
     }
 
     // First BUILT root containing `path` (manifest root first; the workspace batch LAST, so an open
-    // doc's per-file root -- built from the live overlay -- wins over the batch's disk-built copy), -1 if none.
+    // doc's per-file root -- built from the live overlay -- wins over the batch's disk-built copy),
+    // -1 if none. A budget-evicted root (files kept for diag republishing, package dropped) owns
+    // nothing: its module table is empty, so feature queries must not land on it.
     fn owning_root(self: &Self, path: str) i32 {
         for r in 0..self.roots.len() {
-            if !self.is_batch(r) && self.roots.at(r).built && self.root_module(r, path) >= 0 {
+            if !self.is_batch(r) && self.roots.at(r).built && self.roots.at(r).pkg.modules.len() != 0 && self.root_module(
+                r,
+                path,
+            ) >= 0 {
                 return r as i32;
             }
         }
         for r in 0..self.roots.len() {
-            if self.is_batch(r) && self.roots.at(r).built && self.root_module(r, path) >= 0 {
+            if self.is_batch(r) && self.roots.at(r).built && self.roots.at(r).pkg.modules.len() != 0 && self.root_module(
+                r,
+                path,
+            ) >= 0 {
                 return r as i32;
             }
         }
@@ -477,12 +489,51 @@ extend PubSet {
 
 extend Server {
     // Rebuild `r` from the current overlays, converting its DiagRecs into per-URI publish entries.
-    fn build_root(self: &mut Self, r: usize, ps: &mut PubSet) {
+    // `incr` allows the incremental path (document edits only): a built root updates in place, and
+    // only the edit's reach re-analyzes; anything outside the incremental domain falls back to the
+    // full compile below. SC_LSP_NO_INCR=1 disables the path entirely (identical full-rebuild
+    // behavior, the cache-off parity mode).
+    fn build_root(self: &mut Self, r: usize, ps: &mut PubSet, incr: bool) {
         let mut ovf = Vector::<String>::new();
         let mut ovt = Vector::<String>::new();
         for i in 0..self.docs.len() {
             ovf.push(self.docs.at(i).path.clone());
             ovt.push(self.docs.at(i).txt.clone());
+        }
+        if incr && self.roots.at(r).built && self.roots.at(r).pkg.modules.len() != 0 && stdlib::getenv("SC_LSP_NO_INCR") == null {
+            let rf9 = self.roots.at(r).root_file.clone();
+            let ld9 = if r == 0 && self.has_manifest {
+                self.ws_root.clone();
+            } else {
+                String::new();
+            };
+            let mut st = analysis::RecompileStats {};
+            let mut old_diags = replace(&mut self.roots[r].diags, Vector::<analysis::DiagRec>::new());
+            let ok = analysis::recompile(
+                &mut self.roots[r].pkg,
+                self.target,
+                rf9.as_str(),
+                ld9.as_str(),
+                &ovf,
+                &ovt,
+                &mut old_diags,
+                &mut st,
+            );
+            if ok {
+                self.roots[r].diags = old_diags;
+                if stdlib::getenv("SC_LSP_DEBUG") != null {
+                    eprintln(
+                        "lsp incr: root {} reparsed {} analyzed {} body_only {}",
+                        r,
+                        st.reparsed,
+                        st.analyzed,
+                        st.body_only,
+                    );
+                }
+                self.publish_root_diags(r, ps);
+                return;
+            }
+            old_diags.free();
         }
         let mut diags = Vector::<analysis::DiagRec>::new();
         let rf = self.roots.at(r).root_file.clone();
@@ -608,12 +659,12 @@ extend Server {
 
     // Rebuild everything and republish: every URI with diagnostics gets its list, every URI published
     // last round but clean now gets an explicit empty list.
-    fn rebuild_all(self: &mut Self, f: *mut stdio::FILE) {
+    fn rebuild_all(self: &mut Self, f: *mut stdio::FILE, incr: bool) {
         self.drop_orphan_roots();
         // the manifest root must build first: it decides which docs need per-file roots
         if self.has_manifest && self.roots.len() != 0 && !self.roots.at(0).built {
             let mut ps0 = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
-            self.build_root(0, &mut ps0);
+            self.build_root(0, &mut ps0, false);
             // publishing waits for the full round below; this build only seeds ownership
         }
         self.ensure_roots();
@@ -624,7 +675,7 @@ extend Server {
             if self.roots.at(r).sweep && self.roots.at(r).built && !self.doc_open(self.roots.at(r).origin.as_str()) {
                 self.publish_root_diags(r, &mut ps);
             } else {
-                self.build_root(r, &mut ps);
+                self.build_root(r, &mut ps, incr);
             }
         }
         self.publish_manifest_diags(&mut ps);
@@ -654,6 +705,38 @@ extend Server {
         self.published = Vector::<String>::new();
         for i in 0..ps.uris.len() {
             self.published.push(ps.uris.at(i).clone());
+        }
+        self.enforce_budget();
+    }
+
+    // Retention budget (SC_LSP_BUDGET_MB; unset = unlimited): when the retained packages exceed it,
+    // evict the ones no open document pins -- the workspace batch and per-file roots of closed docs.
+    // Their diagnostics (and file maps) stay for cached republishing; the next request that needs the
+    // package rebuilds it. Roots owning open docs (the manifest included) are pinned.
+    fn enforce_budget(self: &mut Self) {
+        let e = stdlib::getenv("SC_LSP_BUDGET_MB");
+        if e == null {
+            return;
+        }
+        let mb = unsafe stdlib::atoi(e);
+        if mb <= 0 {
+            return;
+        }
+        let budget = mb as usize * 1048576;
+        let mut total: usize = 0;
+        for r in 0..self.roots.len() {
+            total += self.roots.at(r).pkg.retained_bytes();
+        }
+        for r in 0..self.roots.len() {
+            if total <= budget {
+                break;
+            }
+            let closed_pf = self.roots.at(r).origin.len() != 0 && !self.doc_open(self.roots.at(r).origin.as_str());
+            if self.is_batch(r) || closed_pf {
+                let b = self.roots.at(r).pkg.retained_bytes();
+                self.roots[r].pkg = loader::Package::new();
+                total -= b;
+            }
         }
     }
 }
@@ -730,7 +813,7 @@ fn on_did_open(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
                     },
                 );
             }
-            sv.rebuild_all(f);
+            sv.rebuild_all(f, true);
         },
         None => {},
     };
@@ -751,7 +834,7 @@ fn on_did_change(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
                         let last = ch.at(ch.size() - 1);
                         sv.docs[di as usize].txt = String::from_str(last.value_str("text"));
                         sv.docs[di as usize].version = params.at_key("textDocument").value_i64("version", 0);
-                        sv.rebuild_all(f);
+                        sv.rebuild_all(f, true);
                     }
                 },
                 None => {},
@@ -769,7 +852,7 @@ fn on_did_close(sv: &mut Server, req: &json::JSON, f: *mut stdio::FILE) {
             if di >= 0 {
                 sv.docs.remove(di as usize).unwrap().free();
             }
-            sv.rebuild_all(f); // overlays revert to the on-disk content
+            sv.rebuild_all(f, false); // overlays revert to the on-disk content
         },
         None => {},
     };
@@ -1491,7 +1574,7 @@ pub fn run(std_dir: *const char, target: i32) i32 {
         } else if method == "initialized" {
             // first full round: the manifest build + workspace sweep publish diagnostics for the
             // whole build.toml folder before any document opens
-            sv.rebuild_all(fout);
+            sv.rebuild_all(fout, false);
         } else if method == "shutdown" {
             sv.shutdown_seen = true;
             let nullv = json::JSON::default();

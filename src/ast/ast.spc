@@ -1648,6 +1648,12 @@ extend Ast {
     pub const fn type_at(self: &Self, t: TypeId) &Ty {
         return self.type_pool.at(t as usize);
     }
+
+    /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
+    /// accounting unit. The map tables are omitted -- small next to the arenas.
+    pub const fn retained_bytes(self: &Self) usize {
+        return self.nodes.capacity() * sizeof(Node) + self.children.capacity() * 4 + self.scratch.capacity() * 4 + self.resolutions.capacity() * sizeof(DefId) + self.type_pool.capacity() * sizeof(Ty) + self.type_index.capacity() * 4 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.instances.capacity() * sizeof(TyInstance) + self.method_insts.capacity() * sizeof(MethodInst) + self.instance_index.capacity() * 4 + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.const_lins.capacity() * sizeof(ConstLin) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl);
+    }
 }
 
 fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) {
