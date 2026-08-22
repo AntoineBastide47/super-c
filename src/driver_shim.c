@@ -325,6 +325,147 @@ long long sc_spawn(const char *cmd) {
 #endif
 }
 
+#if defined(_WIN32)
+/* One CreateProcess command-line argument under the MSVCRT parsing rules: quote when the argument
+   contains a space, tab, quote, or is empty; inside quotes, N backslashes before a '"' become 2N+1
+   backslashes, and trailing backslashes double so the closing quote survives. */
+static size_t win_quoted_len(const char *a) {
+  size_t n = strlen(a), need = 0;
+  int plain = n != 0;
+  for (size_t i = 0; i < n; i++)
+    if (a[i] == ' ' || a[i] == '\t' || a[i] == '"')
+      plain = 0;
+  if (plain)
+    return n;
+  need = 2; /* the surrounding quotes */
+  size_t bs = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (a[i] == '\\') {
+      bs++;
+    } else if (a[i] == '"') {
+      need += bs + 1; /* doubled backslashes + the escape for the quote */
+      bs = 0;
+    } else {
+      bs = 0;
+    }
+    need++;
+  }
+  need += bs; /* trailing backslashes double */
+  return need;
+}
+static char *win_quote_into(char *w, const char *a) {
+  size_t n = strlen(a);
+  int plain = n != 0;
+  for (size_t i = 0; i < n; i++)
+    if (a[i] == ' ' || a[i] == '\t' || a[i] == '"')
+      plain = 0;
+  if (plain) {
+    memcpy(w, a, n);
+    return w + n;
+  }
+  *w++ = '"';
+  size_t bs = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (a[i] == '\\') {
+      bs++;
+      *w++ = '\\';
+    } else if (a[i] == '"') {
+      for (size_t k = 0; k < bs + 1; k++)
+        *w++ = '\\';
+      bs = 0;
+      *w++ = '"';
+    } else {
+      bs = 0;
+      *w++ = a[i];
+    }
+  }
+  for (size_t k = 0; k < bs; k++)
+    *w++ = '\\';
+  *w++ = '"';
+  return w;
+}
+#endif
+
+/* Start argv[0..] (NULL-terminated) WITHOUT any shell: argv[0] is PATH-searched, every later entry
+   reaches the child verbatim (spaces, quotes, non-ASCII bytes included). When out_path is non-NULL,
+   the child's stdout+stderr truncate-redirect into it; NULL inherits the parent's. The returned
+   pid/handle is claimed by sc_wait_any/sc_try_wait/sc_waitpid. -1 on spawn failure. */
+long long sc_spawn_argv(const char *const *argv, const char *out_path) {
+#if defined(__wasi__)
+  (void)argv;
+  (void)out_path;
+  return -1;
+#elif defined(_WIN32)
+  size_t total = 1;
+  for (int i = 0; argv[i]; i++)
+    total += win_quoted_len(argv[i]) + 1;
+  char *line = malloc(total);
+  if (!line)
+    return -1;
+  char *w = line;
+  for (int i = 0; argv[i]; i++) {
+    if (i)
+      *w++ = ' ';
+    w = win_quote_into(w, argv[i]);
+  }
+  *w = '\0';
+  STARTUPINFOA si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof si);
+  si.cb = sizeof si;
+  HANDLE h = INVALID_HANDLE_VALUE;
+  if (out_path) {
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = TRUE;
+    h = CreateFileA(out_path, GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+      free(line);
+      return -1;
+    }
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = h;
+    si.hStdError = h;
+  }
+  BOOL ok = CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+  free(line);
+  if (h != INVALID_HANDLE_VALUE)
+    CloseHandle(h);
+  if (!ok)
+    return -1;
+  CloseHandle(pi.hThread);
+  return (long long)(intptr_t)pi.hProcess;
+#else
+  extern char **environ;
+  pid_t pid;
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_t *pfa = NULL;
+  if (out_path) {
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 1, out_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_adddup2(&fa, 1, 2);
+    pfa = &fa;
+  }
+  int rc = posix_spawnp(&pid, argv[0], pfa, NULL, (char *const *)argv, environ);
+  if (pfa)
+    posix_spawn_file_actions_destroy(&fa);
+  return rc == 0 ? (long long)pid : -1;
+#endif
+}
+
+/* sc_spawn_argv + wait: the child's exit code, or -1 on spawn/wait failure. */
+int sc_exec_argv(const char *const *argv, const char *out_path) {
+  long long pid = sc_spawn_argv(argv, out_path);
+  if (pid < 0)
+    return -1;
+  int code = 1;
+  if (sc_waitpid(pid, &code) != 0)
+    return -1;
+  return code;
+}
+
 /* Wait until ANY of the n spawned children exits: returns its index and stores its exit code, so the
    scheduler refills the freed slot immediately instead of draining in FIFO order. -1 on error. */
 int sc_wait_any(const int64_t *pids, int n, int *code) {
@@ -491,9 +632,18 @@ int sc_asan(void) {
 /* Block for ONE specific child; its exit code via *code, 0 on success, -1 on error/Windows.
    Never reaps unrelated children. */
 int sc_waitpid(long long pid, int *code) {
-#if defined(_WIN32) || defined(__wasi__)
+#if defined(__wasi__)
   (void)pid; (void)code;
   return -1;
+#elif defined(_WIN32)
+  HANDLE h = (HANDLE)(intptr_t)pid;
+  if (WaitForSingleObject(h, INFINITE) != WAIT_OBJECT_0)
+    return -1;
+  DWORD ec = 1;
+  GetExitCodeProcess(h, &ec);
+  CloseHandle(h);
+  *code = (int)ec;
+  return 0;
 #else
   int st = 0;
   while (waitpid((pid_t)pid, &st, 0) < 0) {

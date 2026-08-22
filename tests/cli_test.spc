@@ -5950,3 +5950,124 @@ fn main() i32 {
     assert(rr.ok());
     assert(rr.out_shows("ok"), "tagless tags, payload folds, and guard elision agree at runtime");
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// Build-engine hardening gates: shell-free process spawning (paths pass through verbatim), no-change
+// builds rewriting nothing, -MMD header invalidation, flag invalidation, compile_commands.json.
+// ---------------------------------------------------------------------------------------------------------
+import driver_shim as p13shim;
+import std::parallel::runtime as p13rt;
+
+fn p13_mtime(path: str) i64 {
+    let mut p9 = String::from_str(path);
+    return unsafe p13shim::sc_mtime(p9.cstr());
+}
+
+// mtimes are second-granular: put a real gap between builds whose mtimes the assertions compare.
+fn p13_tick() {
+    p13rt::sleep_ns(1_100_000_000);
+}
+
+// The compile/link argv reaches the C compiler without a shell, so a project living under a
+// directory with spaces (and non-ASCII bytes off Windows, where the engine's *A APIs are
+// codepage-bound) builds, links a binary whose own name carries a space, and runs.
+@test
+fn build_paths_with_spaces() {
+    let p = cli::proj_new();
+    let sub = if cli::on_windows() {
+        "sp ace";
+    } else {
+        "sp ace-ä";
+    };
+    let mut toml = String::new();
+    toml.format_into("{}/build.toml", sub);
+    let mut mainf = String::new();
+    mainf.format_into("{}/src/main.spc", sub);
+    p.mkfile(toml.as_str(), "bin = \"my app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(mainf.as_str(), "fn main() i32 {\n    println(\"weird ok\");\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    let mut dir = String::new();
+    dir.format_into("{}/{}", root, sub);
+    let r = cli::superc_env_in(dir.as_str(), "SC_NO_CACHE", "1", "build");
+    assert(r.ok(), "a project under a directory with spaces builds without shell escaping errors");
+    let mut bin = String::new();
+    bin.format_into("{}/my app{}", dir.as_str(), str::from_cstr(cli::binext()));
+    assert(p13_mtime(bin.as_str()) != 0, "the space-named binary linked");
+    let mut run = String::new();
+    run.format_into("\"{}\"", bin.as_str());
+    let mut rc = String::from_str(run.as_str());
+    assert(cli::run_quiet(rc.cstr()) == 0, "the space-named binary runs");
+}
+
+// Staleness gates, end to end: a no-change build rewrites neither generated C nor objects nor the
+// binary; a header-only change (a struct rename lands in __sc_types.h, not in main.c) recompiles the
+// dependent object while its unchanged C file keeps its mtime; a manifest cflags change invalidates
+// every object through the command fingerprint, again without touching the generated C.
+@test
+fn build_staleness_gates() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "import util;\n\nfn main() i32 {\n    return util::v();\n}\n");
+    p.mkfile(
+        "src/util.spc",
+        "pub struct S {\n    pub a: i32,\n}\n\npub fn v() i32 {\n    let s = S { a: 0 };\n    return s.a;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    let mut genc = String::new();
+    genc.format_into("{}/build/dev/gen/main.c", root);
+    let mut objo = String::new();
+    objo.format_into("{}/build/dev/obj/main.o", root);
+    let mut bin = String::new();
+    bin.format_into("{}/app{}", root, str::from_cstr(cli::binext()));
+    let g1 = p13_mtime(genc.as_str());
+    let o1 = p13_mtime(objo.as_str());
+    let b1 = p13_mtime(bin.as_str());
+    assert(g1 != 0 && o1 != 0 && b1 != 0, "the build produced gen C, an object, and a binary");
+    p13_tick();
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "no-change build");
+    assert(p13_mtime(genc.as_str()) == g1, "a no-change build does not rewrite generated C");
+    assert(p13_mtime(objo.as_str()) == o1, "a no-change build does not rewrite objects");
+    assert(p13_mtime(bin.as_str()) == b1, "a no-change build does not relink");
+    p13_tick();
+    // rename the struct field: __sc_types.h changes, main.c's own text does not
+    p.mkfile(
+        "src/util.spc",
+        "pub struct S {\n    pub b: i32,\n}\n\npub fn v() i32 {\n    let s = S { b: 0 };\n    return s.b;\n}\n",
+    );
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "header-change build");
+    assert(p13_mtime(genc.as_str()) == g1, "main.c is byte-identical, so the sync keeps its mtime");
+    let o2 = p13_mtime(objo.as_str());
+    assert(o2 > o1, "a changed included header rebuilds every dependent object");
+    p13_tick();
+    // a semantic flag change invalidates through the command fingerprint, not through file times
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\ncflags = [\"-DP13_FLAG=1\"]\n");
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "flag-change build");
+    assert(p13_mtime(genc.as_str()) == g1, "a flag change rewrites no generated C");
+    assert(p13_mtime(objo.as_str()) > o2, "a changed C flag invalidates the object cache entries");
+}
+
+// compile_commands.json: one entry per generated translation unit with a full `arguments` argv, so C
+// tooling (clangd and friends) attaches to the generated tree.
+@test
+fn build_compile_commands_json() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "build");
+    let mut dbp = String::new();
+    dbp.format_into("{}/build/dev/compile_commands.json", root);
+    switch loader::read_file(dbp.as_str()) {
+        Some(db) => {
+            let s = db.as_str();
+            assert(s.len() > 2 && s[0] == b'[', "the database is a JSON array");
+            assert(s.find("\"arguments\": [") >= 0, "every entry carries an arguments argv");
+            assert(s.find("main.c") >= 0, "the root translation unit is listed");
+            assert(s.find("\"directory\": ") >= 0, "entries carry the working directory");
+        },
+        None => {
+            assert(false, "compile_commands.json exists beside the profile's gen/obj trees");
+        },
+    };
+}

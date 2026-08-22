@@ -44,6 +44,13 @@ extern "C" "driver_shim.h" {
     /// Start `cmd` through the shell without waiting (redirections go inside the string); returns a
     /// pid/handle that must be claimed by `sc_wait_any`, or -1 on spawn failure.
     pub fn sc_spawn(cmd: *const char) i64;
+    /// Start argv[0..] (NULL-terminated pointer array) WITHOUT a shell: argv[0] is PATH-searched and
+    /// every later entry reaches the child verbatim -- spaces, quotes, and non-ASCII bytes included.
+    /// A non-null `out_path` truncate-redirects the child's stdout+stderr into it; null inherits.
+    /// Returns a pid/handle for sc_wait_any/sc_try_wait/sc_waitpid, or -1 on spawn failure.
+    pub fn sc_spawn_argv(argv: *const *const char, out_path: *const char) i64;
+    /// sc_spawn_argv + wait: the child's exit code, or -1 on spawn/wait failure.
+    pub fn sc_exec_argv(argv: *const *const char, out_path: *const char) i32;
     /// Block until any of the `n` children exits: returns its index into `pids` and stores its exit
     /// code in `code`; -1 on wait error.
     pub fn sc_wait_any(pids: *const i64, n: i32, code: *mut i32) i32;

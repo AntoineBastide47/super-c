@@ -33,6 +33,8 @@ long long sc_mtime(const char *path); /* mtime seconds; 0 if missing */
 int sc_ncpu(void);                    /* online core count; >= 1 */
 long long sc_ticks_ms(void);          /* monotonic milliseconds (build-phase timing) */
 long long sc_spawn(const char *cmd);  /* start cmd via the shell, no wait; pid/handle or -1 */
+long long sc_spawn_argv(const char *const *argv, const char *out_path); /* argv spawn, NO shell; out_path (may be NULL) captures stdout+stderr */
+int sc_exec_argv(const char *const *argv, const char *out_path);        /* sc_spawn_argv + wait: exit code, or -1 */
 int sc_wait_any(const int64_t *pids, int n, int *code); /* index of the first child to exit; -1 on error */
 int sc_try_wait(const int64_t *pids, int n, int *code); /* non-blocking sc_wait_any; -1 when none exited; never reaps outside `pids` */
 long long sc_fork(void);              /* fork(); -1 where unsupported (Windows) */
@@ -42,7 +44,7 @@ int sc_fd_write(int fd, const void *buf, int n); /* write all n bytes; -1 on err
 int sc_fd_close(int fd);
 void sc_exit_now(int code);           /* _exit(): no atexit handlers, no stream flushing */
 int sc_asan(void);                    /* 1 when this binary is ASan-instrumented (fork is pathological there) */
-int sc_waitpid(long long pid, int *code); /* wait for ONE specific child; 0 on success, -1 on error/Windows */
+int sc_waitpid(long long pid, int *code); /* wait for ONE specific child; 0 on success, -1 on error */
 /* Make `path` executable (0755). No-op on Windows, which goes by extension. 0 on success. */
 int sc_chmod_exec(const char *path);
 

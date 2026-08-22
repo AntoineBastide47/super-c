@@ -1,8 +1,15 @@
 // build.toml engine: transpile the root's module closure into <out-dir>/raw, content-sync it into
 // <out-dir>/<profile>/gen (unchanged files keep their mtime), compile stale objects in parallel with
-// -MMD dep tracking into <out-dir>/<profile>/obj, link, then optionally strip. This is the Makefile's
-// sync-generated.sh + compile-generated.mk moved in-process; `super-c run <cmd>` and `super-c clean`
-// live here too.
+// -MMD dep tracking into <out-dir>/<profile>/obj, link, then optionally strip. `super-c run <cmd>`
+// and `super-c clean` live here too.
+//
+// Process discipline: every compiler, linker, archiver, strip, probe, and git invocation is an argv
+// child (sc_spawn_argv, no shell), so paths pass through verbatim -- spaces, quotes, non-ASCII. The
+// ONE shell survivor is `super-c run`, whose manifest lines are sh/cmd syntax by user contract. Flag
+// STRINGS keep their historic whitespace-splitting. compile_commands.json (one `arguments` row per
+// TU) lands beside gen/obj; .cmd fingerprints, the link record, and the emit stamp write through
+// temp + atomic rename. Toolchain contract is a gcc-style driver (cc/clang/gcc; mingw on Windows):
+// -MMD/-c/-o are assumed, so MSVC's cl.exe is out of contract and has no /showIncludes lane.
 import stdio;
 import stdlib;
 import string as cstring;
@@ -458,18 +465,113 @@ fn resolve_cc_raw(m: &mf::Manifest) String {
     return cc;
 }
 
-// Double quotes: understood by both sh (macOS/Linux) and cmd.exe (Windows _popen/system).
-fn push_quoted(cmd: &mut String, s: str) {
-    cmd.push_str(" \"");
-    cmd.push_str(s);
-    cmd.push_str("\"");
-}
-
 fn push_all(cmd: &mut String, flags: &Vector<String>) {
     for i in 0..flags.len() {
         cmd.push_byte(b' ');
         cmd.push_string(flags.at(i));
     }
+}
+
+// Whitespace-split `s` into argv entries: FLAG strings keep their historic shell-splitting contract
+// ("-framework Cocoa" is two arguments); paths the engine controls are pushed as single entries and
+// never split, which is what lets spaces, quotes and non-ASCII bytes pass through.
+fn split_args(out: &mut Vector<String>, s: str) {
+    let mut a: usize = 0;
+    for i in 0..s.len() + 1 {
+        let ws = i == s.len() || s[i] == b' ' || s[i] == b'\t';
+        if ws {
+            if i > a {
+                out.push(String::from_str(s.slice(a, i)));
+            }
+            a = i + 1;
+        }
+    }
+}
+
+fn clone_args(src: &Vector<String>) Vector<String> {
+    let mut out = Vector::<String>::with_capacity(src.len());
+    for i in 0..src.len() {
+        out.push(src.at(i).clone());
+    }
+    return out;
+}
+
+fn push_arg(out: &mut Vector<String>, s: str) {
+    out.push(String::from_str(s));
+}
+
+// One display/fingerprint line for an argv (arguments containing whitespace render quoted). Feeds
+// the .cmd fingerprints and error reporting; never executed, so no escaping subtleties matter.
+fn render_cmd(args: &Vector<String>) String {
+    let mut out = String::new();
+    for i in 0..args.len() {
+        if i != 0 {
+            out.push_byte(b' ');
+        }
+        let a = args.at(i).as_str();
+        let mut plain = a.len() != 0;
+        for k in 0..a.len() {
+            if a[k] == b' ' || a[k] == b'\t' || a[k] == b'"' {
+                plain = false;
+            }
+        }
+        if plain {
+            out.push_str(a);
+        } else {
+            out.push_byte(b'"');
+            out.push_str(a);
+            out.push_byte(b'"');
+        }
+    }
+    return out;
+}
+
+// Spawn `args` without a shell; `log` (may be null) captures the child's stdout+stderr.
+fn spawn_args(args: &mut Vector<String>, log: *const char) i64 {
+    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
+    for i in 0..args.len() {
+        ptrs.push(args[i].cstr() as usize);
+    }
+    ptrs.push(0);
+    return unsafe shim::sc_spawn_argv(ptrs.as_ptr() as *const *const char, log);
+}
+
+// spawn_args + wait, output inherited (or captured when `log` is non-null): exit code, -1 on failure.
+fn exec_args(args: &mut Vector<String>, log: *const char) i32 {
+    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
+    for i in 0..args.len() {
+        ptrs.push(args[i].cstr() as usize);
+    }
+    ptrs.push(0);
+    return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, log);
+}
+
+fn json_escape(out: &mut String, s: str) {
+    for i in 0..s.len() {
+        let c = s[i];
+        if c == b'"' || c == b'\\' {
+            out.push_byte(b'\\');
+            out.push_byte(c);
+        } else if c < 0x20u8 {
+            out.push_str("\\u00");
+            let hx: str = "0123456789abcdef";
+            out.push_byte(hx[(c >> 4) as usize]);
+            out.push_byte(hx[(c & 15u8) as usize]);
+        } else {
+            out.push_byte(c);
+        }
+    }
+}
+
+// write_file through a temporary + atomic rename: an interrupted build never leaves a torn record.
+fn write_file_atomic(path: str, body: str) i32 {
+    let mut tmp = String::from_str(path);
+    tmp.push_str(".tmp");
+    if write_file(tmp.as_str(), body) != 0 {
+        return 1;
+    }
+    let mut dst = String::from_str(path);
+    return unsafe shim::sc_rename(tmp.cstr(), dst.cstr());
 }
 
 // Profile flags, minus what the target cannot honour. mingw ships no libasan/libubsan, so the built-in
@@ -517,21 +619,11 @@ fn write_file(path: str, body: str) i32 {
     return 0;
 }
 
-// First line of `<cc> --version`: part of every command fingerprint so a toolchain upgrade
-// invalidates objects whose sources and flags did not change.
-fn cc_version(cc: &String, dir: str) String {
+// First line of `<argv> ` (a `--version` invocation): part of every command fingerprint so a
+// toolchain upgrade invalidates objects whose sources and flags did not change.
+fn cc_version_argv(args: &mut Vector<String>, dir: str) String {
     let mut vf = join2(dir, ".ccver");
-    let mut cmd = cc.clone();
-    cmd.push_str(" --version >");
-    push_quoted(&mut cmd, vf.as_str());
-    cmd.push_str(
-        if unsafe shim::sc_host_platform() == 0 {
-            " 2>nul";
-        } else {
-            " 2>/dev/null";
-        },
-    );
-    shell(cmd.as_str());
+    let _ = exec_args(args, vf.cstr());
     let mut out = String::new();
     let v = loader::read_file(vf.as_str());
     unsafe shim::sc_unlink(vf.cstr());
@@ -549,7 +641,7 @@ fn cc_version(cc: &String, dir: str) String {
 
 // A stale translation unit waiting for a worker slot.
 struct Pend {
-    pub cmd: String, // full compile command, log redirection included
+    pub args: Vector<String>, // full compile argv (no shell; the spawn API captures the log)
     pub fp: String, // fingerprint: cc version + the command driving the object
     pub log: String,
     pub cmdpath: String, // <obj>.cmd: fingerprint + last duration
@@ -562,7 +654,7 @@ struct Pend {
 
 extend Pend as Free {
     pub fn free(self: &mut Self) {
-        self.cmd.free();
+        self.args.free();
         self.fp.free();
         self.log.free();
         self.cmdpath.free();
@@ -617,7 +709,7 @@ fn finish_job(j: &mut Job, code: i32) i32 {
         cat_file(j.log.as_str());
     } else {
         let rec = format("{}\n{}", j.fp.as_str(), unsafe shim::sc_ticks_ms() - j.start);
-        write_file(j.cmdpath.as_str(), rec.as_str());
+        let _ = write_file_atomic(j.cmdpath.as_str(), rec.as_str());
         if j.cobj.len() != 0 {
             let mut tmp = j.cobj.clone();
             tmp.push_str(".tmp");
@@ -791,11 +883,13 @@ struct CcStream {
     pub obj: String,
     pub pdir: String,
     pub cc_raw: String, // compiler without the ccache decision (see ensure_cc)
-    pub cc_tail: String, // " <cstd> <cflags> <profile cflags> -MMD -c"
-    pub probe_pid: i64, // background ccache+version probe; -1 = resolve synchronously on demand
-    pub ccver_path: String, // <pdir>/.ccver, the probe's output file
-    pub cc: String, // full compiler command (ccache-prefixed when available); empty until ensure_cc
-    pub cmd_prefix: String, // "<cc><cc_tail>"; empty until ensure_cc
+    pub cc_tail: String, // " <cstd> <cflags> <profile cflags> -MMD -c" (also the object-cache key text)
+    pub probe_cc_pid: i64, // background `ccache -V` probe; -1 = resolve synchronously on demand
+    pub probe_ver_pid: i64, // background `<cc> --version` probe; -1 = resolve synchronously
+    pub ccver_path: String, // <pdir>/.ccver, the version probe's output file
+    pub ccprobe_path: String, // <pdir>/.ccprobe, the ccache probe's discarded output
+    pub cc_args: Vector<String>, // resolved compiler argv ([ccache] + cc tokens); empty until ensure_cc
+    pub prefix_args: Vector<String>, // cc_args + cc_tail tokens; empty until ensure_cc
     pub ccver: String,
     pub cc_ready: bool,
     pub jobs: u32,
@@ -806,62 +900,63 @@ struct CcStream {
     pub stale_n: usize,
     pub ret: i32,
     pub cache: String, // the global object cache directory; empty = disabled
+    pub ccdb: Vector<String>, // compile_commands.json rows, one per planned unit (stale or not)
+    pub ccdb_dir: String, // absolute working directory the compile argv is relative to
 }
 
 extend CcStream {
-    // Finish compiler resolution: collect the background probe (ccache presence + `cc --version`
-    // first line, ~50ms of shell round-trips that overlap the transpile), or run both
-    // synchronously when no probe was spawned (Windows, or spawn failure). Idempotent; called
-    // before the first compile command is built and again before the link line.
+    // Finish compiler resolution: collect the background probes (ccache presence by exit code,
+    // `cc --version` first line -- both overlap the transpile), or run either synchronously when its
+    // spawn failed. No shell anywhere: the probes are argv children with captured output. Idempotent;
+    // called before the first compile command is built and again before the link line.
     pub fn ensure_cc(self: &mut Self) {
         if self.cc_ready {
             return;
         }
         self.cc_ready = true;
-        let mut done = false;
-        if self.probe_pid >= 0 {
+        let mut have_ccache = false;
+        if self.probe_cc_pid >= 0 {
             let mut code: i32 = 0;
-            let _ = unsafe shim::sc_waitpid(self.probe_pid, &mut code);
+            have_ccache = unsafe shim::sc_waitpid(self.probe_cc_pid, &mut code) == 0 && code == 0;
+        } else {
+            let mut pa = Vector::<String>::new();
+            push_arg(&mut pa, "ccache");
+            push_arg(&mut pa, "-V");
+            let mut pp = String::from_str(self.ccprobe_path.as_str());
+            have_ccache = exec_args(&mut pa, pp.cstr()) == 0;
+        }
+        let mut pp2 = String::from_str(self.ccprobe_path.as_str());
+        unsafe shim::sc_unlink(pp2.cstr());
+        if have_ccache {
+            push_arg(&mut self.cc_args, "ccache");
+        }
+        split_args(&mut self.cc_args, self.cc_raw.as_str());
+        let mut have_ver = false;
+        if self.probe_ver_pid >= 0 {
+            let mut code2: i32 = 0;
+            let _ = unsafe shim::sc_waitpid(self.probe_ver_pid, &mut code2);
             let v = loader::read_file(self.ccver_path.as_str());
             let mut vp = String::from_str(self.ccver_path.as_str());
             unsafe shim::sc_unlink(vp.cstr());
             if !v.is_none() {
                 let body = v.unwrap();
                 let s = body.as_str();
-                // line 1: "1"/"0" ccache presence; line 2: the compiler's version line
                 let mut e: usize = 0;
-                while e < s.len() && s[e] != b'\n' {
+                while e < s.len() && s[e] != b'\n' && s[e] != b'\r' {
                     e = e + 1;
                 }
-                if e < s.len() {
-                    if s.slice(0, e) == "1" {
-                        self.cc.push_str("ccache ");
-                    }
-                    self.cc.push_string(&self.cc_raw);
-                    let v0 = e + 1;
-                    let mut v1 = v0;
-                    while v1 < s.len() && s[v1] != b'\n' && s[v1] != b'\r' {
-                        v1 = v1 + 1;
-                    }
-                    self.ccver.push_str(s.slice(v0, v1));
-                    done = true;
-                }
+                self.ccver.push_str(s.slice(0, e));
+                have_ver = true;
             }
         }
-        if !done {
-            let probe = if unsafe shim::sc_host_platform() == 0 {
-                "ccache -V >nul 2>&1"; // cmd.exe has no /dev/null
-            } else {
-                "ccache -V >/dev/null 2>&1";
-            };
-            if shell(probe) == 0 {
-                self.cc.push_str("ccache ");
-            }
-            self.cc.push_string(&self.cc_raw);
-            self.ccver = cc_version(&self.cc, self.pdir.as_str());
+        if !have_ver {
+            let mut va = Vector::<String>::new();
+            split_args(&mut va, self.cc_raw.as_str());
+            push_arg(&mut va, "--version");
+            self.ccver = cc_version_argv(&mut va, self.pdir.as_str());
         }
-        self.cmd_prefix = self.cc.clone();
-        self.cmd_prefix.push_string(&self.cc_tail);
+        self.prefix_args = clone_args(&self.cc_args);
+        split_args(&mut self.prefix_args, self.cc_tail.as_str());
         if self.cache.len() != 0 {
             mkdirs(self.cache.as_str());
         }
@@ -918,13 +1013,35 @@ extend CcStream {
         dpath.push_str(".d");
         let mut cmdpath = String::from_str(stem);
         cmdpath.push_str(".cmd");
-        let mut cmd = self.cmd_prefix.clone();
-        push_quoted(&mut cmd, cpath.as_str());
-        cmd.push_str(" -o");
-        push_quoted(&mut cmd, opath.as_str());
+        let mut args = clone_args(&self.prefix_args);
+        args.push(cpath.clone());
+        push_arg(&mut args, "-o");
+        args.push(opath.clone());
         let mut fp = self.ccver.clone();
         fp.push_str(" | ");
-        fp.push_string(&cmd);
+        let rendered = render_cmd(&args);
+        fp.push_string(&rendered);
+        // compile_commands.json row (every unit, stale or not): tooling attaches to the generated
+        // tree through it, so it reflects the exact argv this build would run
+        {
+            let mut row = String::from_str("  {\"directory\": \"");
+            json_escape(&mut row, self.ccdb_dir.as_str());
+            row.push_str("\", \"file\": \"");
+            json_escape(&mut row, cpath.as_str());
+            row.push_str("\", \"output\": \"");
+            json_escape(&mut row, opath.as_str());
+            row.push_str("\", \"arguments\": [");
+            for ai in 0..args.len() {
+                if ai != 0 {
+                    row.push_str(", ");
+                }
+                row.push_byte(b'"');
+                json_escape(&mut row, args.at(ai).as_str());
+                row.push_byte(b'"');
+            }
+            row.push_str("]}");
+            self.ccdb.push(row);
+        }
         let mut fp_ok = false;
         let mut prev_ms: i64 = 0;
         let old = loader::read_file(cmdpath.as_str());
@@ -972,12 +1089,9 @@ extend CcStream {
             }
             let mut log = opath.clone();
             log.push_str(".log");
-            cmd.push_str(" > \"");
-            cmd.push_str(log.as_str());
-            cmd.push_str("\" 2>&1");
             self.pend.push(
                 Pend {
-                    cmd: cmd,
+                    args: args,
                     fp: fp,
                     log: log,
                     cmdpath: cmdpath,
@@ -1015,7 +1129,7 @@ extend CcStream {
         let mut cmdp = String::from_str(opath.slice(0, opath.len() - 2));
         cmdp.push_str(".cmd");
         let rec = format("{}\n0", fp.as_str());
-        let _ = write_file(cmdp.as_str(), rec.as_str());
+        let _ = write_file_atomic(cmdp.as_str(), rec.as_str());
         return true;
     }
 
@@ -1042,7 +1156,7 @@ extend CcStream {
             }
             self.pend.sort_by(pend_cmp);
             let mut w = self.pend.remove(0).unwrap();
-            let pid = unsafe shim::sc_spawn(w.cmd.cstr());
+            let pid = spawn_args(&mut w.args, w.log.cstr());
             if pid < 0 {
                 eprintln("build: cannot spawn compiler");
                 self.ret = 1;
@@ -1076,7 +1190,7 @@ extend CcStream {
             while self.pend.len() != 0 && self.window.len() as u32 < self.jobs {
                 self.pend.sort_by(pend_cmp);
                 let mut w = self.pend.remove(0).unwrap();
-                let pid = unsafe shim::sc_spawn(w.cmd.cstr());
+                let pid = spawn_args(&mut w.args, w.log.cstr());
                 if pid < 0 {
                     eprintln("build: cannot spawn compiler");
                     self.ret = 1;
@@ -1529,19 +1643,26 @@ fn engine_build(
     push_all(&mut tail, &m.cflags);
     push_profile(&mut tail, &prof.cflags, target, m.sdk);
     tail.push_str(" -MMD -c");
-    // The ccache probe and `cc --version` cost ~50ms of shell round-trips; a background process
-    // resolves both while the transpile runs (ensure_cc collects it at first use). POSIX only:
-    // the compound command below is sh syntax, so Windows resolves synchronously on demand.
-    let ccver_path = join2(pdir.as_str(), ".ccver");
-    let mut probe_pid: i64 = -1;
-    if unsafe shim::sc_host_platform() != 0 {
-        let mut pc = String::from_str("{ ccache -V >/dev/null 2>&1 && echo 1 || echo 0; ");
-        pc.push_string(&cc_raw);
-        pc.push_str(" --version; } >");
-        push_quoted(&mut pc, ccver_path.as_str());
-        pc.push_str(" 2>/dev/null");
-        probe_pid = unsafe shim::sc_spawn(pc.cstr());
-    }
+    // The ccache probe and `cc --version` cost ~50ms of process round-trips; two background argv
+    // children (no shell, on every platform) resolve both while the transpile runs -- ensure_cc
+    // collects the exit code and the captured version line at first use.
+    let mut ccver_path = join2(pdir.as_str(), ".ccver");
+    let mut ccprobe_path = join2(pdir.as_str(), ".ccprobe");
+    let mut pa = Vector::<String>::new();
+    push_arg(&mut pa, "ccache");
+    push_arg(&mut pa, "-V");
+    let probe_cc_pid = spawn_args(&mut pa, ccprobe_path.cstr());
+    let mut va = Vector::<String>::new();
+    split_args(&mut va, cc_raw.as_str());
+    push_arg(&mut va, "--version");
+    let probe_ver_pid = spawn_args(&mut va, ccver_path.cstr());
+    // the compile argv runs from the process working directory; record it for compile_commands.json
+    let mut cwdb = PathBuf {};
+    let ccdb_dir = if unsafe shim::sc_realpath(".".ptr() as *const char, &mut cwdb[0]) != null {
+        String::from_cstr(&cwdb[0]);
+    } else {
+        String::from_str(".");
+    };
     let mut stream = CcStream {
         src_len: srcgen.len(),
         gen: gen.clone(),
@@ -1549,10 +1670,12 @@ fn engine_build(
         pdir: pdir.clone(),
         cc_raw: cc_raw,
         cc_tail: tail,
-        probe_pid: probe_pid,
+        probe_cc_pid: probe_cc_pid,
+        probe_ver_pid: probe_ver_pid,
         ccver_path: ccver_path,
-        cc: String::new(),
-        cmd_prefix: String::new(),
+        ccprobe_path: ccprobe_path,
+        cc_args: Vector::<String>::new(),
+        prefix_args: Vector::<String>::new(),
         ccver: String::new(),
         cc_ready: false,
         jobs: jobs,
@@ -1563,6 +1686,8 @@ fn engine_build(
         stale_n: 0,
         ret: 0,
         cache: object_cache_dir(),
+        ccdb: Vector::<String>::new(),
+        ccdb_dir: ccdb_dir,
     };
     let mut sink = EmitSink { ctx: &mut stream, notify: stream_notify };
 
@@ -1642,7 +1767,24 @@ fn engine_build(
         }
         stream.drain(false);
         stream.ensure_cc(); // a build with zero .c files never planned one; the link still needs cc
-        let cc = stream.cc.clone();
+        // compile_commands.json: one row per translation unit, argv exactly as compiled, written
+        // atomically so tooling never reads a torn file. Refreshed on every build that plans units.
+        // Rows sort by their text (a constant directory then the file path): plan order follows the
+        // emit stream's notification arrival, which the parallel emit workers may vary.
+        {
+            stream.ccdb.sort_by(name_cmp);
+            let mut db = String::from_str("[\n");
+            for ri in 0..stream.ccdb.len() {
+                if ri != 0 {
+                    db.push_str(",\n");
+                }
+                db.push_string(stream.ccdb.at(ri));
+            }
+            db.push_str("\n]\n");
+            let dbp = join2(pdir.as_str(), "compile_commands.json");
+            let _ = write_file_atomic(dbp.as_str(), db.as_str());
+        }
+        let cc_link = clone_args(&stream.cc_args);
         let ccver = stream.ccver.clone();
         total_c = stream.total_c;
         stale_n = stream.stale_n;
@@ -1662,31 +1804,36 @@ fn engine_build(
             let bmt = unsafe shim::sc_mtime(binb.cstr());
             let mut tmp = String::from_str(bin);
             tmp.push_str(".tmp");
-            let mut cmd = String::new();
+            let mut largs = Vector::<String>::new();
             if link_kind == 1 {
                 // a static library is an archive: no link flags, no libs
-                cmd.push_str("ar rcs");
-                push_quoted(&mut cmd, tmp.as_str());
+                push_arg(&mut largs, "ar");
+                push_arg(&mut largs, "rcs");
+                largs.push(tmp.clone());
                 for i in 0..objs.len() {
-                    push_quoted(&mut cmd, objs.at(i).as_str());
+                    largs.push(objs.at(i).clone());
                 }
             } else {
-                cmd = cc.clone();
+                largs = cc_link;
                 if link_kind == 2 {
-                    cmd.push_str(" -shared");
+                    push_arg(&mut largs, "-shared");
                     if target != 0 {
-                        cmd.push_str(" -fPIC");
+                        push_arg(&mut largs, "-fPIC");
                     }
                 }
-                cmd.push_str(" -o");
-                push_quoted(&mut cmd, tmp.as_str());
+                push_arg(&mut largs, "-o");
+                largs.push(tmp.clone());
                 for i in 0..objs.len() {
-                    push_quoted(&mut cmd, objs.at(i).as_str());
+                    largs.push(objs.at(i).clone());
                 }
-                push_sdk_flags(&mut cmd, m.sdk, m.arch);
-                push_sdk_libs(&mut cmd, m.sdk);
-                push_all(&mut cmd, &m.ldflags);
-                push_profile(&mut cmd, &prof.ldflags, target, m.sdk);
+                // flag STRINGS keep the historic whitespace-splitting contract; only the paths the
+                // engine controls (above) are single verbatim arguments
+                let mut fl = String::new();
+                push_sdk_flags(&mut fl, m.sdk, m.arch);
+                push_sdk_libs(&mut fl, m.sdk);
+                push_all(&mut fl, &m.ldflags);
+                push_profile(&mut fl, &prof.ldflags, target, m.sdk);
+                split_args(&mut largs, fl.as_str());
                 // @c.link flags recorded by the emitter
                 let lfp = join2(gen.as_str(), "__ldflags");
                 let lf = loader::read_file(lfp.as_str());
@@ -1697,18 +1844,20 @@ fn engine_build(
                     for b in 0..s.len() {
                         if s[b] == b'\n' {
                             if b > a {
-                                cmd.push_byte(b' ');
-                                cmd.push_str(s.slice(a, b));
+                                split_args(&mut largs, s.slice(a, b));
                             }
                             a = b + 1;
                         }
                     }
                 }
-                push_all(&mut cmd, &m.ldlibs);
+                let mut ll = String::new();
+                push_all(&mut ll, &m.ldlibs);
+                split_args(&mut largs, ll.as_str());
             }
             let mut fp = ccver.clone();
             fp.push_str(" | ");
-            fp.push_string(&cmd);
+            let lrendered = render_cmd(&largs);
+            fp.push_string(&lrendered);
             if prof.strip {
                 fp.push_str(" +strip");
             }
@@ -1743,7 +1892,7 @@ fn engine_build(
             }
             if need {
                 linked = true;
-                if shell(cmd.as_str()) != 0 {
+                if exec_args(&mut largs, null) != 0 {
                     ret = 1;
                 } else {
                     if unsafe shim::sc_rename(tmp.cstr(), binb.cstr()) != 0 {
@@ -1751,11 +1900,12 @@ fn engine_build(
                         ret = 1;
                     } else {
                         if prof.strip && link_kind == 0 {
-                            let mut st = String::from_str("strip");
-                            push_quoted(&mut st, bin);
-                            shell(st.as_str());
+                            let mut st = Vector::<String>::new();
+                            push_arg(&mut st, "strip");
+                            push_arg(&mut st, bin);
+                            let _ = exec_args(&mut st, null);
                         }
-                        write_file(fppath.as_str(), fp.as_str());
+                        let _ = write_file_atomic(fppath.as_str(), fp.as_str());
                     }
                 }
             }
@@ -2050,9 +2200,12 @@ pub fn scaffold_project(dir: str, name: str) i32 {
     let gitdir = join2(dir, ".git");
     let mut gd = gitdir.clone();
     if unsafe shim::sc_stat_isdir(gd.cstr()) != 1 {
-        let mut cmd = String::from_str("git init -q");
-        push_quoted(&mut cmd, dir);
-        let _ = shell(cmd.as_str()); // best-effort: no git, no repository, no error
+        let mut ga = Vector::<String>::new();
+        push_arg(&mut ga, "git");
+        push_arg(&mut ga, "init");
+        push_arg(&mut ga, "-q");
+        push_arg(&mut ga, dir);
+        let _ = exec_args(&mut ga, null); // best-effort: no git, no repository, no error
     }
     println("created {} project at {}", name, dir);
     return 0;
@@ -2175,20 +2328,28 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
     stamp.push_str(src);
     stamp.push_str("\"\n");
     if is_git {
-        let mut cmd = String::from_str("git clone -q --recurse-submodules");
-        push_quoted(&mut cmd, src);
-        push_quoted(&mut cmd, dest.as_str());
-        if shell(cmd.as_str()) != 0 {
+        let mut ga = Vector::<String>::new();
+        push_arg(&mut ga, "git");
+        push_arg(&mut ga, "clone");
+        push_arg(&mut ga, "-q");
+        push_arg(&mut ga, "--recurse-submodules");
+        push_arg(&mut ga, src);
+        ga.push(dest.clone());
+        if exec_args(&mut ga, null) != 0 {
             eprintln("vendor: git clone failed for '{}'", src);
             return 1;
         }
         if ref_arg.len() != 0 {
             // --detach takes a commit hash as readily as a branch or tag name.
-            let mut co = String::from_str("git -C");
-            push_quoted(&mut co, dest.as_str());
-            co.push_str(" checkout -q --detach");
-            push_quoted(&mut co, ref_arg);
-            if shell(co.as_str()) != 0 {
+            let mut co = Vector::<String>::new();
+            push_arg(&mut co, "git");
+            push_arg(&mut co, "-C");
+            co.push(dest.clone());
+            push_arg(&mut co, "checkout");
+            push_arg(&mut co, "-q");
+            push_arg(&mut co, "--detach");
+            push_arg(&mut co, ref_arg);
+            if exec_args(&mut co, null) != 0 {
                 eprintln("vendor: no ref '{}' in '{}'", ref_arg, src);
                 rm_rf(dest.as_str());
                 return 1;
@@ -2225,10 +2386,13 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
 // redirection itself: a `>` in the command would need a shell, which Windows does not get.
 fn git_head(dir: str) String {
     let mut tmp = join2(dir, ".vendor-head");
-    let mut cmd = String::from_str("git -C");
-    push_quoted(&mut cmd, dir);
-    cmd.push_str(" rev-parse HEAD");
-    let rc = unsafe shim::sc_run(cmd.cstr(), null, tmp.cstr(), null, null);
+    let mut ga = Vector::<String>::new();
+    push_arg(&mut ga, "git");
+    push_arg(&mut ga, "-C");
+    push_arg(&mut ga, dir);
+    push_arg(&mut ga, "rev-parse");
+    push_arg(&mut ga, "HEAD");
+    let rc = exec_args(&mut ga, tmp.cstr());
     let mut out = String::new();
     if rc == 0 {
         switch loader::read_file(tmp.as_str()) {
@@ -2358,9 +2522,9 @@ pub fn manifest_run_bin(
         if trc != 0 {
             return trc;
         }
-        let mut cmd0 = String::new();
-        push_quoted(&mut cmd0, path.as_str());
-        return unsafe shim::sc_exec(cmd0.cstr());
+        let mut ra0 = Vector::<String>::new();
+        ra0.push(path.clone());
+        return exec_args(&mut ra0, null);
     }
     let rc = if bin_override.len() != 0 {
         built = exe_name(bin_override, target);
@@ -2405,9 +2569,9 @@ pub fn manifest_run_bin(
         path.push_str("./");
     }
     path.push_string(&built);
-    let mut cmd = String::new();
-    push_quoted(&mut cmd, path.as_str());
-    return unsafe shim::sc_exec(cmd.cstr()); // a built binary: never through a shell (see sc_exec)
+    let mut ra = Vector::<String>::new();
+    ra.push(path.clone());
+    return exec_args(&mut ra, null); // a built binary: argv exec, never through a shell
 }
 
 /// `super-c test`: build the project, then discover <test-dir>/**/*.spc (default tests/), synthesize
@@ -2771,9 +2935,9 @@ pub fn manifest_bench(
     if rc != 0 || no_run {
         return rc;
     }
-    let mut cmd = String::new();
-    push_quoted(&mut cmd, bin.as_str());
-    return unsafe shim::sc_exec(cmd.cstr()); // a built binary: never through a shell (see sc_exec)
+    let mut ra = Vector::<String>::new();
+    ra.push(bin.clone());
+    return exec_args(&mut ra, null); // a built binary: argv exec, never through a shell
 }
 
 /// `super-c run <name>`: run a manifest command, building first when it asks for it. Lines run in

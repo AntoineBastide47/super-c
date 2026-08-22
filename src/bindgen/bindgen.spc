@@ -1390,27 +1390,45 @@ fn temp_path(tag: str) String {
     return p;
 }
 
-fn cpp_command(cc: str, header: str, incs: &Vector<String>, cflags: &Vector<String>, dump_macros: bool) String {
-    let mut cmd = String::from_str(cc);
-    cmd.push_str(" -E");
-    if dump_macros {
-        cmd.push_str(" -dM");
+// The preprocessor argv (no shell): the compiler tokens split on whitespace ($CC may be "zig cc");
+// header and include paths are single verbatim arguments, so spaces and quotes pass through.
+fn cpp_command(cc: str, header: str, incs: &Vector<String>, cflags: &Vector<String>, dump_macros: bool) Vector<String> {
+    let mut args = Vector::<String>::new();
+    let mut a: usize = 0;
+    for i in 0..cc.len() + 1 {
+        if i == cc.len() || cc[i] == b' ' || cc[i] == b'\t' {
+            if i > a {
+                args.push(String::from_str(cc.slice(a, i)));
+            }
+            a = i + 1;
+        }
     }
-    cmd.push_str(" -x c");
+    args.push(String::from_str("-E"));
+    if dump_macros {
+        args.push(String::from_str("-dM"));
+    }
+    args.push(String::from_str("-x"));
+    args.push(String::from_str("c"));
     for i in 0..cflags.len() {
-        cmd.push_str(" \"");
-        cmd.push_string(&cflags[i]);
-        cmd.push_byte(b'"');
+        args.push(cflags.at(i).clone());
     }
     for i in 0..incs.len() {
-        cmd.push_str(" -I\"");
-        cmd.push_string(&incs[i]);
-        cmd.push_byte(b'"');
+        let mut inc = String::from_str("-I");
+        inc.push_string(&incs[i]);
+        args.push(inc);
     }
-    cmd.push_str(" \"");
-    cmd.push_str(header);
-    cmd.push_byte(b'"');
-    return cmd;
+    args.push(String::from_str(header));
+    return args;
+}
+
+// Run `args` without a shell, stdout+stderr captured into `out`: exit code, -1 on spawn failure.
+fn bg_exec(args: &mut Vector<String>, out: *const char) i32 {
+    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
+    for i in 0..args.len() {
+        ptrs.push(args[i].cstr() as usize);
+    }
+    ptrs.push(0);
+    return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, out);
 }
 
 // One line of `text` starting at `i`, without its terminator. A `\r` is dropped with the `\n`: the
@@ -2230,7 +2248,7 @@ fn run_one(
 
     let mut mdump = String::new();
     let mut mcmd = cpp_command(cc.as_str(), hdr.as_str(), incs, cflags, true);
-    if unsafe shim::sc_run(mcmd.cstr(), null, mpath.cstr(), null, null) == 0 {
+    if bg_exec(&mut mcmd, mpath.cstr()) == 0 {
         switch loader::read_file(mpath.as_str()) {
             Some(t) => {
                 c.widths = read_widths(t.as_str());
@@ -2242,7 +2260,7 @@ fn run_one(
     let _ = unsafe shim::sc_unlink(mpath.cstr());
 
     let mut cmd = cpp_command(cc.as_str(), hdr.as_str(), incs, cflags, false);
-    let prc = unsafe shim::sc_run(cmd.cstr(), null, ipath.cstr(), null, null);
+    let prc = bg_exec(&mut cmd, ipath.cstr());
     if prc != 0 {
         unsafe stdio::fprintf(
             stdio::stderr(),

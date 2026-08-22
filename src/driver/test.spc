@@ -997,37 +997,40 @@ pub fn test_build_and_run(
             ccs.push_str("cc");
         }
     }
-    let cc = ccs.as_str();
     let root = p.gen_root.as_str();
-    // Every path is DOUBLE-quoted: these lines reach cmd.exe on Windows, which passes single quotes
-    // through as ordinary characters. The runner is named with an explicit `.exe` there so running it
-    // below never depends on the shell filling the extension in.
+    // No shell anywhere: the compile is an argv child, so paths pass through verbatim (spaces,
+    // quotes, non-ASCII). Flag STRINGS keep the whitespace-splitting contract they always had. The
+    // runner is named with an explicit `.exe` on Windows so running it below never depends on the
+    // spawn filling the extension in.
     let exe = if unsafe shim::sc_host_platform() == 0 {
         ".exe";
     } else {
         "";
     };
-    let mut cmd = String::new();
-    cmd.push_str(cc);
-    cmd.push_str(" -std=c11 -D_POSIX_C_SOURCE=200809L");
-    push_sdk_flags(&mut cmd, sdk, p.arch); // the cross triple first; the profile's flags can override
-    cmd.push_str(cflags); // the requested profile, if any: a bare build passes none and compiles unoptimised
-    push_sdk_libs(&mut cmd, sdk); // one command compiles AND links here, so the link-only libs ride along
-    cmd.push_str(" -o \"");
+    let mut args = Vector::<String>::new();
+    tsplit_args(&mut args, ccs.as_str());
+    tsplit_args(&mut args, "-std=c11 -D_POSIX_C_SOURCE=200809L");
+    let mut fl = String::new();
+    push_sdk_flags(&mut fl, sdk, p.arch); // the cross triple first; the profile's flags can override
+    tsplit_args(&mut args, fl.as_str());
+    tsplit_args(&mut args, cflags); // the requested profile; a bare build passes none
+    let mut ll = String::new();
+    push_sdk_libs(&mut ll, sdk); // one command compiles AND links here, so the link-only libs ride along
+    tsplit_args(&mut args, ll.as_str());
+    args.push(String::from_str("-o"));
+    let mut outp = String::new();
     if out_bin.len() != 0 {
-        cmd.push_str(out_bin);
+        outp.push_str(out_bin);
     } else {
-        cmd.push_str(root);
-        cmd.push_str("/__tests");
-        cmd.push_str(exe);
+        outp.push_str(root);
+        outp.push_str("/__tests");
+        outp.push_str(exe);
     }
-    cmd.push_str("\"");
+    args.push(outp.clone());
     for i in 0..keep.len() {
         let cf = keep[i].as_str();
         if cf.len() > 2 && cf.ends_with(".c") {
-            cmd.push_str(" \"");
-            cmd.push_str(cf);
-            cmd.push_str("\"");
+            args.push(String::from_str(cf));
         }
     }
     // @c.link flags (one per line in build/__ldflags)
@@ -1036,18 +1039,17 @@ pub fn test_build_and_run(
     if lf != null {
         let mut line = PathBuf {};
         while unsafe stdio::fgets(&mut line[0], 4096, lf) != null {
-            let ll = unsafe cstring::strlen(&line[0]);
-            if ll > 0 && line[ll - 1] == '\n' as char {
-                line[ll - 1] = 0 as char;
+            let ll2 = unsafe cstring::strlen(&line[0]);
+            if ll2 > 0 && line[ll2 - 1] == '\n' as char {
+                line[ll2 - 1] = 0 as char;
             }
             if line[0] != 0 as char {
-                cmd.push_str(" ");
-                cmd.push_str(str::from_cstr(&line[0]));
+                tsplit_args(&mut args, str::from_cstr(&line[0]));
             }
         }
         unsafe stdio::fclose(lf);
     }
-    let brc = unsafe shim::sc_exec(cmd.cstr());
+    let brc = texec_args(&mut args);
     if brc != 0 {
         let mut what = "test build".ptr() as *const char;
         if out_bin.len() != 0 {
@@ -1059,39 +1061,59 @@ pub fn test_build_and_run(
     if out_bin.len() != 0 {
         return 0;
     } // the `build` subcommand: linked the program, nothing to run
-    let mut run = String::new();
-    run.push_str("\"");
-    run.push_str(root);
-    run.push_str("/__tests");
-    run.push_str(exe);
-    run.push_str("\"");
+    let mut run = Vector::<String>::new();
+    run.push(outp);
     if unsafe topts.jobs > 0 {
         let mut jb = Buf64 {};
-        unsafe stdio::snprintf(&mut jb[0], 64, " --jobs=%d".ptr() as *const char, unsafe topts.jobs);
-        run.push_str(str::from_cstr(&jb[0]));
+        unsafe stdio::snprintf(&mut jb[0], 64, "--jobs=%d".ptr() as *const char, unsafe topts.jobs);
+        run.push(String::from_cstr(&jb[0]));
     }
     if unsafe topts.no_fork {
-        run.push_str(" --no-fork");
+        run.push(String::from_str("--no-fork"));
     }
     if unsafe topts.filter != null {
-        run.push_str(" \"--filter=");
-        run.push_str(str::from_cstr(unsafe topts.filter));
-        run.push_str("\"");
+        let mut fs = String::from_str("--filter=");
+        fs.push_str(str::from_cstr(unsafe topts.filter));
+        run.push(fs);
     }
     if unsafe topts.shards > 0 {
         let mut sb = Buf64 {};
         unsafe stdio::snprintf(
             &mut sb[0],
             64,
-            " --shard=%d/%d".ptr() as *const char,
+            "--shard=%d/%d".ptr() as *const char,
             unsafe topts.shard,
             unsafe topts.shards,
         );
-        run.push_str(str::from_cstr(&sb[0]));
+        run.push(String::from_cstr(&sb[0]));
     }
-    let rrc = unsafe shim::sc_exec(run.cstr());
+    let rrc = texec_args(&mut run);
     if rrc < 0 {
         return 1;
     }
     return rrc;
+}
+
+// Whitespace-split `s` into argv entries (the flag strings' historic shell-splitting contract).
+fn tsplit_args(out: &mut Vector<String>, s: str) {
+    let mut a: usize = 0;
+    for i in 0..s.len() + 1 {
+        let ws = i == s.len() || s[i] == b' ' || s[i] == b'\t';
+        if ws {
+            if i > a {
+                out.push(String::from_str(s.slice(a, i)));
+            }
+            a = i + 1;
+        }
+    }
+}
+
+// Run `args` without a shell, output inherited: the child's exit code, or -1 on spawn failure.
+fn texec_args(args: &mut Vector<String>) i32 {
+    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
+    for i in 0..args.len() {
+        ptrs.push(args[i].cstr() as usize);
+    }
+    ptrs.push(0);
+    return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, null);
 }
