@@ -41,11 +41,9 @@ fn rep_flow_push(t: &mut tc::TypeChecker, st: &mut bfi::RepSt) {
         let mut ac: FlowState;
         t.tc_flow_clear(&mut ac);
         st.acc.push(ac);
-        st.ovf.push(0);
     } else {
         t.tc_flow_save(&mut st.pre[d]);
         t.tc_flow_clear(&mut st.acc[d]);
-        st.ovf.set(d, 0);
     }
     st.fdepth = d + 1;
 }
@@ -317,13 +315,6 @@ extend tc::TypeChecker {
                 binding: NODE_NONE,
             };
             self.nborrows = k + 1;
-        } else if !self.bc_quiet {
-            let sp = self.cur_ast().at_const(origin).span;
-            self.errors.emit(
-                sp.start,
-                1,
-                format("too many simultaneous borrows in one function (borrow-checker limit)"),
-            );
         }
     }
 
@@ -398,52 +389,7 @@ extend tc::TypeChecker {
                 self.borrow_tombstone_at(i);
                 continue;
             }
-            if self.bc_quiet {
-                return true;
-            }
-            let sp = self.cur_ast().at_const(origin).span;
-            let mut k1 = "immutable".ptr() as *const char;
-            if kind == BORROW_MUT {
-                k1 = "mutable".ptr() as *const char;
-            }
-            let mut k2 = "immutable".ptr() as *const char;
-            if b.kind == BORROW_MUT {
-                k2 = "mutable".ptr() as *const char;
-            }
-            self.errors.emit(
-                sp.start,
-                sp.end - sp.start,
-                format(
-                    "cannot borrow this value as {} while it is already borrowed as {}",
-                    diag::cstr(k1),
-                    diag::cstr(k2),
-                ),
-            );
-            self.errors.note(
-                format(
-                    "a value may have many '&' borrows or a single '&mut', not both; the earlier borrow must end first",
-                ),
-            );
-            return true;
-        }
-        return false;
-    }
-
-    pub fn borrow_conflicting_read(self: &mut Self, place: NodeId) bool {
-        let root = self.borrow_place_root(place);
-        if root == NODE_NONE {
-            return false;
-        }
-        for i in 0..self.nborrows {
-            let b = unsafe self.borrows[i as usize];
-            if b.root != root || b.kind != BORROW_MUT || !self.places_overlap(place, b.place) {
-                continue;
-            }
-            if self.borrow_dead_after(b, place) {
-                self.borrow_tombstone_at(i);
-                continue;
-            }
-            return true;
+            return true; // the IR loan analysis owns the conflict wording
         }
         return false;
     }
@@ -804,47 +750,6 @@ extend tc::TypeChecker {
         return overflow;
     }
 
-    pub fn tc_flow_overflow(self: &mut Self, at: NodeId) {
-        if self.bc_quiet {
-            return;
-        }
-        let sp = self.cur_ast().at_const(at).span;
-        self.errors.emit(
-            sp.start,
-            sp.end - sp.start,
-            format("too many flow facts to merge across branches in one function (analysis limit)"),
-        );
-    }
-
-    /// Does `place` overlap a partially-moved sub-place (`p.a` after `p.a` moved; `p` whole while a
-    /// part is moved; `p.a.x` while `p.a` moved)?
-    pub fn tc_place_is_moved(self: &mut Self, place: NodeId) bool {
-        for i in 0..self.nmoved_places {
-            if self.places_overlap(place, unsafe self.moved_places[i as usize]) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /// Is any sub-place of `binding` partially moved out? (using the whole value while a part is gone.)
-    pub fn tc_binding_partially_moved(self: &mut Self, binding: NodeId) bool {
-        for i in 0..self.nmoved_places {
-            if self.tc_place_base_binding(unsafe self.moved_places[i as usize]) == binding {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    pub const fn tc_mark_place_moved(self: &mut Self, place: NodeId) {
-        if self.nmoved_places < 128 {
-            let k = self.nmoved_places;
-            unsafe self.moved_places[k as usize] = place;
-            self.nmoved_places = k + 1;
-        }
-    }
-
     /// Re-initialising `place` (assigning to it or a prefix) makes it owned again: drop the
     /// overlapping partial-move records so it can be moved/used once more.
     pub fn tc_clear_moved_place(self: &mut Self, place: NodeId) {
@@ -879,96 +784,10 @@ extend tc::TypeChecker {
                 break;
             }
         }
-        // Moving a `Free` value out of a dereference (`*r`, or `base[i]` with base a reference) copies
-        // it out of storage this scope does not own -- a second owner that double-frees. Forbidden in
-        // SAFE code; `unsafe` blocks may do it (Vector::pop moves an element out of `*self.ptr[len]`
-        // after shrinking, taking responsibility for the ownership transfer).
         let xk = a.at_const(expr).kind;
-        if !self.bc_quiet && self.unsafe_depth == 0 && self.tc_type_is_free(a.type_of(expr0)) {
-            let mut base = NODE_NONE;
-            if xk == NodeKind::NODE_UNARY && a.at_const(expr).as_data.unary.op == TokenType::Star {
-                base = a.at_const(expr).as_data.unary.operand;
-            } else if xk == NodeKind::NODE_INDEX {
-                base = a.at_const(expr).as_data.index.object;
-            }
-            if base != NODE_NONE {
-                let bt = a.type_of(base);
-                if bt != TYPE_NONE && (self.type_at(bt).kind == TypeKind::TYPE_REFERENCE || self.type_at(bt).kind == TypeKind::TYPE_POINTER) && !self.bc_quiet {
-                    let sp = a.at_const(expr).span;
-                    self.errors.emit(
-                        sp.start,
-                        sp.end - sp.start,
-                        format("cannot move a Free value out of a dereference (it would be freed twice)"),
-                    );
-                }
-            }
-        }
-        // Partial (field/index) move of a Free sub-place out of an OWNED local (`let x = p.a;`,
-        // `eat(p.a)`). Record it so a second move of the same (or an overlapping) sub-place, or of the
-        // whole value, is caught -- otherwise two owners double-free. Moves out of a dereference are
-        // already rejected above; a base reached through a `*`/reference is not an owned place here.
+        // Deref-move, partial-move, and use-after-move of sub-places: the Core IR free-move rules
+        // and move analysis own every one of those checks.
         if xk == NodeKind::NODE_MEMBER && !a.at_const(expr).as_data.member.path || xk == NodeKind::NODE_INDEX {
-            if self.bc_quiet {
-                return; // the Core IR free-move rules and move analysis own every check below
-            }
-            if !self.tc_type_is_free(a.type_of(expr0)) {
-                return;
-            }
-            let base = self.tc_place_base_binding(expr);
-            if base == NODE_NONE {
-                return;
-            }
-            let bt = a.type_of(base);
-            if bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_POINTER {
-                return; // raw pointers are the unsafe world's escape hatch (replace()'s own mechanism)
-            }
-            if bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_REFERENCE {
-                // pointer-typed fields are HANDLES (raw pointers are borrows by rule): copying
-                // one out of a reference escapes no ownership
-                let xt = a.type_of(expr0);
-                if xt != TYPE_NONE && self.type_at(xt).kind == TypeKind::TYPE_POINTER {
-                    return;
-                }
-                // Rust's E0507: moving a Free field out of borrowed content leaves the owner
-                // holding a value it will free again (or forces a leak). `replace` swaps
-                // ownership safely; `unsafe` blocks may still take responsibility themselves.
-                // `.free()` receivers are exempt: destruction nulls in place, nothing escapes.
-                if self.unsafe_depth == 0 && !peeled_unsafe && !self.bc_free_recv && !self.bc_quiet {
-                    let sp = a.at_const(expr).span;
-                    self.errors.emit(
-                        sp.start,
-                        sp.end - sp.start,
-                        format(
-                            "cannot move a field out of a reference; use 'replace' to swap ownership out (or an 'unsafe' block to take responsibility)",
-                        ),
-                    );
-                }
-                return;
-            }
-            // Rust's rule: a value whose type implements Free cannot lose a field -- its free body
-            // would run on a partial value at scope exit (skipping it instead would leak the other
-            // fields and the destructor's side effects). Move the whole value, or swap first.
-            if self.tc_type_is_free(bt) {
-                if !self.bc_quiet {
-                    let sp = a.at_const(expr).span;
-                    self.errors.emit(
-                        sp.start,
-                        sp.end - sp.start,
-                        format(
-                            "cannot move a field out of a value implementing Free; move the whole value or swap in a replacement first",
-                        ),
-                    );
-                }
-                return;
-            }
-            if self.tc_place_is_moved(expr) || self.is_moved(base) {
-                if !self.bc_quiet {
-                    let sp = a.at_const(expr).span;
-                    self.errors.emit(sp.start, sp.end - sp.start, format("use of moved value"));
-                }
-            } else {
-                self.tc_mark_place_moved(expr);
-            }
             return;
         }
         // A constant is named bare (`V`) or qualified (`data::V`); both must reach the const rule below.
@@ -998,7 +817,7 @@ extend tc::TypeChecker {
             // A `.free()` receiver reaches the IR as a `&mut` temp, never a marked move: its
             // const check stays here even when the IR rules are authoritative. So does a call
             // FOLDED to its value (bc_fold_ctx): the fold erased the move from the IR.
-            if !cd.is_static_mut && !cd.is_extern && (!self.bc_quiet || self.bc_free_recv || self.bc_fold_ctx) && self.tc_type_is_free(
+            if !cd.is_static_mut && !cd.is_extern && (self.bc_free_recv || self.bc_fold_ctx) && self.tc_type_is_free(
                 a.type_of(expr),
             ) {
                 let sp = a.at_const(expr).span;
@@ -1024,45 +843,9 @@ extend tc::TypeChecker {
         if ek == TypeKind::TYPE_REFERENCE || ek == TypeKind::TYPE_POINTER {
             return;
         }
-        if self.tc_capture_move_guard(expr) {
-            return;
-        }
-        if self.bc_quiet {
-            return; // the borrow scan's error and the moved-state are walk-only
-        }
-        for i in 0..self.nborrows {
-            if unsafe self.borrows[i as usize].root == d.node && unsafe self.borrows[i as usize].kind == BORROW_SHARED {
-                if self.borrow_dead_after(unsafe self.borrows[i as usize], expr) {
-                    self.borrow_tombstone_at(i);
-                } else {
-                    if !self.bc_quiet {
-                        let sp = a.at_const(expr).span;
-                        self.errors.emit(
-                            sp.start,
-                            sp.end - sp.start,
-                            format("cannot move this value while it is borrowed"),
-                        );
-                    }
-                    break;
-                }
-            }
-        }
-        if self.is_moved(d.node) {
-            return;
-        }
-        if self.nmoved < 1024 {
-            let k = self.nmoved;
-            unsafe self.moved[k as usize] = d.node;
-            self.nmoved = k + 1;
-            self.ms_bit_set(d.node);
-        } else if !self.bc_quiet {
-            let sp = a.at_const(expr).span;
-            self.errors.emit(
-                sp.start,
-                sp.end - sp.start,
-                format("too many moved values in one function (move-analysis limit)"),
-            );
-        }
+        // the borrow scan's error, the capture-move guard, and the whole-binding moved-state were
+        // walk-only: the Core IR move analysis and free-move rules own them (closure captures
+        // still push moved[] entries, unguarded)
     }
 
     pub fn tc_unmark_move(self: &mut Self, decl: NodeId) {
@@ -1124,77 +907,6 @@ extend tc::TypeChecker {
         }
     }
 
-    /// True (with an error) when `expr0` would move a Free value out of the innermost closure's captures.
-    pub fn tc_capture_move_guard(self: &mut Self, expr0: NodeId) bool {
-        if self.nclos == 0 || self.bc_quiet {
-            return false; // quiet: the Core IR free-move rules own the capture-move error
-        }
-        let a = self.cur_ast();
-        let mut expr = expr0;
-        loop {
-            let n = a.at_const(expr);
-            if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
-                expr = n.as_data.unary.operand;
-            } else {
-                break;
-            }
-        }
-        if a.at_const(expr).kind != NodeKind::NODE_IDENTIFIER {
-            return false;
-        }
-        let d = a.resolution_def(expr);
-        if d.module != self.cur_module() || d.node == NODE_NONE || self.tc_capture_index(
-            unsafe self.clos_stack[(self.nclos - 1) as usize],
-            d.node,
-        ) < 0 || !self.tc_type_is_free(a.type_of(expr)) {
-            return false;
-        }
-        let sp = a.at_const(expr).span;
-        self.errors.emit(
-            sp.start,
-            sp.end - sp.start,
-            format("cannot move a captured value out of a closure (the closure's env owns it)"),
-        );
-        return true;
-    }
-
-    /// Record that `expr0`'s base binding is mutated inside every enclosing closure that captures
-    /// it: sets the closure node's mut_caps bit, which codegen reads to lower the capture by pointer.
-    pub fn tc_mark_capture_mut(self: &mut Self, expr0: NodeId) {
-        if self.nclos == 0 || self.bc_quiet {
-            return; // quiet: the lowerer's recorded peels set the bits in bc_ir_lower
-        }
-        let a = self.cur_ast();
-        let mut expr = expr0;
-        loop {
-            let n = a.at_const(expr);
-            if n.kind == NodeKind::NODE_UNARY && (n.as_data.unary.op == TokenType::Move || n.as_data.unary.op == TokenType::Unsafe) {
-                expr = n.as_data.unary.operand;
-            } else if n.kind == NodeKind::NODE_MEMBER && !n.as_data.member.path {
-                expr = n.as_data.member.object;
-            } else if n.kind == NodeKind::NODE_INDEX {
-                expr = n.as_data.index.object;
-            } else {
-                break;
-            }
-        }
-        if a.at_const(expr).kind != NodeKind::NODE_IDENTIFIER {
-            return;
-        }
-        let d = a.resolution_def(expr);
-        if d.module != self.cur_module() || d.node == NODE_NONE {
-            return;
-        }
-        for f in 0..self.nclos {
-            let idx = self.tc_capture_index(unsafe self.clos_stack[f as usize], d.node);
-            if idx >= 0 {
-                let cs = unsafe self.clos_stack[f as usize];
-                let old = self.cur_ast().at(cs).as_data.closure.mut_caps as u64;
-                self.cur_ast().at(cs).as_data.closure.mut_caps = (old | 1u64 << idx as u64) as u32;
-            }
-        }
-    }
-
     pub fn tc_scope_exit(self: &mut Self) {
         let d = self.scope_depth;
         let mut w: u32 = 0;
@@ -1214,17 +926,7 @@ extend tc::TypeChecker {
                 continue;
             }
             if b.binding != NODE_NONE && b.root != NODE_NONE && self.tc_binding_depth(b.root) >= d {
-                if !self.bc_quiet {
-                    let sp = self.cur_ast().at_const(b.origin).span;
-                    self.tc_region_diag(
-                        sp.start,
-                        sp.end - sp.start,
-                        format(
-                            "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored",
-                        ),
-                    );
-                }
-                continue;
+                continue; // the loan solver owns the block-scope dangle wording
             }
             unsafe self.borrows[w as usize] = unsafe self.borrows[i as usize];
             w = w + 1;
@@ -1270,24 +972,6 @@ extend tc::TypeChecker {
                 return;
             }
             i = i + 1;
-        }
-    }
-
-    pub fn tc_add_uninit(self: &mut Self, decl: NodeId) {
-        if self.tc_is_uninit(decl) {
-            return;
-        }
-        if self.nuninit < 256 {
-            let k = self.nuninit;
-            unsafe self.uninit[k as usize] = decl;
-            self.nuninit = k + 1;
-        } else if !self.bc_quiet {
-            let sp = self.cur_ast().at_const(decl).span;
-            self.errors.emit(
-                sp.start,
-                sp.end - sp.start,
-                format("too many uninitialized bindings in one function (definite-init analysis limit)"),
-            );
         }
     }
 
@@ -1353,79 +1037,6 @@ extend tc::TypeChecker {
             return 2;
         }
         return 1;
-    }
-
-    pub fn tc_check_return_region(self: &mut Self, vid: NodeId, bm: u32) {
-        let a = self.cur_ast();
-        let vt = a.type_of(vid);
-        // A returned capturing closure carries its captured borrows even though its stored type
-        // (`dyn fn`) does not advertise them -- bc_closure re-exposed them as transient borrows in
-        // [bm, nborrows), so scan those too (a closure returning a `&local` capture escapes).
-        if !self.tc_carries_borrow(vt) && !self.tc_expr_is_closure(vid) {
-            return; // an owned value carries no borrow out
-        }
-        // The returned value carries a borrow rooted at a local if EITHER the borrow was created
-        // while evaluating the return expression (indices >= bm, e.g. `return b.get()`) OR the borrow
-        // was tied earlier to the returned binding (`let r = Ref { p: &x }; return r` -- the borrow
-        // lives in the array with binding == r, created below bm). Scanning only [bm, nborrows) missed
-        // the second case, so any caught return-of-borrow was bypassable by hoisting it into a local.
-        let mut ret_binding = NODE_NONE;
-        if a.at_const(vid).kind == NodeKind::NODE_IDENTIFIER {
-            let rd = a.resolution_def(vid);
-            if rd.module == self.cur_module() {
-                ret_binding = rd.node;
-            }
-        }
-        let mut i: u32 = 0;
-        while i < self.nborrows {
-            let b = unsafe self.borrows[i as usize];
-            let idx = i;
-            i = i + 1;
-            if b.root == NODE_NONE {
-                continue; // tombstoned
-            }
-            // carried by the returned value?
-            if idx < bm && (ret_binding == NODE_NONE || b.binding != ret_binding) {
-                continue;
-            }
-            // Only LOCALS die at return. A borrow rooted at a parameter may legitimately outlive the
-            // call (the caller owns the referent); addr_escape already handles by-value params.
-            if a.at_const(b.root).kind != NodeKind::NODE_LET {
-                continue;
-            }
-            // A place reaching its root THROUGH a reference lives wherever the reference points, not
-            // in the local's storage: skip when the reference's own binding borrows nothing local
-            // (e.g. it was minted from a raw pointer). A place that does not decompose (a closure's
-            // re-exposed capture) stays conservative.
-            let mut psteps = Steps16 {};
-            let mut pns: i32 = 0;
-            let proot = self.place_decompose(b.place, &mut psteps[0], &mut pns, PLACE_MAX_STEPS);
-            if proot != NODE_NONE {
-                let mut thru = false;
-                for si in 0..pns {
-                    if psteps[si as usize].kind == PS_DEREF {
-                        thru = true;
-                    }
-                }
-                if thru && self.borrow_escape_of_binding(proot, 1) == 0 {
-                    continue;
-                }
-            }
-            if self.bc_quiet {
-                return;
-            }
-            let sp = a.at_const(vid).span;
-            let mut what = "a value borrowing".ptr() as *const char;
-            if self.type_at(vt).kind == TypeKind::TYPE_REFERENCE {
-                what = "a reference borrowed".ptr() as *const char;
-            }
-            self.tc_region_diag(
-                sp.start,
-                sp.end - sp.start,
-                format("returning {} from a local, which does not outlive the call", diag::cstr(what)),
-            );
-            return;
-        }
     }
 
     /// The lifetime slots a type NODE denotes, in order: `&'l T` -> ['l]; an aggregate `S<'l, ..>` ->
@@ -2928,9 +2539,9 @@ extend tc::TypeChecker {
         self.current_fn = id;
         self.err_wm = self.errors.errors.len();
         // Lower first (the tape and the facts come from the lowerings), replay the tape (the same
-        // helper calls the walk would make, without traversing the expression tree), then analyze
-        // the lowered bodies against the final side tables and emit the flow diagnostics. A body
-        // that fails to lower falls back to the loud AST walk, so no function ever goes unchecked.
+        // helper calls the walk made, without traversing the expression tree), then analyze the
+        // lowered bodies against the final side tables and emit the flow diagnostics. A body that
+        // fails to lower was reported as an error by bc_ir_lower -- nothing further to check.
         self.bc_unsafe_spans.truncate(0);
         let mut irbodies = Vector::<irl::Lowerer>::new();
         self.bc_quiet = self.bc_ir_lower(id, ctx, &mut irbodies);
@@ -2949,10 +2560,6 @@ extend tc::TypeChecker {
             ctx.rep.reset();
             let tn = irbodies.at(0).tape.len();
             self.bc_replay(&irbodies, 0, 0, tn, &mut ctx.rep);
-        } else {
-            self.bc_stmt(fnd.body);
-        }
-        if self.bc_quiet {
             let mut irres = Vector::<bfi::FlowErr>::new();
             self.bc_ir_analyze(ow, &irbodies, ctx, &mut irres);
             self.bc_ir_emit(&mut irres);
@@ -3078,29 +2685,20 @@ extend tc::TypeChecker {
                     self.nclos = self.nclos - 1;
                     self.bc_closure_caps(node);
                 }
-            } else if k == ir::TP_DEFER {
-                self.bc_defer(node);
             } else if k == ir::TP_FLOW_SAVE {
                 rep_flow_push(self, st);
             } else if k == ir::TP_FLOW_ELSE {
                 let ti = st.fdepth - 1;
-                if !self.tc_stmt_returns(a.at_const(node).as_data.if_stmt.then_branch) && self.tc_flow_collect(
-                    &mut st.acc[ti],
-                ) {
-                    st.ovf.set(ti, 1);
+                if !self.tc_stmt_returns(a.at_const(node).as_data.if_stmt.then_branch) {
+                    let _ = self.tc_flow_collect(&mut st.acc[ti]);
                 }
                 self.tc_flow_set(&st.pre[ti]);
             } else if k == ir::TP_FLOW_JOIN {
                 let ti = st.fdepth - 1;
-                if !self.tc_stmt_returns(a.at_const(node).as_data.if_stmt.else_branch) && self.tc_flow_collect(
-                    &mut st.acc[ti],
-                ) {
-                    st.ovf.set(ti, 1);
+                if !self.tc_stmt_returns(a.at_const(node).as_data.if_stmt.else_branch) {
+                    let _ = self.tc_flow_collect(&mut st.acc[ti]);
                 }
                 self.tc_flow_set(&st.acc[ti]);
-                if st.ovf[ti] != 0 {
-                    self.tc_flow_overflow(node);
-                }
                 st.fdepth = ti;
             } else if k == ir::TP_MATCH_PRE {
                 let bm = rep_bm(st);
@@ -3125,16 +2723,13 @@ extend tc::TypeChecker {
                 let bt = a.type_of(body);
                 let diverges = self.tc_stmt_returns(body) || bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_NEVER;
                 let ti = st.fdepth - 1;
-                if !diverges && self.tc_flow_collect(&mut st.acc[ti]) {
-                    st.ovf.set(ti, 1);
+                if !diverges {
+                    let _ = self.tc_flow_collect(&mut st.acc[ti]);
                 }
             } else if k == ir::TP_MATCH_POST {
                 let ti = st.fdepth - 1;
                 if a.at_const(node).as_data.match_expr.arms.len != 0 {
                     self.tc_flow_set(&st.acc[ti]);
-                }
-                if st.ovf[ti] != 0 {
-                    self.tc_flow_overflow(node);
                 }
                 st.fdepth = ti;
                 let mut mb: u32 = 0;
@@ -3186,191 +2781,12 @@ extend tc::TypeChecker {
                     self.bc_replay(bodies, bi, start, i, st);
                     self.in_loop_recheck = false;
                 }
-            } else if k == ir::TP_WALK_EXPR {
-                self.bc_expr(node, false, false);
-            } else if k == ir::TP_WALK_STMT {
-                self.bc_stmt(node);
-            } else if k == ir::TP_WALK_FOLD {
+            } else if k == ir::TP_CONST_MOVE {
                 self.bc_fold_ctx = true;
-                self.bc_expr(node, false, false);
+                self.tc_mark_move(node);
                 self.bc_fold_ctx = false;
             }
             i += 1;
-        }
-    }
-
-    pub fn bc_stmt(self: &mut Self, id: NodeId) {
-        if id == NODE_NONE {
-            return;
-        }
-        let a = self.cur_ast();
-        let nk = a.at_const(id).kind;
-        switch nk {
-            NODE_BLOCK => {
-                self.scope_depth = self.scope_depth + 1;
-                let ss = a.at_const(id).as_data.block.statements;
-                for i in 0..ss.len {
-                    self.bc_stmt(unsafe a.list(ss)[i as usize]);
-                    self.borrow_nll_drop(id, a.list(ss), i);
-                }
-                self.bc_scope_close();
-            },
-            NODE_LET => {
-                let bm = self.borrow_mark();
-                let nm = a.at_const(id).as_data.let_stmt.name;
-                let value = a.at_const(id).as_data.let_stmt.value;
-                if a.at_const(nm).kind == NodeKind::NODE_PATTERN_TUPLE {
-                    self.bc_expr(value, false, false);
-                    self.tc_mark_move(value);
-                    self.bc_let_tuple_post(id, bm);
-                    return;
-                }
-                if value != NODE_NONE {
-                    self.bc_expr(value, false, false);
-                    self.tc_mark_move(value);
-                    self.tc_unmark_move(id);
-                } else {
-                    self.tc_add_uninit(id);
-                }
-                self.bc_let_post(id, bm);
-            },
-            NODE_CONST => {
-                let bm = self.borrow_mark();
-                self.bc_expr(a.at_const(id).as_data.const_def.value, false, false);
-                self.borrow_release_to(bm);
-            },
-            NODE_RETURN => {
-                let bm = self.borrow_mark();
-                let values = a.at_const(id).as_data.return_stmt.values;
-                let mut ret_list = NodeList { start: 0, len: 0 };
-                if self.current_fn != NODE_NONE {
-                    ret_list = a.at_const(self.current_fn).as_data.function.returns;
-                }
-                for i in 0..values.len {
-                    let vid = unsafe a.list(values)[i as usize];
-                    self.bc_expr(vid, false, false);
-                    // A returned value moves like any other consumer: the field-move and
-                    // deref-move rules apply to `return x.f` too.
-                    self.tc_mark_move(vid);
-                    self.tc_capture_move_guard(vid);
-                    if i < ret_list.len {
-                        self.tc_check_return_lifetime(vid, unsafe a.list(ret_list)[i as usize]);
-                    }
-                }
-                self.bc_return_post(id, bm);
-            },
-            NODE_EXPRESSION_STATEMENT => {
-                let bm = self.borrow_mark();
-                self.bc_expr(a.at_const(id).as_data.single.value, false, false);
-                self.borrow_release_to(bm);
-            },
-            NODE_MATCH => {
-                self.bc_match(id, false);
-            },
-            _ => {
-                self.bc_stmt_rest(id);
-            },
-        };
-    }
-
-    // The statement kinds split out of bc_stmt's switch (post-helper refactor keeps the hot
-    // switch small); behavior is byte-for-byte the walk's.
-    // The statement kinds split out of bc_stmt's hot switch; behavior is exactly the walk's.
-    fn bc_stmt_rest(self: &mut Self, id: NodeId) {
-        let a = self.cur_ast();
-        switch a.at_const(id).kind {
-            NODE_IF => {
-                let ifd = a.at_const(id).as_data.if_stmt;
-                let cbm = self.borrow_mark();
-                self.bc_expr(ifd.condition, false, false);
-                self.borrow_release_to(cbm);
-                let mut pre: FlowState;
-                self.tc_flow_save(&mut pre);
-                self.bc_stmt(ifd.then_branch);
-                let mut acc: FlowState;
-                self.tc_flow_clear(&mut acc);
-                let mut ovf = false;
-                if !self.tc_stmt_returns(ifd.then_branch) && self.tc_flow_collect(&mut acc) {
-                    ovf = true;
-                }
-                self.tc_flow_set(&pre);
-                self.bc_stmt(ifd.else_branch);
-                if !self.tc_stmt_returns(ifd.else_branch) && self.tc_flow_collect(&mut acc) {
-                    ovf = true;
-                }
-                self.tc_flow_set(&acc);
-                if ovf {
-                    self.tc_flow_overflow(id);
-                }
-            },
-            NODE_WHILE => {
-                let wd = a.at_const(id).as_data.while_stmt;
-                self.loop_depth = self.loop_depth + 1;
-                let le = self.tc_loop_push(wd.label, id, false);
-                let cbm = self.borrow_mark();
-                self.bc_expr(wd.condition, false, false);
-                self.borrow_release_to(cbm);
-                self.bc_loop_body(wd.body, wd.is_do || wd.condition == NODE_NONE);
-                self.bc_loop_pop(le);
-                self.loop_depth = self.loop_depth - 1;
-            },
-            NODE_FOR | NODE_INLINE_FOR => {
-                let fd = a.at_const(id).as_data.for_stmt;
-                self.loop_depth = self.loop_depth + 1;
-                let le = self.tc_loop_push(fd.label, id, false);
-                let bm = self.borrow_mark();
-                self.bc_expr(fd.iterable, false, false);
-                self.tc_record_binding_depth(id);
-                self.bc_loop_body(fd.body, false);
-                self.borrow_release_to(bm);
-                self.bc_loop_pop(le);
-                self.loop_depth = self.loop_depth - 1;
-            },
-            NODE_ASM => {
-                // The assembly writes its outputs and reads its inputs; the checker cannot see inside the
-                // template, so it treats each operand as exactly that.
-                let ad = a.at_const(id).as_data.asm_stmt;
-                let mut oi: u32 = 0;
-                while oi + 1 < ad.outputs.len {
-                    self.bc_expr(unsafe a.list(ad.outputs)[(oi + 1) as usize], false, false);
-                    oi = oi + 2;
-                }
-                let mut ii: u32 = 0;
-                while ii + 1 < ad.inputs.len {
-                    self.bc_expr(unsafe a.list(ad.inputs)[(ii + 1) as usize], false, true);
-                    ii = ii + 2;
-                }
-            },
-            NODE_DEFER => {
-                // check the body in isolation, then queue it to run at scope exit (LIFO), where a
-                // double free or a use-after-deferred-free is actually caught.
-                let dv = a.at_const(id).as_data.single.value;
-                self.bc_defer(dv);
-            },
-            NODE_BREAK => {
-                self.bc_expr(a.at_const(id).as_data.flow.value, false, false);
-            },
-            NODE_CONTINUE => {},
-            _ => {
-                self.bc_expr(id, false, false);
-            },
-        };
-    }
-
-    /// Check a defer body in isolation, then queue it to run at scope exit (LIFO). Shared with
-    /// the tape replay.
-    pub fn bc_defer(self: &mut Self, dv: NodeId) {
-        let mut pre: FlowState;
-        self.tc_flow_save(&mut pre);
-        let dbm = self.borrow_mark();
-        self.bc_expr(dv, false, false);
-        self.borrow_release_to(dbm);
-        self.tc_flow_set(&pre);
-        if self.ndefers < 256 {
-            let k = self.ndefers;
-            unsafe self.defer_stack[k as usize] = dv;
-            unsafe self.defer_depth[k as usize] = self.scope_depth;
-            self.ndefers = k + 1;
         }
     }
 
@@ -3402,10 +2818,8 @@ extend tc::TypeChecker {
                 }
                 let vt2 = a.type_of(vid);
                 let vt2k = if_u8(vt2 != TYPE_NONE, self.type_at(vt2).kind as u8, 0xFF);
-                if self.bc_quiet && !ret_ptr && vt2 != TYPE_NONE && vt2k != TypeKind::TYPE_POINTER as u8 && self.tc_carries_borrow(
-                    vt2,
-                ) {
-                    continue;
+                if !ret_ptr && vt2 != TYPE_NONE && vt2k != TypeKind::TYPE_POINTER as u8 && self.tc_carries_borrow(vt2) {
+                    continue; // the Core IR path reports carrying-return escapes
                 }
                 let sp = a.at_const(vid).span;
                 let mut w = "local variable".ptr() as *const char;
@@ -3417,23 +2831,16 @@ extend tc::TypeChecker {
                     sp.end - sp.start,
                     format("returning a pointer/reference to a {}, which does not outlive the call", diag::cstr(w)),
                 );
-            } else {
-                self.tc_check_return_region(vid, bm);
             }
+            // carrying returns: the loan solver owns the borrowed-from-local escape wording
         }
         self.borrow_release_to(bm);
     }
 
-    /// Block exit: pending defers replay LIFO at this depth, then the scope's borrows and regions
-    /// die. Shared with the tape replay.
+    /// Block exit: the scope's borrows and regions die.
     pub fn bc_scope_close(self: &mut Self) {
-        while self.ndefers != 0 && unsafe self.defer_depth[(self.ndefers - 1) as usize] == self.scope_depth {
-            self.ndefers = self.ndefers - 1;
-            let dv = unsafe self.defer_stack[self.ndefers as usize];
-            let dbm = self.borrow_mark();
-            self.bc_expr(dv, false, false);
-            self.borrow_release_to(dbm);
-        }
+        // Defers need no re-walk here: the lowerer tapes every defer body at every exit (marked),
+        // so their per-exit flow effects replay in place.
         self.tc_scope_exit();
     }
 
@@ -3504,53 +2911,6 @@ extend tc::TypeChecker {
         return false;
     }
 
-    pub fn bc_match(self: &mut Self, id: NodeId, is_expr: bool) {
-        let a = self.cur_ast();
-        let bm = self.borrow_mark();
-        let scrut = a.at_const(id).as_data.match_expr.value;
-        self.bc_expr(scrut, false, false);
-        let sy = a.type_of(scrut);
-        let mut bind_ref = false;
-        if sy != TYPE_NONE {
-            let k = self.type_at(sy).kind;
-            bind_ref = k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_POINTER;
-        }
-        if !bind_ref {
-            self.borrow_release_to(bm);
-            self.tc_mark_move(scrut);
-        }
-        let arms = a.at_const(id).as_data.match_expr.arms;
-        let mut pre: FlowState;
-        self.tc_flow_save(&mut pre);
-        let mut acc: FlowState;
-        self.tc_flow_clear(&mut acc);
-        let mut ovf = false;
-        for i in 0..arms.len {
-            let aid = unsafe a.list(arms)[i as usize];
-            let arm = a.at_const(aid).as_data.match_arm;
-            self.tc_flow_set(&pre);
-            self.bc_pattern_depths(arm.pattern);
-            self.bc_expr(arm.guard, false, false);
-            if is_expr {
-                self.bc_expr(arm.body, false, false);
-            } else {
-                self.bc_stmt(arm.body);
-            }
-            let bt = a.type_of(arm.body);
-            let diverges = self.tc_stmt_returns(arm.body) || bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_NEVER;
-            if !diverges && self.tc_flow_collect(&mut acc) {
-                ovf = true;
-            }
-        }
-        if arms.len != 0 {
-            self.tc_flow_set(&acc);
-        }
-        if ovf {
-            self.tc_flow_overflow(id);
-        }
-        self.borrow_release_to(bm);
-    }
-
     pub fn bc_pattern_depths(self: &mut Self, pat: NodeId) {
         if pat == NODE_NONE {
             return;
@@ -3572,288 +2932,6 @@ extend tc::TypeChecker {
                 self.bc_pattern_depths(unsafe a.list(cs)[i as usize]);
             }
         }
-    }
-
-    pub fn bc_loop_body(self: &mut Self, body: NodeId, always_runs: bool) {
-        // Two passes: a borrow or move created on the first iteration is live across the back edge for
-        // the second, which is where an in-loop conflict shows up. A binding INITIALISED in the body,
-        // however, must not count as initialised after the loop (it may run zero times) -- uninit facts
-        // are restored around the body.
-        let mut pre: FlowState;
-        self.tc_flow_save(&mut pre);
-        let nm0 = self.nmoved;
-        let nb0 = self.nborrows;
-        self.bc_stmt(body);
-        if (self.nmoved > nm0 || self.nborrows > nb0) && !self.in_loop_recheck {
-            self.in_loop_recheck = true;
-            self.bc_stmt(body);
-            self.in_loop_recheck = false;
-        }
-        // a while/for may run zero times, so an init inside it does not hold afterward; a do-while
-        // always runs its body at least once, so its inits DO persist.
-        if !always_runs {
-            self.nuninit = pre.nuninit;
-            for i in 0..pre.nuninit {
-                unsafe self.uninit[i as usize] = unsafe pre.uninit[i as usize];
-            }
-        }
-    }
-
-    /// The expression walk. addr_ctx: `id` is the operand of `&`/`&mut` -- a place being borrowed, so
-    /// the uninit and read-conflict checks are suppressed (`&mut x` may be x's initialization);
-    /// place_use: `id` is the base of a member/index access, checked at the full place instead. The
-    /// plain use-after-move check fires regardless.
-    pub fn bc_expr(self: &mut Self, id: NodeId, addr_ctx: bool, place_use: bool) {
-        if id == NODE_NONE {
-            return;
-        }
-        let a = self.cur_ast();
-        let n = a.at_const(id);
-        switch n.kind {
-            NODE_IDENTIFIER => {
-                let d = a.resolution_def(id);
-                if d.module == self.cur_module() && d.node != NODE_NONE {
-                    if !self.bc_quiet && self.is_moved(d.node) {
-                        let mut freed = false;
-                        for k in 0..self.nfreed {
-                            if unsafe self.freed[k as usize] == d.node {
-                                freed = true;
-                            }
-                        }
-                        let sp = n.span;
-                        let mut msg = "use of moved value".ptr() as *const char;
-                        if freed {
-                            msg = "use after free".ptr() as *const char;
-                        }
-                        self.errors.emit(sp.start, sp.end - sp.start, format("{}", diag::cstr(msg)));
-                    }
-                    if !addr_ctx && !place_use && !self.bc_quiet && !self.is_moved(d.node) && self.tc_binding_partially_moved(
-                        d.node,
-                    ) {
-                        let sp = n.span;
-                        self.errors.emit(sp.start, sp.end - sp.start, format("use of partially moved value"));
-                    }
-                    if !addr_ctx && !self.bc_quiet && self.tc_is_uninit(d.node) {
-                        let sp = n.span;
-                        self.errors.emit(sp.start, sp.end - sp.start, format("use of possibly uninitialized value"));
-                    }
-                    if !addr_ctx && !place_use && self.borrow_conflicting_read(id) && !self.bc_quiet {
-                        let sp = n.span;
-                        self.errors.emit(
-                            sp.start,
-                            sp.end - sp.start,
-                            format("cannot use this value while it is mutably borrowed"),
-                        );
-                    }
-                }
-            },
-            NODE_UNARY => {
-                let op = n.as_data.unary.op;
-                let operand = n.as_data.unary.operand;
-                if op == TokenType::Ampersand {
-                    let rt = a.type_of(id);
-                    let mut2 = rt != TYPE_NONE && self.type_at(rt).kind == TypeKind::TYPE_REFERENCE && self.type_at(rt).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
-                    if mut2 {
-                        self.tc_mark_capture_mut(operand);
-                    }
-                    let mut opw = operand;
-                    loop {
-                        let onn = a.at_const(opw);
-                        if onn.kind == NodeKind::NODE_UNARY && (onn.as_data.unary.op == TokenType::Move || onn.as_data.unary.op == TokenType::Unsafe) {
-                            opw = onn.as_data.unary.operand;
-                        } else {
-                            break;
-                        }
-                    }
-                    if mut2 && a.at_const(opw).kind == NodeKind::NODE_IDENTIFIER {
-                        let od = a.resolution_def(opw);
-                        if od.module == self.cur_module() && od.node != NODE_NONE {
-                            self.tc_init(od.node);
-                        }
-                    }
-                    self.bc_expr(operand, true, false);
-                    let mut bk = BORROW_SHARED;
-                    if mut2 {
-                        bk = BORROW_MUT;
-                    }
-                    self.borrow_create(operand, bk, id);
-                    return;
-                }
-                if op == TokenType::Star {
-                    self.bc_expr(operand, addr_ctx, place_use);
-                    if !addr_ctx && !place_use && self.borrow_conflicting_read(id) && !self.bc_quiet {
-                        let sp = n.span;
-                        self.errors.emit(
-                            sp.start,
-                            sp.end - sp.start,
-                            format("cannot use this value while it is mutably borrowed"),
-                        );
-                    }
-                    return;
-                }
-                if op == TokenType::Unsafe {
-                    // unsafe_depth licenses the Free-move escapes in tc_mark_move; the ranges the
-                    // Core IR free rules read come from the lowerer's recorded peels.
-                    self.unsafe_depth = self.unsafe_depth + 1;
-                    self.bc_expr(operand, addr_ctx, place_use);
-                    self.unsafe_depth = self.unsafe_depth - 1;
-                    return;
-                }
-                self.bc_expr(operand, addr_ctx, place_use);
-            },
-            NODE_ASSIGNMENT => {
-                self.bc_assign(id);
-            },
-            NODE_BINARY => {
-                self.bc_expr(n.as_data.binary.left, false, false);
-                self.bc_expr(n.as_data.binary.right, false, false);
-            },
-            NODE_CALL => {
-                self.bc_call(id);
-            },
-            NODE_MEMBER => {
-                if !n.as_data.member.path {
-                    self.bc_expr(n.as_data.member.object, addr_ctx, true);
-                    if !addr_ctx && !place_use && !self.bc_quiet && self.tc_place_is_moved(id) {
-                        let sp = n.span;
-                        self.errors.emit(sp.start, sp.end - sp.start, format("use of moved value"));
-                    }
-                    if !addr_ctx && !place_use && self.borrow_conflicting_read(id) && !self.bc_quiet {
-                        let sp = n.span;
-                        self.errors.emit(
-                            sp.start,
-                            sp.end - sp.start,
-                            format("cannot use this value while it is mutably borrowed"),
-                        );
-                    }
-                }
-            },
-            NODE_INDEX => {
-                self.bc_expr(n.as_data.index.object, addr_ctx, true);
-                if !addr_ctx && !place_use && !self.bc_quiet && self.tc_place_is_moved(id) {
-                    let sp = n.span;
-                    self.errors.emit(sp.start, sp.end - sp.start, format("use of moved value"));
-                }
-                let idxn = n.as_data.index.index;
-                if a.at_const(idxn).kind == NodeKind::NODE_RANGE {
-                    let rn = a.at_const(idxn).as_data.pattern_range;
-                    self.bc_expr(rn.start, false, false);
-                    self.bc_expr(rn.end, false, false);
-                    self.tc_slice_result_borrows(n.as_data.index.object, a.type_of(id));
-                } else {
-                    self.bc_expr(idxn, false, false);
-                }
-                if !addr_ctx && !place_use && self.borrow_conflicting_read(id) && !self.bc_quiet {
-                    let sp = n.span;
-                    self.errors.emit(
-                        sp.start,
-                        sp.end - sp.start,
-                        format("cannot use this value while it is mutably borrowed"),
-                    );
-                }
-            },
-            NODE_STRUCT_INITIALIZER => {
-                let fs = n.as_data.struct_initializer.fields;
-                for i in 0..fs.len {
-                    let fid = unsafe a.list(fs)[i as usize];
-                    let vid = a.at_const(fid).as_data.field_initializer.value;
-                    self.bc_expr(vid, false, false);
-                    self.tc_mark_move(vid);
-                }
-            },
-            NODE_CLOSURE => {
-                self.bc_closure(id);
-            },
-            NODE_CAST => {
-                let e = n.as_data.cast.expression;
-                self.bc_expr(e, addr_ctx, place_use);
-                let ct = a.type_of(id);
-                let et = a.type_of(e);
-                if ct != TYPE_NONE && et != TYPE_NONE && self.type_at(ct).kind == TypeKind::TYPE_POINTER && self.type_at(
-                    et,
-                ).kind == TypeKind::TYPE_REFERENCE {
-                    self.borrow_erase_origin(e);
-                }
-            },
-            NODE_MATCH => {
-                self.bc_match(id, true);
-            },
-            NODE_IF => {
-                let ifd = n.as_data.if_stmt;
-                let cbm = self.borrow_mark();
-                self.bc_expr(ifd.condition, false, false);
-                self.borrow_release_to(cbm);
-                let mut pre: FlowState;
-                self.tc_flow_save(&mut pre);
-                self.bc_expr(ifd.then_branch, false, false);
-                let mut acc: FlowState;
-                self.tc_flow_clear(&mut acc);
-                let mut ovf = false;
-                if !self.tc_stmt_returns(ifd.then_branch) && self.tc_flow_collect(&mut acc) {
-                    ovf = true;
-                }
-                self.tc_flow_set(&pre);
-                self.bc_expr(ifd.else_branch, false, false);
-                if !self.tc_stmt_returns(ifd.else_branch) && self.tc_flow_collect(&mut acc) {
-                    ovf = true;
-                }
-                self.tc_flow_set(&acc);
-                if ovf {
-                    self.tc_flow_overflow(id);
-                }
-            },
-            NODE_BLOCK => {
-                self.bc_stmt(id);
-            },
-            NODE_RANGE => {
-                self.bc_expr(n.as_data.pattern_range.start, false, false);
-                self.bc_expr(n.as_data.pattern_range.end, false, false);
-            },
-            NODE_ARRAY_LITERAL => {
-                let es = n.as_data.array_literal.elements;
-                for i in 0..es.len {
-                    self.bc_expr(unsafe a.list(es)[i as usize], false, false);
-                }
-            },
-            NODE_TUPLE => {
-                let es = n.as_data.array_literal.elements;
-                for i in 0..es.len {
-                    let vid = unsafe a.list(es)[i as usize];
-                    self.bc_expr(vid, false, false);
-                    self.tc_mark_move(vid);
-                }
-            },
-            _ => {},
-        };
-    }
-
-    pub fn bc_assign(self: &mut Self, id: NodeId) {
-        let a = self.cur_ast();
-        let bd = a.at_const(id).as_data.binary;
-        self.bc_assign_pre(id);
-        let plain = bd.op == TokenType::Equal;
-        let mut ld = DefId { module: 0, node: NODE_NONE };
-        if plain && a.at_const(bd.left).kind == NodeKind::NODE_IDENTIFIER {
-            ld = a.resolution_def(bd.left);
-        }
-        let lhs_local = ld.node != NODE_NONE && ld.module == self.cur_module();
-        let selfref = plain && lhs_local;
-        let bm = self.borrow_mark();
-        if selfref {
-            self.bc_expr(bd.right, false, false);
-            self.tc_mark_move(bd.right);
-            self.tc_init(ld.node);
-            self.tc_unmark_move(ld.node);
-            self.tc_clear_moved_place(bd.left);
-            self.bc_expr(bd.left, false, false);
-            self.tc_mark_capture_mut(bd.left);
-        } else {
-            self.bc_expr(bd.left, false, false);
-            self.tc_mark_capture_mut(bd.left);
-            self.bc_expr(bd.right, false, false);
-            self.tc_mark_move(bd.right);
-        }
-        self.bc_assign_post(id, bm);
     }
 
     /// Assignment pre-pass: split-init enforcement and rebind tombstones -- everything the walk
@@ -3959,46 +3037,7 @@ extend tc::TypeChecker {
         if plain {
             self.tc_check_store_escape(bd.left, bd.right, l);
         }
-        if self.borrow_conflicting_write(bd.left, id) && !self.bc_quiet {
-            let sp = a.at_const(bd.left).span;
-            self.errors.emit(sp.start, sp.end - sp.start, format("cannot assign to this value while it is borrowed"));
-        }
-    }
-
-    pub fn bc_call(self: &mut Self, id: NodeId) {
-        let a = self.cur_ast();
-        let callee_id = a.at_const(id).as_data.call.callee;
-        let pck = a.at_const(callee_id).kind;
-        let args = a.at_const(id).as_data.call.args;
-        // `d.free()` on a `dyn` receiver: the drop glue runs, so the value is moved (no resolved method
-        // to route through check_call_receiver's free handling).
-        if pck == NodeKind::NODE_MEMBER && !a.at_const(callee_id).as_data.member.path && args.len == 0 {
-            let mem = a.at_const(callee_id).as_data.member.member;
-            if span_is(self.mod_src(self.cur_module()), a.at_const(mem).as_data.name.text, "free") {
-                let obj = a.at_const(callee_id).as_data.member.object;
-                let ot = a.type_of(obj);
-                if ot != TYPE_NONE && self.type_at(self.strip(ot)).kind == TypeKind::TYPE_DYN {
-                    self.bc_expr(obj, false, true);
-                    self.bc_free_recv = true;
-                    self.tc_mark_move(obj);
-                    self.bc_free_recv = false;
-                    return;
-                }
-            }
-        }
-        // receiver's OBJECT is evaluated first for a member call
-        let mut recv_n = NODE_NONE;
-        if pck == NodeKind::NODE_MEMBER && !a.at_const(callee_id).as_data.member.path {
-            recv_n = a.at_const(callee_id).as_data.member.object;
-            self.bc_expr(recv_n, false, true);
-        }
-        let arg_bm = self.borrow_mark();
-        for i in 0..args.len {
-            let aid = unsafe a.list(args)[i as usize];
-            self.bc_expr(aid, false, false);
-            self.tc_mark_move(aid);
-        }
-        self.bc_call_post(id, arg_bm, self.nborrows);
+        let _ = self.borrow_conflicting_write(bd.left, id); // the loan solver owns the wording
     }
 
     /// Call post-pass over the typechecker's recorded callee: pointer-coercion erases, receiver
@@ -4488,24 +3527,6 @@ extend tc::TypeChecker {
         return false;
     }
 
-    pub fn bc_closure(self: &mut Self, id: NodeId) {
-        let a = self.cur_ast();
-        if self.nclos >= 8 {
-            return;
-        }
-        let cn = self.nclos;
-        unsafe self.clos_stack[cn as usize] = id;
-        self.nclos = cn + 1;
-        if a.at_const(id).as_data.closure.expr_body {
-            self.bc_expr(a.at_const(id).as_data.closure.body, false, false);
-            self.tc_capture_move_guard(a.at_const(id).as_data.closure.body);
-        } else {
-            self.bc_stmt(a.at_const(id).as_data.closure.body);
-        }
-        self.nclos = self.nclos - 1;
-        self.bc_closure_caps(id);
-    }
-
     /// Closure post-body pass: capture-of-moved/borrowed checks, capture moved-recording, borrow
     /// re-exposure through the closure value, and implicit mut-capture borrows. Everything the
     /// walk does after the closure body; shared with the tape replay.
@@ -4520,14 +3541,7 @@ extend tc::TypeChecker {
             if cty == TYPE_NONE || is_mut || !self.tc_type_is_free(cty) {
                 continue;
             }
-            if self.is_moved(cid) && !self.bc_quiet {
-                let sp = a.at_const(id).span;
-                self.errors.emit(
-                    sp.start,
-                    sp.end - sp.start,
-                    format("closure captures a moved value (use of moved value)"),
-                );
-            }
+            // capture-of-moved is IR-owned (CAT_C_CAP)
             for f in 0..self.nclos {
                 if self.tc_capture_index(unsafe self.clos_stack[f as usize], cid) >= 0 {
                     let sp = a.at_const(id).span;
@@ -4540,20 +3554,11 @@ extend tc::TypeChecker {
                 }
             }
             for b in 0..self.nborrows {
-                if unsafe self.borrows[b as usize].root == cid {
-                    if self.borrow_dead_after(unsafe self.borrows[b as usize], id) {
-                        self.borrow_tombstone_at(b);
-                    } else {
-                        if !self.bc_quiet {
-                            let sp = a.at_const(id).span;
-                            self.errors.emit(
-                                sp.start,
-                                sp.end - sp.start,
-                                format("cannot capture this value while it is borrowed"),
-                            );
-                        }
-                        break;
-                    }
+                if unsafe self.borrows[b as usize].root == cid && self.borrow_dead_after(
+                    unsafe self.borrows[b as usize],
+                    id,
+                ) {
+                    self.borrow_tombstone_at(b); // capture-while-borrowed is IR-owned
                 }
             }
             if self.nmoved < 1024 {
@@ -4641,7 +3646,7 @@ extend tc::TypeChecker {
                     if rk == NodeKind::NODE_LET || rk == NodeKind::NODE_PATTERN_NAME || rk == NodeKind::NODE_IDENTIFIER || rk == NodeKind::NODE_FOR || rk == NodeKind::NODE_INLINE_FOR {
                         // A free THROUGH a reference binding never reaches the Core IR free access
                         // (the receiver operand is already a reference), so that case stays noisy.
-                        if !self.bc_quiet || rty.kind == TypeKind::TYPE_REFERENCE {
+                        if rty.kind == TypeKind::TYPE_REFERENCE {
                             let rsp = a.at_const(recv).span;
                             self.errors.emit(
                                 rsp.start,

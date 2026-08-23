@@ -250,7 +250,7 @@ pub struct TypeChecker<'a> {
     pub free_derive_memo: Map<u64, u64>, // (module<<32|decl) -> 1 = not owning, 2 = derives Free (non-generic only)
     pub bc_free_recv: bool, // marking a `.free()` receiver: destruction, exempt from the ref-move rejection
     pub bc_fold_ctx: bool, // replaying a folded call: the const-move check stays loud (no IR op survives)
-    pub bc_quiet: bool, // the Core IR analysis owns this function's flow diagnostics; the walk stays silent
+    pub bc_quiet: bool, // the current body lowered: the tape replay ran and the Core IR analysis owns its flow diagnostics
     // Unsafe-expression span ranges (start<<32|end) the walk records per function; the Core IR
     // free-move rules consult them in place of the walk's unsafe_depth.
     pub bc_unsafe_spans: Vector<u64>,
@@ -6632,15 +6632,6 @@ extend TypeChecker {
             unsafe self.late[k as usize] = decl;
             self.nlate = k + 1;
         }
-    }
-
-    pub fn tc_is_uninit(self: &Self, decl: NodeId) bool {
-        for i in 0..self.nuninit {
-            if unsafe self.uninit[i as usize] == decl {
-                return true;
-            }
-        }
-        return false;
     }
 
     // ---- flow state save/set/collect ----

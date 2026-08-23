@@ -1,8 +1,9 @@
 // The Core IR constant interpreter: executes verified bodies with compact scalar
 // slots and virtual objects -- no host pointers, deterministic step and depth limits, trap = clean
-// refusal. Runs in COMPARISON mode against the established AST evaluator (the driver's gate); the
-// arithmetic mirrors the language's pinned semantics: unsigned wraps at width, signed overflow,
-// division by zero, out-of-range shifts, and MIN / -1 refuse to fold.
+// refusal. Serves the backend's const/static definitions (referenced consts evaluate on demand,
+// memoized, with cycle detection); SC_CTFE_IR still runs it in comparison mode against the
+// established AST evaluator. The arithmetic mirrors the language's pinned semantics: unsigned
+// wraps at width, signed overflow, division by zero, out-of-range shifts, and MIN / -1 refuse.
 import ast::ast as *;
 import module::loader as loader;
 import ir::core as ir;
@@ -55,6 +56,8 @@ pub struct Interp {
     pub bodies: Vector<Box<irl::Lowerer>>, // lowered callee cache (boxed: nested calls grow it)
     pub body_keys: Vector<u64>, // module << 32 | fn node
     pub call_memo: Map<u64, IVal>, // scalar results keyed over every semantic input (callee + args)
+    pub item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
+    pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
 }
 
 extend Interp as Free {
@@ -76,6 +79,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         bodies: Vector::<Box<irl::Lowerer>>::new(),
         body_keys: Vector::<u64>::new(),
         call_memo: Map::<u64, IVal>::new(),
+        item_memo: Map::<u64, IVal>::new(),
+        item_active: Vector::<u64>::new(),
     };
 }
 
@@ -89,6 +94,7 @@ pub fn eval_const_in(it: &mut Interp, m: ModuleId, cnode: NodeId, max_steps: u32
     it.failed = false;
     it.fail_span = tok::Span { start: 0, end: 0 };
     it.objs.truncate(0);
+    it.item_active.truncate(0);
     let mut lw = irl::Lowerer::new(it.pkg, m, cnode);
     if !lw.lower_const(cnode) {
         return none();
@@ -362,6 +368,46 @@ extend Interp {
         return -1;
     }
 
+    /// The value of referenced constant `(m, cnode)`, lowered and executed on demand. Memoized for
+    /// scalars; a re-entry while active is a cyclic constant dependency. Objects are NOT memoized
+    /// (their slot indices die with the evaluation that built them).
+    fn item_value(self: &mut Self, m: ModuleId, cnode: NodeId) IVal {
+        let key = m as u64 << 32 | cnode as u64;
+        switch self.item_memo.get(&key) {
+            Some(v) => {
+                return *v;
+            },
+            None => {},
+        };
+        for i in 0..self.item_active.len() {
+            if self.item_active[i] == key {
+                return self.bail(); // cyclic constant dependency
+            }
+        }
+        let a = unsafe &*self.p().module_ast_const(m);
+        if a.at_const(cnode).kind != NodeKind::NODE_CONST {
+            return self.bail();
+        }
+        let cd = a.at_const(cnode).as_data.const_def;
+        if cd.value == NODE_NONE || cd.is_extern || cd.is_static_mut {
+            return self.bail();
+        }
+        self.item_active.push(key);
+        let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
+        let mut r = none();
+        if lw.lower_const(cnode) {
+            let args = Vector::<IVal>::new();
+            r = self.run(&lw.body, &args);
+        } else {
+            let _ = self.bail();
+        }
+        let _ = self.item_active.pop();
+        if !self.failed && r.kind != IV_OBJ && r.kind != IV_NONE {
+            self.item_memo.insert(key, r);
+        }
+        return r;
+    }
+
     // Resolve a place to (object slot vector index, slot index) or a bare local (obj == -1).
     fn resolve_place(
         self: &mut Self,
@@ -373,8 +419,16 @@ extend Interp {
     ) bool {
         let pl = *b.places.at(pid as usize);
         if b.locals.at(pl.base as usize).storage == ir::LS_STATIC_REF {
-            self.failed = true;
-            return false;
+            // a referenced item: materialize its value into the local slot on first touch, so
+            // projections read through it like any other local
+            if locals[pl.base as usize].kind == IV_NONE {
+                let it = b.locals.at(pl.base as usize).item;
+                let v = self.item_value(it.module, it.node);
+                if self.failed {
+                    return false;
+                }
+                locals.set(pl.base as usize, v);
+            }
         }
         *obj = -1;
         *slot = pl.base;
@@ -502,6 +556,12 @@ extend Interp {
         }
         if c.kind == ir::CK_UNIT {
             return IVal { kind: IV_UNIT, ty: c.ty, i: 0, f: 0.0 };
+        }
+        if c.kind == ir::CK_ITEM {
+            if c.targ_len != 0 {
+                return self.bail(); // generic associated consts stay with the established evaluator
+            }
+            return self.item_value(c.item.module, c.item.node);
         }
         if c.kind == ir::CK_FLOAT {
             let sp = c.raw;

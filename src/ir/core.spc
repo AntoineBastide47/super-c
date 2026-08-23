@@ -109,7 +109,6 @@ pub const TP_REF: u8 = 14;
 pub const TP_CAST_ERASE: u8 = 15; // node = cast expression operand
 pub const TP_SLICE: u8 = 16;
 pub const TP_CLOSURE: u8 = 17;
-pub const TP_DEFER: u8 = 18; // node = deferred expr
 pub const TP_FLOW_SAVE: u8 = 19;
 pub const TP_FLOW_ELSE: u8 = 20;
 pub const TP_FLOW_JOIN: u8 = 21;
@@ -121,11 +120,9 @@ pub const TP_MATCH_PRE: u8 = 26; // aux 1 = value position
 pub const TP_ARM: u8 = 27; // node = arm, aux = arm index
 pub const TP_ARM_END: u8 = 28;
 pub const TP_MATCH_POST: u8 = 29;
-pub const TP_WALK_EXPR: u8 = 30; // escape hatch: replay walks the subtree
-pub const TP_WALK_STMT: u8 = 31;
-/// A call FOLDED to its value: no IR op survives for the analysis, so the replay walks the call
-/// with the const-move category loud (the one flow check a fold would otherwise erase).
-pub const TP_WALK_FOLD: u8 = 32;
+/// An argument a FOLDED call consumed: no IR op survives for the analysis, so the replay marks
+/// the move directly with the const-move category loud (the one flow check a fold erases).
+pub const TP_CONST_MOVE: u8 = 30;
 
 pub const RV_REF: u8 = 1; // &place; a = PlaceId, b = 1 when mutable
 pub const RV_ADDR: u8 = 2; // raw address of place; a = PlaceId, b = 1 when *mut
@@ -173,6 +170,8 @@ pub const IN_NEW: u8 = 9; // heap allocation of the initializer operand (`new T 
 pub const IN_ASM: u8 = 10;
 pub const IN_SAFEPOINT: u8 = 11; // loop-body preemption marker; printed only for runtime-using programs
 pub const IN_DANGLING: u8 = 12; // non-null aligned no-storage pointer (`dangling::<T>()`; ZST buffers)
+pub const IN_DYN_TID: u8 = 13; // dyn_cast type test: operand = the fat value, target = the queried &T
+pub const IN_DYN_DATA: u8 = 14; // dyn_cast payload: operand = the fat value, target = the result &T
 
 // Field order packs to 24 bytes (kind/c share the item's tail padding); bodies hold one record
 // per expression, so the two byte flags sit last.

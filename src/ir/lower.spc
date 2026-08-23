@@ -261,6 +261,31 @@ extend Lowerer {
         }
     }
 
+    /// Move the events recorded at `[from..len)` to position `at`, sliding `[at..from)` right.
+    /// Lets a construct whose CFG order differs from walk order (a do-while tail condition) record
+    /// its events in place and land them where the replay expects them. No-op when nothing landed.
+    fn tape_splice(self: &mut Self, at: usize, from: usize) {
+        let n = self.tape.len();
+        if from <= at || from >= n {
+            return;
+        }
+        let mut seg = Vector::<u64>::new();
+        seg.reserve(n - from);
+        for i in from..n {
+            seg.push(self.tape[i]);
+        }
+        let mut w = n;
+        let mut r = from;
+        while r > at {
+            r -= 1;
+            w -= 1;
+            self.tape.set(w, self.tape[r]);
+        }
+        for i in 0..seg.len() {
+            self.tape.set(at + i, seg[i]);
+        }
+    }
+
     fn note_unsafe(self: &mut Self, id: NodeId) {
         let sp = self.f.node(id).span;
         self.unsafe_spans.push(sp.start as u64 << 32 | sp.end as u64);
@@ -509,16 +534,18 @@ extend Lowerer {
     }
 
     // Emit defer bodies (innermost first) down to `base` WITHOUT popping (early exits leave the
-    // scope stack intact for the code that follows the branch point).
+    // scope stack intact for the code that follows the branch point). Events flow at EVERY exit:
+    // the replay re-marks the defer's moves/borrows per exit, exactly as the walk's scope-close
+    // re-walk did, each body bracketed by a borrow mark.
     fn emit_defers_down_to(self: &mut Self, base: usize) {
-        self.tape_mute += 1;
         let mut i = self.defers.len();
         while i > base {
             i -= 1;
             let d = self.defers[i];
+            self.tp(ir::TP_MARK_PUSH, 0, d);
             self.lower_stmt(self.f.node(d).as_data.single.value);
+            self.tp(ir::TP_MARK_POP, 0, d);
         }
-        self.tape_mute -= 1;
     }
 
     fn bind(self: &mut Self, decl: NodeId, l: ir::LocalId) {
@@ -827,7 +854,6 @@ extend Lowerer {
         } else if k == NodeKind::NODE_CONTINUE {
             self.lower_continue(id);
         } else if k == NodeKind::NODE_DEFER {
-            self.tp(ir::TP_DEFER, 0, self.f.node(id).as_data.single.value);
             self.defers.push(id);
         } else if k == NodeKind::NODE_MATCH {
             let _ = self.lower_match(id, ir::IR_NONE);
@@ -838,12 +864,6 @@ extend Lowerer {
             // (a `const fn` call or a value expression). An initializer calling a PLAIN fn makes
             // it a RUNTIME local: evaluated here, owned here, freed at scope exit.
             let cdf = self.f.node(id).as_data.const_def;
-            if cdf.value != NODE_NONE {
-                self.tp(ir::TP_MARK_PUSH, 0, id);
-                self.tp(ir::TP_WALK_EXPR, 0, cdf.value);
-                self.tp(ir::TP_MARK_POP, 0, id);
-            }
-            self.tape_mute += 1;
             let mut runtime = false;
             if cdf.value != NODE_NONE && self.f.node(cdf.value).kind == NodeKind::NODE_CALL {
                 let cal = self.f.node(cdf.value).as_data.call;
@@ -858,7 +878,11 @@ extend Lowerer {
                     }
                 }
             }
+            // Runtime initializer: ordinary events flow (the replay sees the same helper sequence
+            // the walk produced). Folded initializer: no IR and no events -- the const domain's
+            // own CTFE rules (traps, use-after-free, budgets) police it.
             if runtime {
+                self.tp(ir::TP_MARK_PUSH, 0, id);
                 let vop = self.lower_expr(cdf.value);
                 if vop != ir::IR_NONE {
                     let ty9 = self.nty(cdf.value);
@@ -879,8 +903,8 @@ extend Lowerer {
                     let rv9 = self.rv_use(vop, ty9);
                     self.assign(pl9, rv9, self.f.node(id).span);
                 }
+                self.tp(ir::TP_MARK_POP, 0, id);
             }
-            self.tape_mute -= 1;
         } else if k == NodeKind::NODE_STATIC_ASSERT || k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_TYPE_ALIAS {
             // Item statements: local consts fold at CTFE; nested items own their own bodies.
         } else {
@@ -1172,12 +1196,9 @@ extend Lowerer {
         let d = self.f.node(id).as_data.while_stmt;
         let sp = self.f.node(id).span;
         self.tp(ir::TP_LOOP_PUSH, 0, id);
-        if d.is_do && d.condition != NODE_NONE {
-            // the walk checks a do-while condition FIRST; the lowered tail below is muted
-            self.tp(ir::TP_MARK_PUSH, 0, id);
-            self.tp(ir::TP_WALK_EXPR, 0, d.condition);
-            self.tp(ir::TP_MARK_POP, 0, id);
-        }
+        // A do-while condition replays FIRST (walk order) but lowers at the TAIL (CFG order): the
+        // tail records its events in place and tape_splice moves them here.
+        let cond_at = self.tape.len();
         let head = self.open_block();
         let body_b = self.open_block();
         let exit = self.open_block();
@@ -1224,9 +1245,11 @@ extend Lowerer {
             // tail: condition decides back-edge vs exit; `head` is the continue target
             self.seal(self.goto_term(head, sp), head);
             if d.condition != NODE_NONE {
-                self.tape_mute += 1;
+                let cond_from = self.tape.len();
+                self.tp(ir::TP_MARK_PUSH, 0, id);
                 let cop = self.lower_expr(d.condition);
-                self.tape_mute -= 1;
+                self.tp(ir::TP_MARK_POP, 0, id);
+                self.tape_splice(cond_at, cond_from);
                 if cop == ir::IR_NONE {
                     return;
                 }
@@ -2327,7 +2350,19 @@ extend Lowerer {
                 self.proj_frames.push(
                     ProjFrame { binder: id, idx: k, vidx: vk, mode: 2, sub0: sub0, sub1: sub1, owner_st: owner },
                 );
+                // first copy = the replay's canonical iteration; later copies mute their events
+                let muted9 = k != 0;
+                if muted9 {
+                    self.tape_mute += 1;
+                } else {
+                    self.tp(ir::TP_BODY_START, 1, id);
+                }
                 self.lower_stmt(d.body);
+                if muted9 {
+                    self.tape_mute -= 1;
+                } else {
+                    self.tp(ir::TP_BODY_END, 0, id);
+                }
                 let _ = self.proj_frames.pop();
                 if self.err.len() != 0 {
                     return true; // consumed (error recorded)
@@ -2363,7 +2398,19 @@ extend Lowerer {
             self.proj_frames.push(
                 ProjFrame { binder: id, idx: k, vidx: 0, mode: mode, sub0: sub0, sub1: sub1, owner_st: owner },
             );
+            // first copy = the replay's canonical iteration; later copies mute their events
+            let muted9 = k != 0;
+            if muted9 {
+                self.tape_mute += 1;
+            } else {
+                self.tp(ir::TP_BODY_START, 1, id);
+            }
             self.lower_stmt(d.body);
+            if muted9 {
+                self.tape_mute -= 1;
+            } else {
+                self.tp(ir::TP_BODY_END, 0, id);
+            }
             let _ = self.proj_frames.pop();
             if self.err.len() != 0 {
                 return true;
@@ -2493,11 +2540,13 @@ extend Lowerer {
                 None => {},
             };
             if !resolved && self.f.res(cd.callee).node == NODE_NONE {
-                // binder/reflect expansion re-lowers the body per iteration; the walk sees one loop
-                self.tp(ir::TP_WALK_STMT, 0, id);
-                self.tape_mute += 1;
+                // binder/reflect expansion lowers the body per iteration; the replay sees ONE loop:
+                // the first copy's events are the canonical iteration, later copies are muted
+                self.tp(ir::TP_LOOP_PUSH, 1, id);
+                self.tp(ir::TP_MARK_PUSH, 0, id);
                 if self.expand_binder(id) {
-                    self.tape_mute -= 1;
+                    self.tp(ir::TP_MARK_POP, 0, id);
+                    self.tp(ir::TP_LOOP_POP, 0, id);
                     return;
                 }
                 self.body.has_reflect = true;
@@ -2542,8 +2591,11 @@ extend Lowerer {
                     },
                     sp,
                 );
+                self.tp(ir::TP_BODY_START, 1, id);
                 self.lower_stmt(d.body);
-                self.tape_mute -= 1;
+                self.tp(ir::TP_BODY_END, 0, id);
+                self.tp(ir::TP_MARK_POP, 0, id);
+                self.tp(ir::TP_LOOP_POP, 0, id);
                 return;
             }
         }
@@ -2597,9 +2649,10 @@ extend Lowerer {
                 self.body.has_reflect = true;
             }
             if lok && hok {
-                // physical unroll: the body lowers once per iteration; the walk sees one loop
-                self.tp(ir::TP_WALK_STMT, 0, id);
-                self.tape_mute += 1;
+                // physical unroll: the body lowers once per iteration; the replay sees ONE loop
+                // whose canonical iteration is the first copy (later copies mute their events)
+                self.tp(ir::TP_LOOP_PUSH, 1, id);
+                self.tp(ir::TP_MARK_PUSH, 0, id);
                 if rd.inclusive {
                     hi += 1;
                 }
@@ -2633,13 +2686,25 @@ extend Lowerer {
                     );
                     let rvc = self.rv_use(cvo, ity);
                     self.assign(self.place_of_local(l), rvc, sp);
+                    let muted9 = v != lo;
+                    if muted9 {
+                        self.tape_mute += 1;
+                    } else {
+                        self.tp(ir::TP_BODY_START, 1, id);
+                    }
                     self.lower_stmt(d.body);
+                    if muted9 {
+                        self.tape_mute -= 1;
+                    } else {
+                        self.tp(ir::TP_BODY_END, 0, id);
+                    }
                     if self.err.len() != 0 {
                         return;
                     }
                     v += 1;
                 }
-                self.tape_mute -= 1;
+                self.tp(ir::TP_MARK_POP, 0, id);
+                self.tp(ir::TP_LOOP_POP, 0, id);
                 return;
             }
         }
@@ -4003,6 +4068,38 @@ extend Lowerer {
         }
     }
 
+    // The variant of enum-carrier type `t` spelled `name` (dyn_cast's None arm).
+    fn carrier_variant_named(self: &Self, t: TypeId, name: str) DefId {
+        let y = *self.f.ty(t);
+        let mut em: ModuleId = 0;
+        let mut ed = NODE_NONE;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.f.instance(y.as_data.inst);
+            em = it.module;
+            ed = it.decl;
+        } else if y.kind == TypeKind::TYPE_ENUM {
+            em = y.module;
+            ed = y.as_data.decl;
+        }
+        if ed == NODE_NONE {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        let a = unsafe &*(&*self.pkg).module_ast_const(em);
+        if a.at_const(ed).kind != NodeKind::NODE_ENUM {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        let src = unsafe (&*self.pkg).modules.at(em as usize).source.as_str();
+        let ms = a.at_const(ed).as_data.aggregate.members;
+        for j in 0..ms.len {
+            let vn = unsafe a.list(ms)[j as usize];
+            let nsp = a.at_const(a.at_const(vn).as_data.variant.name).as_data.name.text;
+            if src.slice(nsp.start as usize, nsp.end as usize) == name {
+                return DefId { module: em, node: vn };
+            }
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
     fn lower_binary(self: &mut Self, id: NodeId) ir::OperandId {
         let d = self.f.node(id).as_data.binary;
         let ty = self.nty(id);
@@ -4226,7 +4323,13 @@ extend Lowerer {
                     if scalar8 && !fd8.is_extern && fd8.body != NODE_NONE && self.maybe_const(id) {
                         let v8 = cev8.eval(self.module, id);
                         if v8.kind == ce::CONST_INT || v8.kind == ce::CONST_BOOL {
-                            self.tp(ir::TP_WALK_FOLD, 0, id); // folded: the walk still sees the call
+                            // folded: the replay still sees the call boundary, and each argument's
+                            // consumption is marked explicitly (no IR op survives to carry it)
+                            self.tp(ir::TP_CALL_MARK, 0, id);
+                            for ai8 in 0..d.args.len {
+                                self.tp(ir::TP_CONST_MOVE, 0, unsafe self.f.list(d.args)[ai8 as usize]);
+                            }
+                            self.tp(ir::TP_CALL, 0, id);
                             let ck8: u8 = if v8.kind == ce::CONST_BOOL {
                                 ir::CK_BOOL;
                             } else {
@@ -4257,6 +4360,95 @@ extend Lowerer {
                 bt9 = unsafe mu.args[0];
             }
             return self.intrinsic_value(ir::IN_TYPE_INFO, bt9, ty, sp);
+        }
+        // `dyn_cast::<T>(v)`: ordinary IR -- a vtable type-id test branching into Some/None
+        // construction, so every downstream pass (drops, borrows, backend) sees plain code.
+        if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "dyn_cast") && d.args.len == 1 {
+            let av = self.lower_expr(unsafe self.f.list(d.args)[0]);
+            if av == ir::IR_NONE {
+                return ir::IR_NONE;
+            }
+            let oy = *self.f.ty(ty);
+            if oy.kind != TypeKind::TYPE_INSTANCE {
+                self.fail_at("dyn-cast-type", id);
+                return ir::IR_NONE;
+            }
+            let oit = *self.f.instance(oy.as_data.inst);
+            if oit.n == 0 {
+                self.fail_at("dyn-cast-type", id);
+                return ir::IR_NONE;
+            }
+            let rt9 = oit.args[0]; // the &T payload of the Option result
+            let mut sord: i64 = -1;
+            let mut svd = DefId { module: 0, node: NODE_NONE };
+            self.carrier_ok_variant(ty, &mut sord, &mut svd);
+            let nvd = self.carrier_variant_named(ty, "None");
+            if sord < 0 || nvd.node == NODE_NONE {
+                self.fail_at("dyn-cast-carrier", id);
+                return ir::IR_NONE;
+            }
+            let bt9 = Ast::builtin(BuiltinType::BT_BOOL);
+            let fl = self.temp(bt9, sp);
+            let mut argv = self.avget();
+            argv.push(av);
+            let fstart = self.pool_ops(&argv);
+            self.avput(argv);
+            self.assign(
+                self.place_of_local(fl),
+                ir::Rvalue {
+                    kind: ir::RV_INTRINSIC,
+                    a: fstart,
+                    b: 1,
+                    c: ir::IN_DYN_TID,
+                    target: rt9,
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
+                sp,
+            );
+            let res = self.temp(ty, sp);
+            let rpl = self.place_of_local(res);
+            let some_b = self.open_block();
+            let none_b = self.open_block();
+            let join = self.open_block();
+            let flc = self.copy_op(self.place_of_local(fl));
+            self.branch_bool(flc, some_b, none_b, sp);
+            let mut argd = self.avget();
+            argd.push(av);
+            let dstart = self.pool_ops(&argd);
+            self.avput(argd);
+            let dv = self.temp(rt9, sp);
+            self.assign(
+                self.place_of_local(dv),
+                ir::Rvalue {
+                    kind: ir::RV_INTRINSIC,
+                    a: dstart,
+                    b: 1,
+                    c: ir::IN_DYN_DATA,
+                    target: rt9,
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
+                sp,
+            );
+            let mut sargs = self.avget();
+            sargs.push(self.copy_op(self.place_of_local(dv)));
+            let sv = self.finish_aggregate(ir::AGG_VARIANT, svd, &sargs, ty, sp);
+            self.avput(sargs);
+            if sv == ir::IR_NONE {
+                return ir::IR_NONE;
+            }
+            let srv = self.rv_use(sv, ty);
+            self.assign(rpl, srv, sp);
+            self.seal(self.goto_term(join, sp), none_b);
+            let nargs = self.avget();
+            let nv = self.finish_aggregate(ir::AGG_VARIANT, nvd, &nargs, ty, sp);
+            self.avput(nargs);
+            if nv == ir::IR_NONE {
+                return ir::IR_NONE;
+            }
+            let nrv = self.rv_use(nv, ty);
+            self.assign(rpl, nrv, sp);
+            self.seal(self.goto_term(join, sp), join);
+            return self.copy_op(rpl);
         }
         if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "zeroed") {
             return self.intrinsic_value(ir::IN_ZEROED, 0, ty, sp);
@@ -5013,28 +5205,52 @@ extend Lowerer {
         let d = self.f.node(id).as_data.va_op;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
-        let ik: u8 = if d.op == VA_START {
-            ir::IN_VA_START;
-        } else if d.op == VA_ARG {
-            ir::IN_VA_ARG;
-        } else {
-            ir::IN_VA_END;
-        };
+        if d.op == VA_START || d.op == VA_END {
+            // Both write the `va_list` itself (va_start also INITIALIZES it -- the init analysis
+            // must see the write, never a read of the not-yet-started list), so the list is the
+            // assignment's PLACE and the C prints the macro over that lvalue.
+            let apl = self.lower_place_or_spill(d.ap);
+            if apl == ir::IR_NONE {
+                return ir::IR_NONE;
+            }
+            let mut argv = self.avget();
+            if d.op == VA_START && d.extra != NODE_NONE {
+                let op = self.lower_expr(d.extra);
+                if op == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                argv.push(op);
+            }
+            let start = self.pool_ops(&argv);
+            let n = argv.len() as u32;
+            self.avput(argv);
+            let ik: u8 = if d.op == VA_START {
+                ir::IN_VA_START;
+            } else {
+                ir::IN_VA_END;
+            };
+            self.assign(
+                apl,
+                ir::Rvalue {
+                    kind: ir::RV_INTRINSIC,
+                    a: start,
+                    b: n,
+                    c: ik,
+                    target: TYPE_NONE,
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
+                sp,
+            );
+            return self.unit_op(ty, sp);
+        }
+        // va_arg(ap, T): the requested type is the expression's own type; `extra` is that type's
+        // syntax, never an expression to lower.
         let mut argv = self.avget();
-        if d.ap != NODE_NONE {
-            let op = self.lower_expr(d.ap);
-            if op == ir::IR_NONE {
-                return ir::IR_NONE;
-            }
-            argv.push(op);
+        let op = self.lower_expr(d.ap);
+        if op == ir::IR_NONE {
+            return ir::IR_NONE;
         }
-        if d.extra != NODE_NONE {
-            let op = self.lower_expr(d.extra);
-            if op == ir::IR_NONE {
-                return ir::IR_NONE;
-            }
-            argv.push(op);
-        }
+        argv.push(op);
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
         self.avput(argv);
@@ -5046,7 +5262,7 @@ extend Lowerer {
                 kind: ir::RV_INTRINSIC,
                 a: start,
                 b: n,
-                c: ik,
+                c: ir::IN_VA_ARG,
                 target: ty,
                 item: DefId { module: 0, node: NODE_NONE },
             },

@@ -1,7 +1,7 @@
-// Production flow diagnostics from the Core IR loan/move analysis. `bc_fn` calls `bc_ir_collect`
-// before the AST walk: on success the walk runs silent (`bc_quiet`) for the flow-owned categories
-// and these records land in its place, worded exactly as the walk words them. A body that fails to
-// lower falls back to the noisy walk, so no function ever goes unchecked.
+// Production flow diagnostics from the Core IR loan/move analysis. `bc_fn` lowers every body,
+// replays its event tape (the helper-call sequence the old walk made), then analyzes the lowered
+// bodies and emits the flow categories, worded exactly as the walk worded them. A body that fails
+// to lower is a hard error (bc_lower_err) -- no body ever goes unchecked.
 import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
@@ -21,7 +21,7 @@ pub struct FlowErr {
 }
 
 // Nesting stacks for the walk-tape replay (one per strictly-nested event family). Pooled in
-// BorrowCtx; pre/acc/ovf are depth-indexed SLOTS (never popped) so FlowState is copied row-wise
+// BorrowCtx; pre/acc are depth-indexed SLOTS (never popped) so FlowState is copied row-wise
 // by save/clear instead of whole-struct by push.
 pub struct RepSt {
     pub bms: Vector<u32>,
@@ -29,7 +29,6 @@ pub struct RepSt {
     pub mbm: Vector<u32>,
     pub pre: Vector<tc::FlowState>,
     pub acc: Vector<tc::FlowState>,
-    pub ovf: Vector<u8>,
     pub seg: Vector<u64>, // start<<32 | nmoved0<<16 | nborrows0
     pub fdepth: usize,
 }
@@ -42,7 +41,6 @@ extend RepSt {
             mbm: Vector::<u32>::new(),
             pre: Vector::<tc::FlowState>::new(),
             acc: Vector::<tc::FlowState>::new(),
-            ovf: Vector::<u8>::new(),
             seg: Vector::<u64>::new(),
             fdepth: 0,
         };
@@ -214,14 +212,32 @@ const CAT_F_CAP: u8 = 16; // Free capture moved out of its closure
 const CAT_F_CONST: u8 = 17; // owning const moved
 
 extend tc::TypeChecker {
-    /// Lower `fnid` and its closures BEFORE the walk (whose capture analysis the facts read).
-    /// False = a body did not lower; the caller runs the noisy walk instead. Lowerers come from
+    /// A body the lowering cannot express is a hard error (no body may go unchecked, and no other
+    /// checker exists): reported at the failing construct with the lowerer's reason slug.
+    fn bc_lower_err(self: &mut Self, lw: &irl::Lowerer, owner: NodeId) {
+        let a = self.cur_ast();
+        let sp = if lw.err_node != NODE_NONE {
+            a.at_const(lw.err_node).span;
+        } else {
+            a.at_const(owner).span;
+        };
+        self.errors.emit(
+            sp.start,
+            sp.end - sp.start,
+            format("cannot borrow-check this body: unsupported construct ({})", lw.err),
+        );
+        self.errors.note(format("this is a compiler limitation; please report it"));
+    }
+
+    /// Lower `fnid` and its closures; their tapes and facts drive the whole borrow pass.
+    /// False = a body did not lower (reported here as an error). Lowerers come from
     /// `ctx.lower_pool` when available (entry re-seeds them), so steady state allocates nothing.
     pub fn bc_ir_lower(self: &mut Self, fnid: NodeId, ctx: &mut BorrowCtx, bodies: &mut Vector<irl::Lowerer>) bool {
         let pkg = self.package as *const loader::Package;
         let m = self.cur_module();
         let mut lw = bc_lw_take(ctx, pkg, m, fnid);
         if !lw.lower_fn(fnid) {
+            self.bc_lower_err(&lw, fnid);
             ctx.lower_pool.push(lw);
             return false;
         }
@@ -244,6 +260,7 @@ extend tc::TypeChecker {
                 }
                 bodies.push(cl);
             } else {
+                self.bc_lower_err(&cl, cn);
                 ctx.lower_pool.push(cl);
                 ok = false;
             }

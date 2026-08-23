@@ -1190,6 +1190,13 @@ extend CEmit {
         if np9 == 0 {
             self.out.push_str("void");
         }
+        {
+            // a DEFINED variadic keeps its `...` tail (va_start in a fixed-args fn is a C error)
+            let on9 = self.p().module_ast_const(b.owner.module).at_const(b.owner.node);
+            if on9.kind == NodeKind::NODE_FUNCTION && on9.as_data.function.is_variadic && np9 != 0 {
+                self.out.push_str(", ...");
+            }
+        }
         self.out.push_str(") {\n");
         for k in 0..arrcp.len() {
             let l = arrcp[k];
@@ -4797,6 +4804,22 @@ extend CEmit {
                 if self.safepoints_on(b.module) {
                     self.out.push_str("  if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();\n");
                 }
+                return true;
+            }
+            if rv0.kind == ir::RV_INTRINSIC && (rv0.c as u32 == ir::IN_VA_START as u32 || rv0.c as u32 == ir::IN_VA_END as u32) {
+                // the assignment's place IS the va_list lvalue the macro mutates
+                let mut mac = String::from_str(if_s(rv0.c as u32 == ir::IN_VA_START as u32, "  va_start(", "  va_end("));
+                if !self.emit_place(b, s.place, &mut mac) {
+                    return false;
+                }
+                if rv0.c as u32 == ir::IN_VA_START as u32 && rv0.b != 0 {
+                    mac.push_str(", ");
+                    if !self.emit_operand(b, b.oper_pool[rv0.a as usize], &mut mac) {
+                        return false;
+                    }
+                }
+                mac.push_str(");\n");
+                self.out.push_string(&mac);
                 return true;
             }
         }
@@ -8684,6 +8707,57 @@ extend CEmit {
                     dst.push_str("){0}");
                 }
                 return ok;
+            }
+            if k == ir::IN_VA_ARG as u32 {
+                let mut ts = String::new();
+                if !self.ty_c(b.module, rv.target, "", &mut ts) {
+                    return self.fail("va-arg");
+                }
+                dst.push_str("va_arg(");
+                if !self.emit_operand(b, b.oper_pool[rv.a as usize], dst) {
+                    return false;
+                }
+                dst.push_str(", ");
+                dst.push_string(&ts);
+                dst.push_str(")");
+                return true;
+            }
+            if k == ir::IN_DYN_TID as u32 {
+                // vtable identity test: the tid slot holds the concrete source type's mangled
+                // spelling (dyn_pair), so equality with the queried type's spelling decides
+                let mut rmT = b.module;
+                let mut rtT = rv.target;
+                self.rty(b, rv.target, &mut rmT, &mut rtT);
+                let yT = *self.p().module_ast_const(rmT).type_at(rtT);
+                if yT.kind != TypeKind::TYPE_REFERENCE {
+                    return self.fail("dyn-tid");
+                }
+                let mut spell = String::new();
+                if !self.mg.type_m(rmT, yT.as_data.elem, &mut spell) {
+                    return self.fail("dyn-tid");
+                }
+                dst.push_str("(strcmp((");
+                if !self.emit_operand(b, b.oper_pool[rv.a as usize], dst) {
+                    return false;
+                }
+                dst.push_str(").vt->tid, \"");
+                dst.push_string(&spell);
+                dst.push_str("\") == 0)");
+                return true;
+            }
+            if k == ir::IN_DYN_DATA as u32 {
+                let mut ts = String::new();
+                if !self.ty_c(b.module, rv.target, "", &mut ts) {
+                    return self.fail("dyn-data");
+                }
+                dst.push_str("((");
+                dst.push_string(&ts);
+                dst.push_str(")(");
+                if !self.emit_operand(b, b.oper_pool[rv.a as usize], dst) {
+                    return false;
+                }
+                dst.push_str(").data)");
+                return true;
             }
             return self.fail("intrinsic");
         }
