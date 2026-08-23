@@ -13,6 +13,7 @@ import resolver::resolver as res;
 import hir::lower as hirl;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
+import ir::lower as irl;
 import consteval::consteval as ce;
 import driver::emit as demit;
 import driver::test as dtest;
@@ -187,11 +188,14 @@ fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
         i = i + 1;
     }
     ceval.flush_asserts(ignore_assert, null);
-    let _ = demit::borrowck_all(&mut p);
+    ceval.all_typed = true;
+    ceval.record_folds = true; // final evaluator state before the first lowering, as the driver sets it
+    let mut irkeep = irl::Keep::new();
+    let _ = demit::borrowck_all(&mut p, &mut irkeep);
 
     let tplan = dtest::TestPlan::new(n);
     let mut o = demit::CemitOut::new(n);
-    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o);
+    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut irkeep);
 
     dutil::write_super_rt(dir);
     write_c(dir, "__sc_types.h", o.types_h.as_str());
@@ -315,12 +319,15 @@ fn transpile_once() Timing {
         i = i + 1;
     }
     ceval.flush_asserts(ignore_assert, null);
+    ceval.all_typed = true;
+    ceval.record_folds = true; // final evaluator state before the first lowering, as the driver sets it
     let a3 = time::cpu_seconds();
     let c3 = unsafe shim::sc_cpu_cycles();
     let h3 = unsafe shim::sc_alloc_count();
     let y3 = unsafe shim::sc_alloc_bytes();
 
-    let _ = demit::borrowck_all(&mut p); // the real stage, so the lane measures what ships
+    let mut irkeep = irl::Keep::new();
+    let _ = demit::borrowck_all(&mut p, &mut irkeep); // the real stage, so the lane measures what ships
     let a3b = time::cpu_seconds();
     let c3b = unsafe shim::sc_cpu_cycles();
     let h3b = unsafe shim::sc_alloc_count();
@@ -330,7 +337,7 @@ fn transpile_once() Timing {
     {
         let tplan = dtest::TestPlan::new(n);
         let mut o = demit::CemitOut::new(n);
-        demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o);
+        demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut irkeep);
         // write the whole package to the sink FILE exactly as a build does, so out_bytes is real
         unsafe stdio::fwrite(o.types_h.as_ptr(), 1, o.types_h.len(), f);
         unsafe stdio::fwrite(o.protos_h.as_ptr(), 1, o.protos_h.len(), f);

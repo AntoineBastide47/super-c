@@ -123,6 +123,9 @@ pub const TP_ARM_END: u8 = 28;
 pub const TP_MATCH_POST: u8 = 29;
 pub const TP_WALK_EXPR: u8 = 30; // escape hatch: replay walks the subtree
 pub const TP_WALK_STMT: u8 = 31;
+/// A call FOLDED to its value: no IR op survives for the analysis, so the replay walks the call
+/// with the const-move category loud (the one flow check a fold would otherwise erase).
+pub const TP_WALK_FOLD: u8 = 32;
 
 pub const RV_REF: u8 = 1; // &place; a = PlaceId, b = 1 when mutable
 pub const RV_ADDR: u8 = 2; // raw address of place; a = PlaceId, b = 1 when *mut

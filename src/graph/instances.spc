@@ -98,6 +98,9 @@ pub struct InstGraph {
     low: irl::Lowerer,
     wcache: Vector<WalkCache>, // parallel to `kept`
     wt_seen: Map<u64, u64>, // scratch: TypeIds already in the cache being built
+    /// Borrowck's finished lowerings (null = none): `body_idx` moves an entry into `kept` on first
+    /// demand instead of lowering the body a second time.
+    keep: *mut irl::Keep,
     pub bodies: u64, // walked body count (roots + expansions)
     pub overflow: bool, // budget exhausted; the report marks itself partial
     budget: u32,
@@ -154,8 +157,9 @@ pub fn skey_norm(a: &Ast, t: TypeId, depth: i32) u64 {
 }
 
 extend InstGraph {
-    pub fn new(pkg: *const loader::Package) InstGraph {
+    pub fn new(pkg: *const loader::Package, keep: *mut irl::Keep) InstGraph {
         return InstGraph {
+            keep: keep,
             pkg: pkg,
             recs: Vector::<InstRec>::new(),
             keys: Vector::<ArgKey>::new(),
@@ -1166,6 +1170,28 @@ extend InstGraph {
         };
         if hit != -2 {
             return hit;
+        }
+        if self.keep != null {
+            let kp = unsafe &mut *self.keep;
+            let ki = switch kp.ix.get(&key) {
+                Some(v) => (*v) as i64,
+                None => (-1) as i64,
+            };
+            if ki >= 0 {
+                let klw = replace(&mut kp.kept[ki as usize], irl::Lowerer::new(self.pkg, m, node));
+                let slot = self.kept.len() as i64;
+                self.kept.push(klw);
+                self.wcache.push(
+                    WalkCache {
+                        built: false,
+                        tys: Vector::<TypeId>::new(),
+                        consts: Vector::<u32>::new(),
+                        calls: Vector::<u32>::new(),
+                    },
+                );
+                self.kept_ix.insert(key, slot as u64);
+                return slot;
+            }
         }
         self.low.retarget(m);
         let ok = if closure {

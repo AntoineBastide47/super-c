@@ -366,7 +366,7 @@ pub fn compile_c(src: str) CompiledC {
     // concatenated so prelude definitions (`str`, monomorphized Slice/Box, ...) are inspectable.
     let tplan = dtest::TestPlan::new(n);
     let mut o = demit::CemitOut::new(n);
-    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o);
+    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, null);
     if o.skips != 0 {
         out.errors = o.skips as usize;
         return out;
@@ -590,7 +590,7 @@ fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled)
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    t.borrowck();
+    t.borrowck_solo();
     if i == cap {
         let c = t.errors.errors.len();
         if c > 0 {

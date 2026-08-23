@@ -95,6 +95,32 @@ pub struct Lowerer {
     ret_locals: u32, // first return-slot local
 }
 
+/// Package-lifetime store of finished lowerings, keyed `skey_mix(0, module << 32 | owner)`:
+/// borrowck adopts every body it lowers so the instance graph starts from these instead of
+/// lowering the package a second time. Entries move out on first demand and never return.
+pub struct Keep {
+    pub ix: Map<u64, u64>,
+    pub kept: Vector<Lowerer>,
+}
+
+extend Keep {
+    pub fn new() Keep {
+        return Keep { ix: Map::<u64, u64>::new(), kept: Vector::<Lowerer>::new() };
+    }
+
+    pub fn put(self: &mut Self, src: &Lowerer) {
+        let d = src.body.owner;
+        let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
+        if self.ix.contains_key(&key) {
+            return;
+        }
+        let mut klw = Lowerer::new(src.pkg, d.module, d.node);
+        klw.adopt(src);
+        self.ix.insert(key, self.kept.len() as u64);
+        self.kept.push(klw);
+    }
+}
+
 // Decode call_info: (fmod << 40 | fdecl << 8 | skip).
 const fn ci_module(v: u64) ModuleId {
     return (v >> 40) as ModuleId;
@@ -4200,7 +4226,7 @@ extend Lowerer {
                     if scalar8 && !fd8.is_extern && fd8.body != NODE_NONE && self.maybe_const(id) {
                         let v8 = cev8.eval(self.module, id);
                         if v8.kind == ce::CONST_INT || v8.kind == ce::CONST_BOOL {
-                            self.tp(ir::TP_WALK_EXPR, 0, id); // folded: the walk still sees the call
+                            self.tp(ir::TP_WALK_FOLD, 0, id); // folded: the walk still sees the call
                             let ck8: u8 = if v8.kind == ce::CONST_BOOL {
                                 ir::CK_BOOL;
                             } else {

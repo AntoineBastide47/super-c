@@ -1,8 +1,7 @@
-// Differential rejection parity: every snippet runs through BOTH the established AST
-// flow walk and the Core IR loan analysis on one typed package. Both must reject, and (unless a
-// case is marked as a reviewed precision difference) a primary error line must coincide. One
-// acceptance case pins behavior the established checker permits, so the new analysis cannot drift
-// stricter there.
+// Rejection parity: every snippet runs through BOTH the production borrow pass and the raw Core IR
+// loan-analysis stages on one typed package. Both must reject, and (unless a case is marked as a
+// reviewed precision difference) a primary error line must coincide. One acceptance case pins
+// behavior the checker permits, so the analysis cannot drift stricter there.
 import driver_shim as shim;
 import module::loader as loader;
 import ast::ast as *;
@@ -30,20 +29,30 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
     return !had;
 }
 
-// Type checking plus the ESTABLISHED flow walk; the walk's error offsets land in `old_errs`
-// (user-module records only -- earlier modules must stay clean).
-fn t_old(p: &mut loader::Package, i: usize, last: bool, old_errs: &mut Vector<u32>) bool {
+// Type checking for one module (borrowck runs after, as its own whole-package stage).
+fn t_check(p: &mut loader::Package, i: usize) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    t.bc_mode = 1; // the comparison baseline is the AST walk, whatever the production default
     t.check();
-    let tc_clean = !t.has_errors();
-    if tc_clean {
-        t.borrowck();
+    let had = t.has_errors();
+    if had {
+        t.log_errors();
     }
+    return !had;
+}
+
+// The PRODUCTION borrow pass over one typed module; the user module's error offsets land in
+// `old_errs` (earlier modules must stay clean).
+fn t_prod(p: &mut loader::Package, i: usize, last: bool, old_errs: &mut Vector<u32>) bool {
+    let pkg = p as *mut loader::Package;
+    let m = &mut p.modules[i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    t.borrowck_solo();
     if last {
         for e in 0..t.errors.errors.len() {
             old_errs.push(t.errors.errors.at(e).start);
@@ -53,7 +62,7 @@ fn t_old(p: &mut loader::Package, i: usize, last: bool, old_errs: &mut Vector<u3
     if had {
         t.log_errors();
     }
-    return tc_clean && !had;
+    return !had;
 }
 
 // Resolve + typecheck + old flow walk. Asserts the snippet TYPECHECKS; the old walk's verdict
@@ -76,9 +85,12 @@ fn typed_both(src: str, old_errs: &mut Vector<u32>) loader::Package {
     }
     assert(ok, "snippet resolves");
     for i in 0..n {
-        ok = t_old(&mut p, i, i == n - 1, old_errs) && ok;
+        ok = t_check(&mut p, i) && ok;
     }
     assert(ok, "snippet typechecks");
+    for i in 0..n {
+        ok = t_prod(&mut p, i, i == n - 1, old_errs) && ok;
+    }
     p.ceval = null;
     return p;
 }
@@ -243,7 +255,7 @@ fn diff_out_param_store() {
     assert(hit, "a primary error line coincides");
 }
 
-// Run the full PRODUCTION borrowck (Core IR mode) over the user module; error offsets land in `out`.
+// Run the full PRODUCTION borrowck over the user module; error offsets land in `out`.
 fn prod_verdict(p: &mut loader::Package, out: &mut Vector<u32>) {
     let pkg = p as *mut loader::Package;
     let i = p.modules.len() - 1;
@@ -251,8 +263,7 @@ fn prod_verdict(p: &mut loader::Package, out: &mut Vector<u32>) {
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    t.bc_mode = 2;
-    t.borrowck();
+    t.borrowck_solo();
     for e in 0..t.errors.errors.len() {
         out.push(t.errors.errors.at(e).start);
     }

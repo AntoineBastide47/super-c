@@ -249,9 +249,8 @@ pub struct TypeChecker<'a> {
     pub lint: bool,
     pub free_derive_memo: Map<u64, u64>, // (module<<32|decl) -> 1 = not owning, 2 = derives Free (non-generic only)
     pub bc_free_recv: bool, // marking a `.free()` receiver: destruction, exempt from the ref-move rejection
+    pub bc_fold_ctx: bool, // replaying a folded call: the const-move check stays loud (no IR op survives)
     pub bc_quiet: bool, // the Core IR analysis owns this function's flow diagnostics; the walk stays silent
-    pub bc_mode: u8, // flow-walk selector: 0 = env default, 1 = force the AST walk, 2 = force Core IR
-    pub bc_tape: u8, // quiet-walk selector: 0 = env default, 1 = full walk, 2 = tape replay
     // Unsafe-expression span ranges (start<<32|end) the walk records per function; the Core IR
     // free-move rules consult them in place of the walk's unsafe_depth.
     pub bc_unsafe_spans: Vector<u64>,
@@ -547,8 +546,7 @@ extend TypeChecker {
             free_derive_memo: Map::<u64, u64>::new(),
             bc_free_recv: false,
             bc_quiet: false,
-            bc_mode: 0,
-            bc_tape: 0,
+            bc_fold_ctx: false,
             bc_unsafe_spans: Vector::<u64>::new(),
             derive_busy: Vector::<u64>::new(),
             mut_used: Vector::<NodeId>::new(),

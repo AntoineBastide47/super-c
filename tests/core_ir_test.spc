@@ -33,11 +33,23 @@ fn t_typecheck(p: &mut loader::Package, i: usize) bool {
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    t.bc_mode = 1; // modules are checked in load order here; the Core IR path needs the typed package
     t.check();
-    if !t.has_errors() {
-        t.borrowck();
+    let had = t.has_errors();
+    if had {
+        t.log_errors();
     }
+    return !had;
+}
+
+// Borrow-check one module of the fully typed package (its own stage, like the driver: the Core IR
+// path reads callee facts that can live in any module).
+fn t_borrowck(p: &mut loader::Package, i: usize) bool {
+    let pkg = p as *mut loader::Package;
+    let m = &mut p.modules[i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    t.borrowck_solo();
     let had = t.has_errors();
     if had {
         t.log_errors();
@@ -67,6 +79,10 @@ fn typed_package(src: str) loader::Package {
         ok = t_typecheck(&mut p, i) && ok;
     }
     assert(ok, "snippet typechecks");
+    for i in 0..n {
+        ok = t_borrowck(&mut p, i) && ok;
+    }
+    assert(ok, "snippet borrow-checks");
     p.ceval = null;
     return p;
 }

@@ -63,12 +63,11 @@ extend Interp as Free {
     }
 }
 
-/// Evaluate module `m`'s constant `cnode` by lowering and executing its initializer body.
-pub fn eval_const(pkg: *const loader::Package, m: ModuleId, cnode: NodeId, max_steps: u32) IVal {
-    let mut it = Interp {
+pub fn interp_new(pkg: *const loader::Package) Interp {
+    return Interp {
         pkg: pkg,
         steps: 0,
-        max_steps: max_steps,
+        max_steps: 0,
         depth: 0,
         objs: Vector::<Vector<IVal>>::new(),
         failed: false,
@@ -78,13 +77,31 @@ pub fn eval_const(pkg: *const loader::Package, m: ModuleId, cnode: NodeId, max_s
         body_keys: Vector::<u64>::new(),
         call_memo: Map::<u64, IVal>::new(),
     };
-    let mut lw = irl::Lowerer::new(pkg, m, cnode);
+}
+
+/// Evaluate `cnode` through a REUSED interpreter: the per-evaluation state resets while the
+/// lowered-callee cache and the call memo (scalar-only, so no object index can dangle across
+/// the `objs` reset) persist -- one interpreter serves a whole emission pass.
+pub fn eval_const_in(it: &mut Interp, m: ModuleId, cnode: NodeId, max_steps: u32) IVal {
+    it.steps = 0;
+    it.max_steps = max_steps;
+    it.depth = 0;
+    it.failed = false;
+    it.fail_span = tok::Span { start: 0, end: 0 };
+    it.objs.truncate(0);
+    let mut lw = irl::Lowerer::new(it.pkg, m, cnode);
     if !lw.lower_const(cnode) {
         return none();
     }
     let args = Vector::<IVal>::new();
     let r = it.run(&lw.body, &args);
     return r;
+}
+
+/// Evaluate module `m`'s constant `cnode` by lowering and executing its initializer body.
+pub fn eval_const(pkg: *const loader::Package, m: ModuleId, cnode: NodeId, max_steps: u32) IVal {
+    let mut it = interp_new(pkg);
+    return eval_const_in(&mut it, m, cnode, max_steps);
 }
 
 extend Interp {

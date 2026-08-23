@@ -53,19 +53,26 @@ fn rep_flow_push(t: &mut tc::TypeChecker, st: &mut bfi::RepSt) {
 extend tc::TypeChecker {
     /// Entry point: run the declaration-level checks and the flow walk over every item of the
     /// current module, then finalize its diagnostics.
-    pub fn borrowck(self: &mut Self) {
+    /// Single-module entry (tests, harness): private oracle and pipeline, discarded after.
+    pub fn borrowck_solo(self: &mut Self) {
+        let mut ow = bfx::Owner::new(self.package);
+        let mut ctx = bfi::BorrowCtx::new();
+        self.borrowck(&mut ow, &mut ctx);
+    }
+
+    /// `ow`/`ctx` are the package-level ownership oracle and borrow pipeline: one of each per
+    /// build, so their memo tables and vector capacities survive across modules.
+    pub fn borrowck(self: &mut Self, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
         if self.package != null && unsafe (&*self.package).co_state == 0 {
             // single-threaded phase: the const package pointer is the one place mutated (ceval precedent)
             unsafe (&mut *self.package).co_compute();
             unsafe (&*self.package).co_dump();
         }
-        let mut ow = bfx::Owner::new(self.package);
-        let mut ctx = bfi::BorrowCtx::new(); // one reusable borrow pipeline for every body in the module
         let a = self.cur_ast();
         let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
             let id = unsafe a.list(items)[i as usize];
-            self.bc_item(id, &mut ow, &mut ctx);
+            self.bc_item(id, ow, ctx);
         }
         let mut file: str = "";
         if self.package != null && self.cur_module() as usize < self.pkg_count() {
@@ -989,8 +996,9 @@ extend tc::TypeChecker {
         if dk == NodeKind::NODE_CONST {
             let cd = self.mod_ast(d.module).at_const(d.node).as_data.const_def;
             // A `.free()` receiver reaches the IR as a `&mut` temp, never a marked move: its
-            // const check stays here even when the IR rules are authoritative.
-            if !cd.is_static_mut && !cd.is_extern && (!self.bc_quiet || self.bc_free_recv) && self.tc_type_is_free(
+            // const check stays here even when the IR rules are authoritative. So does a call
+            // FOLDED to its value (bc_fold_ctx): the fold erased the move from the IR.
+            if !cd.is_static_mut && !cd.is_extern && (!self.bc_quiet || self.bc_free_recv || self.bc_fold_ctx) && self.tc_type_is_free(
                 a.type_of(expr),
             ) {
                 let sp = a.at_const(expr).span;
@@ -2919,18 +2927,17 @@ extend tc::TypeChecker {
         self.loop_depth = 0;
         self.current_fn = id;
         self.err_wm = self.errors.errors.len();
-        // Core IR mode: lower first (a body that lowers silences the walk's flow categories),
-        // walk (it still computes capture mutability and the signature checks), then analyze the
-        // lowered bodies against the final side tables and emit in place of the silenced walk.
+        // Lower first (the tape and the facts come from the lowerings), replay the tape (the same
+        // helper calls the walk would make, without traversing the expression tree), then analyze
+        // the lowered bodies against the final side tables and emit the flow diagnostics. A body
+        // that fails to lower falls back to the loud AST walk, so no function ever goes unchecked.
         self.bc_unsafe_spans.truncate(0);
         let mut irbodies = Vector::<irl::Lowerer>::new();
-        if self.bc_flow_new() {
-            self.bc_quiet = self.bc_ir_lower(id, ctx, &mut irbodies);
-            for b in 0..irbodies.len() {
-                let bw = irbodies.at(b);
-                for u in 0..bw.unsafe_spans.len() {
-                    self.bc_unsafe_spans.push(bw.unsafe_spans[u]);
-                }
+        self.bc_quiet = self.bc_ir_lower(id, ctx, &mut irbodies);
+        for b in 0..irbodies.len() {
+            let bw = irbodies.at(b);
+            for u in 0..bw.unsafe_spans.len() {
+                self.bc_unsafe_spans.push(bw.unsafe_spans[u]);
             }
         }
         self.region_reset(id);
@@ -2938,7 +2945,7 @@ extend tc::TypeChecker {
             let pid = unsafe a.list(fnd.params)[pi as usize];
             self.region_alloc_for(pid, a.type_of(pid));
         }
-        if self.bc_quiet && irbodies.len() != 0 && self.bc_tape_on() {
+        if self.bc_quiet && irbodies.len() != 0 {
             ctx.rep.reset();
             let tn = irbodies.at(0).tape.len();
             self.bc_replay(&irbodies, 0, 0, tn, &mut ctx.rep);
@@ -2954,6 +2961,9 @@ extend tc::TypeChecker {
         loop {
             switch irbodies.pop() {
                 Some(lw) => {
+                    if ctx.keep != null {
+                        unsafe (&mut *ctx.keep).put(&lw);
+                    }
                     ctx.lower_pool.push(lw);
                 },
                 _ => {
@@ -2975,19 +2985,6 @@ extend tc::TypeChecker {
         self.scope_depth = 0;
         self.loop_depth = 0;
         self.current_fn = NODE_NONE;
-    }
-
-    /// The quiet-mode tape selector: SC_BC_TAPE=walk reverts to the full AST walk.
-    // (RepSt and its helpers live at module scope below bc_replay's callers.)
-    pub fn bc_tape_on(self: &mut Self) bool {
-        if self.bc_tape == 0 {
-            let v = stdlib::getenv("SC_BC_TAPE");
-            self.bc_tape = 2;
-            if v != null && diag::cstr(v) == "walk" {
-                self.bc_tape = 1;
-            }
-        }
-        return self.bc_tape == 2;
     }
 
     /// Replay the lowerer's event tape in place of the quiet walk: the same helper calls at the
@@ -3193,6 +3190,10 @@ extend tc::TypeChecker {
                 self.bc_expr(node, false, false);
             } else if k == ir::TP_WALK_STMT {
                 self.bc_stmt(node);
+            } else if k == ir::TP_WALK_FOLD {
+                self.bc_fold_ctx = true;
+                self.bc_expr(node, false, false);
+                self.bc_fold_ctx = false;
             }
             i += 1;
         }

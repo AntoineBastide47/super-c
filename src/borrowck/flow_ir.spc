@@ -2,8 +2,6 @@
 // before the AST walk: on success the walk runs silent (`bc_quiet`) for the flow-owned categories
 // and these records land in its place, worded exactly as the walk words them. A body that fails to
 // lower falls back to the noisy walk, so no function ever goes unchecked.
-import stdlib;
-import utils::errors as diag;
 import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
@@ -72,8 +70,11 @@ pub struct BorrowCtx {
     pub rep: RepSt,
     pub escaping: Vector<u32>,
     /// Spent Lowerers recycled across bodies: lower_fn/lower_closure_body re-seed on entry, so a
-    /// pooled entry only donates its heap capacity. Same-module only (BorrowCtx is per-module).
+    /// pooled entry only donates its heap capacity (bc_lw_take retargets it at the current module).
     pub lower_pool: Vector<irl::Lowerer>,
+    /// Package store the driver hands in (null = discard lowerings): every body that lowers is
+    /// adopted here so the backend never lowers it again.
+    pub keep: *mut irl::Keep,
 }
 
 extend BorrowCtx {
@@ -89,15 +90,19 @@ extend BorrowCtx {
             rep: RepSt::new(),
             escaping: Vector::<u32>::new(),
             lower_pool: Vector::<irl::Lowerer>::new(),
+            keep: null,
         };
     }
 }
 
-// A Lowerer for `owner`: recycled from the pool when one is spent, else freshly built.
+// A Lowerer for `owner`: recycled from the pool when one is spent, else freshly built. The pool
+// crosses modules (one BorrowCtx per build), so a pooled entry is retargeted at `m` first.
 fn bc_lw_take(ctx: &mut BorrowCtx, pkg: *const loader::Package, m: ModuleId, owner: NodeId) irl::Lowerer {
     switch ctx.lower_pool.pop() {
         Some(lw) => {
-            return lw;
+            let mut l = lw;
+            l.retarget(m);
+            return l;
         },
         _ => {},
     };
@@ -209,19 +214,6 @@ const CAT_F_CAP: u8 = 16; // Free capture moved out of its closure
 const CAT_F_CONST: u8 = 17; // owning const moved
 
 extend tc::TypeChecker {
-    /// The active flow-walk mode: true = Core IR analysis owns flow diagnostics. `bc_mode` forces a
-    /// side (differential tests); otherwise `SC_BORROW_WALK=old` reverts to the AST walk.
-    pub fn bc_flow_new(self: &mut Self) bool {
-        if self.bc_mode == 0 {
-            let v = stdlib::getenv("SC_BORROW_WALK");
-            self.bc_mode = 2;
-            if v != null && diag::cstr(v) == "old" {
-                self.bc_mode = 1;
-            }
-        }
-        return self.bc_mode == 2;
-    }
-
     /// Lower `fnid` and its closures BEFORE the walk (whose capture analysis the facts read).
     /// False = a body did not lower; the caller runs the noisy walk instead. Lowerers come from
     /// `ctx.lower_pool` when available (entry re-seeds them), so steady state allocates nothing.

@@ -18,6 +18,7 @@ import resolver::resolver as resolver;
 import hir::lower as hirl;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
+import borrowck::flow_ir as bfi;
 import consteval::consteval as ce;
 import ir::core as irc;
 import ir::lower as irl;
@@ -363,6 +364,50 @@ fn typecheck_module(
 // Dev gate (SC_FACTS_CHECK=1): snapshot every module's semantic-table watermarks right after
 // type checking, then assert -- after borrow checking AND after codegen -- that no later stage
 // changed a semantic decision table (intern pools excepted; see ast::facts). Off without the env var.
+// Dev gate (SC_AST_STATS=1): per-kind node census plus arena byte totals over the whole package,
+// printed after typechecking (post-HIR, so desugar-built nodes are counted). Off without the env var.
+fn ast_stats(p: &loader::Package) {
+    if stdlib::getenv("SC_AST_STATS") == null {
+        return;
+    }
+    let mut counts = Vector::<u64>::new();
+    counts.reserve(128);
+    for _ in 0..128 {
+        counts.push(0);
+    }
+    let mut nodes: u64 = 0;
+    let mut children: u64 = 0;
+    let mut bytes: u64 = 0;
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = &p.modules[m].ast;
+        nodes += a.nodes.len() as u64;
+        children += a.children.len() as u64;
+        bytes += a.retained_bytes() as u64;
+        for i in 0..a.nodes.len() {
+            let k = a.nodes.at(i).kind as usize;
+            if k < 128 {
+                counts[k] += 1;
+            }
+        }
+    }
+    unsafe stdio::fprintf(
+        stdio::stderr(),
+        "ast-stats: %llu nodes, %llu children, %llu KiB retained, sizeof(Node)=%zu\n".ptr() as *const char,
+        nodes,
+        children,
+        bytes / 1024,
+        sizeof(Node),
+    );
+    for k in 0..counts.len() {
+        if counts[k] != 0 {
+            unsafe stdio::fprintf(stdio::stderr(), "  kind %3zu: %llu\n".ptr() as *const char, k, counts[k]);
+        }
+    }
+}
+
 fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) {
     if stdlib::getenv("SC_FACTS_CHECK") == null {
         return;
@@ -1651,10 +1696,11 @@ pub fn cemit_package(
     live: *const bool,
     target: i32,
     o: &mut CemitOut,
+    irkeep: *mut irl::Keep,
 ) {
     let verbose = stdlib::getenv("SC_CEMIT_TU") != null || stdlib::getenv("SC_CEMIT_STATS") != null;
     p.ensure_sigs(); // the planner's signature-level propagation reads the package metadata
-    let mut g = ig::InstGraph::new(p);
+    let mut g = ig::InstGraph::new(p, irkeep);
     g.collect();
     let mut em = tbe::TuEmit::new(p);
     em.mg.agg_on = true;
@@ -2607,6 +2653,9 @@ pub fn cemit_package(
     {
         let mut cd_ok: u64 = 0;
         let mut cd_skip: u64 = 0;
+        // one interpreter for the whole loop: its lowered-callee cache and call memo persist, so
+        // a fn transitively called by many constants lowers and folds once
+        let mut cdit = iri::interp_new(p);
         for ci in 0..cem.stat_items.len() {
             let em2 = cem.stat_items.at(ci).em;
             let cdef = cem.stat_items.at(ci).def;
@@ -2624,7 +2673,7 @@ pub fn cemit_package(
                 cd_skip += 1; // associated consts fold under Self frames -- not through this path yet
                 continue;
             }
-            let v = iri::eval_const(p, cdef.module, cdef.node, 1u32 << 20);
+            let v = iri::eval_const_in(&mut cdit, cdef.module, cdef.node, 1u32 << 20);
             let cty = cem.stat_items.at(ci).ty;
             // array-of-string consts render from their literal initializer directly
             if v.kind == iri::IV_OBJ || v.kind == iri::IV_NONE {
@@ -3172,7 +3221,7 @@ fn cemit_tu_pass(p: &mut loader::Package) {
     let mut tplan = TestPlan::new(p.modules.len());
     test_plan_build(p, &mut tplan);
     let mut o = CemitOut::new(p.modules.len());
-    cemit_package(p, true, &tplan, null, -1, &mut o);
+    cemit_package(p, true, &tplan, null, -1, &mut o, null);
     let _ = unsafe shim::sc_run("mkdir -p build/cemit_mod".ptr() as *const char, null, null, null, null);
     write_super_rt("build/cemit_mod");
     let mut ok9 = cemit_write("build/cemit_mod/__sc_types.h", &o.types_h) && cemit_write(
@@ -4054,13 +4103,13 @@ fn proto_of(body: &String, out: &mut String) {
     out.push_str(";\n");
 }
 
-fn borrowck_module(p: &mut loader::Package, i: usize) bool {
+fn borrowck_module(p: &mut loader::Package, i: usize, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    t.borrowck();
+    t.borrowck(ow, ctx);
     let had = t.has_errors();
     p.lint_errs = p.lint_errs + t.errors.errors.len() as u32;
     if had {
@@ -4069,12 +4118,17 @@ fn borrowck_module(p: &mut loader::Package, i: usize) bool {
     return !had;
 }
 
-// Borrow-check every module, serially, in module order.
-pub fn borrowck_all(p: &mut loader::Package) bool {
+// Borrow-check every module, serially, in module order, through ONE ownership oracle and ONE
+// borrow pipeline (their memo tables and capacities survive across modules). `keep` (null =
+// discard) collects every lowered body for the backend, so codegen starts from finished lowerings.
+pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     let n = p.modules.len();
+    let mut ow = bfx::Owner::new(p);
+    let mut ctx = bfi::BorrowCtx::new();
+    ctx.keep = keep;
     let mut ok = true;
     for i in 0..n {
-        if !borrowck_module(p, i) {
+        if !borrowck_module(p, i, &mut ow, &mut ctx) {
             ok = false;
         }
     }
@@ -5181,7 +5235,7 @@ pub fn lint_package(
     }
     let mut wms = Vector::<facts::FactsWatermark>::new();
     facts_snapshot(p, &mut wms);
-    p.ok = borrowck_all(p) && p.ok;
+    p.ok = borrowck_all(p, null) && p.ok;
     if !p.ok {
         return 1;
     }
@@ -5269,9 +5323,21 @@ pub fn run_package(
     if !p.ok {
         return 1;
     }
+    ast_stats(p);
     let mut wms = Vector::<facts::FactsWatermark>::new();
     facts_snapshot(p, &mut wms);
-    p.ok = borrowck_all(p) && p.ok;
+    // The backend consumes borrowck's lowerings (irkeep), so the evaluator must reach its final
+    // state BEFORE the first body lowers: every module is typed here, and mandatory call-site
+    // folds must behave exactly as they would under the backend's own lowering.
+    {
+        let cep = p.ceval as *mut ce::ConstEval;
+        if cep != null {
+            unsafe cep.all_typed = true;
+            unsafe cep.record_folds = true;
+        }
+    }
+    let mut irkeep = irl::Keep::new();
+    p.ok = borrowck_all(p, &mut irkeep) && p.ok;
     // Release the pool as soon as the one parallel stage is done: the test runner FORKS after this,
     // and a forked child inherits the pool's state but none of its worker threads. (Also what keeps
     // the leak gate green.) The bench calls borrowck_all directly, so its iterations keep a warm pool.
@@ -5364,7 +5430,7 @@ pub fn run_package(
     if ceptr != null {
         unsafe ceptr.record_folds = true; // the seed/instance lowering attempts mandatory folds
     }
-    cemit_package(p, testing, &plan, live, target, &mut co);
+    cemit_package(p, testing, &plan, live, target, &mut co, &mut irkeep);
     report_fold_errs(p);
     if !p.ok {
         err = true;
