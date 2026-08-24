@@ -43,7 +43,7 @@ extend Module as Free {
 }
 
 /// The whole compilation: the root module plus every module reachable through `import`. Modules are kept as
-/// separate Asts; cross-module references are DefId{module, node} into this array. (`ceval` and the codegen
+/// separate Asts; cross-module references are DefId{module, node} into this array. (`cir` and the codegen
 /// emit-order/instance-propagation fields are added when those stages are ported.)
 pub struct Package {
     pub modules: Vector<Module>,
@@ -96,9 +96,13 @@ pub struct Package {
     /// `static` symbol -- so its owner emits it with external linkage and declares it in its header.
     /// Filled once, serially, before codegen forks: every worker must answer this the same way.
     pub extern_privates: Set<u64>,
-    /// The compile-time evaluator (a *mut consteval::ConstEval, kept opaque here to avoid a type cycle);
-    /// owned by the driver, created after load, set before type-checking. Null in library/test use.
-    pub ceval: *mut void,
+    /// The Core IR constant interpreter (a *mut ir::interp::Interp, kept opaque here to avoid a type
+    /// cycle); owned by the driver, created after load, set before type-checking. Null in library use.
+    pub cir: *mut void,
+    /// Top-level items the type checker has COMPLETED (module << 32 | item node): the constant
+    /// engine only interprets function bodies whose item is recorded here (an unchecked body
+    /// would evaluate with degraded widths).
+    pub tc_done: Set<u64>,
     /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
     /// has any resolution into module `to`. Built once (resolve-final) at the start of instance propagation;
     /// makes module_imports an O(1) query instead of a linear resolutions scan. `mod_refs_ready` gates it
@@ -806,7 +810,11 @@ fn parse_source(source: &mut String, file: str, bootstrap_tags: bool, recycled: 
         ps.log_errors();
         return ParseResult { ast: Ast::new(0), ok: false, tokens: ps.take_tokens() };
     }
-    let out = ps.take_ast();
+    let mut out = ps.take_ast();
+    // Seed the type tables at load: builtin TypeIds are positional (b + 1), and the constant
+    // engine may read a module's pool BEFORE its typecheck (a const initializer demanded by an
+    // importer). The checker's init_types re-seeds identically.
+    out.init_types();
     return ParseResult { ast: out, ok: true, tokens: ps.take_tokens() };
 }
 
@@ -836,7 +844,8 @@ extend Package {
             method_edges: Vector::<u64>::new(),
             edge_seen: Set::<u64>::new(),
             extern_privates: Set::<u64>::new(),
-            ceval: null,
+            cir: null,
+            tc_done: Set::<u64>::new(),
             mod_refs: Vector::<u64>::new(),
             mod_refs_w: 0,
             mod_refs_ready: false,

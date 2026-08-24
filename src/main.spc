@@ -16,7 +16,7 @@ import driver_shim as shim;
 import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import utils::errors as diag;
 import driver::util as *;
 import driver::extc as *;
@@ -53,8 +53,14 @@ fn run_file(
     }
     let mut rc: i32 = 1;
     if p.ok {
-        let mut ceval = ce::ConstEval::new(&mut p, ce_steps, ce_mem);
-        p.ceval = &mut ceval;
+        let mut cirv = iri::interp_new((&mut p) as *mut loader::Package);
+        p.cir = &mut cirv;
+        if ce_steps != 0 {
+            cirv.max_steps = ce_steps;
+        }
+        if ce_mem != 0 {
+            cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
+        }
         rc = run_package(&mut p, topts, out_bin, target, lint, cflags, null);
     }
     return rc;
@@ -379,8 +385,14 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
             return 1;
         }
         let pkg = (&mut p) as *mut loader::Package;
-        let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
-        p.ceval = &mut ceval;
+        let mut cirv = iri::interp_new(pkg);
+        p.cir = &mut cirv;
+        if ce_steps != 0 {
+            cirv.max_steps = ce_steps;
+        }
+        if ce_mem != 0 {
+            cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
+        }
         if !fix {
             let rc = lint_package(&mut p, target, lint_mod, null, null, sc);
             return rc;
@@ -506,8 +518,14 @@ fn lint_batch(
             return 1;
         }
         let pkg = (&mut p) as *mut loader::Package;
-        let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
-        p.ceval = &mut ceval;
+        let mut cirv = iri::interp_new(pkg);
+        p.cir = &mut cirv;
+        if ce_steps != 0 {
+            cirv.max_steps = ce_steps;
+        }
+        if ce_mem != 0 {
+            cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
+        }
         if !fix {
             return lint_package(&mut p, target, 0, null, null, sc);
         }

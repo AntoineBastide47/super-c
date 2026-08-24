@@ -18,7 +18,7 @@ import borrowck::borrowck as bck;
 import driver::emit as demit;
 import driver::test as dtest;
 import module::loader as loader;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import driver_shim as shim;
 import tests::cli_harness as cli;
 
@@ -108,8 +108,8 @@ pub fn compile(src: str, stop: i32) Compiled {
         unsafe shim::sc_host_platform(),
     );
     let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
 
     let n = p.modules.len();
     let uidx = n - 1; // the user module is loaded last, after the prelude
@@ -226,8 +226,8 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
         return out;
     }
     let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
     let n = p.modules.len();
     let uidx = n - 1;
     let mut rr = Compiled {};
@@ -338,8 +338,8 @@ pub fn compile_c(src: str) CompiledC {
         return out;
     }
     let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
     let n = p.modules.len();
     let uidx = n - 1;
     let mut rr = Compiled {};

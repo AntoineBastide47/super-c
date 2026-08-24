@@ -23,7 +23,7 @@ import module::loader as loader;
 import stdlib;
 import ir::core as ir;
 import ir::layout as lay;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import pattern::pattern as pat;
 
 /// One binding in scope: the declaring node (LET name / parameter / pattern name) -> its local.
@@ -777,6 +777,40 @@ extend Lowerer {
                 let rv = self.rv_use(op, ty);
                 self.assign(pl, rv, sp);
             }
+        }
+        let t = self.term0(ir::TM_RETURN, sp);
+        let end = self.open_block();
+        self.seal(t, end);
+        while self.body.blocks.len() != 0 && !self.body.blocks.at(self.body.blocks.len() - 1).sealed {
+            let _ = self.body.blocks.pop();
+        }
+        return self.err.len() == 0;
+    }
+
+    /// Lower a bare TYPED expression as a one-return body (the facade behind expression-level
+    /// CTFE requests: array lengths, discriminants, folds).
+    pub fn lower_expr_root(self: &mut Self, expr: NodeId) bool {
+        let sp = self.f.node(expr).span;
+        let ty = self.nty(expr);
+        let _ = self.body.add_local(
+            ir::LocalDecl {
+                ty: ty,
+                storage: ir::LS_RET,
+                is_mutable: true,
+                span: sp,
+                decl: NODE_NONE,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+        );
+        self.body.returns = 1;
+        self.body.entry = self.open_block();
+        self.cur = self.body.entry;
+        self.run_start = 0;
+        let op = self.lower_expr(expr);
+        if op != ir::IR_NONE {
+            let pl = self.place_of_local(0);
+            let rv = self.rv_use(op, ty);
+            self.assign(pl, rv, sp);
         }
         let t = self.term0(ir::TM_RETURN, sp);
         let end = self.open_block();
@@ -1579,11 +1613,11 @@ extend Lowerer {
             let vid = unsafe da.list(ms)[i as usize];
             let vv = da.at_const(vid).as_data.variant.value;
             let mut set = false;
-            if vv != NODE_NONE && unsafe (&*self.pkg).ceval != null {
-                let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+            if vv != NODE_NONE && unsafe (&*self.pkg).cir != null {
+                let cev = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
                 let cv = cev.eval(dm, vv);
-                if cv.kind == ce::CONST_INT {
-                    cur = cv.as_data.i;
+                if cv.kind == iri::IV_INT {
+                    cur = cv.i;
                     set = true;
                 }
             }
@@ -1656,9 +1690,9 @@ extend Lowerer {
                 let pk9 = unsafe &*self.pkg;
                 let sh = pk9.prelude_lookup("str", true);
                 let lh = pk9.prelude_lookup("Slice", true);
-                if pk9.ceval != null && sh.node != NODE_NONE && lh.node != NODE_NONE {
-                    let cev = unsafe &mut *(pk9.ceval as *mut ce::ConstEval);
-                    v = cev.ce_ti_tag(self.module, fty, sh.mid, sh.node, lh.mid, lh.node);
+                if pk9.cir != null && sh.node != NODE_NONE && lh.node != NODE_NONE {
+                    let cev = unsafe &mut *(pk9.cir as *mut iri::Interp);
+                    v = cev.ti_tag(self.module, fty, sh.mid, sh.node, lh.mid, lh.node);
                     if v < 0 {
                         v = 0;
                     }
@@ -2173,12 +2207,12 @@ extend Lowerer {
         // only zero comparisons fold: their outcome is a pure function of the args' ZST bits,
         // which is what lets instantiations share one folded body per bit signature
         {
-            if unsafe (&*self.pkg).ceval == null {
+            if unsafe (&*self.pkg).cir == null {
                 return -1;
             }
-            let cev0 = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+            let cev0 = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
             let cv0 = cev0.eval(self.module, ln);
-            if cv0.kind != ce::CONST_INT || cv0.as_data.i != 0 {
+            if cv0.kind != iri::IV_INT || cv0.i != 0 {
                 return -1;
             }
         }
@@ -2239,15 +2273,15 @@ extend Lowerer {
     }
 
     fn binder_cond_cmp(self: &mut Self, cond: NodeId, mv: i64, lit: NodeId, mem_left: bool) i32 {
-        if unsafe (&*self.pkg).ceval == null {
+        if unsafe (&*self.pkg).cir == null {
             return -1;
         }
-        let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+        let cev = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
         let cv = cev.eval(self.module, lit);
-        if cv.kind != ce::CONST_INT {
+        if cv.kind != iri::IV_INT {
             return -1;
         }
-        let lv = cv.as_data.i;
+        let lv = cv.i;
         let op = self.f.node(cond).as_data.binary.op;
         let mut r = false;
         if op == tt::TokenType::EqualEqual {
@@ -2428,10 +2462,10 @@ extend Lowerer {
         if node == NODE_NONE {
             return false;
         }
-        let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+        let cev = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
         let cv = cev.eval(self.module, node);
-        if cv.kind == ce::CONST_INT {
-            *out = cv.as_data.i;
+        if cv.kind == iri::IV_INT {
+            *out = cv.i;
             return true;
         }
         let d = self.f.res(node);
@@ -2513,7 +2547,7 @@ extend Lowerer {
         if dn == NODE_NONE {
             return false;
         }
-        let cev = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+        let cev = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
         *out = if is_fields {
             cev.field_count_of(dm, dn);
         } else {
@@ -2635,7 +2669,7 @@ extend Lowerer {
         }
         let rd = self.f.node(d.iterable).as_data.pattern_range;
         let ity = self.nty(id);
-        if self.f.node(id).kind == NodeKind::NODE_INLINE_FOR && unsafe (&*self.pkg).ceval != null {
+        if self.f.node(id).kind == NodeKind::NODE_INLINE_FOR && unsafe (&*self.pkg).cir != null {
             // Physical unroll: inline-for bounds are compile-time constants. A const-generic bound
             // (`0..N`) is symbolic during the generic pre-pass and resolves only once an instance
             // binds N, so eval_bound consults the instance env; an open start counts from zero. When a
@@ -3504,7 +3538,30 @@ extend Lowerer {
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
             }
-            let t = self.temp(ty, sp);
+            // an UNTYPED cast (a const initializer demanded before its module typechecks) still
+            // names its builtin in the syntax: resolve it so `E::COUNT as usize` folds
+            let mut cty = ty;
+            if cty == TYPE_NONE && d.ty != NODE_NONE {
+                let tk9 = self.f.node(d.ty).kind;
+                if tk9 == NodeKind::NODE_TYPE_PATH || tk9 == NodeKind::NODE_IDENTIFIER {
+                    let rd9 = self.f.res(d.ty);
+                    let mut bb9: i32 = -1;
+                    if rd9.node != NODE_NONE {
+                        bb9 = unsafe (&*self.pkg).builtin_of_decl(rd9.module, rd9.node);
+                    } else if tk9 == NodeKind::NODE_IDENTIFIER {
+                        bb9 = bt_of_name(self.src, self.f.node(d.ty).as_data.name.text);
+                    } else {
+                        let parts9 = self.f.node(d.ty).as_data.type_path.parts;
+                        if parts9.len == 1 {
+                            bb9 = bt_of_name(self.src, self.f.node(unsafe self.f.list(parts9)[0]).as_data.name.text);
+                        }
+                    }
+                    if bb9 >= 0 {
+                        cty = Ast::builtin((bb9 as u8) as BuiltinType);
+                    }
+                }
+            }
+            let t = self.temp(cty, sp);
             let pl = self.place_of_local(t);
             self.assign(
                 pl,
@@ -3513,7 +3570,7 @@ extend Lowerer {
                     a: op,
                     b: ir::CAST_NUMERIC,
                     c: 0,
-                    target: ty,
+                    target: cty,
                     item: DefId { module: 0, node: NODE_NONE },
                 },
                 sp,
@@ -4130,13 +4187,13 @@ extend Lowerer {
                 self.seal(tm, rhs_b);
             }
             // the RHS only runs on the deciding path: a failed fold there is not an error
-            if unsafe (&*self.pkg).ceval != null {
-                let cev9 = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+            if unsafe (&*self.pkg).cir != null {
+                let cev9 = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
                 cev9.record_pause += 1;
             }
             let rop = self.lower_expr(d.right);
-            if unsafe (&*self.pkg).ceval != null {
-                let cev9 = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+            if unsafe (&*self.pkg).cir != null {
+                let cev9 = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
                 cev9.record_pause -= 1;
             }
             if rop == ir::IR_NONE {
@@ -4306,9 +4363,12 @@ extend Lowerer {
         // Emit-time implicit CTFE (the old backend's fold pass): a scalar call whose arguments
         // look compile-time constant runs through the evaluator -- success folds the call to its
         // value, a `const fn` failure records a fold error the driver promotes.
-        if !self.body.is_generic && ty != TYPE_NONE && unsafe (&*self.pkg).ceval != null {
-            let cev8 = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
-            if cev8.record_folds {
+        if !self.body.is_generic && ty != TYPE_NONE && unsafe (&*self.pkg).cir != null {
+            let cev8 = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
+            // a body the interpreter lowers for its OWN execution folds through interpretation
+            // itself (and a facade root lowering IS the fold in progress); re-entrant implicit
+            // folding would clobber the live evaluation state
+            if cev8.record_folds && cev8.in_run == 0 && cev8.ev_depth == 0 {
                 let mut ct8 = target;
                 if ct8.node == NODE_NONE {
                     ct8 = self.path_res(d.callee);
@@ -4322,7 +4382,7 @@ extend Lowerer {
                     let scalar8 = y8.kind == TypeKind::TYPE_BUILTIN && y8.as_data.builtin != BuiltinType::BT_VOID && y8.as_data.builtin != BuiltinType::BT_VALIST && y8.as_data.builtin != BuiltinType::BT_C32 && y8.as_data.builtin != BuiltinType::BT_C64;
                     if scalar8 && !fd8.is_extern && fd8.body != NODE_NONE && self.maybe_const(id) {
                         let v8 = cev8.eval(self.module, id);
-                        if v8.kind == ce::CONST_INT || v8.kind == ce::CONST_BOOL {
+                        if v8.kind == iri::IV_INT || v8.kind == iri::IV_BOOL {
                             // folded: the replay still sees the call boundary, and each argument's
                             // consumption is marked explicitly (no IR op survives to carry it)
                             self.tp(ir::TP_CALL_MARK, 0, id);
@@ -4330,7 +4390,7 @@ extend Lowerer {
                                 self.tp(ir::TP_CONST_MOVE, 0, unsafe self.f.list(d.args)[ai8 as usize]);
                             }
                             self.tp(ir::TP_CALL, 0, id);
-                            let ck8: u8 = if v8.kind == ce::CONST_BOOL {
+                            let ck8: u8 = if v8.kind == iri::IV_BOOL {
                                 ir::CK_BOOL;
                             } else {
                                 ir::CK_INT;
@@ -4339,7 +4399,7 @@ extend Lowerer {
                                 ir::Constant {
                                     kind: ck8,
                                     ty: ty,
-                                    val: v8.as_data.i,
+                                    val: v8.i,
                                     raw: sp,
                                     item: DefId { module: 0, node: NODE_NONE },
                                     targ_start: 0,
@@ -4991,11 +5051,11 @@ extend Lowerer {
                 // later elements continue from it (C semantics); omitted slots zero-fill
                 let ie = self.f.node(e).as_data.field_initializer.name;
                 let mut iv: i64 = -1;
-                if unsafe (&*self.pkg).ceval != null {
-                    let cevA = unsafe &mut *((&*self.pkg).ceval as *mut ce::ConstEval);
+                if unsafe (&*self.pkg).cir != null {
+                    let cevA = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
                     let cvA = cevA.eval(self.module, ie);
-                    if cvA.kind == ce::CONST_INT {
-                        iv = cvA.as_data.i;
+                    if cvA.kind == iri::IV_INT {
+                        iv = cvA.i;
                     }
                 }
                 if iv < 0 {
@@ -5434,7 +5494,38 @@ extend Lowerer {
     }
 
     // An item in value position: functions become item constants, constants/statics become places.
-    fn item_value(self: &mut Self, id: NodeId, d: DefId, ty: TypeId, sp: tok::Span) ir::OperandId {
+    fn item_value(self: &mut Self, id: NodeId, d0: DefId, ty: TypeId, sp: tok::Span) ir::OperandId {
+        let mut d = d0;
+        // An unresolved member on a resolved ENUM object: member resolution is the checker's act,
+        // so a not-yet-checked module's `E::V` (a const initializer demanded early) finds the
+        // variant from the object and the member's name.
+        if (d.node == NODE_NONE || self.decl_kind(d) == NodeKind::NODE_ENUM) && self.f.node(id).kind == NodeKind::NODE_MEMBER && self.f.node(
+            id,
+        ).as_data.member.path {
+            let md0 = self.f.node(id).as_data.member;
+            let mut od = self.f.res(md0.object);
+            if od.node == NODE_NONE && self.decl_kind(d) == NodeKind::NODE_ENUM {
+                od = d;
+            }
+            if od.node != NODE_NONE && self.decl_kind(od) == NodeKind::NODE_ENUM {
+                let ea = unsafe &*(&*self.pkg).module_ast_const(od.module);
+                let esrc = unsafe (&*self.pkg).modules.at(od.module as usize).source.as_str();
+                let mn = self.f.node(md0.member).as_data.name.text;
+                let mtxt = self.src.slice(mn.start as usize, mn.end as usize);
+                let ms0 = ea.at_const(od.node).as_data.aggregate.members;
+                for vi0 in 0..ms0.len {
+                    let vid0 = unsafe ea.list(ms0)[vi0 as usize];
+                    if ea.at_const(vid0).kind != NodeKind::NODE_VARIANT {
+                        continue;
+                    }
+                    let vn0 = ea.at_const(ea.at_const(vid0).as_data.variant.name).as_data.name.text;
+                    if esrc.slice(vn0.start as usize, vn0.end as usize) == mtxt {
+                        d = DefId { module: od.module, node: vid0 };
+                        break;
+                    }
+                }
+            }
+        }
         let dk = self.decl_kind(d);
         if dk == NodeKind::NODE_FUNCTION {
             let ts = self.body.targ_pool.len() as u32;

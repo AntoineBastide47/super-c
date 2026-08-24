@@ -62,7 +62,7 @@ extend tc::TypeChecker {
     /// build, so their memo tables and vector capacities survive across modules.
     pub fn borrowck(self: &mut Self, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
         if self.package != null && unsafe (&*self.package).co_state == 0 {
-            // single-threaded phase: the const package pointer is the one place mutated (ceval precedent)
+            // single-threaded phase: the const package pointer is the one place mutated (cir precedent)
             unsafe (&mut *self.package).co_compute();
             unsafe (&*self.package).co_dump();
         }

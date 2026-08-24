@@ -5,7 +5,7 @@
 // frozen subset are counted and skipped, never guessed.
 import ast::ast as *;
 import emit::mangle as mbe;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import lexer::token_type as tt;
 import graph::instances as ig;
 import module::loader as loader;
@@ -736,12 +736,12 @@ extend TuEmit {
             self.mg.enum_tag(it.m, it.decl, vid, body);
             // an explicit discriminant pins the C value (`Code_Bad = 404`): casts observe it
             let vv = da.at_const(vid).as_data.variant.value;
-            if vv != NODE_NONE && self.p().ceval != null {
-                let cevE = unsafe &mut *(self.p().ceval as *mut ce::ConstEval);
+            if vv != NODE_NONE && self.p().cir != null {
+                let cevE = unsafe &mut *(self.p().cir as *mut iri::Interp);
                 let cvE = cevE.eval(it.m, vv);
-                if cvE.kind == ce::CONST_INT {
+                if cvE.kind == iri::IV_INT {
                     body.push_str(" = ");
-                    body.push_i64(cvE.as_data.i);
+                    body.push_i64(cvE.i);
                 }
             }
         }

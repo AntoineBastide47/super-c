@@ -12,7 +12,7 @@ import lexer::token as ltok;
 import resolver::resolver as resolver;
 import hir::lower as hirl;
 import typechecker::typechecker as tc;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import utils::errors as diag;
 import driver::emit as emit;
 
@@ -607,8 +607,8 @@ pub fn recompile(
     }
     // 5) re-run the pipeline over the affected set only, mirroring run_pipeline's phase order
     let pkg = p as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
     let mut nd = Vector::<DiagRec>::new();
     for i in 0..n {
         if !aff[i] {
@@ -618,7 +618,7 @@ pub fn recompile(
         if !lsp_resolve_module(p, i, lw, &mut nd) {
             // run_pipeline gates ALL typechecking on every module resolving; mirroring that
             // incrementally would wipe retained analyses, so hand the round to the full path
-            p.ceval = null;
+            p.cir = null;
             nd.free();
             return false;
         }
@@ -631,7 +631,7 @@ pub fn recompile(
         let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
         lsp_typecheck_module(p, i, lw, &mut nd);
     }
-    ceval.all_typed = true;
+    cirv.all_typed = true;
     for i in 0..n {
         if !aff[i] {
             continue;
@@ -645,7 +645,7 @@ pub fn recompile(
             }
         }
     }
-    p.ceval = null;
+    p.cir = null;
     // 6) merge: keep unaffected modules' records, replace the affected ones'
     let mut merged = Vector::<DiagRec>::new();
     while diags.len() > 0 {
@@ -731,8 +731,8 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
     }
     emit::platform_filter(p, target);
     let pkg = p as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
     let n = p.modules.len();
     let mut resolved = true;
     for i in 0..n {
@@ -747,7 +747,7 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
         }
         // driver-parity post-typecheck phase: the always-panics check (an error) interprets
         // cross-module `const fn` bodies, so it only runs once every module is typed
-        ceval.all_typed = true;
+        cirv.all_typed = true;
         for i in 0..n {
             if lsp_lint_wanted(p, i, root_file, lint_dir) {
                 let mut errs = diag::Errors::new();
@@ -759,5 +759,5 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
             }
         }
     }
-    p.ceval = null; // the stack ConstEval dies here; the Package outlives it
+    p.cir = null;
 }

@@ -8,7 +8,7 @@ import ast::ast as *;
 import ir::layout as lay;
 import lexer::token as tok;
 import module::loader as loader;
-import consteval::consteval as ce;
+import ir::interp as iri;
 
 // The mangle spelling of a builtin ("void" doubles as the not-a-scalar fallback).
 const fn bt_mangle(b: BuiltinType) str<'static> {
@@ -598,11 +598,11 @@ extend Mangler {
             if !got {
                 // a term naming a module CONST (not a generic param): the evaluator has its value
                 let pa = self.p().module_ast_const(pd.module);
-                if pa.at_const(pd.node).kind == NodeKind::NODE_CONST && self.p().ceval != null {
-                    let cev = unsafe &mut *(self.p().ceval as *mut ce::ConstEval);
+                if pa.at_const(pd.node).kind == NodeKind::NODE_CONST && self.p().cir != null {
+                    let cev = unsafe &mut *(self.p().cir as *mut iri::Interp);
                     let cv = cev.eval(pd.module, pa.at_const(pd.node).as_data.const_def.value);
-                    if cv.kind == ce::CONST_INT {
-                        v += cv.as_data.i * c;
+                    if cv.kind == iri::IV_INT {
+                        v += cv.i * c;
                         continue;
                     }
                 }

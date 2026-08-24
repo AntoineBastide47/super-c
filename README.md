@@ -811,6 +811,66 @@ Includes are relative, so the whole tree builds with `cc build/**/*.c` and no `-
 module-mangled only when more than one user module is present, so single-file programs emit plain C
 names.
 
+## Environment variables
+
+All knobs are environment variables prefixed `SC_`; none is required for normal use.
+
+### Build system and caches (`src/build_system`, `src/driver/tuc.spc`)
+
+| Variable | Effect |
+| --- | --- |
+| `SC_CACHE_DIR` | override the build-record cache directory |
+| `SC_NO_CACHE` | disable the build-record cache |
+| `SC_NO_EMIT_CACHE` | disable the emit stamp (the whole-transpile skip when no input changed) |
+| `SC_NO_TU_CACHE` | disable the per-TU journal/replay cache |
+| `SC_STAMP_DEBUG` | trace emit-stamp decisions (why a build was or was not skipped) |
+| `SC_TIMINGS` | print per-phase timing for a build |
+
+### Verification passes (dev gates in `src/driver/emit.spc`; each runs only when set)
+
+| Variable | Effect |
+| --- | --- |
+| `SC_FACTS_CHECK` | snapshot semantic-table watermarks after typecheck; report any table a later stage changed (the freeze contract) |
+| `SC_CORE_IR` | Core IR coverage pass; `=print` dumps lowered bodies |
+| `SC_BORROW_IR` | borrow-IR shadow pass; `=ref` runs the reference lane |
+| `SC_LAYOUT` | validate every concrete pool type against the C layout invariants |
+| `SC_CEMIT` | run the streaming C emitter over every body twice and verify the hashes match |
+| `SC_AST_STATS` | print AST/node statistics |
+| `SC_CEMIT_TU` / `SC_CEMIT_STATS` | verbose per-TU emission and const/reflect group statistics |
+
+### Debug traces
+
+| Variable | Effect |
+| --- | --- |
+| `SC_IRI_DBG` | const-engine failure traces (failed rvalues, failed runs, flush results) |
+| `SC_BORROW_TRACE` | dump borrow-check errors with context |
+| `SC_ZC_DBG` | ZST-elision layout decisions in lowering |
+| `SC_PROJ_DBG` | parallel-for field-projection lowering decisions |
+| `SC_CO_DEBUG` | coroutine-launch reachability widening in the loader |
+
+### LSP (`src/lsp/server.spc`)
+
+| Variable | Effect |
+| --- | --- |
+| `SC_LSP_DEBUG` | server-side logging |
+| `SC_LSP_NO_INCR` | disable incremental per-edit recompilation (full rebuild each edit) |
+| `SC_LSP_BUDGET_MB` | memory budget for the analysis cache |
+
+### Test harness
+
+| Variable | Effect |
+| --- | --- |
+| `SC_TEST_SUPERC` | path of the compiler under test (the wasm lane sets it to a wasmtime wrapper) |
+
+### Runtime — read by compiled programs, so they also gate the compiler itself and every test binary
+
+| Variable | Effect |
+| --- | --- |
+| `SC_LEAK_CHECK` | the self-hosted leak/double-free/UAF tracker; any non-`0` value reports at exit, `f...`/`F...` (e.g. `fatal`) makes findings exit 23 — the CI gate |
+| `SC_TASK_TRACE` | coroutine/task tracing for the life of the process |
+| `SC_SCHED_SEED` | scheduler seed for the parallel pool, read only when the program set none; replays a race in a shipped binary without a rebuild |
+| `SC_LOCK_ORDER` | lock-order checking (`ffi/sc_rt.c`); non-`0` reports violations, `f...`/`F...` aborts |
+
 ## Status and roadmap
 
 Everything in the tour above is implemented and working. Beyond it, Super-C also has:

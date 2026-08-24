@@ -11,7 +11,7 @@ import lexer::token_type as *;
 import ast::ast as *;
 import module::loader as loader;
 import pattern::pattern as pat;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import ir::layout as lay;
 import utils::errors as diag;
 
@@ -149,9 +149,6 @@ pub struct TypeChecker<'a> {
     /// lookups that land back on this module read the live tree with no override indirection.
     pub ast: *mut Ast,
     pub source: str<'a>,
-    // Private const-evaluator for the parallel borrow-check stage (address of a ce::ConstEval, held
-    // as usize so the checker never owns it): the shared Package.ceval single-threads cycle marks and
-    // memo writes, which concurrent workers may not share. 0 = use the shared one.
     pub current_returns: NodeList,
     pub current_self: NodeId,
     pub current_extend: NodeId,
@@ -306,7 +303,7 @@ pub struct TypeChecker<'a> {
     pub peel_memo: Map<u64, u64>,
     // TC-13: foreign generic-instance lowering memo, (module<<32|node) -> current-pool TypeId,
     // HEAVY NODES ONLY (type paths with generic args; anything cheaper loses to the hash probe).
-    // Foreign lowering is context-free (resolution_def/builtin_of_decl/consteval only; Self and
+    // Foreign lowering is context-free (resolution_def/builtin_of_decl/const-eval only; Self and
     // generic params lower to identity types, substitution happens in callers). DIAGNOSTICS GATE:
     // entries are inserted only when the lowering emitted no new errors and the result is not
     // TYPE_ERROR, so error-carrying programs re-emit their diagnostics exactly as before.
@@ -617,11 +614,11 @@ extend TypeChecker {
         }
         return unsafe self.package.modules.len();
     }
-    const fn ceval(self: &Self) *mut ce::ConstEval {
+    const fn cir(self: &Self) *mut iri::Interp {
         if self.package == null {
             return null;
         }
-        return (unsafe self.package.ceval) as *mut ce::ConstEval;
+        return (unsafe self.package.cir) as *mut iri::Interp;
     }
 
     pub const fn name_span(self: &Self, name_node: NodeId) tok::Span {
@@ -910,15 +907,15 @@ extend TypeChecker {
     // Const-fold `nid` to an integer via the always-on interpreter. False when it isn't a
     // compile-time constant (locals, calls the fx summary rejects, ...) -- never an error.
     fn tc_fold_int(self: &mut Self, nid: NodeId, out: *mut i64) bool {
-        let ceptr = self.ceval();
+        let ceptr = self.cir();
         if ceptr == null {
             return false;
         }
         let v = ceptr.eval(self.cur_module(), nid);
-        if v.kind != ce::CONST_INT {
+        if v.kind != iri::IV_INT {
             return false;
         }
-        unsafe *out = v.as_data.i;
+        unsafe *out = v.i;
         return true;
     }
 
@@ -1918,11 +1915,11 @@ extend TypeChecker {
             return false;
         }
         // A leaf with no parameter in it -- a literal, a named const -- is the evaluator's business.
-        let ceptr = self.ceval();
+        let ceptr = self.cir();
         if ceptr != null {
             let lv = ceptr.eval(m, id);
-            if lv.kind == ce::CONST_INT {
-                out.k = out.k + lv.as_data.i;
+            if lv.kind == iri::IV_INT {
+                out.k = out.k + lv.i;
                 return true;
             }
         }
@@ -2441,11 +2438,11 @@ extend TypeChecker {
 
     // Fold a const-generic argument expression (e.g. the `4` in `Buff<i32, 4>`) to an interned TYPE_CONST value.
     fn tc_const_arg(self: &mut Self, m: ModuleId, aid: NodeId) TypeId {
-        let ceptr = self.ceval();
+        let ceptr = self.cir();
         if ceptr != null {
             let lv = ceptr.eval(m, aid);
-            if lv.kind == ce::CONST_INT {
-                return self.cur_ast().const_value(lv.as_data.i);
+            if lv.kind == iri::IV_INT {
+                return self.cur_ast().const_value(lv.i);
             }
         }
         // An enum VARIANT as the value of an enum-typed const parameter (`{Family::Ieee}`): its
@@ -2467,8 +2464,8 @@ extend TypeChecker {
                     let vv = ea.at_const(mid).as_data.variant.value;
                     if vv != NODE_NONE && ceptr != null {
                         let ev = ceptr.eval(ed.module, vv);
-                        if ev.kind == ce::CONST_INT {
-                            next = ev.as_data.i;
+                        if ev.kind == iri::IV_INT {
+                            next = ev.i;
                         }
                     }
                     let mname = ea.at_const(ea.at_const(mid).as_data.variant.name).as_data.name.text;
@@ -2489,11 +2486,11 @@ extend TypeChecker {
             return self.cur_ast().intern_const_lin(&lin);
         }
         let sp = self.mod_ast(m).at_const(aid).span;
-        if ceptr != null && ceptr.ce_trap_get().len() != 0 {
+        if ceptr != null && ceptr.trap_get().len() != 0 {
             self.errors.emit(
                 sp.start,
                 sp.end - sp.start,
-                format("const generic argument must be a constant integer: {}", ceptr.ce_trap_detail()),
+                format("const generic argument must be a constant integer: {}", ceptr.trap_detail()),
             );
         } else {
             self.errors.emit(sp.start, sp.end - sp.start, format("const generic argument must be a constant integer"));
@@ -2501,16 +2498,16 @@ extend TypeChecker {
         return TYPE_ERROR;
     }
 
-    fn ce_array_len(self: &mut Self, m: ModuleId, lenNode: NodeId) u32 {
-        let ceptr = self.ceval();
+    fn tc_array_len(self: &mut Self, m: ModuleId, lenNode: NodeId) u32 {
+        let ceptr = self.cir();
         if ceptr == null {
             return 0;
         }
         let lv = ceptr.eval(m, lenNode);
         // A length of 0 is legal (an empty carrier type); it interns as the same len-0 array a
         // `[]` literal types with, which is exactly the type the literal must match.
-        if lv.kind == ce::CONST_INT && lv.as_data.i >= 0 && lv.as_data.i <= 0xFFFFFFFFi64 {
-            return lv.as_data.i as u32;
+        if lv.kind == iri::IV_INT && lv.i >= 0 && lv.i <= 0xFFFFFFFFi64 {
+            return lv.i as u32;
         }
         // A length that belongs to ANOTHER module is that module's to diagnose, in its own source: this
         // one is only lowering the foreign type to learn its layout, and the module has not been
@@ -2529,14 +2526,14 @@ extend TypeChecker {
             }
         }
         let sp = self.mod_ast(m).at_const(lenNode).span;
-        if ceptr.ce_trap_get().len() != 0 {
+        if ceptr.trap_get().len() != 0 {
             self.len_reported.push(key);
             self.errors.emit(
                 sp.start,
                 sp.end - sp.start,
-                format("array length cannot be evaluated: {}", ceptr.ce_trap_detail()),
+                format("array length cannot be evaluated: {}", ceptr.trap_detail()),
             );
-        } else if lv.kind != ce::CONST_NONE {
+        } else if lv.kind != iri::IV_NONE {
             self.len_reported.push(key);
             self.errors.emit(
                 sp.start,
@@ -2748,7 +2745,7 @@ extend TypeChecker {
         }
         if nk == NodeKind::NODE_ARRAY_TYPE {
             let at = a.at_const(id).as_data.array_type;
-            let alen = self.ce_array_len(m, at.length);
+            let alen = self.tc_array_len(m, at.length);
             return self.cur_ast().intern_type(
                 Ty {
                     kind: TypeKind::TYPE_ARRAY,
@@ -2965,7 +2962,7 @@ extend TypeChecker {
             NODE_ARRAY_TYPE => {
                 let at = a.at_const(id).as_data.array_type;
                 self.check_expr(at.length);
-                let alen = self.ce_array_len(self.cur_module(), at.length);
+                let alen = self.tc_array_len(self.cur_module(), at.length);
                 result = self.cur_ast().intern_type(
                     Ty {
                         kind: TypeKind::TYPE_ARRAY,
@@ -6056,7 +6053,7 @@ extend TypeChecker {
             // responsibility to the programmer (dereferencing it needs `unsafe`). Keeping the borrow
             // live would pin the referent for as long as whatever stored the pointer lives -- which
             // the checker cannot see -- and would reject correct code like
-            // `ConstEval::new(&mut p, ..)` where the parameter is `*mut Package`.
+            // `interp_new(&mut p)` where the parameter is `*mut Package`.
             if !probe {}
             acp.kind = TypeKind::TYPE_POINTER;
             if acp.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
@@ -9015,7 +9012,7 @@ extend TypeChecker {
     // `format("a{}b", v)` rewrites IN PLACE into a value block
     //     { let mut f = sugar_fmt_new(); sugar_fmt_str(&mut f, "a"); sugar_fmt_i64(&mut f, v); ... f; }
     // then the block is typechecked like handwritten code: downstream passes never see a `format`
-    // call, so consteval folds it through the ordinary interpreter and codegen needs no format
+    // call, so const-eval folds it through the ordinary interpreter and codegen needs no format
     // lowering. Template diagnostics live here now; every error path leaves the node as the
     // (already reported) call, which nothing downstream runs on.
     fn tc_check_format(self: &mut Self, id: NodeId) TypeId {
@@ -9832,7 +9829,7 @@ extend TypeChecker {
                 return tt;
             }
             // type_info::<T>(): compiler intrinsic -- a TypeInfo descriptor of T, folded at compile
-            // time (consteval builds the object graph; codegen emits static data at runtime uses).
+            // time (const-eval builds the object graph; codegen emits static data at runtime uses).
             if a.at_const(spx.expression).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(spx.expression).node == NODE_NONE && span_is(
                 self.source,
                 a.at_const(spx.expression).as_data.name.text,
@@ -12969,15 +12966,15 @@ extend TypeChecker {
             let mut pos = cursor;
             if el.kind == NodeKind::NODE_FIELD_INITIALIZER {
                 unsafe *sparse = true;
-                let ceptr = self.ceval();
+                let ceptr = self.cir();
                 if ceptr == null {
                     return -1;
                 }
                 let lv = ceptr.eval(self.cur_module(), el.as_data.field_initializer.name);
-                if lv.kind != ce::CONST_INT || lv.as_data.i < 0 {
+                if lv.kind != iri::IV_INT || lv.i < 0 {
                     return -1;
                 }
-                pos = lv.as_data.i;
+                pos = lv.i;
             }
             if pos + 1 > extent {
                 extent = pos + 1;
@@ -13056,16 +13053,16 @@ extend TypeChecker {
                             format("array designator index must be an integer"),
                         );
                     } else {
-                        let ceptr = self.ceval();
-                        if ceptr != null && ceptr.eval(self.cur_module(), el.as_data.field_initializer.name).kind == ce::CONST_NONE {
+                        let ceptr = self.cir();
+                        if ceptr != null && ceptr.eval(self.cur_module(), el.as_data.field_initializer.name).kind == iri::IV_NONE {
                             let sp = a.at_const(el.as_data.field_initializer.name).span;
-                            if ceptr.ce_trap_get().len() != 0 {
+                            if ceptr.trap_get().len() != 0 {
                                 self.errors.emit(
                                     sp.start,
                                     sp.end - sp.start,
                                     format(
                                         "array designator index must be a constant expression: {}",
-                                        ceptr.ce_trap_detail(),
+                                        ceptr.trap_detail(),
                                     ),
                                 );
                             } else {
@@ -13140,12 +13137,12 @@ extend TypeChecker {
                 return TYPE_NONE;
             }
         }
-        let ceptr = self.ceval();
+        let ceptr = self.cir();
         let mut n: i64 = -1;
         if ceptr != null {
             let cv = ceptr.eval(self.cur_module(), nid);
-            if cv.kind == ce::CONST_INT {
-                n = cv.as_data.i;
+            if cv.kind == iri::IV_INT {
+                n = cv.i;
             }
         }
         if n < 0 {
@@ -13527,19 +13524,19 @@ extend TypeChecker {
         if !self.expr_has_call(value, 0) {
             return;
         }
-        let ceptr = self.ceval();
+        let ceptr = self.cir();
         if ceptr == null {
             return;
         }
         let m = self.cur_module();
         let v = ceptr.eval(m, value);
-        if v.kind != ce::CONST_NONE {
+        if v.kind != iri::IV_NONE {
             return;
         }
-        if ceptr.ce_trap_get().len() == 0 && ceptr.eval_static(m, value).ok {
+        if ceptr.trap_get().len() == 0 && ceptr.eval_static(m, value).ok {
             return;
         }
-        if ceptr.ce_trap_get().len() != 0 {
+        if ceptr.trap_get().len() != 0 {
             let cd = self.cur_ast().at_const(id).as_data.const_def;
             let sp = self.name_span(cd.name);
             self.errors.emit(
@@ -13548,7 +13545,7 @@ extend TypeChecker {
                 format(
                     "constant '{}' cannot be evaluated at compile time: {}",
                     diag::span_str(self.source, sp.start, sp.end),
-                    ceptr.ce_trap_detail(),
+                    ceptr.trap_detail(),
                 ),
             );
         } else {
@@ -13627,20 +13624,20 @@ extend TypeChecker {
             );
             return;
         }
-        let ceptr = self.ceval();
+        let ceptr = self.cir();
         if ceptr == null {
             return;
         }
         let v = ceptr.eval(self.cur_module(), left);
-        if v.kind == ce::CONST_BOOL && v.as_data.i == 0 {
+        if v.kind == iri::IV_BOOL && v.i == 0 {
             self.errors.emit(sp.start, sp.end - sp.start, format("static assertion failed"));
-        } else if v.kind == ce::CONST_NONE {
-            let trap = ceptr.ce_trap_get();
+        } else if v.kind == iri::IV_NONE {
+            let trap = ceptr.trap_get();
             if trap.len() != 0 {
                 self.errors.emit(
                     sp.start,
                     sp.end - sp.start,
-                    format("static assertion cannot be evaluated: {}", ceptr.ce_trap_detail()),
+                    format("static assertion cannot be evaluated: {}", ceptr.trap_detail()),
                 );
             } else {
                 ceptr.defer_assert(self.cur_module(), left);
@@ -14541,10 +14538,10 @@ extend TypeChecker {
                 }
                 // Def-site `const fn` validation, AFTER the body walk: type-based disqualifiers
                 // ('@no_const' mentions) only exist once the body is typed, so a pre-body verdict
-                // would be blind to them (ce_fn_recheck also overwrites any blind memoized verdict).
+                // would be blind to them (fn_recheck also overwrites any blind memoized verdict).
                 if fnd.is_const && fnd.body != NODE_NONE && !fnd.is_extern {
-                    let ceptr = self.ceval();
-                    if ceptr != null && ceptr.ce_fn_recheck(self.cur_module(), id) == ce::FX_NO {
+                    let ceptr = self.cir();
+                    if ceptr != null && ceptr.fn_recheck(self.cur_module(), id) == iri::FX_NO {
                         let sp = self.name_span(fnd.name);
                         // the actionable token is the `const` keyword itself: [pub] [unsafe] const fn
                         // is the canonical order, so scan back from the name across `fn`
@@ -15012,7 +15009,13 @@ extend TypeChecker {
         self.cur_ast().init_types();
         let items = self.cur_ast().at_const(unsafe self.cur_ast().root).as_data.program.items;
         for i in 0..items.len {
-            self.check_item(unsafe self.cur_ast().list(items)[i as usize]);
+            let it9 = unsafe self.cur_ast().list(items)[i as usize];
+            self.check_item(it9);
+            // completion record: the constant engine interprets a function body only once its
+            // item is typed (an unchecked body would evaluate with degraded widths)
+            if self.package != null {
+                unsafe self.package.tc_done.insert(self.cur_module() as u64 << 32 | it9 as u64);
+            }
         }
         self.close_instances();
         if self.lint {

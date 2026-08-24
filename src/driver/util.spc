@@ -15,7 +15,6 @@ import driver_shim as shim;
 import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
-import consteval::consteval as ce;
 import driver::rt_c as rtc;
 import utils::errors as diag;
 

@@ -10,7 +10,7 @@
 import ast::ast as *;
 import emit::mangle as mbe;
 import emit::cflow as cfl;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import ir::core as ir;
 import lexer::token as tok;
 import lexer::token_type as tt;
@@ -2829,10 +2829,10 @@ extend CEmit {
                     let tn9 = da9.at_const(dn9).as_data.let_stmt.ty;
                     if tn9 != NODE_NONE && da9.at_const(tn9).kind == NodeKind::NODE_ARRAY_TYPE {
                         let ln9 = da9.at_const(tn9).as_data.array_type.length;
-                        if ln9 != NODE_NONE && self.p().ceval != null {
-                            let cev9 = unsafe &mut *(self.p().ceval as *mut ce::ConstEval);
+                        if ln9 != NODE_NONE && self.p().cir != null {
+                            let cev9 = unsafe &mut *(self.p().cir as *mut iri::Interp);
                             let cv9 = cev9.eval(b.module, ln9);
-                            if cv9.kind == ce::CONST_INT && cv9.as_data.i == 0 {
+                            if cv9.kind == iri::IV_INT && cv9.i == 0 {
                                 zero_len = true;
                             }
                         }

@@ -1,6 +1,6 @@
 // Self-hosted benchmark: how long does the compiler take to transpile the WHOLE super-c compiler to C?
 // The corpus is the compiler itself -- package_load(selfhost/main.spc) pulls in every module main.spc
-// transitively imports (the entire lexer/ast/parser/resolver/typechecker/consteval/codegen/loader stack,
+// transitively imports (the entire lexer/ast/parser/resolver/typechecker/const-eval/codegen/loader stack,
 // plus the std prelude + ffi bindings it uses). Each iteration runs the real transpile pipeline in process
 // -- parse (lex+parse every module, via the loader) -> resolve-all -> typecheck-all (+ deferred asserts)
 // -> borrowck-all -> emit the whole package to C through the streaming backend (shared headers + every TU +
@@ -14,7 +14,7 @@ import hir::lower as hirl;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
 import ir::lower as irl;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import driver::emit as demit;
 import driver::test as dtest;
 import driver::util as dutil;
@@ -131,7 +131,6 @@ pub struct Timing {
 
 // Deferred-assert sink: a clean self-transpile produces none, so this is never actually called; it just
 // satisfies flush_asserts' callback signature.
-const fn ignore_assert(_ctx: *mut void, _m: ModuleId, _cond: NodeId, _msg: *const char) {}
 
 // Resolve module `i` in place (mirrors main.spc's resolve_module, without diagnostics logging).
 fn resolve_one(p: &mut loader::Package, i: usize) {
@@ -175,8 +174,8 @@ fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
     let mut p = loader::package_load(ROOT, STD_DIR.ptr() as *const char, false, unsafe dshim::sc_host_platform());
     let n = p.modules.len();
     let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
     let mut i: usize = 0;
     while i < n {
         resolve_one(&mut p, i);
@@ -187,9 +186,8 @@ fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
         typecheck_one(&mut p, i);
         i = i + 1;
     }
-    ceval.flush_asserts(ignore_assert, null);
-    ceval.all_typed = true;
-    ceval.record_folds = true; // final evaluator state before the first lowering, as the driver sets it
+    cirv.all_typed = true;
+    cirv.record_folds = true;
     let mut irkeep = irl::Keep::new();
     let _ = demit::borrowck_all(&mut p, &mut irkeep);
 
@@ -300,8 +298,8 @@ fn transpile_once() Timing {
     }
 
     let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
 
     i = 0;
     while i < n {
@@ -318,9 +316,8 @@ fn transpile_once() Timing {
         typecheck_one(&mut p, i);
         i = i + 1;
     }
-    ceval.flush_asserts(ignore_assert, null);
-    ceval.all_typed = true;
-    ceval.record_folds = true; // final evaluator state before the first lowering, as the driver sets it
+    cirv.all_typed = true;
+    cirv.record_folds = true;
     let a3 = time::cpu_seconds();
     let c3 = unsafe shim::sc_cpu_cycles();
     let h3 = unsafe shim::sc_alloc_count();

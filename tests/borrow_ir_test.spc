@@ -7,7 +7,7 @@ import module::loader as loader;
 import ast::ast as *;
 import resolver::resolver as res;
 import typechecker::typechecker as tc;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import ir::lower as irl;
 import ir::verify as irv;
 import borrowck::move_paths as bmp;
@@ -53,8 +53,8 @@ fn typed_package(src: str) loader::Package {
     );
     assert(p.ok, "snippet parses");
     let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
     let n = p.modules.len();
     let mut ok = true;
     for i in 0..n {
@@ -65,7 +65,7 @@ fn typed_package(src: str) loader::Package {
         ok = t_typecheck(&mut p, i) && ok;
     }
     assert(ok, "snippet typechecks");
-    p.ceval = null;
+    p.cir = null;
     return p;
 }
 

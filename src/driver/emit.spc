@@ -1,6 +1,6 @@
 // Global-phase pipeline driver over a loaded Package: platform-filters items, runs resolve/typecheck/
 // borrowck per module (each stage mutates the module's Ast in place through a raw pointer into its
-// Package slot), flushes deferred consteval errors, then prunes dead modules from
+// Package slot), flushes deferred const-eval errors, then prunes dead modules from
 // the emit set and codegens each live module into <gen_root> in dependency order. Entry points:
 // run_package (build/run/test) and lint_package (report-only lints + `--fix` fix collection).
 import stdio;
@@ -19,7 +19,6 @@ import hir::lower as hirl;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
 import borrowck::flow_ir as bfi;
-import consteval::consteval as ce;
 import ir::core as irc;
 import ir::lower as irl;
 import ir::print as irp;
@@ -815,132 +814,6 @@ fn borrow_ir_pass(p: &mut loader::Package) u32 {
     );
     return (st.move_errs + st.loan_errs + st.ref_diffs) as u32;
 }
-fn ctfe_ir_pass(p: &mut loader::Package) {
-    if stdlib::getenv("SC_CTFE_IR") == null {
-        return;
-    }
-    let ceptr = p.ceval as *mut ce::ConstEval;
-    if ceptr == null {
-        return;
-    }
-    let t0 = unsafe shim::sc_ticks_ms();
-    let mut consts: u64 = 0;
-    let mut scalar: u64 = 0;
-    let mut matched: u64 = 0;
-    let mut unsupported: u64 = 0;
-    let mut mism: u64 = 0;
-    let mut aggs: u64 = 0;
-    let mut agg_ok: u64 = 0;
-    let mut newfolds: u64 = 0;
-    for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast {
-            continue;
-        }
-        let a = unsafe &*p.module_ast_const(m as ModuleId);
-        let items = a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let nid = unsafe a.list(items)[i as usize];
-            let n = a.at_const(nid);
-            if n.kind != NodeKind::NODE_CONST || n.as_data.const_def.is_extern || n.as_data.const_def.value == NODE_NONE {
-                continue;
-            }
-            consts += 1;
-            let old = unsafe (&mut *ceptr).eval(m as ModuleId, n.as_data.const_def.value);
-            let omemo = unsafe (&*ceptr).memo_kind(m as ModuleId, n.as_data.const_def.value);
-            let budget = unsafe (&*ceptr).max_steps;
-            if old.kind != ce::CONST_INT && old.kind != ce::CONST_BOOL && old.kind != ce::CONST_FLOAT {
-                let nv2 = iri::eval_const(p, m as ModuleId, nid, budget);
-                if omemo == ce::CONST_AGG_OK {
-                    // non-scalar success parity: the new path must also produce a value
-                    aggs += 1;
-                    if nv2.kind != iri::IV_NONE {
-                        agg_ok += 1;
-                    } else if stdlib::getenv("SC_BORROW_TRACE") != null {
-                        let sp = n.span;
-                        let src = p.modules[m].source.as_str();
-                        let mut e2 = sp.end as usize;
-                        if e2 > sp.start as usize + 60 {
-                            e2 = sp.start as usize + 60;
-                        }
-                        eprint("ctfe-ir: agg-miss module {} `{}`\n", m, src.slice(sp.start as usize, e2));
-                    }
-                } else if nv2.kind != iri::IV_NONE {
-                    // the established evaluator refused; folding here would be semantic drift
-                    newfolds += 1;
-                    if newfolds <= 8 {
-                        let sp = n.span;
-                        let src = p.modules[m].source.as_str();
-                        let mut e2 = sp.end as usize;
-                        if e2 > sp.start as usize + 60 {
-                            e2 = sp.start as usize + 60;
-                        }
-                        eprint("ctfe-ir: new-folds module {} `{}`\n", m, src.slice(sp.start as usize, e2));
-                    }
-                }
-                continue;
-            }
-            scalar += 1;
-            let nv = iri::eval_const(p, m as ModuleId, nid, budget);
-            if nv.kind == iri::IV_NONE {
-                unsupported += 1;
-                if stdlib::getenv("SC_BORROW_TRACE") != null {
-                    let sp = n.span;
-                    let src = p.modules[m].source.as_str();
-                    let mut e2 = sp.end as usize;
-                    if e2 > sp.start as usize + 60 {
-                        e2 = sp.start as usize + 60;
-                    }
-                    eprint("ctfe-ir: unsupported module {} `{}`\n", m, src.slice(sp.start as usize, e2));
-                }
-                continue;
-            }
-            let mut ok = false;
-            if old.kind == ce::CONST_INT && nv.kind == iri::IV_INT {
-                ok = old.as_data.i == nv.i;
-            } else if old.kind == ce::CONST_FLOAT && nv.kind == iri::IV_FLOAT {
-                let of = old.as_data.f;
-                ok = of == nv.f || of != of && nv.f != nv.f;
-            } else if old.kind == ce::CONST_BOOL && nv.kind == iri::IV_BOOL {
-                let mut oi: i64 = 0;
-                if old.as_data.i != 0 {
-                    oi = 1;
-                }
-                ok = oi == nv.i;
-            }
-            if ok {
-                matched += 1;
-            } else {
-                mism += 1;
-                if mism <= 12 {
-                    let sp = n.span;
-                    let src = p.modules[m].source.as_str();
-                    let mut e2 = sp.end as usize;
-                    if e2 > sp.start as usize + 40 {
-                        e2 = sp.start as usize + 40;
-                    }
-                    eprint(
-                        "ctfe-ir: mismatch module {} `{}`: old {} new {}\n",
-                        m,
-                        src.slice(sp.start as usize, e2),
-                        old.as_data.i,
-                        nv.i,
-                    );
-                }
-            }
-        }
-    }
-    let dt = unsafe shim::sc_ticks_ms() - t0;
-    eprint(
-        "ctfe-ir: {} consts, {} scalar, {} matched, {} unsupported, {} mismatched, {} ms\n",
-        consts,
-        scalar,
-        matched,
-        unsupported,
-        mism,
-        dt,
-    );
-    eprint("ctfe-ir: {} aggregate successes, {} reproduced, {} new-folds\n", aggs, agg_ok, newfolds);
-}
 
 // Validation mode (SC_LAYOUT=1): every concrete pool type must satisfy the C layout invariants --
 // power-of-two alignment dividing the size, field offsets aligned, monotone, and inside the parent,
@@ -1348,7 +1221,7 @@ fn cemit_inst_asserts(
         Some(_v) => true,
         None => false,
     };
-    if hit || p.ceval == null || subs.len() == 0 {
+    if hit || p.cir == null || subs.len() == 0 {
         return;
     }
     let a = unsafe &*p.module_ast_const(d_def.module);
@@ -1356,7 +1229,7 @@ fn cemit_inst_asserts(
         return;
     }
     let fsp = a.at_const(d_def.node).span;
-    let cev = p.ceval as *mut ce::ConstEval;
+    let cev = p.cir as *mut iri::Interp;
     let pmod = subs.at(0).pm;
     let mut prm = Array::<NodeId, 8> {};
     let mut ams = Array::<ModuleId, 8> {};
@@ -1380,11 +1253,11 @@ fn cemit_inst_asserts(
         }
         let bd = n.as_data.binary;
         let cv = cev.eval_typed(d_def.module, bd.left, pmod, &prm[0], &ams[0], &ats[0], np);
-        if cv.kind != ce::CONST_INT && cv.kind != ce::CONST_BOOL {
+        if cv.kind != iri::IV_INT && cv.kind != iri::IV_BOOL {
             decided = false;
             continue;
         }
-        if cv.as_data.i != 0 {
+        if cv.i != 0 {
             continue;
         }
         let mut msg = "static assertion failed";
@@ -2648,14 +2521,14 @@ pub fn cemit_package(
             di += 1;
         }
     }
-    // const/static definitions: each referenced item folds through the Core IR interpreter
+    // const/static definitions: each referenced item folds through the Core IR interpreter; one
+    // interpreter serves the whole pass (its lowered-callee cache, call memo, and captured static
+    // groups persist), and the descriptor sections below render from the same store
+    let mut cdit = iri::interp_new(p);
     let mut const_defs = String::new();
     {
         let mut cd_ok: u64 = 0;
         let mut cd_skip: u64 = 0;
-        // one interpreter for the whole loop: its lowered-callee cache and call memo persist, so
-        // a fn transitively called by many constants lowers and folds once
-        let mut cdit = iri::interp_new(p);
         for ci in 0..cem.stat_items.len() {
             let em2 = cem.stat_items.at(ci).em;
             let cdef = cem.stat_items.at(ci).def;
@@ -2755,44 +2628,45 @@ pub fn cemit_package(
                         continue;
                     }
                 }
-                // any other aggregate: the CTFE static graph, rendered like reflection groups
-                // (root + `__ct%u` auxiliaries with pointer relocations). IV_NONE also lands
-                // here: the FULL interpreter handles allocation the Core-IR one refuses.
-                if (v.kind == iri::IV_OBJ || v.kind == iri::IV_NONE) && p.ceval != null {
-                    let cev3 = unsafe &mut *(p.ceval as *mut ce::ConstEval);
-                    let sr3 = cev3.eval_static(cdef.module, cdn.as_data.const_def.value);
-                    if sr3.ok {
-                        let mut grp3 = String::new();
-                        let mut rootd3 = String::new();
-                        let ok3 = st_group(p, &mut cem.mg, &*cev3, csym.as_str(), sr3.root, &mut grp3) && st_ctype(
-                            p,
-                            &mut cem.mg,
-                            &*cev3,
-                            sr3.root,
-                            csym.as_str(),
-                            &mut rootd3,
-                        );
-                        if ok3 {
-                            const_defs.push_string(&grp3);
-                            const_defs.push_string(&rootd3);
-                            const_defs.push_str(" = ");
-                            if st_init(p, &mut cem.mg, &*cev3, csym.as_str(), sr3.root, &mut const_defs) {
-                                const_defs.push_str(";\n");
-                                cd_ok += 1;
-                                continue;
-                            }
+                // any other aggregate: the CTFE static graph, captured straight from the
+                // interpreter's live objects; a refusal falls back to the established
+                // evaluator's graph, converted into the same store.
+                let mut root3: i64 = 0 - 1;
+                if v.kind == iri::IV_OBJ {
+                    let sri = cdit.capture(v);
+                    if sri.ok {
+                        root3 = sri.root;
+                    }
+                }
+                if root3 >= 0 {
+                    let mut grp3 = String::new();
+                    let mut rootd3 = String::new();
+                    let okg3 = st_group(p, &mut cem.mg, &cdit, csym.as_str(), root3 as u32, &mut grp3);
+                    let okc3 = st_ctype(p, &mut cem.mg, &cdit, root3 as u32, csym.as_str(), &mut rootd3);
+                    let ok3 = okg3 && okc3;
+                    if ok3 {
+                        const_defs.push_string(&grp3);
+                        const_defs.push_string(&rootd3);
+                        const_defs.push_str(" = ");
+                        if st_init(p, &mut cem.mg, &cdit, csym.as_str(), root3 as u32, &mut const_defs) {
+                            const_defs.push_str(";\n");
+                            cd_ok += 1;
+                            continue;
                         }
                     }
                 }
             }
             let mut line = String::new();
-            let mut okc = v.kind == iri::IV_INT || v.kind == iri::IV_BOOL || v.kind == iri::IV_FLOAT || v.kind == iri::IV_STR;
+            // a NULL pointer constant is scalar data (`= 0`)
+            let mut okc = v.kind == iri::IV_INT || v.kind == iri::IV_BOOL || v.kind == iri::IV_FLOAT || v.kind == iri::IV_STR || v.kind == iri::IV_PTR && v.i == 0;
             if okc {
                 okc = cem.mg.ctype(em2, cty, csym.as_str(), &mut line);
             }
             if okc {
                 line.push_str(" = ");
-                if v.kind == iri::IV_INT {
+                if v.kind == iri::IV_PTR {
+                    line.push_str("0");
+                } else if v.kind == iri::IV_INT {
                     if v.i < 0 && line.len() != 0 && line.as_str().byte_at(0) == b'u' {
                         line.push_u64(v.i as u64);
                         line.push_str("ULL");
@@ -2859,8 +2733,7 @@ pub fn cemit_package(
     // @reflect exports + `type_info` descriptor groups: the CTFE static graph rendered as file-
     // scope const data (extern roots; `__ct%u` auxiliaries static per group)
     let mut static_defs = String::new();
-    if p.ceval != null {
-        let cevr = unsafe &mut *(p.ceval as *mut ce::ConstEval);
+    if p.cir != null {
         let tih = p.prelude_lookup("TypeInfo", true);
         let mut ti_ok: u64 = 0;
         let mut ti_skip: u64 = 0;
@@ -2873,16 +2746,17 @@ pub fn cemit_package(
                 let rty9 = a9.intern_type(
                     Ty { kind: TypeKind::TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } },
                 );
-                let sr = cevr.eval_type_info_export(em9, rty9, em9, ty9);
+                let sr = cdit.eval_type_info_export(em9, rty9, em9, ty9);
                 let mut ok9b = sr.ok;
                 if ok9b {
+                    let root9 = sr.root;
                     let mut grp = String::new();
                     let mut rootd = String::new();
-                    ok9b = st_group(p, &mut cem.mg, &*cevr, sym9.as_str(), sr.root, &mut grp) && st_ctype(
+                    ok9b = st_group(p, &mut cem.mg, &cdit, sym9.as_str(), root9, &mut grp) && st_ctype(
                         p,
                         &mut cem.mg,
-                        &*cevr,
-                        sr.root,
+                        &cdit,
+                        root9,
                         sym9.as_str(),
                         &mut rootd,
                     );
@@ -2891,7 +2765,7 @@ pub fn cemit_package(
                         static_defs.push_str("const ");
                         static_defs.push_string(&rootd);
                         static_defs.push_str(" = ");
-                        ok9b = st_init(p, &mut cem.mg, &*cevr, sym9.as_str(), sr.root, &mut static_defs);
+                        ok9b = st_init(p, &mut cem.mg, &cdit, sym9.as_str(), root9, &mut static_defs);
                         static_defs.push_str(";\n");
                         cem.stat_decls.push_str("extern const ");
                         cem.stat_decls.push_string(&rootd);
@@ -2939,11 +2813,12 @@ pub fn cemit_package(
                     let rty9 = a9.intern_type(
                         Ty { kind: TypeKind::TYPE_STRUCT, module: tih.mid, as_data: TyAs { decl: tih.node } },
                     );
-                    let sr = cevr.eval_type_info_export(m9 as ModuleId, rty9, m9 as ModuleId, tt9);
+                    let sr = cdit.eval_type_info_export(m9 as ModuleId, rty9, m9 as ModuleId, tt9);
                     if !sr.ok {
                         ti_skip += 1;
                         continue;
                     }
+                    let root9 = sr.root;
                     let mut qn = String::new();
                     cem.mg.modpfx(m9 as ModuleId, &mut qn);
                     cem.mg.ident(
@@ -2955,11 +2830,11 @@ pub fn cemit_package(
                     nm9.push_string(&qn);
                     let mut grp = String::new();
                     let mut rootd = String::new();
-                    let mut ok9b = st_group(p, &mut cem.mg, &*cevr, nm9.as_str(), sr.root, &mut grp) && st_ctype(
+                    let mut ok9b = st_group(p, &mut cem.mg, &cdit, nm9.as_str(), root9, &mut grp) && st_ctype(
                         p,
                         &mut cem.mg,
-                        &*cevr,
-                        sr.root,
+                        &cdit,
+                        root9,
                         nm9.as_str(),
                         &mut rootd,
                     );
@@ -2969,7 +2844,7 @@ pub fn cemit_package(
                         static_defs.push_str("const ");
                         static_defs.push_string(&rootd);
                         static_defs.push_str(" = ");
-                        ok9b = st_init(p, &mut cem.mg, &*cevr, nm9.as_str(), sr.root, &mut static_defs);
+                        ok9b = st_init(p, &mut cem.mg, &cdit, nm9.as_str(), root9, &mut static_defs);
                         static_defs.push_str(";\n__attribute__((constructor)) static void __sc_reg_");
                         static_defs.push_string(&qn);
                         static_defs.push_str("(void) { __sc_reflect_register((const void *)&");
@@ -3339,14 +3214,18 @@ fn render_const_elem(a: &Ast, src: str, eid: NodeId, out: &mut String) bool {
     return false;
 }
 
+// Copy one captured group from the established evaluator's store into the interpreter's,
+// remapping intra-group indices; groups are self-contained (each capture evaluates from a fresh
+// object store), so a constant offset relocates every parent/owner/child/target.
+
 // ---- CTFE static-graph rendering (the new backend's `@reflect` / `type_info` data layer) -------
 
 // The C declarator of statics entry `gi` around `decl`: heap/array groups spell as element arrays,
 // aggregates by their (instance) names, cells by their value type.
-fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, gi: u32, decl: str, out: &mut String) bool {
+fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u32, decl: str, out: &mut String) bool {
     let g = cev.static_at(gi);
     let shape = unsafe g.shape;
-    if shape == ce::SS_HEAP || shape == ce::SS_ARRAY {
+    if shape == iri::SS_HEAP || shape == iri::SS_ARRAY {
         let mut n2 = unsafe g.n;
         if n2 == 0 {
             n2 = 1;
@@ -3358,7 +3237,7 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, gi:
         let ok = mg.ctype(unsafe g.etm, unsafe g.ety, d2.as_str(), out);
         return ok;
     }
-    if shape == ce::SS_CELL {
+    if shape == iri::SS_CELL {
         return mg.ctype(unsafe g.etm, unsafe g.ety, decl, out);
     }
     // SS_STRUCT / SS_ENUM: the aggregate's (instance) C name
@@ -3367,7 +3246,7 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, gi:
     let da = unsafe &*p.module_ast_const(dm);
     mg.modpfx(dm, out);
     mg.ident(dm, da.at_const(da.at_const(dn).as_data.aggregate.name).as_data.name.text, out);
-    if shape == ce::SS_STRUCT && unsafe g.nargs != 0 {
+    if shape == iri::SS_STRUCT && unsafe g.nargs != 0 {
         let mut last = unsafe g.nargs;
         while last > 0 && mg.is_global(unsafe g.am[(last - 1) as usize], unsafe g.at[(last - 1) as usize]) {
             last -= 1;
@@ -3389,7 +3268,7 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, gi:
 // `.field` designator for member index `idx` of aggregate `(dm, dn)` (`._N` for tuples).
 // Is struct slot `idx` a zero-sized field (no C member exists for it)? Resolved under the
 // StaticObj's recorded instance args, mirroring st_field's field-ordinal indexing.
-fn st_field_zst(p: &loader::Package, mg: &mut mbe::Mangler, g: *const ce::StaticObj, idx: u32) bool {
+fn st_field_zst(p: &loader::Package, mg: &mut mbe::Mangler, g: *const iri::StaticObj, idx: u32) bool {
     let dm = unsafe g.dm;
     let dn = unsafe g.dn;
     let a = unsafe &*p.module_ast_const(dm);
@@ -3454,9 +3333,9 @@ fn st_field(p: &loader::Package, mg: &mut mbe::Mangler, dm: ModuleId, dn: NodeId
 }
 
 // The C lvalue path of statics entry `gi`, rooted at its owner's name.
-fn st_path(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name: str, gi: u32, out: &mut String) {
+fn st_path(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: str, gi: u32, out: &mut String) {
     let g = cev.static_at(gi);
-    if unsafe g.parent == ce::S_NO_PARENT {
+    if unsafe g.parent == iri::S_NO_PARENT {
         out.push_str(name);
         if unsafe g.ord != 0 {
             out.push_str("__ct");
@@ -3469,13 +3348,13 @@ fn st_path(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name
     let pg = cev.static_at(pi);
     let pshape = unsafe pg.shape;
     let pslot = unsafe g.pslot;
-    if pshape == ce::SS_ARRAY || pshape == ce::SS_HEAP {
+    if pshape == iri::SS_ARRAY || pshape == iri::SS_HEAP {
         out.push_str("[");
         out.push_u64(pslot);
         out.push_str("]");
-    } else if pshape == ce::SS_STRUCT {
+    } else if pshape == iri::SS_STRUCT {
         st_field(p, mg, unsafe pg.dm, unsafe pg.dn, pslot, out);
-    } else if pshape == ce::SS_ENUM {
+    } else if pshape == iri::SS_ENUM {
         let a = unsafe &*p.module_ast_const(unsafe pg.dm);
         let ms = a.at_const(unsafe pg.dn).as_data.aggregate.members;
         let tag = (unsafe pg.slots.at(0).i) as u32;
@@ -3495,13 +3374,13 @@ fn st_path(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name
 }
 
 // One relocation: a function's address or a (possibly interior) pointer into a sibling static.
-fn st_rel(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name: str, r: &ce::SRel, out: &mut String) bool {
-    if r.kind == ce::SREL_FN {
+fn st_rel(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: str, r: &iri::SRel, out: &mut String) bool {
+    if r.kind == iri::SREL_FN {
         let tgt = mg.method_target(r.fm, r.fnode);
         return mg.fn_sym(r.fm, r.fnode, tgt, true, out);
     }
     let tshape = unsafe cev.static_at(r.target).shape;
-    if tshape == ce::SS_ARRAY || tshape == ce::SS_HEAP {
+    if tshape == iri::SS_ARRAY || tshape == iri::SS_HEAP {
         if r.toff == 0 {
             out.push_str("(void *)");
             st_path(p, mg, cev, name, r.target, out);
@@ -3516,36 +3395,28 @@ fn st_rel(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name:
     }
     out.push_str("(void *)&");
     st_path(p, mg, cev, name, r.target, out);
-    if tshape == ce::SS_STRUCT && r.toff != 0 {
+    if tshape == iri::SS_STRUCT && r.toff != 0 {
         st_field(p, mg, unsafe cev.static_at(r.target).dm, unsafe cev.static_at(r.target).dn, r.toff, out);
     }
     return true;
 }
 
 // One slot's initializer expression.
-fn st_slot(
-    p: &loader::Package,
-    mg: &mut mbe::Mangler,
-    cev: &ce::ConstEval,
-    name: str,
-    gi: u32,
-    k: u32,
-    out: &mut String,
-) bool {
+fn st_slot(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: str, gi: u32, k: u32, out: &mut String) bool {
     let g = cev.static_at(gi);
     let sl = *unsafe g.slots.at(k as usize);
-    if sl.kind == ce::SK_ZERO {
+    if sl.kind == iri::SK_ZERO {
         out.push_str("{0}");
         return true;
     }
-    if sl.kind == ce::SK_NULL {
+    if sl.kind == iri::SK_NULL {
         out.push_str("NULL");
         return true;
     }
-    if sl.kind == ce::SK_AGG {
+    if sl.kind == iri::SK_AGG {
         return st_init(p, mg, cev, name, sl.child, out);
     }
-    if sl.kind == ce::SK_REL {
+    if sl.kind == iri::SK_REL {
         for ri in 0..unsafe g.rels.len() {
             if unsafe g.rels.at(ri).slot == k {
                 return st_rel(p, mg, cev, name, unsafe g.rels.at(ri), out);
@@ -3554,7 +3425,7 @@ fn st_slot(
         out.push_str("NULL");
         return true;
     }
-    if sl.kind == ce::SK_BOOL {
+    if sl.kind == iri::SK_BOOL {
         out.push_str(
             if sl.i != 0 {
                 "true";
@@ -3564,7 +3435,7 @@ fn st_slot(
         );
         return true;
     }
-    if sl.kind == ce::SK_FLOAT {
+    if sl.kind == iri::SK_FLOAT {
         out.push_f64(sl.f);
         return true;
     }
@@ -3589,17 +3460,17 @@ fn st_slot(
 }
 
 // The braced initializer of statics entry `gi`.
-fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name: str, gi: u32, out: &mut String) bool {
+fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: str, gi: u32, out: &mut String) bool {
     let g = cev.static_at(gi);
     let shape = unsafe g.shape;
     let nslots = (unsafe g.slots.len()) as u32;
-    if shape == ce::SS_CELL {
+    if shape == iri::SS_CELL {
         return st_slot(p, mg, cev, name, gi, 0, out);
     }
-    if shape == ce::SS_ARRAY || shape == ce::SS_HEAP {
+    if shape == iri::SS_ARRAY || shape == iri::SS_HEAP {
         let mut allzero = true;
         for k in 0..nslots {
-            if unsafe g.slots.at(k as usize).kind != ce::SK_ZERO {
+            if unsafe g.slots.at(k as usize).kind != iri::SK_ZERO {
                 allzero = false;
                 break;
             }
@@ -3615,7 +3486,7 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name
             if k != 0 {
                 out.push_str(", ");
             }
-            if unsafe g.slots.at(k as usize).kind == ce::SK_ZERO && escalar {
+            if unsafe g.slots.at(k as usize).kind == iri::SK_ZERO && escalar {
                 out.push_str("0");
             } else if !st_slot(p, mg, cev, name, gi, k, out) {
                 return false;
@@ -3624,7 +3495,7 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name
         out.push_str(" }");
         return true;
     }
-    if shape == ce::SS_ENUM {
+    if shape == iri::SS_ENUM {
         let dm = unsafe g.dm;
         let dn = unsafe g.dn;
         let a = unsafe &*p.module_ast_const(dm);
@@ -3639,7 +3510,7 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name
         mg.enum_tag(dm, dn, vid, out);
         let mut haspay = false;
         for k in 1..nslots {
-            if unsafe g.slots.at(k as usize).kind != ce::SK_ZERO {
+            if unsafe g.slots.at(k as usize).kind != iri::SK_ZERO {
                 haspay = true;
             }
         }
@@ -3650,7 +3521,7 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name
             out.push_str(" = { ");
             let mut first = true;
             for k in 1..nslots {
-                if unsafe g.slots.at(k as usize).kind == ce::SK_ZERO {
+                if unsafe g.slots.at(k as usize).kind == iri::SK_ZERO {
                     continue;
                 }
                 if !first {
@@ -3718,10 +3589,10 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name
 // A whole group at file scope: tentative forward declarations for every standalone auxiliary
 // (back-references and cycles resolve against them), then their definitions. The ROOT is the
 // caller's to define (its linkage differs per use).
-fn st_group(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, name: str, root: u32, out: &mut String) bool {
+fn st_group(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: str, root: u32, out: &mut String) bool {
     let groupn = unsafe cev.static_at(root).groupn;
     for gi in root + 1..root + groupn {
-        if unsafe cev.static_at(gi).parent != ce::S_NO_PARENT {
+        if unsafe cev.static_at(gi).parent != iri::S_NO_PARENT {
             continue;
         }
         let mut nm2 = String::from_str(name);
@@ -3739,7 +3610,7 @@ fn st_group(p: &loader::Package, mg: &mut mbe::Mangler, cev: &ce::ConstEval, nam
         }
     }
     for gi in root + 1..root + groupn {
-        if unsafe cev.static_at(gi).parent != ce::S_NO_PARENT {
+        if unsafe cev.static_at(gi).parent != iri::S_NO_PARENT {
             continue;
         }
         let mut nm2 = String::from_str(name);
@@ -4155,21 +4026,45 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
 // Promoted fold failures (proven UB, failed mandatory `const fn` folds) recorded by the evaluator:
 // errors against the owning module; only the outermost record of nested failures is reported.
 fn report_fold_errs(p: &mut loader::Package) {
-    let ceptr = p.ceval as *mut ce::ConstEval;
-    if ceptr == null {
-        return;
+    // the engine's recorded fold failures drain here (lowering-time implicit folds; a node can
+    // record more than once across passes, so duplicates collapse)
+    let mut ms = Vector::<ModuleId>::new();
+    let mut ids = Vector::<NodeId>::new();
+    let mut kinds = Vector::<u8>::new();
+    let mut details = Vector::<String>::new();
+    let cirp = p.cir as *mut iri::Interp;
+    if cirp != null {
+        for i in 0..unsafe cirp.fold_errs.len() {
+            let m2 = unsafe cirp.fold_errs.at(i).m;
+            let id2 = unsafe cirp.fold_errs.at(i).id;
+            let mut dup = false;
+            for j in 0..ms.len() {
+                if ms[j] == m2 && ids[j] == id2 {
+                    dup = true;
+                }
+            }
+            if dup {
+                continue;
+            }
+            ms.push(m2);
+            ids.push(id2);
+            kinds.push(unsafe cirp.fold_errs.at(i).kind);
+            let mut d = String::new();
+            d.push_string(unsafe &cirp.fold_errs.at(i).detail);
+            details.push(d);
+        }
     }
-    let nerr = unsafe ceptr.fold_errs.len();
+    let nerr = ms.len();
     for i in 0..nerr {
-        let m = unsafe ceptr.fold_errs.at(i).m;
-        let rid = unsafe ceptr.fold_errs.at(i).id;
+        let m = ms[i];
+        let rid = ids[i];
         let sp = p.modules[m as usize].ast.at_const(rid).span;
         let mut inner = false;
         for j in 0..nerr {
-            if j == i || unsafe ceptr.fold_errs.at(j).m != m {
+            if j == i || ms[j] != m {
                 continue;
             }
-            let sp2 = p.modules[m as usize].ast.at_const(unsafe ceptr.fold_errs.at(j).id).span;
+            let sp2 = p.modules[m as usize].ast.at_const(ids[j]).span;
             if sp2.start <= sp.start && sp.end <= sp2.end && (sp2.start < sp.start || sp.end < sp2.end) {
                 inner = true;
                 break;
@@ -4178,16 +4073,13 @@ fn report_fold_errs(p: &mut loader::Package) {
         if inner {
             continue;
         }
-        let rkind = unsafe ceptr.fold_errs.at(i).kind;
+        let rkind = kinds[i];
         let mut errs = diag::Errors::new();
-        if ce::ce_trap_is_ub(rkind) {
+        if iri::it_trap_is_ub(rkind) {
             errs.emit(
                 sp.start,
                 sp.end - sp.start,
-                format(
-                    "expression has undefined behavior when evaluated: {}",
-                    diag::cstr(unsafe &ceptr.fold_errs.at(i).detail[0]),
-                ),
+                format("expression has undefined behavior when evaluated: {}", details.at(i).as_str()),
             );
         } else {
             errs.emit(
@@ -4195,7 +4087,7 @@ fn report_fold_errs(p: &mut loader::Package) {
                 sp.end - sp.start,
                 format(
                     "this 'const fn' call has compile-time-known arguments but failed to evaluate: {}",
-                    diag::cstr(unsafe &ceptr.fold_errs.at(i).detail[0]),
+                    details.at(i).as_str(),
                 ),
             );
         }
@@ -4701,21 +4593,20 @@ fn ap_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
     if a.at_const(fnode).kind != NodeKind::NODE_FUNCTION || ap_is_test_fn(a, fnode) {
         return;
     }
-    let cev = p.ceval as *mut ce::ConstEval;
-    let hit = cev.ce_lint_body(m as ModuleId, fnode);
-    if hit != NODE_NONE {
-        let sp = a.at_const(hit).span;
-        if ce::ce_trap_is_ub(cev.ce_trap_kind_get()) {
+    let cev = p.cir as *mut iri::Interp;
+    let sp = cev.lint_body(m as ModuleId, fnode);
+    if sp.end > sp.start {
+        if iri::it_trap_is_ub(cev.trap_kind_get()) {
             errs.emit(
                 sp.start,
                 sp.end - sp.start,
-                format("this statement is undefined behavior when executed: {}", cev.ce_trap_detail()),
+                format("this statement is undefined behavior when executed: {}", cev.trap_detail()),
             );
         } else {
             errs.emit(
                 sp.start,
                 sp.end - sp.start,
-                format("this statement always panics at runtime: {}", cev.ce_trap_detail()),
+                format("this statement always panics at runtime: {}", cev.trap_detail()),
             );
         }
     }
@@ -4726,9 +4617,9 @@ fn ap_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
 /// sweep interprets cross-module `const fn` bodies, whose types only exist once their module is
 /// typed -- an inline per-module pass would silently fold nothing (module order). @test fns are
 /// exempt (panicking on purpose is a feature there), as are explicit `panic(..)` calls (only a
-/// panic reached THROUGH a `const fn` frame classifies -- see ce_lint_body).
+/// panic reached THROUGH a `const fn` frame classifies -- see Interp::lint_body).
 pub fn check_always_panics_module(p: &mut loader::Package, m: usize, errs: &mut diag::Errors) {
-    if p.ceval == null || !p.modules[m].has_ast {
+    if p.cir == null || !p.modules[m].has_ast {
         return;
     }
     let a = mod_ast_c(p, m as ModuleId);
@@ -4767,8 +4658,8 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
     if lint_root_mod(p, m) && diag::span_str(src, nsp.start, nsp.end) == "main" {
         return;
     }
-    let cev = p.ceval as *mut ce::ConstEval;
-    if cev.ce_fn_const_suggest(m as ModuleId, fnode) {
+    let cev = p.cir as *mut iri::Interp;
+    if cev.fn_const_suggest(m as ModuleId, fnode) {
         errs.warn(
             nsp.start,
             nsp.end - nsp.start,
@@ -4786,7 +4677,7 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
 }
 
 fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector<diag::LintFix>) {
-    if p.ceval == null {
+    if p.cir == null {
         return;
     }
     for m in 0..p.modules.len() {
@@ -4990,8 +4881,8 @@ fn dp_check_stmt(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m:
             return; // a reference-carrying param could observe or mutate caller state
         }
     }
-    let cev = p.ceval as *mut ce::ConstEval;
-    if !cev.ce_fn_const_suggest(fd.module, fd.node) {
+    let cev = p.cir as *mut iri::Interp;
+    if !cev.fn_const_suggest(fd.module, fd.node) {
         return;
     }
     let csp = a.at_const(callee).span;
@@ -5005,7 +4896,7 @@ fn dp_check_stmt(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m:
 }
 
 fn lint_discarded_results(p: &mut loader::Package, only_mod: i32) {
-    if p.ceval == null {
+    if p.cir == null {
         return;
     }
     for m in 0..p.modules.len() {
@@ -5246,7 +5137,6 @@ pub fn lint_package(
         return 1;
     }
     let _ = borrow_ir_pass(p);
-    ctfe_ir_pass(p);
     layout_pass(p);
     cemit_pass(p);
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
@@ -5255,9 +5145,9 @@ pub fn lint_package(
     // `const `-insertion fixes instead of printing.
     if fixes == null {
         lint_unused_items(p, lint_mod as i32);
-        let ceptr = p.ceval as *mut ce::ConstEval;
-        if ceptr != null {
-            unsafe ceptr.all_typed = true;
+        let cirp0 = p.cir as *mut iri::Interp;
+        if cirp0 != null {
+            unsafe cirp0.all_typed = true;
         }
         check_always_panics(p, lint_mod as i32);
         lint_discarded_results(p, lint_mod as i32);
@@ -5330,10 +5220,10 @@ pub fn run_package(
     // state BEFORE the first body lowers: every module is typed here, and mandatory call-site
     // folds must behave exactly as they would under the backend's own lowering.
     {
-        let cep = p.ceval as *mut ce::ConstEval;
-        if cep != null {
-            unsafe cep.all_typed = true;
-            unsafe cep.record_folds = true;
+        let cirp1 = p.cir as *mut iri::Interp;
+        if cirp1 != null {
+            unsafe cirp1.all_typed = true;
+            unsafe cirp1.record_folds = true;
         }
     }
     let mut irkeep = irl::Keep::new();
@@ -5351,7 +5241,6 @@ pub fn run_package(
         return 1;
     }
     let _ = borrow_ir_pass(p);
-    ctfe_ir_pass(p);
     layout_pass(p);
     cemit_pass(p);
     cemit_tu_pass(p);
@@ -5359,15 +5248,15 @@ pub fn run_package(
         lint_unused_items(p, -1);
     }
     // static_asserts undecidable in module order re-evaluate now that every module is fully typed.
-    let ceptr = p.ceval as *mut ce::ConstEval;
-    if ceptr != null {
+    let cirf = p.cir as *mut iri::Interp;
+    if cirf != null {
         let pv = p as *mut loader::Package;
-        unsafe ceptr.all_typed = true;
+        unsafe cirf.all_typed = true;
         // an ERROR, not a lint: it runs on every build (user modules; std is gated by check.sh's
         // explicit std lint invocations)
         check_always_panics(p, -1);
-        ceptr.flush_asserts(flush_assert_err, pv);
-        ceptr.flush_consts(flush_const_err, pv);
+        cirf.flush_asserts(flush_assert_err, pv);
+        cirf.flush_consts(flush_const_err, pv);
     }
     if !p.ok {
         return 1;
@@ -5427,8 +5316,11 @@ pub fn run_package(
     // unconditionally, so any module with a non-empty TU must be written even when the reference
     // scan finds no direct use (prelude bodies the instance TU calls into)
     let mut co = CemitOut::new(n);
-    if ceptr != null {
-        unsafe ceptr.record_folds = true; // the seed/instance lowering attempts mandatory folds
+    {
+        let cirg = p.cir as *mut iri::Interp;
+        if cirg != null {
+            unsafe cirg.record_folds = true; // the seed/instance lowering attempts mandatory folds
+        }
     }
     cemit_package(p, testing, &plan, live, target, &mut co, &mut irkeep);
     report_fold_errs(p);

@@ -2,7 +2,7 @@
 // checker (and everything after it) consumes is the HIR: the resolved arena with every sugar-keyword
 // marker lowered to core-language nodes. A sugar node is produced only by the parser, seen otherwise
 // only by the formatter and the resolver (whose lint passes run before this stage), and eliminated
-// here -- typecheck, borrowck, consteval and codegen never see one. Adding a sugar keyword is then a
+// here -- typecheck, borrowck, const-eval and codegen never see one. Adding a sugar keyword is then a
 // lexer token, a parser marker, one lowering entry here, and a formatter arm; the rest of the
 // compiler stays unaware of it.
 //

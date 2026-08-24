@@ -8,7 +8,7 @@ import ast::ast as *;
 import resolver::resolver as res;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import ir::lower as irl;
 import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
@@ -76,8 +76,8 @@ fn typed_both(src: str, old_errs: &mut Vector<u32>) loader::Package {
     );
     assert(p.ok, "snippet parses");
     let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, 0, 0);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
     let n = p.modules.len();
     let mut ok = true;
     for i in 0..n {
@@ -91,7 +91,7 @@ fn typed_both(src: str, old_errs: &mut Vector<u32>) loader::Package {
     for i in 0..n {
         ok = t_prod(&mut p, i, i == n - 1, old_errs) && ok;
     }
-    p.ceval = null;
+    p.cir = null;
     return p;
 }
 

@@ -15,7 +15,7 @@ import stdlib;
 import string as cstring;
 import driver_shim as shim;
 import module::loader as loader;
-import consteval::consteval as ce;
+import ir::interp as iri;
 import driver::emit as *;
 import driver::util as *;
 import build_system::manifest as mf;
@@ -1721,8 +1721,14 @@ fn engine_build(
         }
         p.gen_root = srcgen.clone();
         let pkg = (&mut p) as *mut loader::Package;
-        let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
-        p.ceval = &mut ceval;
+        let mut cirv = iri::interp_new(pkg);
+        p.cir = &mut cirv;
+        if ce_steps != 0 {
+            cirv.max_steps = ce_steps;
+        }
+        if ce_mem != 0 {
+            cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
+        }
         let rc = run_package(&mut p, null, "", target, lint, "", &mut sink);
         if rc != 0 {
             stream.drain(true); // reap what is in flight; abandon what has not started
@@ -2671,8 +2677,14 @@ pub fn manifest_test(
     }
     p.gen_root = join2(m.out_dir.as_str(), "raw-test");
     let pkg = (&mut p) as *mut loader::Package;
-    let mut ceval = ce::ConstEval::new(pkg, ce_steps, ce_mem);
-    p.ceval = &mut ceval;
+    let mut cirv = iri::interp_new(pkg);
+    p.cir = &mut cirv;
+    if ce_steps != 0 {
+        cirv.max_steps = ce_steps;
+    }
+    if ce_mem != 0 {
+        cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
+    }
     return run_package(&mut p, topts, "", target, false, "", null);
 }
 

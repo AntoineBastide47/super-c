@@ -182,7 +182,7 @@ pub enum NodeKind {
     // An interpolating matchertext literal `M{}"(a {hole} b)"` (BlockData): children alternate
     // verbatim segment literals (seg=true, MatchertextLiteral) and hole expressions. Typecheck
     // rewrites it in place into the same `sugar_fmt_*` value block `format()` desugars to, so
-    // borrowck/consteval/codegen never see this kind.
+    // borrowck/const-eval/codegen never see this kind.
     NODE_INTERP,
     NODE_KIND_COUNT,
 }
@@ -303,7 +303,7 @@ pub struct WherePredicateData {
     pub bounds: NodeList,
 }
 /// The builtin types' surface names. BuiltinType is declared in this module, so the shared name
-/// table lives here too: the typechecker's renderer/lookup delegates to it, and consteval uses it to
+/// table lives here too: the typechecker's renderer/lookup delegates to it, and const-eval uses it to
 /// fold builtin-targeted casts demanded before their module is typechecked.
 pub const fn bt_name(b: BuiltinType) str<'static> {
     if b == BuiltinType::BT_BOOL {
@@ -1626,9 +1626,13 @@ extend Ast {
     /// The resolved decl node with its module DROPPED -- use resolution_def when the target may
     /// live in another module.
     pub const fn resolution(self: &Self, ref_id: NodeId) NodeId {
-        return self.resolutions[ref_id as usize].node;
+        return self.resolution_def(ref_id).node;
     }
     pub const fn resolution_def(self: &Self, ref_id: NodeId) DefId {
+        // synthesized nodes (post-resolve desugars) have no slot: unresolved, not an abort
+        if ref_id as usize >= self.resolutions.len() {
+            return DefId { module: 0, node: NODE_NONE };
+        }
         return self.resolutions[ref_id as usize];
     }
     pub const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
@@ -1643,6 +1647,12 @@ extend Ast {
         self.types[n as usize] = t;
     }
     pub const fn type_of(self: &Self, n: NodeId) TypeId {
+        // nodes synthesized after init_types (typecheck-time desugars) have no slot yet; the
+        // constant engine reads through partially-typed modules and must see "untyped", not a
+        // bounds abort
+        if n as usize >= self.types.len() {
+            return TYPE_NONE;
+        }
         return self.types[n as usize];
     }
     pub const fn type_at(self: &Self, t: TypeId) &Ty {
