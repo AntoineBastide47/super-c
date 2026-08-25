@@ -3648,13 +3648,15 @@ extend CEmit {
         if current == cfl::NONE || target == cfl::NONE || *cf.rpo.at(target as usize) <= *cf.rpo.at(current as usize) {
             return false;
         }
-        for h in 0..cf.n {
-            if h != current && *cf.is_header.at(h as usize) && *cf.loop_follow.at(h as usize) == target && cf.dominates(
-                h,
-                current,
-            ) {
+        let mut h = *cf.loop_of.at(current as usize);
+        if h == current {
+            h = *cf.loop_parent.at(h as usize);
+        }
+        while h != cfl::NONE {
+            if *cf.loop_follow.at(h as usize) == target {
                 return true;
             }
+            h = *cf.loop_parent.at(h as usize);
         }
         return false;
     }

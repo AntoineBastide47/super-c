@@ -52,3 +52,25 @@ MEMBER 12.8%, CALL 6.3%, TYPE_PATH 4.5%, LITERAL 4.3%. ~83k identifier nodes exi
 carry a member-access name, but resolutions and deref_uses are keyed on those node ids (and
 path members carry a second DefId), so inlining them is fact-relocation surgery, not a
 deletion — recorded as designed follow-up work, not done in this pass.
+
+## Follow-up hotspot pass (2026-08-25)
+
+Same-session `./super-c bench` A/B on the 79-module, 764722-token corpus:
+
+| metric | before | after | change |
+|---|---:|---:|---:|
+| total | 353.45 ms | 327.68 ms | -7.29% |
+| cycles | 1314 Mcyc | 1217 Mcyc | -7.38% |
+| typecheck | 43.37 ms | 34.49 ms | -20.48% |
+| borrowck | 97.13 ms | 91.19 ms | -6.12% |
+| codegen | 179.41 ms | 167.87 ms | -6.43% |
+| allocations | 569.2 K | 570.5 K | +0.23% |
+| requested heap | 292.15 MiB | 292.64 MiB | +0.17% |
+| generated-C compile | 4132.0 ms | 4014.3 ms | -2.85% |
+
+At 1000 Hz, Samply recorded 38997 before and 33198 after transpile samples. The full
+`find_method_all` function fell from 2.75% to 0.48%. The full `lt_tokens` function fell from
+2.86% to 0.40%. The repeated free-glue resolution scan and the all-header outer-break scan no
+longer exist. The instance-table probe uses an odd secondary stride; its sampled loop share fell
+from 1.12% to 1.09% without a larger table. Native AArch64 disassembly confirms the secondary
+hash sequence (`lsr`, `orr #1`, indexed `add`) in both lookup and rehash paths.

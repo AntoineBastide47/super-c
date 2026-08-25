@@ -313,7 +313,7 @@ extend Owner {
                 if tg.node == NODE_NONE {
                     continue;
                 }
-                keys.push(tg.module as u64 << 32 | tg.node as u64);
+                keys.push(skey_mix(0, tg.module as u64 << 32 | tg.node as u64));
                 vals.push((m as u64 << 32 | iid as u64) + 1u64);
             }
         }
@@ -330,7 +330,7 @@ extend Owner {
 
     fn free_extend_of(self: &mut Self, tmod: ModuleId, tdecl: NodeId) DefId {
         self.build_ext();
-        let key = tmod as u64 << 32 | tdecl as u64;
+        let key = skey_mix(0, tmod as u64 << 32 | tdecl as u64);
         return switch self.free_ext.get(&key) {
             Some(v) => {
                 let e = *v - 1u64;
@@ -1301,7 +1301,7 @@ extend Gen {
         if callee.node == NODE_NONE {
             return;
         }
-        let kkey = callee.module as u64 << 32 | callee.node as u64;
+        let kkey = skey_mix(0, callee.module as u64 << 32 | callee.node as u64);
         let mut hit = false;
         let mut range: u64 = 0;
         switch self.owner().kinds_memo.get(&kkey) {
@@ -1393,7 +1393,7 @@ extend Gen {
         if tyn == NODE_NONE || depth > 6 {
             return;
         }
-        let key = m as u64 << 32 | tyn as u64;
+        let key = skey_mix(0, m as u64 << 32 | tyn as u64);
         let mut hit = false;
         let mut range: u64 = 0;
         switch self.owner().tok_memo.get(&key) {
@@ -1505,7 +1505,7 @@ extend Gen {
         if callee.node == NODE_NONE {
             return 0;
         }
-        let key = callee.module as u64 << 32 | callee.node as u64;
+        let key = skey_mix(0, callee.module as u64 << 32 | callee.node as u64);
         switch self.owner().callee_flags.get(&key) {
             Some(v) => {
                 return *v;

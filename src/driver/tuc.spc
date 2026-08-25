@@ -360,10 +360,13 @@ pub fn tuc_open(t: &Tuc, m: usize) Rd {
 
 fn pool_prefix_hash(a: &Ast, t0: usize, i0: usize) u64 {
     let mut h = 1469598103934665603u64;
-    // Ty is padding-free by construction (see Ty's word-wise Hash): raw bytes are deterministic
-    let tp = a.type_pool.as_ptr() as *const u8;
-    for b in 0..t0 * sizeof(Ty) {
-        h = (h ^ (unsafe tp[b]) as u64) * 1099511628211u64;
+    // Ty is padding-free by construction (see Ty's word-wise Hash): raw bytes are deterministic.
+    // Entry-wise over the chunked pool; byte order matches the old flat scan, so hashes are stable.
+    for k0 in 0..t0 {
+        let tp = (a.type_pool.at(k0) as *const Ty) as *const u8;
+        for b in 0..sizeof(Ty) {
+            h = (h ^ (unsafe tp[b]) as u64) * 1099511628211u64;
+        }
     }
     // TyInstance carries padding: hash fields only
     for k in 0..i0 {

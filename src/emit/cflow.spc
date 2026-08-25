@@ -25,6 +25,7 @@ pub struct CFlow {
     pub is_header: Vector<bool>, // [n] loop header (target of a back edge)
     pub loop_follow: Vector<u32>, // [n] header -> break target block, NONE if none/infinite
     pub loop_of: Vector<u32>, // [n] innermost enclosing loop header, NONE if outside all loops
+    pub loop_parent: Vector<u32>, // [n] loop header -> immediately enclosing loop header
     pub follow: Vector<u32>, // [n] branch block -> its join block, NONE if arms do not rejoin
     pub reducible: bool, // every retreating edge is a back edge
     pub simple: bool, // reducible AND every loop-exit edge targets the loop header or its follow;
@@ -65,6 +66,7 @@ extend CFlow as Free {
         self.is_header.free();
         self.loop_follow.free();
         self.loop_of.free();
+        self.loop_parent.free();
         self.follow.free();
         self.s_tdone.free();
         self.s_onpath.free();
@@ -180,6 +182,7 @@ extend CFlow {
             is_header: Vector::<bool>::new(),
             loop_follow: Vector::<u32>::new(),
             loop_of: Vector::<u32>::new(),
+            loop_parent: Vector::<u32>::new(),
             follow: Vector::<u32>::new(),
             reducible: true,
             simple: true,
@@ -224,6 +227,7 @@ extend CFlow {
         self.is_header.clear();
         self.loop_follow.clear();
         self.loop_of.clear();
+        self.loop_parent.clear();
         self.follow.clear();
         for _i in 0..n {
             self.thread.push(0);
@@ -238,6 +242,7 @@ extend CFlow {
             self.is_header.push(false);
             self.loop_follow.push(NONE);
             self.loop_of.push(NONE);
+            self.loop_parent.push(NONE);
             self.follow.push(NONE);
         }
         if n == 0 {
@@ -730,6 +735,7 @@ extend CFlow {
             if !is_hdr {
                 continue;
             }
+            self.loop_parent.set(h as usize, *self.loop_of.at(h as usize));
             self.is_header.set(h as usize, true);
             // natural loop = h plus every node that reaches a latch without passing through h
             self.s_inloop.set(h as usize, true);

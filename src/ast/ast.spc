@@ -4,6 +4,7 @@
 // downstream emission) is independent of hashing. Analysis results for later passes hang off NodeIds
 // in side tables (resolutions, types, mono/dyn/deref uses, attrs, lifetime_decls, call_info).
 import string as cstring;
+import atomic;
 import lexer::token as tok;
 import lexer::token_type as tt;
 
@@ -1034,6 +1035,76 @@ extend MethodInst as Eq {
     }
 }
 
+/// Realloc-stable append-only arena behind the intern pools. Entries NEVER move once pushed, so a
+/// `&Ty`/`&TyInstance` handed out stays valid while another task appends -- the memory-safety half
+/// of the freeze contract's "growth changes no existing answer". Writers must already hold the
+/// owning module's intern serialization; readers are lock-free: an entry's bytes land before the
+/// length's Release store, and `len()` reads Acquire. Capacity is fixed at POOL_SLOTS chunks;
+/// exceeding it aborts (a pool that large indicates runaway interning, not a real program).
+pub const POOL_SHIFT: usize = 12;
+pub const POOL_CHUNK: usize = 1usize << 12;
+pub const POOL_SLOTS: usize = 512;
+
+pub struct ChunkPool<T> {
+    tab: *mut *mut T,
+    nchunks: u32,
+    n: usize,
+}
+
+extend<T> ChunkPool<T> {
+    pub const fn new() ChunkPool<T> {
+        return ChunkPool::<T> { tab: null, nchunks: 0, n: 0 };
+    }
+
+    pub fn len(self: &Self) usize {
+        return atomic::load_usize(&self.n, 1);
+    }
+
+    pub fn at(self: &Self, i: usize) &T {
+        return unsafe &*(unsafe self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
+    }
+
+    pub fn push(self: &mut Self, v: T) {
+        let i = self.n;
+        if i >> POOL_SHIFT >= self.nchunks as usize {
+            let mut g = Global {};
+            if self.tab == null {
+                self.tab = (unsafe g.alloc(POOL_SLOTS * sizeof(*mut T), alignof(*mut T))) as *mut *mut T;
+            }
+            if self.nchunks as usize >= POOL_SLOTS {
+                panic("intern pool exceeded its fixed capacity");
+            }
+            unsafe self.tab[self.nchunks as usize] = (unsafe g.alloc(POOL_CHUNK * sizeof(T), alignof(T))) as *mut T;
+            self.nchunks += 1;
+        }
+        unsafe (unsafe self.tab[i >> POOL_SHIFT])[i & POOL_CHUNK - 1] = v;
+        atomic::store_usize(&mut self.n, i + 1, 2);
+    }
+
+    /// Reset the length; chunks stay allocated for reuse.
+    pub fn clear(self: &mut Self) {
+        atomic::store_usize(&mut self.n, 0, 2);
+    }
+
+    pub const fn retained(self: &Self) usize {
+        return self.nchunks as usize * POOL_CHUNK * sizeof(T);
+    }
+
+    pub fn free(self: &mut Self) {
+        if self.tab == null {
+            return;
+        }
+        let mut g = Global {};
+        for c in 0..self.nchunks as usize {
+            unsafe g.dealloc(unsafe self.tab[c], POOL_CHUNK * sizeof(T), alignof(T));
+        }
+        unsafe g.dealloc(self.tab, POOL_SLOTS * sizeof(*mut T), alignof(*mut T));
+        self.tab = null;
+        self.nchunks = 0;
+        self.n = 0;
+    }
+}
+
 pub struct Ast {
     pub nodes: Vector<Node>,
     pub children: Vector<u32>,
@@ -1042,7 +1113,7 @@ pub struct Ast {
     // resolution_def is the compiler's hottest lookup and the second cache line cost ~8 Mcyc of
     // typecheck for a 0.78 MiB saving. Access goes through the accessors below regardless.
     pub resolutions: Vector<DefId>,
-    pub type_pool: Vector<Ty>,
+    pub type_pool: ChunkPool<Ty>,
     // Open-addressing INDEX tables over the pools (0xFFFFFFFF = empty slot): the pool entry itself is
     // the key, so nothing is stored twice. Every hit VERIFIES the pool entry against the live pool
     // (defensive: an out-of-range or stale id just probes on, self-healing). Pools are append-only
@@ -1057,7 +1128,7 @@ pub struct Ast {
     // driver's post-typecheck obligation pass.
     pub proj_obs: Vector<ProjOb>,
     pub mono_at: Vector<u32>,
-    pub instances: Vector<TyInstance>,
+    pub instances: ChunkPool<TyInstance>,
     pub method_refs: Vector<MethodRef>,
     pub wide_lits: Vector<WideLit>,
     pub coerces: Vector<CoerceUse>,
@@ -1097,14 +1168,14 @@ extend Ast {
             children: Vector::<u32>::new(),
             scratch: Vector::<u32>::new(),
             resolutions: Vector::<DefId>::new(),
-            type_pool: Vector::<Ty>::new(),
+            type_pool: ChunkPool::<Ty>::new(),
             type_index: Vector::<u32>::new(),
             type_ix_used: 0,
             types: Vector::<u32>::new(),
             mono: Vector::<MonoUse>::new(),
             proj_obs: Vector::<ProjOb>::new(),
             mono_at: Vector::<u32>::new(),
-            instances: Vector::<TyInstance>::new(),
+            instances: ChunkPool::<TyInstance>::new(),
             method_refs: Vector::<MethodRef>::new(),
             wide_lits: Vector::<WideLit>::new(),
             coerces: Vector::<CoerceUse>::new(),
@@ -1265,7 +1336,6 @@ extend Ast {
         }
         let mask = self.type_index.len() - 1;
         let ixp = self.type_index.as_ptr();
-        let pp = self.type_pool.as_ptr();
         let pn = self.type_pool.len();
         let mut i = nt.hash() as usize & mask;
         loop {
@@ -1277,7 +1347,7 @@ extend Ast {
                 self.type_ix_used = self.type_ix_used + 1;
                 return id;
             }
-            if idx as usize < pn && unsafe pp[idx as usize] == nt {
+            if idx as usize < pn && *self.type_pool.at(idx as usize) == nt {
                 return idx;
             }
             i = i + 1 & mask;
@@ -1387,7 +1457,6 @@ extend Ast {
         }
         let mask = self.instance_index.len() - 1;
         let ixp = self.instance_index.as_ptr();
-        let pp = self.instances.as_ptr();
         let pn = self.instances.len();
         let mut i = it.hash() as usize & mask;
         let mut idx = 0xFFFFFFFFu32;
@@ -1400,7 +1469,7 @@ extend Ast {
                 self.inst_ix_used = self.inst_ix_used + 1;
                 break;
             }
-            if cur as usize < pn && unsafe pp[cur as usize] == it {
+            if cur as usize < pn && *self.instances.at(cur as usize) == it {
                 idx = cur;
                 break;
             }
@@ -1662,7 +1731,7 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.capacity() * sizeof(Node) + self.children.capacity() * 4 + self.scratch.capacity() * 4 + self.resolutions.capacity() * sizeof(DefId) + self.type_pool.capacity() * sizeof(Ty) + self.type_index.capacity() * 4 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.instances.capacity() * sizeof(TyInstance) + self.method_insts.capacity() * sizeof(MethodInst) + self.instance_index.capacity() * 4 + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.const_lins.capacity() * sizeof(ConstLin) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl);
+        return self.nodes.capacity() * sizeof(Node) + self.children.capacity() * 4 + self.scratch.capacity() * 4 + self.resolutions.capacity() * sizeof(DefId) + self.type_pool.retained() + self.type_index.capacity() * 4 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.instances.retained() + self.method_insts.capacity() * sizeof(MethodInst) + self.instance_index.capacity() * 4 + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.const_lins.capacity() * sizeof(ConstLin) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl);
     }
 }
 

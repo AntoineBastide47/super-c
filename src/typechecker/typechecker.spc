@@ -290,6 +290,8 @@ pub struct TypeChecker<'a> {
     // privacy filter input) are all fixed per checker. mark_method_used is re-fired on method hits
     // (idempotent set), so used-lint marking is unchanged.
     pub method_memo: Map<MQKey<'a>, u64>,
+    pub method_all_memo: Map<MQKey<'a>, u64>,
+    pub method_all_pool: Vector<DefId>,
     /// The receiver type the last aggregate lookup resolved on: what tc_mark_method_used pairs a method
     /// with, since the lookups themselves are keyed by the receiver's DECL and never carry its arguments.
     pub mark_recv: TypeId,
@@ -562,6 +564,8 @@ extend TypeChecker {
             dynfn_scan: 1,
             fmt_marked: false,
             method_memo: Map::<MQKey, u64>::new(),
+            method_all_memo: Map::<MQKey, u64>::new(),
+            method_all_pool: Vector::<DefId>::new(),
             mark_recv: TYPE_NONE,
             call_args: NodeList { start: 0, len: 0 },
             coerce_depth: 0,
@@ -3688,10 +3692,27 @@ extend TypeChecker {
         return self.find_method_impl(m, decl, name, "");
     }
 
-    // Every method named `name` on (m, decl) across the extend scopes -- the un-memoized collector
+    // Every method named `name` on (m, decl) across the extend scopes -- the memoized collector
     // behind overload disambiguation. Only runs when a first candidate's return type did not fit the
     // expected type, so the common single-candidate path never pays for it.
     fn find_method_all(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, lit: str, out: &mut Defs8) i32 {
+        let qname = if lit.len() != 0 {
+            lit;
+        } else {
+            self.source.slice(name.start as usize, name.end as usize);
+        };
+        let mq = MQKey { m: m, decl: decl, kind: 2, name: qname };
+        switch self.method_all_memo.get(&mq) {
+            Some(v) => {
+                let start = (*v >> 8) as usize;
+                let n = (*v & 0xFF) as i32;
+                for i in 0..n {
+                    out[i as usize] = self.method_all_pool[start + i as usize];
+                }
+                return n;
+            },
+            None => {},
+        };
         let ni = self.ext_scopes();
         let mut nout: i32 = 0;
         let mut s: i32 = -1;
@@ -3737,6 +3758,22 @@ extend TypeChecker {
                 }
             }
             s = s + 1;
+        }
+        let start = self.method_all_pool.len();
+        for i in 0..nout {
+            self.method_all_pool.push(out[i as usize]);
+        }
+        if nout != 0 {
+            let d = out[0];
+            let a = self.mod_ast(d.module);
+            let sp = a.at_const(a.at_const(d.node).as_data.function.name).as_data.name.text;
+            let stable = self.mod_src(d.module).slice(sp.start as usize, sp.end as usize);
+            self.method_all_memo.insert(
+                MQKey { m: m, decl: decl, kind: 2, name: stable },
+                start as u64 << 8 | nout as u64,
+            );
+        } else if lit.len() == 0 {
+            self.method_all_memo.insert(mq, start as u64 << 8);
         }
         return nout;
     }
@@ -15054,6 +15091,8 @@ extend TypeChecker as Free {
         self.encl_ext_memo.free();
         self.encl_trait_memo.free();
         self.method_memo.free();
+        self.method_all_memo.free();
+        self.method_all_pool.free();
         self.peel_memo.free();
         self.lower_memo.free();
         self.dynfn_list.free();

@@ -4914,6 +4914,27 @@ fn main() i32 { return 0; }
     );
     p2.expect_fail("trans.spc", "calls a function that cannot be evaluated at compile time");
 
+    // a dangling-sentinel pointer (`alignof(T) as *mut T`) folds: the shape every ZST buffer in
+    // std relies on, and a `const fn` caller with known arguments must evaluate through it
+    let pz = cli::proj_new();
+    pz.mkfile(
+        "dang.spc",
+        M"(extern "C" { fn exit(c: i32) void; }
+const fn dang<T>() *mut T { return alignof(T) as *mut T; }
+const fn probe() i32 {
+    let a = dang::<u64>();
+    if a == null { return 1; }
+    return 0;
+}
+fn main() i32 { unsafe exit(probe()); }
+)",
+    );
+    let rz = pz.compile("dang.spc");
+    assert(rz.ok());
+    let ccz = pz.cc_build("");
+    assert(ccz.ok());
+    assert_eq(pz.run_bin(), 0);
+
     let p3 = cli::proj_new();
     p3.mkfile(
         "budget.spc",

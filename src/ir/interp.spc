@@ -773,6 +773,12 @@ extend Interp {
         }
         let id = pv_obj(pv);
         if id == 0 {
+            // offset 0 is the true null; a nonzero offset is a storage-free SENTINEL (see
+            // cast_pointer): its access is elided by the backend, so it fails benignly here
+            if pv_off(pv) != 0 {
+                self.failed = true;
+                return false;
+            }
             self.it_trap(IT_TRAP_UB_NULL_DEREF, "null dereference");
             return false;
         }
@@ -2782,6 +2788,10 @@ extend Interp {
                 }
                 let did = pv_obj(cur);
                 if did == 0 {
+                    if pv_off(cur) != 0 {
+                        self.failed = true; // sentinel pointer: benign, not provable UB
+                        return false;
+                    }
                     self.it_trap(IT_TRAP_UB_NULL_DEREF, "null dereference");
                     return false;
                 }
@@ -2893,6 +2903,10 @@ extend Interp {
                 // p[i] through a pointer VALUE: address (p.obj, p.off + i) with the UB ladder
                 let tid = pv_obj(cur);
                 if tid == 0 {
+                    if pv_off(cur) != 0 {
+                        self.failed = true; // sentinel pointer: benign, not provable UB
+                        return false;
+                    }
                     self.it_trap(IT_TRAP_UB_NULL_DEREF, "null dereference");
                     return false;
                 }
@@ -4264,6 +4278,12 @@ extend Interp {
     fn cast_pointer(self: &mut Self, v: IVal, m: ModuleId, target: TypeId) IVal {
         if v.kind == IV_INT && v.i == 0 {
             return iv_ptr(m, target, 0, 0);
+        }
+        if v.kind == IV_INT && v.i > 0 && v.i <= 0xFFFFFFFF {
+            // a positive address literal folds as a storage-free sentinel (object id 0, the
+            // value in the offset): `alignof(T) as *mut T` dangling pointers compare non-null
+            // and round-trip nowhere -- a dereference traps like null
+            return iv_ptr(m, target, 0, v.i as u32);
         }
         if v.kind != IV_PTR {
             return self.bail();

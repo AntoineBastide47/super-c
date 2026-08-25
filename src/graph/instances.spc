@@ -211,9 +211,11 @@ extend InstGraph {
                 nix.push(IG_NONE);
             }
             for r in 0..self.recs.len() {
-                let mut i2 = self.recs.at(r).hash as usize & cap - 1;
+                let rh = self.recs.at(r).hash;
+                let mut i2 = rh as usize & cap - 1;
+                let step2 = (rh >> 32) as usize | 1;
                 while nix[i2] != IG_NONE {
-                    i2 = i2 + 1 & cap - 1;
+                    i2 = i2 + step2 & cap - 1;
                 }
                 nix.set(i2, r as u32);
             }
@@ -222,6 +224,7 @@ extend InstGraph {
         }
         let mask = self.index.len() - 1;
         let mut i = h as usize & mask;
+        let step = (h >> 32) as usize | 1;
         loop {
             let cur = self.index[i];
             if cur == IG_NONE {
@@ -261,7 +264,7 @@ extend InstGraph {
                     return cur;
                 }
             }
-            i = i + 1 & mask;
+            i = i + step & mask;
         }
     }
 

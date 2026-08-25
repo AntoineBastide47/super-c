@@ -3828,6 +3828,16 @@ fn cemit_free_glue_fields(
     let bsp = a.at_const(f.body).span;
     let is_tuple = tn.as_data.aggregate.is_tuple;
     let ms = tn.as_data.aggregate.members;
+    let mut touched = Vector::<NodeId>::new();
+    for r in 0..a.resolutions_len() {
+        let ksp = a.at_const(r as NodeId).span;
+        if ksp.start >= bsp.start && ksp.end <= bsp.end {
+            let d = a.resolution_def(r as NodeId);
+            if d.module == m {
+                touched.push(d.node);
+            }
+        }
+    }
     for i in 0..ms.len {
         let fid = unsafe a.list(ms)[i as usize];
         let fnode = a.at_const(fid);
@@ -3851,18 +3861,14 @@ fn cemit_free_glue_fields(
         if !cem.is_destructible(m, ft, 0) {
             continue;
         }
-        let mut touched = false;
-        for r in 0..a.resolutions_len() {
-            let d = a.resolution_def(r as NodeId);
-            if d.node == fid && d.module == m {
-                let ksp = a.at_const(r as NodeId).span;
-                if ksp.start >= bsp.start && ksp.end <= bsp.end {
-                    touched = true;
-                    break;
-                }
+        let mut field_touched = false;
+        for r in 0..touched.len() {
+            if touched[r] == fid {
+                field_touched = true;
+                break;
             }
         }
-        if !touched {
+        if !field_touched {
             let mut fname = String::new();
             if is_tuple {
                 fname.push_str("_");
