@@ -176,6 +176,7 @@ fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;
+    p.jobs = 1; // the bench is the SERIAL perf gate; parallel stages are timed by the driver
     let mut i: usize = 0;
     while i < n {
         resolve_one(&mut p, i);
@@ -300,6 +301,7 @@ fn transpile_once() Timing {
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;
+    p.jobs = 1; // the bench is the SERIAL perf gate; parallel stages are timed by the driver
 
     i = 0;
     while i < n {

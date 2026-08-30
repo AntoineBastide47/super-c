@@ -108,6 +108,22 @@ extend Keep {
         return Keep { ix: Map::<u64, u64>::new(), kept: Vector::<Lowerer>::new() };
     }
 
+    /// Move every body of `other` in (first key wins, matching `put`); `other` is left empty.
+    /// Slot order in `kept` is not load-bearing -- consumers index through `ix` by owner key.
+    pub fn absorb(self: &mut Self, other: &mut Keep) {
+        for i in 0..other.kept.len() {
+            let d = other.kept.at(i).body.owner;
+            let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
+            if self.ix.contains_key(&key) {
+                continue;
+            }
+            let pkg0 = other.kept.at(i).pkg;
+            let moved = replace(other.kept.index_mut(i), Lowerer::new(pkg0, d.module, d.node));
+            self.ix.insert(key, self.kept.len() as u64);
+            self.kept.push(moved);
+        }
+    }
+
     pub fn put(self: &mut Self, src: &Lowerer) {
         let d = src.body.owner;
         let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
@@ -4189,12 +4205,12 @@ extend Lowerer {
             // the RHS only runs on the deciding path: a failed fold there is not an error
             if unsafe (&*self.pkg).cir != null {
                 let cev9 = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
-                cev9.record_pause += 1;
+                cev9.pause_folds();
             }
             let rop = self.lower_expr(d.right);
             if unsafe (&*self.pkg).cir != null {
                 let cev9 = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
-                cev9.record_pause -= 1;
+                cev9.resume_folds();
             }
             if rop == ir::IR_NONE {
                 return ir::IR_NONE;
@@ -4368,7 +4384,7 @@ extend Lowerer {
             // a body the interpreter lowers for its OWN execution folds through interpretation
             // itself (and a facade root lowering IS the fold in progress); re-entrant implicit
             // folding would clobber the live evaluation state
-            if cev8.record_folds && cev8.in_run == 0 && cev8.ev_depth == 0 {
+            if cev8.record_folds && !cev8.folding_self() {
                 let mut ct8 = target;
                 if ct8.node == NODE_NONE {
                     ct8 = self.path_res(d.callee);

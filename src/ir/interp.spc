@@ -6,6 +6,9 @@
 // semantics: unsigned wraps at width, signed overflow, division by zero, out-of-range shifts, and
 // MIN / -1 trap.
 import string as cstring;
+import atomic;
+import sc_runtime;
+import std::parallel::sync as psy;
 import stdlib;
 import math;
 import ast::ast as *;
@@ -462,6 +465,8 @@ pub struct Interp {
     pub lsvc: lay::Svc,
     pub bodies: Vector<Box<irl::Lowerer>>, // lowered callee cache (boxed: nested calls grow it)
     pub body_keys: Vector<u64>, // module << 32 | fn node
+    pub body_ix: Map<u64, u64>, // bkey -> bodies slot (the linear key scan was O(n^2) over a sweep)
+    pub cont_memo: Map<u64, u64>, // (m << 32 | fn) -> kind << 32 | container: called per interpreted call
     pub call_memo: Map<u64, IVal>, // scalar results keyed over every semantic input (callee + args)
     pub item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
     pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
@@ -475,6 +480,19 @@ pub struct Interp {
     pub record_folds: bool, // failed folds with promotable traps record into fold_errs
     pub record_pause: u32, // >0 suppresses recording (short-circuit RHS probes)
     pub trap_in_constfn: bool,
+    // Engine serialization for parallel stages: off = single-threaded. Task-aware (waiters PARK --
+    // a raw mutex here deadlocks under safepoint preemption) and reentrant by task token -- the
+    // interpreter re-enters its own facade while lowering callee bodies.
+    pub elock_on: bool,
+    // Parallel frontend: the module whose check requested the CURRENT top-level evaluation (the
+    // index-aware gate emulates serial module-order visibility), and the module a gated lowering
+    // asked to WAIT for (-1 = none; the facade releases the engine, waits, and re-runs).
+    pub tc_par: bool,
+    pub root_mod: ModuleId,
+    pub retry_mod: i64,
+    pub elock_sem: psy::Semaphore,
+    pub elock_owner: usize,
+    pub elock_depth: u32,
     pub lint_on: bool, // lint_body tracking: record the executing top-frame statement span
     pub top_span: tok::Span,
     pub trap_span: tok::Span, // top-frame span snapshotted at first trap
@@ -497,6 +515,8 @@ extend Interp as Free {
         self.objs.free();
         self.bodies.free();
         self.body_keys.free();
+        self.body_ix.free();
+        self.cont_memo.free();
         self.call_memo.free();
         self.item_memo.free();
         self.item_active.free();
@@ -509,6 +529,7 @@ extend Interp as Free {
         self.ememo.free();
         self.dbuf.free();
         self.sref.free();
+        self.elock_sem.free();
         self.fx.free();
         self.fxd.free();
         self.fx_no.free();
@@ -536,6 +557,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         lsvc: lay::Svc::new(pkg),
         bodies: Vector::<Box<irl::Lowerer>>::new(),
         body_keys: Vector::<u64>::new(),
+        body_ix: Map::<u64, u64>::new(),
+        cont_memo: Map::<u64, u64>::new(),
         call_memo: Map::<u64, IVal>::new(),
         item_memo: Map::<u64, IVal>::new(),
         item_active: Vector::<u64>::new(),
@@ -549,6 +572,13 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         record_folds: false,
         record_pause: 0,
         trap_in_constfn: false,
+        elock_on: false,
+        tc_par: false,
+        root_mod: 0,
+        retry_mod: 0 - 1,
+        elock_sem: psy::Semaphore::new(1),
+        elock_owner: 0,
+        elock_depth: 0,
         lint_on: false,
         top_span: tok::Span { start: 0, end: 0 },
         trap_span: tok::Span { start: 0, end: 0 },
@@ -1082,7 +1112,7 @@ extend Interp {
                     return false;
                 }
             } else {
-                let at2 = xa.type_of(aid);
+                let at2 = self.tof(xm, xa, aid);
                 if at2 == TYPE_NONE {
                     return false;
                 }
@@ -1407,11 +1437,12 @@ extend Interp {
             bkey = (bkey ^ sb.am as u64) * 1099511628211u64;
             bkey = (bkey ^ sb.at as u64) * 1099511628211u64;
         }
-        for i in 0..self.body_keys.len() {
-            if self.body_keys[i] == bkey {
-                return i as i64;
-            }
-        }
+        switch self.body_ix.get(&bkey) {
+            Some(v) => {
+                return (*v) as i64;
+            },
+            None => {},
+        };
         {
             // an UNCHECKED body must not run: lowering would degrade its widths to i64 and
             // compute wrong values (the AST evaluator's per-node gate refused these silently).
@@ -1426,7 +1457,23 @@ extend Interp {
                 } else {
                     cont;
                 };
-                if !self.p().tc_done.contains(&(m as u64 << 32 | item9 as u64)) {
+                let mut done9 = false;
+                if self.tc_par && m != self.root_mod {
+                    // serial module-order visibility: a LOWER-indexed module is fully checked by
+                    // the time this one runs -- wait for it if its task has not finished; a
+                    // HIGHER-indexed one is unchecked regardless of live parallel progress
+                    if m < self.root_mod {
+                        if m as usize < self.p().tc_mod_done.len() && *self.p().tc_mod_done.at(m as usize) != 0 {
+                            done9 = true;
+                        } else {
+                            self.retry_mod = m;
+                            return -1;
+                        }
+                    }
+                } else if m as usize < self.p().tc_done.len() {
+                    done9 = self.p().tc_done.at(m as usize).contains(&(m as u64 << 32 | item9 as u64));
+                }
+                if !done9 {
                     if stdlib::getenv("SC_IRI_DBG") != null {
                         eprint("iri: tc_done gate m={} fn={} item={} ck={}\n", m, fnode, item9, ck9);
                     }
@@ -1452,6 +1499,7 @@ extend Interp {
         }
         self.bodies.push(Box::new(lw));
         self.body_keys.push(bkey);
+        self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
         return self.body_keys.len() as i64 - 1;
     }
 
@@ -3842,7 +3890,7 @@ extend Interp {
             } else {
                 da.at_const(fid).as_data.field.ty;
             };
-            let t0 = da.type_of(ftn);
+            let t0 = self.tof(dm, da, ftn);
             if t0 == TYPE_NONE {
                 return false;
             }
@@ -4446,6 +4494,14 @@ extend Interp {
 
     // The container item of fn `fnode` in module `fm`: 1 = extend, 2 = interface, 0 = top-level.
     fn container_of(self: &mut Self, fm: ModuleId, fnode: NodeId, out: &mut NodeId) i32 {
+        let ckey = fm as u64 << 32 | fnode as u64;
+        switch self.cont_memo.get(&ckey) {
+            Some(v) => {
+                *out = (*v & 0xFFFFFFFFu64) as NodeId;
+                return (*v >> 32) as i32;
+            },
+            None => {},
+        };
         let a = unsafe &*self.p().module_ast_const(fm);
         let items = a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
@@ -4464,13 +4520,17 @@ extend Interp {
             for k in 0..ms.len {
                 if unsafe a.list(ms)[k as usize] == fnode {
                     *out = iid;
-                    if is_ext {
-                        return 1;
-                    }
-                    return 2;
+                    let kd = if is_ext {
+                        1u64;
+                    } else {
+                        2 as u64;
+                    };
+                    self.cont_memo.insert(ckey, kd << 32 | iid as u64);
+                    return kd as i32;
                 }
             }
         }
+        self.cont_memo.insert(ckey, 0);
         return 0;
     }
 
@@ -4522,7 +4582,7 @@ extend Interp {
                     let tg = a.resolution_def(target);
                     match_recv = tg.module == rdm && tg.node == rdn;
                 } else {
-                    let tt = a.type_of(target);
+                    let tt = self.tof(mm, a, target);
                     if tt != TYPE_NONE {
                         let ty = a.type_at(tt);
                         match_recv = ty.kind == TypeKind::TYPE_BUILTIN && ty.as_data.builtin == rb;
@@ -5042,6 +5102,14 @@ extend Interp {
     /// typechecked (type-based disqualifiers are invisible before), and overwrites any blind
     /// memoized verdict so later folds agree with it.
     pub fn fn_recheck(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+        self.eng_enter();
+        self.root_mod = m; // fx scans of HIGHER modules read them as serial order saw them: unchecked
+        let r = self.fn_recheck_g(m, fn_id);
+        self.eng_leave();
+        return r;
+    }
+
+    fn fn_recheck_g(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
         self.fx_set(m, fn_id, FX_ONSTACK, false);
         self.fx_depth += 1;
         let v = self.fx_scan_fn(m, fn_id, false);
@@ -5161,7 +5229,7 @@ extend Interp {
     fn fx_pat_lit_ok(self: &Self, m: ModuleId, vn: NodeId) bool {
         let a = unsafe &*self.p().module_ast_const(m);
         let mut b = BuiltinType::BT_COUNT;
-        let _ = self.bt_of(m, a.type_of(vn), &mut b);
+        let _ = self.bt_of(m, self.tof(m, a, vn), &mut b);
         return b != BuiltinType::BT_COUNT && (bt_signed(b) || bt_unsigned(b) || b == BuiltinType::BT_BOOL);
     }
 
@@ -5247,7 +5315,7 @@ extend Interp {
             return FX_MAYBE;
         }
         let a = unsafe &*self.p().module_ast_const(m);
-        if self.ty_no_const(m, a.type_of(id), 0) {
+        if self.ty_no_const(m, self.tof(m, a, id), 0) {
             return self.fx_disq(m, owner, id, "uses a '@no_const' type", deep);
         }
         let n = a.at_const(id);
@@ -5610,7 +5678,113 @@ extend Interp {
     /// (retryable unless a trap is set). Mirrors the established evaluator's memo protocol:
     /// scalar successes store, non-scalar successes store a positive fact, in-flight re-entry
     /// is a cyclic constant dependency.
+
+    // A module's per-node type under serial-order visibility: a module checked EARLY by the
+    // parallel schedule but AFTER the requester in id order answers TYPE_NONE, as it did serially.
+    fn tof(self: &Self, m: ModuleId, a: &Ast, n: NodeId) TypeId {
+        if self.tc_par && m > self.root_mod {
+            return TYPE_NONE;
+        }
+        return a.type_of(n);
+    }
+
+    fn etok() usize {
+        let c = (unsafe sc_runtime::sc_rt_tls_get()) as usize;
+        if c == 0 {
+            return 1;
+        }
+        return c;
+    }
+
+    /// Is THIS task inside one of its own engine evaluations? Engine-driven lowering must not
+    /// re-enter implicit folding; another task's live evaluation is NOT a reason to skip (the
+    /// facade serializes on entry), or folds would depend on scheduling.
+    pub fn folding_self(self: &Self) bool {
+        if self.elock_on && atomic::load_usize(&self.elock_owner, 0) != Interp::etok() {
+            return false;
+        }
+        return self.in_run != 0 || self.ev_depth != 0;
+    }
+
+    /// Public bracket for callers that must read trap state coherently with their own evaluation
+    /// (the trap fields describe the LAST evaluation; another task's eval must not run between).
+    /// Reentrant: nested facade entries under a held bracket are free.
+    pub fn eng_lock(self: &mut Self) {
+        self.eng_enter();
+    }
+
+    pub fn eng_unlock(self: &mut Self) {
+        self.eng_leave();
+    }
+
+    fn eng_enter(self: &mut Self) {
+        if !self.elock_on {
+            return;
+        }
+        let tok = Interp::etok();
+        // the fast-path owner read is atomic: it can only equal `tok` when THIS task stored it
+        if atomic::load_usize(&self.elock_owner, 0) == tok {
+            self.elock_depth += 1;
+            return;
+        }
+        self.elock_sem.acquire();
+        atomic::store_usize(&mut self.elock_owner, tok, 0);
+        self.elock_depth = 1;
+    }
+
+    fn eng_leave(self: &mut Self) {
+        if !self.elock_on {
+            return;
+        }
+        self.elock_depth -= 1;
+        if self.elock_depth == 0 {
+            atomic::store_usize(&mut self.elock_owner, 0, 0);
+            self.elock_sem.release();
+        }
+    }
+
+    /// Suppress fold recording across a speculative probe (the short-circuit RHS): a method so the
+    /// counter update serializes with the engine under parallel stages.
+    pub fn pause_folds(self: &mut Self) {
+        self.eng_enter();
+        self.record_pause += 1;
+        self.eng_leave();
+    }
+
+    pub fn resume_folds(self: &mut Self) {
+        self.eng_enter();
+        self.record_pause -= 1;
+        self.eng_leave();
+    }
+
     pub fn eval(self: &mut Self, m: ModuleId, id: NodeId) IVal {
+        self.eng_enter();
+        let top9 = self.ev_depth == 0 && self.in_run == 0;
+        if top9 {
+            self.root_mod = m;
+        }
+        let mut r = self.eval_g(m, id);
+        // Parallel-frontend retry: a lowering was gated on a LOWER-indexed module still being
+        // checked. Serial semantics say that module IS checked by now, so wait for its task
+        // (indexes strictly decrease across waits -- acyclic) and re-run the whole evaluation.
+        while top9 && self.tc_par && self.retry_mod >= 0 {
+            let wm = self.retry_mod as ModuleId;
+            self.retry_mod = 0 - 1;
+            self.eng_leave();
+            let wf = self.p().tc_wait;
+            wf(self.p().tc_wait_ctx, wm);
+            self.eng_enter();
+            self.root_mod = m;
+            r = self.eval_g(m, id);
+        }
+        if top9 {
+            self.retry_mod = 0 - 1;
+        }
+        self.eng_leave();
+        return r;
+    }
+
+    fn eval_g(self: &mut Self, m: ModuleId, id: NodeId) IVal {
         if id == NODE_NONE {
             return none();
         }
@@ -5654,6 +5828,9 @@ extend Interp {
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         self.ev_depth += 1;
         let mut lw = irl::Lowerer::new(self.pkg, m, id);
+        if self.tc_par && m > self.root_mod {
+            lw.f.unchecked_view = true; // serial-order visibility: this module was unchecked then
+        }
         let mut v = none();
         // a CONST DECL as the target evaluates its initializer (the established evaluator's `ev`
         // did the same); anything else is a bare expression
@@ -5668,7 +5845,9 @@ extend Interp {
             v = self.run(&lw.body, &args);
         }
         self.ev_depth -= 1;
-        if top && self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
+        if top && self.retry_mod < 0 && self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(
+            self.trap_kind,
+        ) || self.trap_in_constfn) {
             self.record_fold_err(m, id);
         }
         // scalar success stores the value; non-scalar success stores the positive fact; failure
@@ -5731,6 +5910,9 @@ extend Interp {
         let prev_base = self.sub_base;
         self.sub_base = sb0;
         let mut lw = irl::Lowerer::new(self.pkg, m, id);
+        if self.tc_par && m > self.root_mod {
+            lw.f.unchecked_view = true;
+        }
         for i in 0..n {
             let sb = *self.subst.at(sb0 + i as usize);
             lw.env.push(irl::LSub { pm: sb.pmod, pnode: sb.pnode, am: sb.am, at: sb.at });
@@ -5864,11 +6046,23 @@ extend Interp {
 
     /// Queue a static_assert condition for flush_asserts (re-checked once every module is typed).
     pub fn defer_assert(self: &mut Self, m: ModuleId, cond: NodeId) {
+        self.eng_enter();
+        self.defer_assert_g(m, cond);
+        self.eng_leave();
+    }
+
+    fn defer_assert_g(self: &mut Self, m: ModuleId, cond: NodeId) {
         self.pending.push(m as u64 << 32 | cond as u64);
     }
 
     /// Queue a call-bearing const initializer undecidable in module order.
     pub fn defer_const(self: &mut Self, m: ModuleId, decl: NodeId) {
+        self.eng_enter();
+        self.defer_const_g(m, decl);
+        self.eng_leave();
+    }
+
+    fn defer_const_g(self: &mut Self, m: ModuleId, decl: NodeId) {
         self.pending_consts.push(m as u64 << 32 | decl as u64);
     }
 
@@ -5968,6 +6162,30 @@ extend Interp {
     }
 
     pub fn eval_static(self: &mut Self, m: ModuleId, id: NodeId) StaticRes {
+        self.eng_enter();
+        let top9 = self.ev_depth == 0 && self.in_run == 0;
+        if top9 {
+            self.root_mod = m;
+        }
+        let mut r = self.eval_static_g(m, id);
+        while top9 && self.tc_par && self.retry_mod >= 0 {
+            let wm = self.retry_mod as ModuleId;
+            self.retry_mod = 0 - 1;
+            self.eng_leave();
+            let wf = self.p().tc_wait;
+            wf(self.p().tc_wait_ctx, wm);
+            self.eng_enter();
+            self.root_mod = m;
+            r = self.eval_static_g(m, id);
+        }
+        if top9 {
+            self.retry_mod = 0 - 1;
+        }
+        self.eng_leave();
+        return r;
+    }
+
+    fn eval_static_g(self: &mut Self, m: ModuleId, id: NodeId) StaticRes {
         let bad = StaticRes { ok: false, root: 0 };
         if id == NODE_NONE || self.ev_depth != 0 || self.in_run != 0 {
             return bad;
@@ -6003,6 +6221,9 @@ extend Interp {
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         self.ev_depth += 1;
         let mut lw = irl::Lowerer::new(self.pkg, m, id);
+        if self.tc_par && m > self.root_mod {
+            lw.f.unchecked_view = true;
+        }
         let mut v = none();
         let isconst2 = (unsafe &*self.p().module_ast_const(m)).at_const(id).kind == NodeKind::NODE_CONST;
         let ok02 = if isconst2 {
@@ -6033,10 +6254,12 @@ extend Interp {
             }
         }
         if v.kind != IV_OBJ {
-            if self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
+            if self.retry_mod < 0 && self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(
+                self.trap_kind,
+            ) || self.trap_in_constfn) {
                 self.record_fold_err(m, id);
             }
-            if self.trap.len() != 0 {
+            if self.retry_mod < 0 && self.trap.len() != 0 {
                 self.sref.insert(key, 0 - 1); // definite failure; undecidable stays retryable
             }
             self.failed = false;

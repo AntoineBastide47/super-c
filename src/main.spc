@@ -13,6 +13,7 @@ import ast::ast as *;
 import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
+import std::parallel::runtime as prt;
 import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
@@ -39,8 +40,15 @@ fn run_file(
     bootstrap_tags: bool,
     lint: bool,
     cflags: str,
+    jobs: u32,
 ) i32 {
+    loader::set_load_jobs(jobs);
+    let tl0 = unsafe shim::sc_ticks_ms();
     let mut p = loader::package_load(path, std_dir, bootstrap_tags, target);
+    if stdlib::getenv("SC_CEMIT_STATS") != null {
+        eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
+    }
+    loader::set_load_jobs(1);
     p.arch = arch;
     // A standalone script is a binary with no test suite to count as callers: unreachable pub
     // functions are dead weight. Project trees get this from the whole-workspace lint instead,
@@ -52,7 +60,11 @@ fn run_file(
         p.lint_pub = lint;
     }
     let mut rc: i32 = 1;
+    if !p.ok && jobs != 1 {
+        prt::shutdown(); // parallel loading started the pool; the leak gate needs it gone
+    }
     if p.ok {
+        p.jobs = jobs;
         let mut cirv = iri::interp_new((&mut p) as *mut loader::Package);
         p.cir = &mut cirv;
         if ce_steps != 0 {
@@ -1448,6 +1460,7 @@ OPTIONS:
         bootstrap_tags,
         lint,
         pflags.as_str(),
+        bo.jobs,
     );
     if std_dir != null {
         unsafe stdlib::free(std_dir);

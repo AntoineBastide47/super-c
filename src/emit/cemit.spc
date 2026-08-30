@@ -168,6 +168,34 @@ pub struct CEmit {
     // modules the spelling records used_mods edges for (CSR pools; empty-env spellings only).
     // setup_locals spells every local's type per body -- this makes revisits two pool scans.
     ti_memo2: Map<u64, u64>,
+    /// Frontier shard capture: when `sh_on`, every first-claimant emission records (key, buffer
+    /// end[s]) so the driver can merge shards into the master CEmit in module order, reproducing
+    /// the serial claim history byte-for-byte. Value-vector pairs record post-push lengths.
+    pub sh_on: bool,
+    pub sh_env_k: Vector<u64>,
+    pub sh_env_e: Vector<u32>,
+    pub sh_stat_k: Vector<u64>,
+    pub sh_stat_e: Vector<u32>,
+    pub sh_stat_v: Vector<u32>,
+    pub sh_glue_k: Vector<u64>,
+    pub sh_glue_v: Vector<u32>,
+    pub sh_ext_k: Vector<u64>,
+    pub sh_ext_e: Vector<u32>,
+    pub sh_dyd_k: Vector<u64>,
+    pub sh_dyd_e: Vector<u32>,
+    pub sh_dyt_k: Vector<u64>,
+    pub sh_dyt_e: Vector<u32>,
+    pub sh_dyt_e2: Vector<u32>,
+    pub sh_blk_k: Vector<u64>,
+    pub sh_blk_e: Vector<u32>,
+    pub sh_blk_e2: Vector<u32>,
+    pub sh_sent_k: Vector<u64>,
+    pub sh_sent_e: Vector<u32>,
+    pub sh_sent_e2: Vector<u32>,
+    pub sh_ti_k: Vector<u64>,
+    pub sh_ti_v: Vector<u32>,
+    pub sh_aux_k: Vector<u64>,
+    pub sh_aux_e: Vector<u32>,
     tid_start: Vector<u32>,
     tmod_start: Vector<u32>,
     tid_pool: Vector<u64>,
@@ -201,6 +229,9 @@ pub struct StatRef {
 pub struct Demand {
     pub def: DefId,
     pub sym: String,
+    /// The record-time dedupe key when this demand came through the gated method path (0 =
+    /// ungated); the frontier merge re-applies cross-module suppression with it.
+    pub dk: u64,
     pub subs: Vector<mbe::MSub>,
     /// The instantiation's closure suffix (receiver-args for methods, targs for fn specs) --
     /// hoisted closures of the instance body append it to their symbols.
@@ -359,6 +390,31 @@ extend CEmit {
             sx_assigned: Map::<u64, u64>::new(),
             demand_seen: Set::<u64>::new(),
             ti_memo2: Map::<u64, u64>::new(),
+            sh_on: false,
+            sh_env_k: Vector::<u64>::new(),
+            sh_env_e: Vector::<u32>::new(),
+            sh_stat_k: Vector::<u64>::new(),
+            sh_stat_e: Vector::<u32>::new(),
+            sh_stat_v: Vector::<u32>::new(),
+            sh_glue_k: Vector::<u64>::new(),
+            sh_glue_v: Vector::<u32>::new(),
+            sh_ext_k: Vector::<u64>::new(),
+            sh_ext_e: Vector::<u32>::new(),
+            sh_dyd_k: Vector::<u64>::new(),
+            sh_dyd_e: Vector::<u32>::new(),
+            sh_dyt_k: Vector::<u64>::new(),
+            sh_dyt_e: Vector::<u32>::new(),
+            sh_dyt_e2: Vector::<u32>::new(),
+            sh_blk_k: Vector::<u64>::new(),
+            sh_blk_e: Vector::<u32>::new(),
+            sh_blk_e2: Vector::<u32>::new(),
+            sh_sent_k: Vector::<u64>::new(),
+            sh_sent_e: Vector::<u32>::new(),
+            sh_sent_e2: Vector::<u32>::new(),
+            sh_ti_k: Vector::<u64>::new(),
+            sh_ti_v: Vector::<u32>::new(),
+            sh_aux_k: Vector::<u64>::new(),
+            sh_aux_e: Vector::<u32>::new(),
             tid_start: Vector::<u32>::new(),
             tmod_start: Vector::<u32>::new(),
             tid_pool: Vector::<u64>::new(),
@@ -955,6 +1011,11 @@ extend CEmit {
             self.sent_defs.push_str("unsigned char __sc_zst_");
             self.sent_defs.push_u64(align);
             self.sent_defs.push_str(";\n");
+            if self.sh_on {
+                self.sh_sent_k.push(align);
+                self.sh_sent_e.push(self.sent_decls.len() as u32);
+                self.sh_sent_e2.push(self.sent_defs.len() as u32);
+            }
         }
         dst.push_str("__sc_zst_");
         dst.push_u64(align);
@@ -1101,6 +1162,10 @@ extend CEmit {
                 self.aux.push_str("} ");
                 self.aux.push_str(name);
                 self.aux.push_str("_ret;\n");
+                if self.sh_on {
+                    self.sh_aux_k.push(0);
+                    self.sh_aux_e.push(self.aux.len() as u32);
+                }
                 self.out.push_str(name);
                 self.out.push_str("_ret ");
                 self.out.push_str(name);
@@ -1128,6 +1193,10 @@ extend CEmit {
                 self.aux.push_str("; } ");
                 self.aux.push_str(name);
                 self.aux.push_str("_ret;\n");
+                if self.sh_on {
+                    self.sh_aux_k.push(0);
+                    self.sh_aux_e.push(self.aux.len() as u32);
+                }
                 self.out.push_str(name);
                 self.out.push_str("_ret ");
                 self.out.push_str(name);
@@ -4351,6 +4420,7 @@ extend CEmit {
             self.cap_names.push(nm);
         }
         let mut env_pre = false; // the declaration pass defined this env (aggregate-embedded)
+        let mut eh0: u64 = 0; // the env hash, hoisted for the shard capture below
         if ncaps != 0 {
             let mut enm = String::from_str(sym);
             enm.push_str("_env");
@@ -4370,6 +4440,7 @@ extend CEmit {
                 self.env_skip.insert(eh, 1);
                 self.env_hashes.push(eh);
             }
+            eh0 = eh;
         }
         if ncaps != 0 && !env_pre {
             // named struct + a fwd typedef in the header's FORWARD section: aggregates and protos
@@ -4398,6 +4469,10 @@ extend CEmit {
                 env_out.push_str("unsigned char _sc_zenv; "); // C forbids an empty struct (see tu.spc)
             }
             env_out.push_str("};\n");
+            if self.sh_on {
+                self.sh_env_k.push(eh0);
+                self.sh_env_e.push(self.env_fwd.len() as u32);
+            }
         }
         let mut rty = TYPE_NONE;
         if b.returns == 1 {
@@ -5526,6 +5601,11 @@ extend CEmit {
                             }
                             self.sput(symb);
                         }
+                        if self.sh_on {
+                            self.sh_stat_k.push(h);
+                            self.sh_stat_e.push(self.stat_decls.len() as u32);
+                            self.sh_stat_v.push(self.stat_items.len() as u32);
+                        }
                     }
                 }
             }
@@ -6357,7 +6437,7 @@ extend CEmit {
                 return;
             }
         }
-        let d9 = Demand { def: idef, sym: sym.clone(), subs: snap, sfx: sfx };
+        let d9 = Demand { def: idef, sym: sym.clone(), dk: 0, subs: snap, sfx: sfx };
         self.rec_demand(&d9, 0, 0);
         self.demand.push(d9);
     }
@@ -6483,7 +6563,7 @@ extend CEmit {
                 }
                 let l7 = snap.len() as u32;
                 snap.push(mbe::MSub { pm: callee.module, pnode: idecl, am: rm6, at: rt6, lim: l7 });
-                let d9 = Demand { def: callee, sym: sym.clone(), subs: snap, sfx: String::new() };
+                let d9 = Demand { def: callee, sym: sym.clone(), dk: 0, subs: snap, sfx: String::new() };
                 self.rec_demand(&d9, 0, 0);
                 self.demand.push(d9);
             }
@@ -6654,6 +6734,10 @@ extend CEmit {
         o.push_str("__dyn *const d) { d->vt->__free(d->data); }\n#endif\n");
         if ok {
             self.dyn_defs.push_string(&o);
+            if self.sh_on {
+                self.sh_dyd_k.push(h);
+                self.sh_dyd_e.push(self.dyn_defs.len() as u32);
+            }
         }
         return ok;
     }
@@ -6836,6 +6920,11 @@ extend CEmit {
             self.dyn_decls.push_str("__vt ");
             self.dyn_decls.push_string(pair);
             self.dyn_decls.push_str("__vtbl;\n");
+            if self.sh_on {
+                self.sh_dyt_k.push(h);
+                self.sh_dyt_e.push(self.dyn_tabs.len() as u32);
+                self.sh_dyt_e2.push(self.dyn_decls.len() as u32);
+            }
         }
         return ok;
     }
@@ -7272,7 +7361,7 @@ extend CEmit {
             for i in 0..bp.len() {
                 self.push_bind(&mut snap, callee.module, bp[i], bm[i], bt[i], g0);
             }
-            let d9 = Demand { def: callee, sym: sym.clone(), subs: snap, sfx: sfx };
+            let d9 = Demand { def: callee, sym: sym.clone(), dk: 0, subs: snap, sfx: sfx };
             self.rec_demand(&d9, 0, 0);
             self.demand.push(d9);
         }
@@ -7415,6 +7504,100 @@ extend CEmit {
         return 0;
     }
 
+    // ---- frontier merge accessors (the seen sets are private; the driver replays claims) -------
+    pub fn stat_seen_has(self: &Self, k: u64) bool {
+        return switch self.stat_seen.get(&k) {
+            Some(_v) => true,
+            None => false,
+        };
+    }
+
+    pub fn stat_seen_add(self: &mut Self, k: u64) {
+        self.stat_seen.insert(k, 1);
+    }
+
+    pub fn glue_seen_has(self: &Self, k: u64) bool {
+        return switch self.glue_seen.get(&k) {
+            Some(_v) => true,
+            None => false,
+        };
+    }
+
+    pub fn glue_seen_add(self: &mut Self, k: u64) {
+        self.glue_seen.insert(k, 1);
+    }
+
+    pub fn extern_seen_has(self: &Self, k: u64) bool {
+        return switch self.extern_seen.get(&k) {
+            Some(_v) => true,
+            None => false,
+        };
+    }
+
+    pub fn extern_seen_add(self: &mut Self, k: u64) {
+        self.extern_seen.insert(k, 1);
+    }
+
+    pub fn dyn_def_seen_has(self: &Self, k: u64) bool {
+        return switch self.dyn_def_seen.get(&k) {
+            Some(_v) => true,
+            None => false,
+        };
+    }
+
+    pub fn dyn_def_seen_add(self: &mut Self, k: u64) {
+        self.dyn_def_seen.insert(k, 1);
+    }
+
+    pub fn dyn_tab_seen_has(self: &Self, k: u64) bool {
+        return switch self.dyn_tab_seen.get(&k) {
+            Some(_v) => true,
+            None => false,
+        };
+    }
+
+    pub fn dyn_tab_seen_add(self: &mut Self, k: u64) {
+        self.dyn_tab_seen.insert(k, 1);
+    }
+
+    pub fn sent_seen_has(self: &Self, k: u64) bool {
+        return switch self.sent_seen.get(&k) {
+            Some(_v) => true,
+            None => false,
+        };
+    }
+
+    pub fn sent_seen_add(self: &mut Self, k: u64) {
+        self.sent_seen.insert(k, 1);
+    }
+
+    pub fn ti_seen_has(self: &Self, k: u64) bool {
+        return switch self.ti_seen.get(&k) {
+            Some(_v) => true,
+            None => false,
+        };
+    }
+
+    pub fn ti_seen_add(self: &mut Self, k: u64) {
+        self.ti_seen.insert(k, 1);
+    }
+
+    pub fn demand_seen_has(self: &Self, k: u64) bool {
+        return self.demand_seen.contains(&k);
+    }
+
+    pub fn demand_seen_add(self: &mut Self, k: u64) {
+        self.demand_seen.insert(k);
+    }
+
+    pub const fn assert_helpers_get(self: &Self) u8 {
+        return self.assert_helpers;
+    }
+
+    pub fn assert_helpers_or(self: &mut Self, bit: u8) {
+        self.assert_helpers |= bit;
+    }
+
     fn ensure_assert_helper(self: &mut Self, kind: u8) {
         let bit = 1u8 << kind;
         if (self.assert_helpers & bit) != 0u8 {
@@ -7437,6 +7620,10 @@ extend CEmit {
             self.aux.push_str(
                 "static inline void __sc_assert_bool(bool l, bool r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %s\\n  right: %s\\n  at %s:%llu\\n\", e, l ? \"true\" : \"false\", r ? \"true\" : \"false\", f, n); fflush(stderr); abort(); } }\n",
             );
+        }
+        if self.sh_on {
+            self.sh_aux_k.push(1u64 | bit as u64 << 1);
+            self.sh_aux_e.push(self.aux.len() as u32);
         }
     }
 
@@ -7786,6 +7973,11 @@ extend CEmit {
         self.extern_protos.push_str("(");
         self.extern_protos.push_string(&wrap_params);
         self.extern_protos.push_str(");\n");
+        if self.sh_on {
+            self.sh_blk_k.push(key);
+            self.sh_blk_e.push(self.blk_defs.len() as u32);
+            self.sh_blk_e2.push(self.extern_protos.len() as u32);
+        }
         return true;
     }
 
@@ -8112,7 +8304,7 @@ extend CEmit {
                     }
                 }
                 if sok {
-                    let d9 = Demand { def: callee, sym: sym.clone(), subs: snap, sfx: sfx };
+                    let d9 = Demand { def: callee, sym: sym.clone(), dk: dk9, subs: snap, sfx: sfx };
                     self.rec_demand(&d9, dk9, 1);
                     if fresh9 {
                         self.demand.push(d9);
@@ -8684,6 +8876,10 @@ extend CEmit {
                     self.ti_reqs.push(
                         StatRef { em: rm, def: DefId { module: 0, node: NODE_NONE }, sym: sym.clone(), ty: rt },
                     );
+                    if self.sh_on {
+                        self.sh_ti_k.push(h);
+                        self.sh_ti_v.push(self.ti_reqs.len() as u32);
+                    }
                 }
                 dst.push_string(&sym);
                 return true;
@@ -9322,6 +9518,10 @@ extend CEmit {
             }
             if fresh {
                 self.extern_protos.push_string(&pr);
+                if self.sh_on {
+                    self.sh_ext_k.push(h);
+                    self.sh_ext_e.push(self.extern_protos.len() as u32);
+                }
             }
         }
     }
@@ -9366,6 +9566,10 @@ extend CEmit {
                 self.glue.push(
                     StatRef { em: rm, def: DefId { module: 0, node: NODE_NONE }, sym: String::from_str(sym), ty: rt },
                 );
+                if self.sh_on {
+                    self.sh_glue_k.push(h);
+                    self.sh_glue_v.push(self.glue.len() as u32);
+                }
             }
             return;
         }

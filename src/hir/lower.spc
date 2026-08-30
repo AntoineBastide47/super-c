@@ -57,7 +57,7 @@ fn syntax_snapshot(a: &Ast) Ast {
     }
     s.children.reserve(a.children.len());
     for i in 0..a.children.len() {
-        s.children.push(a.children[i]);
+        s.children.push(*a.children.at(i));
     }
     for i in 0..a.attrs.len() {
         s.attrs.push(*a.attrs.at(i));

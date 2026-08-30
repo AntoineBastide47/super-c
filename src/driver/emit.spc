@@ -19,6 +19,9 @@ import hir::lower as hirl;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
 import borrowck::flow_ir as bfi;
+import sc_runtime;
+import std::parallel::runtime as prt;
+import std::parallel::sync as psync;
 import ir::core as irc;
 import ir::lower as irl;
 import ir::print as irp;
@@ -121,6 +124,72 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
     return changed;
 }
 
+// One module's outgoing liveness edges, written as a bool row. Pure reads of frozen pools, so the
+// rows compute in parallel; the closure walk over them is order-insensitive (a set union).
+fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
+    let n = p.modules.len();
+    let a = mod_ast_c(p, m as ModuleId);
+    let nr = a.resolutions_len();
+    for r in 0..nr {
+        let d = a.resolution_def(r as NodeId);
+        if d.node != NODE_NONE && d.module as usize < n && d.module as usize != m && p.builtin_of_decl(d.module, d.node) < 0 {
+            let _ = mark_live(row, n, d.module);
+        }
+    }
+    let nt = unsafe a.type_pool.len();
+    for ti in 0..nt {
+        let _ = mark_type_modules(p, m as ModuleId, ti as TypeId, row);
+    }
+    let ni = unsafe a.instances.len();
+    for ii in 0..ni {
+        let it = *a.instance(ii as u32);
+        if it.module as usize < n {
+            let _ = mark_live(row, n, it.module);
+        }
+        let home = p.instance_home_mid(m as ModuleId, &it);
+        if home as usize < n {
+            let _ = mark_live(row, n, home);
+        }
+        for k in 0..it.n {
+            let _ = mark_type_modules(p, m as ModuleId, unsafe it.args[k as usize], row);
+            if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe it.args[k as usize]) {
+                let _ = mark_live(row, n, p.core_module);
+            }
+        }
+    }
+    let nmo = unsafe a.mono.len();
+    for moi in 0..nmo {
+        let mu = unsafe a.mono[moi];
+        for k in 0..mu.n {
+            let _ = mark_type_modules(p, m as ModuleId, unsafe mu.args[k as usize], row);
+            if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe mu.args[k as usize]) {
+                let _ = mark_live(row, n, p.core_module);
+            }
+        }
+    }
+    let nmi = unsafe a.method_insts.len();
+    for xi in 0..nmi {
+        let miu = unsafe a.method_insts[xi];
+        let _ = mark_type_modules(p, m as ModuleId, miu.instance, row);
+        for k in 0..miu.n {
+            let _ = mark_type_modules(p, m as ModuleId, unsafe miu.targs[k as usize], row);
+            if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe miu.targs[k as usize]) {
+                let _ = mark_live(row, n, p.core_module);
+            }
+        }
+    }
+}
+
+// `p` is opaque so the release bootstrap's borrow checker accepts the payload as 'static.
+struct LiveTask {
+    pub p: *const void,
+    pub row: *mut bool,
+    pub m: u64,
+}
+
+// Tasks only read the frozen package and write disjoint rows.
+unsafe extend LiveTask as Send {}
+
 fn compute_emit_live(p: &loader::Package) *mut bool {
     let n = p.modules.len();
     let sz = if n != 0 {
@@ -137,6 +206,34 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
             unsafe live[i] = true;
         }
     }
+    let rows = (unsafe stdlib::calloc(sz * sz, 1)) as *mut bool;
+    if rows == null {
+        unsafe stdlib::free(live);
+        return null;
+    }
+    if p.jobs != 1 && n > 1 {
+        let wg = psync::WaitGroup::new();
+        let pv = (p as *const loader::Package) as *const void;
+        for m in 0..n {
+            if !p.modules[m].has_ast {
+                continue;
+            }
+            wg.add(1);
+            let t = LiveTask { p: pv, row: unsafe (rows + m * n), m: m as u64 };
+            let wgc = wg.clone();
+            launch || {
+                emit_live_row(unsafe &*(t.p as *const loader::Package), t.m as usize, t.row);
+                wgc.done();
+            };
+        }
+        wg.wait();
+    } else {
+        for m in 0..n {
+            if p.modules[m].has_ast {
+                emit_live_row(p, m, unsafe (rows + m * n));
+            }
+        }
+    }
     let mut changed = true;
     while changed {
         changed = false;
@@ -144,83 +241,16 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
             if !unsafe live[m] || !p.modules[m].has_ast {
                 continue;
             }
-            let a = mod_ast_c(p, m as ModuleId);
-            let nr = a.resolutions_len();
-            for r in 0..nr {
-                let d = a.resolution_def(r as NodeId);
-                if d.node != NODE_NONE && d.module as usize < n && d.module as usize != m && p.builtin_of_decl(
-                    d.module,
-                    d.node,
-                ) < 0 {
-                    if mark_live(live, n, d.module) {
-                        changed = true;
-                    }
-                }
-            }
-            let nt = unsafe a.type_pool.len();
-            for ti in 0..nt {
-                if mark_type_modules(p, m as ModuleId, ti as TypeId, live) {
+            let row = unsafe (rows + m * n);
+            for d in 0..n {
+                if unsafe row[d] && !unsafe live[d] {
+                    unsafe live[d] = true;
                     changed = true;
-                }
-            }
-            let ni = unsafe a.instances.len();
-            for ii in 0..ni {
-                let it = *a.instance(ii as u32);
-                if it.module as usize < n {
-                    if mark_live(live, n, it.module) {
-                        changed = true;
-                    }
-                }
-                let home = p.instance_home_mid(m as ModuleId, &it);
-                if home as usize < n {
-                    if mark_live(live, n, home) {
-                        changed = true;
-                    }
-                }
-                for k in 0..it.n {
-                    if mark_type_modules(p, m as ModuleId, unsafe it.args[k as usize], live) {
-                        changed = true;
-                    }
-                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe it.args[k as usize]) {
-                        if mark_live(live, n, p.core_module) {
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            let nmo = unsafe a.mono.len();
-            for moi in 0..nmo {
-                let mu = unsafe a.mono[moi];
-                for k in 0..mu.n {
-                    if mark_type_modules(p, m as ModuleId, unsafe mu.args[k as usize], live) {
-                        changed = true;
-                    }
-                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe mu.args[k as usize]) {
-                        if mark_live(live, n, p.core_module) {
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            let nmi = unsafe a.method_insts.len();
-            for xi in 0..nmi {
-                let miu = unsafe a.method_insts[xi];
-                if mark_type_modules(p, m as ModuleId, miu.instance, live) {
-                    changed = true;
-                }
-                for k in 0..miu.n {
-                    if mark_type_modules(p, m as ModuleId, unsafe miu.targs[k as usize], live) {
-                        changed = true;
-                    }
-                    if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe miu.targs[k as usize]) {
-                        if mark_live(live, n, p.core_module) {
-                            changed = true;
-                        }
-                    }
                 }
             }
         }
     }
+    unsafe stdlib::free(rows);
     return live;
 }
 
@@ -310,6 +340,367 @@ fn discharge_obligations(p: &mut loader::Package, n: usize) {
             break;
         }
     }
+}
+
+// ---- parallel resolve frontier -----------------------------------------------------------------
+
+struct RsOut {
+    pub ok: bool,
+    pub warns: u32,
+    pub errs: u32,
+    pub errors: diag::Errors,
+}
+
+struct RsTask {
+    pub p: *mut loader::Package,
+    pub outs: *mut RsOut,
+    pub m: u64,
+    pub lint: bool,
+}
+
+unsafe extend RsTask as Send {}
+
+fn rs_run_one(t: RsTask) {
+    let pkg = t.p as *const loader::Package;
+    let p = unsafe &mut *t.p;
+    let i = t.m as usize;
+    let out = unsafe &mut *(t.outs + i);
+    let m = &mut p.modules[i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let aptr = (&mut m.ast) as *mut Ast;
+    let mut r = resolver::Resolver::new(unsafe &mut *aptr, str::from_raw(src as *const u8, len), pkg);
+    r.lint = t.lint && !p.modules[i].prelude;
+    r.resolve();
+    out.ok = !r.has_errors();
+    out.warns = r.errors.warns.len() as u32;
+    out.errs = r.errors.errors.len() as u32;
+    out.errors = replace(&mut r.errors, diag::Errors::new());
+    hirl::lower_module(p, i);
+}
+
+// Resolution has no cross-module ordering: a module reads only parse-level foreign state through
+// the package index. Build the index and every import closure up front (the shared lazy caches),
+// pin the syntax arrays (prelude scans read foreign nodes while their owners append), run one task
+// per module, then replay diagnostics and counters in module order.
+fn resolve_all_par(p: &mut loader::Package, lint: bool) {
+    let n = p.modules.len();
+    p.ensure_index();
+    for i in 0..n {
+        // module_closure, not import_closure: only the former fills the clo_lists cache that
+        // glob_lookup consults from the tasks
+        let _ = p.module_closure(i as ModuleId);
+    }
+    for i in 0..n {
+        p.modules[i].ast.nodes.freeze();
+        p.modules[i].ast.children.freeze();
+    }
+    let mut outs = Vector::<RsOut>::with_capacity(n);
+    for _ in 0..n {
+        outs.push(RsOut { ok: true, warns: 0, errs: 0, errors: diag::Errors::new() });
+    }
+    prt::set_stack_size(8usize << 20); // the resolver's expression recursion outgrows the default task stack
+    let pp = p as *mut loader::Package;
+    let ob = outs.index_mut(0) as *mut RsOut;
+    let wg = psync::WaitGroup::new();
+    for i in 0..n {
+        wg.add(1);
+        let t = RsTask { p: pp, outs: ob, m: i as u64, lint: lint };
+        let wgc = wg.clone();
+        launch || {
+            rs_run_one(t);
+            wgc.done();
+        };
+    }
+    wg.wait();
+    for i in 0..n {
+        p.modules[i].ast.nodes.thaw();
+        p.modules[i].ast.children.thaw();
+    }
+    for i in 0..n {
+        let o = outs.index_mut(i);
+        if !o.ok || o.errors.has_warnings() {
+            o.errors.log();
+        }
+        p.lint_warnings = p.lint_warnings + o.warns;
+        p.lint_errs = p.lint_errs + o.errs;
+        p.ok = o.ok && p.ok;
+    }
+}
+
+// ---- parallel typecheck frontier ---------------------------------------------------------------
+
+struct TcOut {
+    pub ok: bool,
+    pub warns: u32,
+    pub errs: u32,
+    pub fixable: u32,
+    pub errors: diag::Errors,
+    pub log: tc::TcMarkLog,
+}
+
+struct TcTask {
+    pub p: *mut loader::Package,
+    pub mods: *const u32, // this SCC's modules, ascending id order
+    pub nmods: usize,
+    pub outs: *mut TcOut, // outs base; slot per module id
+    pub lint: bool,
+    pub wc: *mut TcWaitSt,
+}
+
+unsafe extend TcTask as Send {}
+
+// The waiter state behind Package.tc_wait: done flags live on the Package; the mutex/condvar pair
+// serializes flag publication against parked waiters.
+struct TcWaitSt {
+    pub mu: psync::Mutex<i32>,
+    pub cv: psync::Condvar,
+    pub p: *mut loader::Package,
+}
+
+fn tc_wait_impl(ctx: *mut void, m: ModuleId) {
+    let st = ctx as *mut TcWaitSt;
+    let p = unsafe (&*st).p;
+    let g = (unsafe &(&*st).mu).lock();
+    while *(unsafe &*p).tc_mod_done.at(m as usize) == 0 {
+        (unsafe &(&*st).cv).wait(&g);
+    }
+}
+
+fn tc_run_one(t: TcTask) {
+    let pkg = t.p;
+    for k in 0..t.nmods {
+        let i = (unsafe t.mods[k]) as usize;
+        let p = unsafe &mut *t.p;
+        let out = unsafe (t.outs + i);
+        let want = t.lint && !p.modules[i].prelude;
+        let m = &mut p.modules[i];
+        let src = m.source.as_str().ptr() as *const char;
+        let len = m.source.len();
+        let mut tck = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+        tck.lint = want;
+        tck.mark_log = &mut (unsafe &mut *out).log;
+        if stdlib::getenv("SC_TCPAR_DBG") != null {
+            eprint("tcpar: start m={}\n", i);
+        }
+        tck.check();
+        if stdlib::getenv("SC_TCPAR_DBG") != null {
+            eprint("tcpar: end m={}\n", i);
+        }
+        {
+            // publish completion: everything check() wrote happens-before a waiter's wake
+            let st = t.wc;
+            let _g = (unsafe &(&*st).mu).lock();
+            (unsafe &mut *t.p).tc_mod_done.set(i, 1);
+            (unsafe &(&*st).cv).notify_all();
+        }
+        let o = unsafe &mut *out;
+        o.ok = !tck.has_errors();
+        o.warns = tck.errors.warns.len() as u32;
+        o.errs = tck.errors.errors.len() as u32;
+        o.fixable = tck.errors.fixable_errs;
+        o.errors = replace(&mut tck.errors, diag::Errors::new());
+    }
+}
+
+// Type-check every module in parallel while preserving serial module-order OBSERVABILITY: the
+// engine's index-aware gate + retry-wait give each module the exact tc_done visibility the serial
+// sweep gave it, diagnostics buffer per task and print in module order, and the package-global
+// method marks replay through the real functions in module order.
+fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
+    let n = p.modules.len();
+    p.ensure_index();
+    for i in 0..n {
+        let _ = p.import_closure(i as ModuleId);
+    }
+    p.tc_done.clear();
+    p.tc_mod_done.clear();
+    for _ in 0..n {
+        p.tc_done.push(Set::<u64>::new());
+        p.tc_mod_done.push(0);
+    }
+    let cirp = p.cir as *mut iri::Interp;
+    if cirp != null {
+        unsafe cirp.elock_on = true;
+        unsafe cirp.tc_par = true;
+        unsafe cirp.retry_mod = 0 - 1;
+    }
+    for i in 0..n {
+        p.modules[i].ast.ilock_on = true;
+        // pin the syntax arrays: tc synthesizes nodes while other tasks read pre-existing ones
+        p.modules[i].ast.nodes.freeze();
+        p.modules[i].ast.children.freeze();
+        p.modules[i].ast.resolutions.freeze();
+    }
+    let mut wc = TcWaitSt { mu: psync::Mutex::<i32>::new(0), cv: psync::Condvar::new(), p: p };
+    p.tc_wait = tc_wait_impl;
+    p.tc_wait_ctx = &mut wc;
+    p.tc_frontier = true;
+    let mut outs = Vector::<TcOut>::with_capacity(n);
+    for _ in 0..n {
+        outs.push(
+            TcOut { ok: true, warns: 0, errs: 0, fixable: 0, errors: diag::Errors::new(), log: tc::TcMarkLog::new() },
+        );
+    }
+    prt::set_stack_size(8usize << 20); // the checker's expression recursion outgrows the default task stack
+    // Conflict-free schedule: import-SCC condensation, IMPORTS-first levels. A module only ever
+    // reads modules in its import closure, and those are complete before its level starts -- so
+    // no two live tasks touch each other's Asts, and the serial-order visibility rules above
+    // resolve every remaining cross-module question deterministically.
+    let mut nscc: u32 = 0;
+    {
+        let idx9 = &p.idx.scc_of;
+        for i in 0..n {
+            if *idx9.at(i) + 1 > nscc {
+                nscc = *idx9.at(i) + 1;
+            }
+        }
+    }
+    let mut lvl = Vector::<u32>::new(); // per SCC: 1 + max(level of imported SCCs), 0 at the leaves
+    for _ in 0..nscc {
+        lvl.push(0);
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in 0..n {
+            let si = *p.idx.scc_of.at(i);
+            let e0 = (*p.idx.mod_imports.at(i)) as usize;
+            let e1 = (*p.idx.mod_imports.at(i + 1)) as usize;
+            for e in e0..e1 {
+                let j = (*p.idx.imports.at(e)) as usize;
+                let sj = *p.idx.scc_of.at(j);
+                if sj != si && *lvl.at(sj as usize) + 1 > *lvl.at(si as usize) {
+                    lvl.set(si as usize, *lvl.at(sj as usize) + 1);
+                    changed = true;
+                }
+            }
+        }
+        // the prelude is AMBIENTLY visible (format shims, sugar hooks): every non-prelude module
+        // depends on every prelude module even without an import edge
+        let mut plvl: u32 = 0;
+        for i in 0..n {
+            if p.modules[i].prelude && *lvl.at((*p.idx.scc_of.at(i)) as usize) + 1 > plvl {
+                plvl = *lvl.at((*p.idx.scc_of.at(i)) as usize) + 1;
+            }
+        }
+        for i in 0..n {
+            let si = (*p.idx.scc_of.at(i)) as usize;
+            if !p.modules[i].prelude && *lvl.at(si) < plvl {
+                lvl.set(si, plvl);
+                changed = true;
+            }
+        }
+    }
+    let mut maxlvl: u32 = 0;
+    for c in 0..nscc as usize {
+        if *lvl.at(c) > maxlvl {
+            maxlvl = *lvl.at(c);
+        }
+    }
+    // per-SCC module lists, ascending id (intra-SCC checks stay serial in id order). The whole
+    // PRELUDE is one sequential group: prelude names are ambiently visible to every module --
+    // prelude modules included -- so no import-edge order exists among them.
+    let mut scc_mods = Vector::<Vector<u32>>::new();
+    for _ in 0..nscc + 1 {
+        scc_mods.push(Vector::<u32>::new());
+    }
+    lvl.push(0); // the prelude pseudo-group rides at level 0
+    for i in 0..n {
+        if p.modules[i].prelude {
+            scc_mods.index_mut(nscc as usize).push(i as u32);
+        } else {
+            scc_mods.index_mut((*p.idx.scc_of.at(i)) as usize).push(i as u32);
+        }
+    }
+    let ngrp = nscc + 1;
+    if stdlib::getenv("SC_TCPAR_DBG") != null {
+        for i in 0..n {
+            eprint(
+                "tcpar: m={} lvl={} prelude={} base={} path={}\n",
+                i,
+                *lvl.at((*p.idx.scc_of.at(i)) as usize),
+                p.modules[i].prelude,
+                p.modules[i].ast.nodes.ptr_at(0) as usize,
+                p.modules[i].path.as_str(),
+            );
+        }
+    }
+    let pp = p as *mut loader::Package;
+    let wcp = (&mut wc) as *mut TcWaitSt;
+    let want_lint = lint;
+    let mut level: u32 = 0;
+    while level <= maxlvl {
+        let wg = psync::WaitGroup::new();
+        let mut launched: i64 = 0;
+        for c in 0..ngrp as usize {
+            if *lvl.at(c) != level || scc_mods.at(c).len() == 0 {
+                continue;
+            }
+            wg.add(1);
+            launched += 1;
+            let t = TcTask {
+                p: pp,
+                mods: scc_mods.at(c).as_ptr(),
+                nmods: scc_mods.at(c).len(),
+                outs: outs.index_mut(0),
+                lint: want_lint,
+                wc: wcp,
+            };
+            let wgc = wg.clone();
+            launch || {
+                tc_run_one(t);
+                wgc.done();
+            };
+        }
+        if launched != 0 {
+            wg.wait();
+        }
+        level += 1;
+    }
+    p.tc_frontier = false;
+    p.tc_wait = loader::loader_no_wait;
+    p.tc_wait_ctx = null;
+    if cirp != null {
+        unsafe cirp.tc_par = false;
+        unsafe cirp.elock_on = false;
+        unsafe cirp.retry_mod = 0 - 1;
+    }
+    for i in 0..n {
+        p.modules[i].ast.ilock_on = false;
+        p.modules[i].ast.nodes.thaw();
+        p.modules[i].ast.children.thaw();
+        p.modules[i].ast.resolutions.thaw();
+    }
+    let mut ok = true;
+    for i in 0..n {
+        let o = outs.index_mut(i);
+        if !o.ok {
+            ok = false;
+        }
+        if !o.ok || o.errors.has_warnings() {
+            o.errors.log();
+        }
+        p.lint_warnings = p.lint_warnings + o.warns;
+        p.lint_errs = p.lint_errs + o.errs;
+        p.lint_fixable = p.lint_fixable + o.fixable;
+        // module-order replay of the package-global marks, through the real visibility checks
+        let lg = &o.log;
+        for k in 0..lg.kinds.len() {
+            let dv = lg.a[k];
+            let d = DefId { module: (dv >> 32) as ModuleId, node: (dv & 0xFFFFFFFFu64) as NodeId };
+            let kd = lg.kinds[k];
+            if kd == 1 {
+                p.always_methods.insert(dv);
+            } else if kd == 2 {
+                p.mark_method_used(d);
+            } else if !p.method_used_get(d) {
+                let fv = lg.b[k];
+                p.record_method_edge(DefId { module: (fv >> 32) as ModuleId, node: (fv & 0xFFFFFFFFu64) as NodeId }, d);
+            }
+        }
+    }
+    return ok;
 }
 
 fn typecheck_module(
@@ -1216,6 +1607,8 @@ fn cemit_inst_asserts(
     subs: &Vector<mbe::MSub>,
     dk: u64,
     seen: &mut Map<u64, u64>,
+    ia: &mut Vector<Vector<NodeId>>,
+    ia_built: &mut Vector<bool>,
 ) {
     let hit = switch seen.get(&dk) {
         Some(_v) => true,
@@ -1226,6 +1619,22 @@ fn cemit_inst_asserts(
     }
     let a = unsafe &*p.module_ast_const(d_def.module);
     if a.at_const(d_def.node).kind != NodeKind::NODE_FUNCTION {
+        return;
+    }
+    // one static_assert scan per module, not per demand: generic bodies are demanded thousands of
+    // times and the node array is large, while asserts are rare
+    let dm = d_def.module as usize;
+    if !*ia_built.at(dm) {
+        ia_built.set(dm, true);
+        let lst = ia.index_mut(dm);
+        for nid0 in 0..a.nodes.len() {
+            if a.at_const(nid0 as NodeId).kind == NodeKind::NODE_STATIC_ASSERT {
+                lst.push(nid0 as NodeId);
+            }
+        }
+    }
+    if ia.at(dm).len() == 0 {
+        seen.insert(dk, 1);
         return;
     }
     let fsp = a.at_const(d_def.node).span;
@@ -1246,9 +1655,10 @@ fn cemit_inst_asserts(
     }
     let src = p.modules[d_def.module as usize].source.as_str();
     let mut decided = true;
-    for nid in 0..a.nodes.len() {
-        let n = a.at_const(nid as NodeId);
-        if n.kind != NodeKind::NODE_STATIC_ASSERT || n.span.start < fsp.start || n.span.end > fsp.end {
+    for ni in 0..ia.at(dm).len() {
+        let nid = *ia.at(dm).at(ni);
+        let n = a.at_const(nid);
+        if n.span.start < fsp.start || n.span.end > fsp.end {
             continue;
         }
         let bd = n.as_data.binary;
@@ -1562,6 +1972,543 @@ fn cemit_tuc_replay(
     return 0;
 }
 
+// A destructive take from the shared keep, serialized when the frontier hands out `kl`.
+fn cemit_seed_take(
+    g: &mut ig::InstGraph,
+    p: &mut loader::Package,
+    m: ModuleId,
+    nid: NodeId,
+    lw: &mut irl::Lowerer,
+    kl: *const psync::Semaphore,
+    closure: bool,
+) bool {
+    if kl != null {
+        (unsafe &*kl).acquire();
+    }
+    let r = if closure {
+        cemit_take_closure(&mut *g, p, m, nid, lw);
+    } else {
+        cemit_take_body(&mut *g, p, m, nid, lw);
+    };
+    if kl != null {
+        (unsafe &*kl).release();
+    }
+    return r;
+}
+
+// One module's seed emission: candidates, bodies, free-glue wrappers, and the transitive closure
+// worklist -- shared by the serial loop (tuc journaling hooks stay live through mg.rec_on) and
+// the parallel frontier (per-task CEmit shards; rec_on stays false there). `kl` (null =
+// uncontended) serializes the destructive takes from the shared InstGraph keep.
+fn cemit_seed_module(
+    p: &mut loader::Package,
+    cem: &mut cbe::CEmit,
+    g: &mut ig::InstGraph,
+    dow: &mut DropCtx,
+    cl_cache: &mut Map<u64, u64>,
+    clws: &mut Vector<irl::Lowerer>,
+    m: usize,
+    testing: bool,
+    verbose: bool,
+    kl: *const psync::Semaphore,
+    bodies_all: &mut String,
+    protos: &mut String,
+    chunk_mod: &mut Vector<u64>,
+    chunk_off: &mut Vector<u64>,
+    env_names: &mut Vector<u64>,
+    env_bodies: &mut Vector<String>,
+    have_main: &mut bool,
+    main_mod: &mut u64,
+    main_argv: &mut bool,
+    seeds: &mut u64,
+    seed_skip: &mut u64,
+    clos_ok: &mut u64,
+    clos_skip: &mut u64,
+) {
+    let a = unsafe &*p.module_ast_const(m as ModuleId);
+    let its = a.at_const(a.root).as_data.program.items;
+    let mut cands = Vector::<NodeId>::new();
+    for i in 0..its.len {
+        let nid = unsafe a.list(its)[i as usize];
+        let n = a.at_const(nid);
+        if n.kind == NodeKind::NODE_FUNCTION {
+            cands.push(nid);
+        } else if n.kind == NodeKind::NODE_EXTEND {
+            let ms = n.as_data.extend_def.items;
+            for j in 0..ms.len {
+                let mid2 = unsafe a.list(ms)[j as usize];
+                if a.at_const(mid2).kind == NodeKind::NODE_FUNCTION {
+                    cands.push(mid2);
+                }
+            }
+        }
+    }
+    for i in 0..cands.len() {
+        let nid = cands[i];
+        let n = a.at_const(nid);
+        if n.as_data.function.is_extern || n.as_data.function.body == NODE_NONE {
+            continue;
+        }
+        if !testing && cemit_is_test_item(a, nid) {
+            continue; // test-family items exist only under --test
+        }
+        if cem.mg.in_generic_extend(m as ModuleId, nid) {
+            continue; // its instances are demand-emitted; leave the cached body for them
+        }
+        let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
+        if !cemit_seed_take(g, p, m as ModuleId, nid, &mut lw, kl, false) {
+            continue;
+        }
+        if lw.body.is_generic {
+            continue;
+        }
+        cemit_apply_drops(dow, &mut lw);
+        let mut sym = String::new();
+        let tgt = cem.mg.method_target(m as ModuleId, nid);
+        if !cem.mg.fn_sym(m as ModuleId, nid, tgt, true, &mut sym) {
+            continue;
+        }
+        if sym.as_str() == "assert" || sym.as_str() == "assert_eq" || sym.as_str() == "assert_ne" {
+            continue; // desugared builtins; the C names collide with <assert.h>'s macro
+        }
+        cem.out.clear();
+        let is_main = sym.as_str() == "main";
+        if is_main {
+            sym.truncate(0);
+            sym.push_str("__sc_user_main"); // the argv wrapper below owns the C `main`
+        }
+        let mut gfs = Vector::<String>::new();
+        let mut gts = Vector::<TypeId>::new();
+        let is_glue = cemit_free_glue_fields(p, cem, m as ModuleId, nid, &mut gfs, &mut gts);
+        if is_glue {
+            sym.push_str("__fb");
+        }
+        cem.noret = cemit_is_noreturn(a, nid);
+        cem.fn_attrs.truncate(0);
+        cemit_fn_attrs(p, m as ModuleId, nid, &mut cem.fn_attrs);
+        if cem.emit_fn(&lw.body, sym.as_str()) {
+            *seeds += 1;
+            if is_main {
+                *have_main = true;
+                *main_mod = m as u64;
+                *main_argv = n.as_data.function.params.len != 0;
+                if cem.mg.rec_on {
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_MAIN);
+                    ev9.a = if *main_argv {
+                        1u32;
+                    } else {
+                        0;
+                    };
+                    cem.mg.rec.push(ev9);
+                }
+            }
+            {
+                chunk_mod.push(m as u64);
+                chunk_off.push(bodies_all.len() as u64);
+                proto_of(&cem.out, protos);
+                bodies_all.push_string(&cem.out);
+                if cem.mg.rec_on {
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
+                    ev9.a = chunk_off[chunk_off.len() - 1] as u32;
+                    ev9.b = bodies_all.len() as u32;
+                    cem.mg.rec.push(ev9);
+                }
+            }
+            if is_glue {
+                // the public wrapper: the sig is the __fb sig without the suffix
+                let mut wr = String::new();
+                let bs9 = cem.out.as_str();
+                let mut le = 0 as usize;
+                while le < bs9.len() && bs9.byte_at(le) != 10 {
+                    le += 1;
+                }
+                let sig = bs9.slice(0, le);
+                let mut cut = 0 as usize;
+                while cut + 4 < sig.len() && sig.slice(cut, cut + 5) != "__fb(" {
+                    cut += 1;
+                }
+                wr.push_str(sig.slice(0, cut));
+                wr.push_str(sig.slice(cut + 4, sig.len()));
+                // The receiver is the first argument (locals are return-slots then args): ask the
+                // emitter for its C spelling -- it may preserve the source name (`self`) over `_N`.
+                let mut selfp = String::new();
+                cem.local_cname(lw.body.returns, &mut selfp);
+                wr.push_str("\n  ");
+                wr.push_str(sym.as_str());
+                wr.push_str("(");
+                wr.push_string(&selfp);
+                wr.push_str(");\n");
+                let mut wok = true;
+                for gi in 0..gfs.len() {
+                    if !wok {
+                        break;
+                    }
+                    let mut fe9 = String::new();
+                    let mut frm9 = m as ModuleId;
+                    let mut frt9 = gts[gi];
+                    let _ = cem.mg.resolve(m as ModuleId, gts[gi], &mut frm9, &mut frt9);
+                    wok = cem.free_expr(frm9, frt9, &mut fe9);
+                    if wok {
+                        wr.push_str("  ");
+                        wr.push_string(&fe9);
+                        if cem.mg.is_zst(frm9, frt9) {
+                            // the field has no C member: its destructor runs on the sentinel
+                            wr.push_str("(");
+                            let mut zr9 = String::new();
+                            let _ = cem.zst_sentinel_ref(frm9, frt9, &mut zr9);
+                            wr.push_string(&zr9);
+                            wr.push_str(");\n");
+                        } else {
+                            wr.push_str("(&");
+                            wr.push_string(&selfp);
+                            wr.push_str("->");
+                            wr.push_string(&gfs[gi]);
+                            wr.push_str(");\n");
+                        }
+                    }
+                }
+                wr.push_str("}\n");
+                if wok {
+                    chunk_mod.push(m as u64);
+                    chunk_off.push(bodies_all.len() as u64);
+                    proto_of(&wr, protos);
+                    bodies_all.push_string(&wr);
+                    if cem.mg.rec_on {
+                        let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
+                        ev9.a = chunk_off[chunk_off.len() - 1] as u32;
+                        ev9.b = bodies_all.len() as u32;
+                        cem.mg.rec.push(ev9);
+                    }
+                }
+            }
+            let mut clsq = Vector::<NodeId>::new();
+            for c2 in 0..lw.closures.len() {
+                clsq.push(lw.closures[c2]);
+            }
+            let mut cqi: usize = 0;
+            while cqi < clsq.len() {
+                let cn = clsq[cqi];
+                cqi += 1;
+                let ckey = skey_mix(0, m as u64 << 32 | cn as u64);
+                let ci = switch cl_cache.get(&ckey) {
+                    Some(v) => *v,
+                    None => {
+                        let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
+                        let mut slot = 0xFFFFFFFFFFFFFFFFu64;
+                        if cemit_seed_take(g, p, m as ModuleId, cn, &mut cl, kl, true) {
+                            cemit_apply_drops(dow, &mut cl);
+                            slot = clws.len() as u64;
+                            clws.push(cl);
+                        }
+                        cl_cache.insert(ckey, slot);
+                        slot;
+                    },
+                };
+                let mut csym = String::new();
+                cem.mg.closure_sym(m as ModuleId, cn, &mut csym);
+                let mut envs = String::new();
+                cem.out.clear();
+                let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
+                if cok {
+                    for x2 in 0..clws.at(ci as usize).closures.len() {
+                        clsq.push(clws.at(ci as usize).closures[x2]); // closures nest: emit the inner ones too
+                    }
+                }
+                if cok && cem.emit_closure(&clws.at(ci as usize).body, m as ModuleId, cn, csym.as_str(), &mut envs) {
+                    *clos_ok += 1;
+                    {
+                        if envs.len() != 0 {
+                            let mut eh9 = 1469598103934665603u64;
+                            {
+                                let mut en9 = String::from_str(csym.as_str());
+                                en9.push_str("_env");
+                                let es9 = en9.as_str();
+                                for k9 in 0..es9.len() {
+                                    eh9 = (eh9 ^ es9.byte_at(k9) as u64) * 1099511628211u64;
+                                }
+                            }
+                            env_names.push(eh9);
+                            env_bodies.push(envs.clone());
+                            if cem.mg.rec_on {
+                                let mut ev9 = mbe::RecEv::blank(mbe::RK_ENV);
+                                ev9.h = eh9;
+                                ev9.s1 = envs.clone();
+                                cem.mg.rec.push(ev9);
+                            }
+                        }
+                    }
+                    chunk_mod.push(m as u64);
+                    chunk_off.push(bodies_all.len() as u64);
+                    proto_of(&cem.out, protos);
+                    bodies_all.push_string(&cem.out);
+                    if cem.mg.rec_on {
+                        let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
+                        ev9.a = chunk_off[chunk_off.len() - 1] as u32;
+                        ev9.b = bodies_all.len() as u32;
+                        cem.mg.rec.push(ev9);
+                    }
+                } else {
+                    *clos_skip += 1;
+                }
+            }
+        } else {
+            *seed_skip += 1;
+            if verbose {
+                eprint("seed-emit-fail: `{}` {}\n", sym.as_str(), cem.err);
+            }
+        }
+    }
+}
+// ---- parallel seed frontier --------------------------------------------------------------------
+
+struct SeedShard {
+    pub cem: cbe::CEmit,
+    pub bodies: String,
+    pub protos: String,
+    pub chunk_mod: Vector<u64>,
+    pub chunk_off: Vector<u64>,
+    pub env_names: Vector<u64>,
+    pub env_bodies: Vector<String>,
+    pub have_main: bool,
+    pub main_mod: u64,
+    pub main_argv: bool,
+    pub seeds: u64,
+    pub seed_skip: u64,
+    pub clos_ok: u64,
+    pub clos_skip: u64,
+    pub used: bool,
+}
+
+struct SeedTask {
+    pub p: *mut loader::Package,
+    /// The graph and shard, OPAQUE on purpose: the payload transitively holds `str` fields, and the
+    /// bootstrap compiler's carries-borrow walk peels typed pointers (fixed in this tree, but the
+    /// release binary must still build this source).
+    pub g: *mut void,
+    pub out: *mut void,
+    pub m: usize,
+    pub testing: bool,
+    pub verbose: bool,
+    pub kl: *const psync::Semaphore,
+}
+
+unsafe extend SeedTask as Send {}
+
+fn cemit_seed_task(t: SeedTask) {
+    let p = unsafe &mut *t.p;
+    let o = unsafe &mut *(t.out as *mut SeedShard);
+    let g9 = t.g as *mut ig::InstGraph;
+    let mut dow = DropCtx {
+        ow: bfx::Owner::new(p),
+        forest: bmp::MoveForest::empty(),
+        facts: bfx::BodyFacts::empty(),
+        cfg: bdf::Cfg::empty(),
+        mv: bdf::MoveFlow::empty(),
+        el: ird::ElabCtx::empty(),
+    };
+    let mut cl_cache = Map::<u64, u64>::new();
+    let mut clws = Vector::<irl::Lowerer>::new();
+    cemit_seed_module(
+        p,
+        &mut o.cem,
+        unsafe &mut *g9,
+        &mut dow,
+        &mut cl_cache,
+        &mut clws,
+        t.m,
+        t.testing,
+        t.verbose,
+        t.kl,
+        &mut o.bodies,
+        &mut o.protos,
+        &mut o.chunk_mod,
+        &mut o.chunk_off,
+        &mut o.env_names,
+        &mut o.env_bodies,
+        &mut o.have_main,
+        &mut o.main_mod,
+        &mut o.main_argv,
+        &mut o.seeds,
+        &mut o.seed_skip,
+        &mut o.clos_ok,
+        &mut o.clos_skip,
+    );
+}
+
+// Apply one shard's gated first-claimant emissions into the master emitter, in module order: the
+// first module-order claimant of each key wins, exactly as the serial loop's shared seen-sets
+// decided. Buffer segments are [previous end, end) of the shard's own (initially empty) buffers.
+fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
+    let sc = &mut o.cem;
+    let mut pe: u32 = 0;
+    for i in 0..sc.sh_env_k.len() {
+        let k = sc.sh_env_k[i];
+        let e = sc.sh_env_e[i];
+        if !cem.env_skip.contains_key(&k) {
+            cem.env_skip.insert(k, 1);
+            cem.env_hashes.push(k);
+            cem.env_fwd.push_str(sc.env_fwd.as_str().slice(pe as usize, e as usize));
+        }
+        pe = e;
+    }
+    pe = 0;
+    let mut pv: u32 = 0;
+    for i in 0..sc.sh_stat_k.len() {
+        let k = sc.sh_stat_k[i];
+        let e = sc.sh_stat_e[i];
+        let v = sc.sh_stat_v[i];
+        if !cem.stat_seen_has(k) {
+            cem.stat_seen_add(k);
+            cem.stat_decls.push_str(sc.stat_decls.as_str().slice(pe as usize, e as usize));
+            for j in pv..v {
+                let sr = replace(
+                    sc.stat_items.index_mut(j as usize),
+                    cbe::StatRef { em: 0, def: DefId { module: 0, node: NODE_NONE }, sym: String::new(), ty: TYPE_NONE },
+                );
+                cem.stat_items.push(sr);
+            }
+        }
+        pe = e;
+        pv = v;
+    }
+    pv = 0;
+    for i in 0..sc.sh_glue_k.len() {
+        let k = sc.sh_glue_k[i];
+        let v = sc.sh_glue_v[i];
+        if !cem.glue_seen_has(k) {
+            cem.glue_seen_add(k);
+            for j in pv..v {
+                let sr = replace(
+                    sc.glue.index_mut(j as usize),
+                    cbe::StatRef { em: 0, def: DefId { module: 0, node: NODE_NONE }, sym: String::new(), ty: TYPE_NONE },
+                );
+                cem.glue.push(sr);
+                let ge = replace(sc.glue_envs.index_mut(j as usize), cbe::GlueEnv { subs: Vector::<mbe::MSub>::new() });
+                cem.glue_envs.push(ge);
+            }
+        }
+        pv = v;
+    }
+    pe = 0;
+    for i in 0..sc.sh_ext_k.len() {
+        let k = sc.sh_ext_k[i];
+        let e = sc.sh_ext_e[i];
+        if !cem.extern_seen_has(k) {
+            cem.extern_seen_add(k);
+            cem.extern_protos.push_str(sc.extern_protos.as_str().slice(pe as usize, e as usize));
+        }
+        pe = e;
+    }
+    let ext_tail0 = pe;
+    pe = 0;
+    for i in 0..sc.sh_dyd_k.len() {
+        let k = sc.sh_dyd_k[i];
+        let e = sc.sh_dyd_e[i];
+        if !cem.dyn_def_seen_has(k) {
+            cem.dyn_def_seen_add(k);
+            cem.dyn_defs.push_str(sc.dyn_defs.as_str().slice(pe as usize, e as usize));
+        }
+        pe = e;
+    }
+    pe = 0;
+    let mut pe2: u32 = 0;
+    for i in 0..sc.sh_dyt_k.len() {
+        let k = sc.sh_dyt_k[i];
+        let e = sc.sh_dyt_e[i];
+        let e2 = sc.sh_dyt_e2[i];
+        if !cem.dyn_tab_seen_has(k) {
+            cem.dyn_tab_seen_add(k);
+            cem.dyn_tabs.push_str(sc.dyn_tabs.as_str().slice(pe as usize, e as usize));
+            cem.dyn_decls.push_str(sc.dyn_decls.as_str().slice(pe2 as usize, e2 as usize));
+        }
+        pe = e;
+        pe2 = e2;
+    }
+    pe = 0;
+    pe2 = ext_tail0;
+    for i in 0..sc.sh_blk_k.len() {
+        let k = sc.sh_blk_k[i];
+        let e = sc.sh_blk_e[i];
+        let e2 = sc.sh_blk_e2[i];
+        if !cem.blk_seen.contains_key(&k) {
+            cem.blk_seen.insert(k, 1);
+            if cem.blk_defs.len() == 0 {
+                cem.blk_defs.push_str("void __sc_blocking_run(void (*__r)(void *), void *__e);\n");
+            }
+            cem.blk_defs.push_str(sc.blk_defs.as_str().slice(pe as usize, e as usize));
+            cem.extern_protos.push_str(sc.extern_protos.as_str().slice(pe2 as usize, e2 as usize));
+        }
+        pe = e;
+        pe2 = e2;
+    }
+    pe = 0;
+    pe2 = 0;
+    for i in 0..sc.sh_sent_k.len() {
+        let k = sc.sh_sent_k[i];
+        let e = sc.sh_sent_e[i];
+        let e2 = sc.sh_sent_e2[i];
+        if !cem.sent_seen_has(k) {
+            cem.sent_seen_add(k);
+            cem.sent_decls.push_str(sc.sent_decls.as_str().slice(pe as usize, e as usize));
+            cem.sent_defs.push_str(sc.sent_defs.as_str().slice(pe2 as usize, e2 as usize));
+        }
+        pe = e;
+        pe2 = e2;
+    }
+    pv = 0;
+    for i in 0..sc.sh_ti_k.len() {
+        let k = sc.sh_ti_k[i];
+        let v = sc.sh_ti_v[i];
+        if !cem.ti_seen_has(k) {
+            cem.ti_seen_add(k);
+            for j in pv..v {
+                let sr = replace(
+                    sc.ti_reqs.index_mut(j as usize),
+                    cbe::StatRef { em: 0, def: DefId { module: 0, node: NODE_NONE }, sym: String::new(), ty: TYPE_NONE },
+                );
+                cem.ti_reqs.push(sr);
+            }
+        }
+        pv = v;
+    }
+    pe = 0;
+    for i in 0..sc.sh_aux_k.len() {
+        let k = sc.sh_aux_k[i];
+        let e = sc.sh_aux_e[i];
+        if k == 0 {
+            cem.aux.push_str(sc.aux.as_str().slice(pe as usize, e as usize));
+        } else {
+            let bit = (k >> 1) as u8;
+            if (cem.assert_helpers_get() & bit) == 0u8 {
+                cem.assert_helpers_or(bit);
+                cem.aux.push_str(sc.aux.as_str().slice(pe as usize, e as usize));
+            }
+        }
+        pe = e;
+    }
+    for i in 0..sc.demand.len() {
+        let dk = sc.demand.at(i).dk;
+        if dk != 0 {
+            if cem.demand_seen_has(dk) {
+                continue;
+            }
+            cem.demand_seen_add(dk);
+        }
+        let d = replace(
+            sc.demand.index_mut(i),
+            cbe::Demand {
+                def: DefId { module: 0, node: NODE_NONE },
+                sym: String::new(),
+                dk: 0,
+                subs: Vector::<mbe::MSub>::new(),
+                sfx: String::new(),
+            },
+        );
+        cem.demand.push(d);
+    }
+    cem.mg.sh_merge(&mut sc.mg, m);
+}
+
 pub fn cemit_package(
     p: &mut loader::Package,
     testing: bool,
@@ -1572,9 +2519,16 @@ pub fn cemit_package(
     irkeep: *mut irl::Keep,
 ) {
     let verbose = stdlib::getenv("SC_CEMIT_TU") != null || stdlib::getenv("SC_CEMIT_STATS") != null;
+    let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
+    let mut tt0 = unsafe shim::sc_ticks_ms();
     p.ensure_sigs(); // the planner's signature-level propagation reads the package metadata
     let mut g = ig::InstGraph::new(p, irkeep);
     g.collect();
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("cemit-stage collect: {} ms\n", t9 - tt0);
+        tt0 = t9;
+    }
     let mut em = tbe::TuEmit::new(p);
     em.mg.agg_on = true;
     let mut items = Vector::<tbe::AggItem>::new();
@@ -1608,6 +2562,11 @@ pub fn cemit_package(
     for i in 0..items.len() {
         let it = *items.at(i);
         let _ = em.emit_agg(&it);
+    }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("cemit-stage collect+aggs: {} ms\n", t9 - tt0);
+        tt0 = t9;
     }
     // Demand-driven monomorphization: emit every concrete standalone body with demand collection
     // on, then drain the queue -- each demanded instance re-emits the generic Core body under its
@@ -1672,344 +2631,248 @@ pub fn cemit_package(
     // Per-TU cache: fingerprint every module up front; a hit replays the module's journaled side
     // effects instead of lowering it, a miss emits live under journaling. Test builds opt out (the
     // wrapper set would join the fingerprint for little gain).
+    let par8 = p.jobs != 1 && p.modules.len() > 1;
     let mut tuc = tuc::tuc_setup(
         p,
         live,
         target,
-        if testing {
-            "";
+        if testing || par8 {
+            ""; // the frontier's journal state is not serial-prefix-stable: cache off
         } else {
             p.gen_root.as_str();
         },
     );
     let mut tuc_pay = String::new();
-    for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast || live != null && p.modules[m].prelude && !unsafe live[m] {
-            // no seeds (missing AST / unreachable prelude): an empty section keeps the image indexed
+    let par9 = p.jobs != 1 && p.modules.len() > 1;
+    if par9 {
+        // Parallel seed frontier: one task per module with a private emitter shard; gated
+        // first-claimant emissions replay into the master in module order afterwards, so the
+        // shared headers and worklists come out byte-identical to the serial loop's. The tu-cache
+        // stays off here (its journal assumes serial prefix state).
+        let cirg9 = p.cir as *mut iri::Interp;
+        if cirg9 != null {
+            unsafe cirg9.elock_on = true;
+        }
+        for i2 in 0..p.modules.len() {
+            p.modules[i2].ast.ilock_on = true;
+        }
+        let mut kl = psync::Semaphore::new(1);
+        let mut shards = Vector::<SeedShard>::new();
+        for m in 0..p.modules.len() {
+            let mut sh = SeedShard {
+                cem: cbe::CEmit::new(p),
+                bodies: String::new(),
+                protos: String::new(),
+                chunk_mod: Vector::<u64>::new(),
+                chunk_off: Vector::<u64>::new(),
+                env_names: Vector::<u64>::new(),
+                env_bodies: Vector::<String>::new(),
+                have_main: false,
+                main_mod: 0,
+                main_argv: false,
+                seeds: 0,
+                seed_skip: 0,
+                clos_ok: 0,
+                clos_skip: 0,
+                used: false,
+            };
+            if p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]) {
+                sh.used = true;
+                sh.cem.collect_demand = true;
+                sh.cem.mg.agg_on = true;
+                for ei in 0..em.env_defined.len() {
+                    sh.cem.env_skip.insert(*em.env_defined.at(ei), 1);
+                }
+                let mut dumm9 = String::new();
+                cemit_extern_includes(p, &mut dumm9, &mut sh.cem.ext_backed);
+                dumm9.free();
+                sh.cem.sh_on = true;
+                sh.cem.mg.sh_on = true;
+                sh.cem.mg.mark_ctx = m as i64;
+            }
+            shards.push(sh);
+        }
+        let wg = psync::WaitGroup::new();
+        let pp9 = p as *mut loader::Package;
+        let gg9 = ((&mut g) as *mut ig::InstGraph) as *mut void;
+        let klp = ((&mut kl) as *mut psync::Semaphore) as *const psync::Semaphore;
+        let mut launched9: i64 = 0;
+        for m in 0..p.modules.len() {
+            if !shards.at(m).used {
+                continue;
+            }
+            wg.add(1);
+            launched9 += 1;
+            let op9 = (shards.index_mut(m) as *mut SeedShard) as *mut void;
+            let t = SeedTask { p: pp9, g: gg9, out: op9, m: m, testing: testing, verbose: verbose, kl: klp };
+            let wgc = wg.clone();
+            launch || {
+                cemit_seed_task(t);
+                wgc.done();
+            };
+        }
+        if launched9 != 0 {
+            wg.wait();
+        }
+        for m in 0..p.modules.len() {
+            let o = shards.index_mut(m);
+            if !o.used {
+                continue;
+            }
+            let base9 = bodies_all.len() as u64;
+            for k2 in 0..o.chunk_mod.len() {
+                chunk_mod.push(o.chunk_mod[k2]);
+                chunk_off.push(o.chunk_off[k2] + base9);
+            }
+            bodies_all.push_string(&o.bodies);
+            protos.push_string(&o.protos);
+            for k2 in 0..o.env_names.len() {
+                env_names.push(o.env_names[k2]);
+                env_bodies.push(replace(o.env_bodies.index_mut(k2), String::new()));
+            }
+            if o.have_main {
+                have_main = true;
+                main_mod = o.main_mod;
+                main_argv = o.main_argv;
+            }
+            seeds += o.seeds;
+            seed_skip += o.seed_skip;
+            clos_ok += o.clos_ok;
+            clos_skip += o.clos_skip;
+            cemit_seed_merge(&mut cem, o, m as u64);
+        }
+        for i2 in 0..p.modules.len() {
+            p.modules[i2].ast.ilock_on = false;
+        }
+        if cirg9 != null {
+            unsafe cirg9.elock_on = false;
+        }
+    } else {
+        for m in 0..p.modules.len() {
+            if !p.modules[m].has_ast || live != null && p.modules[m].prelude && !unsafe live[m] {
+                // no seeds (missing AST / unreachable prelude): an empty section keeps the image indexed
+                if tuc.on {
+                    tuc_pay.truncate(0);
+                    tuc::sec_add(&mut tuc, m, &tuc_pay);
+                }
+                continue;
+            }
+            cem.mg.mark_ctx = m as i64; // symbols the module spells about ITSELF are not cross-TU uses
+            let mut tuc_rec = false;
             if tuc.on {
-                tuc_pay.truncate(0);
-                tuc::sec_add(&mut tuc, m, &tuc_pay);
-            }
-            continue;
-        }
-        cem.mg.mark_ctx = m as i64; // symbols the module spells about ITSELF are not cross-TU uses
-        let mut tuc_rec = false;
-        if tuc.on {
-            if tuc.hit[m] {
-                let rr = cemit_tuc_replay(
-                    p,
-                    &mut cem,
-                    m,
-                    &tuc,
-                    &mut bodies_all,
-                    &mut protos,
-                    &mut chunk_mod,
-                    &mut chunk_off,
-                    &mut env_names,
-                    &mut env_bodies,
-                    &mut have_main,
-                    &mut main_mod,
-                    &mut main_argv,
-                );
-                if rr == 0 {
-                    tuc::sec_keep(&mut tuc, m);
-                    continue;
-                }
-                // clean rejects are ordinary churn (another module's typecheck moved this pool);
-                // a DIRTY reject means interns landed before diverging -- warn and void the section
-                if rr == 2 {
-                    eprint("tu-cache: dirty replay reject for `{}`; emitting live\n", p.modules[m].path.as_str());
-                    tuc::sec_void(&mut tuc, m);
-                }
-                tuc_rec = rr == 1;
-            } else {
-                tuc_rec = true;
-            }
-        }
-        let mut tuc_seg0: usize = 0;
-        let mut tuc_t0: usize = 0;
-        let mut tuc_i0: usize = 0;
-        let mut tuc_aux0: usize = 0;
-        let mut tuc_efwd0: usize = 0;
-        let mut tuc_eh0: usize = 0;
-        if tuc_rec {
-            cem.mg.rec_on = true;
-            tuc_seg0 = cem.mg.rec.len();
-            let a0 = unsafe &*p.module_ast_const(m as ModuleId);
-            tuc_t0 = a0.type_pool.len();
-            tuc_i0 = a0.instances.len();
-            tuc_aux0 = cem.aux.len();
-            tuc_efwd0 = cem.env_fwd.len();
-            tuc_eh0 = cem.env_hashes.len();
-        }
-        let a = unsafe &*p.module_ast_const(m as ModuleId);
-        let its = a.at_const(a.root).as_data.program.items;
-        let mut cands = Vector::<NodeId>::new();
-        for i in 0..its.len {
-            let nid = unsafe a.list(its)[i as usize];
-            let n = a.at_const(nid);
-            if n.kind == NodeKind::NODE_FUNCTION {
-                cands.push(nid);
-            } else if n.kind == NodeKind::NODE_EXTEND {
-                let ms = n.as_data.extend_def.items;
-                for j in 0..ms.len {
-                    let mid2 = unsafe a.list(ms)[j as usize];
-                    if a.at_const(mid2).kind == NodeKind::NODE_FUNCTION {
-                        cands.push(mid2);
+                if tuc.hit[m] {
+                    let rr = cemit_tuc_replay(
+                        p,
+                        &mut cem,
+                        m,
+                        &tuc,
+                        &mut bodies_all,
+                        &mut protos,
+                        &mut chunk_mod,
+                        &mut chunk_off,
+                        &mut env_names,
+                        &mut env_bodies,
+                        &mut have_main,
+                        &mut main_mod,
+                        &mut main_argv,
+                    );
+                    if rr == 0 {
+                        tuc::sec_keep(&mut tuc, m);
+                        continue;
                     }
+                    // clean rejects are ordinary churn (another module's typecheck moved this pool);
+                    // a DIRTY reject means interns landed before diverging -- warn and void the section
+                    if rr == 2 {
+                        eprint("tu-cache: dirty replay reject for `{}`; emitting live\n", p.modules[m].path.as_str());
+                        tuc::sec_void(&mut tuc, m);
+                    }
+                    tuc_rec = rr == 1;
+                } else {
+                    tuc_rec = true;
                 }
             }
-        }
-        for i in 0..cands.len() {
-            let nid = cands[i];
-            let n = a.at_const(nid);
-            if n.as_data.function.is_extern || n.as_data.function.body == NODE_NONE {
-                continue;
+            let mut tuc_seg0: usize = 0;
+            let mut tuc_t0: usize = 0;
+            let mut tuc_i0: usize = 0;
+            let mut tuc_aux0: usize = 0;
+            let mut tuc_efwd0: usize = 0;
+            let mut tuc_eh0: usize = 0;
+            if tuc_rec {
+                cem.mg.rec_on = true;
+                tuc_seg0 = cem.mg.rec.len();
+                let a0 = unsafe &*p.module_ast_const(m as ModuleId);
+                tuc_t0 = a0.type_pool.len();
+                tuc_i0 = a0.instances.len();
+                tuc_aux0 = cem.aux.len();
+                tuc_efwd0 = cem.env_fwd.len();
+                tuc_eh0 = cem.env_hashes.len();
             }
-            if !testing && cemit_is_test_item(a, nid) {
-                continue; // test-family items exist only under --test
-            }
-            if cem.mg.in_generic_extend(m as ModuleId, nid) {
-                continue; // its instances are demand-emitted; leave the cached body for them
-            }
-            let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
-            if !cemit_take_body(&mut g, p, m as ModuleId, nid, &mut lw) {
-                continue;
-            }
-            if lw.body.is_generic {
-                continue;
-            }
-            cemit_apply_drops(&mut dow, &mut lw);
-            let mut sym = String::new();
-            let tgt = cem.mg.method_target(m as ModuleId, nid);
-            if !cem.mg.fn_sym(m as ModuleId, nid, tgt, true, &mut sym) {
-                continue;
-            }
-            if sym.as_str() == "assert" || sym.as_str() == "assert_eq" || sym.as_str() == "assert_ne" {
-                continue; // desugared builtins; the C names collide with <assert.h>'s macro
-            }
-            cem.out.clear();
-            let is_main = sym.as_str() == "main";
-            if is_main {
-                sym.truncate(0);
-                sym.push_str("__sc_user_main"); // the argv wrapper below owns the C `main`
-            }
-            let mut gfs = Vector::<String>::new();
-            let mut gts = Vector::<TypeId>::new();
-            let is_glue = cemit_free_glue_fields(p, &mut cem, m as ModuleId, nid, &mut gfs, &mut gts);
-            if is_glue {
-                sym.push_str("__fb");
-            }
-            cem.noret = cemit_is_noreturn(a, nid);
-            cem.fn_attrs.truncate(0);
-            cemit_fn_attrs(p, m as ModuleId, nid, &mut cem.fn_attrs);
-            if cem.emit_fn(&lw.body, sym.as_str()) {
-                seeds += 1;
-                if is_main {
-                    have_main = true;
-                    main_mod = m as u64;
-                    main_argv = n.as_data.function.params.len != 0;
-                    if cem.mg.rec_on {
-                        let mut ev9 = mbe::RecEv::blank(mbe::RK_MAIN);
-                        ev9.a = if main_argv {
-                            1u32;
-                        } else {
-                            0;
-                        };
-                        cem.mg.rec.push(ev9);
-                    }
+            cemit_seed_module(
+                p,
+                &mut cem,
+                &mut g,
+                &mut dow,
+                &mut cl_cache,
+                &mut clws,
+                m,
+                testing,
+                verbose,
+                null,
+                &mut bodies_all,
+                &mut protos,
+                &mut chunk_mod,
+                &mut chunk_off,
+                &mut env_names,
+                &mut env_bodies,
+                &mut have_main,
+                &mut main_mod,
+                &mut main_argv,
+                &mut seeds,
+                &mut seed_skip,
+                &mut clos_ok,
+                &mut clos_skip,
+            );
+            if tuc_rec {
+                cem.mg.rec_on = false;
+                // trailing delta events: their accumulators are consumed whole at assembly, so only
+                // their internal order matters
+                if cem.aux.len() > tuc_aux0 {
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_AUX);
+                    ev9.s1.push_str(cem.aux.as_str().slice(tuc_aux0, cem.aux.len()));
+                    cem.mg.rec.push(ev9);
+                }
+                if cem.env_fwd.len() > tuc_efwd0 {
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_EFWD);
+                    ev9.s1.push_str(cem.env_fwd.as_str().slice(tuc_efwd0, cem.env_fwd.len()));
+                    cem.mg.rec.push(ev9);
+                }
+                for k9 in tuc_eh0..cem.env_hashes.len() {
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_EDEF);
+                    ev9.h = *cem.env_hashes.at(k9);
+                    cem.mg.rec.push(ev9);
                 }
                 {
-                    chunk_mod.push(m as u64);
-                    chunk_off.push(bodies_all.len() as u64);
-                    proto_of(&cem.out, &mut protos);
-                    bodies_all.push_string(&cem.out);
-                    if cem.mg.rec_on {
-                        let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
-                        ev9.a = chunk_off[chunk_off.len() - 1] as u32;
-                        ev9.b = bodies_all.len() as u32;
-                        cem.mg.rec.push(ev9);
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_EDGE);
+                    for dst in 0..p.modules.len() {
+                        if cem.mg.um_hit(m as u64, dst) {
+                            ev9.xs.push(dst as u32);
+                        }
                     }
+                    cem.mg.rec.push(ev9);
                 }
-                if is_glue {
-                    // the public wrapper: the sig is the __fb sig without the suffix
-                    let mut wr = String::new();
-                    let bs9 = cem.out.as_str();
-                    let mut le = 0 as usize;
-                    while le < bs9.len() && bs9.byte_at(le) != 10 {
-                        le += 1;
-                    }
-                    let sig = bs9.slice(0, le);
-                    let mut cut = 0 as usize;
-                    while cut + 4 < sig.len() && sig.slice(cut, cut + 5) != "__fb(" {
-                        cut += 1;
-                    }
-                    wr.push_str(sig.slice(0, cut));
-                    wr.push_str(sig.slice(cut + 4, sig.len()));
-                    // The receiver is the first argument (locals are return-slots then args): ask the
-                    // emitter for its C spelling -- it may preserve the source name (`self`) over `_N`.
-                    let mut selfp = String::new();
-                    cem.local_cname(lw.body.returns, &mut selfp);
-                    wr.push_str("\n  ");
-                    wr.push_str(sym.as_str());
-                    wr.push_str("(");
-                    wr.push_string(&selfp);
-                    wr.push_str(");\n");
-                    let mut wok = true;
-                    for gi in 0..gfs.len() {
-                        if !wok {
-                            break;
-                        }
-                        let mut fe9 = String::new();
-                        let mut frm9 = m as ModuleId;
-                        let mut frt9 = gts[gi];
-                        let _ = cem.mg.resolve(m as ModuleId, gts[gi], &mut frm9, &mut frt9);
-                        wok = cem.free_expr(frm9, frt9, &mut fe9);
-                        if wok {
-                            wr.push_str("  ");
-                            wr.push_string(&fe9);
-                            if cem.mg.is_zst(frm9, frt9) {
-                                // the field has no C member: its destructor runs on the sentinel
-                                wr.push_str("(");
-                                let mut zr9 = String::new();
-                                let _ = cem.zst_sentinel_ref(frm9, frt9, &mut zr9);
-                                wr.push_string(&zr9);
-                                wr.push_str(");\n");
-                            } else {
-                                wr.push_str("(&");
-                                wr.push_string(&selfp);
-                                wr.push_str("->");
-                                wr.push_string(&gfs[gi]);
-                                wr.push_str(");\n");
-                            }
-                        }
-                    }
-                    wr.push_str("}\n");
-                    if wok {
-                        chunk_mod.push(m as u64);
-                        chunk_off.push(bodies_all.len() as u64);
-                        proto_of(&wr, &mut protos);
-                        bodies_all.push_string(&wr);
-                        if cem.mg.rec_on {
-                            let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
-                            ev9.a = chunk_off[chunk_off.len() - 1] as u32;
-                            ev9.b = bodies_all.len() as u32;
-                            cem.mg.rec.push(ev9);
-                        }
-                    }
-                }
-                let mut clsq = Vector::<NodeId>::new();
-                for c2 in 0..lw.closures.len() {
-                    clsq.push(lw.closures[c2]);
-                }
-                let mut cqi: usize = 0;
-                while cqi < clsq.len() {
-                    let cn = clsq[cqi];
-                    cqi += 1;
-                    let ckey = skey_mix(0, m as u64 << 32 | cn as u64);
-                    let ci = switch cl_cache.get(&ckey) {
-                        Some(v) => *v,
-                        None => {
-                            let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
-                            let mut slot = 0xFFFFFFFFFFFFFFFFu64;
-                            if cemit_take_closure(&mut g, p, m as ModuleId, cn, &mut cl) {
-                                cemit_apply_drops(&mut dow, &mut cl);
-                                slot = clws.len() as u64;
-                                clws.push(cl);
-                            }
-                            cl_cache.insert(ckey, slot);
-                            slot;
-                        },
-                    };
-                    let mut csym = String::new();
-                    cem.mg.closure_sym(m as ModuleId, cn, &mut csym);
-                    let mut envs = String::new();
-                    cem.out.clear();
-                    let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
-                    if cok {
-                        for x2 in 0..clws.at(ci as usize).closures.len() {
-                            clsq.push(clws.at(ci as usize).closures[x2]); // closures nest: emit the inner ones too
-                        }
-                    }
-                    if cok && cem.emit_closure(&clws.at(ci as usize).body, m as ModuleId, cn, csym.as_str(), &mut envs) {
-                        clos_ok += 1;
-                        {
-                            if envs.len() != 0 {
-                                let mut eh9 = 1469598103934665603u64;
-                                {
-                                    let mut en9 = String::from_str(csym.as_str());
-                                    en9.push_str("_env");
-                                    let es9 = en9.as_str();
-                                    for k9 in 0..es9.len() {
-                                        eh9 = (eh9 ^ es9.byte_at(k9) as u64) * 1099511628211u64;
-                                    }
-                                }
-                                env_names.push(eh9);
-                                env_bodies.push(envs.clone());
-                                if cem.mg.rec_on {
-                                    let mut ev9 = mbe::RecEv::blank(mbe::RK_ENV);
-                                    ev9.h = eh9;
-                                    ev9.s1 = envs.clone();
-                                    cem.mg.rec.push(ev9);
-                                }
-                            }
-                        }
-                        chunk_mod.push(m as u64);
-                        chunk_off.push(bodies_all.len() as u64);
-                        proto_of(&cem.out, &mut protos);
-                        bodies_all.push_string(&cem.out);
-                        if cem.mg.rec_on {
-                            let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
-                            ev9.a = chunk_off[chunk_off.len() - 1] as u32;
-                            ev9.b = bodies_all.len() as u32;
-                            cem.mg.rec.push(ev9);
-                        }
-                    } else {
-                        clos_skip += 1;
-                    }
-                }
-            } else {
-                seed_skip += 1;
-                if verbose {
-                    eprint("seed-emit-fail: `{}` {}\n", sym.as_str(), cem.err);
-                }
+                let a2 = unsafe &*p.module_ast_const(m as ModuleId);
+                tuc_pay.truncate(0);
+                tuc::ser_pool(&mut tuc_pay, a2, tuc_t0, a2.type_pool.len(), tuc_i0, a2.instances.len());
+                tuc::ser_evs(&mut tuc_pay, &cem.mg.rec, tuc_seg0, bodies_all.as_str());
+                tuc::sec_add(&mut tuc, m, &tuc_pay);
+                cem.mg.rec.truncate(tuc_seg0);
             }
         }
-        if tuc_rec {
-            cem.mg.rec_on = false;
-            // trailing delta events: their accumulators are consumed whole at assembly, so only
-            // their internal order matters
-            if cem.aux.len() > tuc_aux0 {
-                let mut ev9 = mbe::RecEv::blank(mbe::RK_AUX);
-                ev9.s1.push_str(cem.aux.as_str().slice(tuc_aux0, cem.aux.len()));
-                cem.mg.rec.push(ev9);
-            }
-            if cem.env_fwd.len() > tuc_efwd0 {
-                let mut ev9 = mbe::RecEv::blank(mbe::RK_EFWD);
-                ev9.s1.push_str(cem.env_fwd.as_str().slice(tuc_efwd0, cem.env_fwd.len()));
-                cem.mg.rec.push(ev9);
-            }
-            for k9 in tuc_eh0..cem.env_hashes.len() {
-                let mut ev9 = mbe::RecEv::blank(mbe::RK_EDEF);
-                ev9.h = *cem.env_hashes.at(k9);
-                cem.mg.rec.push(ev9);
-            }
-            {
-                let mut ev9 = mbe::RecEv::blank(mbe::RK_EDGE);
-                for dst in 0..p.modules.len() {
-                    if cem.mg.um_hit(m as u64, dst) {
-                        ev9.xs.push(dst as u32);
-                    }
-                }
-                cem.mg.rec.push(ev9);
-            }
-            let a2 = unsafe &*p.module_ast_const(m as ModuleId);
-            tuc_pay.truncate(0);
-            tuc::ser_pool(&mut tuc_pay, a2, tuc_t0, a2.type_pool.len(), tuc_i0, a2.instances.len());
-            tuc::ser_evs(&mut tuc_pay, &cem.mg.rec, tuc_seg0, bodies_all.as_str());
-            tuc::sec_add(&mut tuc, m, &tuc_pay);
-            cem.mg.rec.truncate(tuc_seg0);
-        }
+    }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("cemit-stage seed: {} ms\n", t9 - tt0);
+        tt0 = t9;
     }
     // @test wrappers: per-case runner entry points + the global-env hooks, emitted as ordinary
     // chunks of their owning module's TU (their fixture frees join the glue/demand worklists)
@@ -2063,6 +2926,12 @@ pub fn cemit_package(
     let mut cfs = Vector::<cfl::CFlow>::new();
     let mut cf_ok = Vector::<bool>::new();
     let mut sa_seen = Map::<u64, u64>::new();
+    let mut ia_idx = Vector::<Vector<NodeId>>::new();
+    let mut ia_built = Vector::<bool>::new();
+    for _i in 0..p.modules.len() {
+        ia_idx.push(Vector::<NodeId>::new());
+        ia_built.push(false);
+    }
     let mut inst_ok: u64 = 0;
     let mut inst_skip: u64 = 0;
     let mut glue_ok: u64 = 0;
@@ -2140,7 +3009,7 @@ pub fn cemit_package(
         let d_sfx = cem.demand.at(qi - 1).sfx.clone();
         // per-instantiation static_asserts: under this demand's substitution the condition is
         // this instance's compile-time fact -- false is a COMPILE error naming the type argument
-        cemit_inst_asserts(p, d_def, &d_subs, dk, &mut sa_seen);
+        cemit_inst_asserts(p, d_def, &d_subs, dk, &mut sa_seen, &mut ia_idx, &mut ia_built);
         // a body with an UNEXPANDED reflection binder re-lowers per instance: the demand env
         // makes the binder's owner concrete, so the copies expand for real. A body whose only
         // env-dependence is `sizeof(T) <op> 0` branches re-lowers once per ZST-BIT SIGNATURE of
@@ -2343,6 +3212,11 @@ pub fn cemit_package(
             }
         }
     }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("cemit-stage drain: {} ms\n", t9 - tt0);
+        tt0 = t9;
+    }
     if verbose {
         eprint(
             "cemit-tu-inst: {} seeds ({} skipped), {} instances, {} inst-skipped, {} demanded, {} closures ({} skipped), {} glue ({} skipped)\n",
@@ -2506,6 +3380,11 @@ pub fn cemit_package(
             eprint("cemit-macros: {} templates, {} skipped\n", mac_ok, mac_skip);
         }
         o.skips += mac_skip;
+    }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("cemit-stage macros: {} ms\n", t9 - tt0);
+        tt0 = t9;
     }
     // dyn typedef blocks: drain every dyn spelling site both manglers recorded (rendering can
     // discover further stems; the index loop rides the growing vector to a fixed point)
@@ -2730,6 +3609,11 @@ pub fn cemit_package(
             eprint("cemit-consts: {} defined, {} skipped\n", cd_ok, cd_skip);
         }
     }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("cemit-stage consts: {} ms\n", t9 - tt0);
+        tt0 = t9;
+    }
     // @reflect exports + `type_info` descriptor groups: the CTFE static graph rendered as file-
     // scope const data (extern roots; `__ct%u` auxiliaries static per group)
     let mut static_defs = String::new();
@@ -2863,6 +3747,11 @@ pub fn cemit_package(
             eprint("cemit-reflect: {} groups, {} skipped\n", ti_ok, ti_skip);
         }
         o.skips += ti_skip;
+    }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("cemit-stage statics+ti: {} ms\n", t9 - tt0);
+        tt0 = t9;
     }
     // Assembly: shared headers carry every aggregate/ret-struct/env typedef and all cross-TU
     // prototypes; each module TU holds its own bodies plus its static closures; the instance TU
@@ -3059,6 +3948,11 @@ pub fn cemit_package(
                 o.tus.set(t, tu2);
             }
         }
+    }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("cemit-stage assembly: {} ms\n", t9 - tt0);
+        tt0 = t9;
     }
     {
         let nm9 = p.modules.len();
@@ -3995,11 +4889,56 @@ fn borrowck_module(p: &mut loader::Package, i: usize, ow: &mut bfx::Owner, ctx: 
     return !had;
 }
 
-// Borrow-check every module, serially, in module order, through ONE ownership oracle and ONE
-// borrow pipeline (their memo tables and capacities survive across modules). `keep` (null =
-// discard) collects every lowered body for the backend, so codegen starts from finished lowerings.
+// One parallel borrow-check unit of work: a private oracle, pipeline, checker and diagnostics per
+// module. The finished (already finalized) diagnostics and the module's lowered bodies land in
+// `out`; nothing prints and nothing outside the module's own Ast is written -- the const engine
+// serializes behind its gate, interning behind each Ast's lock.
+struct BcOut {
+    pub ok: bool,
+    pub lint: u32,
+    pub errors: diag::Errors,
+    pub keep: irl::Keep,
+}
+
+struct BcTask {
+    pub p: *mut loader::Package,
+    pub i: usize,
+    pub out: *mut BcOut,
+    pub want_keep: bool,
+}
+
+// The task closure crosses to a worker; the package and slots it points at are partitioned by
+// module and outlive the WaitGroup join.
+unsafe extend BcTask as Send {}
+
+fn bc_run_one(t: BcTask) {
+    let pkg = t.p;
+    let p = unsafe &mut *t.p;
+    let mut ow = bfx::Owner::new(p);
+    let mut ctx = bfi::BorrowCtx::new();
+    if t.want_keep {
+        ctx.keep = &mut (unsafe &mut *t.out).keep;
+    }
+    let m = &mut p.modules[t.i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let mut tck = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    tck.borrowck(&mut ow, &mut ctx);
+    let o = unsafe &mut *t.out;
+    o.ok = !tck.has_errors();
+    o.lint = tck.errors.errors.len() as u32;
+    o.errors = replace(&mut tck.errors, diag::Errors::new());
+}
+
+// Borrow-check every module through ONE ownership oracle and ONE borrow pipeline when serial
+// (their memo tables and capacities survive across modules), or one of each per module task when
+// `p.jobs` asks for workers -- outputs merge in module order, so both paths print and lower
+// identically. `keep` (null = discard) collects every lowered body for the backend.
 pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     let n = p.modules.len();
+    if p.jobs != 1 && n > 1 {
+        return borrowck_all_par(p, keep);
+    }
     let mut ow = bfx::Owner::new(p);
     let mut ctx = bfi::BorrowCtx::new();
     ctx.keep = keep;
@@ -4008,6 +4947,64 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
         if !borrowck_module(p, i, &mut ow, &mut ctx) {
             ok = false;
         }
+    }
+    return ok;
+}
+
+fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
+    let n = p.modules.len();
+    // package-wide lazy state the tasks would otherwise race to build
+    if p.co_state == 0 {
+        p.co_compute();
+        p.co_dump();
+    }
+    let cirp = p.cir as *mut iri::Interp;
+    if cirp != null {
+        unsafe cirp.elock_on = true;
+    }
+    for i in 0..n {
+        p.modules[i].ast.ilock_on = true;
+    }
+    let mut outs = Vector::<BcOut>::with_capacity(n);
+    for _ in 0..n {
+        outs.push(BcOut { ok: true, lint: 0, errors: diag::Errors::new(), keep: irl::Keep::new() });
+    }
+    if p.jobs >= 2 {
+        prt::set_worker_count(p.jobs as usize);
+    }
+    prt::set_stack_size(8usize << 20); // no-op if the pool already runs (set again for direct callers)
+    let wg = psync::WaitGroup::new();
+    wg.add(n as i64);
+    let pp = p as *mut loader::Package;
+    let want = keep != null;
+    for i in 0..n {
+        let t = BcTask { p: pp, i: i, out: outs.index_mut(i), want_keep: want };
+        let wgc = wg.clone();
+        launch || {
+            bc_run_one(t);
+            wgc.done();
+        };
+    }
+    wg.wait();
+    let mut ok = true;
+    for i in 0..n {
+        let o = outs.index_mut(i);
+        if !o.ok {
+            ok = false;
+        }
+        p.lint_errs = p.lint_errs + o.lint;
+        if !o.ok {
+            o.errors.log();
+        }
+        if keep != null {
+            unsafe (&mut *keep).absorb(&mut o.keep);
+        }
+    }
+    for i in 0..n {
+        p.modules[i].ast.ilock_on = false;
+    }
+    if cirp != null {
+        unsafe cirp.elock_on = false;
     }
     return ok;
 }
@@ -4060,7 +5057,33 @@ fn report_fold_errs(p: &mut loader::Package) {
             details.push(d);
         }
     }
+    // Canonical report order (module, then source position): recording order is scheduling order
+    // under the parallel stages, and diagnostics must not depend on it.
     let nerr = ms.len();
+    for a3 in 1..nerr {
+        let mut b3 = a3;
+        while b3 > 0 {
+            let spb = p.modules[ms[b3] as usize].ast.at_const(ids[b3]).span.start;
+            let spa = p.modules[ms[b3 - 1] as usize].ast.at_const(ids[b3 - 1]).span.start;
+            if ms[b3] < ms[b3 - 1] || ms[b3] == ms[b3 - 1] && spb < spa {
+                let tm = ms[b3];
+                ms.set(b3, ms[b3 - 1]);
+                ms.set(b3 - 1, tm);
+                let ti = ids[b3];
+                ids.set(b3, ids[b3 - 1]);
+                ids.set(b3 - 1, ti);
+                let tk = kinds[b3];
+                kinds.set(b3, kinds[b3 - 1]);
+                kinds.set(b3 - 1, tk);
+                let td = replace(details.index_mut(b3), String::new());
+                let td2 = replace(details.index_mut(b3 - 1), td);
+                let _ = replace(details.index_mut(b3), td2);
+                b3 -= 1;
+            } else {
+                break;
+            }
+        }
+    }
     for i in 0..nerr {
         let m = ms[i];
         let rid = ids[i];
@@ -4142,7 +5165,7 @@ pub fn platform_filter_module(p: &mut loader::Package, mi: usize, target: i32) {
     let items = m.ast.at_const(root).as_data.program.items;
     let mut w: u32 = 0;
     for j in 0..items.len {
-        let id = m.ast.children[(items.start + j) as usize];
+        let id = *m.ast.children.at((items.start + j) as usize);
         let mut keep = true;
         {
             for k in 0..m.ast.attrs.len() {
@@ -4158,7 +5181,7 @@ pub fn platform_filter_module(p: &mut loader::Package, mi: usize, target: i32) {
             }
         }
         if keep {
-            m.ast.children[(items.start + w) as usize] = id;
+            m.ast.children.set((items.start + w) as usize, id);
             w = w + 1;
         }
     }
@@ -4595,11 +5618,10 @@ fn ap_is_test_fn(a: *const Ast, fnode: NodeId) bool {
     return false;
 }
 
-fn ap_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId) {
+fn ap_check_fn(errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, cev: *mut iri::Interp) {
     if a.at_const(fnode).kind != NodeKind::NODE_FUNCTION || ap_is_test_fn(a, fnode) {
         return;
     }
-    let cev = p.cir as *mut iri::Interp;
     let sp = cev.lint_body(m as ModuleId, fnode);
     if sp.end > sp.start {
         if iri::it_trap_is_ub(cev.trap_kind_get()) {
@@ -4625,7 +5647,14 @@ fn ap_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
 /// exempt (panicking on purpose is a feature there), as are explicit `panic(..)` calls (only a
 /// panic reached THROUGH a `const fn` frame classifies -- see Interp::lint_body).
 pub fn check_always_panics_module(p: &mut loader::Package, m: usize, errs: &mut diag::Errors) {
-    if p.cir == null || !p.modules[m].has_ast {
+    if p.cir == null {
+        return;
+    }
+    ap_check_module_on(p, m, errs, p.cir as *mut iri::Interp);
+}
+
+fn ap_check_module_on(p: &mut loader::Package, m: usize, errs: &mut diag::Errors, cev: *mut iri::Interp) {
+    if !p.modules[m].has_ast {
         return;
     }
     let a = mod_ast_c(p, m as ModuleId);
@@ -4635,10 +5664,10 @@ pub fn check_always_panics_module(p: &mut loader::Package, m: usize, errs: &mut 
         if a.at_const(iid).kind == NodeKind::NODE_EXTEND {
             let ms = a.at_const(iid).as_data.extend_def.items;
             for j in 0..ms.len {
-                ap_check_fn(p, errs, a, m, unsafe a.list(ms)[j as usize]);
+                ap_check_fn(errs, a, m, unsafe a.list(ms)[j as usize], cev);
             }
         } else {
-            ap_check_fn(p, errs, a, m, iid);
+            ap_check_fn(errs, a, m, iid, cev);
         }
     }
 }
@@ -5073,8 +6102,84 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
     }
 }
 
+struct ApTask {
+    pub p: *mut loader::Package,
+    pub outs: *mut diag::Errors,
+    pub m: u64,
+}
+
+unsafe extend ApTask as Send {}
+
+fn ap_run_one(t: ApTask) {
+    // a private engine per task: the scan is a query, and the shared engine's caches must not be
+    // contended per interpreted call. Budgets copy from the master so traps classify identically.
+    let mut cev = iri::interp_new(t.p);
+    {
+        let master = (unsafe (&*t.p).cir) as *mut iri::Interp;
+        cev.all_typed = true;
+        cev.max_steps = unsafe (&*master).max_steps;
+        cev.max_slots = unsafe (&*master).max_slots;
+    }
+    let p = unsafe &mut *t.p;
+    let i = t.m as usize;
+    ap_check_module_on(p, i, unsafe &mut *(t.outs + i), &mut cev);
+}
+
 fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
-    for m in 0..p.modules.len() {
+    let n = p.modules.len();
+    if p.jobs != 1 && n > 1 && only_mod < 0 {
+        // per-module tasks: fold failures recorded through the master's lowering callbacks land
+        // behind its lock and dedup canonically in report_fold_errs; diagnostics replay in module
+        // order below
+        let cirp = p.cir as *mut iri::Interp;
+        if cirp != null {
+            unsafe cirp.elock_on = true;
+        }
+        for i in 0..n {
+            p.modules[i].ast.ilock_on = true;
+        }
+        let mut outs = Vector::<diag::Errors>::with_capacity(n);
+        for _ in 0..n {
+            outs.push(diag::Errors::new());
+        }
+        prt::set_stack_size(8usize << 20);
+        let wg = psync::WaitGroup::new();
+        let pp = p as *mut loader::Package;
+        let ob = outs.index_mut(0) as *mut diag::Errors;
+        let mut launched: i64 = 0;
+        for m in 0..n {
+            if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
+                continue;
+            }
+            wg.add(1);
+            launched += 1;
+            let t = ApTask { p: pp, outs: ob, m: m as u64 };
+            let wgc = wg.clone();
+            launch || {
+                ap_run_one(t);
+                wgc.done();
+            };
+        }
+        if launched != 0 {
+            wg.wait();
+        }
+        for i in 0..n {
+            p.modules[i].ast.ilock_on = false;
+        }
+        if cirp != null {
+            unsafe cirp.elock_on = false;
+        }
+        for m in 0..n {
+            let errs = outs.index_mut(m);
+            if errs.errors.len() != 0 {
+                p.ok = false;
+                errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+                errs.log();
+            }
+        }
+        return;
+    }
+    for m in 0..n {
         if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
             continue;
         }
@@ -5095,6 +6200,21 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
 /// error or remaining warning returns 1. `fixes != null` (`lint --fix`) collects machine fixes instead
 /// of printing.
 pub fn lint_package(
+    p: &mut loader::Package,
+    target: i32,
+    lint_mod: usize,
+    fixes: *mut Vector<diag::LintFix>,
+    ftexts: *mut Vector<String>,
+    suggest_const: bool,
+) i32 {
+    let rc0 = lint_package_i(p, target, lint_mod, fixes, ftexts, suggest_const);
+    if p.jobs != 1 {
+        prt::shutdown(); // early-error net, same as run_package
+    }
+    return rc0;
+}
+
+fn lint_package_i(
     p: &mut loader::Package,
     target: i32,
     lint_mod: usize,
@@ -5133,6 +6253,9 @@ pub fn lint_package(
     let mut wms = Vector::<facts::FactsWatermark>::new();
     facts_snapshot(p, &mut wms);
     p.ok = borrowck_all(p, null) && p.ok;
+    if p.jobs != 1 {
+        prt::shutdown();
+    }
     if !p.ok {
         return 1;
     }
@@ -5200,24 +6323,62 @@ pub fn run_package(
     cflags: str,
     sink: *mut EmitSink,
 ) i32 {
+    let rc0 = run_package_i(p, topts, out_bin, target, lint, cflags, sink);
+    // safety net for every early-error return: parallel loading may have started the pool, and
+    // the leak gate (and any later fork) needs it gone; shutdown is idempotent
+    if p.jobs != 1 {
+        prt::shutdown();
+    }
+    return rc0;
+}
+
+fn run_package_i(
+    p: &mut loader::Package,
+    topts: *const TestOpts,
+    out_bin: str,
+    target: i32,
+    lint: bool,
+    cflags: str,
+    sink: *mut EmitSink,
+) i32 {
+    let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
+    let mut tp0 = unsafe shim::sc_ticks_ms();
     platform_filter(p, target);
     let n = p.modules.len();
-    for i in 0..n {
-        let ok = resolve_module(p, i, lint && !p.modules[i].prelude, null);
-        p.ok = ok && p.ok;
+    if p.jobs != 1 && n > 1 {
+        resolve_all_par(p, lint);
+    } else {
+        for i in 0..n {
+            let ok = resolve_module(p, i, lint && !p.modules[i].prelude, null);
+            p.ok = ok && p.ok;
+        }
     }
     if !p.ok {
         return 1;
     }
-    for i in 0..n {
-        let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null);
-        p.ok = ok && p.ok;
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("phase resolve: {} ms\n", t9 - tp0);
+        tp0 = t9;
+    }
+    if p.jobs != 1 && n > 1 {
+        p.ok = typecheck_all_par(p, lint) && p.ok;
+    } else {
+        for i in 0..n {
+            let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null);
+            p.ok = ok && p.ok;
+        }
     }
     if p.ok {
         discharge_obligations(p, n);
     }
     if !p.ok {
         return 1;
+    }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("phase typecheck: {} ms\n", t9 - tp0);
+        tp0 = t9;
     }
     ast_stats(p);
     let mut wms = Vector::<facts::FactsWatermark>::new();
@@ -5234,11 +6395,22 @@ pub fn run_package(
     }
     let mut irkeep = irl::Keep::new();
     p.ok = borrowck_all(p, &mut irkeep) && p.ok;
+    // Release the pool as soon as the one parallel stage is done: the test runner FORKS after
+    // this, and a forked child inherits the pool's state but none of its worker threads. (Also
+    // what keeps the leak gate green.)
+    if p.jobs != 1 {
+        prt::shutdown();
+    }
     // Release the pool as soon as the one parallel stage is done: the test runner FORKS after this,
     // and a forked child inherits the pool's state but none of its worker threads. (Also what keeps
     // the leak gate green.) The bench calls borrowck_all directly, so its iterations keep a warm pool.
     if !p.ok {
         return 1;
+    }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("phase borrowck: {} ms\n", t9 - tp0);
+        tp0 = t9;
     }
     if facts_verify(p, &wms, "borrowck") != 0 {
         return 1;
@@ -5250,6 +6422,11 @@ pub fn run_package(
     layout_pass(p);
     cemit_pass(p);
     cemit_tu_pass(p);
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("phase verify+layout: {} ms\n", t9 - tp0);
+        tp0 = t9;
+    }
     if lint {
         lint_unused_items(p, -1);
     }
@@ -5261,11 +6438,21 @@ pub fn run_package(
         // an ERROR, not a lint: it runs on every build (user modules; std is gated by check.sh's
         // explicit std lint invocations)
         check_always_panics(p, -1);
+        if tstat {
+            let t9 = unsafe shim::sc_ticks_ms();
+            eprint("phase panics: {} ms\n", t9 - tp0);
+            tp0 = t9;
+        }
         cirf.flush_asserts(flush_assert_err, pv);
         cirf.flush_consts(flush_const_err, pv);
     }
     if !p.ok {
         return 1;
+    }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("phase lint+panics: {} ms\n", t9 - tp0);
+        tp0 = t9;
     }
     let testing = topts != null && unsafe topts.enabled;
     let mut plan = TestPlan::new(n);
@@ -5304,7 +6491,17 @@ pub fn run_package(
             },
         );
     }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("phase rt+ext: {} ms\n", t9 - tp0);
+        tp0 = t9;
+    }
     let live = compute_emit_live(p);
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("phase live: {} ms\n", t9 - tp0);
+        tp0 = t9;
+    }
     let osz = if n != 0 {
         n;
     } else {
@@ -5328,7 +6525,16 @@ pub fn run_package(
             unsafe cirg.record_folds = true; // the seed/instance lowering attempts mandatory folds
         }
     }
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint("phase mid: {} ms\n", t9 - tp0);
+        tp0 = t9;
+    }
     cemit_package(p, testing, &plan, live, target, &mut co, &mut irkeep);
+    // the emission frontier restarted the pool; release it again before any test-runner fork
+    if p.jobs != 1 {
+        prt::shutdown();
+    }
     report_fold_errs(p);
     if !p.ok {
         err = true;
@@ -5383,6 +6589,7 @@ pub fn run_package(
     for k in 0..lm.len() {
         keep.push(build_out_path(root, p.modules[lm[k] as usize].path.as_str(), ".c"));
     }
+    let tw0 = unsafe shim::sc_ticks_ms();
     {
         // Shared headers land before any module file, then per-module header shims + sources in
         // emit order, then the shared instance TU.
@@ -5422,6 +6629,9 @@ pub fn run_package(
             sink_notify(sink, ip.as_str(), 1);
             keep.push(ip);
         }
+    }
+    if stdlib::getenv("SC_CEMIT_STATS") != null {
+        eprint("cemit-stage write: {} ms\n", unsafe shim::sc_ticks_ms() - tw0);
     }
     // publish the per-TU cache only after a fully successful emission; keep[] shields it from pruning
     if !err && co.skips == 0 && co.tuc_path.len() != 0 {

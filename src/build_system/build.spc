@@ -14,6 +14,7 @@ import stdio;
 import stdlib;
 import string as cstring;
 import driver_shim as shim;
+import std::parallel::runtime as prt;
 import module::loader as loader;
 import ir::interp as iri;
 import driver::emit as *;
@@ -1714,12 +1715,22 @@ fn engine_build(
     let mut t_transpile = t0;
     let mut ret: i32 = 0;
     if !skip_emit {
+        loader::set_load_jobs(jobs);
+        let tl0 = unsafe shim::sc_ticks_ms();
         let mut p = loader::package_load_rooted(root, root_dir, alt, std_dir, bootstrap_tags, target);
+        if stdlib::getenv("SC_CEMIT_STATS") != null {
+            eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
+        }
+        loader::set_load_jobs(1);
         p.arch = m.arch; // the instruction-set axis `@arch` gates on
         if !p.ok {
+            if jobs != 1 {
+                prt::shutdown(); // parallel loading started the pool
+            }
             return 1;
         }
         p.gen_root = srcgen.clone();
+        p.jobs = jobs;
         let pkg = (&mut p) as *mut loader::Package;
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
@@ -2663,6 +2674,13 @@ pub fn manifest_test(
         binb.push_string(&binp);
     }
     unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
+    loader::set_load_jobs(
+        if jobs_override != 0 {
+            jobs_override;
+        } else {
+            m.jobs;
+        },
+    );
     let mut p = loader::package_load_rooted(
         rootp.as_str(),
         ".",
@@ -2671,11 +2689,18 @@ pub fn manifest_test(
         bootstrap_tags,
         target,
     );
+    loader::set_load_jobs(1);
     p.arch = m.arch;
     if !p.ok {
+        prt::shutdown(); // parallel loading may have started the pool
         return 1;
     }
     p.gen_root = join2(m.out_dir.as_str(), "raw-test");
+    p.jobs = if jobs_override != 0 {
+        jobs_override;
+    } else {
+        m.jobs;
+    };
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;

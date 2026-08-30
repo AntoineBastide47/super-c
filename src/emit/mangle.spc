@@ -256,6 +256,9 @@ pub struct Mangler {
     pub agg_on: bool,
     pub agg_reqs: Vector<AggReq>,
     agg_seen: Map<u64, u64>,
+    /// Frontier shard capture of instance-aggregate claims (1:1 with agg_reqs pushes).
+    pub sh_on: bool,
+    pub sh_agg_k: Vector<u64>,
     // fnode -> owning extend/interface, per module, built on first query: symbol resolution asks
     // per CALL SITE, so membership must be a lookup, not a rescan of the module's item list.
     own_built: Vector<bool>,
@@ -417,6 +420,8 @@ extend Mangler {
             mark_ctx: -1,
             last_method_def: DefId { module: 0, node: NODE_NONE },
             agg_on: false,
+            sh_on: false,
+            sh_agg_k: Vector::<u64>::new(),
             agg_reqs: Vector::<AggReq>::new(),
             agg_seen: Map::<u64, u64>::new(),
             own_built: Vector::<bool>::new(),
@@ -778,6 +783,36 @@ extend Mangler {
     }
 
     /// Was a (spelling TU `src` -> module `dst`) edge recorded? `src` 65534 = the instance TU.
+    /// Frontier merge: absorb shard `o`'s cross-TU row for TU `m` and its instance-aggregate
+    /// requests (first module-order claimant wins, matching the serial loop).
+    pub fn sh_merge(self: &mut Self, o: &mut Mangler, m: u64) {
+        let nmods = self.p().modules.len();
+        for dst in 0..nmods {
+            if o.um_hit(m, dst) {
+                self.um_set(m, dst as ModuleId);
+            }
+        }
+        for i in 0..o.sh_agg_k.len() {
+            let k = o.sh_agg_k[i];
+            let fresh = switch self.agg_seen.get(&k) {
+                Some(_v) => false,
+                None => true,
+            };
+            if fresh {
+                self.agg_seen.insert(k, 1);
+                let ar = o.agg_reqs.index_mut(i);
+                let moved = replace(
+                    ar,
+                    AggReq { pm: 0, it: TyInstance { module: 0, decl: NODE_NONE, n: 0 }, subs: Vector::<MSub>::new() },
+                );
+                self.agg_reqs.push(moved);
+            }
+        }
+        for i in 0..o.dyn_reqs.len() {
+            self.dyn_reqs.push(*o.dyn_reqs.at(i));
+        }
+    }
+
     pub fn um_hit(self: &Self, src: u64, dst: usize) bool {
         if self.used_mods.len() == 0 {
             return false;
@@ -1816,6 +1851,9 @@ extend Mangler {
                     sn9.push(*self.subs.at(k9));
                 }
                 self.agg_reqs.push(AggReq { pm: pm, it: *it, subs: sn9 });
+                if self.sh_on {
+                    self.sh_agg_k.push(h9);
+                }
             }
             if self.rec_on && self.rec_dup_once(h9 ^ 14) {
                 let mut ev = RecEv::blank(RK_AGG);

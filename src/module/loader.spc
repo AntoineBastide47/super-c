@@ -11,6 +11,8 @@ import lexer::token as tok;
 import lexer::lexer as lexer;
 import ast::ast as *;
 import ast::parser as parser;
+import std::parallel::sync as psy;
+import std::parallel::runtime as prt;
 
 pub const SEEK_END: i32 = 2;
 
@@ -99,10 +101,25 @@ pub struct Package {
     /// The Core IR constant interpreter (a *mut ir::interp::Interp, kept opaque here to avoid a type
     /// cycle); owned by the driver, created after load, set before type-checking. Null in library use.
     pub cir: *mut void,
-    /// Top-level items the type checker has COMPLETED (module << 32 | item node): the constant
-    /// engine only interprets function bodies whose item is recorded here (an unchecked body
-    /// would evaluate with degraded widths).
-    pub tc_done: Set<u64>,
+    /// Compiler-stage parallelism: worker count for the parallel frontiers (0/1 = serial). Set by
+    /// the driver from --jobs before run_package; the parallel cc window reads its own copy.
+    pub jobs: u32,
+    /// Top-level items the type checker has COMPLETED (per-module sets, indexed by module; the
+    /// key keeps its module << 32 | item form): the constant engine only interprets function
+    /// bodies whose item is recorded here (an unchecked body would evaluate with degraded
+    /// widths). Per module so parallel checkers write disjoint sets.
+    pub tc_done: Vector<Set<u64>>,
+    /// Parallel frontend: tc_mod_done[m] flips when module m's check() completed; the engine's
+    /// index-aware gate treats a LOWER-indexed module's items as checked only once its flag is
+    /// set (waiting through `tc_wait`), and a HIGHER-indexed module's as unchecked regardless --
+    /// exactly the serial module-order visibility.
+    pub tc_mod_done: Vector<u8>,
+    /// Driver-installed waiter for the parallel frontend (null when serial): blocks the calling
+    /// task until tc_mod_done[m] is set.
+    pub tc_wait: fn(*mut void, ModuleId) void,
+    pub tc_wait_ctx: *mut void,
+    /// True only while the parallel typecheck frontier is running.
+    pub tc_frontier: bool,
     /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
     /// has any resolution into module `to`. Built once (resolve-final) at the start of instance propagation;
     /// makes module_imports an O(1) query instead of a linear resolutions scan. `mod_refs_ready` gates it
@@ -794,11 +811,17 @@ fn resolve_import_file(dca: usize, root_dir: str, alt_root: str, std_root: str, 
 
 // Lex + parse one module's source into an Ast, printing diagnostics. ok=false on a lex/parse error.
 fn parse_source(source: &mut String, file: str, bootstrap_tags: bool, recycled: Vector<tok::Token>) ParseResult {
+    return parse_source_q(source, file, bootstrap_tags, recycled, false);
+}
+
+fn parse_source_q(source: &mut String, file: str, bootstrap_tags: bool, recycled: Vector<tok::Token>, quiet: bool) ParseResult {
     let mut lx = lexer::Lexer::new(source, file);
     lx.tokens = recycled; // adopt the recycled capacity (caller passes it cleared)
     lx.scan_tokens();
     if lx.has_errors() {
-        lx.log_errors();
+        if !quiet {
+            lx.log_errors();
+        }
         return ParseResult { ast: Ast::new(0), ok: false, tokens: lx.take_tokens() };
     }
     let toks = lx.take_tokens();
@@ -807,7 +830,9 @@ fn parse_source(source: &mut String, file: str, bootstrap_tags: bool, recycled: 
     ps.set_bootstrap_tags(bootstrap_tags);
     ps.build_ast();
     if ps.has_errors() {
-        ps.log_errors();
+        if !quiet {
+            ps.log_errors();
+        }
         return ParseResult { ast: Ast::new(0), ok: false, tokens: ps.take_tokens() };
     }
     let mut out = ps.take_ast();
@@ -821,6 +846,66 @@ fn parse_source(source: &mut String, file: str, bootstrap_tags: bool, recycled: 
 // ---------------------------------------------------------------------------------------------------------
 // Package construction + module loading.
 // ---------------------------------------------------------------------------------------------------------
+
+/// Worker count for parallel module discovery: 1 = the serial reference loader; 0 or >= 2 lets
+/// speculative parse tasks run on the coroutine pool. Set by the DRIVER before package_load; the
+/// LSP and library users keep the serial default (overlaid loads always stay serial).
+static mut G_LOAD_JOBS: u32 = 1;
+
+pub fn set_load_jobs(j: u32) {
+    unsafe G_LOAD_JOBS = j;
+    if j != 1 {
+        // compiler tasks recurse deeply (parser, checker); reserve thread-sized task stacks
+        // BEFORE the pool's first launch (a later call is ignored)
+        prt::set_stack_size(8usize << 20);
+    }
+}
+
+// One speculative parse unit: filled by a worker task; imports are collected and resolved by the
+// coordinator between waves (the dir cache is a serial memo), and ids are assigned afterwards by
+// a serial DFS replay, so module identity is byte-for-byte the recursive loader's.
+struct PUnit {
+    pub path: String,
+    pub file: String,
+    pub source: String,
+    pub ast: Ast,
+    pub ok: bool,
+    pub child_paths: Vector<String>,
+    pub child_files: Vector<String>,
+}
+
+struct PParse {
+    pub u: *mut PUnit,
+    pub tags: bool,
+}
+
+// The unit slot is pinned for the task's lifetime (units only grow between waves) and each task
+// owns exactly one slot.
+unsafe extend PParse as Send {}
+
+fn par_parse_one(t: PParse) {
+    let u = unsafe &mut *t.u;
+    switch read_file(u.file.as_str()) {
+        Some(sx) => {
+            u.source = sx;
+        },
+        None => {
+            u.ok = false;
+            return;
+        },
+    };
+    let mut parsed = parse_source_q(&mut u.source, u.file.as_str(), t.tags, Vector::<tok::Token>::new(), true);
+    parsed.tokens.free();
+    if !parsed.ok {
+        u.ok = false;
+        parsed.ast.free();
+        return;
+    }
+    u.ast = replace(&mut parsed.ast, Ast::new(0));
+    u.ok = true;
+}
+
+pub fn loader_no_wait(_c: *mut void, _m: ModuleId) {}
 
 extend Package {
     pub fn new() Package {
@@ -845,7 +930,12 @@ extend Package {
             edge_seen: Set::<u64>::new(),
             extern_privates: Set::<u64>::new(),
             cir: null,
-            tc_done: Set::<u64>::new(),
+            jobs: 0,
+            tc_done: Vector::<Set<u64>>::new(),
+            tc_mod_done: Vector::<u8>::new(),
+            tc_wait: loader_no_wait,
+            tc_wait_ctx: null,
+            tc_frontier: false,
             mod_refs: Vector::<u64>::new(),
             mod_refs_w: 0,
             mod_refs_ready: false,
@@ -1244,6 +1334,150 @@ extend Package {
     }
 
     pub fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
+        if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 {
+            return self.load_module_par(mod_path, file_path, bootstrap_tags, target);
+        }
+        return self.load_module_serial(mod_path, file_path, bootstrap_tags, target);
+    }
+
+    // Speculative wave-parallel subtree load: parse tasks fan out per wave; the coordinator
+    // resolves each finished unit's imports (dir-cache memo stays serial) and enqueues unseen
+    // files; a serial DFS replay then assigns module ids exactly as the recursive loader would.
+    // A unit that failed to read or parse falls back to the serial loader at replay, so its
+    // diagnostics print with the serial wording, position and order.
+    fn load_module_par(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
+        let existing = self.find(mod_path);
+        if existing >= 0 {
+            return existing;
+        }
+        let dca = ((&mut self.dir_cache) as *mut DirCache) as usize;
+        let mut units = Vector::<PUnit>::new();
+        units.push(
+            PUnit {
+                path: String::from_str(mod_path),
+                file: String::from_str(file_path),
+                source: String::new(),
+                ast: Ast::new(0),
+                ok: false,
+                child_paths: Vector::<String>::new(),
+                child_files: Vector::<String>::new(),
+            },
+        );
+        let mut next: usize = 0;
+        while next < units.len() {
+            let wave_end = units.len();
+            let wg = psy::WaitGroup::new();
+            wg.add((wave_end - next) as i64);
+            for k in next..wave_end {
+                let t = PParse { u: units.index_mut(k), tags: bootstrap_tags };
+                let wgc = wg.clone();
+                launch || {
+                    par_parse_one(t);
+                    wgc.done();
+                };
+            }
+            wg.wait();
+            for k in next..wave_end {
+                if !units.at(k).ok {
+                    continue;
+                }
+                let ap = (&units.at(k).ast) as *const Ast;
+                let sp2 = units.at(k).source.as_str();
+                let mut all_paths = Vector::<String>::new();
+                let mut all_files = Vector::<String>::new();
+                self.collect_imports(unsafe &*ap, sp2, dca, target, &mut all_paths, &mut all_files);
+                for c in 0..all_paths.len() {
+                    let cp = all_paths[c].as_str();
+                    if self.find(cp) >= 0 {
+                        continue;
+                    }
+                    let mut seen = false;
+                    for q in 0..units.len() {
+                        if units.at(q).path.as_str() == cp {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    units.index_mut(k).child_paths.push(String::from_str(cp));
+                    units.index_mut(k).child_files.push(String::from_str(all_files[c].as_str()));
+                    if !seen {
+                        units.push(
+                            PUnit {
+                                path: String::from_str(cp),
+                                file: String::from_str(all_files[c].as_str()),
+                                source: String::new(),
+                                ast: Ast::new(0),
+                                ok: false,
+                                child_paths: Vector::<String>::new(),
+                                child_files: Vector::<String>::new(),
+                            },
+                        );
+                    }
+                }
+                all_paths.free();
+                all_files.free();
+            }
+            next = wave_end;
+        }
+        let root9 = self.par_replay(&mut units, 0, bootstrap_tags, target);
+        units.free();
+        return root9;
+    }
+
+    // DFS in recorded import order over the parsed units -- the id-assignment replay. Consumes
+    // each unit's source/ast on first visit (later visits of the same path are find() hits).
+    fn par_replay(self: &mut Self, units: &mut Vector<PUnit>, ui: usize, bootstrap_tags: bool, target: i32) i32 {
+        {
+            let ex = self.find(units.at(ui).path.as_str());
+            if ex >= 0 {
+                return ex;
+            }
+        }
+        if !units.at(ui).ok {
+            // the serial loader re-reads, re-parses, prints, and recurses its own children
+            let pth = String::from_str(units.at(ui).path.as_str());
+            let fl = String::from_str(units.at(ui).file.as_str());
+            let r = self.load_module_serial(pth.as_str(), fl.as_str(), bootstrap_tags, target);
+            pth.free();
+            fl.free();
+            return r;
+        }
+        let u = units.index_mut(ui);
+        let id = self.add_module(
+            replace(&mut u.path, String::new()),
+            replace(&mut u.file, String::new()),
+            replace(&mut u.source, String::new()),
+            replace(&mut u.ast, Ast::new(0)),
+            true,
+        );
+        self.modules[id as usize].ast.module = id as ModuleId;
+        let nkids = units.at(ui).child_paths.len();
+        for c in 0..nkids {
+            let cp = units.at(ui).child_paths.at(c).as_str();
+            if self.find(cp) >= 0 {
+                continue;
+            }
+            let mut ci: i64 = 0 - 1;
+            for q in 0..units.len() {
+                if units.at(q).path.as_str() == cp {
+                    ci = q as i64;
+                    break;
+                }
+            }
+            if ci >= 0 {
+                let _ = self.par_replay(units, ci as usize, bootstrap_tags, target);
+            } else {
+                let cf = String::from_str(units.at(ui).child_files.at(c).as_str());
+                let cp2 = String::from_str(cp);
+                let _ = self.load_module_serial(cp2.as_str(), cf.as_str(), bootstrap_tags, target);
+                cp2.free();
+                cf.free();
+            }
+        }
+        return id;
+    }
+
+    fn load_module_serial(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
         let existing = self.find(mod_path);
         if existing >= 0 {
             return existing;

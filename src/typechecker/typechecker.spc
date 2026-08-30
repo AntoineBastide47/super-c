@@ -144,6 +144,28 @@ extend MQKey as Eq {
 
 /// The per-module checker. Also the state substrate for the borrowck pass, which extends TypeChecker
 /// and re-walks function bodies after check() (Ast.call_info bridges the two).
+
+/// Parallel-frontier capture of the package-global method marks: replayed by the driver in module
+/// order through the real functions, so visibility-dependent decisions (the used short-circuit
+/// before an edge) resolve exactly as the serial sweep's.
+pub struct TcMarkLog {
+    pub kinds: Vector<u8>, // 1 = always_methods, 2 = mark_method_used, 3 = method edge
+    pub a: Vector<u64>, // the marked/edge-target DefId (module << 32 | node)
+    pub b: Vector<u64>, // kind 3: the edge source DefId
+    pub used: Set<u64>, // task-local dedupe standing in for method_used_get
+}
+
+extend TcMarkLog {
+    pub fn new() TcMarkLog {
+        return TcMarkLog {
+            kinds: Vector::<u8>::new(),
+            a: Vector::<u64>::new(),
+            b: Vector::<u64>::new(),
+            used: Set::<u64>::new(),
+        };
+    }
+}
+
 pub struct TypeChecker<'a> {
     /// The module's Ast, mutated IN PLACE in its `Package.modules` slot (never moved out): package
     /// lookups that land back on this module read the live tree with no override indirection.
@@ -244,6 +266,8 @@ pub struct TypeChecker<'a> {
     pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that actually required it (lint)
     pub len_reported: Vector<u64>, // array-length nodes already diagnosed ((module<<32)|node; resolve_type revisits)
     pub lint: bool,
+    /// Parallel frontier: non-null routes the package-global method marks into a per-task log.
+    pub mark_log: *mut TcMarkLog,
     pub free_derive_memo: Map<u64, u64>, // (module<<32|decl) -> 1 = not owning, 2 = derives Free (non-generic only)
     pub bc_free_recv: bool, // marking a `.free()` receiver: destruction, exempt from the ref-move rejection
     pub bc_fold_ctx: bool, // replaying a folded call: the const-move check stays loud (no IR op survives)
@@ -542,6 +566,7 @@ extend TypeChecker {
             unsafe_used: 0,
             len_reported: Vector::<u64>::new(),
             lint: false,
+            mark_log: null,
             free_derive_memo: Map::<u64, u64>::new(),
             bc_free_recv: false,
             bc_quiet: false,
@@ -1123,6 +1148,26 @@ extend TypeChecker {
         return -1;
     }
 
+    // A foreign node's checked type under serial module-order visibility: a LOWER-indexed
+    // module's value is final (wait for its task under the parallel frontier); a HIGHER-indexed
+    // module is unchecked at this point in serial order, so its value is TYPE_NONE regardless of
+    // live parallel progress.
+    fn tc_foreign_type_of(self: &mut Self, fm: ModuleId, n: NodeId) TypeId {
+        if self.package == null || fm == self.cur_module() {
+            return self.cur_ast().type_of(n);
+        }
+        if unsafe self.package.tc_frontier {
+            if fm >= self.cur_module() {
+                return TYPE_NONE;
+            }
+            if fm as usize < unsafe self.package.tc_mod_done.len() && *unsafe self.package.tc_mod_done.at(fm as usize) == 0 {
+                let wf = unsafe self.package.tc_wait;
+                wf(unsafe self.package.tc_wait_ctx, fm);
+            }
+        }
+        return (unsafe &*self.mod_ast(fm)).type_of(n);
+    }
+
     fn fn_owns(self: &mut Self, fid: TypeId) bool {
         let fy = *self.type_at(fid);
         if fy.kind != TypeKind::TYPE_FUNCTION {
@@ -1138,7 +1183,8 @@ extend TypeChecker {
         for i in 0..caps.len {
             let cid = unsafe fa.list(caps)[i as usize];
             if (mut_caps >> i as u64 & 1u64) == 0 {
-                let rt = self.cur_ast().reintern(unsafe &*fa, fa.type_of(cid));
+                let ct0 = self.tc_foreign_type_of(fy.module, cid);
+                let rt = self.cur_ast().reintern(unsafe &*fa, ct0);
                 if self.tc_type_is_free(rt) {
                     return true;
                 }
@@ -2442,6 +2488,18 @@ extend TypeChecker {
 
     // Fold a const-generic argument expression (e.g. the `4` in `Buff<i32, 4>`) to an interned TYPE_CONST value.
     fn tc_const_arg(self: &mut Self, m: ModuleId, aid: NodeId) TypeId {
+        let cp9 = self.cir();
+        if cp9 != null {
+            cp9.eng_lock();
+        }
+        let r9 = self.tc_const_arg_i(m, aid);
+        if cp9 != null {
+            cp9.eng_unlock();
+        }
+        return r9;
+    }
+
+    fn tc_const_arg_i(self: &mut Self, m: ModuleId, aid: NodeId) TypeId {
         let ceptr = self.cir();
         if ceptr != null {
             let lv = ceptr.eval(m, aid);
@@ -2503,6 +2561,18 @@ extend TypeChecker {
     }
 
     fn tc_array_len(self: &mut Self, m: ModuleId, lenNode: NodeId) u32 {
+        let cp9 = self.cir();
+        if cp9 != null {
+            cp9.eng_lock();
+        }
+        let r9 = self.tc_array_len_i(m, lenNode);
+        if cp9 != null {
+            cp9.eng_unlock();
+        }
+        return r9;
+    }
+
+    fn tc_array_len_i(self: &mut Self, m: ModuleId, lenNode: NodeId) u32 {
         let ceptr = self.cir();
         if ceptr == null {
             return 0;
@@ -3584,15 +3654,28 @@ extend TypeChecker {
         if d.node != NODE_NONE {
             let r = self.mark_recv;
             if r == TYPE_NONE {
-                unsafe self.package.always_methods.insert(d.module as u64 << 32 | d.node as u64);
+                if self.mark_log != null {
+                    let lg = unsafe &mut *self.mark_log;
+                    lg.kinds.push(1);
+                    lg.a.push(d.module as u64 << 32 | d.node as u64);
+                    lg.b.push(0);
+                } else {
+                    unsafe self.package.always_methods.insert(d.module as u64 << 32 | d.node as u64);
+                }
             } else {
                 let cf = self.current_fn;
                 unsafe self.cur_ast().method_refs.push(MethodRef { owner: cf, recv: r, callee: d });
             }
         }
         // Marks repeat heavily (memoized lookups re-fire them): once the callee is already used,
-        // both the direct mark and the edge are no-ops -- skip the context classification.
-        if self.package.method_used_get(d) {
+        // both the direct mark and the edge are no-ops -- skip the context classification. Under
+        // the parallel frontier the task-local log dedupes; the driver's module-order replay
+        // applies the global-visibility version of this same check.
+        if self.mark_log != null {
+            if (unsafe &*self.mark_log).used.contains(&(d.module as u64 << 32 | d.node as u64)) {
+                return;
+            }
+        } else if self.package.method_used_get(d) {
             return;
         }
         let cf = self.current_fn;
@@ -3607,13 +3690,28 @@ extend TypeChecker {
                 ).as_data.function.generics.len == 0 && !self.tc_mark_always_root(d) {
                     let tg = self.tc_peel_target(a.resolution_def(ed.target_type));
                     if tg.node != NODE_NONE && self.tc_attr(tg.module, tg.node, AttrKind::ATTR_EMIT_MACRO) == null {
-                        self.package.record_method_edge(DefId { module: m, node: cf }, d);
+                        if self.mark_log != null {
+                            let lg = unsafe &mut *self.mark_log;
+                            lg.kinds.push(3);
+                            lg.a.push(d.module as u64 << 32 | d.node as u64);
+                            lg.b.push(m as u64 << 32 | cf as u64);
+                        } else {
+                            self.package.record_method_edge(DefId { module: m, node: cf }, d);
+                        }
                         return;
                     }
                 }
             }
         }
-        self.package.mark_method_used(d);
+        if self.mark_log != null {
+            let lg = unsafe &mut *self.mark_log;
+            lg.kinds.push(2);
+            lg.a.push(d.module as u64 << 32 | d.node as u64);
+            lg.b.push(0);
+            lg.used.insert(d.module as u64 << 32 | d.node as u64);
+        } else {
+            self.package.mark_method_used(d);
+        }
     }
 
     // Find a method named `name`/`lit` in an extend of (m,decl); marks it used. Searches the type's home
@@ -4919,7 +5017,8 @@ extend TypeChecker {
             let caps = fnn.as_data.closure.captures;
             for i in 0..caps.len {
                 let cid = unsafe fa.list(caps)[i as usize];
-                let cty = self.cur_ast().reintern(unsafe &*fa, fa.type_of(cid));
+                let ct1 = self.tc_foreign_type_of(y.module, cid);
+                let cty = self.cur_ast().reintern(unsafe &*fa, ct1);
                 let ci = self.marker_iface(sync);
                 if ci.node != NODE_NONE && !self.type_satisfies(cty, ci, depth + 1) {
                     return false;
@@ -13053,6 +13152,18 @@ extend TypeChecker {
     }
 
     fn check_array_literal(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
+        let cp9 = self.cir();
+        if cp9 != null {
+            cp9.eng_lock();
+        }
+        let r9 = self.check_array_literal_i(id, expected);
+        if cp9 != null {
+            cp9.eng_unlock();
+        }
+        return r9;
+    }
+
+    fn check_array_literal_i(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         let a = self.cur_ast();
         let elements = a.at_const(id).as_data.array_literal.elements;
         if a.at_const(id).as_data.array_literal.repeat {
@@ -13558,6 +13669,18 @@ extend TypeChecker {
     // Mandatory evaluation of a call-bearing const initializer: failure with a trap is an error,
     // undecidable-in-module-order defers to flush_consts (mirrors check_static_assert).
     fn tc_mandatory_const(self: &mut Self, id: NodeId, value: NodeId) {
+        let cp9 = self.cir();
+        if cp9 != null {
+            cp9.eng_lock();
+        }
+        self.tc_mandatory_const_i(id, value);
+        if cp9 != null {
+            cp9.eng_unlock();
+        }
+        return;
+    }
+
+    fn tc_mandatory_const_i(self: &mut Self, id: NodeId, value: NodeId) {
         if !self.expr_has_call(value, 0) {
             return;
         }
@@ -13647,6 +13770,18 @@ extend TypeChecker {
     }
 
     fn check_static_assert(self: &mut Self, id: NodeId) {
+        let cp9 = self.cir();
+        if cp9 != null {
+            cp9.eng_lock();
+        }
+        self.check_static_assert_i(id);
+        if cp9 != null {
+            cp9.eng_unlock();
+        }
+        return;
+    }
+
+    fn check_static_assert_i(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let left = a.at_const(id).as_data.binary.left;
         let c = self.check_expr(left);
@@ -15051,7 +15186,14 @@ extend TypeChecker {
             // completion record: the constant engine interprets a function body only once its
             // item is typed (an unchecked body would evaluate with degraded widths)
             if self.package != null {
-                unsafe self.package.tc_done.insert(self.cur_module() as u64 << 32 | it9 as u64);
+                {
+                    // lazily sized on the serial path; the parallel frontier pre-sizes it
+                    let cm9 = self.cur_module() as usize;
+                    while unsafe self.package.tc_done.len() <= cm9 {
+                        unsafe self.package.tc_done.push(Set::<u64>::new());
+                    }
+                    unsafe self.package.tc_done.index_mut(cm9).insert(self.cur_module() as u64 << 32 | it9 as u64);
+                }
             }
         }
         self.close_instances();

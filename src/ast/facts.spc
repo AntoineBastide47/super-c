@@ -21,11 +21,16 @@ import ast::ast as *;
 /// per pass over a loaded package).
 pub struct TypedFacts {
     pub ast: *const Ast,
+    /// Serial-visibility emulation for the parallel frontend: when set, every TYPED accessor
+    /// answers as an unchecked module would (syntax accessors stay live). The serial pipeline
+    /// evaluated higher-indexed modules before their check; a parallel schedule that has already
+    /// checked them must not let those results leak.
+    pub unchecked_view: bool,
 }
 
 extend TypedFacts {
     pub const fn of(a: *const Ast) TypedFacts {
-        return TypedFacts { ast: a };
+        return TypedFacts { ast: a, unchecked_view: false };
     }
 
     const fn a(self: &Self) &Ast {
@@ -43,6 +48,9 @@ extend TypedFacts {
 
     /// The checked type of expression/decl node `n`.
     pub const fn node_type(self: &Self, n: NodeId) TypeId {
+        if self.unchecked_view {
+            return TYPE_NONE;
+        }
         return self.a().type_of(n);
     }
 
@@ -56,17 +64,23 @@ extend TypedFacts {
 
     /// The resolved declaration a reference names (module-qualified).
     pub const fn res(self: &Self, n: NodeId) DefId {
-        return self.a().resolution_def(n);
+        return self.a().resolution_def(n); // resolution is resolve-final: live in every view
     }
 
     /// The type args recorded for `n` (turbofish/inference), or null.
     pub const fn type_args(self: &Self, n: NodeId) *const MonoUse {
+        if self.unchecked_view {
+            return null;
+        }
         return self.a().type_args(n);
     }
 
     /// The call target + ABI data the type checker selected at call node `n`
     /// ((fmod << 40 | fdecl << 8 | skip) -- the record borrowck replays), or None.
     pub const fn call_info(self: &Self, n: NodeId) Option<u64> {
+        if self.unchecked_view {
+            return Option::<u64>::None;
+        }
         return switch self.a().call_info.get(&n) {
             Some(v) => Option::<u64>::Some(*v),
             None => Option::<u64>::None,
@@ -75,6 +89,9 @@ extend TypedFacts {
 
     /// The operator method selected at operator node `n` ((module << 32 | node)), or None.
     pub const fn op_method(self: &Self, n: NodeId) Option<u64> {
+        if self.unchecked_view {
+            return Option::<u64>::None;
+        }
         return switch self.a().op_method.get(&n) {
             Some(v) => Option::<u64>::Some(*v),
             None => Option::<u64>::None,
@@ -83,26 +100,41 @@ extend TypedFacts {
 
     /// The concrete generic arguments recorded at use site `n`, or null.
     pub const fn generic_args(self: &Self, n: NodeId) *const MonoUse {
+        if self.unchecked_view {
+            return null;
+        }
         return self.a().type_args(n);
     }
 
     /// The conversion recorded at `n` (`target::from(expr)` or a builtin widening), or null.
     pub const fn coercion(self: &Self, n: NodeId) *const CoerceUse {
+        if self.unchecked_view {
+            return null;
+        }
         return self.a().coerce_of(n);
     }
 
     /// The auto-dereference chain recorded at `n` (receiver adjustments, in order), or null.
     pub const fn derefs(self: &Self, n: NodeId) *const DerefUse {
+        if self.unchecked_view {
+            return null;
+        }
         return self.a().deref_use_at(n);
     }
 
     /// The dynamic-interface erasure recorded at `n`, or null.
     pub const fn dyn_conv(self: &Self, n: NodeId) *const DynUse {
+        if self.unchecked_view {
+            return null;
+        }
         return self.a().dyn_use_at(n);
     }
 
     /// The wide-literal record for `n` (limbs already two's-complemented/masked), or null.
     pub const fn wide_lit(self: &Self, n: NodeId) *const WideLit {
+        if self.unchecked_view {
+            return null;
+        }
         let i = self.a().wide_lit_of(n);
         if i < 0 {
             return null;
@@ -113,6 +145,9 @@ extend TypedFacts {
     /// The receiver type a method reference was resolved on: the checked type of the receiver
     /// expression `recv` (method selection itself is in `call_info`/`res`).
     pub const fn receiver_type(self: &Self, recv: NodeId) TypeId {
+        if self.unchecked_view {
+            return TYPE_NONE;
+        }
         return self.a().type_of(recv);
     }
 

@@ -5,6 +5,8 @@
 // in side tables (resolutions, types, mono/dyn/deref uses, attrs, lifetime_decls, call_info).
 import string as cstring;
 import atomic;
+import sc_runtime;
+import std::parallel::sync as psy;
 import lexer::token as tok;
 import lexer::token_type as tt;
 
@@ -1081,6 +1083,36 @@ extend<T> ChunkPool<T> {
         atomic::store_usize(&mut self.n, i + 1, 2);
     }
 
+    pub fn index_mut(self: &mut Self, i: usize) &mut T {
+        return unsafe &mut *(unsafe self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
+    }
+
+    pub fn set(self: &mut Self, i: usize, v: T) {
+        unsafe (unsafe self.tab[i >> POOL_SHIFT])[i & POOL_CHUNK - 1] = v;
+    }
+
+    /// Pad with `v` until a run of `need` entries fits inside ONE chunk, then return its start:
+    /// `list()` hands out raw pointers into a run, so a run must never straddle a chunk boundary.
+    pub fn run_start(self: &mut Self, need: usize, v: T) usize {
+        if need > POOL_CHUNK {
+            panic("node list exceeds one arena chunk");
+        }
+        while (self.n & POOL_CHUNK - 1) + need > POOL_CHUNK {
+            self.push(v);
+        }
+        return self.n;
+    }
+
+    /// Raw pointer to entry `i` (valid through the end of its chunk; entries never move). An
+    /// index one past the end of the last chunk answers a stable dummy -- an empty run's start is
+    /// never dereferenced.
+    pub const fn ptr_at(self: &Self, i: usize) *const T {
+        if self.tab == null || i >> POOL_SHIFT >= self.nchunks as usize {
+            return self.tab as *const T;
+        }
+        return unsafe (self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
+    }
+
     /// Reset the length; chunks stay allocated for reuse.
     pub fn clear(self: &mut Self) {
         atomic::store_usize(&mut self.n, 0, 2);
@@ -1105,14 +1137,140 @@ extend<T> ChunkPool<T> {
     }
 }
 
+/// Flat storage with a frontier-only overflow arena. Serial (unfrozen): a plain Vector -- one
+/// predicted compare of overhead. `freeze()` pins the base allocation (its capacity is the split
+/// point) so concurrent readers of PRE-EXISTING entries never see a realloc; growth past the pinned
+/// capacity lands in realloc-stable chunks. `thaw()` folds the overflow back into the base once the
+/// frontier joins, so every later stage reads a flat array again.
+pub struct SplitVec<T> {
+    base: Vector<T>,
+    split: usize, // usize MAX when unfrozen
+    ovf: ChunkPool<T>,
+}
+
+extend<T> SplitVec<T> {
+    pub fn new() SplitVec<T> {
+        return SplitVec::<T> { base: Vector::<T>::new(), split: 0xFFFFFFFFFFFFFFFFusize, ovf: ChunkPool::<T>::new() };
+    }
+
+    pub fn len(self: &Self) usize {
+        if self.split == 0xFFFFFFFFFFFFFFFFusize {
+            return self.base.len();
+        }
+        return self.base.len() + self.ovf.len();
+    }
+
+    pub const fn at(self: &Self, i: usize) &T {
+        if i < self.split {
+            return self.base.at(i);
+        }
+        return self.ovf.at(i - self.split);
+    }
+
+    pub fn index_mut(self: &mut Self, i: usize) &mut T {
+        if i < self.split {
+            return self.base.index_mut(i);
+        }
+        return self.ovf.index_mut(i - self.split);
+    }
+
+    pub fn set(self: &mut Self, i: usize, v: T) {
+        if i < self.split {
+            self.base.set(i, v);
+        } else {
+            self.ovf.set(i - self.split, v);
+        }
+    }
+
+    pub fn push(self: &mut Self, v: T) {
+        if self.split == 0xFFFFFFFFFFFFFFFFusize || self.base.len() < self.split {
+            self.base.push(v);
+        } else {
+            self.ovf.push(v);
+        }
+    }
+
+    pub fn reserve(self: &mut Self, n: usize) {
+        if self.split == 0xFFFFFFFFFFFFFFFFusize {
+            self.base.reserve(n);
+        }
+    }
+
+    /// Raw pointer to entry `i`: valid for the base region for the array's life while frozen, and
+    /// within one overflow chunk otherwise. UNCHECKED like the flat array it replaces: an empty
+    /// list's start sits one past the end and is never dereferenced.
+    pub const fn ptr_at(self: &Self, i: usize) *const T {
+        if i < self.split {
+            return unsafe (self.base.as_ptr() + i);
+        }
+        return self.ovf.ptr_at(i - self.split);
+    }
+
+    /// Pad so a run of `need` fits contiguously (base region: reserve exactly; frozen spill: keep
+    /// the run inside one chunk) and return its start.
+    pub fn run_start(self: &mut Self, need: usize, v: T) usize {
+        if self.split == 0xFFFFFFFFFFFFFFFFusize || self.base.len() + need <= self.split {
+            return self.base.len();
+        }
+        // straddling the split: pad the base to the pin, then place the run in the overflow
+        while self.base.len() < self.split {
+            self.base.push(v);
+        }
+        return self.split + self.ovf.run_start(need, v);
+    }
+
+    /// Pin the base allocation at its CURRENT capacity and route later growth to stable chunks.
+    pub fn freeze(self: &mut Self) {
+        if self.base.capacity() == self.base.len() {
+            self.base.reserve(self.base.len() / 8 + 64); // headroom so small growth stays flat
+        }
+        self.split = self.base.capacity();
+    }
+
+    /// Fold the overflow back into the flat base (single-threaded; frontier pointers are dead).
+    pub fn thaw(self: &mut Self) {
+        if self.split == 0xFFFFFFFFFFFFFFFFusize {
+            return;
+        }
+        // the frozen push path filled base exactly to the pin before spilling
+        for i in 0..self.ovf.len() {
+            self.base.push(*self.ovf.at(i));
+        }
+        self.ovf.clear();
+        self.split = 0xFFFFFFFFFFFFFFFFusize;
+    }
+
+    pub const fn retained(self: &Self) usize {
+        return self.base.capacity() * sizeof(T) + self.ovf.retained();
+    }
+
+    pub fn clear(self: &mut Self) {
+        self.base.clear();
+        self.ovf.clear();
+        self.split = 0xFFFFFFFFFFFFFFFFusize;
+    }
+
+    pub fn free(self: &mut Self) {
+        self.base.free();
+        self.ovf.free();
+    }
+}
+
 pub struct Ast {
-    pub nodes: Vector<Node>,
-    pub children: Vector<u32>,
+    pub nodes: SplitVec<Node>,
+    pub children: SplitVec<u32>,
     pub scratch: Vector<u32>,
+    // Intern serialization for parallel stages: off = single-threaded (no locking). Task-aware
+    // (waiters PARK -- a raw mutex here deadlocks under safepoint preemption) and reentrant by
+    // task token, because intern_dyn/intern_const_lin nest into intern_type/intern_instance.
+    pub ilock_on: bool,
+    pub ilock_sem: psy::Semaphore,
+    pub ilock_owner: usize,
+    pub ilock_depth: u32,
     // NOTE: a node/module parallel-array split (6 B/entry vs padded 8) was tried and reverted:
     // resolution_def is the compiler's hottest lookup and the second cache line cost ~8 Mcyc of
     // typecheck for a 0.78 MiB saving. Access goes through the accessors below regardless.
-    pub resolutions: Vector<DefId>,
+    pub resolutions: SplitVec<DefId>,
     pub type_pool: ChunkPool<Ty>,
     // Open-addressing INDEX tables over the pools (0xFFFFFFFF = empty slot): the pool entry itself is
     // the key, so nothing is stored twice. Every hit VERIFIES the pool entry against the live pool
@@ -1164,10 +1322,14 @@ pub struct Ast {
 extend Ast {
     pub fn new(token_count: usize) Ast {
         let mut a = Ast {
-            nodes: Vector::<Node>::new(),
-            children: Vector::<u32>::new(),
+            nodes: SplitVec::<Node>::new(),
+            children: SplitVec::<u32>::new(),
             scratch: Vector::<u32>::new(),
-            resolutions: Vector::<DefId>::new(),
+            ilock_on: false,
+            ilock_sem: psy::Semaphore::new(1),
+            ilock_owner: 0,
+            ilock_depth: 0,
+            resolutions: SplitVec::<DefId>::new(),
             type_pool: ChunkPool::<Ty>::new(),
             type_index: Vector::<u32>::new(),
             type_ix_used: 0,
@@ -1220,7 +1382,9 @@ extend Ast {
     /// Nested lists work because an inner list commits (draining its scratch tail) first.
     @c.always_inline
     pub fn commit(self: &mut Self, mark: u32) NodeList {
-        let list = NodeList { start: self.children.len() as u32, len: self.scratch.len() as u32 - mark };
+        let need = self.scratch.len() - mark as usize;
+        let start = self.children.run_start(need, 0);
+        let list = NodeList { start: start as u32, len: need as u32 };
         for i in mark as usize..self.scratch.len() {
             self.children.push(self.scratch[i]);
         }
@@ -1320,7 +1484,70 @@ extend Ast {
         return c;
     }
 
+    // The task token for the reentrant intern lock: the running coroutine, or 1 on a plain thread.
+    fn itok() usize {
+        let c = (unsafe sc_runtime::sc_rt_tls_get()) as usize;
+        if c == 0 {
+            return 1;
+        }
+        return c;
+    }
+
+    fn ilock_enter(self: &mut Self) {
+        if !self.ilock_on {
+            return;
+        }
+        let tok = Ast::itok();
+        // atomic fast path: the owner read can only equal `tok` when THIS task stored it
+        if atomic::load_usize(&self.ilock_owner, 0) == tok {
+            self.ilock_depth += 1;
+            return;
+        }
+        self.ilock_sem.acquire();
+        atomic::store_usize(&mut self.ilock_owner, tok, 0);
+        self.ilock_depth = 1;
+    }
+
+    fn ilock_leave(self: &mut Self) {
+        if !self.ilock_on {
+            return;
+        }
+        self.ilock_depth -= 1;
+        if self.ilock_depth == 0 {
+            atomic::store_usize(&mut self.ilock_owner, 0, 0);
+            self.ilock_sem.release();
+        }
+    }
+
     pub fn intern_type(self: &mut Self, t: Ty) TypeId {
+        self.ilock_enter();
+        let r = self.intern_type_i(t);
+        self.ilock_leave();
+        return r;
+    }
+
+    pub fn intern_const_lin(self: &mut Self, l: &ConstLin) TypeId {
+        self.ilock_enter();
+        let r = self.intern_const_lin_i(l);
+        self.ilock_leave();
+        return r;
+    }
+
+    pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
+        self.ilock_enter();
+        let r = self.intern_instance_i(module, decl, args, n);
+        self.ilock_leave();
+        return r;
+    }
+
+    pub fn intern_dyn(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
+        self.ilock_enter();
+        let r = self.intern_dyn_i(module, decl, args, n, qual);
+        self.ilock_leave();
+        return r;
+    }
+
+    fn intern_type_i(self: &mut Self, t: Ty) TypeId {
         let mut nt = Ast::ty_canon(&t);
         nt.concrete = self.tc_decide(t);
         if self.type_index.len() == 0 || (self.type_ix_used as usize + 1) * 4 >= self.type_index.len() * 3 {
@@ -1358,7 +1585,7 @@ extend Ast {
     /// clamped to 8 (the fixed args capacity). Safety: `args` must point at `n` readable TypeIds.
     /// Intern a const-expression form, returning the TYPE that stands for it -- a plain TYPE_CONST once
     /// nothing symbolic is left, so a fully substituted width is an ordinary value again.
-    pub fn intern_const_lin(self: &mut Self, l: &ConstLin) TypeId {
+    fn intern_const_lin_i(self: &mut Self, l: &ConstLin) TypeId {
         let mut nz: i32 = 0;
         for i in 0..l.n {
             if unsafe l.c[i as usize] != 0 {
@@ -1435,7 +1662,7 @@ extend Ast {
         };
     }
 
-    pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
+    fn intern_instance_i(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut m = n;
         if m > 8 {
             m = 8;
@@ -1481,7 +1708,7 @@ extend Ast {
     /// Intern a `dyn` type: the payload is an instance-table index carrying the interface decl
     /// and its (possibly empty) type arguments; `module` mirrors the interface's module so
     /// existing `dy.module` reads stay valid.
-    pub fn intern_dyn(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
+    fn intern_dyn_i(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
         let ii = self.intern_instance(module, decl, args, n);
         let idx = self.type_at(ii).as_data.inst;
         return self.intern_type(
@@ -1679,18 +1906,18 @@ extend Ast {
     }
 
     pub const fn at(self: &mut Self, id: NodeId) &mut Node {
-        return &mut self.nodes[id as usize];
+        return self.nodes.index_mut(id as usize);
     }
     pub const fn at_const(self: &Self, id: NodeId) &Node {
         return self.nodes.at(id as usize);
     }
     pub const fn list(self: &Self, list: NodeList) *const NodeId {
-        return unsafe (self.children.as_ptr() + list.start as usize);
+        return self.children.ptr_at(list.start as usize);
     }
     /// Resolves `ref_id` to a decl in THIS module (the DefId is stamped with `self.module`); use
     /// set_resolution_def for a foreign target.
     pub const fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
-        self.resolutions[ref_id as usize] = DefId { module: self.module, node: decl };
+        self.resolutions.set(ref_id as usize, DefId { module: self.module, node: decl });
     }
     /// The resolved decl node with its module DROPPED -- use resolution_def when the target may
     /// live in another module.
@@ -1702,10 +1929,10 @@ extend Ast {
         if ref_id as usize >= self.resolutions.len() {
             return DefId { module: 0, node: NODE_NONE };
         }
-        return self.resolutions[ref_id as usize];
+        return *self.resolutions.at(ref_id as usize);
     }
     pub const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
-        self.resolutions[ref_id as usize] = decl;
+        self.resolutions.set(ref_id as usize, decl);
     }
     /// Builtin TypeIds are fixed by init_types' seeding: pool slot 0 is TYPE_ERROR, then the
     /// builtins in enum order -- hence b + 1.
@@ -1731,7 +1958,7 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.capacity() * sizeof(Node) + self.children.capacity() * 4 + self.scratch.capacity() * 4 + self.resolutions.capacity() * sizeof(DefId) + self.type_pool.retained() + self.type_index.capacity() * 4 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.instances.retained() + self.method_insts.capacity() * sizeof(MethodInst) + self.instance_index.capacity() * 4 + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.const_lins.capacity() * sizeof(ConstLin) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl);
+        return self.nodes.retained() + self.children.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.type_pool.retained() + self.type_index.capacity() * 4 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.instances.retained() + self.method_insts.capacity() * sizeof(MethodInst) + self.instance_index.capacity() * 4 + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.const_lins.capacity() * sizeof(ConstLin) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl);
     }
 }
 
@@ -1753,6 +1980,7 @@ extend Ast as Free {
         self.scratch.free();
         self.resolutions.free();
         self.type_pool.free();
+        self.ilock_sem.free();
         self.type_index.free();
         self.types.free();
         self.mono.free();

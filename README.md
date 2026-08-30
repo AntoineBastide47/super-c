@@ -61,6 +61,11 @@ The build is driven by `build.toml` and works for any project, not just the comp
 `bin` and `root`, and `super-c build` gives you profiles (`debug`/`dev`/`release`/`bench`, plus your
 own), incremental parallel C compilation with dependency tracking, and the `tests/` + `bench/`
 conventions. Flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `--cc=`, `--bin=`, `--lib`, `-o`.
+`--jobs=N` sets one shared worker count for the whole build: the compiler's own parallel stages
+(module discovery/parsing, type checking over import levels, borrow checking) run on that many
+coroutine workers, and the same count bounds the parallel C compile window. The default is one
+worker per CPU; `--jobs=1` runs the fully serial reference pipeline, which produces byte-identical
+output to every parallel run.
 Custom `[command.NAME]` entries run via `super-c command NAME`; built-in subcommand names are reserved
 and cannot be shadowed (this repo's bootstrap lives under `super-c command bootstrap`). Library targets
 come from a `[lib]` section (`type = ["static", "shared"]`), extra binaries from `[bin.NAME]` sections.
@@ -836,7 +841,7 @@ All knobs are environment variables prefixed `SC_`; none is required for normal 
 | `SC_LAYOUT` | validate every concrete pool type against the C layout invariants |
 | `SC_CEMIT` | run the streaming C emitter over every body twice and verify the hashes match |
 | `SC_AST_STATS` | print AST/node statistics |
-| `SC_CEMIT_TU` / `SC_CEMIT_STATS` | verbose per-TU emission and const/reflect group statistics |
+| `SC_CEMIT_TU` / `SC_CEMIT_STATS` | verbose per-TU emission and const/reflect group statistics; `SC_CEMIT_STATS` also prints per-phase wall times (load/resolve/typecheck/borrowck/panics/emission stages) |
 
 ### Debug traces
 

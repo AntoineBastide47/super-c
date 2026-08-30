@@ -2341,6 +2341,14 @@ extend tc::TypeChecker {
             }
             return false;
         }
+        // A RAW POINTER is the language's lifetime hand-off boundary: dereferencing it needs
+        // `unsafe`, and the checker deliberately ends borrow tracking at the cast that produced
+        // it (the `interp_new(&mut p)` precedent). Peeling it here made every pointer to a
+        // str-carrying aggregate count as a borrow, which rejected 'static task payloads built
+        // from raw handles.
+        if self.type_at(ty).kind == TypeKind::TYPE_POINTER {
+            return false;
+        }
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
         let mut gp = Defs8 {};
