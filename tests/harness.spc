@@ -101,12 +101,7 @@ pub fn compile(src: str, stop: i32) Compiled {
     }
 
     // Semantic stages need the prelude: load the snippet as module 0 alongside std, exactly like the CLI.
-    let mut p = loader::package_from_source(
-        src.ptr() as *const char,
-        src.len(),
-        "std".ptr() as *const char,
-        unsafe shim::sc_host_platform(),
-    );
+    let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;
@@ -214,12 +209,7 @@ extend CompiledAst as Free {
 
 pub fn compile_ast(src: str, stop: i32) CompiledAst {
     let mut out = CompiledAst { errors: 0, stage: stop, ast: Ast::new(0) };
-    let mut p = loader::package_from_source(
-        src.ptr() as *const char,
-        src.len(),
-        "std".ptr() as *const char,
-        unsafe shim::sc_host_platform(),
-    );
+    let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     if !p.ok {
         out.errors = 1;
         out.stage = STAGE_PARSE;
@@ -327,12 +317,7 @@ extend CompiledC as Free {
 // `code` is null; codegen-stage diagnostics also set `errors` but the (partial) code is still returned.
 pub fn compile_c(src: str) CompiledC {
     let mut out = CompiledC { errors: 0, code: null };
-    let mut p = loader::package_from_source(
-        src.ptr() as *const char,
-        src.len(),
-        "std".ptr() as *const char,
-        unsafe shim::sc_host_platform(),
-    );
+    let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     if !p.ok {
         out.errors = 1;
         return out;

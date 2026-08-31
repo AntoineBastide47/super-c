@@ -597,33 +597,127 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
     };
 }
 
-/// Evaluate `cnode` through a REUSED interpreter: the per-evaluation state resets while the
-/// lowered-callee cache and the call memo (scalar-only, so no object id can dangle across the
-/// object-store reset) persist -- one interpreter serves a whole emission pass.
-pub fn eval_const_in(it: &mut Interp, m: ModuleId, cnode: NodeId, max_steps: u32) IVal {
-    it.steps = 0;
-    it.max_steps = max_steps;
-    it.failed = false;
-    it.trap = "";
-    it.trap_kind = IT_TRAP_NONE;
-    it.trap_nframes = 0;
-    it.nframes = 0;
-    it.objs_live = 0;
-    it.live_slots = 0;
-    it.item_active.truncate(0);
-    it.subst.truncate(0);
-    it.sub_base = 0;
-    let mut lw = irl::Lowerer::new(it.pkg, m, cnode);
-    if !lw.lower_const(cnode) {
-        it.failed = true;
-        return none();
+const fn ti_round_up(v: u64, a: u64) u64 {
+    if a == 0 {
+        return v;
     }
-    let args = Vector::<IVal>::new();
-    let r = it.run(&lw.body, &args);
-    return r;
+    let r = v % a;
+    if r == 0 {
+        return v;
+    }
+    return v + (a - r);
+}
+
+// The source spelling of a builtin type, as `type_info` reports it.
+const fn builtin_name(bt: BuiltinType) str<'static> {
+    switch bt {
+        BT_BOOL => {
+            return "bool";
+        },
+        BT_CHAR => {
+            return "char";
+        },
+        BT_I8 => {
+            return "i8";
+        },
+        BT_I16 => {
+            return "i16";
+        },
+        BT_I32 => {
+            return "i32";
+        },
+        BT_I64 => {
+            return "i64";
+        },
+        BT_ISIZE => {
+            return "isize";
+        },
+        BT_U8 => {
+            return "u8";
+        },
+        BT_U16 => {
+            return "u16";
+        },
+        BT_U32 => {
+            return "u32";
+        },
+        BT_U64 => {
+            return "u64";
+        },
+        BT_USIZE => {
+            return "usize";
+        },
+        BT_F32 => {
+            return "f32";
+        },
+        BT_F64 => {
+            return "f64";
+        },
+        BT_C32 => {
+            return "c32";
+        },
+        BT_C64 => {
+            return "c64";
+        },
+        BT_VALIST => {
+            return "va_list";
+        },
+        BT_VOID => {
+            return "void";
+        },
+        _ => {
+            return "";
+        },
+    };
+}
+
+// "_<k>" into `buf` (32 bytes): the field names a tuple's members answer to.
+fn ti_tuple_name<'a>(buf: *mut u8, k: u32) str<'a> {
+    unsafe buf[0] = 95;
+    let mut n: usize = 1;
+    let mut digits: [u8; 16] = [0; 16];
+    let mut v = k;
+    let mut nd: usize = 0;
+    do {
+        unsafe digits[nd] = 48 + (v % 10) as u8;
+        nd += 1;
+        v = v / 10;
+    } while v != 0;
+    while nd > 0 {
+        nd -= 1;
+        unsafe buf[n] = unsafe digits[nd];
+        n += 1;
+    }
+    return str::from_raw(buf, n);
 }
 
 extend Interp {
+    /// Evaluate `cnode` through a REUSED interpreter: the per-evaluation state resets while the
+    /// lowered-callee cache and the call memo (scalar-only, so no object id can dangle across the
+    /// object-store reset) persist -- one interpreter serves a whole emission pass.
+    pub fn eval_const_in(self: &mut Self, m: ModuleId, cnode: NodeId, max_steps: u32) IVal {
+        self.steps = 0;
+        self.max_steps = max_steps;
+        self.failed = false;
+        self.trap = "";
+        self.trap_kind = IT_TRAP_NONE;
+        self.trap_nframes = 0;
+        self.nframes = 0;
+        self.objs_live = 0;
+        self.live_slots = 0;
+        self.item_active.truncate(0);
+        self.subst.truncate(0);
+        self.sub_base = 0;
+        let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
+        if !lw.lower_const(cnode) {
+            self.failed = true;
+            return none();
+        }
+        let args = Vector::<IVal>::new();
+        let r = self.run(&lw.body, &args);
+        return r;
+    }
+
     const fn p(self: &Self) &loader::Package {
         return unsafe &*self.pkg;
     }
@@ -7271,98 +7365,4 @@ extend Interp {
         }
         return IVal { kind: IV_OBJ, tm: m, ty: rty, i: to, f: 0.0 };
     }
-}
-
-const fn ti_round_up(v: u64, a: u64) u64 {
-    if a == 0 {
-        return v;
-    }
-    let r = v % a;
-    if r == 0 {
-        return v;
-    }
-    return v + (a - r);
-}
-
-// The source spelling of a builtin type, as `type_info` reports it.
-const fn builtin_name(bt: BuiltinType) str<'static> {
-    switch bt {
-        BT_BOOL => {
-            return "bool";
-        },
-        BT_CHAR => {
-            return "char";
-        },
-        BT_I8 => {
-            return "i8";
-        },
-        BT_I16 => {
-            return "i16";
-        },
-        BT_I32 => {
-            return "i32";
-        },
-        BT_I64 => {
-            return "i64";
-        },
-        BT_ISIZE => {
-            return "isize";
-        },
-        BT_U8 => {
-            return "u8";
-        },
-        BT_U16 => {
-            return "u16";
-        },
-        BT_U32 => {
-            return "u32";
-        },
-        BT_U64 => {
-            return "u64";
-        },
-        BT_USIZE => {
-            return "usize";
-        },
-        BT_F32 => {
-            return "f32";
-        },
-        BT_F64 => {
-            return "f64";
-        },
-        BT_C32 => {
-            return "c32";
-        },
-        BT_C64 => {
-            return "c64";
-        },
-        BT_VALIST => {
-            return "va_list";
-        },
-        BT_VOID => {
-            return "void";
-        },
-        _ => {
-            return "";
-        },
-    };
-}
-
-// "_<k>" into `buf` (32 bytes): the field names a tuple's members answer to.
-fn ti_tuple_name<'a>(buf: *mut u8, k: u32) str<'a> {
-    unsafe buf[0] = 95;
-    let mut n: usize = 1;
-    let mut digits: [u8; 16] = [0; 16];
-    let mut v = k;
-    let mut nd: usize = 0;
-    do {
-        unsafe digits[nd] = 48 + (v % 10) as u8;
-        nd += 1;
-        v = v / 10;
-    } while v != 0;
-    while nd > 0 {
-        nd -= 1;
-        unsafe buf[n] = unsafe digits[nd];
-        n += 1;
-    }
-    return str::from_raw(buf, n);
 }

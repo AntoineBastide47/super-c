@@ -662,78 +662,80 @@ pub struct ConstLin {
     pub div: i64,
 }
 
-pub const fn lin_div_of(l: &ConstLin) i64 {
-    if l.div <= 1 {
-        return 1;
-    }
-    return l.div;
-}
-
-pub const fn lin_is_concrete(l: &ConstLin) bool {
-    for i in 0..l.n {
-        if unsafe l.c[i as usize] != 0 {
-            return false;
+extend ConstLin {
+    pub const fn div_of(self: &Self) i64 {
+        if self.div <= 1 {
+            return 1;
         }
+        return self.div;
     }
-    return true;
-}
 
-/// The concrete value of a parameter-free form: the constant term through the floor divisor.
-pub const fn lin_value(l: &ConstLin) i64 {
-    let d = lin_div_of(l);
-    if d == 1 {
-        return l.k;
-    }
-    let q = l.k / d;
-    if l.k % d != 0 && l.k < 0 {
-        return q - 1;
-    }
-    return q;
-}
-
-pub fn lin_add_term(out: &mut ConstLin, d: DefId, coeff: i64) bool {
-    if coeff == 0 {
+    pub const fn is_concrete(self: &Self) bool {
+        for i in 0..self.n {
+            if unsafe self.c[i as usize] != 0 {
+                return false;
+            }
+        }
         return true;
     }
-    if lin_div_of(out) != 1 {
-        return false; // a term added AFTER the floor divisor would be divided; it was not written so
+
+    /// The concrete value of a parameter-free form: the constant term through the floor divisor.
+    pub const fn value(self: &Self) i64 {
+        let d = self.div_of();
+        if d == 1 {
+            return self.k;
+        }
+        let q = self.k / d;
+        if self.k % d != 0 && self.k < 0 {
+            return q - 1;
+        }
+        return q;
     }
-    for i in 0..out.n {
-        if unsafe out.p[i as usize].module == d.module && unsafe out.p[i as usize].node == d.node {
-            unsafe {
-                out.c[i as usize] = out.c[i as usize] + coeff;
-            }
+
+    pub fn add_term(self: &mut Self, d: DefId, coeff: i64) bool {
+        if coeff == 0 {
             return true;
         }
-    }
-    if out.n >= 4 {
-        return false;
-    }
-    unsafe {
-        out.p[out.n as usize] = d;
-    }
-    unsafe {
-        out.c[out.n as usize] = coeff;
-    }
-    out.n = out.n + 1;
-    return true;
-}
-
-pub fn lin_scale(src: &ConstLin, f: i64, out: &mut ConstLin) bool {
-    // Widths are small; a factor this large means the expression is running away, not describing a type.
-    if f > 0x40000000 || f < 0 - 0x40000000 || src.k > 0x40000000 || src.k < 0 - 0x40000000 {
-        return false;
-    }
-    if lin_div_of(src) != 1 || lin_div_of(out) != 1 {
-        return false; // scaling does not distribute over the floor divisor
-    }
-    out.k = out.k + src.k * f;
-    for i in 0..src.n {
-        if !lin_add_term(out, unsafe src.p[i as usize], unsafe src.c[i as usize] * f) {
+        if self.div_of() != 1 {
+            return false; // a term added AFTER the floor divisor would be divided; it was not written so
+        }
+        for i in 0..self.n {
+            if unsafe self.p[i as usize].module == d.module && unsafe self.p[i as usize].node == d.node {
+                unsafe {
+                    self.c[i as usize] = self.c[i as usize] + coeff;
+                }
+                return true;
+            }
+        }
+        if self.n >= 4 {
             return false;
         }
+        unsafe {
+            self.p[self.n as usize] = d;
+        }
+        unsafe {
+            self.c[self.n as usize] = coeff;
+        }
+        self.n = self.n + 1;
+        return true;
     }
-    return true;
+
+    pub fn scale(self: &Self, f: i64, out: &mut ConstLin) bool {
+        // Widths are small; a factor this large means the expression is running away, not describing a type.
+        if f > 0x40000000 || f < 0 - 0x40000000 || self.k > 0x40000000 || self.k < 0 - 0x40000000 {
+            return false;
+        }
+        if self.div_of() != 1 || out.div_of() != 1 {
+            return false; // scaling does not distribute over the floor divisor
+        }
+        out.k = out.k + self.k * f;
+        for i in 0..self.n {
+            if !out.add_term(unsafe self.p[i as usize], unsafe self.c[i as usize] * f) {
+                return false;
+            }
+        }
+        return true;
+    }
 }
 
 /// Substitute a const-expression form's parameters and accumulate the result into `out`. `src` holds
@@ -754,9 +756,9 @@ pub fn lin_subst(
         return false;
     }
     let form = *src.const_lin_at(idx);
-    if lin_div_of(&form) != 1 {
+    if form.div_of() != 1 {
         // The divisor covers the WHOLE form, so it transfers only onto an empty accumulator.
-        if out.k != 0 || out.n != 0 || lin_div_of(out) != 1 {
+        if out.k != 0 || out.n != 0 || out.div_of() != 1 {
             return false;
         }
         out.div = form.div;
@@ -775,7 +777,7 @@ pub fn lin_subst(
             }
         }
         if bound == TYPE_NONE {
-            if !lin_add_term(out, d, coeff) {
+            if !out.add_term(d, coeff) {
                 return false;
             }
             continue;
@@ -803,11 +805,11 @@ pub fn lin_subst(
             if !lin_subst(dst, dst, by.as_data.inst, fp.as_ptr(), fa.as_ptr(), fp.len() as i32, &mut inner, depth + 1) {
                 return false;
             }
-            if lin_is_concrete(&inner) {
-                out.k = out.k + lin_value(&inner) * coeff;
+            if inner.is_concrete() {
+                out.k = out.k + inner.value() * coeff;
                 continue;
             }
-            if !lin_scale(&inner, coeff, out) {
+            if !inner.scale(coeff, out) {
                 return false;
             }
             continue;
@@ -815,7 +817,7 @@ pub fn lin_subst(
         // Bound to ANOTHER parameter -- one generic passing its width to the next -- so the term
         // simply changes which parameter it names.
         if by.kind == TypeKind::TYPE_GENERIC {
-            if !lin_add_term(out, DefId { module: by.module, node: by.as_data.decl }, coeff) {
+            if !out.add_term(DefId { module: by.module, node: by.as_data.decl }, coeff) {
                 return false;
             }
             continue;
@@ -838,7 +840,7 @@ pub const fn skey_mix(h: u64, v: u64) u64 {
 }
 
 pub fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
-    if a.k != b.k || lin_div_of(a) != lin_div_of(b) {
+    if a.k != b.k || a.div_of() != b.div_of() {
         return false;
     }
     let mut na: i32 = 0;
@@ -1593,7 +1595,7 @@ extend Ast {
             }
         }
         if nz == 0 {
-            return self.const_value(lin_value(l));
+            return self.const_value(l.value());
         }
         for i in 0..self.const_lins.len() {
             if const_lin_eq(self.const_lins.at(i), l) {
@@ -1638,7 +1640,7 @@ extend Ast {
             TYPE_CONST => skey_mix(h, y.as_data.value as u64),
             TYPE_CONST_EXPR => {
                 let l = self.const_lin_at(y.as_data.inst);
-                let mut k = skey_mix(skey_mix(h, l.k as u64), lin_div_of(l) as u64);
+                let mut k = skey_mix(skey_mix(h, l.k as u64), l.div_of() as u64);
                 for i in 0..l.n {
                     if unsafe l.c[i as usize] == 0 {
                         continue;
@@ -2009,7 +2011,7 @@ extend Ast as Free {
 /// The builtin type a numeric literal's suffix names, or BT_COUNT if it has none. On a match,
 /// *sfx_start (when non-null) receives the suffix's start offset. In a hex literal, f32/f64 only
 /// count as a suffix after a 'p' exponent -- otherwise those bytes are hex digits.
-pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: *mut u32) BuiltinType {
+pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) BuiltinType {
     let hex = end - start > 2 && src[start as usize] == b'0' && (src[(start + 1) as usize] | 0x20u8) == b'x';
     let mut hexf = false;
     let mut i = start + 2;
@@ -2019,13 +2021,13 @@ pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: *mut u32) B
     }
     if end - start > 5 && unsafe cstring::memcmp(unsafe (src.ptr() + (end - 5) as usize), "isize".ptr(), 5) == 0 {
         if sfx_start != null {
-            unsafe *sfx_start = end - 5;
+            *sfx_start = end - 5;
         }
         return BuiltinType::BT_ISIZE;
     }
     if end - start > 5 && unsafe cstring::memcmp(unsafe (src.ptr() + (end - 5) as usize), "usize".ptr(), 5) == 0 {
         if sfx_start != null {
-            unsafe *sfx_start = end - 5;
+            *sfx_start = end - 5;
         }
         return BuiltinType::BT_USIZE;
     }
@@ -2034,49 +2036,49 @@ pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: *mut u32) B
         let p = unsafe (src.ptr() + (end - n) as usize);
         if unsafe cstring::memcmp(p, "i16".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_I16;
         }
         if unsafe cstring::memcmp(p, "i32".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_I32;
         }
         if unsafe cstring::memcmp(p, "i64".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_I64;
         }
         if unsafe cstring::memcmp(p, "u16".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_U16;
         }
         if unsafe cstring::memcmp(p, "u32".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_U32;
         }
         if unsafe cstring::memcmp(p, "u64".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_U64;
         }
         if (!hex || hexf) && unsafe cstring::memcmp(p, "f32".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_F32;
         }
         if (!hex || hexf) && unsafe cstring::memcmp(p, "f64".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_F64;
         }
@@ -2086,13 +2088,13 @@ pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: *mut u32) B
         let p = unsafe (src.ptr() + (end - n) as usize);
         if unsafe cstring::memcmp(p, "i8".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_I8;
         }
         if unsafe cstring::memcmp(p, "u8".ptr(), n as usize) == 0 {
             if sfx_start != null {
-                unsafe *sfx_start = end - n;
+                *sfx_start = end - n;
             }
             return BuiltinType::BT_U8;
         }

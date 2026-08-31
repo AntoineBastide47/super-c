@@ -523,26 +523,6 @@ extend Collected as Free {
     }
 }
 
-extend Collected {
-    fn alias_of(self: &Collected, name: str) i32 {
-        for i in 0..self.aliases.len() {
-            if self.aliases[i].name.as_str() == name {
-                return i as i32;
-            }
-        }
-        return -1;
-    }
-
-    fn note_opaque(self: &mut Collected, name: str) {
-        for i in 0..self.opaques.len() {
-            if self.opaques[i].as_str() == name {
-                return;
-            }
-        }
-        self.opaques.push(String::from_str(name));
-    }
-}
-
 // ---------------------------------------------------------------------------------------------------------
 // parsing declarations
 // ---------------------------------------------------------------------------------------------------------
@@ -557,25 +537,6 @@ const fn noise_call(s: str) bool {
     return s == "__attribute__" || s == "__attribute" || s == "__declspec" || s == "asm" || s == "__asm" || s == "__asm__" || s == "__has_attribute";
 }
 
-fn skip_noise(lx: &mut Lexer) {
-    loop {
-        if lx.kind != TK_IDENT {
-            return;
-        }
-        let t = lx.text();
-        if noise_call(t) {
-            lx.advance();
-            lx.skip_group(b'(', b')');
-            continue;
-        }
-        if noise_word(t) {
-            lx.advance();
-            continue;
-        }
-        return;
-    }
-}
-
 // A Super-C keyword cannot name a parameter; a trailing underscore keeps the C name recognisable.
 const fn keyword(s: str) bool {
     return s == "as" || s == "import" || s == "break" || s == "case" || s == "const" || s == "continue" || s == "defer" || s == "asm" || s == "do" || s == "dyn" || s == "else" || s == "enum" || s == "extern" || s == "false" || s == "fn" || s == "for" || s == "if" || s == "extend" || s == "in" || s == "let" || s == "loop" || s == "switch" || s == "move" || s == "mut" || s == "new" || s == "null" || s == "pub" || s == "sizeof" || s == "alignof" || s == "return" || s == "self" || s == "Self" || s == "struct" || s == "interface" || s == "true" || s == "type" || s == "union" || s == "unsafe" || s == "where" || s == "while" || s == "str" || s == "int";
@@ -586,15 +547,6 @@ fn safe_name(s: str, out: &mut String) {
     if keyword(s) {
         out.push_byte(b'_');
     }
-}
-
-fn record_of(c: &Collected, tag: str) i32 {
-    for i in 0..c.records.len() {
-        if c.records[i].tag.as_str() == tag {
-            return i as i32;
-        }
-    }
-    return -1;
 }
 
 // An integer written in a C enumerator or an array bound: decimal, hex or a character, with the suffixes
@@ -642,704 +594,15 @@ fn int_literal(t: str) i64 {
     return v;
 }
 
-/// `{ NAME [= <int>] , ... }`. Auto-increment is C's, so a bare name is one past the previous value. An
-/// enumerator this cannot evaluate marks the whole enum unusable rather than guessing a discriminant --
-/// a wrong constant is a bug at every call site that compares against it.
-fn parse_enum_body(lx: &mut Lexer, c: &mut Collected, tag: str, dump: str) {
-    let mut e = EnumDef { tag: String::from_str(tag), vals: Vector::<EnumVal>::new(), ok: true, mine: c.cur_mine };
-    lx.advance(); // '{'
-    let mut next: i64 = 0;
-    let mut known = true;
-    loop {
-        skip_noise(lx);
-        if lx.kind == TK_EOF || lx.at_punct(b'}') {
-            break;
-        }
-        let before = lx.pos;
-        if lx.at_punct(b',') {
-            lx.advance();
-            continue;
-        }
-        if lx.kind != TK_IDENT {
-            e.ok = false;
-            lx.advance();
-            continue;
-        }
-        let nm = String::from_str(lx.text());
-        lx.advance();
-        skip_noise(lx);
-        if lx.at_punct(b'=') {
-            lx.advance();
-            skip_noise(lx);
-            // The whole initialiser, up to the comma or brace that ends it, handed to the constant
-            // evaluator: `= 1 << 8` and `= A | B` are as common in headers as a bare number.
-            let vstart = lx.start;
-            let mut vend = lx.start;
-            let mut par: i32 = 0;
-            loop {
-                if lx.kind == TK_EOF {
-                    break;
-                }
-                if par == 0 && (lx.at_punct(b',') || lx.at_punct(b'}')) {
-                    break;
-                }
-                if lx.at_punct(b'(') {
-                    par = par + 1;
-                } else if lx.at_punct(b')') {
-                    par = par - 1;
-                }
-                vend = lx.end;
-                lx.advance();
+extend EnumDef {
+    fn val_of(self: &Self, name: str) Option<i64> {
+        for i in 0..self.vals.len() {
+            if self.vals[i].name.as_str() == name {
+                return Option::<i64>::Some(self.vals[i].value);
             }
-            let mut got = false;
-            let v = ce_eval(lx.src.slice(vstart, vend), c, &e, dump, 0, &mut got);
-            next = v;
-            // An enumerator this cannot evaluate makes the NEXT one unknown too, since C's auto-increment
-            // counts from it. Only those are dropped -- the rest of the enum is still worth having.
-            known = got;
         }
-        if known {
-            e.vals.push(EnumVal { name: nm, value: next });
-        } else {
-            e.partial = true;
-        }
-        next = next + 1;
-        skip_noise(lx);
-        if !lx.at_punct(b',') && !lx.at_punct(b'}') {
-            e.ok = false;
-            break;
-        }
-        if lx.pos == before && lx.kind != TK_EOF {
-            e.ok = false;
-            lx.advance();
-        }
+        return Option::<i64>::None;
     }
-    // Consume the rest of the body whatever happened, so the declaration after it still parses.
-    while lx.kind != TK_EOF && !lx.at_punct(b'}') {
-        lx.advance();
-    }
-    if lx.at_punct(b'}') {
-        lx.advance();
-    }
-    if e.vals.len() == 0 {
-        e.ok = false;
-    }
-    c.enums.push(e);
-}
-
-fn enum_val_of(e: &EnumDef, name: str, out: *mut i64) bool {
-    for i in 0..e.vals.len() {
-        if e.vals[i].name.as_str() == name {
-            unsafe *out = e.vals[i].value;
-            return true;
-        }
-    }
-    return false;
-}
-
-/// `{ <member declarations> }`. Members are ordinary declarations, so the same specifier/declarator parse
-/// runs recursively. Bitfields, anonymous members and flexible arrays make the record unusable: each one
-/// changes the LAYOUT in a way a field list cannot express, and a record with the wrong layout is worse
-/// than no record at all.
-fn parse_record_body(lx: &mut Lexer, c: &mut Collected, tag: str, is_union: bool, dump: str) {
-    let mut r = Record {
-        tag: String::from_str(tag),
-        fields: Vector::<Field>::new(),
-        is_union: is_union,
-        ok: true, // a nameless body is named by the typedef that follows; emission re-checks the tag
-        mine: c.cur_mine,
-    };
-    lx.advance(); // '{'
-    let mut depth: i32 = 1;
-    loop {
-        skip_noise(lx);
-        if lx.kind == TK_EOF {
-            break;
-        }
-        // A member shape this parser does not model would otherwise consume nothing and spin here
-        // forever. Stepping over one token loses that member -- which `ok` already records -- instead
-        // of the whole run.
-        let before = lx.pos;
-        if lx.at_punct(b'}') {
-            lx.advance();
-            depth = depth - 1;
-            if depth == 0 {
-                break;
-            }
-            continue;
-        }
-        if lx.at_punct(b';') {
-            lx.advance();
-            continue;
-        }
-        let mut td = false;
-        let mut bc = false;
-        let mut st = false;
-        let base = parse_specs(lx, c, &mut td, &mut bc, &mut st, dump);
-        let mut any = false;
-        loop {
-            let mut nm = String::new();
-            let mut isfn = false;
-            let mut va = false;
-            let mut ps = Vector::<Param>::new();
-            let mut adim: i64 = -1;
-            let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut ps, &mut va, false, &mut adim, dump);
-
-            if lx.at_punct(b':') {
-                r.ok = false; // a bitfield: its width is not a field type
-                lx.advance();
-                if lx.kind == TK_NUM {
-                    lx.advance();
-                }
-            }
-            if nm.len() == 0 || isfn || !ty.ok || adim == -2 {
-                r.ok = false; // an anonymous member, a function member, or an extent with no constant
-            } else {
-                let mut rt = String::new();
-                if adim >= 0 {
-                    rt.push_byte(b'[');
-                    ty.render(&mut rt);
-                    rt.format_into("; {}]", adim);
-                } else {
-                    ty.render(&mut rt);
-                }
-                let mut fname = String::new();
-                safe_name(nm.as_str(), &mut fname);
-                r.fields.push(Field { name: fname, ty: rt });
-            }
-            any = true;
-            skip_noise(lx);
-            if lx.at_punct(b',') {
-                lx.advance();
-                continue;
-            }
-            break;
-        }
-
-        let _ = any;
-        if lx.at_punct(b';') {
-            lx.advance();
-        }
-        if lx.pos == before && lx.kind != TK_EOF {
-            r.ok = false;
-            lx.advance();
-        }
-    }
-    if r.fields.len() == 0 {
-        r.ok = false;
-    }
-    c.records.push(r);
-}
-
-/// Declaration specifiers: the type part of a declaration, up to the first declarator. Returns the base
-/// type; `is_typedef` reports a leading `typedef`. A `struct`/`union`/`enum` body is skipped -- only its tag
-/// is kept, and the tag becomes an opaque type if the emitted signatures need it.
-fn parse_specs(
-    lx: &mut Lexer,
-    c: &mut Collected,
-    is_typedef: *mut bool,
-    base_const: *mut bool,
-    is_static: *mut bool,
-    dump: str,
-) CType {
-    let mut ty = ctype_new();
-    let mut signed = true;
-    let mut explicit_sign = false;
-    let mut longs: i32 = 0;
-    let mut shorts: i32 = 0;
-    let mut prim = String::new();
-    let mut named = false;
-    unsafe *is_typedef = false;
-    unsafe *base_const = false;
-    unsafe *is_static = false;
-    loop {
-        skip_noise(lx);
-        if lx.kind != TK_IDENT {
-            break;
-        }
-        let t = lx.text();
-        if t == "typedef" {
-            unsafe *is_typedef = true;
-            lx.advance();
-            continue;
-        }
-        if t == "const" {
-            unsafe *base_const = true;
-            lx.advance();
-            continue;
-        }
-        if t == "static" || t == "extern" || t == "register" || t == "auto" || t == "__thread" || t == "_Thread_local" {
-            // A `static inline` helper left in the header has no external symbol to call.
-            if t == "static" {
-                unsafe *is_static = true;
-            }
-            if t == "extern" {
-                c.saw_extern = true;
-            }
-            lx.advance();
-            continue;
-        }
-        if t == "unsigned" || t == "signed" || t == "__signed" || t == "__signed__" {
-            signed = t != "unsigned";
-            explicit_sign = true;
-            lx.advance();
-            continue;
-        }
-        if t == "long" {
-            longs = longs + 1;
-            lx.advance();
-            continue;
-        }
-        if t == "short" {
-            shorts = shorts + 1;
-            lx.advance();
-            continue;
-        }
-        if t == "void" || t == "char" || t == "int" || t == "float" || t == "double" || t == "_Bool" {
-            prim.clear();
-            prim.push_str(t);
-            lx.advance();
-            continue;
-        }
-        if t == "struct" || t == "union" || t == "enum" {
-            let is_enum = t == "enum";
-            let is_union = t == "union";
-            lx.advance();
-            skip_noise(lx);
-            let mut tag = String::new();
-            if lx.kind == TK_IDENT {
-                tag.push_str(lx.text());
-                lx.advance();
-            }
-            let mut defined = false;
-            if lx.at_punct(b'{') {
-                defined = true;
-                if is_enum {
-                    parse_enum_body(lx, c, tag.as_str(), dump);
-                } else {
-                    parse_record_body(lx, c, tag.as_str(), is_union, dump);
-                }
-            }
-            if is_enum {
-                // A TAGGED enum defined here becomes a Super-C enum, so its tag names a type a signature
-                // can use; anything else is an `int` as far as a call is concerned.
-                // Named by its tag exactly when that enum is one this module emits -- including at a USE
-                // site, which carries no body and is where most of them appear.
-                if tag.len() == 0 && defined {
-                    c.pending_agg = c.enums.len() as i32 - 1; // the typedef below names it, if one follows
-                    c.pending_is_enum = true;
-                    ty.ok = false;
-                } else if tag.len() != 0 && enum_emitted(c, tag.as_str()) {
-                    ty.base.push_string(&tag);
-                } else {
-                    ty.base.push_str("i32");
-                }
-            } else if tag.len() != 0 {
-                ty.base.push_string(&tag);
-                c.note_opaque(tag.as_str());
-            } else if defined {
-                c.pending_agg = c.records.len() as i32 - 1;
-                c.pending_is_enum = false;
-                ty.ok = false; // nameless until the typedef below names it
-            } else {
-                ty.ok = false; // an anonymous struct has no name to refer to
-            }
-            named = true;
-            break;
-        }
-        // The type is complete -- this identifier starts the declarator. `unsigned long n` counts as
-        // complete even though no type NAME was written, or the parameter's own name is swallowed as one.
-        if named || prim.len() != 0 || longs > 0 || shorts > 0 || explicit_sign {
-            break;
-        }
-        // A typedef name, or a type this tool has never heard of.
-        // `size_t` means `usize` because that is what it means, not because this host happens to spell
-        // it `unsigned long` -- so the standard names are consulted before the typedef table.
-        if wellknown(t, &mut ty.base) {
-            named = true;
-            lx.advance();
-            break;
-        }
-        let ai = c.alias_of(t);
-        if ai >= 0 {
-            // Copied out first: noting the opaque tag needs `&mut c`, which the alias borrow would hold.
-            let mut sub = String::new();
-            let opaque = c.aliases.at(ai as usize).opaque;
-            if opaque {
-                sub.push_str(c.aliases.at(ai as usize).name.as_str());
-            } else {
-                sub.push_str(c.aliases.at(ai as usize).sub.as_str());
-            }
-            ty.base.push_string(&sub);
-            if opaque {
-                c.note_opaque(sub.as_str());
-            }
-            if !c.aliases.at(ai as usize).ok {
-                ty.ok = false;
-            }
-        } else {
-            ty.ok = false;
-            ty.base.push_str(t);
-        }
-        named = true;
-        lx.advance();
-        break;
-    }
-    if !named {
-        let p = prim.as_str();
-        if p == "void" {
-            ty.base.push_str("void");
-        } else if p == "float" {
-            ty.base.push_str("f32");
-        } else if p == "double" {
-            if longs > 0 {
-                ty.ok = false; // long double has no Super-C counterpart
-            }
-            ty.base.push_str("f64");
-        } else if p == "char" {
-            // Bare `char` is C's string byte and Super-C's `char`; an explicitly signed one is an integer.
-            if explicit_sign {
-                int_name(1, signed, &mut ty.base);
-            } else {
-                ty.base.push_str("char");
-            }
-        } else if p == "_Bool" {
-            ty.base.push_str("bool");
-        } else if p == "int" || longs > 0 || shorts > 0 || explicit_sign {
-            let mut b = c.widths.int_b;
-            if shorts > 0 {
-                b = c.widths.short_b;
-            } else if longs == 1 {
-                b = c.widths.long_b;
-            } else if longs > 1 {
-                b = c.widths.llong_b;
-            }
-            int_name(b, signed, &mut ty.base);
-        } else {
-            ty.ok = false;
-        }
-    }
-    return ty;
-}
-
-/// One declarator: pointers, an optional name, then array/function suffixes. `name` receives the declared
-/// identifier (empty for an abstract declarator). `is_fn` reports a function declarator and `params`/
-/// `variadic` its signature.
-fn parse_declarator(
-    lx: &mut Lexer,
-    c: &mut Collected,
-    base: &CType,
-    base_const: bool,
-    name: &mut String,
-    is_fn: *mut bool,
-    params: &mut Vector<Param>,
-    variadic: *mut bool,
-    decay: bool,
-    arr_len: *mut i64,
-    dump: str,
-) CType {
-    let mut ty = base.clone();
-    if base_const {
-        ty.qual = ty.qual | 1u32;
-    }
-    unsafe *is_fn = false;
-    unsafe *variadic = false;
-    unsafe *arr_len = -1;
-    loop {
-        skip_noise(lx);
-        if !lx.at_punct(b'*') {
-            break;
-        }
-        lx.advance();
-        if ty.ptr + 1 >= MAX_PTR {
-            ty.ok = false;
-            ty.ptr = MAX_PTR - 1;
-        } else {
-            ty.ptr = ty.ptr + 1;
-        }
-        skip_noise(lx);
-        while lx.kind == TK_IDENT && lx.text() == "const" {
-            ty.qual = ty.qual | 1u32 << ty.ptr as u32;
-            lx.advance();
-            skip_noise(lx);
-        }
-    }
-    skip_noise(lx);
-    // `T (*name)(args)`: a function pointer. The inner parenthesised declarator holds the name; the
-    // suffix that follows the group is the signature it points to.
-    let mut fnptr = false;
-    if lx.at_punct(b'(') {
-        let save = lx.pos;
-        let sk = lx.kind;
-        let ss = lx.start;
-        let se = lx.end;
-        lx.advance();
-        skip_noise(lx);
-        if lx.at_punct(b'*') {
-            fnptr = true;
-            lx.advance();
-            skip_noise(lx);
-            if lx.kind == TK_IDENT {
-                name.push_str(lx.text());
-                lx.advance();
-            }
-            skip_noise(lx);
-            if lx.at_punct(b')') {
-                lx.advance();
-            }
-        } else {
-            lx.pos = save;
-            lx.kind = sk;
-            lx.start = ss;
-            lx.end = se;
-        }
-    } else if lx.kind == TK_IDENT {
-        name.push_str(lx.text());
-        lx.advance();
-    }
-    skip_noise(lx);
-    if lx.at_punct(b'(') {
-        let mut ps = Vector::<Param>::new();
-        let mut va = false;
-        parse_params(lx, c, &mut ps, &mut va, dump);
-        if fnptr {
-            // Rendered here and carried as a signature: `fn(..) T` is already the pointer.
-            let mut sig = String::from_str("fn(");
-            for i in 0..ps.len() {
-                if i != 0 {
-                    sig.push_str(", ");
-                }
-                sig.push_string(&ps[i].ty);
-            }
-            sig.push_str(") ");
-            ty.render(&mut sig);
-            let mut out = ctype_new();
-            out.ok = ty.ok && !va;
-            out.fnsig.push_string(&sig);
-            return out;
-        }
-        unsafe *is_fn = true;
-        unsafe *variadic = va;
-        for i in 0..ps.len() {
-            params.push(Param { name: String::from_str(ps[i].name.as_str()), ty: String::from_str(ps[i].ty.as_str()) });
-        }
-    }
-    // An array PARAMETER is a pointer -- that is C's own rule. An array FIELD is not: dropping its extent
-    // would change the record's layout, so the bound is carried out and the field keeps `[T; N]`.
-    let mut first = true;
-    while lx.at_punct(b'[') {
-        if decay {
-            lx.skip_group(b'[', b']');
-            if ty.ptr + 1 >= MAX_PTR {
-                ty.ok = false;
-            } else {
-                ty.ptr = ty.ptr + 1;
-            }
-            continue;
-        }
-        lx.advance();
-        let mut n: i64 = -2; // no extent, or one this tool cannot evaluate
-        if lx.kind == TK_NUM {
-            n = int_literal(lx.text());
-            if n < 0 {
-                n = -2;
-            }
-            lx.advance();
-        }
-        if !lx.at_punct(b']') {
-            n = -2;
-            while lx.kind != TK_EOF && !lx.at_punct(b']') {
-                lx.advance();
-            }
-        }
-        if lx.at_punct(b']') {
-            lx.advance();
-        }
-        if first {
-            unsafe *arr_len = n;
-        } else {
-            unsafe *arr_len = -2; // a second dimension: not modelled
-        }
-        first = false;
-    }
-    return ty;
-}
-
-fn parse_params(lx: &mut Lexer, c: &mut Collected, out: &mut Vector<Param>, variadic: *mut bool, dump: str) {
-    lx.advance(); // '('
-    let mut idx: i32 = 0;
-    loop {
-        skip_noise(lx);
-        if lx.kind == TK_EOF || lx.at_punct(b')') {
-            break;
-        }
-        if lx.kind == TK_PUNCT && lx.text() == "..." {
-            unsafe *variadic = true;
-            lx.advance();
-            continue;
-        }
-        if lx.at_punct(b',') {
-            lx.advance();
-            continue;
-        }
-        let mut td = false;
-        let mut bc = false;
-        let mut st = false;
-        let base = parse_specs(lx, c, &mut td, &mut bc, &mut st, dump);
-        let mut nm = String::new();
-        let mut isfn = false;
-        let mut va2 = false;
-        let mut sub = Vector::<Param>::new();
-        let mut adim: i64 = -1;
-        let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut sub, &mut va2, true, &mut adim, dump);
-
-        // `(void)` is an empty parameter list, not a parameter.
-        let void_only = nm.len() == 0 && ty.ptr == 0 && ty.fnsig.len() == 0 && ty.base.as_str() == "void";
-        if !void_only {
-            let mut rendered = String::new();
-            ty.render(&mut rendered);
-            let mut pname = String::new();
-            if nm.len() != 0 {
-                safe_name(nm.as_str(), &mut pname);
-            } else {
-                pname.format_into("a{}", idx);
-            }
-            if !ty.ok {
-                rendered.clear();
-                rendered.push_str("?");
-            }
-            out.push(Param { name: pname, ty: rendered });
-            idx = idx + 1;
-        }
-
-        skip_noise(lx);
-        if lx.at_punct(b',') {
-            lx.advance();
-        } else if !lx.at_punct(b')') {
-            break; // something unmodelled: stop before it desynchronises the whole file
-        }
-    }
-    if lx.at_punct(b')') {
-        lx.advance();
-    }
-}
-
-/// Walk the whole preprocessed unit. Every typedef is recorded (the target's signatures are spelled with
-/// them, wherever they were declared); only declarations whose origin file is `want` are emitted.
-fn parse_unit(lx: &mut Lexer, c: &mut Collected, want: str, extra: &Vector<String>, dump: str) {
-    loop {
-        skip_noise(lx);
-        if lx.kind == TK_EOF {
-            return;
-        }
-        if lx.at_punct(b';') {
-            lx.advance();
-            continue;
-        }
-        if lx.at_punct(b'{') {
-            lx.skip_group(b'{', b'}'); // a `static inline` body left in the header
-            continue;
-        }
-        if lx.kind != TK_IDENT {
-            lx.advance();
-            continue;
-        }
-        let here = String::from_str(lx.file.as_str());
-        let mine = same_origin(here.as_str(), want, extra);
-        // Published for parse_specs: a struct or enum BODY is parsed from inside the specifier, which is
-        // where its origin has to be known -- only the target header's own records are emitted.
-        c.cur_mine = mine;
-        c.pending_agg = -1;
-        c.saw_extern = false;
-        let mut td = false;
-        let mut bc = false;
-        let mut st = false;
-        let base = parse_specs(lx, c, &mut td, &mut bc, &mut st, dump);
-        loop {
-            let mut nm = String::new();
-            let mut isfn = false;
-            let mut va = false;
-            let mut ps = Vector::<Param>::new();
-            let mut adim: i64 = -1;
-            let ty = parse_declarator(lx, c, &base, bc, &mut nm, &mut isfn, &mut ps, &mut va, true, &mut adim, dump);
-            // A parameter this tool could not model poisons the whole signature: a binding with a wrong
-            // type is worse than a missing one, so the function is dropped rather than guessed at.
-            let mut keep = nm.len() != 0 && !td && !st && isfn && mine && ty.ok;
-            for i in 0..ps.len() {
-                if ps[i].ty.as_str() == "?" {
-                    keep = false;
-                }
-            }
-            if nm.len() != 0 && td {
-                record_typedef(c, nm.as_str(), &ty, isfn);
-            }
-            // `extern int errno;` and friends: a global the library exports. Bound by what C itself
-            // declares: a const-qualified binding becomes an extern `const` (readable), anything else a
-            // `static mut`, whose accesses carry the ordinary static-mut unsafe rules across the FFI.
-            if !keep && !td && !st && !isfn && mine && ty.ok && c.saw_extern && nm.len() != 0 && adim < 0 {
-                let mut vt = String::new();
-                ty.render(&mut vt);
-                let wr = ty.fnsig.len() != 0 || !ty.qual_at(ty.ptr);
-                c.globals.push(
-                    ConstDef { name: String::from_str(nm.as_str()), ty: vt, value: String::new(), mutable: wr },
-                );
-            }
-            if keep {
-                let mut ret = String::new();
-                ty.render(&mut ret);
-                c.fns.push(FnDecl { name: String::from_str(nm.as_str()), params: ps, ret: ret, variadic: va });
-            } else {
-                if isfn && mine && !td && !st && nm.len() != 0 {
-                    c.skipped = c.skipped + 1;
-                }
-            }
-
-            skip_noise(lx);
-            if lx.at_punct(b',') {
-                lx.advance();
-                continue;
-            }
-            break;
-        }
-
-        if lx.at_punct(b'{') {
-            lx.skip_group(b'{', b'}');
-        } else if lx.at_punct(b';') {
-            lx.advance();
-        } else if lx.kind != TK_EOF {
-            lx.advance(); // unmodelled: step over one token and resynchronise on the next `;`
-        }
-    }
-}
-
-// A typedef of a pointer-to-struct or of a struct tag keeps its own NAME as an opaque type; anything else
-// resolves to the Super-C type it stands for.
-fn record_typedef(c: &mut Collected, name: str, ty: &CType, is_fn: bool) {
-    let pend = c.pending_agg;
-    let pend_enum = c.pending_is_enum;
-    c.pending_agg = -1;
-    if is_fn || c.alias_of(name) >= 0 {
-        return;
-    }
-    // `typedef struct { .. } Foo;` -- the body carried no tag, so the typedef IS the name. Most C
-    // libraries declare their types this way, and a nameless record was previously dropped outright.
-    if pend >= 0 && ty.ptr == 0 && ty.fnsig.len() == 0 {
-        let idx = pend as usize;
-        if pend_enum && idx < c.enums.len() && c.enums[idx].tag.len() == 0 {
-            c.enums[idx].tag.push_str(name);
-            c.aliases.push(Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true });
-            return;
-        }
-        if !pend_enum && idx < c.records.len() && c.records[idx].tag.len() == 0 {
-            c.records[idx].tag.push_str(name);
-            c.aliases.push(Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true });
-            return;
-        }
-    }
-    let mut sub = String::new();
-    ty.render(&mut sub);
-    let opaque = ty.ptr == 0 && ty.fnsig.len() == 0 && sub.as_str() == name;
-    c.aliases.push(Alias { name: String::from_str(name), sub: sub, opaque: opaque, ok: ty.ok || opaque });
 }
 
 fn path_contains(a: str, needle: str) bool {
@@ -1435,13 +698,13 @@ fn bg_exec(args: &mut Vector<String>, out: *const char) i32 {
 // preprocessor's output is CRLF on Windows, and a value read as `7\r` parses as nothing at all -- which
 // silently cost every macro constant there, and `__SIZEOF_LONG__` with them (Windows' `long` is 4 bytes,
 // so falling back to the 8-byte default mistyped every `long` in a signature).
-fn line_at(text: str, i: usize, end: *mut usize) str {
+fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
     let n = text.len();
     let mut e = i;
     while e < n && text.byte_at(e) != b'\n' {
         e = e + 1;
     }
-    unsafe *end = e;
+    *end = e;
     let mut t = e;
     if t > i && text.byte_at(t - 1) == b'\r' {
         t = t - 1;
@@ -1528,242 +791,244 @@ extend CExpr<'a> as Free {
 
 const CE_DEPTH: i32 = 8;
 
-// One name: an enumerator of the enum being built, a constant already collected, any enum's value, or
-// another macro -- resolved recursively, since headers define constants in terms of each other.
-fn ex_ident(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32, name: str) i64 {
-    if e != null {
-        let mut v: i64 = 0;
-        if enum_val_of(unsafe &*e, name, &mut v) {
-            return v;
-        }
-    }
-    for i in 0..c.consts.len() {
-        if c.consts[i].name.as_str() == name {
-            let lit = int_literal(c.consts[i].value.as_str());
-            if lit >= 0 {
-                return lit;
+extend CExpr {
+    // One name: an enumerator of the enum being built, a constant already collected, any enum's value, or
+    // another macro -- resolved recursively, since headers define constants in terms of each other.
+    fn ex_ident(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32, name: str) i64 {
+        if e != null {
+            let ed: &EnumDef = unsafe &*e;
+            let v = ed.val_of(name);
+            if v.is_some() {
+                return v.unwrap();
             }
         }
+        for i in 0..c.consts.len() {
+            if c.consts[i].name.as_str() == name {
+                let lit = int_literal(c.consts[i].value.as_str());
+                if lit >= 0 {
+                    return lit;
+                }
+            }
+        }
+        for i in 0..c.enums.len() {
+            let v = c.enums.at(i).val_of(name);
+            if v.is_some() {
+                return v.unwrap();
+            }
+        }
+        if depth < CE_DEPTH {
+            let mut raw = String::new();
+            let got = macro_value(dump, name, &mut raw);
+            if got && raw.len() != 0 {
+                let v = ce_eval(raw.as_str(), c, e, dump, depth + 1);
+                if v.is_some() {
+                    return v.unwrap();
+                }
+                self.ok = false;
+                return 0;
+            }
+        }
+        self.ok = false;
+        return 0;
     }
-    for i in 0..c.enums.len() {
-        let mut v: i64 = 0;
-        if enum_val_of(c.enums.at(i), name, &mut v) {
+
+    fn ex_primary(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+        if self.lx.kind == TK_EOF {
+            self.ok = false;
+            return 0;
+        }
+        if self.lx.at_punct(b'(') {
+            self.lx.advance();
+            let v = self.ex_or(c, e, dump, depth);
+            if !self.lx.at_punct(b')') {
+                self.ok = false;
+                return 0;
+            }
+            self.lx.advance();
             return v;
         }
+        if self.lx.kind == TK_NUM {
+            let v = int_literal(self.lx.text());
+            self.lx.advance();
+            if v < 0 {
+                self.ok = false;
+                return 0;
+            }
+            return v;
+        }
+        if self.lx.kind == TK_STR && self.lx.text().byte_at(0) == b'\'' {
+            // A character constant is an integer; only the plain one-byte form is modelled.
+            let t = self.lx.text();
+            self.lx.advance();
+            if t.len() == 3 {
+                return t.byte_at(1);
+            }
+            self.ok = false;
+            return 0;
+        }
+        if self.lx.kind == TK_IDENT {
+            let nm = String::from_str(self.lx.text());
+            self.lx.advance();
+            // A cast (`(int)c`) or a call reaches here as an identifier followed by something unexpected;
+            // both are refused by the caller when the expression does not end cleanly.
+            let v = self.ex_ident(c, e, dump, depth, nm.as_str());
+            return v;
+        }
+        self.ok = false;
+        return 0;
     }
-    if depth < CE_DEPTH {
-        let mut raw = String::new();
-        let got = macro_value(dump, name, &mut raw);
-        if got && raw.len() != 0 {
-            let mut sub = false;
-            let v = ce_eval(raw.as_str(), c, e, dump, depth + 1, &mut sub);
-            if sub {
+
+    fn ex_unary(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+        if self.lx.at_punct(b'-') {
+            self.lx.advance();
+            return 0 - self.ex_unary(c, e, dump, depth);
+        }
+        if self.lx.at_punct(b'+') {
+            self.lx.advance();
+            return self.ex_unary(c, e, dump, depth);
+        }
+        if self.lx.at_punct(b'~') {
+            self.lx.advance();
+            return 0 - self.ex_unary(c, e, dump, depth) - 1; // ~v == -v - 1
+        }
+        if self.lx.at_punct(b'!') {
+            self.lx.advance();
+            if self.ex_unary(c, e, dump, depth) == 0 {
+                return 1;
+            }
+            return 0;
+        }
+        return self.ex_primary(c, e, dump, depth);
+    }
+
+    fn ex_mul(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+        let mut v = self.ex_unary(c, e, dump, depth);
+        loop {
+            if self.lx.at_punct(b'*') {
+                self.lx.advance();
+                v = v * self.ex_unary(c, e, dump, depth);
+            } else if self.lx.at_punct(b'/') {
+                self.lx.advance();
+                let d = self.ex_unary(c, e, dump, depth);
+                if d == 0 {
+                    self.ok = false;
+                    return 0;
+                }
+                v = v / d;
+            } else if self.lx.at_punct(b'%') {
+                self.lx.advance();
+                let d = self.ex_unary(c, e, dump, depth);
+                if d == 0 {
+                    self.ok = false;
+                    return 0;
+                }
+                v = v % d;
+            } else {
                 return v;
             }
-            x.ok = false;
-            return 0;
         }
     }
-    x.ok = false;
-    return 0;
-}
 
-fn ex_primary(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
-    if x.lx.kind == TK_EOF {
-        x.ok = false;
-        return 0;
-    }
-    if x.lx.at_punct(b'(') {
-        x.lx.advance();
-        let v = ex_or(x, c, e, dump, depth);
-        if !x.lx.at_punct(b')') {
-            x.ok = false;
-            return 0;
+    fn ex_add(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+        let mut v = self.ex_mul(c, e, dump, depth);
+        loop {
+            if self.lx.at_punct(b'+') {
+                self.lx.advance();
+                v = v + self.ex_mul(c, e, dump, depth);
+            } else if self.lx.at_punct(b'-') {
+                self.lx.advance();
+                v = v - self.ex_mul(c, e, dump, depth);
+            } else {
+                return v;
+            }
         }
-        x.lx.advance();
+    }
+
+    fn ex_shift(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+        let mut v = self.ex_add(c, e, dump, depth);
+        loop {
+            // The scanner emits punctuation one byte at a time, so `<<` is two `<` in a row.
+            if self.lx.at_punct(b'<') {
+                self.lx.advance();
+                if !self.lx.at_punct(b'<') {
+                    self.ok = false;
+                    return 0;
+                }
+                self.lx.advance();
+                let sh = self.ex_add(c, e, dump, depth);
+                if sh < 0 || sh > 62 {
+                    self.ok = false;
+                    return 0;
+                }
+                v = v << sh;
+            } else if self.lx.at_punct(b'>') {
+                self.lx.advance();
+                if !self.lx.at_punct(b'>') {
+                    self.ok = false;
+                    return 0;
+                }
+                self.lx.advance();
+                let sh = self.ex_add(c, e, dump, depth);
+                if sh < 0 || sh > 62 {
+                    self.ok = false;
+                    return 0;
+                }
+                v = v >> sh;
+            } else {
+                return v;
+            }
+        }
+    }
+
+    fn ex_and(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+        let mut v = self.ex_shift(c, e, dump, depth);
+        while self.lx.at_punct(b'&') {
+            self.lx.advance();
+            if self.lx.at_punct(b'&') {
+                self.ok = false; // `&&` is a logical operator, not a constant this models
+                return 0;
+            }
+            v = v & self.ex_shift(c, e, dump, depth);
+        }
         return v;
     }
-    if x.lx.kind == TK_NUM {
-        let v = int_literal(x.lx.text());
-        x.lx.advance();
-        if v < 0 {
-            x.ok = false;
-            return 0;
+
+    fn ex_xor(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+        let mut v = self.ex_and(c, e, dump, depth);
+        while self.lx.at_punct(b'^') {
+            self.lx.advance();
+            v = v ^ self.ex_and(c, e, dump, depth);
         }
         return v;
     }
-    if x.lx.kind == TK_STR && x.lx.text().byte_at(0) == b'\'' {
-        // A character constant is an integer; only the plain one-byte form is modelled.
-        let t = x.lx.text();
-        x.lx.advance();
-        if t.len() == 3 {
-            return t.byte_at(1);
+
+    fn ex_or(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+        let mut v = self.ex_xor(c, e, dump, depth);
+        while self.lx.at_punct(b'|') {
+            self.lx.advance();
+            if self.lx.at_punct(b'|') {
+                self.ok = false;
+                return 0;
+            }
+            v = v | self.ex_xor(c, e, dump, depth);
         }
-        x.ok = false;
-        return 0;
-    }
-    if x.lx.kind == TK_IDENT {
-        let nm = String::from_str(x.lx.text());
-        x.lx.advance();
-        // A cast (`(int)x`) or a call reaches here as an identifier followed by something unexpected;
-        // both are refused by the caller when the expression does not end cleanly.
-        let v = ex_ident(x, c, e, dump, depth, nm.as_str());
         return v;
     }
-    x.ok = false;
-    return 0;
-}
-
-fn ex_unary(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
-    if x.lx.at_punct(b'-') {
-        x.lx.advance();
-        return 0 - ex_unary(x, c, e, dump, depth);
-    }
-    if x.lx.at_punct(b'+') {
-        x.lx.advance();
-        return ex_unary(x, c, e, dump, depth);
-    }
-    if x.lx.at_punct(b'~') {
-        x.lx.advance();
-        return 0 - ex_unary(x, c, e, dump, depth) - 1; // ~v == -v - 1
-    }
-    if x.lx.at_punct(b'!') {
-        x.lx.advance();
-        if ex_unary(x, c, e, dump, depth) == 0 {
-            return 1;
-        }
-        return 0;
-    }
-    return ex_primary(x, c, e, dump, depth);
-}
-
-fn ex_mul(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
-    let mut v = ex_unary(x, c, e, dump, depth);
-    loop {
-        if x.lx.at_punct(b'*') {
-            x.lx.advance();
-            v = v * ex_unary(x, c, e, dump, depth);
-        } else if x.lx.at_punct(b'/') {
-            x.lx.advance();
-            let d = ex_unary(x, c, e, dump, depth);
-            if d == 0 {
-                x.ok = false;
-                return 0;
-            }
-            v = v / d;
-        } else if x.lx.at_punct(b'%') {
-            x.lx.advance();
-            let d = ex_unary(x, c, e, dump, depth);
-            if d == 0 {
-                x.ok = false;
-                return 0;
-            }
-            v = v % d;
-        } else {
-            return v;
-        }
-    }
-}
-
-fn ex_add(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
-    let mut v = ex_mul(x, c, e, dump, depth);
-    loop {
-        if x.lx.at_punct(b'+') {
-            x.lx.advance();
-            v = v + ex_mul(x, c, e, dump, depth);
-        } else if x.lx.at_punct(b'-') {
-            x.lx.advance();
-            v = v - ex_mul(x, c, e, dump, depth);
-        } else {
-            return v;
-        }
-    }
-}
-
-fn ex_shift(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
-    let mut v = ex_add(x, c, e, dump, depth);
-    loop {
-        // The scanner emits punctuation one byte at a time, so `<<` is two `<` in a row.
-        if x.lx.at_punct(b'<') {
-            x.lx.advance();
-            if !x.lx.at_punct(b'<') {
-                x.ok = false;
-                return 0;
-            }
-            x.lx.advance();
-            let sh = ex_add(x, c, e, dump, depth);
-            if sh < 0 || sh > 62 {
-                x.ok = false;
-                return 0;
-            }
-            v = v << sh;
-        } else if x.lx.at_punct(b'>') {
-            x.lx.advance();
-            if !x.lx.at_punct(b'>') {
-                x.ok = false;
-                return 0;
-            }
-            x.lx.advance();
-            let sh = ex_add(x, c, e, dump, depth);
-            if sh < 0 || sh > 62 {
-                x.ok = false;
-                return 0;
-            }
-            v = v >> sh;
-        } else {
-            return v;
-        }
-    }
-}
-
-fn ex_and(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
-    let mut v = ex_shift(x, c, e, dump, depth);
-    while x.lx.at_punct(b'&') {
-        x.lx.advance();
-        if x.lx.at_punct(b'&') {
-            x.ok = false; // `&&` is a logical operator, not a constant this models
-            return 0;
-        }
-        v = v & ex_shift(x, c, e, dump, depth);
-    }
-    return v;
-}
-
-fn ex_xor(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
-    let mut v = ex_and(x, c, e, dump, depth);
-    while x.lx.at_punct(b'^') {
-        x.lx.advance();
-        v = v ^ ex_and(x, c, e, dump, depth);
-    }
-    return v;
-}
-
-fn ex_or(x: &mut CExpr, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
-    let mut v = ex_xor(x, c, e, dump, depth);
-    while x.lx.at_punct(b'|') {
-        x.lx.advance();
-        if x.lx.at_punct(b'|') {
-            x.ok = false;
-            return 0;
-        }
-        v = v | ex_xor(x, c, e, dump, depth);
-    }
-    return v;
 }
 
 /// The value of a C integer constant expression, or `ok = false` when any part of it is outside this
 /// subset. `e` (may be null) is an enum under construction, whose earlier enumerators are in scope.
-fn ce_eval(text: str, c: &Collected, e: *const EnumDef, dump: str, depth: i32, ok: *mut bool) i64 {
-    unsafe *ok = false;
+fn ce_eval(text: str, c: &Collected, e: *const EnumDef, dump: str, depth: i32) Option<i64> {
     if text.len() == 0 || depth > CE_DEPTH {
-        return 0;
+        return Option::<i64>::None;
     }
     let mut x = CExpr::<'_> { lx: Lexer::new(text), ok: true };
-    let v = ex_or(&mut x, c, e, dump, depth);
+    let v = x.ex_or(c, e, dump, depth);
     // Trailing tokens mean the text was never a constant expression -- a cast, a call, a comma.
-    let clean = x.ok && x.lx.kind == TK_EOF;
-    unsafe *ok = clean;
-    return v;
+    if x.ok && x.lx.kind == TK_EOF {
+        return Option::<i64>::Some(v);
+    }
+    return Option::<i64>::None;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1917,11 +1182,11 @@ fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef
     if iv < 0 {
         // Not a literal: `(1 << 8)`, `A | B`, or a name standing for another macro. The evaluator settles
         // whether it is a constant at all -- and refuses when any part of it is outside C's integer subset.
-        let mut got = false;
-        let ev = ce_eval(v, c, null, dump, 0, &mut got);
-        if !got {
+        let evo = ce_eval(v, c, null, dump, 0);
+        if evo.is_none() {
             return false;
         }
+        let ev = evo.unwrap();
         out.name.push_str(name);
         out.ty.push_str(
             if ev > 0x7FFFFFFF || ev < 0 - 0x80000000 {
@@ -1971,23 +1236,6 @@ fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef
 // emitting
 // ---------------------------------------------------------------------------------------------------------
 
-// Only the opaque tags the emitted signatures actually mention: a header pulls in hundreds of struct names
-// through its own includes, and binding all of them would bury the ones a caller needs.
-fn opaque_used(c: &Collected, name: str) bool {
-    for i in 0..c.fns.len() {
-        let f = c.fns.at(i);
-        if type_mentions(f.ret.as_str(), name) {
-            return true;
-        }
-        for j in 0..f.params.len() {
-            if type_mentions(f.params[j].ty.as_str(), name) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 fn type_mentions(ty: str, name: str) bool {
     let n = ty.len();
     let m = name.len();
@@ -2006,197 +1254,6 @@ fn type_mentions(ty: str, name: str) bool {
         i = i + 1;
     }
     return false;
-}
-
-// A tag emitted as a real `pub struct`/`pub union` must not ALSO be declared opaque -- one name, one
-// definition.
-fn record_emitted(c: &Collected, tag: str) bool {
-    let ri = record_of(c, tag);
-    if ri < 0 {
-        return false;
-    }
-    let r = c.records.at(ri as usize);
-    return r.mine && r.ok;
-}
-
-fn enum_emitted(c: &Collected, tag: str) bool {
-    for i in 0..c.enums.len() {
-        if c.enums[i].tag.as_str() == tag {
-            return c.enums[i].mine && c.enums[i].ok;
-        }
-    }
-    return false;
-}
-
-// A name already spoken for. C's namespaces are separate -- a macro, an enumerator and a function may all
-// be called `FOO` -- but Super-C has one, so the first definition wins and the rest are left out.
-fn name_taken(c: &Collected, upto: usize, name: str) bool {
-    for i in 0..c.fns.len() {
-        if c.fns[i].name.as_str() == name {
-            return true;
-        }
-    }
-    for i in 0..upto {
-        if c.consts[i].name.as_str() == name {
-            return true;
-        }
-    }
-    for i in 0..c.records.len() {
-        if c.records[i].tag.as_str() == name && record_emitted(c, name) {
-            return true;
-        }
-    }
-    for i in 0..c.enums.len() {
-        if c.enums[i].tag.as_str() == name && enum_emitted(c, name) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// The constants the module exposes: an anonymous enum's enumerators (C's "block of constants" idiom),
-/// then the target header's own object-like macros. Order matters -- an enumerator is a real declaration
-/// and a macro is textual, so the declaration wins any name they share.
-fn collect_consts(c: &mut Collected, header: str, dump: str) {
-    for i in 0..c.enums.len() {
-        if !c.enums[i].mine || !c.enums[i].ok || c.enums[i].tag.len() != 0 {
-            continue;
-        }
-        for j in 0..c.enums[i].vals.len() {
-            let mut cd = ConstDef { name: String::new(), ty: String::from_str("i32"), value: String::new() };
-            cd.name.push_str(c.enums[i].vals[j].name.as_str());
-            cd.value.format_into("{}", c.enums[i].vals[j].value);
-            let taken = name_taken(c, c.consts.len(), cd.name.as_str());
-            if taken {} else {
-                c.consts.push(cd);
-            }
-        }
-    }
-    let mut names = Vector::<String>::new();
-    switch loader::read_file(header) {
-        Some(src) => {
-            header_macro_names(src.as_str(), &mut names);
-        },
-        None => {},
-    };
-    for i in 0..names.len() {
-        let mut raw = String::new();
-        if macro_value(dump, names[i].as_str(), &mut raw) {
-            let mut cd = ConstDef { name: String::new(), ty: String::new(), value: String::new() };
-            let ok = macro_const(names[i].as_str(), raw.as_str(), c, dump, &mut cd) && !name_taken(
-                c,
-                c.consts.len(),
-                names[i].as_str(),
-            );
-            if ok {
-                c.consts.push(cd);
-            } else {}
-        }
-    }
-}
-
-fn emit(c: &Collected, header: str, spelling: str, link: str, out: &mut String) {
-    out.format_into("// Generated by `super-c bindgen {}`; edit the generator's input, not this file.\n", spelling);
-    out.push_str("// Raw C bindings: every call requires `unsafe`. Structs reached only through a pointer are opaque\n");
-    out.push_str("// types -- their layout is C's business, not this module's.\n\n");
-    let _ = header;
-    // The constants are ordinary top-level items and come first; `@c.link` has to sit on the extern block
-    // itself, so it is emitted last, immediately above it.
-    for i in 0..c.consts.len() {
-        let cd = c.consts.at(i);
-        out.format_into("pub const {}: {} = {};\n", cd.name.as_str(), cd.ty.as_str(), cd.value.as_str());
-    }
-    if c.consts.len() != 0 {
-        out.push_byte(b'\n');
-    }
-    if link.len() != 0 {
-        out.format_into("@c.link(\"{}\")\n", link);
-    }
-    out.format_into("extern \"C\" \"{}\" {{\n", spelling);
-    let mut first = true;
-    for i in 0..c.opaques.len() {
-        let nm = c.opaques[i].as_str();
-        if !opaque_used(c, nm) || record_emitted(c, nm) || enum_emitted(c, nm) {
-            continue;
-        }
-        // A tag C never typedef'd is `struct x` there, not `x`.
-        let ai = c.alias_of(nm);
-        if !(ai >= 0 && c.aliases.at(ai as usize).opaque) {
-            out.format_into("    @c.import(\"struct {}\")\n", nm);
-        }
-        out.format_into("    pub type {};\n", nm);
-        first = false;
-    }
-    if !first {
-        out.push_byte(b'\n');
-    }
-    for i in 0..c.enums.len() {
-        let e = c.enums.at(i);
-        if !e.mine || !e.ok || e.tag.len() == 0 {
-            continue;
-        }
-        let ai = c.alias_of(e.tag.as_str());
-        if !(ai >= 0 && c.aliases.at(ai as usize).opaque) {
-            out.format_into("    @c.import(\"enum {}\")\n", e.tag.as_str());
-        }
-        out.format_into("    pub enum {} {{\n", e.tag.as_str());
-        for j in 0..e.vals.len() {
-            out.format_into("        {} = {},\n", e.vals[j].name.as_str(), e.vals[j].value);
-        }
-        out.push_str("    }\n\n");
-    }
-    // Inside the block, so these ARE the header's types rather than look-alikes: the emitted C uses the
-    // header's own definition and asserts this layout against it. A tag C never typedef'd has to be
-    // spelled `struct x` there, which is what the pinned symbol carries.
-    for i in 0..c.records.len() {
-        let r = c.records.at(i);
-        if !r.mine || !r.ok || r.tag.len() == 0 {
-            continue;
-        }
-        let kw = if r.is_union {
-            "union";
-        } else {
-            "struct";
-        };
-        let ai = c.alias_of(r.tag.as_str());
-        let typedefed = ai >= 0 && c.aliases.at(ai as usize).opaque;
-        if !typedefed {
-            out.format_into("    @c.import(\"{} {}\")\n", kw, r.tag.as_str());
-        }
-        out.format_into("    pub {} {} {{\n", kw, r.tag.as_str());
-        for j in 0..r.fields.len() {
-            out.format_into("        pub {}: {},\n", r.fields[j].name.as_str(), r.fields[j].ty.as_str());
-        }
-        out.push_str("    }\n\n");
-    }
-    for i in 0..c.globals.len() {
-        if c.globals[i].mutable {
-            out.format_into("    pub static mut {}: {};\n", c.globals[i].name.as_str(), c.globals[i].ty.as_str());
-        } else {
-            out.format_into("    pub const {}: {};\n", c.globals[i].name.as_str(), c.globals[i].ty.as_str());
-        }
-    }
-    if c.globals.len() != 0 {
-        out.push_byte(b'\n');
-    }
-    for i in 0..c.fns.len() {
-        let f = c.fns.at(i);
-        out.format_into("    pub fn {}(", f.name.as_str());
-        for j in 0..f.params.len() {
-            if j != 0 {
-                out.push_str(", ");
-            }
-            out.format_into("{}: {}", f.params[j].name.as_str(), f.params[j].ty.as_str());
-        }
-        if f.variadic {
-            if f.params.len() != 0 {
-                out.push_str(", ");
-            }
-            out.push_str("...");
-        }
-        out.format_into(") {};\n", f.ret.as_str());
-    }
-    out.push_str("}\n");
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -2272,10 +1329,10 @@ fn run_one(
         switch loader::read_file(ipath.as_str()) {
             Some(text) => {
                 let mut lx = Lexer::new(text.as_str());
-                parse_unit(&mut lx, &mut c, hdr.as_str(), froms, mdump.as_str());
-                collect_consts(&mut c, hdr.as_str(), mdump.as_str());
+                lx.parse_unit(&mut c, hdr.as_str(), froms, mdump.as_str());
+                c.collect_consts(hdr.as_str(), mdump.as_str());
                 let mut out = String::new();
-                emit(&c, hdr.as_str(), spelling.as_str(), link, &mut out);
+                c.emit(hdr.as_str(), spelling.as_str(), link, &mut out);
                 rc = write_out(out.as_str(), out_path, c.fns.len(), c.skipped);
             },
             None => {
@@ -2396,7 +1453,7 @@ fn module_stem(p: str, out: &mut String) {
 /// Every `.h` under `dir`, recursively. `rel` is the path so far BELOW the directory the user named,
 /// which is what the generated module uses to `#include` it -- name the include root and the spellings
 /// come out the way C code writes them (`curl/curl.h`).
-fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) i32 {
+fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
     let mut d = String::from_str(dir);
     let dh = unsafe shim::sc_opendir(d.cstr());
     if dh == null {
@@ -2406,7 +1463,7 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) i32 {
             dir.len() as i32,
             dir.ptr(),
         );
-        return 1;
+        return false;
     }
     let mut names = Vector::<String>::new();
     loop {
@@ -2422,13 +1479,13 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) i32 {
     }
     let _ = unsafe shim::sc_closedir(dh);
     names.sort_by(|a: &String, b: &String| name_cmp(a, b));
-    let mut rc: i32 = 0;
+    let mut ok = true;
     for i in 0..names.len() {
         let mut child = join_path(dir, names[i].as_str());
         let crel = join_path(rel, names[i].as_str());
         if unsafe shim::sc_stat_isdir(child.cstr()) == 1 {
-            if walk_headers(child.as_str(), crel.as_str(), out_dir, jobs) != 0 {
-                rc = 1;
+            if !walk_headers(child.as_str(), crel.as_str(), out_dir, jobs) {
+                ok = false;
             }
         } else if names[i].as_str().ends_with(".h") {
             let o = join_path(out_dir, dir_part(crel.as_str()));
@@ -2440,7 +1497,7 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) i32 {
             continue;
         }
     }
-    return rc;
+    return ok;
 }
 
 // Byte-lexicographic with a length tiebreak: the same walk order on every filesystem.
@@ -2502,7 +1559,7 @@ pub fn run(
                 rc = 1;
                 break;
             }
-            if walk_headers(p, "", out_dir, &mut jobs) != 0 {
+            if !walk_headers(p, "", out_dir, &mut jobs) {
                 rc = 1;
             }
             continue;
@@ -2567,4 +1624,984 @@ pub fn run(
         }
     }
     return rc;
+}
+
+extend Lexer {
+    fn skip_noise(self: &mut Self) {
+        loop {
+            if self.kind != TK_IDENT {
+                return;
+            }
+            let t = self.text();
+            if noise_call(t) {
+                self.advance();
+                self.skip_group(b'(', b')');
+                continue;
+            }
+            if noise_word(t) {
+                self.advance();
+                continue;
+            }
+            return;
+        }
+    }
+
+    /// `{ NAME [= <int>] , ... }`. Auto-increment is C's, so a bare name is one past the previous value. An
+    /// enumerator this cannot evaluate marks the whole enum unusable rather than guessing a discriminant --
+    /// a wrong constant is a bug at every call site that compares against it.
+    fn parse_enum_body(self: &mut Self, c: &mut Collected, tag: str, dump: str) {
+        let mut e = EnumDef { tag: String::from_str(tag), vals: Vector::<EnumVal>::new(), ok: true, mine: c.cur_mine };
+        self.advance(); // '{'
+        let mut next: i64 = 0;
+        let mut known = true;
+        loop {
+            self.skip_noise();
+            if self.kind == TK_EOF || self.at_punct(b'}') {
+                break;
+            }
+            let before = self.pos;
+            if self.at_punct(b',') {
+                self.advance();
+                continue;
+            }
+            if self.kind != TK_IDENT {
+                e.ok = false;
+                self.advance();
+                continue;
+            }
+            let nm = String::from_str(self.text());
+            self.advance();
+            self.skip_noise();
+            if self.at_punct(b'=') {
+                self.advance();
+                self.skip_noise();
+                // The whole initialiser, up to the comma or brace that ends it, handed to the constant
+                // evaluator: `= 1 << 8` and `= A | B` are as common in headers as a bare number.
+                let vstart = self.start;
+                let mut vend = self.start;
+                let mut par: i32 = 0;
+                loop {
+                    if self.kind == TK_EOF {
+                        break;
+                    }
+                    if par == 0 && (self.at_punct(b',') || self.at_punct(b'}')) {
+                        break;
+                    }
+                    if self.at_punct(b'(') {
+                        par = par + 1;
+                    } else if self.at_punct(b')') {
+                        par = par - 1;
+                    }
+                    vend = self.end;
+                    self.advance();
+                }
+                let v = ce_eval(self.src.slice(vstart, vend), c, &e, dump, 0);
+                // An enumerator this cannot evaluate makes the NEXT one unknown too, since C's auto-increment
+                // counts from it. Only those are dropped -- the rest of the enum is still worth having.
+                known = v.is_some();
+                next = v.unwrap_or(0);
+            }
+            if known {
+                e.vals.push(EnumVal { name: nm, value: next });
+            } else {
+                e.partial = true;
+            }
+            next = next + 1;
+            self.skip_noise();
+            if !self.at_punct(b',') && !self.at_punct(b'}') {
+                e.ok = false;
+                break;
+            }
+            if self.pos == before && self.kind != TK_EOF {
+                e.ok = false;
+                self.advance();
+            }
+        }
+        // Consume the rest of the body whatever happened, so the declaration after it still parses.
+        while self.kind != TK_EOF && !self.at_punct(b'}') {
+            self.advance();
+        }
+        if self.at_punct(b'}') {
+            self.advance();
+        }
+        if e.vals.len() == 0 {
+            e.ok = false;
+        }
+        c.enums.push(e);
+    }
+
+    /// `{ <member declarations> }`. Members are ordinary declarations, so the same specifier/declarator parse
+    /// runs recursively. Bitfields, anonymous members and flexible arrays make the record unusable: each one
+    /// changes the LAYOUT in a way a field list cannot express, and a record with the wrong layout is worse
+    /// than no record at all.
+    fn parse_record_body(self: &mut Self, c: &mut Collected, tag: str, is_union: bool, dump: str) {
+        let mut r = Record {
+            tag: String::from_str(tag),
+            fields: Vector::<Field>::new(),
+            is_union: is_union,
+            ok: true, // a nameless body is named by the typedef that follows; emission re-checks the tag
+            mine: c.cur_mine,
+        };
+        self.advance(); // '{'
+        let mut depth: i32 = 1;
+        loop {
+            self.skip_noise();
+            if self.kind == TK_EOF {
+                break;
+            }
+            // A member shape this parser does not model would otherwise consume nothing and spin here
+            // forever. Stepping over one token loses that member -- which `ok` already records -- instead
+            // of the whole run.
+            let before = self.pos;
+            if self.at_punct(b'}') {
+                self.advance();
+                depth = depth - 1;
+                if depth == 0 {
+                    break;
+                }
+                continue;
+            }
+            if self.at_punct(b';') {
+                self.advance();
+                continue;
+            }
+            let mut td = false;
+            let mut bc = false;
+            let mut st = false;
+            let base = self.parse_specs(c, &mut td, &mut bc, &mut st, dump);
+            let mut any = false;
+            loop {
+                let mut nm = String::new();
+                let mut isfn = false;
+                let mut va = false;
+                let mut ps = Vector::<Param>::new();
+                let mut adim: i64 = -1;
+                let ty = self.parse_declarator(
+                    c,
+                    &base,
+                    bc,
+                    &mut nm,
+                    &mut isfn,
+                    &mut ps,
+                    &mut va,
+                    false,
+                    &mut adim,
+                    dump,
+                );
+
+                if self.at_punct(b':') {
+                    r.ok = false; // a bitfield: its width is not a field type
+                    self.advance();
+                    if self.kind == TK_NUM {
+                        self.advance();
+                    }
+                }
+                if nm.len() == 0 || isfn || !ty.ok || adim == -2 {
+                    r.ok = false; // an anonymous member, a function member, or an extent with no constant
+                } else {
+                    let mut rt = String::new();
+                    if adim >= 0 {
+                        rt.push_byte(b'[');
+                        ty.render(&mut rt);
+                        rt.format_into("; {}]", adim);
+                    } else {
+                        ty.render(&mut rt);
+                    }
+                    let mut fname = String::new();
+                    safe_name(nm.as_str(), &mut fname);
+                    r.fields.push(Field { name: fname, ty: rt });
+                }
+                any = true;
+                self.skip_noise();
+                if self.at_punct(b',') {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+
+            let _ = any;
+            if self.at_punct(b';') {
+                self.advance();
+            }
+            if self.pos == before && self.kind != TK_EOF {
+                r.ok = false;
+                self.advance();
+            }
+        }
+        if r.fields.len() == 0 {
+            r.ok = false;
+        }
+        c.records.push(r);
+    }
+
+    /// Declaration specifiers: the type part of a declaration, up to the first declarator. Returns the base
+    /// type; `is_typedef` reports a leading `typedef`. A `struct`/`union`/`enum` body is skipped -- only its tag
+    /// is kept, and the tag becomes an opaque type if the emitted signatures need it.
+    fn parse_specs(
+        self: &mut Self,
+        c: &mut Collected,
+        is_typedef: &mut bool,
+        base_const: &mut bool,
+        is_static: &mut bool,
+        dump: str,
+    ) CType {
+        let mut ty = ctype_new();
+        let mut signed = true;
+        let mut explicit_sign = false;
+        let mut longs: i32 = 0;
+        let mut shorts: i32 = 0;
+        let mut prim = String::new();
+        let mut named = false;
+        *is_typedef = false;
+        *base_const = false;
+        *is_static = false;
+        loop {
+            self.skip_noise();
+            if self.kind != TK_IDENT {
+                break;
+            }
+            let t = self.text();
+            if t == "typedef" {
+                *is_typedef = true;
+                self.advance();
+                continue;
+            }
+            if t == "const" {
+                *base_const = true;
+                self.advance();
+                continue;
+            }
+            if t == "static" || t == "extern" || t == "register" || t == "auto" || t == "__thread" || t == "_Thread_local" {
+                // A `static inline` helper left in the header has no external symbol to call.
+                if t == "static" {
+                    *is_static = true;
+                }
+                if t == "extern" {
+                    c.saw_extern = true;
+                }
+                self.advance();
+                continue;
+            }
+            if t == "unsigned" || t == "signed" || t == "__signed" || t == "__signed__" {
+                signed = t != "unsigned";
+                explicit_sign = true;
+                self.advance();
+                continue;
+            }
+            if t == "long" {
+                longs = longs + 1;
+                self.advance();
+                continue;
+            }
+            if t == "short" {
+                shorts = shorts + 1;
+                self.advance();
+                continue;
+            }
+            if t == "void" || t == "char" || t == "int" || t == "float" || t == "double" || t == "_Bool" {
+                prim.clear();
+                prim.push_str(t);
+                self.advance();
+                continue;
+            }
+            if t == "struct" || t == "union" || t == "enum" {
+                let is_enum = t == "enum";
+                let is_union = t == "union";
+                self.advance();
+                self.skip_noise();
+                let mut tag = String::new();
+                if self.kind == TK_IDENT {
+                    tag.push_str(self.text());
+                    self.advance();
+                }
+                let mut defined = false;
+                if self.at_punct(b'{') {
+                    defined = true;
+                    if is_enum {
+                        self.parse_enum_body(c, tag.as_str(), dump);
+                    } else {
+                        self.parse_record_body(c, tag.as_str(), is_union, dump);
+                    }
+                }
+                if is_enum {
+                    // A TAGGED enum defined here becomes a Super-C enum, so its tag names a type a signature
+                    // can use; anything else is an `int` as far as a call is concerned.
+                    // Named by its tag exactly when that enum is one this module emits -- including at a USE
+                    // site, which carries no body and is where most of them appear.
+                    if tag.len() == 0 && defined {
+                        c.pending_agg = c.enums.len() as i32 - 1; // the typedef below names it, if one follows
+                        c.pending_is_enum = true;
+                        ty.ok = false;
+                    } else if tag.len() != 0 && c.enum_emitted(tag.as_str()) {
+                        ty.base.push_string(&tag);
+                    } else {
+                        ty.base.push_str("i32");
+                    }
+                } else if tag.len() != 0 {
+                    ty.base.push_string(&tag);
+                    c.note_opaque(tag.as_str());
+                } else if defined {
+                    c.pending_agg = c.records.len() as i32 - 1;
+                    c.pending_is_enum = false;
+                    ty.ok = false; // nameless until the typedef below names it
+                } else {
+                    ty.ok = false; // an anonymous struct has no name to refer to
+                }
+                named = true;
+                break;
+            }
+            // The type is complete -- this identifier starts the declarator. `unsigned long n` counts as
+            // complete even though no type NAME was written, or the parameter's own name is swallowed as one.
+            if named || prim.len() != 0 || longs > 0 || shorts > 0 || explicit_sign {
+                break;
+            }
+            // A typedef name, or a type this tool has never heard of.
+            // `size_t` means `usize` because that is what it means, not because this host happens to spell
+            // it `unsigned long` -- so the standard names are consulted before the typedef table.
+            if wellknown(t, &mut ty.base) {
+                named = true;
+                self.advance();
+                break;
+            }
+            let ai = c.alias_of(t);
+            if ai >= 0 {
+                // Copied out first: noting the opaque tag needs `&mut c`, which the alias borrow would hold.
+                let mut sub = String::new();
+                let opaque = c.aliases.at(ai as usize).opaque;
+                if opaque {
+                    sub.push_str(c.aliases.at(ai as usize).name.as_str());
+                } else {
+                    sub.push_str(c.aliases.at(ai as usize).sub.as_str());
+                }
+                ty.base.push_string(&sub);
+                if opaque {
+                    c.note_opaque(sub.as_str());
+                }
+                if !c.aliases.at(ai as usize).ok {
+                    ty.ok = false;
+                }
+            } else {
+                ty.ok = false;
+                ty.base.push_str(t);
+            }
+            named = true;
+            self.advance();
+            break;
+        }
+        if !named {
+            let p = prim.as_str();
+            if p == "void" {
+                ty.base.push_str("void");
+            } else if p == "float" {
+                ty.base.push_str("f32");
+            } else if p == "double" {
+                if longs > 0 {
+                    ty.ok = false; // long double has no Super-C counterpart
+                }
+                ty.base.push_str("f64");
+            } else if p == "char" {
+                // Bare `char` is C's string byte and Super-C's `char`; an explicitly signed one is an integer.
+                if explicit_sign {
+                    int_name(1, signed, &mut ty.base);
+                } else {
+                    ty.base.push_str("char");
+                }
+            } else if p == "_Bool" {
+                ty.base.push_str("bool");
+            } else if p == "int" || longs > 0 || shorts > 0 || explicit_sign {
+                let mut b = c.widths.int_b;
+                if shorts > 0 {
+                    b = c.widths.short_b;
+                } else if longs == 1 {
+                    b = c.widths.long_b;
+                } else if longs > 1 {
+                    b = c.widths.llong_b;
+                }
+                int_name(b, signed, &mut ty.base);
+            } else {
+                ty.ok = false;
+            }
+        }
+        return ty;
+    }
+
+    /// One declarator: pointers, an optional name, then array/function suffixes. `name` receives the declared
+    /// identifier (empty for an abstract declarator). `is_fn` reports a function declarator and `params`/
+    /// `variadic` its signature.
+    fn parse_declarator(
+        self: &mut Self,
+        c: &mut Collected,
+        base: &CType,
+        base_const: bool,
+        name: &mut String,
+        is_fn: &mut bool,
+        params: &mut Vector<Param>,
+        variadic: &mut bool,
+        decay: bool,
+        arr_len: &mut i64,
+        dump: str,
+    ) CType {
+        let mut ty = base.clone();
+        if base_const {
+            ty.qual = ty.qual | 1u32;
+        }
+        *is_fn = false;
+        *variadic = false;
+        *arr_len = -1;
+        loop {
+            self.skip_noise();
+            if !self.at_punct(b'*') {
+                break;
+            }
+            self.advance();
+            if ty.ptr + 1 >= MAX_PTR {
+                ty.ok = false;
+                ty.ptr = MAX_PTR - 1;
+            } else {
+                ty.ptr = ty.ptr + 1;
+            }
+            self.skip_noise();
+            while self.kind == TK_IDENT && self.text() == "const" {
+                ty.qual = ty.qual | 1u32 << ty.ptr as u32;
+                self.advance();
+                self.skip_noise();
+            }
+        }
+        self.skip_noise();
+        // `T (*name)(args)`: a function pointer. The inner parenthesised declarator holds the name; the
+        // suffix that follows the group is the signature it points to.
+        let mut fnptr = false;
+        if self.at_punct(b'(') {
+            let save = self.pos;
+            let sk = self.kind;
+            let ss = self.start;
+            let se = self.end;
+            self.advance();
+            self.skip_noise();
+            if self.at_punct(b'*') {
+                fnptr = true;
+                self.advance();
+                self.skip_noise();
+                if self.kind == TK_IDENT {
+                    name.push_str(self.text());
+                    self.advance();
+                }
+                self.skip_noise();
+                if self.at_punct(b')') {
+                    self.advance();
+                }
+            } else {
+                self.pos = save;
+                self.kind = sk;
+                self.start = ss;
+                self.end = se;
+            }
+        } else if self.kind == TK_IDENT {
+            name.push_str(self.text());
+            self.advance();
+        }
+        self.skip_noise();
+        if self.at_punct(b'(') {
+            let mut ps = Vector::<Param>::new();
+            let mut va = false;
+            self.parse_params(c, &mut ps, &mut va, dump);
+            if fnptr {
+                // Rendered here and carried as a signature: `fn(..) T` is already the pointer.
+                let mut sig = String::from_str("fn(");
+                for i in 0..ps.len() {
+                    if i != 0 {
+                        sig.push_str(", ");
+                    }
+                    sig.push_string(&ps[i].ty);
+                }
+                sig.push_str(") ");
+                ty.render(&mut sig);
+                let mut out = ctype_new();
+                out.ok = ty.ok && !va;
+                out.fnsig.push_string(&sig);
+                return out;
+            }
+            *is_fn = true;
+            *variadic = va;
+            for i in 0..ps.len() {
+                params.push(
+                    Param { name: String::from_str(ps[i].name.as_str()), ty: String::from_str(ps[i].ty.as_str()) },
+                );
+            }
+        }
+        // An array PARAMETER is a pointer -- that is C's own rule. An array FIELD is not: dropping its extent
+        // would change the record's layout, so the bound is carried out and the field keeps `[T; N]`.
+        let mut first = true;
+        while self.at_punct(b'[') {
+            if decay {
+                self.skip_group(b'[', b']');
+                if ty.ptr + 1 >= MAX_PTR {
+                    ty.ok = false;
+                } else {
+                    ty.ptr = ty.ptr + 1;
+                }
+                continue;
+            }
+            self.advance();
+            let mut n: i64 = -2; // no extent, or one this tool cannot evaluate
+            if self.kind == TK_NUM {
+                n = int_literal(self.text());
+                if n < 0 {
+                    n = -2;
+                }
+                self.advance();
+            }
+            if !self.at_punct(b']') {
+                n = -2;
+                while self.kind != TK_EOF && !self.at_punct(b']') {
+                    self.advance();
+                }
+            }
+            if self.at_punct(b']') {
+                self.advance();
+            }
+            if first {
+                *arr_len = n;
+            } else {
+                *arr_len = -2; // a second dimension: not modelled
+            }
+            first = false;
+        }
+        return ty;
+    }
+
+    fn parse_params(self: &mut Self, c: &mut Collected, out: &mut Vector<Param>, variadic: &mut bool, dump: str) {
+        self.advance(); // '('
+        let mut idx: i32 = 0;
+        loop {
+            self.skip_noise();
+            if self.kind == TK_EOF || self.at_punct(b')') {
+                break;
+            }
+            if self.kind == TK_PUNCT && self.text() == "..." {
+                *variadic = true;
+                self.advance();
+                continue;
+            }
+            if self.at_punct(b',') {
+                self.advance();
+                continue;
+            }
+            let mut td = false;
+            let mut bc = false;
+            let mut st = false;
+            let base = self.parse_specs(c, &mut td, &mut bc, &mut st, dump);
+            let mut nm = String::new();
+            let mut isfn = false;
+            let mut va2 = false;
+            let mut sub = Vector::<Param>::new();
+            let mut adim: i64 = -1;
+            let ty = self.parse_declarator(c, &base, bc, &mut nm, &mut isfn, &mut sub, &mut va2, true, &mut adim, dump);
+
+            // `(void)` is an empty parameter list, not a parameter.
+            let void_only = nm.len() == 0 && ty.ptr == 0 && ty.fnsig.len() == 0 && ty.base.as_str() == "void";
+            if !void_only {
+                let mut rendered = String::new();
+                ty.render(&mut rendered);
+                let mut pname = String::new();
+                if nm.len() != 0 {
+                    safe_name(nm.as_str(), &mut pname);
+                } else {
+                    pname.format_into("a{}", idx);
+                }
+                if !ty.ok {
+                    rendered.clear();
+                    rendered.push_str("?");
+                }
+                out.push(Param { name: pname, ty: rendered });
+                idx = idx + 1;
+            }
+
+            self.skip_noise();
+            if self.at_punct(b',') {
+                self.advance();
+            } else if !self.at_punct(b')') {
+                break; // something unmodelled: stop before it desynchronises the whole file
+            }
+        }
+        if self.at_punct(b')') {
+            self.advance();
+        }
+    }
+
+    /// Walk the whole preprocessed unit. Every typedef is recorded (the target's signatures are spelled with
+    /// them, wherever they were declared); only declarations whose origin file is `want` are emitted.
+    fn parse_unit(self: &mut Self, c: &mut Collected, want: str, extra: &Vector<String>, dump: str) {
+        loop {
+            self.skip_noise();
+            if self.kind == TK_EOF {
+                return;
+            }
+            if self.at_punct(b';') {
+                self.advance();
+                continue;
+            }
+            if self.at_punct(b'{') {
+                self.skip_group(b'{', b'}'); // a `static inline` body left in the header
+                continue;
+            }
+            if self.kind != TK_IDENT {
+                self.advance();
+                continue;
+            }
+            let here = String::from_str(self.file.as_str());
+            let mine = same_origin(here.as_str(), want, extra);
+            // Published for parse_specs: a struct or enum BODY is parsed from inside the specifier, which is
+            // where its origin has to be known -- only the target header's own records are emitted.
+            c.cur_mine = mine;
+            c.pending_agg = -1;
+            c.saw_extern = false;
+            let mut td = false;
+            let mut bc = false;
+            let mut st = false;
+            let base = self.parse_specs(c, &mut td, &mut bc, &mut st, dump);
+            loop {
+                let mut nm = String::new();
+                let mut isfn = false;
+                let mut va = false;
+                let mut ps = Vector::<Param>::new();
+                let mut adim: i64 = -1;
+                let ty = self.parse_declarator(
+                    c,
+                    &base,
+                    bc,
+                    &mut nm,
+                    &mut isfn,
+                    &mut ps,
+                    &mut va,
+                    true,
+                    &mut adim,
+                    dump,
+                );
+                // A parameter this tool could not model poisons the whole signature: a binding with a wrong
+                // type is worse than a missing one, so the function is dropped rather than guessed at.
+                let mut keep = nm.len() != 0 && !td && !st && isfn && mine && ty.ok;
+                for i in 0..ps.len() {
+                    if ps[i].ty.as_str() == "?" {
+                        keep = false;
+                    }
+                }
+                if nm.len() != 0 && td {
+                    c.record_typedef(nm.as_str(), &ty, isfn);
+                }
+                // `extern int errno;` and friends: a global the library exports. Bound by what C itself
+                // declares: a const-qualified binding becomes an extern `const` (readable), anything else a
+                // `static mut`, whose accesses carry the ordinary static-mut unsafe rules across the FFI.
+                if !keep && !td && !st && !isfn && mine && ty.ok && c.saw_extern && nm.len() != 0 && adim < 0 {
+                    let mut vt = String::new();
+                    ty.render(&mut vt);
+                    let wr = ty.fnsig.len() != 0 || !ty.qual_at(ty.ptr);
+                    c.globals.push(
+                        ConstDef { name: String::from_str(nm.as_str()), ty: vt, value: String::new(), mutable: wr },
+                    );
+                }
+                if keep {
+                    let mut ret = String::new();
+                    ty.render(&mut ret);
+                    c.fns.push(FnDecl { name: String::from_str(nm.as_str()), params: ps, ret: ret, variadic: va });
+                } else {
+                    if isfn && mine && !td && !st && nm.len() != 0 {
+                        c.skipped = c.skipped + 1;
+                    }
+                }
+
+                self.skip_noise();
+                if self.at_punct(b',') {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+
+            if self.at_punct(b'{') {
+                self.skip_group(b'{', b'}');
+            } else if self.at_punct(b';') {
+                self.advance();
+            } else if self.kind != TK_EOF {
+                self.advance(); // unmodelled: step over one token and resynchronise on the next `;`
+            }
+        }
+    }
+}
+
+extend Collected {
+    fn alias_of(self: &Collected, name: str) i32 {
+        for i in 0..self.aliases.len() {
+            if self.aliases[i].name.as_str() == name {
+                return i as i32;
+            }
+        }
+        return -1;
+    }
+
+    fn note_opaque(self: &mut Collected, name: str) {
+        for i in 0..self.opaques.len() {
+            if self.opaques[i].as_str() == name {
+                return;
+            }
+        }
+        self.opaques.push(String::from_str(name));
+    }
+
+    fn record_of(self: &Self, tag: str) i32 {
+        for i in 0..self.records.len() {
+            if self.records[i].tag.as_str() == tag {
+                return i as i32;
+            }
+        }
+        return -1;
+    }
+
+    // A typedef of a pointer-to-struct or of a struct tag keeps its own NAME as an opaque type; anything else
+    // resolves to the Super-C type it stands for.
+    fn record_typedef(self: &mut Self, name: str, ty: &CType, is_fn: bool) {
+        let pend = self.pending_agg;
+        let pend_enum = self.pending_is_enum;
+        self.pending_agg = -1;
+        if is_fn || self.alias_of(name) >= 0 {
+            return;
+        }
+        // `typedef struct { .. } Foo;` -- the body carried no tag, so the typedef IS the name. Most C
+        // libraries declare their types this way, and a nameless record was previously dropped outright.
+        if pend >= 0 && ty.ptr == 0 && ty.fnsig.len() == 0 {
+            let idx = pend as usize;
+            if pend_enum && idx < self.enums.len() && self.enums[idx].tag.len() == 0 {
+                self.enums[idx].tag.push_str(name);
+                self.aliases.push(
+                    Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true },
+                );
+                return;
+            }
+            if !pend_enum && idx < self.records.len() && self.records[idx].tag.len() == 0 {
+                self.records[idx].tag.push_str(name);
+                self.aliases.push(
+                    Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true },
+                );
+                return;
+            }
+        }
+        let mut sub = String::new();
+        ty.render(&mut sub);
+        let opaque = ty.ptr == 0 && ty.fnsig.len() == 0 && sub.as_str() == name;
+        self.aliases.push(Alias { name: String::from_str(name), sub: sub, opaque: opaque, ok: ty.ok || opaque });
+    }
+
+    // Only the opaque tags the emitted signatures actually mention: a header pulls in hundreds of struct names
+    // through its own includes, and binding all of them would bury the ones a caller needs.
+    fn opaque_used(self: &Self, name: str) bool {
+        for i in 0..self.fns.len() {
+            let f = self.fns.at(i);
+            if type_mentions(f.ret.as_str(), name) {
+                return true;
+            }
+            for j in 0..f.params.len() {
+                if type_mentions(f.params[j].ty.as_str(), name) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // A tag emitted as a real `pub struct`/`pub union` must not ALSO be declared opaque -- one name, one
+    // definition.
+    fn record_emitted(self: &Self, tag: str) bool {
+        let ri = self.record_of(tag);
+        if ri < 0 {
+            return false;
+        }
+        let r = self.records.at(ri as usize);
+        return r.mine && r.ok;
+    }
+
+    fn enum_emitted(self: &Self, tag: str) bool {
+        for i in 0..self.enums.len() {
+            if self.enums[i].tag.as_str() == tag {
+                return self.enums[i].mine && self.enums[i].ok;
+            }
+        }
+        return false;
+    }
+
+    // A name already spoken for. C's namespaces are separate -- a macro, an enumerator and a function may all
+    // be called `FOO` -- but Super-C has one, so the first definition wins and the rest are left out.
+    fn name_taken(self: &Self, upto: usize, name: str) bool {
+        for i in 0..self.fns.len() {
+            if self.fns[i].name.as_str() == name {
+                return true;
+            }
+        }
+        for i in 0..upto {
+            if self.consts[i].name.as_str() == name {
+                return true;
+            }
+        }
+        for i in 0..self.records.len() {
+            if self.records[i].tag.as_str() == name && self.record_emitted(name) {
+                return true;
+            }
+        }
+        for i in 0..self.enums.len() {
+            if self.enums[i].tag.as_str() == name && self.enum_emitted(name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The constants the module exposes: an anonymous enum's enumerators (C's "block of constants" idiom),
+    /// then the target header's own object-like macros. Order matters -- an enumerator is a real declaration
+    /// and a macro is textual, so the declaration wins any name they share.
+    fn collect_consts(self: &mut Self, header: str, dump: str) {
+        for i in 0..self.enums.len() {
+            if !self.enums[i].mine || !self.enums[i].ok || self.enums[i].tag.len() != 0 {
+                continue;
+            }
+            for j in 0..self.enums[i].vals.len() {
+                let mut cd = ConstDef { name: String::new(), ty: String::from_str("i32"), value: String::new() };
+                cd.name.push_str(self.enums[i].vals[j].name.as_str());
+                cd.value.format_into("{}", self.enums[i].vals[j].value);
+                let taken = self.name_taken(self.consts.len(), cd.name.as_str());
+                if taken {} else {
+                    self.consts.push(cd);
+                }
+            }
+        }
+        let mut names = Vector::<String>::new();
+        switch loader::read_file(header) {
+            Some(src) => {
+                header_macro_names(src.as_str(), &mut names);
+            },
+            None => {},
+        };
+        for i in 0..names.len() {
+            let mut raw = String::new();
+            if macro_value(dump, names[i].as_str(), &mut raw) {
+                let mut cd = ConstDef { name: String::new(), ty: String::new(), value: String::new() };
+                let ok = macro_const(names[i].as_str(), raw.as_str(), self, dump, &mut cd) && !self.name_taken(
+                    self.consts.len(),
+                    names[i].as_str(),
+                );
+                if ok {
+                    self.consts.push(cd);
+                } else {}
+            }
+        }
+    }
+
+    fn emit(self: &Self, header: str, spelling: str, link: str, out: &mut String) {
+        out.format_into("// Generated by `super-c bindgen {}`; edit the generator's input, not this file.\n", spelling);
+        out.push_str(
+            "// Raw C bindings: every call requires `unsafe`. Structs reached only through a pointer are opaque\n",
+        );
+        out.push_str("// types -- their layout is C's business, not this module's.\n\n");
+        let _ = header;
+        // The constants are ordinary top-level items and come first; `@c.link` has to sit on the extern block
+        // itself, so it is emitted last, immediately above it.
+        for i in 0..self.consts.len() {
+            let cd = self.consts.at(i);
+            out.format_into("pub const {}: {} = {};\n", cd.name.as_str(), cd.ty.as_str(), cd.value.as_str());
+        }
+        if self.consts.len() != 0 {
+            out.push_byte(b'\n');
+        }
+        if link.len() != 0 {
+            out.format_into("@c.link(\"{}\")\n", link);
+        }
+        out.format_into("extern \"C\" \"{}\" {{\n", spelling);
+        let mut first = true;
+        for i in 0..self.opaques.len() {
+            let nm = self.opaques[i].as_str();
+            if !self.opaque_used(nm) || self.record_emitted(nm) || self.enum_emitted(nm) {
+                continue;
+            }
+            // A tag C never typedef'd is `struct x` there, not `x`.
+            let ai = self.alias_of(nm);
+            if !(ai >= 0 && self.aliases.at(ai as usize).opaque) {
+                out.format_into("    @c.import(\"struct {}\")\n", nm);
+            }
+            out.format_into("    pub type {};\n", nm);
+            first = false;
+        }
+        if !first {
+            out.push_byte(b'\n');
+        }
+        for i in 0..self.enums.len() {
+            let e = self.enums.at(i);
+            if !e.mine || !e.ok || e.tag.len() == 0 {
+                continue;
+            }
+            let ai = self.alias_of(e.tag.as_str());
+            if !(ai >= 0 && self.aliases.at(ai as usize).opaque) {
+                out.format_into("    @c.import(\"enum {}\")\n", e.tag.as_str());
+            }
+            out.format_into("    pub enum {} {{\n", e.tag.as_str());
+            for j in 0..e.vals.len() {
+                out.format_into("        {} = {},\n", e.vals[j].name.as_str(), e.vals[j].value);
+            }
+            out.push_str("    }\n\n");
+        }
+        // Inside the block, so these ARE the header's types rather than look-alikes: the emitted C uses the
+        // header's own definition and asserts this layout against it. A tag C never typedef'd has to be
+        // spelled `struct x` there, which is what the pinned symbol carries.
+        for i in 0..self.records.len() {
+            let r = self.records.at(i);
+            if !r.mine || !r.ok || r.tag.len() == 0 {
+                continue;
+            }
+            let kw = if r.is_union {
+                "union";
+            } else {
+                "struct";
+            };
+            let ai = self.alias_of(r.tag.as_str());
+            let typedefed = ai >= 0 && self.aliases.at(ai as usize).opaque;
+            if !typedefed {
+                out.format_into("    @c.import(\"{} {}\")\n", kw, r.tag.as_str());
+            }
+            out.format_into("    pub {} {} {{\n", kw, r.tag.as_str());
+            for j in 0..r.fields.len() {
+                out.format_into("        pub {}: {},\n", r.fields[j].name.as_str(), r.fields[j].ty.as_str());
+            }
+            out.push_str("    }\n\n");
+        }
+        for i in 0..self.globals.len() {
+            if self.globals[i].mutable {
+                out.format_into(
+                    "    pub static mut {}: {};\n",
+                    self.globals[i].name.as_str(),
+                    self.globals[i].ty.as_str(),
+                );
+            } else {
+                out.format_into("    pub const {}: {};\n", self.globals[i].name.as_str(), self.globals[i].ty.as_str());
+            }
+        }
+        if self.globals.len() != 0 {
+            out.push_byte(b'\n');
+        }
+        for i in 0..self.fns.len() {
+            let f = self.fns.at(i);
+            out.format_into("    pub fn {}(", f.name.as_str());
+            for j in 0..f.params.len() {
+                if j != 0 {
+                    out.push_str(", ");
+                }
+                out.format_into("{}: {}", f.params[j].name.as_str(), f.params[j].ty.as_str());
+            }
+            if f.variadic {
+                if f.params.len() != 0 {
+                    out.push_str(", ");
+                }
+                out.push_str("...");
+            }
+            out.format_into(") {};\n", f.ret.as_str());
+        }
+        out.push_str("}\n");
+    }
 }

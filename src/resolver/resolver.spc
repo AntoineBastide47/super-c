@@ -4,7 +4,6 @@
 // per-symbol chain links, so scope exit is a truncate + relink. Also collects closure captures onto the
 // closure node and, in lint mode, runs the unused-binding / dead-store / unused-label passes.
 import string as cstring;
-import stdlib;
 import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
@@ -292,7 +291,7 @@ extend Resolver {
     // -- module-qualified resolution -----------------------------------------------------------------------
 
     // Heap-join `count` name-span segments with "::". Caller frees.
-    fn join_segs(self: &Self, seg_ids: *const NodeId, count: u32) *mut char {
+    fn join_segs(self: &Self, seg_ids: *const NodeId, count: u32) String {
         let mut total: usize = 0;
         let mut i: u32 = 0;
         while i < count {
@@ -303,22 +302,16 @@ extend Resolver {
             }
             i = i + 1;
         }
-        let out = (unsafe stdlib::malloc(total + 1)) as *mut char;
-        let mut at: usize = 0;
+        let mut out = String::with_capacity(total);
         i = 0;
         while i < count {
             if i != 0 {
-                unsafe out[at] = ':' as char;
-                unsafe out[at + 1] = ':' as char;
-                at = at + 2;
+                out.push_str("::");
             }
             let s = self.name_span(unsafe seg_ids[i as usize]);
-            let l = (s.end - s.start) as usize;
-            unsafe cstring::memcpy(out + at, self.source.ptr() + s.start as usize, l);
-            at = at + l;
+            out.push_str(str::from_raw(unsafe (self.source.ptr() + s.start as usize), (s.end - s.start) as usize));
             i = i + 1;
         }
-        unsafe out[at] = 0 as char;
         return out;
     }
 
@@ -330,9 +323,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         let ids = self.ast.list(parts);
         let buf = self.join_segs(ids, parts.len);
-        let m = pkg.find(str::from_raw(buf as *const u8, unsafe cstring::strlen(buf)));
-        unsafe stdlib::free(buf);
-        return m;
+        return pkg.find(buf.as_str());
     }
 
     // Resolve every import ONCE, up front: which names denote modules as a single leading segment (the
@@ -404,8 +395,7 @@ extend Resolver {
             }
         }
         let buf = self.join_segs(ids, parts.len - 1); // module = every segment but the last
-        let m = pkg.find(str::from_raw(buf as *const u8, unsafe cstring::strlen(buf)));
-        unsafe stdlib::free(buf);
+        let m = pkg.find(str::from_raw(buf.as_str().ptr(), buf.len()));
         if m >= 0 {
             return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize] };
         }
@@ -533,10 +523,9 @@ extend Resolver {
                 }
             }
             if !aliased {
-                found = pkg.find(str::from_raw(buf as *const u8, plen));
+                found = pkg.find(str::from_raw(buf.as_str().ptr(), plen));
             }
             if found >= 0 {
-                unsafe buf[plen] = 0 as char; // NUL-terminate the matched prefix for diagnostics
                 let mid = found as ModuleId;
                 if nn - m == 1 {
                     // module::decl -- a function (preferred) or type
@@ -556,7 +545,7 @@ extend Resolver {
                             format(
                                 "no public item '{}' in module '{}'",
                                 diag::span_str(self.source, dn.start, dn.end),
-                                diag::cstr(buf),
+                                str::from_raw(buf.as_str().ptr(), plen),
                             ),
                         );
                         self.errors.note(format("the module was found, but this item is missing or not public"));
@@ -578,7 +567,6 @@ extend Resolver {
                 }
             }
         }
-        unsafe stdlib::free(buf);
         return handled;
     }
 

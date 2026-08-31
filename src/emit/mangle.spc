@@ -615,9 +615,9 @@ extend Mangler {
             }
             v += bv * c;
         }
-        if lin_div_of(&l) != 1 {
+        if l.div_of() != 1 {
             let folded = ConstLin { k: v, n: 0, div: l.div };
-            v = lin_value(&folded);
+            v = folded.value();
         }
         *out_val = v;
         return true;

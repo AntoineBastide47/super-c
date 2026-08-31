@@ -59,12 +59,7 @@ fn t_borrowck(p: &mut loader::Package, i: usize) bool {
 
 // Resolve + typecheck `src` against the std prelude; asserts the snippet is error-free.
 fn typed_package(src: str) loader::Package {
-    let mut p = loader::package_from_source(
-        src.ptr() as *const char,
-        src.len(),
-        "std".ptr() as *const char,
-        unsafe shim::sc_host_platform(),
-    );
+    let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     assert(p.ok, "snippet parses");
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);

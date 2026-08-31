@@ -324,7 +324,7 @@ extend InstGraph {
                 hit = i;
             }
         }
-        if l.k == 0 && lin_div_of(l) <= 1 && nact == 1 && unsafe l.c[hit as usize] == 1 {
+        if l.k == 0 && l.div_of() <= 1 && nact == 1 && unsafe l.c[hit as usize] == 1 {
             let pd = unsafe l.p[hit as usize];
             for i in 0..frame.len() {
                 if frame.at(i).pmod == pd.module && frame.at(i).pdecl == pd.node {
@@ -357,7 +357,7 @@ extend InstGraph {
                 return none;
             }
         }
-        let d = lin_div_of(l);
+        let d = l.div_of();
         if d > 1 {
             v = v / d;
         }

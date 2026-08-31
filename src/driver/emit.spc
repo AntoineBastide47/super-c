@@ -191,27 +191,22 @@ struct LiveTask {
 // Tasks only read the frozen package and write disjoint rows.
 unsafe extend LiveTask as Send {}
 
-fn compute_emit_live(p: &loader::Package) *mut bool {
+fn compute_emit_live(p: &loader::Package) Vector<bool> {
     let n = p.modules.len();
     let sz = if n != 0 {
         n;
     } else {
         1 as usize;
     };
-    let live = (unsafe stdlib::calloc(sz, 1)) as *mut bool;
-    if live == null {
-        return null;
-    }
+    let mut live = Vector::<bool>::new();
+    live.resize_default(sz);
     for i in 0..n {
         if !p.modules[i].prelude {
-            unsafe live[i] = true;
+            live[i] = true;
         }
     }
-    let rows = (unsafe stdlib::calloc(sz * sz, 1)) as *mut bool;
-    if rows == null {
-        unsafe stdlib::free(live);
-        return null;
-    }
+    let mut rows = Vector::<bool>::new();
+    rows.resize_default(sz * sz);
     if p.jobs != 1 && n > 1 {
         let wg = psync::WaitGroup::new();
         let pv = (p as *const loader::Package) as *const void;
@@ -220,7 +215,7 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
                 continue;
             }
             wg.add(1);
-            let t = LiveTask { p: pv, row: unsafe (rows + m * n), m: m as u64 };
+            let t = LiveTask { p: pv, row: unsafe (rows.as_ptr() as *mut bool + m * n), m: m as u64 };
             let wgc = wg.clone();
             launch || {
                 emit_live_row(unsafe &*(t.p as *const loader::Package), t.m as usize, t.row);
@@ -231,7 +226,7 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
     } else {
         for m in 0..n {
             if p.modules[m].has_ast {
-                emit_live_row(p, m, unsafe (rows + m * n));
+                emit_live_row(p, m, unsafe (rows.as_ptr() as *mut bool + m * n));
             }
         }
     }
@@ -239,19 +234,17 @@ fn compute_emit_live(p: &loader::Package) *mut bool {
     while changed {
         changed = false;
         for m in 0..n {
-            if !unsafe live[m] || !p.modules[m].has_ast {
+            if !live[m] || !p.modules[m].has_ast {
                 continue;
             }
-            let row = unsafe (rows + m * n);
             for d in 0..n {
-                if unsafe row[d] && !unsafe live[d] {
-                    unsafe live[d] = true;
+                if rows[m * n + d] && !live[d] {
+                    live[d] = true;
                     changed = true;
                 }
             }
         }
     }
-    unsafe stdlib::free(rows);
     return live;
 }
 
@@ -1023,7 +1016,7 @@ fn borrow_ir_run(
     st.bodies += 1;
     let t0 = unsafe shim::sc_ticks_ms();
     let forest = bmp::MoveForest::build(body);
-    let bfacts = bfx::generate(ow, body, &forest);
+    let bfacts = ow.generate(body, &forest);
     let cfg = bdf::build_cfg(body);
     let lv = bdf::solve_liveness(&bfacts, &cfg);
     let t1 = unsafe shim::sc_ticks_ms();
@@ -1938,16 +1931,16 @@ fn cemit_tuc_replay(
     main_mod: &mut u64,
     main_argv: &mut bool,
 ) i32 {
-    let mut rd = tuc::tuc_open(t, m);
+    let mut rd = t.open(m);
     let mut tab = Vector::<tuc::TtEnt>::new();
-    if !tuc::read_table(&mut rd, &mut tab) {
+    if !rd.read_table(&mut tab) {
         return 1; // nothing mutated yet: emit live and re-record
     }
     let mut idc = Map::<u64, u64>::new();
-    let nev = tuc::read_count(&mut rd) as usize;
+    let nev = rd.read_count() as usize;
     let mut ev = mbe::RecEv::blank(0);
     for _i in 0..nev {
-        if !tuc::read_ev(&mut rd, &mut ev) {
+        if !rd.read_ev(&mut ev) {
             return 2;
         }
         tuc::ev_patch(p, &tab, &mut idc, &mut ev);
@@ -2071,7 +2064,7 @@ fn cemit_seed_module(
         if lw.body.is_generic {
             continue;
         }
-        cemit_apply_drops(dow, &mut lw);
+        dow.apply_drops(&mut lw);
         let mut sym = String::new();
         let tgt = cem.mg.method_target(m as ModuleId, nid);
         if !cem.mg.fn_sym(m as ModuleId, nid, tgt, true, &mut sym) {
@@ -2205,7 +2198,7 @@ fn cemit_seed_module(
                         let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
                         let mut slot = 0xFFFFFFFFFFFFFFFFu64;
                         if cemit_seed_take(g, p, m as ModuleId, cn, &mut cl, kl, true) {
-                            cemit_apply_drops(dow, &mut cl);
+                            dow.apply_drops(&mut cl);
                             slot = clws.len() as u64;
                             clws.push(cl);
                         }
@@ -2350,31 +2343,33 @@ const fn cap_zero() CapMark {
     };
 }
 
-fn cap_of(o: &SeedShard) CapMark {
-    let sc = &o.cem;
-    return CapMark {
-        env: sc.sh_env_k.len() as u32,
-        stat: sc.sh_stat_k.len() as u32,
-        statv: sc.stat_items.len() as u32,
-        glue: sc.sh_glue_k.len() as u32,
-        gluev: sc.glue.len() as u32,
-        ext: sc.sh_ext_k.len() as u32,
-        dyd: sc.sh_dyd_k.len() as u32,
-        dyt: sc.sh_dyt_k.len() as u32,
-        blk: sc.sh_blk_k.len() as u32,
-        sent: sc.sh_sent_k.len() as u32,
-        ti: sc.sh_ti_k.len() as u32,
-        tiv: sc.ti_reqs.len() as u32,
-        aux: sc.sh_aux_k.len() as u32,
-        dem: sc.demand.len() as u32,
-        agg: sc.mg.sh_agg_k.len() as u32,
-        dynr: sc.mg.dyn_reqs.len() as u32,
-        chunks: o.chunk_mod.len() as u32,
-        bodies: o.bodies.len() as u64,
-        protos: o.protos.len() as u64,
-        envn: o.env_names.len() as u32,
-        dclo: o.dclo_keys.len() as u32,
-    };
+extend SeedShard {
+    fn cap_of(self: &Self) CapMark {
+        let sc = &self.cem;
+        return CapMark {
+            env: sc.sh_env_k.len() as u32,
+            stat: sc.sh_stat_k.len() as u32,
+            statv: sc.stat_items.len() as u32,
+            glue: sc.sh_glue_k.len() as u32,
+            gluev: sc.glue.len() as u32,
+            ext: sc.sh_ext_k.len() as u32,
+            dyd: sc.sh_dyd_k.len() as u32,
+            dyt: sc.sh_dyt_k.len() as u32,
+            blk: sc.sh_blk_k.len() as u32,
+            sent: sc.sh_sent_k.len() as u32,
+            ti: sc.sh_ti_k.len() as u32,
+            tiv: sc.ti_reqs.len() as u32,
+            aux: sc.sh_aux_k.len() as u32,
+            dem: sc.demand.len() as u32,
+            agg: sc.mg.sh_agg_k.len() as u32,
+            dynr: sc.mg.dyn_reqs.len() as u32,
+            chunks: self.chunk_mod.len() as u32,
+            bodies: self.bodies.len() as u64,
+            protos: self.protos.len() as u64,
+            envn: self.env_names.len() as u32,
+            dclo: self.dclo_keys.len() as u32,
+        };
+    }
 }
 
 struct SeedTask {
@@ -2505,7 +2500,7 @@ fn cemit_drain_demand(
             let okl = cemit_take_body(&mut *g, p, d_def.module, d_def.node, &mut lw);
             let mut slot = 0xFFFFFFFFFFFFFFFFu64;
             if okl {
-                cemit_apply_drops(&mut *dow, &mut lw);
+                dow.apply_drops(&mut lw);
                 slot = lws.len() as u64;
                 lws.push(lw);
             } else {
@@ -2538,7 +2533,7 @@ fn cemit_drain_demand(
             lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
         }
         if lw2.lower_fn(d_def.node) {
-            cemit_apply_drops(&mut *dow, &mut lw2);
+            dow.apply_drops(&mut lw2);
             lws.push(lw2);
             li2 = lws.len() as u64 - 1;
         } else {
@@ -2569,7 +2564,7 @@ fn cemit_drain_demand(
                 }
                 let mut slot2 = 0xFFFFFFFFFFFFFFFFu64;
                 if lw2.lower_fn(d_def.node) {
-                    cemit_apply_drops(&mut *dow, &mut lw2);
+                    dow.apply_drops(&mut lw2);
                     slot2 = lws.len() as u64;
                     lws.push(lw2);
                 } else {
@@ -2638,7 +2633,7 @@ fn cemit_drain_demand(
                     let mut cl = irl::Lowerer::new(p, d_def.module, cn);
                     let mut slot = 0xFFFFFFFFFFFFFFFFu64;
                     if cemit_take_closure(&mut *g, p, d_def.module, cn, &mut cl) {
-                        cemit_apply_drops(&mut *dow, &mut cl);
+                        dow.apply_drops(&mut cl);
                         slot = clws.len() as u64;
                         clws.push(cl);
                     }
@@ -2742,7 +2737,7 @@ fn cemit_drain_task(t: DrainTask) {
         let di = (unsafe t.widx[w as usize]) as usize;
         let li = unsafe t.wli[w as usize];
         cemit_drain_slice_one(p, t.g, o, dem, lws, cfs, lwc, clc, clws0, di, li, t.kl, t.verbose);
-        o.dmarks.push(cap_of(o));
+        o.dmarks.push(o.cap_of());
     }
 }
 
@@ -2789,7 +2784,7 @@ fn cemit_drain_slice_one(
                 mv: bdf::MoveFlow::empty(),
                 el: ird::ElabCtx::empty(),
             };
-            cemit_apply_drops(&mut dow2, &mut lw2);
+            dow2.apply_drops(&mut lw2);
             var_on = true;
             var_lw = lw2;
         } else {
@@ -2854,7 +2849,7 @@ fn cemit_drain_slice_one(
                         mv: bdf::MoveFlow::empty(),
                         el: ird::ElabCtx::empty(),
                     };
-                    cemit_apply_drops(&mut dow2, &mut lw2);
+                    dow2.apply_drops(&mut lw2);
                     var_on = true;
                     var_zkey = zkey;
                     var_lw = lw2;
@@ -2983,7 +2978,7 @@ fn cemit_drain_slice_one(
                         mv: bdf::MoveFlow::empty(),
                         el: ird::ElabCtx::empty(),
                     };
-                    cemit_apply_drops(&mut dow2, &mut cl);
+                    dow2.apply_drops(&mut cl);
                     own_ci = o.dclo.len() as u64;
                     o.dclo_keys.push(ckey);
                     o.dclo.push(cl);
@@ -3075,7 +3070,7 @@ fn cemit_low_task(t: LowTask) {
         let mut lw = irl::Lowerer::new(p, m, n);
         let ok = cemit_seed_take(unsafe &mut *(t.g as *mut ig::InstGraph), p, m, n, &mut lw, t.kl, false);
         if ok {
-            cemit_apply_drops(&mut dow2, &mut lw);
+            dow2.apply_drops(&mut lw);
             let mut cf = cfl::CFlow::new_empty();
             cf.build_into(&lw.body);
             let rp = unsafe &mut *(res + i as usize);
@@ -3211,7 +3206,7 @@ fn cemit_seed_merge_um(cem: &mut cbe::CEmit, o: &mut SeedShard) {
 
 fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
     let a = cap_zero();
-    let b = cap_of(o);
+    let b = o.cap_of();
     cemit_seed_merge_range(cem, o, &a, &b);
     cem.mg.sh_merge_um(&mut o.cem.mg, m);
 }
@@ -3664,7 +3659,7 @@ pub fn cemit_package(
             if !eligible9 {
                 if tuc.on {
                     tuc_pay.truncate(0);
-                    tuc::sec_add(&mut tuc, m, &tuc_pay);
+                    tuc.sec_add(m, &tuc_pay);
                 }
                 continue;
             }
@@ -3688,12 +3683,12 @@ pub fn cemit_package(
                     &mut main_argv,
                 );
                 if rr == 0 {
-                    tuc::sec_keep(&mut tuc, m);
+                    tuc.sec_keep(m);
                     continue;
                 }
                 if rr == 2 {
                     eprint("tu-cache: dirty replay reject for `{}`; emitting live\n", p.modules[m].path.as_str());
-                    tuc::sec_void(&mut tuc, m);
+                    tuc.sec_void(m);
                 }
                 // rejected: emit live on the master, serially, at this position (the merge point
                 // is serial-state-equivalent); a clean reject re-records
@@ -3762,7 +3757,7 @@ pub fn cemit_package(
                     }
                     tuc_pay.truncate(0);
                     tuc::ser_evs(p, &mut tuc_pay, &cem.mg.rec, seg9, bodies_all.as_str());
-                    tuc::sec_add(&mut tuc, m, &tuc_pay);
+                    tuc.sec_add(m, &tuc_pay);
                     cem.mg.rec.truncate(seg9);
                 }
                 continue;
@@ -3800,7 +3795,7 @@ pub fn cemit_package(
                 }
                 tuc_pay.truncate(0);
                 tuc::ser_evs(p, &mut tuc_pay, &o.cem.mg.rec, 0, o.bodies.as_str());
-                tuc::sec_add(&mut tuc, m, &tuc_pay);
+                tuc.sec_add(m, &tuc_pay);
             }
             let base9 = bodies_all.len() as u64;
             for k2 in 0..o.chunk_mod.len() {
@@ -3836,7 +3831,7 @@ pub fn cemit_package(
                 // no seeds (missing AST / unreachable prelude): an empty section keeps the image indexed
                 if tuc.on {
                     tuc_pay.truncate(0);
-                    tuc::sec_add(&mut tuc, m, &tuc_pay);
+                    tuc.sec_add(m, &tuc_pay);
                 }
                 continue;
             }
@@ -3860,14 +3855,14 @@ pub fn cemit_package(
                         &mut main_argv,
                     );
                     if rr == 0 {
-                        tuc::sec_keep(&mut tuc, m);
+                        tuc.sec_keep(m);
                         continue;
                     }
                     // clean rejects are ordinary churn (another module's typecheck moved this pool);
                     // a DIRTY reject means interns landed before diverging -- warn and void the section
                     if rr == 2 {
                         eprint("tu-cache: dirty replay reject for `{}`; emitting live\n", p.modules[m].path.as_str());
-                        tuc::sec_void(&mut tuc, m);
+                        tuc.sec_void(m);
                     }
                     tuc_rec = rr == 1;
                 } else {
@@ -3940,7 +3935,7 @@ pub fn cemit_package(
                 }
                 tuc_pay.truncate(0);
                 tuc::ser_evs(p, &mut tuc_pay, &cem.mg.rec, tuc_seg0, bodies_all.as_str());
-                tuc::sec_add(&mut tuc, m, &tuc_pay);
+                tuc.sec_add(m, &tuc_pay);
                 cem.mg.rec.truncate(tuc_seg0);
             }
         }
@@ -4591,7 +4586,7 @@ pub fn cemit_package(
                             okm = false;
                             break;
                         }
-                        cemit_apply_drops(&mut dow, &mut mlw);
+                        dow.apply_drops(&mut mlw);
                         let mut msym = String::from_str("NAME");
                         msym.push_byte(1);
                         msym.push_str("__");
@@ -4683,7 +4678,7 @@ pub fn cemit_package(
                 cd_skip += 1; // associated consts fold under Self frames -- not through this path yet
                 continue;
             }
-            let v = iri::eval_const_in(&mut cdit, cdef.module, cdef.node, 1u32 << 20);
+            let v = cdit.eval_const_in(cdef.module, cdef.node, 1u32 << 20);
             let cty = cem.stat_items.at(ci).ty;
             // array-of-string consts render from their literal initializer directly
             if v.kind == iri::IV_OBJ || v.kind == iri::IV_NONE {
@@ -5996,13 +5991,15 @@ struct DropCtx {
     pub el: ird::ElabCtx,
 }
 
-fn cemit_apply_drops(dc: &mut DropCtx, lw: &mut irl::Lowerer) {
-    dc.forest.build_into(&lw.body);
-    bfx::generate_into(&mut dc.ow, &lw.body, &dc.forest, &mut dc.facts);
-    dc.cfg.build_into(&lw.body);
-    dc.mv.build_into(&lw.body, &dc.forest, &dc.facts, &dc.cfg);
-    ird::elaborate_into(&mut dc.ow, &lw.body, &dc.forest, &dc.facts, &dc.mv, &mut dc.el);
-    ird::insert_drops(&mut lw.body, &dc.el.sched, &dc.forest);
+extend DropCtx {
+    fn apply_drops(self: &mut Self, lw: &mut irl::Lowerer) {
+        self.forest.build_into(&lw.body);
+        self.ow.generate_into(&lw.body, &self.forest, &mut self.facts);
+        self.cfg.build_into(&lw.body);
+        self.mv.build_into(&lw.body, &self.forest, &self.facts, &self.cfg);
+        ird::elaborate_into(&mut self.ow, &lw.body, &self.forest, &self.facts, &self.mv, &mut self.el);
+        ird::insert_drops(&mut lw.body, &self.el.sched, &self.forest);
+    }
 }
 
 // The free-glue wrapper fields (frozen `__fb` convention): a CONCRETE struct's selected user
@@ -7817,19 +7814,8 @@ fn run_package_i(
         eprint("phase live: {} ms\n", t9 - tp0);
         tp0 = t9;
     }
-    let osz = if n != 0 {
-        n;
-    } else {
-        1 as usize;
-    };
-    let order = (unsafe stdlib::malloc(osz * 2)) as *mut ModuleId;
-    if order == null {
-        if live != null {
-            unsafe stdlib::free(live);
-        }
-        return 1;
-    }
-    loader::package_emit_order(p, order);
+    let mut order = Vector::<ModuleId>::new();
+    p.emit_order(&mut order);
     // the whole-package Core-IR emission runs BEFORE the live-module list: it seeds every module
     // unconditionally, so any module with a non-empty TU must be written even when the reference
     // scan finds no direct use (prelude bodies the instance TU calls into)
@@ -7845,7 +7831,7 @@ fn run_package_i(
         eprint("phase mid: {} ms\n", t9 - tp0);
         tp0 = t9;
     }
-    cemit_package(p, testing, &plan, live, target, &mut co, &mut irkeep);
+    cemit_package(p, testing, &plan, live.as_ptr(), target, &mut co, &mut irkeep);
     // the emission frontier restarted the pool; release it again before any test-runner fork
     if p.jobs != 1 {
         prt::shutdown();
@@ -7866,7 +7852,7 @@ fn run_package_i(
     // written instance TU) spells symbols from -- dead prelude chains drop out entirely
     let mut keep_mod = Vector::<bool>::new();
     for mi9 in 0..n {
-        keep_mod.push(live == null || unsafe live[mi9]);
+        keep_mod.push(live[mi9]);
     }
     let mut changed9 = true;
     while changed9 {
@@ -7884,12 +7870,12 @@ fn run_package_i(
     }
     let mut lm = Vector::<ModuleId>::new();
     for oi in 0..n {
-        let mi = unsafe order[oi];
+        let mi = order[oi];
         let has_wrap = co.have_main && !testing && mi as u64 == co.main_mod;
         if co.tus.at(mi as usize).len() == 0 && !has_wrap {
             continue;
         }
-        if live != null && !unsafe live[mi as usize] && !*keep_mod.at(mi as usize) {
+        if !live[mi as usize] && !*keep_mod.at(mi as usize) {
             continue;
         }
         lm.push(mi);
@@ -7980,10 +7966,6 @@ fn run_package_i(
         if cemit_write(co.tuc_path.as_str(), &co.tuc_img) {
             keep.push(String::from_str(co.tuc_path.as_str()));
         }
-    }
-    unsafe stdlib::free(order);
-    if live != null {
-        unsafe stdlib::free(live);
     }
     // Drop outputs from a previous build that this program no longer emits, so the tree matches the current
     // sources. Skip on a keep-list OOM -- never risk deleting a live output.

@@ -72,42 +72,6 @@ pub struct Rd {
     pub ok: bool,
 }
 
-fn r8(r: &mut Rd) u8 {
-    if !r.ok || r.at >= r.end {
-        r.ok = false;
-        return 0;
-    }
-    let v = unsafe r.sp[r.at];
-    r.at += 1;
-    return v;
-}
-
-fn r32(r: &mut Rd) u32 {
-    if !r.ok || r.at + 4 > r.end {
-        r.ok = false;
-        return 0;
-    }
-    let v = (unsafe r.sp[r.at]) as u32 | (unsafe r.sp[r.at + 1]) as u32 << 8 | (unsafe r.sp[r.at + 2]) as u32 << 16 | (unsafe r.sp[r.at + 3]) as u32 << 24;
-    r.at += 4;
-    return v;
-}
-
-fn r64(r: &mut Rd) u64 {
-    let lo = r32(r) as u64;
-    let hi = r32(r) as u64;
-    return lo | hi << 32;
-}
-
-fn rstr(r: &mut Rd, out: &mut String) {
-    let n = r32(r) as usize;
-    if !r.ok || r.at + n > r.end {
-        r.ok = false;
-        return;
-    }
-    out.push_str(unsafe str::from_raw(r.sp + r.at, n));
-    r.at += n;
-}
-
 pub struct Tuc {
     pub on: bool,
     pub hdr: u64,
@@ -330,12 +294,12 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
     }
     t.raw = prev;
     let mut r = Rd { sp: t.raw.as_str().ptr(), at: 0, end: t.raw.len(), ok: true };
-    if r32(&mut r) != TUC_MAGIC || r32(&mut r) != TUC_VER || r64(&mut r) != t.hdr || r32(&mut r) as usize != n {
+    if r.r32() != TUC_MAGIC || r.r32() != TUC_VER || r.r64() != t.hdr || r.r32() as usize != n {
         return t; // stale image: every module misses; the new image still gets written
     }
     for m in 0..n {
-        let key = r64(&mut r);
-        let ln = r32(&mut r) as u64;
+        let key = r.r64();
+        let ln = r.r32() as u64;
         if !r.ok || r.at as u64 + ln > r.end as u64 {
             return t;
         }
@@ -350,10 +314,6 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
         }
     }
     return t;
-}
-
-pub fn tuc_open(t: &Tuc, m: usize) Rd {
-    return Rd { sp: t.raw.as_str().ptr(), at: t.soff[m] as usize, end: (t.soff[m] + t.slen[m]) as usize, ok: true };
 }
 
 // ---- module payloads --------------------------------------------------------------------------
@@ -486,7 +446,7 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
         );
         w32(&mut r.tab, ty.module);
         w64(&mut r.tab, l.k as u64);
-        w64(&mut r.tab, lin_div_of(&l) as u64);
+        w64(&mut r.tab, l.div_of() as u64);
         w32(&mut r.tab, l.n as u32);
         for i in 0..l.n {
             w32(&mut r.tab, (unsafe l.p[i as usize]).module);
@@ -522,89 +482,6 @@ pub struct TtEnt {
     pub argr: [u32; 8],
     pub raw: [u8; 16],
     pub lin: ConstLin,
-}
-
-pub fn read_table(r: &mut Rd, out: &mut Vector<TtEnt>) bool {
-    let ntab = r32(r) as usize;
-    for _i in 0..ntab {
-        let mut e = TtEnt {
-            tag: r8(r),
-            kind: 0,
-            qual: 0,
-            conc: 0,
-            module: 0,
-            r0: 0,
-            aux: 0,
-            im: 0,
-            idecl: 0,
-            n: 0,
-            argr: [0; 8],
-            raw: [0; 16],
-            lin: ConstLin { k: 0, n: 0 },
-        };
-        if e.tag == TT_RAW {
-            for b in 0..sizeof(Ty) {
-                unsafe e.raw[b] = r8(r);
-            }
-        } else if e.tag == TT_WRAP {
-            e.kind = r8(r);
-            e.qual = r8(r);
-            e.conc = r8(r);
-            e.module = r32(r);
-            e.r0 = r32(r);
-        } else if e.tag == TT_ARR {
-            e.qual = r8(r);
-            e.conc = r8(r);
-            e.module = r32(r);
-            e.r0 = r32(r);
-            e.aux = r32(r);
-        } else if e.tag == TT_INST {
-            e.kind = r8(r);
-            e.qual = r8(r);
-            e.conc = r8(r);
-            e.module = r32(r);
-            e.im = r32(r);
-            e.idecl = r32(r);
-            e.n = r8(r);
-            if e.n > 8 {
-                return false;
-            }
-            for i in 0..e.n {
-                unsafe e.argr[i as usize] = r32(r);
-            }
-        } else if e.tag == TT_PROJ {
-            e.qual = r8(r);
-            e.conc = r8(r);
-            e.module = r32(r);
-            e.r0 = r32(r);
-            e.aux = r32(r);
-        } else if e.tag == TT_LIN {
-            e.qual = r8(r);
-            e.conc = r8(r);
-            e.module = r32(r);
-            e.lin.k = r64(r) as i64;
-            let dv = r64(r) as i64;
-            e.lin.div = dv;
-            let ln = r32(r);
-            if ln > 4 {
-                return false;
-            }
-            e.lin.n = ln as i32;
-            for i in 0..ln {
-                let dm = r32(r) as ModuleId;
-                let dn = r32(r);
-                unsafe e.lin.p[i as usize] = DefId { module: dm, node: dn };
-                unsafe e.lin.c[i as usize] = r64(r) as i64;
-            }
-        } else {
-            return false;
-        }
-        if !r.ok {
-            return false;
-        }
-        out.push(e);
-    }
-    return r.ok;
 }
 
 /// Intern table entry `idx` (children first) into module `am`'s pool. `cache` keys (idx, am).
@@ -805,56 +682,188 @@ pub fn ser_evs(p: &loader::Package, o: &mut String, evs: &Vector<mbe::RecEv>, fr
     o.push_string(&eb);
 }
 
-pub fn read_count(r: &mut Rd) u32 {
-    return r32(r);
-}
-
-pub fn read_ev(r: &mut Rd, ev: &mut mbe::RecEv) bool {
-    ev.kind = r8(r);
-    ev.a = r32(r);
-    ev.b = r32(r);
-    ev.c = r32(r);
-    ev.d = r32(r);
-    ev.h = r64(r);
-    ev.s1.truncate(0);
-    rstr(r, &mut ev.s1);
-    ev.s2.truncate(0);
-    rstr(r, &mut ev.s2);
-    ev.subs.truncate(0);
-    let ns = r32(r) as usize;
-    for _i in 0..ns {
-        let pm = r32(r) as ModuleId;
-        let pnode = r32(r);
-        let am = r32(r) as ModuleId;
-        let at = r32(r);
-        let lim = r32(r);
-        ev.subs.push(mbe::MSub { pm: pm, pnode: pnode, am: am, at: at, lim: lim });
+extend Rd {
+    fn r8(self: &mut Self) u8 {
+        if !self.ok || self.at >= self.end {
+            self.ok = false;
+            return 0;
+        }
+        let v = unsafe self.sp[self.at];
+        self.at += 1;
+        return v;
     }
-    ev.xs.truncate(0);
-    let nx = r32(r) as usize;
-    for _i in 0..nx {
-        ev.xs.push(r32(r));
+
+    fn r32(self: &mut Self) u32 {
+        if !self.ok || self.at + 4 > self.end {
+            self.ok = false;
+            return 0;
+        }
+        let v = (unsafe self.sp[self.at]) as u32 | (unsafe self.sp[self.at + 1]) as u32 << 8 | (unsafe self.sp[self.at + 2]) as u32 << 16 | (unsafe self.sp[self.at + 3]) as u32 << 24;
+        self.at += 4;
+        return v;
     }
-    return r.ok;
+
+    fn r64(self: &mut Self) u64 {
+        let lo = self.r32() as u64;
+        let hi = self.r32() as u64;
+        return lo | hi << 32;
+    }
+
+    fn rstr(self: &mut Self, out: &mut String) {
+        let n = self.r32() as usize;
+        if !self.ok || self.at + n > self.end {
+            self.ok = false;
+            return;
+        }
+        out.push_str(unsafe str::from_raw(self.sp + self.at, n));
+        self.at += n;
+    }
+
+    pub fn read_table(self: &mut Self, out: &mut Vector<TtEnt>) bool {
+        let ntab = self.r32() as usize;
+        for _i in 0..ntab {
+            let mut e = TtEnt {
+                tag: self.r8(),
+                kind: 0,
+                qual: 0,
+                conc: 0,
+                module: 0,
+                r0: 0,
+                aux: 0,
+                im: 0,
+                idecl: 0,
+                n: 0,
+                argr: [0; 8],
+                raw: [0; 16],
+                lin: ConstLin { k: 0, n: 0 },
+            };
+            if e.tag == TT_RAW {
+                for b in 0..sizeof(Ty) {
+                    unsafe e.raw[b] = self.r8();
+                }
+            } else if e.tag == TT_WRAP {
+                e.kind = self.r8();
+                e.qual = self.r8();
+                e.conc = self.r8();
+                e.module = self.r32();
+                e.r0 = self.r32();
+            } else if e.tag == TT_ARR {
+                e.qual = self.r8();
+                e.conc = self.r8();
+                e.module = self.r32();
+                e.r0 = self.r32();
+                e.aux = self.r32();
+            } else if e.tag == TT_INST {
+                e.kind = self.r8();
+                e.qual = self.r8();
+                e.conc = self.r8();
+                e.module = self.r32();
+                e.im = self.r32();
+                e.idecl = self.r32();
+                e.n = self.r8();
+                if e.n > 8 {
+                    return false;
+                }
+                for i in 0..e.n {
+                    unsafe e.argr[i as usize] = self.r32();
+                }
+            } else if e.tag == TT_PROJ {
+                e.qual = self.r8();
+                e.conc = self.r8();
+                e.module = self.r32();
+                e.r0 = self.r32();
+                e.aux = self.r32();
+            } else if e.tag == TT_LIN {
+                e.qual = self.r8();
+                e.conc = self.r8();
+                e.module = self.r32();
+                e.lin.k = self.r64() as i64;
+                let dv = self.r64() as i64;
+                e.lin.div = dv;
+                let ln = self.r32();
+                if ln > 4 {
+                    return false;
+                }
+                e.lin.n = ln as i32;
+                for i in 0..ln {
+                    let dm = self.r32() as ModuleId;
+                    let dn = self.r32();
+                    unsafe e.lin.p[i as usize] = DefId { module: dm, node: dn };
+                    unsafe e.lin.c[i as usize] = self.r64() as i64;
+                }
+            } else {
+                return false;
+            }
+            if !self.ok {
+                return false;
+            }
+            out.push(e);
+        }
+        return self.ok;
+    }
+
+    pub fn read_count(self: &mut Self) u32 {
+        return self.r32();
+    }
+
+    pub fn read_ev(self: &mut Self, ev: &mut mbe::RecEv) bool {
+        ev.kind = self.r8();
+        ev.a = self.r32();
+        ev.b = self.r32();
+        ev.c = self.r32();
+        ev.d = self.r32();
+        ev.h = self.r64();
+        ev.s1.truncate(0);
+        self.rstr(&mut ev.s1);
+        ev.s2.truncate(0);
+        self.rstr(&mut ev.s2);
+        ev.subs.truncate(0);
+        let ns = self.r32() as usize;
+        for _i in 0..ns {
+            let pm = self.r32() as ModuleId;
+            let pnode = self.r32();
+            let am = self.r32() as ModuleId;
+            let at = self.r32();
+            let lim = self.r32();
+            ev.subs.push(mbe::MSub { pm: pm, pnode: pnode, am: am, at: at, lim: lim });
+        }
+        ev.xs.truncate(0);
+        let nx = self.r32() as usize;
+        for _i in 0..nx {
+            ev.xs.push(self.r32());
+        }
+        return self.ok;
+    }
 }
 
-/// Append one finished live-module section (key + length + payload) to the next image.
-pub fn sec_add(t: &mut Tuc, m: usize, payload: &String) {
-    w64(&mut t.out, t.keys[m]);
-    w32(&mut t.out, payload.len() as u32);
-    t.out.push_string(payload);
-}
+extend Tuc {
+    pub fn open(self: &Self, m: usize) Rd {
+        return Rd {
+            sp: self.raw.as_str().ptr(),
+            at: self.soff[m] as usize,
+            end: (self.soff[m] + self.slen[m]) as usize,
+            ok: true,
+        };
+    }
 
-/// Carry a hit module's previous section into the next image byte for byte.
-pub fn sec_keep(t: &mut Tuc, m: usize) {
-    w64(&mut t.out, t.keys[m]);
-    w32(&mut t.out, t.slen[m] as u32);
-    t.out.push_str(t.raw.as_str().slice(t.soff[m] as usize, (t.soff[m] + t.slen[m]) as usize));
-}
+    /// Append one finished live-module section (key + length + payload) to the next image.
+    pub fn sec_add(self: &mut Self, m: usize, payload: &String) {
+        w64(&mut self.out, self.keys[m]);
+        w32(&mut self.out, payload.len() as u32);
+        self.out.push_string(payload);
+    }
 
-/// A module that produced no cacheable section (replay precondition failed after a hit): an empty
-/// payload never matches on load, so the next build re-emits it live.
-pub fn sec_void(t: &mut Tuc, m: usize) {
-    w64(&mut t.out, t.keys[m] ^ 0x5555555555555555u64);
-    w32(&mut t.out, 0);
+    /// Carry a hit module's previous section into the next image byte for byte.
+    pub fn sec_keep(self: &mut Self, m: usize) {
+        w64(&mut self.out, self.keys[m]);
+        w32(&mut self.out, self.slen[m] as u32);
+        self.out.push_str(self.raw.as_str().slice(self.soff[m] as usize, (self.soff[m] + self.slen[m]) as usize));
+    }
+
+    /// A module that produced no cacheable section (replay precondition failed after a hit): an empty
+    /// payload never matches on load, so the next build re-emits it live.
+    pub fn sec_void(self: &mut Self, m: usize) {
+        w64(&mut self.out, self.keys[m] ^ 0x5555555555555555u64);
+        w32(&mut self.out, 0);
+    }
 }

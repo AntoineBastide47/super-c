@@ -113,57 +113,6 @@ extend Manifest as Free {
     }
 }
 
-extend Manifest {
-    fn new<'a>() Manifest<'a> {
-        return Manifest {
-            arch: unsafe shim::sc_host_arch(),
-            sdk: 0,
-            toml: Vector::<toml::TomlItem>::new(),
-            bin: String::new(),
-            root: String::new(),
-            out_dir: String::new(),
-            test_dir: String::new(),
-            bench_dir: String::new(),
-            cc: String::new(),
-            cstd: String::new(),
-            cflags: Vector::<String>::new(),
-            ldflags: Vector::<String>::new(),
-            ldlibs: Vector::<String>::new(),
-            jobs: 0,
-            ce_steps: 0,
-            ce_mem: 0,
-            default_profile: String::new(),
-            profiles: Vector::<Profile>::new(),
-            commands: Vector::<Command>::new(),
-            bins: Vector::<BinTarget>::new(),
-            lib_name: String::new(),
-            lib_root: String::new(),
-            lib_static: false,
-            lib_shared: false,
-        };
-    }
-
-    /// Index of the profile named `name`, or -1 when absent.
-    pub fn profile_index(self: &Self, name: str) i64 {
-        for i in 0..self.profiles.len() {
-            if self.profiles.at(i).name == name {
-                return i as i64;
-            }
-        }
-        return -1;
-    }
-
-    /// Index of the command named `name`, or -1 when absent.
-    pub fn command_index(self: &Self, name: str) i64 {
-        for i in 0..self.commands.len() {
-            if self.commands.at(i).name == name {
-                return i as i64;
-            }
-        }
-        return -1;
-    }
-}
-
 extend Profile {
     fn new(name: str) Self {
         return Profile { name: name, cflags: Vector::<String>::new(), ldflags: Vector::<String>::new(), strip: false };
@@ -193,86 +142,8 @@ fn push_flags(dst: &mut Vector<String>, flags: str) {
 /// it was asked for. Free it like any other manifest.
 pub fn builtins_only<'a>() Manifest<'a> {
     let mut m = Manifest::new();
-    add_builtin_profiles(&mut m);
+    m.add_builtin_profiles();
     return m;
-}
-
-// The Makefile's profiles, available out of the box; a [profile.NAME] section with the same name
-// starts from empty flags instead (full override, no merging surprises).
-fn add_builtin_profiles(m: &mut Manifest) {
-    if m.profile_index("debug") < 0 {
-        let mut p = Profile::new("debug");
-        push_flags(
-            &mut p.cflags,
-            "-g -O0  -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
-        );
-        push_flags(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
-        m.profiles.push(p);
-    }
-    if m.profile_index("dev") < 0 {
-        let mut p = Profile::new("dev");
-        push_flags(
-            &mut p.cflags,
-            "-g -O1 -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
-        );
-        push_flags(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
-        m.profiles.push(p);
-    }
-    if m.profile_index("release") < 0 {
-        let mut p = Profile::new("release");
-        push_flags(
-            &mut p.cflags,
-            "-O3 -DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -flto=auto -fPIE",
-        );
-        push_flags(&mut p.ldflags, "-flto=auto -Wl,-O2");
-        p.strip = true;
-        m.profiles.push(p);
-    }
-    if m.profile_index("bench") < 0 {
-        let mut p = Profile::new("bench");
-        // Optimization parity with `release` (-O3 -DNDEBUG): the bench should measure the compiler
-        // users actually run. -g and frame pointers stay so samply profiles remain readable.
-        push_flags(&mut p.cflags, "-O3 -DNDEBUG -g -fno-omit-frame-pointer -flto=auto");
-        // Profile-guided optimization when local training data exists (build with --profile=pgogen,
-        // run a self-transpile under LLVM_PROFILE_FILE, merge with llvm-profdata). Clang hard-errors
-        // on a missing profile file, so the flag only appears when the file is present.
-        let pf = stdio::fopen("build/pgo.profdata", "rb");
-        if pf != null {
-            let _ = unsafe stdio::fclose(pf);
-            push_flags(
-                &mut p.cflags,
-                "-fprofile-use=build/pgo.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin",
-            );
-        }
-        push_flags(&mut p.ldflags, "-flto=auto");
-        m.profiles.push(p);
-    }
-    // PGO training build: instrument, run a representative workload (a self-transpile) under
-    // LLVM_PROFILE_FILE, merge the raw profiles with llvm-profdata into build/pgo.profdata, and the
-    // bench profile above picks it up on its next build.
-    if m.profile_index("pgogen") < 0 {
-        let mut p = Profile::new("pgogen");
-        push_flags(&mut p.cflags, "-O2 -fprofile-generate -flto=auto");
-        push_flags(&mut p.ldflags, "-fprofile-generate -flto=auto");
-        m.profiles.push(p);
-    }
-    // ThreadSanitizer. Its own profile and NEVER part of `release`: TSan costs 5-15x runtime and several
-    // times the memory, and it needs its runtime linked in. No LTO -- it defeats the instrumentation the
-    // tool relies on. This is also what turns on the coroutine fiber annotations in `ffi/sc_rt.c`, without
-    // which every coroutine that migrates between workers reports as a race against itself.
-    //
-    // `-fno-inline` is not tidiness, it is what makes a report TRUE. At plain -O1 this reports one race per
-    // run, on a closure's exit path, and the SAME source is clean at -O0 and clean at `-O1 -fno-inline` --
-    // across five runs each. Inlining changes no memory operation and no lock, so a report that appears and
-    // disappears with it is attribution, not a race: the allocation it blames is inlined into `worker_main`
-    // from a callee, and the write it blames is inlined into a wrapper from the closure body. Losing the
-    // inlining is the price of a report worth acting on.
-    if m.profile_index("race") < 0 {
-        let mut p = Profile::new("race");
-        push_flags(&mut p.cflags, "-O1 -fno-inline -g -fsanitize=thread -fno-omit-frame-pointer -DSC_LOCKDEP");
-        push_flags(&mut p.ldflags, "-fsanitize=thread");
-        m.profiles.push(p);
-    }
 }
 
 fn take_arr(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut Vector<String>) {
@@ -554,7 +425,7 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
     if m.default_profile.len() == 0 {
         m.default_profile.push_str("dev");
     }
-    add_builtin_profiles(&mut m);
+    m.add_builtin_profiles();
     // [lib] defaults: root src/lib.spc, name after the primary binary, static unless told otherwise
     if saw_lib {
         if m.lib_root.len() == 0 {
@@ -600,4 +471,133 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
         return Option::<Manifest>::None, errs;
     }
     return Option::<Manifest>::Some(m), errs;
+}
+
+extend Manifest {
+    fn new<'a>() Manifest<'a> {
+        return Manifest {
+            arch: unsafe shim::sc_host_arch(),
+            sdk: 0,
+            toml: Vector::<toml::TomlItem>::new(),
+            bin: String::new(),
+            root: String::new(),
+            out_dir: String::new(),
+            test_dir: String::new(),
+            bench_dir: String::new(),
+            cc: String::new(),
+            cstd: String::new(),
+            cflags: Vector::<String>::new(),
+            ldflags: Vector::<String>::new(),
+            ldlibs: Vector::<String>::new(),
+            jobs: 0,
+            ce_steps: 0,
+            ce_mem: 0,
+            default_profile: String::new(),
+            profiles: Vector::<Profile>::new(),
+            commands: Vector::<Command>::new(),
+            bins: Vector::<BinTarget>::new(),
+            lib_name: String::new(),
+            lib_root: String::new(),
+            lib_static: false,
+            lib_shared: false,
+        };
+    }
+
+    /// Index of the profile named `name`, or -1 when absent.
+    pub fn profile_index(self: &Self, name: str) i64 {
+        for i in 0..self.profiles.len() {
+            if self.profiles.at(i).name == name {
+                return i as i64;
+            }
+        }
+        return -1;
+    }
+
+    /// Index of the command named `name`, or -1 when absent.
+    pub fn command_index(self: &Self, name: str) i64 {
+        for i in 0..self.commands.len() {
+            if self.commands.at(i).name == name {
+                return i as i64;
+            }
+        }
+        return -1;
+    }
+
+    // The Makefile's profiles, available out of the box; a [profile.NAME] section with the same name
+    // starts from empty flags instead (full override, no merging surprises).
+    fn add_builtin_profiles(self: &mut Self) {
+        if self.profile_index("debug") < 0 {
+            let mut p = Profile::new("debug");
+            push_flags(
+                &mut p.cflags,
+                "-g -O0  -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
+            );
+            push_flags(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
+            self.profiles.push(p);
+        }
+        if self.profile_index("dev") < 0 {
+            let mut p = Profile::new("dev");
+            push_flags(
+                &mut p.cflags,
+                "-g -O1 -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
+            );
+            push_flags(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
+            self.profiles.push(p);
+        }
+        if self.profile_index("release") < 0 {
+            let mut p = Profile::new("release");
+            push_flags(
+                &mut p.cflags,
+                "-O3 -DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -flto=auto -fPIE",
+            );
+            push_flags(&mut p.ldflags, "-flto=auto -Wl,-O2");
+            p.strip = true;
+            self.profiles.push(p);
+        }
+        if self.profile_index("bench") < 0 {
+            let mut p = Profile::new("bench");
+            // Optimization parity with `release` (-O3 -DNDEBUG): the bench should measure the compiler
+            // users actually run. -g and frame pointers stay so samply profiles remain readable.
+            push_flags(&mut p.cflags, "-O3 -DNDEBUG -g -fno-omit-frame-pointer -flto=auto");
+            // Profile-guided optimization when local training data exists (build with --profile=pgogen,
+            // run a self-transpile under LLVM_PROFILE_FILE, merge with llvm-profdata). Clang hard-errors
+            // on a missing profile file, so the flag only appears when the file is present.
+            let pf = stdio::fopen("build/pgo.profdata", "rb");
+            if pf != null {
+                let _ = unsafe stdio::fclose(pf);
+                push_flags(
+                    &mut p.cflags,
+                    "-fprofile-use=build/pgo.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin",
+                );
+            }
+            push_flags(&mut p.ldflags, "-flto=auto");
+            self.profiles.push(p);
+        }
+        // PGO training build: instrument, run a representative workload (a self-transpile) under
+        // LLVM_PROFILE_FILE, merge the raw profiles with llvm-profdata into build/pgo.profdata, and the
+        // bench profile above picks it up on its next build.
+        if self.profile_index("pgogen") < 0 {
+            let mut p = Profile::new("pgogen");
+            push_flags(&mut p.cflags, "-O2 -fprofile-generate -flto=auto");
+            push_flags(&mut p.ldflags, "-fprofile-generate -flto=auto");
+            self.profiles.push(p);
+        }
+        // ThreadSanitizer. Its own profile and NEVER part of `release`: TSan costs 5-15x runtime and several
+        // times the memory, and it needs its runtime linked in. No LTO -- it defeats the instrumentation the
+        // tool relies on. This is also what turns on the coroutine fiber annotations in `ffi/sc_rt.c`, without
+        // which every coroutine that migrates between workers reports as a race against itself.
+        //
+        // `-fno-inline` is not tidiness, it is what makes a report TRUE. At plain -O1 this reports one race per
+        // run, on a closure's exit path, and the SAME source is clean at -O0 and clean at `-O1 -fno-inline` --
+        // across five runs each. Inlining changes no memory operation and no lock, so a report that appears and
+        // disappears with it is attribution, not a race: the allocation it blames is inlined into `worker_main`
+        // from a callee, and the write it blames is inlined into a wrapper from the closure body. Losing the
+        // inlining is the price of a report worth acting on.
+        if self.profile_index("race") < 0 {
+            let mut p = Profile::new("race");
+            push_flags(&mut p.cflags, "-O1 -fno-inline -g -fsanitize=thread -fno-omit-frame-pointer -DSC_LOCKDEP");
+            push_flags(&mut p.ldflags, "-fsanitize=thread");
+            self.profiles.push(p);
+        }
+    }
 }

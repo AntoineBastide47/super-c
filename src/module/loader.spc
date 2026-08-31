@@ -575,14 +575,10 @@ pub fn read_file(path: str) Option<String> {
         return Option::<String>::None;
     }
     let sz = s as usize;
-    let buf = (unsafe stdlib::malloc(sz + 1)) as *mut char;
-    if buf == null {
-        unsafe stdio::fclose(f);
-        return Option::<String>::None;
-    }
-    let n = unsafe stdio::fread(buf, 1, sz, f);
+    let mut buf = Vector::<u8>::new();
+    buf.resize_default(sz + 1);
+    let n = unsafe stdio::fread(buf.as_ptr() as *mut char, 1, sz, f);
     if n != sz && unsafe stdio::ferror(f) != 0 {
-        unsafe stdlib::free(buf);
         unsafe stdio::fclose(f);
         return Option::<String>::None;
     }
@@ -591,8 +587,7 @@ pub fn read_file(path: str) Option<String> {
     // append lexer::SOURCE_PAD trailing NUL bytes PAST len (len stays n) -- a read-ahead sentinel the lexer
     // relies on to over-read safely (see lexer::SOURCE_PAD).
     let mut out = String::with_capacity(n + lexer::SOURCE_PAD);
-    out.push_str(str::from_raw(buf as *const u8, n));
-    unsafe stdlib::free(buf);
+    out.push_str(str::from_raw(buf.as_ptr(), n));
     out.pad_nul(lexer::SOURCE_PAD);
     return Option::<String>::Some(out);
 }
@@ -906,6 +901,234 @@ fn par_parse_one(t: PParse) {
 }
 
 pub fn loader_no_wait(_c: *mut void, _m: ModuleId) {}
+
+extend Package as Free {
+    pub fn free(self: &mut Self) {
+        self.modules.free();
+        self.root_dir.free();
+        self.gen_root.free();
+        self.std_root.free();
+        self.alt_root.free();
+        self.method_used.free();
+        self.method_edges.free();
+        self.edge_seen.free();
+        self.inst_methods.free();
+        self.always_methods.free();
+        self.extern_privates.free();
+        self.mod_refs.free();
+        self.idx.free();
+        self.clo_lists.free();
+        self.clo_built.free();
+        self.tok_scratch.free();
+        self.cg_scratch.free();
+        self.dir_cache.free();
+        self.lint_set.free();
+        self.overlay_files.free();
+        self.overlay_texts.free();
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Cross-module instance propagation + emit ordering (ports of loader.c's file-scope helpers). These thread
+// raw `*mut Ast`/`*const Ast` pointers to sidestep the by-value move rules on `&Ast`; the modules Vector is
+// never grown during propagation, so pointers into `modules[x].ast` stay valid throughout.
+// ---------------------------------------------------------------------------------------------------------
+
+/// Load `root_file` and, transitively, every module it imports, then append the std prelude found under
+/// `std_dir` (empty skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
+pub fn package_load(root_file: str, std_dir: str, bootstrap_tags: bool, target: i32) Package {
+    let d = dir_of(root_file);
+    let p = package_load_rooted(root_file, d.as_str(), "", std_dir, bootstrap_tags, target);
+    return p;
+}
+
+/// Like package_load, but imports resolve against an explicit package root instead of the root
+/// file's own directory (`super-c lint <dir>` lints nested package files in their true package).
+pub fn package_load_rooted(root_file: str, root_dir: str, alt_dir: str, std_dir: str, bootstrap_tags: bool, target: i32) Package {
+    return package_load_overlaid(
+        root_file,
+        root_dir,
+        alt_dir,
+        std_dir,
+        bootstrap_tags,
+        target,
+        Vector::<String>::new(),
+        Vector::<String>::new(),
+    );
+}
+
+/// Like package_load_rooted, with in-memory source overlays (see Package.overlay_files). Takes ownership
+/// of both parallel vectors.
+pub fn package_load_overlaid(
+    root_file: str,
+    root_dir: str,
+    alt_dir: str,
+    std_dir: str,
+    bootstrap_tags: bool,
+    target: i32,
+    overlay_files: Vector<String>,
+    overlay_texts: Vector<String>,
+) Package {
+    let mut p = Package::new();
+    p.ok = true;
+    p.bootstrap = bootstrap_tags;
+    p.overlay_files = overlay_files;
+    p.overlay_texts = overlay_texts;
+    p.root_dir = String::from_str(root_dir);
+    p.alt_root = String::from_str(alt_dir);
+    if std_dir.len() != 0 {
+        p.std_root = dir_of(std_dir);
+    }
+    let rp = stem_of(root_file);
+    let rf = String::from_str(root_file);
+    p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
+    p.load_prelude(std_dir, target);
+    p.seed_core();
+    return p;
+}
+
+/// Prelude-only package (import roots set, no root module): the batch `lint` driver and the LSP's
+/// workspace batch load_module each listed file into it afterwards, so every file shares one closure
+/// instead of reloading its own. Takes ownership of the overlay vectors (empty for CLI use).
+pub fn package_load_prelude(
+    root_dir: str,
+    alt_dir: str,
+    std_dir: str,
+    target: i32,
+    overlay_files: Vector<String>,
+    overlay_texts: Vector<String>,
+) Package {
+    let mut p = Package::new();
+    p.ok = true;
+    p.overlay_files = overlay_files;
+    p.overlay_texts = overlay_texts;
+    p.root_dir = String::from_str(root_dir);
+    p.alt_root = String::from_str(alt_dir);
+    if std_dir.len() != 0 {
+        p.std_root = dir_of(std_dir);
+    }
+    p.load_prelude(std_dir, target);
+    p.seed_core();
+    return p;
+}
+
+/// A batch-listed file's canonical module path: relative to the alt root when under it (the spelling
+/// manifest imports must use -- the alt root has no index form), else to the package root, `/` -> `::`.
+/// A root-level index file (<root>/x/x.spc with no <root>/x.spc beside it) collapses to `x`, mirroring
+/// module_index_path, so imports of it dedup against the listed copy.
+pub fn batch_mod_path(file: str, root: str, alt: str) String {
+    let mut rel = file;
+    if rel.len() > 2 && rel.byte_at(0) == b'.' && rel.byte_at(1) == b'/' {
+        rel = rel.slice(2, rel.len());
+    }
+    let mut from_alt = false;
+    if alt.len() != 0 && rel.len() > alt.len() && rel.starts_with(alt) && rel.byte_at(alt.len()) == b'/' {
+        rel = rel.slice(alt.len() + 1, rel.len());
+        from_alt = true;
+    } else if root.len() > 1 && rel.len() > root.len() && rel.starts_with(root) && rel.byte_at(root.len()) == b'/' {
+        rel = rel.slice(root.len() + 1, rel.len());
+    }
+    let mut end = rel.len();
+    if rel.ends_with(".spc") {
+        end = end - 4;
+    }
+    let mut ls: i64 = -1;
+    let mut pv: i64 = -1;
+    for i in 0..end {
+        if rel.byte_at(i) == b'/' {
+            pv = ls;
+            ls = i as i64;
+        }
+    }
+    // The index collapse mirrors module_index_path, which only ever probes the PACKAGE root:
+    // an alt-rooted `a/a.spc` is imported as `a::a`, so collapsing it would fork a duplicate module.
+    if !from_alt && ls >= 0 && rel.slice(ls as usize + 1, end) == rel.slice(pv as usize + 1, ls as usize) {
+        let mut sib = String::from_str(file.slice(0, file.len() - rel.len() + ls as usize));
+        sib.push_str(".spc");
+        let sf = stdio::fopen(sib.as_str(), "rb");
+        if sf == null {
+            end = ls as usize;
+        } else {
+            unsafe stdio::fclose(sf);
+        }
+    }
+    let mut out = String::new();
+    for i in 0..end {
+        if rel.byte_at(i) == b'/' {
+            out.push_str("::");
+        } else {
+            out.push_byte(rel.byte_at(i));
+        }
+    }
+    return out;
+}
+
+/// Like package_load, but the root module is an in-memory source STRING (path "main"), with no user-import
+/// recursion -- the analog of tests/test_harness.h's sc_compile. The prelude loads FIRST and the user
+/// module is appended LAST (its module id past the prelude), matching sc_compile's layout exactly, so
+/// module-order-sensitive checks (Ty interning, generic-arg validation) reproduce the C test verdicts.
+/// The user module is always the last one: `p.modules.len() - 1`. Used by selfhost/tests.
+pub fn package_from_source(src: str, std_dir: str, target: i32) Package {
+    let mut p = Package::new();
+    p.ok = true;
+    p.root_dir = String::from_str(".");
+    if std_dir.len() != 0 {
+        p.std_root = dir_of(std_dir);
+    }
+    p.load_prelude(std_dir, target);
+    let mut source = String::from_str(src);
+    let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
+    let ok = parsed.ok;
+    let id = p.add_module(
+        String::from_str("main"),
+        String::from_str("<harness>"),
+        source,
+        replace(&mut parsed.ast, Ast::new(0)),
+        ok,
+    );
+    if ok {
+        p.modules[id as usize].ast.module = id as ModuleId;
+    } else {
+        p.ok = false;
+    }
+    p.seed_core();
+    return p;
+}
+
+// A PATH_MAX realpath scratch buffer (the omitted array field zero-fills on partial init).
+struct RealBuf {
+    pub b: [char; 4096],
+}
+
+// The final path component of `path` (a view into it) -- "dir/std/string.spc" -> "string.spc".
+fn basename_of(path: str) str {
+    let n = path.len();
+    let mut b: usize = 0;
+    let mut i: usize = 0;
+    while i < n {
+        if path.byte_at(i) == b'/' {
+            b = i + 1;
+        }
+        i = i + 1;
+    }
+    return path.slice(b, n);
+}
+
+// Byte-lexicographic order of two names with a length tiebreak (equivalent to strcmp over NUL-free views).
+const fn name_cmp(a: &String, b: &String) i32 {
+    let la = a.len();
+    let lb = b.len();
+    let m = if la < lb {
+        la;
+    } else {
+        lb;
+    };
+    let c = unsafe cstring::memcmp(a.as_str().ptr(), b.as_str().ptr(), m);
+    if c != 0 {
+        return c;
+    }
+    return la as i32 - lb as i32;
+}
 
 extend Package {
     pub fn new() Package {
@@ -2255,454 +2478,203 @@ extend Package {
     pub fn instance_home_mid(self: &Self, am: ModuleId, it: &TyInstance) ModuleId {
         return self.instance_home_in(am, it);
     }
-}
 
-extend Package as Free {
-    pub fn free(self: &mut Self) {
-        self.modules.free();
-        self.root_dir.free();
-        self.gen_root.free();
-        self.std_root.free();
-        self.alt_root.free();
-        self.method_used.free();
-        self.method_edges.free();
-        self.edge_seen.free();
-        self.inst_methods.free();
-        self.always_methods.free();
-        self.extern_privates.free();
-        self.mod_refs.free();
-        self.idx.free();
-        self.clo_lists.free();
-        self.clo_built.free();
-        self.tok_scratch.free();
-        self.cg_scratch.free();
-        self.dir_cache.free();
-        self.lint_set.free();
-        self.overlay_files.free();
-        self.overlay_texts.free();
+    const fn ast_c(self: &Self, m: ModuleId) *const Ast {
+        return &self.modules[m as usize].ast;
     }
-}
 
-// ---------------------------------------------------------------------------------------------------------
-// Cross-module instance propagation + emit ordering (ports of loader.c's file-scope helpers). These thread
-// raw `*mut Ast`/`*const Ast` pointers to sidestep the by-value move rules on `&Ast`; the modules Vector is
-// never grown during propagation, so pointers into `modules[x].ast` stay valid throughout.
-// ---------------------------------------------------------------------------------------------------------
-
-const fn pkg_ast_c(p: &Package, m: ModuleId) *const Ast {
-    return &p.modules[m as usize].ast;
-}
-
-/// Dependency-first module emit order: if module `a` full-monomorphizes a generic owned by `b` (re-homing a
-/// concrete instance to `a` itself), `b` must be emitted first. Kahn topo-sort with a lowest-id tiebreak;
-/// `order` is caller-allocated with `modules.len()` entries.
-pub fn package_emit_order(p: &Package, order: *mut ModuleId) {
-    let n = p.modules.len();
-    if n == 0 {
-        return;
-    }
-    let done = (unsafe stdlib::calloc(n, 1)) as *mut bool;
-    let dep = (unsafe stdlib::calloc(n * n, 1)) as *mut bool;
-    let indeg = (unsafe stdlib::calloc(n, 4)) as *mut u32;
-    if done == null || dep == null || indeg == null {
-        for i in 0..n {
-            unsafe order[i] = i as ModuleId;
+    /// Dependency-first module emit order: if module `a` full-monomorphizes a generic owned by `b` (re-homing a
+    /// concrete instance to `a` itself), `b` must be emitted first. Kahn topo-sort with a lowest-id tiebreak;
+    /// `order` is filled with `modules.len()` entries.
+    pub fn emit_order(self: &Self, order: &mut Vector<ModuleId>) {
+        let n = self.modules.len();
+        if n == 0 {
+            return;
         }
-        unsafe stdlib::free(done);
-        unsafe stdlib::free(dep);
-        unsafe stdlib::free(indeg);
-        return;
-    }
-    for a in 0..n {
-        if !p.modules[a].has_ast {
-            continue;
-        }
-        let aa = pkg_ast_c(p, a as ModuleId);
-        let mut i: usize = 0;
-        while i < unsafe aa.instances.len() {
-            let it = *aa.instance(i as u32);
-            let bi = it.module as usize;
-            if bi >= n || bi == a || unsafe dep[a * n + bi] {
-                i = i + 1;
+        let mut done = Vector::<bool>::new();
+        done.resize_default(n);
+        let mut dep = Vector::<bool>::new();
+        dep.resize_default(n * n);
+        let mut indeg = Vector::<u32>::new();
+        indeg.resize_default(n);
+        for a in 0..n {
+            if !self.modules[a].has_ast {
                 continue;
             }
-            let mut concrete = true;
-            for k in 0..it.n {
-                if !unsafe aa.type_concrete(it.args[k as usize]) {
-                    concrete = false;
+            let aa = self.ast_c(a as ModuleId);
+            let mut i: usize = 0;
+            while i < unsafe aa.instances.len() {
+                let it = *aa.instance(i as u32);
+                let bi = it.module as usize;
+                if bi >= n || bi == a || dep[a * n + bi] {
+                    i = i + 1;
+                    continue;
                 }
-            }
-            if concrete && p.instance_home_mid(a as ModuleId, &it) == a as ModuleId {
-                unsafe dep[a * n + bi] = true;
-                unsafe {
+                let mut concrete = true;
+                for k in 0..it.n {
+                    if !unsafe aa.type_concrete(it.args[k as usize]) {
+                        concrete = false;
+                    }
+                }
+                if concrete && self.instance_home_mid(a as ModuleId, &it) == a as ModuleId {
+                    dep[a * n + bi] = true;
                     indeg[a] = indeg[a] + 1;
                 }
-            }
-            i = i + 1;
-        }
-        i = 0;
-        while i < unsafe aa.method_insts.len() {
-            let miinst = unsafe aa.method_insts[i].instance;
-            let y = *aa.type_at(miinst);
-            if y.kind != TypeKind::TYPE_INSTANCE {
                 i = i + 1;
-                continue;
             }
-            let bi = aa.instance(y.as_data.inst).module as usize;
-            if bi >= n || bi == a || unsafe dep[a * n + bi] {
-                i = i + 1;
-                continue;
-            }
-            unsafe dep[a * n + bi] = true;
-            unsafe {
-                indeg[a] = indeg[a] + 1;
-            }
-            i = i + 1;
-        }
-        i = 0;
-        while i < unsafe aa.mono.len() {
-            let mnode = unsafe aa.mono[i].node;
-            if aa.at_const(mnode).kind != NodeKind::NODE_CALL {
-                i = i + 1;
-                continue;
-            }
-            let callee_id = aa.at_const(mnode).as_data.call.callee;
-            let ck = aa.at_const(callee_id).kind;
-            let fd = if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
-                let e = aa.at_const(callee_id).as_data.specialization.expression;
-                aa.resolution_def(e);
-            } else {
-                aa.resolution_def(callee_id);
-            };
-            let bi = fd.module as usize;
-            if fd.node == NODE_NONE || bi >= n || bi == a || unsafe dep[a * n + bi] {
-                i = i + 1;
-                continue;
-            }
-            if !p.modules[bi].has_ast {
-                i = i + 1;
-                continue;
-            }
-            let bast = pkg_ast_c(p, fd.module);
-            if bast.at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
-                i = i + 1;
-                continue;
-            }
-            unsafe dep[a * n + bi] = true;
-            unsafe {
-                indeg[a] = indeg[a] + 1;
-            }
-            i = i + 1;
-        }
-    }
-    for kk in 0..n {
-        let mut pick = n;
-        let mut i: usize = 0;
-        while i < n {
-            if !unsafe done[i] && unsafe indeg[i] == 0 {
-                pick = i;
-                break;
-            }
-            i = i + 1;
-        }
-        if pick == n {
             i = 0;
+            while i < unsafe aa.method_insts.len() {
+                let miinst = unsafe aa.method_insts[i].instance;
+                let y = *aa.type_at(miinst);
+                if y.kind != TypeKind::TYPE_INSTANCE {
+                    i = i + 1;
+                    continue;
+                }
+                let bi = aa.instance(y.as_data.inst).module as usize;
+                if bi >= n || bi == a || dep[a * n + bi] {
+                    i = i + 1;
+                    continue;
+                }
+                dep[a * n + bi] = true;
+                indeg[a] = indeg[a] + 1;
+                i = i + 1;
+            }
+            i = 0;
+            while i < unsafe aa.mono.len() {
+                let mnode = unsafe aa.mono[i].node;
+                if aa.at_const(mnode).kind != NodeKind::NODE_CALL {
+                    i = i + 1;
+                    continue;
+                }
+                let callee_id = aa.at_const(mnode).as_data.call.callee;
+                let ck = aa.at_const(callee_id).kind;
+                let fd = if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                    let e = aa.at_const(callee_id).as_data.specialization.expression;
+                    aa.resolution_def(e);
+                } else {
+                    aa.resolution_def(callee_id);
+                };
+                let bi = fd.module as usize;
+                if fd.node == NODE_NONE || bi >= n || bi == a || dep[a * n + bi] {
+                    i = i + 1;
+                    continue;
+                }
+                if !self.modules[bi].has_ast {
+                    i = i + 1;
+                    continue;
+                }
+                let bast = self.ast_c(fd.module);
+                if bast.at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
+                    i = i + 1;
+                    continue;
+                }
+                dep[a * n + bi] = true;
+                indeg[a] = indeg[a] + 1;
+                i = i + 1;
+            }
+        }
+        for kk in 0..n {
+            let mut pick = n;
+            let mut i: usize = 0;
             while i < n {
-                if !unsafe done[i] {
+                if !done[i] && indeg[i] == 0 {
                     pick = i;
                     break;
                 }
                 i = i + 1;
             }
-        }
-        unsafe order[kk] = pick as ModuleId;
-        unsafe done[pick] = true;
-        for x in 0..n {
-            if !unsafe done[x] && unsafe dep[x * n + pick] && unsafe indeg[x] > 0 {
-                unsafe {
+            if pick == n {
+                i = 0;
+                while i < n {
+                    if !done[i] {
+                        pick = i;
+                        break;
+                    }
+                    i = i + 1;
+                }
+            }
+            order.push(pick as ModuleId);
+            done[pick] = true;
+            for x in 0..n {
+                if !done[x] && dep[x * n + pick] && indeg[x] > 0 {
                     indeg[x] = indeg[x] - 1;
                 }
             }
         }
     }
-    unsafe stdlib::free(done);
-    unsafe stdlib::free(dep);
-    unsafe stdlib::free(indeg);
-}
 
-/// Load `root_file` and, transitively, every module it imports, then append the std prelude found under
-/// `std_dir` (NULL skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
-pub fn package_load(root_file: str, std_dir: *const char, bootstrap_tags: bool, target: i32) Package {
-    let d = dir_of(root_file);
-    let p = package_load_rooted(root_file, d.as_str(), "", std_dir, bootstrap_tags, target);
-    return p;
-}
-
-/// Like package_load, but imports resolve against an explicit package root instead of the root
-/// file's own directory (`super-c lint <dir>` lints nested package files in their true package).
-pub fn package_load_rooted(
-    root_file: str,
-    root_dir: str,
-    alt_dir: str,
-    std_dir: *const char,
-    bootstrap_tags: bool,
-    target: i32,
-) Package {
-    return package_load_overlaid(
-        root_file,
-        root_dir,
-        alt_dir,
-        std_dir,
-        bootstrap_tags,
-        target,
-        Vector::<String>::new(),
-        Vector::<String>::new(),
-    );
-}
-
-/// Like package_load_rooted, with in-memory source overlays (see Package.overlay_files). Takes ownership
-/// of both parallel vectors.
-pub fn package_load_overlaid(
-    root_file: str,
-    root_dir: str,
-    alt_dir: str,
-    std_dir: *const char,
-    bootstrap_tags: bool,
-    target: i32,
-    overlay_files: Vector<String>,
-    overlay_texts: Vector<String>,
-) Package {
-    let mut p = Package::new();
-    p.ok = true;
-    p.bootstrap = bootstrap_tags;
-    p.overlay_files = overlay_files;
-    p.overlay_texts = overlay_texts;
-    p.root_dir = String::from_str(root_dir);
-    p.alt_root = String::from_str(alt_dir);
-    if std_dir != null {
-        p.std_root = dir_of(str::from_cstr(std_dir));
-    }
-    let rp = stem_of(root_file);
-    let rf = String::from_str(root_file);
-    p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
-    load_prelude(&mut p, std_dir, target);
-    p.seed_core();
-    return p;
-}
-
-/// Prelude-only package (import roots set, no root module): the batch `lint` driver and the LSP's
-/// workspace batch load_module each listed file into it afterwards, so every file shares one closure
-/// instead of reloading its own. Takes ownership of the overlay vectors (empty for CLI use).
-pub fn package_load_prelude(
-    root_dir: str,
-    alt_dir: str,
-    std_dir: *const char,
-    target: i32,
-    overlay_files: Vector<String>,
-    overlay_texts: Vector<String>,
-) Package {
-    let mut p = Package::new();
-    p.ok = true;
-    p.overlay_files = overlay_files;
-    p.overlay_texts = overlay_texts;
-    p.root_dir = String::from_str(root_dir);
-    p.alt_root = String::from_str(alt_dir);
-    if std_dir != null {
-        p.std_root = dir_of(str::from_cstr(std_dir));
-    }
-    load_prelude(&mut p, std_dir, target);
-    p.seed_core();
-    return p;
-}
-
-/// A batch-listed file's canonical module path: relative to the alt root when under it (the spelling
-/// manifest imports must use -- the alt root has no index form), else to the package root, `/` -> `::`.
-/// A root-level index file (<root>/x/x.spc with no <root>/x.spc beside it) collapses to `x`, mirroring
-/// module_index_path, so imports of it dedup against the listed copy.
-pub fn batch_mod_path(file: str, root: str, alt: str) String {
-    let mut rel = file;
-    if rel.len() > 2 && rel.byte_at(0) == b'.' && rel.byte_at(1) == b'/' {
-        rel = rel.slice(2, rel.len());
-    }
-    let mut from_alt = false;
-    if alt.len() != 0 && rel.len() > alt.len() && rel.starts_with(alt) && rel.byte_at(alt.len()) == b'/' {
-        rel = rel.slice(alt.len() + 1, rel.len());
-        from_alt = true;
-    } else if root.len() > 1 && rel.len() > root.len() && rel.starts_with(root) && rel.byte_at(root.len()) == b'/' {
-        rel = rel.slice(root.len() + 1, rel.len());
-    }
-    let mut end = rel.len();
-    if rel.ends_with(".spc") {
-        end = end - 4;
-    }
-    let mut ls: i64 = -1;
-    let mut pv: i64 = -1;
-    for i in 0..end {
-        if rel.byte_at(i) == b'/' {
-            pv = ls;
-            ls = i as i64;
+    // Auto-import the prelude: every TOP-LEVEL `<std_dir>/*.spc` (not subdirectories) becomes a prelude module
+    // whose public items resolve unqualified. A file already loaded (explicitly imported) is flagged in place;
+    // otherwise it is loaded under the reserved `__std::` namespace so its build output never collides with a
+    // user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
+    fn load_prelude(self: &mut Self, std_dir: str, target: i32) {
+        if std_dir.len() == 0 {
+            return;
         }
-    }
-    // The index collapse mirrors module_index_path, which only ever probes the PACKAGE root:
-    // an alt-rooted `a/a.spc` is imported as `a::a`, so collapsing it would fork a duplicate module.
-    if !from_alt && ls >= 0 && rel.slice(ls as usize + 1, end) == rel.slice(pv as usize + 1, ls as usize) {
-        let mut sib = String::from_str(file.slice(0, file.len() - rel.len() + ls as usize));
-        sib.push_str(".spc");
-        let sf = stdio::fopen(sib.as_str(), "rb");
-        if sf == null {
-            end = ls as usize;
-        } else {
-            unsafe stdio::fclose(sf);
+        let mut sd = String::from_str(std_dir);
+        let dir = unsafe shim::sc_opendir(sd.cstr());
+        if dir == null {
+            return;
         }
-    }
-    let mut out = String::new();
-    for i in 0..end {
-        if rel.byte_at(i) == b'/' {
-            out.push_str("::");
-        } else {
-            out.push_byte(rel.byte_at(i));
-        }
-    }
-    return out;
-}
-
-/// Like package_load, but the root module is an in-memory source STRING (path "main"), with no user-import
-/// recursion -- the analog of tests/test_harness.h's sc_compile. The prelude loads FIRST and the user
-/// module is appended LAST (its module id past the prelude), matching sc_compile's layout exactly, so
-/// module-order-sensitive checks (Ty interning, generic-arg validation) reproduce the C test verdicts.
-/// The user module is always the last one: `p.modules.len() - 1`. Used by selfhost/tests.
-pub fn package_from_source(src: *const char, len: usize, std_dir: *const char, target: i32) Package {
-    let mut p = Package::new();
-    p.ok = true;
-    p.root_dir = String::from_str(".");
-    if std_dir != null {
-        p.std_root = dir_of(str::from_cstr(std_dir));
-    }
-    load_prelude(&mut p, std_dir, target);
-    let mut source = String::from_str(str::from_raw(src as *const u8, len));
-    let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
-    let ok = parsed.ok;
-    let id = p.add_module(
-        String::from_str("main"),
-        String::from_str("<harness>"),
-        source,
-        replace(&mut parsed.ast, Ast::new(0)),
-        ok,
-    );
-    if ok {
-        p.modules[id as usize].ast.module = id as ModuleId;
-    } else {
-        p.ok = false;
-    }
-    p.seed_core();
-    return p;
-}
-
-// A PATH_MAX realpath scratch buffer (the omitted array field zero-fills on partial init).
-struct RealBuf {
-    pub b: [char; 4096],
-}
-
-// The final path component of `path` (a view into it) -- "dir/std/string.spc" -> "string.spc".
-fn basename_of(path: str) str {
-    let n = path.len();
-    let mut b: usize = 0;
-    let mut i: usize = 0;
-    while i < n {
-        if path.byte_at(i) == b'/' {
-            b = i + 1;
-        }
-        i = i + 1;
-    }
-    return path.slice(b, n);
-}
-
-// Byte-lexicographic order of two names with a length tiebreak (equivalent to strcmp over NUL-free views).
-const fn name_cmp(a: &String, b: &String) i32 {
-    let la = a.len();
-    let lb = b.len();
-    let m = if la < lb {
-        la;
-    } else {
-        lb;
-    };
-    let c = unsafe cstring::memcmp(a.as_str().ptr(), b.as_str().ptr(), m);
-    if c != 0 {
-        return c;
-    }
-    return la as i32 - lb as i32;
-}
-
-// Auto-import the prelude: every TOP-LEVEL `<std_dir>/*.spc` (not subdirectories) becomes a prelude module
-// whose public items resolve unqualified. A file already loaded (explicitly imported) is flagged in place;
-// otherwise it is loaded under the reserved `__std::` namespace so its build output never collides with a
-// user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
-fn load_prelude(p: &mut Package, std_dir: *const char, target: i32) {
-    if std_dir == null {
-        return;
-    }
-    let dir = unsafe shim::sc_opendir(std_dir);
-    if dir == null {
-        return;
-    }
-    let mut names = Vector::<String>::new();
-    loop {
-        let e = unsafe shim::sc_readdir(dir);
-        if e == null {
-            break;
-        }
-        let nm = unsafe shim::sc_dirent_name(e);
-        let l = unsafe cstring::strlen(nm);
-        if l < 5 {
-            continue;
-        }
-        if unsafe cstring::strcmp(nm + (l - 4), ".spc".ptr() as *const char) != 0 {
-            continue;
-        }
-        // Skip subdirectories named "*.spc" straight from readdir's d_type; only DT_UNKNOWN needs a stat.
-        let dt = unsafe shim::sc_dirent_isdir(e);
-        if dt == 1 {
-            continue;
-        }
-        if dt < 0 {
-            let mut probe = join2(str::from_cstr(std_dir), str::from_cstr(nm));
-            if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 {
-                continue;
-            }
-        }
-        names.push(String::from_cstr(nm));
-    }
-    let _ = unsafe shim::sc_closedir(dir);
-    // sort by name (small: the std/ file list) -- byte-lexicographic with a length tiebreak (equivalent to
-    // strcmp over these NUL-free views).
-    names.sort_by(|a: &String, b: &String| name_cmp(a, b));
-    // Dedup: a std file is already loaded iff some already-loaded module has the SAME basename AND is the
-    // same physical file (dev+ino). The basename pre-filter (a plain string compare, no syscall) keeps this
-    // O(std files) even for huge projects -- user modules almost never share a std/ basename, so we stat-
-    // confirm only the rare collisions -- and inode identity is exact + realpath-free (no getdirentries). The
-    // __std:: modules appended below have distinct names and never match, so scanning only the initial m0 is
-    // sufficient.
-    let m0 = p.modules.len();
-    for k in 0..names.len() {
-        let mut file = join2(str::from_cstr(std_dir), names[k].as_str());
-        let mut dup = false;
-        for i2 in 0..m0 {
-            if basename_of(p.modules[i2].file.as_str()) != names[k].as_str() {
-                continue;
-            }
-            if unsafe shim::sc_same_file(file.cstr(), p.modules[i2].file.cstr()) == 1 {
-                p.modules[i2].prelude = true;
-                dup = true;
+        let mut names = Vector::<String>::new();
+        loop {
+            let e = unsafe shim::sc_readdir(dir);
+            if e == null {
                 break;
             }
+            let nm = unsafe shim::sc_dirent_name(e);
+            let l = unsafe cstring::strlen(nm);
+            if l < 5 {
+                continue;
+            }
+            if unsafe cstring::strcmp(nm + (l - 4), ".spc".ptr() as *const char) != 0 {
+                continue;
+            }
+            // Skip subdirectories named "*.spc" straight from readdir's d_type; only DT_UNKNOWN needs a stat.
+            let dt = unsafe shim::sc_dirent_isdir(e);
+            if dt == 1 {
+                continue;
+            }
+            if dt < 0 {
+                let mut probe = join2(std_dir, str::from_cstr(nm));
+                if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 {
+                    continue;
+                }
+            }
+            names.push(String::from_cstr(nm));
         }
-        if !dup {
-            let stem = stem_of(names[k].as_str());
-            let mut modpath = String::from_str("__std::");
-            modpath.push_str(stem.as_str());
-            let id = p.load_module(modpath.as_str(), file.as_str(), false, target);
-            if id >= 0 {
-                p.modules[id as usize].prelude = true;
+        let _ = unsafe shim::sc_closedir(dir);
+        // sort by name (small: the std/ file list) -- byte-lexicographic with a length tiebreak (equivalent to
+        // strcmp over these NUL-free views).
+        names.sort_by(|a: &String, b: &String| name_cmp(a, b));
+        // Dedup: a std file is already loaded iff some already-loaded module has the SAME basename AND is the
+        // same physical file (dev+ino). The basename pre-filter (a plain string compare, no syscall) keeps this
+        // O(std files) even for huge projects -- user modules almost never share a std/ basename, so we stat-
+        // confirm only the rare collisions -- and inode identity is exact + realpath-free (no getdirentries). The
+        // __std:: modules appended below have distinct names and never match, so scanning only the initial m0 is
+        // sufficient.
+        let m0 = self.modules.len();
+        for k in 0..names.len() {
+            let mut file = join2(std_dir, names[k].as_str());
+            let mut dup = false;
+            for i2 in 0..m0 {
+                if basename_of(self.modules[i2].file.as_str()) != names[k].as_str() {
+                    continue;
+                }
+                if unsafe shim::sc_same_file(file.cstr(), self.modules[i2].file.cstr()) == 1 {
+                    self.modules[i2].prelude = true;
+                    dup = true;
+                    break;
+                }
+            }
+            if !dup {
+                let stem = stem_of(names[k].as_str());
+                let mut modpath = String::from_str("__std::");
+                modpath.push_str(stem.as_str());
+                let id = self.load_module(modpath.as_str(), file.as_str(), false, target);
+                if id >= 0 {
+                    self.modules[id as usize].prelude = true;
+                }
             }
         }
     }

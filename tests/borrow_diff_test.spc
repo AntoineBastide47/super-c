@@ -68,12 +68,7 @@ fn t_prod(p: &mut loader::Package, i: usize, last: bool, old_errs: &mut Vector<u
 // Resolve + typecheck + old flow walk. Asserts the snippet TYPECHECKS; the old walk's verdict
 // comes back as user-module error offsets.
 fn typed_both(src: str, old_errs: &mut Vector<u32>) loader::Package {
-    let mut p = loader::package_from_source(
-        src.ptr() as *const char,
-        src.len(),
-        "std".ptr() as *const char,
-        unsafe shim::sc_host_platform(),
-    );
+    let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     assert(p.ok, "snippet parses");
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
@@ -122,7 +117,7 @@ fn new_verdict(p: &loader::Package, name: str, new_errs: &mut Vector<u32>) {
     assert(lw.lower_fn(node), "body lowers");
     let mut ow = bfx::Owner::new(p);
     let forest = bmp::MoveForest::build(&lw.body);
-    let bfacts = bfx::generate(&mut ow, &lw.body, &forest);
+    let bfacts = ow.generate(&lw.body, &forest);
     let cfg = bdf::build_cfg(&lw.body);
     let lv = bdf::solve_liveness(&bfacts, &cfg);
     let mv = bdf::solve_moves(&lw.body, &forest, &bfacts, &cfg);

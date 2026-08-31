@@ -85,17 +85,7 @@ fn fresh(ws: &Ws, ovf: &Vector<String>, ovt: &Vector<String>, diags: &mut Vector
         f2.push(ovf.at(i).clone());
         t2.push(ovt.at(i).clone());
     }
-    return an::compile(
-        ws.root.as_str(),
-        ws.dir.as_str(),
-        "",
-        "std".ptr() as *const char,
-        unsafe shim::sc_host_platform(),
-        f2,
-        t2,
-        "",
-        diags,
-    );
+    return an::compile(ws.root.as_str(), ws.dir.as_str(), "", "std", unsafe shim::sc_host_platform(), f2, t2, "", diags);
 }
 
 // Multiset equality over the semantic identity of each record.

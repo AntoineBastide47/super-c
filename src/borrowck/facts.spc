@@ -233,530 +233,6 @@ fn cache_set(arr: &mut Vector<Vector<i8>>, mid: ModuleId, ty: TypeId, r: bool) {
     row.set(ty as usize, cv);
 }
 
-extend Owner {
-    pub fn new(pkg: *const loader::Package) Owner {
-        return Owner {
-            pkg: pkg,
-            free_ext: Map::<u64, u64>::new(),
-            ext_built: false,
-            owns_arr: Vector::<Vector<i8>>::new(),
-            carry_arr: Vector::<Vector<i8>>::new(),
-            busy: Vector::<u64>::new(),
-            callee_flags: Map::<u64, u64>::new(),
-            kinds_memo: Map::<u64, u64>::new(),
-            kinds_pool: Vector::<u8>::new(),
-            tok_memo: Map::<u64, u64>::new(),
-            tok_pool: Vector::<u64>::new(),
-        };
-    }
-
-    const fn p(self: &Self) &loader::Package {
-        return unsafe &*self.pkg;
-    }
-
-    const fn ast_of(self: &Self, m: ModuleId) &Ast {
-        return unsafe &*self.p().module_ast_const(m);
-    }
-
-    const fn src_of(self: &Self, m: ModuleId) str<'static> {
-        let s = self.p().modules.at(m as usize).source.as_str();
-        return str::from_raw(s.ptr(), s.len());
-    }
-
-    const fn span_text_is(self: &Self, m: ModuleId, sp: tok::Span, what: str) bool {
-        let s = self.src_of(m);
-        if sp.end <= sp.start || sp.end as usize > s.len() {
-            return false;
-        }
-        return s.slice(sp.start as usize, sp.end as usize) == what;
-    }
-
-    // Scan every module's items once for `extend T as Free`.
-    fn build_ext(self: &mut Self) {
-        if self.ext_built {
-            return;
-        }
-        self.ext_built = true;
-        let mut keys = Vector::<u64>::new();
-        let mut vals = Vector::<u64>::new();
-        for m in 0..self.p().modules.len() {
-            if !self.p().modules.at(m).has_ast {
-                continue;
-            }
-            let a = self.ast_of(m as ModuleId);
-            let items = a.at_const(a.root).as_data.program.items;
-            for i in 0..items.len {
-                let iid = unsafe a.list(items)[i as usize];
-                let it = a.at_const(iid);
-                if it.kind != NodeKind::NODE_EXTEND {
-                    continue;
-                }
-                if it.as_data.extend_def.interface_type == NODE_NONE || it.as_data.extend_def.target_type == NODE_NONE {
-                    continue;
-                }
-                let tr = a.resolution_def(it.as_data.extend_def.interface_type);
-                if tr.node == NODE_NONE {
-                    continue;
-                }
-                let trn = self.ast_of(tr.module).at_const(tr.node);
-                if trn.kind != NodeKind::NODE_INTERFACE {
-                    continue;
-                }
-                if !self.span_text_is(
-                    tr.module,
-                    self.ast_of(tr.module).at_const(trn.as_data.interface_def.name).as_data.name.text,
-                    "Free",
-                ) {
-                    continue;
-                }
-                let tg = a.resolution_def(it.as_data.extend_def.target_type);
-                if tg.node == NODE_NONE {
-                    continue;
-                }
-                keys.push(skey_mix(0, tg.module as u64 << 32 | tg.node as u64));
-                vals.push((m as u64 << 32 | iid as u64) + 1u64);
-            }
-        }
-        for i in 0..keys.len() {
-            let key = keys[i];
-            switch self.free_ext.get(&key) {
-                Some(_v) => {},
-                None => {
-                    self.free_ext.insert(key, vals[i]);
-                },
-            };
-        }
-    }
-
-    fn free_extend_of(self: &mut Self, tmod: ModuleId, tdecl: NodeId) DefId {
-        self.build_ext();
-        let key = skey_mix(0, tmod as u64 << 32 | tdecl as u64);
-        return switch self.free_ext.get(&key) {
-            Some(v) => {
-                let e = *v - 1u64;
-                DefId { module: (e >> 32) as ModuleId, node: (e & 0xFFFFFFFFu64) as NodeId };
-            },
-            None => DefId { module: 0, node: NODE_NONE },
-        };
-    }
-
-    fn param_has_free_bound(self: &Self, m: ModuleId, gp: NodeId) bool {
-        let a = self.ast_of(m);
-        let bs = a.at_const(gp).as_data.generic_param.bounds;
-        for i in 0..bs.len {
-            let bid = unsafe a.list(bs)[i as usize];
-            if a.at_const(bid).kind == NodeKind::NODE_FUNCTION_TYPE {
-                if a.at_const(bid).as_data.function_type.is_move {
-                    return true;
-                }
-                continue;
-            }
-            let bd = a.resolution_def(bid);
-            if bd.node == NODE_NONE {
-                continue;
-            }
-            let bn = self.ast_of(bd.module).at_const(bd.node);
-            if bn.kind == NodeKind::NODE_INTERFACE && self.span_text_is(
-                bd.module,
-                self.ast_of(bd.module).at_const(bn.as_data.interface_def.name).as_data.name.text,
-                "Free",
-            ) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /// Does a value of `(mid, ty)` own memory (Free semantics: value uses are moves)?
-    pub fn owns(self: &mut Self, mid: ModuleId, ty: TypeId) bool {
-        let frame = Vector::<OwnSubst>::new();
-        let r = self.owns_f(mid, ty, &frame, 0);
-        return r;
-    }
-
-    fn owns_f(self: &mut Self, mid: ModuleId, ty: TypeId, frame: &Vector<OwnSubst>, depth: i32) bool {
-        if ty == TYPE_NONE || depth > 12 {
-            return false;
-        }
-        // Front cache: a generic type is never concrete, so the substitution path stays below.
-        if frame.len() == 0 && self.ast_of(mid).type_concrete(ty) {
-            let c9 = cache_get(&mut self.owns_arr, mid, ty);
-            if c9 >= 0 {
-                return c9 != 0;
-            }
-            let y9 = *self.ast_of(mid).type_at(ty);
-            let r9 = self.owns_raw(mid, &y9, frame, depth);
-            cache_set(&mut self.owns_arr, mid, ty, r9);
-            return r9;
-        }
-        let y = *self.ast_of(mid).type_at(ty);
-        if y.kind == TypeKind::TYPE_GENERIC {
-            for i in 0..frame.len() {
-                if frame.at(i).pmod == y.module && frame.at(i).pdecl == y.as_data.decl {
-                    let am = frame.at(i).amod;
-                    let at = frame.at(i).aty;
-                    let empty = Vector::<OwnSubst>::new();
-                    let r = self.owns_f(am, at, &empty, depth + 1);
-                    return r;
-                }
-            }
-            return self.param_has_free_bound(y.module, y.as_data.decl);
-        }
-        return self.owns_raw(mid, &y, frame, depth);
-    }
-
-    fn owns_raw(self: &mut Self, mid: ModuleId, y: &Ty, frame: &Vector<OwnSubst>, depth: i32) bool {
-        if y.kind == TypeKind::TYPE_ARRAY {
-            let e = y.as_data.arr.elem;
-            return self.owns_f(mid, e, frame, depth + 1);
-        }
-        if y.kind == TypeKind::TYPE_DYN {
-            return y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8;
-        }
-        if y.kind == TypeKind::TYPE_FUNCTION {
-            let mut cap_tys = Vector::<TypeId>::new();
-            {
-                let fa = self.ast_of(y.module);
-                let fnn = *fa.at_const(y.as_data.decl);
-                if fnn.kind != NodeKind::NODE_CLOSURE {
-                    return false;
-                }
-                let caps = fnn.as_data.closure.captures;
-                let mut_caps = fnn.as_data.closure.mut_caps as u64;
-                for i in 0..caps.len {
-                    if (mut_caps >> i as u64 & 1u64) == 0 {
-                        let cid = unsafe fa.list(caps)[i as usize];
-                        cap_tys.push(fa.type_of(cid));
-                    }
-                }
-            }
-            let mut r = false;
-            for i in 0..cap_tys.len() {
-                let ct = cap_tys[i];
-                let empty = Vector::<OwnSubst>::new();
-                if self.owns_f(y.module, ct, &empty, depth + 1) {
-                    r = true;
-                    break;
-                }
-            }
-            return r;
-        }
-        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
-            if self.free_extend_of(y.module, y.as_data.decl).node != NODE_NONE {
-                return true;
-            }
-            return self.derives(mid, y, frame, depth);
-        }
-        if y.kind != TypeKind::TYPE_INSTANCE {
-            return false;
-        }
-        if y.as_data.inst as usize >= self.ast_of(mid).instances.len() {
-            return false;
-        }
-        let it = *self.ast_of(mid).instance(y.as_data.inst);
-        let ext = self.free_extend_of(it.module, it.decl);
-        if ext.node == NODE_NONE {
-            return self.derives(mid, y, frame, depth);
-        }
-        let mut gid_list = Vector::<NodeId>::new();
-        {
-            let ia = self.ast_of(ext.module);
-            let gens = ia.at_const(ext.node).as_data.extend_def.generics;
-            for i in 0..gens.len {
-                gid_list.push(unsafe ia.list(gens)[i as usize]);
-            }
-        }
-        let mut i: u32 = 0;
-        let mut r = true;
-        while i < gid_list.len() as u32 && i as u8 < it.n {
-            let gid = gid_list[i as usize];
-            let arg = unsafe it.args[i as usize];
-            if self.param_has_free_bound(ext.module, gid) && !self.owns_f(mid, arg, frame, depth + 1) {
-                r = false;
-                break;
-            }
-            i = i + 1;
-        }
-        return r;
-    }
-
-    // Member-derived ownership: a non-union aggregate with no explicit conformance owns memory when
-    // any member does. Instances judge members under their argument substitution.
-    fn derives(self: &mut Self, mid: ModuleId, y: &Ty, frame: &Vector<OwnSubst>, depth: i32) bool {
-        let mut om: ModuleId = 0;
-        let mut od = NODE_NONE;
-        let mut sub = Vector::<OwnSubst>::new();
-        if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *self.ast_of(mid).instance(y.as_data.inst);
-            om = it.module;
-            od = it.decl;
-            let mut gid_list = Vector::<NodeId>::new();
-            {
-                let oa = self.ast_of(om);
-                let ag = oa.at_const(od).as_data.aggregate;
-                let gids = oa.list(ag.generics);
-                for g in 0..ag.generics.len {
-                    let gid = unsafe gids[g as usize];
-                    if !oa.at_const(gid).as_data.generic_param.is_lifetime {
-                        gid_list.push(gid);
-                    }
-                }
-            }
-            for g in 0..gid_list.len() {
-                if g < it.n as usize {
-                    sub.push(OwnSubst { pmod: om, pdecl: gid_list[g], amod: mid, aty: unsafe it.args[g] });
-                }
-            }
-        } else {
-            om = y.module;
-            od = y.as_data.decl;
-            for i in 0..frame.len() {
-                sub.push(*frame.at(i));
-            }
-        }
-        let dn = *self.ast_of(om).at_const(od);
-        let is_enum = dn.kind == NodeKind::NODE_ENUM;
-        if dn.kind != NodeKind::NODE_STRUCT && !is_enum {
-            return false;
-        }
-        if !is_enum && dn.as_data.aggregate.is_union {
-            return false;
-        }
-        let key = om as u64 << 32 | od as u64;
-        for b in 0..self.busy.len() {
-            if self.busy[b] == key {
-                return false;
-            }
-        }
-        self.busy.push(key);
-        // Member types first (no ast borrow may live across the recursive walk).
-        let mut mtys = Vector::<TypeId>::new();
-        {
-            let oa = self.ast_of(om);
-            let ms = dn.as_data.aggregate.members;
-            for i in 0..ms.len {
-                let mid2 = unsafe oa.list(ms)[i as usize];
-                let mn = *oa.at_const(mid2);
-                // tuple members are bare type nodes; named members are NODE_FIELD
-                if !is_enum && (mn.kind == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple) {
-                    let tn9 = if mn.kind == NodeKind::NODE_FIELD {
-                        mn.as_data.field.ty;
-                    } else {
-                        mid2;
-                    };
-                    mtys.push(oa.type_of(tn9));
-                } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
-                    let pids = oa.list(mn.as_data.variant.payload);
-                    for k in 0..mn.as_data.variant.payload.len {
-                        let pid = unsafe pids[k as usize];
-                        let pe = *oa.at_const(pid);
-                        let mut tn = pid;
-                        if pe.kind == NodeKind::NODE_FIELD {
-                            tn = pe.as_data.field.ty;
-                        }
-                        mtys.push(oa.type_of(tn));
-                    }
-                }
-            }
-        }
-        let mut r = false;
-        for i in 0..mtys.len() {
-            let mt = mtys[i];
-            if self.owns_f(om, mt, &sub, depth + 1) {
-                r = true;
-            }
-        }
-        self.busy.pop();
-        return r;
-    }
-
-    /// The field declarations and member types of a struct (or struct instance) value; false for
-    /// every other shape. Types are the OWNER module's recorded member types (`om`).
-    pub fn agg_fields(
-        self: &mut Self,
-        mid: ModuleId,
-        ty: TypeId,
-        decls: &mut Vector<NodeId>,
-        tys: &mut Vector<TypeId>,
-        om_out: &mut ModuleId,
-    ) bool {
-        decls.clear();
-        tys.clear();
-        let y = *self.ast_of(mid).type_at(ty);
-        let mut om: ModuleId = 0;
-        let mut od = NODE_NONE;
-        if y.kind == TypeKind::TYPE_STRUCT {
-            om = y.module;
-            od = y.as_data.decl;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *self.ast_of(mid).instance(y.as_data.inst);
-            om = it.module;
-            od = it.decl;
-        } else {
-            return false;
-        }
-        let dn = *self.ast_of(om).at_const(od);
-        if dn.kind != NodeKind::NODE_STRUCT || dn.as_data.aggregate.is_union {
-            return false;
-        }
-        {
-            let oa = self.ast_of(om);
-            let is_tuple = dn.as_data.aggregate.is_tuple;
-            let ms = dn.as_data.aggregate.members;
-            for i in 0..ms.len {
-                let mid2 = unsafe oa.list(ms)[i as usize];
-                let mn = *oa.at_const(mid2);
-                // tuple members are bare type nodes named `_i`; named members are NODE_FIELD
-                if is_tuple {
-                    decls.push(mid2);
-                    tys.push(oa.type_of(mid2));
-                } else if mn.kind == NodeKind::NODE_FIELD {
-                    decls.push(mid2);
-                    tys.push(oa.type_of(mn.as_data.field.ty));
-                }
-            }
-        }
-        *om_out = om;
-        return true;
-    }
-
-    /// Can a value of `(mid, ty)` hold a tracked borrow? References and borrowed dyn values do;
-    /// aggregates and closures do when a member/capture does. Raw pointers, `str`, and slice views
-    /// (pointer-field structs) do not: their fields are handles, not tracked borrows.
-    pub fn carries(self: &mut Self, mid: ModuleId, ty: TypeId) bool {
-        return self.carries_f(mid, ty, 0);
-    }
-
-    fn carries_f(self: &mut Self, mid: ModuleId, ty: TypeId, depth: i32) bool {
-        if ty == TYPE_NONE || depth > 8 {
-            return false;
-        }
-        // Front cache: mut_caps bits are final before any Owner query runs (bc_ir_lower sets
-        // them), so closure-typed results are stable -- unlike the walk-side memo.
-        let front = self.ast_of(mid).type_concrete(ty);
-        if front {
-            let c = cache_get(&mut self.carry_arr, mid, ty);
-            if c >= 0 {
-                return c != 0;
-            }
-        }
-        let r9 = self.carries_go(mid, ty, depth);
-        if front {
-            cache_set(&mut self.carry_arr, mid, ty, r9);
-        }
-        return r9;
-    }
-
-    fn carries_go(self: &mut Self, mid: ModuleId, ty: TypeId, depth: i32) bool {
-        let y = *self.ast_of(mid).type_at(ty);
-        if y.kind == TypeKind::TYPE_REFERENCE {
-            return true;
-        }
-        if y.kind == TypeKind::TYPE_ARRAY {
-            let e = y.as_data.arr.elem;
-            return self.carries_f(mid, e, depth + 1);
-        }
-        if y.kind == TypeKind::TYPE_DYN {
-            return true; // an erased value can hold captured borrows whatever its ownership
-        }
-        if y.kind == TypeKind::TYPE_FUNCTION {
-            let mut cap_tys = Vector::<TypeId>::new();
-            {
-                let fa = self.ast_of(y.module);
-                let fnn = *fa.at_const(y.as_data.decl);
-                if fnn.kind != NodeKind::NODE_CLOSURE {
-                    return false;
-                }
-                if fnn.as_data.closure.mut_caps != 0 {
-                    return true;
-                }
-                let caps = fnn.as_data.closure.captures;
-                for i in 0..caps.len {
-                    let cid = unsafe fa.list(caps)[i as usize];
-                    cap_tys.push(fa.type_of(cid));
-                }
-            }
-            let mut r = false;
-            for i in 0..cap_tys.len() {
-                let ct = cap_tys[i];
-                if self.carries_f(y.module, ct, depth + 1) {
-                    r = true;
-                    break;
-                }
-            }
-            return r;
-        }
-        let mut om: ModuleId = 0;
-        let mut od = NODE_NONE;
-        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
-            om = y.module;
-            od = y.as_data.decl;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            if y.as_data.inst as usize >= self.ast_of(mid).instances.len() {
-                return false;
-            }
-            let it = *self.ast_of(mid).instance(y.as_data.inst);
-            om = it.module;
-            od = it.decl;
-            for k in 0..it.n {
-                let arg = unsafe it.args[k as usize];
-                if self.carries_f(mid, arg, depth + 1) {
-                    return true;
-                }
-            }
-        } else {
-            return false;
-        }
-        // A view type (a `str`, a slice, any aggregate declaring lifetime params) is a borrow by
-        // declaration even when its fields are raw: values of it pin what they were made from.
-        if od != NODE_NONE && self.ast_of(om).lifetimes_of(od).len != 0 {
-            return true;
-        }
-        let dn = *self.ast_of(om).at_const(od);
-        let mut r = false;
-        if dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM {
-            let is_enum = dn.kind == NodeKind::NODE_ENUM;
-            let mut mtys = Vector::<TypeId>::new();
-            {
-                let oa = self.ast_of(om);
-                let ms = dn.as_data.aggregate.members;
-                for i in 0..ms.len {
-                    let mid2 = unsafe oa.list(ms)[i as usize];
-                    let mn = *oa.at_const(mid2);
-                    // tuple members are bare type nodes; named members are NODE_FIELD
-                    if !is_enum && (mn.kind == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple) {
-                        let tn9 = if mn.kind == NodeKind::NODE_FIELD {
-                            mn.as_data.field.ty;
-                        } else {
-                            mid2;
-                        };
-                        mtys.push(oa.type_of(tn9));
-                    } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
-                        let pids = oa.list(mn.as_data.variant.payload);
-                        for k in 0..mn.as_data.variant.payload.len {
-                            let pid = unsafe pids[k as usize];
-                            let pe = *oa.at_const(pid);
-                            let mut tn = pid;
-                            if pe.kind == NodeKind::NODE_FIELD {
-                                tn = pe.as_data.field.ty;
-                            }
-                            mtys.push(oa.type_of(tn));
-                        }
-                    }
-                }
-            }
-            for i in 0..mtys.len() {
-                let mt = mtys[i];
-                if self.carries_f(om, mt, depth + 1) {
-                    r = true;
-                    break;
-                }
-            }
-        }
-        return r;
-    }
-}
-
 // ---- fact generation ------------------------------------------------------------------------------
 
 /// One statement-order walk of a verified body. Reads happen at a statement's entry point, writes,
@@ -857,37 +333,6 @@ extend BodyFacts {
         self.luse.truncate(0);
         self.ldef.truncate(0);
     }
-}
-
-pub fn generate(ow: &mut Owner, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts {
-    let mut f = BodyFacts::empty();
-    generate_into(ow, b, mf, &mut f);
-    return f;
-}
-
-// Fill `dst` in place, reusing its vector capacity across bodies (the reusable-context path). The
-// generator owns a BodyFacts by value, so `dst`'s reset storage is moved in, filled, and moved back.
-pub fn generate_into(ow: &mut Owner, b: &ir::CoreBody, mf: &mp::MoveForest, dst: &mut BodyFacts) {
-    dst.reset();
-    let mut g = Gen {
-        ow: ow,
-        b: b,
-        mf: mf,
-        f: replace(dst, BodyFacts::empty()),
-        assign_sites: Vector::<KillSite>::new(),
-        cur_block: 0,
-        in_caps: false,
-        plain_copy: false,
-        calling: false,
-        seen: Vector::<u64>::new(),
-    };
-    g.number_points();
-    g.build_origins();
-    g.walk();
-    g.finish();
-    // Hand the filled facts back to `dst`; the throwaway empty returns to `g.f`, freed when `g` drops
-    // (a partial move would leave the generator's scratch fields assign_sites/seen unfreed).
-    replace(dst, replace(&mut g.f, BodyFacts::empty()));
 }
 
 extend Gen {
@@ -2511,4 +1956,559 @@ pub fn places_conflict(b: &ir::CoreBody, a: ir::PlaceId, c: ir::PlaceId) bool {
         }
     }
     return true;
+}
+
+extend Owner {
+    pub fn new(pkg: *const loader::Package) Owner {
+        return Owner {
+            pkg: pkg,
+            free_ext: Map::<u64, u64>::new(),
+            ext_built: false,
+            owns_arr: Vector::<Vector<i8>>::new(),
+            carry_arr: Vector::<Vector<i8>>::new(),
+            busy: Vector::<u64>::new(),
+            callee_flags: Map::<u64, u64>::new(),
+            kinds_memo: Map::<u64, u64>::new(),
+            kinds_pool: Vector::<u8>::new(),
+            tok_memo: Map::<u64, u64>::new(),
+            tok_pool: Vector::<u64>::new(),
+        };
+    }
+
+    const fn p(self: &Self) &loader::Package {
+        return unsafe &*self.pkg;
+    }
+
+    const fn ast_of(self: &Self, m: ModuleId) &Ast {
+        return unsafe &*self.p().module_ast_const(m);
+    }
+
+    const fn src_of(self: &Self, m: ModuleId) str<'static> {
+        let s = self.p().modules.at(m as usize).source.as_str();
+        return str::from_raw(s.ptr(), s.len());
+    }
+
+    const fn span_text_is(self: &Self, m: ModuleId, sp: tok::Span, what: str) bool {
+        let s = self.src_of(m);
+        if sp.end <= sp.start || sp.end as usize > s.len() {
+            return false;
+        }
+        return s.slice(sp.start as usize, sp.end as usize) == what;
+    }
+
+    // Scan every module's items once for `extend T as Free`.
+    fn build_ext(self: &mut Self) {
+        if self.ext_built {
+            return;
+        }
+        self.ext_built = true;
+        let mut keys = Vector::<u64>::new();
+        let mut vals = Vector::<u64>::new();
+        for m in 0..self.p().modules.len() {
+            if !self.p().modules.at(m).has_ast {
+                continue;
+            }
+            let a = self.ast_of(m as ModuleId);
+            let items = a.at_const(a.root).as_data.program.items;
+            for i in 0..items.len {
+                let iid = unsafe a.list(items)[i as usize];
+                let it = a.at_const(iid);
+                if it.kind != NodeKind::NODE_EXTEND {
+                    continue;
+                }
+                if it.as_data.extend_def.interface_type == NODE_NONE || it.as_data.extend_def.target_type == NODE_NONE {
+                    continue;
+                }
+                let tr = a.resolution_def(it.as_data.extend_def.interface_type);
+                if tr.node == NODE_NONE {
+                    continue;
+                }
+                let trn = self.ast_of(tr.module).at_const(tr.node);
+                if trn.kind != NodeKind::NODE_INTERFACE {
+                    continue;
+                }
+                if !self.span_text_is(
+                    tr.module,
+                    self.ast_of(tr.module).at_const(trn.as_data.interface_def.name).as_data.name.text,
+                    "Free",
+                ) {
+                    continue;
+                }
+                let tg = a.resolution_def(it.as_data.extend_def.target_type);
+                if tg.node == NODE_NONE {
+                    continue;
+                }
+                keys.push(skey_mix(0, tg.module as u64 << 32 | tg.node as u64));
+                vals.push((m as u64 << 32 | iid as u64) + 1u64);
+            }
+        }
+        for i in 0..keys.len() {
+            let key = keys[i];
+            switch self.free_ext.get(&key) {
+                Some(_v) => {},
+                None => {
+                    self.free_ext.insert(key, vals[i]);
+                },
+            };
+        }
+    }
+
+    fn free_extend_of(self: &mut Self, tmod: ModuleId, tdecl: NodeId) DefId {
+        self.build_ext();
+        let key = skey_mix(0, tmod as u64 << 32 | tdecl as u64);
+        return switch self.free_ext.get(&key) {
+            Some(v) => {
+                let e = *v - 1u64;
+                DefId { module: (e >> 32) as ModuleId, node: (e & 0xFFFFFFFFu64) as NodeId };
+            },
+            None => DefId { module: 0, node: NODE_NONE },
+        };
+    }
+
+    fn param_has_free_bound(self: &Self, m: ModuleId, gp: NodeId) bool {
+        let a = self.ast_of(m);
+        let bs = a.at_const(gp).as_data.generic_param.bounds;
+        for i in 0..bs.len {
+            let bid = unsafe a.list(bs)[i as usize];
+            if a.at_const(bid).kind == NodeKind::NODE_FUNCTION_TYPE {
+                if a.at_const(bid).as_data.function_type.is_move {
+                    return true;
+                }
+                continue;
+            }
+            let bd = a.resolution_def(bid);
+            if bd.node == NODE_NONE {
+                continue;
+            }
+            let bn = self.ast_of(bd.module).at_const(bd.node);
+            if bn.kind == NodeKind::NODE_INTERFACE && self.span_text_is(
+                bd.module,
+                self.ast_of(bd.module).at_const(bn.as_data.interface_def.name).as_data.name.text,
+                "Free",
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Does a value of `(mid, ty)` own memory (Free semantics: value uses are moves)?
+    pub fn owns(self: &mut Self, mid: ModuleId, ty: TypeId) bool {
+        let frame = Vector::<OwnSubst>::new();
+        let r = self.owns_f(mid, ty, &frame, 0);
+        return r;
+    }
+
+    fn owns_f(self: &mut Self, mid: ModuleId, ty: TypeId, frame: &Vector<OwnSubst>, depth: i32) bool {
+        if ty == TYPE_NONE || depth > 12 {
+            return false;
+        }
+        // Front cache: a generic type is never concrete, so the substitution path stays below.
+        if frame.len() == 0 && self.ast_of(mid).type_concrete(ty) {
+            let c9 = cache_get(&mut self.owns_arr, mid, ty);
+            if c9 >= 0 {
+                return c9 != 0;
+            }
+            let y9 = *self.ast_of(mid).type_at(ty);
+            let r9 = self.owns_raw(mid, &y9, frame, depth);
+            cache_set(&mut self.owns_arr, mid, ty, r9);
+            return r9;
+        }
+        let y = *self.ast_of(mid).type_at(ty);
+        if y.kind == TypeKind::TYPE_GENERIC {
+            for i in 0..frame.len() {
+                if frame.at(i).pmod == y.module && frame.at(i).pdecl == y.as_data.decl {
+                    let am = frame.at(i).amod;
+                    let at = frame.at(i).aty;
+                    let empty = Vector::<OwnSubst>::new();
+                    let r = self.owns_f(am, at, &empty, depth + 1);
+                    return r;
+                }
+            }
+            return self.param_has_free_bound(y.module, y.as_data.decl);
+        }
+        return self.owns_raw(mid, &y, frame, depth);
+    }
+
+    fn owns_raw(self: &mut Self, mid: ModuleId, y: &Ty, frame: &Vector<OwnSubst>, depth: i32) bool {
+        if y.kind == TypeKind::TYPE_ARRAY {
+            let e = y.as_data.arr.elem;
+            return self.owns_f(mid, e, frame, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_DYN {
+            return y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8;
+        }
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            let mut cap_tys = Vector::<TypeId>::new();
+            {
+                let fa = self.ast_of(y.module);
+                let fnn = *fa.at_const(y.as_data.decl);
+                if fnn.kind != NodeKind::NODE_CLOSURE {
+                    return false;
+                }
+                let caps = fnn.as_data.closure.captures;
+                let mut_caps = fnn.as_data.closure.mut_caps as u64;
+                for i in 0..caps.len {
+                    if (mut_caps >> i as u64 & 1u64) == 0 {
+                        let cid = unsafe fa.list(caps)[i as usize];
+                        cap_tys.push(fa.type_of(cid));
+                    }
+                }
+            }
+            let mut r = false;
+            for i in 0..cap_tys.len() {
+                let ct = cap_tys[i];
+                let empty = Vector::<OwnSubst>::new();
+                if self.owns_f(y.module, ct, &empty, depth + 1) {
+                    r = true;
+                    break;
+                }
+            }
+            return r;
+        }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            if self.free_extend_of(y.module, y.as_data.decl).node != NODE_NONE {
+                return true;
+            }
+            return self.derives(mid, y, frame, depth);
+        }
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        if y.as_data.inst as usize >= self.ast_of(mid).instances.len() {
+            return false;
+        }
+        let it = *self.ast_of(mid).instance(y.as_data.inst);
+        let ext = self.free_extend_of(it.module, it.decl);
+        if ext.node == NODE_NONE {
+            return self.derives(mid, y, frame, depth);
+        }
+        let mut gid_list = Vector::<NodeId>::new();
+        {
+            let ia = self.ast_of(ext.module);
+            let gens = ia.at_const(ext.node).as_data.extend_def.generics;
+            for i in 0..gens.len {
+                gid_list.push(unsafe ia.list(gens)[i as usize]);
+            }
+        }
+        let mut i: u32 = 0;
+        let mut r = true;
+        while i < gid_list.len() as u32 && i as u8 < it.n {
+            let gid = gid_list[i as usize];
+            let arg = unsafe it.args[i as usize];
+            if self.param_has_free_bound(ext.module, gid) && !self.owns_f(mid, arg, frame, depth + 1) {
+                r = false;
+                break;
+            }
+            i = i + 1;
+        }
+        return r;
+    }
+
+    // Member-derived ownership: a non-union aggregate with no explicit conformance owns memory when
+    // any member does. Instances judge members under their argument substitution.
+    fn derives(self: &mut Self, mid: ModuleId, y: &Ty, frame: &Vector<OwnSubst>, depth: i32) bool {
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut sub = Vector::<OwnSubst>::new();
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_of(mid).instance(y.as_data.inst);
+            om = it.module;
+            od = it.decl;
+            let mut gid_list = Vector::<NodeId>::new();
+            {
+                let oa = self.ast_of(om);
+                let ag = oa.at_const(od).as_data.aggregate;
+                let gids = oa.list(ag.generics);
+                for g in 0..ag.generics.len {
+                    let gid = unsafe gids[g as usize];
+                    if !oa.at_const(gid).as_data.generic_param.is_lifetime {
+                        gid_list.push(gid);
+                    }
+                }
+            }
+            for g in 0..gid_list.len() {
+                if g < it.n as usize {
+                    sub.push(OwnSubst { pmod: om, pdecl: gid_list[g], amod: mid, aty: unsafe it.args[g] });
+                }
+            }
+        } else {
+            om = y.module;
+            od = y.as_data.decl;
+            for i in 0..frame.len() {
+                sub.push(*frame.at(i));
+            }
+        }
+        let dn = *self.ast_of(om).at_const(od);
+        let is_enum = dn.kind == NodeKind::NODE_ENUM;
+        if dn.kind != NodeKind::NODE_STRUCT && !is_enum {
+            return false;
+        }
+        if !is_enum && dn.as_data.aggregate.is_union {
+            return false;
+        }
+        let key = om as u64 << 32 | od as u64;
+        for b in 0..self.busy.len() {
+            if self.busy[b] == key {
+                return false;
+            }
+        }
+        self.busy.push(key);
+        // Member types first (no ast borrow may live across the recursive walk).
+        let mut mtys = Vector::<TypeId>::new();
+        {
+            let oa = self.ast_of(om);
+            let ms = dn.as_data.aggregate.members;
+            for i in 0..ms.len {
+                let mid2 = unsafe oa.list(ms)[i as usize];
+                let mn = *oa.at_const(mid2);
+                // tuple members are bare type nodes; named members are NODE_FIELD
+                if !is_enum && (mn.kind == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple) {
+                    let tn9 = if mn.kind == NodeKind::NODE_FIELD {
+                        mn.as_data.field.ty;
+                    } else {
+                        mid2;
+                    };
+                    mtys.push(oa.type_of(tn9));
+                } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
+                    let pids = oa.list(mn.as_data.variant.payload);
+                    for k in 0..mn.as_data.variant.payload.len {
+                        let pid = unsafe pids[k as usize];
+                        let pe = *oa.at_const(pid);
+                        let mut tn = pid;
+                        if pe.kind == NodeKind::NODE_FIELD {
+                            tn = pe.as_data.field.ty;
+                        }
+                        mtys.push(oa.type_of(tn));
+                    }
+                }
+            }
+        }
+        let mut r = false;
+        for i in 0..mtys.len() {
+            let mt = mtys[i];
+            if self.owns_f(om, mt, &sub, depth + 1) {
+                r = true;
+            }
+        }
+        self.busy.pop();
+        return r;
+    }
+
+    /// The field declarations and member types of a struct (or struct instance) value; false for
+    /// every other shape. Types are the OWNER module's recorded member types (`om`).
+    pub fn agg_fields(
+        self: &mut Self,
+        mid: ModuleId,
+        ty: TypeId,
+        decls: &mut Vector<NodeId>,
+        tys: &mut Vector<TypeId>,
+        om_out: &mut ModuleId,
+    ) bool {
+        decls.clear();
+        tys.clear();
+        let y = *self.ast_of(mid).type_at(ty);
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT {
+            om = y.module;
+            od = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_of(mid).instance(y.as_data.inst);
+            om = it.module;
+            od = it.decl;
+        } else {
+            return false;
+        }
+        let dn = *self.ast_of(om).at_const(od);
+        if dn.kind != NodeKind::NODE_STRUCT || dn.as_data.aggregate.is_union {
+            return false;
+        }
+        {
+            let oa = self.ast_of(om);
+            let is_tuple = dn.as_data.aggregate.is_tuple;
+            let ms = dn.as_data.aggregate.members;
+            for i in 0..ms.len {
+                let mid2 = unsafe oa.list(ms)[i as usize];
+                let mn = *oa.at_const(mid2);
+                // tuple members are bare type nodes named `_i`; named members are NODE_FIELD
+                if is_tuple {
+                    decls.push(mid2);
+                    tys.push(oa.type_of(mid2));
+                } else if mn.kind == NodeKind::NODE_FIELD {
+                    decls.push(mid2);
+                    tys.push(oa.type_of(mn.as_data.field.ty));
+                }
+            }
+        }
+        *om_out = om;
+        return true;
+    }
+
+    /// Can a value of `(mid, ty)` hold a tracked borrow? References and borrowed dyn values do;
+    /// aggregates and closures do when a member/capture does. Raw pointers, `str`, and slice views
+    /// (pointer-field structs) do not: their fields are handles, not tracked borrows.
+    pub fn carries(self: &mut Self, mid: ModuleId, ty: TypeId) bool {
+        return self.carries_f(mid, ty, 0);
+    }
+
+    fn carries_f(self: &mut Self, mid: ModuleId, ty: TypeId, depth: i32) bool {
+        if ty == TYPE_NONE || depth > 8 {
+            return false;
+        }
+        // Front cache: mut_caps bits are final before any Owner query runs (bc_ir_lower sets
+        // them), so closure-typed results are stable -- unlike the walk-side memo.
+        let front = self.ast_of(mid).type_concrete(ty);
+        if front {
+            let c = cache_get(&mut self.carry_arr, mid, ty);
+            if c >= 0 {
+                return c != 0;
+            }
+        }
+        let r9 = self.carries_go(mid, ty, depth);
+        if front {
+            cache_set(&mut self.carry_arr, mid, ty, r9);
+        }
+        return r9;
+    }
+
+    fn carries_go(self: &mut Self, mid: ModuleId, ty: TypeId, depth: i32) bool {
+        let y = *self.ast_of(mid).type_at(ty);
+        if y.kind == TypeKind::TYPE_REFERENCE {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            let e = y.as_data.arr.elem;
+            return self.carries_f(mid, e, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_DYN {
+            return true; // an erased value can hold captured borrows whatever its ownership
+        }
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            let mut cap_tys = Vector::<TypeId>::new();
+            {
+                let fa = self.ast_of(y.module);
+                let fnn = *fa.at_const(y.as_data.decl);
+                if fnn.kind != NodeKind::NODE_CLOSURE {
+                    return false;
+                }
+                if fnn.as_data.closure.mut_caps != 0 {
+                    return true;
+                }
+                let caps = fnn.as_data.closure.captures;
+                for i in 0..caps.len {
+                    let cid = unsafe fa.list(caps)[i as usize];
+                    cap_tys.push(fa.type_of(cid));
+                }
+            }
+            let mut r = false;
+            for i in 0..cap_tys.len() {
+                let ct = cap_tys[i];
+                if self.carries_f(y.module, ct, depth + 1) {
+                    r = true;
+                    break;
+                }
+            }
+            return r;
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            om = y.module;
+            od = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            if y.as_data.inst as usize >= self.ast_of(mid).instances.len() {
+                return false;
+            }
+            let it = *self.ast_of(mid).instance(y.as_data.inst);
+            om = it.module;
+            od = it.decl;
+            for k in 0..it.n {
+                let arg = unsafe it.args[k as usize];
+                if self.carries_f(mid, arg, depth + 1) {
+                    return true;
+                }
+            }
+        } else {
+            return false;
+        }
+        // A view type (a `str`, a slice, any aggregate declaring lifetime params) is a borrow by
+        // declaration even when its fields are raw: values of it pin what they were made from.
+        if od != NODE_NONE && self.ast_of(om).lifetimes_of(od).len != 0 {
+            return true;
+        }
+        let dn = *self.ast_of(om).at_const(od);
+        let mut r = false;
+        if dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM {
+            let is_enum = dn.kind == NodeKind::NODE_ENUM;
+            let mut mtys = Vector::<TypeId>::new();
+            {
+                let oa = self.ast_of(om);
+                let ms = dn.as_data.aggregate.members;
+                for i in 0..ms.len {
+                    let mid2 = unsafe oa.list(ms)[i as usize];
+                    let mn = *oa.at_const(mid2);
+                    // tuple members are bare type nodes; named members are NODE_FIELD
+                    if !is_enum && (mn.kind == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple) {
+                        let tn9 = if mn.kind == NodeKind::NODE_FIELD {
+                            mn.as_data.field.ty;
+                        } else {
+                            mid2;
+                        };
+                        mtys.push(oa.type_of(tn9));
+                    } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
+                        let pids = oa.list(mn.as_data.variant.payload);
+                        for k in 0..mn.as_data.variant.payload.len {
+                            let pid = unsafe pids[k as usize];
+                            let pe = *oa.at_const(pid);
+                            let mut tn = pid;
+                            if pe.kind == NodeKind::NODE_FIELD {
+                                tn = pe.as_data.field.ty;
+                            }
+                            mtys.push(oa.type_of(tn));
+                        }
+                    }
+                }
+            }
+            for i in 0..mtys.len() {
+                let mt = mtys[i];
+                if self.carries_f(om, mt, depth + 1) {
+                    r = true;
+                    break;
+                }
+            }
+        }
+        return r;
+    }
+
+    pub fn generate(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts {
+        let mut f = BodyFacts::empty();
+        self.generate_into(b, mf, &mut f);
+        return f;
+    }
+
+    // Fill `dst` in place, reusing its vector capacity across bodies (the reusable-context path). The
+    // generator owns a BodyFacts by value, so `dst`'s reset storage is moved in, filled, and moved back.
+    pub fn generate_into(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest, dst: &mut BodyFacts) {
+        dst.reset();
+        let mut g = Gen {
+            ow: self,
+            b: b,
+            mf: mf,
+            f: replace(dst, BodyFacts::empty()),
+            assign_sites: Vector::<KillSite>::new(),
+            cur_block: 0,
+            in_caps: false,
+            plain_copy: false,
+            calling: false,
+            seen: Vector::<u64>::new(),
+        };
+        g.number_points();
+        g.build_origins();
+        g.walk();
+        g.finish();
+        // Hand the filled facts back to `dst`; the throwaway empty returns to `g.f`, freed when `g` drops
+        // (a partial move would leave the generator's scratch fields assign_sites/seen unfreed).
+        replace(dst, replace(&mut g.f, BodyFacts::empty()));
+    }
 }

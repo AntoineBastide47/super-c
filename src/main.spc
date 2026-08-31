@@ -30,7 +30,7 @@ import bindgen::bindgen as bindgen;
 
 fn run_file(
     path: str,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     topts: *const TestOpts,
@@ -123,7 +123,7 @@ fn parse_test_shard(s: *const char, topts: &mut TestOpts) bool {
 }
 
 // The std/ directory next to the running binary ("<exe dir>/std"), so the prelude is found regardless of cwd.
-fn exe_std_dir(argv0: *const char) *mut char {
+fn exe_std_dir(argv0: *const char) String {
     let mut buf = PathBuf {};
     let mut path = argv0;
     if unsafe shim::sc_exe_path(&mut buf[0], 4096) == 0 {
@@ -137,31 +137,24 @@ fn exe_std_dir(argv0: *const char) *mut char {
     } else {
         s1;
     };
-    let dirlen = if slash != null {
-        slash as usize - path as usize;
-    } else {
-        1 as usize;
-    };
-    let out = (unsafe stdlib::malloc(dirlen + 5)) as *mut char;
-    if out == null {
-        return null;
-    }
+    let mut base = String::new();
     if slash != null {
-        unsafe cstring::memcpy(out, path, dirlen);
+        base.push_str(str::from_raw(path as *const u8, slash as usize - path as usize));
     } else {
-        unsafe out[0] = '.' as char;
+        base.push_str(".");
     }
     // std lives beside the compiler -- but not always DIRECTLY beside it: a profile build sits two levels
     // down in <out-dir>/<profile>/, so try the parents before giving up. First 'std' directory wins.
-    let mut cut = dirlen;
+    let mut cut = base.len();
     for _up in 0..3 {
-        unsafe cstring::memcpy(out + cut, "/std".ptr(), 4);
-        unsafe out[cut + 4] = 0 as char;
-        if unsafe shim::sc_stat_isdir(out) == 1 {
-            return out;
+        let mut probe = String::with_capacity(cut + 4);
+        probe.push_str(str::from_raw(base.as_str().ptr(), cut));
+        probe.push_str("/std");
+        if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 {
+            return probe;
         }
         let mut k = cut;
-        while k > 0 && unsafe out[k - 1] != '/' as char {
+        while k > 0 && base.as_str().byte_at(k - 1) != b'/' {
             k = k - 1;
         }
         if k <= 1 {
@@ -170,29 +163,25 @@ fn exe_std_dir(argv0: *const char) *mut char {
         cut = k - 1;
     }
     // Nothing found: answer with the one next to the binary, so a failure names the obvious place.
-    unsafe cstring::memcpy(out + dirlen, "/std".ptr(), 4);
-    unsafe out[dirlen + 4] = 0 as char;
-    return out;
+    base.push_str("/std");
+    return base;
 }
 
 fn read_stdin() Option<String> {
     let mut s = String::new();
     let cap: usize = 65536;
-    let buf = (unsafe stdlib::malloc(cap)) as *mut u8;
-    if buf == null {
-        return Option::<String>::None;
-    }
+    let mut buf = Vector::<u8>::new();
+    buf.resize_default(cap);
     let sin = stdio::stdin();
     loop {
-        let n = unsafe stdio::fread(buf, 1, cap, sin);
+        let n = unsafe stdio::fread(buf.as_ptr() as *mut u8, 1, cap, sin);
         if n > 0 {
-            s.push_bytes(buf, n);
+            s.push_bytes(buf.as_ptr(), n);
         }
         if n < cap {
             break;
         }
     }
-    unsafe stdlib::free(buf);
     return Option::<String>::Some(s);
 }
 
@@ -364,7 +353,7 @@ fn lint_alt() str<'static> {
     return "";
 }
 
-fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
+fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
     // A std/ffi file must keep its prelude identity (module path, builtin seeding, load order):
     // loading it as a root would invent errors. Load an empty root -- the prelude comes along as
     // always -- and if the requested file IS one of those modules, lint it in place.
@@ -375,7 +364,7 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
     let mut pass = 0;
     loop {
         let mut pathc = String::from_str(path);
-        let mut p = loader::package_from_source("".ptr() as *const char, 0, std_dir, target);
+        let mut p = loader::package_from_source("", std_dir, target);
         let mut lint_mod = p.modules.len(); // the appended empty root; replaced below
         let mut found = false;
         for m in 0..p.modules.len() {
@@ -467,7 +456,7 @@ fn lint_collect(dir: str, files: &mut Vector<String>) i32 {
 
 // One-package load for the batch: prelude first (so std/ffi files keep their prelude identity), then
 // each listed file joins the closure once, marked in lint_set.
-fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: *const char, target: i32) loader::Package {
+fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, target: i32) loader::Package {
     let mut p = loader::package_load_prelude(
         root,
         alt,
@@ -514,7 +503,7 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: *const 
 fn lint_batch(
     files: &Vector<String>,
     root: str,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,
@@ -586,7 +575,7 @@ fn lint_batch(
     return lint_batch(files, root, std_dir, ce_steps, ce_mem, target, false, sc, lint_pub);
 }
 
-fn run_lint(path: str, std_dir: *const char, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
+fn run_lint(path: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
     if unsafe shim::sc_stat_isdir(path.ptr() as *const char) == 1 {
         // every file under the directory resolves imports against the directory itself
         let droot = if lint_alt().len() != 0 {
@@ -639,7 +628,7 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     let src = src_opt.unwrap();
 
     let mut out = String::new();
-    if format_source(&src, path, 120, &mut out) != 0 {
+    if !format_source(&src, path, 120, &mut out) {
         return 1;
     }
     let src_view = src.as_str();
@@ -718,58 +707,60 @@ struct CommonOpts {
     pub bad: bool, // malformed argument list: print usage and exit 1
 }
 
-fn common_flag(o: &mut CommonOpts, arg: str) bool {
-    if arg.starts_with("--const-eval-steps=") {
-        let v = parse_size((&arg[19]) as *const char);
-        if v == 0 || v > 4294967295u64 {
-            o.bad = true;
+extend CommonOpts {
+    fn common_flag(self: &mut Self, arg: str) bool {
+        if arg.starts_with("--const-eval-steps=") {
+            let v = parse_size((&arg[19]) as *const char);
+            if v == 0 || v > 4294967295u64 {
+                self.bad = true;
+            } else {
+                self.ce_steps = v as u32;
+            }
+        } else if arg.starts_with("--const-eval-memory=") {
+            self.ce_mem = parse_size((&arg[20]) as *const char);
+            if self.ce_mem == 0 {
+                self.bad = true;
+            }
+        } else if arg.starts_with("--target=") {
+            let t = arg[9..];
+            if t == "windows" {
+                self.target = 0;
+            } else if t == "macos" {
+                self.target = 1;
+            } else if t == "linux" {
+                self.target = 2;
+            } else if t == "wasm" {
+                self.target = 3;
+                self.arch = 2; // wasm32
+            } else if t == "ios" {
+                self.target = 4;
+                self.arch = 1; // aarch64
+            } else if t == "android" {
+                self.target = 5;
+                self.arch = 1; // aarch64
+            } else {
+                self.bad = true;
+            }
+        } else if arg.starts_with("--arch=") {
+            let a2 = arg[7..];
+            if a2 == "x86_64" {
+                self.arch = 0;
+            } else if a2 == "aarch64" {
+                self.arch = 1;
+            } else if a2 == "wasm32" {
+                self.arch = 2;
+            } else {
+                self.bad = true;
+            }
+        } else if arg == "--bootstrap-tags" {
+            self.bootstrap_tags = true;
+        } else if arg == "--no-lint" {
+            self.lint = false;
         } else {
-            o.ce_steps = v as u32;
+            return false;
         }
-    } else if arg.starts_with("--const-eval-memory=") {
-        o.ce_mem = parse_size((&arg[20]) as *const char);
-        if o.ce_mem == 0 {
-            o.bad = true;
-        }
-    } else if arg.starts_with("--target=") {
-        let t = arg[9..];
-        if t == "windows" {
-            o.target = 0;
-        } else if t == "macos" {
-            o.target = 1;
-        } else if t == "linux" {
-            o.target = 2;
-        } else if t == "wasm" {
-            o.target = 3;
-            o.arch = 2; // wasm32
-        } else if t == "ios" {
-            o.target = 4;
-            o.arch = 1; // aarch64
-        } else if t == "android" {
-            o.target = 5;
-            o.arch = 1; // aarch64
-        } else {
-            o.bad = true;
-        }
-    } else if arg.starts_with("--arch=") {
-        let a2 = arg[7..];
-        if a2 == "x86_64" {
-            o.arch = 0;
-        } else if a2 == "aarch64" {
-            o.arch = 1;
-        } else if a2 == "wasm32" {
-            o.arch = 2;
-        } else {
-            o.bad = true;
-        }
-    } else if arg == "--bootstrap-tags" {
-        o.bootstrap_tags = true;
-    } else if arg == "--no-lint" {
-        o.lint = false;
-    } else {
-        return false;
+        return true;
     }
-    return true;
 }
 
 // build.toml engine flags, shared by build/run/test/bench (`clean` takes only --out-dir).
@@ -783,30 +774,32 @@ struct BuildOpts<'a> {
     pub lib_sel: bool, // --lib: build only the [lib] target
 }
 
-fn build_flag(o: &mut BuildOpts, co: &mut CommonOpts, arg: str) bool {
-    if arg.starts_with("--profile=") {
-        o.profile = arg[10..];
-    } else if arg.starts_with("--out-dir=") {
-        o.out_dir = arg[10..];
-    } else if arg.starts_with("--cstd=") {
-        o.cstd = arg[7..];
-    } else if arg.starts_with("--cc=") {
-        o.cc = arg[5..];
-    } else if arg.starts_with("--bin=") {
-        o.bin_sel = arg[6..];
-    } else if arg == "--lib" {
-        o.lib_sel = true;
-    } else if arg.starts_with("--jobs=") {
-        let v = unsafe stdlib::atoi((&arg[7]) as *const char);
-        if v < 1 {
-            co.bad = true;
+extend BuildOpts {
+    fn build_flag(self: &mut Self, co: &mut CommonOpts, arg: str) bool {
+        if arg.starts_with("--profile=") {
+            self.profile = arg[10..];
+        } else if arg.starts_with("--out-dir=") {
+            self.out_dir = arg[10..];
+        } else if arg.starts_with("--cstd=") {
+            self.cstd = arg[7..];
+        } else if arg.starts_with("--cc=") {
+            self.cc = arg[5..];
+        } else if arg.starts_with("--bin=") {
+            self.bin_sel = arg[6..];
+        } else if arg == "--lib" {
+            self.lib_sel = true;
+        } else if arg.starts_with("--jobs=") {
+            let v = unsafe stdlib::atoi((&arg[7]) as *const char);
+            if v < 1 {
+                co.bad = true;
+            } else {
+                self.jobs = v as u32;
+            }
         } else {
-            o.jobs = v as u32;
+            return false;
         }
-    } else {
-        return false;
+        return true;
     }
-    return true;
 }
 
 fn is_dir(path: str) bool {
@@ -900,7 +893,7 @@ fn main(argv: Vector<str>) i32 {
         MODE_DEFAULT => {
             while i < argc {
                 let arg = argv[i];
-                if common_flag(&mut co, arg) {} else if arg == "--test" {
+                if co.common_flag(arg) {} else if arg == "--test" {
                     topts.enabled = true;
                 } else if arg.starts_with("--test-jobs=") {
                     topts.jobs = unsafe stdlib::atoi((&arg[12]) as *const char);
@@ -928,8 +921,8 @@ fn main(argv: Vector<str>) i32 {
         MODE_BUILD | MODE_RELEASE => {
             while i < argc {
                 let arg = argv[i];
-                let common = common_flag(&mut co, arg);
-                if common || build_flag(&mut bo, &mut co, arg) {} else if arg == "-o" {
+                let common = co.common_flag(arg);
+                if common || bo.build_flag(&mut co, arg) {} else if arg == "-o" {
                     if i + 1 < argc {
                         i = i + 1;
                         out_bin = argv[i];
@@ -970,7 +963,7 @@ fn main(argv: Vector<str>) i32 {
         MODE_LINT => {
             while i < argc {
                 let arg = argv[i];
-                if common_flag(&mut co, arg) {} else if arg == "--fix" {
+                if co.common_flag(arg) {} else if arg == "--fix" {
                     lint_fix = true;
                 } else if arg == "--const" {
                     lint_sc = true;
@@ -987,8 +980,8 @@ fn main(argv: Vector<str>) i32 {
         MODE_COMMAND => {
             while i < argc {
                 let arg = argv[i];
-                let common = common_flag(&mut co, arg);
-                if common || build_flag(&mut bo, &mut co, arg) {} else if file.len() == 0 && !arg.starts_with("--") {
+                let common = co.common_flag(arg);
+                if common || bo.build_flag(&mut co, arg) {} else if file.len() == 0 && !arg.starts_with("--") {
                     file = arg; // the build.toml command name
                 } else {
                     co.bad = true;
@@ -1002,8 +995,8 @@ fn main(argv: Vector<str>) i32 {
         MODE_RUN => {
             while i < argc {
                 let arg = argv[i];
-                let common = common_flag(&mut co, arg);
-                if common || build_flag(&mut bo, &mut co, arg) {} else {
+                let common = co.common_flag(arg);
+                if common || bo.build_flag(&mut co, arg) {} else {
                     co.bad = true; // `run` takes only build flags; the binary is the manifest's `bin`
                 }
                 i = i + 1;
@@ -1041,8 +1034,8 @@ fn main(argv: Vector<str>) i32 {
                         co.bad = true;
                     }
                 } else {
-                    let common = common_flag(&mut co, arg);
-                    if !common && !build_flag(&mut bo, &mut co, arg) {
+                    let common = co.common_flag(arg);
+                    if !common && !bo.build_flag(&mut co, arg) {
                         co.bad = true;
                     }
                 }
@@ -1055,8 +1048,8 @@ fn main(argv: Vector<str>) i32 {
                 if arg == "--no-run" {
                     bench_norun = true;
                 } else {
-                    let common = common_flag(&mut co, arg);
-                    if !common && !build_flag(&mut bo, &mut co, arg) {
+                    let common = co.common_flag(arg);
+                    if !common && !bo.build_flag(&mut co, arg) {
                         co.bad = true;
                     }
                 }
@@ -1065,7 +1058,7 @@ fn main(argv: Vector<str>) i32 {
         },
         MODE_LSP => {
             while i < argc {
-                if !common_flag(&mut co, argv[i]) {
+                if !co.common_flag(argv[i]) {
                     co.bad = true;
                 }
                 i = i + 1;
@@ -1314,26 +1307,30 @@ OPTIONS:
                 let man = mo.unwrap();
                 lpub = man.lib_name.len() == 0;
             }
-            if files.len() != 0 && lint_batch(&files, ".", std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc, lpub) != 0 {
+            if files.len() != 0 && lint_batch(
+                &files,
+                ".",
+                std_dir.as_str(),
+                ce_steps,
+                ce_mem,
+                target,
+                lint_fix,
+                lint_sc,
+                lpub,
+            ) != 0 {
                 rc = 1;
             }
         } else {
             for k in 0..paths.len() {
-                if run_lint(paths.at(k).as_str(), std_dir, ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
+                if run_lint(paths.at(k).as_str(), std_dir.as_str(), ce_steps, ce_mem, target, lint_fix, lint_sc) != 0 {
                     rc = 1;
                 }
             }
         }
-        if std_dir != null {
-            unsafe stdlib::free(std_dir);
-        }
         return rc;
     }
     if mode == Mode::MODE_LSP {
-        let rc = lsp_srv::run(std_dir, target);
-        if std_dir != null {
-            unsafe stdlib::free(std_dir);
-        }
+        let rc = lsp_srv::run(std_dir.as_str(), target);
         return rc;
     }
     if manifest_mode {
@@ -1378,14 +1375,24 @@ OPTIONS:
                 }
             } else if mode == Mode::MODE_TEST {
                 topts.enabled = true;
-                rc = bsys::manifest_test(&man, profile, jobs, &topts, std_dir, ce_steps, ce_mem, target, bootstrap_tags);
+                rc = bsys::manifest_test(
+                    &man,
+                    profile,
+                    jobs,
+                    &topts,
+                    std_dir.as_str(),
+                    ce_steps,
+                    ce_mem,
+                    target,
+                    bootstrap_tags,
+                );
             } else if mode == Mode::MODE_BENCH {
                 rc = bsys::manifest_bench(
                     &man,
                     profile,
                     bench_norun,
                     jobs,
-                    std_dir,
+                    std_dir.as_str(),
                     ce_steps,
                     ce_mem,
                     target,
@@ -1397,7 +1404,7 @@ OPTIONS:
                     file,
                     profile,
                     jobs,
-                    std_dir,
+                    std_dir.as_str(),
                     ce_steps,
                     ce_mem,
                     target,
@@ -1412,7 +1419,7 @@ OPTIONS:
                     out_bin,
                     bo.bin_sel,
                     jobs,
-                    std_dir,
+                    std_dir.as_str(),
                     ce_steps,
                     ce_mem,
                     target,
@@ -1425,7 +1432,7 @@ OPTIONS:
                     profile,
                     out_bin,
                     jobs,
-                    std_dir,
+                    std_dir.as_str(),
                     ce_steps,
                     ce_mem,
                     target,
@@ -1439,7 +1446,7 @@ OPTIONS:
                     bo.bin_sel,
                     bo.lib_sel,
                     jobs,
-                    std_dir,
+                    std_dir.as_str(),
                     ce_steps,
                     ce_mem,
                     target,
@@ -1448,9 +1455,6 @@ OPTIONS:
                 );
             }
         }
-        if std_dir != null {
-            unsafe stdlib::free(std_dir);
-        }
         return rc;
     }
     // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins -- without
@@ -1458,7 +1462,7 @@ OPTIONS:
     let pflags = bsys::profile_flags(profile, target, target_sdk(target));
     let rc = run_file(
         file,
-        std_dir,
+        std_dir.as_str(),
         ce_steps,
         ce_mem,
         &topts,
@@ -1474,8 +1478,5 @@ OPTIONS:
             (unsafe shim::sc_ncpu()) as u32; // "0 = core count", resolved so wasm goes serial
         },
     );
-    if std_dir != null {
-        unsafe stdlib::free(std_dir);
-    }
     return rc;
 }

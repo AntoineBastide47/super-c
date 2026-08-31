@@ -52,12 +52,7 @@ fn t_resolve(p: &mut loader::Package, i: usize) bool {
 // `probe_arm` < 0 asks whether a wildcard is still useful (NOT exhaustive); otherwise whether that
 // arm is still reachable behind its predecessors.
 fn engine_over(src: str, probe_arm: i64) bool {
-    let mut p = loader::package_from_source(
-        src.ptr() as *const char,
-        src.len(),
-        "std".ptr() as *const char,
-        unsafe shim::sc_host_platform(),
-    );
+    let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     assert(p.ok, "snippet parses");
     let n = p.modules.len();
     let mut ok = true;

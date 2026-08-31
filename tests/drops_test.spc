@@ -44,12 +44,7 @@ fn t_typecheck(p: &mut loader::Package, i: usize) bool {
 }
 
 fn typed_package(src: str) loader::Package {
-    let mut p = loader::package_from_source(
-        src.ptr() as *const char,
-        src.len(),
-        "std".ptr() as *const char,
-        unsafe shim::sc_host_platform(),
-    );
+    let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     assert(p.ok, "snippet parses");
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
@@ -101,7 +96,7 @@ fn schedule(p: &loader::Package, name: str) DropCounts {
     assert(lw.lower_fn(node), "body lowers");
     let mut ow = bfx::Owner::new(p);
     let forest = bmp::MoveForest::build(&lw.body);
-    let bfacts = bfx::generate(&mut ow, &lw.body, &forest);
+    let bfacts = ow.generate(&lw.body, &forest);
     let cfg = bdf::build_cfg(&lw.body);
     let mv = bdf::solve_moves(&lw.body, &forest, &bfacts, &cfg);
     let mut ecx = ird::ElabCtx::empty();

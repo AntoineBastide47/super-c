@@ -10,6 +10,7 @@ import ir::core as ir;
 import borrowck::facts as bf;
 import borrowck::dataflow as df;
 import borrowck::loan_set as ls;
+import utils::bits as bits;
 
 /// Borrow error kinds.
 pub const BE_CONFLICT: u8 = 0; // access invalidates a loan that is still required
@@ -851,13 +852,13 @@ extend Solver {
                 if upto != bf::BF_NONE && kp > upto {
                     break;
                 }
-                ls::row_clear(scratch, (self.kills_blk[k as usize] & 0xFFFFFFFFu64) as u32);
+                bits::bit_clear(scratch, (self.kills_blk[k as usize] & 0xFFFFFFFFu64) as u32);
                 k += 1;
             } else if ip != bf::BF_NONE {
                 if upto != bf::BF_NONE && ip > upto {
                     break;
                 }
-                ls::row_set(scratch, self.issues_blk[i as usize]);
+                bits::bit_set(scratch, self.issues_blk[i as usize]);
                 i += 1;
             }
         }
@@ -1111,7 +1112,7 @@ extend Solver {
                 // In scope at the access?
                 let bi = self.point_block[ac.point as usize];
                 self.transfer_block(bi, ac.point - 1, &mut scratch);
-                if !ls::row_get(&scratch, li as u32) {
+                if !bits::bit_get(&scratch, li as u32) {
                     continue;
                 }
                 // Still required (some live origin can hold it)?

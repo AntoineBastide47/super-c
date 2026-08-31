@@ -841,7 +841,8 @@ extend TypeChecker {
         if tt != TokenType::IntegerLiteral && tt != TokenType::FloatLiteral {
             return false;
         }
-        return ast_numeric_suffix(self.source, n.as_data.literal.raw.start, n.as_data.literal.raw.end, null) != BuiltinType::BT_COUNT;
+        let mut sfx: u32 = 0;
+        return ast_numeric_suffix(self.source, n.as_data.literal.raw.start, n.as_data.literal.raw.end, &mut sfx) != BuiltinType::BT_COUNT;
     }
     const fn is_integer_literal_node(self: &Self, id: NodeId) bool {
         if id == NODE_NONE {
@@ -856,7 +857,7 @@ extend TypeChecker {
         let n = a.at_const(nid);
         return n.kind == NodeKind::NODE_LITERAL && n.as_data.literal.token_type == TokenType::IntegerLiteral;
     }
-    fn lit_mag(self: &Self, id: NodeId, out: *mut u64) bool {
+    fn lit_mag(self: &Self, id: NodeId, out: &mut u64) bool {
         let n = self.cur_ast().at_const(id);
         let lr = n.as_data.literal.raw;
         let mut endd = lr.end;
@@ -883,7 +884,7 @@ extend TypeChecker {
             }
             acc = acc * base + d;
         }
-        unsafe *out = acc;
+        *out = acc;
         return true;
     }
 
@@ -935,7 +936,7 @@ extend TypeChecker {
 
     // Const-fold `nid` to an integer via the always-on interpreter. False when it isn't a
     // compile-time constant (locals, calls the fx summary rejects, ...) -- never an error.
-    fn tc_fold_int(self: &mut Self, nid: NodeId, out: *mut i64) bool {
+    fn tc_fold_int(self: &mut Self, nid: NodeId, out: &mut i64) bool {
         let ceptr = self.cir();
         if ceptr == null {
             return false;
@@ -944,7 +945,7 @@ extend TypeChecker {
         if v.kind != iri::IV_INT {
             return false;
         }
-        unsafe *out = v.i;
+        *out = v.i;
         return true;
     }
 
@@ -1681,8 +1682,8 @@ pub fn render_type_into(
         if l.k != 0 && at < cap {
             at = at + (unsafe stdio::snprintf(buf + at, cap - at, " + %lld".ptr() as *const char, l.k)) as usize;
         }
-        if lin_div_of(l) != 1 && at < cap {
-            at = at + (unsafe stdio::snprintf(buf + at, cap - at, " / %lld".ptr() as *const char, lin_div_of(l))) as usize;
+        if l.div_of() != 1 && at < cap {
+            at = at + (unsafe stdio::snprintf(buf + at, cap - at, " / %lld".ptr() as *const char, l.div_of())) as usize;
         }
         if at + 1 < cap {
             unsafe buf[at] = '}' as char;
@@ -1807,10 +1808,10 @@ extend TypeChecker {
     // until a substitution makes it a number. Installed only onto an empty accumulator, because the
     // divisor covers the whole form.
     const fn tc_lin_floor(self: &Self, lhs: &ConstLin, d: i64, out: &mut ConstLin) bool {
-        if d <= 1 || lin_div_of(lhs) != 1 {
+        if d <= 1 || lhs.div_of() != 1 {
             return false;
         }
-        if out.k != 0 || out.n != 0 || lin_div_of(out) != 1 {
+        if out.k != 0 || out.n != 0 || out.div_of() != 1 {
             return false;
         }
         *out = *lhs;
@@ -1877,27 +1878,27 @@ extend TypeChecker {
                         ) {
                             return false;
                         }
-                        if lin_is_concrete(&inner) {
-                            out.k = out.k + lin_value(&inner);
+                        if inner.is_concrete() {
+                            out.k = out.k + inner.value();
                             return true;
                         }
-                        if lin_div_of(&inner) != 1 {
+                        if inner.div_of() != 1 {
                             // Whole or not at all: the divisor covers the entire form.
-                            if out.k == 0 && out.n == 0 && lin_div_of(out) == 1 {
+                            if out.k == 0 && out.n == 0 && out.div_of() == 1 {
                                 *out = inner;
                                 return true;
                             }
                             return false;
                         }
-                        return lin_scale(&inner, 1, out);
+                        return inner.scale(1, out);
                     }
                     if by.kind == TypeKind::TYPE_GENERIC {
-                        return lin_add_term(out, DefId { module: by.module, node: by.as_data.decl }, 1);
+                        return out.add_term(DefId { module: by.module, node: by.as_data.decl }, 1);
                     }
                     return false;
                 }
             }
-            return lin_add_term(out, d, 1);
+            return out.add_term(d, 1);
         }
         if node.kind == NodeKind::NODE_BINARY {
             let op = node.as_data.binary.op;
@@ -1918,7 +1919,7 @@ extend TypeChecker {
                 };
                 out.k = out.k + sign * rhs.k;
                 for i in 0..rhs.n {
-                    if !lin_add_term(out, unsafe rhs.p[i as usize], sign * unsafe rhs.c[i as usize]) {
+                    if !out.add_term(unsafe rhs.p[i as usize], sign * unsafe rhs.c[i as usize]) {
                         return false;
                     }
                 }
@@ -1940,15 +1941,15 @@ extend TypeChecker {
             if op == TokenType::Star {
                 // One side must be a plain constant: a product of two parameters is not linear.
                 if rhs.n == 0 {
-                    return lin_scale(&lhs, rhs.k, out);
+                    return lhs.scale(rhs.k, out);
                 }
                 if lhs.n == 0 {
-                    return lin_scale(&rhs, lhs.k, out);
+                    return rhs.scale(lhs.k, out);
                 }
                 return false;
             }
             if op == TokenType::LeftShift && rhs.n == 0 && rhs.k >= 0 && rhs.k < 32 {
-                return lin_scale(&lhs, 1i64 << rhs.k, out);
+                return lhs.scale(1i64 << rhs.k, out);
             }
             if op == TokenType::Slash && rhs.n == 0 && rhs.k != 0 {
                 if lin_divide(&lhs, rhs.k, out) {
@@ -2108,7 +2109,7 @@ extend TypeChecker {
         // have to be solved for P, which this does not attempt.
         if p.kind == TypeKind::TYPE_CONST_EXPR {
             let l = *self.cur_ast().const_lin_at(p.as_data.inst);
-            if l.k == 0 && l.n == 1 && l.c[0] == 1 && lin_div_of(&l) == 1 {
+            if l.k == 0 && l.n == 1 && l.c[0] == 1 && l.div_of() == 1 {
                 for i in 0..n {
                     if unsafe params[i as usize].module == l.p[0].module && unsafe params[i as usize].node == l.p[0].node {
                         if unsafe bound[i as usize] == TYPE_NONE {
@@ -2355,7 +2356,7 @@ extend TypeChecker {
         }
         return kind;
     }
-    const fn tc_box_of(self: &Self, y: &Ty, inner: *mut TypeId, global_alloc: *mut bool) bool {
+    const fn tc_box_of(self: &Self, y: &Ty, inner: &mut TypeId, global_alloc: &mut bool) bool {
         if y.kind != TypeKind::TYPE_INSTANCE || self.package == null {
             return false;
         }
@@ -2363,13 +2364,13 @@ extend TypeChecker {
         if it.module != self.ph_box.mid || it.decl != self.ph_box.node || it.n < 1 {
             return false;
         }
-        unsafe *inner = it.args[0];
+        *inner = it.args[0];
         let mut ga = false;
         if it.n >= 2 {
             let ay = self.type_at(it.args[1]);
             ga = ay.kind == TypeKind::TYPE_STRUCT && ay.module == self.ph_global.mid && ay.as_data.decl == self.ph_global.node;
         }
-        unsafe *global_alloc = ga;
+        *global_alloc = ga;
         return true;
     }
 
@@ -4275,12 +4276,12 @@ extend TypeChecker {
         m: ModuleId,
         bounds: NodeList,
         out: *mut BoundIface,
-        n: *mut i32,
+        n: &mut i32,
         cap: i32,
     ) {
         let a = self.mod_ast(m);
         let mut i: u32 = 0;
-        while i < bounds.len && unsafe *n < cap {
+        while i < bounds.len && *n < cap {
             let bid = unsafe a.list(bounds)[i as usize];
             let d = a.resolution_def(bid);
             if d.node != NODE_NONE {
@@ -4294,9 +4295,9 @@ extend TypeChecker {
                         k = k + 1;
                     }
                 }
-                let idx = unsafe *n;
+                let idx = *n;
                 unsafe out[idx as usize] = b;
-                unsafe *n = idx + 1;
+                *n = idx + 1;
             }
             i = i + 1;
         }
@@ -6148,11 +6149,12 @@ extend TypeChecker {
         let actual = self.cur_ast().type_of(node);
         if actual == TYPE_NONE && expected != TYPE_NONE {
             // `null` types as TYPE_NONE; don't let the wildcard below accept it for value types
-            // (str, structs, ints) -- it is only a pointer/reference/fn-pointer literal.
+            // (str, structs, ints) -- it is only a raw-pointer/fn-pointer literal. References are
+            // never null: accepting one here would emit C that takes the address of an rvalue.
             let n = self.cur_ast().at_const(node);
             if n.kind == NodeKind::NODE_LITERAL && n.as_data.literal.token_type == TokenType::Null {
                 let ek = self.type_at(expected).kind;
-                return ek == TypeKind::TYPE_POINTER || ek == TypeKind::TYPE_REFERENCE || ek == TypeKind::TYPE_FUNCTION;
+                return ek == TypeKind::TYPE_POINTER || ek == TypeKind::TYPE_FUNCTION;
             }
         }
         if expected == TYPE_NONE || expected == actual {
@@ -6481,7 +6483,7 @@ extend TypeChecker {
             return true;
         }
         if tt == TokenType::Null {
-            return et.kind == TypeKind::TYPE_POINTER || et.kind == TypeKind::TYPE_REFERENCE;
+            return et.kind == TypeKind::TYPE_POINTER;
         }
         return false;
     }
@@ -6799,7 +6801,7 @@ extend TypeChecker {
 
     // ---- scope / borrow set ----
 
-    fn place_index_const(self: &Self, idx: NodeId, out: *mut i64) bool {
+    fn place_index_const(self: &Self, idx: NodeId, out: &mut i64) bool {
         let n = self.cur_ast().at_const(idx);
         if n.kind != NodeKind::NODE_LITERAL || n.as_data.literal.token_type != TokenType::IntegerLiteral {
             return false;
@@ -6827,7 +6829,7 @@ extend TypeChecker {
             }
             acc = acc * base + d;
         }
-        unsafe *out = acc as i64;
+        *out = acc as i64;
         return true;
     }
 
@@ -6848,8 +6850,8 @@ extend TypeChecker {
     /// root local decl, or NODE_NONE when the chain crosses a raw pointer, indexes through a
     /// reference, or does not end at a local binding. A union member access drops the steps below it
     /// (all members overlap).
-    pub fn place_decompose(self: &mut Self, place0: NodeId, steps: *mut PStep, nsteps: *mut i32, cap: i32) NodeId {
-        unsafe *nsteps = 0;
+    pub fn place_decompose(self: &mut Self, place0: NodeId, steps: *mut PStep, nsteps: &mut i32, cap: i32) NodeId {
+        *nsteps = 0;
         let a = self.cur_ast();
         let mut place = place0;
         loop {
@@ -6864,10 +6866,10 @@ extend TypeChecker {
                 if ot == TYPE_NONE || self.type_at(ot).kind != TypeKind::TYPE_REFERENCE {
                     return NODE_NONE;
                 }
-                if unsafe *nsteps < cap {
-                    let k = unsafe *nsteps;
+                if *nsteps < cap {
+                    let k = *nsteps;
                     unsafe steps[k as usize] = PStep { kind: PS_DEREF };
-                    unsafe *nsteps = k + 1;
+                    *nsteps = k + 1;
                 }
                 place = op;
                 continue;
@@ -6900,21 +6902,21 @@ extend TypeChecker {
             }
             let base_union = pn.kind == NodeKind::NODE_MEMBER && self.tc_type_is_union(union_ty);
             if base_union {
-                unsafe *nsteps = 0;
+                *nsteps = 0;
             }
             if btk.kind == TypeKind::TYPE_REFERENCE {
                 if pn.kind == NodeKind::NODE_INDEX {
                     return NODE_NONE;
                 }
-                if !base_union && unsafe *nsteps < cap {
-                    let k = unsafe *nsteps;
+                if !base_union && *nsteps < cap {
+                    let k = *nsteps;
                     unsafe steps[k as usize] = step;
-                    unsafe *nsteps = k + 1;
+                    *nsteps = k + 1;
                 }
-                if unsafe *nsteps < cap {
-                    let k = unsafe *nsteps;
+                if *nsteps < cap {
+                    let k = *nsteps;
                     unsafe steps[k as usize] = PStep { kind: PS_DEREF };
-                    unsafe *nsteps = k + 1;
+                    *nsteps = k + 1;
                 }
                 place = base;
                 continue;
@@ -6928,10 +6930,10 @@ extend TypeChecker {
                 // about distinct storage, so they must keep overlapping.
                 step.index_const = false;
             }
-            if !base_union && unsafe *nsteps < cap {
-                let k = unsafe *nsteps;
+            if !base_union && *nsteps < cap {
+                let k = *nsteps;
                 unsafe steps[k as usize] = step;
-                unsafe *nsteps = k + 1;
+                *nsteps = k + 1;
             }
             place = base;
         }
@@ -7842,7 +7844,7 @@ const fn arith_method_name(op: TokenType) str<'static> {
 // Only when every part divides exactly: `{(N * 4) / 2}` is `{N * 2}`, and `{N / 2}` is not an integer
 // form of anything this can compare.
 fn lin_divide(src: &ConstLin, d: i64, out: &mut ConstLin) bool {
-    if lin_div_of(src) != 1 {
+    if src.div_of() != 1 {
         return false; // dividing a divided form would stack floors; nothing writes that
     }
     if d == 0 || src.k % d != 0 {
@@ -7854,7 +7856,7 @@ fn lin_divide(src: &ConstLin, d: i64, out: &mut ConstLin) bool {
         if c % d != 0 {
             return false;
         }
-        if !lin_add_term(out, unsafe src.p[i as usize], c / d) {
+        if !out.add_term(unsafe src.p[i as usize], c / d) {
             return false;
         }
     }
@@ -8180,8 +8182,8 @@ extend TypeChecker {
         return l;
     }
 
-    fn check_ptr_arith(self: &mut Self, id: NodeId, l: TypeId, r: TypeId, handled: *mut bool) TypeId {
-        unsafe *handled = false;
+    fn check_ptr_arith(self: &mut Self, id: NodeId, l: TypeId, r: TypeId, handled: &mut bool) TypeId {
+        *handled = false;
         if l == TYPE_NONE || r == TYPE_NONE {
             return TYPE_NONE;
         }
@@ -8190,7 +8192,7 @@ extend TypeChecker {
         if !lp && !rp {
             return TYPE_NONE;
         }
-        unsafe *handled = true;
+        *handled = true;
         let sp = self.cur_ast().at_const(id).span;
         if self.tc_needs_unsafe() {
             self.err_unsafe(sp, "raw pointer arithmetic");
@@ -8213,7 +8215,7 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    fn check_arith_overload(self: &mut Self, id: NodeId, l: TypeId, out: *mut TypeId) bool {
+    fn check_arith_overload(self: &mut Self, id: NodeId, l: TypeId, out: &mut TypeId) bool {
         let op = self.cur_ast().at_const(id).as_data.binary.op;
         let m = arith_method_name(op);
         if m.len() == 0 {
@@ -8245,7 +8247,7 @@ extend TypeChecker {
                         m,
                     ),
                 );
-                unsafe *out = TYPE_NONE;
+                *out = TYPE_NONE;
             }
             return true;
         }
@@ -8257,7 +8259,7 @@ extend TypeChecker {
         let mut gp = Defs8 {};
         let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        unsafe *out = ls;
+        *out = ls;
         if self.aggregate_of(ls, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             let mut md = self.find_method_cstr(om, od, m);
             // Two conformances may provide this operator for different right operands; the operand is
@@ -8285,12 +8287,12 @@ extend TypeChecker {
                     sp.end - sp.start,
                     format("'{}' has no '{}' method for this operator", diag::cstr(&ty[0]), m),
                 );
-                unsafe *out = TYPE_NONE;
+                *out = TYPE_NONE;
             } else {
                 if !self.method_extend_bounds_hold(ls, md) {
                     let sp = self.cur_ast().at_const(id).span;
                     self.err_method_extend_bounds(sp, ls, md);
-                    unsafe *out = TYPE_NONE;
+                    *out = TYPE_NONE;
                     return true;
                 }
                 let p1 = self.tc_method_param(ls, md, 1);
@@ -8299,7 +8301,7 @@ extend TypeChecker {
                 }
                 let ret = self.tc_method_ret(ls, md);
                 if ret != TYPE_NONE {
-                    unsafe *out = ret;
+                    *out = ret;
                 }
             }
         }
@@ -8309,7 +8311,7 @@ extend TypeChecker {
     /// Unary `~` on an aggregate: the same dispatch the binary operators get, through `bit_not`. Reports
     /// against the operator rather than falling through to "requires an integer operand", which would name
     /// the wrong problem for a type that simply has no such method.
-    fn check_bit_not_overload(self: &mut Self, id: NodeId, opnd: TypeId, out: *mut TypeId) bool {
+    fn check_bit_not_overload(self: &mut Self, id: NodeId, opnd: TypeId, out: &mut TypeId) bool {
         let mut os = opnd;
         while os != TYPE_NONE && self.type_at(os).kind == TypeKind::TYPE_REFERENCE {
             os = self.type_at(os).as_data.elem;
@@ -8331,10 +8333,10 @@ extend TypeChecker {
                         diag::cstr(&ty[0]),
                     ),
                 );
-                unsafe *out = TYPE_NONE;
+                *out = TYPE_NONE;
                 return true;
             }
-            unsafe *out = os;
+            *out = os;
             return true;
         }
         if ot.kind != TypeKind::TYPE_STRUCT && ot.kind != TypeKind::TYPE_INSTANCE {
@@ -8345,7 +8347,7 @@ extend TypeChecker {
         let mut gp = Defs8 {};
         let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        unsafe *out = os;
+        *out = os;
         if self.aggregate_of(os, &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             let md = self.find_method_cstr(om, od, "bit_not");
             if md.node != NODE_NONE {
@@ -8359,12 +8361,12 @@ extend TypeChecker {
                     sp.end - sp.start,
                     format("type '{}' has no 'bit_not' method for this operator", diag::cstr(&ty[0])),
                 );
-                unsafe *out = TYPE_NONE;
+                *out = TYPE_NONE;
                 return true;
             }
             let ret = self.tc_method_ret(os, md);
             if ret != TYPE_NONE {
-                unsafe *out = ret;
+                *out = ret;
             }
         }
         return true;
@@ -10937,8 +10939,8 @@ extend TypeChecker {
 
     /// One `Deref` step: the type behind `ty`, with the `deref` that produces it written to `out`.
     /// TYPE_NONE when `ty` has no Deref, or its `deref` does not return a reference/pointer.
-    fn tc_deref_step(self: &mut Self, ty: TypeId, out: *mut DefId) TypeId {
-        unsafe *out = DefId { module: 0, node: NODE_NONE };
+    fn tc_deref_step(self: &mut Self, ty: TypeId, out: &mut DefId) TypeId {
+        *out = DefId { module: 0, node: NODE_NONE };
         let mut cm: ModuleId = 0;
         let mut cd = NODE_NONE;
         let mut cgp = Defs8 {};
@@ -10959,7 +10961,7 @@ extend TypeChecker {
         if dry.kind != TypeKind::TYPE_REFERENCE && dry.kind != TypeKind::TYPE_POINTER {
             return TYPE_NONE;
         }
-        unsafe *out = dm;
+        *out = dm;
         return dry.as_data.elem;
     }
 
@@ -13054,7 +13056,8 @@ extend TypeChecker {
             return result;
         }
         if tt == TokenType::FloatLiteral {
-            let sb = ast_numeric_suffix(self.source, lr.start, lr.end, null);
+            let mut sfx: u32 = 0;
+            let sb = ast_numeric_suffix(self.source, lr.start, lr.end, &mut sfx);
             if sb == BuiltinType::BT_F64 {
                 return Ast::builtin(BuiltinType::BT_F64);
             }
@@ -13091,7 +13094,7 @@ extend TypeChecker {
     // own diagnostic already fired) -- callers skip length checking then. `sparse` reports whether any
     // designator appeared: a designated literal intentionally underfills (zero-fill is the feature),
     // so only excess is an error for it.
-    fn tc_array_lit_extent(self: &mut Self, id: NodeId, sparse: *mut bool) i64 {
+    fn tc_array_lit_extent(self: &mut Self, id: NodeId, sparse: &mut bool) i64 {
         let a = self.cur_ast();
         let elements = a.at_const(id).as_data.array_literal.elements;
         let mut cursor: i64 = 0;
@@ -13101,7 +13104,7 @@ extend TypeChecker {
             let el = a.at_const(eid);
             let mut pos = cursor;
             if el.kind == NodeKind::NODE_FIELD_INITIALIZER {
-                unsafe *sparse = true;
+                *sparse = true;
                 let ceptr = self.cir();
                 if ceptr == null {
                     return -1;

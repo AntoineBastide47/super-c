@@ -158,7 +158,7 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
         return false;
     }
     ctx.forest.build_into(body);
-    bfx::generate_into(ow, body, &ctx.forest, &mut ctx.facts);
+    ow.generate_into(body, &ctx.forest, &mut ctx.facts);
     // Boundary liveness only feeds the loan solver's origin-liveness stage, which runs for
     // loan-bearing bodies and for declared return-lifetime placeholders (the solver's
     // zero-loan gate, mirrored); leave the stale rows unread otherwise.

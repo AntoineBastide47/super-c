@@ -565,14 +565,14 @@ fn json_escape(out: &mut String, s: str) {
 }
 
 // write_file through a temporary + atomic rename: an interrupted build never leaves a torn record.
-fn write_file_atomic(path: str, body: str) i32 {
+fn write_file_atomic(path: str, body: str) bool {
     let mut tmp = String::from_str(path);
     tmp.push_str(".tmp");
-    if write_file(tmp.as_str(), body) != 0 {
-        return 1;
+    if !write_file(tmp.as_str(), body) {
+        return false;
     }
     let mut dst = String::from_str(path);
-    return unsafe shim::sc_rename(tmp.cstr(), dst.cstr());
+    return unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) == 0;
 }
 
 // Profile flags, minus what the target cannot honour. mingw ships no libasan/libubsan, so the built-in
@@ -610,14 +610,14 @@ pub fn profile_flags(name: str, target: i32, sdk: i32) String {
     return out;
 }
 
-fn write_file(path: str, body: str) i32 {
+fn write_file(path: str, body: str) bool {
     let f = stdio::fopen(path, "wb");
     if f == null {
-        return 1;
+        return false;
     }
     unsafe stdio::fwrite(body.ptr(), 1, body.len(), f);
     unsafe stdio::fclose(f);
-    return 0;
+    return true;
 }
 
 // First line of `<argv> ` (a `--version` invocation): part of every command fingerprint so a
@@ -702,42 +702,44 @@ extend Job as Free {
     }
 }
 
-// On success, persist fingerprint + duration -- and install the object into the global cache, via a
-// key-named temp + rename so concurrent builds (which would write the SAME bytes) stay atomic. On
-// failure, surface the captured compiler output.
-fn finish_job(j: &mut Job, code: i32) i32 {
-    if code != 0 {
-        cat_file(j.log.as_str());
-    } else {
-        let rec = format("{}\n{}", j.fp.as_str(), unsafe shim::sc_ticks_ms() - j.start);
-        let _ = write_file_atomic(j.cmdpath.as_str(), rec.as_str());
-        if j.cobj.len() != 0 {
-            let mut tmp = j.cobj.clone();
-            tmp.push_str(".tmp");
-            if copy_file(j.oout.as_str(), tmp.as_str()) == 0 {
-                let mut tc = tmp.clone();
-                let mut oc = j.cobj.clone();
-                let _ = unsafe shim::sc_rename(tc.cstr(), oc.cstr());
-            }
-            let dep = loader::read_file(j.dout.as_str());
-            if !dep.is_none() {
-                let d = dep.unwrap();
-                let port = dep_portable(d.as_str(), j.genpfx.as_str());
-                let mut dtmp = j.cobj.clone();
-                dtmp.push_str(".d.tmp");
-                if write_file(dtmp.as_str(), port.as_str()) == 0 {
-                    let mut cd = j.cobj.clone();
-                    cd.truncate(cd.len() - 2);
-                    cd.push_str(".d");
-                    let mut dc = dtmp.clone();
-                    let mut cdc = cd.clone();
-                    let _ = unsafe shim::sc_rename(dc.cstr(), cdc.cstr());
+extend Job {
+    // On success, persist fingerprint + duration -- and install the object into the global cache, via a
+    // key-named temp + rename so concurrent builds (which would write the SAME bytes) stay atomic. On
+    // failure, surface the captured compiler output.
+    fn finish(self: &mut Self, code: i32) i32 {
+        if code != 0 {
+            cat_file(self.log.as_str());
+        } else {
+            let rec = format("{}\n{}", self.fp.as_str(), unsafe shim::sc_ticks_ms() - self.start);
+            let _ = write_file_atomic(self.cmdpath.as_str(), rec.as_str());
+            if self.cobj.len() != 0 {
+                let mut tmp = self.cobj.clone();
+                tmp.push_str(".tmp");
+                if copy_file(self.oout.as_str(), tmp.as_str()) {
+                    let mut tc = tmp.clone();
+                    let mut oc = self.cobj.clone();
+                    let _ = unsafe shim::sc_rename(tc.cstr(), oc.cstr());
+                }
+                let dep = loader::read_file(self.dout.as_str());
+                if !dep.is_none() {
+                    let d = dep.unwrap();
+                    let port = dep_portable(d.as_str(), self.genpfx.as_str());
+                    let mut dtmp = self.cobj.clone();
+                    dtmp.push_str(".d.tmp");
+                    if write_file(dtmp.as_str(), port.as_str()) {
+                        let mut cd = self.cobj.clone();
+                        cd.truncate(cd.len() - 2);
+                        cd.push_str(".d");
+                        let mut dc = dtmp.clone();
+                        let mut cdc = cd.clone();
+                        let _ = unsafe shim::sc_rename(dc.cstr(), cdc.cstr());
+                    }
                 }
             }
         }
+        unsafe shim::sc_unlink(self.log.cstr());
+        return code;
     }
-    unsafe shim::sc_unlink(j.log.cstr());
-    return code;
 }
 
 fn dirname_of(p: str) str {
@@ -1115,7 +1117,7 @@ extend CcStream {
         if unsafe shim::sc_mtime(co.cstr()) == 0 {
             return false;
         }
-        if copy_file(cobj.as_str(), opath) != 0 {
+        if !copy_file(cobj.as_str(), opath) {
             return false;
         }
         let mut cd = cobj.clone();
@@ -1148,7 +1150,7 @@ extend CcStream {
                     break;
                 }
                 let mut j = self.window.remove(idx as usize).unwrap();
-                if finish_job(&mut j, code) != 0 {
+                if j.finish(code) != 0 {
                     self.ret = 1;
                 }
             }
@@ -1227,7 +1229,7 @@ extend CcStream {
                 break;
             }
             let mut j = self.window.remove(idx as usize).unwrap();
-            if finish_job(&mut j, code) != 0 {
+            if j.finish(code) != 0 {
                 self.ret = 1;
             }
         }
@@ -1602,7 +1604,7 @@ fn engine_build(
     raw: str,
     bin: str,
     jobs_override: u32,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,
@@ -1959,7 +1961,7 @@ pub fn manifest_build(
     profile: str,
     bin_override: str,
     jobs_override: u32,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,
@@ -2020,7 +2022,7 @@ fn target_build(
     leaf: str,
     link_kind: i32,
     jobs_override: u32,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,
@@ -2063,7 +2065,7 @@ pub fn manifest_build_all(
     sel_bin: str,
     sel_lib: bool,
     jobs_override: u32,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,
@@ -2194,7 +2196,7 @@ pub fn scaffold_project(dir: str, name: str) i32 {
     toml.push_str("bin = \"");
     toml.push_str(name);
     toml.push_str("\"\nroot = \"src/main.spc\"\n");
-    if write_file(man.as_str(), toml.as_str()) != 0 {
+    if !write_file(man.as_str(), toml.as_str()) {
         eprintln("init: cannot write '{}'", man.as_str());
         return 1;
     }
@@ -2203,7 +2205,7 @@ pub fn scaffold_project(dir: str, name: str) i32 {
     mains.push_str("fn main() i32 {\n    println(\"Hello from ");
     mains.push_str(name);
     mains.push_str("!\");\n    return 0;\n}\n");
-    if write_file(mainp.as_str(), mains.as_str()) != 0 {
+    if !write_file(mainp.as_str(), mains.as_str()) {
         eprintln("init: cannot write '{}'", mainp.as_str());
         return 1;
     }
@@ -2230,42 +2232,42 @@ pub fn scaffold_project(dir: str, name: str) i32 {
 
 // Byte-for-byte file copy, streamed: read_file would also work for source text, but a vendored tree
 // can carry anything (test fixtures, images), so nothing here may assume text.
-fn copy_file(srcp: str, dstp: str) i32 {
+fn copy_file(srcp: str, dstp: str) bool {
     let fi = stdio::fopen(srcp, "rb");
     if fi == null {
-        return 1;
+        return false;
     }
     let fo = stdio::fopen(dstp, "wb");
     if fo == null {
         unsafe stdio::fclose(fi);
-        return 1;
+        return false;
     }
     let mut buf = Array::<char, 4096>::new();
-    let mut rc = 0;
+    let mut ok = true;
     loop {
         let n = unsafe stdio::fread(&mut buf[0], 1, 4096, fi);
         if n == 0 {
             break;
         }
         if unsafe stdio::fwrite(&buf[0], 1, n, fo) != n {
-            rc = 1;
+            ok = false;
             break;
         }
     }
     unsafe stdio::fclose(fi);
     unsafe stdio::fclose(fo);
-    return rc;
+    return ok;
 }
 
 /// Recursive directory copy. Any `.git` entry is dropped AT EVERY LEVEL: vendored source belongs to
 /// the project's own history, and a nested repository (the dependency's, or a submodule's) would be
 /// invisible to -- and shadow files from -- the repository the project lives in.
-fn copy_tree(srcd: str, dstd: str) i32 {
+fn copy_tree(srcd: str, dstd: str) bool {
     mkdirs(dstd);
     let mut sp = String::from_str(srcd);
     let dh = unsafe shim::sc_opendir(sp.cstr());
     if dh == null {
-        return 1;
+        return false;
     }
     let mut names = Vector::<String>::new();
     loop {
@@ -2281,20 +2283,20 @@ fn copy_tree(srcd: str, dstd: str) i32 {
         names.push(String::from_str(s));
     }
     unsafe shim::sc_closedir(dh);
-    let mut rc = 0;
+    let mut ok = true;
     for i in 0..names.len() {
         let s = join2(srcd, names.at(i).as_str());
         let d = join2(dstd, names.at(i).as_str());
         let mut sc = s.clone();
         if unsafe shim::sc_stat_isdir(sc.cstr()) == 1 {
-            if copy_tree(s.as_str(), d.as_str()) != 0 {
-                rc = 1;
+            if !copy_tree(s.as_str(), d.as_str()) {
+                ok = false;
             }
-        } else if copy_file(s.as_str(), d.as_str()) != 0 {
-            rc = 1;
+        } else if !copy_file(s.as_str(), d.as_str()) {
+            ok = false;
         }
     }
-    return rc;
+    return ok;
 }
 
 /// `super-c vendor <src> [name]`: copy a dependency's source into `<root>/vendor/<name>`, where the
@@ -2387,7 +2389,7 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
             eprintln("vendor: '{}' is not a directory (a git source needs a scheme, git@, or .git)", src);
             return 1;
         }
-        if copy_tree(src, dest.as_str()) != 0 {
+        if !copy_tree(src, dest.as_str()) {
             eprintln("vendor: copy failed for '{}'", src);
             rm_rf(dest.as_str());
             return 1;
@@ -2451,7 +2453,7 @@ fn build_into_profile(
     m: &mf::Manifest,
     prof_name: str,
     jobs_override: u32,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,
@@ -2491,7 +2493,7 @@ pub fn manifest_run_bin(
     bin_override: str,
     sel_bin: str,
     jobs_override: u32,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,
@@ -2598,7 +2600,7 @@ pub fn manifest_test(
     profile: str,
     jobs_override: u32,
     topts: *const TestOpts,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,
@@ -2750,7 +2752,7 @@ fn bench_collect(
     rootp: str,
     prefix: str,
     src_dir: str,
-    std_dir: *const char,
+    std_dir: str,
     bootstrap_tags: bool,
     target: i32,
     out: &mut Vector<String>,
@@ -2882,7 +2884,7 @@ pub fn manifest_bench(
     profile: str,
     no_run: bool,
     jobs_override: u32,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,
@@ -2909,7 +2911,7 @@ pub fn manifest_bench(
     }
     mkdirs(m.out_dir.as_str());
     let scanp = join2(m.out_dir.as_str(), "bench_scan.spc");
-    if write_file(scanp.as_str(), listing.as_str()) != 0 {
+    if !write_file(scanp.as_str(), listing.as_str()) {
         eprintln("bench: cannot write '{}'", scanp.as_str());
         return 1;
     }
@@ -2932,7 +2934,7 @@ pub fn manifest_bench(
     let mut rootsrc = String::new();
     bench_run_root(&found, bpref.as_str(), &mut rootsrc);
     let genp = join2(m.out_dir.as_str(), "bench_root.spc");
-    if write_file(genp.as_str(), rootsrc.as_str()) != 0 {
+    if !write_file(genp.as_str(), rootsrc.as_str()) {
         eprintln("bench: cannot write '{}'", genp.as_str());
         return 1;
     }
@@ -2981,7 +2983,7 @@ pub fn manifest_run(
     name: str,
     profile: str,
     jobs_override: u32,
-    std_dir: *const char,
+    std_dir: str,
     ce_steps: u32,
     ce_mem: u64,
     target: i32,

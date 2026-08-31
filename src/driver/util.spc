@@ -43,7 +43,7 @@ pub const fn mod_ast_c(p: &loader::Package, m: ModuleId) *const Ast {
 /// columns -- the shared core of `super-c fmt` and LSP textDocument/formatting. 0 = ok (`out` filled);
 /// 1 = lex/parse error (diagnostics printed against `path`); 2 = the dropped-comment safety check
 /// tripped. `out` must not be used unless 0.
-pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 {
+pub fn format_source(src: &String, path: str, width: i32, out: &mut String) bool {
     // Reject sources that do not parse -- never rewrite something the compiler cannot read.
     // Lexed with trivia so the doc pipeline can count comments; the parser gets a filtered stream.
     let mut vsrc = src.clone();
@@ -52,7 +52,7 @@ pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 
     lx.scan_tokens();
     if lx.has_errors() {
         lx.log_errors();
-        return 1;
+        return false;
     }
     let toks = lx.take_tokens();
     let mut ncomments: usize = 0;
@@ -73,7 +73,7 @@ pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 
     ps.build_ast();
     if ps.has_errors() {
         ps.errors.log();
-        return 1;
+        return false;
     }
     let ast = ps.take_ast();
     let emitted = fbld::format_program(&ast, src.as_str(), width, out);
@@ -84,9 +84,9 @@ pub fn format_source(src: &String, path: str, width: i32, out: &mut String) i32 
             ncomments,
             path,
         );
-        return 2;
+        return false;
     }
-    return 0;
+    return true;
 }
 
 /// "<gen_dir>/<mod path, '::' -> '/'><ext>" (heap-allocated; caller owns).

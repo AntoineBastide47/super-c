@@ -11,6 +11,7 @@ import ir::core as ir;
 import borrowck::move_paths as mp;
 import borrowck::facts as bf;
 import borrowck::dataflow as df;
+import utils::bits as bits;
 
 /// Drop classifications.
 pub const DK_UNCOND: u8 = 0;
@@ -68,10 +69,6 @@ fn place_over_class(a: &Ast, b: &ir::CoreBody, pl: &ir::Place) u8 {
         cur = pr.ty;
     }
     return cls;
-}
-
-const fn bit(v: &Vector<u64>, i: u32) bool {
-    return (*v.at((i / 64) as usize) >> (i & 63) as u64 & 1u64) != 0;
 }
 
 /// Classify every storage-death point of `b` against the move/init solution.
@@ -197,7 +194,7 @@ pub fn elaborate_into(
                             dp0 = forest.place_cut[s.place as usize];
                         }
                         if dp0 != mp::MP_NONE {
-                            if bit(di, dp0) && !bit(mi, dp0) {
+                            if bits::bit_get(di, dp0) && !bits::bit_get(mi, dp0) {
                                 sched.drops.push(
                                     DropAt {
                                         local: pl0.base,
@@ -208,7 +205,7 @@ pub fn elaborate_into(
                                         fdecl: NODE_NONE,
                                     },
                                 );
-                            } else if bit(mi, dp0) && bit(di, dp0) {
+                            } else if bits::bit_get(mi, dp0) && bits::bit_get(di, dp0) {
                                 sched.drops.push(
                                     DropAt {
                                         local: pl0.base,
@@ -235,13 +232,13 @@ pub fn elaborate_into(
                     let mut any_mi = false;
                     let mut sub_moved = false;
                     for i in 0..sub.len() {
-                        if !bit(di, sub[i]) {
+                        if !bits::bit_get(di, sub[i]) {
                             all_di = false;
                         }
-                        if bit(mi, sub[i]) {
+                        if bits::bit_get(mi, sub[i]) {
                             any_mi = true;
                         }
-                        if sub[i] != root && bit(mm, sub[i]) {
+                        if sub[i] != root && bits::bit_get(mm, sub[i]) {
                             sub_moved = true;
                         }
                     }
@@ -256,7 +253,7 @@ pub fn elaborate_into(
                                 fdecl: NODE_NONE,
                             },
                         );
-                    } else if sub_moved && !bit(mm, root) {
+                    } else if sub_moved && !bits::bit_get(mm, root) {
                         // Partially moved (never wholly): every still-owned FIELD drops -- fields
                         // never mentioned have no move path and are owned by construction.
                         let mut fdecls = Vector::<NodeId>::new();
@@ -267,7 +264,7 @@ pub fn elaborate_into(
                                 let child = tuple_member_child(ow, forest, root, fom, fdecls[fi], fi as u32);
                                 let mut live = child == mp::MP_NONE;
                                 if child != mp::MP_NONE {
-                                    live = bit(di, child);
+                                    live = bits::bit_get(di, child);
                                 }
                                 if live && ow.owns(fom, ftys[fi]) {
                                     let mut pth = root;
@@ -287,7 +284,7 @@ pub fn elaborate_into(
                                 }
                             }
                         }
-                    } else if bit(di, root) || bit(mi, root) {
+                    } else if bits::bit_get(di, root) || bits::bit_get(mi, root) {
                         // The whole value may or may not still be here: one flag guards it.
                         sched.drops.push(
                             DropAt {
@@ -305,7 +302,7 @@ pub fn elaborate_into(
                         let mut fom2: ModuleId = 0;
                         let have2 = ow.agg_fields(b.module, lty, &mut fdecls2, &mut ftys2, &mut fom2);
                         for i in 0..sub.len() {
-                            if sub[i] != root && bit(di, sub[i]) && ow.owns(
+                            if sub[i] != root && bits::bit_get(di, sub[i]) && ow.owns(
                                 b.module,
                                 forest.paths.at(sub[i] as usize).ty,
                             ) {

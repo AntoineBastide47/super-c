@@ -62,37 +62,6 @@ pub struct TestPlan {
     pub genv_is_enum: bool,
     pub ok: bool,
 }
-extend TestPlan {
-    /// `count` is the package's module count: it sizes the per-module fixture tables (minimum 1).
-    pub fn new(count: usize) TestPlan {
-        let mut pl = TestPlan {
-            cases: Vector::<TestCase>::new(),
-            fx_init: Vector::<NodeId>::new(),
-            fx_free: Vector::<NodeId>::new(),
-            fx_type: Vector::<DefId>::new(),
-            fx_is_enum: Vector::<bool>::new(),
-            suites: Vector::<TestSuite>::new(),
-            genv_mod: 0,
-            genv_init: NODE_NONE,
-            genv_free: NODE_NONE,
-            genv_type: DefId { module: 0, node: NODE_NONE },
-            genv_is_enum: false,
-            ok: true,
-        };
-        let m = if count != 0 {
-            count;
-        } else {
-            1 as usize;
-        };
-        for i in 0..m {
-            pl.fx_init.push(NODE_NONE);
-            pl.fx_free.push(NODE_NONE);
-            pl.fx_type.push(DefId { module: 0, node: NODE_NONE });
-            pl.fx_is_enum.push(false);
-        }
-        return pl;
-    }
-}
 extend TestPlan as Free {
     pub fn free(self: &mut Self) {
         self.cases.free();
@@ -116,7 +85,7 @@ fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const cha
 }
 
 // The plain struct/enum decl a type NODE names, or {0, NODE_NONE} (fixtures must be nominal + non-generic).
-const fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enum: *mut bool) DefId {
+const fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enum: &mut bool) DefId {
     let none = DefId { module: 0, node: NODE_NONE };
     if tnode == NODE_NONE {
         return none;
@@ -136,7 +105,7 @@ const fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enu
     if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM || gen.len != 0 {
         return none;
     }
-    unsafe *is_enum = dk == NodeKind::NODE_ENUM;
+    *is_enum = dk == NodeKind::NODE_ENUM;
     return d;
 }
 
@@ -219,7 +188,7 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
 
 // The inherent, non-generic extend whose items contain `fnode`, or NODE_NONE. `*bad` is set when it IS a
 // method but of a conformance/generic extend (not suite-able).
-fn test_owner_extend(p: &loader::Package, am: ModuleId, fnode: NodeId, bad: *mut bool) NodeId {
+fn test_owner_extend(p: &loader::Package, am: ModuleId, fnode: NodeId, bad: &mut bool) NodeId {
     let a = mod_ast_c(p, am);
     let items = unsafe a.at_const(a.root).as_data.program.items;
     let ids = a.list(items);
@@ -230,28 +199,13 @@ fn test_owner_extend(p: &loader::Package, am: ModuleId, fnode: NodeId, bad: *mut
             let mids = a.list(ed.items);
             for j in 0..ed.items.len {
                 if unsafe mids[j as usize] == fnode {
-                    unsafe *bad = ed.interface_type != NODE_NONE || ed.generics.len != 0;
+                    *bad = ed.interface_type != NODE_NONE || ed.generics.len != 0;
                     return iid;
                 }
             }
         }
     }
     return NODE_NONE;
-}
-
-// Index of the (module, type) suite in plan.suites, creating it when `create`; -1 when absent / no-create.
-fn plan_suite_of(plan: &mut TestPlan, m: ModuleId, ty: DefId, is_enum: bool, create: bool) i32 {
-    for i in 0..plan.suites.len() {
-        let s = plan.suites.at(i);
-        if s.mod == m && s.ty.module == ty.module && s.ty.node == ty.node {
-            return i as i32;
-        }
-    }
-    if !create {
-        return -1;
-    }
-    plan.suites.push(TestSuite { mod: m, ty: ty, is_enum: is_enum, init: NODE_NONE, fre: NODE_NONE });
-    return (plan.suites.len() - 1) as i32;
 }
 
 /// Collect + validate every @test/@test_init/@test_free in the package into a runnable plan.
@@ -333,7 +287,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                         );
                         continue;
                     }
-                    let si = plan_suite_of(plan, m as ModuleId, target, target_is_enum, true);
+                    let si = plan.suite_of(m as ModuleId, target, target_is_enum, true);
                     if plan.suites[si as usize].init != NODE_NONE {
                         test_err(
                             p,
@@ -397,7 +351,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                     );
                     continue;
                 }
-                let si = plan_suite_of(plan, m as ModuleId, target, target_is_enum, true);
+                let si = plan.suite_of(m as ModuleId, target, target_is_enum, true);
                 if plan.suites[si as usize].fre != NODE_NONE {
                     test_err(p, m as ModuleId, sp, "duplicate suite '@test_free'".ptr() as *const char);
                     continue;
@@ -612,7 +566,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             let mut suite_init = NODE_NONE;
             let mut suite_free = NODE_NONE;
             if ext != NODE_NONE && (wants & 1) != 0 {
-                let si2 = plan_suite_of(plan, m as ModuleId, suite, suite_is_enum, false);
+                let si2 = plan.suite_of(m as ModuleId, suite, suite_is_enum, false);
                 if si2 < 0 || plan.suites[si2 as usize].init == NODE_NONE {
                     test_err(
                         p,
@@ -1115,4 +1069,51 @@ fn texec_args(args: &mut Vector<String>) i32 {
     }
     ptrs.push(0);
     return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, null);
+}
+
+extend TestPlan {
+    /// `count` is the package's module count: it sizes the per-module fixture tables (minimum 1).
+    pub fn new(count: usize) TestPlan {
+        let mut pl = TestPlan {
+            cases: Vector::<TestCase>::new(),
+            fx_init: Vector::<NodeId>::new(),
+            fx_free: Vector::<NodeId>::new(),
+            fx_type: Vector::<DefId>::new(),
+            fx_is_enum: Vector::<bool>::new(),
+            suites: Vector::<TestSuite>::new(),
+            genv_mod: 0,
+            genv_init: NODE_NONE,
+            genv_free: NODE_NONE,
+            genv_type: DefId { module: 0, node: NODE_NONE },
+            genv_is_enum: false,
+            ok: true,
+        };
+        let m = if count != 0 {
+            count;
+        } else {
+            1 as usize;
+        };
+        for i in 0..m {
+            pl.fx_init.push(NODE_NONE);
+            pl.fx_free.push(NODE_NONE);
+            pl.fx_type.push(DefId { module: 0, node: NODE_NONE });
+            pl.fx_is_enum.push(false);
+        }
+        return pl;
+    }
+
+    // Index of the (module, type) suite in plan.suites, creating it when `create`; -1 when absent / no-create.
+    fn suite_of(self: &mut Self, m: ModuleId, ty: DefId, is_enum: bool, create: bool) i32 {
+        for i in 0..self.suites.len() {
+            let s = self.suites.at(i);
+            if s.mod == m && s.ty.module == ty.module && s.ty.node == ty.node {
+                return i as i32;
+            }
+        }
+        if !create {
+            return -1;
+        }
+        self.suites.push(TestSuite { mod: m, ty: ty, is_enum: is_enum, init: NODE_NONE, fre: NODE_NONE });
+        return (self.suites.len() - 1) as i32;
+    }
 }

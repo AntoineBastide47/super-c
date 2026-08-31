@@ -62,17 +62,3 @@ extend LoanMat {
         return self.pool.capacity() * 8;
     }
 }
-
-pub fn row_set(s: &mut Vector<u64>, loan: u32) {
-    let i = (loan / 64) as usize;
-    s.set(i, s[i] | 1u64 << (loan & 63) as u64);
-}
-
-pub fn row_clear(s: &mut Vector<u64>, loan: u32) {
-    let i = (loan / 64) as usize;
-    s.set(i, s[i] & ~(1u64 << (loan & 63) as u64));
-}
-
-pub const fn row_get(s: &Vector<u64>, loan: u32) bool {
-    return (*s.at((loan / 64) as usize) >> (loan & 63) as u64 & 1u64) != 0;
-}

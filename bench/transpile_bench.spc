@@ -171,7 +171,7 @@ fn write_c(dir: str, base: str, s: str) {
 // TU's `#include "__sc_types.h"` resolves in place. Fills `names` with the .c basenames (super_rt first)
 // and returns the total emitted C size in bytes.
 fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
-    let mut p = loader::package_load(ROOT, STD_DIR.ptr() as *const char, false, unsafe dshim::sc_host_platform());
+    let mut p = loader::package_load(ROOT, STD_DIR, false, unsafe dshim::sc_host_platform());
     let n = p.modules.len();
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
@@ -279,7 +279,7 @@ fn transpile_once() Timing {
     let c0 = unsafe shim::sc_cpu_cycles();
     let h0 = unsafe shim::sc_alloc_count();
     let y0 = unsafe shim::sc_alloc_bytes();
-    let mut p = loader::package_load(ROOT, STD_DIR.ptr() as *const char, false, unsafe dshim::sc_host_platform());
+    let mut p = loader::package_load(ROOT, STD_DIR, false, unsafe dshim::sc_host_platform());
     let a1 = time::cpu_seconds();
     let c1 = unsafe shim::sc_cpu_cycles();
     let h1 = unsafe shim::sc_alloc_count();

@@ -42,9 +42,9 @@ fn ext_c_wrap(
     root: str,
     keep: &mut Vector<String>,
     seen: &mut Vector<String>,
-    nsrc: *mut u32,
+    nsrc: &mut u32,
     rsl: *const char,
-    err: *mut bool,
+    err: &mut bool,
 ) {
     for k in 0..seen.len() {
         if seen[k].as_str() == str::from_cstr(rsl) {
@@ -74,14 +74,14 @@ fn ext_c_wrap(
     }
     stem[sl] = 0 as char;
     let mut nm = Buf128 {};
-    let idx = unsafe *nsrc;
-    unsafe *nsrc = idx + 1;
+    let idx = *nsrc;
+    *nsrc = idx + 1;
     unsafe stdio::snprintf(&mut nm[0], 128, "__ext%u_%s".ptr() as *const char, idx, &stem[0]);
     let mut path = build_out_path(root, str::from_cstr(&nm[0]), ".c");
     let f = open_out(path.as_str());
     if f == null {
         unsafe stdio::perror(path.cstr());
-        unsafe *err = true;
+        *err = true;
         return;
     }
     unsafe stdio::fprintf(
@@ -96,7 +96,7 @@ fn ext_c_wrap(
 /// Scan every module for @c.source/@c.link and implicit backing-header `.c` siblings: wrapper TUs are
 /// written under gen_root and pushed onto `keep`; link flags go to build/__ldflags (removed when none).
 /// Sets `*err` on an unresolvable source or a write failure; already-set values are never cleared.
-pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *mut bool, target: i32) {
+pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &mut bool, target: i32) {
     let root = p.gen_root.as_str();
     let mut ld = Vector::<String>::new();
     // libm, on every POSIX link line: the prelude's float methods (`f64::fma` and friends) are emitted into
@@ -176,7 +176,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: *m
                         vl,
                         v,
                     );
-                    unsafe *err = true;
+                    *err = true;
                     continue;
                 }
             }

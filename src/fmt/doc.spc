@@ -46,6 +46,43 @@ const fn wadd(x: u32, y: u32) u32 {
     return x + y;
 }
 
+extend DocPool as Free {
+    pub fn free(self: &mut Self) {
+        self.docs.free();
+        self.kids.free();
+    }
+}
+
+struct Renderer {
+    pub col: i32,
+    pub width: i32,
+    pub out: *mut String,
+}
+
+extend Renderer {
+    fn newline(self: &mut Self, indent: i32, blank: bool) {
+        // Trailing whitespace never survives a break.
+        let o = unsafe &mut *self.out;
+        while o.len() > 0 {
+            let b = o.as_str().byte_at(o.len() - 1);
+            if b != b' ' {
+                break;
+            }
+            o.truncate(o.len() - 1);
+        }
+        o.push_byte(b'\n');
+        if blank {
+            o.push_byte(b'\n');
+        }
+        let mut i: i32 = 0;
+        while i < indent {
+            o.push_byte(b' ');
+            i = i + 1;
+        }
+        self.col = indent;
+    }
+}
+
 extend DocPool {
     pub fn new<'a>(src: *const u8) DocPool<'a> {
         let mut p = DocPool { docs: Vector::<DocNode>::new(), kids: Vector::<DocId>::new(), src: src };
@@ -131,122 +168,87 @@ extend DocPool {
         let d = self.concat(&v);
         return d;
     }
-}
 
-extend DocPool as Free {
-    pub fn free(self: &mut Self) {
-        self.docs.free();
-        self.kids.free();
-    }
-}
-
-struct Renderer {
-    pub col: i32,
-    pub width: i32,
-    pub out: *mut String,
-}
-
-fn newline_into(r: &mut Renderer, indent: i32, blank: bool) {
-    // Trailing whitespace never survives a break.
-    let o = unsafe &mut *r.out;
-    while o.len() > 0 {
-        let b = o.as_str().byte_at(o.len() - 1);
-        if b != b' ' {
-            break;
-        }
-        o.truncate(o.len() - 1);
-    }
-    o.push_byte(b'\n');
-    if blank {
-        o.push_byte(b'\n');
-    }
-    let mut i: i32 = 0;
-    while i < indent {
-        o.push_byte(b' ');
-        i = i + 1;
-    }
-    r.col = indent;
-}
-
-fn render_doc(p: &DocPool, r: &mut Renderer, id: DocId, indent: i32, flat: bool) {
-    let n = *p.docs.at(id as usize);
-    switch n.kind {
-        DOC_NIL => {},
-        DOC_TEXT_SPAN => {
-            let len = (n.b - n.a) as usize;
-            r.out.push_bytes(unsafe (p.src + n.a as usize), len);
-            r.col = r.col + len as i32;
-        },
-        DOC_TEXT_STR => {
-            r.out.push_str(n.s);
-            r.col = r.col + n.s.len() as i32;
-        },
-        DOC_LINE => {
-            if flat {
-                r.out.push_byte(b' ');
-                r.col = r.col + 1;
-            } else {
-                newline_into(r, indent, false);
-            }
-        },
-        DOC_SOFTLINE => {
-            if !flat {
-                newline_into(r, indent, false);
-            }
-        },
-        DOC_HARDLINE => {
-            newline_into(r, indent, false);
-        },
-        DOC_BLANKLINE => {
-            newline_into(r, indent, true);
-        },
-        DOC_CONCAT => {
-            for i in 0..n.b {
-                render_doc(p, r, *p.kids.at((n.a + i) as usize), indent, flat);
-            }
-        },
-        DOC_INDENT => {
-            render_doc(p, r, n.a, indent + INDENT_WIDTH, flat);
-        },
-        DOC_GROUP => {
-            // Inside a flat parent everything stays flat; otherwise break iff the flat form
-            // does not fit the remaining width.
-            let mut f = true;
-            if !flat {
-                let rem = r.width - r.col;
-                if n.w == W_INF || n.w as i32 > rem {
-                    f = false;
-                }
-            }
-            render_doc(p, r, n.a, indent, f);
-        },
-        DOC_IFBREAK => {
-            if flat {
-                if n.a == 1 {
-                    r.out.push_byte(b' ');
-                    r.col = r.col + 1;
-                }
-            } else {
+    fn render_doc(self: &Self, r: &mut Renderer, id: DocId, indent: i32, flat: bool) {
+        let n = *self.docs.at(id as usize);
+        switch n.kind {
+            DOC_NIL => {},
+            DOC_TEXT_SPAN => {
+                let len = (n.b - n.a) as usize;
+                r.out.push_bytes(unsafe (self.src + n.a as usize), len);
+                r.col = r.col + len as i32;
+            },
+            DOC_TEXT_STR => {
                 r.out.push_str(n.s);
                 r.col = r.col + n.s.len() as i32;
-            }
-        },
-    };
-}
-
-/// Render `root` into `out` at the given width. The result always ends with exactly one newline.
-pub fn render(p: &DocPool, root: DocId, width: i32, out: &mut String) {
-    let mut r = Renderer { col: 0, width: width, out: out };
-    render_doc(p, &mut r, root, 0, false);
-    // Normalize the tail: strip trailing blank lines/spaces, end with one '\n'.
-    while out.len() > 0 {
-        let b = out.as_str().byte_at(out.len() - 1);
-        if b != b'\n' && b != b' ' {
-            break;
-        }
-        out.truncate(out.len() - 1);
+            },
+            DOC_LINE => {
+                if flat {
+                    r.out.push_byte(b' ');
+                    r.col = r.col + 1;
+                } else {
+                    r.newline(indent, false);
+                }
+            },
+            DOC_SOFTLINE => {
+                if !flat {
+                    r.newline(indent, false);
+                }
+            },
+            DOC_HARDLINE => {
+                r.newline(indent, false);
+            },
+            DOC_BLANKLINE => {
+                r.newline(indent, true);
+            },
+            DOC_CONCAT => {
+                for i in 0..n.b {
+                    self.render_doc(r, *self.kids.at((n.a + i) as usize), indent, flat);
+                }
+            },
+            DOC_INDENT => {
+                self.render_doc(r, n.a, indent + INDENT_WIDTH, flat);
+            },
+            DOC_GROUP => {
+                // Inside a flat parent everything stays flat; otherwise break iff the flat form
+                // does not fit the remaining width.
+                let mut f = true;
+                if !flat {
+                    let rem = r.width - r.col;
+                    if n.w == W_INF || n.w as i32 > rem {
+                        f = false;
+                    }
+                }
+                self.render_doc(r, n.a, indent, f);
+            },
+            DOC_IFBREAK => {
+                if flat {
+                    if n.a == 1 {
+                        r.out.push_byte(b' ');
+                        r.col = r.col + 1;
+                    }
+                } else {
+                    r.out.push_str(n.s);
+                    r.col = r.col + n.s.len() as i32;
+                }
+            },
+        };
     }
-    if out.len() > 0 {
-        out.push_byte(b'\n');
+
+    /// Render `root` into `out` at the given width. The result always ends with exactly one newline.
+    pub fn render(self: &Self, root: DocId, width: i32, out: &mut String) {
+        let mut r = Renderer { col: 0, width: width, out: out };
+        self.render_doc(&mut r, root, 0, false);
+        // Normalize the tail: strip trailing blank lines/spaces, end with one '\n'.
+        while out.len() > 0 {
+            let b = out.as_str().byte_at(out.len() - 1);
+            if b != b'\n' && b != b' ' {
+                break;
+            }
+            out.truncate(out.len() - 1);
+        }
+        if out.len() > 0 {
+            out.push_byte(b'\n');
+        }
     }
 }

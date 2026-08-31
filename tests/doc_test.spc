@@ -27,7 +27,7 @@ fn call_doc(p: &mut d::DocPool, args: []str) d::DocId {
 
 fn render_of(p: &d::DocPool, root: d::DocId, width: i32) String {
     let mut out = String::new();
-    d::render(p, root, width, &mut out);
+    p.render(root, width, &mut out);
     return out;
 }
 

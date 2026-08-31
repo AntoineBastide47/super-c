@@ -6847,11 +6847,7 @@ const fn compound_base_op(op: tt::TokenType) u32 {
 // keeps the exact spelling for CTFE).
 // The code point of a `'x'` / `b'x'` literal (the pattern matrix owns the decode rules).
 fn decode_char(src: str, sp: tok::Span) i64 {
-    let mut v: i64 = 0;
-    if pat::char_of(src, sp, &mut v) {
-        return v;
-    }
-    return 0;
+    return pat::char_of(src, sp).unwrap_or(0);
 }
 
 // An integer literal's exact magnitude (dec/hex, `_` separators, [iu]NN suffix stripped);

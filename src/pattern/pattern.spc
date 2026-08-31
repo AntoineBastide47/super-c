@@ -128,52 +128,44 @@ extend PatCx as Free {
 
 // Decimal literal fast path (sign included); ok=false for any other spelling.
 /// The code point of a `'x'` / `b'x'` literal (escape rules mirror the checker's decode).
-pub fn char_of(src: str, sp: tok::Span, out: &mut i64) bool {
+pub fn char_of(src: str, sp: tok::Span) Option<i64> {
     if sp.end <= sp.start + 2 {
-        return false;
+        return Option::<i64>::None;
     }
     let mut i = sp.start + 1;
     if src[sp.start as usize] == b'b' {
         i = i + 1;
     }
     if i >= sp.end {
-        return false;
+        return Option::<i64>::None;
     }
     if src[i as usize] != b'\\' {
-        *out = src[i as usize];
-        return true;
+        return Option::<i64>::Some(src[i as usize]);
     }
     if i + 1 >= sp.end {
-        return false;
+        return Option::<i64>::None;
     }
     let e = src[(i + 1) as usize];
     if e == b'n' {
-        *out = 10;
-        return true;
+        return Option::<i64>::Some(10);
     }
     if e == b't' {
-        *out = 9;
-        return true;
+        return Option::<i64>::Some(9);
     }
     if e == b'r' {
-        *out = 13;
-        return true;
+        return Option::<i64>::Some(13);
     }
     if e == b'0' {
-        *out = 0;
-        return true;
+        return Option::<i64>::Some(0);
     }
     if e == b'\\' {
-        *out = 92;
-        return true;
+        return Option::<i64>::Some(92);
     }
     if e == 39 {
-        *out = 39;
-        return true;
+        return Option::<i64>::Some(39);
     }
     if e == 34 {
-        *out = 34;
-        return true;
+        return Option::<i64>::Some(34);
     }
     if e == b'x' {
         let mut v: i64 = 0;
@@ -190,18 +182,17 @@ pub fn char_of(src: str, sp: tok::Span, out: &mut i64) bool {
                 -1;
             };
             if d < 0 {
-                return false;
+                return Option::<i64>::None;
             }
             v = v * 16 + d;
             k = k + 1;
         }
-        *out = v;
-        return true;
+        return Option::<i64>::Some(v);
     }
-    return false;
+    return Option::<i64>::None;
 }
 
-fn dec_of(src: str, sp: tok::Span, out: &mut i64) bool {
+fn dec_of(src: str, sp: tok::Span) Option<i64> {
     let mut i = sp.start as usize;
     let mut neg = false;
     if i < sp.end as usize && src[i] == b'-' {
@@ -209,16 +200,16 @@ fn dec_of(src: str, sp: tok::Span, out: &mut i64) bool {
         i += 1;
     }
     if i >= sp.end as usize {
-        return false;
+        return Option::<i64>::None;
     }
     let mut v: i64 = 0;
     while i < sp.end as usize {
         let b = src[i];
         if b < b'0' || b > b'9' {
-            return false;
+            return Option::<i64>::None;
         }
         if v > 922337203685477580 {
-            return false;
+            return Option::<i64>::None;
         }
         v = v * 10 + (b - b'0') as i64;
         i += 1;
@@ -226,8 +217,7 @@ fn dec_of(src: str, sp: tok::Span, out: &mut i64) bool {
     if neg {
         v = 0 - v;
     }
-    *out = v;
-    return true;
+    return Option::<i64>::Some(v);
 }
 
 extend PatCx {
@@ -357,10 +347,20 @@ extend PatCx {
         }
         if k == NodeKind::NODE_PATTERN_RANGE {
             let rd = self.f.node(pid).as_data.pattern_range;
-            let mut lo: i64 = 0;
-            let mut hi: i64 = 0;
-            let lo_ok = rd.start != NODE_NONE && self.bound_dec(rd.start, &mut lo);
-            let hi_ok = rd.end != NODE_NONE && self.bound_dec(rd.end, &mut hi);
+            let lov = if rd.start != NODE_NONE {
+                self.bound_dec(rd.start);
+            } else {
+                Option::<i64>::None;
+            };
+            let hiv = if rd.end != NODE_NONE {
+                self.bound_dec(rd.end);
+            } else {
+                Option::<i64>::None;
+            };
+            let lo_ok = lov.is_some();
+            let hi_ok = hiv.is_some();
+            let lo = lov.unwrap_or(0);
+            let hi = hiv.unwrap_or(0);
             // bounds the matrix cannot value (const paths, hex, open ends) key the range by its
             // NODE with the arity-2 sentinel: it covers nothing and equals only itself -- garbage
             // (0,0) bounds once merged every char range into one edge
@@ -462,19 +462,19 @@ extend PatCx {
         return a.at_const(d.node).kind;
     }
 
-    fn bound_dec(self: &Self, b: NodeId, out: &mut i64) bool {
+    fn bound_dec(self: &Self, b: NodeId) Option<i64> {
         let mut v = b;
         if self.f.node(v).kind == NodeKind::NODE_PATTERN_LITERAL {
             v = self.f.node(v).as_data.single.value;
         }
         if self.f.node(v).kind != NodeKind::NODE_LITERAL {
-            return false;
+            return Option::<i64>::None;
         }
         let ld = self.f.node(v).as_data.literal;
         if ld.token_type == tt::TokenType::CharacterLiteral || ld.token_type == tt::TokenType::ByteCharacterLiteral {
-            return char_of(self.src, ld.raw, out);
+            return char_of(self.src, ld.raw);
         }
-        return dec_of(self.src, ld.raw, out);
+        return dec_of(self.src, ld.raw);
     }
 
     fn norm_literal(self: &mut Self, pid: NodeId, out: &mut Vector<u32>) {
@@ -495,10 +495,19 @@ extend PatCx {
                 out.push(self.pats.len() as u32 - 1);
                 return;
             }
-            let mut iv: i64 = 0;
-            if dec_of(self.src, ld.raw, &mut iv) {
+            let ivo = dec_of(self.src, ld.raw);
+            if ivo.is_some() {
                 self.pats.push(
-                    NPat { kind: PC_INT, val: iv, hi: 0, decl: no, node: pid, sub_start: 0, sub_len: 0, arity: 0 },
+                    NPat {
+                        kind: PC_INT,
+                        val: ivo.unwrap(),
+                        hi: 0,
+                        decl: no,
+                        node: pid,
+                        sub_start: 0,
+                        sub_len: 0,
+                        arity: 0,
+                    },
                 );
                 out.push(self.pats.len() as u32 - 1);
                 return;
