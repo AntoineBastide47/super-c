@@ -1,6 +1,10 @@
 // Per-TU emission cache (see cemit_package): for every module whose fingerprint is unchanged the
 // seed loop skips lowering and replays the module's journaled side effects -- chunk texts, demand/
-// glue/agg/proto attempts, pool interns, liveness edges -- through the emitter's own dedup gates.
+// glue/agg/proto attempts, liveness edges -- through the emitter's own dedup gates. Sections are
+// POSITION-INDEPENDENT: every TypeId a journaled event carries is translated to a section-local
+// structural type table at record time and re-interned at replay, so a section records and replays
+// under any pool state -- including the parallel seed frontier, whose intern order is scheduling-
+// dependent.
 // The fingerprint is deliberately package-aware where emission is: it hashes the module's transitive
 // import closure (plus the prelude), the ordered module path list (short-prefix collisions and
 // ModuleId order rename symbols in UNRELATED TUs), the package extend surface (method_by_name scans
@@ -15,7 +19,7 @@ import driver::util as *;
 import stdlib;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 2;
+const TUC_VER: u32 = 3;
 
 fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
@@ -353,130 +357,407 @@ pub fn tuc_open(t: &Tuc, m: usize) Rd {
 }
 
 // ---- module payloads --------------------------------------------------------------------------
-// payload = t0 t1 i0 i1 (u32) | pool records | 0xFF | nev u32 | events
-// pool record: 1 = raw Ty + expected TypeId; 2 = raw TyInstance + expected TypeId (its paired
-// TYPE_INSTANCE entry). Records replay through intern_type/intern_instance in recorded order, so
-// ids match exactly or the section is rejected before any other side effect lands.
+// payload = ntab u32 | type-table entries | nev u32 | events
+// Events carry table INDICES where they carried TypeIds (0xFFFFFFFF = TYPE_NONE); the table entry
+// is a structural description whose children are earlier entries, re-interned at replay into the
+// pool the consuming field names. Node ids and declaring modules are stable under the key (the
+// sources of the whole import closure), so nominal leaves serialize as raw Ty bytes.
 
-fn pool_prefix_hash(a: &Ast, t0: usize, i0: usize) u64 {
-    let mut h = 1469598103934665603u64;
-    // Ty is padding-free by construction (see Ty's word-wise Hash): raw bytes are deterministic.
-    // Entry-wise over the chunked pool; byte order matches the old flat scan, so hashes are stable.
-    for k0 in 0..t0 {
-        let tp = (a.type_pool.at(k0) as *const Ty) as *const u8;
+const TT_NONE: u32 = 0xFFFFFFFFu32;
+const TT_RAW: u8 = 0;
+const TT_WRAP: u8 = 1;
+const TT_ARR: u8 = 2;
+const TT_INST: u8 = 3;
+const TT_PROJ: u8 = 4;
+const TT_LIN: u8 = 5;
+
+pub struct TtRec {
+    pub memo: Map<u64, u64>, // (am << 32 | at) -> table index
+    pub tab: String,
+    pub count: u32,
+}
+
+extend TtRec as Free {
+    pub fn free(self: &mut Self) {
+        self.memo.free();
+        self.tab.free();
+    }
+}
+
+pub fn tt_new() TtRec {
+    return TtRec { memo: Map::<u64, u64>::new(), tab: String::new(), count: 0 };
+}
+
+/// Table index for `(am, at)`, appending the entry (children first) on first sight.
+pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 {
+    if at == TYPE_NONE {
+        return TT_NONE;
+    }
+    let key = am as u64 << 32 | at as u64;
+    switch r.memo.get(&key) {
+        Some(v) => {
+            return (*v) as u32;
+        },
+        None => {},
+    };
+    let a = unsafe &*p.module_ast_const(am);
+    let ty = *a.type_at(at);
+    let k = ty.kind;
+    if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+        let er = tt_ref(p, r, am, ty.as_data.elem);
+        w8(&mut r.tab, TT_WRAP);
+        w8(&mut r.tab, k as u8);
+        w8(&mut r.tab, ty.qualifier);
+        w8(
+            &mut r.tab,
+            if ty.concrete {
+                1u8;
+            } else {
+                0 as u8;
+            },
+        );
+        w32(&mut r.tab, ty.module);
+        w32(&mut r.tab, er);
+    } else if k == TypeKind::TYPE_ARRAY {
+        let er = tt_ref(p, r, am, ty.as_data.arr.elem);
+        w8(&mut r.tab, TT_ARR);
+        w8(&mut r.tab, ty.qualifier);
+        w8(
+            &mut r.tab,
+            if ty.concrete {
+                1u8;
+            } else {
+                0 as u8;
+            },
+        );
+        w32(&mut r.tab, ty.module);
+        w32(&mut r.tab, er);
+        w32(&mut r.tab, ty.as_data.arr.len);
+    } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
+        let it = *a.instance(ty.as_data.inst);
+        let mut ar = Array::<u32, 8> {};
+        for i in 0..it.n {
+            ar[i as usize] = tt_ref(p, r, am, unsafe it.args[i as usize]);
+        }
+        w8(&mut r.tab, TT_INST);
+        w8(&mut r.tab, k as u8);
+        w8(&mut r.tab, ty.qualifier);
+        w8(
+            &mut r.tab,
+            if ty.concrete {
+                1u8;
+            } else {
+                0 as u8;
+            },
+        );
+        w32(&mut r.tab, ty.module);
+        w32(&mut r.tab, it.module);
+        w32(&mut r.tab, it.decl);
+        w8(&mut r.tab, it.n);
+        for i in 0..it.n {
+            w32(&mut r.tab, ar[i as usize]);
+        }
+    } else if k == TypeKind::TYPE_FIELD_PROJECTION {
+        let orf = tt_ref(p, r, am, ty.as_data.proj.owner);
+        w8(&mut r.tab, TT_PROJ);
+        w8(&mut r.tab, ty.qualifier);
+        w8(
+            &mut r.tab,
+            if ty.concrete {
+                1u8;
+            } else {
+                0 as u8;
+            },
+        );
+        w32(&mut r.tab, ty.module);
+        w32(&mut r.tab, orf);
+        w32(&mut r.tab, ty.as_data.proj.binder);
+    } else if k == TypeKind::TYPE_CONST_EXPR {
+        let l = *a.const_lin_at(ty.as_data.inst);
+        w8(&mut r.tab, TT_LIN);
+        w8(&mut r.tab, ty.qualifier);
+        w8(
+            &mut r.tab,
+            if ty.concrete {
+                1u8;
+            } else {
+                0 as u8;
+            },
+        );
+        w32(&mut r.tab, ty.module);
+        w64(&mut r.tab, l.k as u64);
+        w64(&mut r.tab, lin_div_of(&l) as u64);
+        w32(&mut r.tab, l.n as u32);
+        for i in 0..l.n {
+            w32(&mut r.tab, (unsafe l.p[i as usize]).module);
+            w32(&mut r.tab, (unsafe l.p[i as usize]).node);
+            w64(&mut r.tab, (unsafe l.c[i as usize]) as u64);
+        }
+    } else {
+        // nominal / leaf payloads carry no pool-relative data: raw bytes round-trip
+        w8(&mut r.tab, TT_RAW);
+        let tp = ((&ty) as *const Ty) as *const u8;
         for b in 0..sizeof(Ty) {
-            h = (h ^ (unsafe tp[b]) as u64) * 1099511628211u64;
+            r.tab.push_byte(unsafe tp[b]);
         }
     }
-    // TyInstance carries padding: hash fields only
-    for k in 0..i0 {
-        let it = a.instances.at(k);
-        h = fnv_mix(h, it.module as u64 << 40 ^ it.decl as u64 << 8 ^ it.n as u64);
-        for j in 0..it.n {
-            h = fnv_mix(h, unsafe it.args[j as usize]);
-        }
-    }
-    return h;
+    let idx = r.count;
+    r.count += 1;
+    r.memo.insert(key, idx);
+    return idx;
 }
 
-pub fn ser_pool(o: &mut String, a: &Ast, t0: usize, t1: usize, i0: usize, i1: usize) {
-    w32(o, t0 as u32);
-    w32(o, t1 as u32);
-    w32(o, i0 as u32);
-    w32(o, i1 as u32);
-    // recorded events reference pre-seed pool ids of this module: the whole prefix must be byte-
-    // identical at replay, not merely the same length (cross-module typecheck interns land here)
-    w64(o, pool_prefix_hash(a, t0, i0));
-    for ti in t0..t1 {
-        let ty = *a.type_pool.at(ti);
-        if ty.kind == TypeKind::TYPE_INSTANCE && ty.as_data.inst as usize >= i0 {
-            let it = a.instances.at(ty.as_data.inst as usize);
-            w8(o, 2);
-            let ip = (it as *const TyInstance) as *const u8;
-            for b in 0..sizeof(TyInstance) {
-                o.push_byte(unsafe ip[b]);
-            }
-            w32(o, ti as u32);
-        } else {
-            w8(o, 1);
-            let tp = ((&ty) as *const Ty) as *const u8;
+/// One decoded table entry; fields are tag-specific.
+pub struct TtEnt {
+    pub tag: u8,
+    pub kind: u8,
+    pub qual: u8,
+    pub conc: u8,
+    pub module: u32,
+    pub r0: u32, // elem/owner ref
+    pub aux: u32, // array len / projection binder
+    pub im: u32,
+    pub idecl: u32,
+    pub n: u8,
+    pub argr: [u32; 8],
+    pub raw: [u8; 16],
+    pub lin: ConstLin,
+}
+
+pub fn read_table(r: &mut Rd, out: &mut Vector<TtEnt>) bool {
+    let ntab = r32(r) as usize;
+    for _i in 0..ntab {
+        let mut e = TtEnt {
+            tag: r8(r),
+            kind: 0,
+            qual: 0,
+            conc: 0,
+            module: 0,
+            r0: 0,
+            aux: 0,
+            im: 0,
+            idecl: 0,
+            n: 0,
+            argr: [0; 8],
+            raw: [0; 16],
+            lin: ConstLin { k: 0, n: 0 },
+        };
+        if e.tag == TT_RAW {
             for b in 0..sizeof(Ty) {
-                o.push_byte(unsafe tp[b]);
+                unsafe e.raw[b] = r8(r);
             }
-            w32(o, ti as u32);
+        } else if e.tag == TT_WRAP {
+            e.kind = r8(r);
+            e.qual = r8(r);
+            e.conc = r8(r);
+            e.module = r32(r);
+            e.r0 = r32(r);
+        } else if e.tag == TT_ARR {
+            e.qual = r8(r);
+            e.conc = r8(r);
+            e.module = r32(r);
+            e.r0 = r32(r);
+            e.aux = r32(r);
+        } else if e.tag == TT_INST {
+            e.kind = r8(r);
+            e.qual = r8(r);
+            e.conc = r8(r);
+            e.module = r32(r);
+            e.im = r32(r);
+            e.idecl = r32(r);
+            e.n = r8(r);
+            if e.n > 8 {
+                return false;
+            }
+            for i in 0..e.n {
+                unsafe e.argr[i as usize] = r32(r);
+            }
+        } else if e.tag == TT_PROJ {
+            e.qual = r8(r);
+            e.conc = r8(r);
+            e.module = r32(r);
+            e.r0 = r32(r);
+            e.aux = r32(r);
+        } else if e.tag == TT_LIN {
+            e.qual = r8(r);
+            e.conc = r8(r);
+            e.module = r32(r);
+            e.lin.k = r64(r) as i64;
+            let dv = r64(r) as i64;
+            e.lin.div = dv;
+            let ln = r32(r);
+            if ln > 4 {
+                return false;
+            }
+            e.lin.n = ln as i32;
+            for i in 0..ln {
+                let dm = r32(r) as ModuleId;
+                let dn = r32(r);
+                unsafe e.lin.p[i as usize] = DefId { module: dm, node: dn };
+                unsafe e.lin.c[i as usize] = r64(r) as i64;
+            }
+        } else {
+            return false;
         }
-    }
-    w8(o, 0xFF);
-}
-
-/// Re-intern the recorded pool delta, run FIRST in a section replay: 0 = ok, 1 = clean reject
-/// (nothing mutated yet -- the caller may emit live and re-record), 2 = dirty reject (interns
-/// landed before the divergence -- the caller must void the section and skip re-recording).
-pub fn replay_pool(r: &mut Rd, a: &mut Ast) i32 {
-    let t0 = r32(r) as usize;
-    let _t1 = r32(r) as usize;
-    let i0 = r32(r) as usize;
-    let _i1 = r32(r) as usize;
-    let ph = r64(r);
-    if !r.ok || a.type_pool.len() != t0 || a.instances.len() != i0 || pool_prefix_hash(a, t0, i0) != ph {
-        return 1;
-    }
-    let mut mutated = false;
-    loop {
-        let tag = r8(r);
         if !r.ok {
-            return reject(mutated);
+            return false;
         }
-        if tag == 0xFF {
-            return 0;
+        out.push(e);
+    }
+    return r.ok;
+}
+
+/// Intern table entry `idx` (children first) into module `am`'s pool. `cache` keys (idx, am).
+pub fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, idx: u32, am: ModuleId) TypeId {
+    if idx == TT_NONE {
+        return TYPE_NONE;
+    }
+    if idx as usize >= tab.len() {
+        return TYPE_NONE;
+    }
+    let key = idx as u64 << 32 | am as u64;
+    switch cache.get(&key) {
+        Some(v) => {
+            return (*v) as TypeId;
+        },
+        None => {},
+    };
+    let e = tab.at(idx as usize);
+    let a = unsafe &mut *(p.module_ast_const(am) as *mut Ast);
+    let mut id = TYPE_NONE;
+    if e.tag == TT_RAW {
+        let mut ty = Ty { kind: TypeKind::TYPE_ERROR, concrete: false };
+        let tp = ((&mut ty) as *mut Ty) as *mut u8;
+        for b in 0..sizeof(Ty) {
+            unsafe tp[b] = unsafe e.raw[b];
         }
-        if tag == 2 {
-            let mut it = TyInstance { module: 0, decl: NODE_NONE, n: 0 };
-            let ip = ((&mut it) as *mut TyInstance) as *mut u8;
-            for b in 0..sizeof(TyInstance) {
-                unsafe ip[b] = r8(r);
-            }
-            let expect = r32(r);
-            if !r.ok {
-                return reject(mutated);
-            }
-            mutated = true;
-            if a.intern_instance(it.module, it.decl, &it.args[0], it.n) != expect {
-                return 2;
-            }
-        } else if tag == 1 {
-            let mut ty = Ty { kind: TypeKind::TYPE_ERROR, concrete: false };
-            let tp = ((&mut ty) as *mut Ty) as *mut u8;
-            for b in 0..sizeof(Ty) {
-                unsafe tp[b] = r8(r);
-            }
-            let expect = r32(r);
-            if !r.ok {
-                return reject(mutated);
-            }
-            mutated = true;
-            if a.intern_type(ty) != expect {
-                return 2;
-            }
+        id = a.intern_type(ty);
+    } else if e.tag == TT_WRAP {
+        let el = tt_id(p, tab, cache, e.r0, am);
+        id = a.intern_type(
+            Ty {
+                kind: e.kind as TypeKind,
+                qualifier: e.qual,
+                concrete: e.conc != 0,
+                module: e.module as ModuleId,
+                as_data: TyAs { elem: el },
+            },
+        );
+    } else if e.tag == TT_ARR {
+        let el = tt_id(p, tab, cache, e.r0, am);
+        id = a.intern_type(
+            Ty {
+                kind: TypeKind::TYPE_ARRAY,
+                qualifier: e.qual,
+                concrete: e.conc != 0,
+                module: e.module as ModuleId,
+                as_data: TyAs { arr: TyArr { elem: el, len: e.aux } },
+            },
+        );
+    } else if e.tag == TT_INST {
+        let mut ar = Array::<TypeId, 8> {};
+        for i in 0..e.n {
+            ar[i as usize] = tt_id(p, tab, cache, unsafe e.argr[i as usize], am);
+        }
+        id = if e.kind as TypeKind == TypeKind::TYPE_DYN {
+            a.intern_dyn(e.im as ModuleId, e.idecl, &ar[0], e.n, e.qual);
         } else {
-            return reject(mutated);
+            a.intern_instance(e.im as ModuleId, e.idecl, &ar[0], e.n);
+        };
+    } else if e.tag == TT_PROJ {
+        let ow = tt_id(p, tab, cache, e.r0, am);
+        id = a.intern_type(
+            Ty {
+                kind: TypeKind::TYPE_FIELD_PROJECTION,
+                qualifier: e.qual,
+                concrete: e.conc != 0,
+                module: e.module as ModuleId,
+                as_data: TyAs { proj: TyProj { owner: ow, binder: e.aux } },
+            },
+        );
+    } else {
+        let l = e.lin;
+        id = a.intern_const_lin(&l);
+    }
+    cache.insert(key, id);
+    return id;
+}
+
+// The id slots per event kind (see RK_*): each pairs a TypeId field with the field naming its pool.
+fn ev_tr(
+    p: &loader::Package,
+    r: &mut TtRec,
+    ev: &mbe::RecEv,
+    b_out: &mut u32,
+    d_out: &mut u32,
+    xs_out: &mut Vector<u32>,
+    subs_out: &mut Vector<u32>,
+) {
+    *b_out = ev.b;
+    *d_out = ev.d;
+    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT {
+        *d_out = tt_ref(p, r, ev.a as ModuleId, ev.d);
+    } else if ev.kind == mbe::RK_DYNREQ || ev.kind == mbe::RK_TI || ev.kind == mbe::RK_MDYN {
+        *b_out = tt_ref(p, r, ev.a as ModuleId, ev.b);
+    } else if ev.kind == mbe::RK_DYNTAB {
+        *b_out = tt_ref(p, r, ev.a as ModuleId, ev.b);
+        *d_out = tt_ref(p, r, ev.c as ModuleId, ev.d);
+    }
+    if ev.kind == mbe::RK_AGG {
+        for i in 0..ev.xs.len() {
+            xs_out.push(tt_ref(p, r, ev.a as ModuleId, ev.xs[i]));
+        }
+    } else {
+        for i in 0..ev.xs.len() {
+            xs_out.push(ev.xs[i]);
+        }
+    }
+    if ev.kind == mbe::RK_DEMAND || ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_AGG {
+        for i in 0..ev.subs.len() {
+            subs_out.push(tt_ref(p, r, ev.subs.at(i).am, ev.subs.at(i).at));
+        }
+    } else {
+        for i in 0..ev.subs.len() {
+            subs_out.push(ev.subs.at(i).at);
         }
     }
 }
 
-fn reject(mutated: bool) i32 {
-    if mutated {
-        return 2;
+/// Rewrite a decoded event's table refs back to live TypeIds interned into the consuming pools.
+pub fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, ev: &mut mbe::RecEv) {
+    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT {
+        ev.d = tt_id(p, tab, cache, ev.d, ev.a as ModuleId);
+    } else if ev.kind == mbe::RK_DYNREQ || ev.kind == mbe::RK_TI || ev.kind == mbe::RK_MDYN {
+        ev.b = tt_id(p, tab, cache, ev.b, ev.a as ModuleId);
+    } else if ev.kind == mbe::RK_DYNTAB {
+        ev.b = tt_id(p, tab, cache, ev.b, ev.a as ModuleId);
+        ev.d = tt_id(p, tab, cache, ev.d, ev.c as ModuleId);
     }
-    return 1;
+    if ev.kind == mbe::RK_AGG {
+        for i in 0..ev.xs.len() {
+            ev.xs.set(i, tt_id(p, tab, cache, ev.xs[i], ev.a as ModuleId));
+        }
+    }
+    if ev.kind == mbe::RK_DEMAND || ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_AGG {
+        for i in 0..ev.subs.len() {
+            let am = ev.subs.at(i).am;
+            let nv = tt_id(p, tab, cache, ev.subs.at(i).at, am);
+            ev.subs.index_mut(i).at = nv;
+        }
+    }
 }
 
-pub fn ser_ev(o: &mut String, ev: &mbe::RecEv) {
+fn ser_ev_tr(p: &loader::Package, r: &mut TtRec, o: &mut String, ev: &mbe::RecEv) {
+    let mut b = ev.b;
+    let mut d = ev.d;
+    let mut xs = Vector::<u32>::new();
+    let mut sat = Vector::<u32>::new();
+    ev_tr(p, r, ev, &mut b, &mut d, &mut xs, &mut sat);
     w8(o, ev.kind);
     w32(o, ev.a);
-    w32(o, ev.b);
+    w32(o, b);
     w32(o, ev.c);
-    w32(o, ev.d);
+    w32(o, d);
     w64(o, ev.h);
     wstr(o, ev.s1.as_str());
     wstr(o, ev.s2.as_str());
@@ -486,35 +767,42 @@ pub fn ser_ev(o: &mut String, ev: &mbe::RecEv) {
         w32(o, sb.pm);
         w32(o, sb.pnode);
         w32(o, sb.am);
-        w32(o, sb.at);
+        w32(o, sat[i]);
         w32(o, sb.lim);
     }
-    w32(o, ev.xs.len() as u32);
-    for i in 0..ev.xs.len() {
-        w32(o, ev.xs[i]);
+    w32(o, xs.len() as u32);
+    for i in 0..xs.len() {
+        w32(o, xs[i]);
     }
 }
 
-pub fn ser_evs(o: &mut String, evs: &Vector<mbe::RecEv>, from: usize, bodies: str) {
-    w32(o, (evs.len() - from) as u32);
+/// Serialize `evs[from..]` as one section payload: the structural type table first, then the
+/// events with every TypeId slot rewritten to a table index.
+pub fn ser_evs(p: &loader::Package, o: &mut String, evs: &Vector<mbe::RecEv>, from: usize, bodies: str) {
+    let mut r = tt_new();
+    let mut eb = String::new();
     for i in from..evs.len() {
         let ev = evs.at(i);
         if ev.kind == mbe::RK_CHUNK && ev.s1.len() == 0 {
-            // chunk text lives in bodies_all at record time (a/b are its bounds); materialize it
-            w8(o, ev.kind);
-            w32(o, 0);
-            w32(o, 0);
-            w32(o, 0);
-            w32(o, 0);
-            w64(o, 0);
-            wstr(o, bodies.slice(ev.a as usize, ev.b as usize));
-            wstr(o, "");
-            w32(o, 0);
-            w32(o, 0);
+            // chunk text lives in the bodies buffer at record time (a/b are its bounds)
+            w8(&mut eb, ev.kind);
+            w32(&mut eb, 0);
+            w32(&mut eb, 0);
+            w32(&mut eb, 0);
+            w32(&mut eb, 0);
+            w64(&mut eb, 0);
+            wstr(&mut eb, bodies.slice(ev.a as usize, ev.b as usize));
+            wstr(&mut eb, "");
+            w32(&mut eb, 0);
+            w32(&mut eb, 0);
         } else {
-            ser_ev(o, ev);
+            ser_ev_tr(p, &mut r, &mut eb, ev);
         }
     }
+    w32(o, r.count);
+    o.push_string(&r.tab);
+    w32(o, (evs.len() - from) as u32);
+    o.push_string(&eb);
 }
 
 pub fn read_count(r: &mut Rd) u32 {

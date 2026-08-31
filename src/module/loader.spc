@@ -930,7 +930,7 @@ extend Package {
             edge_seen: Set::<u64>::new(),
             extern_privates: Set::<u64>::new(),
             cir: null,
-            jobs: 0,
+            jobs: 1, // serial unless a driver opts in: a bare Package must never launch tasks
             tc_done: Vector::<Set<u64>>::new(),
             tc_mod_done: Vector::<u8>::new(),
             tc_wait: loader_no_wait,

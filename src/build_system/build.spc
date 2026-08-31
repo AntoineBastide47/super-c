@@ -2674,13 +2674,14 @@ pub fn manifest_test(
         binb.push_string(&binp);
     }
     unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
-    loader::set_load_jobs(
-        if jobs_override != 0 {
-            jobs_override;
-        } else {
-            m.jobs;
-        },
-    );
+    let tjobs: u32 = if jobs_override != 0 {
+        jobs_override;
+    } else if m.jobs != 0 {
+        m.jobs;
+    } else {
+        (unsafe shim::sc_ncpu()) as u32;
+    };
+    loader::set_load_jobs(tjobs);
     let mut p = loader::package_load_rooted(
         rootp.as_str(),
         ".",
@@ -2696,11 +2697,7 @@ pub fn manifest_test(
         return 1;
     }
     p.gen_root = join2(m.out_dir.as_str(), "raw-test");
-    p.jobs = if jobs_override != 0 {
-        jobs_override;
-    } else {
-        m.jobs;
-    };
+    p.jobs = tjobs;
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;

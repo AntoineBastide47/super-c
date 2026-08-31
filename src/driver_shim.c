@@ -273,6 +273,8 @@ int sc_ncpu(void) {
   if (sysctlbyname("hw.ncpu", &v, &len, NULL, 0) != 0 || v < 1)
     return 4;
   return v;
+#elif defined(__wasm__)
+  return 1; /* one thread of execution: the parallel frontiers must resolve to the serial path */
 #else
   long n = sysconf(_SC_NPROCESSORS_ONLN);
   return n > 0 ? (int)n : 4;

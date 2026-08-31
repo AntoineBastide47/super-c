@@ -1931,17 +1931,18 @@ fn cemit_tuc_replay(
     main_argv: &mut bool,
 ) i32 {
     let mut rd = tuc::tuc_open(t, m);
-    let a = unsafe &mut *(p.module_ast_const(m as ModuleId) as *mut Ast);
-    let pr = tuc::replay_pool(&mut rd, a);
-    if pr != 0 {
-        return pr;
+    let mut tab = Vector::<tuc::TtEnt>::new();
+    if !tuc::read_table(&mut rd, &mut tab) {
+        return 1; // nothing mutated yet: emit live and re-record
     }
+    let mut idc = Map::<u64, u64>::new();
     let nev = tuc::read_count(&mut rd) as usize;
     let mut ev = mbe::RecEv::blank(0);
     for _i in 0..nev {
         if !tuc::read_ev(&mut rd, &mut ev) {
             return 2;
         }
+        tuc::ev_patch(p, &tab, &mut idc, &mut ev);
         if ev.kind == mbe::RK_CHUNK {
             chunk_mod.push(m as u64);
             chunk_off.push(bodies_all.len() as u64);
@@ -2631,13 +2632,12 @@ pub fn cemit_package(
     // Per-TU cache: fingerprint every module up front; a hit replays the module's journaled side
     // effects instead of lowering it, a miss emits live under journaling. Test builds opt out (the
     // wrapper set would join the fingerprint for little gain).
-    let par8 = p.jobs != 1 && p.modules.len() > 1;
     let mut tuc = tuc::tuc_setup(
         p,
         live,
         target,
-        if testing || par8 {
-            ""; // the frontier's journal state is not serial-prefix-stable: cache off
+        if testing {
+            ""; // the wrapper set would join the fingerprint for little gain
         } else {
             p.gen_root.as_str();
         },
@@ -2647,8 +2647,10 @@ pub fn cemit_package(
     if par9 {
         // Parallel seed frontier: one task per module with a private emitter shard; gated
         // first-claimant emissions replay into the master in module order afterwards, so the
-        // shared headers and worklists come out byte-identical to the serial loop's. The tu-cache
-        // stays off here (its journal assumes serial prefix state).
+        // shared headers and worklists come out byte-identical to the serial loop's. Cache-hit
+        // modules skip their shard entirely and replay their journaled section at merge time;
+        // missed shards journal under rec_on and their sections serialize at merge (the type
+        // table makes sections pool-position-independent, so parallel intern order is harmless).
         let cirg9 = p.cir as *mut iri::Interp;
         if cirg9 != null {
             unsafe cirg9.elock_on = true;
@@ -2676,7 +2678,7 @@ pub fn cemit_package(
                 clos_skip: 0,
                 used: false,
             };
-            if p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]) {
+            if p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]) && !(tuc.on && tuc.hit[m]) {
                 sh.used = true;
                 sh.cem.collect_demand = true;
                 sh.cem.mg.agg_on = true;
@@ -2689,6 +2691,7 @@ pub fn cemit_package(
                 sh.cem.sh_on = true;
                 sh.cem.mg.sh_on = true;
                 sh.cem.mg.mark_ctx = m as i64;
+                sh.cem.mg.rec_on = tuc.on;
             }
             shards.push(sh);
         }
@@ -2715,9 +2718,147 @@ pub fn cemit_package(
             wg.wait();
         }
         for m in 0..p.modules.len() {
+            let eligible9 = p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]);
+            if !eligible9 {
+                if tuc.on {
+                    tuc_pay.truncate(0);
+                    tuc::sec_add(&mut tuc, m, &tuc_pay);
+                }
+                continue;
+            }
+            if tuc.on && tuc.hit[m] {
+                // hit: no shard ran; replay the journaled section through the master's gates at
+                // exactly this module-order position
+                cem.mg.mark_ctx = m as i64;
+                let rr = cemit_tuc_replay(
+                    p,
+                    &mut cem,
+                    m,
+                    &tuc,
+                    &mut bodies_all,
+                    &mut protos,
+                    &mut chunk_mod,
+                    &mut chunk_off,
+                    &mut env_names,
+                    &mut env_bodies,
+                    &mut have_main,
+                    &mut main_mod,
+                    &mut main_argv,
+                );
+                if rr == 0 {
+                    tuc::sec_keep(&mut tuc, m);
+                    continue;
+                }
+                if rr == 2 {
+                    eprint("tu-cache: dirty replay reject for `{}`; emitting live\n", p.modules[m].path.as_str());
+                    tuc::sec_void(&mut tuc, m);
+                }
+                // rejected: emit live on the master, serially, at this position (the merge point
+                // is serial-state-equivalent); a clean reject re-records
+                let rec9 = rr == 1;
+                let mut seg9: usize = 0;
+                let mut aux9: usize = 0;
+                let mut efwd9: usize = 0;
+                let mut eh9: usize = 0;
+                if rec9 {
+                    cem.mg.rec_on = true;
+                    seg9 = cem.mg.rec.len();
+                    aux9 = cem.aux.len();
+                    efwd9 = cem.env_fwd.len();
+                    eh9 = cem.env_hashes.len();
+                }
+                cemit_seed_module(
+                    p,
+                    &mut cem,
+                    &mut g,
+                    &mut dow,
+                    &mut cl_cache,
+                    &mut clws,
+                    m,
+                    testing,
+                    verbose,
+                    null,
+                    &mut bodies_all,
+                    &mut protos,
+                    &mut chunk_mod,
+                    &mut chunk_off,
+                    &mut env_names,
+                    &mut env_bodies,
+                    &mut have_main,
+                    &mut main_mod,
+                    &mut main_argv,
+                    &mut seeds,
+                    &mut seed_skip,
+                    &mut clos_ok,
+                    &mut clos_skip,
+                );
+                if rec9 {
+                    cem.mg.rec_on = false;
+                    if cem.aux.len() > aux9 {
+                        let mut ev9 = mbe::RecEv::blank(mbe::RK_AUX);
+                        ev9.s1.push_str(cem.aux.as_str().slice(aux9, cem.aux.len()));
+                        cem.mg.rec.push(ev9);
+                    }
+                    if cem.env_fwd.len() > efwd9 {
+                        let mut ev9 = mbe::RecEv::blank(mbe::RK_EFWD);
+                        ev9.s1.push_str(cem.env_fwd.as_str().slice(efwd9, cem.env_fwd.len()));
+                        cem.mg.rec.push(ev9);
+                    }
+                    for k9 in eh9..cem.env_hashes.len() {
+                        let mut ev9 = mbe::RecEv::blank(mbe::RK_EDEF);
+                        ev9.h = *cem.env_hashes.at(k9);
+                        cem.mg.rec.push(ev9);
+                    }
+                    {
+                        let mut ev9 = mbe::RecEv::blank(mbe::RK_EDGE);
+                        for dst in 0..p.modules.len() {
+                            if cem.mg.um_hit(m as u64, dst) {
+                                ev9.xs.push(dst as u32);
+                            }
+                        }
+                        cem.mg.rec.push(ev9);
+                    }
+                    tuc_pay.truncate(0);
+                    tuc::ser_evs(p, &mut tuc_pay, &cem.mg.rec, seg9, bodies_all.as_str());
+                    tuc::sec_add(&mut tuc, m, &tuc_pay);
+                    cem.mg.rec.truncate(seg9);
+                }
+                continue;
+            }
             let o = shards.index_mut(m);
             if !o.used {
                 continue;
+            }
+            if tuc.on {
+                // the shard's journal becomes the module's section: trailing deltas are the whole
+                // shard-local accumulators, chunk texts materialize from the shard's bodies buffer
+                if o.cem.aux.len() != 0 {
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_AUX);
+                    ev9.s1.push_str(o.cem.aux.as_str());
+                    o.cem.mg.rec.push(ev9);
+                }
+                if o.cem.env_fwd.len() != 0 {
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_EFWD);
+                    ev9.s1.push_str(o.cem.env_fwd.as_str());
+                    o.cem.mg.rec.push(ev9);
+                }
+                for k9 in 0..o.cem.env_hashes.len() {
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_EDEF);
+                    ev9.h = *o.cem.env_hashes.at(k9);
+                    o.cem.mg.rec.push(ev9);
+                }
+                {
+                    let mut ev9 = mbe::RecEv::blank(mbe::RK_EDGE);
+                    for dst in 0..p.modules.len() {
+                        if o.cem.mg.um_hit(m as u64, dst) {
+                            ev9.xs.push(dst as u32);
+                        }
+                    }
+                    o.cem.mg.rec.push(ev9);
+                }
+                tuc_pay.truncate(0);
+                tuc::ser_evs(p, &mut tuc_pay, &o.cem.mg.rec, 0, o.bodies.as_str());
+                tuc::sec_add(&mut tuc, m, &tuc_pay);
             }
             let base9 = bodies_all.len() as u64;
             for k2 in 0..o.chunk_mod.len() {
@@ -2792,17 +2933,12 @@ pub fn cemit_package(
                 }
             }
             let mut tuc_seg0: usize = 0;
-            let mut tuc_t0: usize = 0;
-            let mut tuc_i0: usize = 0;
             let mut tuc_aux0: usize = 0;
             let mut tuc_efwd0: usize = 0;
             let mut tuc_eh0: usize = 0;
             if tuc_rec {
                 cem.mg.rec_on = true;
                 tuc_seg0 = cem.mg.rec.len();
-                let a0 = unsafe &*p.module_ast_const(m as ModuleId);
-                tuc_t0 = a0.type_pool.len();
-                tuc_i0 = a0.instances.len();
                 tuc_aux0 = cem.aux.len();
                 tuc_efwd0 = cem.env_fwd.len();
                 tuc_eh0 = cem.env_hashes.len();
@@ -2860,10 +2996,8 @@ pub fn cemit_package(
                     }
                     cem.mg.rec.push(ev9);
                 }
-                let a2 = unsafe &*p.module_ast_const(m as ModuleId);
                 tuc_pay.truncate(0);
-                tuc::ser_pool(&mut tuc_pay, a2, tuc_t0, a2.type_pool.len(), tuc_i0, a2.instances.len());
-                tuc::ser_evs(&mut tuc_pay, &cem.mg.rec, tuc_seg0, bodies_all.as_str());
+                tuc::ser_evs(p, &mut tuc_pay, &cem.mg.rec, tuc_seg0, bodies_all.as_str());
                 tuc::sec_add(&mut tuc, m, &tuc_pay);
                 cem.mg.rec.truncate(tuc_seg0);
             }

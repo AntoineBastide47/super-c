@@ -396,6 +396,7 @@ fn lint_one(path: str, root: str, std_dir: *const char, ce_steps: u32, ce_mem: u
         if !p.ok {
             return 1;
         }
+        p.jobs = (unsafe shim::sc_ncpu()) as u32; // parallel analysis; resolves to 1 on wasm
         let pkg = (&mut p) as *mut loader::Package;
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
@@ -529,6 +530,7 @@ fn lint_batch(
         if !p.ok {
             return 1;
         }
+        p.jobs = (unsafe shim::sc_ncpu()) as u32; // parallel analysis; resolves to 1 on wasm
         let pkg = (&mut p) as *mut loader::Package;
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
@@ -1227,7 +1229,13 @@ OPTIONS:
     let profile = bo.profile;
     let out_dir = bo.out_dir;
     let cstd = bo.cstd;
-    let jobs = bo.jobs;
+    // resolve "0 = core count" HERE: the p.jobs != 1 frontier gates need a real number, and a
+    // single-threaded host (wasm) must resolve to the serial path
+    let jobs = if bo.jobs != 0 {
+        bo.jobs;
+    } else {
+        (unsafe shim::sc_ncpu()) as u32;
+    };
     // fmt/lint take any number of paths; with none, the project discovers itself.
     let mut paths = Vector::<String>::new();
     if mode == Mode::MODE_FMT || mode == Mode::MODE_LINT {
@@ -1460,7 +1468,11 @@ OPTIONS:
         bootstrap_tags,
         lint,
         pflags.as_str(),
-        bo.jobs,
+        if bo.jobs != 0 {
+            bo.jobs;
+        } else {
+            (unsafe shim::sc_ncpu()) as u32; // "0 = core count", resolved so wasm goes serial
+        },
     );
     if std_dir != null {
         unsafe stdlib::free(std_dir);
