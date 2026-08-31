@@ -41,6 +41,7 @@ import borrowck::loans as bln;
 import borrowck::explain as bex;
 import utils::errors as diag;
 import driver::tuc as tuc;
+import driver::taskctl as tctl;
 import driver::util as *;
 
 import driver::extc as *;
@@ -1414,7 +1415,9 @@ pub struct CemitOut {
     pub types_h: String,
     pub protos_h: String,
     pub tus: Vector<String>,
+    pub tu_extra: Vector<Vector<String>>, // parts 1.. of an oversized TU (part 0 stays in tus)
     pub inst_c: String,
+    pub inst_extra: Vector<String>,
     pub have_main: bool,
     pub main_mod: u64,
     pub main_argv: bool,
@@ -1431,7 +1434,9 @@ extend CemitOut as Free {
         self.types_h.free();
         self.protos_h.free();
         self.tus.free();
+        self.tu_extra.free();
         self.inst_c.free();
+        self.inst_extra.free();
         self.edges.free();
         self.tuc_img.free();
         self.tuc_path.free();
@@ -1444,7 +1449,9 @@ extend CemitOut {
             types_h: String::new(),
             protos_h: String::new(),
             tus: Vector::<String>::new(),
+            tu_extra: Vector::<Vector<String>>::new(),
             inst_c: String::new(),
+            inst_extra: Vector::<String>::new(),
             have_main: false,
             main_mod: 0,
             main_argv: false,
@@ -1455,6 +1462,7 @@ extend CemitOut {
         };
         for _i in 0..n {
             o.tus.push(String::new());
+            o.tu_extra.push(Vector::<String>::new());
         }
         return o;
     }
@@ -2278,10 +2286,101 @@ struct SeedShard {
     pub clos_ok: u64,
     pub clos_skip: u64,
     pub used: bool,
+    // drain-slice state: one shard per SLICE of a wave in the parallel instance frontier;
+    // per-demand capture marks let the merge replay each demand's claims at its exact queue slot
+    pub dmarks: Vector<CapMark>,
+    pub douts: Vector<u8>, // per demand: 0 = emitted, 1 = lowering-path skip, 2 = emit failure
+    pub derrs: Vector<str<'static>>,
+    pub dvix: Vector<u64>, // per demand: index into dvars (0xFF.. = none)
+    pub dvkeys: Vector<u64>, // per dvars entry: the zst-signature cache key
+    pub dvars: Vector<irl::Lowerer>,
+    pub dclo_keys: Vector<u64>, // closure lowerings this slice produced on a shared-cache miss
+    pub dclo: Vector<irl::Lowerer>,
+}
+
+/// Counts of a drain shard's capture rows and sink sizes at one demand boundary; every row carries
+/// its absolute text end, so counts alone define a replayable range.
+struct CapMark {
+    pub env: u32,
+    pub stat: u32,
+    pub statv: u32,
+    pub glue: u32,
+    pub gluev: u32,
+    pub ext: u32,
+    pub dyd: u32,
+    pub dyt: u32,
+    pub blk: u32,
+    pub sent: u32,
+    pub ti: u32,
+    pub tiv: u32,
+    pub aux: u32,
+    pub dem: u32,
+    pub agg: u32,
+    pub dynr: u32,
+    pub chunks: u32,
+    pub bodies: u64,
+    pub protos: u64,
+    pub envn: u32,
+    pub dclo: u32,
+}
+
+const fn cap_zero() CapMark {
+    return CapMark {
+        env: 0,
+        stat: 0,
+        statv: 0,
+        glue: 0,
+        gluev: 0,
+        ext: 0,
+        dyd: 0,
+        dyt: 0,
+        blk: 0,
+        sent: 0,
+        ti: 0,
+        tiv: 0,
+        aux: 0,
+        dem: 0,
+        agg: 0,
+        dynr: 0,
+        chunks: 0,
+        bodies: 0,
+        protos: 0,
+        envn: 0,
+        dclo: 0,
+    };
+}
+
+fn cap_of(o: &SeedShard) CapMark {
+    let sc = &o.cem;
+    return CapMark {
+        env: sc.sh_env_k.len() as u32,
+        stat: sc.sh_stat_k.len() as u32,
+        statv: sc.stat_items.len() as u32,
+        glue: sc.sh_glue_k.len() as u32,
+        gluev: sc.glue.len() as u32,
+        ext: sc.sh_ext_k.len() as u32,
+        dyd: sc.sh_dyd_k.len() as u32,
+        dyt: sc.sh_dyt_k.len() as u32,
+        blk: sc.sh_blk_k.len() as u32,
+        sent: sc.sh_sent_k.len() as u32,
+        ti: sc.sh_ti_k.len() as u32,
+        tiv: sc.ti_reqs.len() as u32,
+        aux: sc.sh_aux_k.len() as u32,
+        dem: sc.demand.len() as u32,
+        agg: sc.mg.sh_agg_k.len() as u32,
+        dynr: sc.mg.dyn_reqs.len() as u32,
+        chunks: o.chunk_mod.len() as u32,
+        bodies: o.bodies.len() as u64,
+        protos: o.protos.len() as u64,
+        envn: o.env_names.len() as u32,
+        dclo: o.dclo_keys.len() as u32,
+    };
 }
 
 struct SeedTask {
     pub p: *mut loader::Package,
+    pub ctl: *const tctl::Ctl,
+    pub est: u64,
     /// The graph and shard, OPAQUE on purpose: the payload transitively holds `str` fields, and the
     /// bootstrap compiler's carries-borrow walk peels typed pointers (fixed in this tree, but the
     /// release binary must still build this source).
@@ -2334,15 +2433,801 @@ fn cemit_seed_task(t: SeedTask) {
         &mut o.clos_ok,
         &mut o.clos_skip,
     );
+    if t.ctl != null {
+        let d9 = tctl::TaskDesc {
+            key: tctl::TaskKey { stage: tctl::ST_SEED, module: t.m as u32, item: 0 },
+            estimated_cpu: 1,
+            estimated_memory: t.est,
+            priority: 0,
+        };
+        (unsafe &*t.ctl).release(&d9);
+    }
 }
 
 // Apply one shard's gated first-claimant emissions into the master emitter, in module order: the
 // first module-order claimant of each key wins, exactly as the serial loop's shared seen-sets
 // decided. Buffer segments are [previous end, end) of the shard's own (initially empty) buffers.
+fn cemit_drain_demand(
+    p: &mut loader::Package,
+    cem: &mut cbe::CEmit,
+    g: &mut ig::InstGraph,
+    dow: &mut DropCtx,
+    lw_cache: &mut Map<u64, u64>,
+    lws: &mut Vector<irl::Lowerer>,
+    cl_cache: &mut Map<u64, u64>,
+    clws: &mut Vector<irl::Lowerer>,
+    cfs: &mut Vector<cfl::CFlow>,
+    cf_ok: &mut Vector<bool>,
+    done: &mut Map<u64, u64>,
+    sa_seen: &mut Map<u64, u64>,
+    ia_idx: &mut Vector<Vector<NodeId>>,
+    ia_built: &mut Vector<bool>,
+    di: usize,
+    verbose: bool,
+    bodies_all: &mut String,
+    protos: &mut String,
+    chunk_mod: &mut Vector<u64>,
+    chunk_off: &mut Vector<u64>,
+    env_names: &mut Vector<u64>,
+    env_bodies: &mut Vector<String>,
+    inst_ok: &mut u64,
+    inst_skip: &mut u64,
+    clos_ok: &mut u64,
+    clos_skip: &mut u64,
+    reasons: &mut Vector<str<'static>>,
+    rcounts: &mut Vector<u64>,
+) {
+    let d_def = cem.demand.at(di).def;
+    let ds = cem.demand.at(di).sym.as_str();
+    let mut dk = 1469598103934665603u64;
+    for k in 0..ds.len() {
+        dk = (dk ^ ds.byte_at(k) as u64) * 1099511628211u64;
+    }
+    // dedup on SUCCESS only: two demands for one symbol can carry different substitution
+    // chains, and the first may be the incomplete one -- a later, fuller chain must retry
+    let seen = switch done.get(&dk) {
+        Some(_v) => true,
+        None => false,
+    };
+    if seen {
+        return;
+    }
+    let d_sym = cem.demand.at(di).sym.clone();
+    let mut d_subs = Vector::<mbe::MSub>::new();
+    for i2 in 0..cem.demand.at(di).subs.len() {
+        d_subs.push(*cem.demand.at(di).subs.at(i2));
+    }
+    let key = skey_mix(0, d_def.module as u64 << 32 | d_def.node as u64);
+    let li = switch lw_cache.get(&key) {
+        Some(v) => *v,
+        None => {
+            let mut lw = irl::Lowerer::new(p, d_def.module, d_def.node);
+            let okl = cemit_take_body(&mut *g, p, d_def.module, d_def.node, &mut lw);
+            let mut slot = 0xFFFFFFFFFFFFFFFFu64;
+            if okl {
+                cemit_apply_drops(&mut *dow, &mut lw);
+                slot = lws.len() as u64;
+                lws.push(lw);
+            } else {
+                eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw.err);
+            }
+            lw_cache.insert(key, slot);
+            slot;
+        },
+    };
+    if li == 0xFFFFFFFFFFFFFFFFu64 {
+        *inst_skip += 1;
+        return;
+    }
+    let d_sfx = cem.demand.at(di).sfx.clone();
+    // per-instantiation static_asserts: under this demand's substitution the condition is
+    // this instance's compile-time fact -- false is a COMPILE error naming the type argument
+    cemit_inst_asserts(p, d_def, &d_subs, dk, sa_seen, ia_idx, ia_built);
+    // a body with an UNEXPANDED reflection binder re-lowers per instance: the demand env
+    // makes the binder's owner concrete, so the copies expand for real. A body whose only
+    // env-dependence is `sizeof(T) <op> 0` branches re-lowers once per ZST-BIT SIGNATURE of
+    // its args -- every material instantiation folds identically and shares one body.
+    let mut li2 = li;
+    if lws.at(li as usize).body.has_reflect {
+        if stdlib::getenv("SC_PROJ_DBG") != null {
+            eprint("proj-relower: `{}` subs {}\n", d_sym.as_str(), d_subs.len());
+        }
+        let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
+        for i2 in 0..d_subs.len() {
+            let sb2 = *d_subs.at(i2);
+            lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
+        }
+        if lw2.lower_fn(d_def.node) {
+            cemit_apply_drops(&mut *dow, &mut lw2);
+            lws.push(lw2);
+            li2 = lws.len() as u64 - 1;
+        } else {
+            if verbose {
+                eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
+            }
+            *inst_skip += 1;
+            return;
+        }
+    } else if lws.at(li as usize).body.has_zst_cond {
+        let mut zb: u64 = 1;
+        for i2 in 0..d_subs.len() {
+            let sb2 = *d_subs.at(i2);
+            zb = zb << 1 | if cem.mg.is_zst(sb2.am, sb2.at) {
+                1u64;
+            } else {
+                0 as u64;
+            };
+        }
+        let zkey = skey_mix(zb, d_def.module as u64 << 32 | d_def.node as u64);
+        let zi = switch lw_cache.get(&zkey) {
+            Some(v) => *v,
+            None => {
+                let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
+                for i2 in 0..d_subs.len() {
+                    let sb2 = *d_subs.at(i2);
+                    lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
+                }
+                let mut slot2 = 0xFFFFFFFFFFFFFFFFu64;
+                if lw2.lower_fn(d_def.node) {
+                    cemit_apply_drops(&mut *dow, &mut lw2);
+                    slot2 = lws.len() as u64;
+                    lws.push(lw2);
+                } else {
+                    if verbose {
+                        eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
+                    }
+                }
+                lw_cache.insert(zkey, slot2);
+                slot2;
+            },
+        };
+        if zi == 0xFFFFFFFFFFFFFFFFu64 {
+            *inst_skip += 1;
+            return;
+        }
+        li2 = zi;
+    }
+    cem.mg.subs.truncate(0);
+    for i2 in 0..d_subs.len() {
+        cem.mg.push_msub(*d_subs.at(i2));
+    }
+    cem.mg.clos_sfx.truncate(0);
+    cem.mg.clos_sfx.push_string(&d_sfx);
+    cem.mg.clos_ids.truncate(0);
+    for c2 in 0..lws.at(li2 as usize).closures.len() {
+        cem.mg.clos_ids.push(lws.at(li2 as usize).closures[c2]);
+    }
+    {
+        // every lws slot gets a cached CFlow: shared zst-signature bodies and reflect
+        // re-lowers alike (a per-slot build amortizes across their instantiations)
+        while cfs.len() <= li2 as usize {
+            cfs.push(cfl::CFlow::new_empty());
+            cf_ok.push(false);
+        }
+        if !cf_ok[li2 as usize] {
+            let cfp = &mut cfs[li2 as usize];
+            cfp.build_into(&lws.at(li2 as usize).body);
+            cf_ok.set(li2 as usize, true);
+        }
+        cem.cf_ext = cfs.at(li2 as usize);
+    }
+    cem.out.clear();
+    cem.fn_attrs.truncate(0);
+    cemit_fn_attrs(p, d_def.module, d_def.node, &mut cem.fn_attrs);
+    let em_ok9 = cem.emit_fn(&lws.at(li2 as usize).body, d_sym.as_str());
+    cem.cf_ext = null;
+    if em_ok9 {
+        done.insert(dk, 1);
+        *inst_ok += 1;
+        chunk_mod.push(65534);
+        chunk_off.push(bodies_all.len() as u64);
+        proto_of(&cem.out, protos);
+        bodies_all.push_string(&cem.out);
+        let mut clsq = Vector::<NodeId>::new();
+        for c2 in 0..lws.at(li2 as usize).closures.len() {
+            clsq.push(lws.at(li2 as usize).closures[c2]);
+        }
+        let mut cqi: usize = 0;
+        while cqi < clsq.len() {
+            let cn = clsq[cqi];
+            cqi += 1;
+            let ckey = skey_mix(0, d_def.module as u64 << 32 | cn as u64);
+            let ci = switch cl_cache.get(&ckey) {
+                Some(v) => *v,
+                None => {
+                    let mut cl = irl::Lowerer::new(p, d_def.module, cn);
+                    let mut slot = 0xFFFFFFFFFFFFFFFFu64;
+                    if cemit_take_closure(&mut *g, p, d_def.module, cn, &mut cl) {
+                        cemit_apply_drops(&mut *dow, &mut cl);
+                        slot = clws.len() as u64;
+                        clws.push(cl);
+                    }
+                    cl_cache.insert(ckey, slot);
+                    slot;
+                },
+            };
+            let mut csym = String::new();
+            cem.mg.closure_sym(d_def.module, cn, &mut csym);
+            let mut envs = String::new();
+            cem.out.clear();
+            let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
+            if cok {
+                for x2 in 0..clws.at(ci as usize).closures.len() {
+                    clsq.push(clws.at(ci as usize).closures[x2]); // closures nest: emit the inner ones too
+                }
+            }
+            if cok && cem.emit_closure(&clws.at(ci as usize).body, d_def.module, cn, csym.as_str(), &mut envs) {
+                *clos_ok += 1;
+                {
+                    if envs.len() != 0 {
+                        let mut eh9 = 1469598103934665603u64;
+                        {
+                            let mut en9 = String::from_str(csym.as_str());
+                            en9.push_str("_env");
+                            let es9 = en9.as_str();
+                            for k9 in 0..es9.len() {
+                                eh9 = (eh9 ^ es9.byte_at(k9) as u64) * 1099511628211u64;
+                            }
+                        }
+                        env_names.push(eh9);
+                        env_bodies.push(envs.clone());
+                    }
+                }
+                chunk_mod.push(65534);
+                chunk_off.push(bodies_all.len() as u64);
+                proto_of(&cem.out, protos);
+                bodies_all.push_string(&cem.out);
+            } else {
+                *clos_skip += 1;
+            }
+        }
+    } else {
+        if verbose {
+            eprint("inst-emit-fail: `{}` {}\n", d_sym.as_str(), cem.err);
+        }
+        let mut found = false;
+        for r2 in 0..reasons.len() {
+            if reasons[r2] == cem.err {
+                rcounts.set(r2, rcounts[r2] + 1);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            reasons.push(cem.err);
+            rcounts.push(1);
+        }
+    }
+    cem.mg.subs.truncate(0);
+    cem.mg.clos_sfx.truncate(0);
+    cem.mg.clos_ids.truncate(0);
+    cem.mg.subs.truncate(0);
+    cem.mg.clos_sfx.truncate(0);
+    cem.mg.clos_ids.truncate(0);
+}
+
+// One demanded instance emitted into a private shard by the parallel instance frontier. Shared
+// caches are READ-ONLY during a wave (the master mutates them only at merge); pointers are opaque
+// where the payload transitively reaches `str` (the release bootstrap's carries-borrow walk).
+struct DrainTask {
+    pub p: *mut loader::Package,
+    pub g: *mut void, // InstGraph
+    pub out: *mut void, // SeedShard
+    pub dem: *const void, // Vector<cbe::Demand>: frozen during the wave
+    pub lws: *const void, // Vector<irl::Lowerer>: frozen during the wave
+    pub cfs: *const void, // Vector<cfl::CFlow>: frozen during the wave
+    pub lwc: *const void, // lw_cache: frozen during the wave
+    pub clc: *const void, // cl_cache: frozen during the wave
+    pub clw: *const void, // clws: frozen during the wave
+    pub widx: *const u64, // tasked demand indices, ascending
+    pub wli: *const u64, // their base lowering slots
+    pub lo: u64, // this slice: widx[lo..hi)
+    pub hi: u64,
+    pub kl: *const psync::Semaphore,
+    pub verbose: bool,
+}
+
+unsafe extend DrainTask as Send {}
+
+fn cemit_drain_task(t: DrainTask) {
+    let p = unsafe &mut *t.p;
+    let o = unsafe &mut *(t.out as *mut SeedShard);
+    let dem = unsafe &*(t.dem as *const Vector<cbe::Demand>);
+    let lws = unsafe &*(t.lws as *const Vector<irl::Lowerer>);
+    let cfs = unsafe &*(t.cfs as *const Vector<cfl::CFlow>);
+    let lwc = unsafe &*(t.lwc as *const Map<u64, u64>);
+    let clc = unsafe &*(t.clc as *const Map<u64, u64>);
+    let clws0 = unsafe &*(t.clw as *const Vector<irl::Lowerer>);
+    for w in t.lo..t.hi {
+        let di = (unsafe t.widx[w as usize]) as usize;
+        let li = unsafe t.wli[w as usize];
+        cemit_drain_slice_one(p, t.g, o, dem, lws, cfs, lwc, clc, clws0, di, li, t.kl, t.verbose);
+        o.dmarks.push(cap_of(o));
+    }
+}
+
+fn cemit_drain_slice_one(
+    p: &mut loader::Package,
+    gv: *mut void,
+    o: &mut SeedShard,
+    dem: &Vector<cbe::Demand>,
+    lws: &Vector<irl::Lowerer>,
+    cfs: &Vector<cfl::CFlow>,
+    lwc: &Map<u64, u64>,
+    clc: &Map<u64, u64>,
+    clws0: &Vector<irl::Lowerer>,
+    di: usize,
+    li: u64,
+    kl: *const psync::Semaphore,
+    verbose: bool,
+) {
+    let d_def = dem.at(di).def;
+    let d_sym = dem.at(di).sym.clone();
+    let mut d_subs = Vector::<mbe::MSub>::new();
+    for i2 in 0..dem.at(di).subs.len() {
+        d_subs.push(*dem.at(di).subs.at(i2));
+    }
+    let d_sfx = dem.at(di).sfx.clone();
+    let mut var_on = false;
+    let mut var_zkey: u64 = 0;
+    let mut var_lw = irl::Lowerer::new(p, 0, NODE_NONE);
+    let mut li2 = li;
+    let mut cfp: *const cfl::CFlow = null;
+    let mut cf_own = cfl::CFlow::new_empty();
+    if lws.at(li as usize).body.has_reflect {
+        let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
+        for i2 in 0..d_subs.len() {
+            let sb2 = *d_subs.at(i2);
+            lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
+        }
+        if lw2.lower_fn(d_def.node) {
+            let mut dow2 = DropCtx {
+                ow: bfx::Owner::new(p),
+                forest: bmp::MoveForest::empty(),
+                facts: bfx::BodyFacts::empty(),
+                cfg: bdf::Cfg::empty(),
+                mv: bdf::MoveFlow::empty(),
+                el: ird::ElabCtx::empty(),
+            };
+            cemit_apply_drops(&mut dow2, &mut lw2);
+            var_on = true;
+            var_lw = lw2;
+        } else {
+            if verbose {
+                eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
+            }
+            o.douts.push(1);
+            o.derrs.push("");
+            o.dvix.push(0xFFFFFFFFFFFFFFFFu64);
+            return;
+        }
+    } else if lws.at(li as usize).body.has_zst_cond {
+        let sh0 = &mut o.cem;
+        let mut zb: u64 = 1;
+        for i2 in 0..d_subs.len() {
+            let sb2 = *d_subs.at(i2);
+            zb = zb << 1 | if sh0.mg.is_zst(sb2.am, sb2.at) {
+                1u64;
+            } else {
+                0 as u64;
+            };
+        }
+        let zkey = skey_mix(zb, d_def.module as u64 << 32 | d_def.node as u64);
+        let zi = switch lwc.get(&zkey) {
+            Some(v) => *v,
+            None => 0xFFFFFFFFFFFFFFFEu64,
+        };
+        if zi == 0xFFFFFFFFFFFFFFFFu64 {
+            o.douts.push(1);
+            o.derrs.push("");
+            o.dvix.push(0xFFFFFFFFFFFFFFFFu64);
+            return;
+        }
+        if zi != 0xFFFFFFFFFFFFFFFEu64 {
+            li2 = zi;
+        } else {
+            // a slice-local earlier demand may have lowered this signature already
+            let mut own9 = 0xFFFFFFFFFFFFFFFFu64;
+            for k2 in 0..o.dvkeys.len() {
+                if o.dvkeys[k2] == zkey {
+                    own9 = k2 as u64;
+                    break;
+                }
+            }
+            if own9 != 0xFFFFFFFFFFFFFFFFu64 {
+                var_on = true;
+                var_zkey = zkey;
+                li2 = 0xFFFFFFFFFFFFFFFFu64;
+                o.dvix.push(own9);
+            } else {
+                let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
+                for i2 in 0..d_subs.len() {
+                    let sb2 = *d_subs.at(i2);
+                    lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
+                }
+                if lw2.lower_fn(d_def.node) {
+                    let mut dow2 = DropCtx {
+                        ow: bfx::Owner::new(p),
+                        forest: bmp::MoveForest::empty(),
+                        facts: bfx::BodyFacts::empty(),
+                        cfg: bdf::Cfg::empty(),
+                        mv: bdf::MoveFlow::empty(),
+                        el: ird::ElabCtx::empty(),
+                    };
+                    cemit_apply_drops(&mut dow2, &mut lw2);
+                    var_on = true;
+                    var_zkey = zkey;
+                    var_lw = lw2;
+                } else {
+                    if verbose {
+                        eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
+                    }
+                    o.douts.push(1);
+                    o.derrs.push("");
+                    o.dvix.push(0xFFFFFFFFFFFFFFFFu64);
+                    return;
+                }
+            }
+        }
+    }
+    // register the variant (if fresh) so the body reference below and later demands can find it
+    let mut vix = 0xFFFFFFFFFFFFFFFFu64;
+    if var_on {
+        if li2 == 0xFFFFFFFFFFFFFFFFu64 {
+            // slice-local zst reuse: dvix already pushed above
+            for k2 in 0..o.dvkeys.len() {
+                if o.dvkeys[k2] == var_zkey {
+                    vix = k2 as u64;
+                    break;
+                }
+            }
+        } else {
+            vix = o.dvars.len() as u64;
+            o.dvkeys.push(var_zkey);
+            o.dvars.push(var_lw);
+        }
+    }
+    let sh = &mut o.cem;
+    sh.mg.subs.truncate(0);
+    for i2 in 0..d_subs.len() {
+        sh.mg.push_msub(*d_subs.at(i2));
+    }
+    sh.mg.clos_sfx.truncate(0);
+    sh.mg.clos_sfx.push_string(&d_sfx);
+    sh.mg.clos_ids.truncate(0);
+    {
+        let cls = if var_on {
+            &o.dvars.at(vix as usize).closures;
+        } else {
+            &lws.at(li2 as usize).closures;
+        };
+        for c2 in 0..cls.len() {
+            sh.mg.clos_ids.push(cls[c2]);
+        }
+    }
+    if var_on {
+        cf_own.build_into(&o.dvars.at(vix as usize).body);
+        cfp = &cf_own;
+    } else {
+        cfp = cfs.at(li2 as usize);
+    }
+    sh.cf_ext = cfp;
+    sh.out.clear();
+    sh.fn_attrs.truncate(0);
+    cemit_fn_attrs(p, d_def.module, d_def.node, &mut sh.fn_attrs);
+    let bodyp = if var_on {
+        &o.dvars.at(vix as usize).body;
+    } else {
+        &lws.at(li2 as usize).body;
+    };
+    let em_ok9 = sh.emit_fn(bodyp, d_sym.as_str());
+    sh.cf_ext = null;
+    if !em_ok9 {
+        o.douts.push(2);
+        o.derrs.push(sh.err);
+        if li2 != 0xFFFFFFFFFFFFFFFFu64 || !var_on {
+            o.dvix.push(vix);
+        }
+        return;
+    }
+    o.douts.push(0);
+    o.derrs.push("");
+    if li2 != 0xFFFFFFFFFFFFFFFFu64 || !var_on {
+        o.dvix.push(vix);
+    }
+    o.chunk_mod.push(65534);
+    o.chunk_off.push(o.bodies.len() as u64);
+    proto_of(&sh.out, &mut o.protos);
+    o.bodies.push_string(&sh.out);
+    let mut clsq = Vector::<NodeId>::new();
+    {
+        let cls = if var_on {
+            &o.dvars.at(vix as usize).closures;
+        } else {
+            &lws.at(li2 as usize).closures;
+        };
+        for c2 in 0..cls.len() {
+            clsq.push(cls[c2]);
+        }
+    }
+    let mut cqi: usize = 0;
+    while cqi < clsq.len() {
+        let cn = clsq[cqi];
+        cqi += 1;
+        let ckey = skey_mix(0, d_def.module as u64 << 32 | cn as u64);
+        // shared cache first (frozen), then this slice's own lowerings, then a fresh take
+        let mut shared_ci = switch clc.get(&ckey) {
+            Some(v) => *v,
+            None => 0xFFFFFFFFFFFFFFFEu64,
+        };
+        let mut own_ci = 0xFFFFFFFFFFFFFFFFu64;
+        if shared_ci == 0xFFFFFFFFFFFFFFFEu64 {
+            let mut known = false;
+            for k2 in 0..o.dclo_keys.len() {
+                if o.dclo_keys[k2] == ckey {
+                    known = true;
+                    if o.dclo.at(k2).body.blocks.len() != 0 {
+                        own_ci = k2 as u64;
+                    }
+                    break;
+                }
+            }
+            if !known {
+                let mut cl = irl::Lowerer::new(p, d_def.module, cn);
+                if cemit_seed_take(unsafe &mut *(gv as *mut ig::InstGraph), p, d_def.module, cn, &mut cl, kl, true) {
+                    let mut dow2 = DropCtx {
+                        ow: bfx::Owner::new(p),
+                        forest: bmp::MoveForest::empty(),
+                        facts: bfx::BodyFacts::empty(),
+                        cfg: bdf::Cfg::empty(),
+                        mv: bdf::MoveFlow::empty(),
+                        el: ird::ElabCtx::empty(),
+                    };
+                    cemit_apply_drops(&mut dow2, &mut cl);
+                    own_ci = o.dclo.len() as u64;
+                    o.dclo_keys.push(ckey);
+                    o.dclo.push(cl);
+                } else {
+                    // remembered as failed: an empty-body placeholder maps to -1 at merge
+                    o.dclo_keys.push(ckey);
+                    o.dclo.push(irl::Lowerer::new(p, d_def.module, cn));
+                }
+            }
+            shared_ci = 0xFFFFFFFFFFFFFFFFu64;
+        }
+        let cok = shared_ci < 0xFFFFFFFFFFFFFFFEu64 || own_ci != 0xFFFFFFFFFFFFFFFFu64;
+        let clp: *const irl::Lowerer = if shared_ci < 0xFFFFFFFFFFFFFFFEu64 {
+            clws0.at(shared_ci as usize);
+        } else if own_ci != 0xFFFFFFFFFFFFFFFFu64 {
+            o.dclo.at(own_ci as usize);
+        } else {
+            null;
+        };
+        let mut csym = String::new();
+        sh.mg.closure_sym(d_def.module, cn, &mut csym);
+        let mut envs = String::new();
+        sh.out.clear();
+        if cok {
+            let cls2 = unsafe &(&*clp).closures;
+            for x2 in 0..cls2.len() {
+                clsq.push(cls2[x2]); // closures nest: emit the inner ones too
+            }
+        }
+        if cok && sh.emit_closure(unsafe &(&*clp).body, d_def.module, cn, csym.as_str(), &mut envs) {
+            o.clos_ok += 1;
+            if envs.len() != 0 {
+                let mut eh9 = 1469598103934665603u64;
+                {
+                    let mut en9 = String::from_str(csym.as_str());
+                    en9.push_str("_env");
+                    let es9 = en9.as_str();
+                    for k9 in 0..es9.len() {
+                        eh9 = (eh9 ^ es9.byte_at(k9) as u64) * 1099511628211u64;
+                    }
+                }
+                o.env_names.push(eh9);
+                o.env_bodies.push(envs.clone());
+            }
+            o.chunk_mod.push(65534);
+            o.chunk_off.push(o.bodies.len() as u64);
+            proto_of(&sh.out, &mut o.protos);
+            o.bodies.push_string(&sh.out);
+        } else {
+            o.clos_skip += 1;
+        }
+    }
+    sh.mg.subs.truncate(0);
+    sh.mg.clos_sfx.truncate(0);
+    sh.mg.clos_ids.truncate(0);
+}
+
+// One slice of a wave's unique base-definition lowerings; results land in disjoint slots.
+struct LowTask {
+    pub p: *mut loader::Package,
+    pub g: *mut void, // InstGraph
+    pub defs: *const u64, // packed module << 32 | node
+    pub res: *mut void, // irl::Lowerer slot base (disjoint writes per index)
+    pub cfr: *mut void, // cfl::CFlow slot base
+    pub oks: *mut bool,
+    pub lo: u64,
+    pub hi: u64,
+    pub kl: *const psync::Semaphore,
+}
+
+unsafe extend LowTask as Send {}
+
+fn cemit_low_task(t: LowTask) {
+    let p = unsafe &mut *t.p;
+    let res = t.res as *mut irl::Lowerer;
+    let cfr = t.cfr as *mut cfl::CFlow;
+    let mut dow2 = DropCtx {
+        ow: bfx::Owner::new(p),
+        forest: bmp::MoveForest::empty(),
+        facts: bfx::BodyFacts::empty(),
+        cfg: bdf::Cfg::empty(),
+        mv: bdf::MoveFlow::empty(),
+        el: ird::ElabCtx::empty(),
+    };
+    for i in t.lo..t.hi {
+        let dv = unsafe t.defs[i as usize];
+        let m = (dv >> 32) as ModuleId;
+        let n = (dv & 0xFFFFFFFFu64) as NodeId;
+        let mut lw = irl::Lowerer::new(p, m, n);
+        let ok = cemit_seed_take(unsafe &mut *(t.g as *mut ig::InstGraph), p, m, n, &mut lw, t.kl, false);
+        if ok {
+            cemit_apply_drops(&mut dow2, &mut lw);
+            let mut cf = cfl::CFlow::new_empty();
+            cf.build_into(&lw.body);
+            let rp = unsafe &mut *(res + i as usize);
+            *rp = lw;
+            let cp = unsafe &mut *(cfr + i as usize);
+            *cp = cf;
+        }
+        unsafe t.oks[i as usize] = ok;
+    }
+}
+
+// The raw casts these launchers take live only for the call: the checker retains a laundered
+// borrow for the enclosing function, so the casts must not share a body with the merge's writers.
+fn cemit_low_launch(
+    p: &mut loader::Package,
+    g: &mut ig::InstGraph,
+    kl9: &mut psync::Semaphore,
+    defs: &Vector<u64>,
+    res: &mut Vector<irl::Lowerer>,
+    cfr: &mut Vector<cfl::CFlow>,
+    oks: &mut Vector<bool>,
+    jobs: u32,
+) {
+    let nd = defs.len();
+    let mut nsl: usize = 1;
+    if jobs >= 2 && nd > 1 {
+        nsl = if nd < jobs as usize {
+            nd;
+        } else {
+            jobs as usize;
+        };
+    }
+    let wgl = psync::WaitGroup::new();
+    let resb = (res.index_mut(0) as *mut irl::Lowerer) as *mut void;
+    let cfrb = (cfr.index_mut(0) as *mut cfl::CFlow) as *mut void;
+    let oksb = oks.index_mut(0) as *mut bool;
+    let defb = defs.as_ptr();
+    let ppd = p as *mut loader::Package;
+    let ggd = (g as *mut ig::InstGraph) as *mut void;
+    let klp9 = (kl9 as *mut psync::Semaphore) as *const psync::Semaphore;
+    for sI in 0..nsl {
+        let lo9 = nd * sI / nsl;
+        let hi9 = nd * (sI + 1) / nsl;
+        if lo9 == hi9 {
+            continue;
+        }
+        wgl.add(1);
+        let tl = LowTask {
+            p: ppd,
+            g: ggd,
+            defs: defb,
+            res: resb,
+            cfr: cfrb,
+            oks: oksb,
+            lo: lo9 as u64,
+            hi: hi9 as u64,
+            kl: klp9,
+        };
+        let wgc = wgl.clone();
+        launch || {
+            cemit_low_task(tl);
+            wgc.done();
+        };
+    }
+    wgl.wait();
+}
+
+fn cemit_drain_launch(
+    p: &mut loader::Package,
+    g: &mut ig::InstGraph,
+    kl9: &mut psync::Semaphore,
+    cem: &mut cbe::CEmit,
+    lws: &Vector<irl::Lowerer>,
+    cfs: &Vector<cfl::CFlow>,
+    lw_cache: &Map<u64, u64>,
+    cl_cache: &Map<u64, u64>,
+    clws: &Vector<irl::Lowerer>,
+    dsh: &mut Vector<SeedShard>,
+    sbounds: &Vector<u64>, // per slice: exclusive end index into widx
+    widx: &Vector<u64>,
+    wli: &Vector<u64>,
+    verbose: bool,
+) {
+    let wgd = psync::WaitGroup::new();
+    let ppd = p as *mut loader::Package;
+    let ggd = (g as *mut ig::InstGraph) as *mut void;
+    let klp9 = (kl9 as *mut psync::Semaphore) as *const psync::Semaphore;
+    let demp = ((&cem.demand) as *const Vector<cbe::Demand>) as *const void;
+    let lwsp = (lws as *const Vector<irl::Lowerer>) as *const void;
+    let cfsp = (cfs as *const Vector<cfl::CFlow>) as *const void;
+    let lwcp = (lw_cache as *const Map<u64, u64>) as *const void;
+    let clcp = (cl_cache as *const Map<u64, u64>) as *const void;
+    let clwp = (clws as *const Vector<irl::Lowerer>) as *const void;
+    let wip = widx.as_ptr();
+    let wlp = wli.as_ptr();
+    let mut lo9: u64 = 0;
+    for i in 0..dsh.len() {
+        let hi9 = *sbounds.at(i);
+        if lo9 == hi9 {
+            continue;
+        }
+        wgd.add(1);
+        let td = DrainTask {
+            p: ppd,
+            g: ggd,
+            out: dsh.index_mut(i),
+            dem: demp,
+            lws: lwsp,
+            cfs: cfsp,
+            lwc: lwcp,
+            clc: clcp,
+            clw: clwp,
+            widx: wip,
+            wli: wlp,
+            lo: lo9,
+            hi: hi9,
+            kl: klp9,
+            verbose: verbose,
+        };
+        let wgc = wgd.clone();
+        launch || {
+            cemit_drain_task(td);
+            wgc.done();
+        };
+        lo9 = hi9;
+    }
+    wgd.wait();
+}
+
+fn cemit_seed_merge_um(cem: &mut cbe::CEmit, o: &mut SeedShard) {
+    cem.mg.sh_merge_um(&mut o.cem.mg, 65534);
+}
+
 fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
+    let a = cap_zero();
+    let b = cap_of(o);
+    cemit_seed_merge_range(cem, o, &a, &b);
+    cem.mg.sh_merge_um(&mut o.cem.mg, m);
+}
+
+// prior end offset of row range [0..a) in a single-kind text buffer
+const fn cap_pe(rows: &Vector<u32>, a: u32) u32 {
+    if a == 0 {
+        return 0;
+    }
+    return rows[a as usize - 1];
+}
+
+fn cemit_seed_merge_range(cem: &mut cbe::CEmit, o: &mut SeedShard, a: &CapMark, b: &CapMark) {
     let sc = &mut o.cem;
-    let mut pe: u32 = 0;
-    for i in 0..sc.sh_env_k.len() {
+    let mut pe = cap_pe(&sc.sh_env_e, a.env);
+    for i in a.env as usize..b.env as usize {
         let k = sc.sh_env_k[i];
         let e = sc.sh_env_e[i];
         if !cem.env_skip.contains_key(&k) {
@@ -2352,9 +3237,13 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         }
         pe = e;
     }
-    pe = 0;
-    let mut pv: u32 = 0;
-    for i in 0..sc.sh_stat_k.len() {
+    pe = cap_pe(&sc.sh_stat_e, a.stat);
+    let mut pv = if a.stat == 0 {
+        0u32;
+    } else {
+        sc.sh_stat_v[a.stat as usize - 1];
+    };
+    for i in a.stat as usize..b.stat as usize {
         let k = sc.sh_stat_k[i];
         let e = sc.sh_stat_e[i];
         let v = sc.sh_stat_v[i];
@@ -2372,8 +3261,12 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         pe = e;
         pv = v;
     }
-    pv = 0;
-    for i in 0..sc.sh_glue_k.len() {
+    pv = if a.glue == 0 {
+        0u32;
+    } else {
+        sc.sh_glue_v[a.glue as usize - 1];
+    };
+    for i in a.glue as usize..b.glue as usize {
         let k = sc.sh_glue_k[i];
         let v = sc.sh_glue_v[i];
         if !cem.glue_seen_has(k) {
@@ -2390,8 +3283,8 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         }
         pv = v;
     }
-    pe = 0;
-    for i in 0..sc.sh_ext_k.len() {
+    pe = cap_pe(&sc.sh_ext_e, a.ext);
+    for i in a.ext as usize..b.ext as usize {
         let k = sc.sh_ext_k[i];
         let e = sc.sh_ext_e[i];
         if !cem.extern_seen_has(k) {
@@ -2400,9 +3293,13 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         }
         pe = e;
     }
-    let ext_tail0 = pe;
-    pe = 0;
-    for i in 0..sc.sh_dyd_k.len() {
+    let ext_tail0 = if sc.sh_ext_k.len() == 0 {
+        0u32;
+    } else {
+        sc.sh_ext_e[sc.sh_ext_k.len() - 1];
+    };
+    pe = cap_pe(&sc.sh_dyd_e, a.dyd);
+    for i in a.dyd as usize..b.dyd as usize {
         let k = sc.sh_dyd_k[i];
         let e = sc.sh_dyd_e[i];
         if !cem.dyn_def_seen_has(k) {
@@ -2411,9 +3308,9 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         }
         pe = e;
     }
-    pe = 0;
-    let mut pe2: u32 = 0;
-    for i in 0..sc.sh_dyt_k.len() {
+    pe = cap_pe(&sc.sh_dyt_e, a.dyt);
+    let mut pe2 = cap_pe(&sc.sh_dyt_e2, a.dyt);
+    for i in a.dyt as usize..b.dyt as usize {
         let k = sc.sh_dyt_k[i];
         let e = sc.sh_dyt_e[i];
         let e2 = sc.sh_dyt_e2[i];
@@ -2425,9 +3322,13 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         pe = e;
         pe2 = e2;
     }
-    pe = 0;
-    pe2 = ext_tail0;
-    for i in 0..sc.sh_blk_k.len() {
+    pe = cap_pe(&sc.sh_blk_e, a.blk);
+    pe2 = if a.blk == 0 {
+        ext_tail0;
+    } else {
+        sc.sh_blk_e2[a.blk as usize - 1];
+    };
+    for i in a.blk as usize..b.blk as usize {
         let k = sc.sh_blk_k[i];
         let e = sc.sh_blk_e[i];
         let e2 = sc.sh_blk_e2[i];
@@ -2442,9 +3343,9 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         pe = e;
         pe2 = e2;
     }
-    pe = 0;
-    pe2 = 0;
-    for i in 0..sc.sh_sent_k.len() {
+    pe = cap_pe(&sc.sh_sent_e, a.sent);
+    pe2 = cap_pe(&sc.sh_sent_e2, a.sent);
+    for i in a.sent as usize..b.sent as usize {
         let k = sc.sh_sent_k[i];
         let e = sc.sh_sent_e[i];
         let e2 = sc.sh_sent_e2[i];
@@ -2456,8 +3357,12 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         pe = e;
         pe2 = e2;
     }
-    pv = 0;
-    for i in 0..sc.sh_ti_k.len() {
+    pv = if a.ti == 0 {
+        0u32;
+    } else {
+        sc.sh_ti_v[a.ti as usize - 1];
+    };
+    for i in a.ti as usize..b.ti as usize {
         let k = sc.sh_ti_k[i];
         let v = sc.sh_ti_v[i];
         if !cem.ti_seen_has(k) {
@@ -2472,8 +3377,8 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         }
         pv = v;
     }
-    pe = 0;
-    for i in 0..sc.sh_aux_k.len() {
+    pe = cap_pe(&sc.sh_aux_e, a.aux);
+    for i in a.aux as usize..b.aux as usize {
         let k = sc.sh_aux_k[i];
         let e = sc.sh_aux_e[i];
         if k == 0 {
@@ -2487,7 +3392,7 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         }
         pe = e;
     }
-    for i in 0..sc.demand.len() {
+    for i in a.dem as usize..b.dem as usize {
         let dk = sc.demand.at(i).dk;
         if dk != 0 {
             if cem.demand_seen_has(dk) {
@@ -2507,7 +3412,7 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
         );
         cem.demand.push(d);
     }
-    cem.mg.sh_merge(&mut sc.mg, m);
+    cem.mg.sh_merge_range(&mut sc.mg, a.agg as usize, b.agg as usize, a.dynr as usize, b.dynr as usize);
 }
 
 pub fn cemit_package(
@@ -2677,6 +3582,14 @@ pub fn cemit_package(
                 clos_ok: 0,
                 clos_skip: 0,
                 used: false,
+                dmarks: Vector::<CapMark>::new(),
+                douts: Vector::<u8>::new(),
+                derrs: Vector::<str<'static>>::new(),
+                dvix: Vector::<u64>::new(),
+                dvkeys: Vector::<u64>::new(),
+                dvars: Vector::<irl::Lowerer>::new(),
+                dclo_keys: Vector::<u64>::new(),
+                dclo: Vector::<irl::Lowerer>::new(),
             };
             if p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]) && !(tuc.on && tuc.hit[m]) {
                 sh.used = true;
@@ -2699,15 +3612,41 @@ pub fn cemit_package(
         let pp9 = p as *mut loader::Package;
         let gg9 = ((&mut g) as *mut ig::InstGraph) as *mut void;
         let klp = ((&mut kl) as *mut psync::Semaphore) as *const psync::Semaphore;
-        let mut launched9: i64 = 0;
+        // longest-job-first submission (the runtime still executes in any order), gated by the
+        // build memory budget; the merge below stays in module order regardless
+        let mctl = tctl::Ctl::new(tctl::budget_from_env());
+        let mut order9 = Vector::<u64>::new();
         for m in 0..p.modules.len() {
-            if !shards.at(m).used {
-                continue;
+            if shards.at(m).used {
+                order9.push(0xFFFFFFFFFFFFFFFFu64 - p.modules[m].source.len() as u64 << 20 | m as u64);
             }
+        }
+        order9.sort();
+        let mut launched9: i64 = 0;
+        for oi9 in 0..order9.len() {
+            let m = (order9[oi9] & 0xFFFFFu64) as usize;
+            let est9 = p.modules[m].source.len() as u64 * 12 + (1u64 << 20);
+            let d9 = tctl::TaskDesc {
+                key: tctl::TaskKey { stage: tctl::ST_SEED, module: m as u32, item: 0 },
+                estimated_cpu: 1,
+                estimated_memory: est9,
+                priority: p.modules[m].source.len() as u32,
+            };
+            mctl.acquire(&d9);
             wg.add(1);
             launched9 += 1;
             let op9 = (shards.index_mut(m) as *mut SeedShard) as *mut void;
-            let t = SeedTask { p: pp9, g: gg9, out: op9, m: m, testing: testing, verbose: verbose, kl: klp };
+            let t = SeedTask {
+                p: pp9,
+                ctl: &mctl,
+                est: est9,
+                g: gg9,
+                out: op9,
+                m: m,
+                testing: testing,
+                verbose: verbose,
+                kl: klp,
+            };
             let wgc = wg.clone();
             launch || {
                 cemit_seed_task(t);
@@ -2716,6 +3655,9 @@ pub fn cemit_package(
         }
         if launched9 != 0 {
             wg.wait();
+        }
+        if tstat {
+            eprint("cemit-frontier seed: {} tasks\n", launched9);
         }
         for m in 0..p.modules.len() {
             let eligible9 = p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]);
@@ -3074,7 +4016,20 @@ pub fn cemit_package(
     let mut reasons = Vector::<str<'static>>::new();
     let mut rcounts = Vector::<u64>::new();
     cem.mg.mark_ctx = -1; // instance-TU emission: every spelled module is link-reachable
+    let mut kl9 = psync::Semaphore::new(1);
+    let cird = p.cir as *mut iri::Interp;
+    if par9 {
+        if cird != null {
+            unsafe cird.elock_on = true;
+        }
+        for i2 in 0..p.modules.len() {
+            p.modules[i2].ast.ilock_on = true;
+        }
+    }
     let mut qi: usize = 0;
+    let mut dwaves: u64 = 0;
+    let mut dtasks: u64 = 0;
+    let mut dslices: u64 = 0;
     while (qi < cem.demand.len() || gi9 < cem.glue.len()) && qi < 200000 {
         // derived destructors drain alongside instances (each may enqueue the other)
         while gi9 < cem.glue.len() {
@@ -3096,232 +4051,398 @@ pub fn cemit_package(
         if qi >= cem.demand.len() {
             continue;
         }
-        let d_def = cem.demand.at(qi).def;
-        let ds = cem.demand.at(qi).sym.as_str();
-        let mut dk = 1469598103934665603u64;
-        for k in 0..ds.len() {
-            dk = (dk ^ ds.byte_at(k) as u64) * 1099511628211u64;
-        }
-        // dedup on SUCCESS only: two demands for one symbol can carry different substitution
-        // chains, and the first may be the incomplete one -- a later, fuller chain must retry
-        let seen = switch done.get(&dk) {
-            Some(_v) => true,
-            None => false,
-        };
-        if seen {
+        if !par9 {
+            let di0 = qi;
             qi += 1;
+            cemit_drain_demand(
+                p,
+                &mut cem,
+                &mut g,
+                &mut dow,
+                &mut lw_cache,
+                &mut lws,
+                &mut cl_cache,
+                &mut clws,
+                &mut cfs,
+                &mut cf_ok,
+                &mut done,
+                &mut sa_seen,
+                &mut ia_idx,
+                &mut ia_built,
+                di0,
+                verbose,
+                &mut bodies_all,
+                &mut protos,
+                &mut chunk_mod,
+                &mut chunk_off,
+                &mut env_names,
+                &mut env_bodies,
+                &mut inst_ok,
+                &mut inst_skip,
+                &mut clos_ok,
+                &mut clos_skip,
+                &mut reasons,
+                &mut rcounts,
+            );
             continue;
         }
-        let d_sym = cem.demand.at(qi).sym.clone();
-        let mut d_subs = Vector::<mbe::MSub>::new();
-        for i2 in 0..cem.demand.at(qi).subs.len() {
-            d_subs.push(*cem.demand.at(qi).subs.at(i2));
-        }
-        qi += 1;
-        let key = skey_mix(0, d_def.module as u64 << 32 | d_def.node as u64);
-        let li = switch lw_cache.get(&key) {
-            Some(v) => *v,
-            None => {
-                let mut lw = irl::Lowerer::new(p, d_def.module, d_def.node);
-                let okl = cemit_take_body(&mut g, p, d_def.module, d_def.node, &mut lw);
-                let mut slot = 0xFFFFFFFFFFFFFFFFu64;
-                if okl {
-                    cemit_apply_drops(&mut dow, &mut lw);
-                    slot = lws.len() as u64;
-                    lws.push(lw);
-                } else {
-                    eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw.err);
-                }
-                lw_cache.insert(key, slot);
-                slot;
-            },
-        };
-        if li == 0xFFFFFFFFFFFFFFFFu64 {
-            inst_skip += 1;
-            continue;
-        }
-        let d_sfx = cem.demand.at(qi - 1).sfx.clone();
-        // per-instantiation static_asserts: under this demand's substitution the condition is
-        // this instance's compile-time fact -- false is a COMPILE error naming the type argument
-        cemit_inst_asserts(p, d_def, &d_subs, dk, &mut sa_seen, &mut ia_idx, &mut ia_built);
-        // a body with an UNEXPANDED reflection binder re-lowers per instance: the demand env
-        // makes the binder's owner concrete, so the copies expand for real. A body whose only
-        // env-dependence is `sizeof(T) <op> 0` branches re-lowers once per ZST-BIT SIGNATURE of
-        // its args -- every material instantiation folds identically and shares one body.
-        let mut li2 = li;
-        if lws.at(li as usize).body.has_reflect {
-            if stdlib::getenv("SC_PROJ_DBG") != null {
-                eprint("proj-relower: `{}` subs {}\n", d_sym.as_str(), d_subs.len());
+        // ---- parallel instance frontier: one wave = the current unseen demand tail ----
+        dwaves += 1;
+        let len0 = cem.demand.len();
+        let mut widx = Vector::<u64>::new(); // tasked demand indices, ascending
+        let mut wli = Vector::<u64>::new(); // their base lowering slots (0xFF.. = pending phase L)
+        let mut wdef = Vector::<u64>::new(); // their packed defs
+        let mut wave_seen = Map::<u64, u64>::new();
+        let mut newdefs = Vector::<u64>::new();
+        let mut newsyms = Vector::<String>::new(); // first demanding symbol, for the failure print
+        let mut newdef_seen = Map::<u64, u64>::new();
+        for j in qi..len0 {
+            let js9 = cem.demand.at(j).sym.clone();
+            let js = js9.as_str();
+            let mut dkj = 1469598103934665603u64;
+            for k in 0..js.len() {
+                dkj = (dkj ^ js.byte_at(k) as u64) * 1099511628211u64;
             }
-            let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
-            for i2 in 0..d_subs.len() {
-                let sb2 = *d_subs.at(i2);
-                lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
-            }
-            if lw2.lower_fn(d_def.node) {
-                cemit_apply_drops(&mut dow, &mut lw2);
-                lws.push(lw2);
-                li2 = lws.len() as u64 - 1;
-            } else {
-                if verbose {
-                    eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
-                }
-                inst_skip += 1;
-                continue;
-            }
-        } else if lws.at(li as usize).body.has_zst_cond {
-            let mut zb: u64 = 1;
-            for i2 in 0..d_subs.len() {
-                let sb2 = *d_subs.at(i2);
-                zb = zb << 1 | if cem.mg.is_zst(sb2.am, sb2.at) {
-                    1u64;
-                } else {
-                    0 as u64;
-                };
-            }
-            let zkey = skey_mix(zb, d_def.module as u64 << 32 | d_def.node as u64);
-            let zi = switch lw_cache.get(&zkey) {
-                Some(v) => *v,
-                None => {
-                    let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
-                    for i2 in 0..d_subs.len() {
-                        let sb2 = *d_subs.at(i2);
-                        lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
-                    }
-                    let mut slot2 = 0xFFFFFFFFFFFFFFFFu64;
-                    if lw2.lower_fn(d_def.node) {
-                        cemit_apply_drops(&mut dow, &mut lw2);
-                        slot2 = lws.len() as u64;
-                        lws.push(lw2);
-                    } else {
-                        if verbose {
-                            eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
-                        }
-                    }
-                    lw_cache.insert(zkey, slot2);
-                    slot2;
-                },
+            let seenj = switch done.get(&dkj) {
+                Some(_v) => true,
+                None => false,
             };
-            if zi == 0xFFFFFFFFFFFFFFFFu64 {
-                inst_skip += 1;
+            if seenj {
                 continue;
             }
-            li2 = zi;
-        }
-        cem.mg.subs.truncate(0);
-        for i2 in 0..d_subs.len() {
-            cem.mg.push_msub(*d_subs.at(i2));
-        }
-        cem.mg.clos_sfx.truncate(0);
-        cem.mg.clos_sfx.push_string(&d_sfx);
-        cem.mg.clos_ids.truncate(0);
-        for c2 in 0..lws.at(li2 as usize).closures.len() {
-            cem.mg.clos_ids.push(lws.at(li2 as usize).closures[c2]);
-        }
-        {
-            // every lws slot gets a cached CFlow: shared zst-signature bodies and reflect
-            // re-lowers alike (a per-slot build amortizes across their instantiations)
-            while cfs.len() <= li2 as usize {
-                cfs.push(cfl::CFlow::new_empty());
-                cf_ok.push(false);
+            let wavedup = switch wave_seen.get(&dkj) {
+                Some(_v) => true,
+                None => false,
+            };
+            if wavedup {
+                continue; // a later chain retries on the master only if the first fails
             }
-            if !cf_ok[li2 as usize] {
-                let cfp = &mut cfs[li2 as usize];
-                cfp.build_into(&lws.at(li2 as usize).body);
-                cf_ok.set(li2 as usize, true);
+            wave_seen.insert(dkj, 1);
+            let jd = cem.demand.at(j).def;
+            let jkey = jd.module as u64 << 32 | jd.node as u64;
+            let base = switch lw_cache.get(&skey_mix(0, jkey)) {
+                Some(v) => *v,
+                None => 0xFFFFFFFFFFFFFFFEu64,
+            };
+            if base == 0xFFFFFFFFFFFFFFFFu64 {
+                continue; // known-unlowerable: the merge fallback counts the skip
             }
-            cem.cf_ext = cfs.at(li2 as usize);
-        }
-        cem.out.clear();
-        cem.fn_attrs.truncate(0);
-        cemit_fn_attrs(p, d_def.module, d_def.node, &mut cem.fn_attrs);
-        let em_ok9 = cem.emit_fn(&lws.at(li2 as usize).body, d_sym.as_str());
-        cem.cf_ext = null;
-        if em_ok9 {
-            done.insert(dk, 1);
-            inst_ok += 1;
-            chunk_mod.push(65534);
-            chunk_off.push(bodies_all.len() as u64);
-            proto_of(&cem.out, &mut protos);
-            bodies_all.push_string(&cem.out);
-            let mut clsq = Vector::<NodeId>::new();
-            for c2 in 0..lws.at(li2 as usize).closures.len() {
-                clsq.push(lws.at(li2 as usize).closures[c2]);
-            }
-            let mut cqi: usize = 0;
-            while cqi < clsq.len() {
-                let cn = clsq[cqi];
-                cqi += 1;
-                let ckey = skey_mix(0, d_def.module as u64 << 32 | cn as u64);
-                let ci = switch cl_cache.get(&ckey) {
-                    Some(v) => *v,
-                    None => {
-                        let mut cl = irl::Lowerer::new(p, d_def.module, cn);
-                        let mut slot = 0xFFFFFFFFFFFFFFFFu64;
-                        if cemit_take_closure(&mut g, p, d_def.module, cn, &mut cl) {
-                            cemit_apply_drops(&mut dow, &mut cl);
-                            slot = clws.len() as u64;
-                            clws.push(cl);
-                        }
-                        cl_cache.insert(ckey, slot);
-                        slot;
-                    },
+            if base == 0xFFFFFFFFFFFFFFFEu64 {
+                let nds = switch newdef_seen.get(&jkey) {
+                    Some(_v) => true,
+                    None => false,
                 };
-                let mut csym = String::new();
-                cem.mg.closure_sym(d_def.module, cn, &mut csym);
-                let mut envs = String::new();
-                cem.out.clear();
-                let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
-                if cok {
-                    for x2 in 0..clws.at(ci as usize).closures.len() {
-                        clsq.push(clws.at(ci as usize).closures[x2]); // closures nest: emit the inner ones too
-                    }
+                if !nds {
+                    newdef_seen.insert(jkey, 1);
+                    newdefs.push(jkey);
+                    newsyms.push(cem.demand.at(j).sym.clone());
                 }
-                if cok && cem.emit_closure(&clws.at(ci as usize).body, d_def.module, cn, csym.as_str(), &mut envs) {
-                    clos_ok += 1;
-                    {
-                        if envs.len() != 0 {
-                            let mut eh9 = 1469598103934665603u64;
-                            {
-                                let mut en9 = String::from_str(csym.as_str());
-                                en9.push_str("_env");
-                                let es9 = en9.as_str();
-                                for k9 in 0..es9.len() {
-                                    eh9 = (eh9 ^ es9.byte_at(k9) as u64) * 1099511628211u64;
-                                }
-                            }
-                            env_names.push(eh9);
-                            env_bodies.push(envs.clone());
-                        }
+            }
+            widx.push(j as u64);
+            wli.push(base);
+            wdef.push(jkey);
+        }
+        // phase L: lower this wave's missing base definitions in parallel slices
+        if newdefs.len() != 0 {
+            let nd = newdefs.len();
+            let mut res9 = Vector::<irl::Lowerer>::new();
+            let mut cfr9 = Vector::<cfl::CFlow>::new();
+            let mut oks9 = Vector::<bool>::new();
+            for _i in 0..nd {
+                res9.push(irl::Lowerer::new(p, 0, NODE_NONE));
+                cfr9.push(cfl::CFlow::new_empty());
+                oks9.push(false);
+            }
+            cemit_low_launch(p, &mut g, &mut kl9, &newdefs, &mut res9, &mut cfr9, &mut oks9, p.jobs);
+            for i in 0..nd {
+                let jkey = newdefs[i];
+                if oks9[i] {
+                    while cfs.len() < lws.len() {
+                        cfs.push(cfl::CFlow::new_empty());
+                        cf_ok.push(false);
                     }
+                    let slot = lws.len() as u64;
+                    lws.push(replace(res9.index_mut(i), irl::Lowerer::new(p, 0, NODE_NONE)));
+                    cfs.push(replace(cfr9.index_mut(i), cfl::CFlow::new_empty()));
+                    cf_ok.push(true);
+                    lw_cache.insert(skey_mix(0, jkey), slot);
+                } else {
+                    eprint("inst-lower-fail: `{}` {}\n", newsyms.at(i).as_str(), "");
+                    lw_cache.insert(skey_mix(0, jkey), 0xFFFFFFFFFFFFFFFFu64);
+                }
+            }
+        }
+        // resolve pending base slots; drop entries whose base failed (merge fallback counts them)
+        {
+            let mut w2 = Vector::<u64>::new();
+            let mut l2 = Vector::<u64>::new();
+            for i in 0..widx.len() {
+                let mut li9 = wli[i];
+                if li9 == 0xFFFFFFFFFFFFFFFEu64 {
+                    li9 = (switch lw_cache.get(&skey_mix(0, wdef[i])) {
+                        Some(v) => *v,
+                        None => 0xFFFFFFFFFFFFFFFFu64,
+                    });
+                }
+                if li9 == 0xFFFFFFFFFFFFFFFFu64 {
+                    continue;
+                }
+                w2.push(widx[i]);
+                l2.push(li9);
+            }
+            widx = w2;
+            wli = l2;
+        }
+        // phase E: contiguous demand slices, each emitting into one private shard
+        let mut envh9 = Vector::<u64>::new();
+        for ei in 0..cem.env_hashes.len() {
+            envh9.push(*cem.env_hashes.at(ei));
+        }
+        let mut nsl9: usize = 1;
+        if p.jobs >= 2 && widx.len() > 1 {
+            nsl9 = 2 * p.jobs as usize;
+            if nsl9 > widx.len() {
+                nsl9 = widx.len();
+            }
+        }
+        let mut sbounds = Vector::<u64>::new();
+        for i in 0..nsl9 {
+            sbounds.push((widx.len() * (i + 1) / nsl9) as u64);
+        }
+        let mut dsh = Vector::<SeedShard>::new();
+        for _i in 0..nsl9 {
+            let mut sh = SeedShard {
+                cem: cbe::CEmit::new(p),
+                bodies: String::new(),
+                protos: String::new(),
+                chunk_mod: Vector::<u64>::new(),
+                chunk_off: Vector::<u64>::new(),
+                env_names: Vector::<u64>::new(),
+                env_bodies: Vector::<String>::new(),
+                have_main: false,
+                main_mod: 0,
+                main_argv: false,
+                seeds: 0,
+                seed_skip: 0,
+                clos_ok: 0,
+                clos_skip: 0,
+                used: true,
+                dmarks: Vector::<CapMark>::new(),
+                douts: Vector::<u8>::new(),
+                derrs: Vector::<str<'static>>::new(),
+                dvix: Vector::<u64>::new(),
+                dvkeys: Vector::<u64>::new(),
+                dvars: Vector::<irl::Lowerer>::new(),
+                dclo_keys: Vector::<u64>::new(),
+                dclo: Vector::<irl::Lowerer>::new(),
+            };
+            sh.cem.collect_demand = true;
+            sh.cem.mg.agg_on = true;
+            for ei in 0..em.env_defined.len() {
+                sh.cem.env_skip.insert(*em.env_defined.at(ei), 1);
+            }
+            for ei in 0..envh9.len() {
+                sh.cem.env_skip.insert(envh9[ei], 1);
+            }
+            let mut dumm9 = String::new();
+            cemit_extern_includes(p, &mut dumm9, &mut sh.cem.ext_backed);
+            dumm9.free();
+            sh.cem.sh_on = true;
+            sh.cem.mg.sh_on = true;
+            sh.cem.mg.mark_ctx = -1;
+            dsh.push(sh);
+        }
+        dtasks += widx.len() as u64;
+        dslices += nsl9 as u64;
+        cemit_drain_launch(
+            p,
+            &mut g,
+            &mut kl9,
+            &mut cem,
+            &lws,
+            &cfs,
+            &lw_cache,
+            &cl_cache,
+            &clws,
+            &mut dsh,
+            &sbounds,
+            &widx,
+            &wli,
+            verbose,
+        );
+        // merge in exact queue order, glue interleaved exactly as the serial loop drains it
+        let mut wcur: usize = 0;
+        let mut scur: usize = 0;
+        let mut slo: usize = 0;
+        for j in qi..len0 {
+            while gi9 < cem.glue.len() {
+                cem.out.clear();
+                if cem.emit_glue(gi9) {
+                    glue_ok += 1;
                     chunk_mod.push(65534);
                     chunk_off.push(bodies_all.len() as u64);
                     proto_of(&cem.out, &mut protos);
                     bodies_all.push_string(&cem.out);
                 } else {
-                    clos_skip += 1;
+                    if verbose {
+                        eprint("glue-emit-fail: `{}` {}\n", cem.glue.at(gi9).sym.as_str(), cem.err);
+                    }
+                    glue_skip += 1;
+                }
+                gi9 += 1;
+            }
+            let tasked = wcur < widx.len() && widx[wcur] == j as u64;
+            if !tasked {
+                cemit_drain_demand(
+                    p,
+                    &mut cem,
+                    &mut g,
+                    &mut dow,
+                    &mut lw_cache,
+                    &mut lws,
+                    &mut cl_cache,
+                    &mut clws,
+                    &mut cfs,
+                    &mut cf_ok,
+                    &mut done,
+                    &mut sa_seen,
+                    &mut ia_idx,
+                    &mut ia_built,
+                    j,
+                    verbose,
+                    &mut bodies_all,
+                    &mut protos,
+                    &mut chunk_mod,
+                    &mut chunk_off,
+                    &mut env_names,
+                    &mut env_bodies,
+                    &mut inst_ok,
+                    &mut inst_skip,
+                    &mut clos_ok,
+                    &mut clos_skip,
+                    &mut reasons,
+                    &mut rcounts,
+                );
+                continue;
+            }
+            let d_ord = wcur - slo;
+            wcur += 1;
+            let js9 = cem.demand.at(j).sym.clone();
+            let js = js9.as_str();
+            let mut dkj = 1469598103934665603u64;
+            for k in 0..js.len() {
+                dkj = (dkj ^ js.byte_at(k) as u64) * 1099511628211u64;
+            }
+            {
+                let jd = cem.demand.at(j).def;
+                let mut jsubs = Vector::<mbe::MSub>::new();
+                for i2 in 0..cem.demand.at(j).subs.len() {
+                    jsubs.push(*cem.demand.at(j).subs.at(i2));
+                }
+                cemit_inst_asserts(p, jd, &jsubs, dkj, &mut sa_seen, &mut ia_idx, &mut ia_built);
+            }
+            {
+                let o = dsh.index_mut(scur);
+                let ma = if d_ord == 0 {
+                    cap_zero();
+                } else {
+                    *o.dmarks.at(d_ord - 1);
+                };
+                let mb = *o.dmarks.at(d_ord);
+                let out9 = o.douts[d_ord];
+                if out9 == 0 {
+                    done.insert(dkj, 1);
+                    inst_ok += 1;
+                    let vix = o.dvix[d_ord];
+                    if vix != 0xFFFFFFFFFFFFFFFFu64 && o.dvkeys[vix as usize] != 0 {
+                        let zk = o.dvkeys[vix as usize];
+                        let zseen = switch lw_cache.get(&zk) {
+                            Some(_v) => true,
+                            None => false,
+                        };
+                        if !zseen && o.dvars.at(vix as usize).body.blocks.len() != 0 {
+                            while cfs.len() < lws.len() {
+                                cfs.push(cfl::CFlow::new_empty());
+                                cf_ok.push(false);
+                            }
+                            let slot = lws.len() as u64;
+                            let mv9 = replace(o.dvars.index_mut(vix as usize), irl::Lowerer::new(p, 0, NODE_NONE));
+                            let mut cf9 = cfl::CFlow::new_empty();
+                            cf9.build_into(&mv9.body);
+                            lws.push(mv9);
+                            cfs.push(cf9);
+                            cf_ok.push(true);
+                            lw_cache.insert(zk, slot);
+                        }
+                    }
+                    for k2 in ma.dclo as usize..mb.dclo as usize {
+                        let ckey = o.dclo_keys[k2];
+                        let cseen = switch cl_cache.get(&ckey) {
+                            Some(_v) => true,
+                            None => false,
+                        };
+                        if !cseen {
+                            let lw9 = replace(o.dclo.index_mut(k2), irl::Lowerer::new(p, 0, NODE_NONE));
+                            if lw9.body.blocks.len() != 0 {
+                                let slot = clws.len() as u64;
+                                clws.push(lw9);
+                                cl_cache.insert(ckey, slot);
+                            } else {
+                                cl_cache.insert(ckey, 0xFFFFFFFFFFFFFFFFu64);
+                            }
+                        }
+                    }
+                    let base9 = bodies_all.len() as u64;
+                    for k2 in ma.chunks as usize..mb.chunks as usize {
+                        chunk_mod.push(o.chunk_mod[k2]);
+                        chunk_off.push(o.chunk_off[k2] - ma.bodies + base9);
+                    }
+                    bodies_all.push_str(o.bodies.as_str().slice(ma.bodies as usize, mb.bodies as usize));
+                    protos.push_str(o.protos.as_str().slice(ma.protos as usize, mb.protos as usize));
+                    for k2 in ma.envn as usize..mb.envn as usize {
+                        env_names.push(o.env_names[k2]);
+                        env_bodies.push(replace(o.env_bodies.index_mut(k2), String::new()));
+                    }
+                    cemit_seed_merge_range(&mut cem, o, &ma, &mb);
+                } else if out9 == 1 {
+                    inst_skip += 1;
+                } else {
+                    if verbose {
+                        eprint("inst-emit-fail: `{}` {}\n", js, o.derrs[d_ord]);
+                    }
+                    let mut found = false;
+                    for r2 in 0..reasons.len() {
+                        if reasons[r2] == o.derrs[d_ord] {
+                            rcounts.set(r2, rcounts[r2] + 1);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        reasons.push(o.derrs[d_ord]);
+                        rcounts.push(1);
+                    }
                 }
             }
-        } else {
-            if verbose {
-                eprint("inst-emit-fail: `{}` {}\n", d_sym.as_str(), cem.err);
-            }
-            let mut found = false;
-            for r2 in 0..reasons.len() {
-                if reasons[r2] == cem.err {
-                    rcounts.set(r2, rcounts[r2] + 1);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                reasons.push(cem.err);
-                rcounts.push(1);
+            // slice exhausted: absorb its order-insensitive remainder once
+            if scur < sbounds.len() && wcur == sbounds[scur] as usize {
+                let o = dsh.index_mut(scur);
+                clos_ok += o.clos_ok;
+                clos_skip += o.clos_skip;
+                cemit_seed_merge_um(&mut cem, o);
+                slo = wcur;
+                scur += 1;
             }
         }
-        cem.mg.subs.truncate(0);
-        cem.mg.clos_sfx.truncate(0);
-        cem.mg.clos_ids.truncate(0);
+        qi = len0;
+    }
+    if par9 {
+        for i2 in 0..p.modules.len() {
+            p.modules[i2].ast.ilock_on = false;
+        }
+        if cird != null {
+            unsafe cird.elock_on = false;
+        }
     }
     // true instance failures = demanded symbols that never emitted on ANY chain
     {
@@ -3350,6 +4471,9 @@ pub fn cemit_package(
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage drain: {} ms\n", t9 - tt0);
         tt0 = t9;
+        if dwaves != 0 {
+            eprint("cemit-frontier inst: {} waves, {} tasks, {} slices\n", dwaves, dtasks, dslices);
+        }
     }
     if verbose {
         eprint(
@@ -3996,53 +5120,70 @@ pub fn cemit_package(
             };
             tu_chunks[w].push(i as u32);
         }
-        let mut lp = String::new();
-        let mut lb = String::new();
+        let mut lps = Vector::<String>::new();
+        let mut lbs = Vector::<String>::new();
+        for _k in 0..8 {
+            lps.push(String::new());
+            lbs.push(String::new());
+        }
         for t in 0..p.modules.len() + 1 {
             let is_inst = t == p.modules.len();
-            lp.truncate(0);
-            lb.truncate(0);
-            {
-                let mut bb: usize = 0;
-                for k in 0..tu_chunks[t].len() {
-                    let i = tu_chunks[t][k] as usize;
-                    let b1 = if i + 1 < chunk_off.len() {
-                        chunk_off[i + 1] as usize;
-                    } else {
-                        bs.len();
-                    };
-                    bb += b1 - chunk_off[i] as usize;
-                }
-                lb.reserve(bb);
+            let mut bb: usize = 0;
+            for k in 0..tu_chunks[t].len() {
+                let i = tu_chunks[t][k] as usize;
+                let b1 = if i + 1 < chunk_off.len() {
+                    chunk_off[i + 1] as usize;
+                } else {
+                    bs.len();
+                };
+                bb += b1 - chunk_off[i] as usize;
             }
+            // Partition an oversized TU into deterministic units so the C compiler parallelizes
+            // its critical path. The part count is a pure function of the body bytes, and a part
+            // boundary sits only BEFORE a non-static chunk: a `static` chunk is a closure that
+            // must share a unit with the body it belongs to.
+            let mut nparts = 1 + bb / 262144;
+            if nparts > 8 {
+                nparts = 8;
+            }
+            for k in 0..nparts {
+                lps.index_mut(k).truncate(0);
+                lbs.index_mut(k).truncate(0);
+            }
+            let target = bb / nparts + 1;
+            let mut cur: usize = 0;
             for k in 0..tu_chunks[t].len() {
                 let i = tu_chunks[t][k] as usize;
                 let pl = ps.slice(poff[i] as usize, poff[i + 1] as usize);
-                if pl.len() >= 7 && pl.slice(0, 7) == "static " {
-                    lp.push_str(pl);
+                let is_static = pl.len() >= 7 && pl.slice(0, 7) == "static ";
+                if !is_static && cur + 1 < nparts && lbs.at(cur).len() >= target {
+                    cur += 1;
+                }
+                if is_static {
+                    lps.index_mut(cur).push_str(pl);
                 }
                 let b1 = if i + 1 < chunk_off.len() {
                     chunk_off[i + 1] as usize;
                 } else {
                     bs.len();
                 };
-                lb.push_str(bs.slice(chunk_off[i] as usize, b1));
+                lbs.index_mut(cur).push_str(bs.slice(chunk_off[i] as usize, b1));
             }
             // under --test the fork-per-test runner owns the C `main`; the user main stays a
             // plain (unreferenced) `__sc_user_main`
             let has_wrap = have_main && !testing && !is_inst && t as u64 == main_mod;
-            if lb.len() == 0 && !is_inst && !has_wrap {
+            if bb == 0 && !is_inst && !has_wrap {
                 continue;
             }
             let mut tu2 = String::new();
             {
-                let mut cap2 = lp.len() + lb.len() + 2048;
+                let mut cap2 = lps.at(0).len() + lbs.at(0).len() + 2048;
                 if is_inst {
                     cap2 += cem.blk_defs.len() + const_defs.len() + static_defs.len() + cem.dyn_tabs.len();
                 }
                 tu2.reserve(cap2);
             }
-            tu2.push_string(&lp);
+            tu2.push_string(lps.at(0));
             if !is_inst && p.modules[t].has_ast {
                 // folded module-level static_asserts leave their record in the C (parity with
                 // the checker: a false one already failed the build)
@@ -4072,14 +5213,31 @@ pub fn cemit_package(
                 tu2.push_string(&cem.dyn_tabs);
                 tu2.push_string(&cem.sent_defs);
             }
-            tu2.push_string(&lb);
-            if has_wrap {
+            tu2.push_string(lbs.at(0));
+            if has_wrap && nparts == 1 {
                 cemit_main_wrapper(&mut tu2, main_argv);
             }
             if is_inst {
                 o.inst_c = tu2;
             } else {
                 o.tus.set(t, tu2);
+            }
+            for k in 1..nparts {
+                let mut px = String::new();
+                px.reserve(lps.at(k).len() + lbs.at(k).len() + 256);
+                px.push_string(lps.at(k));
+                px.push_string(lbs.at(k));
+                if has_wrap && k == nparts - 1 {
+                    cemit_main_wrapper(&mut px, main_argv);
+                }
+                if px.len() == 0 {
+                    continue;
+                }
+                if is_inst {
+                    o.inst_extra.push(px);
+                } else {
+                    o.tu_extra.index_mut(t).push(px);
+                }
             }
         }
     }
@@ -4169,6 +5327,29 @@ fn cemit_tu_pass(p: &mut loader::Package) {
         cc_cmd.push_str(" ");
         cc_cmd.push_string(&path);
         ntu += 1;
+        // part files of an oversized TU compile alongside part 0
+        let nex = if is_inst {
+            o.inst_extra.len();
+        } else {
+            o.tu_extra.at(t).len();
+        };
+        for x in 0..nex {
+            let px = if is_inst {
+                o.inst_extra.at(x);
+            } else {
+                o.tu_extra.at(t).at(x);
+            };
+            let mut tux = String::from_str("#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n");
+            tux.push_string(px);
+            let mut xpath = String::from_str(path.as_str().slice(0, path.len() - 2));
+            xpath.push_str("__p");
+            xpath.push_u64(x as u64 + 1);
+            xpath.push_str(".c");
+            ok9 = ok9 && cemit_write(xpath.as_str(), &tux);
+            cc_cmd.push_str(" ");
+            cc_cmd.push_string(&xpath);
+            ntu += 1;
+        }
     }
     if !o.have_main && tplan.ok && tplan.cases.len() != 0 {
         // no user main: the fork-per-test runner TU is the program (the lane runs before codegen
@@ -6752,6 +7933,21 @@ fn run_package_i(
                 err = true;
             }
             sink_notify(sink, keep.at(base_c + k).as_str(), 1);
+            let ex = co.tu_extra.at(lm[k] as usize);
+            for x in 0..ex.len() {
+                let mut stem = String::from_str(p.modules[lm[k] as usize].path.as_str());
+                stem.push_str("__p");
+                stem.push_u64(x as u64 + 1);
+                let xp = build_out_path(root, stem.as_str(), ".c");
+                let mut sx = String::new();
+                cemit_shared_incs(p.modules[lm[k] as usize].path.as_str(), &mut sx);
+                sx.push_string(ex.at(x));
+                if !cemit_write(xp.as_str(), &sx) {
+                    err = true;
+                }
+                sink_notify(sink, xp.as_str(), 1);
+                keep.push(xp);
+            }
         }
         if co.inst_c.len() != 0 {
             let ip = build_out_path(root, "__sc_inst", ".c");
@@ -6762,6 +7958,18 @@ fn run_package_i(
             }
             sink_notify(sink, ip.as_str(), 1);
             keep.push(ip);
+            for x in 0..co.inst_extra.len() {
+                let mut stem = String::from_str("__sc_inst__p");
+                stem.push_u64(x as u64 + 1);
+                let xp = build_out_path(root, stem.as_str(), ".c");
+                let mut ix = String::from_str("#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n");
+                ix.push_string(co.inst_extra.at(x));
+                if !cemit_write(xp.as_str(), &ix) {
+                    err = true;
+                }
+                sink_notify(sink, xp.as_str(), 1);
+                keep.push(xp);
+            }
         }
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {

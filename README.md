@@ -828,6 +828,7 @@ All knobs are environment variables prefixed `SC_`; none is required for normal 
 | `SC_NO_CACHE` | disable the build-record cache |
 | `SC_NO_EMIT_CACHE` | disable the emit stamp (the whole-transpile skip when no input changed) |
 | `SC_NO_TU_CACHE` | disable the per-TU journal/replay cache |
+| `SC_BUILD_MEM_BUDGET` | cap the estimated bytes the parallel emission holds in flight (`64M`, `2G`; unset = unlimited) |
 | `SC_STAMP_DEBUG` | trace emit-stamp decisions (why a build was or was not skipped) |
 | `SC_TIMINGS` | print per-phase timing for a build |
 

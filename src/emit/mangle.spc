@@ -785,14 +785,18 @@ extend Mangler {
     /// Was a (spelling TU `src` -> module `dst`) edge recorded? `src` 65534 = the instance TU.
     /// Frontier merge: absorb shard `o`'s cross-TU row for TU `m` and its instance-aggregate
     /// requests (first module-order claimant wins, matching the serial loop).
-    pub fn sh_merge(self: &mut Self, o: &mut Mangler, m: u64) {
+    /// The used-mods row is an idempotent OR: absorbed once per shard, outside any demand range.
+    pub fn sh_merge_um(self: &mut Self, o: &mut Mangler, m: u64) {
         let nmods = self.p().modules.len();
         for dst in 0..nmods {
             if o.um_hit(m, dst) {
                 self.um_set(m, dst as ModuleId);
             }
         }
-        for i in 0..o.sh_agg_k.len() {
+    }
+
+    pub fn sh_merge_range(self: &mut Self, o: &mut Mangler, a0: usize, a1: usize, d0: usize, d1: usize) {
+        for i in a0..a1 {
             let k = o.sh_agg_k[i];
             let fresh = switch self.agg_seen.get(&k) {
                 Some(_v) => false,
@@ -808,7 +812,7 @@ extend Mangler {
                 self.agg_reqs.push(moved);
             }
         }
-        for i in 0..o.dyn_reqs.len() {
+        for i in d0..d1 {
             self.dyn_reqs.push(*o.dyn_reqs.at(i));
         }
     }
