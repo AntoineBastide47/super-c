@@ -49,7 +49,7 @@ super-c build path/to/app.spc -o app
 ## Building and testing
 
 ```sh
-super-c build                     # two-stage dev self-build (ASan/UBSan)
+super-c build                     # dev build (ASan/UBSan)
 super-c release                   # optimized build (-O3 -flto)
 super-c run                       # build the project, then execute its binary
 super-c test                      # run the full test suite (tests/ by convention)
