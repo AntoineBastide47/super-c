@@ -106,16 +106,22 @@ jobs:
           [ -f "./$bin" ] || mv "./super-c" "./$bin"
           test -x "./$bin"
 
-      - name: Reproduce and symbolize the full-shard leak
+      - name: Run the test suite (leak-gated, symbolized on failure)
         shell: bash {0}
         run: |
           bin="super-c${BINEXT:-}"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          echo "===== full shard, leaks captured (isolated runs are clean; only the concurrent shard leaks) ====="
           SC_LEAK_CHECK=fatal "./$bin" test --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"} > shard.txt 2>&1
-          echo "exit=$?"
+          rc=$?
+          echo "exit=$rc"
           tail -3 shard.txt
-          echo "leak lines: $(grep -c '^leak:' shard.txt)"
+          fails=$(grep -c 'FAILED' shard.txt || true)
+          leaks=$(grep -c '^leak:' shard.txt || true)
+          echo "leak lines: $leaks"
+          if [ "$rc" -eq 0 ] && [ "$fails" -eq 0 ] && [ "$leaks" -eq 0 ]; then
+            exit 0
+          fi
+          # Failure: dump the leak sizes and failing tests, then symbolize the distinct leak frames.
           echo "===== leak sizes ====="
           grep -oE 'leak: [0-9]+ allocation\(s\), [0-9]+ byte' shard.txt | sort | uniq -c | sort -rn | head -12
           echo "===== failing tests ====="
@@ -132,7 +138,8 @@ jobs:
               addr2line -f -p -e "$harness" "$off" 2>/dev/null
             fi
           done
-          true
+          echo "shard did not pass clean: rc=$rc failed=$fails leaks=$leaks"
+          exit 1
 
   wasm:
     name: wasm (tests ${{ matrix.test_shard }})

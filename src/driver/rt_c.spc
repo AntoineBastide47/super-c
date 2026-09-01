@@ -169,6 +169,17 @@ static __attribute__((unused)) inline size_t __sc_bounds(size_t __i, size_t __n)
   if (__i >= __n) __sc_panic("index out of bounds");
   return __i;
 }
+/* Range validation for safe slicing: proves start <= end <= len BEFORE any pointer arithmetic
+   and returns the exclusive end. */
+static __attribute__((unused)) inline size_t __sc_range(size_t __s, size_t __e, size_t __n) {
+  if (__s > __e || __e > __n) __sc_panic("range out of bounds");
+  return __e;
+}
+/* Coalesced element checks: index + width <= len in overflow-safe form; returns the index. */
+static __attribute__((unused)) inline size_t __sc_bounds_group(size_t __i, size_t __n, size_t __w) {
+  if (__i > __n || __w > __n - __i) __sc_panic("index out of bounds");
+  return __i;
+}
 /* Pointer distance over a zero-sized element type: bytes cannot encode an element count. */
 static _Noreturn __attribute__((unused)) void __sc_zst_ptrdiff(void) {
   __sc_panic("pointer distance on a zero-sized element type");

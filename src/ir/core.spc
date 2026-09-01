@@ -22,6 +22,9 @@ pub const LS_RET: u8 = 1;
 pub const LS_USER: u8 = 2;
 pub const LS_TEMP: u8 = 3;
 pub const LS_STATIC_REF: u8 = 4; // a reference to an item (global/static); base of item places
+/// An inlined callee's declared local (its arg or user binding, decl cleared by the splice):
+/// drop elaboration schedules its storage-death drops exactly as the callee's own would have.
+pub const LS_INL: u8 = 5;
 
 /// One local slot: argument, return slot, user variable, or compiler temporary.
 pub struct LocalDecl {
@@ -172,6 +175,36 @@ pub const IN_SAFEPOINT: u8 = 11; // loop-body preemption marker; printed only fo
 pub const IN_DANGLING: u8 = 12; // non-null aligned no-storage pointer (`dangling::<T>()`; ZST buffers)
 pub const IN_DYN_TID: u8 = 13; // dyn_cast type test: operand = the fat value, target = the queried &T
 pub const IN_DYN_DATA: u8 = 14; // dyn_cast payload: operand = the fat value, target = the result &T
+/// Safe-access checks (bounds-check normalization; see plans/1_bounds_check_elimination.md).
+/// IN_BOUNDS(index, len): panics when index >= len, else returns the unchanged index. The
+/// PROVEN twin has identical language semantics but a BCE proof that the panic edge is
+/// unreachable: the C emitter prints only the index; the interpreter still checks.
+pub const IN_BOUNDS: u8 = 15;
+pub const IN_BOUNDS_PROVEN: u8 = 16;
+/// IN_RANGE_BOUNDS(start, end, len): panics unless start <= end <= len, else returns the
+/// validated exclusive end. Inclusive ranges are decomposed at lowering (IN_BOUNDS(end, len)
+/// proves end < len BEFORE end + 1 is computed), so no inclusive flag exists in the IR.
+pub const IN_RANGE_BOUNDS: u8 = 17;
+pub const IN_RANGE_BOUNDS_PROVEN: u8 = 18;
+/// IN_BOUNDS_GROUP(index, len, width): panics unless index <= len && width <= len - index (the
+/// overflow-safe spelling of `index + width <= len`), else returns the unchanged index. Produced
+/// only by BCE range-check coalescing: one group check at the FIRST access site covers the
+/// accesses index .. index + width - 1, whose own element checks become IN_BOUNDS_PROVEN.
+pub const IN_BOUNDS_GROUP: u8 = 19;
+
+/// True for the five safe-access check intrinsics.
+pub const fn is_check(c: u8) bool {
+    return c == IN_BOUNDS || c == IN_BOUNDS_PROVEN || c == IN_BOUNDS_GROUP || c == IN_RANGE_BOUNDS || c == IN_RANGE_BOUNDS_PROVEN;
+}
+
+/// Operand count of a check intrinsic: element checks take (index, len); range and group checks
+/// take (start, end, len) / (index, len, width).
+pub const fn check_arity(c: u8) u32 {
+    if c == IN_BOUNDS || c == IN_BOUNDS_PROVEN {
+        return 2;
+    }
+    return 3;
+}
 
 // Field order packs to 24 bytes (kind/c share the item's tail padding); bodies hold one record
 // per expression, so the two byte flags sit last.

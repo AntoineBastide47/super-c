@@ -451,6 +451,9 @@ extend<T, const N: usize> StaticVector<T, N> as Index<T, []T> {
         return &unsafe self.data[i];
     }
     pub const fn index_range(self: &StaticVector<T, N>, r: Range<usize>) []T {
+        if r.inclusive && r.end >= self.len {
+            panic("StaticVector<T, N>[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -474,6 +477,9 @@ extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
         return &mut unsafe self.data[i];
     }
     pub const fn index_range_mut(self: &mut StaticVector<T, N>, r: Range<usize>) []mut T {
+        if r.inclusive && r.end >= self.len {
+            panic("StaticVector<T, N>[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {

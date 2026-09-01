@@ -63,6 +63,26 @@ struct ProjFrame {
     pub owner_st: TypeId, // the concrete owner, reinterned into THIS module's pool
 }
 
+/// The prelude view decls the safe-access gates compare against, resolved lazily once per
+/// Lowerer (`ok` = resolved). Package-constant, so a kept Lowerer's cache stays valid.
+struct ViewDecls {
+    pub ok: bool,
+    pub v_str: DefId,
+    pub v_slice: DefId,
+    pub v_slice_mut: DefId,
+    pub v_vector: DefId,
+    pub v_string: DefId,
+    pub v_array: DefId,
+}
+
+const fn vd_none() DefId {
+    return DefId { module: 0, node: NODE_NONE };
+}
+
+const fn vd_is(d: DefId, decl: NodeId, m: ModuleId) bool {
+    return d.node != NODE_NONE && d.node == decl && d.module == m;
+}
+
 pub struct Lowerer {
     pub f: facts::TypedFacts,
     pub pkg: *const loader::Package,
@@ -90,6 +110,7 @@ pub struct Lowerer {
     // Reusable u32 buffers (argument lists, match work lists): call/aggregate lowering builds one
     // per expression, so the pool keeps their capacity across the whole body and package.
     u32_pool: Vector<Vector<u32>>,
+    views: ViewDecls,
     cur: ir::BlockId,
     run_start: u32, // statements index where the open block's run began
     ret_locals: u32, // first return-slot local
@@ -172,6 +193,15 @@ extend Lowerer {
             tape: Vector::<u64>::new(),
             tape_mute: 0,
             u32_pool: Vector::<Vector<u32>>::new(),
+            views: ViewDecls {
+                ok: false,
+                v_str: vd_none(),
+                v_slice: vd_none(),
+                v_slice_mut: vd_none(),
+                v_vector: vd_none(),
+                v_string: vd_none(),
+                v_array: vd_none(),
+            },
             cur: 0,
             run_start: 0,
             ret_locals: 0,
@@ -3273,7 +3303,15 @@ extend Lowerer {
         let cop = self.copy_op(cpl);
         self.branch_bool(cop, body_b, exit, sp);
         let iop2 = self.copy_op(idx_pl);
-        let epl = self.place_project(ipl, ir::Projection { kind: ir::PJ_INDEX_OP, data: iop2, sub: 0, ty: elem_ty });
+        let mut iop_e = iop2;
+        if self.checked_view(self.peeled_view_ty(ipl)) {
+            // normalized element check against the cached loop length; BCE proves it from the
+            // loop guard (index < length) and marks it PROVEN
+            let lop_e = self.copy_op(lpl);
+            let ck_e = self.bounds_check_len(iop2, lop_e, sp);
+            iop_e = self.copy_op(ck_e);
+        }
+        let epl = self.place_project(ipl, ir::Projection { kind: ir::PJ_INDEX_OP, data: iop_e, sub: 0, ty: elem_ty });
         let eop = self.copy_op(epl);
         let erv = self.rv_use(eop, elem_ty);
         let bind_pl = self.place_of_local(el);
@@ -4577,12 +4615,50 @@ extend Lowerer {
         let mut callee_op = ir::IR_NONE;
         if ck == NodeKind::NODE_MEMBER && !self.f.node(d.callee).as_data.member.path && target.node != NODE_NONE {
             let recv = self.f.node(d.callee).as_data.member.object;
-            let rop = self.lower_expr(recv);
+            // A receiver that resolved through the checker's auto-deref chain lowers each hop
+            // (exactly as `*x` and field access do), so the operand the call carries has the
+            // TARGET's type: the callee symbol and the arg shape need no Deref knowledge.
+            let du9 = self.f.derefs(self.f.node(d.callee).as_data.member.member);
+            let mut rop = ir::IR_NONE;
+            if du9 != null && unsafe du9.n > 0 {
+                let mut base9 = self.lower_place_or_spill(recv);
+                if base9 == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                let steps9 = unsafe du9.n;
+                for s9 in 0..steps9 {
+                    let m9 = unsafe du9.method[s9 as usize];
+                    let rt9 = unsafe du9.recv[s9 as usize];
+                    if m9.node != NODE_NONE {
+                        let mut rt29 = self.deref_ret_ty(m9, self.body.places.at(base9 as usize).ty);
+                        if rt29 == TYPE_NONE {
+                            rt29 = rt9;
+                        }
+                        let rop9 = self.copy_op(base9);
+                        let start9 = self.body.oper_pool.len() as u32;
+                        self.body.oper_pool.push(rop9);
+                        let res9 = self.emit_call(m9, ir::IR_NONE, start9, 1, 0, 0, rt29, sp);
+                        if res9 == ir::IR_NONE {
+                            return ir::IR_NONE;
+                        }
+                        base9 = self.spill(res9, sp);
+                    } else {
+                        base9 = self.place_project(
+                            base9,
+                            ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: rt9 },
+                        );
+                    }
+                }
+                rop = self.copy_op(base9);
+            } else {
+                rop = self.lower_expr(recv);
+            }
             if rop == ir::IR_NONE {
                 return ir::IR_NONE;
             }
-            if self.f.node(recv).kind == NodeKind::NODE_CALL {
+            if (du9 == null || unsafe du9.n == 0) && self.f.node(recv).kind == NodeKind::NODE_CALL {
                 // a call-result RECEIVER temporary owns its value: scope-drop it after use
+                // (the deref-chain path lowers the receiver as a place, which registers it)
                 let o9 = *self.body.operands.at(rop as usize);
                 if o9.kind == ir::OP_COPY || o9.kind == ir::OP_MOVE {
                     let pl9 = *self.body.places.at(o9.data as usize);
@@ -5842,6 +5918,150 @@ extend Lowerer {
         return self.place_project(base, ir::Projection { kind: ir::PJ_FIELD, data: fdata, sub: fsub, ty: ty });
     }
 
+    // ---- bounds-check normalization (plans/1_bounds_check_elimination.md) ------------------------
+
+    /// The base type behind up to three reference wrappers (types only; no place is built).
+    fn peeled_view_ty(self: &mut Self, base: ir::PlaceId) TypeId {
+        let mut ty = self.body.places.at(base as usize).ty;
+        let mut guard = 0;
+        while guard < 3 && ty != TYPE_NONE {
+            let y = *self.f.ty(ty);
+            if y.kind != TypeKind::TYPE_REFERENCE {
+                break;
+            }
+            ty = y.as_data.elem;
+            guard += 1;
+        }
+        return ty;
+    }
+
+    /// The prelude view decls, resolved on first use and cached for the Lowerer's lifetime.
+    fn view_decls(self: &mut Self) ViewDecls {
+        if !self.views.ok {
+            let pk = unsafe &*self.pkg;
+            let hs = pk.prelude_lookup("str", true);
+            let hl = pk.prelude_lookup("Slice", true);
+            let hm = pk.prelude_lookup("SliceMut", true);
+            let hv = pk.prelude_lookup("Vector", true);
+            let hg = pk.prelude_lookup("String", true);
+            let ha = pk.prelude_lookup("Array", true);
+            self.views = ViewDecls {
+                ok: true,
+                v_str: DefId { module: hs.mid, node: hs.node },
+                v_slice: DefId { module: hl.mid, node: hl.node },
+                v_slice_mut: DefId { module: hm.mid, node: hm.node },
+                v_vector: DefId { module: hv.mid, node: hv.node },
+                v_string: DefId { module: hg.mid, node: hg.node },
+                v_array: DefId { module: ha.mid, node: ha.node },
+            };
+        }
+        return self.views;
+    }
+
+    /// True for the prelude length-carrying views whose safe access carries an explicit Core IR
+    /// check: Slice, SliceMut, Vector, String, and `str`. Raw arrays are const-checked by the
+    /// typechecker (dynamic raw indexing is `unsafe`); raw pointers never gain a safe-access claim.
+    fn checked_view(self: &mut Self, ty: TypeId) bool {
+        if ty == TYPE_NONE {
+            return false;
+        }
+        let y = *self.f.ty(ty);
+        if y.kind == TypeKind::TYPE_STRUCT {
+            let v = self.view_decls();
+            return vd_is(v.v_str, y.as_data.decl, y.module);
+        }
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *self.f.instance(y.as_data.inst);
+        let v = self.view_decls();
+        return vd_is(v.v_slice, it.decl, it.module) || vd_is(v.v_slice_mut, it.decl, it.module) || vd_is(
+            v.v_vector,
+            it.decl,
+            it.module,
+        ) || vd_is(v.v_string, it.decl, it.module);
+    }
+
+    /// True for the prelude `Array<T, N>` instance (fixed length; range-validated like a view).
+    fn array_view(self: &mut Self, ty: TypeId) bool {
+        if ty == TYPE_NONE {
+            return false;
+        }
+        let y = *self.f.ty(ty);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *self.f.instance(y.as_data.inst);
+        let v = self.view_decls();
+        return vd_is(v.v_array, it.decl, it.module);
+    }
+
+    /// The place RV_LEN reads for a check: the view itself, reached through any reference
+    /// wrappers. Only the length read derefs; the access projection keeps its original shape.
+    fn view_len_place(self: &mut Self, base: ir::PlaceId) ir::PlaceId {
+        let mut pl = base;
+        let mut guard = 0;
+        while guard < 3 {
+            let ty = self.body.places.at(pl as usize).ty;
+            if ty == TYPE_NONE {
+                break;
+            }
+            let y = *self.f.ty(ty);
+            if y.kind != TypeKind::TYPE_REFERENCE {
+                break;
+            }
+            let el = y.as_data.elem;
+            pl = self.place_project(pl, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: el });
+            guard += 1;
+        }
+        return pl;
+    }
+
+    /// `t = IN_BOUNDS(index, len)` against an already-materialized length operand. Returns the
+    /// temp place holding the checked index; the caller addresses through it (dynamic index) or
+    /// discards it (constant index, which keeps PJ_INDEX_CONST for place disjointness).
+    fn bounds_check_len(self: &mut Self, iop: ir::OperandId, lop: ir::OperandId, sp: tok::Span) ir::PlaceId {
+        let ut = Ast::builtin(BuiltinType::BT_USIZE);
+        let start = self.body.oper_pool.len() as u32;
+        self.body.oper_pool.push(iop);
+        self.body.oper_pool.push(lop);
+        let ct = self.temp(ut, sp);
+        let cpl = self.place_of_local(ct);
+        self.assign(
+            cpl,
+            ir::Rvalue {
+                kind: ir::RV_INTRINSIC,
+                a: start,
+                b: 2,
+                c: ir::IN_BOUNDS,
+                target: ut,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+            sp,
+        );
+        return cpl;
+    }
+
+    /// Materialize `RV_LEN(view)` into a temp and return its place.
+    fn len_temp(self: &mut Self, view: ir::PlaceId, sp: tok::Span) ir::PlaceId {
+        let ut = Ast::builtin(BuiltinType::BT_USIZE);
+        let ll = self.temp(ut, sp);
+        let lpl = self.place_of_local(ll);
+        self.assign(
+            lpl,
+            ir::Rvalue { kind: ir::RV_LEN, a: view, b: 0, c: 0, target: ut, item: DefId { module: 0, node: NODE_NONE } },
+            sp,
+        );
+        return lpl;
+    }
+
+    /// `t = IN_BOUNDS(index, RV_LEN(view))`: the explicit element check.
+    fn bounds_check(self: &mut Self, view: ir::PlaceId, iop: ir::OperandId, sp: tok::Span) ir::PlaceId {
+        let lpl = self.len_temp(view, sp);
+        let lop = self.copy_op(lpl);
+        return self.bounds_check_len(iop, lop, sp);
+    }
+
     fn lower_index_place(self: &mut Self, id: NodeId) ir::PlaceId {
         let d = self.f.node(id).as_data.index;
         let ty = self.nty(id);
@@ -5890,6 +6110,85 @@ extend Lowerer {
                 fl = 1;
             }
             self.tp(ir::TP_SLICE, 0, id);
+            // Range validation (bounds-check normalization): materialize the length, prove
+            // `start <= end <= len` BEFORE any pointer arithmetic, and hand RV_SLICE the
+            // validated EXCLUSIVE end. An inclusive end first proves `end < len`, so `end + 1`
+            // cannot overflow. Bases outside the known safe views keep the legacy operands.
+            let pvt = self.peeled_view_ty(base);
+            let is_arr = pvt != TYPE_NONE && self.f.ty(pvt).kind == TypeKind::TYPE_ARRAY;
+            if self.checked_view(pvt) || is_arr || self.array_view(pvt) {
+                let ut = Ast::builtin(BuiltinType::BT_USIZE);
+                let vbase = self.view_len_place(base);
+                let lpl = self.len_temp(vbase, sp);
+                if sop == ir::IR_NONE {
+                    sop = self.const_op(
+                        ir::Constant {
+                            kind: ir::CK_INT,
+                            ty: ut,
+                            val: 0,
+                            raw: sp,
+                            item: DefId { module: 0, node: NODE_NONE },
+                            targ_start: 0,
+                            targ_len: 0,
+                        },
+                    );
+                }
+                let mut excl = eop;
+                if eop == ir::IR_NONE {
+                    excl = self.copy_op(lpl);
+                } else if rd.inclusive {
+                    let lop0 = self.copy_op(lpl);
+                    let ck = self.bounds_check_len(eop, lop0, sp);
+                    let one = self.const_op(
+                        ir::Constant {
+                            kind: ir::CK_INT,
+                            ty: ut,
+                            val: 1,
+                            raw: sp,
+                            item: DefId { module: 0, node: NODE_NONE },
+                            targ_start: 0,
+                            targ_len: 0,
+                        },
+                    );
+                    let ckop = self.copy_op(ck);
+                    let et = self.temp(ut, sp);
+                    let etpl = self.place_of_local(et);
+                    self.assign(
+                        etpl,
+                        ir::Rvalue {
+                            kind: ir::RV_BINARY,
+                            a: ckop,
+                            b: one,
+                            c: tt::TokenType::Plus as u8,
+                            target: ut,
+                            item: DefId { module: 0, node: NODE_NONE },
+                        },
+                        sp,
+                    );
+                    excl = self.copy_op(etpl);
+                }
+                let lop1 = self.copy_op(lpl);
+                let start = self.body.oper_pool.len() as u32;
+                self.body.oper_pool.push(sop);
+                self.body.oper_pool.push(excl);
+                self.body.oper_pool.push(lop1);
+                let vt = self.temp(ut, sp);
+                let vtpl = self.place_of_local(vt);
+                self.assign(
+                    vtpl,
+                    ir::Rvalue {
+                        kind: ir::RV_INTRINSIC,
+                        a: start,
+                        b: 3,
+                        c: ir::IN_RANGE_BOUNDS,
+                        target: ut,
+                        item: DefId { module: 0, node: NODE_NONE },
+                    },
+                    sp,
+                );
+                eop = self.copy_op(vtpl);
+                fl = 0;
+            }
             let t = self.temp(ty, sp);
             let pl = self.place_of_local(t);
             self.assign(
@@ -5925,6 +6224,10 @@ extend Lowerer {
                         }
                     }
                     if dec && cn.val >= 0 {
+                        if self.checked_view(self.peeled_view_ty(base)) {
+                            let vb0 = self.view_len_place(base);
+                            let _ = self.bounds_check(vb0, iop, sp);
+                        }
                         return self.place_project(
                             base,
                             ir::Projection { kind: ir::PJ_INDEX_CONST, data: cn.val as u32, sub: 0, ty: ty },
@@ -5933,7 +6236,13 @@ extend Lowerer {
                 }
             }
         }
-        return self.place_project(base, ir::Projection { kind: ir::PJ_INDEX_OP, data: iop, sub: 0, ty: ty });
+        let mut iop_use = iop;
+        if self.checked_view(self.peeled_view_ty(base)) {
+            let vb1 = self.view_len_place(base);
+            let ck1 = self.bounds_check(vb1, iop, sp);
+            iop_use = self.copy_op(ck1);
+        }
+        return self.place_project(base, ir::Projection { kind: ir::PJ_INDEX_OP, data: iop_use, sub: 0, ty: ty });
     }
 
     // ---- match ------------------------------------------------------------------------------------

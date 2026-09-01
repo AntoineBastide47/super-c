@@ -216,6 +216,25 @@ pub fn elaborate_into(
                                         fdecl: NODE_NONE,
                                     },
                                 );
+                            } else if cls0 == 1 {
+                                // A place reached through a REFERENCE deref (cls == 1) names storage
+                                // the referent owns: the borrow checker guarantees it holds an
+                                // initialized value (a field cannot be moved out through a reference,
+                                // an out-of-bounds element traps before the store), so its overwrite
+                                // frees the old value. The dataflow bit above tracks LOCAL init and
+                                // is not seeded for such a referent -- a spliced-in block boundary
+                                // (an inlined call) can leave it clear -- so cls == 1 frees here
+                                // regardless, as place_over_class documents.
+                                sched.drops.push(
+                                    DropAt {
+                                        local: pl0.base,
+                                        path: s.place,
+                                        kind: DK_OVER,
+                                        stmt: sx as u32,
+                                        block: bi as u32,
+                                        fdecl: NODE_NONE,
+                                    },
+                                );
                             }
                         }
                     }
@@ -225,7 +244,8 @@ pub fn elaborate_into(
                 let l = s.a;
                 let decl = b.locals.at(l as usize).decl;
                 let lty = b.locals.at(l as usize).ty;
-                if decl != NODE_NONE && ow.owns(b.module, lty) {
+                let declared = decl != NODE_NONE || b.locals.at(l as usize).storage == ir::LS_INL;
+                if declared && ow.owns(b.module, lty) {
                     let root = forest.local_root[l as usize];
                     forest.subtree(root, scratch, sub);
                     let mut all_di = true;

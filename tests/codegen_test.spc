@@ -1,6 +1,13 @@
 // Self-hosted port of tests/codegen_test.c: structural codegen coverage (emitted-C substring assertions)
 // driven in-process through tests::harness (compile_c), pinned to the Core-IR streaming backend's shapes.
 import tests::harness as h;
+import driver_shim as shim;
+
+// Call-shape assertions predate the Core IR inliner: they pin the NON-inlined emission, so the
+// tests that read call sites out of the C disable it for their snippets (fork-isolated).
+fn no_inline() {
+    let _ = unsafe shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
+}
 
 const BROAD: str = "struct Point { pub x: i32, }\nextend Point { fn get(self: &Point) i32 { return self.x; } }\nfn add(a: i32, b: i32) i32 { return a + b; }\nfn main() i32 {\n  let p: Point = Point { x: 1, };\n  let y: i32 = p.get();\n  let z: i32 = add(1, 2);\n  if (true) { let w: i32 = 0; }\n  while (false) { }\n  let q: *i32 = new i32;\n}\n";
 
@@ -80,6 +87,7 @@ fn structured_backend() {
 
 @test
 fn broad() {
+    no_inline();
     h::expect_c("function", BROAD, "int32_t add(");
     h::expect_c("struct decl", BROAD, "struct Point");
     h::expect_c("struct field", BROAD, "int32_t x;");
@@ -189,6 +197,7 @@ fn externs() {
 
 @test
 fn str() {
+    no_inline();
     h::expect_c("str forward typedef", STR, "typedef struct str str;");
     h::expect_c("str body has the view pair", STR, "const uint8_t *ptr;");
     h::expect_c("str param", STR, "size_t f(str ");
@@ -291,10 +300,11 @@ fn slices_and_arrays() {
     h::expect_c("slice param is Slice__T", "fn first(s: []i32) i32 { return s[0]; }\n", "first(Slice__i32 ");
     h::expect_c("mut slice param is SliceMut__T", "fn set0(s: []mut i32) { s[0] = 1; }\n", "set0(SliceMut__i32 ");
     h::expect_c(
-        "slice index uses typed ptr, bounds-checked",
+        "slice index emits an explicit bounds check",
         "fn first(s: []i32) i32 { return s[0]; }\n",
-        ".ptr[__sc_bounds(0, ",
+        "__sc_bounds(",
     );
+    h::expect_c("slice index subscripts the typed ptr", "fn first(s: []i32) i32 { return s[0]; }\n", ".ptr[0]");
     h::expect_c("array param keeps extent", "fn g(a: [i32; 3]) i32 { return a[0]; }\n", "[3])");
     h::expect_c(
         "array arg coerces to slice view",
@@ -362,6 +372,7 @@ fn attributes() {
 
 @test
 fn generics() {
+    no_inline();
     let ID: str = "fn id<T>(x: T) T { return x; }\nfn main() i32 { let a: i32 = id::<i32>(5); let b: bool = id::<bool>(true); return a; }\n";
     h::expect_c("generic specialization with substituted return", ID, "int32_t id__i32(");
     h::expect_c("second instantiation", ID, "id__bool(");

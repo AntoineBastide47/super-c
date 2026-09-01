@@ -27,6 +27,8 @@ import ir::lower as irl;
 import ir::print as irp;
 import ir::verify as irv;
 import ir::drops as ird;
+import ir::bce as bce;
+import ir::inline as inl;
 import ir::interp as iri;
 import ir::layout as lay;
 import emit::cemit as cbe;
@@ -868,7 +870,7 @@ fn core_ir_body(p: &loader::Package, m: usize, node: NodeId, is_const: bool, st:
         return;
     }
     let tp = unsafe (&*p.module_ast_const(m as ModuleId)).type_pool.len();
-    let v = irv::verify(&lw.body, tp);
+    let v = irv::verify(&lw.body, tp, p);
     if v.len() != 0 {
         st.failed += 1;
         eprint("core-ir: module {} node {}: verify: {}\n", m, node, v);
@@ -893,7 +895,7 @@ fn core_ir_body(p: &loader::Package, m: usize, node: NodeId, is_const: bool, st:
             st.failed += 1;
             eprint("core-ir: module {} closure {}: {}\n", m, cn, cl.err);
         } else {
-            let cv = irv::verify(&cl.body, tp);
+            let cv = irv::verify(&cl.body, tp, p);
             if cv.len() != 0 {
                 st.failed += 1;
                 eprint("core-ir: module {} closure {}: verify: {}\n", m, cn, cv);
@@ -2390,17 +2392,10 @@ struct SeedTask {
 unsafe extend SeedTask as Send {}
 
 fn cemit_seed_task(t: SeedTask) {
+    let mut dow = dctx_take(t.p);
     let p = unsafe &mut *t.p;
     let o = unsafe &mut *(t.out as *mut SeedShard);
     let g9 = t.g as *mut ig::InstGraph;
-    let mut dow = DropCtx {
-        ow: bfx::Owner::new(p),
-        forest: bmp::MoveForest::empty(),
-        facts: bfx::BodyFacts::empty(),
-        cfg: bdf::Cfg::empty(),
-        mv: bdf::MoveFlow::empty(),
-        el: ird::ElabCtx::empty(),
-    };
     let mut cl_cache = Map::<u64, u64>::new();
     let mut clws = Vector::<irl::Lowerer>::new();
     cemit_seed_module(
@@ -2437,6 +2432,7 @@ fn cemit_seed_task(t: SeedTask) {
         };
         (unsafe &*t.ctl).release(&d9);
     }
+    dctx_put(dow);
 }
 
 // Apply one shard's gated first-claimant emissions into the master emitter, in module order: the
@@ -2725,6 +2721,10 @@ struct DrainTask {
 unsafe extend DrainTask as Send {}
 
 fn cemit_drain_task(t: DrainTask) {
+    // One drop/inline context for the whole task: the inliner's vetted-callee cache is the
+    // expensive part (each miss lowers and copies the callee); per-demand contexts rebuilt it
+    // from nothing.
+    let mut dow = dctx_take(t.p);
     let p = unsafe &mut *t.p;
     let o = unsafe &mut *(t.out as *mut SeedShard);
     let dem = unsafe &*(t.dem as *const Vector<cbe::Demand>);
@@ -2736,9 +2736,10 @@ fn cemit_drain_task(t: DrainTask) {
     for w in t.lo..t.hi {
         let di = (unsafe t.widx[w as usize]) as usize;
         let li = unsafe t.wli[w as usize];
-        cemit_drain_slice_one(p, t.g, o, dem, lws, cfs, lwc, clc, clws0, di, li, t.kl, t.verbose);
+        cemit_drain_slice_one(p, t.g, o, dem, lws, cfs, lwc, clc, clws0, di, li, t.kl, t.verbose, &mut dow);
         o.dmarks.push(o.cap_of());
     }
+    dctx_put(dow);
 }
 
 fn cemit_drain_slice_one(
@@ -2755,6 +2756,7 @@ fn cemit_drain_slice_one(
     li: u64,
     kl: *const psync::Semaphore,
     verbose: bool,
+    dow2: &mut DropCtx,
 ) {
     let d_def = dem.at(di).def;
     let d_sym = dem.at(di).sym.clone();
@@ -2776,14 +2778,6 @@ fn cemit_drain_slice_one(
             lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
         }
         if lw2.lower_fn(d_def.node) {
-            let mut dow2 = DropCtx {
-                ow: bfx::Owner::new(p),
-                forest: bmp::MoveForest::empty(),
-                facts: bfx::BodyFacts::empty(),
-                cfg: bdf::Cfg::empty(),
-                mv: bdf::MoveFlow::empty(),
-                el: ird::ElabCtx::empty(),
-            };
             dow2.apply_drops(&mut lw2);
             var_on = true;
             var_lw = lw2;
@@ -2841,14 +2835,6 @@ fn cemit_drain_slice_one(
                     lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
                 }
                 if lw2.lower_fn(d_def.node) {
-                    let mut dow2 = DropCtx {
-                        ow: bfx::Owner::new(p),
-                        forest: bmp::MoveForest::empty(),
-                        facts: bfx::BodyFacts::empty(),
-                        cfg: bdf::Cfg::empty(),
-                        mv: bdf::MoveFlow::empty(),
-                        el: ird::ElabCtx::empty(),
-                    };
                     dow2.apply_drops(&mut lw2);
                     var_on = true;
                     var_zkey = zkey;
@@ -2970,14 +2956,6 @@ fn cemit_drain_slice_one(
             if !known {
                 let mut cl = irl::Lowerer::new(p, d_def.module, cn);
                 if cemit_seed_take(unsafe &mut *(gv as *mut ig::InstGraph), p, d_def.module, cn, &mut cl, kl, true) {
-                    let mut dow2 = DropCtx {
-                        ow: bfx::Owner::new(p),
-                        forest: bmp::MoveForest::empty(),
-                        facts: bfx::BodyFacts::empty(),
-                        cfg: bdf::Cfg::empty(),
-                        mv: bdf::MoveFlow::empty(),
-                        el: ird::ElabCtx::empty(),
-                    };
                     dow2.apply_drops(&mut cl);
                     own_ci = o.dclo.len() as u64;
                     o.dclo_keys.push(ckey);
@@ -3052,17 +3030,10 @@ struct LowTask {
 unsafe extend LowTask as Send {}
 
 fn cemit_low_task(t: LowTask) {
+    let mut dow2 = dctx_take(t.p);
     let p = unsafe &mut *t.p;
     let res = t.res as *mut irl::Lowerer;
     let cfr = t.cfr as *mut cfl::CFlow;
-    let mut dow2 = DropCtx {
-        ow: bfx::Owner::new(p),
-        forest: bmp::MoveForest::empty(),
-        facts: bfx::BodyFacts::empty(),
-        cfg: bdf::Cfg::empty(),
-        mv: bdf::MoveFlow::empty(),
-        el: ird::ElabCtx::empty(),
-    };
     for i in t.lo..t.hi {
         let dv = unsafe t.defs[i as usize];
         let m = (dv >> 32) as ModuleId;
@@ -3080,6 +3051,7 @@ fn cemit_low_task(t: LowTask) {
         }
         unsafe t.oks[i as usize] = ok;
     }
+    dctx_put(dow2);
 }
 
 // The raw casts these launchers take live only for the call: the checker retains a laundered
@@ -3473,6 +3445,7 @@ pub fn cemit_package(
     // on, then drain the queue -- each demanded instance re-emits the generic Core body under its
     // recorded substitution chain. The drained symbol set is the closed instance set the old
     // propagation computed, derived from Core IR alone.
+    dctx_reset();
     let mut cem = cbe::CEmit::new(p);
     cem.collect_demand = true;
     cem.mg.agg_on = true;
@@ -3487,14 +3460,7 @@ pub fn cemit_package(
     // so call sites never synthesize conflicting protos)
     let mut ext_incs = String::new();
     cemit_extern_includes(p, &mut ext_incs, &mut cem.ext_backed);
-    let mut dow = DropCtx {
-        ow: bfx::Owner::new(p),
-        forest: bmp::MoveForest::empty(),
-        facts: bfx::BodyFacts::empty(),
-        cfg: bdf::Cfg::empty(),
-        mv: bdf::MoveFlow::empty(),
-        el: ird::ElabCtx::empty(),
-    };
+    let mut dow = DropCtx::new(p);
     let mut lw_cache = Map::<u64, u64>::new();
     let mut lws = Vector::<irl::Lowerer>::new();
     // closure lowerings, drops applied, shared by the seed and instance loops (a demanded generic
@@ -4586,7 +4552,8 @@ pub fn cemit_package(
                             okm = false;
                             break;
                         }
-                        dow.apply_drops(&mut mlw);
+                        // macro-template bodies keep symbolic generics: never inline into them
+                        dow.apply_drops_of(&mut mlw, false);
                         let mut msym = String::from_str("NAME");
                         msym.push_byte(1);
                         msym.push_str("__");
@@ -5264,6 +5231,7 @@ pub fn cemit_package(
         o.tuc_path = tuc.path.clone();
     }
     let _ = fwd_end;
+    dctx_drop();
 }
 
 // The verification lane (SC_CEMIT_TU=1|2): run the whole-package emission, write the scratch tree
@@ -5982,6 +5950,62 @@ const fn if_s2(c: bool, a: str<'static>, b: str<'static>) str<'static> {
 // non-moved owning local (explicit `.free()` calls are the only TM_DROPs lowering itself emits).
 /// The drop-elaboration analyses, pooled: one instance rebuilds in place per body (capacity kept),
 /// mirroring flow_ir's FlowCtx -- fresh builds per body dominated the elaboration's allocator cost.
+// Emission-phase pool of DropCtx instances: a task checks one out and returns it, so the
+// inliner's vetted-callee cache (whose misses lower and copy whole callees) warms once per pooled
+// slot -- about the worker count -- instead of once per task. Valid within one emission phase:
+// every cached decision is a pure function of the frozen package. `cemit_package` resets it.
+static mut G_DPOOL: *mut Vector<DropCtx> = null;
+static mut G_DPOOL_LOCK: i32 = 0;
+
+fn dctx_take(p: *const loader::Package) DropCtx {
+    unsafe sc_runtime::sc_rt_spin_lock(&mut G_DPOOL_LOCK);
+    if unsafe G_DPOOL != null {
+        switch (unsafe &mut *G_DPOOL).pop() {
+            Some(d9) => {
+                unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
+                return d9;
+            },
+            _ => {},
+        };
+    }
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
+    return DropCtx::new(p);
+}
+
+fn dctx_put(d: DropCtx) {
+    unsafe sc_runtime::sc_rt_spin_lock(&mut G_DPOOL_LOCK);
+    if unsafe G_DPOOL == null {
+        let mut g9 = Global {};
+        let pv = (unsafe g9.alloc(sizeof(Vector<DropCtx>), alignof(Vector<DropCtx>))) as *mut Vector<DropCtx>;
+        unsafe pv[0] = Vector::<DropCtx>::new();
+        unsafe G_DPOOL = pv;
+    }
+    (unsafe &mut *G_DPOOL).push(d);
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
+}
+
+fn dctx_reset() {
+    unsafe sc_runtime::sc_rt_spin_lock(&mut G_DPOOL_LOCK);
+    if unsafe G_DPOOL != null {
+        (unsafe &mut *G_DPOOL).truncate(0);
+    }
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
+}
+
+// End-of-phase teardown: the pooled contexts and the pool holder itself are released, so a compile
+// exits with no live pool allocation (the leak gate audits every process).
+fn dctx_drop() {
+    unsafe sc_runtime::sc_rt_spin_lock(&mut G_DPOOL_LOCK);
+    if unsafe G_DPOOL != null {
+        let pv = unsafe G_DPOOL;
+        unsafe G_DPOOL = null;
+        pv.free();
+        let mut g9 = Global {};
+        unsafe g9.dealloc(pv, sizeof(Vector<DropCtx>), alignof(Vector<DropCtx>));
+    }
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
+}
+
 struct DropCtx {
     pub ow: bfx::Owner,
     pub forest: bmp::MoveForest,
@@ -5989,16 +6013,90 @@ struct DropCtx {
     pub cfg: bdf::Cfg,
     pub mv: bdf::MoveFlow,
     pub el: ird::ElabCtx,
+    pub inl: inl::InlineCtx,
+    pub bce: bce::Bce,
+    pub core_ir: bool, // SC_CORE_IR development re-verification
+    pub bce_stats: bool, // SC_BCE_STATS per-owner report lines
 }
 
 extend DropCtx {
+    fn new(p: *const loader::Package) DropCtx {
+        return DropCtx {
+            ow: bfx::Owner::new(p),
+            forest: bmp::MoveForest::empty(),
+            facts: bfx::BodyFacts::empty(),
+            cfg: bdf::Cfg::empty(),
+            mv: bdf::MoveFlow::empty(),
+            el: ird::ElabCtx::empty(),
+            inl: inl::InlineCtx::new(),
+            bce: bce::Bce::new(p),
+            core_ir: stdlib::getenv("SC_CORE_IR") != null,
+            bce_stats: stdlib::getenv("SC_BCE_STATS") != null,
+        };
+    }
+
     fn apply_drops(self: &mut Self, lw: &mut irl::Lowerer) {
+        self.apply_drops_of(lw, true);
+    }
+
+    fn apply_drops_of(self: &mut Self, lw: &mut irl::Lowerer, allow_inline: bool) {
+        // the inliner runs FIRST so drop elaboration and BCE see the merged body; the callee's
+        // own storage markers make the merged elaboration reproduce the callee's drops in place
+        if allow_inline && !self.inl.off {
+            let mut ist = inl::InlineStats::new();
+            inl::run(lw, &mut self.inl, &mut ist);
+            if self.inl.stats_on && ist.considered != 0 {
+                let mut iline = String::new();
+                inl::stats_line(&ist, &mut iline);
+                eprint("{} owner {}:{}\n", iline.as_str(), lw.body.module, lw.body.owner.node);
+            }
+            if ist.inlined != 0 && self.inl.dbg_on {
+                let want9 = stdlib::getenv("SC_INLINE_DBG_OWNER");
+                let mut show9 = true;
+                if want9 != null {
+                    let mut key9 = String::new();
+                    key9.push_u64(lw.body.module);
+                    key9.push_str(":");
+                    key9.push_u64(lw.body.owner.node);
+                    show9 = key9.as_str() == str::from_cstr(want9);
+                }
+                if show9 {
+                    eprint("inline-dbg owner {}:{}\n", lw.body.module, lw.body.owner.node);
+                    let dump9 = irp::print_body(&lw.body);
+                    dump9.eprintln();
+                }
+            }
+            if ist.inlined != 0 && self.core_ir {
+                let tp9 = unsafe (&*(&*lw.pkg).module_ast_const(lw.body.module)).type_pool.len();
+                let iv9 = irv::verify(&lw.body, tp9, lw.pkg);
+                if iv9.len() != 0 {
+                    eprintln("SC_CORE_IR: inline verify: {}", iv9);
+                }
+            }
+        }
         self.forest.build_into(&lw.body);
         self.ow.generate_into(&lw.body, &self.forest, &mut self.facts);
         self.cfg.build_into(&lw.body);
         self.mv.build_into(&lw.body, &self.forest, &self.facts, &self.cfg);
         ird::elaborate_into(&mut self.ow, &lw.body, &self.forest, &self.facts, &self.mv, &mut self.el);
         ird::insert_drops(&mut lw.body, &self.el.sched, &self.forest);
+        // bounds-check elimination runs HERE, on the final elaborated body, so every emission
+        // path (seed, instance, closure, wrapper) proves against the exact statements it emits
+        let mut bst = bce::BceStats::new();
+        let _ = bce::run(&mut lw.body, lw.pkg, &mut self.bce, &mut bst, false);
+        if self.core_ir {
+            // development re-verification: every PROVEN operation must re-prove
+            let be = bce::run(&mut lw.body, lw.pkg, &mut self.bce, &mut bst, true);
+            if be.len() != 0 {
+                eprintln("SC_CORE_IR: {}", be);
+            }
+        }
+        if self.bce_stats && (bst.total != 0 || bst.ranges_total != 0 || bst.folded != 0) {
+            let mut line = String::new();
+            bce::stats_line(&bst, &mut line);
+            eprint("{} owner {}:{}\n", line.as_str(), lw.body.module, lw.body.owner.node);
+            line.free();
+        }
     }
 }
 

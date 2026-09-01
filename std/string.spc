@@ -1101,6 +1101,9 @@ extend<A: Allocator> String<A> as Index<u8, str> {
         return &unsafe self.as_str().ptr()[i];
     }
     pub fn index_range(self: &String<A>, r: Range<usize>) str {
+        if r.inclusive && r.end >= self.len() {
+            panic("String[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {

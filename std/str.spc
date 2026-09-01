@@ -273,6 +273,9 @@ extend str as Index<u8, str> {
         return &unsafe self.ptr[i];
     }
     pub const fn index_range(self: &str, r: Range<usize>) str {
+        if r.inclusive && r.end >= self.len() {
+            panic("str[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {

@@ -168,6 +168,11 @@ extend<T> Slice<T> as Index<T, []T> {
         return &unsafe self.ptr[i];
     }
     pub const fn index_range(self: &Slice<T>, r: Range<usize>) []T {
+        // Inclusive ends validate before `end + 1` so `end == usize::MAX` cannot wrap past the
+        // check. Every std range method keeps this order.
+        if r.inclusive && r.end >= self.len {
+            panic("Slice[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -188,6 +193,9 @@ extend<T> SliceMut<T> as Index<T, []T> {
         return &unsafe self.ptr[i];
     }
     pub const fn index_range(self: &SliceMut<T>, r: Range<usize>) []T {
+        if r.inclusive && r.end >= self.len {
+            panic("Slice[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -208,6 +216,9 @@ extend<T> SliceMut<T> as IndexMut<T, []mut T> {
         return &mut unsafe self.ptr[i];
     }
     pub const fn index_range_mut(self: &mut SliceMut<T>, r: Range<usize>) []mut T {
+        if r.inclusive && r.end >= self.len {
+            panic("SliceMut[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {

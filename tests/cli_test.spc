@@ -455,6 +455,8 @@ fn main() i32 {
 
 @test
 fn reflect_metadata() {
+    // instance-symbol assertions pin the NON-inlined emission (fork-isolated env)
+    let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -777,6 +779,7 @@ fn main() i32 {
 
 @test
 fn fields_projection_serializer() {
+    let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -869,6 +872,7 @@ enum Shape { Dot, Line(i32, i32), }
 
 @test
 fn ctfe() {
+    let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5904,6 +5908,7 @@ fn main() i32 {
 // copies -- so a generic touched only under an untaken guard is never instantiated.
 @test
 fn tagless_variants_and_meta_elision() {
+    let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",

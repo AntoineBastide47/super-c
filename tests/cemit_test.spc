@@ -92,7 +92,7 @@ fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit)
         let mut lw = irl::Lowerer::new(p, u, node);
         assert(lw.lower_fn(node), "body lowers");
         let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
-        assert(irv::verify(&lw.body, tp).len() == 0, "body verifies");
+        assert(irv::verify(&lw.body, tp, p).len() == 0, "body verifies");
         bodies.push(lw);
     }
     for i in 0..bodies.len() {

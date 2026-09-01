@@ -348,6 +348,9 @@ extend<T, const N: usize> Array<T, N> as Index<T, []T> {
         return &unsafe self.data[i];
     }
     pub const fn index_range(self: &Array<T, N>, r: Range<usize>) []T {
+        if r.inclusive && r.end >= N {
+            panic("Array<T, N>[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -371,6 +374,9 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
         return &mut unsafe self.data[i];
     }
     pub const fn index_range_mut(self: &mut Array<T, N>, r: Range<usize>) []mut T {
+        if r.inclusive && r.end >= N {
+            panic("Array<T, N>[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {

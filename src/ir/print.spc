@@ -120,6 +120,40 @@ fn p_rvalue(out: &mut String, b: &ir::CoreBody, rid: ir::RvalueId) {
     } else if r.kind == ir::RV_CLOSURE {
         out.push_str("closure n");
         p_u(out, r.item.node);
+    } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_BOUNDS || r.c == ir::IN_BOUNDS_PROVEN) {
+        out.push_str(
+            if r.c == ir::IN_BOUNDS {
+                "bounds(";
+            } else {
+                "bounds.proven(";
+            },
+        );
+        p_operand(out, b, b.oper_pool[r.a as usize]);
+        out.push_str(", ");
+        p_operand(out, b, b.oper_pool[(r.a + 1) as usize]);
+        out.push_str(")");
+    } else if r.kind == ir::RV_INTRINSIC && r.c == ir::IN_BOUNDS_GROUP {
+        out.push_str("bounds.group(");
+        p_operand(out, b, b.oper_pool[r.a as usize]);
+        out.push_str(", ");
+        p_operand(out, b, b.oper_pool[(r.a + 1) as usize]);
+        out.push_str(", ");
+        p_operand(out, b, b.oper_pool[(r.a + 2) as usize]);
+        out.push_str(")");
+    } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_RANGE_BOUNDS || r.c == ir::IN_RANGE_BOUNDS_PROVEN) {
+        out.push_str(
+            if r.c == ir::IN_RANGE_BOUNDS {
+                "range_bounds(";
+            } else {
+                "range_bounds.proven(";
+            },
+        );
+        p_operand(out, b, b.oper_pool[r.a as usize]);
+        out.push_str(", ");
+        p_operand(out, b, b.oper_pool[(r.a + 1) as usize]);
+        out.push_str(", ");
+        p_operand(out, b, b.oper_pool[(r.a + 2) as usize]);
+        out.push_str(")");
     } else {
         out.push_str("intrinsic");
         p_u(out, r.c);

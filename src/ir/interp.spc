@@ -3496,10 +3496,29 @@ extend Interp {
                 v = lv;
                 peel += 1;
             }
+            if v.kind == IV_STR {
+                v = self.str_materialize(v.tm, v);
+                if self.failed || v.kind != IV_OBJ {
+                    self.failed = true;
+                    return none();
+                }
+            }
             if v.kind == IV_OBJ {
                 let op = self.obj_ptr(v.i as u32);
                 if op == null {
                     return self.bail();
+                }
+                // a length-carrying view struct answers its logical `len` field, not its slot count
+                if unsafe op.dn != NODE_NONE {
+                    let pi = self.ti_findf(unsafe op.dm, unsafe op.dn, "ptr");
+                    let li = self.ti_findf(unsafe op.dm, unsafe op.dn, "len");
+                    if pi >= 0 && li >= 0 {
+                        let lv2 = unsafe op.slots[li as usize];
+                        if lv2.kind != IV_INT {
+                            return self.bail();
+                        }
+                        return iv_int(b.module, rv.target, lv2.i);
+                    }
                 }
                 let mut n = (unsafe op.slots.len()) as i64;
                 if unsafe op.is_enum != 0 {
@@ -3607,6 +3626,45 @@ extend Interp {
             if rv.c == ir::IN_SAFEPOINT {
                 // a runtime preemption marker: nothing to evaluate
                 return IVal { kind: IV_UNIT, tm: b.module, ty: rv.target, i: 0, f: 0.0 };
+            }
+            if rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN {
+                // PROVEN keeps the identical check here: CTFE catches a false proof as a trap
+                let iv = self.operand(b, env, b.oper_pool[rv.a as usize]);
+                let lv = self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
+                if iv.kind != IV_INT || lv.kind != IV_INT {
+                    return self.bail();
+                }
+                if iv.i as u64 >= lv.i as u64 {
+                    self.it_trap(IT_TRAP_UB_OOB, "index out of bounds");
+                    return none();
+                }
+                return iv_int(b.module, rv.target, iv.i);
+            }
+            if rv.c == ir::IN_BOUNDS_GROUP {
+                let iv = self.operand(b, env, b.oper_pool[rv.a as usize]);
+                let lv = self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
+                let wv = self.operand(b, env, b.oper_pool[(rv.a + 2) as usize]);
+                if iv.kind != IV_INT || lv.kind != IV_INT || wv.kind != IV_INT {
+                    return self.bail();
+                }
+                if iv.i as u64 > lv.i as u64 || wv.i as u64 > lv.i as u64 - iv.i as u64 {
+                    self.it_trap(IT_TRAP_UB_OOB, "index out of bounds");
+                    return none();
+                }
+                return iv_int(b.module, rv.target, iv.i);
+            }
+            if rv.c == ir::IN_RANGE_BOUNDS || rv.c == ir::IN_RANGE_BOUNDS_PROVEN {
+                let sv = self.operand(b, env, b.oper_pool[rv.a as usize]);
+                let ev = self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
+                let nv = self.operand(b, env, b.oper_pool[(rv.a + 2) as usize]);
+                if sv.kind != IV_INT || ev.kind != IV_INT || nv.kind != IV_INT {
+                    return self.bail();
+                }
+                if sv.i as u64 > ev.i as u64 || ev.i as u64 > nv.i as u64 {
+                    self.it_trap(IT_TRAP_UB_OOB, "range out of bounds");
+                    return none();
+                }
+                return iv_int(b.module, rv.target, ev.i);
             }
             if rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF {
                 let mut lm: ModuleId = 0;

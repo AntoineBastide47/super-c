@@ -547,6 +547,9 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
         return &unsafe self.ptr[i];
     }
     pub const fn index_range(self: &Vector<T, A>, r: Range<usize>) []T {
+        if r.inclusive && r.end >= self.len {
+            panic("Vector<T, A>[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {
@@ -570,6 +573,9 @@ extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
         return &mut unsafe self.ptr[i];
     }
     pub const fn index_range_mut(self: &mut Vector<T, A>, r: Range<usize>) []mut T {
+        if r.inclusive && r.end >= self.len {
+            panic("Vector<T, A>[a..b]: range out of bounds");
+        }
         let hi = if r.inclusive {
             r.end + 1;
         } else {

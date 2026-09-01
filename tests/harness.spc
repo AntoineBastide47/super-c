@@ -316,6 +316,13 @@ extend CompiledC as Free {
 // Run the full pipeline and emit module 0 to a string. On any pre-codegen error, `errors` is set and
 // `code` is null; codegen-stage diagnostics also set `errors` but the (partial) code is still returned.
 pub fn compile_c(src: str) CompiledC {
+    return compile_c_of(src, false);
+}
+/// Only the user snippet's own translation unit (needle absence must not trip on std code).
+pub fn compile_c_user(src: str) CompiledC {
+    return compile_c_of(src, true);
+}
+fn compile_c_of(src: str, user_only: bool) CompiledC {
     let mut out = CompiledC { errors: 0, code: null };
     let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     if !p.ok {
@@ -357,12 +364,16 @@ pub fn compile_c(src: str) CompiledC {
         return out;
     }
     let mut code = String::new();
-    code.push_string(&o.types_h);
-    code.push_string(&o.protos_h);
-    for t in 0..n {
-        code.push_string(o.tus.at(t));
+    if user_only {
+        code.push_string(o.tus.at(uidx));
+    } else {
+        code.push_string(&o.types_h);
+        code.push_string(&o.protos_h);
+        for t in 0..n {
+            code.push_string(o.tus.at(t));
+        }
+        code.push_string(&o.inst_c);
     }
-    code.push_string(&o.inst_c);
     let buf = (unsafe stdlib::malloc(code.len() + 1)) as *mut char;
     if buf == null {
         out.errors = 1;

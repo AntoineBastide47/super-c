@@ -19,6 +19,18 @@ if [ "$(uname -s)" = Linux ]; then HOST_TARGET=linux; fi
 if [ "$(uname -m)" = x86_64 ]; then HOST_ARCH=x86_64; fi
 PIN="--target=$HOST_TARGET --arch=$HOST_ARCH"
 case "$*" in *--target=*) PIN="" ;; esac
-exec wasmtime run --dir=/ --argv0 "$WASM" \
-  ${SC_LEAK_CHECK:+--env SC_LEAK_CHECK="$SC_LEAK_CHECK"} \
-  -- "$WASM" "$@" $PIN
+# wasmtime forwards only the env it is told to, so a test that sets an SC_* compiler switch
+# (SC_INLINE, SC_BCE, SC_CONST_EVAL_*, SC_LEAK_CHECK ...) would otherwise have no effect in the
+# guest -- its assertions on emitted C would silently test the default path. Forward every SC_*
+# except this shim's own plumbing, whose values are host paths that may contain spaces (the
+# compiler switches themselves are space-free, so word-splitting ENVF into flags is safe).
+ENVF=""
+while IFS='=' read -r k v; do
+  case "$k" in
+  SC_WASM_MODULE | SC_WASM_NATIVE | SC_TEST_SUPERC) ;;
+  SC_*) ENVF="$ENVF --env $k=$v" ;;
+  esac
+done <<EOF
+$(env)
+EOF
+exec wasmtime run --dir=/ --argv0 "$WASM" $ENVF -- "$WASM" "$@" $PIN

@@ -2121,6 +2121,39 @@ extend CEmit {
         return false;
     }
 
+    // Whether operand `opid` is a bare whole-local read of a mem-tainted local.
+    const fn op_taints(self: &Self, b: &ir::CoreBody, opid: u32, taint: &Vector<bool>) bool {
+        if opid == ir::IR_NONE || opid as usize >= b.operands.len() {
+            return false;
+        }
+        let op = *b.operands.at(opid as usize);
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return false;
+        }
+        let pl = *b.places.at(op.data as usize);
+        return pl.proj_len == 0 && taint[pl.base as usize];
+    }
+
+    // Whether an inlinable-kind rvalue reads a mem-tainted local through a bare operand (the one
+    // link shape whose fold relays the operand's spelled expression).
+    fn rvalue_reads_tainted(self: &Self, b: &ir::CoreBody, rid: u32, taint: &Vector<bool>) bool {
+        let rv = *b.rvalues.at(rid as usize);
+        if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
+            return self.op_taints(b, rv.a, taint);
+        }
+        if rv.kind == ir::RV_BINARY {
+            return self.op_taints(b, rv.a, taint) || self.op_taints(b, rv.b, taint);
+        }
+        if rv.kind == ir::RV_AGGREGATE {
+            for i in 0..rv.b {
+                if self.op_taints(b, b.oper_pool[(rv.a + i) as usize], taint) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     // Whether statement `s`, sitting between a single-use temp's definition (rvalue `def_rv`, which
     // reads memory iff `reads_mem`) and its read, leaves that definition's value unchanged -- so the
     // definition may fold past it. Safe when: a marker; or a pure whole/projected store that neither
@@ -2242,6 +2275,42 @@ extend CEmit {
                 }
             }
         }
+        // Transitive memory-read taint. Folding is recursive at the SPELL site: a folded local's
+        // use spells its definition, which spells ITS folded operands, so a leaf memory read can
+        // relocate to the final use across every span only the intermediate links were checked
+        // against. Taint every single-def foldable local whose spelled expression may contain a
+        // memory read once substitution bottoms out, and use that as the local's reads_mem below.
+        // Over-approximates (assumes every eligible link folds): only blocks a fold, never admits.
+        let mut mem_taint = Vector::<bool>::new();
+        for l in 0..n {
+            let single = !*blocked.at(l) && *ndef.at(l) == 1 && *def_rv.at(l) != ir::IR_NONE;
+            mem_taint.push(single && self.rvalue_reads_mem(b, *def_rv.at(l)));
+        }
+        {
+            let mut pass = 0;
+            let mut changed = true;
+            while changed && pass < 8 {
+                changed = false;
+                pass += 1;
+                for l in 0..n {
+                    if *mem_taint.at(l) || *blocked.at(l) || *ndef.at(l) != 1 || *def_rv.at(l) == ir::IR_NONE {
+                        continue;
+                    }
+                    if self.rvalue_reads_tainted(b, *def_rv.at(l), &mem_taint) {
+                        mem_taint.set(l, true);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                // deeper chains than the pass bound: give up precision, keep soundness
+                for l in 0..n {
+                    if !*blocked.at(l) && *ndef.at(l) == 1 && *def_rv.at(l) != ir::IR_NONE {
+                        mem_taint.set(l, true);
+                    }
+                }
+            }
+        }
         for l in 0..n {
             let ls = b.locals.at(l).storage;
             let dn0 = b.locals.at(l).decl;
@@ -2273,7 +2342,7 @@ extend CEmit {
             let di = *def_idx.at(l);
             let blk = *b.blocks.at(bd as usize);
             let drv = *def_rv.at(l);
-            let reads_mem = self.rvalue_reads_mem(b, drv);
+            let reads_mem = *mem_taint.at(l);
             // Fold the definition forward to its single read, stepping over statements that provably
             // leave the definition's value intact (they neither write an input nor alias its memory).
             // The read is a later statement's operand or the block's switch discriminant; any statement
@@ -2319,7 +2388,7 @@ extend CEmit {
                     continue;
                 }
                 let drv = *def_rv.at(l);
-                let reads_mem = self.rvalue_reads_mem(b, drv);
+                let reads_mem = *mem_taint.at(l);
                 let blk = *b.blocks.at(bd as usize);
                 let mut ok = true;
                 let mut sk = *def_idx.at(l) + 1;
@@ -2462,6 +2531,11 @@ extend CEmit {
             return true;
         }
         if k == ir::RV_INTRINSIC && rv.c as u32 == ir::IN_NEW as u32 {
+            return true;
+        }
+        // explicit safe-access checks emit as a single call (or the bare operand when PROVEN):
+        // fusing the declaration keeps one C statement without reordering anything
+        if k == ir::RV_INTRINSIC && ir::is_check(rv.c) {
             return true;
         }
         if k == ir::RV_CLOSURE {
@@ -5729,45 +5803,29 @@ extend CEmit {
                     rt2 = nt2;
                     g2 += 1;
                 }
+                // checks are explicit Core IR operations (IN_BOUNDS); the emitter only addresses
                 let a2 = self.p().module_ast_const(rm2);
-                let mut chk = false; // length-carrying views bounds-check every subscript
-                let mut base_txt = self.sget();
                 if a2.type_at(rt2).kind == TypeKind::TYPE_INSTANCE {
                     let it2 = *a2.instance(a2.type_at(rt2).as_data.inst);
                     let da2 = self.p().module_ast_const(it2.module);
                     let nsp2 = da2.at_const(da2.at_const(it2.decl).as_data.aggregate.name).as_data.name.text;
                     let nsrc2 = self.p().modules.at(it2.module as usize).source.as_str();
                     let nmv = nsrc2.slice(nsp2.start as usize, nsp2.end as usize);
-                    if nmv == "Slice" || nmv == "SliceMut" || nmv == "Vector" {
-                        chk = true;
-                        base_txt.push_string(&cur);
-                    }
                     if nmv == "Array" {
                         cur.push_str(".data");
                     } else {
                         cur.push_str(".ptr");
                     }
                 } else if self.is_str_ty(rm2, rt2) {
-                    chk = true;
-                    base_txt.push_string(&cur);
                     cur.push_str(".ptr");
                 }
                 cur.push_str("[");
-                if chk {
-                    cur.push_str("__sc_bounds(");
-                }
                 if pj.kind == ir::PJ_INDEX_CONST {
                     cur.push_u64(pj.data);
                 } else {
                     ok = self.emit_operand(b, pj.data, &mut cur);
                 }
-                if chk {
-                    cur.push_str(", ");
-                    cur.push_string(&base_txt);
-                    cur.push_str(".len)");
-                }
                 cur.push_str("]");
-                self.sput(base_txt);
             } else if pj.kind == ir::PJ_DOWNCAST {
                 let mut arrow = pend_arrow;
                 pend_arrow = false;
@@ -5942,8 +6000,14 @@ extend CEmit {
             return self.emit_int(b, &c, dst);
         }
         if c.kind == ir::CK_FLOAT {
-            // the exact source spelling, with the language width suffix mapped to C's
-            let txt = src.slice(c.raw.start as usize, c.raw.end as usize);
+            // the exact source spelling, with the language width suffix mapped to C's; an inlined
+            // constant spans a FOREIGN module's source (item marks it, the CK_STR convention)
+            let srcf = if c.item.node != NODE_NONE {
+                self.p().modules.at(c.item.module as usize).source.as_str();
+            } else {
+                src;
+            };
+            let txt = srcf.slice(c.raw.start as usize, c.raw.end as usize);
             let n = txt.len();
             if n > 3 && txt.slice(n - 3, n) == "f32" {
                 dst.push_str(txt.slice(0, n - 3));
@@ -6106,7 +6170,12 @@ extend CEmit {
         let mut digits = Vector::<u8>::new();
         let mut spelled = false;
         {
-            let s0 = self.p().modules.at(b.module as usize).source.as_str();
+            // an inlined constant spans a FOREIGN module's source (item marks it)
+            let s0 = if c.item.node != NODE_NONE && c.kind == ir::CK_INT {
+                self.p().modules.at(c.item.module as usize).source.as_str();
+            } else {
+                self.p().modules.at(b.module as usize).source.as_str();
+            };
             if sp.end > sp.start && sp.end as usize <= s0.len() {
                 let txt = s0.slice(sp.start as usize, sp.end as usize);
                 let b0 = txt.byte_at(0);
@@ -8740,12 +8809,28 @@ extend CEmit {
                     ns.start as usize,
                     ns.end as usize,
                 );
-                if nm == "Slice" || nm == "SliceMut" {
+                if nm == "Slice" || nm == "SliceMut" || nm == "Vector" || nm == "String" {
                     dst.push_str("(");
                     let ok = self.emit_place(b, rv.a, dst);
                     dst.push_str(").len");
                     return ok;
                 }
+                if nm == "Array" {
+                    let mut pv = String::new();
+                    let ok = self.emit_place(b, rv.a, &mut pv);
+                    dst.push_str("(sizeof((");
+                    dst.push_string(&pv);
+                    dst.push_str(").data) / sizeof((");
+                    dst.push_string(&pv);
+                    dst.push_str(").data[0]))");
+                    return ok;
+                }
+            }
+            if self.is_str_ty(rm, rt) {
+                dst.push_str("(");
+                let ok = self.emit_place(b, rv.a, dst);
+                dst.push_str(").len");
+                return ok;
             }
             return self.fail("len");
         }
@@ -8957,6 +9042,58 @@ extend CEmit {
                 dst.push_str(").data)");
                 return true;
             }
+            if k == ir::IN_BOUNDS as u32 {
+                dst.push_str("__sc_bounds(");
+                if !self.emit_operand(b, b.oper_pool[rv.a as usize], dst) {
+                    return false;
+                }
+                dst.push_str(", ");
+                if !self.emit_operand(b, b.oper_pool[(rv.a + 1) as usize], dst) {
+                    return false;
+                }
+                dst.push_str(")");
+                return true;
+            }
+            if k == ir::IN_BOUNDS_PROVEN as u32 {
+                // the proof made the panic edge unreachable: only the index value remains
+                return self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
+            }
+            if k == ir::IN_BOUNDS_GROUP as u32 {
+                dst.push_str("__sc_bounds_group(");
+                if !self.emit_operand(b, b.oper_pool[rv.a as usize], dst) {
+                    return false;
+                }
+                dst.push_str(", ");
+                if !self.emit_operand(b, b.oper_pool[(rv.a + 1) as usize], dst) {
+                    return false;
+                }
+                dst.push_str(", ");
+                if !self.emit_operand(b, b.oper_pool[(rv.a + 2) as usize], dst) {
+                    return false;
+                }
+                dst.push_str(")");
+                return true;
+            }
+            if k == ir::IN_RANGE_BOUNDS as u32 {
+                dst.push_str("__sc_range(");
+                if !self.emit_operand(b, b.oper_pool[rv.a as usize], dst) {
+                    return false;
+                }
+                dst.push_str(", ");
+                if !self.emit_operand(b, b.oper_pool[(rv.a + 1) as usize], dst) {
+                    return false;
+                }
+                dst.push_str(", ");
+                if !self.emit_operand(b, b.oper_pool[(rv.a + 2) as usize], dst) {
+                    return false;
+                }
+                dst.push_str(")");
+                return true;
+            }
+            if k == ir::IN_RANGE_BOUNDS_PROVEN as u32 {
+                // only the validated exclusive end remains
+                return self.emit_operand(b, b.oper_pool[(rv.a + 1) as usize], dst);
+            }
             return self.fail("intrinsic");
         }
         if rv.kind == ir::RV_CLOSURE {
@@ -9137,11 +9274,9 @@ extend CEmit {
             }
             dst.push_str(", .len = ");
             if ev.len() != 0 {
+                // the end operand is a VALIDATED exclusive end (IN_RANGE_BOUNDS ran first)
                 dst.push_str("(");
                 dst.push_string(&ev);
-                if (rv.c & 1) != 0 {
-                    dst.push_str(" + 1");
-                }
                 dst.push_str(")");
             } else if is_arr {
                 dst.push_u64(by.as_data.arr.len);
@@ -9940,6 +10075,21 @@ extend CEmit {
     // The side effect of a terminator -- a drop's free, a call's statement, an assert's check, a
     // return's value, an unreachable abort -- with NO control transfer: the structured driver owns
     // every goto, break, continue, and fall-through. GOTO and SWITCH carry no effect here.
+    /// The erased dyn receiver, deref-wrapped through its reference stars.
+    fn emit_dyn_recv(self: &mut Self, b: &ir::CoreBody, dyn_recv: u32, dyn_stars: u32, sink: &mut String) bool {
+        if dyn_stars != 0 {
+            sink.push_str("(");
+            for _s in 0..dyn_stars {
+                sink.push_str("*");
+            }
+        }
+        let ok = self.emit_operand(b, dyn_recv, sink);
+        if dyn_stars != 0 {
+            sink.push_str(")");
+        }
+        return ok;
+    }
+
     fn emit_term_effect(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
         if t.kind == ir::TM_GOTO {
             return true;
@@ -10183,18 +10333,36 @@ extend CEmit {
                 return self.emit_multi_call(b, t);
             }
             // an interface-member call whose receiver is a dyn value dispatches through the
-            // vtable: no symbol, no call-site prototype
+            // vtable: no symbol, no call-site prototype. A receiver operand may carry the pair
+            // behind references (a generic `&T` with T = Box<dyn I> stays a reference in the
+            // body): peel to the pair and spell one `*` per level at the dispatch site.
             let mut dyn_recv = ir::IR_NONE;
+            let mut dyn_stars: u32 = 0;
             if t.callee.node != NODE_NONE && t.args_len > 0 && self.mg.in_interface(t.callee.module, t.callee.node) != NODE_NONE {
                 let a0 = b.oper_pool[t.args_start as usize];
                 let mut om0 = b.module;
                 let mut ot0 = b.operands.at(a0 as usize).ty;
                 self.rty(b, b.operands.at(a0 as usize).ty, &mut om0, &mut ot0);
-                if self.p().module_ast_const(om0).type_at(ot0).kind == TypeKind::TYPE_DYN {
+                let mut y0 = *self.p().module_ast_const(om0).type_at(ot0);
+                while (y0.kind == TypeKind::TYPE_REFERENCE || y0.kind == TypeKind::TYPE_POINTER) && dyn_stars < 4 {
+                    let mut nm0 = om0;
+                    let mut nt0 = y0.as_data.elem;
+                    if !self.mg.resolve(om0, y0.as_data.elem, &mut nm0, &mut nt0) {
+                        nm0 = om0;
+                        nt0 = y0.as_data.elem;
+                    }
+                    om0 = nm0;
+                    ot0 = nt0;
+                    y0 = *self.p().module_ast_const(om0).type_at(ot0);
+                    dyn_stars += 1;
+                }
+                if y0.kind == TypeKind::TYPE_DYN {
                     dyn_recv = a0;
                     if !self.dyn_request(om0, ot0) {
                         return false;
                     }
+                } else {
+                    dyn_stars = 0;
                 }
             }
             if self.collect_demand && dyn_recv == ir::IR_NONE {
@@ -10316,7 +10484,7 @@ extend CEmit {
                         ok = self.emit_operand(b, t.a, sink);
                     }
                 } else if ok && dyn_recv != ir::IR_NONE {
-                    ok = self.emit_operand(b, dyn_recv, sink);
+                    ok = self.emit_dyn_recv(b, dyn_recv, dyn_stars, sink);
                     sink.push_str(".vt->");
                     let ca0 = self.p().module_ast_const(t.callee.module);
                     self.mg.ident(
@@ -10355,7 +10523,7 @@ extend CEmit {
                         }
                         if dyn_recv != ir::IR_NONE && i == 0 {
                             // the erased receiver: its data pointer takes the self slot
-                            ok = self.emit_operand(b, dyn_recv, sink);
+                            ok = self.emit_dyn_recv(b, dyn_recv, dyn_stars, sink);
                             sink.push_str(".data");
                             na9 += 1;
                             continue;

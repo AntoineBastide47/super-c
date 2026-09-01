@@ -16,6 +16,7 @@ import string as cstring;
 import driver_shim as shim;
 import std::parallel::runtime as prt;
 import module::loader as loader;
+import ir::inline as inl;
 import ir::interp as iri;
 import driver::emit as *;
 import driver::util as *;
@@ -1378,6 +1379,14 @@ fn stamp_write_text(path: str, body: &String) {
 
 // Record the inputs of a just-completed emission. Written only on full success; an unreadable
 // input aborts the write (no cache beats a wrong one).
+fn stamp_push_env(out: &mut String, name: str) {
+    let v = stdlib::getenv(name);
+    out.push_str(";");
+    if v != null {
+        out.push_str(str::from_cstr(v));
+    }
+}
+
 fn stamp_write(
     path: str,
     p: &loader::Package,
@@ -1414,6 +1423,12 @@ fn stamp_write(
     out.push_u64(stamp_gen_c_count(gen));
     out.push_str("\t");
     out.push_str(root_dir);
+    // emission-mode switches change the emitted C: a stamp written under one mode must not
+    // satisfy a build under another
+    out.push_str("\t");
+    for i in 0..inl::EMIT_MODE_ENV_N {
+        stamp_push_env(&mut out, inl::emit_mode_env(i));
+    }
     out.push_str("\n");
     {
         let mut man = join2(root_dir, "build.toml");
@@ -1515,9 +1530,16 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
             } else {
                 0;
             };
+            let mut wenv = String::new();
+            for i in 0..inl::EMIT_MODE_ENV_N {
+                stamp_push_env(&mut wenv, inl::emit_mode_env(i));
+            }
             if stamp_u64(stamp_field(line, 1)) != target as u64 || stamp_u64(stamp_field(line, 2)) != (arch as u64 & 0xFF) || stamp_u64(
                 stamp_field(line, 3),
-            ) != wb9 || stamp_u64(stamp_field(line, 4)) != wl9 || stamp_field(line, 6) != root_dir {
+            ) != wb9 || stamp_u64(stamp_field(line, 4)) != wl9 || stamp_field(line, 6) != root_dir || stamp_field(
+                line,
+                7,
+            ) != wenv.as_str() {
                 if stdlib::getenv("SC_STAMP_DEBUG") != null {
                     eprintln("stamp: reject #5");
                 }

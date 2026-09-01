@@ -110,7 +110,7 @@ fn lowered(p: &loader::Package, name: str) String {
     let ok = lw.lower_fn(node);
     assert(ok, "body lowers");
     let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
-    assert(irv::verify(&lw.body, tp).len() == 0, "body verifies");
+    assert(irv::verify(&lw.body, tp, p).len() == 0, "body verifies");
     return irp::print_body(&lw.body);
 }
 

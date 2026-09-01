@@ -21,7 +21,7 @@ fn redundant_coalescing_cast_lint_and_fix() {
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
     let fr = p.run_raw(fargs.as_str());
-    assert_eq(fr.exit, 0); // clean after the fix
+    assert(fr.ok()); // clean after the fix
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
     let fixed = loader::read_file(mp.as_str()).unwrap();

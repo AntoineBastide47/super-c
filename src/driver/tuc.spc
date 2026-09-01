@@ -13,6 +13,7 @@
 // in a fully fresh assembly.
 import ast::ast as *;
 import emit::mangle as mbe;
+import ir::inline as inl;
 import module::loader as loader;
 import driver_shim as shim;
 import driver::util as *;
@@ -110,6 +111,15 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     h = fnv_str(h, ep);
     h = fnv_mix(h, mt as u64);
     h = fnv_mix(h, TUC_VER);
+    // emission-mode switches change the C a body renders to: a record written under one mode
+    // must never replay under another
+    for i in 0..inl::EMIT_MODE_ENV_N {
+        let e = stdlib::getenv(inl::emit_mode_env(i));
+        if e != null {
+            h = fnv_str(h, str::from_cstr(e));
+            h = fnv_mix(h, 101 + i as u64);
+        }
+    }
     h = fnv_mix(h, target as u64 ^ p.arch as u64 << 8);
     h = fnv_mix(
         h,
