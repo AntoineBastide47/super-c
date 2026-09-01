@@ -1,6 +1,8 @@
 #ifndef SC_DRIVER_SHIM_H
 #define SC_DRIVER_SHIM_H
 
+#include <stdint.h> /* int64_t in sc_process_alive */
+
 /* Platform glue for the self-hosted super-c driver: the handful of things that need C struct/macro
    access or process-global state a `fn main() i32` (which maps onto `int main(void)`) cannot reach. */
 
@@ -13,6 +15,7 @@ int sc_wexitstatus(int status);                      /* WEXITSTATUS(status) */
 char *sc_realpath(const char *path, char *resolved); /* realpath(3) */
 int sc_exe_path(char *buf, unsigned size);           /* absolute path of the running binary; 0 on success */
 int sc_getpid(void);                                 /* getpid(); for unique temp paths */
+int sc_process_alive(int64_t pid); /* 1 while `pid` exists (kill 0 / OpenProcess); 0 once it is gone */
 int sc_host_platform(void);
 /* Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other. */
 int sc_host_arch(void);                          /* build target: 0 windows, 1 macos, 2 linux */

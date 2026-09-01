@@ -1,8 +1,8 @@
 // The LSP's codegen-free diagnostics pass: build the package (editor-buffer overlays applied), resolve
 // and typecheck every module, and harvest every diagnostic as a (module, span, severity, message)
-// record instead of printing it. Mirrors driver::emit's lint_package recipe exactly -- including its
-// phase gate (no typechecking while any module has a resolve error), so the LSP shows the same error
-// sets as the CLI.
+// record instead of printing it. Mirrors driver::emit's lint_package recipe with a PER-MODULE gate:
+// a module typechecks once its own import closure resolves, so one broken module cannot suppress
+// another module's semantic diagnostics.
 import driver_shim as shim;
 import module::loader as loader;
 import ast::ast as *;
@@ -616,8 +616,8 @@ pub fn recompile(
         }
         let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
         if !lsp_resolve_module(p, i, lw, &mut nd) {
-            // run_pipeline gates ALL typechecking on every module resolving; mirroring that
-            // incrementally would wipe retained analyses, so hand the round to the full path
+            // a resolve failure invalidates this module's retained analyses and its importers';
+            // rather than track that incrementally, hand the round to the full path
             p.cir = null;
             nd.free();
             return false;
@@ -734,17 +734,33 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;
     let n = p.modules.len();
-    let mut resolved = true;
+    let mut res_ok = Vector::<bool>::new();
+    let mut all_ok = true;
     for i in 0..n {
         let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
         let ok = lsp_resolve_module(p, i, lw, diags);
-        resolved = ok && resolved;
+        res_ok.push(ok);
+        all_ok = ok && all_ok;
     }
-    if resolved {
-        for i in 0..n {
+    // Per-module gate, not one package-wide Boolean: module `i` typechecks when its own import
+    // closure resolved cleanly, so one broken file does not suppress every other file's semantic
+    // diagnostics. The cross-module always-panics phase still needs the whole package typed.
+    for i in 0..n {
+        let mut gate = res_ok[i];
+        if gate && !all_ok {
+            let clo = unsafe &*p.module_closure(i as ModuleId);
+            for j in 0..clo.len() {
+                if !res_ok[clo[j] as usize] {
+                    gate = false;
+                }
+            }
+        }
+        if gate {
             let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
             lsp_typecheck_module(p, i, lw, diags);
         }
+    }
+    if all_ok {
         // driver-parity post-typecheck phase: the always-panics check (an error) interprets
         // cross-module `const fn` bodies, so it only runs once every module is typed
         cirv.all_typed = true;

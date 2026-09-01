@@ -4689,3 +4689,33 @@ extend Parser as Free {
         self.pending_metas.free();
     }
 }
+
+/// Every attribute spelling this parser classifies, exactly as written after `@` (namespace-qualified
+/// where required). The inventory mirrors `attr_kind_of` and `parse_attribute` above -- update all
+/// three together when an attribute is added; LSP completion serves this list.
+pub fn known_attributes(out: &mut Vector<String>) {
+    let names = "emit_macro bench test test_init test_free blocking no_const derive reflect platform arch fmt.skip c.inline c.always_inline c.noinline c.cold c.noreturn c.packed c.used c.unused c.align c.export c.import c.section c.source c.link";
+    let mut it = names.split(" ");
+    loop {
+        let w = it.next();
+        if w.is_none() {
+            break;
+        }
+        out.push(String::from_str(w.unwrap()));
+    }
+}
+
+/// The identifier vocabulary accepted inside `@platform(...)` (negatable with '!').
+pub fn platform_arg_names(out: &mut Vector<String>) {
+    out.push(String::from_str("macos"));
+    out.push(String::from_str("linux"));
+    out.push(String::from_str("windows"));
+    out.push(String::from_str("wasm"));
+}
+
+/// The identifier vocabulary accepted inside `@arch(...)`.
+pub fn arch_arg_names(out: &mut Vector<String>) {
+    out.push(String::from_str("x86_64"));
+    out.push(String::from_str("aarch64"));
+    out.push(String::from_str("wasm32"));
+}

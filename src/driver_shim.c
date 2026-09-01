@@ -33,6 +33,7 @@
 #  include <process.h> /* _getpid */
 #  include <windows.h>
 #elif !defined(__wasi__)
+#  include <signal.h>   /* kill(pid, 0) liveness probe */
 #  include <sys/wait.h> /* WIFEXITED/WEXITSTATUS */
 #endif
 #if defined(__APPLE__)
@@ -168,6 +169,24 @@ int sc_getpid(void) {
   return 1; /* WASI has no pids; a constant keeps pid-suffixed temp names stable */
 #else
   return (int)getpid();
+#endif
+}
+
+int sc_process_alive(int64_t pid) {
+  if (pid <= 0)
+    return 0;
+#if defined(_WIN32)
+  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+  if (h == NULL)
+    return 0;
+  DWORD code = 0;
+  int alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+  CloseHandle(h);
+  return alive;
+#elif defined(__wasi__)
+  return 1; /* WASI has no pids to probe */
+#else
+  return kill((pid_t)pid, 0) == 0 || errno == EPERM;
 #endif
 }
 

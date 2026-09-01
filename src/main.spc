@@ -668,7 +668,7 @@ enum Mode {
     MODE_RUN, // `super-c run [--profile=P]`: build the project, then execute its binary (cargo run)
     MODE_CLEAN, // `super-c clean`: drop build.toml outputs
     MODE_TEST, // `super-c test`: tests/ by convention
-    MODE_BENCH, // `super-c bench`: bench/main.spc by convention
+    MODE_BENCH, // `super-c bench`: a generated runner over bench/'s `pub @bench` fns
     MODE_LSP, // `super-c lsp`: language server over stdio
     MODE_NEW, // `super-c new <name>`: scaffold a project directory (cargo new)
     MODE_INIT, // `super-c init`: scaffold a project in the current directory (cargo init)
@@ -1058,7 +1058,9 @@ fn main(argv: Vector<str>) i32 {
         },
         MODE_LSP => {
             while i < argc {
-                if !co.common_flag(argv[i]) {
+                if argv[i] == "--capabilities" || argv[i] == "--version" {
+                    // handled at dispatch: print the capability/version JSON and exit
+                } else if !co.common_flag(argv[i]) {
                     co.bad = true;
                 }
                 i = i + 1;
@@ -1330,6 +1332,19 @@ OPTIONS:
         return rc;
     }
     if mode == Mode::MODE_LSP {
+        // `super-c lsp --capabilities`: print the advertised capability JSON and exit (machine-
+        // readable; editors and tests read it without a protocol session)
+        for i in 2..argv.len() {
+            if argv[i] == "--capabilities" {
+                let caps = lsp_srv::capabilities_json();
+                println("{}", caps.as_str());
+                return 0;
+            }
+            if argv[i] == "--version" {
+                println("{}", M"({"name":"super-c lsp","version":"0.3"})");
+                return 0;
+            }
+        }
         let rc = lsp_srv::run(std_dir.as_str(), target);
         return rc;
     }

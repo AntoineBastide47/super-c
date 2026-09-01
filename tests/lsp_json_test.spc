@@ -144,3 +144,41 @@ fn json_deep_nesting_capped() {
     }
     parse_err(src.as_str(), "Nesting depth limit exceeded");
 }
+
+// A pathological exponent must cost O(digits), never a loop proportional to its value, and the
+// saturated result must still serialize as valid JSON (no NaN/Inf on the wire).
+@test
+fn pathological_exponent_is_bounded() {
+    let mut src = String::from_str("1e");
+    for i in 0..2000 as usize {
+        src.push_byte(b'9');
+    }
+    switch json::parse(src.as_str()) {
+        Ok(v) => {
+            let d = v.dump(false);
+            assert_eq(d.as_str(), "null"); // saturated to infinity, serialized as null
+            let vv = v;
+            vv.free();
+            d.free();
+        },
+        Err(e) => {
+            let ee = e;
+            ee.free();
+            assert(false, "a huge exponent must parse (saturated), not error");
+        },
+    };
+    switch json::parse("1e-99999") {
+        Ok(v) => {
+            let d = v.dump(false);
+            assert_eq(d.as_str(), "0");
+            let vv = v;
+            vv.free();
+            d.free();
+        },
+        Err(e) => {
+            let ee = e;
+            ee.free();
+            assert(false);
+        },
+    };
+}

@@ -27,24 +27,89 @@ fn is_content_length(line: str) bool {
     return true;
 }
 
-/// Read one framed message body from `f`. None on EOF or malformed framing (missing/bad
-/// Content-Length, or a declared length over the 128 MiB sanity cap).
+// Case-insensitive "content-type:" prefix test.
+fn is_content_type(line: str) bool {
+    let name = "content-type:";
+    if line.len() < name.len() {
+        return false;
+    }
+    for i in 0..name.len() {
+        if ascii_lower(line[i]) != name[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// True when a Content-Type value names an acceptable charset: none stated, or utf-8/utf8.
+fn charset_ok(v: str) bool {
+    let key = "charset=";
+    let mut i: usize = 0;
+    while i + key.len() <= v.len() {
+        let mut hit = true;
+        for k in 0..key.len() {
+            if ascii_lower(v[i + k]) != key[k] {
+                hit = false;
+            }
+        }
+        if hit {
+            let mut e = i + key.len();
+            while e < v.len() && v[e] != b';' && v[e] != b' ' {
+                e += 1;
+            }
+            let cs = v.slice(i + key.len(), e);
+            let mut low = String::with_capacity(cs.len());
+            for k in 0..cs.len() {
+                if cs[k] != b'"' {
+                    low.push_byte(ascii_lower(cs[k]));
+                }
+            }
+            return low.as_str() == "utf-8" || low.as_str() == "utf8";
+        }
+        i += 1;
+    }
+    return true;
+}
+
+/// Read one framed message body from `f`. None on EOF or malformed framing: missing, duplicate, or
+/// bad Content-Length, an overlong or over-count header line, a non-UTF-8 charset, or a declared
+/// length over the 128 MiB cap.
 pub fn read_message(f: *mut stdio::FILE) Option<String> {
     let mut clen: i64 = -1;
+    let mut headers: u32 = 0;
     loop {
         let mut line = HdrBuf {};
         if unsafe stdio::fgets(&mut line[0], 512, f) == null {
             return Option::<String>::None; // EOF
         }
-        let l = str::from_cstr(&line[0]).trim();
+        let raw = str::from_cstr(&line[0]);
+        // a header line that fills the buffer without its newline is over the limit
+        if raw.len() == 511 && raw[510] != b'\n' {
+            return Option::<String>::None;
+        }
+        let l = raw.trim();
         if l.len() == 0 {
             break; // blank line: end of headers
         }
+        headers += 1;
+        if headers > 32 {
+            return Option::<String>::None;
+        }
         if is_content_length(l) {
+            if clen >= 0 {
+                return Option::<String>::None; // duplicate Content-Length
+            }
             clen = (switch l.slice(15, l.len()).trim().parse_i64() {
                 Some(n) => n,
                 None => -1,
             });
+            if clen < 0 {
+                return Option::<String>::None; // present but invalid
+            }
+        } else if is_content_type(l) {
+            if !charset_ok(l.slice(13, l.len())) {
+                return Option::<String>::None;
+            }
         }
     }
     if clen < 0 || clen > 128 * 1024 * 1024 {

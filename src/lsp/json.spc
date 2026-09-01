@@ -340,12 +340,9 @@ fn dump_indent(out: &mut String, level: u32) {
 }
 
 fn dump_number(n: f64, out: &mut String) {
-    if n != n {
-        out.push_str("NaN");
-        return;
-    }
-    if n > 1.7976931348623157e308 || n < -1.7976931348623157e308 {
-        out.push_str("Inf");
+    // NaN and infinity are not valid JSON: emit null so the wire format stays parseable.
+    if n != n || n > 1.7976931348623157e308 || n < -1.7976931348623157e308 {
+        out.push_str("null");
         return;
     }
     if n >= -9007199254740992.0 && n <= 9007199254740992.0 {
@@ -699,15 +696,27 @@ extend JSONParser {
                 self.fail("Invalid number: digit expected after exponent");
                 return 0.0;
             }
+            // Saturate the exponent at a value past the f64 range so a pathological input like
+            // 1e999999999 costs O(digits), and scale by squaring -- O(log exponent), never linear.
             let mut exponent: i64 = 0;
             while p < to && self.src[p] >= b'0' && self.src[p] <= b'9' {
-                exponent = exponent * 10 + (self.src[p] - b'0') as i64;
+                if exponent < 4096 {
+                    exponent = exponent * 10 + (self.src[p] - b'0') as i64;
+                }
                 p += 1;
             }
+            if exponent > 400 {
+                exponent = 400;
+            }
             let mut scale: f64 = 1.0;
-            while exponent > 0 {
-                scale *= 10.0;
-                exponent -= 1;
+            let mut base: f64 = 10.0;
+            let mut e = exponent;
+            while e > 0 {
+                if (e & 1) == 1 {
+                    scale *= base;
+                }
+                base *= base;
+                e = e >> 1;
             }
             if exp_neg {
                 value /= scale;

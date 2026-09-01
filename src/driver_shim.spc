@@ -21,6 +21,8 @@ extern "C" "driver_shim.h" {
     /// Running executable's path into `buf`: 0 on success, nonzero on failure or truncation.
     pub fn sc_exe_path(buf: *mut char, size: u32) i32;
     pub fn sc_getpid() i32;
+    /// 1 while process `pid` is alive, 0 once it is gone (parent-death detection for the LSP).
+    pub fn sc_process_alive(pid: i64) i32;
     /// Platform index baked in when the shim is compiled: 0 windows, 1 macos, 2 linux (the default --target).
     pub fn sc_host_platform() i32;
     /// Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other

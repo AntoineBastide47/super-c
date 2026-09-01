@@ -392,7 +392,10 @@ fn lsp_code_actions() {
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://",
     );
     b.push_str(root);
-    b.push_str("\"}}");
+    // code-action literals need the client capability (the server returns nothing without it)
+    b.push_str(
+        "\",\"capabilities\":{\"textDocument\":{\"codeAction\":{\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":[]}}}}}}}",
+    );
     frame(&mut ses, &b);
     b.clear();
     b.push_str(
