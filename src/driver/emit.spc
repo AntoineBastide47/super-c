@@ -2346,7 +2346,7 @@ const fn cap_zero() CapMark {
 }
 
 extend SeedShard {
-    fn cap_of(self: &Self) CapMark {
+    const fn cap_of(self: &Self) CapMark {
         let sc = &self.cem;
         return CapMark {
             env: sc.sh_env_k.len() as u32,

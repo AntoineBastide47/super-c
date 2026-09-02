@@ -602,10 +602,14 @@ super-c --test --test-filter=drains app.spc # substring selection
 super-c --test --test-shard=1/2 app.spc     # stable one-based CI shard
 super-c --test --test-jobs=4 app.spc        # bound the process pool (default: one per core)
 super-c --test --test-no-fork app.spc       # in-process, for debuggers (should_panic is skipped)
+super-c --test --quiet app.spc              # only the failures and the tally
 ```
 
 Each test runs in a forked child, so a panic, a failed assertion, or a crash fails just that test —
-and `@test(should_panic)` passes only when the body aborts. `@test_init` returns a fixture value the
+and `@test(should_panic)` passes only when the body aborts. A test's output is captured and shown
+only if the test fails: after the run, a `failures:` section replays each failed test's output under
+its own header, says how its process ended, and lists the failed names again (`--test-no-fork`
+captures nothing). `@test_init` returns a fixture value the
 test takes by parameter (torn down by the optional `@test_free`, then RAII); `@test_init(global)` /
 `@test_free(global)` build a suite-wide env once in the parent, passed to tests as a shared `&` —
 fork's copy-on-write makes cross-test mutation impossible by construction. `assert(cond[, "msg"])`,

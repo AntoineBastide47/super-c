@@ -307,7 +307,7 @@ extend Bce {
     // ---- operand resolution --------------------------------------------------------------------
 
     /// A whole-local place (no projections), or IR_NONE.
-    fn whole_local(self: &Self, b: &ir::CoreBody, pl: u32) u32 {
+    const fn whole_local(self: &Self, b: &ir::CoreBody, pl: u32) u32 {
         let p = *b.places.at(pl as usize);
         if p.proj_len != 0 {
             return ir::IR_NONE;
@@ -363,7 +363,7 @@ extend Bce {
 
     /// A compile-time length for the measured place of a still-current length binding: the fixed
     /// extent of a raw array, or -1 when unknown.
-    fn const_len_of(self: &Self, b: &ir::CoreBody, l: u32) i64 {
+    const fn const_len_of(self: &Self, b: &ir::CoreBody, l: u32) i64 {
         let lb = *self.lenof.at(l as usize);
         if !lb.ok || lb.my_v != self.lver[l as usize] || (lb.pl & SYNTH_PL) != 0 {
             return 0 - 1;
@@ -381,7 +381,7 @@ extend Bce {
     }
 
     /// The len-place identity carried by a resolved local, when its binding is still current.
-    fn len_place_of(self: &Self, l: u32) LenBind {
+    const fn len_place_of(self: &Self, l: u32) LenBind {
         let lb = *self.lenof.at(l as usize);
         if lb.ok && lb.my_v == self.lver[l as usize] {
             return lb;
@@ -408,7 +408,7 @@ extend Bce {
     /// Is `sub` the `len` field of the prelude view `view_ty` names? Sound because a place-identity
     /// match still requires the SAME place: the same place has one type, and every prelude view's
     /// `len()` returns exactly its `len` field.
-    fn is_prelude_len_field(self: &Self, b: &ir::CoreBody, view_ty: TypeId, sub: NodeId) bool {
+    const fn is_prelude_len_field(self: &Self, b: &ir::CoreBody, view_ty: TypeId, sub: NodeId) bool {
         if view_ty == TYPE_NONE || sub == NODE_NONE {
             return false;
         }
@@ -925,7 +925,7 @@ extend Bce {
 
     /// True when the callee is a local Super-C function body (not extern, not a fn value): the
     /// argument classification then bounds everything it can reach.
-    fn callee_defined(self: &Self, d: DefId) bool {
+    const fn callee_defined(self: &Self, d: DefId) bool {
         let pk = unsafe &*self.pkg;
         if d.node == NODE_NONE || d.module as usize >= pk.modules.len() || !pk.modules.at(d.module as usize).has_ast {
             return false;
@@ -939,7 +939,7 @@ extend Bce {
     }
 
     /// `rv` casts a reference to a raw pointer: its target leaves the borrow discipline.
-    fn is_ref_to_ptr_cast(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+    const fn is_ref_to_ptr_cast(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
         let op = *b.operands.at(rv.a as usize);
         if op.kind == ir::OP_CONST {
             return false;
@@ -1056,7 +1056,7 @@ extend Bce {
     /// True when `t` is a call of the borrow-pure prelude length getter: `fn len(&self)` on a
     /// prelude view. Its shared receiver cannot mutate the collection, so it both yields a
     /// length fact and preserves standing facts.
-    fn is_prelude_len_call(self: &Self, t: &ir::Terminator) bool {
+    const fn is_prelude_len_call(self: &Self, t: &ir::Terminator) bool {
         if t.callee.node == NODE_NONE || t.args_len != 1 || t.dests_len != 1 {
             return false;
         }
@@ -1076,7 +1076,7 @@ extend Bce {
 
     /// The receiver place behind the single `&self` argument of a len call, or IR_NONE. The
     /// argument may sit behind whole-local copies of the autoref temp.
-    fn len_call_receiver(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) u32 {
+    const fn len_call_receiver(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) u32 {
         let opid = b.oper_pool[t.args_start as usize];
         let op = *b.operands.at(opid as usize);
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {

@@ -201,7 +201,7 @@ const TZ64_TAB: [u8; 64] = [
     7,
     6,
 ];
-fn tz64(b: u64) usize {
+const fn tz64(b: u64) usize {
     // The de Bruijn multiply deliberately wraps; only the top 6 bits of the product matter.
     let p = b * 0x03F79D71B4CB0A89u64;
     let tab: []u8 = TZ64_TAB;

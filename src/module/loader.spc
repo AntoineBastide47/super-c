@@ -900,7 +900,7 @@ fn par_parse_one(t: PParse) {
     u.ok = true;
 }
 
-pub fn loader_no_wait(_c: *mut void, _m: ModuleId) {}
+pub const fn loader_no_wait(_c: *mut void, _m: ModuleId) {}
 
 extend Package as Free {
     pub fn free(self: &mut Self) {

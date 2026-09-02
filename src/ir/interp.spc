@@ -5605,7 +5605,7 @@ extend Interp {
 
     // Does the intercept model this extern name? Heap/trap names, then libm by (suffix-stripped)
     // name probe.
-    fn intercept_name(self: &Self, fm: ModuleId, nm: tok::Span) bool {
+    const fn intercept_name(self: &Self, fm: ModuleId, nm: tok::Span) bool {
         if self.span_is(fm, nm, "malloc") || self.span_is(fm, nm, "realloc") || self.span_is(fm, nm, "free") || self.span_is(
             fm,
             nm,
@@ -5833,7 +5833,7 @@ extend Interp {
 
     // A module's per-node type under serial-order visibility: a module checked EARLY by the
     // parallel schedule but AFTER the requester in id order answers TYPE_NONE, as it did serially.
-    fn tof(self: &Self, m: ModuleId, a: &Ast, n: NodeId) TypeId {
+    const fn tof(self: &Self, m: ModuleId, a: &Ast, n: NodeId) TypeId {
         if self.tc_par && m > self.root_mod {
             return TYPE_NONE;
         }

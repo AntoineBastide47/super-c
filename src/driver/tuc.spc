@@ -22,7 +22,7 @@ import stdlib;
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
 const TUC_VER: u32 = 3;
 
-fn fnv_mix(h: u64, v: u64) u64 {
+const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
     x = (x ^ v & 0xFF) * 1099511628211u64;
     x = (x ^ v >> 8 & 0xFF) * 1099511628211u64;
@@ -693,7 +693,7 @@ pub fn ser_evs(p: &loader::Package, o: &mut String, evs: &Vector<mbe::RecEv>, fr
 }
 
 extend Rd {
-    fn r8(self: &mut Self) u8 {
+    const fn r8(self: &mut Self) u8 {
         if !self.ok || self.at >= self.end {
             self.ok = false;
             return 0;
@@ -703,7 +703,7 @@ extend Rd {
         return v;
     }
 
-    fn r32(self: &mut Self) u32 {
+    const fn r32(self: &mut Self) u32 {
         if !self.ok || self.at + 4 > self.end {
             self.ok = false;
             return 0;
@@ -713,7 +713,7 @@ extend Rd {
         return v;
     }
 
-    fn r64(self: &mut Self) u64 {
+    const fn r64(self: &mut Self) u64 {
         let lo = self.r32() as u64;
         let hi = self.r32() as u64;
         return lo | hi << 32;
@@ -812,7 +812,7 @@ extend Rd {
         return self.ok;
     }
 
-    pub fn read_count(self: &mut Self) u32 {
+    pub const fn read_count(self: &mut Self) u32 {
         return self.r32();
     }
 
@@ -847,7 +847,7 @@ extend Rd {
 }
 
 extend Tuc {
-    pub fn open(self: &Self, m: usize) Rd {
+    pub const fn open(self: &Self, m: usize) Rd {
         return Rd {
             sp: self.raw.as_str().ptr(),
             at: self.soff[m] as usize,

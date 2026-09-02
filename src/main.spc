@@ -871,8 +871,17 @@ fn main(argv: Vector<str>) i32 {
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
     let mut lint_sc = false; // lint --const: warn on functions the deep CTFE scan proves always evaluable
     let mut bench_norun = false; // bench --no-run: build the bench binary only
+    let mut bench_filter: str = ""; // bench --bench-filter=S: run only benchmarks whose name contains S
     let mut extra = Vector::<usize>::new(); // argv indices of extra `fmt`/`lint` paths
-    let mut topts = TestOpts { enabled: false, jobs: 0, no_fork: false, filter: null, shard: 0, shards: 0 };
+    let mut topts = TestOpts {
+        enabled: false,
+        jobs: 0,
+        no_fork: false,
+        quiet: false,
+        filter: null,
+        shard: 0,
+        shards: 0,
+    };
     let mut co = CommonOpts {
         ce_steps: 0,
         ce_mem: 0,
@@ -902,6 +911,8 @@ fn main(argv: Vector<str>) i32 {
                     }
                 } else if arg == "--test-no-fork" {
                     topts.no_fork = true;
+                } else if arg == "--quiet" {
+                    topts.quiet = true;
                 } else if arg.starts_with("--test-filter=") {
                     topts.filter = (&arg[14]) as *const char;
                 } else if arg.starts_with("--test-shard=") {
@@ -1027,6 +1038,8 @@ fn main(argv: Vector<str>) i32 {
                     }
                 } else if arg == "--test-no-fork" {
                     topts.no_fork = true;
+                } else if arg == "--quiet" {
+                    topts.quiet = true;
                 } else if arg.starts_with("--test-filter=") {
                     topts.filter = (&arg[14]) as *const char;
                 } else if arg.starts_with("--test-shard=") {
@@ -1047,6 +1060,8 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 if arg == "--no-run" {
                     bench_norun = true;
+                } else if arg.starts_with("--bench-filter=") {
+                    bench_filter = arg[15..];
                 } else {
                     let common = co.common_flag(arg);
                     if !common && !bo.build_flag(&mut co, arg) {
@@ -1203,6 +1218,7 @@ OPTIONS:
     --fix                  lint: apply machine-applicable fixes and re-lint
     --const        lint: also flag functions that could be 'const fn'
     --no-run               bench: build the bench binary but do not run it
+    --bench-filter=S       bench: run only benchmarks whose name contains S
     --dir=D                vendor: project root vendored into (default: the current directory)
     --ref=R                vendor: branch, tag or commit to pin (git sources)
     --force                vendor: replace an existing vendor/<name>
@@ -1211,6 +1227,7 @@ OPTIONS:
     --test-shard=K/N       run shard K of N (one-based, stable round-robin)
     --test-jobs=N          bound the test process pool (default: one per core)
     --test-no-fork         run tests in-process (for a debugger)
+    --quiet                test: print only the failures and the tally
 )".ptr() as *const char,
             stdio::stderr(),
         );
@@ -1406,6 +1423,7 @@ OPTIONS:
                     &man,
                     profile,
                     bench_norun,
+                    bench_filter,
                     jobs,
                     std_dir.as_str(),
                     ce_steps,

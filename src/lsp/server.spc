@@ -413,7 +413,7 @@ fn valid_ident(nm: str) bool {
 
 // A request id is valid when it is a string or a number (LSP integer). Booleans, arrays, objects
 // and null are not request ids.
-fn valid_id(id: &json::JSON) bool {
+const fn valid_id(id: &json::JSON) bool {
     return id.kind == json::JT_STRING || id.kind == json::JT_NUMBER;
 }
 

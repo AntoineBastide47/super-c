@@ -817,7 +817,7 @@ extend Mangler {
         }
     }
 
-    pub fn um_hit(self: &Self, src: u64, dst: usize) bool {
+    pub const fn um_hit(self: &Self, src: u64, dst: usize) bool {
         if self.used_mods.len() == 0 {
             return false;
         }

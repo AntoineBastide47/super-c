@@ -1470,13 +1470,14 @@ extend Fx as Free {
 fn setup() Fx { let mut v = Vector::<i32>::new(); v.push(1); v.push(2); return Fx { v: v }; }
 @test
 fn drains(fx: &mut Fx, e: &env::Env) {
+  println("drain trace");
   let mut s = 0;
   while let Some(x) = fx.v.pop() { s += x; }
   assert_eq(s, 3);
   assert_eq(e.tag.len(), 5);
 }
 @test
-fn fails() { assert_eq(2 * 3, 7); }
+fn fails() { println("fail trace"); assert_eq(2 * 3, 7); }
 @test(should_panic)
 fn boom() { panic("boom"); }
 struct Counter { pub n: i32 }
@@ -1507,6 +1508,20 @@ fn main() i32 { return 0; }
     assert(r.out_shows("right: 7"), "assert shows right value");
     assert(r.out_has("teardown suite"), "global @test_free ran");
     assert(r.out_has("3 passed, 1 failed"), "final tally");
+    // A failed test's output is replayed under its own header after the run, then the names are listed
+    // again; a passing test's output is captured and never shown.
+    assert(r.out_shows("---- main::fails ----"), "failure section has a header per failed test");
+    assert(r.out_shows("fail trace"), "failure section replays the failed test's output");
+    assert(r.out_shows("    main::fails"), "failures listed again at the end");
+    assert(!r.out_has("drain trace"), "a passing test's output is captured");
+    // --quiet drops the per-test `ok` lines and keeps the failures and the tally.
+    let q = p.compile_flags("--test --quiet", "main.spc");
+    assert_eq(q.exit, 1);
+    assert(q.out_has("running 4 tests"), "quiet keeps the header");
+    assert(!q.out_has("... ok"), "quiet drops the ok lines");
+    assert(q.out_has("test main::fails ... FAILED"), "quiet keeps the FAILED line");
+    assert(q.out_shows("---- main::fails ----"), "quiet keeps the failure section");
+    assert(q.out_has("3 passed, 1 failed"), "quiet keeps the tally");
     // Shards partition the filtered test order without overlap; each adjacent pair is split.
     let s1 = p.compile_flags("--test --test-filter=main:: --test-shard=1/2 --test-jobs=2", "main.spc");
     assert(s1.ok());
@@ -5745,6 +5760,44 @@ fn global_object_cache_round_trip() {
     assert(cli::dir_count_suffix(cache.as_str(), ".o") > 0, "a wiped cache repopulates");
     cache.free();
     bdir.free();
+}
+
+// `super-c bench --bench-filter=S` selects benchmarks by substring at run time: the generated root is the
+// same for every filter, a miss is an error, and the tally counts only what ran.
+@test
+fn bench_filter_selects_by_substring() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    p.mkfile(
+        "bench/micro.spc",
+        M"(import std::testing::bench as bench;
+@bench
+pub fn add_loop(b: &mut bench::Bencher) {
+    b.set_rounds(2);
+    while b.running() { let mut s = 0; for i in 0..100 { s = s + i; } assert(s > 0); }
+}
+@bench
+pub fn mul_loop(b: &mut bench::Bencher) {
+    b.set_rounds(2);
+    while b.running() { let mut s = 1; for i in 1..50 { s = s * i % 1000003; } assert(s > 0); }
+}
+)",
+    );
+    let root = str::from_cstr(p.rootp());
+    let all = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=dev");
+    assert(all.ok());
+    assert(all.out_shows("micro::add_loop"), "unfiltered run reports the first benchmark");
+    assert(all.out_shows("micro::mul_loop"), "unfiltered run reports the second benchmark");
+    assert(all.out_has("2 benchmark(s)"), "unfiltered tally");
+    let one = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=dev --bench-filter=mul");
+    assert(one.ok());
+    assert(!one.out_has("micro::add_loop"), "filter excludes a non-matching benchmark");
+    assert(one.out_shows("micro::mul_loop"), "filter keeps the matching benchmark");
+    assert(one.out_has("1 benchmark(s)"), "tally counts only what ran");
+    let none = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=dev --bench-filter=zzz");
+    assert_eq(none.exit, 1);
+    assert(none.out_shows("bench: no benchmark name contains 'zzz'"), "a filter that selects nothing is an error");
 }
 
 // `format` is rewritten at typecheck into `sugar_fmt_*` shim calls, so it folds under CTFE like

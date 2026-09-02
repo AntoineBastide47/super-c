@@ -219,7 +219,7 @@ fn check_body(opers: u32) ir::CoreBody {
     return b;
 }
 
-fn tok_span() tok::Span {
+const fn tok_span() tok::Span {
     return tok::Span { start: 0, end: 0 };
 }
 

@@ -2036,7 +2036,7 @@ extend CEmit {
         return false;
     }
 
-    fn rvalue_reads_call_use(self: &Self, b: &ir::CoreBody, rid: u32, l: u32) bool {
+    const fn rvalue_reads_call_use(self: &Self, b: &ir::CoreBody, rid: u32, l: u32) bool {
         let rv = *b.rvalues.at(rid as usize);
         if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_REPEAT || rv.kind == ir::RV_DYN {
             return self.op_is_call_use(b, rv.a, l);
@@ -7663,7 +7663,7 @@ extend CEmit {
         return self.assert_helpers;
     }
 
-    pub fn assert_helpers_or(self: &mut Self, bit: u8) {
+    pub const fn assert_helpers_or(self: &mut Self, bit: u8) {
         self.assert_helpers |= bit;
     }
 

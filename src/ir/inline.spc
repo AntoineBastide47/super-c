@@ -322,7 +322,7 @@ fn extend_of(a: &Ast, fnode: NodeId) NodeId {
     return NODE_NONE;
 }
 
-fn callee_key(d: DefId) u64 {
+const fn callee_key(d: DefId) u64 {
     return skey_mix(3, d.module as u64 << 32 | d.node as u64);
 }
 
@@ -544,7 +544,7 @@ fn assign_local_use(b: &mut ir::CoreBody, l: ir::LocalId, op: ir::OperandId, sp:
     );
 }
 
-fn goto_term(t0: ir::BlockId, sp: tok::Span) ir::Terminator {
+const fn goto_term(t0: ir::BlockId, sp: tok::Span) ir::Terminator {
     return ir::Terminator {
         kind: ir::TM_GOTO,
         a: ir::IR_NONE,
@@ -931,7 +931,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
 /// The C-authoritative type of a place: the base local's declared type for a bare place, else the
 /// last projection's result type. `Place.ty` may carry a checker coercion (an autoref'd view) the
 /// emitted storage does not have.
-fn eff_pty(b: &ir::CoreBody, plid: ir::PlaceId) TypeId {
+const fn eff_pty(b: &ir::CoreBody, plid: ir::PlaceId) TypeId {
     let pl = *b.places.at(plid as usize);
     if pl.proj_len == 0 {
         return b.locals.at(pl.base as usize).ty;

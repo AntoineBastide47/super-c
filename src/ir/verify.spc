@@ -18,7 +18,7 @@ struct SafeViews {
     pub s_array: DefId,
 }
 
-fn hit_def(h: loader::LookupHit) DefId {
+const fn hit_def(h: loader::LookupHit) DefId {
     return DefId { module: h.mid, node: h.node };
 }
 

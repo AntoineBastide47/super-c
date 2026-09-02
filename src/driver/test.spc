@@ -22,6 +22,7 @@ pub struct TestOpts {
     pub enabled: bool,
     pub jobs: i32,
     pub no_fork: bool,
+    pub quiet: bool,
     pub filter: *const char,
     pub shard: i32,
     pub shards: i32,
@@ -608,14 +609,62 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
 // necessarily the platform this compiler is running on. It also keeps both runners in every build, so
 // neither can rot unnoticed.
 const fn test_runner_includes() *const char {
-    return "#ifdef _WIN32\n#include <process.h>\n#include <stdint.h>\n#include <windows.h>\n#else\n#include <unistd.h>\n#include <sys/wait.h>\n#endif\n\n".ptr() as *const char;
+    return "#ifdef _WIN32\n#include <io.h>\n#include <process.h>\n#include <stdint.h>\n#include <windows.h>\n#else\n#include <unistd.h>\n#include <sys/wait.h>\n#endif\n\n".ptr() as *const char;
 }
 
 // The fixed part of the generated test runner: option parsing, fork-per-test isolation with a waitpid job
 // pool, an in-process fallback (--no-fork), substring selection, per-test reporting, and the exit code.
+// Each forked child writes to its own capture file, so a test's output is attributed to that test rather
+// than interleaved with the pool's. The captured text is replayed only for tests that fail, in a
+// `failures:` section after the run; `--quiet` also drops the per-test `ok` lines.
 const fn test_runner_main_posix() *const char {
     return M"(static int sc_match(const char *name, const char *filter) {
   return !filter || strstr(name, filter) != NULL;
+}
+static char *sc_strdup(const char *s) {
+  char *d = malloc(strlen(s) + 1);
+  if (!d) { perror("malloc"); exit(101); }
+  strcpy(d, s);
+  return d;
+}
+/* Everything the test wrote, as one owned NUL-terminated buffer (empty when it wrote nothing). */
+static char *sc_slurp(FILE *f) {
+  long n = 0;
+  if (f && fseek(f, 0, SEEK_END) == 0) n = ftell(f);
+  if (n < 0) n = 0;
+  char *buf = malloc((size_t)n + 1);
+  if (!buf) { perror("malloc"); exit(101); }
+  size_t got = 0;
+  if (f) { rewind(f); got = fread(buf, 1, (size_t)n, f); }
+  buf[got] = 0;
+  return buf;
+}
+/* The failures, together, after the run: each test's captured output under its own header, how the
+   process ended, then the bare list of names. */
+static void sc_report_failures(int nfail, const int *fail_test, char **fail_out, char **fail_why) {
+  printf("\nfailures:\n");
+  for (int k = 0; k < nfail; k++) {
+    printf("\n---- %s ----\n", SC_TESTS[fail_test[k]].name);
+    const size_t len = strlen(fail_out[k]);
+    if (len > 0) {
+      fwrite(fail_out[k], 1, len, stdout);
+      if (fail_out[k][len - 1] != '\n') putchar('\n');
+    }
+    printf("%s\n", fail_why[k]);
+    free(fail_out[k]);
+    free(fail_why[k]);
+  }
+  printf("\nfailures:\n");
+  for (int k = 0; k < nfail; k++) printf("    %s\n", SC_TESTS[fail_test[k]].name);
+  fflush(stdout);
+}
+/* One line on how a failed test's process ended, from its wait status. */
+static char *sc_why_posix(int st, int should_panic) {
+  char buf[128];
+  if (WIFSIGNALED(st)) snprintf(buf, sizeof buf, "terminated by signal %d (%s)", WTERMSIG(st), strsignal(WTERMSIG(st)));
+  else if (WIFEXITED(st) && WEXITSTATUS(st) != 0) snprintf(buf, sizeof buf, "exited with code %d", WEXITSTATUS(st));
+  else snprintf(buf, sizeof buf, "%s", should_panic ? "did not panic as expected" : "exited with code 0");
+  return sc_strdup(buf);
 }
 /* Core count without feature-test-macro landmines: macOS hides _SC_NPROCESSORS_ONLN under strict
    _POSIX_C_SOURCE, so use the stable sysctl entry point there. */
@@ -633,11 +682,12 @@ static int sc_runner_ncpu(void) {
 }
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0); /* forked children must not inherit (and re-flush) buffered lines */
-  int jobs = 0, no_fork = 0, shard = 1, shards = 1;
+  int jobs = 0, no_fork = 0, quiet = 0, shard = 1, shards = 1;
   const char *filter = NULL;
   for (int i = 1; i < argc; i++) {
     if (!strncmp(argv[i], "--jobs=", 7)) jobs = atoi(argv[i] + 7);
     else if (!strcmp(argv[i], "--no-fork")) no_fork = 1;
+    else if (!strcmp(argv[i], "--quiet")) quiet = 1;
     else if (!strncmp(argv[i], "--filter=", 9)) filter = argv[i] + 9;
     else if (!strncmp(argv[i], "--shard=", 8)) {
       char tail;
@@ -659,27 +709,40 @@ int main(int argc, char **argv) {
   void *genv = NULL;
   if (nsel > 0) genv = sc_genv_init();
   int passed = 0, failed = 0, skipped = 0;
-  if (no_fork) {
+  int fail_test[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  char *fail_out[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  char *fail_why[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  if (no_fork) { /* in-process: nothing is captured, a failure ends the run where it happens */
     for (int k = 0; k < nsel; k++) {
       const int i = sel[k];
       if (SC_TESTS[i].should_panic) {
-        printf("test %s ... skipped (should_panic needs fork)\n", SC_TESTS[i].name);
+        if (!quiet) printf("test %s ... skipped (should_panic needs fork)\n", SC_TESTS[i].name);
         skipped++;
         continue;
       }
       SC_TESTS[i].fn(genv);
-      printf("test %s ... ok\n", SC_TESTS[i].name);
+      if (!quiet) printf("test %s ... ok\n", SC_TESTS[i].name);
       passed++;
     }
   } else {
     pid_t pid_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
+    FILE *cap_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
     int active = 0, next = 0;
     while (next < nsel || active > 0) {
       while (active < jobs && next < nsel) {
+        FILE *cap = tmpfile();
+        if (!cap) { perror("tmpfile"); return 101; }
         const pid_t pid = fork();
-        if (pid == 0) { SC_TESTS[sel[next]].fn(genv); _exit(0); }
+        if (pid == 0) {
+          if (dup2(fileno(cap), 1) < 0 || dup2(fileno(cap), 2) < 0) { perror("dup2"); _exit(101); }
+          SC_TESTS[sel[next]].fn(genv);
+          fflush(NULL);
+          _exit(0);
+        }
         if (pid < 0) { perror("fork"); return 101; }
-        pid_of[next++] = pid;
+        pid_of[next] = pid;
+        cap_of[next] = cap;
+        next++;
         active++;
       }
       int st = 0;
@@ -687,21 +750,27 @@ int main(int argc, char **argv) {
       if (done < 0) break;
       active--;
       int ti = -1;
+      FILE *cap = NULL;
       for (int k = 0; k < next; k++)
-        if (pid_of[k] == done) { ti = sel[k]; pid_of[k] = -1; break; }
+        if (pid_of[k] == done) { ti = sel[k]; cap = cap_of[k]; pid_of[k] = -1; break; }
       if (ti < 0) continue;
       const int crashed = !(WIFEXITED(st) && WEXITSTATUS(st) == 0);
       if (crashed == SC_TESTS[ti].should_panic) {
-        printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
+        if (!quiet) printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
         passed++;
       } else {
         printf("test %s ... FAILED%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (expected a panic)" : "");
+        fail_test[failed] = ti;
+        fail_out[failed] = sc_slurp(cap);
+        fail_why[failed] = sc_why_posix(st, SC_TESTS[ti].should_panic);
         failed++;
       }
+      fclose(cap);
       fflush(stdout);
     }
   }
   if (genv) sc_genv_free(genv);
+  if (failed) sc_report_failures(failed, fail_test, fail_out, fail_why);
   if (skipped)
     printf("\n%d passed, %d failed, %d skipped\n", passed, failed, skipped);
   else
@@ -711,12 +780,64 @@ int main(int argc, char **argv) {
 )".ptr() as *const char;
 }
 
-// Windows has no fork(); isolate each test in its own subprocess (`self --run-one=<i>`) so should_panic
-// and crashing tests are caught via the child's exit code. Serial (no job pool); @test_init(global) reruns
-// per test (fresh process) rather than once — same isolation, minor repeated setup.
+// Windows has no fork(); isolate each test in its own subprocess (`self --run-one=<i> --capture=<file>`)
+// so should_panic and crashing tests are caught via the child's exit code. The PARENT runs the global
+// @test_init/@test_free pair once, exactly as POSIX does -- that pair's output is the visible one, since
+// every child's stdout goes to its capture file (deleted for passing tests). Each child then rebuilds a
+// private env for its own test: no fork means the parent's pointer cannot cross the process boundary.
+// The child redirects its own stdout and stderr into the capture file; the parent reads it back for a
+// failed test and deletes it.
 const fn test_runner_main_win() *const char {
     return M"(static int sc_match(const char *name, const char *filter) {
   return !filter || strstr(name, filter) != NULL;
+}
+static char *sc_strdup(const char *s) {
+  char *d = malloc(strlen(s) + 1);
+  if (!d) { perror("malloc"); exit(101); }
+  strcpy(d, s);
+  return d;
+}
+/* Everything the test wrote, as one owned NUL-terminated buffer (empty when it wrote nothing). */
+static char *sc_slurp(FILE *f) {
+  long n = 0;
+  if (f && fseek(f, 0, SEEK_END) == 0) n = ftell(f);
+  if (n < 0) n = 0;
+  char *buf = malloc((size_t)n + 1);
+  if (!buf) { perror("malloc"); exit(101); }
+  size_t got = 0;
+  if (f) { rewind(f); got = fread(buf, 1, (size_t)n, f); }
+  buf[got] = 0;
+  return buf;
+}
+/* The failures, together, after the run: each test's captured output under its own header, how the
+   process ended, then the bare list of names. */
+static void sc_report_failures(int nfail, const int *fail_test, char **fail_out, char **fail_why) {
+  printf("\nfailures:\n");
+  for (int k = 0; k < nfail; k++) {
+    printf("\n---- %s ----\n", SC_TESTS[fail_test[k]].name);
+    const size_t len = strlen(fail_out[k]);
+    if (len > 0) {
+      fwrite(fail_out[k], 1, len, stdout);
+      if (fail_out[k][len - 1] != '\n') putchar('\n');
+    }
+    printf("%s\n", fail_why[k]);
+    free(fail_out[k]);
+    free(fail_why[k]);
+  }
+  printf("\nfailures:\n");
+  for (int k = 0; k < nfail; k++) printf("    %s\n", SC_TESTS[fail_test[k]].name);
+  fflush(stdout);
+}
+/* One line on how a failed test's process ended, from its exit code. */
+static char *sc_why_win(DWORD code, int should_panic) {
+  char buf[128];
+  if (code != 0) snprintf(buf, sizeof buf, "exited with code %lu (0x%08lX)", (unsigned long)code, (unsigned long)code);
+  else snprintf(buf, sizeof buf, "%s", should_panic ? "did not panic as expected" : "exited with code 0");
+  return sc_strdup(buf);
+}
+/* The capture file of test `i` in this run: deterministic, so the parent can name it again at reap time. */
+static void sc_cap_path(char *out, size_t cap, const char *tmpdir, int i) {
+  snprintf(out, cap, "%ssc-test-%lu-%d.txt", tmpdir, (unsigned long)GetCurrentProcessId(), i);
 }
 /* Path to re-spawn: argv[0] is whatever the caller typed and need not name a file the loader can open
    (`./__tests` from a shell has no .exe), so ask the CRT for this image's real path and fall back only
@@ -733,12 +854,14 @@ static int sc_runner_ncpu(void) {
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   setvbuf(stderr, NULL, _IOFBF, BUFSIZ); /* keep each child's flushed diagnostic in one append */
-  const char *filter = NULL;
-  int run_one = -1, no_fork = 0, jobs = 0, shard = 1, shards = 1;
+  const char *filter = NULL, *capture = NULL;
+  int run_one = -1, no_fork = 0, quiet = 0, jobs = 0, shard = 1, shards = 1;
   for (int i = 1; i < argc; i++) {
     if (!strncmp(argv[i], "--run-one=", 10)) run_one = atoi(argv[i] + 10);
+    else if (!strncmp(argv[i], "--capture=", 10)) capture = argv[i] + 10;
     else if (!strncmp(argv[i], "--jobs=", 7)) jobs = atoi(argv[i] + 7);
     else if (!strcmp(argv[i], "--no-fork")) no_fork = 1;
+    else if (!strcmp(argv[i], "--quiet")) quiet = 1;
     else if (!strncmp(argv[i], "--filter=", 9)) filter = argv[i] + 9;
     else if (!strncmp(argv[i], "--shard=", 8)) {
       char tail;
@@ -752,6 +875,14 @@ int main(int argc, char **argv) {
   /* WaitForMultipleObjects cannot watch more than this many handles at once. */
   if (jobs > MAXIMUM_WAIT_OBJECTS) jobs = MAXIMUM_WAIT_OBJECTS;
   if (run_one >= 0) { /* child: run exactly one test in-process, exit status reports crash/panic */
+    if (capture) { /* both streams into the one file, UNBUFFERED: a panic aborts without flushing,
+       and freopen resets stdout to full buffering (Windows has no line buffering at all), so any
+       buffered output would die with the crashing test */
+      if (!freopen(capture, "wb", stdout)) { perror(capture); return 101; }
+      if (_dup2(_fileno(stdout), _fileno(stderr)) != 0) { perror("dup2"); return 101; }
+      setvbuf(stdout, NULL, _IONBF, 0);
+      setvbuf(stderr, NULL, _IONBF, 0);
+    }
     void *genv = sc_genv_init();
     SC_TESTS[run_one].fn(genv);
     if (genv) sc_genv_free(genv);
@@ -765,22 +896,30 @@ int main(int argc, char **argv) {
     printf("running %d test%s (shard %d/%d)\n", nsel, nsel == 1 ? "" : "s", shard, shards);
   else
     printf("running %d test%s\n", nsel, nsel == 1 ? "" : "s");
+  /* The suite-level env lifecycle, in the parent as on POSIX: its teardown output is the one the
+     run's caller sees. Children build their own env per test (no fork to inherit this one). */
+  void *genv = NULL;
+  if (nsel > 0) genv = sc_genv_init();
   int passed = 0, failed = 0, skipped = 0;
+  int fail_test[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  char *fail_out[SC_NTESTS > 0 ? SC_NTESTS : 1];
+  char *fail_why[SC_NTESTS > 0 ? SC_NTESTS : 1];
   if (no_fork) { /* in-process, same meaning as POSIX: no isolation, so no panic can be caught */
-    void *genv = nsel > 0 ? sc_genv_init() : NULL;
     for (int k = 0; k < nsel; k++) {
       const int i = sel[k];
       if (SC_TESTS[i].should_panic) {
-        printf("test %s ... skipped (should_panic needs fork)\n", SC_TESTS[i].name);
+        if (!quiet) printf("test %s ... skipped (should_panic needs fork)\n", SC_TESTS[i].name);
         skipped++;
         continue;
       }
       SC_TESTS[i].fn(genv);
-      printf("test %s ... ok\n", SC_TESTS[i].name);
+      if (!quiet) printf("test %s ... ok\n", SC_TESTS[i].name);
       passed++;
     }
-    if (genv) sc_genv_free(genv);
   } else {
+    char tmpdir[MAX_PATH];
+    const DWORD tl = GetTempPathA(MAX_PATH, tmpdir);
+    if (tl == 0 || tl >= MAX_PATH) { fprintf(stderr, "cannot locate the temp directory\n"); return 101; }
     /* A pool of subprocesses, `jobs` at a time -- the same shape as the POSIX fork pool: _P_NOWAIT hands
        back a process handle instead of blocking, and WaitForMultipleObjects reaps whichever finishes
        first. Serial spawning was what made this runner several times slower than its POSIX siblings. */
@@ -792,11 +931,19 @@ int main(int argc, char **argv) {
         const int i = sel[next++];
         char idbuf[24];
         snprintf(idbuf, sizeof idbuf, "--run-one=%d", i);
+        /* _spawnv joins the arguments with spaces and quotes nothing; the temp path may contain spaces. */
+        char cappath[MAX_PATH];
+        sc_cap_path(cappath, sizeof cappath, tmpdir, i);
+        char capbuf[MAX_PATH + 16];
+        snprintf(capbuf, sizeof capbuf, "--capture=\"%s\"", cappath);
         const char *self = sc_self(argv[0]);
-        const char *const args[] = { self, idbuf, NULL };
+        const char *const args[] = { self, idbuf, capbuf, NULL };
         const intptr_t ph = _spawnv(_P_NOWAIT, self, args);
         if (ph == -1) {
           printf("test %s ... FAILED (could not start)\n", SC_TESTS[i].name);
+          fail_test[failed] = i;
+          fail_out[failed] = sc_strdup("");
+          fail_why[failed] = sc_strdup("could not start");
           failed++;
           fflush(stdout);
           continue;
@@ -817,19 +964,26 @@ int main(int argc, char **argv) {
       running_test[slot] = running_test[active - 1];
       active--;
       const int crashed = (code != 0);
+      char cappath[MAX_PATH];
+      sc_cap_path(cappath, sizeof cappath, tmpdir, ti);
       if (crashed == SC_TESTS[ti].should_panic) {
-        printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
+        if (!quiet) printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
         passed++;
-      } else if (SC_TESTS[ti].should_panic) {
-        printf("test %s ... FAILED (expected a panic)\n", SC_TESTS[ti].name);
-        failed++;
       } else {
-        printf("test %s ... FAILED\n", SC_TESTS[ti].name);
+        printf("test %s ... FAILED%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (expected a panic)" : "");
+        FILE *cap = fopen(cappath, "rb");
+        fail_test[failed] = ti;
+        fail_out[failed] = sc_slurp(cap);
+        fail_why[failed] = sc_why_win(code, SC_TESTS[ti].should_panic);
+        if (cap) fclose(cap);
         failed++;
       }
+      remove(cappath);
       fflush(stdout);
     }
   }
+  if (genv) sc_genv_free(genv);
+  if (failed) sc_report_failures(failed, fail_test, fail_out, fail_why);
   if (skipped)
     printf("\n%d passed, %d failed, %d skipped\n", passed, failed, skipped);
   else
@@ -1023,6 +1177,9 @@ pub fn test_build_and_run(
     }
     if unsafe topts.no_fork {
         run.push(String::from_str("--no-fork"));
+    }
+    if unsafe topts.quiet {
+        run.push(String::from_str("--quiet"));
     }
     if unsafe topts.filter != null {
         let mut fs = String::from_str("--filter=");

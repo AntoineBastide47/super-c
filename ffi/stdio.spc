@@ -152,6 +152,6 @@ pub fn set_binary(stream: *mut FILE) bool {
 }
 
 @platform(!windows)
-pub fn set_binary(_stream: *mut FILE) bool {
+pub const fn set_binary(_stream: *mut FILE) bool {
     return true;
 }

@@ -21,7 +21,7 @@ import ir::lower as irl;
 import ir::core as ir;
 
 @c.always_inline
-fn rep_bm(st: &mut bfi::RepSt) u32 {
+const fn rep_bm(st: &mut bfi::RepSt) u32 {
     switch st.bms.pop() {
         Some(v) => {
             return v;
@@ -303,7 +303,7 @@ extend tc::TypeChecker {
 
     /// Append a borrow of `place` rooted at `root`. New borrows start TRANSIENT (binding ==
     /// NODE_NONE) until a store ties them to a binding; the 256-entry cap overflows to a diagnostic.
-    pub fn borrow_push(self: &mut Self, root: NodeId, kind: u8, place: NodeId, origin: NodeId) {
+    pub const fn borrow_push(self: &mut Self, root: NodeId, kind: u8, place: NodeId, origin: NodeId) {
         if self.nborrows < 256 {
             let k = self.nborrows;
             unsafe self.borrows[k as usize] = Borrow {

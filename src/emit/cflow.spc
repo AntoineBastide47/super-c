@@ -701,7 +701,7 @@ extend CFlow {
     }
 
     // x dominates y: an O(1) interval test over the dominator-tree Euler tour.
-    pub fn dominates(self: &Self, x: u32, y: u32) bool {
+    pub const fn dominates(self: &Self, x: u32, y: u32) bool {
         if *self.tin.at(y as usize) == NONE || *self.tin.at(x as usize) == NONE {
             return false;
         }

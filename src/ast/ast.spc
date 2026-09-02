@@ -1064,7 +1064,7 @@ extend<T> ChunkPool<T> {
         return atomic::load_usize(&self.n, 1);
     }
 
-    pub fn at(self: &Self, i: usize) &T {
+    pub const fn at(self: &Self, i: usize) &T {
         return unsafe &*(unsafe self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
     }
 
@@ -1085,11 +1085,11 @@ extend<T> ChunkPool<T> {
         atomic::store_usize(&mut self.n, i + 1, 2);
     }
 
-    pub fn index_mut(self: &mut Self, i: usize) &mut T {
+    pub const fn index_mut(self: &mut Self, i: usize) &mut T {
         return unsafe &mut *(unsafe self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
     }
 
-    pub fn set(self: &mut Self, i: usize, v: T) {
+    pub const fn set(self: &mut Self, i: usize, v: T) {
         unsafe (unsafe self.tab[i >> POOL_SHIFT])[i & POOL_CHUNK - 1] = v;
     }
 
@@ -1169,7 +1169,7 @@ extend<T> SplitVec<T> {
         return self.ovf.at(i - self.split);
     }
 
-    pub fn index_mut(self: &mut Self, i: usize) &mut T {
+    pub const fn index_mut(self: &mut Self, i: usize) &mut T {
         if i < self.split {
             return self.base.index_mut(i);
         }

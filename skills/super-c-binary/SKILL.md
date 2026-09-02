@@ -48,28 +48,38 @@ content-fingerprinted stale detection with longest-job-first scheduling.
 
 ### Testing
 
+Always pass `--quiet` (only the failures and the tally print; failed tests replay
+their captured output regardless). Drop it only to watch a passing test's output
+under `--test-no-fork`.
+
 ```sh
-super-c test                           # discover tests/**/*.spc, build, run
-super-c test --test-filter=parse       # substring match on test name
-super-c test --test-shard=1/4          # stable one-based CI sharding
-super-c test --test-jobs=8             # bound the fork pool (default: one per core)
+super-c test --quiet                   # the standard form: discover tests/**/*.spc, build, run
+super-c test --quiet --test-filter=parse  # substring match on test name
+super-c test --quiet --test-shard=1/4  # stable one-based CI sharding
+super-c test --quiet --test-jobs=8     # bound the fork pool (default: one per core)
 super-c test --test-no-fork            # in-process (for debuggers; should_panic skipped)
-super-c --test app.spc                 # single-file form (same --test-* flags apply)
+super-c --test --quiet app.spc         # single-file form (same --test-* flags apply)
 ```
 
 Each `@test` function runs in a forked child. `@test_init` provides fixtures;
-`@test(should_panic)` passes only when the body aborts.
+`@test(should_panic)` passes only when the body aborts. Each child's output is captured
+and replayed only for failed tests, in a `failures:` section after the run (one header per
+failed test, its output, how the process ended, then the list of failed names).
+`--test-no-fork` captures nothing.
 
 ### Benchmarking
 
 ```sh
 super-c bench                # generate a runner over bench/'s @bench fns, build, run
 super-c bench --no-run       # build only (for profiler attachment; binary: build/bench-bin)
+super-c bench --bench-filter=S  # run only benchmarks whose name contains S
 super-c command profile      # build then run under samply (if [command.profile] defined)
 ```
 
 `super-c bench` writes an import-only root covering every `.spc` under `bench/` and
-collects `pub @bench` functions. The compiler's own transpile bench runs 100 serial
+collects `pub @bench` functions. The filter is forwarded to the bench binary as a run-time
+argument, so a filtered run never relinks; a filter that selects no benchmark exits
+nonzero. The compiler's own transpile bench runs 100 serial
 self-transpile iterations and prints per-phase averages, throughput (MB/s), the best
 end-to-end run, heap requested per iteration, and peak RSS.
 

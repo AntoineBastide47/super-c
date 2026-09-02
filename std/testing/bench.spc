@@ -221,15 +221,38 @@ const fn median_of(v: &Vector<f64>) f64 {
     return v[n / 2];
 }
 
+/// The benchmark selection from the runner's arguments: the text after `--filter=`, or "" when every
+/// benchmark runs. `pub` for the generated runner.
+pub fn filter_of<'a>(argv: &Vector<str<'a>>) str<'a> {
+    for i in 0..argv.len() {
+        let a = argv[i];
+        if a.starts_with("--filter=") {
+            return a.slice(9, a.len());
+        }
+    }
+    return "";
+}
+
+/// Whether the benchmark called `name` runs under `filter`: a substring match, and "" selects all.
+/// `pub` for the generated runner.
+pub fn selected(name: str, filter: str) bool {
+    return filter.len() == 0 || name.contains(filter);
+}
+
 /// Printed once before the first benchmark. `pub` for the generated runner.
 pub fn begin() {
     println("");
     println("running benchmarks");
 }
 
-/// Printed once after the last one. `pub` for the generated runner.
-pub fn end(n: i32) i32 {
+/// Printed once after the last one; `n` is how many ran. A `filter` that selected nothing is an error, as
+/// a mistyped name would otherwise report success. `pub` for the generated runner.
+pub fn end(n: i32, filter: str) i32 {
     println("");
     println("{} benchmark(s)", n);
+    if n == 0 && filter.len() != 0 {
+        eprintln("bench: no benchmark name contains '{}'", filter);
+        return 1;
+    }
     return 0;
 }

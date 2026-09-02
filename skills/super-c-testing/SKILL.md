@@ -9,6 +9,8 @@ allowed-tools: Bash Read
 ## Agent checklist
 
 - Read the test lifecycle rules before changing fixtures or test attributes.
+- Always pass `--quiet` when running tests: only the failures (with their replayed
+  output) and the tally matter, and the per-test `ok` lines drown them out.
 - Use the narrowest relevant test command and preserve fork isolation.
 - Keep leak checking enabled when validating ownership behavior.
 - Report stale test documentation after harness or fixture changes.
@@ -142,12 +144,16 @@ usable. The source text of the expression is captured at compile time.
 
 ## Running Tests
 
+Always run with `--quiet`: the failure replay and the tally carry all the signal, and
+agents and CI logs stay readable. Drop it only when a PASSING test's output is needed
+(pair with `--test-no-fork`, which is the only mode that shows it).
+
 ```sh
-super-c test                           # discover tests/**/*.spc, build, run
-super-c test --test-filter=parse       # substring match on test name
-super-c test --test-shard=1/4          # stable one-based CI sharding
-super-c test --test-jobs=8             # bound the fork pool (default: one per CPU)
-super-c test --test-no-fork            # in-process (for debuggers)
+super-c test --quiet                   # the standard form: only the failures and the tally
+super-c test --quiet --test-filter=parse  # substring match on test name
+super-c test --quiet --test-shard=1/4  # stable one-based CI sharding
+super-c test --quiet --test-jobs=8     # bound the fork pool (default: one per CPU)
+super-c test --test-no-fork            # in-process (for debuggers; shows passing output)
 ```
 
 ### Fork isolation
@@ -157,6 +163,16 @@ only that test — the other tests continue. The parent collects exit status and
 
 `--test-no-fork` disables forking for debugger attachment. `should_panic` tests are
 skipped in this mode.
+
+### Output capture and the failure report
+
+Each child's stdout and stderr go to a capture file owned by the runner. A passing
+test's output is discarded. After the run, a `failures:` section replays each failed
+test's output under a `---- name ----` header, followed by how the process ended
+(the signal or exit code, or "did not panic as expected"), then lists the failed names
+again. `--quiet` drops the per-test `ok` and `skipped` lines; the header, the `FAILED`
+lines, the failure section, and the tally stay. `--test-no-fork` captures nothing, so
+use it to see a passing test's output.
 
 ### Sharding for CI
 
@@ -186,7 +202,7 @@ The CI suite runs all tests under `SC_LEAK_CHECK=fatal`. Leak-freedom is enforce
 construction, not by audit.
 
 ```sh
-SC_LEAK_CHECK=fatal super-c test
+SC_LEAK_CHECK=fatal super-c test --quiet
 ```
 
 ## Lint-Based Leak Detection

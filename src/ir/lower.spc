@@ -2534,7 +2534,7 @@ extend Lowerer {
     }
 
     // Whether identifier node `id` spells `name`.
-    fn node_name_eq(self: &Self, id: NodeId, name: str) bool {
+    const fn node_name_eq(self: &Self, id: NodeId, name: str) bool {
         let sp = self.f.node(id).as_data.name.text;
         if sp.end <= sp.start {
             return false;
