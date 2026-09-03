@@ -3422,6 +3422,38 @@ extend Lowerer {
     fn apply_adjust(self: &mut Self, id: NodeId, base: ir::OperandId) ir::OperandId {
         let sp = self.f.node(id).span;
         let mut op = base;
+        // A deref coercion recorded on a non-place expression (a `&W` value meeting a `&Target`
+        // parameter): members and `*x` consume their chains in place lowering; every other node
+        // applies the recorded hops to the lowered reference here, or the C would cast `W*` to
+        // `Target*` and read the wrong storage.
+        {
+            let nk = self.f.node(id).kind;
+            let star = nk == NodeKind::NODE_UNARY && self.f.node(id).as_data.unary.op == tt::TokenType::Star;
+            if nk != NodeKind::NODE_MEMBER && !star {
+                let du = self.f.derefs(id);
+                if du != null {
+                    let steps = unsafe du.n;
+                    for s in 0..steps {
+                        let m = unsafe du.method[s as usize];
+                        if m.node == NODE_NONE {
+                            continue; // a raw pointer/reference hop changes no representation
+                        }
+                        let rt = unsafe du.recv[s as usize];
+                        let mut rt2 = self.deref_ret_ty(m, rt);
+                        if rt2 == TYPE_NONE {
+                            rt2 = rt;
+                        }
+                        let start = self.body.oper_pool.len() as u32;
+                        self.body.oper_pool.push(op);
+                        let res = self.emit_call(m, ir::IR_NONE, start, 1, 0, 0, rt2, sp);
+                        if res == ir::IR_NONE {
+                            return ir::IR_NONE;
+                        }
+                        op = res;
+                    }
+                }
+            }
+        }
         let co = self.f.coercion(id);
         if co != null && self.f.wide_lit(id) != null {
             // a wide literal already CARRIES the target-width limbs: the widening `from` shim
@@ -3871,11 +3903,29 @@ extend Lowerer {
             if rk == ir::RV_REF && ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_REFERENCE && self.f.ty(ty).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
                 self.note_mut_bind(d.operand);
             }
-            let t = self.temp(ty, sp);
+            // A deref-coerced borrow: the node's checked type is already the coercion TARGET, but
+            // the borrow itself references the operand place; apply_adjust's recorded hops produce
+            // the target from it. Typing the temp from the node would hand the hop's `deref` call a
+            // receiver labeled with the wrong C type.
+            let mut bty = ty;
+            if ty != TYPE_NONE && self.f.derefs(id) != null && self.f.ty(ty).kind == TypeKind::TYPE_REFERENCE {
+                let q = self.f.ty(ty).qualifier;
+                let pty = self.body.places.at(pl as usize).ty;
+                let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+                bty = sa.intern_type(Ty { kind: TypeKind::TYPE_REFERENCE, qualifier: q, as_data: TyAs { elem: pty } });
+            }
+            let t = self.temp(bty, sp);
             let tp = self.place_of_local(t);
             self.assign(
                 tp,
-                ir::Rvalue { kind: rk, a: pl, b: mutable, c: 0, target: ty, item: DefId { module: 0, node: NODE_NONE } },
+                ir::Rvalue {
+                    kind: rk,
+                    a: pl,
+                    b: mutable,
+                    c: 0,
+                    target: bty,
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
                 sp,
             );
             return self.copy_op(tp);

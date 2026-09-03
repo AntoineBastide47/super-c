@@ -1,6 +1,6 @@
 // The self-hosted super-c driver. The first argument selects the mode: build/release (emit + link,
 // through build.toml when no root is given), fmt, lint, run/command/clean/test/bench (build.toml engine),
-// lsp, or a bare <root.spc> (compile + run, MODE_DEFAULT). Compiling modes share CommonOpts
+// lsp, or a bare <root.spc> (compile only, MODE_DEFAULT). Compiling modes share CommonOpts
 // (--const-eval-*, --target, --bootstrap-tags, --no-lint); manifest modes add BuildOpts
 // (--profile/--out-dir/--cstd/--jobs). A compiled root runs the global phases (resolve all ->
 // type-check all -> flush deferred static_asserts -> propagate instances -> emit all), writing a
@@ -657,9 +657,9 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
 }
 
 // CLI mode: `super-c <subcommand> <flags|args...>` -- the subcommand is always the first argument;
-// a non-keyword first argument means MODE_DEFAULT (compile + run a script).
+// a non-keyword first argument means MODE_DEFAULT (compile a script).
 enum Mode {
-    MODE_DEFAULT, // `super-c <root.spc>`: compile + run
+    MODE_DEFAULT, // `super-c <root.spc>`: compile (emit C; `--test` runs tests instead)
     MODE_BUILD, // `super-c build [<root.spc>] [-o out]`: emit + link a program (or build.toml)
     MODE_RELEASE, // `super-c release [<root.spc>] [-o out]`: emit + link a release profile program (or build.toml)
     MODE_FMT, // `super-c fmt [--check] [<path>...| -]` (no path: the whole project)
@@ -1176,7 +1176,7 @@ fn main(argv: Vector<str>) i32 {
             M"(super-c — a systems language that compiles to readable C
 
 USAGE:
-    super-c <file.spc> [options]      compile and run a script
+    super-c <file.spc> [options]      compile a script (emit C into build/)
     super-c <command> [options]
 
 COMMANDS:

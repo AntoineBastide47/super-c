@@ -283,10 +283,16 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
 
 // Cross-module reflection-bound obligations: discharged once every module is typechecked, so a
 // callee's obligations exist regardless of check order (module order follows imports, not calls).
-fn discharge_obligations(p: &mut loader::Package, n: usize) {
+fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool) {
     // Package-wide duplicate conformances first: a per-module concern, but only decidable once
-    // every module is typechecked, like the obligations below.
-    for i in 0..n {
+    // every module is typechecked, like the obligations below. The parallel checking path already
+    // ran this as its own level (dup_done); only the serial path sweeps here.
+    let dup_n = if dup_done {
+        0usize;
+    } else {
+        n;
+    };
+    for i in 0..dup_n {
         let pkg = p as *mut loader::Package;
         let m = &mut p.modules[i];
         let src = m.source.as_str().ptr() as *const char;
@@ -433,6 +439,7 @@ struct TcOut {
     pub fixable: u32,
     pub errors: diag::Errors,
     pub log: tc::TcMarkLog,
+    pub stats: tc::TcStats,
 }
 
 struct TcTask {
@@ -495,6 +502,7 @@ fn tc_run_one(t: TcTask) {
         o.warns = tck.errors.warns.len() as u32;
         o.errs = tck.errors.errors.len() as u32;
         o.fixable = tck.errors.fixable_errs;
+        o.stats = tck.stats;
         o.errors = replace(&mut tck.errors, diag::Errors::new());
     }
 }
@@ -503,7 +511,33 @@ fn tc_run_one(t: TcTask) {
 // engine's index-aware gate + retry-wait give each module the exact tc_done visibility the serial
 // sweep gave it, diagnostics buffer per task and print in module order, and the package-global
 // method marks replay through the real functions in module order.
-fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
+// One module's cross-module duplicate-conformance sweep, run as a parallel level after every
+// module is typechecked (the check reads other modules' frozen syntax, so it is decidable only
+// then, and it writes nothing shared -- errors buffer per module and log in module order).
+struct DupTask {
+    pub p: *mut loader::Package,
+    pub i: usize,
+    pub out: *mut diag::Errors,
+}
+
+unsafe extend DupTask as Send {}
+
+fn dup_run_one(t: DupTask) {
+    let pkg = t.p;
+    let p = unsafe &mut *t.p;
+    let m = &mut p.modules[t.i];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let mut tck = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    tck.check_cross_module_dup_conformances();
+    if tck.has_errors() {
+        tck.errors.finalize(str::from_raw(src as *const u8, len), unsafe (&*t.p).modules[t.i].file.as_str());
+        let o = unsafe &mut *t.out;
+        *o = replace(&mut tck.errors, diag::Errors::new());
+    }
+}
+
+fn typecheck_all_par(p: &mut loader::Package, lint: bool, stats: *mut tc::TcStats) bool {
     let n = p.modules.len();
     p.ensure_index();
     for i in 0..n {
@@ -535,7 +569,15 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
     let mut outs = Vector::<TcOut>::with_capacity(n);
     for _ in 0..n {
         outs.push(
-            TcOut { ok: true, warns: 0, errs: 0, fixable: 0, errors: diag::Errors::new(), log: tc::TcMarkLog::new() },
+            TcOut {
+                ok: true,
+                warns: 0,
+                errs: 0,
+                fixable: 0,
+                errors: diag::Errors::new(),
+                log: tc::TcMarkLog::new(),
+                stats: tc::TcStats {},
+            },
         );
     }
     prt::set_stack_size(8usize << 20); // the checker's expression recursion outgrows the default task stack
@@ -654,6 +696,26 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
         }
         level += 1;
     }
+    // Duplicate-conformance level: independent per module, under the same freeze and ilock
+    // discipline as the checking levels. Replaces the serial per-module sweep in
+    // discharge_obligations for the parallel path.
+    let mut douts = Vector::<diag::Errors>::new();
+    for _ in 0..n {
+        douts.push(diag::Errors::new());
+    }
+    {
+        let wgd = psync::WaitGroup::new();
+        for i in 0..n {
+            wgd.add(1);
+            let t = DupTask { p: pp, i: i, out: douts.index_mut(i) };
+            let wgc = wgd.clone();
+            launch || {
+                dup_run_one(t);
+                wgc.done();
+            };
+        }
+        wgd.wait();
+    }
     p.tc_frontier = false;
     p.tc_wait = loader::loader_no_wait;
     p.tc_wait_ctx = null;
@@ -680,6 +742,9 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
         p.lint_warnings = p.lint_warnings + o.warns;
         p.lint_errs = p.lint_errs + o.errs;
         p.lint_fixable = p.lint_fixable + o.fixable;
+        if stats != null {
+            unsafe (&mut *stats).merge(&o.stats);
+        }
         // module-order replay of the package-global marks, through the real visibility checks
         let lg = &o.log;
         for k in 0..lg.kinds.len() {
@@ -696,6 +761,13 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
             }
         }
     }
+    for i in 0..n {
+        let de = douts.index_mut(i);
+        if de.errors.len() != 0 {
+            de.log();
+            ok = false;
+        }
+    }
     return ok;
 }
 
@@ -705,6 +777,7 @@ fn typecheck_module(
     lint: bool,
     fixes: *mut Vector<diag::LintFix>,
     ftexts: *mut Vector<String>,
+    stats: *mut tc::TcStats,
 ) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
@@ -713,6 +786,9 @@ fn typecheck_module(
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     t.check();
+    if stats != null {
+        unsafe (&mut *stats).merge(&t.stats);
+    }
     let had = t.has_errors();
     if had || fixes == null && t.errors.has_warnings() {
         t.log_errors();
@@ -792,6 +868,26 @@ fn ast_stats(p: &loader::Package) {
             unsafe stdio::fprintf(stdio::stderr(), "  kind %3zu: %llu\n".ptr() as *const char, k, counts[k]);
         }
     }
+}
+
+// Dev gate (SC_TC_STATS=1): package-total inference counters, printed after typechecking.
+// Off without the env var.
+fn tc_stats_print(s: &tc::TcStats) {
+    if stdlib::getenv("SC_TC_STATS") == null {
+        return;
+    }
+    eprint(
+        "tc-stats: unify={} conflicts={} len-binds={} generic-calls={} owner-infer={} bound-infer={} closure-expected={} iface-scans={} types-interned={}\n",
+        s.unify_calls,
+        s.unify_conflicts,
+        s.len_binds,
+        s.generic_calls,
+        s.owner_infer,
+        s.bound_infer,
+        s.closure_expected,
+        s.iface_scans,
+        s.types_interned,
+    );
 }
 
 fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) {
@@ -7654,7 +7750,7 @@ fn lint_package_i(
         } else {
             null;
         };
-        let ok = typecheck_module(p, i, sel, fx, ftexts);
+        let ok = typecheck_module(p, i, sel, fx, ftexts, null);
         p.ok = ok && p.ok;
     }
     if !p.ok {
@@ -7771,16 +7867,18 @@ fn run_package_i(
         eprint("phase resolve: {} ms\n", t9 - tp0);
         tp0 = t9;
     }
+    let mut tcs = tc::TcStats {};
     if p.jobs != 1 && n > 1 {
-        p.ok = typecheck_all_par(p, lint) && p.ok;
+        p.ok = typecheck_all_par(p, lint, &mut tcs) && p.ok;
     } else {
         for i in 0..n {
-            let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null);
+            let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null, &mut tcs);
             p.ok = ok && p.ok;
         }
     }
+    tc_stats_print(&tcs);
     if p.ok {
-        discharge_obligations(p, n);
+        discharge_obligations(p, n, p.jobs != 1 && n > 1);
     }
     if !p.ok {
         return 1;

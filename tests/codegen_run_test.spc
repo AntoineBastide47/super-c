@@ -336,6 +336,11 @@ fn deref_beyond_methods() {
         0,
     );
     h::expect_exit(
+        "mutation reaches through deref_mut: field assign, '&mut' borrow, '&mut W' coercion",
+        "struct P { pub v: i32 }\nfn bump(t: &mut P) { t.v += 1; }\nfn main() i32 {\n    let mut b = Box::<P>::new(P { v: 1 });\n    b.v = 5;\n    let r = &mut b.v;\n    *r += 1;\n    bump(&mut b);\n    return b.v - 7;\n}\n",
+        0,
+    );
+    h::expect_exit(
         "a method through Deref still resolves",
         "struct P { pub v: i32 }\nextend P { pub fn peek(self: &P) i32 { return self.v; } }\nfn main() i32 {\n    let b = Box::<P>::new(P { v: 5 });\n    return b.peek() - 5;\n}\n",
         0,

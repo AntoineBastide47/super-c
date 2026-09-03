@@ -263,7 +263,7 @@ jobs:
           set -eu
           bin="super-c${BINEXT:-}"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./$bin" test --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
 
       - name: Build the release binary
         if: matrix.artifact
@@ -435,7 +435,7 @@ jobs:
           diff -r /tmp/wasm-gen1 /tmp/wwasm/src/build
 
       - name: Run the test suite against the wasm compiler
-        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --test-shard=${{ matrix.test_shard }}
+        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }}
 
       - name: Package
         if: matrix.artifact

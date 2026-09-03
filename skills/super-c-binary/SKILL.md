@@ -20,16 +20,16 @@ of the workflow.
 
 ## Subcommands
 
-### Compile and run
+### Compile
 
 ```sh
-super-c app.spc              # compile + link + run (script mode; no -o here)
+super-c app.spc              # compile only: emit the build/ C tree (script mode)
 super-c build app.spc -o app # compile + link only, name the binary (default: a.out)
 ```
 
-A bare `.spc` argument compiles the file (and its transitive imports), emits a `build/`
-tree of `.h`/`.c` files, invokes cc, and runs the result. Script mode takes no `-o` —
-use `super-c build <file.spc> -o <name>` to keep a named binary. Single-file programs
+A bare `.spc` argument compiles the file (and its transitive imports) and emits a `build/`
+tree of `.h`/`.c` files. It links and runs nothing —
+use `super-c build <file.spc> -o <name>` to link a named binary, then run it yourself. Single-file programs
 emit plain C names; multi-module programs mangle symbols by module path.
 
 ### Build system (manifest-driven)
@@ -229,6 +229,7 @@ sanitizer frames dominate the samples.
 | `SC_LAYOUT` | Validate pool types against C layout invariants |
 | `SC_CEMIT` | Double-hash streaming emitter verification |
 | `SC_AST_STATS` | Print AST/node statistics |
+| `SC_TC_STATS` | Print package-total type-inference counters after typechecking |
 | `SC_CEMIT_TU` | Verbose per-TU emission |
 | `SC_CEMIT_STATS` | Per-phase wall times and const/reflect statistics |
 

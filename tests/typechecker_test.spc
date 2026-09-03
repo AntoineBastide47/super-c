@@ -1168,6 +1168,16 @@ fn deref() {
         "it has 'deref' but no 'deref_mut'",
     );
     h::expect_err_msg(
+        "deref without deref_mut cannot assign a reached field",
+        "struct Inner { pub k: i32 }\nstruct W { pub inner: Inner }\nextend W { pub fn deref(self: &W) &Inner { return &self.inner; } }\nfn main() i32 { let mut w = W { inner: Inner { k: 1 } }; w.k = 2; return w.k; }\n",
+        "cannot assign to this expression",
+    );
+    h::expect_err_msg(
+        "deref without deref_mut cannot lend a reached field as '&mut'",
+        "struct Inner { pub k: i32 }\nstruct W { pub inner: Inner }\nextend W { pub fn deref(self: &W) &Inner { return &self.inner; } }\nfn main() i32 { let mut w = W { inner: Inner { k: 1 } }; let r = &mut w.k; *r = 2; return w.k; }\n",
+        "cannot take '&mut'",
+    );
+    h::expect_err_msg(
         "cyclic deref chains are rejected",
         "struct A { pub x: i32 }\nstruct B { pub y: i32 }\nextend A { pub fn deref(self: &A) &B { unsafe { let p = null as *const B; return &*p; } } }\nextend B { pub fn deref(self: &B) &A { unsafe { let p = null as *const A; return &*p; } } }\nfn main() i32 { let a = A { x: 1 }; a.missing(); return 0; }\n",
         "cyclic deref chain",

@@ -28,6 +28,10 @@ enums, generics, closures, trait objects, slices, arrays, tuples, pointers, refe
 See [style.md](references/style.md) for naming conventions, file organization, comment
 rules, and the formatting contract.
 
+See [inference.md](references/inference.md) for the local type-inference rules: literal
+defaults, safe-conversion ranks, branch joins, generic-argument evidence, const generic
+solving, closures, and overload ambiguity.
+
 ## Bindings and Mutability
 
 Mutability is a property of the **binding**, not the type.

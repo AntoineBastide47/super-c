@@ -1963,6 +1963,28 @@ fn main() i32 {
 // @platform gates @c.source/@c.link: a windows-only extern block (backing header + link flag) must not
 // contribute its wrapper TU or -l flag on a non-windows build -- else every target links every OS's runtime
 // C. Regression guard for the extc gating fix.
+// usize/isize literal ranges follow the SELECTED target's pointer width, not the host's: a 64-bit
+// usize literal is legal for 64-bit targets and rejected for wasm32.
+@test
+fn usize_literal_range_follows_target() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(fn main() i32 {
+    let sentinel: usize = 0xFFFFFFFFFFFFFFFFusize;
+    let big: usize = 4294967296;
+    return ((sentinel & 1) + (big & 1) - 1) as i32;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok(), "a 64-bit host target accepts usize MAX literals");
+    let r2 = p.compile_flags("--target=wasm", "main.spc");
+    assert(r2.exit != 0, "wasm32 rejects 64-bit usize literals");
+    assert(r2.out_has("does not fit in its suffixed type"), "the suffixed literal names its diagnostic");
+    assert(r2.out_has("out of range"), "the expected-type literal names its diagnostic");
+}
+
 @test
 fn platform_gates_ext_c() {
     let p = cli::proj_new();

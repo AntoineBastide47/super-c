@@ -1139,6 +1139,10 @@ extend<T> ChunkPool<T> {
     }
 }
 
+// usize MAX on every target width: the cast wraps the u64 value at the target's pointer width, so
+// a 32-bit target gets 0xFFFFFFFF instead of a truncated always-false 64-bit literal.
+const SV_UNFROZEN: usize = 0xFFFFFFFFFFFFFFFFu64 as usize;
+
 /// Flat storage with a frontier-only overflow arena. Serial (unfrozen): a plain Vector -- one
 /// predicted compare of overhead. `freeze()` pins the base allocation (its capacity is the split
 /// point) so concurrent readers of PRE-EXISTING entries never see a realloc; growth past the pinned
@@ -1152,11 +1156,11 @@ pub struct SplitVec<T> {
 
 extend<T> SplitVec<T> {
     pub fn new() SplitVec<T> {
-        return SplitVec::<T> { base: Vector::<T>::new(), split: 0xFFFFFFFFFFFFFFFFusize, ovf: ChunkPool::<T>::new() };
+        return SplitVec::<T> { base: Vector::<T>::new(), split: SV_UNFROZEN, ovf: ChunkPool::<T>::new() };
     }
 
     pub fn len(self: &Self) usize {
-        if self.split == 0xFFFFFFFFFFFFFFFFusize {
+        if self.split == SV_UNFROZEN {
             return self.base.len();
         }
         return self.base.len() + self.ovf.len();
@@ -1185,7 +1189,7 @@ extend<T> SplitVec<T> {
     }
 
     pub fn push(self: &mut Self, v: T) {
-        if self.split == 0xFFFFFFFFFFFFFFFFusize || self.base.len() < self.split {
+        if self.split == SV_UNFROZEN || self.base.len() < self.split {
             self.base.push(v);
         } else {
             self.ovf.push(v);
@@ -1193,7 +1197,7 @@ extend<T> SplitVec<T> {
     }
 
     pub fn reserve(self: &mut Self, n: usize) {
-        if self.split == 0xFFFFFFFFFFFFFFFFusize {
+        if self.split == SV_UNFROZEN {
             self.base.reserve(n);
         }
     }
@@ -1211,7 +1215,7 @@ extend<T> SplitVec<T> {
     /// Pad so a run of `need` fits contiguously (base region: reserve exactly; frozen spill: keep
     /// the run inside one chunk) and return its start.
     pub fn run_start(self: &mut Self, need: usize, v: T) usize {
-        if self.split == 0xFFFFFFFFFFFFFFFFusize || self.base.len() + need <= self.split {
+        if self.split == SV_UNFROZEN || self.base.len() + need <= self.split {
             return self.base.len();
         }
         // straddling the split: pad the base to the pin, then place the run in the overflow
@@ -1231,7 +1235,7 @@ extend<T> SplitVec<T> {
 
     /// Fold the overflow back into the flat base (single-threaded; frontier pointers are dead).
     pub fn thaw(self: &mut Self) {
-        if self.split == 0xFFFFFFFFFFFFFFFFusize {
+        if self.split == SV_UNFROZEN {
             return;
         }
         // the frozen push path filled base exactly to the pin before spilling
@@ -1239,7 +1243,7 @@ extend<T> SplitVec<T> {
             self.base.push(*self.ovf.at(i));
         }
         self.ovf.clear();
-        self.split = 0xFFFFFFFFFFFFFFFFusize;
+        self.split = SV_UNFROZEN;
     }
 
     pub const fn retained(self: &Self) usize {
@@ -1249,7 +1253,7 @@ extend<T> SplitVec<T> {
     pub fn clear(self: &mut Self) {
         self.base.clear();
         self.ovf.clear();
-        self.split = 0xFFFFFFFFFFFFFFFFusize;
+        self.split = SV_UNFROZEN;
     }
 
     pub fn free(self: &mut Self) {
@@ -1905,6 +1909,19 @@ extend Ast {
             return null;
         }
         return self.deref_uses.at((idx - 1) as usize);
+    }
+
+    /// The auto-deref chain recorded at `node`, writable (a mutable place use patches method hops
+    /// to `deref_mut`), or null if none.
+    pub fn deref_use_mut(self: &mut Self, node: NodeId) *mut DerefUse {
+        if node as usize >= self.deref_at.len() {
+            return null;
+        }
+        let idx = self.deref_at[node as usize];
+        if idx == 0 {
+            return null;
+        }
+        return self.deref_uses.index_mut((idx - 1) as usize);
     }
 
     pub const fn at(self: &mut Self, id: NodeId) &mut Node {

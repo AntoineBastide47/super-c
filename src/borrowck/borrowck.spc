@@ -1254,11 +1254,11 @@ extend tc::TypeChecker {
         if span_is(self.source, name, "'static") {
             return REGION_STATIC;
         }
-        if self.current_fn == NODE_NONE {
+        if self.icx.current_fn == NODE_NONE {
             return REGION_NONE;
         }
         let a = self.cur_ast();
-        let lts = a.lifetimes_of(self.current_fn);
+        let lts = a.lifetimes_of(self.icx.current_fn);
         for i in 0..lts.len {
             let lp = unsafe a.list(lts)[i as usize];
             if spans_eq2(self.source, self.tc_lt_name(lp), self.source, name) {
@@ -2544,7 +2544,7 @@ extend tc::TypeChecker {
         self.nborrows = 0;
         self.scope_depth = 0;
         self.loop_depth = 0;
-        self.current_fn = id;
+        self.icx.current_fn = id;
         self.err_wm = self.errors.errors.len();
         // Lower first (the tape and the facts come from the lowerings), replay the tape (the same
         // helper calls the walk made, without traversing the expression tree), then analyze the
@@ -2599,7 +2599,7 @@ extend tc::TypeChecker {
         self.nborrows = 0;
         self.scope_depth = 0;
         self.loop_depth = 0;
-        self.current_fn = NODE_NONE;
+        self.icx.current_fn = NODE_NONE;
     }
 
     /// Replay the lowerer's event tape in place of the quiet walk: the same helper calls at the
@@ -2647,8 +2647,8 @@ extend tc::TypeChecker {
                 let bm = rep_bm(st);
                 self.bc_assign_post(node, bm);
             } else if k == ir::TP_RET_VAL {
-                if self.current_fn != NODE_NONE {
-                    let rl = a.at_const(self.current_fn).as_data.function.returns;
+                if self.icx.current_fn != NODE_NONE {
+                    let rl = a.at_const(self.icx.current_fn).as_data.function.returns;
                     if aux < rl.len {
                         self.tc_check_return_lifetime(node, unsafe a.list(rl)[aux as usize]);
                     }
@@ -2680,17 +2680,17 @@ extend tc::TypeChecker {
             } else if k == ir::TP_SLICE {
                 self.tc_slice_result_borrows(a.at_const(node).as_data.index.object, a.type_of(node));
             } else if k == ir::TP_CLOSURE {
-                if self.nclos < 8 {
-                    let cn = self.nclos;
-                    unsafe self.clos_stack[cn as usize] = node;
-                    self.nclos = cn + 1;
+                if self.icx.nclos < 8 {
+                    let cn = self.icx.nclos;
+                    unsafe self.icx.clos_stack[cn as usize] = node;
+                    self.icx.nclos = cn + 1;
                     for b2 in 0..bodies.len() {
                         if bodies.at(b2).body.owner.node == node {
                             self.bc_replay(bodies, b2, 0, bodies.at(b2).tape.len(), st);
                             break;
                         }
                     }
-                    self.nclos = self.nclos - 1;
+                    self.icx.nclos = self.icx.nclos - 1;
                     self.bc_closure_caps(node);
                 }
             } else if k == ir::TP_FLOW_SAVE {
@@ -2804,8 +2804,8 @@ extend tc::TypeChecker {
         let a = self.cur_ast();
         let values = a.at_const(id).as_data.return_stmt.values;
         let mut ret_list = NodeList { start: 0, len: 0 };
-        if self.current_fn != NODE_NONE {
-            ret_list = a.at_const(self.current_fn).as_data.function.returns;
+        if self.icx.current_fn != NODE_NONE {
+            ret_list = a.at_const(self.icx.current_fn).as_data.function.returns;
         }
         for i in 0..values.len {
             let vid = unsafe a.list(values)[i as usize];
@@ -3550,8 +3550,8 @@ extend tc::TypeChecker {
                 continue;
             }
             // capture-of-moved is IR-owned (CAT_C_CAP)
-            for f in 0..self.nclos {
-                if self.tc_capture_index(unsafe self.clos_stack[f as usize], cid) >= 0 {
+            for f in 0..self.icx.nclos {
+                if self.tc_capture_index(unsafe self.icx.clos_stack[f as usize], cid) >= 0 {
                     let sp = a.at_const(id).span;
                     self.errors.emit(
                         sp.start,

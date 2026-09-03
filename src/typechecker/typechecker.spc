@@ -13,9 +13,49 @@ import module::loader as loader;
 import pattern::pattern as pat;
 import ir::interp as iri;
 import ir::layout as lay;
+import typechecker::infer as inf;
 import utils::errors as diag;
 
 pub const TYPE_ALIAS_MAX_DEPTH: u32 = 64;
+/// Per-call inference operation budget: obligation processings one call may spend (plan 13.4).
+pub const TC_INFER_MAX_OPS: u32 = 1024;
+/// Candidates one call may weigh; the collector stops here and past it the call is an error.
+pub type Lits8 = Array<u8, 8>;
+pub const TC_MAX_CANDIDATES: usize = 8;
+
+/// One candidate's lexicographic score (plan 13.3): fewer safe conversions, then fewer reference
+/// adjustments, then fewer literal defaults, then fewer generic defaults, then more exact matches.
+struct CandScore {
+    pub viable: bool,
+    pub conv: i32,
+    pub radj: i32,
+    pub litd: i32,
+    pub gdef: i32,
+    pub exact: i32,
+}
+
+const fn score_better(a: &CandScore, b: &CandScore) bool {
+    if a.conv != b.conv {
+        return a.conv < b.conv;
+    }
+    if a.radj != b.radj {
+        return a.radj < b.radj;
+    }
+    if a.litd != b.litd {
+        return a.litd < b.litd;
+    }
+    if a.gdef != b.gdef {
+        return a.gdef < b.gdef;
+    }
+    return a.exact > b.exact;
+}
+
+const fn if_u32c(c: bool, a: u32, b: u32) u32 {
+    if c {
+        return a;
+    }
+    return b;
+}
 pub const BOUND_MAX_DEPTH: i32 = 8;
 pub const PLACE_MAX_STEPS: i32 = 16;
 pub const MATCH_MAX_VARIANTS: u32 = 256;
@@ -166,17 +206,47 @@ extend TcMarkLog {
     }
 }
 
+/// Inference-path counters over one module's check(), merged per package in module order and
+/// printed by the driver under SC_TC_STATS=1. `unify_conflicts` counts the silent first-binding
+/// drops: a later use whose type differs from an existing generic-parameter binding.
+pub struct TcStats {
+    pub unify_calls: u64,
+    pub unify_conflicts: u64,
+    pub len_binds: u64,
+    pub generic_calls: u64,
+    pub owner_infer: u64,
+    pub bound_infer: u64,
+    pub closure_expected: u64,
+    pub iface_scans: u64,
+    pub types_interned: u64,
+}
+
+extend TcStats {
+    pub fn merge(self: &mut Self, o: &TcStats) {
+        self.unify_calls += o.unify_calls;
+        self.unify_conflicts += o.unify_conflicts;
+        self.len_binds += o.len_binds;
+        self.generic_calls += o.generic_calls;
+        self.owner_infer += o.owner_infer;
+        self.bound_infer += o.bound_infer;
+        self.closure_expected += o.closure_expected;
+        self.iface_scans += o.iface_scans;
+        self.types_interned += o.types_interned;
+    }
+}
+
 pub struct TypeChecker<'a> {
     /// The module's Ast, mutated IN PLACE in its `Package.modules` slot (never moved out): package
     /// lookups that land back on this module read the live tree with no override indirection.
     pub ast: *mut Ast,
     pub source: str<'a>,
-    pub current_returns: NodeList,
     pub current_self: NodeId,
     pub current_extend: NodeId,
-    pub current_fn: NodeId,
-    pub clos_stack: [NodeId; 8],
-    pub nclos: u32,
+    /// The per-body mutable walk state (plan 1_type_inference phase 1): expected type, function
+    /// state, closures, returns, and unsafe state live here, isolated from the module-wide caches.
+    pub icx: inf::InferenceContext,
+    /// Read-only package boundary the adapters route lookups through.
+    pub db: inf::PackageTypeDb<'a>,
     pub package: *mut loader::Package,
     pub alias_depth: u32,
     pub ext_scope: Vector<ModuleId>,
@@ -186,7 +256,6 @@ pub struct TypeChecker<'a> {
     // interning (hence emitted C) is byte-identical.
     pub ext_items: Vector<Vector<NodeId>>,
     pub ext_items_built: Vector<bool>,
-    pub expected: TypeId,
     pub moved: [NodeId; 1024],
     pub nmoved: u32,
     // Partial (field/index) moves: the moved sub-place NODES (`p.a`, `arr[0]`). A whole binding uses the
@@ -208,21 +277,12 @@ pub struct TypeChecker<'a> {
     pub scope_depth: u32,
     pub loop_depth: u32,
     pub fields_depth: u32, // nesting inside `inline for .. in fields(..)` bodies (closures rejected there)
-    pub proj_obj_ok: bool, // one-shot: the identifier being checked is a member's object
     pub binding_depth: Map<u32, u32>,
-    pub closure_depth: u32, // nesting of closure bodies being checked
     pub proj_cbase: Map<u32, u32>, // fields-loop node -> closure_depth at its entry (capture guard)
     pub defer_stack: [NodeId; 256],
     pub defer_depth: [u32; 256],
     pub ndefers: u32,
     pub in_loop_recheck: bool,
-    pub place_use: bool,
-    pub addr_ctx: bool,
-    pub mret_call: NodeId,
-    pub mret_types: [TypeId; 8],
-    pub mret_n: u8,
-    pub mret_total: u32,
-    pub unsafe_depth: u32,
     // ---- region inference state (per function) ----
     // Next RegionVid to hand out. REGION_STATIC (0) is reserved; the current function's declared
     // lifetimes take the ids after it (universal -- they outlive the whole body), and every other
@@ -263,7 +323,6 @@ pub struct TypeChecker<'a> {
     // does not conflict with the shared borrows its own arguments produced (`v.push(v.len())`,
     // `self.m(self.field.as_str())`). 0xFFFFFFFF = not in a receiver check.
     pub tc_twophase_wm: u32,
-    pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that actually required it (lint)
     pub len_reported: Vector<u64>, // array-length nodes already diagnosed ((module<<32)|node; resolve_type revisits)
     pub lint: bool,
     /// Parallel frontier: non-null routes the package-global method marks into a per-task log.
@@ -319,11 +378,6 @@ pub struct TypeChecker<'a> {
     /// The receiver type the last aggregate lookup resolved on: what tc_mark_method_used pairs a method
     /// with, since the lookups themselves are keyed by the receiver's DECL and never carry its arguments.
     pub mark_recv: TypeId,
-    /// The argument list of the call whose callee is being resolved, so overload selection can look at
-    /// what is being passed. Empty outside that window -- a bare member access has no arguments.
-    pub call_args: NodeList,
-    /// Guards tc_coerce_from against re-entering itself through the oracle it hangs off.
-    pub coerce_depth: i32,
     // TC-12: tc_peel_target memo, (module<<32|node) -> packed DefId. The first peel does the
     // named_type_of interning; repeats re-derived the same DefId from frozen inputs.
     pub peel_memo: Map<u64, u64>,
@@ -352,6 +406,7 @@ pub struct TypeChecker<'a> {
     pub ph_result: loader::LookupHit,
     pub ph_uint: loader::LookupHit, // the prelude's UInt/Int: what admits a wide integer literal
     pub ph_int: loader::LookupHit,
+    pub stats: TcStats,
 }
 
 // Takes the package pointer as usize: a *mut Package value is move-tracked (Package is Free).
@@ -428,7 +483,17 @@ const fn bt_is_complex(b: BuiltinType) bool {
     return b == BuiltinType::BT_C32 || b == BuiltinType::BT_C64;
 }
 
-const fn bt_int_max(b: BuiltinType) u64 {
+/// Largest positive value of builtin `b` (0 = unbounded in a u64 carrier). `ptr32` narrows
+/// usize/isize to the 32-bit target's pointer width.
+const fn bt_int_max(b: BuiltinType, ptr32: bool) u64 {
+    if ptr32 {
+        if b == BuiltinType::BT_USIZE {
+            return 4294967295u64;
+        }
+        if b == BuiltinType::BT_ISIZE {
+            return 2147483647u64;
+        }
+    }
     if b == BuiltinType::BT_I8 {
         return 127u64;
     }
@@ -453,8 +518,8 @@ const fn bt_int_max(b: BuiltinType) u64 {
     return 0u64; // u64/usize
 }
 
-const fn tc_lit_in_range(b: BuiltinType, mag: u64, neg: bool) bool {
-    let mx = bt_int_max(b);
+const fn tc_lit_in_range(b: BuiltinType, mag: u64, neg: bool, ptr32: bool) bool {
+    let mx = bt_int_max(b, ptr32);
     if neg {
         let sgn = b == BuiltinType::BT_I8 || b == BuiltinType::BT_I16 || b == BuiltinType::BT_I32 || b == BuiltinType::BT_I64 || b == BuiltinType::BT_ISIZE;
         return sgn && (mx == 0 || mag <= mx + 1);
@@ -488,6 +553,33 @@ const fn bt_widens(from: BuiltinType, to: BuiltinType) bool {
     return ts && tw > fw;
 }
 
+// Type-level safe-conversion oracle for the generic-argument join: identity, the integer widening
+// lattice, f32 -> f64, `&mut T` -> `&T`, and never -> anything. Deliberately narrower than
+// `compatible`: an unmodeled conversion makes the join fall back to the first bound, which is the
+// pre-rewrite result.
+fn it_conv_join(a: *mut Ast, from: TypeId, to: TypeId) bool {
+    if from == to {
+        return true;
+    }
+    if from == TYPE_NONE || to == TYPE_NONE {
+        return false;
+    }
+    let f = *unsafe (&*a).type_at(from);
+    let t = *unsafe (&*a).type_at(to);
+    if f.kind == TypeKind::TYPE_NEVER {
+        return true;
+    }
+    if f.kind == TypeKind::TYPE_BUILTIN && t.kind == TypeKind::TYPE_BUILTIN {
+        return bt_widens(f.as_data.builtin, t.as_data.builtin);
+    }
+    if f.kind == TypeKind::TYPE_REFERENCE && t.kind == TypeKind::TYPE_REFERENCE {
+        let fm = f.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+        let ts = t.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
+        return fm && ts && f.as_data.elem == t.as_data.elem;
+    }
+    return false;
+}
+
 // Shared integer-literal base-prefix detection: returns (base, prefix chars consumed).
 const fn lit_base_prefix(p: *const u8, len: usize) (u64, usize) {
     if len >= 2 && unsafe p[0] == b'0' {
@@ -516,21 +608,19 @@ extend TypeChecker {
     /// Ownership: borrows `ast` (the module keeps it); `package` is a borrowed raw pointer (may be null).
     pub fn new(ast: *mut Ast, source: str, package: *mut loader::Package) TypeChecker {
         let pkg = package as usize; // read the address before the literal's `package:` field moves it
-        return TypeChecker {
+        let mut t = TypeChecker {
             ast: ast,
             source: source,
-            current_returns: NodeList { start: 0, len: 0 },
             current_self: NODE_NONE,
             current_extend: NODE_NONE,
-            current_fn: NODE_NONE,
-            nclos: 0,
+            icx: inf::InferenceContext::new(),
+            db: inf::PackageTypeDb { ast: ast, package: package, source: source },
             package: package,
             alias_depth: 0,
             ext_scope: Vector::<ModuleId>::new(),
             n_ext_scope: -1,
             ext_items: Vector::<Vector<NodeId>>::new(),
             ext_items_built: Vector::<bool>::new(),
-            expected: TYPE_NONE,
             nmoved: 0,
             nmoved_places: 0,
             nuninit: 0,
@@ -540,18 +630,10 @@ extend TypeChecker {
             scope_depth: 0,
             loop_depth: 0,
             fields_depth: 0,
-            proj_obj_ok: false,
             binding_depth: Map::<u32, u32>::new(),
-            closure_depth: 0,
             proj_cbase: Map::<u32, u32>::new(),
             ndefers: 0,
             in_loop_recheck: false,
-            place_use: false,
-            addr_ctx: false,
-            mret_call: NODE_NONE,
-            mret_n: 0,
-            mret_total: 0,
-            unsafe_depth: 0,
             region_next: 1,
             rv_pool: Vector::<u32>::new(),
             rv_of: Map::<u32, u64>::new(),
@@ -563,7 +645,6 @@ extend TypeChecker {
             outlives: Vector::<u64>::new(),
             err_wm: 0,
             tc_twophase_wm: 0xFFFFFFFF,
-            unsafe_used: 0,
             len_reported: Vector::<u64>::new(),
             lint: false,
             mark_log: null,
@@ -592,8 +673,6 @@ extend TypeChecker {
             method_all_memo: Map::<MQKey, u64>::new(),
             method_all_pool: Vector::<DefId>::new(),
             mark_recv: TYPE_NONE,
-            call_args: NodeList { start: 0, len: 0 },
-            coerce_depth: 0,
             peel_memo: Map::<u64, u64>::new(),
             lower_memo: Map::<u64, TypeId>::new(),
             carries_memo: Map::<u64, u8>::new(),
@@ -610,7 +689,10 @@ extend TypeChecker {
             ph_result: ph_lookup(pkg, "Result"),
             ph_uint: ph_lookup(pkg, "UInt"),
             ph_int: ph_lookup(pkg, "Int"),
+            stats: TcStats {},
         };
+        t.icx.sv.ast = ast;
+        return t;
     }
 
     // ---- ast / source access (raw pointers) ----
@@ -623,25 +705,23 @@ extend TypeChecker {
         return unsafe self.cur_ast().module;
     }
 
+    /// True when the selected target's pointers are 32-bit: usize/isize literal ranges narrow.
+    const fn tc_ptr32(self: &Self) bool {
+        if self.package == null {
+            return false;
+        }
+        return lay::target_for(unsafe self.package.arch).ptr == 4;
+    }
+
     @c.always_inline
     pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
-        if self.package != null && m != self.cur_module() {
-            // Asts live in place in the module table, so the slot IS the live tree.
-            return unsafe &mut self.package.modules[m as usize].ast;
-        }
-        return self.ast;
+        return self.db.mod_ast(m);
     }
     pub const fn mod_src(self: &Self, m: ModuleId) str {
-        if self.package != null && m != self.cur_module() {
-            return unsafe self.package.modules[m as usize].source.as_str();
-        }
-        return self.source;
+        return self.db.mod_src(m);
     }
     pub const fn pkg_count(self: &Self) usize {
-        if self.package == null {
-            return 0;
-        }
-        return unsafe self.package.modules.len();
+        return self.db.pkg_count();
     }
     const fn cir(self: &Self) *mut iri::Interp {
         if self.package == null {
@@ -815,7 +895,7 @@ extend TypeChecker {
         return false;
     }
     fn tc_in_test_fn(self: &Self) bool {
-        return self.current_fn != NODE_NONE && self.tc_is_test_fn(self.cur_module(), self.current_fn);
+        return self.icx.current_fn != NODE_NONE && self.tc_is_test_fn(self.cur_module(), self.icx.current_fn);
     }
     fn tc_check_test_ref(self: &mut Self, d: DefId, sp: tok::Span) {
         if d.node == NODE_NONE || !self.tc_is_test_fn(d.module, d.node) || self.tc_in_test_fn() {
@@ -930,8 +1010,8 @@ extend TypeChecker {
     // An operation that requires 'unsafe': counts against the innermost active marker (for the
     // unnecessary-unsafe lint) and reports whether the requirement is unmet.
     const fn tc_needs_unsafe(self: &mut Self) bool {
-        self.unsafe_used = self.unsafe_used + 1;
-        return self.unsafe_depth == 0;
+        self.icx.unsafe_used = self.icx.unsafe_used + 1;
+        return self.icx.unsafe_depth == 0;
     }
 
     // Const-fold `nid` to an integer via the always-on interpreter. False when it isn't a
@@ -1109,8 +1189,8 @@ extend TypeChecker {
                 return bid;
             }
         }
-        if self.current_fn != NODE_NONE && (self.package == null || m == self.cur_module()) {
-            let wc = self.cur_ast().at_const(self.current_fn).as_data.function.where_clause;
+        if self.icx.current_fn != NODE_NONE && (self.package == null || m == self.cur_module()) {
+            let wc = self.cur_ast().at_const(self.icx.current_fn).as_data.function.where_clause;
             for w in 0..wc.len {
                 let wid = unsafe self.cur_ast().list(wc)[w as usize];
                 let wp = self.cur_ast().at_const(wid).as_data.where_predicate;
@@ -1283,21 +1363,38 @@ extend TypeChecker {
         if params.len as i32 != en || en > 4 || rets.len > 1 {
             return false;
         }
-        // infer the rest from the wanted signature, parameters then return
+        // Probe session: infer the rest from the wanted signature, parameters then return.
+        let mark = self.icx.sv.probe_begin();
+        for i in 0..g {
+            let pgid = unsafe fa.list(gens)[i as usize];
+            let is_c9 = fa.at_const(pgid).as_data.generic_param.is_const;
+            let _ = self.icx.sv.map_param(DefId { module: d.module, node: pgid }, is_c9, node);
+            if ga[i as usize] != TYPE_NONE {
+                self.icx.sv.s_explicit(mark.base + i as u32, ga[i as usize]);
+            }
+        }
         for i in 0..en {
             let pid = unsafe fa.list(params)[i as usize];
-            self.unify_infer(self.decl_type_in(d.module, pid), ep[i as usize], &gp[0], &mut ga[0], g);
+            self.tc_infer_ev(self.decl_type_in(d.module, pid), ep[i as usize], node, false);
         }
         if rets.len == 1 {
             let r0 = unsafe fa.list(rets)[0];
             let rn = self.mod_ast(d.module).at_const(r0);
             let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
-            self.unify_infer(self.lower_type_in(d.module, tn), er, &gp[0], &mut ga[0], g);
+            self.tc_infer_ev(self.lower_type_in(d.module, tn), er, node, false);
         }
+        let mut all9 = true;
         for i in 0..g {
             if ga[i as usize] == TYPE_NONE {
-                return false;
+                ga[i as usize] = self.icx.sv.s_resolve(mark.base + i as u32, it_conv_join);
             }
+            if ga[i as usize] == TYPE_NONE {
+                all9 = false;
+            }
+        }
+        self.icx.sv.probe_end(&mark);
+        if !all9 {
+            return false;
         }
         // the substituted signature must be exactly what was asked for
         for i in 0..en {
@@ -2042,17 +2139,29 @@ extend TypeChecker {
     // so it is read from the parameter's type NODE against the argument's concrete array type. Without it
     // the call inferred nothing: the instance emitted as `f__v` with a bare `N` left in the C, and only an
     // explicit `f::<3>(..)` worked.
-    fn infer_const_len(
-        self: &mut Self,
-        m: ModuleId,
-        tn: NodeId,
-        arg_ty: TypeId,
-        arg_node: NodeId,
-        params: *const DefId,
-        bound: *mut TypeId,
-        n: i32,
-        depth: u32,
-    ) {
+    /// Solve a single-unknown, undivided linear const form against an exact value (plan 10.5).
+    /// Exact integer division gives the one solution; a remainder or an unmapped unknown leaves the
+    /// parameter unresolved, which the call reports. Conflicting solved values are conflicts.
+    fn tc_lin_solve_ev(self: &mut Self, l: &ConstLin, v: i64, node: NodeId) {
+        if l.n != 1 || l.div_of() != 1 {
+            return; // multi-variable, divided, or constant form: never solved here
+        }
+        let c = l.c[0];
+        if c == 0 {
+            return;
+        }
+        let slot = self.icx.sv.slot_of(l.p[0]);
+        if slot < 0 {
+            return;
+        }
+        let num = v - l.k;
+        if num % c != 0 {
+            return;
+        }
+        self.icx.sv.s_cval(slot as u32, num / c, node);
+    }
+
+    fn infer_const_len(self: &mut Self, m: ModuleId, tn: NodeId, arg_ty: TypeId, arg_node: NodeId, depth: u32) {
         if tn == NODE_NONE || arg_ty == TYPE_NONE || depth > 8 {
             return;
         }
@@ -2061,16 +2170,7 @@ extend TypeChecker {
         let at = *self.type_at(arg_ty);
         if nk == NodeKind::NODE_POINTER_TYPE || nk == NodeKind::NODE_REFERENCE_TYPE {
             if at.kind == TypeKind::TYPE_POINTER || at.kind == TypeKind::TYPE_REFERENCE {
-                self.infer_const_len(
-                    m,
-                    a.at_const(tn).as_data.indirect_type.ty,
-                    at.as_data.elem,
-                    NODE_NONE,
-                    params,
-                    bound,
-                    n,
-                    depth + 1,
-                );
+                self.infer_const_len(m, a.at_const(tn).as_data.indirect_type.ty, at.as_data.elem, NODE_NONE, depth + 1);
             }
             return;
         }
@@ -2089,58 +2189,81 @@ extend TypeChecker {
                 }
             }
             let d = a.resolution_def(ar.length);
-            for i in 0..n {
-                if unsafe params[i as usize].module == d.module && unsafe params[i as usize].node == d.node && unsafe bound[i as usize] == TYPE_NONE {
-                    unsafe bound[i as usize] = self.cur_ast().const_value(alen);
-                    break;
+            let slot = self.icx.sv.slot_of(d);
+            if slot >= 0 {
+                self.icx.sv.s_cval(slot as u32, alen, arg_node);
+                self.stats.len_binds += 1;
+            }
+        } else if ar.length != NODE_NONE {
+            // A written length expression (`[T; N * 2]`): solve its linear form against the
+            // argument's exact length (plan section 10.5).
+            let mut alen2 = at.as_data.arr.len;
+            if alen2 == 0 && arg_node != NODE_NONE && self.cur_ast().at_const(arg_node).kind == NodeKind::NODE_ARRAY_LITERAL {
+                let al2 = self.cur_ast().at_const(arg_node).as_data.array_literal;
+                if !al2.repeat {
+                    alen2 = al2.elements.len;
                 }
             }
+            let mut lf = ConstLin { k: 0, n: 0 };
+            if self.tc_lin(m, ar.length, null, null, 0, &mut lf, 0) {
+                self.tc_lin_solve_ev(&lf, alen2, arg_node);
+                self.stats.len_binds += 1;
+            }
         }
-        self.infer_const_len(m, ar.element, at.as_data.arr.elem, NODE_NONE, params, bound, n, depth + 1);
+        self.infer_const_len(m, ar.element, at.as_data.arr.elem, NODE_NONE, depth + 1);
     }
 
-    fn unify_infer(self: &mut Self, param_ty: TypeId, arg_ty: TypeId, params: *const DefId, bound: *mut TypeId, n: i32) {
+    /// Session-driven evidence walk (plan phase 2): replaces the removed `unify_infer`: same structural walk, but a
+    /// mapped generic-parameter leaf feeds its solver variable instead of a first-binding array.
+    /// A top-level parameter position records a directional bound (a safe conversion is allowed
+    /// there); every nested position is invariant evidence.
+    fn tc_infer_ev(self: &mut Self, param_ty: TypeId, arg_ty: TypeId, node: NodeId, top: bool) {
         if param_ty == TYPE_NONE || arg_ty == TYPE_NONE {
             return;
         }
+        self.stats.unify_calls += 1;
         let p = *self.type_at(param_ty);
         // A parameter position written as a bare const-generic parameter reduces to the form `1 * P`,
-        // which binds P exactly as a type parameter would. Anything more (`{P * 2}` in a PARAMETER) would
-        // have to be solved for P, which this does not attempt.
+        // which binds P exactly as a type parameter would. Anything more (`{P * 2}` in a PARAMETER)
+        // would have to be solved for P, which this does not attempt.
         if p.kind == TypeKind::TYPE_CONST_EXPR {
             let l = *self.cur_ast().const_lin_at(p.as_data.inst);
             if l.k == 0 && l.n == 1 && l.c[0] == 1 && l.div_of() == 1 {
-                for i in 0..n {
-                    if unsafe params[i as usize].module == l.p[0].module && unsafe params[i as usize].node == l.p[0].node {
-                        if unsafe bound[i as usize] == TYPE_NONE {
-                            unsafe bound[i as usize] = arg_ty;
-                        }
-                        return;
-                    }
+                // Exact `1 * P`: a symbolic or exact argument binds the parameter directly.
+                let slot = self.icx.sv.slot_of(l.p[0]);
+                if slot >= 0 {
+                    self.icx.sv.s_eq(slot as u32, arg_ty, node);
+                }
+            } else {
+                // A single-unknown linear form solves against an exact argument value
+                // (plan section 10.5); division with a remainder leaves it unresolved.
+                let ay9 = *self.type_at(arg_ty);
+                if ay9.kind == TypeKind::TYPE_CONST {
+                    self.tc_lin_solve_ev(&l, ay9.as_data.value, node);
                 }
             }
             return;
         }
         if p.kind == TypeKind::TYPE_GENERIC {
-            for i in 0..n {
-                if unsafe params[i as usize].module == p.module && unsafe params[i as usize].node == p.as_data.decl {
-                    if unsafe bound[i as usize] == TYPE_NONE {
-                        unsafe bound[i as usize] = arg_ty;
-                    }
-                    return;
+            let slot = self.icx.sv.slot_of(DefId { module: p.module, node: p.as_data.decl });
+            if slot >= 0 {
+                if top {
+                    self.icx.sv.s_lb(slot as u32, arg_ty, node);
+                } else {
+                    self.icx.sv.s_eq(slot as u32, arg_ty, node);
                 }
             }
             return;
         }
         let aT = *self.type_at(arg_ty);
         if aT.kind == p.kind && (p.kind == TypeKind::TYPE_POINTER || p.kind == TypeKind::TYPE_REFERENCE || p.kind == TypeKind::TYPE_SLICE || p.kind == TypeKind::TYPE_ARRAY) {
-            self.unify_infer(p.as_data.elem, aT.as_data.elem, params, bound, n);
+            self.tc_infer_ev(p.as_data.elem, aT.as_data.elem, node, false);
         } else if p.kind == TypeKind::TYPE_INSTANCE && aT.kind == TypeKind::TYPE_INSTANCE {
             let pi = *self.cur_ast().instance(p.as_data.inst);
             let ai = *self.cur_ast().instance(aT.as_data.inst);
             if pi.decl == ai.decl && pi.module == ai.module && pi.n == ai.n {
                 for i in 0..pi.n {
-                    self.unify_infer(unsafe pi.args[i as usize], unsafe ai.args[i as usize], params, bound, n);
+                    self.tc_infer_ev(unsafe pi.args[i as usize], unsafe ai.args[i as usize], node, false);
                 }
             }
         } else if p.kind == TypeKind::TYPE_FUNCTION && aT.kind == TypeKind::TYPE_FUNCTION {
@@ -2152,11 +2275,62 @@ extend TypeChecker {
             let an = self.fn_sig(arg_ty, &mut ap[0], 4, &mut ar);
             if pn == an && pn <= 4 {
                 for i in 0..pn {
-                    self.unify_infer(pp[i as usize], ap[i as usize], params, bound, n);
+                    self.tc_infer_ev(pp[i as usize], ap[i as usize], node, false);
                 }
-                self.unify_infer(pr, ar, params, bound, n);
+                self.tc_infer_ev(pr, ar, node, false);
             }
         }
+    }
+
+    /// Report the const-evidence conflicts the active session recorded, once, at the call span.
+    @c.cold
+    fn tc_report_const_conflicts(self: &mut Self, sp: tok::Span) {
+        for ci in 0..self.icx.sv.cconflicts.len() {
+            let cf = *self.icx.sv.cconflicts.at(ci);
+            let oldy = *self.type_at(cf.old);
+            let newy = *self.type_at(cf.later);
+            self.stats.unify_conflicts += 1;
+            if oldy.kind == TypeKind::TYPE_CONST && newy.kind == TypeKind::TYPE_CONST {
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format(
+                        "conflicting const generic arguments: inferred both {} and {}",
+                        oldy.as_data.value,
+                        newy.as_data.value,
+                    ),
+                );
+            } else {
+                self.errors.emit(
+                    sp.start,
+                    sp.end - sp.start,
+                    format("conflicting const generic arguments for this call"),
+                );
+            }
+        }
+        self.icx.sv.cconflicts.clear();
+    }
+
+    @c.cold
+    fn tc_report_type_conflicts(self: &mut Self, sp: tok::Span) {
+        for ci in 0..self.icx.sv.type_conflicts.len() {
+            let cf = *self.icx.sv.type_conflicts.at(ci);
+            let mut first = Buf96 {};
+            let mut later = Buf96 {};
+            self.render_type(cf.first, &mut first[0], 96);
+            self.render_type(cf.later, &mut later[0], 96);
+            self.stats.unify_conflicts += 1;
+            self.errors.emit(
+                sp.start,
+                sp.end - sp.start,
+                format(
+                    "mismatched types: generic parameter was constrained to both '{}' and '{}'",
+                    diag::cstr(&first[0]),
+                    diag::cstr(&later[0]),
+                ),
+            );
+        }
+        self.icx.sv.type_conflicts.clear();
     }
 
     fn named_type_of(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
@@ -3664,7 +3838,7 @@ extend TypeChecker {
                     unsafe self.package.always_methods.insert(d.module as u64 << 32 | d.node as u64);
                 }
             } else {
-                let cf = self.current_fn;
+                let cf = self.icx.current_fn;
                 unsafe self.cur_ast().method_refs.push(MethodRef { owner: cf, recv: r, callee: d });
             }
         }
@@ -3679,7 +3853,7 @@ extend TypeChecker {
         } else if self.package.method_used_get(d) {
             return;
         }
-        let cf = self.current_fn;
+        let cf = self.icx.current_fn;
         if cf != NODE_NONE {
             let m = self.cur_module();
             let ext = self.enclosing_extend(m, cf);
@@ -3877,25 +4051,35 @@ extend TypeChecker {
         return nout;
     }
 
-    /// Would a parameter of type `pt` take a value of type `at`? Deliberately strict -- identity, or one
-    /// reference away from it. Overload selection only has to REJECT what a candidate plainly cannot
-    /// take; anything it cannot decide leaves the choice to the caller.
-    const fn tc_param_accepts(self: &mut Self, pt: TypeId, at: TypeId) bool {
-        if pt == TYPE_NONE || at == TYPE_NONE {
-            return true; // unknown on either side: this argument does not constrain the choice
+    /// The adaptability class of a simple unsuffixed literal argument: 1 = integer, 2 = float,
+    /// 0 = not a literal this peek understands (suffixed, based, or interpolated forms stay 0 and
+    /// leave the position unconstrained).
+    const fn tc_peek_lit_class(self: &Self, id: NodeId) u8 {
+        let a = self.cur_ast();
+        let n = *a.at_const(id);
+        if n.kind != NodeKind::NODE_LITERAL {
+            return 0;
         }
-        if pt == at {
-            return true;
+        let tt = n.as_data.literal.token_type;
+        if tt != TokenType::IntegerLiteral && tt != TokenType::FloatLiteral {
+            return 0;
         }
-        let p = *self.type_at(pt);
-        let v = *self.type_at(at);
-        if p.kind == TypeKind::TYPE_REFERENCE && p.as_data.elem == at {
-            return true;
+        let sp = n.span;
+        let mut dot = false;
+        let mut i = sp.start as usize;
+        while i < sp.end as usize {
+            let ch = self.source[i];
+            if ch == b'.' {
+                dot = true;
+            } else if !(ch >= b'0' && ch <= b'9' || ch == b'_') {
+                return 0; // a suffix, base prefix, or exponent: the literal's type is already pinned
+            }
+            i += 1;
         }
-        if v.kind == TypeKind::TYPE_REFERENCE && v.as_data.elem == pt {
-            return true;
+        if tt == TokenType::FloatLiteral || dot {
+            return 2;
         }
-        return p.kind == TypeKind::TYPE_REFERENCE && v.kind == TypeKind::TYPE_REFERENCE && p.as_data.elem == v.as_data.elem;
+        return 1;
     }
 
     /// The type of an argument WITHOUT checking it. Overload selection runs before a call's arguments are
@@ -3934,10 +4118,11 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    /// Choose among same-named methods by what their PARAMETERS accept. The `want`-directed pick below
-    /// separates candidates by their result, which cannot tell two conformances apart when they differ
-    /// only in their right operand (`as Mul` and `as Mul<Vec3>`). Returns `first` unless exactly one
-    /// candidate fits, so an undecidable case behaves exactly as before.
+    /// Choose among same-named methods by what their PARAMETERS accept, under the documented
+    /// lexicographic score (plan section 13.3): viability first, then fewer reference adjustments,
+    /// then more exact parameter matches. A tie between distinct viable candidates whose score is
+    /// fully informed (every argument type known) is an ambiguity error. Source order never breaks
+    /// a tie.
     fn tc_pick_by_args(
         self: &mut Self,
         m: ModuleId,
@@ -3947,6 +4132,7 @@ extend TypeChecker {
         recv: TypeId,
         first: DefId,
         args: *const TypeId,
+        lits: *const u8,
         nargs: i32,
     ) DefId {
         let mut cands = Defs8 {};
@@ -3954,8 +4140,14 @@ extend TypeChecker {
         if n < 2 {
             return first;
         }
+        if n as usize >= TC_MAX_CANDIDATES {
+            self.err_candidate_budget(name, lit);
+            return first;
+        }
         let mut best = DefId { module: 0, node: NODE_NONE };
-        let mut nbest: i32 = 0;
+        let mut best2 = DefId { module: 0, node: NODE_NONE };
+        let mut bs = CandScore {};
+        let mut have = false;
         for i in 0..n {
             let c = cands[i as usize];
             let np = self.mod_ast(c.module).at_const(c.node).as_data.function.params.len as i32;
@@ -3965,25 +4157,189 @@ extend TypeChecker {
             if skip != 0 && skip != 1 {
                 continue;
             }
-            let mut ok = true;
-            for j in 0..nargs {
-                if !self.tc_param_accepts(self.tc_method_param(recv, c, j + skip), unsafe args[j as usize]) {
-                    ok = false;
-                }
+            let sc = self.tc_score_candidate(recv, c, skip, args, lits, nargs);
+            if !sc.viable {
+                continue;
             }
-            if ok {
-                if nbest == 0 {
-                    best = c;
-                }
-                nbest = nbest + 1;
+            if !have || score_better(&sc, &bs) {
+                best = c;
+                best2 = DefId { module: 0, node: NODE_NONE };
+                bs = sc;
+                have = true;
+            } else if !score_better(&bs, &sc) && (c.module != best.module || c.node != best.node) {
+                best2 = c;
             }
         }
-        if nbest == 1 && best.node != NODE_NONE {
+        if have && best2.node != NODE_NONE {
+            self.err_ambiguous_candidates(name, lit, best, best2);
+            return first;
+        }
+        if have && best.node != NODE_NONE {
             self.mark_recv = recv;
             self.tc_mark_method_used(best);
             return best;
         }
         return first;
+    }
+
+    /// Score one candidate against the peeked argument information (plan section 13.3): safe
+    /// conversions, reference adjustments, literal defaults, generic defaults, exact matches. A
+    /// generic candidate runs a solver probe: its own parameters take evidence from the known
+    /// arguments and the score is computed against the substituted signature; the probe rolls back.
+    fn tc_score_candidate(
+        self: &mut Self,
+        recv: TypeId,
+        c: DefId,
+        skip: i32,
+        args: *const TypeId,
+        lits: *const u8,
+        nargs: i32,
+    ) CandScore {
+        let ca = self.mod_ast(c.module);
+        let gens = ca.at_const(c.node).as_data.function.generics;
+        let g = if_u32c(gens.len <= 8, gens.len, 8) as i32;
+        let mut sc = CandScore { viable: true };
+        let mut prm = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if g > 0 {
+            let mark = self.icx.sv.probe_begin();
+            for k in 0..g {
+                let gid = unsafe ca.list(gens)[k as usize];
+                let _ = self.icx.sv.map_param(
+                    DefId { module: c.module, node: gid },
+                    ca.at_const(gid).as_data.generic_param.is_const,
+                    c.node,
+                );
+            }
+            for j in 0..nargs {
+                let at = unsafe args[j as usize];
+                if at != TYPE_NONE {
+                    let pt0 = self.tc_method_param(recv, c, j + skip);
+                    self.tc_infer_ev(pt0, at, NODE_NONE, true);
+                }
+            }
+            for k in 0..g {
+                let gid = unsafe ca.list(gens)[k as usize];
+                prm[k as usize] = DefId { module: c.module, node: gid };
+                ga[k as usize] = self.icx.sv.s_resolve(mark.base + k as u32, it_conv_join);
+                if ga[k as usize] == TYPE_NONE {
+                    sc.gdef += 1; // an unresolved own parameter: worse than one the call pins
+                }
+                gn += 1;
+            }
+            self.icx.sv.probe_end(&mark);
+        }
+        for j in 0..nargs {
+            let mut pt = self.tc_method_param(recv, c, j + skip);
+            if gn > 0 && pt != TYPE_NONE {
+                pt = self.subst_type(pt, &prm[0], &ga[0], gn);
+            }
+            self.tc_score_param(&mut sc, pt, unsafe args[j as usize], unsafe lits[j as usize]);
+        }
+        return sc;
+    }
+
+    /// One parameter position's score contribution.
+    fn tc_score_param(self: &mut Self, sc: &mut CandScore, pt: TypeId, at: TypeId, lc: u8) {
+        if pt == TYPE_NONE || self.tc_infer_ty_open(pt) {
+            return; // unknown parameter side: this position does not constrain the choice
+        }
+        if at != TYPE_NONE {
+            if pt == at {
+                sc.exact += 1;
+                return;
+            }
+            let p = *self.type_at(pt);
+            let v = *self.type_at(at);
+            if p.kind == TypeKind::TYPE_REFERENCE && p.as_data.elem == at {
+                sc.radj += 1;
+                return;
+            }
+            if v.kind == TypeKind::TYPE_REFERENCE && v.as_data.elem == pt {
+                sc.radj += 1;
+                return;
+            }
+            if p.kind == TypeKind::TYPE_REFERENCE && v.kind == TypeKind::TYPE_REFERENCE && p.as_data.elem == v.as_data.elem {
+                sc.radj += 1;
+                return;
+            }
+            if it_conv_join(self.cur_ast(), at, pt) {
+                sc.conv += 1;
+                return;
+            }
+            sc.viable = false;
+            return;
+        }
+        if lc == 1 {
+            // An unsuffixed integer literal: any integer parameter takes it by adaptation; the
+            // default type is the exact match (plan 10.4), and a float parameter is a defaulted use.
+            let p = *self.type_at(pt);
+            if p.kind == TypeKind::TYPE_BUILTIN && bt_is_int(p.as_data.builtin) {
+                if p.as_data.builtin == BuiltinType::BT_I32 {
+                    sc.exact += 1;
+                } else {
+                    sc.litd += 1;
+                }
+                return;
+            }
+            if p.kind == TypeKind::TYPE_BUILTIN && (bt_is_float(p.as_data.builtin) || bt_is_complex(p.as_data.builtin)) {
+                sc.litd += 1;
+                return;
+            }
+            sc.viable = false;
+            return;
+        }
+        if lc == 2 {
+            let p = *self.type_at(pt);
+            if p.kind == TypeKind::TYPE_BUILTIN && (bt_is_float(p.as_data.builtin) || bt_is_complex(p.as_data.builtin)) {
+                if p.as_data.builtin == BuiltinType::BT_F32 {
+                    sc.exact += 1;
+                } else {
+                    sc.litd += 1;
+                }
+                return;
+            }
+            sc.viable = false;
+            return;
+        }
+        // No information for this argument: neutral.
+    }
+
+    /// Two candidates with equal best scores: an ambiguity error, never a source-order pick
+    /// (plan section 13.3).
+    @c.cold
+    fn err_ambiguous_candidates(self: &mut Self, name: tok::Span, lit: str, a1: DefId, a2: DefId) {
+        let nm = if lit.len() != 0 {
+            lit;
+        } else {
+            self.source.slice(name.start as usize, name.end as usize);
+        };
+        let sp1 = self.mod_ast(a1.module).at_const(a1.node).span;
+        let sp2 = self.mod_ast(a2.module).at_const(a2.node).span;
+        self.errors.emit(
+            name.start,
+            name.end - name.start,
+            format("ambiguous call: two candidates for '{}' fit equally well", nm),
+        );
+        self.errors.note(format("first candidate at offset {}, second at offset {}", sp1.start, sp2.start));
+        self.errors.note(format("qualify the call or adjust an argument so one candidate is a strictly better fit"));
+    }
+
+    /// The candidate list hit the fixed cap: dropped candidates could have scored better, so the
+    /// call must be disambiguated by hand (plan section 13.4).
+    @c.cold
+    fn err_candidate_budget(self: &mut Self, name: tok::Span, lit: str) {
+        let nm = if lit.len() != 0 {
+            lit;
+        } else {
+            self.source.slice(name.start as usize, name.end as usize);
+        };
+        self.errors.emit(
+            name.start,
+            name.end - name.start,
+            format("the candidate limit ({}) for '{}' was reached; qualify the call explicitly", TC_MAX_CANDIDATES, nm),
+        );
     }
 
     // Several extends may define the same method name through different interface conformances
@@ -4004,13 +4360,18 @@ extend TypeChecker {
             return first;
         }
         // What the call PASSES decides before what it expects back.
-        let ca = self.call_args;
+        let ca = self.icx.call_args;
         if ca.len != 0 && ca.len <= 8 {
             let mut at = Tys8 {};
+            let mut lc = Lits8 {};
             for i in 0..ca.len {
-                at[i as usize] = self.tc_peek_arg_type(unsafe self.cur_ast().list(ca)[i as usize]);
+                let aid9 = unsafe self.cur_ast().list(ca)[i as usize];
+                at[i as usize] = self.tc_peek_arg_type(aid9);
+                if at[i as usize] == TYPE_NONE {
+                    lc[i as usize] = self.tc_peek_lit_class(aid9);
+                }
             }
-            let byarg = self.tc_pick_by_args(m, decl, name, "", self.strip(recv), first, &at[0], ca.len as i32);
+            let byarg = self.tc_pick_by_args(m, decl, name, "", self.strip(recv), first, &at[0], &lc[0], ca.len as i32);
             if byarg.node != first.node || byarg.module != first.module {
                 return byarg;
             }
@@ -4101,6 +4462,7 @@ extend TypeChecker {
     }
 
     fn find_extend_as(self: &mut Self, tmod: ModuleId, tdecl: NodeId, iface: DefId, imod: *mut ModuleId) NodeId {
+        self.stats.iface_scans += 1;
         let ni = self.ext_scopes();
         let mut s: i32 = -1;
         while s < ni {
@@ -4306,8 +4668,8 @@ extend TypeChecker {
         let mut n: i32 = 0;
         let pa = self.mod_ast(pmod);
         self.add_bound_ifaces_full(pmod, pa.at_const(pdecl).as_data.generic_param.bounds, out, &mut n, cap);
-        if pmod == self.cur_module() && self.current_fn != NODE_NONE {
-            let wc = self.cur_ast().at_const(self.current_fn).as_data.function.where_clause;
+        if pmod == self.cur_module() && self.icx.current_fn != NODE_NONE {
+            let wc = self.cur_ast().at_const(self.icx.current_fn).as_data.function.where_clause;
             for w in 0..wc.len {
                 let wid = unsafe self.cur_ast().list(wc)[w as usize];
                 let wp = self.cur_ast().at_const(wid).as_data.where_predicate;
@@ -4853,7 +5215,7 @@ extend TypeChecker {
             if self.cur_ast().type_concrete(powner) {
                 return self.proj_fields_satisfy(powner, iface, depth, false);
             }
-            (unsafe self.cur_ast().proj_obs).push(ProjOb { fnd: self.current_fn, owner: powner, iface: iface });
+            (unsafe self.cur_ast().proj_obs).push(ProjOb { fnd: self.icx.current_fn, owner: powner, iface: iface });
             return true;
         }
         if ty == TYPE_NONE || ty == TYPE_ERROR || depth > BOUND_MAX_DEPTH {
@@ -5915,7 +6277,7 @@ extend TypeChecker {
     }
 
     fn tc_coerce_from(self: &mut Self, expected: TypeId, node: NodeId, probe: bool) bool {
-        if expected == TYPE_NONE || node == NODE_NONE || self.coerce_depth > 2 {
+        if expected == TYPE_NONE || node == NODE_NONE || self.icx.coerce_depth > 2 {
             return false;
         }
         let want = self.strip(expected);
@@ -5938,15 +6300,15 @@ extend TypeChecker {
             // bare string literal allocate without a call in sight; a `From<u64>` on an integer type is
             // the built-in widening rule extended to library integers, which is all this is for.
             if pt != TYPE_NONE && pt != want && self.is_int(pt) {
-                self.coerce_depth = self.coerce_depth + 1;
+                self.icx.coerce_depth = self.icx.coerce_depth + 1;
                 let fits = self.compatible_in(pt, node, true);
-                self.coerce_depth = self.coerce_depth - 1;
+                self.icx.coerce_depth = self.icx.coerce_depth - 1;
                 if fits {
                     if !probe {
                         // Re-run unprobed so a literal takes the CONVERSION's parameter type.
-                        self.coerce_depth = self.coerce_depth + 1;
+                        self.icx.coerce_depth = self.icx.coerce_depth + 1;
                         let _ = self.compatible_in(pt, node, false);
-                        self.coerce_depth = self.coerce_depth - 1;
+                        self.icx.coerce_depth = self.icx.coerce_depth - 1;
                         self.cur_ast().set_coerce(node, want, md);
                     }
                     return true;
@@ -6102,24 +6464,26 @@ extend TypeChecker {
             if self.type_at(pt).kind == TypeKind::TYPE_REFERENCE {
                 pt = self.type_at(pt).as_data.elem;
             }
+            let mark = self.icx.sv.probe_begin();
             let mut prm = Defs8 {};
             let mut bnd = Tys8 {};
             let mut np: i32 = 0;
             while np < gens.len as i32 && np < 8 {
-                prm[np as usize] = DefId {
-                    module: md.module,
-                    node: unsafe self.mod_ast(md.module).list(gens)[np as usize],
-                };
-                bnd[np as usize] = TYPE_NONE;
+                let pgid = unsafe self.mod_ast(md.module).list(gens)[np as usize];
+                prm[np as usize] = DefId { module: md.module, node: pgid };
+                let is_c9 = self.mod_ast(md.module).at_const(pgid).as_data.generic_param.is_const;
+                let _ = self.icx.sv.map_param(DefId { module: md.module, node: pgid }, is_c9, node);
                 np = np + 1;
             }
-            self.unify_infer(pt, actual, &prm[0], &mut bnd[0], np);
+            self.tc_infer_ev(pt, actual, node, false);
             let mut all = true;
             for i in 0..np {
+                bnd[i as usize] = self.icx.sv.s_resolve(mark.base + i as u32, it_conv_join);
                 if bnd[i as usize] == TYPE_NONE {
                     all = false;
                 }
             }
+            self.icx.sv.probe_end(&mark);
             if !all || self.subst_type(pt, &prm[0], &bnd[0], np) != actual {
                 continue;
             }
@@ -6272,7 +6636,7 @@ extend TypeChecker {
         // would hand out mutability the source never had.
         if ex.kind == TypeKind::TYPE_REFERENCE && ac.kind == TypeKind::TYPE_REFERENCE && ex.as_data.elem != ac.as_data.elem && (ex.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 || ac.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8) {
             let mut dm = DefId { module: 0, node: NODE_NONE };
-            let dt = self.tc_deref_step(ac.as_data.elem, &mut dm);
+            let dt = self.tc_deref_step(ac.as_data.elem, &mut dm, ex.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8);
             if dt == ex.as_data.elem && dt != TYPE_NONE {
                 if !probe {
                     self.tc_record_deref(node, ac.as_data.elem, dm, dt);
@@ -6430,10 +6794,10 @@ extend TypeChecker {
                 let mut mag: u64 = 0;
                 let neg = vid != node;
                 let got = self.lit_mag(vid, &mut mag);
-                if got && !tc_lit_in_range(et.as_data.builtin, mag, neg) && probe {
+                if got && !tc_lit_in_range(et.as_data.builtin, mag, neg, self.tc_ptr32()) && probe {
                     return false;
                 }
-                if got && !tc_lit_in_range(et.as_data.builtin, mag, neg) {
+                if got && !tc_lit_in_range(et.as_data.builtin, mag, neg, self.tc_ptr32()) {
                     let mut tn = Buf96 {};
                     self.render_type(expected, &mut tn[0], 96);
                     let vsp = self.cur_ast().at_const(node).span;
@@ -6643,6 +7007,11 @@ extend TypeChecker {
         if nk == NodeKind::NODE_INDEX || nk == NodeKind::NODE_MEMBER {
             if nk == NodeKind::NODE_MEMBER && a.at_const(node).as_data.member.path {
                 return self.tc_path_static_mut(node);
+            }
+            // A member reached through an auto-deref chain mutates only through `deref_mut`; every
+            // caller is a genuine mutation requirement, so the hops are patched here.
+            if nk == NodeKind::NODE_MEMBER && self.tc_deref_hops_mut(a.at_const(node).as_data.member.member) != TYPE_NONE {
+                return false;
             }
             let obj = if_node(
                 nk == NodeKind::NODE_INDEX,
@@ -7887,19 +8256,19 @@ extend TypeChecker {
             }
         }
         if op == TokenType::Ampersand {
-            self.addr_ctx = true;
+            self.icx.addr_ctx = true;
         }
-        let outer_unsafe_used = self.unsafe_used;
+        let outer_unsafe_used = self.icx.unsafe_used;
         if op == TokenType::Unsafe {
-            self.unsafe_depth = self.unsafe_depth + 1;
-            self.unsafe_used = 0;
+            self.icx.unsafe_depth = self.icx.unsafe_depth + 1;
+            self.icx.unsafe_used = 0;
         }
         let opnd = self.check_expr(operand);
         if op == TokenType::Unsafe {
-            self.unsafe_depth = self.unsafe_depth - 1;
+            self.icx.unsafe_depth = self.icx.unsafe_depth - 1;
             // an `unsafe` take of a Free field through a reference is CONSUMED by the borrow
             // checker's E0507 exemption (a later pass this lint cannot see): count it as used
-            if self.unsafe_used == 0 {
+            if self.icx.unsafe_used == 0 {
                 let mut w = operand;
                 loop {
                     let wn = a.at_const(w);
@@ -7913,10 +8282,10 @@ extend TypeChecker {
                 if (wk == NodeKind::NODE_MEMBER && !a.at_const(w).as_data.member.path || wk == NodeKind::NODE_INDEX) && self.tc_type_is_free(
                     opnd,
                 ) {
-                    self.unsafe_used = 1;
+                    self.icx.unsafe_used = 1;
                 }
             }
-            if self.lint && self.unsafe_used == 0 {
+            if self.lint && self.icx.unsafe_used == 0 {
                 let usp = a.at_const(id).span;
                 self.errors.warn(usp.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
                 // Prefix form only: a bare block is not an expression, so `unsafe { .. }` keeps its marker.
@@ -7930,7 +8299,7 @@ extend TypeChecker {
                     self.errors.fix(usp.start, fe, 0);
                 }
             }
-            self.unsafe_used = outer_unsafe_used;
+            self.icx.unsafe_used = outer_unsafe_used;
         }
         let sp = a.at_const(id).span;
         if op == TokenType::Minus {
@@ -7978,7 +8347,7 @@ extend TypeChecker {
             }
             // `*x` on a type that implements Deref is that impl's job, exactly as `x.method()` is
             let mut dm = DefId { module: 0, node: NODE_NONE };
-            let dt = self.tc_deref_step(self.strip(opnd), &mut dm);
+            let dt = self.tc_deref_step(self.strip(opnd), &mut dm, false);
             if dt != TYPE_NONE {
                 self.tc_record_deref(id, self.strip(opnd), dm, dt);
                 return dt;
@@ -8060,8 +8429,8 @@ extend TypeChecker {
                 return TYPE_NONE;
             }
             let mut fnret: TypeId = TYPE_NONE;
-            if self.current_returns.len == 1 {
-                let r0 = unsafe self.cur_ast().list(self.current_returns)[0];
+            if self.icx.current_returns.len == 1 {
+                let r0 = unsafe self.cur_ast().list(self.icx.current_returns)[0];
                 let rnn = self.cur_ast().at_const(r0);
                 fnret = self.resolve_type(if_node(rnn.kind == NodeKind::NODE_PARAMETER, rnn.as_data.parameter.ty, r0));
             }
@@ -8137,7 +8506,7 @@ extend TypeChecker {
                 let mut mag: u64 = 0;
                 let got = self.lit_mag(ln, &mut mag);
                 let rb = self.type_at(r).as_data.builtin;
-                if got && !tc_lit_in_range(rb, mag, false) {
+                if got && !tc_lit_in_range(rb, mag, false, self.tc_ptr32()) {
                     let mut tn = Buf96 {};
                     self.render_type(r, &mut tn[0], 96);
                     let lsp = self.cur_ast().at_const(ln).span;
@@ -8157,7 +8526,7 @@ extend TypeChecker {
                 let mut mag: u64 = 0;
                 let got = self.lit_mag(rn, &mut mag);
                 let lb = self.type_at(l).as_data.builtin;
-                if got && !tc_lit_in_range(lb, mag, false) {
+                if got && !tc_lit_in_range(lb, mag, false, self.tc_ptr32()) {
                     let mut tn = Buf96 {};
                     self.render_type(l, &mut tn[0], 96);
                     let rsp = self.cur_ast().at_const(rn).span;
@@ -8266,8 +8635,9 @@ extend TypeChecker {
             // already typed here, so it picks between them.
             if md.node != NODE_NONE {
                 let mut rt = Tys8 {};
+                let rl = Lits8 {};
                 rt[0] = self.cur_ast().type_of(right);
-                md = self.tc_pick_by_args(om, od, tok::Span::empty(), m, ls, md, &rt[0], 1);
+                md = self.tc_pick_by_args(om, od, tok::Span::empty(), m, ls, md, &rt[0], &rl[0], 1);
                 unsafe self.cur_ast().op_method.insert(id, md.module as u64 << 32 | md.node as u64);
             }
             if md.node == NODE_NONE {
@@ -8383,13 +8753,14 @@ extend TypeChecker {
         // right means, exactly as the operators' Rhs = Self default reads. Without this the literal
         // is checked contextless and a >64-bit one has nowhere to go.
         let rk = a.at_const(rn).kind;
+        let mut rwant = TYPE_NONE;
         if (rk == NodeKind::NODE_LITERAL || rk == NodeKind::NODE_UNARY) && op != TokenType::AmpersandAmpersand && op != TokenType::PipePipe {
             let mut wbits: i64 = 0;
             if self.tc_wide_target(l, &mut wbits) != 0 {
-                self.expected = l;
+                rwant = l;
             }
         }
-        let r = self.check_expr(rn);
+        let r = self.check_expr_w(rn, rwant);
         let sp = a.at_const(id).span;
         if op == TokenType::Plus || op == TokenType::Minus {
             let mut ov: TypeId = TYPE_NONE;
@@ -9186,7 +9557,6 @@ extend TypeChecker {
         }
         let ne0 = self.errors.errors.len();
         for i in 1..args.len {
-            self.expected = TYPE_NONE;
             if self.check_expr(unsafe self.cur_ast().list(args)[i as usize]) == TYPE_NONE {
                 return sret;
             }
@@ -9401,7 +9771,6 @@ extend TypeChecker {
         let stmts = self.cur_ast().commit(mark);
         self.cur_ast().at(id).kind = NodeKind::NODE_BLOCK;
         self.cur_ast().at(id).as_data = NodeAs { block: BlockData { statements: stmts } };
-        self.expected = TYPE_NONE;
         return self.check_expr(id);
     }
 
@@ -9427,7 +9796,6 @@ extend TypeChecker {
             if kn.kind == NodeKind::NODE_LITERAL && kn.as_data.literal.seg {
                 continue;
             }
-            self.expected = TYPE_NONE;
             if self.check_expr(kid) == TYPE_NONE {
                 return sret;
             }
@@ -9467,7 +9835,6 @@ extend TypeChecker {
         let stmts = self.cur_ast().commit(mark);
         self.cur_ast().at(id).kind = NodeKind::NODE_BLOCK;
         self.cur_ast().at(id).as_data = NodeAs { block: BlockData { statements: stmts } };
-        self.expected = TYPE_NONE;
         return self.check_expr(id);
     }
 
@@ -9511,8 +9878,7 @@ extend TypeChecker {
             return Ast::builtin(BuiltinType::BT_VOID);
         }
         let lt = self.check_expr(unsafe a.list(args)[0]);
-        self.expected = lt;
-        let rt = self.check_expr(unsafe a.list(args)[1]);
+        let rt = self.check_expr_w(unsafe a.list(args)[1], lt);
         if lt == TYPE_NONE || rt == TYPE_NONE {
             return Ast::builtin(BuiltinType::BT_VOID);
         }
@@ -9554,91 +9920,142 @@ extend TypeChecker {
         return Ast::builtin(BuiltinType::BT_VOID);
     }
 
-    fn infer_from_bounds(
+    /// Changed-slot worklist (plan phase 3): a slot's obligations -- the declared fn bound and its
+    /// interface bounds -- run exactly once, when the slot first resolves. Obligation evidence can
+    /// resolve further slots; the loop continues to a fixed point with no fixed pass count, under
+    /// the named per-call operation budget. `processed` and `ops` persist across re-entry so the
+    /// expected-result round only touches newly resolvable slots.
+    fn tc_infer_worklist(
         self: &mut Self,
+        id: NodeId,
+        sp: tok::Span,
         fmod: ModuleId,
         fdecl: NodeId,
-        gids: *const NodeId,
-        gparams: *const DefId,
+        gens: NodeList,
         bound: *mut TypeId,
         g: i32,
+        processed: *mut u32,
+        ops: *mut u32,
     ) {
         let fa = self.mod_ast(fmod);
-        for pass in 0..2 {
-            for i in 0..g {
-                if unsafe bound[i as usize] != TYPE_NONE {
-                    let mut bs = BoundArr8 {};
-                    let mut nb: i32 = 0;
-                    self.add_bound_ifaces_full(
-                        fmod,
-                        fa.at_const(unsafe gids[i as usize]).as_data.generic_param.bounds,
-                        &mut bs[0],
-                        &mut nb,
-                        8,
-                    );
-                    let wc = fa.at_const(fdecl).as_data.function.where_clause;
-                    for w in 0..wc.len {
-                        let wid = unsafe fa.list(wc)[w as usize];
-                        let wp = fa.at_const(wid).as_data.where_predicate;
-                        if fa.resolution(wp.ty) == unsafe gids[i as usize] {
-                            self.add_bound_ifaces_full(fmod, wp.bounds, &mut bs[0], &mut nb, 8);
-                        }
+        let mut making_progress = true;
+        while making_progress {
+            making_progress = false;
+            for k in 0..g {
+                if unsafe bound[k as usize] == TYPE_NONE {
+                    unsafe bound[k as usize] = self.icx.sv.s_resolve(k as u32, it_conv_join);
+                }
+                if unsafe bound[k as usize] == TYPE_NONE || (unsafe *processed & 1u32 << k as u32) != 0 {
+                    continue;
+                }
+                unsafe {
+                    *processed = *processed | 1u32 << k as u32;
+                }
+                making_progress = true;
+                unsafe {
+                    *ops = *ops + 1;
+                }
+                if unsafe *ops > TC_INFER_MAX_OPS {
+                    self.err_infer_budget(sp);
+                    break;
+                }
+                let gid9 = unsafe fa.list(gens)[k as usize];
+                if self.type_at(unsafe bound[k as usize]).kind == TypeKind::TYPE_FUNCTION {
+                    let fb = self.generic_fn_bound(fmod, gid9);
+                    if fb != NODE_NONE {
+                        self.tc_infer_ev(self.lower_type_in(fmod, fb), unsafe bound[k as usize], id, false);
                     }
-                    for b in 0..nb {
-                        if bs[b as usize].n != 0 {
-                            let mut tm: ModuleId = 0;
-                            let mut td = NODE_NONE;
-                            let mut sp = Defs8 {};
-                            let mut sa = Tys8 {};
-                            let mut sn: i32 = 0;
-                            if self.aggregate_of(
-                                self.strip(unsafe bound[i as usize]),
-                                &mut tm,
-                                &mut td,
-                                &mut sp,
-                                &mut sa,
-                                &mut sn,
-                            ) {
-                                let mut imod: ModuleId = 0;
-                                let extn = self.find_extend_as(tm, td, bs[b as usize].iface, &mut imod);
-                                if extn != NODE_NONE {
-                                    let ia = self.mod_ast(imod);
-                                    let egids = ia.at_const(extn).as_data.extend_def.generics;
-                                    let mut egp = Defs8 {};
-                                    let mut ega = Tys8 {};
-                                    let mut egn: i32 = 0;
-                                    let mut k: u32 = 0;
-                                    while k < egids.len && k as i32 < sn && egn < 8 {
-                                        let xg = unsafe ia.list(egids)[k as usize];
-                                        egp[egn as usize] = DefId { module: imod, node: xg };
-                                        ega[egn as usize] = sa[k as usize];
-                                        egn = egn + 1;
-                                        k = k + 1;
-                                    }
-                                    let itf = ia.at_const(ia.at_const(extn).as_data.extend_def.interface_type);
-                                    if itf.kind == NodeKind::NODE_TYPE_PATH {
-                                        let iargs = itf.as_data.type_path.args;
-                                        let mut kk: u32 = 0;
-                                        while kk < iargs.len && kk < bs[b as usize].n as u32 {
-                                            let lowered = self.lower_type_in(imod, unsafe ia.list(iargs)[kk as usize]);
-                                            let subst = self.subst_type(lowered, &egp[0], &ega[0], egn);
-                                            self.unify_infer(
-                                                unsafe bs[b as usize].args[kk as usize],
-                                                subst,
-                                                gparams,
-                                                bound,
-                                                g,
-                                            );
-                                            kk = kk + 1;
-                                        }
-                                    }
-                                }
+                }
+                self.tc_slot_obligations(fmod, fdecl, gid9, unsafe bound[k as usize]);
+            }
+        }
+    }
+
+    /// One slot's interface-bound obligations (plan phase 3): with `self_ty` known for generic
+    /// parameter `gid`, look up each declared bound's conformance and feed the instantiated
+    /// interface arguments back as evidence. Runs exactly once per slot, from the call worklist.
+    fn tc_slot_obligations(self: &mut Self, fmod: ModuleId, fdecl: NodeId, gid: NodeId, self_ty: TypeId) {
+        self.stats.bound_infer += 1;
+        let fa = self.mod_ast(fmod);
+        let mut bs = BoundArr8 {};
+        let mut nb: i32 = 0;
+        self.add_bound_ifaces_full(fmod, fa.at_const(gid).as_data.generic_param.bounds, &mut bs[0], &mut nb, 8);
+        let wc = fa.at_const(fdecl).as_data.function.where_clause;
+        for w in 0..wc.len {
+            let wid = unsafe fa.list(wc)[w as usize];
+            let wp = fa.at_const(wid).as_data.where_predicate;
+            if fa.resolution(wp.ty) == gid {
+                self.add_bound_ifaces_full(fmod, wp.bounds, &mut bs[0], &mut nb, 8);
+            }
+        }
+        for b in 0..nb {
+            if bs[b as usize].n != 0 {
+                let mut tm: ModuleId = 0;
+                let mut td = NODE_NONE;
+                let mut sp = Defs8 {};
+                let mut sa = Tys8 {};
+                let mut sn: i32 = 0;
+                if self.aggregate_of(self.strip(self_ty), &mut tm, &mut td, &mut sp, &mut sa, &mut sn) {
+                    let mut imod: ModuleId = 0;
+                    let extn = self.find_extend_as(tm, td, bs[b as usize].iface, &mut imod);
+                    if extn != NODE_NONE {
+                        let ia = self.mod_ast(imod);
+                        let egids = ia.at_const(extn).as_data.extend_def.generics;
+                        let mut egp = Defs8 {};
+                        let mut ega = Tys8 {};
+                        let mut egn: i32 = 0;
+                        let mut k: u32 = 0;
+                        while k < egids.len && k as i32 < sn && egn < 8 {
+                            let xg = unsafe ia.list(egids)[k as usize];
+                            egp[egn as usize] = DefId { module: imod, node: xg };
+                            ega[egn as usize] = sa[k as usize];
+                            egn = egn + 1;
+                            k = k + 1;
+                        }
+                        let itf = ia.at_const(ia.at_const(extn).as_data.extend_def.interface_type);
+                        if itf.kind == NodeKind::NODE_TYPE_PATH {
+                            let iargs = itf.as_data.type_path.args;
+                            let mut kk: u32 = 0;
+                            while kk < iargs.len && kk < bs[b as usize].n as u32 {
+                                let lowered = self.lower_type_in(imod, unsafe ia.list(iargs)[kk as usize]);
+                                let subst = self.subst_type(lowered, &egp[0], &ega[0], egn);
+                                self.tc_infer_ev(unsafe bs[b as usize].args[kk as usize], subst, NODE_NONE, false);
+                                kk = kk + 1;
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// An unresolved generic argument after defaults is a call-site error (plan section 5.3), not a
+    /// downstream emission failure.
+    @c.cold
+    fn err_unresolved_generic(self: &mut Self, sp: tok::Span, gmod: ModuleId, gid: NodeId) {
+        let ga2 = self.mod_ast(gmod);
+        let nsp = ga2.at_const(ga2.at_const(gid).as_data.generic_param.name).as_data.name.text;
+        self.errors.emit(
+            sp.start,
+            sp.end - sp.start,
+            format(
+                "cannot infer the generic argument '{}' for this call; add an explicit argument",
+                diag::span_str(self.mod_src(gmod), nsp.start, nsp.end),
+            ),
+        );
+    }
+
+    /// The per-call inference operation budget was exhausted (plan section 13.4).
+    @c.cold
+    fn err_infer_budget(self: &mut Self, sp: tok::Span) {
+        self.errors.emit(
+            sp.start,
+            sp.end - sp.start,
+            format(
+                "type inference exceeded its operation budget for this call (limit {}); add explicit generic arguments",
+                TC_INFER_MAX_OPS,
+            ),
+        );
     }
 
     fn fn_compatible_subst(
@@ -9725,7 +10142,7 @@ extend TypeChecker {
                     if is_has || is_b || is_i || is_s {
                         switch self.proj_cbase.get(&blid) {
                             Some(cb) => {
-                                if self.closure_depth > *cb {
+                                if self.icx.closure_depth > *cb {
                                     let csp3 = a.at_const(id).span;
                                     self.errors.emit(
                                         csp3.start,
@@ -9803,17 +10220,15 @@ extend TypeChecker {
             }
         }
         if pck == NodeKind::NODE_MEMBER && a.at_const(callee_id).as_data.member.path {
-            self.expected = want;
-            callee = self.check_expr(callee_id);
+            callee = self.check_expr_w(callee_id, want);
             let vd = a.resolution_def(cmem);
             if vd.node != NODE_NONE && self.mod_ast(vd.module).at_const(vd.node).kind == NodeKind::NODE_VARIANT {
                 return self.check_variant_call(id, vd.module, vd.node, callee);
             }
         } else if pck == NodeKind::NODE_MEMBER {
-            self.expected = want;
-            self.call_args = a.at_const(id).as_data.call.args;
-            callee = self.check_member(callee_id, true);
-            self.call_args = NodeList { start: 0, len: 0 };
+            self.icx.call_args = a.at_const(id).as_data.call.args;
+            callee = self.check_member(callee_id, true, want);
+            self.icx.call_args = NodeList { start: 0, len: 0 };
             let fd = a.resolution_def(cmem);
             if fd.node != NODE_NONE && (fd.module == self.cur_module() || self.package != null && fd.module as usize < self.pkg_count()) && self.mod_ast(
                 fd.module,
@@ -10044,12 +10459,21 @@ extend TypeChecker {
             let aid = unsafe a.list(args)[i as usize];
             // `[]`, a generic fn named as a value, and a range literal all take their type from the
             // parameter (a range's bounds adopt the parameter's element type, like bare literals do).
+            let mut awant = TYPE_NONE;
             if self.tc_is_iface_assoc_call(aid) || a.at_const(aid).kind == NodeKind::NODE_CLOSURE || a.at_const(aid).kind == NodeKind::NODE_RANGE || self.tc_wants_param_type(
                 aid,
             ) {
-                self.expected = self.tc_param_expected(callee, callee_id, i);
+                awant = self.tc_param_expected(callee, callee_id, i);
             }
-            self.check_expr(aid);
+            // Postponed closure (plan section 12): an unannotated closure whose parameter type
+            // still mentions the callee's generics is checked once, after call inference has
+            // resolved them, never per candidate.
+            if a.at_const(aid).kind == NodeKind::NODE_CLOSURE && awant != TYPE_NONE && self.tc_infer_ty_open(awant) && self.tc_closure_unannotated(
+                aid,
+            ) {
+                continue;
+            }
+            self.check_expr_w(aid, awant);
         }
         if callee == TYPE_NONE {
             return TYPE_NONE;
@@ -10179,6 +10603,72 @@ extend TypeChecker {
         // `Option<&i64>` only here). Re-check with the resolved type and persist the receiver borrow
         // so the container cannot be mutated while the returned view is live.
         return ret;
+    }
+
+    // Postponed-closure completion (plan section 12): check each still-untyped closure argument
+    // once its parameter shape is closed under the current substitution, seeding its unannotated
+    // parameters first, and feed the checked type back as call evidence. `final9` forces the check
+    // even with an open shape -- the post-defaults last chance, whose failures are the user's
+    // annotation-required diagnostics.
+    fn tc_check_postponed(
+        self: &mut Self,
+        fmod: ModuleId,
+        args: NodeList,
+        params: NodeList,
+        skip: u32,
+        rsubp: *const DefId,
+        rsuba: *const TypeId,
+        nrsub: i32,
+        gparams: *const DefId,
+        bound: *const TypeId,
+        g: i32,
+        final9: bool,
+    ) bool {
+        let a = self.cur_ast();
+        let fa = self.mod_ast(fmod);
+        let mut checked = false;
+        for i in 0..args.len {
+            let aid9 = unsafe a.list(args)[i as usize];
+            if a.at_const(aid9).kind != NodeKind::NODE_CLOSURE || a.type_of(aid9) != TYPE_NONE {
+                continue;
+            }
+            let pid9 = unsafe fa.list(params)[(i + skip) as usize];
+            let raw9 = self.decl_type_in(fmod, pid9);
+            let mut open9 = false;
+            // A decl-referenced fn type does not substitute as a whole: seed each unannotated
+            // closure parameter with its substituted component instead.
+            if self.type_at(raw9).kind == TypeKind::TYPE_FUNCTION {
+                let clp9 = a.at_const(aid9).as_data.closure.params;
+                let mut fsp = Tys8 {};
+                let mut fsr: TypeId = TYPE_NONE;
+                let fn9 = self.fn_sig(raw9, &mut fsp[0], 8, &mut fsr);
+                let mut j: u32 = 0;
+                while j < clp9.len && j as i32 < fn9 {
+                    let cpid = unsafe a.list(clp9)[j as usize];
+                    if a.at_const(cpid).as_data.parameter.ty == NODE_NONE {
+                        let st9 = self.subst_type(
+                            self.subst_type(fsp[j as usize], rsubp, rsuba, nrsub),
+                            gparams,
+                            bound,
+                            g,
+                        );
+                        if st9 != TYPE_NONE && !self.tc_infer_ty_open(st9) {
+                            self.cur_ast().set_type(cpid, st9);
+                        } else {
+                            open9 = true;
+                        }
+                    }
+                    j += 1;
+                }
+            }
+            if open9 && !final9 {
+                continue; // shape still open: the literal-default pass may close it
+            }
+            let ct9 = self.check_expr_w(aid9, raw9);
+            self.tc_infer_ev(raw9, ct9, aid9, true);
+            checked = true;
+        }
+        return checked;
     }
 
     fn check_call_finish(
@@ -10417,6 +10907,7 @@ extend TypeChecker {
         let mut gargs = Tys8 {};
         let mut gn: i32 = 0;
         if named && fa.at_const(fdecl).as_data.function.generics.len != 0 {
+            self.stats.generic_calls += 1;
             let gens = fa.at_const(fdecl).as_data.function.generics;
             let mut g = gens.len as i32;
             if g > 8 {
@@ -10426,6 +10917,19 @@ extend TypeChecker {
                 gparams[ii as usize] = DefId { module: fmod, node: unsafe fa.list(gens)[ii as usize] };
                 gargs[ii as usize] = TYPE_NONE;
             }
+            // Session-driven inference (plan 1_type_inference phase 2): every use of a repeated
+            // parameter feeds one solver variable, top-level argument positions record directional
+            // bounds joined under the safe-conversion oracle, and const evidence conflicts are
+            // detected instead of silently keeping the first binding.
+            self.icx.sv.session_begin();
+            for ii in 0..g {
+                let gid9 = unsafe fa.list(gens)[ii as usize];
+                let _ = self.icx.sv.map_param(
+                    DefId { module: fmod, node: gid9 },
+                    fa.at_const(gid9).as_data.generic_param.is_const,
+                    id,
+                );
+            }
             let mut bound = Tys8 {};
             let mut nexplicit: i32 = 0;
             if cn_kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
@@ -10433,6 +10937,7 @@ extend TypeChecker {
                 let mut i: u32 = 0;
                 while i < tas.len && nexplicit < g {
                     bound[nexplicit as usize] = a.type_of(unsafe a.list(tas)[i as usize]);
+                    self.icx.sv.s_explicit(nexplicit as u32, bound[nexplicit as usize]);
                     nexplicit = nexplicit + 1;
                     i = i + 1;
                 }
@@ -10440,36 +10945,113 @@ extend TypeChecker {
             if nexplicit < g && args.len == params.len - skip {
                 for i in 0..args.len {
                     let pid = unsafe fa.list(params)[(i + skip) as usize];
-                    let aty = a.type_of(unsafe a.list(args)[i as usize]);
-                    self.unify_infer(self.decl_type_in(fmod, pid), aty, &gparams[0], &mut bound[0], g);
+                    let arg9 = unsafe a.list(args)[i as usize];
+                    let aty = a.type_of(arg9);
+                    if self.tc_peek_lit_class(arg9) == 0 {
+                        self.tc_infer_ev(self.decl_type_in(fmod, pid), aty, arg9, true);
+                    }
                     if fa.at_const(pid).kind == NodeKind::NODE_PARAMETER {
-                        self.infer_const_len(
+                        self.infer_const_len(fmod, fa.at_const(pid).as_data.parameter.ty, aty, arg9, 0);
+                    }
+                }
+                let mut processed: u32 = 0; // bit k = slot k's obligations ran
+                let mut infer_ops: u32 = 0;
+                self.tc_infer_worklist(id, sp, fmod, fdecl, gens, &mut bound[0], g, &mut processed, &mut infer_ops);
+                // Expected-result inference (plan section 11 step 5): a parameter the arguments and
+                // bounds left unresolved takes evidence from the call's expected type against the
+                // declared result, before declared and literal defaults.
+                if want != TYPE_NONE && returns.len == 1 {
+                    let mut unresolved = false;
+                    for k in 0..g {
+                        if bound[k as usize] == TYPE_NONE {
+                            unresolved = true;
+                        }
+                    }
+                    if unresolved {
+                        let r0 = unsafe fa.list(returns)[0];
+                        let rn = *fa.at_const(r0);
+                        let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
+                        let rty = self.subst_type(self.lower_type_in(fmod, tn), &rsubp[0], &rsuba[0], nrsub);
+                        self.tc_infer_ev(rty, self.strip(want), id, true);
+                        self.tc_infer_worklist(
+                            id,
+                            sp,
                             fmod,
-                            fa.at_const(pid).as_data.parameter.ty,
-                            aty,
-                            unsafe a.list(args)[i as usize],
-                            &gparams[0],
+                            fdecl,
+                            gens,
                             &mut bound[0],
                             g,
-                            0,
+                            &mut processed,
+                            &mut infer_ops,
                         );
                     }
                 }
-                for k in 0..g {
-                    if bound[k as usize] != TYPE_NONE && self.type_at(bound[k as usize]).kind == TypeKind::TYPE_FUNCTION {
-                        let fb = self.generic_fn_bound(fmod, unsafe fa.list(gens)[k as usize]);
-                        if fb != NODE_NONE {
-                            self.unify_infer(
-                                self.lower_type_in(fmod, fb),
-                                bound[k as usize],
-                                &gparams[0],
-                                &mut bound[0],
-                                g,
-                            );
-                        }
+                // A postponed closure whose parameter shape is known now is checked once with
+                // the substituted parameter type, and its checked type feeds back as evidence for
+                // parameters that depend on the closure's result. A closure whose shape is still
+                // open waits for the literal-default pass below (final = false); after defaults it
+                // is checked unconditionally -- if the shape is still open then, the body errors
+                // and the unresolved-generic report tell the user an annotation is required.
+                let mut clos_checked = self.tc_check_postponed(
+                    fmod,
+                    args,
+                    params,
+                    skip,
+                    &rsubp[0],
+                    &rsuba[0],
+                    nrsub,
+                    &gparams[0],
+                    &bound[0],
+                    g,
+                    false,
+                );
+                if clos_checked {
+                    self.tc_infer_worklist(id, sp, fmod, fdecl, gens, &mut bound[0], g, &mut processed, &mut infer_ops);
+                }
+                let mut used_literal_default = false;
+                for i in 0..args.len {
+                    let arg9 = unsafe a.list(args)[i as usize];
+                    if self.tc_peek_lit_class(arg9) == 0 {
+                        continue;
+                    }
+                    let pid9 = unsafe fa.list(params)[(i + skip) as usize];
+                    let pty9 = self.decl_type_in(fmod, pid9);
+                    if pty9 == TYPE_NONE || self.type_at(pty9).kind != TypeKind::TYPE_GENERIC {
+                        continue;
+                    }
+                    let py9 = *self.type_at(pty9);
+                    let slot9 = self.icx.sv.slot_of(DefId { module: py9.module, node: py9.as_data.decl });
+                    if slot9 >= 0 && bound[slot9 as usize] == TYPE_NONE {
+                        self.icx.sv.s_lb(slot9 as u32, a.type_of(arg9), arg9);
+                        used_literal_default = true;
                     }
                 }
-                self.infer_from_bounds(fmod, fdecl, fa.list(gens), &gparams[0], &mut bound[0], g);
+                if used_literal_default {
+                    self.tc_infer_worklist(id, sp, fmod, fdecl, gens, &mut bound[0], g, &mut processed, &mut infer_ops);
+                }
+                clos_checked = self.tc_check_postponed(
+                    fmod,
+                    args,
+                    params,
+                    skip,
+                    &rsubp[0],
+                    &rsuba[0],
+                    nrsub,
+                    &gparams[0],
+                    &bound[0],
+                    g,
+                    true,
+                );
+                if clos_checked {
+                    self.tc_infer_worklist(id, sp, fmod, fdecl, gens, &mut bound[0], g, &mut processed, &mut infer_ops);
+                }
+                self.tc_report_const_conflicts(sp);
+                self.tc_report_type_conflicts(sp);
+                for k in 0..g {
+                    if bound[k as usize] == TYPE_NONE {
+                        self.err_unresolved_generic(sp, fmod, unsafe fa.list(gens)[k as usize]);
+                    }
+                }
                 nexplicit = g;
             }
             for i in 0..nexplicit {
@@ -10480,7 +11062,7 @@ extend TypeChecker {
             // differs per instantiation. Binding it to ANOTHER function's type parameter would make
             // that function's instance depend on which instantiation produced the closure -- which the
             // closure's type does not record, so both would collapse onto one wrong symbol.
-            if self.tc_fn_is_generic(self.cur_module(), self.current_fn) {
+            if self.tc_fn_is_generic(self.cur_module(), self.icx.current_fn) {
                 let mut bad = false;
                 for i in 0..gn {
                     if self.tc_is_local_closure(gargs[i as usize]) {
@@ -10530,6 +11112,7 @@ extend TypeChecker {
                     og = 8;
                 }
                 if og > 0 {
+                    self.stats.owner_infer += 1;
                     // The owner type's own generic list (`struct Box<T, A = Global>`) supplies the
                     // DEFAULTS, which the extend's re-declared `<T, A: Allocator + Default>` does not.
                     let target = fa.at_const(extnode).as_data.extend_def.target_type;
@@ -10543,20 +11126,49 @@ extend TypeChecker {
                     }
                     let mut oparams = Defs8 {};
                     let mut obound = Tys8 {};
+                    self.icx.sv.session_begin();
                     for k in 0..og {
-                        oparams[k as usize] = DefId { module: fmod, node: unsafe fa.list(ig)[k as usize] };
+                        let ogid = unsafe fa.list(ig)[k as usize];
+                        oparams[k as usize] = DefId { module: fmod, node: ogid };
                         obound[k as usize] = TYPE_NONE;
+                        let _ = self.icx.sv.map_param(
+                            DefId { module: fmod, node: ogid },
+                            fa.at_const(ogid).as_data.generic_param.is_const,
+                            id,
+                        );
                     }
                     for i in 0..args.len {
                         let pid = unsafe fa.list(params)[(i + skip) as usize];
-                        self.unify_infer(
-                            self.decl_type_in(fmod, pid),
-                            a.type_of(unsafe a.list(args)[i as usize]),
-                            &oparams[0],
-                            &mut obound[0],
-                            og,
-                        );
+                        let arg9 = unsafe a.list(args)[i as usize];
+                        self.tc_infer_ev(self.decl_type_in(fmod, pid), a.type_of(arg9), arg9, true);
                     }
+                    for k in 0..og {
+                        obound[k as usize] = self.icx.sv.s_resolve(k as u32, it_conv_join);
+                    }
+                    // Expected-result inference for a constructor (plan section 11 step 5): an
+                    // owner parameter the arguments left unresolved takes evidence from the call's
+                    // expected type against the declared result, before the declared defaults.
+                    if want != TYPE_NONE && returns.len == 1 {
+                        let mut ounresolved = false;
+                        for k in 0..og {
+                            if obound[k as usize] == TYPE_NONE {
+                                ounresolved = true;
+                            }
+                        }
+                        if ounresolved {
+                            let r0 = unsafe fa.list(returns)[0];
+                            let rn = *fa.at_const(r0);
+                            let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
+                            self.tc_infer_ev(self.lower_type_in(fmod, tn), self.strip(want), id, true);
+                            for k in 0..og {
+                                if obound[k as usize] == TYPE_NONE {
+                                    obound[k as usize] = self.icx.sv.s_resolve(k as u32, it_conv_join);
+                                }
+                            }
+                        }
+                    }
+                    self.tc_report_const_conflicts(sp);
+                    self.tc_report_type_conflicts(sp);
                     let mut ia = Tys8 {};
                     let mut ic: u8 = 0;
                     for k in 0..og {
@@ -10575,6 +11187,8 @@ extend TypeChecker {
                             nrsub = nrsub + 1;
                             ia[ic as usize] = b;
                             ic = ic + 1;
+                        } else if b == TYPE_NONE {
+                            self.err_unresolved_generic(sp, fmod, unsafe fa.list(ig)[k as usize]);
                         }
                     }
                     // Make the inferred owner instance visible to codegen and monomorphization: give the
@@ -10629,6 +11243,11 @@ extend TypeChecker {
                 let raw = if_ty(named, self.decl_type_in(fmod, pid), self.lower_type_in(fmod, pid));
                 let pt = self.subst_type(self.subst_type(raw, &rsubp[0], &rsuba[0], nrsub), &gparams[0], &gargs[0], gn);
                 let aid = unsafe a.list(args)[i as usize];
+                // A closure postponed on a path that skipped call inference is checked here, once,
+                // with the fully substituted parameter type.
+                if a.at_const(aid).kind == NodeKind::NODE_CLOSURE && a.type_of(aid) == TYPE_NONE {
+                    let _ct = self.check_expr_w(aid, pt);
+                }
                 if self.type_at(pt).kind == TypeKind::TYPE_FUNCTION {
                     let at = a.type_of(aid);
                     if pt != at && at != TYPE_NONE && self.fn_is_capturing(at) {
@@ -10723,23 +11342,23 @@ extend TypeChecker {
         }
         if returns.len != 1 {
             if returns.len > 1 {
-                self.mret_n = if_u8(returns.len < 8, returns.len as u8, 8);
-                self.mret_total = returns.len;
-                for i in 0..self.mret_n {
+                self.icx.mret_n = if_u8(returns.len < 8, returns.len as u8, 8);
+                self.icx.mret_total = returns.len;
+                for i in 0..self.icx.mret_n {
                     let mrid = unsafe fa.list(returns)[i as usize];
                     let mrn = fa.at_const(mrid);
                     let mrt = self.lower_type_in(
                         fmod,
                         if_node(mrn.kind == NodeKind::NODE_PARAMETER, mrn.as_data.parameter.ty, mrid),
                     );
-                    unsafe self.mret_types[i as usize] = self.subst_type(
+                    unsafe self.icx.mret_types[i as usize] = self.subst_type(
                         self.subst_type(mrt, &gparams[0], &gargs[0], gn),
                         &rsubp[0],
                         &rsuba[0],
                         nrsub,
                     );
                 }
-                self.mret_call = id;
+                self.icx.mret_call = id;
                 return TYPE_NONE;
             }
             // an omitted return type IS void: the call must not type-check leniently
@@ -10842,7 +11461,7 @@ extend TypeChecker {
                 let owner2 = self.subst_type(ob.owner, gparams, gargs, gn);
                 if !self.cur_ast().type_concrete(owner2) {
                     (unsafe self.cur_ast().proj_obs).push(
-                        ProjOb { fnd: self.current_fn, owner: owner2, iface: ob.iface },
+                        ProjOb { fnd: self.icx.current_fn, owner: owner2, iface: ob.iface },
                     );
                     continue;
                 }
@@ -10937,9 +11556,10 @@ extend TypeChecker {
         return ext != NODE_NONE && self.mod_ast(m).at_const(ext).as_data.extend_def.generics.len != 0;
     }
 
-    /// One `Deref` step: the type behind `ty`, with the `deref` that produces it written to `out`.
-    /// TYPE_NONE when `ty` has no Deref, or its `deref` does not return a reference/pointer.
-    fn tc_deref_step(self: &mut Self, ty: TypeId, out: &mut DefId) TypeId {
+    /// One `Deref` step: the type behind `ty`, with the `deref` (or `deref_mut` for a mutable use)
+    /// that produces it written to `out`. TYPE_NONE when `ty` has no such method, or the method
+    /// does not return a reference/pointer.
+    fn tc_deref_step(self: &mut Self, ty: TypeId, out: &mut DefId, want_mut: bool) TypeId {
         *out = DefId { module: 0, node: NODE_NONE };
         let mut cm: ModuleId = 0;
         let mut cd = NODE_NONE;
@@ -10949,7 +11569,11 @@ extend TypeChecker {
         if !self.aggregate_of(ty, &mut cm, &mut cd, &mut cgp, &mut cga, &mut cgn) {
             return TYPE_NONE;
         }
-        let dm = self.find_method_cstr(cm, cd, "deref");
+        let mut mn = "deref";
+        if want_mut {
+            mn = "deref_mut";
+        }
+        let dm = self.find_method_cstr(cm, cd, mn);
         if dm.node == NODE_NONE {
             return TYPE_NONE;
         }
@@ -10965,6 +11589,35 @@ extend TypeChecker {
         return dry.as_data.elem;
     }
 
+    /// Patch every method hop of the auto-deref chain recorded at `node` to `deref_mut`, so a
+    /// mutable place use (assignment, `&mut`, `&mut self` receiver) never mutates through the
+    /// shared `deref`. Returns TYPE_NONE on success (or when no chain is recorded), else the first
+    /// hop type that has `deref` but no `deref_mut`: that place stays read-only.
+    fn tc_deref_hops_mut(self: &mut Self, node: NodeId) TypeId {
+        let du = self.cur_ast().deref_use_mut(node);
+        if du == null {
+            return TYPE_NONE;
+        }
+        for hi in 0..unsafe du.n {
+            if unsafe du.method[hi as usize].node == NODE_NONE {
+                continue; // a raw pointer/reference hop has no method to swap
+            }
+            let recv = unsafe du.recv[hi as usize];
+            let mut hm: ModuleId = 0;
+            let mut hd = NODE_NONE;
+            let mut hgp = Defs8 {};
+            let mut hga = Tys8 {};
+            let mut hgn: i32 = 0;
+            self.aggregate_of(recv, &mut hm, &mut hd, &mut hgp, &mut hga, &mut hgn);
+            let dmm = self.find_method_cstr(hm, hd, "deref_mut");
+            if dmm.node == NODE_NONE {
+                return recv;
+            }
+            unsafe du.method[hi as usize] = dmm;
+        }
+        return TYPE_NONE;
+    }
+
     /// Record the single deref hop `node` needs, so codegen emits `T__deref(&x)` around it.
     fn tc_record_deref(self: &mut Self, node: NodeId, recv: TypeId, dm: DefId, target: TypeId) {
         let mut du = DerefUse { node: node, target: target, n: 1 };
@@ -10973,14 +11626,12 @@ extend TypeChecker {
         self.cur_ast().add_deref_use(&du);
     }
 
-    fn check_member(self: &mut Self, id: NodeId, prefer_method: bool) TypeId {
+    fn check_member(self: &mut Self, id: NodeId, prefer_method: bool, want: TypeId) TypeId {
         let a = self.cur_ast();
-        let want = self.expected;
-        self.expected = TYPE_NONE;
         let obj_node = a.at_const(id).as_data.member.object;
-        self.proj_obj_ok = true;
+        self.icx.proj_obj_ok = true;
         let obj = self.check_expr(obj_node);
-        self.proj_obj_ok = false;
+        self.icx.proj_obj_ok = false;
         if obj == TYPE_NONE {
             return TYPE_NONE;
         }
@@ -10998,7 +11649,7 @@ extend TypeChecker {
             if blid != NODE_NONE {
                 switch self.proj_cbase.get(&blid) {
                     Some(cb) => {
-                        if self.closure_depth > *cb {
+                        if self.icx.closure_depth > *cb {
                             let csp2 = a.at_const(id).span;
                             self.errors.emit(
                                 csp2.start,
@@ -11337,40 +11988,24 @@ extend TypeChecker {
                         );
                         return TYPE_NONE;
                     }
-                    if sk == 2 {
-                        for hi in 0..du.n {
-                            let mut hm: ModuleId = 0;
-                            let mut hd = NODE_NONE;
-                            let mut hgp = Defs8 {};
-                            let mut hga = Tys8 {};
-                            let mut hgn: i32 = 0;
-                            self.aggregate_of(
-                                unsafe du.recv[hi as usize],
-                                &mut hm,
-                                &mut hd,
-                                &mut hgp,
-                                &mut hga,
-                                &mut hgn,
-                            );
-                            let dmm = self.find_method_cstr(hm, hd, "deref_mut");
-                            if dmm.node == NODE_NONE {
-                                let mut tn = Buf96 {};
-                                self.render_type(unsafe du.recv[hi as usize], &mut tn[0], 96);
-                                self.errors.emit(
-                                    name.start,
-                                    name.end - name.start,
-                                    format(
-                                        "cannot call a '&mut self' method through '{}': it has 'deref' but no 'deref_mut'",
-                                        diag::cstr(&tn[0]),
-                                    ),
-                                );
-                                return TYPE_NONE;
-                            }
-                            unsafe du.method[hi as usize] = dmm;
-                        }
-                    }
                     du.target = target;
                     self.cur_ast().add_deref_use(&du);
+                    if sk == 2 {
+                        let bad = self.tc_deref_hops_mut(mname);
+                        if bad != TYPE_NONE {
+                            let mut tn = Buf96 {};
+                            self.render_type(bad, &mut tn[0], 96);
+                            self.errors.emit(
+                                name.start,
+                                name.end - name.start,
+                                format(
+                                    "cannot call a '&mut self' method through '{}': it has 'deref' but no 'deref_mut'",
+                                    diag::cstr(&tn[0]),
+                                ),
+                            );
+                            return TYPE_NONE;
+                        }
+                    }
                     self.cur_ast().set_resolution_def(mname, mhit);
                     return self.subst_type(self.decl_type_in(mhit.module, mhit.node), &tgp[0], &tga[0], tgn);
                 }
@@ -11610,6 +12245,7 @@ extend TypeChecker {
             // widen towards, so `Plain { b: [3, 0, 0, 7] }` typed itself `[i32]` and was rejected against a
             // `[i64; 4]` field. This used to be done only for an interface assoc call; the reason applies to
             // every initializer.
+            let mut fwant = TYPE_NONE;
             if variant == NODE_NONE && decl != NODE_NONE {
                 let field = self.find_member(smod, decl, fname);
                 let ft = if_ty(
@@ -11618,10 +12254,10 @@ extend TypeChecker {
                     TYPE_NONE,
                 );
                 if ft != TYPE_NONE && self.cur_ast().type_concrete(ft) {
-                    self.expected = ft;
+                    fwant = ft;
                 }
             }
-            self.check_expr(fval);
+            self.check_expr_w(fval, fwant);
             if variant != NODE_NONE {
                 let va = self.mod_ast(vmod);
                 let vpl = va.at_const(variant).as_data.variant.payload;
@@ -11957,8 +12593,7 @@ extend TypeChecker {
         let bd = a.at_const(id).as_data.binary;
         let l = self.check_expr(bd.left);
         let pt = self.compound_param_type(bd.op, l);
-        self.expected = if_ty(pt != TYPE_NONE, pt, l);
-        self.check_expr(bd.right);
+        self.check_expr_w(bd.right, if_ty(pt != TYPE_NONE, pt, l));
         if !self.is_assignable(bd.left) {
             let sp = a.at_const(bd.left).span;
             self.errors.emit(sp.start, sp.end - sp.start, format("cannot assign to this expression"));
@@ -11971,16 +12606,57 @@ extend TypeChecker {
         }
         return l;
     }
+    /// True when `t` still mentions unresolved generics. A decl-referenced function type reports
+    /// concrete, so its signature components are inspected one level deep.
+    fn tc_infer_ty_open(self: &mut Self, t: TypeId) bool {
+        if t == TYPE_NONE {
+            return false;
+        }
+        if !self.cur_ast().type_concrete(t) {
+            return true;
+        }
+        if self.type_at(t).kind == TypeKind::TYPE_FUNCTION {
+            let mut ps = Tys8 {};
+            let mut r: TypeId = TYPE_NONE;
+            let n = self.fn_sig(t, &mut ps[0], 8, &mut r);
+            for i in 0..n {
+                if !self.cur_ast().type_concrete(ps[i as usize]) {
+                    return true;
+                }
+            }
+            if r != TYPE_NONE && !self.cur_ast().type_concrete(r) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// True when the closure has at least one parameter with no type annotation: the ones whose
+    /// check must wait for an expected function shape.
+    const fn tc_closure_unannotated(self: &Self, cid: NodeId) bool {
+        let a = self.cur_ast();
+        let ps = a.at_const(cid).as_data.closure.params;
+        for i in 0..ps.len {
+            if a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty == NODE_NONE {
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn check_closure(self: &mut Self, id: NodeId, cwant: TypeId) TypeId {
         // Inside a fields loop a closure is fine as long as it never touches the binder -- its one
         // lifted C form serves every copy. Binder USES check the depth watermark (proj_cbase).
-        self.closure_depth = self.closure_depth + 1;
+        self.icx.closure_depth = self.icx.closure_depth + 1;
         let cres = self.check_closure_in(id, cwant);
-        self.closure_depth = self.closure_depth - 1;
+        self.icx.closure_depth = self.icx.closure_depth - 1;
         return cres;
     }
 
     fn check_closure_in(self: &mut Self, id: NodeId, cwant: TypeId) TypeId {
+        if cwant != TYPE_NONE {
+            self.stats.closure_expected += 1;
+        }
         let a = self.cur_ast();
         let params = a.at_const(id).as_data.closure.params;
         let mut sigp = Tys8 {};
@@ -11998,7 +12674,9 @@ extend TypeChecker {
                     sn = 0;
                 }
             }
-            if i as i32 < sn && sigp[i as usize] != TYPE_NONE {
+            if a.type_of(pid) != TYPE_NONE {
+                // Pre-seeded by the postponed-closure site with the substituted parameter type.
+            } else if i as i32 < sn && sigp[i as usize] != TYPE_NONE {
                 self.cur_ast().set_type(pid, sigp[i as usize]);
             } else {
                 let psp = a.at_const(pid).span;
@@ -12015,26 +12693,26 @@ extend TypeChecker {
         for i in 0..params.len {
             self.decl_type(unsafe a.list(params)[i as usize]);
         }
-        if self.nclos >= 8 {
+        if self.icx.nclos >= 8 {
             let sp = a.at_const(id).span;
             self.errors.emit(sp.start, sp.end - sp.start, format("closures nested too deeply (max 8)"));
             return TYPE_NONE;
         }
-        let cn = self.nclos;
-        unsafe self.clos_stack[cn as usize] = id;
-        self.nclos = cn + 1;
+        let cn = self.icx.nclos;
+        unsafe self.icx.clos_stack[cn as usize] = id;
+        self.icx.nclos = cn + 1;
         let saved_lf = self.loop_floor;
         self.loop_floor = self.nloops;
         if a.at_const(id).as_data.closure.expr_body {
             self.check_expr(a.at_const(id).as_data.closure.body);
         } else {
-            let saved = self.current_returns;
-            self.current_returns = a.at_const(id).as_data.closure.returns;
+            let saved = self.icx.current_returns;
+            self.icx.current_returns = a.at_const(id).as_data.closure.returns;
             self.check_stmt(a.at_const(id).as_data.closure.body);
-            self.current_returns = saved;
+            self.icx.current_returns = saved;
         }
         self.loop_floor = saved_lf;
-        self.nclos = self.nclos - 1;
+        self.icx.nclos = self.icx.nclos - 1;
         // capture validation
         let caps = a.at_const(id).as_data.closure.captures;
         let mut_caps = a.at_const(id).as_data.closure.mut_caps as u64;
@@ -12086,8 +12764,8 @@ extend TypeChecker {
         let a = self.cur_ast();
         let obj_n = a.at_const(id).as_data.index.object;
         let index_n = a.at_const(id).as_data.index.index;
-        self.addr_ctx = addr_ctx;
-        self.place_use = !addr_ctx;
+        self.icx.addr_ctx = addr_ctx;
+        self.icx.place_use = !addr_ctx;
         let mut obj = self.check_expr(obj_n);
         if self.type_at(obj).kind == TypeKind::TYPE_REFERENCE {
             let mut p = obj;
@@ -12315,8 +12993,7 @@ extend TypeChecker {
                 let sp = a.at_const(arm.guard).span;
                 self.errors.emit(sp.start, sp.end - sp.start, format("match guard must be 'bool'"));
             }
-            self.expected = expected;
-            let mut body = self.check_expr(arm.body);
+            let mut body = self.check_expr_w(arm.body, expected);
             if expected != TYPE_NONE {
                 self.tc_tail_adapt(expected, arm.body);
                 body = self.cur_ast().type_of(arm.body);
@@ -12354,17 +13031,22 @@ extend TypeChecker {
     }
 
     fn check_expr(self: &mut Self, id: NodeId) TypeId {
+        return self.check_expr_w(id, TYPE_NONE);
+    }
+
+    /// Bidirectional expression check (plan phase 5): `expected` is an explicit argument -- the
+    /// expectation a parent grants this one child -- never shared state, so a nested expectation
+    /// cannot leak to a sibling expression.
+    fn check_expr_w(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         if id == NODE_NONE {
             return TYPE_NONE;
         }
         let a = self.cur_ast();
         let nk = a.at_const(id).kind;
-        let expected = self.expected;
-        self.expected = TYPE_NONE;
-        let addr_ctx = self.addr_ctx;
-        self.addr_ctx = false;
-        let place_use = self.place_use;
-        self.place_use = false;
+        let addr_ctx = self.icx.addr_ctx;
+        self.icx.addr_ctx = false;
+        let place_use = self.icx.place_use;
+        self.icx.place_use = false;
         let mut result = TYPE_NONE;
         switch nk {
             NODE_LITERAL => {
@@ -12401,13 +13083,12 @@ extend TypeChecker {
             },
             NODE_MEMBER => {
                 let value_read = !a.at_const(id).as_data.member.path && !addr_ctx;
-                self.addr_ctx = addr_ctx;
-                self.place_use = value_read;
+                self.icx.addr_ctx = addr_ctx;
+                self.icx.place_use = value_read;
                 if a.at_const(id).as_data.member.path {
                     result = self.check_path_member(id, expected);
                 } else {
-                    self.expected = expected;
-                    result = self.check_member(id, false);
+                    result = self.check_member(id, false, expected);
                 }
             },
             NODE_CAST => {
@@ -12668,10 +13349,8 @@ extend TypeChecker {
                 }
                 let rs = a.at_const(id).as_data.pattern_range.start;
                 let re = a.at_const(id).as_data.pattern_range.end;
-                self.expected = want;
-                let s = self.check_expr(rs);
-                self.expected = want;
-                let e = self.check_expr(re);
+                let s = self.check_expr_w(rs, want);
+                let e = self.check_expr_w(re, want);
                 let mut elem = self.range_type(id, s, e);
                 // Literal bounds adopt the expected element type (bare literals only re-type through
                 // `compatible`, so the adoption is decided here, where Range<E> is known).
@@ -12694,7 +13373,7 @@ extend TypeChecker {
         };
         // The reflection binder never stands alone: without a member access there is no copy for it
         // to mean, so a bare `f` (stored, returned, passed) is rejected here, where its use is.
-        if nk == NodeKind::NODE_IDENTIFIER && result != TYPE_NONE && self.type_at(result).kind == TypeKind::TYPE_FIELD_PROJECTION && !self.proj_obj_ok {
+        if nk == NodeKind::NODE_IDENTIFIER && result != TYPE_NONE && self.type_at(result).kind == TypeKind::TYPE_FIELD_PROJECTION && !self.icx.proj_obj_ok {
             let bsp2 = a.at_const(id).span;
             self.errors.emit(
                 bsp2.start,
@@ -13046,7 +13725,10 @@ extend TypeChecker {
                     sp.end - sp.start,
                     format("integer literal is too large to fit in a 64-bit integer"),
                 );
-            } else if sb != BuiltinType::BT_COUNT && bt_int_max(sb) != 0 && acc > bt_int_max(sb) {
+            } else if sb != BuiltinType::BT_COUNT && bt_int_max(sb, self.tc_ptr32()) != 0 && acc > bt_int_max(
+                sb,
+                self.tc_ptr32(),
+            ) {
                 self.errors.emit(
                     sp.start,
                     sp.end - sp.start,
@@ -13349,9 +14031,11 @@ extend TypeChecker {
         for i in 0..stmts.len {
             let sid = unsafe a.list(stmts)[i as usize];
             if expected != TYPE_NONE && i == stmts.len - 1 && a.at_const(sid).kind == NodeKind::NODE_EXPRESSION_STATEMENT {
-                self.expected = expected; // the tail is this block's value: let it see the context type
+                // The tail is this block's value: it sees the context type directly.
+                let _bt = self.check_expr_w(a.at_const(sid).as_data.single.value, expected);
+            } else {
+                self.check_stmt(sid);
             }
-            self.check_stmt(sid);
         }
         while self.ndefers != 0 && unsafe self.defer_depth[(self.ndefers - 1) as usize] == self.scope_depth {
             self.ndefers = self.ndefers - 1;
@@ -13385,15 +14069,13 @@ extend TypeChecker {
                 format("if condition must be 'bool', found '{}'", diag::cstr(&ty[0])),
             );
         }
-        self.expected = expected;
-        let then_ty = self.check_expr(ifd.then_branch);
+        let then_ty = self.check_expr_w(ifd.then_branch, expected);
         if ifd.else_branch == NODE_NONE {
             let sp = a.at_const(id).span;
             self.errors.emit(sp.start, sp.end - sp.start, format("an 'if' used as a value must have an 'else' branch"));
             return TYPE_NONE;
         }
-        self.expected = expected;
-        let else_ty = self.check_expr(ifd.else_branch);
+        let else_ty = self.check_expr_w(ifd.else_branch, expected);
         let then_never = then_ty != TYPE_NONE && self.type_at(then_ty).kind == TypeKind::TYPE_NEVER;
         let else_never = else_ty != TYPE_NONE && self.type_at(else_ty).kind == TypeKind::TYPE_NEVER;
         if then_never || else_never {
@@ -13459,9 +14141,9 @@ extend TypeChecker {
         let value = a.at_const(id).as_data.let_stmt.value;
         let nm = a.at_const(id).as_data.let_stmt.name;
         let names = a.at_const(nm).as_data.pattern.children;
-        self.mret_call = NODE_NONE;
+        self.icx.mret_call = NODE_NONE;
         self.check_expr(value);
-        let stashed = value != NODE_NONE && self.mret_call == value;
+        let stashed = value != NODE_NONE && self.icx.mret_call == value;
         let mut targs = Tys8 {};
         let mut tn: i32 = -1;
         if !stashed && value != NODE_NONE {
@@ -13506,7 +14188,7 @@ extend TypeChecker {
             );
             return;
         }
-        let nret = if_u32(stashed, self.mret_total, if_u32(tn >= 0, tn as u32, returns.len));
+        let nret = if_u32(stashed, self.icx.mret_total, if_u32(tn >= 0, tn as u32, returns.len));
         if names.len != nret {
             let sp = a.at_const(id).span;
             let mut s1 = "s".ptr() as *const char;
@@ -13531,8 +14213,8 @@ extend TypeChecker {
         }
         for i in 0..names.len {
             let mut et = TYPE_NONE;
-            if stashed && i < self.mret_n as u32 {
-                et = unsafe self.mret_types[i as usize];
+            if stashed && i < self.icx.mret_n as u32 {
+                et = unsafe self.icx.mret_types[i as usize];
             } else if tn >= 0 {
                 et = if_ty(i < tn as u32, targs[i as usize], TYPE_NONE);
             } else if i < returns.len {
@@ -13547,16 +14229,17 @@ extend TypeChecker {
     fn check_return(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let values = a.at_const(id).as_data.return_stmt.values;
-        let rets = self.current_returns;
+        let rets = self.icx.current_returns;
         let returns_void = self.return_list_is_explicit_void(rets);
+        let mut rvwant = TYPE_NONE;
         if values.len == 1 && !returns_void && rets.len == 1 {
             let r0 = unsafe a.list(rets)[0];
             let rn = a.at_const(r0);
-            self.expected = self.resolve_type(if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0));
+            rvwant = self.resolve_type(if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0));
         }
         for i in 0..values.len {
             let vid = unsafe a.list(values)[i as usize];
-            self.check_expr(vid);
+            self.check_expr_w(vid, rvwant);
         }
         for i in 0..values.len {
             let vid = unsafe a.list(values)[i as usize];
@@ -13923,9 +14606,9 @@ extend TypeChecker {
                         let pav = unsafe a.list(fargs)[0];
                         if a.at_const(pav).kind == NodeKind::NODE_IDENTIFIER {
                             let plid = a.resolution(pav);
-                            self.proj_obj_ok = true;
+                            self.icx.proj_obj_ok = true;
                             let pty = self.check_expr(pav);
-                            self.proj_obj_ok = false;
+                            self.icx.proj_obj_ok = false;
                             if plid != NODE_NONE && a.at_const(plid).kind == NodeKind::NODE_INLINE_FOR && pty != TYPE_NONE && self.type_at(
                                 pty,
                             ).kind == TypeKind::TYPE_FIELD_PROJECTION {
@@ -14012,7 +14695,7 @@ extend TypeChecker {
                     self.cur_ast().set_type(id, pt);
                 }
                 self.binding_depth.insert(id, self.scope_depth + 1);
-                self.proj_cbase.insert(id, self.closure_depth);
+                self.proj_cbase.insert(id, self.icx.closure_depth);
                 self.fields_depth = self.fields_depth + 1;
                 self.check_loop_body(self.cur_ast().at_const(id).as_data.for_stmt.body);
                 self.fields_depth = self.fields_depth - 1;
@@ -14128,8 +14811,7 @@ extend TypeChecker {
                 let valued = value != NODE_NONE;
                 let declared = if_ty(annotated, self.resolve_type(tyn), TYPE_NONE);
                 if valued {
-                    self.expected = declared;
-                    self.check_expr(value);
+                    self.check_expr_w(value, declared);
                 }
                 let mut binding = TYPE_NONE;
                 if annotated {
@@ -14274,8 +14956,7 @@ extend TypeChecker {
                     unsafe self.loop_stack[le as usize].saw_bare = true;
                     return;
                 }
-                self.expected = unsafe self.loop_stack[le as usize].break_ty;
-                let vt = self.check_expr(fv);
+                let vt = self.check_expr_w(fv, unsafe self.loop_stack[le as usize].break_ty);
                 let sp = self.cur_ast().at_const(id).span;
                 if !unsafe self.loop_stack[le as usize].value_loop {
                     self.errors.emit(
@@ -14686,11 +15367,11 @@ extend TypeChecker {
                         );
                     }
                 }
-                let saved = self.current_returns;
-                let savedfn = self.current_fn;
+                let saved = self.icx.current_returns;
+                let savedfn = self.icx.current_fn;
                 let saved_wm = self.err_wm;
-                self.current_returns = fnd.returns;
-                self.current_fn = id;
+                self.icx.current_returns = fnd.returns;
+                self.icx.current_fn = id;
                 self.err_wm = self.errors.errors.len();
                 self.nmoved = 0;
                 self.nuninit = 0;
@@ -14704,11 +15385,11 @@ extend TypeChecker {
                     // an `unsafe fn` body is one big unsafe context: raw-pointer work inside needs
                     // no per-statement markers -- the safety obligation moved to the call sites
                     if fnd.is_unsafe {
-                        self.unsafe_depth = self.unsafe_depth + 1;
+                        self.icx.unsafe_depth = self.icx.unsafe_depth + 1;
                     }
                     self.check_stmt(fnd.body);
                     if fnd.is_unsafe {
-                        self.unsafe_depth = self.unsafe_depth - 1;
+                        self.icx.unsafe_depth = self.icx.unsafe_depth - 1;
                     }
                 }
                 // Def-site `const fn` validation, AFTER the body walk: type-based disqualifiers
@@ -14777,8 +15458,8 @@ extend TypeChecker {
                 self.scope_depth = 0;
                 self.loop_depth = 0;
                 self.ndefers = 0;
-                self.current_returns = saved;
-                self.current_fn = savedfn;
+                self.icx.current_returns = saved;
+                self.icx.current_fn = savedfn;
                 self.err_wm = saved_wm;
             },
             NODE_STRUCT | NODE_ENUM => {
@@ -14874,8 +15555,8 @@ extend TypeChecker {
                     }
                 }
                 if cd.value != NODE_NONE {
-                    self.expected = declared; // `[..].into()` and `[]` take their type from here
-                    self.check_expr(cd.value);
+                    // `[..].into()` and `[]` take their type from here.
+                    self.check_expr_w(cd.value, declared);
                     if !self.compatible(declared, cd.value) {
                         self.err_mismatch(cd.value, declared);
                     }
@@ -15182,6 +15863,7 @@ extend TypeChecker {
     /// stays in its module slot; the borrowck pass re-walks it from there.
     pub fn check(self: &mut Self) {
         self.cur_ast().init_types();
+        let pool0 = unsafe self.cur_ast().type_pool.len();
         let items = self.cur_ast().at_const(unsafe self.cur_ast().root).as_data.program.items;
         for i in 0..items.len {
             let it9 = unsafe self.cur_ast().list(items)[i as usize];
@@ -15200,6 +15882,7 @@ extend TypeChecker {
             }
         }
         self.close_instances();
+        self.stats.types_interned += (unsafe self.cur_ast().type_pool.len() - pool0) as u64;
         if self.lint {
             self.tc_lint_unneeded_mut();
         }
@@ -15220,6 +15903,7 @@ extend TypeChecker {
 
 extend TypeChecker as Free {
     pub fn free(self: &mut Self) {
+        self.icx.free();
         self.ext_scope.free();
         self.ext_items.free();
         self.len_reported.free();
