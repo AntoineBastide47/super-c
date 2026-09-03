@@ -9,9 +9,11 @@ import ir::lower as irl;
 
 /// Record kinds.
 pub const IG_AGG: u8 = 0; // generic struct/enum instantiation
+/// Instance record kinds (InstRec.kind).
 pub const IG_FN: u8 = 1; // generic function instantiation
 pub const IG_METHOD: u8 = 2; // method demanded on a generic-aggregate instance
 
+/// The absent record index.
 pub const IG_NONE: u32 = 0xFFFFFFFF;
 
 /// One instance argument: its package-stable skey plus, for const-generic values, the folded
@@ -23,7 +25,7 @@ pub struct ArgKey {
 }
 
 /// One discovered instance: the declaration plus its argument keys (flat pool range). Packed to
-/// 32 bytes (two records per cache line) -- expansion and pairing iterate `recs` by value.
+/// 32 bytes (two records per cache line): expansion and pairing iterate `recs` by value.
 pub struct InstRec {
     pub hash: u64,
     pub def: DefId,
@@ -37,7 +39,7 @@ pub struct InstRec {
     pub expanded: bool,
 }
 
-/// One extend targeting a declaration (built once; aggregate expansion walks its methods).
+// One extend targeting a declaration (built once; aggregate expansion walks its methods).
 struct ExtRow {
     pub dmod: ModuleId,
     pub ddecl: NodeId,
@@ -45,17 +47,17 @@ struct ExtRow {
     pub enode: NodeId,
 }
 
-/// One substitution frame entry: generic-param decl -> the argument's key (value included for
-/// const params, so dependent const-exprs can fold).
+// One substitution frame entry: generic-param decl -> the argument's key (value included for
+// const params, so dependent const-exprs can fold).
 struct Subst {
     pub pmod: ModuleId,
     pub pdecl: NodeId,
     pub key: ArgKey,
 }
 
-/// Per kept body: the walk-relevant items, extracted once. A body's locals and rvalues repeat the
-/// same interned TypeIds heavily, and generic bodies re-walk once per instantiation frame -- the
-/// framed walks iterate this ~10x smaller list instead of the whole body.
+// Per kept body: the walk-relevant items, extracted once. A body's locals and rvalues repeat the
+// same interned TypeIds heavily, and generic bodies re-walk once per instantiation frame: the
+// framed walks iterate this ~10x smaller list instead of the whole body.
 struct WalkCache {
     pub built: bool,
     pub tys: Vector<TypeId>, // unique local/rvalue types, first-occurrence order
@@ -63,6 +65,8 @@ struct WalkCache {
     pub calls: Vector<u32>, // block ids whose terminator is a resolved TM_CALL
 }
 
+/// The package's closed set of generic instantiations, reached by walking every live body's
+/// demands to a fixpoint; records are deduplicated by (kind, def, argument keys).
 pub struct InstGraph {
     pub pkg: *const loader::Package,
     pub recs: Vector<InstRec>,
@@ -71,12 +75,12 @@ pub struct InstGraph {
     ix_used: u32,
     cursor: usize, // worklist: recs[cursor..] await expansion
     exts: Vector<ExtRow>, // every extend in the package, keyed by its target declaration
-    // membership indexes over `exts` and the package's interfaces: expansion asks per call site,
-    // so owner lookups must not rescan the extend/item lists
+    // Membership indexes over `exts` and the package's interfaces: expansion asks per call site,
+    // so owner lookups must not rescan the extend/item lists.
     ext_of: Map<u64, u64>, // (module << 32 | fnode) -> owning extend node (rows of `exts` only)
     iface_of: Map<u64, u64>, // (module << 32 | fnode) -> owning interface node
-    // per-module TypeIds already fully walked by note_type under an EMPTY frame: bodies name the
-    // same interned types over and over, and a completed depth-0 walk covers every revisit
+    // Per-module TypeIds already fully walked by note_type under an EMPTY frame: bodies name the
+    // same interned types over and over, and a completed depth-0 walk covers every revisit.
     noted: Vector<Vector<bool>>,
     /// One lowering per declaration, shared by every frame that walks it (lowering ignores the
     /// frame; only walking applies it). The emitter takes these bodies instead of re-lowering.
@@ -87,7 +91,7 @@ pub struct InstGraph {
     // walk never allocates a per-record key vector.
     argbuf: Vector<ArgKey>,
     /// The shared scratch Lowerer: every body lowers through its (capacity-retaining) pools, and
-    /// only an exact-size compact copy lands in `kept` -- no growth chains, no retained slack.
+    /// only an exact-size compact copy lands in `kept`: no growth chains, no retained slack.
     low: irl::Lowerer,
     wcache: Vector<WalkCache>, // parallel to `kept`
     wt_seen: Map<u64, u64>, // scratch: TypeIds already in the cache being built
@@ -154,6 +158,8 @@ pub fn skey_norm(a: &Ast, t: TypeId, depth: i32) u64 {
 }
 
 extend InstGraph {
+    /// An empty graph over `pkg`; `keep` (null = lower on demand) supplies kept lowerings and `live`
+    /// (per module) selects the roots. Both must outlive the graph.
     pub fn new(pkg: *const loader::Package, keep: *mut irl::Keep, live: *const bool) InstGraph {
         return InstGraph {
             keep: keep,
@@ -190,9 +196,9 @@ extend InstGraph {
         return true;
     }
 
-    // Intern the record whose argument keys sit in `argbuf`; returns its id and whether it was
-    // new. Hash + equality use skeys only (the value is derived data riding along for frame
-    // evaluation).
+    /// Intern the record whose argument keys sit in `argbuf`; returns its id and whether it was
+    /// new. Hash + equality use skeys only (the value is derived data riding along for frame
+    /// evaluation).
     pub fn add(self: &mut Self, kind: u8, def: DefId, fresh: &mut bool) u32 {
         let mut h = mix(mix(1469598103934665603u64, kind), def.module);
         h = mix(h, def.node);
@@ -266,8 +272,6 @@ extend InstGraph {
         }
     }
 
-    // ---- substitution-aware type keys -------------------------------------------------------------
-
     // type_skey with a substitution frame: a generic parameter keys as its bound argument, so the
     // key of `Vector<T>` under {T -> i32} equals the key of `Vector<i32>` in any pool.
     fn skey_subst(self: &Self, a: &Ast, t: TypeId, frame: &Vector<Subst>, depth: i32) u64 {
@@ -313,7 +317,7 @@ extend InstGraph {
     fn const_expr_bound(self: &Self, a: &Ast, y: &Ty, frame: &Vector<Subst>) ArgKey {
         let none = ArgKey { skey: 0, val: 0, has_val: false };
         let l = a.const_lin_at(y.as_data.inst);
-        // identity: one coefficient-1 param, no constant, no divisor
+        // Identity: one coefficient-1 param, no constant, no divisor.
         let mut nact: u32 = 0;
         let mut hit: i64 = -1;
         for i in 0..l.n {
@@ -331,7 +335,7 @@ extend InstGraph {
             }
             return none;
         }
-        // compound: fold value = (k + sum(c_i * v_i)) / div from bound VALUES
+        // Compound: fold value = (k + sum(c_i * v_i)) / div from bound VALUES.
         let mut v = l.k;
         for i in 0..l.n {
             let c = unsafe l.c[i as usize];
@@ -343,7 +347,7 @@ extend InstGraph {
             for f in 0..frame.len() {
                 if frame.at(f).pmod == pd.module && frame.at(f).pdecl == pd.node && frame.at(f).key.has_val {
                     let fv = frame.at(f).key.val;
-                    // widths are small; a huge operand means a non-width const rode in -- bail
+                    // Widths are small; a huge operand means a non-width const rode in: bail.
                     if fv < 0 || fv > 0xFFFFFFFF || c > 0xFFFF || c < -65536 {
                         return none;
                     }
@@ -359,7 +363,7 @@ extend InstGraph {
         if d > 1 {
             v = v / d;
         }
-        // key exactly as type_skey keys the folded TYPE_CONST (qualifier 0)
+        // Key exactly as type_skey keys the folded TYPE_CONST (qualifier 0).
         let h = mix(mix(14695981039346656037u64, TypeKind::TYPE_CONST as u64), 0);
         return ArgKey { skey: mix(h, v as u64), val: v, has_val: true };
     }
@@ -484,7 +488,7 @@ extend InstGraph {
             return;
         }
         let it = *a.instance(y.as_data.inst);
-        // the declaration must be a real aggregate (dyn fn carriers ride FUNCTION_TYPE decls)
+        // The declaration must be a real aggregate (dyn fn carriers ride FUNCTION_TYPE decls).
         let da = unsafe &*(&*self.pkg).module_ast_const(it.module);
         let dk = da.at_const(it.decl).kind;
         for i in 0..it.n {
@@ -504,13 +508,11 @@ extend InstGraph {
         let mut fresh = false;
         let id = self.add(IG_AGG, DefId { module: it.module, node: it.decl }, &mut fresh);
         if self.recs.at(id as usize).aty == TYPE_NONE && a.type_concrete(t) {
-            // a pool-concrete spelling anchors the record (frames leave symbolic types unanchored)
+            // A pool-concrete spelling anchors the record (frames leave symbolic types unanchored).
             self.recs[id as usize].amod = a.module;
             self.recs[id as usize].aty = t;
         }
     }
-
-    // ---- body walking -----------------------------------------------------------------------------
 
     // Walk one lowered body under `frame`: every type it stores, every resolved call, every item
     // constant. Fresh generic-fn instances queue their own expansion.
@@ -544,7 +546,7 @@ extend InstGraph {
     // instance binds the extend's params; the method body walks under that frame. No extend search:
     // the checker already selected the method.
     fn note_method(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) {
-        // the method's enclosing extend, if it is generic
+        // The method's enclosing extend, if it is generic.
         let ma = unsafe &*(&*self.pkg).module_ast_const(t.callee.module);
         let ext = switch self.ext_of.get(&skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64)) {
             Some(v) => (*v) as NodeId,
@@ -560,7 +562,7 @@ extend InstGraph {
         if t.args_len == 0 {
             return;
         }
-        // peel the receiver to its instance
+        // Peel the receiver to its instance.
         let recv_op = b.oper_pool[t.args_start as usize];
         let mut rt = b.operands.at(recv_op as usize).ty;
         let mut guard = 0;
@@ -577,7 +579,7 @@ extend InstGraph {
             return;
         }
         let it = *a.instance(a.type_at(rt).as_data.inst);
-        // method key = receiver-instance args, then the method's own bound args (bail on symbolic)
+        // Method key: receiver-instance args, then the method's own bound args (bail on symbolic).
         self.argbuf.truncate(0);
         for i in 0..it.n {
             if !self.concrete_subst(a, unsafe it.args[i], frame, 0) {
@@ -604,7 +606,8 @@ extend InstGraph {
         for i in 0..tn {
             let t = b.targ_pool[(ts + i) as usize];
             if !self.concrete_subst(a, t, frame, 0) {
-                return; // still symbolic here; the enclosing instantiation walks it bound
+                // Still symbolic here; the enclosing instantiation walks it bound.
+                return;
             }
             let k0 = self.argkey_subst(a, t, frame);
             self.argbuf.push(k0);
@@ -613,10 +616,10 @@ extend InstGraph {
         let _ = self.add(IG_FN, callee, &mut fresh);
     }
 
-    // Expand queued records to a fixed point, alternating the worklist with the demand cross
-    // product: method demand is PER DECLARATION (one call to `.at` on any Vector<X> emits `at` for
-    // every reachable Vector instance -- the established method_used semantics), so each demanded
-    // non-generic method pairs with every instance of its extend's target.
+    /// Expand queued records to a fixed point, alternating the worklist with the demand cross
+    /// product: method demand is PER DECLARATION (one call to `.at` on any Vector<X> emits `at` for
+    /// every reachable Vector instance: the established method_used semantics), so each demanded
+    /// non-generic method pairs with every instance of its extend's target.
     pub fn run(self: &mut Self) {
         loop {
             self.drain();
@@ -634,7 +637,7 @@ extend InstGraph {
     // interface DEFAULT bodies (one copy per conforming instance, unconditionally), and dyn-vtable
     // methods (every interface method of a dyn-erased source type).
     fn cross_demand(self: &mut Self) {
-        // demanded method decls, deduped
+        // Demanded method decls, deduped.
         let mut dm = Vector::<DefId>::new();
         let mut dseen = Set::<u64>::new();
         for r in 0..self.recs.len() {
@@ -670,8 +673,8 @@ extend InstGraph {
             let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
             let src = unsafe (&*self.pkg).modules.at(row.emod as usize).source.as_str();
             let ed = a.at_const(row.enode).as_data.extend_def;
-            // an interface-conforming extend emits EVERY bodied method per instance -- the
-            // method_used gate applies only to plain extends
+            // An interface-conforming extend emits EVERY bodied method per instance: the
+            // The method_used gate applies only to plain extends.
             let conforming = ed.interface_type != NODE_NONE;
             for j in 0..ed.items.len {
                 let iid = unsafe a.list(ed.items)[j as usize];
@@ -689,9 +692,9 @@ extend InstGraph {
                 }
             }
         }
-        // a demanded INTERFACE method maps to each conforming extend's override of the same name:
+        // A demanded INTERFACE method maps to each conforming extend's override of the same name:
         // dispatch through a bound selects the impl per receiver, so the emitter emits the impl
-        // decl -- the demand must follow it there
+        // decl: the demand must follow it there.
         let ndm = dm.len();
         for d in 0..ndm {
             let md = *dm.at(d);
@@ -756,7 +759,7 @@ extend InstGraph {
                 continue;
             }
             let a = unsafe &*(&*self.pkg).module_ast_const(md.module);
-            // a demanded method with own generics pairs only through explicit (instance, targs)
+            // A demanded method with own generics pairs only through explicit (instance, targs).
             if a.at_const(md.node).as_data.function.generics.len != 0 {
                 continue;
             }
@@ -785,7 +788,7 @@ extend InstGraph {
     }
 
     // Interface default bodies: every extend that conforms `Target as Iface` emits one copy of each
-    // default-bodied interface method per Target instance -- record those pairs so the emitted-set
+    // default-bodied interface method per Target instance: record those pairs so the emitted-set
     // diff can find them (def = the INTERFACE's method decl, keys = the instance args).
     fn cross_defaults(self: &mut Self, gk: &Map<u64, u64>, groups: &Vector<Vector<u32>>) {
         for x in 0..self.exts.len() {
@@ -809,7 +812,7 @@ extend InstGraph {
             if ia.at_const(iface.node).kind != NodeKind::NODE_INTERFACE {
                 continue;
             }
-            // default-bodied interface methods the extend does NOT override
+            // Default-bodied interface methods the extend does NOT override.
             let src = unsafe (&*self.pkg).modules.at(row.emod as usize).source.as_str();
             let isrc = unsafe (&*self.pkg).modules.at(iface.module as usize).source.as_str();
             let ims = ia.at_const(iface.node).as_data.interface_def.items;
@@ -836,7 +839,7 @@ extend InstGraph {
                 if overridden {
                     continue;
                 }
-                // pair with every instance of the extend's target
+                // Pair with every instance of the extend's target.
                 let tg = self.ext_target(a, row.enode);
                 let gi = switch gk.get(&skey_mix(0, tg.module as u64 << 32 | tg.node as u64)) {
                     Some(v) => (*v) as i64,
@@ -881,8 +884,8 @@ extend InstGraph {
             if r.kind != IG_FN {
                 continue;
             }
-            // an extend member reached as a plain call (assoc fns, turbofish method values) still
-            // binds the extend's params through its leading argument keys
+            // An extend member reached as a plain call (assoc fns, turbofish method values) still
+            // binds the extend's params through its leading argument keys.
             if self.enclosing_extend(r.def) != NODE_NONE {
                 self.expand_method(&r);
                 continue;
@@ -895,7 +898,7 @@ extend InstGraph {
             if fd.body == NODE_NONE || fd.is_extern {
                 continue;
             }
-            // bind the declaration's non-lifetime params to the record's arg keys
+            // Bind the declaration's non-lifetime params to the record's arg keys.
             let mut frame = Vector::<Subst>::new();
             let mut ai: u32 = 0;
             for g in 0..fd.generics.len {
@@ -968,7 +971,7 @@ extend InstGraph {
         for i in 0..ms.len {
             let mid = unsafe a.list(ms)[i as usize];
             let mk = a.at_const(mid).kind;
-            // tuple members are bare type nodes; named members carry their type in field.ty
+            // Tuple members are bare type nodes; named members carry their type in field.ty.
             if mk == NodeKind::NODE_FIELD || is_tuple {
                 let tnode = if mk == NodeKind::NODE_FIELD {
                     a.at_const(mid).as_data.field.ty;
@@ -1024,7 +1027,7 @@ extend InstGraph {
 
     // Signature-level propagation (established reintern_method_signature_deps semantics): every
     // method SIGNATURE of every extend targeting a reachable instance contributes its substituted
-    // types -- Option<&T> from `first`, iterators from `iter` -- regardless of demand.
+    // types (Option<&T> from `first`, iterators from `iter`) regardless of demand.
     fn expand_signatures(self: &mut Self, r: &InstRec) {
         for x in 0..self.exts.len() {
             let row = *self.exts.at(x);
@@ -1033,7 +1036,7 @@ extend InstGraph {
             }
             let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
             let ed = a.at_const(row.enode).as_data.extend_def;
-            // bind the extend's params through the target's argument positions (as expand_method)
+            // Bind the extend's params through the target's argument positions (as expand_method).
             let mut frame = Vector::<Subst>::new();
             let tt = ed.target_type;
             if tt != NODE_NONE && a.at_const(tt).kind == NodeKind::NODE_TYPE_PATH {
@@ -1069,7 +1072,8 @@ extend InstGraph {
                 // TypeIds), not from re-walking the item's syntax; non-function items record none.
                 let sg = (unsafe &*self.pkg).item_sig(row.emod, iid);
                 if sg == null || unsafe sg.generic {
-                    continue; // generic methods substitute per explicit (instance, targs) pair
+                    // Generic methods substitute per explicit (instance, targs) pair.
+                    continue;
                 }
                 let sn = (unsafe sg.np) as u32 + (unsafe sg.nr) as u32;
                 for si in 0..sn {
@@ -1279,7 +1283,7 @@ extend InstGraph {
             if ci < 0 {
                 continue;
             }
-            // nested closures append to the cached lowering's list; one level at a time keeps
+            // Nested closures append to the cached lowering's list; one level at a time keeps
             // this bounded. Raw borrow: walk_body never touches `kept`, but body_idx below can
             // grow it, so the nested ids are copied out first.
             self.walk_kept(ci, a, frame);
@@ -1360,7 +1364,8 @@ extend InstGraph {
                     }
                 } else if n.kind == NodeKind::NODE_EXTEND {
                     if n.as_data.extend_def.generics.len != 0 {
-                        continue; // generic-extend methods run under their instances' frames
+                        // Generic-extend methods run under their instances' frames.
+                        continue;
                     }
                     let inner = n.as_data.extend_def.items;
                     for j in 0..inner.len {
@@ -1379,7 +1384,7 @@ extend InstGraph {
                     }
                 } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
                     // an exported alias of a concrete instantiation (`pub type u128 = UInt<128>`)
-                    // is API surface: the instance is reachable without any body naming it
+                    // is API surface: the instance is reachable without any body naming it.
                     if n.as_data.type_alias.is_public && n.as_data.type_alias.ty != NODE_NONE {
                         let t = a.type_of(n.as_data.type_alias.ty);
                         if t != TYPE_NONE {

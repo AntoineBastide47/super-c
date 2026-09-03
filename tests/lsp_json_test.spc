@@ -61,7 +61,8 @@ fn json_dump_roundtrip() {
     let out = v.dump(false);
     assert_eq(out.as_str(), "{\"a\":[1,2.5,\"x\"],\"b\":{\"c\":true,\"d\":null}}");
     let back = parse_ok(out.as_str());
-    assert_eq(back.at_key("b").value_i64("c", 9), 9 as i64); // c is a bool, not a number
+    // C is a bool, not a number.
+    assert_eq(back.at_key("b").value_i64("c", 9), 9 as i64);
     assert(back.at_key("b").at_key("c").get_bool());
 }
 
@@ -76,7 +77,8 @@ fn json_dump_escapes() {
 fn json_build_and_emplace() {
     let mut o = json::JSON::object();
     o.emplace("x", json::JSON::integer(3));
-    o.emplace("x", json::JSON::integer(4)); // overwrite frees the old value
+    // Overwrite frees the old value.
+    o.emplace("x", json::JSON::integer(4));
     let mut a = json::JSON::array();
     a.push_back(json::JSON::boolean(true));
     a.push_back(json::JSON::string(String::from_str("s")));
@@ -104,7 +106,8 @@ fn json_rejects_malformed() {
     parse_err("{:1}", "Expected a string key before ':'");
     parse_err("{\"a\":1}x", "Unexpected character 'x' after JSON end");
     parse_err("\"abc", "Unterminated string");
-    parse_err("tru", "Unexpected character 'u'"); // truncated literal points at its last byte
+    // Truncated literal points at its last byte.
+    parse_err("tru", "Unexpected character 'u'");
     parse_err("truX", "Unexpected character 'X'");
     parse_err("{1:2}", "Expected a key before adding a number");
     parse_err("[01]", "Invalid number: Leading zeros are not allowed");
@@ -134,7 +137,7 @@ fn json_numbers() {
 
 @test
 fn json_deep_nesting_capped() {
-    // 2000 nested arrays exceed MAX_NESTING_DEPTH (1024) without touching the C stack
+    // 2000 nested arrays exceed MAX_NESTING_DEPTH (1024) without touching the C stack.
     let mut src = String::new();
     for i in 0..2000 as usize {
         src.push_byte(b'[');
@@ -156,7 +159,8 @@ fn pathological_exponent_is_bounded() {
     switch json::parse(src.as_str()) {
         Ok(v) => {
             let d = v.dump(false);
-            assert_eq(d.as_str(), "null"); // saturated to infinity, serialized as null
+            // Saturated to infinity, serialized as null.
+            assert_eq(d.as_str(), "null");
             let vv = v;
             vv.free();
             d.free();

@@ -1,7 +1,7 @@
 // Benchmarking. Import with `import std::testing::bench;`.
 //
 // A benchmark is a `pub fn` marked `@bench` in a file under `bench/`. `super-c bench` finds them the way
-// `super-c test` finds `@test` functions -- no registry, no `main` to maintain -- hands each one a `Bencher`
+// `super-c test` finds `@test` functions (no registry, no `main` to maintain) hands each one a `Bencher`
 // and prints one table.
 //
 //     @bench
@@ -16,7 +16,7 @@
 // `running()` is the whole protocol: it starts the clock, and each time round it stops the clock, keeps the
 // sample and decides whether another round is wanted. Warm-up rounds run first and are discarded, because
 // the first pass through any code pays for cold caches and lazily-started runtimes and is not the number
-// anyone means. What is reported is the DISTRIBUTION -- min, median, p95, standard deviation -- since a
+// anyone means. What is reported is the DISTRIBUTION (min, median, p95, standard deviation) since a
 // single mean hides exactly the variance that makes a benchmark a lie.
 //
 // Setup that has to happen INSIDE a round is excluded with `pause`/`resume`:
@@ -26,7 +26,7 @@
 //         let input = build_input();      // not counted
 //         b.resume();
 //         process(input);                 // counted
-//     }
+//     }.
 
 import stdio;
 import math;
@@ -96,19 +96,20 @@ extend Bencher {
         self.unit_name.push_str(name);
     }
 
-    /// Anything else worth printing on this benchmark's line -- an allocation count, a cache hit rate.
+    /// Anything else worth printing on this benchmark's line: an allocation count, a cache hit rate.
     /// Appended verbatim after the timings.
     pub fn note(self: &mut Self, s: str) {
         self.extra.clear();
         self.extra.push_str(s);
     }
 
-    /// The loop condition. Stops the clock on the round just finished, keeps it unless it was a warm-up,
+    /// The loop condition. Stops the clock on the finished round, keeps it unless it was a warm-up,
     /// and starts the next one. False when enough samples have been collected.
     pub fn running(self: &mut Self) bool {
         if self.done > 0 {
             if self.pause_at != 0 {
-                self.resume(); // a benchmark that paused and never resumed still gets a usable number
+                // A benchmark that paused and never resumed still gets a usable number.
+                self.resume();
             }
             let dt = platform::now_ns() - self.t0 - self.excluded;
             if self.done > self.warmup {

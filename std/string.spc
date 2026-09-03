@@ -5,17 +5,17 @@
 // Representation: the SMALL STRING OPTIMIZATION. `String` is a struct of a `repr` (an untagged union of two
 // same-sized layouts, 24 bytes on a 64-bit target and 12 on a 32-bit one) plus the allocator it was built
 // through:
-//   - Large { ptr, len, cap } -- a heap buffer the value owns.
-//   - Small { data: [u8; SSO_CAP], len: u8 } -- that many UTF-8 bytes stored INLINE, no allocation.
+//   - Large { ptr, len, cap }: a heap buffer the value owns.
+//   - Small { data: [u8; SSO_CAP], len: u8 }; that many UTF-8 bytes stored INLINE, no allocation.
 // The union's last byte is `Small.len` and (little-endian) the most-significant byte of `Large.cap`. The
 // high bit of that byte is the discriminant: set => large (so `cap` keeps its real value in the remaining
 // bits), clear => small (a small length 0..=SSO_CAP always has its high bit clear). So a freshly built short
 // string lives entirely inline and the first push that crosses SSO_CAP bytes transitions it to the heap.
 //
 // The allocator `A` is a VALUE stored OUTSIDE the SSO union (`alloc: A`), so the same allocator instance
-// that made an allocation also releases it -- which a stateful arena/pool handle requires (`alloc`/`dealloc`
+// that made an allocation also releases it, which a stateful arena/pool handle requires (`alloc`/`dealloc`
 // never reconstruct a fresh `A`). A zero-sized allocator (`Global`) costs no space, so a `String<Global>` is
-// still exactly the union; a non-zero handle makes `String<A>` larger -- the price of a stateful allocator.
+// still exactly the union; a non-zero handle makes `String<A>` larger: the price of a stateful allocator.
 // `new()`/`from_str()`/... use a default-constructed allocator; build a stateful one with `new_in`/
 // `with_capacity_in`/`from_str_in` (the convenience constructors require `A: Default`).
 //
@@ -24,7 +24,7 @@
 // through `as_ptr()`/`data_ptr()` and the length through `len()`, so the small/large split is invisible.
 //
 // Caveat: for a SMALL string `as_ptr()` points INTO the String value itself, so it is invalidated when the
-// String is moved/copied as well as when a mutation grows it onto the heap (matches C++ SSO).
+// String is moved/copied as well as when a mutation grows it onto the heap.
 //
 // Encapsulation: `String` is `pub` but its `repr`/`alloc` members are private; the Repr/Large/Small helper
 // types are module-private (their fields are `pub` only so `String`'s own methods can reach them).
@@ -76,6 +76,8 @@ union StringRepr {
     pub small: StringSmall,
 }
 
+/// A growable, heap-owning byte string with a small inline buffer; not NUL-terminated (see `cstr`). A
+/// is the allocator of the large representation.
 pub struct String<A = Global> {
     repr: StringRepr,
     alloc: A, // the allocator the heap buffer (if any) was obtained through (private; zero-sized for Global)
@@ -88,7 +90,7 @@ unsafe extend<A: Send> String<A> as Send {}
 unsafe extend<A: Sync> String<A> as Sync {}
 
 extend<A: Allocator> String<A> {
-    // --- representation helpers (private) ------------------------------------------------------
+    // --- representation helpers (private) ------------------------------------------------------.
 
     // The high bit of the union's last byte: set for the heap layout, clear for the inline one.
     fn is_large(self: &String<A>) bool {
@@ -132,10 +134,10 @@ extend<A: Allocator> String<A> {
         self.repr.large.cap = new_cap | LARGE_BIT;
     }
 
-    // --- construction --------------------------------------------------------------------------
+    // --- construction --------------------------------------------------------------------------.
 
     /// An empty string backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized
-    /// tag) -- inline, owns no heap yet. `small.len = 0` also clears the discriminant bit.
+    /// tag): inline, owns no heap yet. `small.len = 0` also clears the discriminant bit.
     pub fn new_in(alloc: A) String<A> {
         return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
     }
@@ -159,10 +161,10 @@ extend<A: Allocator> String<A> {
         return s;
     }
 
-    // --- capacity & length ---------------------------------------------------------------------
+    // --- capacity & length ---------------------------------------------------------------------.
 
     /// Bytes currently stored. `s.len()` (this method) is the public accessor; the small/large split is
-    /// internal. (A bare `s.len` would be a private member -- a compile error outside this module.)
+    /// internal. (A bare `s.len` would be a private member: a compile error outside this module.)
     pub fn len(self: &String<A>) usize {
         if self.is_large() {
             return self.repr.large.len;
@@ -173,11 +175,13 @@ extend<A: Allocator> String<A> {
     /// Total bytes available before the next growth: the real heap capacity, or the inline budget.
     pub fn capacity(self: &String<A>) usize {
         if self.is_large() {
-            return self.repr.large.cap << 1 >> 1; // drop the discriminant bit
+            // Drop the discriminant bit.
+            return self.repr.large.cap << 1 >> 1;
         }
         return SSO_CAP;
     }
 
+    /// True when the length is 0.
     pub fn is_empty(self: &String<A>) bool {
         return self.len() == 0;
     }
@@ -206,7 +210,7 @@ extend<A: Allocator> String<A> {
 
     /// Read-ahead sentinel padding: guarantee at least `n` zero bytes immediately after the logical end,
     /// WITHOUT changing len. Code that establishes this may then over-read up to `n` bytes past the end
-    /// safely -- e.g. a lexer whose scan loops rely on the trailing NUL to terminate (no per-byte bounds
+    /// safely: e.g. a lexer whose scan loops rely on the trailing NUL to terminate (no per-byte bounds
     /// check) or that reads 8-byte words. Pre-size with with_capacity(len+n) and this never reallocates.
     pub fn pad_nul(self: &mut String<A>, n: usize) {
         self.reserve_exact(n);
@@ -219,17 +223,17 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // --- raw tail writes: for an external writer (a C vsnprintf/memcpy) that fills the spare region ------
+    // --- raw tail writes: for an external writer (a C vsnprintf/memcpy) that fills the spare region ------.
 
     /// Reserve room for `additional` more bytes and return a writable pointer at the current end (into the
     /// spare capacity, `capacity() - len()` bytes of it). Write up to that many bytes there, then commit them
-    /// with `advance_len`. The returned pointer is invalidated by any later growth -- re-fetch after one.
+    /// with `advance_len`. The returned pointer is invalidated by any later growth: re-fetch after one.
     pub fn spare_mut(self: &mut String<A>, additional: usize) *mut u8 {
         self.reserve(additional);
         return unsafe (self.data_ptr() + self.len());
     }
 
-    /// Grow the length by `n` bytes just written into the spare region via `spare_mut`. Caller guarantees
+    /// Grow the length by `n` bytes written into the spare region via `spare_mut`. Caller guarantees
     /// `len() + n <= capacity()` and that those `n` bytes were initialised.
     pub fn advance_len(self: &mut String<A>, n: usize) {
         self.set_len(self.len() + n);
@@ -245,12 +249,13 @@ extend<A: Allocator> String<A> {
         let p = self.repr.large.ptr;
         let cap = self.capacity(); // read BEFORE any memcpy: the inline move overwrites the union's cap field
         if n <= SSO_CAP {
-            // move back inline, then free the heap buffer
+            // Move back inline, then free the heap buffer.
             if n > 0 {
                 unsafe memcpy(&mut self.repr.small.data[0], p, n);
             }
             unsafe self.alloc.dealloc(p, cap, 1);
-            self.repr.small.len = n as u8; // clears the discriminant (n <= SSO_CAP)
+            // Clears the discriminant (n <= SSO_CAP).
+            self.repr.small.len = n as u8;
             return;
         }
         if self.capacity() != n {
@@ -272,7 +277,7 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    // --- append --------------------------------------------------------------------------------
+    // --- append --------------------------------------------------------------------------------.
 
     /// Append `n` raw bytes from `src` (the bulk primitive the other appenders build on).
     pub fn push_bytes(self: &mut String<A>, src: *const u8, n: usize) {
@@ -356,7 +361,8 @@ extend<A: Allocator> String<A> {
         } else {
             let mut base: u64 = 87; // 'a' - 10
             if upper {
-                base = 55; // 'A' - 10
+                // 'A' - 10.
+                base = 55;
             }
             self.push_byte((base + d) as u8);
         }
@@ -387,7 +393,8 @@ extend<A: Allocator> String<A> {
         if n > 0 {
             let mut m = n as usize;
             if m > 63 {
-                m = 63; // snprintf reports the WOULD-BE length; only the truncated bytes exist
+                // Snprintf reports the WOULD-BE length; only the truncated bytes exist.
+                m = 63;
             }
             self.push_bytes(buf as *const u8, m);
         }
@@ -430,7 +437,7 @@ extend<A: Allocator> String<A> {
         }
     }
 
-    /// Pad, in place, the field appended since `from` (a prior `len()`) to `width` bytes — the
+    /// Pad, in place, the field appended since `from` (a prior `len()`) to `width` bytes: the
     /// no-temporary twin of `push_padded` for values formatted directly into this string: one
     /// reserve, one memmove of the field, then fill. Same rules: `align` 0 = left, 1 = right,
     /// 2 = center; a right-aligned zero fill keeps a leading '-' in front of the zeros.
@@ -502,7 +509,7 @@ extend<A: Allocator> String<A> {
         self.set_len(len + text.len());
     }
 
-    // --- remove --------------------------------------------------------------------------------
+    // --- remove --------------------------------------------------------------------------------.
 
     /// Remove and return the last byte, or 0 if the string is empty.
     pub fn pop_byte(self: &mut String<A>) u8 {
@@ -516,7 +523,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Remove and return the last UTF-8 scalar value (walking back over continuation bytes), or 0 if
-    /// empty -- the inverse of `push`.
+    /// empty: the inverse of `push`.
     pub fn pop(self: &mut String<A>) u32 {
         let len = self.len();
         if len == 0 {
@@ -525,7 +532,7 @@ extend<A: Allocator> String<A> {
         let p = self.data_ptr();
         let mut start = len - 1;
         while start > 0 && (unsafe p[start] & 0xC0) == 0x80 {
-            // skip 0b10xxxxxx continuation bytes
+            // Skip 0b10xxxxxx continuation bytes.
             start = start - 1;
         }
         let n = len - start;
@@ -552,9 +559,9 @@ extend<A: Allocator> String<A> {
         return b;
     }
 
-    // --- access --------------------------------------------------------------------------------
+    // --- access --------------------------------------------------------------------------------.
 
-    /// The byte at `i` (0 <= i < len). No bounds check -- the caller owns the index.
+    /// The byte at `i` (0 <= i < len). No bounds check: the caller owns the index.
     pub fn byte(self: &String<A>, i: usize) u8 {
         return unsafe self.as_ptr()[i];
     }
@@ -578,26 +585,29 @@ extend<A: Allocator> String<A> {
         return str::from_raw(self.as_ptr(), self.len());
     }
 
-    /// Borrowed iterators over the bytes -- delegate to the `str` view: valid until the next mutation, and
+    /// Borrowed iterators over the bytes: delegate to the `str` view: valid until the next mutation, and
     /// only while `self` is alive (bind the String to a `let`; do not iterate a temporary's iterator).
     pub fn bytes(self: &String<A>) Bytes {
         return self.as_str().bytes();
     }
 
+    /// Iterator over the Unicode scalars (assumes valid UTF-8).
     pub fn chars(self: &String<A>) Chars {
         return self.as_str().chars();
     }
 
+    /// Iterator over the pieces between occurrences of `sep`.
     pub fn split(self: &String<A>, sep: str) Split {
         return self.as_str().split(sep);
     }
 
+    /// Iterator over the lines without their terminators.
     pub fn lines(self: &String<A>) Lines {
         return self.as_str().lines();
     }
 
     /// A NUL-terminated `*const char` view of the bytes, for passing to C APIs (the FFI `.cstr()` bridge).
-    /// Writes a trailing 0 just past `len` without changing the length, growing by one byte if needed. The
+    /// Writes a trailing 0 right past `len` without changing the length, growing by one byte if needed. The
     /// pointer is valid until the next mutation; embedded NULs make C see a truncated string.
     pub fn cstr(self: &mut String<A>) *const char {
         self.reserve(1);
@@ -647,8 +657,9 @@ extend<A: Allocator> String<A> {
         return out;
     }
 
-    // --- compare -------------------------------------------------------------------------------
+    // --- compare -------------------------------------------------------------------------------.
 
+    /// Byte equality with another String.
     pub fn equals(self: &String<A>, other: &String<A>) bool {
         let n = self.len();
         if n != other.len() {
@@ -660,6 +671,7 @@ extend<A: Allocator> String<A> {
         return unsafe memcmp(self.as_ptr(), other.as_ptr(), n) == 0;
     }
 
+    /// Byte equality with a `str`.
     pub fn eq_str(self: &String<A>, text: str) bool {
         let n = self.len();
         if n != text.len() {
@@ -695,7 +707,7 @@ extend<A: Allocator> String<A> {
         return true;
     }
 
-    /// True if every byte is ASCII (< 0x80) -- i.e. no multibyte UTF-8 sequences.
+    /// True if every byte is ASCII (< 0x80): i.e. no multibyte UTF-8 sequences.
     pub fn is_ascii(self: &String<A>) bool {
         let n = self.len();
         let p = self.as_ptr();
@@ -707,8 +719,9 @@ extend<A: Allocator> String<A> {
         return true;
     }
 
-    // --- search --------------------------------------------------------------------------------
+    // --- search --------------------------------------------------------------------------------.
 
+    /// True when the bytes begin with `prefix`.
     pub fn starts_with(self: &String<A>, prefix: str) bool {
         if prefix.len() > self.len() {
             return false;
@@ -719,6 +732,7 @@ extend<A: Allocator> String<A> {
         return unsafe memcmp(self.as_ptr(), prefix.ptr(), prefix.len()) == 0;
     }
 
+    /// True when the bytes end with `suffix`.
     pub fn ends_with(self: &String<A>, suffix: str) bool {
         let n = self.len();
         if suffix.len() > n {
@@ -756,6 +770,7 @@ extend<A: Allocator> String<A> {
         return n;
     }
 
+    /// True when byte `b` occurs.
     pub fn contains_byte(self: &String<A>, b: u8) bool {
         return self.index_of_byte(b) < self.len();
     }
@@ -812,31 +827,34 @@ extend<A: Allocator> String<A> {
         return n;
     }
 
+    /// True when `needle` occurs as a substring.
     pub fn contains(self: &String<A>, needle: str) bool {
         return self.find(needle) != self.len();
     }
 
-    // --- transform & replace -------------------------------------------------------------------
+    // --- transform & replace -------------------------------------------------------------------.
 
+    /// Uppercase every ASCII letter in place; other bytes untouched.
     pub fn to_ascii_upper(self: &mut String<A>) {
         let n = self.len();
         let p = self.data_ptr();
         for i in 0..n {
             let b = unsafe p[i];
             if b >= 97 && b <= 122 {
-                // 'a'..='z' -> 'A'..='Z'
+                // 'a'..='z' -> 'A'..='Z'.
                 unsafe p[i] = b - 32;
             }
         }
     }
 
+    /// Lowercase every ASCII letter in place; other bytes untouched.
     pub fn to_ascii_lower(self: &mut String<A>) {
         let n = self.len();
         let p = self.data_ptr();
         for i in 0..n {
             let b = unsafe p[i];
             if b >= 65 && b <= 90 {
-                // 'A'..='Z' -> 'a'..='z'
+                // 'A'..='Z' -> 'a'..='z'.
                 unsafe p[i] = b + 32;
             }
         }
@@ -875,7 +893,8 @@ extend<A: Allocator> String<A> {
                 i = i + 1;
             }
         }
-        out.push_bytes(unsafe (p + run), n - run); // trailing run
+        // Trailing run.
+        out.push_bytes(unsafe (p + run), n - run);
         return out;
     }
 
@@ -917,23 +936,25 @@ extend<A: Allocator> String<A> {
         self.trim_start();
     }
 
-    // --- output --------------------------------------------------------------------------------
+    // --- output --------------------------------------------------------------------------------.
 
     /// Write the UTF-8 bytes to stdout (no trailing newline).
     pub fn print(self: &String<A>) {
         unsafe fwrite(self.as_ptr(), 1, self.len(), unsafe __sc_stdout());
     }
 
+    /// Write the bytes plus a newline to stdout.
     pub fn println(self: &String<A>) {
         self.print();
         unsafe putchar(10);
     }
 
-    /// Write the UTF-8 bytes to stderr (no trailing newline) -- the `eprint`/`eprintln` builtins' writer.
+    /// Write the UTF-8 bytes to stderr (no trailing newline): the `eprint`/`eprintln` builtins' writer.
     pub fn eprint(self: &String<A>) {
         unsafe fwrite(self.as_ptr(), 1, self.len(), unsafe __sc_stderr());
     }
 
+    /// Write the bytes plus a newline to stderr.
     pub fn eprintln(self: &String<A>) {
         self.eprint();
         unsafe fputc(10, unsafe __sc_stderr());
@@ -941,7 +962,7 @@ extend<A: Allocator> String<A> {
 }
 
 extend<A: Allocator + Default> String<A> {
-    /// An empty string (default-constructed allocator -- `Global`, or any zero-sized/reconstructible tag).
+    /// An empty string (default-constructed allocator: `Global`, or any zero-sized/reconstructible tag).
     pub fn new() String<A> {
         return String::<A>::new_in(A::default());
     }
@@ -971,16 +992,19 @@ extend<A: Allocator + Default> String<A> {
         s.push_u64(value);
         return s;
     }
+    /// The decimal spelling of `value`.
     pub fn from_i64(value: i64) String<A> {
         let mut s = String::<A>::new();
         s.push_i64(value);
         return s;
     }
+    /// The default spelling of `value` (see push_f64).
     pub fn from_f64(value: f64) String<A> {
         let mut s = String::<A>::new();
         s.push_f64(value);
         return s;
     }
+    /// The hexadecimal spelling of `value`, without a prefix; `upper` selects A-F.
     pub fn from_hex(value: u64, upper: bool) String<A> {
         let mut s = String::<A>::new();
         s.push_hex(value, upper);
@@ -990,14 +1014,15 @@ extend<A: Allocator + Default> String<A> {
 
 // Release the heap buffer (through the STORED allocator) and reset to the empty, inline state. Auto-`Free`:
 // a `String` is freed at scope exit (unless moved out or freed explicitly). This is sound because every
-// `String`-returning method here (`clone`/`substring`/`replace`/`repeat`) allocates a FRESH buffer -- none
-// hands out a copy that shares the heap pointer -- so no aliased owner ever exists to double-free.
+// `String`-returning method here (`clone`/`substring`/`replace`/`repeat`) allocates a FRESH buffer: none
+// hands out a copy that shares the heap pointer, so no aliased owner ever exists to double-free.
 extend<A: Allocator> String<A> as Free {
     pub fn free(self: &mut String<A>) {
         if self.is_large() {
             unsafe self.alloc.dealloc(self.repr.large.ptr, self.capacity(), 1);
         }
-        self.repr.small.len = 0; // back to inline, empty (clears the discriminant)
+        // Back to inline, empty (clears the discriminant).
+        self.repr.small.len = 0;
     }
 }
 
@@ -1081,7 +1106,7 @@ extend<A: Allocator> String<A> as Format {
 }
 
 extend<A: Allocator> String<A> as Writer {
-    /// Append the bytes, returning the number written (always the slice length -- the buffer grows on demand).
+    /// Append the bytes, returning the number written (always the slice length: the buffer grows on demand).
     pub fn write(self: &mut String<A>, bytes: []u8) usize {
         let n = bytes.len();
         self.push_bytes(bytes.as_ptr(), n);
@@ -1089,8 +1114,8 @@ extend<A: Allocator> String<A> as Writer {
     }
 }
 
-// Index conformance: `s[i]` borrows the byte at `i`, and `s[lo..hi]` -- any range form, `..=` including
-// the end byte, an open end meaning `len()` -- is a borrowed `str` sub-view (valid until the next
+// Index conformance: `s[i]` borrows the byte at `i`, and `s[lo..hi]`; any range form, `..=` including
+// the end byte, an open end meaning `len()`: is a borrowed `str` sub-view (valid until the next
 // mutation, like `as_str`). Byte-addressed and unchecked: the caller keeps the bounds within `len` and
 // on UTF-8 boundaries. No IndexMut: bytes are mutated through the growing/UTF-8-aware String API.
 extend<A: Allocator> String<A> as Index<u8, str> {
@@ -1119,58 +1144,63 @@ extend<A: Allocator> String<A> as Index<u8, str> {
 /// Formatted output, compiler builtins. The first argument is a string literal with `{}` placeholders; the
 /// trailing arguments fill them in order and are appended by their type (any integer/float, bool, char, str,
 /// String, or any `Format` type). `{{`/`}}` are literal braces. `format` returns the built String; `print`
-/// writes it to stdout; `println` adds a trailing newline. (Bodies are stubs -- the typechecker rewrites a
+/// writes it to stdout; `println` adds a trailing newline. (Bodies are stubs: the typechecker rewrites a
 /// `format` call into `sugar_fmt_*` shim calls, so it const-folds; the print family is lowered by codegen.)
 pub fn format(_fmt: str, ...) String {
     return String::<Global>::new();
 }
+/// Formatted print to stdout; the compiler lowers calls, this body is never run.
 pub fn print(_fmt: str, ...) {}
 pub fn println(_fmt: str, ...) {}
+/// Formatted print to stderr; the compiler lowers calls, this body is never run.
 pub fn eprint(_fmt: str, ...) {} // like print/println, written to stderr
 pub fn eprintln(_fmt: str, ...) {}
 
-// The print family's desugar tails: consume the rendered buffer (write, then free) so the
-// checker-built sugar block owns no live String at its end.
+/// The print family's desugar tails: consume the rendered buffer (write, then free) so the
+/// checker-built sugar block owns no live String at its end.
 pub fn sugar_print(f: String) {
     f.print();
 }
+/// `println` shim: prints the formatted String plus newline to stdout and consumes it.
 pub fn sugar_println(f: String) {
     f.println();
 }
+/// `eprint` shim: prints the formatted String to stderr and consumes it.
 pub fn sugar_eprint(f: String) {
     f.eprint();
 }
+/// `eprintln` shim: prints the formatted String plus newline to stderr and consumes it.
 pub fn sugar_eprintln(f: String) {
     f.eprintln();
 }
-// `format_into`'s desugar tail: append the rendered piece into the destination buffer, consuming it.
+/// `format_into`'s desugar tail: append the rendered piece into the destination buffer, consuming it.
 pub fn sugar_format_into(dst: &mut String, f: String) {
     dst.push_string(&f);
 }
 
-// Like `format`, but APPENDS the rendered output into this buffer instead of returning a new String --
+// Like `format`, but APPENDS the rendered output into this buffer instead of returning a new String:
 // zero allocation (reuses the buffer's capacity). It is a METHOD so the receiver's `&mut` borrow defers
 // past the argument evaluation (a free-fn `&mut dst` arg would collide with `self.X` format args).
 // Lowered by codegen; this body is never emitted.
 extend<A: Allocator> String<A> {
+    /// Formatted append; the compiler lowers calls, this body is never run.
     pub fn format_into(self: &mut String<A>, _fmt: str, ...) {}
 }
 
-// ---- `format` lowering targets ----
-// The typechecker rewrites every `format(..)` call into a block of assignments through these
-// shims -- `f = sugar_fmt_i64(f, v);` -- so the result const-folds like ordinary code. The String
-// threads BY VALUE (move in, move out): statements keep C's evaluation order strict, and a padded
-// placeholder reuses the same shims to render its piece as one nested expression, so no second
-// local is ever needed. Each value parameter's type is what the widening rules let every dispatched
-// source type reach implicitly (the rewrite synthesizes no casts). Not meant to be called by hand.
+/// The typechecker rewrites every `format(..)` call into a block of assignments through these
+/// shims (`f = sugar_fmt_i64(f, v);`) so the result const-folds like ordinary code. The String
+/// threads BY VALUE (move in, move out): statements keep C's evaluation order strict, and a padded
+/// placeholder reuses the same shims to render its piece as one nested expression, so no second
+/// local is ever needed. Each value parameter's type is what the widening rules let every dispatched
+/// source type reach implicitly (the rewrite synthesizes no casts). Not meant to be called by hand.
 pub fn sugar_fmt_new() String {
     return String::<Global>::new();
 }
-// Matchertext interpolation guard: a hole's rendered piece must itself be matchertext -- the
-// ASCII matchers (), [], {} must properly match -- so no runtime value can break out of the
-// literal's structure (each compliant piece keeps the whole result compliant, and matching can
-// never complete ACROSS holes). Byte-level scan: matchers are ASCII, every other byte passes
-// through uninspected. Panics on violation; in a const context the panic fails the fold instead.
+/// Matchertext interpolation guard: a hole's rendered piece must itself be matchertext; the
+/// ASCII matchers (), [], {} must properly match, so no runtime value can break out of the
+/// literal's structure (each compliant piece keeps the whole result compliant, and matching can
+/// never complete ACROSS holes). Byte-level scan: matchers are ASCII, every other byte passes
+/// through uninspected. Panics on violation; in a const context the panic fails the fold instead.
 pub fn sugar_mt_splice(mut s: String, piece: String) String {
     let v = piece.as_str();
     let mut st = Vector::<u8>::new();
@@ -1199,44 +1229,53 @@ pub fn sugar_mt_splice(mut s: String, piece: String) String {
     s.push_string(&piece);
     return s;
 }
+/// `format` shim: appends a `str` to `s` and returns it.
 pub fn sugar_fmt_str(mut s: String, v: str) String {
     s.push_str(v);
     return s;
 }
+/// `format` shim: appends a borrowed String to `s` and returns it.
 pub fn sugar_fmt_string(mut s: String, v: &String) String {
     s.push_string(v);
     return s;
 }
+/// `format` shim: appends an owned String (consumed) to `s` and returns it.
 pub fn sugar_fmt_owned(mut s: String, v: String) String {
     s.push_string(&v);
     return s;
 }
+/// `format` shim: appends a signed integer in decimal to `s` and returns it.
 pub fn sugar_fmt_i64(mut s: String, v: i64) String {
     s.push_i64(v);
     return s;
 }
+/// `format` shim: appends an unsigned integer in decimal to `s` and returns it.
 pub fn sugar_fmt_u64(mut s: String, v: u64) String {
     s.push_u64(v);
     return s;
 }
-// isize/usize have no implicit widening (their width is platform-dependent), so they get their own
-// shims; same for their hex/bin forms below.
+/// Isize/usize have no implicit widening (their width is platform-dependent), so they get their own
+/// shims; same for their hex/bin forms below.
 pub fn sugar_fmt_isize(mut s: String, v: isize) String {
     s.push_i64(v as i64);
     return s;
 }
+/// `format` shim: appends a usize in decimal to `s` and returns it.
 pub fn sugar_fmt_usize(mut s: String, v: usize) String {
     s.push_u64(v as u64);
     return s;
 }
+/// `format` shim: appends an f64 with the default precision to `s` and returns it.
 pub fn sugar_fmt_f64(mut s: String, v: f64) String {
     s.push_f64(v);
     return s;
 }
+/// `format` shim: appends an f64 with `prec` fractional digits to `s` and returns it.
 pub fn sugar_fmt_f64_prec(mut s: String, v: f64, prec: u32) String {
     s.push_f64_prec(v, prec);
     return s;
 }
+/// `format` shim: appends `true`/`false` to `s` and returns it.
 pub fn sugar_fmt_bool(mut s: String, v: bool) String {
     if v {
         s.push_str("true");
@@ -1245,109 +1284,131 @@ pub fn sugar_fmt_bool(mut s: String, v: bool) String {
     }
     return s;
 }
+/// `format` shim: appends a char as one byte to `s` and returns it.
 pub fn sugar_fmt_char(mut s: String, v: char) String {
     s.push_byte(v as u8);
     return s;
 }
+/// `format` shim: appends a signed integer in lowercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_i(mut s: String, v: i64) String {
     s.push_hex_i64(v, false);
     return s;
 }
+/// `format` shim: appends a signed integer in uppercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_i_up(mut s: String, v: i64) String {
     s.push_hex_i64(v, true);
     return s;
 }
+/// `format` shim: appends an unsigned integer in lowercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_u(mut s: String, v: u64) String {
     s.push_hex(v, false);
     return s;
 }
+/// `format` shim: appends an unsigned integer in uppercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_u_up(mut s: String, v: u64) String {
     s.push_hex(v, true);
     return s;
 }
+/// `format` shim: appends a char in lowercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_c(mut s: String, v: char) String {
     s.push_hex(v as u64, false);
     return s;
 }
+/// `format` shim: appends a char in uppercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_c_up(mut s: String, v: char) String {
     s.push_hex(v as u64, true);
     return s;
 }
+/// `format` shim: appends an isize in lowercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_is(mut s: String, v: isize) String {
     s.push_hex_i64(v as i64, false);
     return s;
 }
+/// `format` shim: appends an isize in uppercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_is_up(mut s: String, v: isize) String {
     s.push_hex_i64(v as i64, true);
     return s;
 }
+/// `format` shim: appends a usize in lowercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_us(mut s: String, v: usize) String {
     s.push_hex(v as u64, false);
     return s;
 }
+/// `format` shim: appends a usize in uppercase hex to `s` and returns it.
 pub fn sugar_fmt_hex_us_up(mut s: String, v: usize) String {
     s.push_hex(v as u64, true);
     return s;
 }
-// `{:b}` renders at the ARGUMENT's width (an i8 shows 8 digits), so one shim per width; the sub-64
-// ones take i64 because every narrower integer, signed or not, widens to it losslessly.
+/// `{:b}` renders at the ARGUMENT's width (an i8 shows 8 digits), so one shim per width; the sub-64
+/// ones take i64 because every narrower integer, signed or not, widens to it losslessly.
 pub fn sugar_fmt_bin8(mut s: String, v: i64) String {
     s.push_bin((v & 0xFF) as u64);
     return s;
 }
+/// `format` shim: appends the low 16 bits in binary to `s` and returns it.
 pub fn sugar_fmt_bin16(mut s: String, v: i64) String {
     s.push_bin((v & 0xFFFF) as u64);
     return s;
 }
+/// `format` shim: appends the low 32 bits in binary to `s` and returns it.
 pub fn sugar_fmt_bin32(mut s: String, v: i64) String {
     s.push_bin((v & 0xFFFFFFFF) as u64);
     return s;
 }
+/// `format` shim: appends a signed integer's 64 bits in binary to `s` and returns it.
 pub fn sugar_fmt_bin64i(mut s: String, v: i64) String {
     s.push_bin(v as u64);
     return s;
 }
+/// `format` shim: appends an unsigned integer in binary to `s` and returns it.
 pub fn sugar_fmt_bin64u(mut s: String, v: u64) String {
     s.push_bin(v);
     return s;
 }
+/// `format` shim: appends a char in binary to `s` and returns it.
 pub fn sugar_fmt_bin_c(mut s: String, v: char) String {
     s.push_bin(v as u64);
     return s;
 }
+/// `format` shim: appends an isize in binary to `s` and returns it.
 pub fn sugar_fmt_bin_is(mut s: String, v: isize) String {
     s.push_bin((v as i64) as u64);
     return s;
 }
+/// `format` shim: appends a usize in binary to `s` and returns it.
 pub fn sugar_fmt_bin_us(mut s: String, v: usize) String {
     s.push_bin(v as u64);
     return s;
 }
+/// `format` shim: appends a `Format` value through its `fmt` to `s` and returns it.
 pub fn sugar_fmt_val<T: Format>(mut s: String, v: &T) String {
     let r = v.fmt();
     s.push_string(&r);
     return s;
 }
+/// `format` shim: appends an owned `Format` value (consumed) through its `fmt` to `s` and returns it.
 pub fn sugar_fmt_val_owned<T: Format>(mut s: String, v: T) String {
     let r = v.fmt();
     s.push_string(&r);
     return s;
 }
-// Width padding: `piece` is the placeholder rendered on its own (by the shims above, on a fresh
-// String -- SSO keeps short pieces off the heap); it lands in `s` filled up to `width` with
-// `fill`'s first byte (space when empty -- the spec had no fill character to point at).
+/// Width padding: `piece` is the placeholder rendered on its own (by the shims above, on a fresh
+/// String: SSO keeps short pieces off the heap); it lands in `s` filled up to `width` with
+/// `fill`'s first byte (space when empty: the spec had no fill character to point at).
 pub fn sugar_fmt_pad_l(mut s: String, piece: String, width: usize, fill: str) String {
     let from = s.len();
     s.push_string(&piece);
     s.pad_at(from, width, sugar_fill_byte(fill), 0u8);
     return s;
 }
+/// `format` shim: appends `piece` right-aligned in `width` columns, padded with `fill`.
 pub fn sugar_fmt_pad_r(mut s: String, piece: String, width: usize, fill: str) String {
     let from = s.len();
     s.push_string(&piece);
     s.pad_at(from, width, sugar_fill_byte(fill), 1u8);
     return s;
 }
+/// `format` shim: appends `piece` centered in `width` columns, padded with `fill`.
 pub fn sugar_fmt_pad_c(mut s: String, piece: String, width: usize, fill: str) String {
     let from = s.len();
     s.push_string(&piece);

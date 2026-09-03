@@ -1,5 +1,5 @@
 // M7's micro-benchmarks: one primitive per lane, one number each. These are the numbers a regression shows
-// up in first -- a macro benchmark tells you something got slower, a micro benchmark tells you what.
+// up in first: a macro benchmark tells you something got slower, a micro benchmark tells you what.
 //
 // Every lane reports per-operation cost via `b.each(N)`, so the figure is comparable across runs whatever
 // the round size. Where a lane needs more than one task it uses a WaitGroup rather than sleeping, so the
@@ -8,7 +8,7 @@
 // Two lanes the milestone asks for are NOT here, and deliberately:
 //
 //   * steals per task / idle-worker latency. The scheduler keeps no steal counter, and adding one means an
-//     atomic increment on the steal path -- paying for the metric in the thing being measured. It wants a
+//     atomic increment on the steal path: paying for the metric in the thing being measured. It wants a
 //     counter compiled in only under a flag, which is its own change.
 //   * the data-parallel SCALING CURVE (speedup at 1/2/4/8/N workers). Worker count is fixed before the pool
 //     starts and the pool is per process, so a curve needs one process per point; `parallel_range` below
@@ -28,13 +28,13 @@ const SPAWNS: i64 = 2000; // tasks per round for the spawn lanes
 const OPS: i64 = 20000; // operations per round for the uncontended lanes
 const MSGS: i64 = 5000; // messages per round for the channel lanes
 const HAMMER: i64 = 2000; // per-task operations in the contended lanes
-const LOCKERS: i64 = 8; // tasks in the contended lock lane -- FIXED, so the number compares across machines
+const LOCKERS: i64 = 8; // tasks in the contended lock lane: FIXED, so the number compares across machines
 const FANIN_TASKS: i64 = 8; // signallers in the fan-in lane
 const FANIN_EACH: i64 = 20000; // `done` calls each, so spawn cost is a rounding error next to them
 const DISPATCHES: i64 = 200; // `parallel::range` calls per round
 const SPAN: usize = 256; // iterations per dispatch: small, so what is measured is the dispatch
 
-// --- spawn ------------------------------------------------------------------------------------------
+// --- spawn ------------------------------------------------------------------------------------------.
 
 /// What one `launch` costs end to end: the task is created, scheduled, run and accounted for. This is the
 /// number a fan-out is made of, so it bounds every other coroutine lane.
@@ -57,7 +57,7 @@ pub fn spawn_to_completion(b: &mut bench::Bencher) {
 
 /// Spawn-to-FIRST-RUN, isolated from the run itself: the launcher waits for one task at a time, so what is
 /// measured is the latency from `launch` to the task's first instruction rather than throughput under a
-/// backlog. Slower per task than the lane above by design -- there is no pipelining to hide it.
+/// backlog. Slower per task than the lane above by design: there is no pipelining to hide it.
 @bench
 pub fn spawn_latency(b: &mut bench::Bencher) {
     let rounds: i64 = 2000;
@@ -76,11 +76,11 @@ pub fn spawn_latency(b: &mut bench::Bencher) {
     }
 }
 
-// --- park / unpark ----------------------------------------------------------------------------------
+// --- park / unpark ----------------------------------------------------------------------------------.
 
 /// A park/unpark ROUND TRIP: two coroutines hand a value back and forth over a pair of channels, so each
-/// message parks one task and wakes the other. This is the context-switch cost as a program actually pays
-/// it -- the raw register swap is a fraction of it; the rest is the scheduler.
+/// message parks one task and wakes the other. This is the context-switch cost as a program pays
+/// it: the raw register swap is a fraction of it; the rest is the scheduler.
 @bench
 pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
     let trips: i64 = 2000;
@@ -91,12 +91,12 @@ pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
         let back = chan::Channel::<i64>::bounded(1);
         let rx = there.receiver();
         let tx2 = back.sender();
-        let tx = there.sender(); // before the echo task starts -- see the note in `channel_lane`
+        let tx = there.sender(); // before the echo task starts: see the note in `channel_lane`
         let rx2 = back.receiver();
         let n = trips;
         // Wait for the echo task before freeing the channels it holds. Without this the round returns while
         // that task is still parked in `recv`, and freeing the channel under it leaves a live task pointing
-        // at released memory -- which showed up not here but in whichever lane ran next.
+        // at released memory, which showed up not here but in whichever lane ran next.
         let wg = sync::WaitGroup::new();
         wg.add(1);
         let w = wg.clone();
@@ -122,7 +122,7 @@ pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
     }
 }
 
-// --- mutex ------------------------------------------------------------------------------------------
+// --- mutex ------------------------------------------------------------------------------------------.
 
 /// An uncontended lock/unlock pair, on the thread that already owns it. The fast path, and the one that
 /// shows up in every data structure built on top of `Mutex`.
@@ -168,16 +168,16 @@ pub fn mutex_contended(b: &mut bench::Bencher) {
     }
 }
 
-// --- channels ---------------------------------------------------------------------------------------
+// --- channels ---------------------------------------------------------------------------------------.
 
 // One producer, one consumer, `cap` slots. Capacity is the whole point of the sweep: at 1 every message
 // parks both ends, and at 1024 a producer runs ahead and the parks disappear.
 fn channel_lane(b: &mut bench::Bencher, cap: usize) {
     b.each(MSGS);
     b.unit("msg");
-    // The consumer records how many it actually took. A channel lane that silently delivers nothing would
+    // The consumer records how many it took. A channel lane that silently delivers nothing would
     // otherwise report a wonderful number for doing no work, which is the one way a benchmark can lie
-    // outright -- so the count is checked and a wrong one is said out loud rather than averaged in.
+    // outright, so the count is checked and a wrong one is said out loud rather than averaged in.
     let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
     let mut short: i64 = 0;
     while b.running() {
@@ -185,7 +185,7 @@ fn channel_lane(b: &mut bench::Bencher, cap: usize) {
         let rx = ch.receiver();
         // The sender MUST exist before the consumer starts. `recv` reports "closed and drained" when the
         // sender count is zero, so a consumer scheduled in the window between `launch` and `ch.sender()`
-        // gives up at once and drops the last receiver -- after which every `send` is rejected and the round
+        // gives up at once and drops the last receiver: after which every `send` is rejected and the round
         // silently measures nothing. Cheap to get wrong, and it only shows up under load.
         let tx = ch.sender();
         let wg = sync::WaitGroup::new();
@@ -228,21 +228,24 @@ fn channel_lane(b: &mut bench::Bencher, cap: usize) {
 }
 
 @bench
+/// Benchmark lane: ping-pong over a capacity-1 channel.
 pub fn channel_cap1(b: &mut bench::Bencher) {
     channel_lane(b, 1);
 }
 
 @bench
+/// Benchmark lane: ping-pong over a capacity-64 channel.
 pub fn channel_cap64(b: &mut bench::Bencher) {
     channel_lane(b, 64);
 }
 
 @bench
+/// Benchmark lane: ping-pong over a capacity-1024 channel.
 pub fn channel_cap1024(b: &mut bench::Bencher) {
     channel_lane(b, 1024);
 }
 
-/// The same traffic as `channel_cap64` -- same message count, same capacity -- moved with `send_batch` /
+/// The same traffic as `channel_cap64` (same message count, same capacity) moved with `send_batch` /
 /// `recv_batch` instead of one `send`/`recv` per item. Directly comparable to that lane, and the difference
 /// between the two is what one lock, one unlock and one wake per item cost.
 @bench
@@ -253,7 +256,7 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
     while b.running() {
         let ch = chan::Channel::<i64>::bounded(64);
         let rx = ch.receiver();
-        let tx = ch.sender(); // before the consumer starts -- see the note in `channel_lane`
+        let tx = ch.sender(); // before the consumer starts: see the note in `channel_lane`
         let wg = sync::WaitGroup::new();
         wg.add(1);
         let w = wg.clone();
@@ -264,7 +267,8 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
             loop {
                 let k = rx.recv_batch(&mut got, 64);
                 if k == 0 {
-                    break; // closed and drained
+                    // Closed and drained.
+                    break;
                 }
                 n = n + k as i64;
                 got.clear();
@@ -293,12 +297,12 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
     }
 }
 
-// --- fan-in -----------------------------------------------------------------------------------------
+// --- fan-in -----------------------------------------------------------------------------------------.
 
 /// `WaitGroup` fan-in: `done` itself, plus the wake the last one owes the waiter.
 ///
-/// A FIXED, small number of tasks each signal many times. One task per `done` -- the obvious way to write
-/// this -- measures spawn instead: `done` is a single atomic, so a task built to call it once is a thousand
+/// A FIXED, small number of tasks each signal many times. One task per `done`: the obvious way to write
+/// this: measures spawn instead: `done` is a single atomic, so a task built to call it once is a thousand
 /// nanoseconds of scheduling wrapped around twenty of work, and the lane reported the same figure as
 /// `spawn_to_completion` to within one percent.
 @bench
@@ -322,7 +326,7 @@ pub fn waitgroup_fanin(b: &mut bench::Bencher) {
     }
 }
 
-// --- data-parallel ----------------------------------------------------------------------------------
+// --- data-parallel ----------------------------------------------------------------------------------.
 
 /// What one `parallel::range` CALL costs, which is almost entirely fixed: measured at 182us per dispatch
 /// over a 256-iteration span and 217us over an 8192-iteration one, so thirty-two times the work adds under
@@ -334,7 +338,7 @@ pub fn parallel_range(b: &mut bench::Bencher) {
     b.each(DISPATCHES);
     b.unit("dispatch");
     b.set_rounds(50);
-    // A SCOPED parallel call returns only once every chunk is done, so it may borrow this frame -- no Arc.
+    // A SCOPED parallel call returns only once every chunk is done, so it may borrow this frame: no Arc.
     let hits = atomics::Atomic::<i64>::new(0);
     let hp = &hits;
     while b.running() {
@@ -342,7 +346,7 @@ pub fn parallel_range(b: &mut bench::Bencher) {
             data::range(
                 0..SPAN,
                 |i: usize| {
-                    // Just enough that the body cannot be deleted, and far too little to hide the dispatch.
+                    // Enough that the body cannot be deleted, and far too little to hide the dispatch.
                     if i == 0 {
                         let _ = hp.fetch_add(1, atomics::MemoryOrder::Relaxed);
                     }

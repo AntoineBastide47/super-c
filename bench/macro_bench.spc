@@ -7,7 +7,7 @@
 // Every lane restores the default (`set_worker_count(0)`) before returning, or every benchmark scheduled
 // after it would silently inherit a one-worker pool.
 //
-// The workload at each point is IDENTICAL -- same task count, same items, same arithmetic. Only the number
+// The workload at each point is IDENTICAL: same task count, same items, same arithmetic. Only the number
 // of OS workers changes. A curve is only meaningful if the work is held still.
 
 import stdio;
@@ -29,13 +29,13 @@ const MIXED_OPS: i64 = 500;
 const COMPUTE: usize = 2000000; // iterations for the compute-bound lane
 
 // The per-task arithmetic count, as a `static mut` rather than a constant ON PURPOSE. With a literal
-// argument LTO folds `burn(256)` to its answer at compile time and the task does no work at all -- which had
+// argument LTO folds `burn(256)` to its answer at compile time and the task does no work at all, which had
 // `fanout_tree` reporting 0.04ms for arithmetic that costs 0.10ms to perform. A mutable static cannot be
 // folded, because nothing can prove it was not written.
 static mut WORK: i64 = 256;
 
 // A little arithmetic so a task is not pure scheduling. Unsigned: it wraps at width where the signed form
-// would trap on overflow. Callers must OBSERVE the result -- `let _ = burn(n)` is a pure call with a
+// would trap on overflow. Callers must OBSERVE the result: `let _ = burn(n)` is a pure call with a
 // discarded value and LTO deletes it outright, which had `fanout_tree` reporting a time below the cost of
 // the arithmetic it was supposed to be doing.
 // Consume a value so the computation that produced it cannot be optimised away. Never prints.
@@ -54,7 +54,7 @@ fn burn(rounds: i64) u64 {
 }
 
 // Run `body` at each worker count and print a row per point: wall time and speedup against one worker.
-// `body` must leave no task running -- the pool is torn down between points.
+// `body` must leave no task running: the pool is torn down between points.
 fn sweep(name: str, body: fn() void) {
     unsafe stdio::printf("\n  %s: fixed workload, varying workers\n".ptr() as *const char, name.ptr() as *const char);
     unsafe stdio::printf(
@@ -74,11 +74,13 @@ fn sweep(name: str, body: fn() void) {
     for k in 0..5usize {
         let n = counts[k];
         if k > 0 && n <= counts[k - 1] {
-            continue; // a machine with few cores: skip a point the sweep already covered
+            // A machine with few cores: skip a point the sweep already covered.
+            continue;
         }
         rt::shutdown(); // release the previous pool so the next size is honoured
         rt::set_worker_count(n);
-        body(); // warm: builds the pool and faults in the first stacks
+        // Warm: builds the pool and faults in the first stacks.
+        body();
         let mut best: f64 = 0.0;
         for r in 0..POINT_ROUNDS {
             let t0 = platform::now_ns();
@@ -97,7 +99,7 @@ fn sweep(name: str, body: fn() void) {
     rt::set_worker_count(0); // back to one worker per CPU for whatever runs next
 }
 
-// --- producer / consumer pipeline -------------------------------------------------------------------
+// --- producer / consumer pipeline -------------------------------------------------------------------.
 
 // One producer feeds `STAGES` worker tasks over a channel; each does a little arithmetic per item and
 // forwards it; one consumer drains the far end. The classic shape a server has.
@@ -144,12 +146,14 @@ fn pipeline_once() {
         let _ = tx.send(i);
     }
     tx.close();
-    wg.wait(); // every stage has finished, so no sender remains on `output`
+    // Every stage has finished, so no sender remains on `output`.
+    wg.wait();
     output.sender().close();
     drain.wait();
 }
 
 @bench(log_results = false)
+/// Benchmark lane: a linear stage pipeline, one item per message.
 pub fn pipeline(b: &mut bench::Bencher) {
     b.set_rounds(1);
     b.set_warmup(0);
@@ -159,7 +163,7 @@ pub fn pipeline(b: &mut bench::Bencher) {
 }
 
 // The same pipeline moved in batches of `BATCH`: one lock, one unlock and one wake per batch rather than per
-// item, at every hop. Directly comparable to `pipeline` above -- same items, same stages, same arithmetic --
+// item, at every hop. Directly comparable to `pipeline` above: same items, same stages, same arithmetic;
 // so the difference between the two curves is exactly what per-item channel overhead costs a pipeline.
 const BATCH: usize = 64;
 
@@ -225,6 +229,7 @@ fn pipeline_batched_once() {
 }
 
 @bench(log_results = false)
+/// Benchmark lane: the pipeline with batched messages.
 pub fn pipeline_batched(b: &mut bench::Bencher) {
     b.set_rounds(1);
     b.set_warmup(0);
@@ -233,12 +238,12 @@ pub fn pipeline_batched(b: &mut bench::Bencher) {
     }
 }
 
-// --- break-even ---------------------------------------------------------------------------------------
+// --- break-even ---------------------------------------------------------------------------------------.
 
 // The one number here that a choice of workload cannot flatter: how much work an item must carry before
 // spreading the pipeline over every core beats keeping it on one.
 //
-// A speedup quoted at a single `WORK` says only what `WORK` was chosen -- ANY scheduler, however bad, reaches
+// A speedup quoted at a single `WORK` says only what `WORK` was chosen: ANY scheduler, however bad, reaches
 // linear scaling once the work per synchronisation dwarfs the synchronisation. Sweeping `WORK` instead and
 // reporting where the all-cores time crosses the one-core time measures the runtime rather than the
 // benchmark: the crossover IS the per-item synchronisation cost, in units of work.
@@ -277,7 +282,8 @@ fn breakeven(name: str, body: fn() void) {
                     ncpu;
                 },
             );
-            body(); // warm
+            // Warm.
+            body();
             let mut best: f64 = 0.0;
             for r in 0..3 {
                 let t0 = platform::now_ns();
@@ -303,6 +309,7 @@ fn breakeven(name: str, body: fn() void) {
 }
 
 @bench(log_results = false)
+/// Benchmark lane: pipeline throughput as batch size varies.
 pub fn pipeline_breakeven(b: &mut bench::Bencher) {
     b.set_rounds(1);
     b.set_warmup(0);
@@ -312,7 +319,7 @@ pub fn pipeline_breakeven(b: &mut bench::Bencher) {
     }
 }
 
-// --- fan-out / fan-in tree --------------------------------------------------------------------------
+// --- fan-out / fan-in tree --------------------------------------------------------------------------.
 
 // Two levels: `BRANCH` children, each spawning `BRANCH` of its own. Spawning from INSIDE a task is the
 // shape that exercises the per-worker queues and stealing rather than the submit path.
@@ -337,6 +344,7 @@ fn tree_once() {
 }
 
 @bench(log_results = false)
+/// Benchmark lane: a fan-out/fan-in task tree.
 pub fn fanout_tree(b: &mut bench::Bencher) {
     b.set_rounds(1);
     b.set_warmup(0);
@@ -344,8 +352,6 @@ pub fn fanout_tree(b: &mut bench::Bencher) {
         sweep("fanout_tree", tree_once);
     }
 }
-
-// --- mixed lock + channel ---------------------------------------------------------------------------
 
 // Tasks that both contend on a shared lock and pass messages: the two synchronisation paths interleaved,
 // which is where a runtime that is fast at each one separately can still fall over.
@@ -392,6 +398,7 @@ fn mixed_once() {
 }
 
 @bench(log_results = false)
+/// Benchmark lane: mixed mutex and channel traffic.
 pub fn mixed_lock_channel(b: &mut bench::Bencher) {
     b.set_rounds(1);
     b.set_warmup(0);
@@ -400,10 +407,10 @@ pub fn mixed_lock_channel(b: &mut bench::Bencher) {
     }
 }
 
-// --- compute-bound parallel::range ------------------------------------------------------------------
+// --- compute-bound parallel::range ------------------------------------------------------------------.
 
 // The case the data-parallel API exists for: enough arithmetic that its ~180us dispatch (see
-// `micro_bench::parallel_range`) is amortised and the curve shows what the chunking actually buys.
+// `micro_bench::parallel_range`) is amortised and the curve shows what the chunking buys.
 fn compute_once() {
     let hits = atomics::Atomic::<i64>::new(0);
     let hp = &hits;
@@ -418,6 +425,7 @@ fn compute_once() {
 }
 
 @bench(log_results = false)
+/// Benchmark lane: data-parallel range over a compute kernel.
 pub fn compute_range(b: &mut bench::Bencher) {
     b.set_rounds(1);
     b.set_warmup(0);

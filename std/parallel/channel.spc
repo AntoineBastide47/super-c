@@ -2,10 +2,10 @@
 // deadline variants, and non-blocking `try_*`. Import with `import std::parallel::channel;`.
 //
 // A `Channel<T>` vends cloneable `Sender<T>` and `Receiver<T>` handles; move them into tasks (`launch`) or
-// threads. A `bounded(n)` channel makes `send` wait while the buffer is full -- that backpressure is the
-// point -- while an `unbounded()` one grows instead and never makes a sender wait. `recv` waits while the
-// buffer is empty. The channel closes -- `recv` then drains the buffer and returns `None`, and further
-// `send`s hand the value back -- when its last `Sender` is dropped, when its last `Receiver` is dropped, or
+// threads. A `bounded(n)` channel makes `send` wait while the buffer is full: that backpressure is the
+// point: while an `unbounded()` one grows instead and never makes a sender wait. `recv` waits while the
+// buffer is empty. The channel closes: `recv` then drains the buffer and returns `None`, and further
+// `send`s hand the value back: when its last `Sender` is dropped, when its last `Receiver` is dropped, or
 // on an explicit `close()`. `T` must be `Send`.
 //
 // Every wait is task-aware, because it goes through `sync::Condvar`: a coroutine parks and its worker moves
@@ -16,7 +16,7 @@ import std::parallel::arc as arc;
 import std::parallel::time as time;
 import std::parallel::runtime as runtime;
 
-/// The outcome of a `send`: `Sent`, or `Rejected(value)` when the channel is closed or has no receivers --
+/// The outcome of a `send`: `Sent`, or `Rejected(value)` when the channel is closed or has no receivers;
 /// the value is handed back so ownership is never dropped on the floor (and is auto-freed if discarded).
 pub enum SendResult<T> {
     Sent,
@@ -37,14 +37,15 @@ struct ChannelState<T> {
 }
 
 extend<T> ChannelState<T> {
-    // Double the ring and rewind it to index 0. Only for an unbounded channel, only when full, and only
-    // under the state lock. `pub` for linkage (the generic methods that call it are monomorphized in the
-    // caller's module).
+    /// Double the ring and rewind it to index 0. Only for an unbounded channel, only when full, and only
+    /// under the state lock. `pub` for linkage (the generic methods that call it are monomorphized in the
+    /// caller's module).
     pub fn grow(self: &mut ChannelState<T>) {
         let ncap = self.cap * 2;
         if sizeof(T) == 0 {
             self.head = 0;
-            self.cap = ncap; // zero-sized items buffer by count alone
+            // Zero-sized items buffer by count alone.
+            self.cap = ncap;
             return;
         }
         let mut g = Global {};
@@ -109,7 +110,7 @@ pub struct Receiver<T> {
 }
 
 // The endpoints move a `Send` payload between threads, so they are Send + Sync when `T` is Send. Explicit
-// (unsafe) assertions -- the `Arc<ChannelInner>` holds a raw slot pointer that would otherwise disqualify
+// (unsafe) assertions: the `Arc<ChannelInner>` holds a raw slot pointer that would otherwise disqualify
 // them structurally; the mutex makes every access race-free.
 unsafe extend<T: Send> Channel<T> as Send {}
 
@@ -154,7 +155,7 @@ extend<T> Channel<T> {
         return Channel::<T> { inner: arc::Arc::<ChannelInner<T>>::new(inner) };
     }
     /// A new channel with no capacity limit: the ring grows as needed, so `send` never waits. Use it only
-    /// when the producers are known to outpace the consumers by a bounded amount -- `bounded` is what keeps
+    /// when the producers are known to outpace the consumers by a bounded amount: `bounded` is what keeps
     /// a runaway producer from exhausting memory.
     pub fn unbounded() Channel<T> {
         let ch = Channel::<T>::bounded(8);
@@ -242,7 +243,8 @@ extend<T> Sender<T> {
         }
         let sm = g.get_mut();
         if sm.count == sm.cap {
-            sm.grow(); // unbounded only: the wait above is what a bounded channel does instead
+            // Unbounded only: the wait above is what a bounded channel does instead.
+            sm.grow();
         }
         let idx = (sm.head + sm.count) % sm.cap;
         unsafe sm.slots[idx] = value;
@@ -278,7 +280,7 @@ extend<T> Sender<T> {
     /// already has several items in hand pays that three times over for nothing. Filling the ring under one
     /// acquisition is the entire point of this method; with a batch of 64 it is what a single `send` costs.
     pub fn send_batch(self: &Sender<T>, items: &mut Vector<T>) usize {
-        // Reversed, so the next item to send is a `pop` -- O(1) -- rather than a front removal that shifts
+        // Reversed, so the next item to send is a `pop` (O(1)) rather than a front removal that shifts
         // everything after it. Reversed back before returning, so a caller left holding a partial batch finds
         // its remainder in the order it passed in.
         items.reverse();
@@ -304,7 +306,8 @@ extend<T> Sender<T> {
                 let r = unsafe inner.not_full.wait_raw(g.lock_handle(), 0, true, runtime::WK_CHANNEL_SEND);
                 if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
                     let _ = runtime::cancel_after_wait(true);
-                    cancelled = true; // the unsent remainder stays in `items`, in order
+                    // The unsent remainder stays in `items`, in order.
+                    cancelled = true;
                     break;
                 }
             }
@@ -315,7 +318,8 @@ extend<T> Sender<T> {
                     switch items.pop() {
                         Some(v) => {
                             if sm.count == sm.cap {
-                                sm.grow(); // unbounded only, exactly as in `send`
+                                // Unbounded only, exactly as in `send`.
+                                sm.grow();
                             }
                             let idx = (sm.head + sm.count) % sm.cap;
                             unsafe sm.slots[idx] = v;
@@ -340,7 +344,7 @@ extend<T> Sender<T> {
     /// Close the channel: no further sends succeed; buffered items stay readable until drained.
     pub fn close(self: &Sender<T>) {
         let inner = self.inner.get();
-        // notify UNDER the lock: the dual-mode condvar's wait queue is guarded by this mutex.
+        // Notify UNDER the lock: the dual-mode condvar's wait queue is guarded by this mutex.
         let mut g = inner.state.lock();
         let s = g.get_mut();
         s.closed = true;
@@ -357,7 +361,7 @@ extend<T> Sender<T> as Free {
             let s = g.get_mut();
             s.senders = s.senders - 1;
             if s.senders == 0 {
-                // No producers left: wake blocked receivers (under the lock -- it guards the wait queue) so
+                // No producers left: wake blocked receivers (under the lock; it guards the wait queue) so
                 // they observe the closed-and-draining channel.
                 inner.not_empty.notify_all();
             }
@@ -380,7 +384,7 @@ extend<T> Receiver<T> {
     pub fn recv(self: &Receiver<T>) Option<T> {
         return self.recv_deadline(0);
     }
-    /// `recv`, giving up after `d`. `None` means "timed out", "closed and drained" -- or both.
+    /// `recv`, giving up after `d`. `None` means "timed out", "closed and drained", or both.
     pub fn recv_timeout(self: &Receiver<T>, d: time::Duration) Option<T> {
         return self.recv_deadline(time::deadline_in(d));
     }
@@ -412,7 +416,8 @@ extend<T> Receiver<T> {
             let r = unsafe inner.not_empty.wait_raw(g.lock_handle(), deadline, true, runtime::WK_CHANNEL_RECV);
             if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
                 let _ = runtime::cancel_after_wait(true);
-                return Option::<T>::None; // cancelled: the receive wait is removed and no value is taken
+                // Cancelled: the receive wait is removed and no value is taken.
+                return Option::<T>::None;
             }
         }
         let sm = g.get_mut();
@@ -477,7 +482,8 @@ extend<T> Receiver<T> {
             let r = unsafe inner.not_empty.wait_raw(g.lock_handle(), 0, true, runtime::WK_CHANNEL_RECV);
             if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
                 let _ = runtime::cancel_after_wait(true);
-                return 0; // cancelled: nothing taken
+                // Cancelled: nothing taken.
+                return 0;
             }
         }
         let sm = g.get_mut();
@@ -486,7 +492,8 @@ extend<T> Receiver<T> {
         } else {
             sm.count;
         };
-        out.reserve(n); // one growth for the batch, while the lock is held for as few instructions as possible
+        // One growth for the batch, while the lock is held for as few instructions as possible.
+        out.reserve(n);
         for _i in 0..n {
             let v = unsafe {
                 sm.slots[sm.head];
@@ -513,7 +520,7 @@ extend<T> Receiver<T> as Free {
             let s = g.get_mut();
             s.receivers = s.receivers - 1;
             if s.receivers == 0 {
-                // No consumers left: wake blocked senders (under the lock -- it guards the wait queue) so
+                // No consumers left: wake blocked senders (under the lock; it guards the wait queue) so
                 // they observe the closed channel and give up.
                 inner.not_full.notify_all();
             }
@@ -536,7 +543,7 @@ extend<T> Sender<T> as sync::Selectable {
     /// Would `try_send` do something other than wait? A closed or receiver-less channel counts as ready:
     /// `try_send` hands the value straight back rather than blocking.
     pub unsafe fn select_ready(self: &Sender<T>) bool {
-        // The selector holds `select_lock` across this call -- that is what makes the unlocked read sound.
+        // The selector holds `select_lock` across this call: that is what makes the unlocked read sound.
         let s = unsafe self.inner.get().state.locked_ref();
         return s.count < s.cap || s.unbounded || s.closed || s.receivers == 0;
     }

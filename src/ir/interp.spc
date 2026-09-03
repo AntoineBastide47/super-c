@@ -445,6 +445,26 @@ struct UFree {
     pub user: bool,
 }
 
+/// find_method memo key: the callee (module << 32 | fn) and the receiver with the calling scope
+/// (scope << 48 | rdm << 32 | rdn for a nominal receiver; scope << 48 | builtin << 32 | NODE_NONE
+/// for a builtin one).
+pub struct MKey {
+    pub callee: u64,
+    pub recv: u64,
+}
+
+extend MKey as Hash {
+    pub fn hash(self: &Self) u64 {
+        return (self.callee ^ self.recv * 1099511628211u64) * 1099511628211u64;
+    }
+}
+
+extend MKey as Eq {
+    pub fn eq(self: &Self, other: &Self) bool {
+        return self.callee == other.callee && self.recv == other.recv;
+    }
+}
+
 pub struct Interp {
     pub pkg: *const loader::Package,
     pub steps: u32,
@@ -466,6 +486,7 @@ pub struct Interp {
     pub body_keys: Vector<u64>, // module << 32 | fn node
     pub body_ix: Map<u64, u64>, // bkey -> bodies slot (the linear key scan was O(n^2) over a sweep)
     pub cont_memo: Map<u64, u64>, // (m << 32 | fn) -> kind << 32 | container: called per interpreted call
+    pub method_memo: Map<MKey, u64>, // find_method results (module << 32 | node) once every module is typed
     pub call_memo: Map<u64, IVal>, // scalar results keyed over every semantic input (callee + args)
     pub item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
     pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
@@ -516,6 +537,7 @@ extend Interp as Free {
         self.body_keys.free();
         self.body_ix.free();
         self.cont_memo.free();
+        self.method_memo.free();
         self.call_memo.free();
         self.item_memo.free();
         self.item_active.free();
@@ -558,6 +580,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         body_keys: Vector::<u64>::new(),
         body_ix: Map::<u64, u64>::new(),
         cont_memo: Map::<u64, u64>::new(),
+        method_memo: Map::<MKey, u64>::new(),
         call_memo: Map::<u64, IVal>::new(),
         item_memo: Map::<u64, IVal>::new(),
         item_active: Vector::<u64>::new(),
@@ -1657,7 +1680,7 @@ extend Interp {
                 }
                 let fa0 = unsafe &*self.p().module_ast_const(fm);
                 let mnm = fa0.at_const(fa0.at_const(fnode).as_data.function.name).as_data.name.text;
-                let md = self.find_method(rdm, rdn, rb, b.module, fm, mnm);
+                let md = self.find_method(rdm, rdn, rb, b.module, fm, fnode, mnm);
                 if md.node != NODE_NONE {
                     fm = md.module;
                     fnode = md.node;
@@ -4533,8 +4556,42 @@ extend Interp {
 
     // The receiver's OWN method named like (nm, name): the conformer's override wins over an
     // interface default. Search order mirrors the established evaluator: the receiver's module,
-    // the calling scope, then (builtin receivers only) every module.
+    // the calling scope, then (builtin receivers only) every module. `name` is the name of fn
+    // `callee` in module `nm`. The scan walks every extend block of every module for a builtin
+    // receiver, so the result is memoized once every module is typed (before that, an untyped
+    // module's extend targets have no type yet and the answer can still change).
     fn find_method(
+        self: &mut Self,
+        rdm: ModuleId,
+        rdn: NodeId,
+        rb: BuiltinType,
+        scope: ModuleId,
+        nm: ModuleId,
+        callee: NodeId,
+        name: tok::Span,
+    ) DefId {
+        let mid = if rdn == NODE_NONE {
+            rb as u64;
+        } else {
+            rdm as u64;
+        };
+        let key = MKey { callee: nm as u64 << 32 | callee as u64, recv: scope as u64 << 48 | mid << 32 | rdn as u64 };
+        if self.all_typed {
+            switch self.method_memo.get(&key) {
+                Some(v) => {
+                    return DefId { module: (*v >> 32) as ModuleId, node: (*v & 0xFFFFFFFFu64) as NodeId };
+                },
+                None => {},
+            };
+        }
+        let found = self.find_method_scan(rdm, rdn, rb, scope, nm, name);
+        if self.all_typed {
+            self.method_memo.insert(key, found.module as u64 << 32 | found.node as u64);
+        }
+        return found;
+    }
+
+    fn find_method_scan(
         self: &Self,
         rdm: ModuleId,
         rdn: NodeId,

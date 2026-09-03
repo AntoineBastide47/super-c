@@ -98,7 +98,7 @@ fn traits_impls_match_and_new() {
 }
 
 // `unsafe extend`: an item-scope `unsafe` that commits to an extend rather than a function, on the one
-// token after it (LL(1)). The flag rides the extend, not the items inside it -- what is being asserted is
+// token after it (LL(1)). The flag rides the extend, not the items inside it: what is being asserted is
 // the conformance. Nothing requires the marker yet; this pins that it parses and survives.
 @test
 fn unsafe_extend() {
@@ -332,7 +332,7 @@ fn closures() {
         assert(h::nth_kind(&c.ast, NodeKind::NODE_CLOSURE, 0) == NODE_NONE, "`a | b` is not a closure");
         assert(h::nth_kind(&c.ast, NodeKind::NODE_BINARY, 0) != NODE_NONE, "`a | b` is a binary expression");
     }
-    // `F: fn(i32) i32` -- a callable bound is a NODE_FUNCTION_TYPE in the generic param's bound list.
+    // `F: fn(i32) i32`; a callable bound is a NODE_FUNCTION_TYPE in the generic param's bound list.
     {
         let c = h::parse_ast("fn apply<F: fn(i32) i32 + Eq>(x: i32, f: F) i32 { return f(x); }\n");
         assert(c.errors == 0, "fn-type bound parses");
@@ -750,7 +750,7 @@ fn pathological_depth() {
 }
 
 // Lifetime syntax (`'a`). The lexer already emits `'name` as a Label (loop labels share the surface
-// form), so every slot below is a single-token `check(Label)` decision -- the grammar stays LL(1).
+// form), so every slot below is a single-token `check(Label)` decision: the grammar stays LL(1).
 // Lifetime params are parsed into a SEPARATE `lifetimes` list so `generics` stays mono-relevant only
 // (lifetimes are erased before monomorphization).
 @test
@@ -760,7 +760,7 @@ fn lifetimes() {
     assert(c.errors == 0, "lifetime syntax parses");
     assert(c.ast.at_const(c.ast.root).as_data.program.items.len == 4, "lifetimes: expected 4 items");
 
-    // struct Ref<'a>: the lifetime lands in `lifetimes`, NOT in `generics`
+    // Struct Ref<'a>: the lifetime lands in `lifetimes`, NOT in `generics`.
     let agg = item(&c.ast, 0).as_data.aggregate;
     let agg_lts = c.ast.lifetimes_of(item_id(&c.ast, 0));
     assert(agg_lts.len == 1, "struct lifetime param recorded");
@@ -768,7 +768,7 @@ fn lifetimes() {
     let ltp = c.ast.at_const(unsafe c.ast.list(agg_lts)[0]);
     assert(ltp.as_data.generic_param.is_lifetime, "param flagged is_lifetime");
 
-    // the field's `&'a i32` carries the annotation on the reference type node
+    // The field's `&'a i32` carries the annotation on the reference type node.
     let fields = agg.members;
     let fty = c.ast.at_const(unsafe c.ast.list(fields)[0]).as_data.field.ty;
     assert(c.ast.at_const(fty).kind == NodeKind::NODE_REFERENCE_TYPE, "field is a reference type");
@@ -788,12 +788,12 @@ fn lifetimes() {
     assert(lt_b.as_data.generic_param.bounds.len == 1, "'b: 'a outlives bound recorded");
     assert(f2.where_clause.len == 1, "where T: 'a recorded");
 
-    // an elided reference keeps lifetime == NODE_NONE
+    // An elided reference keeps lifetime == NODE_NONE.
     let f3 = item(&c.ast, 3).as_data.function;
     let p0 = c.ast.at_const(unsafe c.ast.list(f3.params)[0]).as_data.parameter.ty;
     assert(c.ast.at_const(p0).as_data.indirect_type.lifetime == NODE_NONE, "elided reference has no lifetime");
 
-    // lifetime ARGUMENTS at a use site, and lifetimes-before-types is enforced
+    // Lifetime ARGUMENTS at a use site, and lifetimes-before-types is enforced.
     assert(
         !h::parse_has_error(
             "struct S<'a> { pub p: &'a i32 }\nfn f() i32 { let v = 1; let s = S::<'a> { p: &v }; return *s.p; }\n",
@@ -805,14 +805,14 @@ fn lifetimes() {
 
 // The grammar batch: a higher-ranked bound `for<'a>` and a lifetime-parameterised associated type.
 // Both store their lifetimes in the same side table as a declared `<'a>`, and both wrap them in
-// NODE_GENERIC_PARAM so every consumer -- side table, checker, formatter -- sees one shape.
+// NODE_GENERIC_PARAM so every consumer (side table, checker, formatter) sees one shape.
 @test
 fn hrtb_and_gat() {
     let src = "fn apply<F: for<'a> fn(&'a i32) i32>(f: F) i32 { return 0; }\ninterface Lend { type Item<'a>; }\n";
     let c = h::parse_ast(src);
     assert(c.errors == 0, "for<'a> and type Item<'a> parse");
 
-    // the bound's lifetimes hang off the BOUND node, not the enclosing function
+    // The bound's lifetimes hang off the BOUND node, not the enclosing function.
     let fnd = item(&c.ast, 0).as_data.function;
     let gp = c.ast.at_const(unsafe c.ast.list(fnd.generics)[0]).as_data.generic_param;
     let bound = unsafe c.ast.list(gp.bounds)[0];
@@ -821,7 +821,7 @@ fn hrtb_and_gat() {
     assert(c.ast.at_const(unsafe c.ast.list(hr)[0]).as_data.generic_param.is_lifetime, "hrtb param flagged is_lifetime");
     assert(c.ast.lifetimes_of(item_id(&c.ast, 0)).len == 0, "the function itself declares no lifetime");
 
-    // the associated type carries its own lifetime param
+    // The associated type carries its own lifetime param.
     let items = item(&c.ast, 1).as_data.interface_def.items;
     let assoc = unsafe c.ast.list(items)[0];
     assert(c.ast.at_const(assoc).kind == NodeKind::NODE_TYPE_ALIAS, "assoc type is a type alias");

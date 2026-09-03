@@ -1,7 +1,7 @@
 // The streaming backend's declaration layer: aggregate forward typedefs, tag enums, and struct
 // bodies in dependency-first order, concrete and per-instance (spelled under the mangler's
 // substitution env from each instance's graph anchor pool). Consumes package items + the instance
-// graph only -- no resolution, search, or interning at emission time. Constructs outside the
+// graph only: no resolution, search, or interning at emission time. Constructs outside the
 // frozen subset are counted and skipped, never guessed.
 import ast::ast as *;
 import emit::mangle as mbe;
@@ -19,6 +19,7 @@ pub struct AggItem {
     pub aty: TypeId,
 }
 
+/// Declaration-layer emitter state for one TU; `out` collects the bodies, `fwd` the forward typedefs.
 pub struct TuEmit {
     pub pkg: *const loader::Package,
     pub mg: mbe::Mangler,
@@ -31,7 +32,7 @@ pub struct TuEmit {
     /// emitter must not define them again.
     pub env_defined: Vector<u64>,
     pub emitted: u64,
-    // emission state keyed by the FNV of the mangled type name: 0 absent / 1 in progress / 2 done
+    // Emission state keyed by the FNV of the mangled type name: 0 absent / 1 in progress / 2 done.
     state: Map<u64, u64>,
     fwds: Map<u64, u64>, // forward-typedef'd names (deps discovered mid-DFS need one too)
 }
@@ -56,6 +57,7 @@ const fn fnv(s: str) u64 {
 }
 
 extend TuEmit {
+    /// An emitter over `pkg` (which must outlive it) with empty buffers.
     pub fn new(pkg: *const loader::Package) TuEmit {
         return TuEmit {
             pkg: pkg,
@@ -123,7 +125,8 @@ extend TuEmit {
             None => 0u64,
         };
         if st != 0 {
-            return st != 1; // 1 = in progress: a by-value cycle would be an upstream bug
+            // 1 = in progress: a by-value cycle would be an upstream bug.
+            return st != 1;
         }
         self.state.insert(key, 1);
         self.emit_fwd(it);
@@ -179,8 +182,8 @@ extend TuEmit {
             return self.field_dep(rm, y.as_data.arr.elem);
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
-            // a stored CLOSURE VALUE embeds its env struct: define it here (captures first), and
-            // record the name so the body emitter skips its own copy
+            // A stored CLOSURE VALUE embeds its env struct: define it here (captures first), and
+            // record the name so the body emitter skips its own copy.
             let ca = self.p().module_ast_const(y.module);
             let cdn = ca.at_const(y.as_data.decl);
             if cdn.kind == NodeKind::NODE_CLOSURE && cdn.as_data.closure.captures.len != 0 {
@@ -216,7 +219,8 @@ extend TuEmit {
                         break;
                     }
                     if self.mg.is_zst(y.module, cty) {
-                        continue; // zero-sized captures take no env storage (reads are erased)
+                        // Zero-sized captures take no env storage (reads are erased).
+                        continue;
                     }
                     cmat += 1;
                     if !self.field_dep(y.module, cty) {
@@ -233,9 +237,9 @@ extend TuEmit {
                     body.push_str("; ");
                 }
                 if cmat == 0 {
-                    // every capture is zero-sized: C cannot define an empty struct, so keep ONE
-                    // byte -- the env is a compiler-internal carrier with no semantic layout, and
-                    // the body emitter must still pass a real env pointer for the captured drops
+                    // Every capture is zero-sized: C cannot define an empty struct, so keep ONE
+                    // byte; the env is a compiler-internal carrier with no semantic layout, and
+                    // the body emitter must still pass a real env pointer for the captured drops.
                     body.push_str("unsigned char _sc_zenv; ");
                 }
                 body.push_str("};\n");
@@ -256,7 +260,8 @@ extend TuEmit {
         let da = self.p().module_ast_const(it.m);
         let n = da.at_const(it.decl);
         if n.as_data.aggregate.is_extern {
-            return true; // extern aggregates are defined by their backing C header
+            // Extern aggregates are defined by their backing C header.
+            return true;
         }
         let is_union = n.as_data.aggregate.is_union;
         let is_tuple = n.as_data.aggregate.is_tuple;
@@ -288,7 +293,7 @@ extend TuEmit {
         let mut zalign_hi = false;
         for i in 0..ms.len {
             let fid = unsafe da.list(ms)[i as usize];
-            // tuple members are bare type nodes named positionally `_i`; named members are NODE_FIELD
+            // Tuple members are bare type nodes named positionally `_i`; named members are NODE_FIELD.
             if !is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
                 keep.push(2);
                 continue;
@@ -316,17 +321,19 @@ extend TuEmit {
             }
         }
         if mat == 0 {
-            return true; // the aggregate is zero-sized: forward typedef only, no definition
+            // The aggregate is zero-sized: forward typedef only, no definition.
+            return true;
         }
         let mut pads = Vector::<u64>::new(); // per-member leading pad bytes (dual-walk mismatch only)
         let mut tail_pad: u64 = 0;
         let mut force_align: u64 = 0;
         if zalign_hi && !self.zst_pad_plan(it, &keep, is_union, align_attr, &mut pads, &mut tail_pad, &mut force_align) {
-            return false; // over-aligned elided field with an unlayoutable sibling: no safe C shape
+            // Over-aligned elided field with an unlayoutable sibling: no safe C shape.
+            return false;
         }
         let kw = if_str2(is_union, "union ", "struct ");
         body.push_str(kw);
-        // layout attributes ride the keyword: `struct __attribute__((packed)) X { .. }`
+        // layout attributes ride the keyword: `struct __attribute__((packed)) X { .. }`.
         if packed {
             body.push_str("__attribute__((packed)) ");
         }
@@ -370,9 +377,9 @@ extend TuEmit {
                 body.push_u64(force_align);
                 body.push_str(") ");
             }
-            // a `[T; N]` field interns len-0 in the generic pool (the length is symbolic, and a
+            // A `[T; N]` field interns len-0 in the generic pool (the length is symbolic, and a
             // len-0 array's frozen spelling is a POINTER): recover N from the annotation's length
-            // expression under the instance env before the ctype rules see the type
+            // expression under the instance env before the ctype rules see the type.
             let mut ok = false;
             let mut done = false;
             let fyv = *da.type_at(fty);
@@ -406,11 +413,11 @@ extend TuEmit {
         return true;
     }
 
-    /// Dual layout walk for the rare shape where an ELIDED field has alignment > 1: compare the
-    /// semantic offsets (all fields) against the natural C offsets of the stored fields alone.
-    /// On divergence, produce leading pads per stored member, a tail pad, and a forced alignment
-    /// so the flat C struct reproduces the semantic layout exactly. False = a sibling field has
-    /// no layout, so the shape cannot be validated.
+    // Dual layout walk for the rare shape where an ELIDED field has alignment > 1: compare the
+    // semantic offsets (all fields) against the natural C offsets of the stored fields alone.
+    // On divergence, produce leading pads per stored member, a tail pad, and a forced alignment
+    // so the flat C struct reproduces the semantic layout exactly. False = a sibling field has
+    // no layout, so the shape cannot be validated.
     fn zst_pad_plan(
         self: &mut Self,
         it: &AggItem,
@@ -500,15 +507,17 @@ extend TuEmit {
         let stotal = (soff + samax - 1) / samax * samax;
         let mtotal = (moff + mamax - 1) / mamax * mamax;
         if !diverged && stotal == mtotal && samax == mamax {
-            pads.truncate(0); // the elided fields never moved anything: flat emission
+            // The elided fields never moved anything: flat emission.
+            pads.truncate(0);
             return true;
         }
-        // with per-member pads the stored fields already sit at their semantic offsets (moff ends
+        // With per-member pads the stored fields already sit at their semantic offsets (moff ends
         // equal to the last stored field's semantic end); an explicit tail brings the total to the
-        // semantic size, and _Alignas on the first member pins the aggregate alignment
+        // semantic size, and _Alignas on the first member pins the aggregate alignment.
         *force_align = samax;
         if is_union {
-            *tail_pad = stotal; // a union member must span the FULL semantic size by itself
+            // A union member must span the FULL semantic size by itself.
+            *tail_pad = stotal;
         } else if stotal > moff {
             *tail_pad = stotal - moff;
         }
@@ -550,7 +559,8 @@ extend TuEmit {
                     d = (ch | 32) as i64 - 87;
                 }
                 if d < 0 {
-                    break; // a width suffix ends the digits
+                    // A width suffix ends the digits.
+                    break;
                 }
                 let base: i64 = if hex {
                     16;
@@ -598,7 +608,7 @@ extend TuEmit {
             }
             return true;
         }
-        // an identifier naming a generic param folds through the env
+        // An identifier naming a generic param folds through the env.
         let ld = da.resolution_def(id);
         if ld.node == NODE_NONE || self.p().module_ast_const(ld.module).at_const(ld.node).kind != NodeKind::NODE_GENERIC_PARAM {
             return false;
@@ -627,7 +637,8 @@ extend TuEmit {
         let tn = if da.at_const(fid).kind == NodeKind::NODE_FIELD {
             da.at_const(fid).as_data.field.ty;
         } else {
-            fid; // tuple member: the node is already the type annotation
+            // Tuple member: the node is already the type annotation.
+            fid;
         };
         if tn == NODE_NONE || da.at_const(tn).kind != NodeKind::NODE_ARRAY_TYPE {
             return false;
@@ -636,8 +647,8 @@ extend TuEmit {
         if ln == NODE_NONE {
             return false;
         }
-        // the length expression types as its const type (usize); its RESOLUTION names the
-        // param decl, which the instance env binds to a TYPE_CONST (innermost binding wins)
+        // The length expression types as its const type (usize); its RESOLUTION names the
+        // param decl, which the instance env binds to a TYPE_CONST (innermost binding wins).
         let ld = da.resolution_def(ln);
         if ld.node != NODE_NONE {
             let mut i9 = self.mg.subs.len();
@@ -656,7 +667,7 @@ extend TuEmit {
         }
         let lty = da.type_of(ln);
         if lty == TYPE_NONE || da.type_at(lty).kind == TypeKind::TYPE_BUILTIN {
-            // an arithmetic length expression carries no const record: evaluate it under the env
+            // An arithmetic length expression carries no const record: evaluate it under the env.
             let mut ev: i64 = 0;
             if self.eval_len_expr(m, ln, &mut ev, 0) && ev > 0 {
                 *len_out = ev as u64;
@@ -709,8 +720,8 @@ extend TuEmit {
                 has_payload = true;
             }
         }
-        // the tag enum (or the whole payload-less enum) belongs to the GENERIC declaration and is
-        // shared by every instance: guard it and spell it from the decl, not the anchor
+        // The tag enum (or the whole payload-less enum) belongs to the GENERIC declaration and is
+        // shared by every instance: guard it and spell it from the decl, not the anchor.
         let mut q = String::new();
         self.mg.qualified(it.m, n.as_data.aggregate.name, &mut q);
         body.push_str(if_str2(has_payload, "#ifndef SUPER_ENUMTAG_", "#ifndef SUPER_ENUM_"));
@@ -730,7 +741,7 @@ extend TuEmit {
             }
             first = false;
             self.mg.enum_tag(it.m, it.decl, vid, body);
-            // an explicit discriminant pins the C value (`Code_Bad = 404`): casts observe it
+            // an explicit discriminant pins the C value (`Code_Bad = 404`): casts observe it.
             let vv = da.at_const(vid).as_data.variant.value;
             if vv != NODE_NONE && self.p().cir != null {
                 let cevE = unsafe &mut *(self.p().cir as *mut iri::Interp);
@@ -757,11 +768,11 @@ extend TuEmit {
         self.mg.qualified(it.m, n.as_data.aggregate.name, &mut q2);
         body.push_string(&q2);
         body.push_str("Tag tag;\n");
-        // the payload union is buffered: when EVERY variant payload is zero-sized the union has no
-        // members, and an empty union is not C -- the enum then defines as `{ Tag tag; }` alone
+        // The payload union is buffered: when EVERY variant payload is zero-sized the union has no
+        // members, and an empty union is not C; the enum then defines as `{ Tag tag; }` alone.
         let hold = body.len();
         body.push_str("  union {\n");
-        let mut upay: usize = 0; // union members actually emitted (all-ZST variants take none)
+        let mut upay: usize = 0; // union members emitted (all-ZST variants take none)
         for i in 0..ms.len {
             let vid = unsafe da.list(ms)[i as usize];
             let vn = da.at_const(vid);
@@ -769,8 +780,8 @@ extend TuEmit {
                 continue;
             }
             let pl = vn.as_data.variant.payload;
-            // zero-sized payload members take no C storage; a variant with ONLY zero-sized payload
-            // takes no union member at all (its accesses are erased with it)
+            // Zero-sized payload members take no C storage; a variant with ONLY zero-sized payload
+            // takes no union member at all (its accesses are erased with it).
             let mut vmat: usize = 0;
             for k in 0..pl.len {
                 let pid = unsafe da.list(pl)[k as usize];
@@ -853,7 +864,7 @@ extend TuEmit {
         };
         self.fwds.insert(fk, 1);
         if n.kind == NodeKind::NODE_ENUM {
-            // payload-less enums typedef in their own guarded block; payload enums fwd as structs
+            // Payload-less enums typedef in their own guarded block; payload enums fwd as structs.
             let ms = n.as_data.aggregate.members;
             let mut has_payload = false;
             for i in 0..ms.len {
@@ -880,6 +891,7 @@ extend TuEmit {
     pub fn mark_env_done(self: &mut Self, h: u64) {
         self.state.insert(h, 2);
     }
+    /// True once mark_env_done recorded `h`.
     pub fn env_done(self: &Self, h: u64) bool {
         return switch self.state.get(&h) {
             Some(v) => *v == 2,

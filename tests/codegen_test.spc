@@ -29,7 +29,7 @@ const STRUCT: str = "fn f(n: i32) i32 { if n > 0 { return 1; } return 0; }\nfn g
 
 // `expect_c` scans the whole program including any prelude functions that use the goto-layout
 // fallback, so it cannot assert the absence of `goto bb_`; these pin the structured SHAPES the
-// backend now produces, plus behavior. (The whole-program goto reduction is measured separately.)
+// backend produces, plus behavior. (The whole-program goto reduction is measured separately.)
 @test
 fn structured_backend() {
     h::expect_c("branches emit structured if", STRUCT, "if (");
@@ -53,7 +53,7 @@ fn structured_backend() {
     h::expect_c("early-return-in-loop is structured", EARLY, "while (1)");
     h::expect_exit("early-return-in-loop behaves", EARLY, 0);
 
-    // A parameter named after a type in scope must not hide the typedef -- the whole TU stays legal
+    // A parameter named after a type in scope must not hide the typedef: the whole TU stays legal
     // C and behaves (the emitter disambiguates the variable name).
     let COLLIDE: str = "struct Node { pub v: i32 }\nfn take(Node: i32, n: Node) i32 { return Node + n.v; }\nfn main() i32 { return take(2, Node { v: 3 }) - 5; }\n";
     h::expect_exit("a variable named after a type stays legal C", COLLIDE, 0);
@@ -73,7 +73,7 @@ fn structured_backend() {
     h::expect_exit("a doubly-colliding variable falls back to a temp name", GCOLLIDE2, 0);
 
     // A never-read local is a dead store: dropping it must preserve behavior. (The structural check
-    // -- that neither declaration nor assignment is emitted -- is in cemit_test on an isolated
+    // that neither declaration nor assignment is emitted: is in cemit_test on an isolated
     // function, since the whole program includes the -Wunused pragma text.)
     let DEADL: str = "fn dead() i32 { let unused: i32 = 9; return 0; }\nfn main() i32 { return dead(); }\n";
     h::expect_exit("dropping the dead store preserves behavior", DEADL, 0);
@@ -113,7 +113,7 @@ fn control() {
 
 @test
 fn ranges() {
-    // range loops lower to head/body/step blocks; the arithmetic is the observable contract
+    // Range loops lower to head/body/step blocks; the arithmetic is the observable contract.
     h::expect_c("exclusive bound test", RANGES, "< 10LL");
     h::expect_c("inclusive bound test", RANGES, "<= 5LL");
     h::expect_c("open-start counts from zero", RANGES, "< 4LL");
@@ -412,7 +412,7 @@ fn const_generics() {
 }
 
 // The old backend specialized known-callee callbacks (`apply__cb_inc`); the streaming backend
-// keeps the pointer-taking original for BOTH shapes -- one body, callee passed as a value.
+// keeps the pointer-taking original for BOTH shapes: one body, callee passed as a value.
 @test
 fn callback_specialization() {
     let KNOWN: str = "extern \"C\" { fn putchar(c: i32) i32; }\nfn apply(x: i32, f: fn(i32) i32) i32 { return f(x); }\nfn inc(x: i32) i32 { unsafe putchar(0); return x + 1; }\nfn use() i32 { return apply(10, inc); }\n";
@@ -426,7 +426,7 @@ fn callback_specialization() {
 }
 
 // Lifetimes are ERASED before monomorphization: they are checked, then dropped. They must never
-// reach an instance's type args, the mangled symbol, or the emitted C -- otherwise `Slice<'a,T>`
+// reach an instance's type args, the mangled symbol, or the emitted C: otherwise `Slice<'a,T>`
 // and `Slice<'b,T>` would become two distinct monomorphizations of the same code.
 @test
 fn lifetimes_are_erased() {

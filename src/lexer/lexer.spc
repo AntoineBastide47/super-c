@@ -1,5 +1,5 @@
 // Byte-driven scanner: a NUL-padded source String in (see SOURCE_PAD), a Vector<Token> out. Tokens
-// carry only (kind, start, len) spans indexing the source -- no text is copied. Every error is
+// carry only (kind, start, len) spans indexing the source; no text is copied. Every error is
 // recovered from, so the scan always completes; keep_trivia additionally emits comment tokens for
 // the formatter path (the parser never sees trivia).
 import string as cstring;
@@ -7,17 +7,20 @@ import lexer::token as *;
 import lexer::token_type as *;
 import utils::errors as diag;
 
+/// The NUL byte the scan loops treat as end of input.
 pub const EOF_CH: u8 = 0;
+/// Sentinel for "none" in u32 positions and scalar values.
 pub const UINT32_MAX: u32 = 0xFFFFFFFFu32;
+/// Sentinel for "none" in usize positions.
 pub const USIZE_MAX: usize = 0xFFFFFFFFFFFFFFFFu64 as usize;
 
-// Read-ahead sentinel padding a lexed source buffer MUST carry past its logical end (all NUL): the loader
-// pads every module source (String::pad_nul) so the lexer's scan loops drop their per-byte bounds check
-// and rely on the trailing NUL to terminate. Fixed lookahead reads at most 4 bytes past the end.
+/// Read-ahead sentinel padding a lexed source buffer MUST carry past its logical end (all NUL): the loader
+/// pads every module source (String::pad_nul) so the lexer's scan loops drop their per-byte bounds check
+/// and rely on the trailing NUL to terminate. Fixed lookahead reads at most 4 bytes past the end.
 pub const SOURCE_PAD: usize = 8;
 
-// Per-byte character-class flags, indexed by byte value (see build_char_class). Held BY VALUE in each Lexer
-// so there is no global mutable state (the compiler lexes many sources, possibly concurrently in-process).
+/// Per-byte character-class flags, indexed by byte value (see build_char_class). Held BY VALUE in each Lexer
+/// so there is no global mutable state (the compiler lexes many sources, possibly concurrently in-process).
 pub const CC_ID_START: u8 = 1;
 pub const CC_ID_PART: u8 = 2;
 pub const CC_DIGIT: u8 = 4;
@@ -46,10 +49,10 @@ const fn build_char_class() CharClass {
     return c;
 }
 
-// One in-flight matchertext literal whose template is paused at an interpolation hole. The
-// delimiter chain is not copied: `dpos`/`d_len` index its openers in the source. `base` is where
-// this literal's open matchers start in `mt_stack`; `hole_depth` counts matcher tokens open in
-// the current hole so the closing delimiter sequence is only recognized at hole level.
+/// One in-flight matchertext literal whose template is paused at an interpolation hole. The
+/// delimiter chain is not copied: `dpos`/`d_len` index its openers in the source. `base` is where
+/// this literal's open matchers start in `mt_stack`; `hole_depth` counts matcher tokens open in
+/// the current hole so the closing delimiter sequence is only recognized at hole level.
 pub struct MtFrame {
     pub dpos: u32,
     pub d_len: u8,
@@ -57,6 +60,7 @@ pub struct MtFrame {
     pub hole_depth: u32,
 }
 
+/// Scanner state over one padded source buffer; `tokens` and `errors` accumulate until taken.
 pub struct Lexer<'a> {
     pub bytes: str<'a>,
     pub start: usize,
@@ -395,7 +399,7 @@ extend Lexer {
     }
 
     // Decodes one UTF-8 scalar starting at `current` (first byte `b`). Any malformed sequence sets
-    // *size to 0 and returns 0 UNDIAGNOSED -- the caller owns the error report.
+    // *size to 0 and returns 0 UNDIAGNOSED; the caller owns the error report.
     @c.cold
     fn decode_at_b(self: &Self, b: u8, current: usize, size: &mut usize) u32 {
         let mut minimum: u32 = 0x10000;
@@ -554,7 +558,7 @@ extend Lexer {
     }
 
     // Scans one escape sequence (the '\' already consumed) and returns its scalar value. UINT32_MAX =
-    // malformed, ALREADY diagnosed here -- callers must not double-report, only mark the literal bad.
+    // malformed, ALREADY diagnosed here; callers must not double-report, only mark the literal bad.
     fn escape(self: &mut Self, byte_character: bool) u32 {
         if self.is_eof() {
             self.error_at(self.current, 0, "unterminated escape sequence");
@@ -658,7 +662,7 @@ extend Lexer {
             } else if b == b'\n' || b == b'\r' {
                 self.current = i - 1;
                 self.error("unterminated string literal");
-                // resync just past the next '"' (or EOF) so the rest of the line cannot cascade errors
+                // Resync past the next '"' (or EOF) so the rest of the line cannot cascade errors.
                 while self.current < self.bytes.len() {
                     let recovery = self.bytes.byte_at(self.current);
                     self.current += 1;
@@ -681,7 +685,7 @@ extend Lexer {
         }
     }
 
-    // After a '\'': true when an identifier run follows WITHOUT a closing '\'' -- a label/lifetime
+    // After a '\'': true when an identifier run follows WITHOUT a closing '\'', so a label/lifetime
     // token, not a character literal ('a vs 'a'). The parser's lifetime grammar relies on this split.
     fn label_ahead(self: &Self) bool {
         let mut i = self.current;
@@ -759,7 +763,7 @@ extend Lexer {
     // `M` (already consumed) starts a matchertext literal only when a VALID delimiter chain
     // (strictly nested pairs, possibly empty) followed by a `"` is ahead. Anything else leaves `M` an
     // ordinary identifier, so existing code like a call `M("x")` or a struct literal `M{}` is
-    // untouched -- those never abut a quote through a well-nested chain.
+    // untouched: those never abut a quote through a well-nested chain.
     fn matchertext_ahead(self: &Self) bool {
         let mut i = self.current;
         let mut dn: usize = 0;
@@ -978,8 +982,8 @@ extend Lexer {
         let mut error_at = USIZE_MAX;
         let mut error: str = "";
         let mut is_float = false;
-        // radix-prefixed scan (0x/0o/0b): the full id-part run is consumed so bad digits and suffixes
-        // stay inside one token
+        // Radix-prefixed scan (0x/0o/0b): the full id-part run is consumed so bad digits and suffixes
+        // stay inside one token.
         if self.bytes.byte_at(self.start) == b'0' {
             let mut radix: u32 = 10;
             let mut digit: fn(u8) bool = is_dec;
@@ -1041,8 +1045,8 @@ extend Lexer {
                     error_at = component_start;
                     error = "radix prefix must be followed by at least one digit";
                 }
-                // hex float: '.' commits only when a hex digit follows; the 'p' exponent is mandatory
-                // (a fraction without one is diagnosed below)
+                // Hex float: '.' commits only when a hex digit follows; the 'p' exponent is mandatory
+                // (a fraction without one is diagnosed below).
                 let mut hex_float = false;
                 if radix == 16 && error_at == USIZE_MAX && self.peek_byte() == b'.' && is_hex(self.peek_next()) {
                     hex_float = true;
@@ -1078,8 +1082,8 @@ extend Lexer {
                     error_at = self.current;
                     error = "a hexadecimal float requires a binary exponent ('p'), e.g. 0x1.8p3";
                 }
-                // a '.' after any other radix literal is an error, but the whole float-shaped run is
-                // still consumed so it remains a single bad token
+                // A '.' after any other radix literal is an error, but the whole float-shaped run is
+                // still consumed so it remains a single bad token.
                 if !hex_float && self.peek_byte() == b'.' {
                     if error_at == USIZE_MAX {
                         error_at = self.current;
@@ -1115,8 +1119,8 @@ extend Lexer {
         if error_at != USIZE_MAX {
             error = "invalid numeric separator";
         }
-        // decimal fraction -- a digit must follow the '.', else '1..2' is a range and 'x.0.len' is a
-        // tuple-index member access (`0.len`), never a fraction
+        // Decimal fraction: a digit must follow the '.', else '1..2' is a range and 'x.0.len' is a
+        // tuple-index member access (`0.len`), never a fraction.
         if self.peek_byte() == b'.' && is_dec(self.peek_next()) {
             is_float = true;
             self.current += 1;
@@ -1141,7 +1145,7 @@ extend Lexer {
                 error = "invalid numeric separator";
             }
         }
-        // suffix: the whole id-part tail is consumed; f32/f64 flips the literal to float
+        // Suffix: the whole id-part tail is consumed; f32/f64 flips the literal to float.
         if is_id_part_byte(self.peek_byte()) {
             let sfx_start = self.current;
             while is_id_part_byte(self.peek_byte()) {
@@ -1290,8 +1294,8 @@ extend Lexer {
                 return;
             },
             '>' => {
-                // always a single '>': the parser reassembles '>>', '>=', '>>=' itself so that nested
-                // generics ('Vec<Vec<T>>') can close
+                // Always a single '>': the parser reassembles '>>', '>=', '>>=' itself so that nested
+                // generics ('Vec<Vec<T>>') can close.
                 self.add_token(TokenType::GreaterThan);
                 return;
             },
@@ -1447,7 +1451,7 @@ extend Lexer {
 
     /// Scans the whole source into `tokens`, ending with an Eof token spanning (len, 0). Recovers
     /// from every error (diagnostics accumulate in `errors`; the stream is always complete). A
-    /// UTF-8 BOM is consumed only at byte 0 -- anywhere else it is diagnosed.
+    /// UTF-8 BOM is consumed only at byte 0; anywhere else it is diagnosed.
     pub fn scan_tokens(self: &mut Self) {
         self.tokens.reserve(self.bytes.len() / 5);
         if self.current == 0 && self.bytes.len() >= 3 && self.bytes.byte_at(0) == 0xEFu8 && self.bytes.byte_at(1) == 0xBBu8 && self.bytes.byte_at(
@@ -1478,9 +1482,11 @@ extend Lexer {
         return out;
     }
 
+    /// True once any scan error is recorded.
     pub const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
+    /// Print the accumulated diagnostics to stderr.
     pub fn log_errors(self: &Self) {
         self.errors.log();
     }

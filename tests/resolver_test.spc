@@ -1,6 +1,6 @@
-// Self-hosted port of tests/resolver_test.c: name resolution -- forward refs, shadowing, generics/Self,
+// Self-hosted port of tests/resolver_test.c: name resolution; forward refs, shadowing, generics/Self,
 // loop/match/let scopes; resolution TARGETS (nearest-shadow wins, value/type namespaces independent);
-// undefined-name / duplicate-definition diagnostics; and closure capture collection. Drives the real
+// undefined-name / duplicate-definition diagnostics, and closure capture collection. Drives the real
 // resolver in-process through tests/harness (compile / compile_ast).
 import ast::ast as *;
 import tests::harness as h;
@@ -36,8 +36,8 @@ fn errors() {
         "fn f() { let x: i32 = 1; let x: i32 = 2; }\n",
         "duplicate definition of 'x'",
     );
-    // a body-top `let` shares the parameter scope (C semantics: the emitted C would otherwise be
-    // a same-scope redefinition); nested braces still shadow legally
+    // A body-top `let` shares the parameter scope (C semantics: the emitted C would otherwise be
+    // a same-scope redefinition); nested braces still shadow legally.
     h::expect_resolve_err_msg(
         "body let reusing a parameter name",
         "fn f(x: i32) i32 { let x: i32 = 2; return x; }\n",
@@ -92,7 +92,8 @@ fn namespace_separation() {
     let const_decl = h::nth_kind(&c.ast, NodeKind::NODE_CONST, 0);
     let mut uses: [NodeId; 4] = [0 as NodeId, 0 as NodeId, 0 as NodeId, 0 as NodeId];
     let n = value_uses(&c.ast, src.ptr() as *const char, "Foo".ptr() as *const char, &mut uses[0], 4);
-    assert_eq(n, 1); // the value use is the let initializer
+    // The value use is the let initializer.
+    assert_eq(n, 1);
     assert(c.ast.resolution(uses[0]) == const_decl, "value Foo binds to the const, not the struct");
     // The type use is the `: Foo` annotation, resolved on the NODE_TYPE_PATH.
     let mut type_path: NodeId = NODE_NONE;

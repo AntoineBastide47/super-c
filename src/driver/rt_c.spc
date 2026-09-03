@@ -1,5 +1,5 @@
 // The generated-C runtime strings: the C standard library include block every generated TU
-// shares (super_rt.h) and the leak-tracker implementation TU (super_rt.c). Emission-agnostic --
+// shares (super_rt.h) and the leak-tracker implementation TU (super_rt.c). Emission-agnostic:
 // the driver writes them verbatim next to whatever backend produced the code.
 
 /// The full C standard library include block the generated runtime pulls in, emitted verbatim into

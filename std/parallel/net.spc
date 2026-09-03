@@ -17,15 +17,15 @@
 // here encodes a platform layout. Addresses resolve to IPv4 or IPv6, whichever the name gives.
 //
 // Anything that can fail returns `Result<T, IoError>`, so `?` propagates it and the caller can say WHICH
-// failure it was rather than just that there was one.
+// failure it was rather than only that there was one.
 //
-// Every platform, like the reactor -- on Windows over its select() backend.
+// Every platform, like the reactor: on Windows over its select() backend.
 
 import sc_io;
 import std::parallel::io as io;
 
 /// Why an operation failed. `code` is the platform errno, kept so a caller can report or match on the exact
-/// failure; the kind is what most code actually branches on.
+/// failure; the kind is what most code branches on.
 pub struct IoError {
     pub kind: IoErrorKind,
     pub code: i32,
@@ -80,7 +80,7 @@ pub struct TcpStream {
     pub fd: i32,
 }
 
-// Both are just a descriptor, so they move between tasks freely.
+// Both are a bare descriptor, so they move between tasks freely.
 unsafe extend TcpListener as Send {}
 
 unsafe extend TcpStream as Send {}
@@ -96,7 +96,7 @@ extend TcpListener {
         }
         return Result::<TcpListener, IoError>::Ok(TcpListener { fd: fd });
     }
-    /// The port actually bound -- the one to connect to after binding port 0.
+    /// The port bound: the one to connect to after binding port 0.
     pub fn port(self: &TcpListener) i32 {
         return unsafe sc_io::sc_tcp_port(self.fd);
     }
@@ -150,7 +150,7 @@ extend TcpStream {
             return Result::<TcpStream, IoError>::Err(IoError::last());
         }
         // A non-blocking connect finishes asynchronously: the socket becomes writable, and only then does
-        // it say whether it actually connected -- and the failure is in SO_ERROR, not errno.
+        // it say whether it connected, and the failure is in SO_ERROR, not errno.
         io::wait_writable(fd);
         let err = unsafe sc_io::sc_tcp_connect_result(fd);
         if err != 0 {
@@ -191,7 +191,7 @@ extend TcpStream as Free {
     }
 }
 
-/// A UDP socket. Datagrams, so there is no connection to accept or close -- just a bound port that sends
+/// A UDP socket. Datagrams, so there is no connection to accept or close, only a bound port that sends
 /// and receives. Dropping it closes the descriptor.
 @no_const
 pub struct UdpSocket {
@@ -210,7 +210,7 @@ extend UdpSocket {
         }
         return Result::<UdpSocket, IoError>::Ok(UdpSocket { fd: fd });
     }
-    /// The port actually bound.
+    /// The port bound.
     pub fn port(self: &UdpSocket) i32 {
         return unsafe sc_io::sc_tcp_port(self.fd);
     }

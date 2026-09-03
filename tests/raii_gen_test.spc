@@ -1,20 +1,20 @@
-// Self-hosted port of tests/raii_gen_test.c -- an auto-generating deep-RAII stress suite. It synthesizes
+// Self-hosted port of tests/raii_gen_test.c: an auto-generating deep-RAII stress suite. It synthesizes
 // programs over deeply nested owning types (chains of Option / Result / Box wrapping a leaf Free type `Tr`,
 // plus Vector aggregates) and exercises every ownership operation the move analysis must get right:
 // scope-exit free, move-into-call, conditional move, binding reassignment, container deep-free, and nested
 // switch in all three modes (move-out, borrow-peek, free-elaboration of a bound-but-not-moved payload).
 //
 // Soundness oracle: `Tr::free` does `putchar(self.id)`, so each tracker prints its unique id byte exactly
-// when it is freed. The one RAII invariant -- every value freed EXACTLY once -- becomes: the MULTISET of
+// when it is freed. The one RAII invariant (every value freed EXACTLY once) becomes: the MULTISET of
 // bytes printed == the multiset of ids constructed (a missing byte is a leak, a doubled byte a double-free).
 // Each batch is built + run through `super-c build` (via h::compile_and_run) and must exit 0 with a
 // matching free multiset. (The C suite additionally links under ASan; `super-c build` uses plain cc, so the
-// multiset check -- not ASan -- is what catches leaks / double-frees here.)
+// multiset check (not ASan) is what catches leaks / double-frees here.)
 //
 // FULL depth, matching tests/raii_gen_test.c (MAX_SWITCH_DEPTH=6, MAX_GENERAL_DEPTH=5): OR switch chains
-// through depth 6 and ORB general chains through depth 5 -- hundreds of scenarios per op. Scenarios batch
+// through depth 6 and ORB general chains through depth 5: hundreds of scenarios per op. Scenarios batch
 // into programs (ID_CAP ids each) and the ops fork-parallelize across @tests; within a fork the batches
-// build+run serially (no OpenMP fan-out), so raii_gen is the slow part of the run -- the cost of exhaustive
+// build+run serially (no OpenMP fan-out), so raii_gen is the slow part of the run: the cost of exhaustive
 // RAII coverage. (The C suite additionally runs under ASan; here the free-multiset check catches the bugs.)
 import tests::harness as h;
 import stdio;

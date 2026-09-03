@@ -186,7 +186,7 @@ fn defer_runs_before_return() {
     );
     let out = lowered(&p, "d");
     assert(has(&out, "call m"), "deferred call emitted");
-    // the deferred effect(1) call lands between the return-slot assignment and the return
+    // The deferred effect(1) call lands between the return-slot assignment and the return.
     assert(has(&out, "return"), "return present");
 }
 
@@ -197,7 +197,7 @@ fn typed_facts_boundary() {
     let u = (p.modules.len() - 1) as ModuleId;
     let f = facts::TypedFacts::of(p.module_ast_const(u));
     let a = unsafe &*p.module_ast_const(u);
-    // instance + node types: the Vector::<i32> value is an interned instance type
+    // Instance + node types: the Vector::<i32> value is an interned instance type.
     let mut saw_inst = false;
     let mut saw_recv = false;
     let mut closure = NODE_NONE;
@@ -223,7 +223,7 @@ fn typed_facts_boundary() {
     assert(closure != NODE_NONE, "closure found");
     assert(f.mut_captures(closure) != 0, "mutated capture recorded in the mask");
     assert(f.captures(closure).len != 0, "capture list recorded");
-    // generic args recorded at the specialized use site
+    // Generic args recorded at the specialized use site.
     let mut saw_args = false;
     for n in 0..a.nodes.len() {
         if f.generic_args(n as NodeId) != null {

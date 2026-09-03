@@ -8,10 +8,12 @@ import borrowck::facts as bf;
 
 /// Move/init error kinds.
 pub const ME_UNINIT: u8 = 0; // read of a never-initialized-on-some-path place
+/// Move error kinds (MoveErr.kind).
 pub const ME_MOVED: u8 = 1; // read of a maybe-moved place
 pub const ME_DOUBLE_MOVE: u8 = 2; // second move of a maybe-moved place
 pub const ME_PARTIAL: u8 = 3; // whole-value read while a sub-place is moved out
 
+/// One use-after-move style error: kind, move path, and the offending point and span.
 pub struct MoveErr {
     pub kind: u8,
     pub path: u32,
@@ -19,6 +21,7 @@ pub struct MoveErr {
     pub span: tok::Span,
 }
 
+/// Block successor and predecessor lists of one body in CSR form, plus its RPO.
 pub struct Cfg {
     pub nblocks: u32,
     pub succ: Vector<u32>, // flat successor pool
@@ -48,6 +51,7 @@ extend Cfg as Free {
 }
 
 extend Cfg {
+    /// A graph with no blocks and no heap storage; `build_into` fills it.
     pub fn empty() Cfg {
         return Cfg {
             nblocks: 0,
@@ -65,6 +69,7 @@ extend Cfg {
     }
 }
 
+/// The control-flow graph of `b`, freshly allocated, with predecessors built.
 pub fn build_cfg(b: &ir::CoreBody) Cfg {
     let mut c = Cfg::empty();
     c.build_into(b);
@@ -73,7 +78,7 @@ pub fn build_cfg(b: &ir::CoreBody) Cfg {
 }
 
 extend Cfg {
-    // Reset-and-fill in place, keeping vector capacity across bodies (the reusable-context path).
+    /// Reset-and-fill in place, keeping vector capacity across bodies (the reusable-context path).
     pub fn build_into(self: &mut Self, b: &ir::CoreBody) {
         let c = self; // keep the body below identical to the by-value builder
         let n = b.blocks.len() as u32;
@@ -145,7 +150,7 @@ extend Cfg {
     }
 
     /// Invert successors into predecessor lists (two passes: counts, then fill). Liveness is the
-    /// only consumer, so this runs lazily -- zero-loan bodies never pay for it. Idempotent per body:
+    /// only consumer, so this runs lazily: zero-loan bodies never pay for it. Idempotent per body:
     /// build_into truncates pred_start, and a filled list is left alone.
     pub fn build_preds(self: &mut Self) {
         let c = self;
@@ -202,6 +207,7 @@ extend Liveness as Free {
 }
 
 extend Liveness {
+    /// A solution with no rows; `build_into` fills it.
     pub fn empty() Liveness {
         return Liveness {
             words: 0,
@@ -213,6 +219,7 @@ extend Liveness {
     }
 }
 
+/// Per-block origin liveness of `f` over `c`, freshly allocated.
 pub fn solve_liveness(f: &bf::BodyFacts, c: &Cfg) Liveness {
     let mut lv = Liveness::empty();
     lv.build_into(f, c);
@@ -220,6 +227,7 @@ pub fn solve_liveness(f: &bf::BodyFacts, c: &Cfg) Liveness {
 }
 
 extend Liveness {
+    /// Solve in place, keeping row capacity from earlier bodies.
     pub fn build_into(self: &mut Self, f: &bf::BodyFacts, c: &Cfg) {
         let lv = self;
         let w = f.lwords;
@@ -254,7 +262,8 @@ extend Liveness {
         }
         for bi in 0..c.nblocks {
             if !lv.s_queued[bi as usize] {
-                lv.s_queue.push(bi); // popped after the postorder run
+                // Popped after the postorder run.
+                lv.s_queue.push(bi);
             }
         }
         for i in 0..c.rpo.len() {
@@ -306,8 +315,7 @@ extend Liveness {
     }
 }
 
-// ---- init/move solver -----------------------------------------------------------------------------
-
+/// The move/init dataflow solution of one body: per-block entry states and the errors found.
 pub struct MoveFlow {
     pub npaths: u32,
     pub words: u32,
@@ -424,7 +432,7 @@ extend FlowCtx {
         errs: &mut Vector<MoveErr>,
     ) {
         // Reads (EV_USE, and EV_MOVE_CUT which never mutates here) only matter when reporting;
-        // in the fixpoint's silent replays -- the majority of all event work -- they are no-ops,
+        // in the fixpoint's silent replays (the majority of all event work) they are no-ops,
         // so skip the subtree materialization entirely.
         if !report && ev.kind() != bf::EV_ASSIGN && ev.kind() != bf::EV_DEAD && ev.kind() != bf::EV_MOVE {
             return;
@@ -507,6 +515,7 @@ extend FlowCtx {
 }
 
 extend MoveFlow {
+    /// A solution with no paths; `build_into` fills it.
     pub fn empty() MoveFlow {
         return MoveFlow {
             npaths: 0,
@@ -525,6 +534,7 @@ extend MoveFlow {
     }
 }
 
+/// The move/init solution of `b`, freshly allocated; `errs` holds every move error.
 pub fn solve_moves(b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) MoveFlow {
     let mut mf = MoveFlow::empty();
     mf.build_into(b, forest, f, c);
@@ -532,6 +542,7 @@ pub fn solve_moves(b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts,
 }
 
 extend MoveFlow {
+    /// Solve in place, keeping capacity from earlier bodies.
     pub fn build_into(self: &mut Self, b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) {
         let mf = self;
         let npaths = forest.paths.len() as u32;
@@ -605,7 +616,7 @@ extend MoveFlow {
         }
         mf.s_reached.set(b.entry as usize, true);
         // Acyclic bodies (the common case): RPO is a topological order, so every block's entry
-        // state is final on first touch -- one fused pass replays events WITH reporting and
+        // state is final on first touch: one fused pass replays events WITH reporting and
         // propagates, and both the change-driven queue and the separate reporting pass vanish.
         // Cyclic bodies keep the queue and report after convergence.
         let fused = c.acyclic;
@@ -630,7 +641,7 @@ extend MoveFlow {
             let mut bi: u32 = 0;
             let mut sweep = false;
             if ri < c.rpo.len() {
-                // Phase 1 (both modes): one exact-RPO sweep, so every block's first visit sees all
+                // First (both modes): one exact-RPO sweep, so every block's first visit sees all
                 // its already-swept predecessors converged; only back edges re-enter via the queue.
                 bi = c.rpo[ri];
                 ri += 1;
@@ -646,7 +657,7 @@ extend MoveFlow {
             }
             let base = (bi * w) as usize;
             // A block with no move events has an identity transfer, so its exit state IS its entry
-            // row -- skip the copy-to-ctx and the event pass, and propagate straight from mf's row.
+            // row: skip the copy-to-ctx and the event pass, and propagate straight from mf's row.
             let mut smi = pmi;
             let mut sdi = pdi;
             let mut smm = pmm;
@@ -721,10 +732,11 @@ extend MoveFlow {
             }
         }
         if fused {
-            return; // the single pass already reported
+            // The single pass already reported.
+            return;
         }
         // Reporting pass: replay every reached block once against its fixpoint entry state. A block
-        // with no events -- or none the replay could report on -- skips entirely.
+        // with no events (or none the replay could report on) skips entirely.
         for bi in 0..c.nblocks {
             if !mf.s_reached[bi as usize] || !f.rep_blk[bi as usize] {
                 continue;
@@ -732,7 +744,7 @@ extend MoveFlow {
             let base = (bi * w) as usize;
             if f.easy_blk[bi as usize] {
                 // Easy block (assigns + root-leaf uses only): a use can only error if its path's
-                // entry maybe-moved bit is set or its entry definitely-init bit is clear -- the
+                // entry maybe-moved bit is set or its entry definitely-init bit is clear: the
                 // block's own assigns strictly improve both. Clean entry bits are proof; a dirty
                 // word falls through to the exact replay.
                 let lb = (bi * f.lwords) as usize;

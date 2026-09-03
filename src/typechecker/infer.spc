@@ -1,4 +1,4 @@
-// Body-local inference state and the read-only package boundary (plan 1_type_inference, phases 1-2).
+// Body-local inference state and the read-only package boundary.
 // InferenceContext owns the mutable walk state one body's check may touch plus the solver core:
 // inference variables, union-find with a rollback log, body-local compound types, occurs checks,
 // and the per-call generic-argument session. PackageTypeDb owns the read-only declaration and type
@@ -7,7 +7,6 @@
 import ast::ast as *;
 import module::loader as loader;
 
-// ---- InferTy: one four-byte term handle ----
 // Tag in the top two bits; the payload never exceeds 30 bits (TypeIds and body-local ids are dense).
 //   00 Published(TypeId)   an interned type in the current module's pool
 //   01 Var(InferVarId)     a type inference variable
@@ -15,6 +14,8 @@ import module::loader as loader;
 //   11 special: payload 0 = Error; payload >= 1 = ConstVar(payload - 1)
 // Error is distinct from an unbound variable: an unbound variable is unresolved input, Error is a
 // recovered diagnostic state that must not satisfy a bound or select a candidate.
+/// A tagged inference-time type: a published TypeId, a variable, a body-local term, Error, or a
+/// const variable (see the IT_TAG_* tags and the it_* constructors).
 pub type InferTy = u32;
 pub const IT_TAG_PUB: u32 = 0;
 pub const IT_TAG_VAR: u32 = 1;
@@ -22,27 +23,35 @@ pub const IT_TAG_LOCAL: u32 = 2;
 pub const IT_ERROR: InferTy = 3u32 << 30;
 pub const IT_UNBOUND: u32 = 0xFFFFFFFF; // binding-slot sentinel, never a valid InferTy
 
+/// The InferTy of an interned type of the current module.
 pub const fn it_pub(t: TypeId) InferTy {
     return t;
 }
+/// The InferTy of inference variable `v`.
 pub const fn it_var(v: u32) InferTy {
     return 1u32 << 30 | v;
 }
+/// The InferTy of body-local compound term `l`.
 pub const fn it_local(l: u32) InferTy {
     return 2u32 << 30 | l;
 }
+/// The InferTy of const variable `c`.
 pub const fn it_cvar(c: u32) InferTy {
     return 3u32 << 30 | c + 1;
 }
+/// The IT_TAG_* tag of `t` (3 for Error and const variables).
 pub const fn it_tag(t: InferTy) u32 {
     return t >> 30;
 }
+/// The 30-bit payload of `t`: TypeId, variable, local, or const-variable id + 1.
 pub const fn it_payload(t: InferTy) u32 {
     return t & 0x3FFFFFFF;
 }
+/// True for a const variable (tag 3 with a nonzero payload).
 pub const fn it_is_cvar(t: InferTy) bool {
     return it_tag(t) == 3 && it_payload(t) >= 1;
 }
+/// The const-variable id of `t`; `it_is_cvar(t)` must hold.
 pub const fn it_cvar_id(t: InferTy) u32 {
     return it_payload(t) - 1;
 }
@@ -79,8 +88,8 @@ pub struct Snapshot {
     pub ntype_conflicts: u32,
 }
 
-/// One recorded piece of directional evidence for a variable: `ty` flowed into the variable's
-/// position at `node`. `eq` marks a nested (invariant) position.
+// One recorded piece of directional evidence for a variable: `ty` flowed into the variable's
+// position at `node`. `eq` marks a nested (invariant) position.
 struct BoundRec {
     pub var: u32,
     pub ty: TypeId,
@@ -88,7 +97,7 @@ struct BoundRec {
     pub eq: bool,
 }
 
-/// A const-value conflict: two exact uses disagreed. Recorded, not emitted -- the adapter turns
+/// A const-value conflict: two exact uses disagreed. Recorded, not emitted; the adapter turns
 /// these into one diagnostic at the call.
 pub struct CConflict {
     pub old: TypeId,
@@ -112,13 +121,13 @@ pub struct InferenceContext {
     pub nclos: u32,
     pub closure_depth: u32,
     pub unsafe_depth: u32,
-    pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that actually required it (lint)
+    pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that required it (lint)
     pub mret_call: NodeId,
     pub mret_types: [TypeId; 8],
     pub mret_n: u8,
     pub mret_total: u32,
     /// The argument list of the call whose callee is being resolved, so overload selection can look
-    /// at what is being passed. Empty outside that window -- a bare member access has no arguments.
+    /// at what is being passed. Empty outside that window: a bare member access has no arguments.
     pub call_args: NodeList,
     pub addr_ctx: bool,
     pub place_use: bool,
@@ -130,6 +139,7 @@ pub struct InferenceContext {
 }
 
 extend InferenceContext {
+    /// Fresh walk state with no function in progress and an empty solver.
     pub fn new() InferenceContext {
         return InferenceContext {
             current_returns: NodeList { start: 0, len: 0 },
@@ -167,11 +177,13 @@ pub struct PackageTypeDb<'a> {
 }
 
 extend PackageTypeDb {
+    /// The module whose body is being checked.
     pub const fn cur_module(self: &Self) ModuleId {
         return unsafe (&*self.ast).module;
     }
 
     @c.always_inline
+    /// Module `m`'s live Ast (the current module's when `m` is it or no package is attached).
     pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if self.package != null && m != self.cur_module() {
             // Asts live in place in the module table, so the slot IS the live tree.
@@ -180,6 +192,7 @@ extend PackageTypeDb {
         return self.ast;
     }
 
+    /// Module `m`'s source text, for span rendering.
     pub const fn mod_src(self: &Self, m: ModuleId) str {
         if self.package != null && m != self.cur_module() {
             return unsafe self.package.modules[m as usize].source.as_str();
@@ -187,6 +200,7 @@ extend PackageTypeDb {
         return self.source;
     }
 
+    /// Number of modules in the package; 0 without one.
     pub const fn pkg_count(self: &Self) usize {
         if self.package == null {
             return 0;
@@ -195,8 +209,8 @@ extend PackageTypeDb {
     }
 }
 
-/// A body-local compound term that contains at least one variable. Var-free terms use published
-/// `TypeId` values directly and never enter this arena.
+// A body-local compound term that contains at least one variable. Var-free terms use published
+// `TypeId` values directly and never enter this arena.
 struct LocalRec {
     pub kind: TypeKind,
     pub qual: u8,
@@ -206,6 +220,7 @@ struct LocalRec {
     pub n: u32, // instance: argument count
 }
 
+/// Solver budgets; exceeding one is an inference failure, not a crash.
 pub const SOLVER_MAX_PAIRS: u32 = 4096; // structural pairs per unify call (type nesting budget)
 pub const SOLVER_MAX_RESOLVE: u32 = 256; // binding-chain hops before declaring a solver bug
 
@@ -214,33 +229,27 @@ pub const SOLVER_MAX_RESOLVE: u32 = 256; // binding-chain hops before declaring 
 /// is reused across bodies through clear(); nothing here is published.
 pub struct Solver {
     pub ast: *mut Ast, // the module under check; set per checker, read-only pool access
-    // ---- type variables (SoA, indexed by InferVarId) ----
     v_parent: Vector<u32>,
     v_size: Vector<u32>,
     v_binding: Vector<u32>, // InferTy or IT_UNBOUND
-    // ---- const variables (separate array: a type operation cannot accept one by accident) ----
     c_ty: Vector<u32>, // TYPE_CONST or TYPE_CONST_EXPR TypeId; canonical interning makes id equality value equality
     c_bound: Vector<bool>,
     c_origin: Vector<u32>,
-    // ---- body-local compound terms ----
     locals: Vector<LocalRec>,
     lt_args: Vector<u32>, // InferTy argument pool for local instances
-    // ---- rollback ----
     log: Vector<LogEnt>,
-    // ---- directional evidence and recorded conflicts ----
     bounds: Vector<BoundRec>,
     pub cconflicts: Vector<CConflict>,
     pub type_conflicts: Vector<TypeConflict>,
-    // ---- per-call session: generic parameter -> variable map ----
     s_pd: Vector<DefId>,
     s_slot: Vector<u32>, // it_var(..) or it_cvar(..)
-    // ---- iterative work stacks (reused) ----
     st_a: Vector<u32>,
     st_b: Vector<u32>,
     oc: Vector<u32>,
 }
 
 extend Solver {
+    /// An empty solver bound to no Ast.
     pub fn new() Solver {
         return Solver {
             ast: null,
@@ -264,8 +273,7 @@ extend Solver {
         };
     }
 
-    // ---- variables ----
-
+    /// A fresh unbound inference variable (its own union-find root).
     pub fn var_new(self: &mut Self) u32 {
         let v = self.v_parent.len() as u32;
         self.v_parent.push(v);
@@ -274,6 +282,7 @@ extend Solver {
         return v;
     }
 
+    /// A fresh unbound const variable; `origin` is the node it was created for (diagnostics).
     pub fn cvar_new(self: &mut Self, origin: u32) u32 {
         let c = self.c_ty.len() as u32;
         self.c_ty.push(0);
@@ -313,8 +322,7 @@ extend Solver {
         return cur;
     }
 
-    // ---- rollback ----
-
+    /// The current lengths of every solver table; `rollback` restores them.
     pub const fn snapshot(self: &Self) Snapshot {
         return Snapshot {
             log: self.log.len() as u32,
@@ -328,6 +336,7 @@ extend Solver {
         };
     }
 
+    /// Undo every binding and allocation made since `s` was taken.
     pub fn rollback(self: &mut Self, s: &Snapshot) {
         // Replay the log backwards first: entries may touch cells that predate the snapshot.
         let mut i = self.log.len();
@@ -377,14 +386,15 @@ extend Solver {
         self.log.push(LogEnt { kind: LK_CBIND, idx: c, old: packed });
     }
 
-    // ---- local compound terms ----
-
+    /// A body-local wrapper term (reference, pointer, array, ..) of `kind` around `elem`.
     pub fn local_elem(self: &mut Self, kind: TypeKind, qual: u8, elem: InferTy) InferTy {
         let l = self.locals.len() as u32;
         self.locals.push(LocalRec { kind: kind, qual: qual, module: 0, a: elem, b: 0, n: 0 });
         return it_local(l);
     }
 
+    /// A body-local generic instance term of decl `(m, decl)` over `n` InferTy args.
+    /// Safety: `args` must point at `n` readable entries.
     pub fn local_inst(self: &mut Self, m: ModuleId, decl: NodeId, args: *const u32, n: u32) InferTy {
         let start = self.lt_args.len() as u32;
         for i in 0..n {
@@ -404,7 +414,8 @@ extend Solver {
         while self.oc.len() > 0 {
             steps += 1;
             if steps > SOLVER_MAX_PAIRS {
-                return true; // budget hit: treat as occurring (refuses the bind, no cycle risk)
+                // Budget hit: treat as occurring (refuses the bind, no cycle risk).
+                return true;
             }
             let cur = self.resolve(*self.oc.at(self.oc.len() - 1));
             let _ = self.oc.pop();
@@ -440,8 +451,8 @@ extend Solver {
         return true;
     }
 
-    /// Join two variable classes; both must be roots with no binding (`unify`'s resolve step
-    /// guarantees that). Union by size.
+    // Join two variable classes; both must be roots with no binding (`unify`'s resolve step
+    // guarantees that). Union by size.
     fn union_roots(self: &mut Self, ra: u32, rb: u32) {
         if ra == rb {
             return;
@@ -486,7 +497,8 @@ extend Solver {
                 continue;
             }
             if a == IT_ERROR || b == IT_ERROR {
-                continue; // an error term unifies with anything and proves nothing
+                // An error term unifies with anything and proves nothing.
+                continue;
             }
             let ta = it_tag(a);
             let tb = it_tag(b);
@@ -671,14 +683,13 @@ extend Solver {
         return h;
     }
 
-    // ---- per-call generic-argument session ----
-
     /// Begin a nested candidate probe: parameters mapped after this mark stack on top of the
     /// enclosing session, and probe_end removes every trace of the probe's work.
     pub fn probe_begin(self: &mut Self) ProbeMark {
         return ProbeMark { snap: self.snapshot(), base: self.s_pd.len() as u32 };
     }
 
+    /// End the probe begun at `m`: every binding and parameter slot it created is discarded.
     pub fn probe_end(self: &mut Self, m: &ProbeMark) {
         self.rollback(&m.snap);
         self.s_pd.truncate(m.base as usize);
@@ -706,6 +717,7 @@ extend Solver {
         return slot;
     }
 
+    /// The session slot mapped for generic parameter `d`, or -1. Linear over the active session.
     pub const fn slot_of(self: &Self, d: DefId) i32 {
         for i in 0..self.s_pd.len() {
             if self.s_pd[i].module == d.module && self.s_pd[i].node == d.node {
@@ -796,7 +808,8 @@ extend Solver {
             return it_payload(head);
         }
         if it_tag(head) != IT_TAG_VAR {
-            return TYPE_NONE; // a local compound cannot publish in the adapter phase
+            // A local compound cannot publish in the adapter phase.
+            return TYPE_NONE;
         }
         let r = it_payload(head);
         // Join the directional bounds: the unique bound every other bound converts to.

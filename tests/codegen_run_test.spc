@@ -29,26 +29,26 @@ fn run_exit(label: str, body: str, code: i32) {
 
 @test
 fn operator_overload_lowering() {
-    // compound assignment on an operator-overloaded struct lowers through the method (C cannot += structs)
+    // Compound assignment on an operator-overloaded struct lowers through the method (C cannot += structs).
     run_exit(
         "struct compound assignment",
         "struct P { pub x: i32, }\nextend P { pub fn add(self: &P, o: &P) P { return P { x: self.x + o.x }; } pub fn mul(self: &P, o: &P) P { return P { x: self.x * o.x }; } }\nfn main() i32 { let mut a = P { x: 2 }; let b = P { x: 3 }; a += b; a *= b; unsafe exit(a.x); }\n",
         15,
     );
     // Bitwise and shift operators dispatch the same way. A shift's right operand is a COUNT, so it is
-    // passed BY VALUE where `&` passes its operand by reference -- the two are lowered differently.
+    // passed BY VALUE where `&` passes its operand by reference: the two are lowered differently.
     run_exit(
         "bitwise and shift overloads",
         "struct M { pub b: u32, }\nextend M { pub fn bit_and(self: &M, o: &M) M { return M { b: self.b & o.b }; } pub fn bit_or(self: &M, o: &M) M { return M { b: self.b | o.b }; } pub fn bit_xor(self: &M, o: &M) M { return M { b: self.b ^ o.b }; } pub fn bit_not(self: &M) M { return M { b: ~self.b }; } pub fn shl(self: &M, n: usize) M { return M { b: self.b << n as u32 }; } pub fn shr(self: &M, n: usize) M { return M { b: self.b >> n as u32 }; } }\nfn main() i32 {\n    let a = M { b: 0b1100 };\n    let b = M { b: 0b1010 };\n    let mut acc = a;\n    acc &= b;\n    acc |= M { b: 1 };\n    acc ^= M { b: 2 };\n    acc <<= 2;\n    acc >>= 1;\n    let n = (~a).b & 0xF;\n    unsafe exit(((a & b).b + (a | b).b + (a ^ b).b + (a << 1).b + (a >> 2).b + acc.b + n) as i32);\n}\n",
         80,
     );
-    // string patterns in switch compare through str's eq, incl. inside an enum payload
+    // String patterns in switch compare through str's eq, incl. inside an enum payload.
     run_exit(
         "string switch patterns",
         "fn pick(s: str) i32 { return switch s { \"build\" => 1, \"fmt\" => 2, _ => 3, }; }\nfn pay(o: Option<str>) i32 { return switch o { Some(\"x\") => 10, Some(_) => 20, None => 30, }; }\nfn main() i32 { unsafe exit(pick(\"build\") + pick(\"fmt\") * 2 + pick(\"?\") * 3 + pay(Option::<str>::Some(\"x\")) + pay(Option::<str>::Some(\"y\")) + pay(Option::<str>::None)); }\n",
         74,
     );
-    // string range patterns test through str's cmp (lexicographic buckets)
+    // String range patterns test through str's cmp (lexicographic buckets).
     run_exit(
         "string range patterns",
         "fn bucket(s: str) i32 { return switch s { \"a\"..\"m\" => 1, \"m\"..\"z\" => 2, _ => 3, }; }\nfn main() i32 { unsafe exit(bucket(\"apple\") + bucket(\"pear\") * 2 + bucket(\"~t\") * 3); }\n",
@@ -58,16 +58,16 @@ fn operator_overload_lowering() {
 
 @test
 fn matchertext() {
-    // plain literals decode verbatim (embedded quotes, no escape processing); interpolation
+    // Plain literals decode verbatim (embedded quotes, no escape processing); interpolation
     // desugars through the sugar_fmt_* path; format() accepts a matchertext template with `{}`
-    // placeholders; interp segments keep doubled braces (they are matchers, not escapes)
+    // placeholders; interp segments keep doubled braces (they are matchers, not escapes).
     run_exit(
         "matchertext literals and interpolation",
         "fn main() i32 {\n    let a = M\"(ab\"cd)\";\n    let b = M[]\"(v=[10 + 4] q=[a.len() as i32])\";\n    let mut r = 0;\n    if a.len() == 5 { r += 1; }\n    if a[2] == 34u8 { r += 2; }\n    if b.as_str() == \"v=14 q=5\" { r += 4; }\n    if M\"[mix {a} (b)]\" == \"mix {a} (b)\" { r += 8; }\n    let f = format(M\"(x={} {{lit}})\", 9);\n    if f.as_str() == \"x=9 {lit}\" { r += 16; }\n    const K: str = M\"(k)\";\n    if K == \"k\" { r += 32; }\n    let g = M[]\"(brace {{x}} [1])\";\n    if g.as_str() == \"brace {{x}} 1\" { r += 64; }\n    unsafe exit(r);\n}\n",
         127,
     );
-    // the runtime hole guard: a spliced value must itself be matchertext -- compliant values
-    // (matched matchers) pass, a breakout value panics; format() args stay unchecked
+    // The runtime hole guard: a spliced value must itself be matchertext; compliant values
+    // (matched matchers) pass, a breakout value panics; format() args stay unchecked.
     run_exit(
         "matchertext hole guard accepts compliant values",
         "fn main() i32 { let ok = \"(a) [b] {c}\"; let s = M{}\"(v={ok})\"; let f = format(\"{}\", \"loose (\"); let mut r = s.len() as i32; if f.len() == 7 { r += 1; } unsafe exit(r); }\n",
@@ -125,11 +125,12 @@ fn control_flow() {
 
 @test
 fn recursion() {
+    // Fib(10)=55, sum 0..9=45.
     run_exit(
         "fib + range sum",
         "fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }\nfn main() i32 { let mut s: i32 = 0; for i in 0..10 { s = s + i; } unsafe exit(fib(10) - s); }\n",
         10,
-    ); // fib(10)=55, sum 0..9=45
+    );
 }
 
 @test
@@ -177,20 +178,22 @@ fn structs_and_methods() {
 
 @test
 fn const_generics() {
+    // 1 + 4 + 9 + a.cap()=4 + c.cap()=8.
     run_exit(
         "distinct const-generic instances + value use",
         "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\nfn main() i32 {\n  let a = Buff::<i32, 4> { b: [1, 2, 3, 4] };\n  let c = Buff::<i32, 8> { b: [0, 0, 0, 0, 0, 0, 0, 9] };\n  unsafe exit(a.b[0] + a.b[3] + c.b[7] + a.cap() as i32 + c.cap() as i32);\n}\n",
         26,
-    ); // 1 + 4 + 9 + a.cap()=4 + c.cap()=8
-    // A NAMED const as the argument, not just a literal. The grammar parses every non-literal argument as a
+    );
+    // A NAMED const as the argument, not only a literal. The grammar parses every non-literal argument as a
     // type, so this only works if the resolver notices the name is a value and the typechecker then folds
-    // it -- in a field type and in a turbofish alike, which are separate paths. The `[i64]` elements also
+    // it: in a field type and in a turbofish alike, which are separate paths. The `[i64]` elements also
     // pin the contextual typing of an array literal: written as bare integers, they are i32 on their own.
+    // 3 + 7 + cap()=4.
     run_exit(
         "a named const as a const-generic argument",
         "const N: usize = 4;\nstruct Holder { pub cells: Buff<i64, N> }\nstruct Buff<T, const M: usize> { pub b: [T; M] }\nextend<T, const M: usize> Buff<T, M> { fn cap(self: &Self) usize { return M; } }\nfn main() i32 {\n  let h = Holder { cells: Buff::<i64, N> { b: [3, 0, 0, 7] } };\n  unsafe exit(h.cells.b[0] as i32 + h.cells.b[3] as i32 + h.cells.cap() as i32);\n}\n",
         14,
-    ); // 3 + 7 + cap()=4
+    );
 }
 
 @test
@@ -202,7 +205,7 @@ fn mut_match_binding() {
     );
 }
 
-// `[v; N]` -- N copies of one value. The count is part of the type, so it must be constant, and a value
+// `[v; N]`: N copies of one value. The count is part of the type, so it must be constant, and a value
 // that owns resources cannot be copied into more than one slot; both are rejected rather than emitted. A
 // zero fill emits `{0}` so the C does not grow with N.
 @test
@@ -216,7 +219,7 @@ fn array_repeat_literal() {
 
 // A designated array literal carries only its SPELLED elements; the destination's tail is zero. In a
 // struct-literal field the emitted temp is that short array, so the copy into the field must be sized
-// by the source -- sized by the field, it read past the temp. And the constant evaluator's value for
+// by the source: sized by the field, it read past the temp. And the constant evaluator's value for
 // the literal kept the short length through field-init and return positions, so a constant index into
 // the zero tail was reported as out of bounds.
 @test
@@ -231,8 +234,8 @@ fn designated_array_literal_short_tail() {
 // An array whose element is a POINTER or a FUNCTION POINTER, and an array binding whose type is inferred.
 // Three separate defects met here. C cannot initialize an array from an array value, so the compound
 // literal every inferred array binding was emitted with (`const T x[N] = (T[N]){..}`) was rejected outright
-// -- `let v = [1, 2];` did not compile at all. The cast for an array of function pointers was built by
-// appending `[N]` to the element's spelling, producing `T (*)(..)[N]` -- a function returning an array,
+// `let v = [1, 2];` did not compile at all. The cast for an array of function pointers was built by
+// appending `[N]` to the element's spelling, producing `T (*)(..)[N]`: a function returning an array,
 // which is not a type. And an immutable binding took its `const` as a prefix, which for these element types
 // binds to the POINTEE (or the return type), not to the binding: writing through such a pointer then fails.
 @test
@@ -245,7 +248,7 @@ fn array_of_pointers_and_functions() {
 }
 
 // A closure's DECLARED return type has to be resolved like any other type annotation. It was not, so it
-// lowered to no type at all for anything that is not a builtin -- and a builtin needs no resolution, which
+// lowered to no type at all for anything that is not a builtin, and a builtin needs no resolution, which
 // is exactly why it went unnoticed: `fn() u8` behaved and `fn() SomeStruct` silently had no return type, so
 // every signature check against such a closure (a `F: fn() T` bound, above all) compared against nothing
 // and rejected it. Covered here through a generic method on a generic struct AND a free generic function,
@@ -260,7 +263,7 @@ fn closure_declared_return_type_resolves() {
 }
 
 // An array-typed FIELD coerces to a slice like any other array. It did not: the coercion needs the element
-// count, which is read from the declaration the expression names -- and that lookup only understood a plain
+// count, which is read from the declaration the expression names, and that lookup only understood a plain
 // identifier, so `f(x.buf)` type-checked and then emitted a raw C array where a slice was expected. Covers
 // both directions and a write THROUGH the mutable slice, so the view really is the field's storage.
 @test
@@ -276,8 +279,8 @@ fn array_field_coerces_to_slice() {
 fn closure_captures_every_binding_kind() {
     // A closure environment must name EVERY kind of binding it can capture, not only `let`s and parameters:
     // a `for` induction variable, an iterator-`for` binding, an `if let` / switch-arm payload and a
-    // struct-pattern shorthand each used to emit a nameless env field (`struct { int32_t; }`), which does
-    // not compile. All five kinds are captured here, so the emitted C proves each field is named.
+    // struct-pattern shorthand must each emit a NAMED env field (`struct { int32_t; }` does not
+    // compile). All five kinds are captured here, so the emitted C proves each field is named.
     run_exit(
         "closure captures for / iterator / if-let / switch-arm / struct-shorthand bindings",
         "fn apply<F: fn() i64>(f: F) i64 { return f(); }\nstruct P { pub a: i64, pub b: i64 }\nenum E { N, V(i64), }\nfn main() i32 {\n  let mut t: i64 = 0;\n  for i in 0..3 { t = t + apply(fn() i64 { return i; }); }\n  let mut v = Vector::<i64>::new();\n  v.push(4);\n  v.push(5);\n  for x in v.iter() { t = t + apply(fn() i64 { return *x; }); }\n  v.free();\n  let e = E::V(10);\n  if let V(n) = e { t = t + apply(fn() i64 { return n; }); }\n  switch e { V(n2) => { t = t + apply(fn() i64 { return n2; }); }, N => {}, };\n  let p = P { a: 6, b: 7 };\n  switch p { P { a, b } => { t = t + apply(fn() i64 { return a + b; }); }, };\n  unsafe exit(t as i32);\n}\n",
@@ -307,7 +310,7 @@ fn mut_array_param_is_a_copy() {
 }
 
 // `&T` and `&mut T` are DIFFERENT C types (`const T*` vs `T*`), so instances named by them must get
-// different symbols -- one name for both redefines the struct and conflicts on every method.
+// different symbols: one name for both redefines the struct and conflicts on every method.
 @test
 fn ref_mutability_mangles_apart() {
     let SRC: str = "fn peek<T>(v: &T) Option<&T> { return Option::<&T>::Some(v); }\nfn peek_mut<T>(v: &mut T) Option<&mut T> { return Option::<&mut T>::Some(v); }\nfn main() i32 {\n    let mut x = 41;\n    let m = peek_mut(&mut x).unwrap();\n    *m = *m + 1;\n    return *peek(&x).unwrap() - 42;\n}\n";
@@ -377,7 +380,7 @@ fn closures_in_generic_fns() {
 
 // `From<[]T>` on the containers: an array literal coerces to the slice, so a list of elements builds a
 // container through `.into()` or the explicit `from`. The slice BORROWS, so elements are cloned in and
-// the source keeps its own -- a Free element type must not end up with two owners.
+// the source keeps its own: a Free element type must not end up with two owners.
 @test
 fn container_from_list() {
     h::expect_exit(
@@ -461,7 +464,7 @@ fn inline_asm() {
 }
 
 // A monomorphized body asks of EVERY identifier whether it is a bound const-generic parameter, and the
-// answer used to be read from the current module's node pool with the referenced decl's node id -- which
+// answer must not be read from the current module's node pool with the referenced decl's node id, which
 // is only that module's id when the decl is local. A call to any prelude function from inside a generic
 // body (`panic` is the one std itself needs) indexed this Ast with the prelude's node id and read past
 // the end of it. Any generic fn calling any imported fn is enough.
@@ -487,7 +490,7 @@ fn prelude_call_inside_generic_body() {
 // The small-string budget is `sizeof(StringLarge) - 1`, so it MUST follow the pointer width: the union's
 // last byte carries the discriminant, and it is the top byte of `cap` only while the two layouts are the
 // same size. Written out as 23 it was right on a 64-bit target and wrong on wasm32, where the byte fell
-// outside `cap` entirely and every heap string read back as inline -- printing its own header. Checked
+// outside `cap` entirely and every heap string read back as inline: printing its own header. Checked
 // through the public API, so it holds at whatever width the suite runs on.
 @test
 fn sso_budget_follows_pointer_width() {
@@ -500,9 +503,9 @@ fn sso_budget_follows_pointer_width() {
 
 // A const-generic parameter in an ARRAY LENGTH position, inferred from the argument. The lowered parameter
 // type cannot carry the binding (`[T; N]` interns with length 0 while N is unbound), so it is read from the
-// parameter's type node -- and from the argument literal's own element count, since that literal is typed
-// against this very parameter and would otherwise also be length 0. Only `f::<3>(..)` used to work; the
-// inferred call emitted `f__v` with a bare `N` left in the C.
+// parameter's type node, and from the argument literal's own element count, since that literal is typed
+// against this very parameter and would otherwise also be length 0. An inferred call must not emit `f__v` with a
+// bare `N` left in the C.
 @test
 fn const_generic_array_length_inferred() {
     h::expect_exit(
@@ -529,37 +532,37 @@ fn const_generic_array_length_inferred() {
 
 @test
 fn tuple_structs_byte_strings_and_slice_for() {
-    // tuple-struct construction lowers to positional aggregate init; reads spell `._N` in C
+    // Tuple-struct construction lowers to positional aggregate init; reads spell `._N` in C.
     h::expect_exit(
         "tuple struct positional fields",
         "struct Wrap(i32, bool);\nfn main() i32 { let w = Wrap(30, true); let mut r = w.0; if w.1 { r += 5; } return r - 35; }\n",
         0,
     );
-    // generic tuple struct: element types bind under the instance's generic args
+    // Generic tuple struct: element types bind under the instance's generic args.
     h::expect_exit(
         "generic tuple struct",
         "struct Pair<A, B>(A, B);\nfn main() i32 { let p = Pair::<i32, i32>(9, 4); return p.0 - p.1 - 5; }\n",
         0,
     );
-    // `for value in slice` reads the length through the slice's runtime `.len`, not a static count
+    // `for value in slice` reads the length through the slice's runtime `.len`, not a static count.
     h::expect_exit(
         "for value in slice",
         "fn main() i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let mut t = 0;\n    for v in s { t += v; }\n    return t - 10;\n}\n",
         0,
     );
-    // byte-string literal: the `b` prefix is stripped and the bytes re-emit as a valid C string view
+    // Byte-string literal: the `b` prefix is stripped and the bytes re-emit as a valid C string view.
     h::expect_exit(
         "byte string literal",
         "fn main() i32 { let b = b\"AB\"; return (b[0] as i32) + (b[1] as i32) - 131; }\n",
         0,
     );
-    // tuple index then method: `0.len` must lex as an index access, not a malformed float
+    // Tuple index then method: `0.len` must lex as an index access, not a malformed float.
     h::expect_exit(
         "tuple index chained method",
         "struct Words([]i32);\nfn main() i32 { let a: [i32; 3] = [4, 5, 6]; let w = Words(a[0..3]); return w.0.len() as i32 - 3; }\n",
         0,
     );
-    // a tuple struct wrapping an owner gets an auto-derived destructor; the leak gate would fail if
+    // A tuple struct wrapping an owner gets an auto-derived destructor; the leak gate would fail if
     // the field were skipped. The string must be long enough to HEAP-allocate (past SSO), or a leak
     // of the field would be invisible.
     h::expect_exit(
@@ -568,27 +571,27 @@ fn tuple_structs_byte_strings_and_slice_for() {
         0,
     );
     // escape decoding: `\\xNN` is exactly two hex digits (C would read `\\x41B` greedily); `\\u{..}`
-    // becomes UTF-8 bytes (C rejects the syntax outright)
+    // becomes UTF-8 bytes (C rejects the syntax outright).
     h::expect_exit(
         "byte-string escapes decode to bytes",
         "fn main() i32 { let b = b\"\\x41B\"; let u = b\"\\u{41}\"; return (b[0] as i32) + (b[1] as i32) + (u[0] as i32) - 196; }\n",
         0,
     );
-    // a tuple-struct constructor folds at compile time (a `const`/`static_assert` requires it)
+    // A tuple-struct constructor folds at compile time (a `const`/`static_assert` requires it).
     h::expect_exit(
         "tuple struct const-evaluates",
         "struct Pt(i32, i32);\nconst C: Pt = Pt(20, 22);\nstatic_assert(C.0 + C.1 == 42, \"tuple const eval\");\nfn main() i32 { return C.0 + C.1 - 42; }\n",
         0,
     );
     // zeroed::<TupleStruct>() must allocate one slot per positional member (a field-count of 0 wrote
-    // out of bounds and crashed the compiler)
+    // out of bounds and crashed the compiler).
     h::expect_exit(
         "zeroed tuple struct",
         "struct Zt(i32, i32);\nconst Z: Zt = unsafe zeroed::<Zt>();\nstatic_assert(Z.0 == 0 && Z.1 == 0, \"zeroed tuple\");\nfn main() i32 { return Z.0 + Z.1; }\n",
         0,
     );
-    // a fixed-array tuple member: constructing it needs the array-store path, and coercing `w.0` to a
-    // slice needs the positional array-length recovery (both were struct-only)
+    // A fixed-array tuple member: constructing it needs the array-store path, and coercing `w.0` to a
+    // slice needs the positional array-length recovery (both were struct-only).
     h::expect_exit(
         "tuple struct fixed-array member coerces to slice",
         "struct Wrap([i32; 3]);\nfn sum(s: []i32) i32 { return s[0] + s[1] + s[2]; }\nfn main() i32 { let w = Wrap([1, 2, 3]); return sum(w.0) - 6; }\n",
@@ -598,20 +601,20 @@ fn tuple_structs_byte_strings_and_slice_for() {
 
 @test
 fn tuple_struct_reference_field_obeys_lifetimes() {
-    // a reference stored in a tuple member is subject to the same stored-borrow rule as a named field
+    // A reference stored in a tuple member is subject to the same stored-borrow rule as a named field.
     h::expect_err_msg(
         "reference tuple member needs a named lifetime",
         "struct RefT(&i32);\nfn main() i32 { return 0; }\n",
         "must name a lifetime",
     );
-    // and a borrow of a local must not escape through a tuple constructor
+    // And a borrow of a local must not escape through a tuple constructor.
     h::expect_err_msg(
         "tuple constructor cannot leak a local borrow",
         "struct RefT<'a>(&'a i32);\nfn bad<'a>() RefT<'a> { let x = 5; return RefT::<'a>(&x); }\nfn main() i32 { return 0; }\n",
         "does not outlive",
     );
-    // a tuple struct is recognized as Free when a member owns, so moving one member out is rejected
-    // exactly as for a named struct (else the destructor double-frees at scope exit)
+    // A tuple struct is recognized as Free when a member owns, so moving one member out is rejected
+    // exactly as for a named struct (else the destructor double-frees at scope exit).
     h::expect_err_msg(
         "tuple partial move rejected like a named field",
         "struct Two(String, String);\nfn main() i32 { let t = Two(String::from_str(\"aaaaaaaaaaaaaaaaaaaaaaaaaa\"), String::from_str(\"bbbbbbbbbbbbbbbbbbbbbbbbbb\")); let a = t.0; return a.len() as i32; }\n",

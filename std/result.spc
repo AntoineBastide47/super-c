@@ -2,22 +2,26 @@
 // monomorphized per (T, E). Value-yielding methods CONSUME `self` (matching the owned value moves the
 // payload out); read-only methods take `&self` and bind the payload by reference (`switch` binding modes).
 // `Result<T, E>` is auto-`Free` whenever `T` is `Free` (the `E` arm is freed through the `.free()`
-// Free intrinsic -- a no-op when `E` is not `Free`); freeing it deep-frees the live payload.
+// Free intrinsic: a no-op when `E` is not `Free`); freeing it deep-frees the live payload.
 
+/// A success value `Ok(T)` or a failure `Err(E)`.
 pub enum Result<T, E> {
     Ok(T),
     Err(E),
 }
 
 extend<T, E> Result<T, E> {
+    /// `Ok(value)`.
     pub const fn ok(value: T) Result<T, E> {
         return Result::<T, E>::Ok(value);
     }
 
+    /// `Err(error)`.
     pub const fn err(error: E) Result<T, E> {
         return Result::<T, E>::Err(error);
     }
 
+    /// True for `Ok`.
     pub const fn is_ok(self: &Result<T, E>) bool {
         return switch self {
             Ok(_) => true,
@@ -25,6 +29,7 @@ extend<T, E> Result<T, E> {
         };
     }
 
+    /// True for `Err`.
     pub const fn is_err(self: &Result<T, E>) bool {
         return switch self {
             Ok(_) => false,
@@ -145,7 +150,7 @@ extend<T, E> Result<T, E> {
 }
 
 // Auto-`Free` whenever `T` is `Free`: freeing deep-frees the live payload in place (the `&mut self` match
-// binds it by reference). The `Err` arm's `.free()` is the Free intrinsic -- a no-op unless `E` too
+// binds it by reference). The `Err` arm's `.free()` is the Free intrinsic: a no-op unless `E` too
 // is `Free`.
 extend<T: Free, E> Result<T, E> as Free {
     pub fn free(self: &mut Result<T, E>) {

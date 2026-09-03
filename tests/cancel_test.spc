@@ -1,6 +1,6 @@
 // Stuck-coroutine cancellation and reclamation: the verification cases from the reclamation plan.
 // Every test runs in a forked child, starts its own scheduler, and must end with a successful runtime
-// shutdown -- the suite's SC_LEAK_CHECK=fatal gate then proves that reclamation left no coroutine-owned
+// shutdown: the suite's SC_LEAK_CHECK=fatal gate then proves that reclamation left no coroutine-owned
 // allocation behind.
 
 import atomic;
@@ -84,7 +84,7 @@ fn forever() time::Duration {
     return time::Duration::from_secs(30);
 }
 
-// --- cancellation of parked waits: one test per wait kind --------------------------------------------
+// --- cancellation of parked waits: one test per wait kind --------------------------------------------.
 
 @test
 fn sleep_cancel_wakes_and_reclaims() {
@@ -107,8 +107,10 @@ fn sleep_cancel_wakes_and_reclaims() {
     assert(wg.wait_timeout(time::Duration::from_secs(5)), "the cancelled sleeper finishes");
     rt::shutdown();
     assert_eq(rt::cancelled_tasks(), 1);
-    assert_eq(unwounds(), 1); // the defer saw the task cancelling
-    assert_eq(afters(), 0); // nothing after the cancelled sleep ran
+    // The defer saw the task cancelling.
+    assert_eq(unwounds(), 1);
+    // Nothing after the cancelled sleep ran.
+    assert_eq(afters(), 0);
 }
 
 @test
@@ -138,9 +140,12 @@ fn edge_unwinds_through_helper_frames_exactly_once() {
     rt::shutdown();
     assert_eq(rt::cancelled_tasks(), 1);
     assert_eq(unwounds(), 1);
-    assert_eq(afters(), 0); // neither frame ran past its cancelled wait
-    assert_eq(atomic::load_i64(&mut unsafe G_HELPER_DEFERS, 1), 1); // the helper defer ran exactly once
-    assert_eq(frees(), 2); // the helper local and the root local, once each
+    // Neither frame ran past its cancelled wait.
+    assert_eq(afters(), 0);
+    // The helper defer ran exactly once.
+    assert_eq(atomic::load_i64(&mut unsafe G_HELPER_DEFERS, 1), 1);
+    // The helper local and the root local, once each.
+    assert_eq(frees(), 2);
 }
 
 @test
@@ -176,7 +181,8 @@ fn wait_group_cancel_leaves_count() {
     launch || {
         defer finish(&d2);
         let _ = ktx.send(rt::current_key());
-        g2.wait(); // parks forever until cancelled; the edge unwinds here
+        // Parks forever until cancelled; the edge unwinds here.
+        g2.wait();
         after_mark();
     };
     let key = krx.recv().unwrap();
@@ -205,7 +211,8 @@ fn semaphore_cancel_consumes_no_permit() {
     launch || {
         defer finish(&d2);
         let _ = ktx.send(rt::current_key());
-        s2.acquire(); // parks; cancelled before any permit exists; the edge unwinds here
+        // Parks; cancelled before any permit exists; the edge unwinds here.
+        s2.acquire();
         after_mark();
     };
     let key = krx.recv().unwrap();
@@ -300,7 +307,8 @@ fn channel_send_cancel_keeps_payload_ownership() {
     assert_eq(rt::cancelled_tasks(), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
-    assert_eq(frees(), 2); // the received value was freed exactly once
+    // The received value was freed exactly once.
+    assert_eq(frees(), 2);
 }
 
 @test
@@ -397,7 +405,8 @@ fn mutex_lock_c_cancel_never_returns_a_guard() {
     launch || {
         let _g = m2.get().lock();
         hg.done();
-        h2.wait(); // owns the lock until the main thread says otherwise
+        // Owns the lock until the main thread says otherwise.
+        h2.wait();
     };
     holding.wait();
     let m3 = m.clone();
@@ -414,7 +423,8 @@ fn mutex_lock_c_cancel_never_returns_a_guard() {
     time::sleep(short());
     assert(rt::request_cancel(key, rt::CR_USER), "the lock waiter is live");
     assert(done.wait_timeout(time::Duration::from_secs(5)), "the cancelled waiter finishes");
-    hold.done(); // release the holder; the lock must be fully functional afterwards
+    // Release the holder; the lock must be fully functional afterwards.
+    hold.done();
     time::sleep(short());
     {
         let g = m.get().lock();
@@ -423,7 +433,8 @@ fn mutex_lock_c_cancel_never_returns_a_guard() {
     rt::shutdown();
     assert_eq(rt::cancelled_tasks(), 1);
     assert_eq(unwounds(), 1);
-    assert_eq(afters(), 0); // no guard reached the cancelled waiter's frame
+    // No guard reached the cancelled waiter's frame.
+    assert_eq(afters(), 0);
 }
 
 @test
@@ -471,7 +482,8 @@ fn mutex_unlock_passes_over_a_cancelled_waiter() {
     time::sleep(short());
     assert(rt::request_cancel(key, rt::CR_USER), "the first waiter is live");
     assert(done_c.wait_timeout(time::Duration::from_secs(5)), "the cancelled waiter finishes");
-    hold.done(); // the release must reach the surviving waiter, not die on the cancelled one
+    // The release must reach the surviving waiter, not die on the cancelled one.
+    hold.done();
     assert(done_n.wait_timeout(time::Duration::from_secs(5)), "the surviving waiter acquires");
     {
         let g = m.get().lock();
@@ -525,10 +537,11 @@ fn rwlock_write_c_cancel_restores_writer_count() {
     rt::shutdown();
     assert_eq(rt::cancelled_tasks(), 1);
     assert_eq(unwounds(), 1);
-    assert_eq(afters(), 0); // no guard reached the cancelled writer's frame
+    // No guard reached the cancelled writer's frame.
+    assert_eq(afters(), 0);
 }
 
-// --- blocking pool: heap-owned results and abandonment ------------------------------------------------
+// --- blocking pool: heap-owned results and abandonment ------------------------------------------------.
 
 @test
 fn blocking_call_c_cancel_abandons_job() {
@@ -597,11 +610,12 @@ fn blocking_completion_races_cancel_to_one_owner() {
         assert(done.wait_timeout(time::Duration::from_secs(5)), "the racer finishes");
     }
     blocking::shutdown();
-    assert_eq(frees(), rounds); // one free per round, from exactly one owner
+    // One free per round, from exactly one owner.
+    assert_eq(frees(), rounds);
     rt::shutdown();
 }
 
-// --- I/O: reactor interests and cancellation ----------------------------------------------------------
+// --- I/O: reactor interests and cancellation ----------------------------------------------------------.
 
 @test
 fn io_read_cancel_settles_interest() {
@@ -648,7 +662,7 @@ fn io_read_cancel_settles_interest() {
     assert_eq(afters(), 0);
 }
 
-// --- pairwise races -----------------------------------------------------------------------------------
+// --- pairwise races -----------------------------------------------------------------------------------.
 
 @test
 fn notify_races_cancel_single_winner() {
@@ -714,7 +728,8 @@ fn timeout_races_cancel_single_winner() {
         time::sleep(time::Duration::from_millis(1)); // land the request right at the deadline
         let _ = rt::request_cancel(key, rt::CR_USER);
         assert(done.wait_timeout(time::Duration::from_secs(5)), "the racer finishes exactly once");
-        gate.done(); // reset for leak-freedom (the group is dropped each round)
+        // Reset for leak-freedom (the group is dropped each round).
+        gate.done();
     }
     rt::shutdown();
 }
@@ -726,7 +741,8 @@ fn completion_races_cancel_to_one_outcome() {
     for _i in 0..rounds {
         let mut g = task::TaskGroup::new();
         g.spawn(|| {});
-        g.cancel(); // may land before, during, or after the (instant) body
+        // May land before, during, or after the (instant) body.
+        g.cancel();
         let report = g.join();
         assert_eq(report.completed + report.cancelled, 1);
         assert_eq(report.unresponsive, 0);
@@ -763,7 +779,8 @@ fn stale_key_cannot_touch_a_recycled_task() {
     }
     wg2.wait();
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 0); // nothing was cancelled by the stale key
+    // Nothing was cancelled by the stale key.
+    assert_eq(rt::cancelled_tasks(), 0);
 }
 
 @test
@@ -792,7 +809,8 @@ fn closed_runtime_frees_rejected_closures() {
     let g2 = gate.clone();
     launch || {
         rt::cancel_mask_enter();
-        g2.wait(); // masked: shutdown cannot cancel this wait
+        // Masked: shutdown cannot cancel this wait.
+        g2.wait();
         rt::cancel_mask_exit();
     };
     time::sleep(short());
@@ -800,18 +818,22 @@ fn closed_runtime_frees_rejected_closures() {
     opts.grace_ns = 50000000;
     opts.report_unresponsive = false;
     let res = rt::try_shutdown(opts);
-    assert_eq(res.unresponsive, 1); // the masked waiter cannot be reclaimed
+    // The masked waiter cannot be reclaimed.
+    assert_eq(res.unresponsive, 1);
     // The runtime is still alive and closed: a new submission is rejected and its captures freed.
     let p = Payload { n: 5 };
     launch || {
-        assert(p.n != 5, "a closed runtime must not run new tasks"); // `p` is an owned capture
+        // `p` is an owned capture.
+        assert(p.n != 5, "a closed runtime must not run new tasks");
     };
     assert_eq(frees(), 1);
-    gate.done(); // unblock the masked waiter; it completes normally
+    // Unblock the masked waiter; it completes normally.
+    gate.done();
     time::sleep(short());
     let res2 = rt::try_shutdown(rt::ShutdownOptions::defaults());
     assert_eq(res2.unresponsive, 0);
-    assert_eq(rt::cancelled_tasks(), 0); // the masked task was never cancelled, only reported
+    // The masked task was never cancelled, only reported.
+    assert_eq(rt::cancelled_tasks(), 0);
 }
 
 @test
@@ -876,7 +898,7 @@ fn safepoint_cancels_a_compute_loop() {
         let held = Payload { n: 3 }; // an owning local the safepoint ladder must free
         let _ = ktx.send(rt::current_key());
         // A compute loop with NO wait and NO explicit cancellation point: only the combined loop
-        // safepoint (plan 10.4) can stop it. The xorshift state never reaches zero from a nonzero
+        // safepoint can stop it. The xorshift state never reaches zero from a nonzero
         // seed, so cancellation is the loop's only exit.
         let mut x: u64 = 88172645463325252;
         loop {
@@ -897,8 +919,10 @@ fn safepoint_cancels_a_compute_loop() {
     rt::shutdown();
     assert_eq(rt::cancelled_tasks(), 1);
     assert_eq(unwounds(), 1);
-    assert_eq(afters(), 0); // nothing after the cancelled loop ran
-    assert_eq(frees(), 1); // the ladder freed the owning local exactly once
+    // Nothing after the cancelled loop ran.
+    assert_eq(afters(), 0);
+    // The ladder freed the owning local exactly once.
+    assert_eq(frees(), 1);
 }
 
 @test
@@ -907,27 +931,32 @@ fn mask_defers_cancellation_until_exit() {
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
     let krx = kch.receiver();
+    // main -> task: released only after the cancel has been requested, so the request is guaranteed
+    // pending before the mask lifts. This orders the two threads without a timing guess.
+    let rch = chan::Channel::<i32>::bounded(1);
+    let rtx = rch.sender();
+    let rrx = rch.receiver();
     let done = sync::WaitGroup::new();
     done.add(1);
     let d2 = done.clone();
     launch || {
         let _ = ktx.send(rt::current_key());
         rt::cancel_mask_enter();
-        time::sleep(time::Duration::from_millis(60)); // masked: the cancel cannot claim this park
-        assert(!rt::cancelling(), "a masked sleep is never cancelled");
+        let _ = rrx.recv(); // a masked park: the pending cancel must not claim it
+        assert(!rt::cancelling(), "a masked park is never cancelled");
         rt::cancel_mask_exit();
         assert(rt::cancel_point(), "the pending request is accepted after the mask lifts");
         d2.done();
     };
     let key = krx.recv().unwrap();
-    time::sleep(short());
     assert(rt::request_cancel(key, rt::CR_USER), "the masked task is live");
+    let _ = rtx.send(1); // release the masked park now that the cancel is pending
     assert(done.wait_timeout(time::Duration::from_secs(5)), "the masked task finishes");
     rt::shutdown();
     assert_eq(rt::cancelled_tasks(), 1);
 }
 
-// --- task groups and sources --------------------------------------------------------------------------
+// --- task groups and sources --------------------------------------------------------------------------.
 
 @test
 fn group_cancel_reclaims_children_at_any_worker_count() {
@@ -1010,5 +1039,6 @@ fn shutdown_cancels_detached_sleepers() {
     time::sleep(short());
     let res = rt::try_shutdown(rt::ShutdownOptions::defaults());
     assert_eq(res.unresponsive, 0);
-    assert_eq(res.cancelled, 3); // runtime shutdown owns detached tasks
+    // Runtime shutdown owns detached tasks.
+    assert_eq(res.cancelled, 3);
 }

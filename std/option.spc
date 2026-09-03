@@ -1,23 +1,27 @@
-// Option<T>: an optional value -- `Some(T)` or `None`. A payload-bearing generic enum, monomorphized
+// Option<T>: an optional value; `Some(T)` or `None`. A payload-bearing generic enum, monomorphized
 // per element type. Methods that yield the contained value CONSUME `self` (Rust's by-value `Option`):
 // matching an owned value moves the payload out, so the source is not double-freed. Read-only methods take
 // `&self` and bind the payload by reference (`switch` binding modes). `Option<T>` is auto-`Free` exactly
 // when `T` is (conditional conformance): freeing a `Some(t)` deep-frees its payload.
 
+/// An optional value: `Some(T)` or `None`.
 pub enum Option<T> {
     Some(T),
     None,
 }
 
 extend<T> Option<T> {
+    /// `Some(value)`.
     pub const fn some(value: T) Option<T> {
         return Option::<T>::Some(value);
     }
 
+    /// `None`.
     pub const fn none() Option<T> {
         return Option::<T>::None;
     }
 
+    /// True for `Some`.
     pub const fn is_some(self: &Option<T>) bool {
         return switch self {
             Some(_) => true,
@@ -25,6 +29,7 @@ extend<T> Option<T> {
         };
     }
 
+    /// True for `None`.
     pub const fn is_none(self: &Option<T>) bool {
         return switch self {
             Some(_) => false,
@@ -197,7 +202,7 @@ extend<T: Format> Option<T> as Format {
             return String::from_str("None");
         }
         let inner = switch self {
-            // Some -- bind and format the payload (None arm is unreachable here)
+            // Some: bind and format the payload (None arm is unreachable here).
             Some(v) => v.fmt(),
             None => String::new(),
         };

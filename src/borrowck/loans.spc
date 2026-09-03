@@ -1,6 +1,6 @@
 // The loan-scope solver: a unified origin-and-CFG graph queried lazily per candidate.
 // Subset edges exist at their Core IR points (location-sensitive); liveness edges follow CFG point
-// order for origins live at the target. A cheap point-stripped prepass filters candidates first --
+// order for origins live at the target. A cheap point-stripped prepass filters candidates first:
 // it may produce false candidates but can never hide one, because every edge it drops exists at
 // SOME point. The reference solver at the bottom materializes the full product graph and must agree
 // with the optimized path on small bodies; only tests run it.
@@ -18,6 +18,8 @@ pub const BE_ESCAPE: u8 = 1; // borrow of body-local storage escapes through a p
 /// BorrowErr.acc for a conflict caused by storage death (the borrowed local leaves scope).
 pub const ACC_DEAD: u8 = 5;
 
+/// One borrow error the solver found: its kind, the offending loan, and the point and span of the
+/// invalidating access.
 pub struct BorrowErr {
     pub kind: u8,
     pub acc: u8, // BE_CONFLICT: the invalidating access kind (bf::ACC_* or ACC_DEAD)
@@ -27,6 +29,8 @@ pub struct BorrowErr {
     pub loan_span: tok::Span,
 }
 
+/// The loan solver's state for one body: the in-scope loan matrix, per-point liveness, and the
+/// errors found. Pointers borrow the caller's facts for the solve's duration.
 pub struct Solver {
     pub b: *const ir::CoreBody,
     pub f: *const bf::BodyFacts,
@@ -179,6 +183,7 @@ extend Solver as Free {
 }
 
 extend Solver {
+    /// A solver with no body attached and no heap storage; `build_into` fills it.
     pub fn empty() Solver {
         return Solver {
             b: null,
@@ -221,7 +226,7 @@ extend Solver {
         };
     }
 
-    // Truncate every vector (keeping heap capacity) and clear scalars and scope, for reuse.
+    /// Truncate every vector (keeping heap capacity) and clear scalars and scope, for reuse.
     pub fn reset(self: &mut Self) {
         self.pwords = 0;
         self.owords = 0;
@@ -247,6 +252,7 @@ extend Solver {
     }
 }
 
+/// Solve body `b` from scratch: the returned solver's `errs` holds every borrow error.
 pub fn solve(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) Solver {
     let mut s = Solver::empty();
     s.build_into(b, f, c, lv);
@@ -254,6 +260,7 @@ pub fn solve(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness
 }
 
 extend Solver {
+    /// Solve body `b` in place, keeping this solver's heap capacity from earlier bodies.
     pub fn build_into(self: &mut Self, b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) {
         let s = self;
         s.reset();
@@ -287,8 +294,6 @@ extend Solver {
     const fn cfg(self: &Self) &df::Cfg {
         return unsafe &*self.c;
     }
-
-    // ---- indexes ----------------------------------------------------------------------------------
 
     fn index_points(self: &mut Self) {
         let f = unsafe &*self.f;
@@ -447,7 +452,7 @@ extend Solver {
         let lw = f.lwords as usize;
         // Invert origin_local into a per-local CSR: each statement pair then touches only the
         // origins whose local is live there (found by scanning the live-word bits), instead of
-        // testing every inference origin per pair -- the old O(pairs * norigins) hot spot.
+        // testing every inference origin per pair: the old O(pairs * norigins) hot spot.
         let nl = bd.locals.len();
         self.s_lo_start.truncate(0);
         for _i in 0..nl + 1 {
@@ -478,13 +483,13 @@ extend Solver {
             }
         }
         // Statement pairs backward (entry, exit). A definition is LIVE at both points of its own
-        // statement -- loans and subsets injected there must flow onward -- and dead before it.
+        // statement (loans and subsets injected there must flow onward) and dead before it.
         // dset/uset live outside the block loop (the pair loop re-zeroes them) so a body allocates
         // them once, not per block.
         let mut cur = replace(&mut self.s_cur64, Vector::<u64>::new());
         let mut dset = replace(&mut self.s_dset, Vector::<u64>::new());
         let mut uset = replace(&mut self.s_uset, Vector::<u64>::new());
-        // s_cur32 is free again after the CSR fill above; reuse it as the pair's dirty-word list.
+        // S_cur32 is free again after the CSR fill above; reuse it as the pair's dirty-word list.
         let mut dirty = replace(&mut self.s_cur32, Vector::<u32>::new());
         cur.truncate(0);
         dset.truncate(0);
@@ -521,7 +526,7 @@ extend Solver {
             }
             let mut wpos = ub;
             let mut p = end;
-            // dset/uset are all-zero at every pair entry: the fill below records the words it
+            // Dset/uset are all-zero at every pair entry: the fill below records the words it
             // touches and the pair's tail re-zeroes exactly those, so the per-pair cost follows
             // the pair's accesses instead of the full row width.
             while p > base + 1 {
@@ -572,7 +577,7 @@ extend Solver {
                     }
                 }
                 // live-before = (live-after - defs) | uses; untouched words have empty defs/uses,
-                // so only the dirty words can change -- fold their re-zeroing into the same pass.
+                // so only the dirty words can change: fold their re-zeroing into the same pass.
                 for di in 0..dirty.len() {
                     let k = dirty[di] as usize;
                     cur.set(k, cur[k] & ~dset[k] | uset[k]);
@@ -654,8 +659,8 @@ extend Solver {
         return from == to || self.prereach(from, to);
     }
 
-    // A whole-local rebind at (origin `o`, stmt entry `p`): flows already in `o` end before the
-    // write; a subset ENTERING `o` at `p` lands past it (the incoming value survives its own store).
+    /// A whole-local rebind at (origin `o`, stmt entry `p`): flows already in `o` end before the
+    /// write; a subset ENTERING `o` at `p` lands past it (the incoming value survives its own store).
     pub const fn cut_at(self: &Self, o: u32, p: u32) bool {
         let f = unsafe &*self.f;
         let key = o as u64 << 32 | p as u64;
@@ -666,8 +671,6 @@ extend Solver {
         }
         return false;
     }
-
-    // ---- loans-in-scope dataflow ------------------------------------------------------------------
 
     fn scope_flow(self: &mut Self) {
         let f = unsafe &*self.f;
@@ -682,9 +685,9 @@ extend Solver {
         queued.truncate(0);
         queue.truncate(0);
         // Every block runs at least once: a block's own issues must reach its successors even when
-        // its entry row never changes. Seed so the LIFO pops visit reachable blocks in exact RPO --
+        // its entry row never changes. Seed so the LIFO pops visit reachable blocks in exact RPO:
         // loans flow forward, so each sees converged predecessors on its first visit (the liveness
-        // seed's mirror) -- with unreachable blocks after them (same converged state as before).
+        // seed's mirror), with unreachable blocks after them (same converged state as before).
         for _i in 0..nb {
             queued.push(false);
         }
@@ -693,7 +696,8 @@ extend Solver {
         }
         for bi in 0..nb {
             if !queued[bi as usize] {
-                queue.push(bi); // popped after the RPO run
+                // Popped after the RPO run.
+                queue.push(bi);
             }
         }
         for i in 0..c.rpo.len() {
@@ -758,8 +762,6 @@ extend Solver {
         }
     }
 
-    // ---- lazy required-point reachability ---------------------------------------------------------
-
     // Point successors: entry -> exit within a statement, exit -> next entry, terminator exit -> the
     // base point of every CFG successor.
     fn point_succs(self: &Self, p: u32, out: &mut Vector<u32>) {
@@ -779,7 +781,7 @@ extend Solver {
         }
     }
 
-    /// The point bitset where loan `li` is required: some origin that can hold it is live there.
+    // The point bitset where loan `li` is required: some origin that can hold it is live there.
     fn required(self: &mut Self, li: u32) usize {
         let f = unsafe &*self.f;
         if self.req_have.len() == 0 {
@@ -861,7 +863,8 @@ extend Solver {
                 }
             }
         }
-        self.succs = succs; // return the reused scratch to the solver, keeping its capacity
+        // Return the reused scratch to the solver, keeping its capacity.
+        self.succs = succs;
         return row;
     }
 
@@ -874,16 +877,16 @@ extend Solver {
         return self.required(li);
     }
 
+    /// Word `w` of the cached required-loan row starting at `row`.
     pub const fn req_word(self: &Self, row: usize, w: u32) u64 {
         return *self.req_cache.at(row + w as usize);
     }
 
-    // ---- error detection --------------------------------------------------------------------------
-
     // Does access `ac` invalidate loan `li` by kind (two-phase aware)?
     const fn kind_conflicts(self: &Self, lo: &bf::Loan, ac: &bf::Access) bool {
         if lo.kind == bf::LK_CAP {
-            return false; // capture loans invalidate only through storage death (established rules)
+            // Capture loans invalidate only through storage death (established rules).
+            return false;
         }
         if ac.kind == bf::ACC_READ {
             if lo.kind == bf::LK_SHARED {
@@ -907,7 +910,7 @@ extend Solver {
         // Every conflict needs the loan and the access to share a base local (the whole-local
         // branch tests it, places_conflict demands it), so bucket loans by base and sweep only
         // the access's own bucket: O(accesses + same-base pairs) instead of accesses * loans.
-        // Bucket order is ascending loan id -- the exact subsequence the full sweep visited.
+        // Bucket order is ascending loan id: the exact subsequence the full sweep visited.
         let bucketed = na * nl >= 1024;
         if bucketed {
             let nlc = self.body().locals.len();
@@ -945,7 +948,8 @@ extend Solver {
                     self.body().places.at(ac.place as usize).base as usize;
                 };
                 if base + 1 >= self.s_lb_start.len() {
-                    continue; // no local -> no loan shares its base
+                    // No local -> no loan shares its base.
+                    continue;
                 }
                 it0 = self.s_lb_start[base] as usize;
                 it1 = self.s_lb_start[base + 1] as usize;
@@ -965,7 +969,8 @@ extend Solver {
                         continue;
                     }
                     if lo.pin && f.moved_whole[self.body().places.at(lo.place as usize).base as usize] {
-                        continue; // the pinned container's ownership travelled with a move
+                        // The pinned container's ownership travelled with a move.
+                        continue;
                     }
                     let pl = *self.body().places.at(lo.place as usize);
                     if pl.base != ac.local {
@@ -982,7 +987,8 @@ extend Solver {
                     }
                 } else {
                     if ac.point == lo.issued_at || ac.point == lo.activated_at && ac.place == lo.place {
-                        continue; // a loan's own issue/activation is not an invalidation of itself
+                        // A loan's own issue/activation is not an invalidation of itself.
+                        continue;
                     }
                     if !self.kind_conflicts(&lo, &ac) {
                         continue;
@@ -990,7 +996,7 @@ extend Solver {
                     if lo.pin && (ac.kind == bf::ACC_MOVE || ac.kind == bf::ACC_FREE) && self.body().places.at(
                         ac.place as usize,
                     ).proj_len == 0 {
-                        // Element views ride a whole-container move (heap storage is stable) --
+                        // Element views ride a whole-container move (heap storage is stable):
                         // the walk accepts this, so the pin must too.
                         continue;
                     }
@@ -1042,7 +1048,8 @@ extend Solver {
                 let mut sp = ac.span;
                 let mut ak = ac.kind;
                 if ac.place == bf::BF_NONE {
-                    sp = lo.span; // point at the borrow that outlives its storage
+                    // Point at the borrow that outlives its storage.
+                    sp = lo.span;
                     ak = ACC_DEAD;
                 }
                 self.errs.push(
@@ -1068,10 +1075,12 @@ extend Solver {
         for li in 0..f.loans.len() {
             let lo = *f.loans.at(li);
             if lo.view {
-                continue; // a borrow OF a view chains to the view's own origin, not local storage
+                // A borrow OF a view chains to the view's own origin, not local storage.
+                continue;
             }
             if lo.pin && f.moved_whole[self.body().places.at(lo.place as usize).base as usize] {
-                continue; // a moved container carries its pinned views with it
+                // A moved container carries its pinned views with it.
+                continue;
             }
             let pl = *bd.places.at(lo.place as usize);
             let st = bd.locals.at(pl.base as usize).storage;
@@ -1085,7 +1094,8 @@ extend Solver {
                 }
             }
             if through {
-                continue; // a reborrow's storage belongs to the reference it went through
+                // A reborrow's storage belongs to the reference it went through.
+                continue;
             }
             // Prepass filter, then precise flood: does the loan reach any placeholder?
             let mut cand = false;
@@ -1124,10 +1134,8 @@ extend Solver {
     }
 }
 
-// ---- reference solver -----------------------------------------------------------------------------
-
 /// Small, slow, and independent: materializes every (origin, point) node and edge, then answers each
-/// loan query by direct search. Development comparisons only -- never part of compilation.
+/// loan query by direct search. Development comparisons only: never part of compilation.
 pub struct RefResult {
     pub required: Vector<u64>, // per loan: point bitset rows (pwords each)
     pub pwords: u32,

@@ -1,6 +1,6 @@
 // AST -> Doc builder for the canonical formatter: format_node lowers every NodeKind to the document
 // IR in fmt::doc; the renderer then chooses line breaks by width. Layout policy (user-approved):
-// fully canonical -- blocks always break, lists group with IfBreak trailing commas, indentation is
+// fully canonical: blocks always break, lists group with IfBreak trailing commas, indentation is
 // structural. Two things the AST does not carry are reconstructed here:
 //   - Parentheses (the parser drops them): re-inserted by precedence. The ladder mirrors the parser:
 //     postfix (call/index/member/cast/?/turbofish) = 14, unary prefix = 12, binary ops use
@@ -20,6 +20,7 @@ import ast::ast as *;
 import ast::parser as par;
 import fmt::doc as d;
 
+/// Per-file formatter state: the doc pool, the AST being printed, and the source bytes trivia is read from.
 pub struct Builder<'a> {
     pub p: d::DocPool<'a>,
     pub ast: *const Ast,
@@ -33,8 +34,6 @@ extend Builder as Free {
     }
 }
 
-// ---- trivia gaps ----------------------------------------------------------------------------------
-
 struct TriviaSeg {
     pub start: u32,
     pub end: u32,
@@ -42,8 +41,6 @@ struct TriviaSeg {
     pub is_attr: bool,
     pub blank_before: bool, // a blank line separated this segment from what precedes it
 }
-
-// ---- entry ----------------------------------------------------------------------------------------
 
 /// Build and render the whole program. Returns the number of comment segments emitted (the caller
 /// checks it against the lexer's comment-token count and refuses to write on a mismatch).
@@ -71,8 +68,7 @@ pub fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String
     return n;
 }
 
-// ---- precedence -----------------------------------------------------------------------------------
-
+/// Precedence ladder for parenthesis re-insertion; binary operators use Parser::precedence (2..11).
 pub const PREC_ASSIGN: i32 = 0;
 pub const PREC_RANGE: i32 = 1;
 pub const PREC_CAST: i32 = 12; // `as`: looser than prefix ops, tighter than any binary op (parser binary max = 11)
@@ -139,7 +135,7 @@ extend Builder {
                     while en < to as usize && s.byte_at(en) != b'\n' {
                         en = en + 1;
                     }
-                    // strip trailing spaces/commas of the attr line
+                    // Strip trailing spaces/commas of the attr line.
                     while en > st && (s.byte_at(en - 1) == b' ' || s.byte_at(en - 1) == b'\t' || s.byte_at(en - 1) == b'\r') {
                         en = en - 1;
                     }
@@ -147,7 +143,7 @@ extend Builder {
                     is_attr = true;
                 }
                 if is_seg {
-                    // trim trailing blanks of line comments
+                    // Trim trailing blanks of line comments.
                     let mut e2 = en;
                     while e2 > st && (s.byte_at(e2 - 1) == b' ' || s.byte_at(e2 - 1) == b'\t') {
                         e2 = e2 - 1;
@@ -199,7 +195,7 @@ extend Builder {
             }
             i = i + 1;
         }
-        // separation after the previous element (before the first leading seg or the next element)
+        // Separation after the previous element (before the first leading seg or the next element).
         let mut blank = false;
         if i < segs.len() {
             blank = segs.at(i).blank_before;
@@ -324,8 +320,6 @@ extend Builder {
         return e;
     }
 
-    // ---- shared list shapes ---------------------------------------------------------------------------
-
     // Does src[from..to) hold a comment or attribute? Decides up front whether a list must print broken.
     fn gap_has_trivia(self: &Self, from: u32, to: u32) bool {
         let mut segs = Vector::<TriviaSeg>::new();
@@ -364,7 +358,7 @@ extend Builder {
     // The byte offset of the delimiter closing a list, scanning from `from` (the last element's end) and
     // skipping comments. Only trivia and a separator can sit between the last element and its closer, so no
     // nesting has to be tracked. `to` bounds the search; on failure it returns `from`, which makes the tail gap
-    // empty and the list simply keeps its old shape.
+    // empty and the list keeps its old shape.
     fn find_close(self: &Self, from: u32, to: u32, close: u8) u32 {
         let src = self.src;
         let mut i = from as usize;
@@ -398,7 +392,7 @@ extend Builder {
     }
 
     // Does any gap in `ids` (between `open_end` and `close_pos`) hold trivia? What decides whether a list needs
-    // the trivia-aware shape at all -- every list keeps its existing output byte for byte when it does not.
+    // the trivia-aware shape at all; every list keeps its existing output byte for byte when it does not.
     fn list_has_trivia(self: &Self, ids: NodeList, open_end: u32, close_pos: u32) bool {
         let mut prev = open_end;
         for i in 0..ids.len {
@@ -415,9 +409,9 @@ extend Builder {
     // element docs came from (index-aligned), `open_end` the byte just past the opening delimiter and
     // `close_pos` the closing one, so every gap is scanned exactly once and by exactly one list.
     //
-    // Any comment forces the list to print BROKEN -- a line comment printed flat would swallow the rest of the
-    // line, closing delimiter included -- which the `hardline` separators do by making the group's width
-    // infinite. Without this, a comment inside an expression list is simply dropped, and the whole-file
+    // Any comment forces the list to print BROKEN (a line comment printed flat would swallow the rest of the
+    // line, closing delimiter included), which the `hardline` separators do by making the group's width
+    // infinite. Without this, a comment inside an expression list is dropped, and the whole-file
     // comment-preservation check then refuses to write the file.
     fn b_comma_list_tr(
         self: &mut Self,
@@ -576,8 +570,6 @@ extend Builder {
         }
     }
 
-    // ---- types ----------------------------------------------------------------------------------------
-
     fn b_type(self: &mut Self, id: NodeId) d::DocId {
         if id == NODE_NONE {
             return self.p.nil();
@@ -602,7 +594,7 @@ extend Builder {
                         if self.nd(a).kind == NodeKind::NODE_LITERAL {
                             az.push(self.node_text(a));
                         } else if self.fmt_const_arg(a) {
-                            az.push(self.b_const_arg(a)); // `{N * 2}`: the braces are what make it an expression
+                            az.push(self.b_const_arg(a));
                         } else {
                             az.push(self.b_type(a));
                         }
@@ -687,7 +679,7 @@ extend Builder {
             },
             _ => {
                 v.push(self.node_text(id));
-            }, // ellipsis `...` and friends: span verbatim
+            },
         };
         let r = self.p.concat(&v);
         return r;
@@ -696,7 +688,7 @@ extend Builder {
     // Return types: one type bare, several as "(A, B)".
     fn b_returns(self: &mut Self, rets: NodeList) d::DocId {
         let __h = self.list_at(rets, 0);
-        // a single NAMED return keeps its parens (`(ret: bool)`); a single unnamed one never has them
+        // A single NAMED return keeps its parens (`(ret: bool)`); a single unnamed one never has them.
         if rets.len == 1 && self.nd(__h).kind != NodeKind::NODE_PARAMETER {
             return self.b_type(__h);
         }
@@ -710,7 +702,7 @@ extend Builder {
         let n = self.nd(id);
         let mut v = Vector::<d::DocId>::new();
         if n.kind != NodeKind::NODE_PARAMETER {
-            // function-type params may be bare types
+            // Function-type params may be bare types.
             let r0 = self.b_type(id);
             return r0;
         }
@@ -760,7 +752,7 @@ extend Builder {
         return r;
     }
 
-    // `for<'a, 'b> ` -- the higher-ranked prefix of a bound, held in the lifetime side table.
+    // `for<'a, 'b> `: the higher-ranked prefix of a bound, held in the lifetime side table.
     fn b_hrtb(self: &mut Self, id: NodeId, v: &mut Vector<d::DocId>) {
         let lts = self.ast.lifetimes_of(id);
         if lts.len == 0 {
@@ -789,8 +781,6 @@ extend Builder {
         v.push(self.b_comma_list("<", &gs, ">", false));
     }
 
-    // ---- patterns -------------------------------------------------------------------------------------
-
     fn b_pattern(self: &mut Self, id: NodeId) d::DocId {
         if id == NODE_NONE {
             return self.p.nil();
@@ -807,7 +797,7 @@ extend Builder {
             NODE_PATTERN_NAME => {
                 let p = n.as_data.pattern;
                 if p.children.len > 0 {
-                    // binding @ subpattern or `mut x` -- emit from span (rare shapes)
+                    // Binding @ subpattern or `mut x`: emitted from the span (rare shapes).
                     v.push(self.node_text(id));
                 } else {
                     v.push(self.node_text(id));
@@ -872,8 +862,6 @@ extend Builder {
         }
         return self.node_text(id);
     }
-
-    // ---- expressions ----------------------------------------------------------------------------------
 
     const fn is_block_node(self: &Self, id: NodeId) bool {
         return id != NODE_NONE && self.nd(id).kind == NodeKind::NODE_BLOCK;
@@ -1003,9 +991,9 @@ extend Builder {
             },
             NODE_CAST => {
                 // Print the operand at POSTFIX, not CAST: prefix-op and chained-cast operands keep
-                // their parens, so the output parses identically under the pre-flip bootstrap
-                // grammar (`as` used to bind tighter than prefix ops). Relax to PREC_CAST once
-                // every bootstrap release contains the precedence flip.
+                // their parens, so the output parses identically under a bootstrap grammar in which
+                // `as` binds tighter than prefix ops. Relax to PREC_CAST once every bootstrap
+                // release contains the precedence flip.
                 v.push(self.b_expr_prec(n.as_data.cast.expression, PREC_POSTFIX));
                 v.push(self.p.txt(" as "));
                 v.push(self.b_type(n.as_data.cast.ty));
@@ -1031,9 +1019,9 @@ extend Builder {
                 let c = n.as_data.closure;
                 let mut ps = Vector::<d::DocId>::new();
                 self.b_each(c.params, 3, &mut ps);
-                // `|..|` has no return-type slot -- only the `fn(..) T { .. }` spelling does. Both parse to this
+                // `|..|` has no return-type slot; only the `fn(..) T { .. }` spelling does. Both parse to this
                 // node, so a closure that DECLARES a return type has to print in that form: normalising it to
-                // `||` would drop the type from the source, which is how this arm used to corrupt a file.
+                // `||` would drop the type from the source.
                 if c.returns.len != 0 {
                     v.push(self.p.txt("fn"));
                     v.push(self.b_comma_list("(", &ps, ")", true));
@@ -1135,7 +1123,7 @@ extend Builder {
                 for i in 0..elems.len {
                     let e = self.list_at(elems, i);
                     if self.nd(e).kind == NodeKind::NODE_FIELD_INITIALIZER {
-                        // designated element `[index] = value`
+                        // Designated element `[index] = value`.
                         let fi = self.nd(e).as_data.field_initializer;
                         let mut dv = Vector::<d::DocId>::new();
                         dv.push(self.p.txt("["));
@@ -1173,7 +1161,7 @@ extend Builder {
                 v.push(self.b_expr(n.as_data.field_initializer.value));
             },
             NODE_IF => {
-                // if-expression (`let x = if c { a; } else { self; };`)
+                // If-expression (`let x = if c { a; } else { self; };`).
                 v.push(self.b_if(id));
             },
             NODE_BLOCK => {
@@ -1223,8 +1211,8 @@ extend Builder {
         return r;
     }
 
-    // A const-generic argument written as an expression. It reaches here as an ordinary expression node --
-    // nothing a TYPE position can otherwise hold -- and the braces have to come back or it will not re-parse.
+    // A const-generic argument written as an expression. It reaches here as an ordinary expression node
+    // (nothing a TYPE position can otherwise hold), and the braces have to come back or it will not re-parse.
     const fn fmt_const_arg(self: &Self, id: NodeId) bool {
         let k = self.nd(id).kind;
         return k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL;
@@ -1238,7 +1226,7 @@ extend Builder {
         return self.p.concat(&v);
     }
 
-    // sizeof/alignof accept a type (usual) -- the parser stores a type node.
+    // sizeof/alignof accept a type (usual); the parser stores a type node.
     fn b_sizeof_arg(self: &mut Self, id: NodeId) d::DocId {
         return self.b_type(id);
     }
@@ -1267,7 +1255,7 @@ extend Builder {
         if has {
             return self.b_comma_list_tr("{", &fz, fields, open_end, close_pos, "}", true);
         }
-        // struct literals: `{ a: 1, self: 2 }` flat / broken one per line with trailing comma
+        // Struct literals: `{ a: 1, self: 2 }` flat, or broken one per line with a trailing comma.
         let mut inner = Vector::<d::DocId>::new();
         inner.push(self.p.line());
         for i in 0..fz.len() {
@@ -1384,8 +1372,6 @@ extend Builder {
         return self.p.txt("?op?");
     }
 
-    // ---- statements -----------------------------------------------------------------------------------
-
     fn stmt_starts_with(self: &Self, id: NodeId, kw: str) bool {
         let s = self.nd(id).span;
         if (s.end - s.start) as usize < kw.len() {
@@ -1425,8 +1411,8 @@ extend Builder {
             },
             NODE_RETURN => {
                 let vals = n.as_data.return_stmt.values;
-                // a bare `return;` in a named-return fn carries parser-synthesized identifiers whose
-                // spans point back INTO the signature: print the bare form the user wrote
+                // A bare `return;` in a named-return fn carries parser-synthesized identifiers whose
+                // spans point back INTO the signature: print the bare form the user wrote.
                 let mut synthetic = vals.len > 0;
                 if synthetic {
                     synthetic = self.nd(self.list_at(vals, 0)).span.start < n.span.start;
@@ -1648,7 +1634,7 @@ extend Builder {
     }
 
     // `select { .. }` (sugar marker, pre-desugar). Laid out like `switch`, but its arms carry no separator and
-    // the operation is REBUILT from the pieces the parser kept: `ch.recv()` survives as just `ch`.
+    // the operation is REBUILT from the pieces the parser kept: `ch.recv()` survives as `ch` alone.
     fn b_select(self: &mut Self, id: NodeId) d::DocId {
         let n = self.nd(id);
         let arms = n.as_data.block.statements;
@@ -1746,8 +1732,9 @@ extend Builder {
         for i in 0..stmts.len {
             let sid = self.list_at(stmts, i);
             let ssp = self.nd(sid).span;
+            // Parser-synthesized statements (named-return bindings) are not in the source text.
             if ssp.start < n.span.start {
-                continue; // parser-synthesized (named-return bindings): not in the source text
+                continue;
             }
             if first {
                 body.push(self.p.hardline());
@@ -1791,8 +1778,6 @@ extend Builder {
         return r;
     }
 
-    // ---- items ----------------------------------------------------------------------------------------
-
     // True when the item carries @fmt.skip: it is then emitted verbatim from its source span.
     fn fmt_skipped(self: &Self, id: NodeId) bool {
         let na = unsafe self.ast.attrs.len();
@@ -1832,7 +1817,7 @@ extend Builder {
                 if f.is_variadic {
                     ps.push(self.p.txt("..."));
                 }
-                // Parameters normally GROUP (`a, self: i32`), which is not index-aligned with the node list -- so a
+                // Parameters normally GROUP (`a, self: i32`), which is not index-aligned with the node list, so a
                 // list carrying comments is built one parameter per doc instead. Grouping is a flat-form
                 // nicety, and a comment forces the broken form anyway.
                 let popen = if f.generics.len != 0 {
@@ -1898,7 +1883,7 @@ extend Builder {
                 v.push(self.node_text(a.name));
                 self.b_generics_lt(self.ast.lifetimes_of(id), a.generics, &mut v);
                 if a.is_tuple {
-                    // tuple members are bare type nodes, not NODE_FIELD -- render each directly
+                    // Tuple members are bare type nodes, not NODE_FIELD: render each directly.
                     let mut fz = Vector::<d::DocId>::new();
                     for i in 0..a.members.len {
                         fz.push(self.b_type(self.list_at(a.members, i)));
@@ -2140,7 +2125,7 @@ extend Builder {
 
     // Find the `{` between `from` and `to` so leading trivia scans start after it. Scans FORWARD and
     // skips comment interiors: the first member's leading comment may itself contain a brace, and a
-    // backward scan would land inside it -- dropping the comment from the lead-trivia window.
+    // backward scan would land inside it, dropping the comment from the lead-trivia window.
     fn item_gap_floor(self: &Self, from: u32, to: u32) u32 {
         let mut i = from as usize;
         while i < to as usize {

@@ -48,9 +48,7 @@ import driver::util as *;
 import driver::extc as *;
 import driver::test as *;
 
-// ---------------------------------------------------------------------------------------------------------
 // Dead-module pruning of the emit set: a live module reaches its own decls + everything it references.
-// ---------------------------------------------------------------------------------------------------------
 const fn mark_live(live: *mut bool, n: usize, m: ModuleId) bool {
     if m as usize >= n || unsafe live[m as usize] {
         return false;
@@ -249,9 +247,7 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
     return live;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Pipeline stages over one module (move the Ast out of its slot, run, and restore it).
-// ---------------------------------------------------------------------------------------------------------
 // `fixes != null` = `lint --fix`: machine-applicable fixes are drained into it and warning output is
 // suppressed (the fix loop re-lints and the final plain pass prints what remains).
 fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vector<diag::LintFix>) bool {
@@ -343,8 +339,6 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool) {
     }
 }
 
-// ---- parallel resolve frontier -----------------------------------------------------------------
-
 struct RsOut {
     pub ok: bool,
     pub warns: u32,
@@ -389,7 +383,7 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
     p.ensure_index();
     for i in 0..n {
         // module_closure, not import_closure: only the former fills the clo_lists cache that
-        // glob_lookup consults from the tasks
+        // glob_lookup consults from the tasks.
         let _ = p.module_closure(i as ModuleId);
     }
     for i in 0..n {
@@ -428,8 +422,6 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
         p.ok = o.ok && p.ok;
     }
 }
-
-// ---- parallel typecheck frontier ---------------------------------------------------------------
 
 struct TcOut {
     pub ok: bool,
@@ -483,7 +475,7 @@ fn tc_run_one(t: TcTask) {
         tck.mark_log = &mut (unsafe &mut *out).log;
         tck.check();
         {
-            // publish completion: everything check() wrote happens-before a waiter's wake
+            // Publish completion: everything check() wrote happens-before a waiter's wake.
             let st = t.wc;
             let _g = (unsafe &(&*st).mu).lock();
             (unsafe &mut *t.p).tc_mod_done.set(i, 1);
@@ -504,7 +496,7 @@ fn tc_run_one(t: TcTask) {
 // method marks replay through the real functions in module order.
 // One module's cross-module duplicate-conformance sweep, run as a parallel level after every
 // module is typechecked (the check reads other modules' frozen syntax, so it is decidable only
-// then, and it writes nothing shared -- errors buffer per module and log in module order).
+// then, and it writes nothing shared: errors buffer per module and log in module order).
 struct DupTask {
     pub p: *mut loader::Package,
     pub i: usize,
@@ -548,7 +540,7 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
     }
     for i in 0..n {
         p.modules[i].ast.ilock_on = true;
-        // pin the syntax arrays: tc synthesizes nodes while other tasks read pre-existing ones
+        // Pin the syntax arrays: tc synthesizes nodes while other tasks read pre-existing ones.
         p.modules[i].ast.nodes.freeze();
         p.modules[i].ast.children.freeze();
         p.modules[i].ast.resolutions.freeze();
@@ -565,7 +557,7 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
     }
     prt::set_stack_size(8usize << 20); // the checker's expression recursion outgrows the default task stack
     // Conflict-free schedule: import-SCC condensation, IMPORTS-first levels. A module only ever
-    // reads modules in its import closure, and those are complete before its level starts -- so
+    // reads modules in its import closure, and those are complete before its level starts, so
     // no two live tasks touch each other's Asts, and the serial-order visibility rules above
     // resolve every remaining cross-module question deterministically.
     let mut nscc: u32 = 0;
@@ -597,8 +589,8 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
                 }
             }
         }
-        // the prelude is AMBIENTLY visible (format shims, sugar hooks): every non-prelude module
-        // depends on every prelude module even without an import edge
+        // The prelude is AMBIENTLY visible (format shims, sugar hooks): every non-prelude module
+        // depends on every prelude module even without an import edge.
         let mut plvl: u32 = 0;
         for i in 0..n {
             if p.modules[i].prelude && *lvl.at((*p.idx.scc_of.at(i)) as usize) + 1 > plvl {
@@ -619,14 +611,15 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
             maxlvl = *lvl.at(c);
         }
     }
-    // per-SCC module lists, ascending id (intra-SCC checks stay serial in id order). The whole
-    // PRELUDE is one sequential group: prelude names are ambiently visible to every module --
-    // prelude modules included -- so no import-edge order exists among them.
+    // Per-SCC module lists, ascending id (intra-SCC checks stay serial in id order). The whole
+    // PRELUDE is one sequential group: prelude names are ambiently visible to every module
+    // (prelude modules included), so no import-edge order exists among them.
     let mut scc_mods = Vector::<Vector<u32>>::new();
     for _ in 0..nscc + 1 {
         scc_mods.push(Vector::<u32>::new());
     }
-    lvl.push(0); // the prelude pseudo-group rides at level 0
+    // The prelude pseudo-group rides at level 0.
+    lvl.push(0);
     for i in 0..n {
         if p.modules[i].prelude {
             scc_mods.index_mut(nscc as usize).push(i as u32);
@@ -713,7 +706,7 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
         p.lint_warnings = p.lint_warnings + o.warns;
         p.lint_errs = p.lint_errs + o.errs;
         p.lint_fixable = p.lint_fixable + o.fixable;
-        // module-order replay of the package-global marks, through the real visibility checks
+        // Module-order replay of the package-global marks, through the real visibility checks.
         let lg = &o.log;
         for k in 0..lg.kinds.len() {
             let dv = lg.a[k];
@@ -761,7 +754,7 @@ fn typecheck_module(
     p.lint_errs = p.lint_errs + t.errors.errors.len() as u32;
     p.lint_fixable = p.lint_fixable + t.errors.fixable_errs;
     if fixes != null {
-        // kind-3 fixes index into the caller's shared fix_texts pool: rebase and copy the payloads
+        // Kind-3 fixes index into the caller's shared fix_texts pool: rebase and copy the payloads.
         let base = if ftexts != null {
             ftexts.len() as u32;
         } else {
@@ -785,7 +778,7 @@ fn typecheck_module(
 }
 
 // Dev gate (SC_FACTS_CHECK=1): snapshot every module's semantic-table watermarks right after
-// type checking, then assert -- after borrow checking AND after codegen -- that no later stage
+// type checking, then assert (after borrow checking AND after codegen) that no later stage
 // changed a semantic decision table (intern pools excepted; see ast::facts). Off without the env var.
 fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) {
     if stdlib::getenv("SC_FACTS_CHECK") == null {
@@ -814,7 +807,7 @@ fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, stage:
     return d;
 }
 
-// Validation mode (SC_LAYOUT=1): every concrete pool type must satisfy the C layout invariants --
+// Validation mode (SC_LAYOUT=1): every concrete pool type must satisfy the C layout invariants:
 // power-of-two alignment dividing the size, field offsets aligned, monotone, and inside the parent,
 // and the enum view agreeing with the plain one.
 fn layout_pass(p: &mut loader::Package) {
@@ -840,11 +833,12 @@ fn layout_pass(p: &mut loader::Package) {
             typed += 1;
             let l = svc.layout(m as ModuleId, ty);
             if !l.ok {
-                continue; // opaque/zero-length/unlayoutable shapes are legitimate refusals
+                // Opaque/zero-length/unlayoutable shapes are legitimate refusals.
+                continue;
             }
             laid += 1;
             let mut ok = l.align != 0 && (l.align & l.align - 1) == 0 && l.size % l.align == 0;
-            // struct fields: aligned, monotone, inside the parent
+            // Struct fields: aligned, monotone, inside the parent.
             let y = *a.type_at(ty);
             let mut dm: ModuleId = 0;
             let mut dn = NODE_NONE;
@@ -871,7 +865,7 @@ fn layout_pass(p: &mut loader::Package) {
                             continue;
                         }
                         fields += 1;
-                        // zero-size members share offsets and may sit at the very end
+                        // Zero-size members share offsets and may sit at the very end.
                         if off < prev || off as u64 > l.size {
                             ok = false;
                         }
@@ -903,9 +897,10 @@ fn layout_pass(p: &mut loader::Package) {
     );
 }
 
-// SC_CEMIT_TU=1: the backend's declaration layer over the whole package -- every concrete
+// SC_CEMIT_TU=1: the backend's declaration layer over the whole package (every concrete
 // aggregate plus every anchored instance from a fresh graph, forward typedefs then dependency-first
-// definitions -- gated by a strict-C11 syntax-only compile of the emitted scratch TU.
+// definitions), gated by a strict-C11 syntax-only compile of the emitted scratch TU.
+
 /// One assembled new-backend emission. TU texts carry NO include lines; the writer prepends the
 /// layout-relative includes of the two shared headers. `skips` MUST be zero for the output to be
 /// complete (every count is an emission the backend refused).
@@ -942,6 +937,7 @@ extend CemitOut as Free {
 }
 
 extend CemitOut {
+    /// Empty output buffers for a package of `n` modules.
     pub fn new(n: usize) CemitOut {
         let mut o = CemitOut {
             types_h: String::new(),
@@ -1001,7 +997,7 @@ fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, out: &mut Strin
     }
     if inl || always {
         // C11 `extern inline`: the definition still provides the external symbol (plain `inline`
-        // would not -- a non-inlined cross-TU caller then fails to link), and carries the hint.
+        // would not: a non-inlined cross-TU caller then fails to link), and carries the hint.
         out.push_str("extern inline ");
     }
     let mut g = String::new();
@@ -1127,8 +1123,8 @@ fn cemit_inst_asserts(
     if a.at_const(d_def.node).kind != NodeKind::NODE_FUNCTION {
         return;
     }
-    // one static_assert scan per module, not per demand: generic bodies are demanded thousands of
-    // times and the node array is large, while asserts are rare
+    // One static_assert scan per module, not per demand: generic bodies are demanded thousands of
+    // times and the node array is large, while asserts are rare.
     let dm = d_def.module as usize;
     if !*ia_built.at(dm) {
         ia_built.set(dm, true);
@@ -1239,7 +1235,7 @@ const fn struct_def_hit(defined: &Set<u64>, nm: str) bool {
 }
 
 // Layout-model verification asserts for module `m`: sizeof/_Alignof of every concrete aggregate
-// (extern aggregates especially -- their layout is a CLAIM about a C header) checked against the
+// (extern aggregates especially: their layout is a CLAIM about a C header) checked against the
 // layout service, so the C compiler proves the model on every target.
 fn cemit_layout_asserts(
     p: &mut loader::Package,
@@ -1286,7 +1282,8 @@ fn cemit_layout_asserts(
                     }
                 }
                 if !pay {
-                    continue; // tagless enums have no modelled layout claim
+                    // Tagless enums have no modelled layout claim.
+                    continue;
                 }
             }
             decls.push(nid);
@@ -1318,7 +1315,7 @@ fn cemit_layout_asserts(
             }
         }
         if !is_ext {
-            // demand-driven emission: only aggregates the plan actually DEFINED can be sized
+            // Demand-driven emission: only aggregates the plan DEFINED can be sized.
             if !struct_def_hit(defined, nm.as_str()) {
                 continue;
             }
@@ -1375,8 +1372,8 @@ fn cemit_layout_asserts(
     svc.free();
 }
 
-// Take the graph's cached lowering of `(m, nid)` into `lw_out` -- the graph lowered every body it
-// walked exactly once -- lowering in place only when the cache has no live entry. A taken slot is
+// Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
+// walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
 // removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
 fn cemit_take_body(
     g: &mut ig::InstGraph,
@@ -1418,9 +1415,9 @@ fn cemit_take_closure(
     return lw_out.lower_closure_body(cn);
 }
 
-/// Replay one cached module: pool interns first (verified id by id), then the journaled events
-/// through the emitter's live dedup gates. 0 = replayed, 1 = clean reject (nothing landed; emit
-/// live and re-record), 2 = dirty reject (side effects landed; void the section, skip recording).
+// Replay one cached module: pool interns first (verified id by id), then the journaled events
+// through the emitter's live dedup gates. 0 = replayed, 1 = clean reject (nothing landed; emit
+// live and re-record), 2 = dirty reject (side effects landed; void the section, skip recording).
 fn cemit_tuc_replay(
     p: &mut loader::Package,
     cem: &mut cbe::CEmit,
@@ -1439,7 +1436,8 @@ fn cemit_tuc_replay(
     let mut rd = t.open(m);
     let mut tab = Vector::<tuc::TtEnt>::new();
     if !rd.read_table(&mut tab) {
-        return 1; // nothing mutated yet: emit live and re-record
+        // Nothing mutated yet: emit live and re-record.
+        return 1;
     }
     let mut idc = Map::<u64, u64>::new();
     let nev = rd.read_count() as usize;
@@ -1504,7 +1502,7 @@ fn cemit_seed_take(
 }
 
 // One module's seed emission: candidates, bodies, free-glue wrappers, and the transitive closure
-// worklist -- shared by the serial loop (tuc journaling hooks stay live through mg.rec_on) and
+// worklist, shared by the serial loop (tuc journaling hooks stay live through mg.rec_on) and
 // the parallel frontier (per-task CEmit shards; rec_on stays false there). `kl` (null =
 // uncontended) serializes the destructive takes from the shared InstGraph keep.
 fn cemit_seed_module(
@@ -1557,10 +1555,12 @@ fn cemit_seed_module(
             continue;
         }
         if !testing && cemit_is_test_item(a, nid) {
-            continue; // test-family items exist only under --test
+            // Test-family items exist only under --test.
+            continue;
         }
         if cem.mg.in_generic_extend(m as ModuleId, nid) {
-            continue; // its instances are demand-emitted; leave the cached body for them
+            // Its instances are demand-emitted; leave the cached body for them.
+            continue;
         }
         let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
         if !cemit_seed_take(g, p, m as ModuleId, nid, &mut lw, kl, false) {
@@ -1576,13 +1576,15 @@ fn cemit_seed_module(
             continue;
         }
         if sym.as_str() == "assert" || sym.as_str() == "assert_eq" || sym.as_str() == "assert_ne" {
-            continue; // desugared builtins; the C names collide with <assert.h>'s macro
+            // Desugared builtins; the C names collide with <assert.h>'s macro.
+            continue;
         }
         cem.out.clear();
         let is_main = sym.as_str() == "main";
         if is_main {
             sym.truncate(0);
-            sym.push_str("__sc_user_main"); // the argv wrapper below owns the C `main`
+            // The argv wrapper below owns the C `main`.
+            sym.push_str("__sc_user_main");
         }
         let mut gfs = Vector::<String>::new();
         let mut gts = Vector::<TypeId>::new();
@@ -1622,7 +1624,7 @@ fn cemit_seed_module(
                 }
             }
             if is_glue {
-                // the public wrapper: the sig is the __fb sig without the suffix
+                // The public wrapper: the sig is the __fb sig without the suffix.
                 let mut wr = String::new();
                 let bs9 = cem.out.as_str();
                 let mut le = 0 as usize;
@@ -1637,7 +1639,7 @@ fn cemit_seed_module(
                 wr.push_str(sig.slice(0, cut));
                 wr.push_str(sig.slice(cut + 4, sig.len()));
                 // The receiver is the first argument (locals are return-slots then args): ask the
-                // emitter for its C spelling -- it may preserve the source name (`self`) over `_N`.
+                // emitter for its C spelling; it may preserve the source name (`self`) over `_N`.
                 let mut selfp = String::new();
                 cem.lspell(lw.body.returns, &mut selfp);
                 wr.push_str("\n  ");
@@ -1659,7 +1661,7 @@ fn cemit_seed_module(
                         wr.push_str("  ");
                         wr.push_string(&fe9);
                         if cem.mg.is_zst(frm9, frt9) {
-                            // the field has no C member: its destructor runs on the sentinel
+                            // The field has no C member: its destructor runs on the sentinel.
                             wr.push_str("(");
                             let mut zr9 = String::new();
                             let _ = cem.zst_sentinel_ref(frm9, frt9, &mut zr9);
@@ -1718,7 +1720,8 @@ fn cemit_seed_module(
                 let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
                 if cok {
                     for x2 in 0..clws.at(ci as usize).closures.len() {
-                        clsq.push(clws.at(ci as usize).closures[x2]); // closures nest: emit the inner ones too
+                        // Closures nest: emit the inner ones too.
+                        clsq.push(clws.at(ci as usize).closures[x2]);
                     }
                 }
                 if cok && cem.emit_closure(&clws.at(ci as usize).body, m as ModuleId, cn, csym.as_str(), &mut envs) {
@@ -1766,7 +1769,6 @@ fn cemit_seed_module(
         }
     }
 }
-// ---- parallel seed frontier --------------------------------------------------------------------
 
 struct SeedShard {
     pub cem: cbe::CEmit,
@@ -1784,8 +1786,8 @@ struct SeedShard {
     pub clos_ok: u64,
     pub clos_skip: u64,
     pub used: bool,
-    // drain-slice state: one shard per SLICE of a wave in the parallel instance frontier;
-    // per-demand capture marks let the merge replay each demand's claims at its exact queue slot
+    // Drain-slice state: one shard per SLICE of a wave in the parallel instance frontier;
+    // per-demand capture marks let the merge replay each demand's claims at its exact queue slot.
     pub dmarks: Vector<CapMark>,
     pub douts: Vector<u8>, // per demand: 0 = emitted, 1 = lowering-path skip, 2 = emit failure
     pub derrs: Vector<str<'static>>,
@@ -1796,8 +1798,8 @@ struct SeedShard {
     pub dclo: Vector<irl::Lowerer>,
 }
 
-/// Counts of a drain shard's capture rows and sink sizes at one demand boundary; every row carries
-/// its absolute text end, so counts alone define a replayable range.
+// Counts of a drain shard's capture rows and sink sizes at one demand boundary; every row carries
+// its absolute text end, so counts alone define a replayable range.
 struct CapMark {
     pub env: u32,
     pub stat: u32,
@@ -1971,8 +1973,8 @@ fn cemit_drain_demand(
     for k in 0..ds.len() {
         dk = (dk ^ ds.byte_at(k) as u64) * 1099511628211u64;
     }
-    // dedup on SUCCESS only: two demands for one symbol can carry different substitution
-    // chains, and the first may be the incomplete one -- a later, fuller chain must retry
+    // Dedup on SUCCESS only: two demands for one symbol can carry different substitution
+    // chains, and the first may be the incomplete one; a later, fuller chain must retry.
     let seen = switch done.get(&dk) {
         Some(_v) => true,
         None => false,
@@ -2008,13 +2010,13 @@ fn cemit_drain_demand(
         return;
     }
     let d_sfx = cem.demand.at(di).sfx.clone();
-    // per-instantiation static_asserts: under this demand's substitution the condition is
-    // this instance's compile-time fact -- false is a COMPILE error naming the type argument
+    // Per-instantiation static_asserts: under this demand's substitution the condition is
+    // this instance's compile-time fact; false is a COMPILE error naming the type argument.
     cemit_inst_asserts(p, d_def, &d_subs, dk, sa_seen, ia_idx, ia_built);
-    // a body with an UNEXPANDED reflection binder re-lowers per instance: the demand env
+    // A body with an UNEXPANDED reflection binder re-lowers per instance: the demand env
     // makes the binder's owner concrete, so the copies expand for real. A body whose only
     // env-dependence is `sizeof(T) <op> 0` branches re-lowers once per ZST-BIT SIGNATURE of
-    // its args -- every material instantiation folds identically and shares one body.
+    // its args; every material instantiation folds identically and shares one body.
     let mut li2 = li;
     if lws.at(li as usize).body.has_reflect {
         let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
@@ -2083,8 +2085,8 @@ fn cemit_drain_demand(
         cem.mg.clos_ids.push(lws.at(li2 as usize).closures[c2]);
     }
     {
-        // every lws slot gets a cached CFlow: shared zst-signature bodies and reflect
-        // re-lowers alike (a per-slot build amortizes across their instantiations)
+        // Every lws slot gets a cached CFlow: shared zst-signature bodies and reflect
+        // re-lowers alike (a per-slot build amortizes across their instantiations).
         while cfs.len() <= li2 as usize {
             cfs.push(cfl::CFlow::new_empty());
             cf_ok.push(false);
@@ -2138,7 +2140,8 @@ fn cemit_drain_demand(
             let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
             if cok {
                 for x2 in 0..clws.at(ci as usize).closures.len() {
-                    clsq.push(clws.at(ci as usize).closures[x2]); // closures nest: emit the inner ones too
+                    // Closures nest: emit the inner ones too.
+                    clsq.push(clws.at(ci as usize).closures[x2]);
                 }
             }
             if cok && cem.emit_closure(&clws.at(ci as usize).body, d_def.module, cn, csym.as_str(), &mut envs) {
@@ -2309,7 +2312,7 @@ fn cemit_drain_slice_one(
         if zi != 0xFFFFFFFFFFFFFFFEu64 {
             li2 = zi;
         } else {
-            // a slice-local earlier demand may have lowered this signature already
+            // A slice-local earlier demand may have lowered this signature already.
             let mut own9 = 0xFFFFFFFFFFFFFFFFu64;
             for k2 in 0..o.dvkeys.len() {
                 if o.dvkeys[k2] == zkey {
@@ -2345,11 +2348,11 @@ fn cemit_drain_slice_one(
             }
         }
     }
-    // register the variant (if fresh) so the body reference below and later demands can find it
+    // Register the variant (if fresh) so the body reference below and later demands can find it.
     let mut vix = 0xFFFFFFFFFFFFFFFFu64;
     if var_on {
         if li2 == 0xFFFFFFFFFFFFFFFFu64 {
-            // slice-local zst reuse: dvix already pushed above
+            // Slice-local zst reuse: dvix already pushed above.
             for k2 in 0..o.dvkeys.len() {
                 if o.dvkeys[k2] == var_zkey {
                     vix = k2 as u64;
@@ -2430,7 +2433,7 @@ fn cemit_drain_slice_one(
         let cn = clsq[cqi];
         cqi += 1;
         let ckey = skey_mix(0, d_def.module as u64 << 32 | cn as u64);
-        // shared cache first (frozen), then this slice's own lowerings, then a fresh take
+        // Shared cache first (frozen), then this slice's own lowerings, then a fresh take.
         let mut shared_ci = switch clc.get(&ckey) {
             Some(v) => *v,
             None => 0xFFFFFFFFFFFFFFFEu64,
@@ -2455,7 +2458,7 @@ fn cemit_drain_slice_one(
                     o.dclo_keys.push(ckey);
                     o.dclo.push(cl);
                 } else {
-                    // remembered as failed: an empty-body placeholder maps to -1 at merge
+                    // Remembered as failed: an empty-body placeholder maps to -1 at merge.
                     o.dclo_keys.push(ckey);
                     o.dclo.push(irl::Lowerer::new(p, d_def.module, cn));
                 }
@@ -2477,7 +2480,8 @@ fn cemit_drain_slice_one(
         if cok {
             let cls2 = unsafe &(&*clp).closures;
             for x2 in 0..cls2.len() {
-                clsq.push(cls2[x2]); // closures nest: emit the inner ones too
+                // Closures nest: emit the inner ones too.
+                clsq.push(cls2[x2]);
             }
         }
         if cok && sh.emit_closure(unsafe &(&*clp).body, d_def.module, cn, csym.as_str(), &mut envs) {
@@ -2677,7 +2681,7 @@ fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
     cem.mg.sh_merge_um(&mut o.cem.mg, m);
 }
 
-// prior end offset of row range [0..a) in a single-kind text buffer
+// The end offset of row range [0..a) in a single-kind text buffer.
 const fn cap_pe(rows: &Vector<u32>, a: u32) u32 {
     if a == 0 {
         return 0;
@@ -2875,6 +2879,10 @@ fn cemit_seed_merge_range(cem: &mut cbe::CEmit, o: &mut SeedShard, a: &CapMark, 
     cem.mg.sh_merge_range(&mut sc.mg, a.agg as usize, b.agg as usize, a.dynr as usize, b.dynr as usize);
 }
 
+/// Emit the whole package through the streaming backend into `o`: the instance graph, every TU's
+/// declarations and bodies, the shared instance TU, the test runner when `testing`, and the
+/// per-module TU-cache sections. `live` (per module) and `target` select what is emitted;
+/// `irkeep` (null = discard) supplies the borrow checker's kept lowerings.
 pub fn cemit_package(
     p: &mut loader::Package,
     testing: bool,
@@ -2887,7 +2895,8 @@ pub fn cemit_package(
     let verbose = stdlib::getenv("SC_CEMIT_STATS") != null;
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tt0 = unsafe shim::sc_ticks_ms();
-    p.ensure_sigs(); // the planner's signature-level propagation reads the package metadata
+    // The planner's signature-level propagation reads the package metadata.
+    p.ensure_sigs();
     let mut g = ig::InstGraph::new(p, irkeep, live);
     g.collect();
     if tstat {
@@ -2921,9 +2930,9 @@ pub fn cemit_package(
     for i in 0..items.len() {
         em.emit_fwd(items.at(i));
     }
-    // dyn typedef blocks splice in AFTER these forward typedefs and BEFORE the definitions:
+    // Dyn typedef blocks splice in AFTER these forward typedefs and BEFORE the definitions:
     // vtable signatures may name aggregates (fn-pointer params need only the typedef), and
-    // aggregates may embed fat values (which need the complete dyn struct)
+    // aggregates may embed fat values (which need the complete dyn struct).
     let fwd_end = em.out.len();
     for i in 0..items.len() {
         let it = *items.at(i);
@@ -2935,7 +2944,7 @@ pub fn cemit_package(
         tt0 = t9;
     }
     // Demand-driven monomorphization: emit every concrete standalone body with demand collection
-    // on, then drain the queue -- each demanded instance re-emits the generic Core body under its
+    // on, then drain the queue; each demanded instance re-emits the generic Core body under its
     // recorded substitution chain. The drained symbol set is the closed instance set the old
     // propagation computed, derived from Core IR alone.
     let mut cem = cbe::CEmit::new(p);
@@ -2948,15 +2957,15 @@ pub fn cemit_package(
             cem.env_skip.insert(h0, 1);
         }
     }
-    // header-backed extern includes ship real prototypes: collect them (and the fns they declare,
-    // so call sites never synthesize conflicting protos)
+    // Header-backed extern includes ship real prototypes: collect them (and the fns they declare,
+    // so call sites never synthesize conflicting protos).
     let mut ext_incs = String::new();
     cemit_extern_includes(p, &mut ext_incs, &mut cem.ext_backed);
     let mut dow = DropCtx::new(p);
     let mut lw_cache = Map::<u64, u64>::new();
     let mut lws = Vector::<irl::Lowerer>::new();
-    // closure lowerings, drops applied, shared by the seed and instance loops (a demanded generic
-    // body re-emits its closures per instantiation; the lowering is instantiation-independent)
+    // Closure lowerings, drops applied, shared by the seed and instance loops (a demanded generic
+    // body re-emits its closures per instantiation; the lowering is instantiation-independent).
     let mut cl_cache = Map::<u64, u64>::new();
     let mut clws = Vector::<irl::Lowerer>::new();
     let mut seeds: u64 = 0;
@@ -2965,8 +2974,8 @@ pub fn cemit_package(
     let mut clos_skip: u64 = 0;
     let mut bodies_all = String::new();
     let mut protos = String::new();
-    // pre-size the two whole-package accumulators from the corpus (emitted C runs ~10 bytes per
-    // AST node): one sized request instead of a doubling-growth chain over multi-MB buffers
+    // Pre-size the two whole-package accumulators from the corpus (emitted C runs ~10 bytes per
+    // AST node): one sized request instead of a doubling-growth chain over multi-MB buffers.
     {
         let mut est_nodes: usize = 0;
         for m in 0..p.modules.len() {
@@ -2983,8 +2992,8 @@ pub fn cemit_package(
     let mut have_main = false;
     let mut main_argv = false;
     let mut main_mod: u64 = 0;
-    // chunk provenance: proto_of precedes every body push, so prototype line k pairs with chunk k;
-    // chunk_mod is the owning TU (65534 = the shared instance TU), chunk_off the bodies_all offset
+    // Chunk provenance: proto_of precedes every body push, so prototype line k pairs with chunk k;
+    // chunk_mod is the owning TU (65534 = the shared instance TU), chunk_off the bodies_all offset.
     let mut chunk_mod = Vector::<u64>::new();
     let mut chunk_off = Vector::<u64>::new();
     // Per-TU cache: fingerprint every module up front; a hit replays the module's journaled side
@@ -2995,7 +3004,8 @@ pub fn cemit_package(
         live,
         target,
         if testing {
-            ""; // the wrapper set would join the fingerprint for little gain
+            // The wrapper set would join the fingerprint for little gain.
+            "";
         } else {
             p.gen_root.as_str();
         },
@@ -3065,8 +3075,8 @@ pub fn cemit_package(
         let pp9 = p as *mut loader::Package;
         let gg9 = ((&mut g) as *mut ig::InstGraph) as *mut void;
         let klp = ((&mut kl) as *mut psync::Semaphore) as *const psync::Semaphore;
-        // longest-job-first submission (the runtime still executes in any order), gated by the
-        // build memory budget; the merge below stays in module order regardless
+        // Longest-job-first submission (the runtime still executes in any order), gated by the
+        // build memory budget; the merge below stays in module order regardless.
         let mctl = tctl::Ctl::new(tctl::budget_from_env());
         let mut order9 = Vector::<u64>::new();
         for m in 0..p.modules.len() {
@@ -3117,7 +3127,7 @@ pub fn cemit_package(
             }
             if tuc.on && tuc.hit[m] {
                 // hit: no shard ran; replay the journaled section through the master's gates at
-                // exactly this module-order position
+                // exactly this module-order position.
                 cem.mg.mark_ctx = m as i64;
                 let rr = cemit_tuc_replay(
                     p,
@@ -3143,7 +3153,7 @@ pub fn cemit_package(
                     tuc.sec_void(m);
                 }
                 // rejected: emit live on the master, serially, at this position (the merge point
-                // is serial-state-equivalent); a clean reject re-records
+                // is serial-state-equivalent); a clean reject re-records.
                 let rec9 = rr == 1;
                 let mut seg9: usize = 0;
                 let mut aux9: usize = 0;
@@ -3219,8 +3229,8 @@ pub fn cemit_package(
                 continue;
             }
             if tuc.on {
-                // the shard's journal becomes the module's section: trailing deltas are the whole
-                // shard-local accumulators, chunk texts materialize from the shard's bodies buffer
+                // The shard's journal becomes the module's section: trailing deltas are the whole
+                // shard-local accumulators, chunk texts materialize from the shard's bodies buffer.
                 if o.cem.aux.len() != 0 {
                     let mut ev9 = mbe::RecEv::blank(mbe::RK_AUX);
                     ev9.s1.push_str(o.cem.aux.as_str());
@@ -3280,14 +3290,15 @@ pub fn cemit_package(
     } else {
         for m in 0..p.modules.len() {
             if !p.modules[m].has_ast || live != null && p.modules[m].prelude && !unsafe live[m] {
-                // no seeds (missing AST / unreachable prelude): an empty section keeps the image indexed
+                // No seeds (missing AST / unreachable prelude): an empty section keeps the image indexed.
                 if tuc.on {
                     tuc_pay.truncate(0);
                     tuc.sec_add(m, &tuc_pay);
                 }
                 continue;
             }
-            cem.mg.mark_ctx = m as i64; // symbols the module spells about ITSELF are not cross-TU uses
+            // Symbols the module spells about ITSELF are not cross-TU uses.
+            cem.mg.mark_ctx = m as i64;
             let mut tuc_rec = false;
             if tuc.on {
                 if tuc.hit[m] {
@@ -3310,8 +3321,8 @@ pub fn cemit_package(
                         tuc.sec_keep(m);
                         continue;
                     }
-                    // clean rejects are ordinary churn (another module's typecheck moved this pool);
-                    // a DIRTY reject means interns landed before diverging -- warn and void the section
+                    // Clean rejects are ordinary churn (another module's typecheck moved this pool);
+                    // a DIRTY reject means interns landed before diverging: warn and void the section.
                     if rr == 2 {
                         eprint("tu-cache: dirty replay reject for `{}`; emitting live\n", p.modules[m].path.as_str());
                         tuc.sec_void(m);
@@ -3359,8 +3370,8 @@ pub fn cemit_package(
             );
             if tuc_rec {
                 cem.mg.rec_on = false;
-                // trailing delta events: their accumulators are consumed whole at assembly, so only
-                // their internal order matters
+                // Trailing delta events: their accumulators are consumed whole at assembly, so only
+                // their internal order matters.
                 if cem.aux.len() > tuc_aux0 {
                     let mut ev9 = mbe::RecEv::blank(mbe::RK_AUX);
                     ev9.s1.push_str(cem.aux.as_str().slice(tuc_aux0, cem.aux.len()));
@@ -3398,7 +3409,7 @@ pub fn cemit_package(
         tt0 = t9;
     }
     // @test wrappers: per-case runner entry points + the global-env hooks, emitted as ordinary
-    // chunks of their owning module's TU (their fixture frees join the glue/demand worklists)
+    // chunks of their owning module's TU (their fixture frees join the glue/demand worklists).
     let mut tw_ok: u64 = 0;
     let mut tw_skip: u64 = 0;
     if testing && tplan.ok && tplan.cases.len() != 0 {
@@ -3445,7 +3456,7 @@ pub fn cemit_package(
         }
     }
     let mut done = Map::<u64, u64>::new();
-    // per-lowering CFGs, built once and lent to every instantiation's emission (see CEmit.cf_ext)
+    // Per-lowering CFGs, built once and lent to every instantiation's emission (see CEmit.cf_ext).
     let mut cfs = Vector::<cfl::CFlow>::new();
     let mut cf_ok = Vector::<bool>::new();
     let mut sa_seen = Map::<u64, u64>::new();
@@ -3462,7 +3473,8 @@ pub fn cemit_package(
     let mut gi9: usize = 0;
     let mut reasons = Vector::<str<'static>>::new();
     let mut rcounts = Vector::<u64>::new();
-    cem.mg.mark_ctx = -1; // instance-TU emission: every spelled module is link-reachable
+    // Instance-TU emission: every spelled module is link-reachable.
+    cem.mg.mark_ctx = -1;
     let mut kl9 = psync::Semaphore::new(1);
     let cird = p.cir as *mut iri::Interp;
     if par9 {
@@ -3478,7 +3490,7 @@ pub fn cemit_package(
     let mut dtasks: u64 = 0;
     let mut dslices: u64 = 0;
     while (qi < cem.demand.len() || gi9 < cem.glue.len()) && qi < 200000 {
-        // derived destructors drain alongside instances (each may enqueue the other)
+        // Derived destructors drain alongside instances (each may enqueue the other).
         while gi9 < cem.glue.len() {
             cem.out.clear();
             if cem.emit_glue(gi9) {
@@ -3533,7 +3545,6 @@ pub fn cemit_package(
             );
             continue;
         }
-        // ---- parallel instance frontier: one wave = the current unseen demand tail ----
         dwaves += 1;
         let len0 = cem.demand.len();
         let mut widx = Vector::<u64>::new(); // tasked demand indices, ascending
@@ -3562,7 +3573,8 @@ pub fn cemit_package(
                 None => false,
             };
             if wavedup {
-                continue; // a later chain retries on the master only if the first fails
+                // A later chain retries on the master only if the first fails.
+                continue;
             }
             wave_seen.insert(dkj, 1);
             let jd = cem.demand.at(j).def;
@@ -3572,7 +3584,8 @@ pub fn cemit_package(
                 None => 0xFFFFFFFFFFFFFFFEu64,
             };
             if base == 0xFFFFFFFFFFFFFFFFu64 {
-                continue; // known-unlowerable: the merge fallback counts the skip
+                // Known-unlowerable: the merge fallback counts the skip.
+                continue;
             }
             if base == 0xFFFFFFFFFFFFFFFEu64 {
                 let nds = switch newdef_seen.get(&jkey) {
@@ -3589,7 +3602,7 @@ pub fn cemit_package(
             wli.push(base);
             wdef.push(jkey);
         }
-        // phase L: lower this wave's missing base definitions in parallel slices
+        // Phase L: lower this wave's missing base definitions in parallel slices.
         if newdefs.len() != 0 {
             let nd = newdefs.len();
             let mut res9 = Vector::<irl::Lowerer>::new();
@@ -3619,7 +3632,7 @@ pub fn cemit_package(
                 }
             }
         }
-        // resolve pending base slots; drop entries whose base failed (merge fallback counts them)
+        // Resolve pending base slots; drop entries whose base failed (merge fallback counts them).
         {
             let mut w2 = Vector::<u64>::new();
             let mut l2 = Vector::<u64>::new();
@@ -3640,7 +3653,7 @@ pub fn cemit_package(
             widx = w2;
             wli = l2;
         }
-        // phase E: contiguous demand slices, each emitting into one private shard
+        // Phase E: contiguous demand slices, each emitting into one private shard.
         let mut envh9 = Vector::<u64>::new();
         for ei in 0..cem.env_hashes.len() {
             envh9.push(*cem.env_hashes.at(ei));
@@ -3717,7 +3730,7 @@ pub fn cemit_package(
             &wli,
             verbose,
         );
-        // merge in exact queue order, glue interleaved exactly as the serial loop drains it
+        // Merge in exact queue order, glue interleaved exactly as the serial loop drains it.
         let mut wcur: usize = 0;
         let mut scur: usize = 0;
         let mut slo: usize = 0;
@@ -3871,7 +3884,7 @@ pub fn cemit_package(
                     }
                 }
             }
-            // slice exhausted: absorb its order-insensitive remainder once
+            // Slice exhausted: absorb its order-insensitive remainder once.
             if scur < sbounds.len() && wcur == sbounds[scur] as usize {
                 let o = dsh.index_mut(scur);
                 clos_ok += o.clos_ok;
@@ -3891,7 +3904,7 @@ pub fn cemit_package(
             unsafe cird.elock_on = false;
         }
     }
-    // true instance failures = demanded symbols that never emitted on ANY chain
+    // True instance failures are demanded symbols that never emitted on ANY chain.
     {
         let mut fseen = Map::<u64, u64>::new();
         for di9 in 0..cem.demand.len() {
@@ -3942,11 +3955,12 @@ pub fn cemit_package(
     o.skips += seed_skip + inst_skip + clos_skip + glue_skip + tw_skip;
     if have_main && main_argv && !testing {
         let mut sn9 = String::new();
-        cem.sentinel(1, &mut sn9); // the argv wrapper's Global allocator receiver
+        // The argv wrapper's Global allocator receiver.
+        cem.sentinel(1, &mut sn9);
     }
-    // `@emit_macro` C-reuse templates: `<STEM>_DECLARE/_DEFINE(<params>, NAME)` -- the struct body
+    // `@emit_macro` C-reuse templates: `<STEM>_DECLARE/_DEFINE(<params>, NAME)`, the struct body
     // plus every non-generic method of the type's plain generic extends, emitted through cemit
-    // under macro spelling (unresolved params as their names; symbols pasted onto NAME)
+    // under macro spelling (unresolved params as their names; symbols pasted onto NAME).
     let mut macros_out = String::new();
     {
         let mut mac_ok: u64 = 0;
@@ -3973,7 +3987,7 @@ pub fn cemit_package(
                 if !tagged {
                     continue;
                 }
-                // the raw (pre-rewrite) bodies of the two templates
+                // The raw (pre-rewrite) bodies of the two templates.
                 let mut mb_dec = String::new();
                 let mut mb_def = String::new();
                 cem.mg.macro_on = true;
@@ -4004,7 +4018,7 @@ pub fn cemit_package(
                     mb_dec.push_str(";\n");
                 }
                 mb_dec.push_str("};\n");
-                // every non-generic single-return method of the type's plain generic extends
+                // Every non-generic single-return method of the type's plain generic extends.
                 for j9 in 0..its9.len {
                     if !okm {
                         break;
@@ -4038,7 +4052,7 @@ pub fn cemit_package(
                             okm = false;
                             break;
                         }
-                        // macro-template bodies keep symbolic generics: never inline into them
+                        // Macro-template bodies keep symbolic generics: never inline into them.
                         dow.apply_drops_of(&mut mlw, false);
                         let mut msym = String::from_str("NAME");
                         msym.push_byte(1);
@@ -4092,8 +4106,8 @@ pub fn cemit_package(
         eprint("cemit-stage macros: {} ms\n", t9 - tt0);
         tt0 = t9;
     }
-    // dyn typedef blocks: drain every dyn spelling site both manglers recorded (rendering can
-    // discover further stems; the index loop rides the growing vector to a fixed point)
+    // Dyn typedef blocks: drain every dyn spelling site both manglers recorded (rendering can
+    // discover further stems; the index loop rides the growing vector to a fixed point).
     {
         for i in 0..em.mg.dyn_reqs.len() {
             let rq = *em.mg.dyn_reqs.at(i);
@@ -4106,9 +4120,9 @@ pub fn cemit_package(
             di += 1;
         }
     }
-    // const/static definitions: each referenced item folds through the Core IR interpreter; one
+    // Const/static definitions: each referenced item folds through the Core IR interpreter; one
     // interpreter serves the whole pass (its lowered-callee cache, call memo, and captured static
-    // groups persist), and the descriptor sections below render from the same store
+    // groups persist), and the descriptor sections below render from the same store.
     let mut cdit = iri::interp_new(p);
     let mut const_defs = String::new();
     {
@@ -4121,19 +4135,21 @@ pub fn cemit_package(
             let cda = unsafe &*p.module_ast_const(cdef.module);
             let cdn = cda.at_const(cdef.node);
             if cdn.kind == NodeKind::NODE_CONST && cdn.as_data.const_def.is_extern {
-                continue; // the backing C header owns the definition; the extern stub suffices
+                // The backing C header owns the definition; the extern stub suffices.
+                continue;
             }
             if cdn.kind != NodeKind::NODE_CONST || cdn.as_data.const_def.value == NODE_NONE {
                 cd_skip += 1;
                 continue;
             }
             if cem.mg.method_target(cdef.module, cdef.node).node != NODE_NONE {
-                cd_skip += 1; // associated consts fold under Self frames -- not through this path yet
+                // Associated consts fold under Self frames, not through this path.
+                cd_skip += 1;
                 continue;
             }
             let v = cdit.eval_const_in(cdef.module, cdef.node, 1u32 << 20);
             let cty = cem.stat_items.at(ci).ty;
-            // array-of-string consts render from their literal initializer directly
+            // Array-of-string consts render from their literal initializer directly.
             if v.kind == iri::IV_OBJ || v.kind == iri::IV_NONE {
                 let vn0 = cda.at_const(cdn.as_data.const_def.value);
                 if vn0.kind == NodeKind::NODE_STRUCT_INITIALIZER && vn0.as_data.struct_initializer.fields.len == 0 {
@@ -4155,7 +4171,8 @@ pub fn cemit_package(
                         if ty2.kind == TypeKind::TYPE_INSTANCE {
                             let it2 = *ea2.instance(ty2.as_data.inst);
                             if it2.n > 0 {
-                                is_slice2 = true; // slice-view consts: a hidden data array + the view
+                                // Slice-view consts: a hidden data array + the view.
+                                is_slice2 = true;
                                 ety2 = it2.args[0];
                             }
                         }
@@ -4213,7 +4230,7 @@ pub fn cemit_package(
                         continue;
                     }
                 }
-                // any other aggregate: the CTFE static graph, captured straight from the
+                // Any other aggregate: the CTFE static graph, captured straight from the
                 // interpreter's live objects; a refusal falls back to the established
                 // evaluator's graph, converted into the same store.
                 let mut root3: i64 = 0 - 1;
@@ -4242,7 +4259,7 @@ pub fn cemit_package(
                 }
             }
             let mut line = String::new();
-            // a NULL pointer constant is scalar data (`= 0`)
+            // A NULL pointer constant is scalar data (`= 0`).
             let mut okc = v.kind == iri::IV_INT || v.kind == iri::IV_BOOL || v.kind == iri::IV_FLOAT || v.kind == iri::IV_STR || v.kind == iri::IV_PTR && v.i == 0;
             if okc {
                 okc = cem.mg.ctype(em2, cty, csym.as_str(), &mut line);
@@ -4256,7 +4273,8 @@ pub fn cemit_package(
                         line.push_u64(v.i as u64);
                         line.push_str("ULL");
                     } else if v.i as u64 == 0x8000000000000000u64 {
-                        line.push_str("(-9223372036854775807LL - 1)"); // C has no i64::MIN literal
+                        // C has no i64::MIN literal.
+                        line.push_str("(-9223372036854775807LL - 1)");
                     } else {
                         line.push_i64(v.i);
                     }
@@ -4281,7 +4299,8 @@ pub fn cemit_package(
                     }
                     if b0 > a0 + 3 && csrc.byte_at(a0) == b'M' && csrc.byte_at(a0 + 1) == 34 && csrc.byte_at(a0 + 2) == b'(' {
                         a0 += 3;
-                        b0 -= 2; // `)"` suffix
+                        // `)"` suffix.
+                        b0 -= 2;
                         mtext = true;
                     } else if b0 > a0 + 1 && csrc.byte_at(a0) == 34 && csrc.byte_at(b0 - 1) == 34 {
                         a0 += 1;
@@ -4321,7 +4340,7 @@ pub fn cemit_package(
         tt0 = t9;
     }
     // @reflect exports + `type_info` descriptor groups: the CTFE static graph rendered as file-
-    // scope const data (extern roots; `__ct%u` auxiliaries static per group)
+    // scope const data (extern roots; `__ct%u` auxiliaries static per group).
     let mut static_defs = String::new();
     if p.cir != null {
         let tih = p.prelude_lookup("TypeInfo", true);
@@ -4368,7 +4387,7 @@ pub fn cemit_package(
                     ti_skip += 1;
                 }
             }
-            // `@reflect`-tagged concrete aggregates export a registered descriptor
+            // `@reflect`-tagged concrete aggregates export a registered descriptor.
             for m9 in 0..p.modules.len() {
                 if !p.modules[m9].has_ast {
                     continue;
@@ -4479,10 +4498,10 @@ pub fn cemit_package(
             }
             poff.push(c0 as u64);
         }
-        // aggregates first named by demand-driven bodies or by other aggregates' FIELDS (chains
+        // Aggregates first named by demand-driven bodies or by other aggregates' FIELDS (chains
         // the planner's closure never reached): replay each recorded spelling under its env; the
         // name-keyed state map skips everything already defined. em's own list GROWS while
-        // replaying (a replayed body's field types record deeper instances) -- follow it.
+        // replaying (a replayed body's field types record deeper instances); follow it.
         for ri9 in 0..cem.mg.agg_reqs.len() {
             let pm9 = cem.mg.agg_reqs.at(ri9).pm;
             let it9 = cem.mg.agg_reqs.at(ri9).it;
@@ -4506,8 +4525,8 @@ pub fn cemit_package(
             em.mg.pop_subs(ns8);
             ri8 += 1;
         }
-        // env bodies the declaration pass did NOT define inline (non-embedded closures): they
-        // land after every aggregate body, deduped against the embedded ones
+        // Env bodies the declaration pass did NOT define inline (non-embedded closures): they
+        // land after every aggregate body, deduped against the embedded ones.
         {
             let nb0 = env_bodies.len();
             for bi0 in 0..nb0 {
@@ -4554,8 +4573,8 @@ pub fn cemit_package(
         o.protos_h = phh;
         let mut sdefs = Set::<u64>::new();
         struct_def_names(o.types_h.as_str(), &mut sdefs);
-        // chunk indexes per TU (the instance TU last), one pass over the chunk list: the per-TU
-        // assembly below then touches only its own chunks and reserves its buffers exactly
+        // Chunk indexes per TU (the instance TU last), one pass over the chunk list: the per-TU
+        // assembly below then touches only its own chunks and reserves its buffers exactly.
         let mut tu_chunks = Vector::<Vector<u32>>::new();
         for _i in 0..p.modules.len() + 1 {
             tu_chunks.push(Vector::<u32>::new());
@@ -4617,8 +4636,8 @@ pub fn cemit_package(
                 };
                 lbs.index_mut(cur).push_str(bs.slice(chunk_off[i] as usize, b1));
             }
-            // under --test the fork-per-test runner owns the C `main`; the user main stays a
-            // plain (unreferenced) `__sc_user_main`
+            // Under --test the fork-per-test runner owns the C `main`; the user main stays a
+            // plain (unreferenced) `__sc_user_main`.
             let has_wrap = have_main && !testing && !is_inst && t as u64 == main_mod;
             if bb == 0 && !is_inst && !has_wrap {
                 continue;
@@ -4633,8 +4652,8 @@ pub fn cemit_package(
             }
             tu2.push_string(lps.at(0));
             if !is_inst && p.modules[t].has_ast {
-                // folded module-level static_asserts leave their record in the C (parity with
-                // the checker: a false one already failed the build)
+                // Folded module-level static_asserts leave their record in the C (parity with
+                // the checker: a false one already failed the build).
                 let a9 = unsafe &*p.module_ast_const(t as ModuleId);
                 let its9 = a9.at_const(a9.root).as_data.program.items;
                 for i9 in 0..its9.len {
@@ -4763,8 +4782,6 @@ fn render_const_elem(a: &Ast, src: str, eid: NodeId, out: &mut String) bool {
 // remapping intra-group indices; groups are self-contained (each capture evaluates from a fresh
 // object store), so a constant offset relocates every parent/owner/child/target.
 
-// ---- CTFE static-graph rendering (the new backend's `@reflect` / `type_info` data layer) -------
-
 // The C declarator of statics entry `gi` around `decl`: heap/array groups spell as element arrays,
 // aggregates by their (instance) names, cells by their value type.
 fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u32, decl: str, out: &mut String) bool {
@@ -4785,7 +4802,7 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
     if shape == iri::SS_CELL {
         return mg.ctype(unsafe g.etm, unsafe g.ety, decl, out);
     }
-    // SS_STRUCT / SS_ENUM: the aggregate's (instance) C name
+    // SS_STRUCT / SS_ENUM: the aggregate's (instance) C name.
     let dm = unsafe g.dm;
     let dn = unsafe g.dn;
     let da = unsafe &*p.module_ast_const(dm);
@@ -4984,7 +5001,7 @@ fn st_slot(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         out.push_f64(sl.f);
         return true;
     }
-    // SK_INT: unsigned pool types print unsigned (with the 64-bit suffix when the sign bit is set)
+    // SK_INT: unsigned pool types print unsigned (with the 64-bit suffix when the sign bit is set).
     let mut usig = false;
     if sl.ty != TYPE_NONE {
         let y = *unsafe (&*p.module_ast_const(sl.tm)).type_at(sl.ty);
@@ -5092,9 +5109,10 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         out.push_str(" }");
         return true;
     }
-    // SS_STRUCT
+    // SS_STRUCT.
     if nslots == 0 {
-        out.push_str("{0}"); // strict C11: an empty initializer list is not C
+        // Strict C11: an empty initializer list is not C.
+        out.push_str("{0}");
         return true;
     }
     let uact = unsafe g.uactive;
@@ -5112,7 +5130,8 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
     let mut ne9: u32 = 0;
     for k in 0..nslots {
         if st_field_zst(p, mg, g, k) {
-            continue; // zero-sized field: no C member to initialize
+            // Zero-sized field: no C member to initialize.
+            continue;
         }
         if ne9 != 0 {
             out.push_str(", ");
@@ -5125,7 +5144,8 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         }
     }
     if ne9 == 0 {
-        out.push_str("0"); // all fields erased inside a still-material carrier
+        // All fields erased inside a still-material carrier.
+        out.push_str("0");
     }
     out.push_str(" }");
     return true;
@@ -5197,7 +5217,7 @@ fn macro_finish(body: str, out: &mut String) {
     out.push_str("\n");
 }
 
-// `<QUALIFIED>` uppercased with every non-alphanumeric flattened to `_` -- the template family stem.
+// `<QUALIFIED>` uppercased with every non-alphanumeric flattened to `_`: the template family stem.
 fn macro_stem(mg: &mut mbe::Mangler, m: ModuleId, name: tok::Span, out: &mut String) {
     let mut q = String::new();
     mg.modpfx(m, &mut q);
@@ -5267,8 +5287,8 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, backed: &mut Set
             let mut line = String::new();
             let mut done = false;
             if p.modules[m].file.len() != 0 {
-                // resolve next to the declaring module's file; realpath makes the tree
-                // compile from any location
+                // Resolve next to the declaring module's file; realpath makes the tree
+                // compile from any location.
                 let fs2 = p.modules[m].file.as_str();
                 let mut dend = fs2.len();
                 while dend > 0 && fs2.byte_at(dend - 1) != b'/' {
@@ -5319,13 +5339,13 @@ const fn if_s2(c: bool, a: str<'static>, b: str<'static>) str<'static> {
 }
 
 // Scope-end destruction for a lane body: elaborate the drop schedule and rewrite the body with
-// drop terminators, exactly as the differential does -- WITHOUT this, emitted programs leak every
+// drop terminators, exactly as the differential does; WITHOUT this, emitted programs leak every
 // non-moved owning local (explicit `.free()` calls are the only TM_DROPs lowering itself emits).
-/// The drop-elaboration analyses, pooled: one instance rebuilds in place per body (capacity kept),
-/// mirroring flow_ir's FlowCtx -- fresh builds per body dominated the elaboration's allocator cost.
+// The drop-elaboration analyses, pooled: one instance rebuilds in place per body (capacity kept),
+// mirroring flow_ir's FlowCtx; fresh builds per body dominated the elaboration's allocator cost.
 // Emission-phase pool of DropCtx instances: a task checks one out and returns it, so the
 // inliner's vetted-callee cache (whose misses lower and copy whole callees) warms once per pooled
-// slot -- about the worker count -- instead of once per task. Valid within one emission phase:
+// slot (about the worker count) instead of once per task. Valid within one emission phase:
 // every cached decision is a pure function of the frozen package. `cemit_package` resets it.
 static mut G_DPOOL: *mut Vector<DropCtx> = null;
 static mut G_DPOOL_LOCK: i32 = 0;
@@ -5405,8 +5425,8 @@ extend DropCtx {
     }
 
     fn apply_drops_of(self: &mut Self, lw: &mut irl::Lowerer, allow_inline: bool) {
-        // the inliner runs FIRST so drop elaboration and BCE see the merged body; the callee's
-        // own storage markers make the merged elaboration reproduce the callee's drops in place
+        // The inliner runs FIRST so drop elaboration and BCE see the merged body; the callee's
+        // own storage markers make the merged elaboration reproduce the callee's drops in place.
         if allow_inline && !self.inl.off {
             let mut ist = inl::InlineStats::new();
             inl::run(lw, &mut self.inl, &mut ist);
@@ -5429,12 +5449,12 @@ extend DropCtx {
         self.mv.build_into(&lw.body, &self.forest, &self.facts, &self.cfg);
         ird::elaborate_into(&mut self.ow, &lw.body, &self.forest, &self.facts, &self.mv, &mut self.el);
         ird::insert_drops(&mut lw.body, &self.el.sched, &self.forest);
-        // bounds-check elimination runs HERE, on the final elaborated body, so every emission
-        // path (seed, instance, closure, wrapper) proves against the exact statements it emits
+        // Bounds-check elimination runs HERE, on the final elaborated body, so every emission
+        // path (seed, instance, closure, wrapper) proves against the exact statements it emits.
         let mut bst = bce::BceStats::new();
         let _ = bce::run(&mut lw.body, lw.pkg, &mut self.bce, &mut bst, false);
         if self.core_ir {
-            // development re-verification: every PROVEN operation must re-prove
+            // Development re-verification: every PROVEN operation must re-prove.
             let be = bce::run(&mut lw.body, lw.pkg, &mut self.bce, &mut bst, true);
             if be.len() != 0 {
                 eprintln("SC_CORE_IR: {}", be);
@@ -5451,7 +5471,7 @@ extend DropCtx {
 
 // The free-glue wrapper fields (frozen `__fb` convention): a CONCRETE struct's selected user
 // `free` whose body never touches some destructible owning fields gets renamed `<sym>__fb`, and
-// the public symbol wraps it, freeing each untouched field -- covering every early return.
+// the public symbol wraps it, freeing each untouched field, covering every early return.
 fn cemit_free_glue_fields(
     p: &loader::Package,
     cem: &mut cbe::CEmit,
@@ -5494,7 +5514,7 @@ fn cemit_free_glue_fields(
     for i in 0..ms.len {
         let fid = unsafe a.list(ms)[i as usize];
         let fnode = a.at_const(fid);
-        // tuple members are bare type nodes; named members are NODE_FIELD
+        // Tuple members are bare type nodes; named members are NODE_FIELD.
         if !is_tuple && fnode.kind != NodeKind::NODE_FIELD {
             continue;
         }
@@ -5509,7 +5529,8 @@ fn cemit_free_glue_fields(
         }
         let fk = a.type_at(ft).kind;
         if fk == TypeKind::TYPE_POINTER || fk == TypeKind::TYPE_REFERENCE {
-            continue; // non-owning by rule: raw pointers are borrows
+            // Non-owning by rule: raw pointers are borrows.
+            continue;
         }
         if !cem.is_destructible(m, ft, 0) {
             continue;
@@ -5653,7 +5674,7 @@ fn borrowck_module(p: &mut loader::Package, i: usize, ow: &mut bfx::Owner, ctx: 
 
 // One parallel borrow-check unit of work: a private oracle, pipeline, checker and diagnostics per
 // module. The finished (already finalized) diagnostics and the module's lowered bodies land in
-// `out`; nothing prints and nothing outside the module's own Ast is written -- the const engine
+// `out`; nothing prints and nothing outside the module's own Ast is written; the const engine
 // serializes behind its gate, interning behind each Ast's lock.
 struct BcOut {
     pub ok: bool,
@@ -5692,10 +5713,11 @@ fn bc_run_one(t: BcTask) {
     o.errors = replace(&mut tck.errors, diag::Errors::new());
 }
 
-// Borrow-check every module through ONE ownership oracle and ONE borrow pipeline when serial
-// (their memo tables and capacities survive across modules), or one of each per module task when
-// `p.jobs` asks for workers -- outputs merge in module order, so both paths print and lower
-// identically. `keep` (null = discard) collects every lowered body for the backend.
+/// Borrow-check every module through ONE ownership oracle and ONE borrow pipeline when serial
+/// (their memo tables and capacities survive across modules), or one of each per module task when
+/// `p.jobs` asks for workers; outputs merge in module order, so both paths print and lower
+/// identically. `keep` (null = discard) collects every lowered body for the backend. False when
+/// any module reported an error.
 pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     let n = p.modules.len();
     if p.jobs != 1 && n > 1 {
@@ -5715,7 +5737,7 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
 
 fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     let n = p.modules.len();
-    // package-wide lazy state the tasks would otherwise race to build
+    // Package-wide lazy state the tasks would otherwise race to build.
     if p.co_state == 0 {
         p.co_compute();
     }
@@ -5793,8 +5815,8 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
 // Promoted fold failures (proven UB, failed mandatory `const fn` folds) recorded by the evaluator:
 // errors against the owning module; only the outermost record of nested failures is reported.
 fn report_fold_errs(p: &mut loader::Package) {
-    // the engine's recorded fold failures drain here (lowering-time implicit folds; a node can
-    // record more than once across passes, so duplicates collapse)
+    // The engine's recorded fold failures drain here (lowering-time implicit folds; a node can
+    // record more than once across passes, so duplicates collapse).
     let mut ms = Vector::<ModuleId>::new();
     let mut ids = Vector::<NodeId>::new();
     let mut kinds = Vector::<u8>::new();
@@ -5903,9 +5925,7 @@ fn flush_const_err(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) 
     unsafe p.ok = false;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Global-phase compilation of a loaded package into a `<root>/build/` tree.
-// ---------------------------------------------------------------------------------------------------------
 
 /// Drop @platform-gated items that don't match the build target BEFORE resolution, so inactive code is
 /// parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
@@ -5917,7 +5937,7 @@ pub fn platform_filter(p: &mut loader::Package, target: i32) {
     }
 }
 
-/// Filter one module's item list (idempotent): the LSP's incremental rebuild re-filters just the
+/// Filter one module's item list (idempotent): the LSP's incremental rebuild re-filters only the
 /// reparsed module.
 pub fn platform_filter_module(p: &mut loader::Package, mi: usize, target: i32) {
     let arch = p.arch; // the instruction-set axis rides on the package, so no caller has to thread it
@@ -5952,11 +5972,10 @@ pub fn platform_filter_module(p: &mut loader::Package, mi: usize, target: i32) {
     m.ast.at(root).as_data.program.items.len = w;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // --lint: unused non-pub items (functions/structs/unions/enums/interfaces/type aliases). Reachability v2:
 // entries are top-level items + extend members (disjoint spans; extend HEADERS are deliberately not
 // entries, so `extend Foo` alone is not a use of Foo). An item is live iff a root reaches it through the
-// resolution graph -- dead cycles and dead-only callers are caught. Roots = everything exempt from
+// resolution graph, so dead cycles and dead-only callers are caught. Roots = everything exempt from
 // reporting: `pub` (spc export layer), @c.export/@c.used/@emit_macro/extern (C export layer), @test*,
 // main, bodyless fns, `extend X as Iface` conformance members, and every module outside the reported set
 // (per-file `lint` invocations treat other modules as live; the full-build lint reports all non-prelude
@@ -6040,7 +6059,7 @@ const fn lint_root_mod(p: &loader::Package, m: usize) bool {
 
 fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut Vector<LintEnt>) {
     let a = mod_ast_c(p, m as ModuleId);
-    // items of a module reported this run are candidates; everything else roots the graph
+    // Items of a module reported this run are candidates; everything else roots the graph.
     let reported = lint_reported(p, m, only_mod);
     let src = p.modules[m].source.as_str();
     let items = unsafe a.at_const(a.root).as_data.program.items;
@@ -6068,7 +6087,7 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
             continue;
         }
         let mut root = !(reported && lint_item_candidate(a, iid, false, lint_pub_applies(p, m)));
-        // `main` in the root module is the program entry: never reported, always a root
+        // `main` in the root module is the program entry: never reported, always a root.
         if !root && lint_root_mod(p, m) && it.kind == NodeKind::NODE_FUNCTION {
             let nsp = a.at_const(it.as_data.function.name).as_data.name.text;
             if diag::span_str(src, nsp.start, nsp.end) == "main" {
@@ -6080,7 +6099,7 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
     ents.sort_by(lint_ent_cmp);
 }
 
-// Whether the binary-project pub lint applies to module `m`: never to the std/ffi trees -- they are
+// Whether the binary-project pub lint applies to module `m`: never to the std/ffi trees, which are
 // libraries whose `pub` is API for downstream programs, even when they sit inside the workspace
 // (nested std modules do not carry the prelude flag, so the file location is the reliable signal).
 const fn lint_pub_applies(p: &loader::Package, m: usize) bool {
@@ -6156,8 +6175,8 @@ fn lint_report_item(
     root_mod: bool,
 ) {
     let it = a.at_const(iid);
-    // a `@reflect`-tagged declaration is REACHED at startup: its exported descriptor registers
-    // itself, and the metadata is the point even when no code names the type
+    // A `@reflect`-tagged declaration is REACHED at startup: its exported descriptor registers
+    // itself, and the metadata is the point even when no code names the type.
     if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
         let nmet = (unsafe a.metas).len();
         for k in 0..nmet {
@@ -6207,7 +6226,7 @@ fn lint_report_item(
 }
 
 fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
-    // one flat reachable-bitset over all modules' node ids
+    // One flat reachable-bitset over all modules' node ids.
     let nm = p.modules.len();
     let mut starts = Vector::<usize>::new();
     let mut total: usize = 0;
@@ -6242,7 +6261,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
         }
         ents.push(e);
     }
-    // seed roots, then edge list (src item -> referenced item) from every module's resolution table
+    // Seed roots, then the edge list (src item -> referenced item) from every module's resolution table.
     let mut queue = Vector::<u32>::new();
     for m in 0..nm {
         for k in 0..ents[m].len() {
@@ -6405,11 +6424,11 @@ fn ap_check_fn(errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, 
 }
 
 /// Always-panics check (the `unconditional_panic` analog, an ERROR like the raw-array provable-OOB
-/// gate -- the same proof one tier up). A DRIVER phase, after every module has typechecked: the
+/// gate: the same proof one tier up). A DRIVER phase, after every module has typechecked: the
 /// sweep interprets cross-module `const fn` bodies, whose types only exist once their module is
-/// typed -- an inline per-module pass would silently fold nothing (module order). @test fns are
+/// typed; an inline per-module pass would silently fold nothing (module order). @test fns are
 /// exempt (panicking on purpose is a feature there), as are explicit `panic(..)` calls (only a
-/// panic reached THROUGH a `const fn` frame classifies -- see Interp::lint_body).
+/// panic reached THROUGH a `const fn` frame classifies; see Interp::lint_body).
 pub fn check_always_panics_module(p: &mut loader::Package, m: usize, errs: &mut diag::Errors) {
     if p.cir == null {
         return;
@@ -6436,14 +6455,14 @@ fn ap_check_module_on(p: &mut loader::Package, m: usize, errs: &mut diag::Errors
     }
 }
 
-// --lint: functions the deep (all-paths) CTFE scan proves always evaluable -- declaring them
+// --lint: functions the deep (all-paths) CTFE scan proves always evaluable; declaring them
 // `const fn` passes the def-site check and unlocks folding. `const fn` is a semantic contract
 // (folds with known arguments must succeed), so the fix (insert `const ` before the `fn` keyword,
-// which lands AFTER any `pub`/`unsafe` -- the canonical order) applies only under `--fix`.
+// which lands AFTER any `pub`/`unsafe`, the canonical order) applies only under `--fix`.
 // Conformance members are skipped (the interface fixes the signature), as are @test fns and `main`.
 // Prelude modules are ALWAYS excluded, even when linted in place: constifying a prelude helper
 // promotes failed folds to errors in every downstream program, a blast radius the per-package
-// `--fix` fixpoint cannot validate -- prelude const adoption must be a deliberate manual change.
+// `--fix` fixpoint cannot validate; prelude const adoption must be a deliberate manual change.
 fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, in_iface: bool) {
     if a.at_const(fnode).kind != NodeKind::NODE_FUNCTION || in_iface || ap_is_test_fn(a, fnode) {
         return;
@@ -6464,7 +6483,7 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
             nsp.end - nsp.start,
             format("function '{}' can be declared 'const fn'", diag::span_str(src, nsp.start, nsp.end)),
         );
-        // the `fn` keyword sits just before the name, across whitespace
+        // The `fn` keyword sits right before the name, across whitespace.
         let mut i = nsp.start as usize;
         while i > 0 && (src[i - 1] == b' ' || src[i - 1] == b'\t' || src[i - 1] == b'\n' || src[i - 1] == b'\r') {
             i = i - 1;
@@ -6534,7 +6553,8 @@ fn module_platform_gated(a: *const Ast) bool {
 
 fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
     if mid as usize >= p.modules.len() || !p.modules[mid as usize].has_ast {
-        return true; // unknowable: keep the import
+        // Unknowable: keep the import.
+        return true;
     }
     let a = mod_ast_c(p, mid);
     for i in 0..unsafe a.attrs.len() {
@@ -6549,7 +6569,8 @@ fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
         if a.at_const(iid).kind == NodeKind::NODE_EXTEND {
             let d = a.resolution_def(a.at_const(iid).as_data.extend_def.target_type);
             if d.node == NODE_NONE || d.module != mid {
-                return true; // extends a foreign (or unresolved) type
+                // Extends a foreign (or unresolved) type.
+                return true;
             }
         }
     }
@@ -6629,7 +6650,7 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
 }
 
 // --lint: an expression statement calling a provably pure function (deep FX_YES, value-only params,
-// non-generic) whose results are dropped computes nothing observable -- dead code. The trailing
+// non-generic) whose results are dropped computes nothing observable: dead code. The trailing
 // statement of every block is exempt (it may be the block's value in expression position).
 fn dp_check_stmt(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, sid: NodeId) {
     if a.at_const(sid).kind != NodeKind::NODE_EXPRESSION_STATEMENT {
@@ -6677,7 +6698,8 @@ fn dp_check_stmt(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m:
         }
         let tk = fa.at_const(fa.at_const(pid).as_data.parameter.ty).kind;
         if tk == NodeKind::NODE_POINTER_TYPE || tk == NodeKind::NODE_REFERENCE_TYPE || tk == NodeKind::NODE_SLICE_TYPE || tk == NodeKind::NODE_DYN_TYPE || tk == NodeKind::NODE_FUNCTION_TYPE {
-            return; // a reference-carrying param could observe or mutate caller state
+            // A reference-carrying param could observe or mutate caller state.
+            return;
         }
     }
     let cev = p.cir as *mut iri::Interp;
@@ -6753,8 +6775,8 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
             continue;
         }
         let a = mod_ast_c(p, m as ModuleId);
-        // struct-literal initializer names resolve to the field decl but only WRITE it: exclude
-        // them from the read set (fields warn on never-READ, Rust semantics)
+        // Struct-literal initializer names resolve to the field decl but only WRITE it: exclude
+        // them from the read set (fields warn on never-READ, Rust semantics).
         let an = unsafe a.nodes.len();
         let mut init_src = Vector::<bool>::new();
         init_src.reserve(an);
@@ -6875,7 +6897,7 @@ struct ApTask {
 unsafe extend ApTask as Send {}
 
 fn ap_run_one(t: ApTask) {
-    // a private engine per task: the scan is a query, and the shared engine's caches must not be
+    // A private engine per task: the scan is a query, and the shared engine's caches must not be
     // contended per interpreted call. Budgets copy from the master so traps classify identically.
     let mut cev = iri::interp_new(t.p);
     {
@@ -6892,9 +6914,9 @@ fn ap_run_one(t: ApTask) {
 fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     let n = p.modules.len();
     if p.jobs != 1 && n > 1 && only_mod < 0 {
-        // per-module tasks: fold failures recorded through the master's lowering callbacks land
+        // Per-module tasks: fold failures recorded through the master's lowering callbacks land
         // behind its lock and dedup canonically in report_fold_errs; diagnostics replay in module
-        // order below
+        // order below.
         let cirp = p.cir as *mut iri::Interp;
         if cirp != null {
             unsafe cirp.elock_on = true;
@@ -6958,9 +6980,9 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
 }
 
 /// `super-c lint`: resolve + typecheck + borrowck the whole closure with lints enabled for module
-/// `lint_mod` only -- or, when `p.lint_set` is non-empty, for every module in that mask (the batch
-/// driver loads all listed files into ONE package; each module still warns exactly once) -- then the
-/// report-only passes restricted to the same set. No code is emitted. Returns 0 only when clean -- any
+/// `lint_mod` only, or, when `p.lint_set` is non-empty, for every module in that mask (the batch
+/// driver loads all listed files into ONE package; each module still warns exactly once), then the
+/// report-only passes restricted to the same set. No code is emitted. Returns 0 only when clean; any
 /// error or remaining warning returns 1. `fixes != null` (`lint --fix`) collects machine fixes instead
 /// of printing.
 pub fn lint_package(
@@ -7067,7 +7089,7 @@ fn sink_notify(sink: *mut EmitSink, path: str, kind: i32) {
     }
 }
 
-/// then codegen of the live modules (headers first, then sources across `jobs` forked workers),
+/// Then codegen of the live modules (headers first, then sources across `jobs` forked workers),
 /// pruning stale outputs afterwards. A non-empty `out_bin` also compiles + links the program there
 /// (`build`); `topts.enabled` synthesizes the test runner and, without a `sink`, builds and runs it
 /// too. `sink` (may be null) hears about every finished output file, which is what lets the build
@@ -7084,8 +7106,8 @@ pub fn run_package(
     sink: *mut EmitSink,
 ) i32 {
     let rc0 = run_package_i(p, topts, out_bin, target, lint, cflags, sink);
-    // safety net for every early-error return: parallel loading may have started the pool, and
-    // the leak gate (and any later fork) needs it gone; shutdown is idempotent
+    // Safety net for every early-error return: parallel loading may have started the pool, and
+    // the leak gate (and any later fork) needs it gone; shutdown is idempotent.
     if p.jobs != 1 {
         prt::shutdown();
     }
@@ -7180,13 +7202,13 @@ fn run_package_i(
     if lint {
         lint_unused_items(p, -1);
     }
-    // static_asserts undecidable in module order re-evaluate now that every module is fully typed.
+    // The static_asserts undecidable in module order re-evaluate now that every module is fully typed.
     let cirf = p.cir as *mut iri::Interp;
     if cirf != null {
         let pv = p as *mut loader::Package;
         unsafe cirf.all_typed = true;
-        // an ERROR, not a lint: it runs on every build (user modules; std is gated by check.sh's
-        // explicit std lint invocations)
+        // An ERROR, not a lint: it runs on every build (user modules; std is gated by check.sh's
+        // explicit std lint invocations).
         check_always_panics(p, -1);
         if tstat {
             let t9 = unsafe shim::sc_ticks_ms();
@@ -7224,7 +7246,8 @@ fn run_package_i(
     keep.push(build_out_path(root, "super_rt", ".h"));
     keep.push(build_out_path(root, "super_rt", ".c"));
     sink_notify(sink, keep.at(0).as_str(), 0);
-    sink_notify(sink, keep.at(1).as_str(), 1); // self-contained: carries its own includes
+    // Self-contained: carries its own includes.
+    sink_notify(sink, keep.at(1).as_str(), 1);
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
     let pre_ext = keep.len();
@@ -7254,14 +7277,15 @@ fn run_package_i(
     }
     let mut order = Vector::<ModuleId>::new();
     p.emit_order(&mut order);
-    // the whole-package Core-IR emission runs BEFORE the live-module list: it seeds every module
+    // The whole-package Core-IR emission runs BEFORE the live-module list: it seeds every module
     // unconditionally, so any module with a non-empty TU must be written even when the reference
-    // scan finds no direct use (prelude bodies the instance TU calls into)
+    // scan finds no direct use (prelude bodies the instance TU calls into).
     let mut co = CemitOut::new(n);
     {
         let cirg = p.cir as *mut iri::Interp;
         if cirg != null {
-            unsafe cirg.record_folds = true; // the seed/instance lowering attempts mandatory folds
+            // The seed/instance lowering attempts mandatory folds.
+            unsafe cirg.record_folds = true;
         }
     }
     if tstat {
@@ -7270,7 +7294,7 @@ fn run_package_i(
         tp0 = t9;
     }
     cemit_package(p, testing, &plan, live.as_ptr(), target, &mut co, &mut irkeep);
-    // the emission frontier restarted the pool; release it again before any test-runner fork
+    // The emission frontier restarted the pool; release it again before any test-runner fork.
     if p.jobs != 1 {
         prt::shutdown();
     }
@@ -7286,8 +7310,8 @@ fn run_package_i(
         );
         err = true;
     }
-    // transitive TU pruning: keep scan-live modules, then everything a KEPT TU (or the always-
-    // written instance TU) spells symbols from -- dead prelude chains drop out entirely
+    // Transitive TU pruning: keep scan-live modules, then everything a KEPT TU (or the always-
+    // written instance TU) spells symbols from; dead prelude chains drop out entirely.
     let mut keep_mod = Vector::<bool>::new();
     for mi9 in 0..n {
         keep_mod.push(live[mi9]);
@@ -7399,16 +7423,16 @@ fn run_package_i(
     if stdlib::getenv("SC_CEMIT_STATS") != null {
         eprint("cemit-stage write: {} ms\n", unsafe shim::sc_ticks_ms() - tw0);
     }
-    // publish the per-TU cache only after a fully successful emission; keep[] shields it from pruning
+    // Publish the per-TU cache only after a fully successful emission; keep[] shields it from pruning.
     if !err && co.skips == 0 && co.tuc_path.len() != 0 {
         if cemit_write(co.tuc_path.as_str(), &co.tuc_img) {
             keep.push(String::from_str(co.tuc_path.as_str()));
         }
     }
-    // Drop outputs from a previous build that this program no longer emits, so the tree matches the current
-    // sources. Skip on a keep-list OOM -- never risk deleting a live output.
+    // Drop outputs of an earlier build that this program does not emit, so the tree matches the current
+    // sources. Skip on a keep-list OOM: never risk deleting a live output.
     let mut broot = PathBuf {};
-    // root is a str view (not nul-terminated); bound the copy with %.*s or %s runs off the buffer end.
+    // Root is a str view (not nul-terminated); bound the copy with %.*s or %s runs off the buffer end.
     let bn = unsafe stdio::snprintf(
         &mut broot[0],
         4096,

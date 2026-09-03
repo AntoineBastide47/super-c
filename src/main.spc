@@ -67,7 +67,8 @@ fn run_file(
         p.jobs = p.analysis_jobs(jobs);
         if p.jobs == 1 && jobs != 1 {
             prt::shutdown(); // parallel loading may have started the pool
-            unsafe shim::sc_jobserver_release_claim(); // a serial compile hands its slots back
+            // A serial compile hands its slots back.
+            unsafe shim::sc_jobserver_release_claim();
         }
         let mut cirv = iri::interp_new((&mut p) as *mut loader::Package);
         p.cir = &mut cirv;
@@ -75,7 +76,8 @@ fn run_file(
             cirv.max_steps = ce_steps;
         }
         if ce_mem != 0 {
-            cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
+            // Bytes -> IVal slots.
+            cirv.max_slots = ce_mem / 32;
         }
         rc = run_package(&mut p, topts, out_bin, target, lint, cflags, null);
     }
@@ -133,7 +135,7 @@ fn exe_std_dir(argv0: *const char) String {
     if unsafe shim::sc_exe_path(&mut buf[0], 4096) == 0 {
         path = &buf[0];
     }
-    // Last path separator, '/' or '\\' (Windows), whichever occurs later -- branch-free, no platform detection.
+    // Last path separator, '/' or '\\' (Windows), whichever occurs later: branch-free, no platform detection.
     let s1 = unsafe cstring::strrchr(path, '/');
     let s2 = unsafe cstring::strrchr(path, '\\');
     let slash = if s2 as usize > s1 as usize {
@@ -147,7 +149,7 @@ fn exe_std_dir(argv0: *const char) String {
     } else {
         base.push_str(".");
     }
-    // std lives beside the compiler -- but not always DIRECTLY beside it: a profile build sits two levels
+    // Std lives beside the compiler, but not always DIRECTLY beside it: a profile build sits two levels
     // down in <out-dir>/<profile>/, so try the parents before giving up. First 'std' directory wins.
     let mut cut = base.len();
     for _up in 0..3 {
@@ -230,7 +232,7 @@ fn dir_entries(dir: str) Option<Vector<String>> {
     return Option::<Vector<String>>::Some(names);
 }
 
-// `fmt`/`lint` with no path: every top-level entry of the project, minus the build output -- it
+// `fmt`/`lint` with no path: every top-level entry of the project, minus the build output; it
 // holds the generated .spc roots of `test`/`bench`, which are not project source.
 fn project_paths() Vector<String> {
     let mut out = Vector::<String>::new();
@@ -310,7 +312,7 @@ const fn lint_fix_cmp(a: &diag::LintFix, b: &diag::LintFix) i32 {
 
 // Apply machine fixes ascending: kind 0 deletes [start, end), kind 1 inserts '_' before start,
 // kind 2 inserts 'const ' before start, kind 3 inserts fix_texts[text] before start, kind 4 replaces
-// [start, end) with fix_texts[text]. An overlapping fix is skipped -- the next `--fix` re-lint pass
+// [start, end) with fix_texts[text]. An overlapping fix is skipped: the next `--fix` re-lint pass
 // records it against the patched source.
 fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>, texts: &Vector<String>) String {
     fixes.sort_by(lint_fix_cmp);
@@ -359,9 +361,9 @@ fn lint_alt() str<'static> {
 
 fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
     // A std/ffi file must keep its prelude identity (module path, builtin seeding, load order):
-    // loading it as a root would invent errors. Load an empty root -- the prelude comes along as
-    // always -- and if the requested file IS one of those modules, lint it in place.
-    // `--fix`: quiet fixpoint loop (re-lint after each write, capped) that REJECTS -- writes nothing --
+    // loading it as a root would invent errors. Load an empty root (the prelude comes along as
+    // always) and if the requested file IS one of those modules, lint it in place.
+    // `--fix`: quiet fixpoint loop (re-lint after each write, capped) that REJECTS (writes nothing)
     // if the package has any error a machine fix cannot repair (when EVERY error carries a fix, e.g.
     // the generated-Free leak fix, applying is the way out); a final plain pass prints what remains
     // and sets the exit code.
@@ -389,7 +391,8 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
         if !p.ok {
             return 1;
         }
-        p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32); // parallel analysis; resolves to 1 on wasm
+        // Parallel analysis; resolves to 1 on wasm.
+        p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32);
         if p.jobs == 1 {
             prt::shutdown(); // parallel loading may have started the pool
         }
@@ -400,7 +403,8 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
             cirv.max_steps = ce_steps;
         }
         if ce_mem != 0 {
-            cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
+            // Bytes -> IVal slots.
+            cirv.max_slots = ce_mem / 32;
         }
         if !fix {
             let rc = lint_package(&mut p, target, lint_mod, null, null, sc);
@@ -475,7 +479,7 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, ta
     let mut mids = Vector::<i32>::new();
     for k in 0..files.len() {
         let mut fc = String::from_str(files.at(k).as_str());
-        // already present? (a prelude module, or pulled in by an earlier file's imports)
+        // Already present? (a prelude module, or pulled in by an earlier file's imports).
         let mut mid: i32 = -1;
         for m in 0..p.modules.len() {
             if p.modules[m].has_ast && unsafe shim::sc_same_file(fc.cstr(), p.modules[m].file.cstr()) == 1 {
@@ -504,8 +508,8 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, ta
 
 // Batch lint: ONE package shared by every listed file, and the pipeline runs once with the listed
 // modules masked in lint_set. Replaces the per-file full-closure reload, which was quadratic in project
-// size. `--fix` runs the same quiet fixpoint as lint_one -- one package per round, every module's fixes
-// applied together (LintFix.module groups them) -- with the same reject rule: nothing is written while
+// size. `--fix` runs the same quiet fixpoint as lint_one (one package per round, every module's fixes
+// applied together, LintFix.module groups them) with the same reject rule: nothing is written while
 // the package has an error a machine fix cannot repair.
 fn lint_batch(
     files: &Vector<String>,
@@ -526,7 +530,8 @@ fn lint_batch(
         if !p.ok {
             return 1;
         }
-        p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32); // parallel analysis; resolves to 1 on wasm
+        // Parallel analysis; resolves to 1 on wasm.
+        p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32);
         if p.jobs == 1 {
             prt::shutdown(); // parallel loading may have started the pool
         }
@@ -537,7 +542,8 @@ fn lint_batch(
             cirv.max_steps = ce_steps;
         }
         if ce_mem != 0 {
-            cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
+            // Bytes -> IVal slots.
+            cirv.max_slots = ce_mem / 32;
         }
         if !fix {
             return lint_package(&mut p, target, 0, null, null, sc);
@@ -567,7 +573,7 @@ fn lint_batch(
                 } else {
                     unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), f);
                     unsafe stdio::fclose(f);
-                    // reformat before re-linting: canonicalization can unlock paren-guarded fixes
+                    // Reformat before re-linting: canonicalization can unlock paren-guarded fixes.
                     fmt_one(p.modules[m].file.as_str(), false, true, false);
                     applied = true;
                 }
@@ -581,13 +587,13 @@ fn lint_batch(
         }
         pass = pass + 1;
     }
-    // a final plain pass prints what remains and sets the exit code
+    // A final plain pass prints what remains and sets the exit code.
     return lint_batch(files, root, std_dir, ce_steps, ce_mem, target, false, sc, lint_pub);
 }
 
 fn run_lint(path: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
     if unsafe shim::sc_stat_isdir(path.ptr() as *const char) == 1 {
-        // every file under the directory resolves imports against the directory itself
+        // Every file under the directory resolves imports against the directory itself.
         let droot = if lint_alt().len() != 0 {
             ".";
         } else {
@@ -666,7 +672,7 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     return rc;
 }
 
-// CLI mode: `super-c <subcommand> <flags|args...>` -- the subcommand is always the first argument;
+// CLI mode: `super-c <subcommand> <flags|args...>`; the subcommand is always the first argument;
 // a non-keyword first argument means MODE_DEFAULT (compile a script).
 enum Mode {
     MODE_DEFAULT, // `super-c <root.spc>`: compile (emit C; `--test` runs tests instead)
@@ -741,13 +747,16 @@ extend CommonOpts {
                 self.target = 2;
             } else if t == "wasm" {
                 self.target = 3;
-                self.arch = 2; // wasm32
+                // Wasm32.
+                self.arch = 2;
             } else if t == "ios" {
                 self.target = 4;
-                self.arch = 1; // aarch64
+                // Aarch64.
+                self.arch = 1;
             } else if t == "android" {
                 self.target = 5;
-                self.arch = 1; // aarch64
+                // Aarch64.
+                self.arch = 1;
             } else {
                 self.bad = true;
             }
@@ -822,7 +831,7 @@ fn canon_cwd() String {
 }
 
 // Cargo-style manifest discovery: when the cwd has no build.toml, walk toward the filesystem root and
-// chdir to the nearest directory that has one. A miss changes nothing -- the caller reports it.
+// chdir to the nearest directory that has one. A miss changes nothing: the caller reports it.
 fn chdir_to_manifest() {
     let probe = stdio::fopen("build.toml", "rb");
     if probe != null {
@@ -838,7 +847,8 @@ fn chdir_to_manifest() {
         if end <= 1 {
             break;
         }
-        end = end - 1; // drop the trailing '/'
+        // Drop the trailing '/'.
+        end = end - 1;
         let mut dir = String::from_str(cwd.as_str().slice(0, end));
         let mut man = dir.clone();
         man.push_str("/build.toml");
@@ -971,7 +981,8 @@ fn main(argv: Vector<str>) i32 {
                 } else if file.len() == 0 {
                     file = arg;
                 } else {
-                    extra.push(i); // any number of paths
+                    // Any number of paths.
+                    extra.push(i);
                 }
                 i = i + 1;
             }
@@ -988,7 +999,8 @@ fn main(argv: Vector<str>) i32 {
                 } else if file.len() == 0 {
                     file = arg;
                 } else {
-                    extra.push(i); // any number of paths
+                    // Any number of paths.
+                    extra.push(i);
                 }
                 i = i + 1;
             }
@@ -998,14 +1010,16 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 let common = co.common_flag(arg);
                 if common || bo.build_flag(&mut co, arg) {} else if file.len() == 0 && !arg.starts_with("--") {
-                    file = arg; // the build.toml command name
+                    // The build.toml command name.
+                    file = arg;
                 } else {
                     co.bad = true;
                 }
                 i = i + 1;
             }
             if file.len() == 0 {
-                co.bad = true; // `command` needs a command name
+                // `command` needs a command name.
+                co.bad = true;
             }
         },
         MODE_RUN => {
@@ -1013,7 +1027,8 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 let common = co.common_flag(arg);
                 if common || bo.build_flag(&mut co, arg) {} else {
-                    co.bad = true; // `run` takes only build flags; the binary is the manifest's `bin`
+                    // `run` takes only build flags; the binary is the manifest's `bin`.
+                    co.bad = true;
                 }
                 i = i + 1;
             }
@@ -1031,7 +1046,8 @@ fn main(argv: Vector<str>) i32 {
             }
         },
         MODE_TEST => {
-            topts.enabled = true; // `super-c test` IS the test mode, which is what makes its flags legal
+            // `super-c test` IS the test mode, which is what makes its flags legal.
+            topts.enabled = true;
             while i < argc {
                 let arg = argv[i];
                 // The test flags belong here as much as in script mode (`file.spc --test`): `super-c test`
@@ -1079,7 +1095,7 @@ fn main(argv: Vector<str>) i32 {
         MODE_LSP => {
             while i < argc {
                 if argv[i] == "--capabilities" || argv[i] == "--version" {
-                    // handled at dispatch: print the capability/version JSON and exit
+                    // Handled at dispatch: print the capability/version JSON and exit.
                 } else if !co.common_flag(argv[i]) {
                     co.bad = true;
                 }
@@ -1089,19 +1105,22 @@ fn main(argv: Vector<str>) i32 {
         MODE_NEW => {
             while i < argc {
                 if !argv[i].starts_with("--") && file.len() == 0 {
-                    file = argv[i]; // the project name
+                    // The project name.
+                    file = argv[i];
                 } else {
                     co.bad = true;
                 }
                 i = i + 1;
             }
             if file.len() == 0 {
-                co.bad = true; // `new` needs a project name
+                // `new` needs a project name.
+                co.bad = true;
             }
         },
         MODE_INIT => {
             if i < argc {
-                co.bad = true; // `init` scaffolds the current directory, no arguments
+                // `init` scaffolds the current directory, no arguments.
+                co.bad = true;
             }
         },
         MODE_VENDOR => {
@@ -1114,7 +1133,8 @@ fn main(argv: Vector<str>) i32 {
                 } else if arg == "--force" {
                     vendor_force = true;
                 } else if !arg.starts_with("--") && file.len() == 0 {
-                    file = arg; // the source: a git url or a local directory
+                    // The source: a git url or a local directory.
+                    file = arg;
                 } else if !arg.starts_with("--") && vendor_name.len() == 0 {
                     vendor_name = arg;
                 } else {
@@ -1123,7 +1143,8 @@ fn main(argv: Vector<str>) i32 {
                 i = i + 1;
             }
             if file.len() == 0 {
-                co.bad = true; // `vendor` needs a source
+                // `vendor` needs a source.
+                co.bad = true;
             }
         },
         MODE_BINDGEN => {
@@ -1160,17 +1181,18 @@ fn main(argv: Vector<str>) i32 {
                 i = i + 1;
             }
             if file.len() == 0 {
-                co.bad = true; // `bindgen` needs a header or a directory
+                // `bindgen` needs a header or a directory.
+                co.bad = true;
             }
         },
     };
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null || topts.shards != 0) {
         co.bad = true;
     }
-    // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml
+    // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml.
     let manifest_mode = (mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE) && file.len() == 0 || mode == Mode::MODE_COMMAND || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
-    // cargo-style manifest discovery: a manifest command run from a subdirectory walks up to the
-    // nearest build.toml and works from there
+    // Cargo-style manifest discovery: a manifest command run from a subdirectory walks up to the
+    // nearest build.toml and works from there.
     if manifest_mode {
         chdir_to_manifest();
     }
@@ -1247,7 +1269,7 @@ OPTIONS:
     let out_dir = bo.out_dir;
     let cstd = bo.cstd;
     // resolve "0 = core count" HERE: the p.jobs != 1 frontier gates need a real number, and a
-    // single-threaded host (wasm) must resolve to the serial path
+    // single-threaded host (wasm) must resolve to the serial path.
     let jobs_wanted = if bo.jobs != 0 {
         bo.jobs;
     } else {
@@ -1258,7 +1280,7 @@ OPTIONS:
     let tree_jobs = jobs_wanted;
     unsafe shim::sc_jobserver_init(tree_jobs as i32);
     let jobs = (unsafe shim::sc_jobserver_claim(jobs_wanted as i32)) as u32;
-    // fmt/lint take any number of paths; with none, the project discovers itself.
+    // Fmt/lint take any number of paths; with none, the project discovers itself.
     let mut paths = Vector::<String>::new();
     if mode == Mode::MODE_FMT || mode == Mode::MODE_LINT {
         if file.len() == 0 {
@@ -1317,7 +1339,7 @@ OPTIONS:
         let mut rc = 0;
         if lint_alt().len() != 0 {
             // Manifest layout: every path resolves against the project root, so ALL listed paths share
-            // one closure -- collect them into a single package and run the pipeline once.
+            // one closure: collect them into a single package and run the pipeline once.
             let mut files = Vector::<String>::new();
             for k in 0..paths.len() {
                 let pa = paths.at(k).as_str();
@@ -1329,7 +1351,7 @@ OPTIONS:
                     files.push(String::from_str(pa));
                 }
             }
-            // whole-workspace lint of a lib-less manifest: unreachable pub functions are findings
+            // Whole-workspace lint of a lib-less manifest: unreachable pub functions are findings.
             let mut lpub = false;
             let mo = bman::load("build.toml");
             if !mo.is_none() {
@@ -1360,7 +1382,7 @@ OPTIONS:
     }
     if mode == Mode::MODE_LSP {
         // `super-c lsp --capabilities`: print the advertised capability JSON and exit (machine-
-        // readable; editors and tests read it without a protocol session)
+        // readable; editors and tests read it without a protocol session).
         for i in 2..argv.len() {
             if argv[i] == "--capabilities" {
                 let caps = lsp_srv::capabilities_with(true, true, true);
@@ -1380,10 +1402,12 @@ OPTIONS:
         let mut rc = 1;
         if !mo.is_none() {
             let mut man = mo.unwrap();
-            man.arch = co.arch; // --arch= (else the host) is the axis `@arch` gates on
-            man.sdk = target_sdk(target); // --target=ios|android|wasm picks the cross toolchain
+            // --arch= (else the host) is the axis `@arch` gates on.
+            man.arch = co.arch;
+            // --target=ios|android|wasm picks the cross toolchain.
+            man.sdk = target_sdk(target);
             // CLI --const-eval-* wins; else the manifest's value; else (0) the engine default.
-            // Capture the CLI values under fresh names -- shadowing `ce_steps` with an initializer
+            // Capture the CLI values under fresh names: shadowing `ce_steps` with an initializer
             // that reads `ce_steps` would resolve to the new (uninitialized) binding.
             let cli_steps = ce_steps;
             let cli_mem = ce_mem;
@@ -1455,7 +1479,7 @@ OPTIONS:
                     lint,
                 );
             } else if mode == Mode::MODE_RUN {
-                // cargo run: build the manifest binary and exec it
+                // Cargo run: build the manifest binary and exec it.
                 rc = bsys::manifest_run_bin(
                     &man,
                     profile,
@@ -1500,7 +1524,7 @@ OPTIONS:
         }
         return rc;
     }
-    // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins -- without
+    // No manifest here, so the profile the CLI asked for has to be resolved from the built-ins: without
     // this a `super-c release foo.spc` linked with no -O at all while reporting success.
     let pflags = bsys::profile_flags(profile, target, target_sdk(target));
     let rc = run_file(

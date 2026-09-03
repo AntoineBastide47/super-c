@@ -20,7 +20,7 @@ pub enum Namespace {
 }
 
 /// One live binding on the scope stack. 16 bytes (a power-of-2 stride for the hot linear scope scan): the
-/// namespace rides in the top bit of `decl` -- NodeIds are far below 2^31 -- so no separate `ns` byte is
+/// namespace rides in the top bit of `decl` (NodeIds are far below 2^31) so no separate `ns` byte is
 /// needed. Mask `decl & 0x7FFFFFFF` for the real NodeId; `decl >> 31` recovers the Namespace.
 pub struct Symbol {
     pub hash: u32,
@@ -42,7 +42,7 @@ extend ClosureScope as Free {
     }
 }
 
-/// Single-module resolver. Mutates the module's Ast IN PLACE through a borrowed reference -- the Ast
+/// Single-module resolver. Mutates the module's Ast IN PLACE through a borrowed reference: the Ast
 /// never leaves its `Package.modules` slot, so package-level lookups that land back on this module
 /// read the live tree with no override indirection.
 pub struct Resolver<'a> {
@@ -62,7 +62,7 @@ pub struct Resolver<'a> {
     pub errors: diag::Errors,
     pub lint: bool,
     pub lint_decls: Vector<NodeId>, // lets/params declared during resolution (lint only): the unused
-    // pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive
+    // Pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive.
 }
 
 /// A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
@@ -87,9 +87,7 @@ pub struct ModEntry {
     pub mid: ModuleId,
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Span-based helpers (no resolver state).
-// ---------------------------------------------------------------------------------------------------------
 
 fn name_hash(src: str, s: tok::Span) u32 {
     let mut h: u32 = 2166136261u32;
@@ -157,9 +155,8 @@ const fn symbol_key(hash: u32, ns: u8) u64 {
     return ns as u64 << 32 | hash as u64;
 }
 
-// ---------------------------------------------------------------------------------------------------------
-
 extend Resolver {
+    /// A resolver over `ast` (mutated in place) with `package` (may be null) supplying imports.
     pub fn new<'a>(ast: &'a mut Ast, source: str<'a>, package: *const loader::Package) Resolver<'a> {
         return Resolver {
             ast: ast,
@@ -181,7 +178,7 @@ extend Resolver {
         };
     }
 
-    // The i-th element of `list` -- refetched each call so a closure-capture commit that grows ast.children
+    // The i-th element of `list`: refetched each call so a closure-capture commit that grows ast.children
     // never leaves a dangling base pointer mid-iteration.
     const fn child(self: &Self, list: NodeList, i: u32) NodeId {
         return unsafe self.ast.list(list)[i as usize];
@@ -191,7 +188,7 @@ extend Resolver {
         return self.ast.at_const(name_node).as_data.name.text;
     }
 
-    // -- scope stack ---------------------------------------------------------------------------------------
+    // scope stack ---------------------------------------------------------------------------------------.
 
     fn scope_enter(self: &mut Self) {
         self.scope_starts.push(self.symbols.len() as u32);
@@ -263,7 +260,7 @@ extend Resolver {
         }
     }
 
-    // Symbol-stack lookup. `idx` is the matched symbol's 1-based stack position (0 = not found), used to
+    // Symbol-stack lookup. `idx` is the matched symbol's 1-based stack position (0 = not found), which
     // tell whether a reference inside a closure binds to a variable declared OUTSIDE it (a capture).
     @c.always_inline
     fn sym_lookup(self: &Self, name: tok::Span, ns: Namespace) SymLookup {
@@ -288,7 +285,7 @@ extend Resolver {
         return SymLookup { decl: NODE_NONE, idx: 0 };
     }
 
-    // -- module-qualified resolution -----------------------------------------------------------------------
+    // module-qualified resolution -----------------------------------------------------------------------.
 
     // Heap-join `count` name-span segments with "::". Caller frees.
     fn join_segs(self: &Self, seg_ids: *const NodeId, count: u32) String {
@@ -326,7 +323,7 @@ extend Resolver {
         return pkg.find(buf.as_str());
     }
 
-    // Resolve every import ONCE, up front: which names denote modules as a single leading segment (the
+    // Resolve every import ONCE, up front, which names denote modules as a single leading segment (the
     // `as` alias, or a single-segment path) and which module ids are glob-imported. name_is_module and
     // glob_lookup then probe these tables instead of rescanning the item list per reference.
     fn scan_imports(self: &mut Self) {
@@ -355,7 +352,7 @@ extend Resolver {
             } else {
                 // The LAST segment is the default qualifier, for one segment or many: `import std::parallel
                 // ::sync;` binds `sync::`, which is what an alias was otherwise needed for. An explicit
-                // alias still wins, and a name already bound by an earlier import keeps it -- two modules
+                // alias still wins, and a name already bound by an earlier import keeps it: two modules
                 // whose last segment matches need an alias to tell apart, exactly as before.
                 nm = self.child(parts, parts.len - 1);
             }
@@ -387,7 +384,7 @@ extend Resolver {
         }
         let pkg = unsafe &*self.package;
         let ids = self.ast.list(parts);
-        // `alias::Type` -- this module's own binding wins over a package-wide path of the same one word.
+        // `alias::Type`; this module's own binding wins over a package-wide path of the same one word.
         if parts.len == 2 {
             let nm = self.name_is_module(self.name_span(unsafe ids[0]));
             if nm.found {
@@ -491,7 +488,7 @@ extend Resolver {
         }
         let pkg = unsafe &*self.package;
         // Join the LONGEST candidate module prefix once; every shorter prefix is a byte prefix of it, so
-        // the probe loop just shrinks the viewed length instead of re-joining (and re-allocating) per try.
+        // the probe loop shrinks the viewed length instead of re-joining (and re-allocating) per try.
         let buf = self.join_segs(&seg[0], nn - 1);
         let mut lens: [usize; 32] = [[0] = 0usize];
         let mut plen: usize = 0;
@@ -510,7 +507,7 @@ extend Resolver {
         let mut m = nn - 1; // longest module prefix leaving >=1 trailing segment
         while m >= 1 && !done {
             // A ONE-segment prefix is this module's own import binding before it is a package path. The
-            // other order lets any module anywhere hijack a local alias just by importing a module whose
+            // other order lets any module anywhere hijack a local alias merely by importing a module whose
             // path is that one word: `import time;` (ffi) in one file made every `time::` elsewhere resolve
             // to it, including inside std, where the alias plainly says std::parallel::time.
             let mut found: i32 = -1;
@@ -528,7 +525,7 @@ extend Resolver {
             if found >= 0 {
                 let mid = found as ModuleId;
                 if nn - m == 1 {
-                    // module::decl -- a function (preferred) or type
+                    // module::decl; a function (preferred) or type.
                     let dn = self.name_span(unsafe seg[m as usize]);
                     let dnm = (unsafe (self.source.ptr() + dn.start as usize)) as *const char;
                     let dl = (dn.end - dn.start) as usize;
@@ -552,13 +549,14 @@ extend Resolver {
                     }
                     handled = true;
                 } else if nn - m == 2 {
-                    // module::Type::method -- record the Type
+                    // module::Type::method; record the Type.
                     let chain1 = chain[1];
                     let tspan = self.name_span(unsafe seg[m as usize]);
                     self.resolve_module_decl(chain1, mid, tspan, true, "type");
                     handled = true;
                 }
-                done = true; // deeper than module::Type::method is not supported here
+                // Deeper than module::Type::method is not supported here.
+                done = true;
             }
             if !done {
                 m = m - 1;
@@ -570,7 +568,7 @@ extend Resolver {
         return handled;
     }
 
-    // -- references ----------------------------------------------------------------------------------------
+    // references ----------------------------------------------------------------------------------------.
 
     // Commit a scope-stack hit: record captures and the resolution. `idx` is the matched symbol's 1-based
     // stack position from sym_lookup.
@@ -646,8 +644,8 @@ extend Resolver {
     }
 
     // Does this name resolve in `ns`, without committing to it or reporting if it does not? The one caller
-    // is the generic-argument list, where `Foo<Bar>` is structurally ambiguous -- `Bar` may name a type or a
-    // const -- so both readings have to be tried before either is blamed.
+    // is the generic-argument list, where `Foo<Bar>` is structurally ambiguous: `Bar` may name a type or a
+    // const, so both readings have to be tried before either is blamed.
     fn name_resolves(self: &Self, name: tok::Span, ns: Namespace) bool {
         if self.sym_lookup(name, ns).decl != NODE_NONE {
             return true;
@@ -674,12 +672,12 @@ extend Resolver {
     // One generic argument, which the grammar cannot tell apart from a type. `parse_type_args` only takes a
     // bare integer literal as a const value; every other argument is parsed as a type, so `Array<i64, N>`
     // arrives here as a one-part type path whether `N` names a type or a const. Prefer the type reading, and
-    // take the value reading only when the name is not a type but IS a value -- which is what lets a named
-    // const stand where previously only a literal could. A name that is neither falls through to
+    // take the value reading only when the name is not a type but IS a value, which is what lets a named
+    // const stand where a literal is otherwise required. A name that is neither falls through to
     // `resolve_type`, so the diagnostic still blames a missing type.
     fn resolve_generic_arg(self: &mut Self, a: NodeId) {
-        // A braced argument (`Foo<{N * 2}>`) is an expression, and its names -- the enclosing generic's
-        // own parameters -- resolve as values, not as types.
+        // A braced argument (`Foo<{N * 2}>`) is an expression, and its names: the enclosing generic's
+        // own parameters: resolve as values, not as types.
         let k = self.ast.at_const(a).kind;
         if k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL {
             self.resolve_expr(a);
@@ -712,7 +710,7 @@ extend Resolver {
         self.resolve_ref_miss(refn, name, ns, kind);
     }
 
-    // -- types ---------------------------------------------------------------------------------------------
+    // types ---------------------------------------------------------------------------------------------.
 
     fn resolve_bounds(self: &mut Self, bounds: NodeList) {
         for i in 0..bounds.len {
@@ -723,8 +721,8 @@ extend Resolver {
 
     fn declare_generics(self: &mut Self, generics: NodeList) {
         // Monomorphization carries an instance's type arguments in fixed-size arrays (`CgInst.args` /
-        // `TyArgs8` in codegen), so the arity has a hard ceiling. Rejecting it here -- the one place every
-        // generic item declares its parameters -- is what keeps those arrays from being written past.
+        // `TyArgs8` in codegen), so the arity has a hard ceiling. Rejecting it here: the one place every
+        // generic item declares its parameters: is what keeps those arrays from being written past.
         if generics.len > MAX_TYPE_PARAMS {
             let over = self.child(generics, MAX_TYPE_PARAMS);
             let sp = self.ast.at_const(over).span;
@@ -752,8 +750,8 @@ extend Resolver {
             let gp = self.ast.at_const(gid).as_data.generic_param;
             self.resolve_bounds(gp.bounds);
             if gp.default_type != NODE_NONE {
-                // A CONST parameter's default is a VALUE -- a named constant spelled as a bare path, or
-                // a braced expression -- so it resolves in the value namespace, not the type one.
+                // A CONST parameter's default is a VALUE: a named constant spelled as a bare path, or
+                // a braced expression, so it resolves in the value namespace, not the type one.
                 let dk = self.ast.at_const(gp.default_type).kind;
                 if gp.is_const && dk == NodeKind::NODE_TYPE_PATH && self.ast.at_const(gp.default_type).as_data.type_path.parts.len == 1 {
                     let first = self.child(self.ast.at_const(gp.default_type).as_data.type_path.parts, 0);
@@ -893,7 +891,7 @@ extend Resolver {
         }
     }
 
-    // -- items ---------------------------------------------------------------------------------------------
+    // items ---------------------------------------------------------------------------------------------.
 
     fn resolve_function(self: &mut Self, id: NodeId) {
         let fd = self.ast.at_const(id).as_data.function;
@@ -946,10 +944,11 @@ extend Resolver {
                 self.declare(fld.name, mid, Namespace::NS_VALUE);
                 self.resolve_type(fld.ty);
             } else {
-                // NODE_VARIANT
+                // NODE_VARIANT.
                 let vr = self.ast.at_const(mid).as_data.variant;
                 self.declare(vr.name, mid, Namespace::NS_VALUE);
-                self.resolve_expr(vr.value); // explicit discriminant (NODE_NONE when absent)
+                // Explicit discriminant (NODE_NONE when absent).
+                self.resolve_expr(vr.value);
                 for j in 0..vr.payload.len {
                     let pid = self.child(vr.payload, j);
                     let pk = self.ast.at_const(pid).kind;
@@ -995,7 +994,7 @@ extend Resolver {
                 self.scope_enter();
                 self.declare_generics(ag.generics);
                 if ag.is_tuple {
-                    // tuple struct: members ARE type nodes
+                    // Tuple struct: members ARE type nodes.
                     for i in 0..ag.members.len {
                         let mid = self.child(ag.members, i);
                         self.resolve_type(mid);
@@ -1010,7 +1009,7 @@ extend Resolver {
                 self.scope_enter();
                 let old_self = self.current_self;
                 let old_items = self.current_self_items;
-                // Self is in scope for the interface's OWN generics, not just its items: an operator
+                // Self is in scope for the interface's OWN generics, not only its items: an operator
                 // interface names it in a parameter default (`Mul<Rhs = Self>`).
                 self.current_self = DefId { module: self.ast.module, node: id };
                 self.current_self_items = it.items;
@@ -1059,7 +1058,8 @@ extend Resolver {
                     self.current_self = DefId { module: self.ast.module, node: id };
                 }
                 let saved_generic = self.in_generic;
-                self.in_generic = saved_generic || ex.generics.len > 0; // methods inherit the extend's generics
+                // Methods inherit the extend's generics.
+                self.in_generic = saved_generic || ex.generics.len > 0;
                 let old_items = self.current_self_items;
                 self.current_self_items = ex.items;
                 self.resolve_associated_items(ex.items);
@@ -1088,7 +1088,7 @@ extend Resolver {
         };
     }
 
-    // -- statements ----------------------------------------------------------------------------------------
+    // statements ----------------------------------------------------------------------------------------.
 
     fn resolve_if(self: &mut Self, id: NodeId) {
         let ifd = self.ast.at_const(id).as_data.if_stmt;
@@ -1104,7 +1104,7 @@ extend Resolver {
     }
 
     // A function/closure BODY shares its parameters' scope (C semantics): a top-level `let` that
-    // reuses a parameter name is a duplicate definition, not a shadow -- the emitted C would be a
+    // reuses a parameter name is a duplicate definition, not a shadow: the emitted C would be a
     // same-scope redefinition otherwise.
     fn resolve_block_stmts(self: &mut Self, id: NodeId) {
         let stmts = self.ast.at_const(id).as_data.block.statements;
@@ -1129,15 +1129,17 @@ extend Resolver {
                 self.resolve_expr(ld.value);
                 let nmkind = self.ast.at_const(ld.name).kind;
                 if nmkind == NodeKind::NODE_PATTERN_TUPLE {
-                    // `let (a, b) = ..`: each element declares itself
+                    // `let (a, b) = ..`: each element declares itself.
                     let children = self.ast.at_const(ld.name).as_data.pattern.children;
                     for i in 0..children.len {
                         let cid = self.child(children, i);
                         self.declare(cid, cid, Namespace::NS_VALUE);
-                        self.ast.set_resolution(cid, id); // back-point to the let so mutability is recoverable
+                        // Back-point to the let so mutability is recoverable.
+                        self.ast.set_resolution(cid, id);
                     }
                 } else {
-                    self.declare(ld.name, id, Namespace::NS_VALUE); // bound only after its initializer
+                    // Bound only after its initializer.
+                    self.declare(ld.name, id, Namespace::NS_VALUE);
                 }
             },
             NODE_CONST => {
@@ -1178,7 +1180,7 @@ extend Resolver {
             },
             NODE_SELECT => {
                 // Sugar marker. Each arm's operation is already taken apart (a channel, a duration, or
-                // nothing), so there is nothing here but ordinary expressions -- plus the value-less `let`
+                // nothing), so there is nothing here but ordinary expressions: plus the value-less `let`
                 // the parser built for a binding arm, declared in a scope of its own so the body can use
                 // the name and the next arm cannot.
                 let arms = self.ast.at_const(id).as_data.block.statements;
@@ -1203,7 +1205,8 @@ extend Resolver {
             },
             NODE_FOR | NODE_INLINE_FOR => {
                 let fr = self.ast.at_const(id).as_data.for_stmt;
-                self.resolve_expr(fr.iterable); // evaluated before the binding is in scope
+                // Evaluated before the binding is in scope.
+                self.resolve_expr(fr.iterable);
                 self.scope_enter();
                 self.declare(fr.binding, id, Namespace::NS_VALUE);
                 self.resolve_block(fr.body);
@@ -1211,7 +1214,7 @@ extend Resolver {
             },
             NODE_PARALLEL_FOR => {
                 // Sugar marker; `body` is the closure the parser built over the binding, so resolving
-                // it AS a closure is what fills its captures -- desugar (which runs after this pass)
+                // it AS a closure is what fills its captures: desugar (which runs after this pass)
                 // could not. The binding is the closure's parameter, not a loop binding.
                 let fr = self.ast.at_const(id).as_data.for_stmt;
                 self.resolve_expr(fr.iterable);
@@ -1233,7 +1236,7 @@ extend Resolver {
         };
     }
 
-    // -- expressions ---------------------------------------------------------------------------------------
+    // expressions ---------------------------------------------------------------------------------------.
 
     fn resolve_expr(self: &mut Self, id: NodeId) {
         if id == NODE_NONE {
@@ -1242,7 +1245,8 @@ extend Resolver {
         let kind = self.ast.at_const(id).kind;
         switch kind {
             NODE_IDENTIFIER => {
-                self.resolve_ref(id, id, Namespace::NS_VALUE, "value"); // also covers 'self'
+                // Also covers 'self'.
+                self.resolve_ref(id, id, Namespace::NS_VALUE, "value");
             },
             NODE_UNARY => {
                 let op = self.ast.at_const(id).as_data.unary.operand;
@@ -1352,7 +1356,7 @@ extend Resolver {
                 }
             },
             NODE_WHILE => {
-                // `loop { .. }` as an expression
+                // `loop { .. }` as an expression.
                 let body = self.ast.at_const(id).as_data.while_stmt.body;
                 self.resolve_block(body);
             },
@@ -1362,7 +1366,7 @@ extend Resolver {
                     let eid = self.child(elements, i);
                     let ek = self.ast.at_const(eid).kind;
                     if ek == NodeKind::NODE_FIELD_INITIALIZER {
-                        // designated `[index] = value`
+                        // designated `[index] = value`.
                         let fi = self.ast.at_const(eid).as_data.field_initializer;
                         self.resolve_expr(fi.name);
                         self.resolve_expr(fi.value);
@@ -1422,7 +1426,8 @@ extend Resolver {
                 self.resolve_ref(mb.object, mb.object, Namespace::NS_TYPE, "type");
             }
         } else {
-            self.resolve_expr(mb.object); // member name needs a type; deferred to the type checker
+            // Member name needs a type; deferred to the type checker.
+            self.resolve_expr(mb.object);
         }
     }
 
@@ -1441,12 +1446,12 @@ extend Resolver {
                 }
                 let look = self.sym_lookup(name, Namespace::NS_TYPE);
                 if look.decl != NODE_NONE {
-                    // a scope-stack type: commit it directly (no re-lookup)
+                    // A scope-stack type: commit it directly (no re-lookup).
                     self.resolve_ref_hit(v, look.decl, look.idx, Namespace::NS_TYPE);
                     return;
                 }
                 if self.package != null {
-                    // a prelude/glob type: commit the hit found while probing
+                    // A prelude/glob type: commit the hit found while probing.
                     let pkg = unsafe &*self.package;
                     let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
                     let nl = (name.end - name.start) as usize;
@@ -1494,7 +1499,7 @@ extend Resolver {
             self.resolve_type(param.ty);
         }
         // The DECLARED return type needs resolving too. Unresolved, it lowers to no type at all for
-        // anything that is not a builtin -- and a builtin needs no resolution, which is exactly why this
+        // anything that is not a builtin, and a builtin needs no resolution, which is exactly why this
         // went unnoticed: `fn() u8` worked and `fn() SomeStruct` silently had no return type, so every
         // signature check against it (a `F: fn() T` bound, say) compared against nothing.
         for i in 0..cl.returns.len {
@@ -1522,11 +1527,12 @@ extend Resolver {
         }
         let list = self.ast.commit(mark);
         self.ast.at(id).as_data.closure.captures = list;
-        self.closures.truncate(top); // frees the popped ClosureScope's caps (Vector::truncate drops removed elems)
+        // Frees the popped ClosureScope's caps (Vector::truncate drops removed elems).
+        self.closures.truncate(top);
         self.scope_exit();
     }
 
-    // -- patterns ------------------------------------------------------------------------------------------
+    // patterns ------------------------------------------------------------------------------------------.
 
     fn resolve_pattern(self: &mut Self, id: NodeId) {
         if id == NODE_NONE {
@@ -1535,7 +1541,7 @@ extend Resolver {
         let kind = self.ast.at_const(id).kind;
         switch kind {
             NODE_IDENTIFIER => {
-                // shorthand struct-pattern field binding
+                // Shorthand struct-pattern field binding.
                 self.declare(id, id, Namespace::NS_VALUE);
             },
             NODE_PATTERN_NAME => {
@@ -1554,7 +1560,7 @@ extend Resolver {
                 }
             },
             NODE_PATTERN_OR => {
-                // alternatives bind the same names; declare the first's
+                // Alternatives bind the same names; declare the first's.
                 let children = self.ast.at_const(id).as_data.pattern.children;
                 if children.len != 0 {
                     let c0 = self.child(children, 0);
@@ -1565,7 +1571,7 @@ extend Resolver {
         };
     }
 
-    // -- driver --------------------------------------------------------------------------------------------
+    // driver --------------------------------------------------------------------------------------------.
 
     // Top-level items are visible regardless of order, so declare them all before resolving bodies.
     fn collect_items(self: &mut Self, items: NodeList) {
@@ -1658,14 +1664,15 @@ extend Resolver {
         self.errors.finalize(self.source, fstr);
     }
 
+    /// True once any resolution error is recorded.
     pub const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
+    /// Print the accumulated diagnostics to stderr.
     pub fn log_errors(self: &Self) {
         self.errors.log();
     }
 
-    // ---- lint: unused local variables and parameters --------------------------------------------
     // A decl is "used" when any node's resolution points at it. Only lets, and params of fns/closures
     // that have bodies, are considered; `self` and `_`-prefixed names opt out.
     const fn lint_name_span(self: &Self, name: NodeId) tok::Span {
@@ -1702,8 +1709,8 @@ extend Resolver {
                 used.set(d.node as usize, true);
             }
         }
-        // params of interface methods (signatures, default bodies) and of `extend X as Iface`
-        // conformance impls are contract-fixed: exempt them all
+        // Params of interface methods (signatures, default bodies) and of `extend X as Iface`
+        // conformance impls are contract-fixed: exempt them all.
         let items = self.ast.at_const(self.ast.root).as_data.program.items;
         for k in 0..items.len {
             let iid = unsafe self.ast.list(items)[k as usize];
@@ -1731,7 +1738,7 @@ extend Resolver {
                 }
             }
         }
-        // Only decls the resolver actually declared: @platform-dropped items stay in the node pool but
+        // Only decls the resolver declared: @platform-dropped items stay in the node pool but
         // are never resolved, and must not be reported as blanket-unused.
         let mut seen = Vector::<bool>::new();
         seen.reserve(n);
@@ -1770,7 +1777,6 @@ extend Resolver {
         }
     }
 
-    // ---- lint: back-to-back stores -- the first assigned value is overwritten before any read ----
     // Scope is deliberately tight (zero false positives): the two stores must be ADJACENT statements
     // of one block, both plain `=` to the same bare local, the second RHS must not read it, and
     // bindings that are address-taken or closure-captured anywhere are exempt (aliased reads).
@@ -1828,7 +1834,7 @@ extend Resolver {
         while i as usize < n {
             let nd = *self.ast.at_const(i);
             if nd.kind == NodeKind::NODE_UNARY && nd.as_data.unary.op == TokenType::Ampersand {
-                // the borrowed place's root binding can be read through the alias from anywhere
+                // The borrowed place's root binding can be read through the alias from anywhere.
                 let mut o = nd.as_data.unary.operand;
                 loop {
                     let ok = self.ast.at_const(o).kind;
@@ -1879,7 +1885,7 @@ extend Resolver {
                 if decl == NODE_NONE || exempt[decl as usize] {
                     continue;
                 }
-                // first store: `let <decl> = v;` or `<decl> = v;`
+                // first store: `let <decl> = v;` or `<decl> = v;`.
                 let mut sp1 = tok::Span::empty();
                 if self.ast.at_const(s1).kind == NodeKind::NODE_LET && s1 == decl && self.ast.at_const(s1).as_data.let_stmt.value != NODE_NONE {
                     sp1 = self.ast.at_const(s1).span;
@@ -1890,7 +1896,7 @@ extend Resolver {
                     }
                     sp1 = self.ast.at_const(s1).span;
                 }
-                // the second RHS must not read the binding (`x = f(x)` is a read)
+                // the second RHS must not read the binding (`x = f(x)` is a read).
                 let rsp = self.ast.at_const(self.ast.at_const(a2).as_data.binary.right).span;
                 let mut read = false;
                 for k in 0..self.ast.resolutions_len() {
@@ -1923,7 +1929,6 @@ extend Resolver {
         }
     }
 
-    // ---- lint: loop labels never targeted by a break/continue ------------------------------------
     fn lint_unused_labels(self: &mut Self) {
         let n = self.ast.nodes.len();
         let mut i: u32 = 1;

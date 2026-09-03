@@ -1,4 +1,4 @@
-// Self-hosted port of tests/errors_test.c: direct coverage of utils::errors -- emit (message + span
+// Self-hosted port of tests/errors_test.c: direct coverage of utils::errors; emit (message + span
 // collection), finalize (1-based line:col, caret count/clamping, \r/\n/\r\n line starts, long-line
 // windowing, file prefix, notes, offset-past-EOF). The two log-capture cases (plain vs pty-colored
 // stderr) test terminal I/O plumbing, not rendering logic, and are covered by the C suite.
@@ -38,7 +38,8 @@ fn emit_collects() {
     e.emit(12, 3, format("count is {} for {}", 7, "x"));
     assert(e.errors.len() == 1, "one record collected");
     let d = e.errors.at(0);
-    assert(d.msg.eq_str("count is 7 for x"), "format() rendering"); // records stay raw
+    // Records stay raw.
+    assert(d.msg.eq_str("count is 7 for x"), "format() rendering");
     assert(d.start == 12 && d.len == 3, "span recorded verbatim");
     assert(d.severity == diag::SEV_ERROR && d.note_head == diag::NOTE_NONE, "record fields");
 }

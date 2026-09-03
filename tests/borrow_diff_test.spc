@@ -162,8 +162,6 @@ fn both_reject_same_line(src: str, name: str) {
     assert(hit, "a primary error line coincides");
 }
 
-// ---- coinciding rejections ------------------------------------------------------------------------
-
 @test
 fn diff_use_after_move() {
     both_reject_same_line(
@@ -264,13 +262,11 @@ fn prod_verdict(p: &mut loader::Package, out: &mut Vector<u32>) {
     }
 }
 
-// ---- reviewed differences -------------------------------------------------------------------------
-
 @test
 fn diff_partial_move_reviewed() {
     // The established walk rejects the FIELD MOVE itself (`takes(p.a)`: no partial moves out of a
     // Free value). The loan analysis tracks the partial move and rejects the later WHOLE-VALUE use
-    // instead -- one line later, by design (location-sensitive precision; drop elaboration owns the
+    // instead: one line later, by design (location-sensitive precision; drop elaboration owns the
     // remaining-fields story).
     let mut old_errs = Vector::<u32>::new();
     let p = typed_both(
@@ -299,7 +295,6 @@ fn diff_return_field_move_reviewed() {
     new_verdict(&p, "f", &mut new_errs);
     assert(new_errs.len() == 0, "the loan analysis tracks the partial move");
 }
-// ---- acceptance parity ----------------------------------------------------------------------------
 
 @test
 fn diff_closure_capture_accepted() {

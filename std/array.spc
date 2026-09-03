@@ -1,11 +1,12 @@
 // Array<T, const N: usize>: a fixed-size inline array, monomorphized per (element type, length). The N
 // elements live directly in the value (no heap, no allocator) and every slot always holds a valid element,
-// so the length-mutating parts of Vector's API (push/pop/insert/remove/clear/...) do not exist -- everything
+// so the length-mutating parts of Vector's API (push/pop/insert/remove/clear/...) do not exist: everything
 // length-preserving does, with the same semantics: peek accessors borrow (`at` -> `&T`, bounds-checked
 // `get`/`first`/`last`/`find` -> `Option<&T>`), `set` frees the replaced element. Construct with `new()`
 // (every slot `T::default()`) or `filled(&x)` (every slot a clone of `x`). Conditionally `Free`: an Array of
 // a Free element type deep-frees its elements at scope exit; an Array of plain values stays a plain value.
 
+/// A fixed-size inline array of N elements, always fully initialized; the prelude type behind `[T; N]`.
 pub struct Array<T, const N: usize> {
     data: [T; N], // the N elements, all always initialized (private)
 }
@@ -15,14 +16,17 @@ extern "C" {
 }
 
 extend<T, const N: usize> Array<T, N> {
+    /// Always N.
     pub const fn len(self: &Array<T, N>) usize {
         return N;
     }
 
+    /// Always N.
     pub const fn capacity(self: &Array<T, N>) usize {
         return N;
     }
 
+    /// True iff N is 0.
     pub const fn is_empty(self: &Array<T, N>) bool {
         return N == 0;
     }
@@ -35,13 +39,13 @@ extend<T, const N: usize> Array<T, N> {
         return &unsafe self.data[index];
     }
 
-    /// Unchecked element access -- the caller PROVES `index < N` (hot loops with an established
+    /// Unchecked element access: the caller PROVES `index < N` (hot loops with an established
     /// bound). Out of range is undefined behavior, hence `unsafe`.
     pub unsafe const fn get_unsafe(self: &Array<T, N>, index: usize) &T {
         return &self.data[index];
     }
 
-    /// Bounds-checked element access -- borrows the element (`&T`) so the Array keeps sole ownership.
+    /// Bounds-checked element access: borrows the element (`&T`) so the Array keeps sole ownership.
     pub const fn get(self: &Array<T, N>, index: usize) Option<&T> {
         if index >= N {
             return Option::<&T>::None;
@@ -57,10 +61,12 @@ extend<T, const N: usize> Array<T, N> {
         unsafe self.data[index] = value;
     }
 
+    /// The first element, None for an empty array.
     pub const fn first(self: &Array<T, N>) Option<&T> {
         return self.get(0);
     }
 
+    /// The last element, None for an empty array.
     pub const fn last(self: &Array<T, N>) Option<&T> {
         if N == 0 {
             return Option::<&T>::None;
@@ -127,6 +133,7 @@ extend<T, const N: usize> Array<T, N> {
         return Option::<&T>::None;
     }
 
+    /// A by-reference iterator over the elements in order.
     pub const fn iter(self: &Array<T, N>) VecIter<T> {
         return VecIter::<T> { data: self.as_ptr(), idx: 0, stop: N };
     }
@@ -135,6 +142,7 @@ extend<T, const N: usize> Array<T, N> {
 // Constructors. Fields are private, so these are the public way in: `new()` default-constructs every
 // slot; `filled(&x)` clones `x` into every slot.
 extend<T: Default, const N: usize> Array<T, N> {
+    /// An array of N default values.
     pub const fn new() Array<T, N> {
         let mut a = Array::<T, N> {};
         let p = (&mut unsafe a.data[0]) as *mut T;
@@ -146,6 +154,7 @@ extend<T: Default, const N: usize> Array<T, N> {
 }
 
 extend<T: Clone, const N: usize> Array<T, N> {
+    /// An array of N clones of `x`.
     pub const fn filled(x: &T) Array<T, N> {
         let mut a = Array::<T, N> {};
         let p = (&mut unsafe a.data[0]) as *mut T;
@@ -337,8 +346,8 @@ extend<T, const N: usize> Array<T, N> {
     }
 }
 
-// Index conformances: `a[i]` borrows the element in place (unchecked, like `at`), and `a[lo..hi]` -- any
-// range form, `..=` including the end, an open end meaning `N` -- is a borrowed `[]T` view of the
+// Index conformances: `a[i]` borrows the element in place (unchecked, like `at`), and `a[lo..hi]`; any
+// range form, `..=` including the end, an open end meaning `N`: is a borrowed `[]T` view of the
 // elements. Views alias the inline buffer, so they are invalidated when the Array is moved.
 extend<T, const N: usize> Array<T, N> as Index<T, []T> {
     pub const fn index(self: &Array<T, N>, i: usize) &T {
@@ -364,7 +373,7 @@ extend<T, const N: usize> Array<T, N> as Index<T, []T> {
 }
 
 // The writable counterpart: `a[i] = x` stores through the returned element pointer (a plain `=` over a
-// Free element frees the replaced value first, compiler-inserted -- same semantics as `set`);
+// Free element frees the replaced value first, compiler-inserted: same semantics as `set`);
 // `index_range_mut` is an in-place writable view.
 extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
     pub const fn index_mut(self: &mut Array<T, N>, i: usize) &mut T {

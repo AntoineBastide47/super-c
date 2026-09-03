@@ -1,14 +1,12 @@
-// JSON value + parser for the LSP: a Super-C port of the author's C++ Serde::JSON / Serde::JSONParser
-// library (JSON.hpp/cpp + JsonParser.hpp/cpp), on existing std types. Kept from the original: ordered
-// key/value pair objects, the iterative token-dispatch parser over an explicit value stack (no recursion,
+// JSON value + parser for the LSP: ordered key/value pair objects,
+// the iterative token-dispatch parser over an explicit value stack (no recursion,
 // depth-capped), SWAR quote/backslash/control scanning, run-copied string decoding with full \uXXXX
-// surrogate handling, and the strict error messages. Adapted: exceptions become Result<JSON, String>,
-// GetX() type mismatches panic, and only the in-memory (string_view) parse path is ported -- the LSP reads
-// whole Content-Length-framed bodies. Two protocol-driven deviations in dump(): strings are re-escaped on
+// surrogate handling, and the strict error messages. Two protocol-driven deviations in dump(): strings are re-escaped on
 // output (the wire format must be valid JSON) and integral numbers print without a ".0" suffix (LSP
 // positions and ids are integers).
 import string as cstring;
 
+/// JSON value kinds (JSON.kind).
 pub const JT_NULL: u8 = 0;
 pub const JT_BOOL: u8 = 1;
 pub const JT_NUMBER: u8 = 2;
@@ -18,7 +16,7 @@ pub const JT_OBJECT: u8 = 5;
 
 const MAX_NESTING_DEPTH: usize = 1024;
 
-/// One ordered object member (the C++ JSONObject is a vector of pairs, not a map: order preserved).
+/// One ordered object member
 pub struct JSONPair {
     pub key: String,
     pub value: JSON,
@@ -53,60 +51,70 @@ extend JSON {
         };
     }
 
+    /// A boolean value.
     pub fn boolean(value: bool) JSON {
         let mut j = JSON::make(JT_BOOL);
         j.b = value;
         return j;
     }
 
+    /// A number value.
     pub fn number(value: f64) JSON {
         let mut j = JSON::make(JT_NUMBER);
         j.num = value;
         return j;
     }
 
+    /// An integer, stored as f64 (exact below 2^53).
     pub fn integer(value: i64) JSON {
         return JSON::number(value as f64);
     }
 
+    /// A string value; `value` is copied.
     pub fn str(value: str) JSON {
         let mut j = JSON::make(JT_STRING);
         j.s = String::from_str(value);
         return j;
     }
 
-    /// Takes ownership of `value` (no copy) -- the JSON(std::string&&) constructor.
+    /// Takes ownership of `value` (no copy): the JSON(std::string&&) constructor.
     pub fn string(value: String) JSON {
         let mut j = JSON::make(JT_STRING);
         j.s = value;
         return j;
     }
 
+    /// An empty array.
     pub fn array() JSON {
         return JSON::make(JT_ARRAY);
     }
 
+    /// An empty object.
     pub fn object() JSON {
         return JSON::make(JT_OBJECT);
     }
 
+    /// Kind test.
     pub const fn is_null(self: &Self) bool {
         return self.kind == JT_NULL;
     }
 
+    /// Kind test.
     pub const fn is_bool(self: &Self) bool {
         return self.kind == JT_BOOL;
     }
 
+    /// Kind test.
     pub const fn is_array(self: &Self) bool {
         return self.kind == JT_ARRAY;
     }
 
+    /// Kind test.
     pub const fn is_object(self: &Self) bool {
         return self.kind == JT_OBJECT;
     }
 
-    // Checked accessors: the C++ GetX() throw std::logic_error on a type mismatch; here they panic.
+    /// The boolean. Panics: not a boolean.
     pub const fn get_bool(self: &Self) bool {
         if self.kind != JT_BOOL {
             panic("JSON::get_bool called on a non-boolean type");
@@ -114,6 +122,7 @@ extend JSON {
         return self.b;
     }
 
+    /// The number. Panics: not a number.
     pub const fn get_number(self: &Self) f64 {
         if self.kind != JT_NUMBER {
             panic("JSON::get_number called on a non-number type");
@@ -121,10 +130,12 @@ extend JSON {
         return self.num;
     }
 
+    /// The number truncated to i64. Panics: not a number.
     pub const fn get_i64(self: &Self) i64 {
         return self.get_number() as i64;
     }
 
+    /// The string. Panics: not a string.
     pub const fn get_string(self: &Self) &String {
         if self.kind != JT_STRING {
             panic("JSON::get_string called on a non-string type");
@@ -132,6 +143,7 @@ extend JSON {
         return &self.s;
     }
 
+    /// The string as a view. Panics: not a string.
     pub const fn get_str(self: &Self) str {
         return self.get_string().as_str();
     }
@@ -164,11 +176,12 @@ extend JSON {
         return Option::<&JSON>::None;
     }
 
+    /// True when this object has member `key` (false for non-objects).
     pub fn contains_key(self: &Self, key: str) bool {
         return self.value(key).is_some();
     }
 
-    // Member as integer / string view with a default -- the common LSP request-field reads.
+    /// Member as integer / string view with a default: the common LSP request-field reads.
     pub fn value_i64(self: &Self, key: str, dflt: i64) i64 {
         return switch self.value(key) {
             Some(v) => switch v.kind == JT_NUMBER {
@@ -179,6 +192,7 @@ extend JSON {
         };
     }
 
+    /// Member `key` as a string view; empty when absent or not a string.
     pub fn value_str(self: &Self, key: str) str {
         return switch self.value(key) {
             Some(v) => switch v.kind == JT_STRING {
@@ -189,6 +203,7 @@ extend JSON {
         };
     }
 
+    /// Element count of an array or member count of an object; 0 for scalars.
     pub const fn size(self: &Self) usize {
         if self.kind == JT_ARRAY {
             return self.arr.len();
@@ -199,7 +214,7 @@ extend JSON {
         panic("JSON::size called on non-array or non-object type");
     }
 
-    // Become an empty value of `kind` (the variant reassignment in C++). Assigning over a field frees what
+    // Become an empty value of `kind`. Assigning over a field frees what
     // it held, so the three stores below are the release as well as the reset.
     fn reset_to(self: &mut Self, kind: u8) {
         self.s = String::new();
@@ -231,7 +246,7 @@ extend JSON {
         self.obj.push(JSONPair { key: String::from_str(key), value: value });
     }
 
-    /// Deep copy (the C++ copy constructor).
+    /// Deep copy
     pub fn clone(self: &Self) JSON {
         let mut j = JSON::make(self.kind);
         j.b = self.b;
@@ -246,6 +261,7 @@ extend JSON {
         return j;
     }
 
+    /// Reserve capacity for `size` elements or members; a no-op for scalars.
     pub fn reserve(self: &mut Self, size: usize) {
         if self.kind == JT_ARRAY {
             self.arr.reserve(size);
@@ -256,9 +272,7 @@ extend JSON {
         }
     }
 
-    /// Serialize; `pretty` indents by two spaces per level (JSON::Dump). Unlike the C++ original this
-    /// re-escapes string content (required for a valid wire format) and prints integral numbers without
-    /// the ".0" suffix (LSP ids/positions are integers).
+    /// Serialize; `pretty` indents by two spaces per level (JSON::Dump).
     pub fn dump(self: &Self, pretty: bool) String {
         let mut out = String::with_capacity(256);
         self.dump_into(&mut out, pretty, 0);
@@ -318,7 +332,7 @@ extend JSON {
 }
 
 extend JSON as Default {
-    /// A JSON null -- the C++ default constructor.
+    /// A JSON null
     pub fn default() JSON {
         return JSON::make(JT_NULL);
     }
@@ -381,12 +395,10 @@ pub fn dump_escaped(s: str, out: &mut String) {
     out.push_byte(b'"');
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Parser (JSONParser's string_view path): one pass over the bytes, dispatching per token class and
-// attaching values through an explicit stack of raw slots -- no recursion, so nesting depth is bounded by
+// attaching values through an explicit stack of raw slots: no recursion, so nesting depth is bounded by
 // MAX_NESTING_DEPTH instead of the C stack. Pointers are stored as usize (a raw *mut to a Free type is
 // move-tracked); slot pointers stay stable because a parent container never grows while a child is open.
-// ---------------------------------------------------------------------------------------------------------
 
 // SWAR helpers (findStringStop): scan 8 bytes at a time for a quote, backslash or control byte.
 const SWAR_LO: u64 = 0x0101010101010101;
@@ -547,7 +559,8 @@ extend JSONParser {
             if p >= to {
                 break;
             }
-            p += 1; // the backslash
+            // The backslash.
+            p += 1;
             if p >= to {
                 self.fail("Unterminated escape sequence");
                 return out;
@@ -612,7 +625,8 @@ extend JSONParser {
                     self.fail_s(format("Unexpected low surrogate \\u{:04X} without preceding high surrogate", first));
                     return out;
                 }
-                out.push(code); // UTF-8 encode (String::push replaces the manual encoder)
+                // UTF-8 encode (String::push replaces the manual encoder).
+                out.push(code);
             } else {
                 self.fail("Invalid escape sequence");
                 return out;
@@ -697,7 +711,7 @@ extend JSONParser {
                 return 0.0;
             }
             // Saturate the exponent at a value past the f64 range so a pathological input like
-            // 1e999999999 costs O(digits), and scale by squaring -- O(log exponent), never linear.
+            // 1e999999999 costs O(digits), and scale by squaring: O(log exponent), never linear.
             let mut exponent: i64 = 0;
             while p < to && self.src[p] >= b'0' && self.src[p] <= b'9' {
                 if exponent < 4096 {
@@ -744,7 +758,7 @@ extend JSONParser {
             }
             let c = self.src[i];
             if is_ws(c) {
-                // skip
+                // Skip.
             } else if c == b'{' {
                 self.depth += 1;
                 if self.depth > MAX_NESTING_DEPTH {
@@ -823,7 +837,7 @@ extend JSONParser {
                     let last = unsafe t.arr.len() - 1;
                     self.stack.push(((&mut unsafe t.arr[last]) as *mut JSON) as usize);
                 } else if self.stack.len() == 1 {
-                    // root arrays reserve by input size (max(16, n/512)) like the original
+                    // Root arrays reserve by input size (max(16, n/512)) like the original.
                     let mut cap: usize = 16;
                     if n / 512 > cap {
                         cap = n / 512;

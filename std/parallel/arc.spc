@@ -3,7 +3,7 @@
 // handle is dropped. Import with `import std::parallel::arc;`.
 //
 // Use it to share one value across threads: move an `Arc` into each thread (clone per thread), read through
-// `get`. `Arc` gives shared (`&T`) access only -- for shared MUTATION put an atomic or a lock inside it
+// `get`. `Arc` gives shared (`&T`) access only: for shared MUTATION put an atomic or a lock inside it
 // (`Arc<Atomic<i64>>`, later `Arc<Mutex<T>>`).
 
 import atomic;
@@ -48,7 +48,7 @@ extend<T> Arc<T> {
 }
 
 // `Arc<T>` shares one value across threads, so it is `Send` and `Sync` exactly when its payload is safe to
-// share -- `T: Send + Sync`. The conformances are explicit (unsafe) assertions: the raw pointer inside would
+// share: `T: Send + Sync`. The conformances are explicit (unsafe) assertions: the raw pointer inside would
 // otherwise make `Arc` structurally neither. The atomic strong count makes the reference counting itself
 // race-free.
 unsafe extend<T: Send + Sync> Arc<T> as Send {}
@@ -56,16 +56,16 @@ unsafe extend<T: Send + Sync> Arc<T> as Send {}
 unsafe extend<T: Send + Sync> Arc<T> as Sync {}
 
 // Dropping a handle atomically decrements the strong count; the thread that observes the count fall to zero
-// owns the teardown -- it deep-frees the value and releases the block.
+// owns the teardown: it deep-frees the value and releases the block.
 extend<T> Arc<T> as Free {
     pub fn free(self: &mut Arc<T>) {
         // AcqRel, not Release + an Acquire fence on the zero path: the decrement chain is what orders every
         // handle's LAST payload access before the teardown (a `WaitGroup` doner is still inside the gate
-        // after publishing zero, and only this drop orders that use before a free) -- and a standalone fence
+        // after publishing zero, and only this drop orders that use before a free), and a standalone fence
         // is outside TSan's memory model, so the race gate could never check the fence form.
         let prev = unsafe atomic::sub_usize(&mut self.ptr.strong, 1, atomics::MemoryOrder::AcqRel as i32);
         if prev == 1 {
-            // Free the value THROUGH a raw pointer (no-op if T isn't Free), like Box::free -- freeing the
+            // Free the value THROUGH a raw pointer (no-op if T isn't Free), like Box::free; freeing the
             // place directly would be a conditional move out of a dereference.
             let vp = (&mut unsafe self.ptr.value) as *mut T;
             vp.free();

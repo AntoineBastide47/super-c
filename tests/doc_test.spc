@@ -2,7 +2,7 @@
 // groups, hard/blank lines, IfBreak trailing commas, indentation, and the flat-width memo.
 import fmt::doc as d;
 
-// group( "foo(" indent(softline join("," line, args)) softline ")" )
+// `group( "foo(" indent(softline join("," line, args)) softline ")" )`.
 fn call_doc(p: &mut d::DocPool, args: []str) d::DocId {
     let mut parts = Vector::<d::DocId>::new();
     parts.push(p.txt("foo("));
@@ -15,7 +15,8 @@ fn call_doc(p: &mut d::DocPool, args: []str) d::DocId {
         }
         inner.push(p.txt(args[i]));
     }
-    inner.push(p.ifbreak(",", false)); // trailing comma only when broken
+    // Trailing comma only when broken.
+    inner.push(p.ifbreak(",", false));
     let ic = p.concat(&inner);
     parts.push(p.indent(ic));
     parts.push(p.softline());
@@ -53,7 +54,7 @@ fn group_breaks_when_too_wide() {
 
 @test
 fn nested_groups_break_outer_first() {
-    // outer group breaks, inner still fits flat on its own line.
+    // Outer group breaks, inner still fits flat on its own line.
     let mut p = d::DocPool::new(null);
     let inner = call_doc(&mut p, ["a", "b"]);
     let mut parts = Vector::<d::DocId>::new();
@@ -108,9 +109,11 @@ fn flat_width_memo() {
     let mut parts = Vector::<d::DocId>::new();
     parts.push(t);
     parts.push(l);
-    parts.push(t); // shared DocId: DAG reuse is legal
+    // Shared DocId: DAG reuse is legal.
+    parts.push(t);
     let cc = p.concat(&parts);
-    assert_eq(p.docs.at(cc as usize).w, 9u32); // 4 + 1 + 4
+    // 4 + 1 + 4.
+    assert_eq(p.docs.at(cc as usize).w, 9u32);
     let h = p.hardline();
     let mut pair = Vector::<d::DocId>::new();
     pair.push(cc);

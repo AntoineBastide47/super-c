@@ -1,7 +1,7 @@
 // Diagnostics for every pass: structured records accumulate as (severity, span, message, note chain)
 // rows against one source buffer; `finalize` dedups the records, then renders each one into a
-// caret-annotated terminal block held in a parallel `rendered_*` store -- it never rewrites a stored
-// record -- and `log` prints warnings then errors. The LSP and the build system read the records
+// caret-annotated terminal block held in a parallel `rendered_*` store (it never rewrites a stored
+// record), and `log` prints warnings then errors. The LSP and the build system read the records
 // directly; nothing parses rendered text back into data.
 // LintFix rows are the structured suggestion store: machine-applicable repairs for `lint --fix`
 // (kind 3 carries generated text via `fix_texts`); `fixable_errs` counts errors carrying one, so
@@ -13,6 +13,7 @@ pub const ERRORS_MAX: usize = 256;
 
 /// Severity values match the LSP's DiagnosticSeverity, so consumers forward them unchanged.
 pub const SEV_ERROR: u8 = 1;
+/// Non-fatal severity; see SEV_ERROR.
 pub const SEV_WARNING: u8 = 2;
 
 /// Empty note-chain link (note indexes are dense u32s into Errors.note_pool).
@@ -63,7 +64,7 @@ pub struct Errors {
     pub rendered_warns: Vector<String>,
     pub fixes: Vector<LintFix>,
     pub fix_texts: Vector<String>, // generated insertion payloads for kind-3 fixes
-    pub fixable_errs: u32, // errors carrying a machine fix -- `lint --fix` may proceed when EVERY error is fixable
+    pub fixable_errs: u32, // errors carrying a machine fix; `lint --fix` may proceed when EVERY error is fixable
     pub seq: u32, // next emission sequence
 }
 
@@ -73,13 +74,13 @@ pub fn cstr<'a>(p: *const char) str<'a> {
     return str::from_raw(p as *const u8, unsafe string::strlen(p));
 }
 
-/// A borrowed `str` view of the source bytes in the span [start, end) -- the idiomatic replacement for the
-/// old `%.*s` (width, source+start) diagnostic argument pair.
+/// A borrowed `str` view of the source bytes in the span [start, end), for diagnostic arguments.
 pub const fn span_str(src: str, start: u32, end: u32) str {
     return src[start as usize..end as usize];
 }
 
 extend Errors {
+    /// An empty accumulator with no heap storage.
     pub fn new() Errors {
         return Errors {
             errors: Vector::<Diagnostic>::new(),
@@ -94,10 +95,12 @@ extend Errors {
         };
     }
 
+    /// True once any error is recorded.
     pub const fn has_errors(self: &Self) bool {
         return self.errors.len() != 0;
     }
 
+    /// True once any warning is recorded.
     pub const fn has_warnings(self: &Self) bool {
         return self.warns.len() != 0;
     }
@@ -173,7 +176,7 @@ extend Errors {
         );
     }
 
-    /// Record a diagnostic that was produced OUT of source order -- a region/lifetime error the solver
+    /// Record a diagnostic produced OUT of source order: a region/lifetime error the solver
     /// only discovers after the whole function body has been walked. `from` is the index the enclosing
     /// function's diagnostics start at; the record is inserted at the first position in [from, len)
     /// whose span starts after `at`, so it lands where a reader expects it instead of after every other
@@ -238,7 +241,7 @@ extend Errors {
         self.attach_note(n - 1, msg);
     }
 
-    /// Attach a note to a SPECIFIC diagnostic (the index `emit_ordered` returned) -- `note` always
+    /// Attach a note to a SPECIFIC diagnostic (the index `emit_ordered` returned); `note` always
     /// targets the last one, which is wrong once a diagnostic has been inserted out of order.
     @c.cold
     pub fn note_at(self: &mut Self, index: usize, msg: String) {
@@ -383,7 +386,7 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
 }
 
 // The `--> file:line:col` location, the offending source line (windowed to 120 cols), and the
-// caret run under the span -- the block every rendered diagnostic shares.
+// caret run under the span: the block every rendered diagnostic shares.
 @c.cold
 fn push_loc_block(out: &mut String, source: str, line_starts: &Vector<u32>, mut off: u32, span: u32, file: str) {
     let src_len = source.len();
@@ -426,7 +429,7 @@ fn push_loc_block(out: &mut String, source: str, line_starts: &Vector<u32>, mut 
     out.push_str("--> ");
     if file.len() != 0 {
         out.push_str(file);
-        out.push_byte(58); // ':'
+        out.push_byte(58);
     }
     out.push_u64(line_no as u64);
     out.push_byte(58);
@@ -440,7 +443,7 @@ fn push_loc_block(out: &mut String, source: str, line_starts: &Vector<u32>, mut 
         t = t / 10;
         nd = nd + 1;
     }
-    out.push_byte(10); // '\n'
+    out.push_byte(10);
     for _ in 0..nd {
         out.push_byte(32);
     }
@@ -448,17 +451,17 @@ fn push_loc_block(out: &mut String, source: str, line_starts: &Vector<u32>, mut 
     out.push_u64(line_no as u64);
     out.push_str(" | ");
     out.push_str(source[disp_start..disp_end]);
-    out.push_byte(10); // '\n'
+    out.push_byte(10);
     for _ in 0..nd {
         out.push_byte(32);
     }
     out.push_str(" | ");
     for _ in 0..caret_col {
         out.push_byte(32);
-    } // ' '
+    }
     for _ in 0..carets {
         out.push_byte(94);
-    } // '^'
+    }
 }
 
 // Render one record into a pretty source-annotated block: the message, the location block, and the
@@ -469,7 +472,7 @@ fn render(d: &Diagnostic, source: str, line_starts: &Vector<u32>, file: str, poo
     out.push_str(kind);
     out.push_str(": ");
     out.push_string(&d.msg);
-    out.push_byte(10); // '\n'
+    out.push_byte(10);
     push_loc_block(&mut out, source, line_starts, d.start, d.len, file);
     let mut n = d.note_head;
     while n != NOTE_NONE {
@@ -480,7 +483,7 @@ fn render(d: &Diagnostic, source: str, line_starts: &Vector<u32>, file: str, poo
     return out;
 }
 
-/// A bare location block for a SECONDARY site -- rendered into a note, where the primary rendering
+/// A bare location block for a SECONDARY site, rendered into a note where the primary rendering
 /// pass cannot reach another file's source. Builds its own line index (cold path).
 @c.cold
 pub fn render_site(source: str, file: str, off: u32, span: u32) String {

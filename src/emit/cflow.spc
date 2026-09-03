@@ -2,12 +2,14 @@
 // derives, in near-linear time over blocks and edges, the facts the emitter needs to reconstruct
 // structured C: reachability from entry, trivial-forward jump threading, reverse-postorder layout,
 // predecessor lists, immediate dominators, loop headers with their break targets, and each branch's
-// join. It reads Core IR only -- it never mutates the body, spells C, or does semantic work. All
+// join. It reads Core IR only; it never mutates the body, spells C, or does semantic work. All
 // storage is per-function and freed with the value.
 import ir::core as ir;
 
+/// The absent block, position, or dominator.
 pub const NONE: u32 = 0xFFFFFFFF;
 
+/// The derived control-flow facts of one body; every vector is indexed by block id (`[n]`).
 pub struct CFlow {
     pub n: u32,
     pub entry: u32, // threaded entry block
@@ -157,11 +159,12 @@ fn raw_succ(b: &ir::CoreBody, x: u32, k: u32) u32 {
 }
 
 extend CFlow {
-    // Threaded k-th successor of x.
+    /// Threaded k-th successor of x.
     pub fn succ(self: &Self, b: &ir::CoreBody, x: u32, k: u32) u32 {
         return *self.thread.at(raw_succ(b, x, k) as usize);
     }
 
+    /// A value with no blocks and no heap storage; `analyze` fills it.
     pub fn new_empty() CFlow {
         return CFlow {
             n: 0,
@@ -275,14 +278,14 @@ extend CFlow {
                 self.s_tdone.set(p as usize, true);
                 self.s_onpath.set(p as usize, false);
             }
-            // a non-trivial start is its own target and is not on the path
+            // A non-trivial start is its own target and is not on the path.
             self.thread.set(x as usize, target);
             self.s_tdone.set(x as usize, true);
         }
         self.entry = *self.thread.at(b.entry as usize);
 
         // Chain fast path: without a TM_SWITCH no block branches, so the reachable CFG is a single
-        // forward chain (a repeated block would be a switchless loop -- bail to the general path).
+        // forward chain (a repeated block would be a switchless loop: bail to the general path).
         // Every derived fact (rpo, preds, dominators, post-dominators, loops, follows) has the
         // closed form the general passes would compute, at O(chain) instead of many passes.
         {
@@ -298,7 +301,8 @@ extend CFlow {
                 let mut ok = true;
                 loop {
                     if *self.reach.at(c as usize) {
-                        ok = false; // a cycle: fall back to the general passes
+                        // A cycle: fall back to the general passes.
+                        ok = false;
                         break;
                     }
                     self.reach.set(c as usize, true);
@@ -319,7 +323,7 @@ extend CFlow {
                         } else {
                             self.idom.set(x as usize, x);
                         }
-                        // dominator tree is the chain itself: nested Euler intervals
+                        // Dominator tree is the chain itself: nested Euler intervals.
                         self.tin.set(x as usize, i as u32);
                         self.tout.set(x as usize, (2 * m - i) as u32);
                     }
@@ -351,7 +355,7 @@ extend CFlow {
                     self.ipdom.set(n as usize, n);
                     return;
                 }
-                // undo the partial chain walk
+                // Undo the partial chain walk.
                 for i in 0..self.order.len() {
                     let x = *self.order.at(i);
                     self.reach.set(x as usize, false);
@@ -362,12 +366,14 @@ extend CFlow {
         }
 
         // Reverse-postorder DFS from entry over threaded edges (iterative; children in edge order).
-        self.s_state.clear(); // 0 unseen, 1 on-stack, 2 done
+        // 0 unseen, 1 on-stack, 2 done.
+        self.s_state.clear();
         for _i in 0..n {
             self.s_state.push(0);
         }
         self.s_stack.clear();
-        self.s_kidx.clear(); // next child index per stack frame
+        // Next child index per stack frame.
+        self.s_kidx.clear();
         self.s_post.clear();
         self.s_stack.push(self.entry);
         self.s_kidx.push(0);
@@ -498,8 +504,8 @@ extend CFlow {
         if self.n == 0 {
             return;
         }
-        // sinks (reachable blocks with no forward successor) -- the exit's reverse-graph successors,
-        // built once so the DFS indexes rather than rescanning all blocks per sink
+        // Sinks (reachable blocks with no forward successor) are the exit's reverse-graph successors,
+        // built once so the DFS indexes rather than rescanning all blocks per sink.
         self.s_sinks.clear();
         for v in 0..self.n {
             if *self.reach.at(v as usize) && n_succ(b, v) == 0 {
@@ -564,7 +570,8 @@ extend CFlow {
                 let mut nd = NONE;
                 let ns = n_succ(b, x);
                 if ns == 0 {
-                    nd = e; // sink: its only reverse-pred is the exit
+                    // Sink: its only reverse-pred is the exit.
+                    nd = e;
                 }
                 for k in 0..ns {
                     let s = self.succ(b, x, k);
@@ -617,7 +624,7 @@ extend CFlow {
     // whose immediate dominator is this one), stamping entry/exit times so dominance is an O(1)
     // interval test instead of an idom-chain walk per query.
     fn compute_domtree(self: &mut Self) {
-        // children CSR from idom
+        // Children CSR from idom.
         self.s_cnt.clear();
         for _i in 0..self.n {
             self.s_cnt.push(0);
@@ -676,7 +683,7 @@ extend CFlow {
         }
     }
 
-    // x dominates y: an O(1) interval test over the dominator-tree Euler tour.
+    /// True when x dominates y: an O(1) interval test over the dominator-tree Euler tour.
     pub const fn dominates(self: &Self, x: u32, y: u32) bool {
         if *self.tin.at(y as usize) == NONE || *self.tin.at(x as usize) == NONE {
             return false;
@@ -738,7 +745,7 @@ extend CFlow {
                     }
                 }
             }
-            // innermost enclosing header per node: the deepest (largest RPO) header wins
+            // Innermost enclosing header per node: the deepest (largest RPO) header wins.
             for mi in 0..self.s_members.len() {
                 let k = *self.s_members.at(mi);
                 let cur = *self.loop_of.at(k as usize);
@@ -763,7 +770,7 @@ extend CFlow {
                 }
             }
             self.loop_follow.set(h as usize, brk);
-            // clear only this loop's membership for the next header
+            // Clear only this loop's membership for the next header.
             for mi in 0..self.s_members.len() {
                 self.s_inloop.set((*self.s_members.at(mi)) as usize, false);
             }
@@ -771,7 +778,7 @@ extend CFlow {
         }
     }
 
-    // Branch join: where a branch's arms reconverge -- its immediate post-dominator, but only when
+    // Branch join: where a branch's arms reconverge, its immediate post-dominator, but only when
     // the branch dominates it (so it is genuinely inside the branch and emitted once, after the
     // arms). NONE when the arms do not rejoin (each terminates, or the continuation is absorbed into
     // an arm because it post-dominates through a path that leaves the branch).

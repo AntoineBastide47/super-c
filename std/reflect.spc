@@ -1,21 +1,21 @@
 // Reflection-derived operations, and the reference for the COMPILE-TIME REFLECTION intrinsics they
-// are written over. The intrinsics are compiler constructs, not functions -- no declaration exists
+// are written over. The intrinsics are compiler constructs, not functions: no declaration exists
 // anywhere, so this header is their documentation.
 //
 //   type_info::<T>()   A non-owning `TypeInfo` descriptor of T (name, kind, size, align, fields,
 //                      variants, meta, methods; see std/core.spc). Folds at compile time; a runtime
 //                      use reads static data. Cannot describe an opaque FFI type. `methods` lists
 //                      every `extend` function declared for a decl-backed or builtin type
-//                      (enumeration only -- a descriptor cannot invoke).
+//                      (enumeration only: a descriptor cannot invoke).
 //   zeroed::<T>()      An all-zero-bytes T. `unsafe`: zero bytes are not a valid value of every
-//                      type. It is the seed the reflection constructors fill field by field --
+//                      type. It is the seed the reflection constructors fill field by field:
 //                      releasing an all-zero value is a no-op for every owning std type.
 //   fields(&v)         The field binder: `inline for f in fields(&v) { .. }` typechecks the body
 //                      ONCE against a symbolic per-field type and the emitter unrolls one copy per
-//                      field, each with the field's concrete type -- no runtime walk, no erasure.
+//                      field, each with the field's concrete type: no runtime walk, no erasure.
 //                      Subjects must be references; `fields(&mut v)` makes each `f.value` a mutable
 //                      place. Iterates a struct, tuple, or union (or a type parameter standing for
-//                      one; on an enum the loop simply has zero copies).
+//                      one; on an enum the loop has zero copies).
 //   variants(&e)       The variant binder, over an enum's declaration order. `v.is_active` is the
 //                      only member that reads the subject; everything else is a per-copy constant.
 //   payloads(v)        The payload sub-binder of the ACTIVE variants loop: it takes the variants
@@ -23,7 +23,7 @@
 //                      through the outer loop's subjects.
 //
 // Every binder form exists only as the iterable of an `inline for` (a `parallel for` or a stored
-// value is rejected), and a closure inside the body may not capture the binder -- its type differs
+// value is rejected), and a closure inside the body may not capture the binder: its type differs
 // per copy. Binder members:
 //
 //   f.name / f.index               `str<'static>` / `usize` copy constants ("_0", "_1", .. for
@@ -41,7 +41,7 @@
 //   p.value / p.index / p.name     One payload of the active variant, like a field.
 //
 // PAIRED subjects: `fields(&a, &b)` / `variants(&a, &b)` bind a second subject of the SAME type.
-// `f.other` (fields, payloads) is the second subject's same field -- always read-only -- and
+// `f.other` (fields, payloads) is the second subject's same field: always read-only; and
 // `v.other_active` tests the second subject's tag. This is what field-wise equality, ordering, and
 // clone-into are built from; there is no way to reach a second value's field without it.
 //
@@ -50,13 +50,13 @@
 // `VariantInfo.meta`, `MethodInfo.meta`; lookups via `.meta("key")` / `.has_meta("key")`). Inside a
 // binder body, `f.has_meta("k")`, `f.meta_bool("k")`, `f.meta_int("k")`, and `f.meta_str("k")` are
 // PER-COPY CONSTANTS (a missing key reads false / 0 / ""; the key must be a string literal), and an
-// `if` over them -- including a `meta_str` compare against a string literal -- folds at emission,
+// `if` over them (including a `meta_str` compare against a string literal) folds at emission,
 // so the untagged copies' bodies are never emitted. A `@reflect` tag on a CONCRETE type
 // additionally EXPORTS its descriptor as the C global `sc_typeinfo_<name>` and registers it at
 // startup: an external tool reads `__sc_reflect_types` (super_rt.h) and walks the same statics the
 // program uses. String values keep their RAW source bytes (escape sequences are not processed).
 //
-// All of it works under the compile-time evaluator (`const fn`, static_assert -- which also runs
+// All of it works under the compile-time evaluator (`const fn`, static_assert, which also runs
 // INSIDE fn bodies, per instantiation for a generic fn), including writes through `&mut f.value`,
 // `zeroed`, payload-less enums (tags read their declared constants), `payloads` projection, and
 // `format`. `if` conditions on per-copy constants (`v.payload == 1`, `f.index != 0`,
@@ -64,8 +64,8 @@
 //
 // The derive helpers below are each written ONCE over these binders and monomorphize per concrete
 // type into exactly the code a hand-written version would be. `Format`/`Hash`/`Eq`/`Ord`/`Clone`/
-// `Default` use them as DEFAULT bodies, so a bare `extend T as I {}` -- or `@derive(I, ..)` on the
-// declaration, which expands to exactly those extends -- derives the implementation; defining the
+// `Default` use them as DEFAULT bodies, so a bare `extend T as I {}`, or `@derive(I, ..)` on the
+// declaration, which expands to exactly those extends: derives the implementation; defining the
 // method overrides it.
 
 /// `"Name { a: 1, b: x }"` for any struct, tuple, or union whose fields all satisfy `Format`.
@@ -126,7 +126,7 @@ pub fn reflect_variant_string<T>(e: &T) String {
     return s;
 }
 
-/// FNV-1a over the ACTIVE variant's tag, then each of its payload values' own `Hash`, in order --
+/// FNV-1a over the ACTIVE variant's tag, then each of its payload values' own `Hash`, in order:
 /// so payload-less variants hash by tag alone, and equal values hash equally.
 pub fn reflect_variant_hash<T>(e: &T) u64 {
     let mut h: u64 = 1469598103934665603u64;
@@ -152,6 +152,7 @@ pub fn reflect_any_string<T>(v: &T) String {
     return reflect_string(v);
 }
 
+/// The derived hash of `v`: field-wise for structs and tuples, variant-wise for enums.
 pub fn reflect_any_hash<T>(v: &T) u64 {
     if type_info::<T>().kind == TypeTag::Enum {
         return reflect_variant_hash(v);
@@ -159,7 +160,7 @@ pub fn reflect_any_hash<T>(v: &T) u64 {
     return reflect_hash(v);
 }
 
-/// Field-by-field equality through each field's own `Eq`, in declaration order -- `fields(a, b)`
+/// Field-by-field equality through each field's own `Eq`, in declaration order: `fields(a, b)`
 /// pairs every field with the other subject's same field.
 pub fn reflect_eq<T>(a: &T, b: &T) bool {
     inline for f in fields(a, b) {
@@ -241,6 +242,7 @@ pub fn reflect_variant_cmp<T>(a: &T, b: &T) i32 {
     return c;
 }
 
+/// The derived equality of `a` and `b`. Panics: T is a union.
 pub fn reflect_any_eq<T>(a: &T, b: &T) bool {
     if type_info::<T>().kind == TypeTag::Union {
         panic("a derived 'eq' covers structs, tuples, and enums; write it by hand for a union");
@@ -251,6 +253,7 @@ pub fn reflect_any_eq<T>(a: &T, b: &T) bool {
     return reflect_eq(a, b);
 }
 
+/// The derived ordering of `a` and `b` (negative, zero, positive). Panics: T is a union.
 pub fn reflect_any_cmp<T>(a: &T, b: &T) i32 {
     if type_info::<T>().kind == TypeTag::Union {
         panic("a derived 'cmp' covers structs, tuples, and enums; write it by hand for a union");
@@ -262,7 +265,7 @@ pub fn reflect_any_cmp<T>(a: &T, b: &T) i32 {
 }
 
 /// A fresh deep copy built field by field: a `zeroed` T seeded, then every field cloned in from the
-/// source through its own `Clone`. Overwriting the zeroed placeholder is safe -- releasing an
+/// source through its own `Clone`. Overwriting the zeroed placeholder is safe: releasing an
 /// all-zero value is a no-op for every owning std type. Enums need the active variant CONSTRUCTED,
 /// and a union's overlapping fields cannot be cloned independently, so both refuse loudly.
 pub fn reflect_clone<T>(v: &T) T {

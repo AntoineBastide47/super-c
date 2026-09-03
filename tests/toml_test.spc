@@ -63,9 +63,14 @@ fn toml_string_escapes() {
 
 @test
 fn toml_rejects_malformed() {
-    assert(toml::parse("bin \"app\"\n", "t").is_none()); // missing '='
-    assert(toml::parse("bin = \"app\n", "t").is_none()); // unterminated string
-    assert(toml::parse("[oops\nbin = \"a\"\n", "t").is_none()); // malformed section
-    assert(toml::parse("a = [1, 2]\n", "t").is_none()); // non-string array
-    assert(toml::parse("a = \"x\" b = \"y\"\n", "t").is_none()); // trailing junk
+    // Missing '='.
+    assert(toml::parse("bin \"app\"\n", "t").is_none());
+    // Unterminated string.
+    assert(toml::parse("bin = \"app\n", "t").is_none());
+    // Malformed section.
+    assert(toml::parse("[oops\nbin = \"a\"\n", "t").is_none());
+    // Non-string array.
+    assert(toml::parse("a = [1, 2]\n", "t").is_none());
+    // Trailing junk.
+    assert(toml::parse("a = \"x\" b = \"y\"\n", "t").is_none());
 }

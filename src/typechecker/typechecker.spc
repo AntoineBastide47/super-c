@@ -1,9 +1,9 @@
 // Type checking for one module: consumes the resolver's AST (+ the Package for imports) and types it
-// in place -- per-node/decl TypeIds, member/method resolutions, call_info, dyn uses, deref chains and
-// generic instances -- everything the borrowck pass and codegen read. Borrow/move/lifetime analysis is
+// in place: per-node/decl TypeIds, member/method resolutions, call_info, dyn uses, deref chains and
+// generic instances: everything the borrowck pass and codegen read. Borrow/move/lifetime analysis is
 // the separate src/borrowck stage (extends TypeChecker, replays bodies after check()); the flow/borrow/
 // region fields here are its state. Invariant: TC-* memoizations must not change type-pool interning
-// order -- emitted C is byte-compared across bootstrap generations.
+// order: emitted C is byte-compared across bootstrap generations.
 import string as cstring;
 import stdio;
 import lexer::token as tok;
@@ -16,15 +16,16 @@ import ir::layout as lay;
 import typechecker::infer as inf;
 import utils::errors as diag;
 
+/// Alias-chain hops before a cycle is reported.
 pub const TYPE_ALIAS_MAX_DEPTH: u32 = 64;
-/// Per-call inference operation budget: obligation processings one call may spend (plan 13.4).
+/// Per-call inference operation budget: obligation processings one call may spend.
 pub const TC_INFER_MAX_OPS: u32 = 1024;
-/// Candidates one call may weigh; the collector stops here and past it the call is an error.
 pub type Lits8 = Array<u8, 8>;
+/// Candidates one call may weigh; the collector stops here and past it the call is an error.
 pub const TC_MAX_CANDIDATES: usize = 8;
 
-/// One candidate's lexicographic score (plan 13.3): fewer safe conversions, then fewer reference
-/// adjustments, then fewer literal defaults, then fewer generic defaults, then more exact matches.
+// One candidate's lexicographic score: fewer safe conversions, then fewer reference
+// adjustments, then fewer literal defaults, then fewer generic defaults, then more exact matches.
 struct CandScore {
     pub viable: bool,
     pub conv: i32,
@@ -50,31 +51,34 @@ const fn score_better(a: &CandScore, b: &CandScore) bool {
     return a.exact > b.exact;
 }
 
+/// Walk budgets: bound nesting, place projection steps, match variants, and borrow-escape depth.
 pub const BOUND_MAX_DEPTH: i32 = 8;
 pub const PLACE_MAX_STEPS: i32 = 16;
 pub const MATCH_MAX_VARIANTS: u32 = 256;
 pub const BORROW_ESCAPE_MAX_DEPTH: u32 = 64;
 
+/// Borrow kinds (Borrow.kind).
 pub const BORROW_SHARED: u8 = 0;
 pub const BORROW_MUT: u8 = 1;
 /// The reserved RegionVid for `'static`: outlives every other region.
 pub const REGION_STATIC: u32 = 0;
-/// "no region" -- a lifetime name that denotes nothing in the current signature.
+/// "no region": a lifetime name that denotes nothing in the current signature.
 pub const REGION_NONE: u32 = 0xFFFFFFFF;
+/// Place-projection step kinds (PStep.kind).
 pub const PS_FIELD: u8 = 0;
 pub const PS_INDEX: u8 = 1;
 pub const PS_DEREF: u8 = 2;
 
-// Variance of a type/lifetime parameter in an aggregate, 2 bits, packed LSB-first per parameter
-// (lifetime params first, then type params). Used for subtyping: `C<'a> <: C<'b>` requires 'a and 'b
-// related per C's variance in that slot. BIVARIANT is the lattice bottom (unconstrained); INVARIANT
-// the top. Composition/join in v_transform / v_join.
+/// Variance of a type/lifetime parameter in an aggregate, 2 bits, packed LSB-first per parameter
+/// (lifetime params first, then type params). Drives subtyping: `C<'a> <: C<'b>` requires 'a and 'b
+/// related per C's variance in that slot. BIVARIANT is the lattice bottom (unconstrained); INVARIANT
+/// the top. Composition/join in v_transform / v_join.
 pub const V_BIVARIANT: u32 = 0;
 pub const V_COVARIANT: u32 = 1;
 pub const V_CONTRAVARIANT: u32 = 2;
 pub const V_INVARIANT: u32 = 3;
 
-// --- fixed-buffer / small-array wrappers (a struct field zero-inits its array) ------------------
+/// Fixed-size scratch arrays (a struct field zero-inits its array).
 pub type Buf96 = Array<char, 96>;
 pub type Buf512 = Array<char, 512>;
 pub type Defs8 = Array<DefId, 8>;
@@ -83,10 +87,10 @@ pub type BoundArr8 = Array<BoundIface, 8>;
 pub type Names14 = Array<*const char, 16>;
 pub type Steps16 = Array<PStep, 16>;
 pub type Keep256 = Array<bool, 256>;
-// Worklist/visited scratch for the outlives closure. The DECLARED outlives graph is signature-sized
-// (a handful of lifetimes), so 32 is ample; overflowing answers "cannot prove", which over-rejects.
+/// Worklist/visited scratch for the outlives closure. The DECLARED outlives graph is signature-sized
+/// (a handful of lifetimes), so 32 is ample; overflowing answers "cannot prove", which over-rejects.
 pub type Regions32 = Array<u32, 32>;
-// Field-chain scratch for resolving a store slot's lifetime through nested aggregates.
+/// Field-chain scratch for resolving a store slot's lifetime through nested aggregates.
 pub type Nodes8 = Array<NodeId, 8>;
 pub type Spans8 = Array<tok::Span, 8>;
 pub type Buf128 = Array<char, 128>;
@@ -120,6 +124,7 @@ pub struct BoundIface {
     pub args: [TypeId; 8],
 }
 
+/// One enclosing loop of the statement under check: its label, node, and `break <value>` type.
 pub struct LoopEntry {
     pub label: tok::Span,
     pub node: NodeId,
@@ -128,7 +133,7 @@ pub struct LoopEntry {
     pub saw_value: bool,
     pub saw_bare: bool,
     // Scope depth on entry to this loop. A binding declared DEEPER than this lives inside the loop
-    // body and therefore dies at the end of each iteration -- which is what makes source-order
+    // body and therefore dies at the end of each iteration, which is what makes source-order
     // last-use reasoning valid for it despite the back edge (see borrow_dead_after).
     pub depth: u32,
 }
@@ -190,6 +195,7 @@ pub struct TcMarkLog {
 }
 
 extend TcMarkLog {
+    /// An empty log.
     pub fn new() TcMarkLog {
         return TcMarkLog {
             kinds: Vector::<u8>::new(),
@@ -207,7 +213,7 @@ pub struct TypeChecker<'a> {
     pub source: str<'a>,
     pub current_self: NodeId,
     pub current_extend: NodeId,
-    /// The per-body mutable walk state (plan 1_type_inference phase 1): expected type, function
+    /// The per-body mutable walk state: expected type, function
     /// state, closures, returns, and unsafe state live here, isolated from the module-wide caches.
     pub icx: inf::InferenceContext,
     /// Read-only package boundary the adapters route lookups through.
@@ -231,7 +237,7 @@ pub struct TypeChecker<'a> {
     pub nmoved_places: u32,
     pub uninit: [NodeId; 256],
     pub nuninit: u32,
-    /// Split-initialization tracking: immutable `let x;` bindings assigned on SOME path so far --
+    /// Split-initialization tracking: immutable `let x;` bindings assigned on SOME path so far;
     /// a second assignment (or one on a path that may repeat) is "cannot assign twice".
     pub late: [NodeId; 256],
     pub nlate: u32,
@@ -248,9 +254,8 @@ pub struct TypeChecker<'a> {
     pub defer_depth: [u32; 256],
     pub ndefers: u32,
     pub in_loop_recheck: bool,
-    // ---- region inference state (per function) ----
     // Next RegionVid to hand out. REGION_STATIC (0) is reserved; the current function's declared
-    // lifetimes take the ids after it (universal -- they outlive the whole body), and every other
+    // lifetimes take the ids after it (universal: they outlive the whole body), and every other
     // region is existential, allocated one per lifetime slot of a value's type as the body is walked.
     pub region_next: u32,
     // Flat storage for region VECTORS: the RegionVids filling a type's lifetime slots, in canonical
@@ -259,7 +264,7 @@ pub struct TypeChecker<'a> {
     pub rv_pool: Vector<u32>,
     pub rv_of: Map<u32, u64>,
     // (module << 32 | TypeId) -> number of lifetime slots in that type. Pure function of the interned
-    // type, so the memo is sound -- same idiom as carries_memo.
+    // type, so the memo is sound: same idiom as carries_memo.
     pub arity_memo: Map<u64, u32>,
     // Per-aggregate variance of each lifetime-then-type parameter, 2 bits each (V_*), packed LSB-first,
     // keyed by decl (module << 32 | node). Lazy + memoized; a recursive-type cycle resolves to the
@@ -276,7 +281,7 @@ pub struct TypeChecker<'a> {
     pub lt_region: Map<u32, u32>,
     // Outlives constraints for the current function, packed (sup << 32 | sub) meaning "sup: sub",
     // i.e. sup outlives sub. Seeded from the signature (`<'a: 'b>` bounds and `where 'a: 'b`) and
-    // later from constraint generation. Cleared per function -- RegionVids are function-scoped.
+    // later from constraint generation. Cleared per function: RegionVids are function-scoped.
     pub outlives: Vector<u64>,
     // Index into `errors` where the CURRENT function's diagnostics begin. Region/lifetime errors are
     // discovered after the body has been walked (the solver only knows once its constraints are
@@ -299,14 +304,14 @@ pub struct TypeChecker<'a> {
     // free-move rules consult them in place of the walk's unsafe_depth.
     pub bc_unsafe_spans: Vector<u64>,
     pub derive_busy: Vector<u64>, // derive-recursion guard (value cycles are infinite-size errors anyway)
-    pub mut_used: Vector<NodeId>, // bindings whose mutability was actually required (unnecessary-mut lint)
+    pub mut_used: Vector<NodeId>, // bindings whose mutability was required (unnecessary-mut lint)
     pub loop_stack: [LoopEntry; 32],
     pub nloops: u32,
     pub loop_floor: u32,
     pub errors: diag::Errors,
     // TC-3: per-decl index of the LAST node whose resolution targets it (built lazily from the
-    // resolver's tables; the one typechecker-added resolution kind that can target a binding --
-    // break/continue -> loop node -- is folded in at its set site). Replaces the full-arena scan
+    // resolver's tables; the one typechecker-added resolution kind that can target a binding
+    // (break/continue -> loop node) is folded in at its set site). Replaces the full-arena scan
     // in borrow_dead_after; answers are identical by construction.
     pub last_use: Vector<NodeId>,
     pub last_use_built: bool,
@@ -326,7 +331,7 @@ pub struct TypeChecker<'a> {
     // TC-8: (module<<32|method) -> enclosing extend/interface item (NODE_NONE misses included).
     pub encl_ext_memo: Map<u64, NodeId>,
     pub encl_trait_memo: Map<u64, NodeId>,
-    // TC-7: dyn-fn canonicalization worklist -- pool indices of TYPE_DYN-over-fn entries, collected
+    // TC-7: dyn-fn canonicalization worklist; pool indices of TYPE_DYN-over-fn entries, collected
     // incrementally (each pool index scanned once); list order == pool order == old rescan order.
     pub dynfn_list: Vector<TypeId>,
     pub dynfn_scan: TypeId,
@@ -352,7 +357,7 @@ pub struct TypeChecker<'a> {
     // entries are inserted only when the lowering emitted no new errors and the result is not
     // TYPE_ERROR, so error-carrying programs re-emit their diagnostics exactly as before.
     pub lower_memo: Map<u64, TypeId>,
-    // Memoized "does a value of this type carry a borrow" -- a pure function of the interned type, so
+    // Memoized "does a value of this type carry a borrow": a pure function of the interned type, so
     // caching per (module, TypeId) makes the DEEP structural check O(1) after first use (it runs on
     // every method call and every binding/return). 1 = carries, 0 = does not.
     pub carries_memo: Map<u64, u8>,
@@ -381,23 +386,25 @@ fn ph_lookup(pkg: usize, name: str) loader::LookupHit {
     return package.prelude_lookup(name, true);
 }
 
-// --- result structs (out-params) ----------------------------------------------------------------
+/// A function signature read out of a type: `n` parameters (at most 4 kept) and the return type.
 pub struct FnSig {
     pub n: i32,
     pub params: [TypeId; 4],
     pub ret: TypeId,
 }
+/// Classification of a slice-family type: `kind` (0 = none) and its element type.
 pub struct SliceKind {
     pub kind: i32,
     pub elem: TypeId,
 }
+/// A receiver's generic substitution: `n` (param decl, argument type) pairs, at most 8.
 pub struct RecvSubst {
     pub n: i32,
     pub p: [DefId; 8],
     pub a: [TypeId; 8],
 }
 
-// --- span helpers -------------------------------------------------------------------------------
+/// True when span `s` of `src` spells exactly `lit`.
 pub const fn span_is(src: str, s: tok::Span, lit: str) bool {
     let n = lit.len();
     if (s.end - s.start) as usize != n {
@@ -406,6 +413,7 @@ pub const fn span_is(src: str, s: tok::Span, lit: str) bool {
     return unsafe cstring::memcmp(src.ptr() + s.start as usize, lit.ptr(), n) == 0;
 }
 
+/// True when two spans, possibly of different sources, spell the same bytes.
 pub const fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
     let la = a.end - a.start;
     if la != b.end - b.start {
@@ -441,8 +449,8 @@ const fn bt_is_complex(b: BuiltinType) bool {
     return b == BuiltinType::BT_C32 || b == BuiltinType::BT_C64;
 }
 
-/// Largest positive value of builtin `b` (0 = unbounded in a u64 carrier). `ptr32` narrows
-/// usize/isize to the 32-bit target's pointer width.
+// Largest positive value of builtin `b` (0 = unbounded in a u64 carrier). `ptr32` narrows
+// usize/isize to the 32-bit target's pointer width.
 const fn bt_int_max(b: BuiltinType, ptr32: bool) u64 {
     if ptr32 {
         if b == BuiltinType::BT_USIZE {
@@ -473,7 +481,8 @@ const fn bt_int_max(b: BuiltinType, ptr32: bool) u64 {
     if b == BuiltinType::BT_U32 {
         return 4294967295u64;
     }
-    return 0u64; // u64/usize
+    // U64/usize.
+    return 0u64;
 }
 
 const fn tc_lit_in_range(b: BuiltinType, mag: u64, neg: bool, ptr32: bool) bool {
@@ -651,17 +660,17 @@ extend TypeChecker {
         return t;
     }
 
-    // ---- ast / source access (raw pointers) ----
+    /// The Ast under check (live in its package slot).
     pub const fn cur_ast(self: &Self) *mut Ast {
         return self.ast;
     }
-    // The module id of the AST under check. A by-value read (no lingering borrow of `self`), so it composes
-    // inside expressions that also take `&mut self`.
+    /// The module id of the AST under check. A by-value read (no lingering borrow of `self`), so it composes
+    /// inside expressions that also take `&mut self`.
     pub const fn cur_module(self: &Self) ModuleId {
         return unsafe self.cur_ast().module;
     }
 
-    /// True when the selected target's pointers are 32-bit: usize/isize literal ranges narrow.
+    // True when the selected target's pointers are 32-bit: usize/isize literal ranges narrow.
     const fn tc_ptr32(self: &Self) bool {
         if self.package == null {
             return false;
@@ -669,13 +678,16 @@ extend TypeChecker {
         return lay::target_for(unsafe self.package.arch).ptr == 4;
     }
 
+    /// Module `m`'s live Ast (see PackageTypeDb::mod_ast).
     @c.always_inline
     pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         return self.db.mod_ast(m);
     }
+    /// Module `m`'s source text.
     pub const fn mod_src(self: &Self, m: ModuleId) str {
         return self.db.mod_src(m);
     }
+    /// Number of modules in the package; 0 without one.
     pub const fn pkg_count(self: &Self) usize {
         return self.db.pkg_count();
     }
@@ -686,10 +698,12 @@ extend TypeChecker {
         return (unsafe self.package.cir) as *mut iri::Interp;
     }
 
+    /// The text span of an identifier node.
     pub const fn name_span(self: &Self, name_node: NodeId) tok::Span {
         return self.cur_ast().at_const(name_node).as_data.name.text;
     }
 
+    /// The interned record of `x` in the current module's pool.
     pub const fn type_at(self: &Self, x: TypeId) &Ty {
         return self.cur_ast().type_at(x);
     }
@@ -697,7 +711,6 @@ extend TypeChecker {
         return self.type_at(x).kind != TypeKind::TYPE_FUNCTION;
     }
 
-    // ---- simple type predicates ----
     const fn is_bool(self: &Self, x: TypeId) bool {
         let y = self.type_at(x);
         return y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_BOOL;
@@ -738,6 +751,7 @@ extend TypeChecker {
         }
         return true;
     }
+    /// `x0` with every pointer and reference wrapper peeled.
     pub fn strip(self: &Self, x0: TypeId) TypeId {
         let mut x = x0;
         let mut y = self.type_at(x);
@@ -788,7 +802,6 @@ extend TypeChecker {
         return it.module == hit.mid && it.decl == hit.node && it.n >= 1 && self.tc_is_prelude_decl(it.args[0], "str");
     }
 
-    // ---- loop stack ----
     /// Returns the loop-stack index, or -1 when 32 loops are already open (callers skip the matching pop).
     pub const fn tc_loop_push(self: &mut Self, label: tok::Span, node: NodeId, value_loop: bool) i32 {
         if self.nloops >= 32 {
@@ -839,7 +852,6 @@ extend TypeChecker {
         return -1;
     }
 
-    // ---- test-fn visibility ----
     fn tc_is_test_fn(self: &Self, m: ModuleId, fnode: NodeId) bool {
         let a = self.mod_ast(m);
         for i in 0..unsafe a.attrs.len() {
@@ -867,7 +879,6 @@ extend TypeChecker {
         );
     }
 
-    // ---- literal helpers ----
     fn tc_literal_pinned(self: &Self, id: NodeId) bool {
         let n = self.cur_ast().at_const(id);
         if n.kind != NodeKind::NODE_LITERAL {
@@ -971,7 +982,7 @@ extend TypeChecker {
     }
 
     // Const-fold `nid` to an integer via the always-on interpreter. False when it isn't a
-    // compile-time constant (locals, calls the fx summary rejects, ...) -- never an error.
+    // compile-time constant (locals, calls the fx summary rejects, ...): never an error.
     fn tc_fold_int(self: &mut Self, nid: NodeId, out: &mut i64) bool {
         let ceptr = self.cir();
         if ceptr == null {
@@ -985,7 +996,6 @@ extend TypeChecker {
         return true;
     }
 
-    // ---- error / misc ----
     @c.cold
     fn err_unsafe(self: &mut Self, sp: tok::Span, what: str) {
         self.errors.emit(sp.start, sp.end - sp.start, format("{} requires an 'unsafe' block", what));
@@ -1001,9 +1011,9 @@ extend TypeChecker {
         }
         return null;
     }
-    /// Whether `t` mentions a '@no_const' declaration anywhere (through pointers, references,
-    /// slices, arrays and instance arguments). Used by the `const fn` def-site check: no value of
-    /// such a type can exist at compile time, so the signature cannot be part of a const contract.
+    // Whether `t` mentions a '@no_const' declaration anywhere (through pointers, references,
+    // slices, arrays and instance arguments). Used by the `const fn` def-site check: no value of
+    // such a type can exist at compile time, so the signature cannot be part of a const contract.
     fn tc_ty_no_const(self: &Self, t: TypeId, depth: u32) bool {
         if t == TYPE_NONE || depth > 16 {
             return false;
@@ -1073,7 +1083,6 @@ extend TypeChecker {
         );
     }
 
-    // ---- function-type helpers ----
     fn fn_sig(self: &mut Self, fid: TypeId, params: *mut TypeId, cap: i32, ret: *mut TypeId) i32 {
         let fty = *self.type_at(fid);
         let m = fty.module;
@@ -1113,10 +1122,11 @@ extend TypeChecker {
             let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
             unsafe *ret = self.lower_type_in(m, tn);
         } else if rs.len == 0 {
-            // an omitted return type IS void -- TYPE_NONE here would make call sites lenient
+            // An omitted return type IS void: TYPE_NONE here would make call sites lenient.
             unsafe *ret = Ast::builtin(BuiltinType::BT_VOID);
         } else {
-            unsafe *ret = TYPE_NONE; // multi-return: callers read the component list instead
+            // Multi-return: callers read the component list instead.
+            unsafe *ret = TYPE_NONE;
         }
         return ps.len as i32;
     }
@@ -1173,6 +1183,7 @@ extend TypeChecker {
         return fnn.kind == NodeKind::NODE_CLOSURE && fnn.as_data.closure.captures.len != 0;
     }
 
+    /// Index of binding `decl` in closure `clos`'s capture list, or -1 when not captured.
     pub fn tc_capture_index(self: &Self, clos: NodeId, decl: NodeId) i32 {
         let a = self.cur_ast();
         let caps = a.at_const(clos).as_data.closure.captures;
@@ -1245,9 +1256,9 @@ extend TypeChecker {
         return self.dynfn_sig_ok(exid, acid);
     }
 
-    /// The generic function `node` names, or NODE_NONE when it names something else. A generic function
-    /// has no type of its own -- only its instantiations do -- so naming one as a VALUE needs the type
-    /// arguments pinned before it can be a fn pointer.
+    // The generic function `node` names, or NODE_NONE when it names something else. A generic function
+    // has no type of its own (only its instantiations do) so naming one as a VALUE needs the type
+    // arguments pinned before it can be a fn pointer.
     const fn tc_generic_fn_named(self: &Self, node: NodeId) DefId {
         let a = self.cur_ast();
         let mut n = node;
@@ -1269,8 +1280,8 @@ extend TypeChecker {
         return d;
     }
 
-    /// Does `node` need the context type pushed into it before it can be checked? A generic function
-    /// named as a value and an empty array literal both carry no type of their own.
+    // Does `node` need the context type pushed into it before it can be checked? A generic function
+    // named as a value and an empty array literal both carry no type of their own.
     const fn tc_wants_param_type(self: &Self, node: NodeId) bool {
         let n = self.cur_ast().at_const(node);
         if n.kind == NodeKind::NODE_ARRAY_LITERAL {
@@ -1279,11 +1290,11 @@ extend TypeChecker {
         return self.tc_generic_fn_named(node).node != NODE_NONE;
     }
 
-    /// Coerce a generic function named as a value to the expected function-pointer type: bind its type
-    /// parameters by matching its declared signature against `expected`'s, then check the substituted
-    /// signature. On success the node ADOPTS `expected` (a concrete signature the rest of the pipeline
-    /// can render and emit) and records its type arguments, so codegen names the monomorphized instance
-    /// exactly as a call site does. A turbofish pre-binds the arguments it spells out.
+    // Coerce a generic function named as a value to the expected function-pointer type: bind its type
+    // parameters by matching its declared signature against `expected`'s, then check the substituted
+    // signature. On success the node ADOPTS `expected` (a concrete signature the rest of the pipeline
+    // can render and emit) and records its type arguments, so codegen names the monomorphized instance
+    // exactly as a call site does. A turbofish pre-binds the arguments it spells out.
     fn tc_coerce_generic_fn(self: &mut Self, expected: TypeId, node: NodeId) bool {
         let d = self.tc_generic_fn_named(node);
         if d.node == NODE_NONE || self.type_at(expected).kind != TypeKind::TYPE_FUNCTION {
@@ -1301,7 +1312,7 @@ extend TypeChecker {
             gp[i as usize] = DefId { module: d.module, node: unsafe fa.list(gens)[i as usize] };
             ga[i as usize] = TYPE_NONE;
         }
-        // explicit turbofish arguments bind first, left to right
+        // Explicit turbofish arguments bind first, left to right.
         let sn = self.cur_ast().at_const(node);
         if sn.kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
             let tas = sn.as_data.specialization.types;
@@ -1352,7 +1363,7 @@ extend TypeChecker {
         if !all9 {
             return false;
         }
-        // the substituted signature must be exactly what was asked for
+        // The substituted signature must be exactly what was asked for.
         for i in 0..en {
             let pid = unsafe fa.list(params)[i as usize];
             if self.subst_type(self.decl_type_in(d.module, pid), &gp[0], &ga[0], g) != ep[i as usize] {
@@ -1417,12 +1428,14 @@ extend TypeChecker {
     }
 }
 
+/// `c ? a : b` without evaluating a branch expression twice.
 pub const fn if_node(c: bool, a: NodeId, b: NodeId) NodeId {
     if c {
         return a;
     }
     return b;
 }
+/// `c ? a : b` for TypeIds.
 pub const fn if_ty(c: bool, a: TypeId, b: TypeId) TypeId {
     if c {
         return a;
@@ -1569,7 +1582,8 @@ pub fn render_type_into(
         if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
             mq = "mut ".ptr() as *const char;
         } else if ty.kind == TypeKind::TYPE_POINTER && ty.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
-            mq = "const ".ptr() as *const char; // a bare `*T` and `*const T` are distinct types
+            // A bare `*T` and `*const T` are distinct types.
+            mq = "const ".ptr() as *const char;
         }
         unsafe stdio::snprintf(buf, cap, "%s%s%s".ptr() as *const char, pfx, mq, &inb[0]);
     } else if ty.kind == TypeKind::TYPE_SLICE {
@@ -1622,7 +1636,7 @@ pub fn render_type_into(
             let mut argb = Buf96 {};
             let ai = unsafe it.args[i as usize];
             if ai == TYPE_NONE || a.type_at(ai).kind == TypeKind::TYPE_ERROR {
-                // An argument inference never filled: name the declaration's own parameter --
+                // An argument inference never filled: name the declaration's own parameter;
                 // `UInt<BITS>` says WHAT is undetermined, where `UInt<?>` said nothing.
                 let gens = ma.at_const(it.decl).as_data.aggregate.generics;
                 if i as u32 < gens.len {
@@ -1686,12 +1700,12 @@ pub fn render_type_into(
             );
         }
     } else if ty.kind == TypeKind::TYPE_CONST {
-        // A concrete const argument prints its VALUE: `UInt<64>`, not `UInt<?>` -- the number is the
+        // A concrete const argument prints its VALUE: `UInt<64>`, not `UInt<?>`; the number is the
         // whole point of the diagnostic.
         unsafe stdio::snprintf(buf, cap, "%lld".ptr() as *const char, ty.as_data.value);
     } else if ty.kind == TypeKind::TYPE_CONST_EXPR {
         // Printed from the canonical form rather than as written: two of these failing to match is the
-        // one diagnostic this type produces, and the forms are what actually differ.
+        // one diagnostic this type produces, and the forms are what differ.
         let l = a.const_lin_at(ty.as_data.inst);
         let mut at: usize = 0;
         if cap > 1 {
@@ -1771,7 +1785,7 @@ extend TypeChecker {
     ) bool {
         *n_out = 0;
         // Every method lookup reaches its (module, decl) through here, so this is where the RECEIVER a
-        // method is resolved on is recorded -- the one piece the lookups themselves never carry.
+        // method is resolved on is recorded: the one piece the lookups themselves never carry.
         unsafe {
             ((self as *const TypeChecker) as *mut TypeChecker).mark_recv = ty;
         }
@@ -1816,7 +1830,8 @@ extend TypeChecker {
             if self.tc_lin_subst(y.as_data.inst, params, args, n, &mut out, 0) {
                 return self.cur_ast().intern_const_lin(&out);
             }
-            return ty; // a parameter this instantiation does not bind: still symbolic
+            // A parameter this instantiation does not bind: still symbolic.
+            return ty;
         }
         if y.kind == TypeKind::TYPE_GENERIC {
             for i in 0..n {
@@ -1854,10 +1869,10 @@ extend TypeChecker {
     }
 
     /// A const-generic expression in canonical form: a constant plus a coefficient per parameter. This is
-    /// what makes `{(N * 2) * 2}` and `{N * 4}` the same width -- comparing the expressions as written
+    /// what makes `{(N * 2) * 2}` and `{N * 4}` the same width: comparing the expressions as written
     /// says they differ, and they do not. Linear is exactly the closed set here: `+`, `-`, and scaling by
     /// a constant stay inside it, and `N * N` does not, which is refused rather than approximated.
-    // The inexact case: keep the divisor ON the form -- `{(BITS + 7) / 8}` stays floor((BITS+7)/8)
+    // The inexact case: keep the divisor ON the form; `{(BITS + 7) / 8}` stays floor((BITS+7)/8)
     // until a substitution makes it a number. Installed only onto an empty accumulator, because the
     // divisor covers the whole form.
     const fn tc_lin_floor(self: &Self, lhs: &ConstLin, d: i64, out: &mut ConstLin) bool {
@@ -2018,7 +2033,7 @@ extend TypeChecker {
             }
             return false;
         }
-        // A leaf with no parameter in it -- a literal, a named const -- is the evaluator's business.
+        // A leaf with no parameter in it (a literal, a named const) is the evaluator's business.
         let ceptr = self.cir();
         if ceptr != null {
             let lv = ceptr.eval(m, id);
@@ -2030,8 +2045,8 @@ extend TypeChecker {
         return false;
     }
 
-    /// Substitute a canonical form: every parameter that this instantiation binds is replaced by what it
-    /// is bound to -- a value, or another form, folded in. What is left is the composed width.
+    // Substitute a canonical form: every parameter that this instantiation binds is replaced by what it
+    // is bound to: a value, or another form, folded in. What is left is the composed width.
     fn tc_lin_subst(
         self: &mut Self,
         idx: u32,
@@ -2045,8 +2060,8 @@ extend TypeChecker {
         return unsafe lin_subst(&*a, &*a, idx, params, args, n, out, depth);
     }
 
-    /// Do two types denote the same thing when one or both still carry an unfolded const-generic
-    /// expression? Compared by canonical form, not as written, so `{(N * 2) * 2}` matches `{N * 4}`.
+    // Do two types denote the same thing when one or both still carry an unfolded const-generic
+    // expression? Compared by canonical form, not as written, so `{(N * 2) * 2}` matches `{N * 4}`.
     fn tc_const_expr_same(self: &mut Self, a: TypeId, b: TypeId) bool {
         if a == b {
             return true;
@@ -2091,16 +2106,17 @@ extend TypeChecker {
     /// is written where BITS is a parameter and read where it is a value.
 
     // A const-generic parameter used as an ARRAY LENGTH (`fn f<const N: usize>(a: [T; N])`). The lowered
-    // parameter type cannot carry the binding -- `[T; N]` interns with a length of 0 while N is unbound --
+    // parameter type cannot carry the binding: `[T; N]` interns with a length of 0 while N is unbound;
     // so it is read from the parameter's type NODE against the argument's concrete array type. Without it
     // the call inferred nothing: the instance emitted as `f__v` with a bare `N` left in the C, and only an
     // explicit `f::<3>(..)` worked.
-    /// Solve a single-unknown, undivided linear const form against an exact value (plan 10.5).
-    /// Exact integer division gives the one solution; a remainder or an unmapped unknown leaves the
-    /// parameter unresolved, which the call reports. Conflicting solved values are conflicts.
+    // Solve a single-unknown, undivided linear const form against an exact value.
+    // Exact integer division gives the one solution; a remainder or an unmapped unknown leaves the
+    // parameter unresolved, which the call reports. Conflicting solved values are conflicts.
     fn tc_lin_solve_ev(self: &mut Self, l: &ConstLin, v: i64) {
         if l.n != 1 || l.div_of() != 1 {
-            return; // multi-variable, divided, or constant form: never solved here
+            // Multi-variable, divided, or constant form: never solved here.
+            return;
         }
         let c = l.c[0];
         if c == 0 {
@@ -2135,7 +2151,7 @@ extend TypeChecker {
         }
         let ar = a.at_const(tn).as_data.array_type;
         if ar.length != NODE_NONE && a.at_const(ar.length).kind == NodeKind::NODE_IDENTIFIER {
-            // An array LITERAL argument is typed against the expected type, which is this very parameter --
+            // An array LITERAL argument is typed against the expected type, which is this very parameter:
             // so while N is unbound the literal types as length 0 and has to be counted directly.
             let mut alen = at.as_data.arr.len;
             if alen == 0 && arg_node != NODE_NONE && self.cur_ast().at_const(arg_node).kind == NodeKind::NODE_ARRAY_LITERAL {
@@ -2167,10 +2183,10 @@ extend TypeChecker {
         self.infer_const_len(m, ar.element, at.as_data.arr.elem, NODE_NONE, depth + 1);
     }
 
-    /// Session-driven evidence walk (plan phase 2): replaces the removed `unify_infer`: same structural walk, but a
-    /// mapped generic-parameter leaf feeds its solver variable instead of a first-binding array.
-    /// A top-level parameter position records a directional bound (a safe conversion is allowed
-    /// there); every nested position is invariant evidence.
+    // Session-driven evidence walk: a structural walk in which a mapped generic-parameter leaf
+    // feeds its solver variable instead of a first-binding array.
+    // A top-level parameter position records a directional bound (a safe conversion is allowed
+    // there); every nested position is invariant evidence.
     fn tc_infer_ev(self: &mut Self, param_ty: TypeId, arg_ty: TypeId, node: NodeId, top: bool) {
         if param_ty == TYPE_NONE || arg_ty == TYPE_NONE {
             return;
@@ -2235,7 +2251,7 @@ extend TypeChecker {
         }
     }
 
-    /// Report the const-evidence conflicts the active session recorded, once, at the call span.
+    // Report the const-evidence conflicts the active session recorded, once, at the call span.
     @c.cold
     fn tc_report_const_conflicts(self: &mut Self, sp: tok::Span) {
         for ci in 0..self.icx.sv.cconflicts.len() {
@@ -2364,7 +2380,6 @@ extend TypeChecker {
         }
     }
 
-    // ---- prelude type intercepts (all through the TC-10 cached hits) ----
     fn prelude_str_type(self: &mut Self) TypeId {
         if self.package == null {
             return TYPE_ERROR;
@@ -2528,7 +2543,7 @@ extend TypeChecker {
         } else if dk == NodeKind::NODE_GENERIC_PARAM {
             let gp = a.at_const(decl).as_data.generic_param;
             // In value position a const-generic param has its declared type (e.g. usize); a type param is TYPE_GENERIC.
-            // A LIFETIME param has no type at all -- lifetimes are erased before monomorphization, so it must never
+            // A LIFETIME param has no type at all: lifetimes are erased before monomorphization, so it must never
             // become a TYPE_GENERIC (that would make it a mono argument and mangle into the emitted symbol).
             if gp.is_lifetime {
                 result = TYPE_NONE;
@@ -2570,7 +2585,8 @@ extend TypeChecker {
                 let mut tn: u8 = 0;
                 self.apply_default_args(d.module, d.node, &mut ta[0], &mut tn);
                 let it = self.cur_ast().intern_instance(d.module, d.node, &ta[0], tn);
-                self.cur_ast().set_type(id, it); // codegen renders the literal's type from this node
+                // Codegen renders the literal's type from this node.
+                self.cur_ast().set_type(id, it);
                 return it;
             }
             return self.named_type_of(d.module, d.node);
@@ -2585,7 +2601,7 @@ extend TypeChecker {
     // Is this generic argument a const VALUE rather than a type? A bare integer literal always is; that is
     // the only form `parse_type_args` recognises, so everything else arrives as a type node and the deciding
     // fact is what the resolver bound it to. A one-part path bound to a `const` is a named constant standing
-    // where a literal used to be required. A const-generic PARAMETER is deliberately not included: it is
+    // where a literal is otherwise required. A const-generic PARAMETER is deliberately not included: it is
     // declared in both namespaces and keeps flowing through the type path, which already substitutes it.
     const fn tc_arg_is_const(self: &mut Self, m: ModuleId, aid: NodeId) bool {
         let k = self.mod_ast(m).at_const(aid).kind;
@@ -2594,7 +2610,7 @@ extend TypeChecker {
         }
         // A braced argument is written as an expression, so it arrives as one: anything that is not a
         // type path cannot be a type, and the braces already said it is a value. A MEMBER path is how a
-        // braced `Family::Ieee` parses -- an enum variant as the value of an enum-typed const parameter.
+        // braced `Family::Ieee` parses; an enum variant as the value of an enum-typed const parameter.
         if k == NodeKind::NODE_BINARY || k == NodeKind::NODE_UNARY || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF || k == NodeKind::NODE_CALL || k == NodeKind::NODE_MEMBER {
             return true;
         }
@@ -2634,12 +2650,12 @@ extend TypeChecker {
             }
         }
         // An enum VARIANT as the value of an enum-typed const parameter (`{Family::Ieee}`): its
-        // discriminant, computed the way the emitted C computes it -- the explicit value when one is
+        // discriminant, computed the way the emitted C computes it: the explicit value when one is
         // written, else the previous discriminant plus one.
         let an = self.mod_ast(m).at_const(aid);
         if an.kind == NodeKind::NODE_MEMBER && an.as_data.member.path {
             // Member resolution is the type checker's act, and a braced type-position expression is
-            // never type-checked -- so the variant is found from the OBJECT (the resolver did resolve
+            // never type-checked, so the variant is found from the OBJECT (the resolver did resolve
             // the enum) and the member's name.
             let ed = self.mod_ast(m).resolution_def(an.as_data.member.object);
             if ed.node != NODE_NONE && self.mod_ast(ed.module).at_const(ed.node).kind == NodeKind::NODE_ENUM {
@@ -2667,7 +2683,7 @@ extend TypeChecker {
         // A braced argument is an ordinary expression node, and one in a TYPE position is never checked,
         // so the evaluator has no type to work from and answers only its leaves. Reduce it to canonical
         // form instead: an expression of literals comes out a plain value, and one over the enclosing
-        // generic's own parameters -- unbound HERE -- comes out a form, interned by VALUE so substitution
+        // generic's own parameters (unbound HERE) comes out a form, interned by VALUE so substitution
         // can compose forms later and two spellings of one width are already the same type.
         let mut lin = ConstLin { k: 0, n: 0 };
         if self.tc_lin(m, aid, null, null, 0, &mut lin, 0) {
@@ -2714,11 +2730,11 @@ extend TypeChecker {
         // typechecked yet, so a const-valued length (`[u8; CAP]`, `CAP` folding a `sizeof`) has no value
         // to fold TO yet and fails here through no fault of its own. Reporting it against the current
         // module also rendered the foreign span against the wrong source. Every module is typechecked, so
-        // a genuinely non-constant length is still reported -- once, where it is written.
+        // a genuinely non-constant length is still reported: once, where it is written.
         if m != self.cur_module() {
             return 0;
         }
-        // diagnose once per node; unsubstituted generic contexts stay silent (re-lowered at instantiation)
+        // Diagnose once per node; unsubstituted generic contexts stay silent (re-lowered at instantiation).
         let key = m as u64 << 32 | lenNode as u64;
         for i in 0..self.len_reported.len() {
             if self.len_reported[i] == key {
@@ -2797,7 +2813,8 @@ extend TypeChecker {
             },
             _ => {},
         };
-        return true; // unknown shapes: assume generic-dependent (stay silent)
+        // Unknown shapes: assume generic-dependent (stay silent).
+        return true;
     }
 
     /// Lower a type node of module `m` to a TypeId interned in the CURRENT module's pool: the current
@@ -2874,7 +2891,7 @@ extend TypeChecker {
                     while i < args.len && tn < 8 {
                         let aid = unsafe a.list(args)[i as usize];
                         // Lifetime arguments occupy list slots but are not type arguments (erased here,
-                        // tracked by borrowck) -- exactly as the same-module path skips them.
+                        // tracked by borrowck): exactly as the same-module path skips them.
                         if a.at_const(aid).kind == NodeKind::NODE_LIFETIME {
                             i = i + 1;
                             continue;
@@ -3000,7 +3017,7 @@ extend TypeChecker {
             NODE_TYPE_PATH => {
                 let parts = a.at_const(id).as_data.type_path.parts;
                 let args = a.at_const(id).as_data.type_path.args;
-                // Box<dyn I> interception
+                // Box<dyn I> interception.
                 let mut i: u32 = 0;
                 while i < args.len && self.package != null {
                     let aid = unsafe a.list(args)[i as usize];
@@ -3194,7 +3211,6 @@ extend TypeChecker {
         return result;
     }
 
-    // ---- dyn trait objects ----
     fn tc_intern_dynfn(self: &mut Self, m: ModuleId, sig: NodeId, qual: TypeQualifier) TypeId {
         let mysig = self.lower_type_in(m, sig);
         // TC-7: candidates come from dynfn_list instead of a full pool rescan. New pool entries
@@ -3272,7 +3288,7 @@ extend TypeChecker {
             self.errors.emit(sp.start, sp.end - sp.start, format("'dyn' requires an interface"));
         } else {
             // `dyn I<T, ..>`: lower the type-path arguments and check the count against the
-            // interface's generic parameters (zero args for a plain interface)
+            // interface's generic parameters (zero args for a plain interface).
             let targs = a.at_const(inner).as_data.type_path.args;
             let ig = self.mod_ast(d.module).at_const(d.node).as_data.interface_def.generics;
             let mut na = Tys8 {};
@@ -3396,9 +3412,9 @@ extend TypeChecker {
         let idn = ia.at_const(iface.node).as_data.interface_def;
         let mut why: str = "";
         let mut mn = tok::Span { start: 0, end: 0 };
-        // validate the whole superinterface closure: every method of every interface in it is
+        // Validate the whole superinterface closure: every method of every interface in it is
         // dispatched through the SAME vtable (inherited methods are named fields), so each must
-        // be dyn-able and no two may share a name (they would collide as C struct fields)
+        // be dyn-able and no two may share a name (they would collide as C struct fields).
         let mut clo = Defs8 {};
         let nclo = self.dyn_super_closure(iface, &mut clo[0], 8);
         let mut ci: i32 = 0;
@@ -3407,8 +3423,8 @@ extend TypeChecker {
             let ca = self.mod_ast(cd.module);
             let cdn = ca.at_const(cd.node).as_data.interface_def;
             if cdn.generics.len != 0 && ci != 0 {
-                // the root interface's generics are instantiated by the `dyn I<..>` arguments;
-                // generic SUPERinterfaces are not wired up yet
+                // The root interface's generics are instantiated by the `dyn I<..>` arguments;
+                // generic SUPERinterfaces are not wired up.
                 why = "a superinterface has generic parameters";
                 break;
             }
@@ -3509,7 +3525,6 @@ extend TypeChecker {
         return why.len() == 0;
     }
 
-    // ---- extension / method lookup ----
     @c.always_inline
     fn ext_scopes(self: &mut Self) i32 {
         if self.n_ext_scope < 0 {
@@ -3648,7 +3663,7 @@ extend TypeChecker {
         return NODE_NONE;
     }
 
-    // Both lookups are memoized -- callers re-resolve the same method's owner repeatedly
+    // Both lookups are memoized: callers re-resolve the same method's owner repeatedly
     // (tc_method_param + tc_method_ret alone scan twice per operator check). Lazy insert through a
     // const-cast, the codebase's established pattern for caches behind &Self.
     fn enclosing_extend(self: &Self, m: ModuleId, method: NodeId) NodeId {
@@ -3714,7 +3729,7 @@ extend TypeChecker {
 
     // Method names codegen can synthesize calls to WITHOUT a type-checked call node (assert/format
     // templates, auto-free, operator/index/for lowering, `?` conversions). Marks on these must stay
-    // unconditional -- they can be referenced from emitted C that no tc-visible caller explains.
+    // unconditional: they can be referenced from emitted C that no tc-visible caller explains.
     const fn tc_mark_always_root(self: &Self, d: DefId) bool {
         let a = self.mod_ast(d.module);
         let f = a.at_const(d.node);
@@ -3750,7 +3765,7 @@ extend TypeChecker {
         );
     }
     // Route a method-used mark through its calling context. Inside a non-generic method of a plain
-    // generic extend -- exactly the shape codegen's demand-gate prunes -- the mark becomes a
+    // generic extend: exactly the shape codegen's demand-gate prunes; the mark becomes a
     // caller->callee edge resolved after typechecking, so callees kept alive only by never-emitted
     // methods are pruned too. Every other context (top-level code, conformance/interface methods,
     // generic methods, @emit_macro targets: all emitted unconditionally) marks directly, as before.
@@ -3777,7 +3792,7 @@ extend TypeChecker {
             }
         }
         // Marks repeat heavily (memoized lookups re-fire them): once the callee is already used,
-        // both the direct mark and the edge are no-ops -- skip the context classification. Under
+        // both the direct mark and the edge are no-ops: skip the context classification. Under
         // the parallel frontier the task-local log dedupes; the driver's module-order replay
         // applies the global-visibility version of this same check.
         if self.mark_log != null {
@@ -3899,7 +3914,7 @@ extend TypeChecker {
         return self.find_method_impl(m, decl, name, "");
     }
 
-    // Every method named `name` on (m, decl) across the extend scopes -- the memoized collector
+    // Every method named `name` on (m, decl) across the extend scopes: the memoized collector
     // behind overload disambiguation. Only runs when a first candidate's return type did not fit the
     // expected type, so the common single-candidate path never pays for it.
     fn find_method_all(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, lit: str, out: &mut Defs8) i32 {
@@ -3985,9 +4000,9 @@ extend TypeChecker {
         return nout;
     }
 
-    /// The adaptability class of a simple unsuffixed literal argument: 1 = integer, 2 = float,
-    /// 0 = not a literal this peek understands (suffixed, based, or interpolated forms stay 0 and
-    /// leave the position unconstrained).
+    // The adaptability class of a simple unsuffixed literal argument: 1 = integer, 2 = float,
+    // 0 = not a literal this peek understands (suffixed, based, or interpolated forms stay 0 and
+    // leave the position unconstrained).
     const fn tc_peek_lit_class(self: &Self, id: NodeId) u8 {
         let a = self.cur_ast();
         let n = *a.at_const(id);
@@ -4006,7 +4021,8 @@ extend TypeChecker {
             if ch == b'.' {
                 dot = true;
             } else if !(ch >= b'0' && ch <= b'9' || ch == b'_') {
-                return 0; // a suffix, base prefix, or exponent: the literal's type is already pinned
+                // A suffix, base prefix, or exponent: the literal's type is already pinned.
+                return 0;
             }
             i += 1;
         }
@@ -4016,10 +4032,10 @@ extend TypeChecker {
         return 1;
     }
 
-    /// The type of an argument WITHOUT checking it. Overload selection runs before a call's arguments are
-    /// typed, and checking them here would record their moves and borrows a second time. Answers only for
-    /// the shapes that need no evaluation -- a name, a struct literal, a reference to either -- and
-    /// TYPE_NONE otherwise, which simply leaves that argument out of the decision.
+    // The type of an argument WITHOUT checking it. Overload selection runs before a call's arguments are
+    // typed, and checking them here would record their moves and borrows a second time. Answers only for
+    // the shapes that need no evaluation (a name, a struct literal, a reference to either) and
+    // TYPE_NONE otherwise, which leaves that argument out of the decision.
     fn tc_peek_arg_type(self: &mut Self, id: NodeId) TypeId {
         if id == NODE_NONE {
             return TYPE_NONE;
@@ -4052,11 +4068,11 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    /// Choose among same-named methods by what their PARAMETERS accept, under the documented
-    /// lexicographic score (plan section 13.3): viability first, then fewer reference adjustments,
-    /// then more exact parameter matches. A tie between distinct viable candidates whose score is
-    /// fully informed (every argument type known) is an ambiguity error. Source order never breaks
-    /// a tie.
+    // Choose among same-named methods by what their PARAMETERS accept, under the documented
+    // lexicographic score (plan section 13.3): viability first, then fewer reference adjustments,
+    // then more exact parameter matches. A tie between distinct viable candidates whose score is
+    // fully informed (every argument type known) is an ambiguity error. Source order never breaks
+    // a tie.
     fn tc_pick_by_args(
         self: &mut Self,
         m: ModuleId,
@@ -4116,10 +4132,10 @@ extend TypeChecker {
         return first;
     }
 
-    /// Score one candidate against the peeked argument information (plan section 13.3): safe
-    /// conversions, reference adjustments, literal defaults, generic defaults, exact matches. A
-    /// generic candidate runs a solver probe: its own parameters take evidence from the known
-    /// arguments and the score is computed against the substituted signature; the probe rolls back.
+    // Score one candidate against the peeked argument information (plan section 13.3): safe
+    // conversions, reference adjustments, literal defaults, generic defaults, exact matches. A
+    // generic candidate runs a solver probe: its own parameters take evidence from the known
+    // arguments and the score is computed against the substituted signature; the probe rolls back.
     fn tc_score_candidate(
         self: &mut Self,
         recv: TypeId,
@@ -4158,7 +4174,8 @@ extend TypeChecker {
                 prm[k as usize] = DefId { module: c.module, node: gid };
                 ga[k as usize] = self.icx.sv.s_resolve(mark.base + k as u32, it_conv_join);
                 if ga[k as usize] == TYPE_NONE {
-                    sc.gdef += 1; // an unresolved own parameter: worse than one the call pins
+                    // An unresolved own parameter: worse than one the call pins.
+                    sc.gdef += 1;
                 }
                 gn += 1;
             }
@@ -4174,10 +4191,11 @@ extend TypeChecker {
         return sc;
     }
 
-    /// One parameter position's score contribution.
+    // One parameter position's score contribution.
     fn tc_score_param(self: &mut Self, sc: &mut CandScore, pt: TypeId, at: TypeId, lc: u8) {
         if pt == TYPE_NONE || self.tc_infer_ty_open(pt) {
-            return; // unknown parameter side: this position does not constrain the choice
+            // Unknown parameter side: this position does not constrain the choice.
+            return;
         }
         if at != TYPE_NONE {
             if pt == at {
@@ -4207,7 +4225,7 @@ extend TypeChecker {
         }
         if lc == 1 {
             // An unsuffixed integer literal: any integer parameter takes it by adaptation; the
-            // default type is the exact match (plan 10.4), and a float parameter is a defaulted use.
+            // default type is the exact match, and a float parameter is a defaulted use.
             let p = *self.type_at(pt);
             if p.kind == TypeKind::TYPE_BUILTIN && bt_is_int(p.as_data.builtin) {
                 if p.as_data.builtin == BuiltinType::BT_I32 {
@@ -4240,8 +4258,8 @@ extend TypeChecker {
         // No information for this argument: neutral.
     }
 
-    /// Two candidates with equal best scores: an ambiguity error, never a source-order pick
-    /// (plan section 13.3).
+    // Two candidates with equal best scores: an ambiguity error, never a source-order pick
+    // (plan section 13.3).
     @c.cold
     fn err_ambiguous_candidates(self: &mut Self, name: tok::Span, lit: str, a1: DefId, a2: DefId) {
         let nm = if lit.len() != 0 {
@@ -4260,8 +4278,8 @@ extend TypeChecker {
         self.errors.note(format("qualify the call or adjust an argument so one candidate is a strictly better fit"));
     }
 
-    /// The candidate list hit the fixed cap: dropped candidates could have scored better, so the
-    /// call must be disambiguated by hand (plan section 13.4).
+    // The candidate list hit the fixed cap: dropped candidates could have scored better, so the
+    // call must be disambiguated by hand (plan section 13.4).
     @c.cold
     fn err_candidate_budget(self: &mut Self, name: tok::Span, lit: str) {
         let nm = if lit.len() != 0 {
@@ -4327,7 +4345,8 @@ extend TypeChecker {
                 continue;
             }
             if self.tc_method_ret(self.strip(recv), c) == want {
-                self.mark_recv = self.strip(recv); // the overload search bypassed aggregate_of
+                // The overload search bypassed aggregate_of.
+                self.mark_recv = self.strip(recv);
                 self.tc_mark_method_used(c);
                 return c;
             }
@@ -4798,8 +4817,8 @@ extend TypeChecker {
                     let ms = if ik == NodeKind::NODE_EXTEND {
                         a.at_const(iid).as_data.extend_def.items;
                     } else {
-                        // an interface DEFAULT body: the obligation lands on the interface method,
-                        // where every inheriting conformance discharges it with Self bound
+                        // An interface DEFAULT body: the obligation lands on the interface method,
+                        // where every inheriting conformance discharges it with Self bound.
                         a.at_const(iid).as_data.interface_def.items;
                     };
                     for k2 in 0..ms.len {
@@ -4821,7 +4840,7 @@ extend TypeChecker {
     /// instantiations. Driven AFTER every module has typechecked, so a callee's obligations exist
     /// regardless of module order. `starts[m]` = the obligation index already processed for callee
     /// module m in earlier passes; a still-symbolic owner re-defers into THIS module's list, and
-    /// the driver iterates passes until no list grows -- multi-hop chains resolve hop per pass.
+    /// the driver iterates passes until no list grows: multi-hop chains resolve hop per pass.
     pub fn discharge_foreign_obligations(self: &mut Self, starts: *const u32) bool {
         let mut grew = false;
         let nmu = (unsafe self.cur_ast().mono).len();
@@ -4829,7 +4848,8 @@ extend TypeChecker {
             let mu = *(unsafe self.cur_ast().mono).at(i);
             let a = self.cur_ast();
             if mu.node as usize >= (unsafe a.mono_at).len() || (unsafe a.mono_at)[mu.node as usize] != i as u32 + 1 {
-                continue; // superseded entry: a re-checked node records again
+                // Superseded entry: a re-checked node records again.
+                continue;
             }
             if a.at_const(mu.node).kind != NodeKind::NODE_CALL {
                 continue;
@@ -4866,7 +4886,8 @@ extend TypeChecker {
             let ostart = (unsafe starts[cd.module as usize]) as usize;
             for oi in 0..nob {
                 if oi < ostart {
-                    continue; // an earlier pass already ran this obligation against this module
+                    // An earlier pass already ran this obligation against this module.
+                    continue;
                 }
                 let ob = *(unsafe fa.proj_obs).at(oi);
                 if ob.fnd != cd.node {
@@ -4875,7 +4896,7 @@ extend TypeChecker {
                 let owner0 = self.cur_ast().reintern(unsafe &*fa, ob.owner);
                 let owner2 = self.subst_type(owner0, &gp[0], &ga[0], gn2);
                 if !self.cur_ast().type_concrete(owner2) {
-                    // still symbolic: this fn's own callers must bind it -- hand the obligation up
+                    // Still symbolic: this fn's own callers must bind it; hand the obligation up.
                     let host = self.tc_enclosing_fn(mu.node);
                     if host != NODE_NONE {
                         (unsafe self.cur_ast().proj_obs).push(ProjOb { fnd: host, owner: owner2, iface: ob.iface });
@@ -4902,12 +4923,12 @@ extend TypeChecker {
         return grew;
     }
 
-    // Cross-module duplicate conformances, for interfaces written WITHOUT arguments (Format, Hash,
-    // ..): the same-module case errors in check_extend_conformance; across modules the two copies
-    // would only collide at link as a C redefinition, so name the duplicate here instead. Scans the
-    // EARLIER modules so the later declaration carries the error. Argumented conformances
-    // (`Conv<i32>`) are exempt -- distinct arguments are legal, and comparing them across pools is
-    // not worth the rare case the linker still catches.
+    /// Report cross-module duplicate conformances for interfaces written WITHOUT arguments (Format,
+    /// Hash, ..): the same-module case errors in check_extend_conformance; across modules the two
+    /// copies would only collide at link as a C redefinition, so name the duplicate here instead.
+    /// Scans the EARLIER modules so the later declaration carries the error. Argumented conformances
+    /// (`Conv<i32>`) are exempt: distinct arguments are legal, and comparing them across pools is
+    /// not worth the rare case the linker still catches.
     pub fn check_cross_module_dup_conformances(self: &mut Self) {
         let items = unsafe self.cur_ast().at_const(self.cur_ast().root).as_data.program.items;
         for i in 0..items.len {
@@ -5001,13 +5022,13 @@ extend TypeChecker {
         let _ = self.proj_fields_satisfy(owner, ob_iface, 0, true);
     }
 
-    // Reflection-bound obligations carried by interface DEFAULT bodies, discharged at every
-    // conformance that INHERITS them: `extend T as Format {}` must prove what `fmt`'s body defers
-    // (each field satisfies Format), with Self bound to T. Runs in the driver's fixpoint alongside
-    // discharge_foreign_obligations -- the default's own obligations only exist after its module's
-    // cross-module hand-up -- over the [starts, ends) window so no obligation runs against an extend
-    // twice across passes. A conformance whose target is still generic proves nothing here: its
-    // instantiations discharge through their own call sites.
+    /// Discharge the reflection-bound obligations carried by interface DEFAULT bodies at every
+    /// conformance that INHERITS them: `extend T as Format {}` must prove what `fmt`'s body defers
+    /// (each field satisfies Format), with Self bound to T. Runs in the driver's fixpoint alongside
+    /// discharge_foreign_obligations (the default's own obligations only exist after its module's
+    /// cross-module hand-up) over the [starts, ends) window so no obligation runs against an extend
+    /// twice across passes. A conformance whose target is still generic proves nothing here: its
+    /// instantiations discharge through their own call sites.
     pub fn discharge_conformance_obligations(self: &mut Self, starts: *const u32, ends: *const u32) bool {
         let items = unsafe self.cur_ast().at_const(self.cur_ast().root).as_data.program.items;
         for i in 0..items.len {
@@ -5048,7 +5069,8 @@ extend TypeChecker {
                 }
                 let rn = ia.at_const(rm.as_data.function.name).as_data.name.text;
                 if self.find_extend_item_named(id, rn, iface.module) != NODE_NONE {
-                    continue; // overridden: the extend's own body was checked normally
+                    // Overridden: the extend's own body was checked normally.
+                    continue;
                 }
                 // One error per required bound: the default's call chain hands the same (owner,
                 // iface) requirement up once per branch it flows through.
@@ -5173,7 +5195,7 @@ extend TypeChecker {
             return false;
         }
         // Send / Sync are STRUCTURAL markers: no explicit `extend` is required (an explicit one is honored
-        // below as an unsafe override). Answer them from the type's shape -- this handles pointers /
+        // below as an unsafe override). Answer them from the type's shape: this handles pointers /
         // references / closures / slices that the aggregate path below cannot even name.
         if self.is_send_iface(iface) {
             return self.tc_thread_marker(ty, false, depth);
@@ -5255,7 +5277,7 @@ extend TypeChecker {
     const fn is_send_iface(self: &Self, tr: DefId) bool {
         return self.iface_named(tr, "Send");
     }
-    // True while checking a method of the prelude `UnsafeCell` -- the one place `&T as *mut T` is allowed
+    // True while checking a method of the prelude `UnsafeCell`: the one place `&T as *mut T` is allowed
     // (its `get` is the sanctioned interior-mutability hole).
     fn in_unsafe_cell(self: &Self) bool {
         if self.package == null || self.current_self == NODE_NONE {
@@ -5278,7 +5300,7 @@ extend TypeChecker {
     // Structural `Send`/`Sync`: is `ty` safe to transfer to (`sync=false`) or share with (`sync=true`)
     // another thread? Scalars/str yes; a raw pointer no (so is anything transitively holding one); a
     // reference reduces to `Sync` of its pointee; a closure to all its captures; an aggregate to all its
-    // fields -- but an explicit `extend T as Send/Sync {}` overrides the field walk (the unsafe escape
+    // fields, but an explicit `extend T as Send/Sync {}` overrides the field walk (the unsafe escape
     // hatch, e.g. Arc). Mirrors tc_type_is_free's decomposition; the depth cap breaks reference cycles.
     fn tc_thread_marker(self: &mut Self, ty: TypeId, sync: bool, depth: i32) bool {
         if ty == TYPE_NONE || depth > BOUND_MAX_DEPTH {
@@ -5287,28 +5309,34 @@ extend TypeChecker {
         let y = *self.type_at(ty);
         let k = y.kind;
         if k == TypeKind::TYPE_GENERIC {
-            return true; // a generic param -- enforced where it is instantiated
+            // A generic param: enforced where it is instantiated.
+            return true;
         }
         if k == TypeKind::TYPE_POINTER {
-            return false; // raw pointer: neither Send nor Sync
+            // Raw pointer: neither Send nor Sync.
+            return false;
         }
         if k == TypeKind::TYPE_REFERENCE {
-            return self.tc_thread_marker(y.as_data.elem, true, depth + 1); // &T needs T: Sync
+            // &T needs T: Sync.
+            return self.tc_thread_marker(y.as_data.elem, true, depth + 1);
         }
         if k == TypeKind::TYPE_SLICE || k == TypeKind::TYPE_ARRAY {
             return self.tc_thread_marker(y.as_data.elem, sync, depth + 1);
         }
         if k == TypeKind::TYPE_BUILTIN {
-            return true; // scalars, bool, char, str view
+            // Scalars, bool, char, str view.
+            return true;
         }
         if k == TypeKind::TYPE_DYN {
-            return false; // a trait object does not advertise Send/Sync -- conservative
+            // A trait object does not advertise Send/Sync: conservative.
+            return false;
         }
         if k == TypeKind::TYPE_FUNCTION {
             let fa = self.mod_ast(y.module);
             let fnn = fa.at_const(y.as_data.decl);
             if fnn.kind != NodeKind::NODE_CLOSURE {
-                return true; // a bare fn pointer captures nothing
+                // A bare fn pointer captures nothing.
+                return true;
             }
             let caps = fnn.as_data.closure.captures;
             for i in 0..caps.len {
@@ -5332,7 +5360,7 @@ extend TypeChecker {
             return false;
         }
         // `UnsafeCell<T>` is never `Sync`. It hands out a `*mut T` from a SHARED borrow, so two threads
-        // holding `&UnsafeCell<T>` can write the same value at once -- and the field walk below would read
+        // holding `&UnsafeCell<T>` can write the same value at once, and the field walk below would read
         // straight through the cell to its payload and grant `Sync` for free, which is the whole hole
         // interior mutability is supposed to be gated by. Anything built on one (`Atomic`, `Mutex`,
         // `RwLock`) is shareable only by ASSERTING `Sync`, which is where its discipline is written down.
@@ -5344,7 +5372,7 @@ extend TypeChecker {
             let mut imod: ModuleId = 0;
             let extnode = self.find_extend_as(om, od, ci, &mut imod);
             if extnode != NODE_NONE {
-                // Explicit `extend T as Send/Sync {}` -- an unsafe override, but its own bounds still hold
+                // Explicit `extend T as Send/Sync {}`: an unsafe override, but its own bounds still hold
                 // (e.g. `extend<T: Send + Sync> Arc<T> as Send` is Send only for a Send + Sync payload).
                 let ia = self.mod_ast(imod);
                 let gens = ia.at_const(extnode).as_data.extend_def.generics;
@@ -5375,7 +5403,7 @@ extend TypeChecker {
         for i in 0..ms.len {
             let mid = unsafe mids[i as usize];
             let mn = *a.at_const(mid);
-            // tuple members are bare type nodes; named members carry their type in field.ty
+            // Tuple members are bare type nodes; named members carry their type in field.ty.
             if !is_enum && (mn.kind == NodeKind::NODE_FIELD || is_tuple) {
                 let tn = if_node(mn.kind == NodeKind::NODE_FIELD, mn.as_data.field.ty, mid);
                 if !self.tc_member_marker(om, tn, &gp[0], &ga[0], gn, sync, depth) {
@@ -5434,7 +5462,7 @@ extend TypeChecker {
     }
     // Leak check (lint, error-level): structs and enums DERIVE Free when their members own
     // memory, but a UNION cannot (only the author knows the active member), so an owning union
-    // with no explicit Free conformance silently leaks -- reject it. No machine fix: a generated
+    // with no explicit Free conformance silently leaks: reject it. No machine fix: a generated
     // body freeing every overlapping member would double-free.
     fn tc_lint_missing_free(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
@@ -5488,9 +5516,9 @@ extend TypeChecker {
     }
     fn tc_member_owns(self: &mut Self, om: ModuleId, tnode: NodeId, gp: *const DefId, ga: *const TypeId, gn: i32) bool {
         let mut ft = self.lower_type_in(om, tnode);
-        // substitute only fully-concrete instantiations: generic args would intern novel
+        // Substitute only fully-concrete instantiations: generic args would intern novel
         // partially-generic instances into the pool (they emit as undefined C type names);
-        // generic members fall to the TYPE_GENERIC bound-based verdict instead
+        // generic members fall to the TYPE_GENERIC bound-based verdict instead.
         let mut conc = true;
         for k in 0..gn {
             if !self.cur_ast().type_concrete(unsafe ga[k as usize]) {
@@ -5541,7 +5569,7 @@ extend TypeChecker {
         for i in 0..ms.len {
             let mid = unsafe mids[i as usize];
             let mn = *a.at_const(mid);
-            // tuple members are bare type nodes; named members carry their type in field.ty
+            // Tuple members are bare type nodes; named members carry their type in field.ty.
             if !is_enum && (mn.kind == NodeKind::NODE_FIELD || is_tuple) {
                 let tn = if_node(mn.kind == NodeKind::NODE_FIELD, mn.as_data.field.ty, mid);
                 if self.tc_member_owns(om, tn, gp, ga, gn) {
@@ -5572,8 +5600,8 @@ extend TypeChecker {
         }
         return owns;
     }
-    /// Does a value of `ty` occupy no bytes? A struct with no fields, or whose every field is itself
-    /// zero-sized (`Global`, any allocator tag). The depth cap breaks reference cycles.
+    // Does a value of `ty` occupy no bytes? A struct with no fields, or whose every field is itself
+    // zero-sized (`Global`, any allocator tag). The depth cap breaks reference cycles.
     fn tc_type_is_zero_sized(self: &mut Self, ty: TypeId, depth: u32) bool {
         if ty == TYPE_NONE || depth > 8 {
             return false;
@@ -5592,7 +5620,8 @@ extend TypeChecker {
         }
         let dn = self.mod_ast(om).at_const(od);
         if dn.kind != NodeKind::NODE_STRUCT {
-            return false; // an enum carries a tag; a union is as big as its widest member
+            // An enum carries a tag; a union is as big as its widest member.
+            return false;
         }
         let is_tuple = dn.as_data.aggregate.is_tuple;
         let ms = dn.as_data.aggregate.members;
@@ -5614,12 +5643,12 @@ extend TypeChecker {
         return true;
     }
 
-    /// The stateful allocator a constant of `ty` would EMBED, or TYPE_NONE. A constant's storage is static
-    /// data no allocator provided, so an allocator value stored beside it describes memory that does not
-    /// exist -- and a state field holding a compile-time pointer bakes that block into the binary as
-    /// read-only data the allocator could never legally hand out. Walks stored fields only: a pointer is
-    /// not embedded state, and elements a program deliberately stores are data, not the container's
-    /// allocator.
+    // The stateful allocator a constant of `ty` would EMBED, or TYPE_NONE. A constant's storage is static
+    // data no allocator provided, so an allocator value stored beside it describes memory that does not
+    // exist, and a state field holding a compile-time pointer bakes that block into the binary as
+    // read-only data the allocator could never legally hand out. Walks stored fields only: a pointer is
+    // not embedded state, and elements a program deliberately stores are data, not the container's
+    // allocator.
     fn tc_const_alloc_state(self: &mut Self, ty: TypeId, depth: u32) TypeId {
         if ty == TYPE_NONE || depth > 8 {
             return TYPE_NONE;
@@ -5657,7 +5686,8 @@ extend TypeChecker {
             }
             let fk = self.type_at(ft).kind;
             if fk == TypeKind::TYPE_POINTER || fk == TypeKind::TYPE_REFERENCE {
-                continue; // a pointer field is not embedded state
+                // A pointer field is not embedded state.
+                continue;
             }
             if self.tc_is_stateful_allocator(ft) {
                 return ft;
@@ -5670,7 +5700,7 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    /// Does `ty` implement Allocator AND occupy bytes? Those bytes are the state a constant cannot carry.
+    // Does `ty` implement Allocator AND occupy bytes? Those bytes are the state a constant cannot carry.
     fn tc_is_stateful_allocator(self: &mut Self, ty: TypeId) bool {
         if self.tc_type_is_zero_sized(ty, 0) || self.package == null {
             return false;
@@ -5695,7 +5725,7 @@ extend TypeChecker {
     }
     /// Does a value of `ty` own memory (i.e. is it Free)? An explicit Free extend decides first (its
     /// per-param Free bounds re-checked against the instance args); otherwise structs/enums DERIVE Free
-    /// when any field/payload owns, transitively -- unions never derive. Owning closures (a by-copy Free
+    /// when any field/payload owns, transitively: unions never derive. Owning closures (a by-copy Free
     /// capture) and owned `Box<dyn>` count too. References/pointers peel to their referent: callers that
     /// must treat a borrow as non-owning gate on the pointer kind first.
     pub fn tc_type_is_free(self: &mut Self, ty: TypeId) bool {
@@ -5740,7 +5770,7 @@ extend TypeChecker {
         if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             return false;
         }
-        // TC-6: the (first) Free extend of a (module, decl) is a parse-time fact -- memoize it and
+        // TC-6: the (first) Free extend of a (module, decl) is a parse-time fact; memoize it and
         // re-run only the per-instance bound check below. 0 = "no Free extend".
         let key = om as u64 << 32 | od as u64;
         let mut fm: ModuleId = 0;
@@ -5873,7 +5903,7 @@ extend TypeChecker {
         }
         self.fmt_marked = true;
         // Resolved by decl with no receiver: they land in always_methods, which is what the print
-        // lowering needs -- it names them for whatever String instance it happens to build.
+        // lowering needs: it names them for whatever String instance it happens to build.
         self.mark_recv = TYPE_NONE;
         let mut names = Names14 {};
         names[0] = "new".ptr() as *const char;
@@ -5926,10 +5956,10 @@ extend TypeChecker {
         return self.find_method_cstr(m, decl, lit);
     }
 
-    /// The type a `.into()` / `.try_into()` call builds, when `mname` is one of those and it resolved to
-    /// the mirror `from` / `try_from`. That is the type whose generic arguments the call substitutes
-    /// through; TYPE_NONE for any ordinary method call. Mirrors resolve_conversion's unwrapping: the
-    /// fallible pair names `Result<Target, E>`, so the target is its first argument.
+    // The type a `.into()` / `.try_into()` call builds, when `mname` is one of those and it resolved to
+    // the mirror `from` / `try_from`. That is the type whose generic arguments the call substitutes
+    // through; TYPE_NONE for any ordinary method call. Mirrors resolve_conversion's unwrapping: the
+    // fallible pair names `Result<Target, E>`, so the target is its first argument.
     fn tc_conversion_target(self: &mut Self, mname: NodeId, md: DefId, want: TypeId) TypeId {
         if md.node == NODE_NONE || want == TYPE_NONE {
             return TYPE_NONE;
@@ -6021,7 +6051,7 @@ extend TypeChecker {
 
     // `probe` = answer without observable effects (no diagnostics, no dyn-use recording): a path that
     // would diagnose reports false instead. (A probe may still warm idempotent caches/method-used
-    // marks -- harmless.) Used by the redundant-cast lint.
+    // marks: harmless.) Used by the redundant-cast lint.
     fn dyn_coerce_alloc(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId, balloc: TypeId, probe: bool) bool {
         let dy = *self.type_at(dyn_ty);
         let iface = DefId { module: dy.module, node: self.cur_ast().dyn_decl_of(&dy) };
@@ -6098,7 +6128,8 @@ extend TypeChecker {
             }
         }
         if probe {
-            return true; // erasure would succeed; record nothing
+            // Erasure would succeed; record nothing.
+            return true;
         }
         // Synthesize (superinterface, src) uses FIRST so codegen emits their vtables (the root
         // vtable's __super_* fields point at them); the real use goes last so dyn_at[node] wins.
@@ -6137,7 +6168,7 @@ extend TypeChecker {
         self.errors.fix(fs, csp.end, 0);
     }
 
-    // Lint: `E as P` at a position expecting exactly P, where E converts to P implicitly -- the cast
+    // Lint: `E as P` at a position expecting exactly P, where E converts to P implicitly; the cast
     // is redundant (dropping it typechecks identically). Delegates to compatible_in(probe): whatever
     // the language accepts implicitly, this flags, by construction. Casts with no expected type stay
     // exempt (an unannotated `let x = E as P` uses the cast to pick the binding's type), as do pinned
@@ -6145,7 +6176,7 @@ extend TypeChecker {
     @c.cold
     fn tc_lint_redundant_coalesce(self: &mut Self, expected: TypeId, node: NodeId) {
         let a = self.cur_ast();
-        // peel `move`/`unsafe` wrappers: `unsafe (E as P)` is as redundant as the bare cast
+        // Peel `move`/`unsafe` wrappers: `unsafe (E as P)` is as redundant as the bare cast.
         let mut nid = node;
         while a.at_const(nid).kind == NodeKind::NODE_UNARY && (a.at_const(nid).as_data.unary.op == TokenType::Move || a.at_const(
             nid,
@@ -6161,7 +6192,8 @@ extend TypeChecker {
         }
         let ot = a.type_of(opn);
         if ot == expected {
-            return; // same-type casts belong to the existing unnecessary-cast lint
+            // Same-type casts belong to the existing unnecessary-cast lint.
+            return;
         }
         if !self.compatible_in(expected, opn, true) {
             return;
@@ -6194,10 +6226,10 @@ extend TypeChecker {
         return self.compatible_in(expected, node, false);
     }
 
-    /// The oracle, plus the USER-DEFINED conversions. A type that provides `From<S>` accepts an S
-    /// wherever it is expected, which is what makes a library integer usable where a built-in one is:
-    /// `let a: u128 = 42`, `a + 1`, `f(a)`. Tried only after every built-in rule has failed, so nothing
-    /// that converted before converts differently now.
+    // The oracle, plus the USER-DEFINED conversions. A type that provides `From<S>` accepts an S
+    // wherever it is expected, which is what makes a library integer usable where a built-in one is:
+    // `let a: u128 = 42`, `a + 1`, `f(a)`. Tried only after every built-in rule has failed, so nothing
+    // that converted before converts differently now.
     fn compatible_in(self: &mut Self, expected: TypeId, node: NodeId, probe: bool) bool {
         if self.compatible_core(expected, node, probe) {
             return true;
@@ -6247,10 +6279,10 @@ extend TypeChecker {
         return self.tc_coerce_named(want, node, "widen", probe);
     }
 
-    /// `expr as T` where the source or target is a generic INSTANCE. Returns true when it settled the
-    /// cast -- by recording a conversion, or by reporting it invalid -- and false to leave the cast to
-    /// the built-in rules. Only VALUE casts are taken (both sides an instance, struct or builtin):
-    /// pointer, reference and enum casts keep their existing meaning.
+    // `expr as T` where the source or target is a generic INSTANCE. Returns true when it settled the
+    // cast (by recording a conversion, or by reporting it invalid) and false to leave the cast to
+    // the built-in rules. Only VALUE casts are taken (both sides an instance, struct or builtin):
+    // pointer, reference and enum casts keep their existing meaning.
     fn tc_cast_conv(self: &mut Self, id: NodeId, expr: NodeId, src: TypeId, dst: TypeId) bool {
         let sk = self.type_at(src).kind;
         let dk = self.type_at(dst).kind;
@@ -6294,7 +6326,7 @@ extend TypeChecker {
                 }
             }
         }
-        // Target a built-in scalar: the value's own conversion, and the built-in cast then narrows --
+        // Target a built-in scalar: the value's own conversion, and the built-in cast then narrows;
         // integers through to_u64/to_i64, floats through to_f32/to_f64.
         if sk == TypeKind::TYPE_INSTANCE && dk == TypeKind::TYPE_BUILTIN {
             let dst_int = self.is_int(dst);
@@ -6341,8 +6373,8 @@ extend TypeChecker {
         return true;
     }
 
-    /// Are `want` and `actual` instances of one decl differing in a single CONST argument, with the
-    /// source's larger? The shape of a width parameter -- what makes `UInt<256> -> UInt<128>` narrowing.
+    // Are `want` and `actual` instances of one decl differing in a single CONST argument, with the
+    // source's larger? The shape of a width parameter: what makes `UInt<256> -> UInt<128>` narrowing.
     const fn tc_const_arg_shrinks(self: &mut Self, want: TypeId, actual: TypeId) bool {
         let wy = *self.type_at(want);
         let ay = *self.type_at(actual);
@@ -6359,12 +6391,12 @@ extend TypeChecker {
         return wa.kind == TypeKind::TYPE_CONST && aa.kind == TypeKind::TYPE_CONST && aa.as_data.value > wa.as_data.value;
     }
 
-    /// A conversion that is generic in its SOURCE: `widen<M>(&UInt<M>)` (and `cast_of<M>` for `as`)
-    /// accepts any width, so one method covers every pair. M is not fixed by the receiver, so it is
-    /// inferred by unifying each candidate's declared parameter against what is actually there -- the
-    /// candidates are same-named overloads (a signed and an unsigned source), and unification is what
-    /// picks between them. The instantiation is recorded here because this use site is not a call node,
-    /// so nothing else will record it.
+    // A conversion that is generic in its SOURCE: `widen<M>(&UInt<M>)` (and `cast_of<M>` for `as`)
+    // accepts any width, so one method covers every pair. M is not fixed by the receiver, so it is
+    // inferred by unifying each candidate's declared parameter against what is there: the
+    // candidates are same-named overloads (a signed and an unsigned source), and unification is what
+    // picks between them. The instantiation is recorded here because this use site is not a call node,
+    // so nothing else will record it.
     fn tc_coerce_named(self: &mut Self, want: TypeId, node: NodeId, lit: str, probe: bool) bool {
         let mut m: ModuleId = 0;
         let mut decl = NODE_NONE;
@@ -6418,7 +6450,7 @@ extend TypeChecker {
             }
             // `widen` is the IMPLICIT conversion, so it must be lossless: when source and target are
             // instances of one decl differing in a single const argument, a larger source is refused
-            // here -- the mismatch then reports normally instead of tripping the method's own
+            // here: the mismatch then reports normally instead of tripping the method's own
             // static_assert in the emitted C.
             if lit == "widen" && self.tc_const_arg_shrinks(want, actual) {
                 continue;
@@ -6442,7 +6474,7 @@ extend TypeChecker {
         let actual = self.cur_ast().type_of(node);
         if actual == TYPE_NONE && expected != TYPE_NONE {
             // `null` types as TYPE_NONE; don't let the wildcard below accept it for value types
-            // (str, structs, ints) -- it is only a raw-pointer/fn-pointer literal. References are
+            // (str, structs, ints): it is only a raw-pointer/fn-pointer literal. References are
             // never null: accepting one here would emit C that takes the address of an rvalue.
             let n = self.cur_ast().at_const(node);
             if n.kind == NodeKind::NODE_LITERAL && n.as_data.literal.token_type == TokenType::Null {
@@ -6476,14 +6508,14 @@ extend TypeChecker {
         // Normalizing it here lets the single pointer rule below apply transitively, so `&T` reaches
         // `*const void` via `*const T` (ref -> ptr -> void) with no special case. A BARE `*T` accepts
         // references of either mutability (`&T`/`&mut T` -> `*T`); the reverse (pointer -> reference)
-        // is never implicit -- it needs an explicit cast inside `unsafe`.
+        // is never implicit: it needs an explicit cast inside `unsafe`.
         let mut acp = ac;
         if ac.kind == TypeKind::TYPE_REFERENCE && ex.kind == TypeKind::TYPE_POINTER {
             // Coercing a reference into a RAW POINTER ERASES the borrow. A raw pointer carries no
             // region, and it is precisely the boundary at which this language hands lifetime
             // responsibility to the programmer (dereferencing it needs `unsafe`). Keeping the borrow
-            // live would pin the referent for as long as whatever stored the pointer lives -- which
-            // the checker cannot see -- and would reject correct code like
+            // live would pin the referent for as long as whatever stored the pointer lives (which
+            // the checker cannot see) and would reject correct code like
             // `interp_new(&mut p)` where the parameter is `*mut Package`.
             if !probe {}
             acp.kind = TypeKind::TYPE_POINTER;
@@ -6515,7 +6547,7 @@ extend TypeChecker {
                 return false;
             }
             // An array literal types with len 0 (unknown), so the wildcard rule above never sees its
-            // real element count: enforce it here -- excess initializers are a C constraint violation
+            // real element count: enforce it here; excess initializers are a C constraint violation
             // downstream, missing ones a silent zero-fill. Strict both ways for plain positional
             // literals; a designated literal may underfill (sparse zero-fill is that feature) but
             // never exceed. A precise error beats the generic mismatch, so emit and report compatible.
@@ -6583,7 +6615,7 @@ extend TypeChecker {
                     return qual_ok;
                 }
                 // upcast: dyn X coerces to dyn Y when Y is in X's superinterface closure; the fat
-                // value's data is reused and the vtable comes from the __super_* embed
+                // value's data is reused and the vtable comes from the __super_* embed.
                 if qual_ok && exsig == TYPE_NONE && self.mod_ast(ac.module).at_const(self.cur_ast().dyn_decl_of(&ac)).kind == NodeKind::NODE_INTERFACE {
                     let mut uclo = Defs8 {};
                     let nu = self.dyn_super_closure(
@@ -6670,8 +6702,8 @@ extend TypeChecker {
                     let mut balloc = TYPE_NONE;
                     if !galloc && it2.n >= 2 {
                         balloc = it2.args[1];
-                        // the 2-word fat value cannot carry allocator state: the free glue
-                        // reconstructs the allocator via Default
+                        // The 2-word fat value cannot carry allocator state: the free glue
+                        // reconstructs the allocator via Default.
                         let dh = self.package.prelude_lookup("Default", true);
                         let ddef = DefId { module: dh.mid, node: dh.node };
                         if !self.type_satisfies(balloc, ddef, 0) {
@@ -6754,7 +6786,7 @@ extend TypeChecker {
                 et.as_data.builtin,
             ));
             // Record the CONTEXT's type on the literal, exactly as the integer branch does. The emitted C
-            // is right either way -- the literal passes through textually -- but the compile-time
+            // is right either way (the literal passes through textually) but the compile-time
             // evaluator folds from the RECORDED type, and an f64 context with an f32 record folded
             // `f64_bits(0.1)` at single precision.
             if okf && !probe && !bt_is_complex(et.as_data.builtin) {
@@ -6826,7 +6858,7 @@ extend TypeChecker {
 
     // Every read and write of a `static mut` is an unsafe operation, on the same footing as dereferencing a
     // raw pointer. A `static mut` is unsynchronised shared mutable state reachable from any task without
-    // being captured, so it slips past the `Send`/`Sync` check on a `launch` -- there is nothing to capture
+    // being captured, so it slips past the `Send`/`Sync` check on a `launch`: there is nothing to capture
     // and so nothing to check. Nothing in the type system can prove such an access is free of a data race,
     // so the compiler stops guessing and makes the author say so: the marker is the audit trail.
     //
@@ -6844,7 +6876,6 @@ extend TypeChecker {
             self.err_unsafe(self.cur_ast().at_const(id).span, "accessing a 'static mut'");
         }
     }
-    // ---- places / assignability ----
     const fn tc_path_static_mut(self: &Self, id: NodeId) bool {
         let n = self.cur_ast().at_const(id);
         let mut d = self.cur_ast().resolution_def(id);
@@ -6857,9 +6888,9 @@ extend TypeChecker {
         let dn = self.mod_ast(d.module).at_const(d.node);
         return dn.kind == NodeKind::NODE_CONST && dn.as_data.const_def.is_static_mut;
     }
-    /// Does this qualified path name a constant? A constant emits as a named object with an address,
-    /// so `mod::C` is a PLACE -- borrowing through it (`mod::TABLE.at(i)`) is rooted in that object,
-    /// not in a temporary. (Assignability is decided separately, and a constant is never assignable.)
+    // Does this qualified path name a constant? A constant emits as a named object with an address,
+    // so `mod::C` is a PLACE; borrowing through it (`mod::TABLE.at(i)`) is rooted in that object,
+    // not in a temporary. (Assignability is decided separately, and a constant is never assignable.)
     const fn tc_path_const(self: &Self, id: NodeId) bool {
         let n = self.cur_ast().at_const(id);
         let mut d = self.cur_ast().resolution_def(id);
@@ -6889,9 +6920,9 @@ extend TypeChecker {
             if dn.kind == NodeKind::NODE_CONST {
                 return dn.as_data.const_def.is_static_mut;
             }
-            // every caller is a genuine mutation requirement (assignment LHS, `&mut`, `&mut self`
+            // Every caller is a genuine mutation requirement (assignment LHS, `&mut`, `&mut self`
             // receiver, mut-slice coercion): a positive answer through a local binding marks it for
-            // the unnecessary-mut lint
+            // the unnecessary-mut lint.
             if dn.kind == NodeKind::NODE_LET {
                 if dn.as_data.let_stmt.is_mutable {
                     self.tc_mark_mut_used(d);
@@ -6949,7 +6980,7 @@ extend TypeChecker {
             );
             let mut oty = a.type_of(obj);
             // `f.value` through a fields(&mut v) binder is as mutable as the subject reference;
-            // `f.other` is ALWAYS read-only -- it shares value's type (so a generic callee unifies
+            // `f.other` is ALWAYS read-only: it shares value's type (so a generic callee unifies
             // both), and mutability of the place is denied by NAME instead.
             if nk == NodeKind::NODE_MEMBER && oty != TYPE_NONE && self.type_at(oty).kind == TypeKind::TYPE_FIELD_PROJECTION {
                 if span_is(self.source, self.name_span(a.at_const(node).as_data.member.member), "other") {
@@ -7041,8 +7072,7 @@ extend TypeChecker {
         return true;
     }
 
-    // ---- move / definite-init / free tracking ----
-
+    /// True when `decl` is queued for late (post-module) checking.
     pub fn tc_is_late(self: &Self, decl: NodeId) bool {
         for i in 0..self.nlate {
             if unsafe self.late[i as usize] == decl {
@@ -7052,6 +7082,7 @@ extend TypeChecker {
         return false;
     }
 
+    /// Queue `decl` for late checking (idempotent; drops silently past the fixed capacity).
     pub fn tc_add_late(self: &mut Self, decl: NodeId) {
         if self.tc_is_late(decl) {
             return;
@@ -7088,8 +7119,6 @@ extend TypeChecker {
         }
         return false;
     }
-
-    // ---- scope / borrow set ----
 
     fn place_index_const(self: &Self, idx: NodeId, out: &mut i64) bool {
         let n = self.cur_ast().at_const(idx);
@@ -7282,11 +7311,11 @@ extend TypeChecker {
 
     // The owning binding at the base of an assignable PLACE, walking field / index / deref steps
     // down to the root identifier (`s.r.x` -> s, `arr[i]` -> arr, `*p` -> p). Unlike
-    // place_through_binding this does not require the chain to pass through a reference -- it is the
+    // place_through_binding this does not require the chain to pass through a reference: it is the
     // root a stored borrow's region must be checked against.
 
-    // When a method/index result REBORROWS its receiver -- the receiver is itself a view carrying a
-    // borrow, so the result views the same underlying storage -- the result must INHERIT the borrows
+    // When a method/index result REBORROWS its receiver: the receiver is itself a view carrying a
+    // borrow, so the result views the same underlying storage: the result must INHERIT the borrows
     // the receiver holds of the real container, not silently drop them. `let s = v[0..3]` retains a
     // borrow of `v` tied to `s`; a sub-view `let sub = s[0..2]` reborrows `s`, and without inheriting
     // `s`'s borrow of `v`, `sub` stops pinning `v` the moment `s`'s own borrow ends -> `v` reallocates
@@ -7295,7 +7324,7 @@ extend TypeChecker {
 
     // A `[..]` slice result views its source's storage: mint (source owns its data) or inherit (source
     // is itself a view) a borrow of the source so the container cannot be reallocated while the slice
-    // is live. Shared by both range exits -- an `index_range` method result and a `prelude_slice_type`
+    // is live. Shared by both range exits: an `index_range` method result and a `prelude_slice_type`
     // result (the latter covers a slice-of-a-slice, which `slice_kind` handles before index_range).
 
     /// The local binding a place reaches THROUGH a reference (`*p` -> p, `r.f` with `r: &T` -> r), or
@@ -7331,7 +7360,7 @@ extend TypeChecker {
         }
     }
 
-    // Drop the borrow(s) produced by `origin` -- used where a reference is erased into a raw pointer.
+    // Drop the borrow(s) produced by `origin`: used where a reference is erased into a raw pointer.
 
     /// TC-3: one pass over the resolution table records, per local decl, the LAST node that
     /// resolves to it. "any use after `after`" then collapses to one compare. Typechecker-added
@@ -7363,15 +7392,13 @@ extend TypeChecker {
 
     // Is a binding confined to the CURRENT innermost loop's body? Such a binding is re-created every
     // iteration and dies at the end of each one, so no use of it can execute after a given point via
-    // the back edge -- which is exactly the condition that makes source-order last-use reasoning valid
+    // the back edge, which is exactly the condition that makes source-order last-use reasoning valid
     // inside a loop. A binding declared at or outside the loop's entry depth can be used again on the
     // next iteration (after the point in execution order, though before it in source order).
 
-    // ---- escape analysis ----
-
     // True if a value of this type can carry a borrow out of the scope that produced it: a reference,
     // an aggregate that declares a lifetime param, an instance whose generic ARG is borrowing
-    // (`Vector<&i32>`), or an aggregate with a reference-typed field, transitively. Conservative --
+    // (`Vector<&i32>`), or an aggregate with a reference-typed field, transitively. Conservative:
     // a spurious `true` only over-rejects, never under-rejects.
     // Memoized entry: does a value of this type carry a borrow (a reference, an aggregate/instance
     // holding one, transitively, or a type with a lifetime param)? Pure function of the interned type.
@@ -7380,17 +7407,17 @@ extend TypeChecker {
     // This is the Rust argument-boundary rule that makes `Vector<&'a T>::push(&mut self, value: T)`
     // reject a too-short borrow with NO "does it store" flag: `value: T` and the container's elements
     // are the SAME `T`, so they share `T`'s region. When `T` is instantiated to a borrow-carrying type
-    // (`&i32`), the argument passed for `value` must outlive the receiver -- by variance, whether or
-    // not push actually stores it. Returns true when pdecl's declared type is exactly a generic
+    // (`&i32`), the argument passed for `value` must outlive the receiver: by variance, whether or
+    // not push stores it. Returns true when pdecl's declared type is exactly a generic
     // parameter that the receiver aggregate instantiates with a borrow-carrying type.
 
     // The referent a `&mut <place>`/`&<place>` argument points at (its base binding), or the arg's own
-    // base binding when a place is passed directly. Used to region-tie borrows stored through it.
+    // base binding when a place is passed directly, which region-ties borrows stored through it.
 
     // Every lifetime NAME a type node mentions, anywhere: the annotation on a reference, and the
     // lifetime arguments of an aggregate (`Ref<'a>`), recursively. A value parameter shares a region
-    // with a storage parameter whenever ANY of these matches -- reading only the outermost reference's
-    // annotation missed `src: Ref<'a>`, an aggregate that borrows just as much as `&'a i32` does.
+    // with a storage parameter whenever ANY of these matches: reading only the outermost reference's
+    // annotation would miss `src: Ref<'a>`, an aggregate that borrows as much as `&'a i32` does.
 
     // Does a `&mut` storage pointee TYPE NODE mention the named lifetime `lt` (compared in module `m`)?
     // Either it is an aggregate carrying `lt` as a lifetime argument (`Slot<'a>`), or it is itself a
@@ -7404,10 +7431,10 @@ extend TypeChecker {
 
     // The interned generic ELEMENT of a `&mut T` parameter (T a callee type variable), or TYPE_NONE.
     // Does a type mention a callee TYPE VARIABLE anywhere inside it? `T`, `Cell<T>`, `&T`, `[T; N]`
-    // all do. Used to find the `&mut` parameters whose pointee the caller instantiates.
+    // all do. Finds the `&mut` parameters whose pointee the caller instantiates.
 
     // The POINTEE of a `&mut` parameter, when that pointee mentions a callee type variable. `&mut` is
-    // invariant in its pointee unconditionally -- no per-aggregate variance needed -- so two arguments
+    // invariant in its pointee unconditionally: no per-aggregate variance needed, so two arguments
     // passed for the SAME pointee type must have equal regions. Covers `&mut T` and `&mut Cell<T>`
     // alike; the latter was a hole while this only recognised a bare type variable.
     // Copy the content borrows a `&mut T` argument's referent holds onto the OTHER `&mut T` argument's
@@ -7418,17 +7445,16 @@ extend TypeChecker {
     // have their contents swapped, so their arguments' referents must have equal lifetime. Cross-tie
     // the content borrows both ways; a no-op when T is not a borrow-carrier (no content borrows exist).
 
-    // ---- lifetime elision (Rust's three rules) ----
     // Rule 1 is structural: every elided INPUT position is its own fresh lifetime, which is why two
     // elided parameters never share a region. Rules 2 and 3 say which lifetime an elided OUTPUT gets:
     // with exactly one input position it takes that one; with a `&self` receiver it takes self's.
-    // When neither applies the output's region is unconstrained -- the caller cannot tell what it
-    // borrows -- so it must be written, exactly as Rust demands.
+    // When neither applies the output's region is unconstrained: the caller cannot tell what it
+    // borrows, so it must be written, exactly as Rust demands.
     //
     // Counts lifetime POSITIONS in a type: each reference, and each lifetime argument slot of a
     // borrowing aggregate, whether written or elided.
 
-    // Does this type have an ELIDED lifetime position -- a reference with no annotation, or a
+    // Does this type have an ELIDED lifetime position: a reference with no annotation, or a
     // borrowing aggregate given no lifetime argument?
 
     // Apply rules 2 and 3 to a signature: an elided output lifetime must be determined by a `&self`
@@ -7441,7 +7467,7 @@ extend TypeChecker {
 
     // `T: 'a` bounds, enforced at the call site. The bound promises every region inside the type
     // substituted for `T` outlives `'a`; it was parsed and ignored, so a callee could rely on a
-    // guarantee the caller never had to meet. The checkable case here is `T: 'static` -- the argument's
+    // guarantee the caller never had to meet. The checkable case here is `T: 'static`; the argument's
     // type must then carry no borrow at all, since nothing borrowed from a local outlives the program.
     // A bound naming a signature lifetime is left to the argument-boundary tie, which already relates
     // the argument's region to that lifetime's.
@@ -7450,14 +7476,14 @@ extend TypeChecker {
     // the where clause (`where T: 'static`)?
 
     // Family B: a borrow passed for a bare value parameter `x: T` that ANOTHER parameter stores through
-    // (`dst: &mut T` or `dst: &mut C<..T..>`) must outlive that storage's referent -- the Rust
+    // (`dst: &mut T` or `dst: &mut C<..T..>`) must outlive that storage's referent; the Rust
     // argument-boundary variance rule across a plain function boundary (bug6 covered only the receiver-
     // as-container case of a method). Tie this call's argument borrows to the storage argument's
     // referent region; the existing scope-exit check then reports a referent that dies while the
     // container holding it lives on. Excludes the storage arg's own borrow (rooted at the container).
 
     // Region-aware return check. `addr_escape` only recognizes a reference taken DIRECTLY of a local
-    // or parameter (`return &x`). It misses a borrow that reaches the caller indirectly -- e.g.
+    // or parameter (`return &x`). It misses a borrow that reaches the caller indirectly: e.g.
     // `return b.get()` where `b` is a local `Box` (the reference points into b's heap cell, not into
     // b's own storage, so no `&local` is ever seen, yet the cell is freed when b drops at return), or
     // a borrow buried in a returned aggregate (`return R { p: &local }`).
@@ -7466,7 +7492,6 @@ extend TypeChecker {
     // at a binding declared inside this function dies at return, so if the returned value can carry a
     // borrow out at all, that is a dangling return. `bm` is the watermark taken before the operands.
 
-    // ---- extend conformance ----
     fn find_extend_item_named(self: &Self, extnode: NodeId, name: tok::Span, nmod: ModuleId) NodeId {
         let a = self.cur_ast();
         let have = a.at_const(extnode).as_data.extend_def.items;
@@ -7644,7 +7669,7 @@ extend TypeChecker {
         for i in 0..req.len {
             let rid = unsafe ia.list(req)[i as usize];
             let rm = ia.at_const(rid);
-            // An ASSOCIATED TYPE requirement (`type Item<'a>;` -- no definition). The impl must
+            // An ASSOCIATED TYPE requirement (`type Item<'a>;`, no definition). The impl must
             // provide it with the same lifetime and type-generic arity: the interface's declared
             // shape is a contract even though lifetimes are erased from the interned types.
             if rm.kind == NodeKind::NODE_TYPE_ALIAS && rm.as_data.type_alias.ty == NODE_NONE {
@@ -7721,7 +7746,7 @@ extend TypeChecker {
     }
     // `Send` and `Sync` are the two conformances the compiler cannot verify. Every other interface is checked
     // against its requirements; these two are DERIVED structurally, and writing one by hand overrides that
-    // derivation -- it asserts a synchronisation discipline living outside the type system (an `Arc`'s
+    // derivation: it asserts a synchronisation discipline living outside the type system (an `Arc`'s
     // refcount, a `Mutex`'s lock, an atomic instruction). Nothing checks the claim, so the claim is marked:
     // `unsafe extend` puts every such assertion one grep away from an audit.
     fn check_marker_is_unsafe(self: &mut Self, id: NodeId, iface: DefId) {
@@ -7752,12 +7777,12 @@ extend TypeChecker {
     //
     // `unsafe` must match exactly, and the direction that matters is an implementation MORE unsafe than its
     // declaration: a caller reaching it through the bound sees the safe declaration, promises nothing, and
-    // lands in an unsafe body -- the mark laundered away by the interface. The other direction is only
+    // lands in an unsafe body: the mark laundered away by the interface. The other direction is only
     // confusing (a direct call needs no mark while a call through the bound does), so both are errors and
-    // the two signatures simply agree.
+    // the two signatures agree.
     //
     // `const` only has to be strong ENOUGH. An implementation may be `const fn` where the interface asks for
-    // a plain one -- it is more capable, and `std` leans on this throughout (`Array as Default` is const
+    // a plain one: it is more capable, and `std` leans on this throughout (`Array as Default` is const
     // where `Default` is not). It may not be plain where the interface asks for `const`, or a `const fn`
     // calling through the bound would fail at the fold, far from the implementation that caused it.
     fn check_method_qualifiers(self: &mut Self, req: DefId, hm: NodeId, rn: tok::Span) {
@@ -7803,7 +7828,7 @@ extend TypeChecker {
                 nsub = nsub + 1;
                 i = i + 1;
             }
-            // A parameter the conformance did not spell takes its DEFAULT -- `Mul<Rhs = Self>` written as a
+            // A parameter the conformance did not spell takes its DEFAULT: `Mul<Rhs = Self>` written as a
             // bare `as Mul`. Lowered through the frame built so far, so `Self` in the default is the
             // implementing type and a later default may name an earlier parameter.
             while i < gens.len && nsub < 8 {
@@ -7878,7 +7903,7 @@ extend TypeChecker {
         let mut subp = Defs8 {};
         let mut suba = Tys8 {};
         let nsub = self.tc_extend_self_frame(id, iface, &mut subp, &mut suba);
-        // A type states one conformance per (interface, arguments) pair -- `Conv<i32>` and
+        // A type states one conformance per (interface, arguments) pair: `Conv<i32>` and
         // `Conv<bool>` are distinct, a repeat of either could only redefine its methods. Scan the
         // EARLIER siblings so the later extend carries the error; a cross-module duplicate still
         // surfaces at link.
@@ -7942,13 +7967,12 @@ extend TypeChecker {
         self.check_interface_requirements(id, iface, suba[0], &subp[0], &suba[0], nsub, 0);
     }
 
-    // ---- operators ----
     fn method_recv_subst(self: &mut Self, recv: TypeId, md: DefId, rsubp: *mut DefId, rsuba: *mut TypeId) i32 {
         let mut nrsub: i32 = 0;
         let rvy = *self.type_at(self.strip(recv));
         if rvy.kind == TypeKind::TYPE_DYN {
-            // dyn receiver over an instantiated generic interface: map the interface's generic
-            // params to the dyn type's arguments (method sigs mention them directly)
+            // Dyn receiver over an instantiated generic interface: map the interface's generic
+            // params to the dyn type's arguments (method sigs mention them directly).
             let dinst = *self.cur_ast().instance(rvy.as_data.inst);
             if dinst.n > 0 && self.mod_ast(dinst.module).at_const(dinst.decl).kind == NodeKind::NODE_INTERFACE {
                 let ig = self.mod_ast(dinst.module).at_const(dinst.decl).as_data.interface_def.generics;
@@ -8135,7 +8159,8 @@ const fn arith_method_name(op: TokenType) str<'static> {
 // form of anything this can compare.
 fn lin_divide(src: &ConstLin, d: i64, out: &mut ConstLin) bool {
     if src.div_of() != 1 {
-        return false; // dividing a divided form would stack floors; nothing writes that
+        // Dividing a divided form would stack floors; nothing writes that.
+        return false;
     }
     if d == 0 || src.k % d != 0 {
         return false;
@@ -8160,7 +8185,7 @@ extend TypeChecker {
         let operand = a.at_const(id).as_data.unary.operand;
         let qual = a.at_const(id).as_data.unary.qualifier;
         // A negative literal past i64, where the context expects Int<N>: the sign belongs to the
-        // literal, so the pair becomes one wide value here -- checking the operand alone would only
+        // literal, so the pair becomes one wide value here: checking the operand alone would only
         // reject it.
         if op == TokenType::Minus && a.at_const(operand).kind == NodeKind::NODE_LITERAL && a.at_const(operand).as_data.literal.token_type == TokenType::IntegerLiteral {
             if self.tc_wide_literal(operand, id, true, expected) {
@@ -8187,8 +8212,8 @@ extend TypeChecker {
         let opnd = self.check_expr(operand);
         if op == TokenType::Unsafe {
             self.icx.unsafe_depth = self.icx.unsafe_depth - 1;
-            // an `unsafe` take of a Free field through a reference is CONSUMED by the borrow
-            // checker's E0507 exemption (a later pass this lint cannot see): count it as used
+            // An `unsafe` take of a Free field through a reference is CONSUMED by the borrow
+            // checker's E0507 exemption (a later pass this lint cannot see): count it as used.
             if self.icx.unsafe_used == 0 {
                 let mut w = operand;
                 loop {
@@ -8210,7 +8235,7 @@ extend TypeChecker {
                 let usp = a.at_const(id).span;
                 self.errors.warn(usp.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
                 // Prefix form only: a bare block is not an expression, so `unsafe { .. }` keeps its marker.
-                // Delete just the keyword + trailing blanks -- the operand span excludes dropped grouping
+                // Delete only the keyword + trailing blanks: the operand span excludes dropped grouping
                 // parens, so deleting up to it would swallow a '(' (`unsafe (a + 1)`).
                 if a.at_const(operand).kind != NodeKind::NODE_BLOCK {
                     let mut fe = usp.start + 6;
@@ -8246,7 +8271,7 @@ extend TypeChecker {
             return opnd;
         }
         if op == TokenType::Star {
-            // Lint: `*&x` (any mutability) yields the place/value x itself -- both tokens cancel.
+            // Lint: `*&x` (any mutability) yields the place/value x itself; both tokens cancel.
             if self.lint && a.at_const(operand).kind == NodeKind::NODE_UNARY && a.at_const(operand).as_data.unary.op == TokenType::Ampersand {
                 let usp = a.at_const(id).span;
                 self.errors.warn(
@@ -8266,7 +8291,7 @@ extend TypeChecker {
                 }
                 return ot.as_data.elem;
             }
-            // `*x` on a type that implements Deref is that impl's job, exactly as `x.method()` is
+            // `*x` on a type that implements Deref is that impl's job, exactly as `x.method()` is.
             let mut dm = DefId { module: 0, node: NODE_NONE };
             let dt = self.tc_deref_step(self.strip(opnd), &mut dm, false);
             if dt != TYPE_NONE {
@@ -8278,7 +8303,7 @@ extend TypeChecker {
         }
         if op == TokenType::Ampersand {
             let mut2 = qual == TypeQualifier::TYPE_QUAL_MUT;
-            // Lint: `&*r` on a shared reference re-produces r -- both tokens cancel. (`&mut *r`
+            // Lint: `&*r` on a shared reference re-produces r; both tokens cancel. (`&mut *r`
             // reborrows and `&*p` on a raw pointer materializes a reference: both meaningful.)
             if self.lint && !mut2 && a.at_const(operand).kind == NodeKind::NODE_UNARY && a.at_const(operand).as_data.unary.op == TokenType::Star {
                 let inner = a.at_const(operand).as_data.unary.operand;
@@ -8562,8 +8587,8 @@ extend TypeChecker {
                 unsafe self.cur_ast().op_method.insert(id, md.module as u64 << 32 | md.node as u64);
             }
             if md.node == NODE_NONE {
-                // an interface DEFAULT the conformance inherits (a derived `eq`/`cmp`) provides the
-                // operator too
+                // An interface DEFAULT the conformance inherits (a derived `eq`/`cmp`) provides the
+                // operator too.
                 md = self.find_default_method_cstr(om, od, m);
                 if md.node != NODE_NONE {
                     unsafe self.cur_ast().op_method.insert(id, md.module as u64 << 32 | md.node as u64);
@@ -8599,9 +8624,9 @@ extend TypeChecker {
         return true;
     }
 
-    /// Unary `~` on an aggregate: the same dispatch the binary operators get, through `bit_not`. Reports
-    /// against the operator rather than falling through to "requires an integer operand", which would name
-    /// the wrong problem for a type that simply has no such method.
+    // Unary `~` on an aggregate: the same dispatch the binary operators get, through `bit_not`. Reports
+    // against the operator rather than falling through to "requires an integer operand", which would name
+    // the wrong problem for a type that has no such method.
     fn check_bit_not_overload(self: &mut Self, id: NodeId, opnd: TypeId, out: &mut TypeId) bool {
         let mut os = opnd;
         while os != TYPE_NONE && self.type_at(os).kind == TypeKind::TYPE_REFERENCE {
@@ -8715,7 +8740,7 @@ extend TypeChecker {
             }
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
-        // comparisons
+        // Comparisons.
         let ord = op == TokenType::LessThan || op == TokenType::LessThanEqual || op == TokenType::GreaterThan || op == TokenType::GreaterThanEqual;
         // `null == value` mirror of the null-operand check in the struct-eq branch below.
         let lnn = self.cur_ast().at_const(ln);
@@ -8744,8 +8769,8 @@ extend TypeChecker {
         while rstrip != TYPE_NONE && self.type_at(rstrip).kind == TypeKind::TYPE_REFERENCE {
             rstrip = self.type_at(rstrip).as_data.elem;
         }
-        // a raw pointer compares by ADDRESS, a reference by VALUE: one of each in a comparison has
-        // no consistent meaning, so it is rejected instead of silently picking a side
+        // A raw pointer compares by ADDRESS, a reference by VALUE: one of each in a comparison has
+        // no consistent meaning, so it is rejected instead of silently picking a side.
         let lptr = ls != TYPE_NONE && self.type_at(ls).kind == TypeKind::TYPE_POINTER;
         let rptr = rstrip != TYPE_NONE && self.type_at(rstrip).kind == TypeKind::TYPE_POINTER;
         if lptr != rptr && (lptr && r != rstrip || rptr && l != ls) {
@@ -8795,12 +8820,13 @@ extend TypeChecker {
                 }
                 let mut md = self.find_method_cstr(om, od, mm);
                 if md.node == NODE_NONE {
-                    // an interface DEFAULT the conformance inherits (a derived `eq`/`cmp`) serves
-                    // the operator too
+                    // An interface DEFAULT the conformance inherits (a derived `eq`/`cmp`) serves
+                    // the operator too.
                     md = self.find_default_method_cstr(om, od, mm);
                 }
                 if md.node == NODE_NONE && ls_enum {
-                    native_enum = true; // no conformance: the native discriminant comparison below
+                    // No conformance: the native discriminant comparison below.
+                    native_enum = true;
                 } else if md.node == NODE_NONE {
                     let mut ty = Buf96 {};
                     self.render_type(ls, &mut ty[0], 96);
@@ -8855,7 +8881,7 @@ extend TypeChecker {
             }
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
-        // scalar comparison: references compare by value, so validate the reference-STRIPPED types
+        // Scalar comparison: references compare by value, so validate the reference-STRIPPED types
         // (`&i32 == &i32`, `&i32 == i32`, `i32 == &i32` are all i32-value comparisons). Raw pointers
         // were handled by the pointer branch above.
         if ls != TYPE_NONE && rstrip != TYPE_NONE && ls != rstrip && !self.compatible(ls, rn) && !self.compatible(
@@ -8933,7 +8959,7 @@ extend TypeChecker {
         let ct = *self.type_at(callee);
         if ct.kind != TypeKind::TYPE_FUNCTION {
             // A generic fn callee has no concrete fn TYPE this early, but its declared params that
-            // do not mention a type parameter are still exact -- `range(0..n, ..)`'s Range<usize>
+            // do not mention a type parameter are still exact: `range(0..n, ..)`'s Range<usize>
             // should reach the range literal even though the fn is generic over its closure.
             let mut cd = self.cur_ast().resolution_def(callee_node);
             if cd.node == NODE_NONE && self.cur_ast().at_const(callee_node).kind == NodeKind::NODE_MEMBER {
@@ -8959,7 +8985,7 @@ extend TypeChecker {
         let fa = self.mod_ast(ct.module);
         let fnn = fa.at_const(ct.as_data.decl);
         if fnn.kind == NodeKind::NODE_FUNCTION_TYPE {
-            // a call THROUGH a fn-pointer value: the parameter types are the signature's own
+            // A call THROUGH a fn-pointer value: the parameter types are the signature's own.
             let fps = fnn.as_data.function_type.params;
             if argi >= fps.len {
                 return TYPE_NONE;
@@ -9031,7 +9057,7 @@ extend TypeChecker {
     }
 
     // `forid` receives the selected `next` (call_info) and its substituted Option return type
-    // (type_args) -- the facts Core IR lowering replays instead of re-deriving the protocol.
+    // (type_args): the facts Core IR lowering replays instead of re-deriving the protocol.
     fn iter_elem_type(self: &mut Self, forid: NodeId, it: TypeId) TypeId {
         let mut im: ModuleId = 0;
         let mut idl = NODE_NONE;
@@ -9085,7 +9111,6 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    // ---- `format` rewrite ----------------------------------------------------------------------
     // Node builders for the rewrite; each keeps the resolution/type side tables sized (they were
     // sized before typecheck, and these are the only nodes built during it).
     fn tc_add_node(self: &mut Self, n: Node) NodeId {
@@ -9176,7 +9201,7 @@ extend TypeChecker {
             },
         );
     }
-    // `sugar_fmt_<shim>(first, v, ...extra)` -- the String always threads by value as `first`.
+    // `sugar_fmt_<shim>(first, v, ...extra)`: the String always threads by value as `first`.
     fn tc_fmt_call(self: &mut Self, shim: str, kw: tok::Span, first: NodeId, v: NodeId, extra: NodeId) NodeId {
         let mut sa = Nodes8 {};
         let mut n: u32 = 0;
@@ -9343,7 +9368,7 @@ extend TypeChecker {
         } else if at == self.prelude_str_type() {
             shim = "sugar_fmt_str";
         } else {
-            // strip references; aggregates and generic params go through the `Format` bound
+            // Strip references; aggregates and generic params go through the `Format` bound.
             let mut vt = at;
             let mut rd: u32 = 0;
             while self.type_at(vt).kind == TypeKind::TYPE_REFERENCE {
@@ -9352,7 +9377,7 @@ extend TypeChecker {
             }
             let vy = *self.type_at(vt);
             if rd == 0 && vy.kind == TypeKind::TYPE_INSTANCE {
-                // a Global-allocated String pushes directly; other allocators format via `fmt`
+                // A Global-allocated String pushes directly; other allocators format via `fmt`.
                 let ii = *self.cur_ast().instance(vy.as_data.inst);
                 let sh = self.package.prelude_lookup("String", true);
                 let gh = self.package.prelude_lookup("Global", true);
@@ -9390,7 +9415,7 @@ extend TypeChecker {
             }
         }
         if width_e > width_s {
-            // f = sugar_fmt_pad_X(f, <shim>(sugar_fmt_new(), v), width, fill);
+            // `f = sugar_fmt_pad_X(f, <shim>(sugar_fmt_new(), v), width, fill);`.
             let pshim = if align == b'<' {
                 "sugar_fmt_pad_l";
             } else if align == b'^' {
@@ -9408,14 +9433,14 @@ extend TypeChecker {
             pa[0] = self.tc_local_use(kw, letf);
             pa[1] = piece;
             pa[2] = self.tc_lit(width_s, width_e, TokenType::IntegerLiteral, false);
-            // the fill character rides as a RAW one-byte segment literal (escaping-proof)
+            // The fill character rides as a RAW one-byte segment literal (escaping-proof).
             pa[3] = self.tc_lit(fill_s, fill_e, TokenType::RawStringLiteral, true);
             let pc = self.tc_shim_call(pshim, kw, &pa[0], 4);
             self.tc_fmt_assign(letf, kw, pc);
         } else if mt && (shim == "sugar_fmt_str" || shim == "sugar_fmt_char" || shim == "sugar_fmt_string" || shim == "sugar_fmt_owned" || shim == "sugar_fmt_val" || shim == "sugar_fmt_val_owned") {
-            // matchertext hole whose piece can carry matcher bytes: render it onto a fresh String
+            // Matchertext hole whose piece can carry matcher bytes: render it onto a fresh String
             // and splice through the runtime matchertext check (numeric/bool pieces never can, and
-            // append directly). `f = sugar_mt_splice(f, <shim>(sugar_fmt_new(), v));`
+            // append directly). `f = sugar_mt_splice(f, <shim>(sugar_fmt_new(), v));`.
             let newc = self.tc_fmt_call("sugar_fmt_new", kw, NODE_NONE, NODE_NONE, NODE_NONE);
             let piece = self.tc_fmt_call(shim, kw, newc, varg, extra);
             let mut pa = Nodes8 {};
@@ -9446,7 +9471,7 @@ extend TypeChecker {
     // lowering. Template diagnostics live here now; every error path leaves the node as the
     // (already reported) call, which nothing downstream runs on.
     // `pkind`: 0 = `format()` (block value = the String); 1..4 = the print family
-    // (print/println/eprint/eprintln) -- the block tail CALLS the matching String method instead,
+    // (print/println/eprint/eprintln): the block tail CALLS the matching String method instead,
     // so the print expansion is settled here once and every later stage sees plain calls.
     fn tc_check_format_p(self: &mut Self, id: NodeId, pkind: u32) TypeId {
         let sh = self.package.prelude_lookup("String", true);
@@ -9491,7 +9516,7 @@ extend TypeChecker {
         };
         let mut kw = self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee).span;
         if pkind == 5 {
-            // member callee: the synthetic local's ident must be the METHOD name alone
+            // Member callee: the synthetic local's ident must be the METHOD name alone.
             let mm = self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee).as_data.member.member;
             kw = self.cur_ast().at_const(mm).span;
         }
@@ -9510,8 +9535,8 @@ extend TypeChecker {
                 kind: NodeKind::NODE_LET,
                 span: kw,
                 as_data: NodeAs {
-                    // every segment/placeholder append reassigns the binding; an empty template
-                    // appends nothing, so `mut` would lint as unneeded
+                    // Every segment/placeholder append reassigns the binding; an empty template
+                    // appends nothing, so `mut` would lint as unneeded.
                     let_stmt: LetData {
                         name: self.tc_ident(kw),
                         ty: NODE_NONE,
@@ -9534,7 +9559,7 @@ extend TypeChecker {
                 continue;
             }
             if c == b'{' {
-                // scan the spec keeping SPANS: every literal the rewrite builds points at real text
+                // Scan the spec keeping SPANS: every literal the rewrite builds points at real text.
                 let mut fill_s = i;
                 let mut fill_e = i;
                 let mut align: u8 = 0;
@@ -9633,7 +9658,8 @@ extend TypeChecker {
             bad = true;
         }
         if bad {
-            self.cur_ast().commit(mark); // abandon the partial rewrite; the nodes stay, unreferenced
+            // Abandon the partial rewrite; the nodes stay, unreferenced.
+            self.cur_ast().commit(mark);
             return sret;
         }
         if endc > seg {
@@ -9644,9 +9670,9 @@ extend TypeChecker {
         if pkind == 0 {
             tail = self.tc_expr_stmt(self.tc_local_use(kw, letf), kw);
         } else if pkind == 5 {
-            // `buf.format_into(fmt, ...)`: absorb the rendered piece into `&mut buf`
+            // `buf.format_into(fmt, ...)`: absorb the rendered piece into `&mut buf`.
             let recv = self.cur_ast().at_const(self.cur_ast().at_const(id).as_data.call.callee).as_data.member.object;
-            // a receiver that is ALREADY a mutable reference passes through unwrapped
+            // A receiver that is ALREADY a mutable reference passes through unwrapped.
             let rvt = self.type_at(self.cur_ast().type_of(recv)).kind;
             let mut rref = recv;
             if rvt != TypeKind::TYPE_REFERENCE && rvt != TypeKind::TYPE_POINTER {
@@ -9670,7 +9696,7 @@ extend TypeChecker {
             let pcall = self.tc_shim_call("sugar_format_into", kw, &sa2[0], 2);
             tail = self.tc_expr_stmt(pcall, kw);
         } else {
-            // the consuming print tails write and free the buffer in one move
+            // The consuming print tails write and free the buffer in one move.
             let mut shim2: str = "sugar_print";
             if pkind == 2 {
                 shim2 = "sugar_println";
@@ -9703,7 +9729,7 @@ extend TypeChecker {
         let sret = self.cur_ast().intern_instance(sh.mid, sh.node, &sa[0], 1);
         self.cur_ast().set_type(id, sret);
         let kids = self.cur_ast().at_const(id).as_data.block.statements;
-        // the rewrite's identifiers render from their span text, so use just the leading `M`
+        // The rewrite's identifiers render from their span text, so use only the leading `M`.
         let sp0 = self.cur_ast().at_const(id).span;
         let kw = tok::Span { start: sp0.start, end: sp0.start + 1 };
         let ne0 = self.errors.errors.len();
@@ -9744,7 +9770,8 @@ extend TypeChecker {
             }
         }
         if bad {
-            self.cur_ast().commit(mark); // abandon the partial rewrite; the nodes stay, unreferenced
+            // Abandon the partial rewrite; the nodes stay, unreferenced.
+            self.cur_ast().commit(mark);
             return sret;
         }
         let tail = self.tc_expr_stmt(self.tc_local_use(kw, letf), kw);
@@ -9837,11 +9864,11 @@ extend TypeChecker {
         return Ast::builtin(BuiltinType::BT_VOID);
     }
 
-    /// Changed-slot worklist (plan phase 3): a slot's obligations -- the declared fn bound and its
-    /// interface bounds -- run exactly once, when the slot first resolves. Obligation evidence can
-    /// resolve further slots; the loop continues to a fixed point with no fixed pass count, under
-    /// the named per-call operation budget. `processed` and `ops` persist across re-entry so the
-    /// expected-result round only touches newly resolvable slots.
+    // Changed-slot worklist: a slot's obligations (the declared fn bound and its
+    // interface bounds) run exactly once, when the slot first resolves. Obligation evidence can
+    // resolve further slots; the loop continues to a fixed point with no fixed pass count, under
+    // the named per-call operation budget. `processed` and `ops` persist across re-entry so the
+    // expected-result round only touches newly resolvable slots.
     fn tc_infer_worklist(
         self: &mut Self,
         id: NodeId,
@@ -9888,9 +9915,9 @@ extend TypeChecker {
         }
     }
 
-    /// One slot's interface-bound obligations (plan phase 3): with `self_ty` known for generic
-    /// parameter `gid`, look up each declared bound's conformance and feed the instantiated
-    /// interface arguments back as evidence. Runs exactly once per slot, from the call worklist.
+    // One slot's interface-bound obligations: with `self_ty` known for generic
+    // parameter `gid`, look up each declared bound's conformance and feed the instantiated
+    // interface arguments back as evidence. Runs exactly once per slot, from the call worklist.
     fn tc_slot_obligations(self: &mut Self, fmod: ModuleId, fdecl: NodeId, gid: NodeId, self_ty: TypeId) {
         let fa = self.mod_ast(fmod);
         let mut bs = BoundArr8 {};
@@ -9945,8 +9972,8 @@ extend TypeChecker {
         }
     }
 
-    /// An unresolved generic argument after defaults is a call-site error (plan section 5.3), not a
-    /// downstream emission failure.
+    // An unresolved generic argument after defaults is a call-site error (plan section 5.3), not a
+    // downstream emission failure.
     @c.cold
     fn err_unresolved_generic(self: &mut Self, sp: tok::Span, gmod: ModuleId, gid: NodeId) {
         let ga2 = self.mod_ast(gmod);
@@ -9961,7 +9988,7 @@ extend TypeChecker {
         );
     }
 
-    /// The per-call inference operation budget was exhausted (plan section 13.4).
+    // The per-call inference operation budget was exhausted (plan section 13.4).
     @c.cold
     fn err_infer_budget(self: &mut Self, sp: tok::Span) {
         self.errors.emit(
@@ -10039,7 +10066,7 @@ extend TypeChecker {
             NODE_NONE;
         };
         let mut callee = TYPE_NONE;
-        // Binder metadata reads -- `f.has_meta("k")` / `f.meta_bool` / `f.meta_int` / `f.meta_str`
+        // Binder metadata reads: `f.has_meta("k")` / `f.meta_bool` / `f.meta_int` / `f.meta_str`
         // on a fields/variants/payloads binder: per-copy CONSTANTS the emitter (and the binder-const
         // `if` elision) computes from the declaration's `@reflect` entries. The key must be a string
         // LITERAL; a missing key reads false / 0 / "".
@@ -10104,7 +10131,7 @@ extend TypeChecker {
                 }
             }
         }
-        // `x.free()` intrinsic no-op check
+        // `x.free()` intrinsic no-op check.
         if pck == NodeKind::NODE_MEMBER && !a.at_const(callee_id).as_data.member.path && a.at_const(id).as_data.call.args.len == 0 {
             let mem = cmem;
             if span_is(self.mod_src(self.cur_module()), a.at_const(mem).as_data.name.text, "free") {
@@ -10179,7 +10206,7 @@ extend TypeChecker {
             );
             return TYPE_NONE;
         }
-        // assert builtins
+        // Assert builtins.
         if pck == NodeKind::NODE_IDENTIFIER && self.package != null {
             let ad = a.resolution_def(callee_id);
             if ad.node != NODE_NONE && ad.module as usize < self.pkg_count() && unsafe self.package.modules[ad.module as usize].prelude && self.mod_ast(
@@ -10217,7 +10244,7 @@ extend TypeChecker {
                 }
             }
         }
-        // dyn_cast::<T>(d): compiler intrinsic -- vtable type-id compare, Option<&T> result
+        // dyn_cast::<T>(d): compiler intrinsic; vtable type-id compare, Option<&T> result.
         if pck == NodeKind::NODE_GENERIC_SPECIALIZATION {
             let spx = a.at_const(callee_id).as_data.specialization;
             let tp_args = spx.types;
@@ -10263,7 +10290,7 @@ extend TypeChecker {
                 self.cur_ast().set_type(id, ot);
                 return ot;
             }
-            // zeroed::<T>(): compiler intrinsic -- an all-zero-bytes T, the `unsafe` seed the
+            // zeroed::<T>(): compiler intrinsic; an all-zero-bytes T, the `unsafe` seed the
             // reflection constructors (reflect_default / reflect_clone) then fill field by field.
             if a.at_const(spx.expression).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(spx.expression).node == NODE_NONE && span_is(
                 self.source,
@@ -10297,7 +10324,7 @@ extend TypeChecker {
                 self.cur_ast().set_type(id, tt);
                 return tt;
             }
-            // type_info::<T>(): compiler intrinsic -- a TypeInfo descriptor of T, folded at compile
+            // type_info::<T>(): compiler intrinsic; a TypeInfo descriptor of T, folded at compile
             // time (const-eval builds the object graph; codegen emits static data at runtime uses).
             if a.at_const(spx.expression).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(spx.expression).node == NODE_NONE && span_is(
                 self.source,
@@ -10336,7 +10363,7 @@ extend TypeChecker {
                 self.cur_ast().set_type(id, rt3);
                 return rt3;
             }
-            // dangling::<T>(): compiler intrinsic -- a non-null, T-aligned `*mut T` backed by no
+            // dangling::<T>(): compiler intrinsic; a non-null, T-aligned `*mut T` backed by no
             // storage (the backend's per-alignment sentinel). The portable pointer for zero-sized
             // element buffers: never dereferenced, never freed.
             if a.at_const(spx.expression).kind == NodeKind::NODE_IDENTIFIER && a.resolution_def(spx.expression).node == NODE_NONE && span_is(
@@ -10497,7 +10524,7 @@ extend TypeChecker {
                 skip = 1;
             }
         }
-        // generic-instance receiver substitution + generic call inference
+        // Generic-instance receiver substitution + generic call inference.
         let ret = self.check_call_finish(
             id,
             callee_id,
@@ -10513,7 +10540,7 @@ extend TypeChecker {
             fmt_builtin,
         );
         // A method whose RESULT carries a borrow (`Option<&V>`, a view, ...) borrows its receiver
-        // just as much as one returning a bare `&T`. check_call_receiver can only inspect the
+        // as much as one returning a bare `&T`. check_call_receiver can only inspect the
         // DECLARED return node, which is not enough: the borrow may sit inside a generic argument
         // that exists only after substitution (`Map::get` is declared `Option<T>`, and is
         // `Option<&i64>` only here). Re-check with the resolved type and persist the receiver borrow
@@ -10524,7 +10551,7 @@ extend TypeChecker {
     // Postponed-closure completion (plan section 12): check each still-untyped closure argument
     // once its parameter shape is closed under the current substitution, seeding its unannotated
     // parameters first, and feed the checked type back as call evidence. `final9` forces the check
-    // even with an open shape -- the post-defaults last chance, whose failures are the user's
+    // even with an open shape: the post-defaults last chance, whose failures are the user's
     // annotation-required diagnostics.
     fn tc_check_postponed(
         self: &mut Self,
@@ -10578,7 +10605,8 @@ extend TypeChecker {
                 }
             }
             if open9 && !final9 {
-                continue; // shape still open: the literal-default pass may close it
+                // Shape still open: the literal-default pass may close it.
+                continue;
             }
             let ct9 = self.check_expr_w(aid9, raw9);
             self.tc_infer_ev(raw9, ct9, aid9, true);
@@ -10626,7 +10654,7 @@ extend TypeChecker {
                 recvbase = unsafe cdu.target;
             }
             // `x.into()` calls `Target::from(x)`, so the generics to bind are the TARGET's, taken from
-            // the expected type -- the object is the argument here, not the receiver. Without this a
+            // the expected type: the object is the argument here, not the receiver. Without this a
             // generic target (`let v: Vector<i32> = [..].into()`) kept its parameters unbound.
             conv_target = self.tc_conversion_target(a.at_const(callee_id).as_data.member.member, md, want);
             if conv_target != TYPE_NONE {
@@ -10658,7 +10686,7 @@ extend TypeChecker {
                     }
                 }
             }
-            // dyn receiver over an instantiated generic interface: interface generics -> dyn args
+            // Dyn receiver over an instantiated generic interface: interface generics -> dyn args.
             if nrsub == 0 {
                 let rvy2 = *self.type_at(recvbase);
                 if rvy2.kind == TypeKind::TYPE_DYN {
@@ -10679,7 +10707,7 @@ extend TypeChecker {
                 }
             }
         }
-        // `T::default()` reaching an interface DEFAULT: the qualified type IS Self
+        // `T::default()` reaching an interface DEFAULT: the qualified type IS Self.
         if cn_kind == NodeKind::NODE_MEMBER && cn_path && nrsub < 8 {
             let md = a.resolution_def(a.at_const(callee_id).as_data.member.member);
             let mut tr = NODE_NONE;
@@ -10690,7 +10718,7 @@ extend TypeChecker {
                 let pobj = a.at_const(callee_id).as_data.member.object;
                 let mut target = self.strip(a.type_of(pobj));
                 if target == TYPE_NONE {
-                    // a bare `P::` base records no type; its resolution names the aggregate
+                    // A bare `P::` base records no type; its resolution names the aggregate.
                     let ob = a.resolution_def(pobj);
                     if ob.node != NODE_NONE {
                         let obk = self.mod_ast(ob.module).at_const(ob.node).kind;
@@ -10707,7 +10735,7 @@ extend TypeChecker {
                 }
             }
         }
-        // method through a generic bound: substitute interface Self
+        // Method through a generic bound: substitute interface Self.
         if cn_kind == NodeKind::NODE_MEMBER && !cn_path && nrsub < 8 {
             let md = a.resolution_def(a.at_const(callee_id).as_data.member.member);
             let mut tr = NODE_NONE;
@@ -10764,7 +10792,7 @@ extend TypeChecker {
                 }
             }
             // `Interface::assoc()` on a generic instance target (`let v: Vector<String> = Default::default();`):
-            // the resolved method's signature uses the EXTEND's type params -- bind them to the target's args.
+            // the resolved method's signature uses the EXTEND's type params: bind them to the target's args.
             if ob.node != NODE_NONE && md.node != NODE_NONE && ob_kind == NodeKind::NODE_INTERFACE {
                 let mut em: ModuleId = 0;
                 let mut ed = NODE_NONE;
@@ -10793,7 +10821,7 @@ extend TypeChecker {
                 }
             }
         }
-        // method-extend bounds check
+        // Method-extend bounds check.
         if cn_kind == NodeKind::NODE_MEMBER {
             let md = a.resolution_def(a.at_const(callee_id).as_data.member.member);
             if md.node != NODE_NONE && self.mod_ast(md.module).at_const(md.node).kind == NodeKind::NODE_FUNCTION {
@@ -10818,7 +10846,7 @@ extend TypeChecker {
                 }
             }
         }
-        // generic function call inference
+        // Generic function call inference.
         let mut gparams = Defs8 {};
         let mut gargs = Tys8 {};
         let mut gn: i32 = 0;
@@ -10832,7 +10860,7 @@ extend TypeChecker {
                 gparams[ii as usize] = DefId { module: fmod, node: unsafe fa.list(gens)[ii as usize] };
                 gargs[ii as usize] = TYPE_NONE;
             }
-            // Session-driven inference (plan 1_type_inference phase 2): every use of a repeated
+            // Session-driven inference: every use of a repeated
             // parameter feeds one solver variable, top-level argument positions record directional
             // bounds joined under the safe-conversion oracle, and const evidence conflicts are
             // detected instead of silently keeping the first binding.
@@ -10905,7 +10933,7 @@ extend TypeChecker {
                 // the substituted parameter type, and its checked type feeds back as evidence for
                 // parameters that depend on the closure's result. A closure whose shape is still
                 // open waits for the literal-default pass below (final = false); after defaults it
-                // is checked unconditionally -- if the shape is still open then, the body errors
+                // is checked unconditionally: if the shape is still open then, the body errors
                 // and the unresolved-generic report tell the user an annotation is required.
                 let mut clos_checked = self.tc_check_postponed(
                     fmod,
@@ -10975,7 +11003,7 @@ extend TypeChecker {
             gn = nexplicit;
             // A closure written inside a generic body is monomorphized with that body, so its C form
             // differs per instantiation. Binding it to ANOTHER function's type parameter would make
-            // that function's instance depend on which instantiation produced the closure -- which the
+            // that function's instance depend on which instantiation produced the closure, which the
             // closure's type does not record, so both would collapse onto one wrong symbol.
             if self.tc_fn_is_generic(self.cur_module(), self.icx.current_fn) {
                 let mut bad = false;
@@ -10996,7 +11024,7 @@ extend TypeChecker {
             }
             if gn == g {
                 self.cur_ast().set_type_args(id, &gargs[0], gn as u8);
-                // enforce bounds (best-effort; diagnostics)
+                // Enforce bounds (best-effort; diagnostics).
                 self.check_generic_bounds(
                     id,
                     fmod,
@@ -11012,12 +11040,12 @@ extend TypeChecker {
             }
         }
         // Owner (extend) generics for a static/associated call: a constructor like `Box::new(w)` calls
-        // `new`, which has NO generics of its own -- `T`/`A` belong to `extend<T, A> Box<T, A>`. The
+        // `new`, which has NO generics of its own: `T`/`A` belong to `extend<T, A> Box<T, A>`. The
         // function-generic pass above therefore binds nothing, and no receiver instance supplies the
         // owner args (nrsub == 0). Infer them from the arguments the way function-own generics are, then
         // fill any that remain with the extend's declared defaults (e.g. `A = Global`). Result and
         // parameter types below are substituted through rsubp/rsuba, so `T` resolves to the argument's
-        // concrete type and `Box<T>` coerces to `Box<dyn I>` at the use site -- no turbofish needed.
+        // concrete type and `Box<T>` coerces to `Box<dyn I>` at the use site: no turbofish needed.
         if nrsub == 0 && named && fdecl != NODE_NONE && args.len == params.len - skip {
             let extnode = self.enclosing_extend(fmod, fdecl);
             if extnode != NODE_NONE {
@@ -11129,7 +11157,7 @@ extend TypeChecker {
                 self.err_mismatch(obj0, pt0);
             }
         }
-        // arity + arg compatibility
+        // Arity + arg compatibility.
         let variadic = named && fa.at_const(fdecl).as_data.function.is_variadic;
         let expected = params.len - skip;
         let bad = if variadic {
@@ -11192,7 +11220,7 @@ extend TypeChecker {
                 }
             }
         }
-        // C-vararg string-literal default to *const char
+        // C-vararg string-literal default to *const char.
         if variadic && !fmt_builtin && args.len >= expected {
             let cstr = self.cur_ast().intern_type(
                 Ty {
@@ -11211,7 +11239,7 @@ extend TypeChecker {
                 i = i + 1;
             }
         }
-        // &mut self receiver mutability
+        // &mut self receiver mutability.
         if skip == 1 && cn_kind == NodeKind::NODE_MEMBER && params.len > 0 {
             let selfp = *self.type_at(self.decl_type_in(fmod, unsafe fa.list(params)[0]));
             if (selfp.kind == TypeKind::TYPE_REFERENCE || selfp.kind == TypeKind::TYPE_POINTER) && selfp.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
@@ -11279,7 +11307,7 @@ extend TypeChecker {
                 self.icx.mret_call = id;
                 return TYPE_NONE;
             }
-            // an omitted return type IS void: the call must not type-check leniently
+            // An omitted return type IS void: the call must not type-check leniently.
             return Ast::builtin(BuiltinType::BT_VOID);
         }
         let r0 = unsafe fa.list(returns)[0];
@@ -11353,7 +11381,7 @@ extend TypeChecker {
                                 diag::span_str(self.mod_src(fmod), bsp.start, bsp.end),
                             ),
                         );
-                        // Notes attach to the error just emitted: name the failing field(s).
+                        // Notes attach to the error emitted last: name the failing field(s).
                         let gy2 = *self.type_at(unsafe gargs[i as usize]);
                         if gy2.kind == TypeKind::TYPE_FIELD_PROJECTION && self.cur_ast().type_concrete(
                             gy2.as_data.proj.owner,
@@ -11365,7 +11393,7 @@ extend TypeChecker {
             }
         }
         // The callee's deferred field-projection obligations (same module: obligations live with
-        // the checker that created them): with the owner now bound, prove every field -- or, still
+        // the checker that created them): with the owner now bound, prove every field; or, still
         // symbolic, hand the obligation up to the current fn's own call sites.
         if fmod == self.cur_module() {
             let nobs = (unsafe self.cur_ast().proj_obs).len();
@@ -11398,7 +11426,7 @@ extend TypeChecker {
                 }
             }
         }
-        // where clause
+        // Where clause.
         let wc = fa.at_const(fdecl).as_data.function.where_clause;
         for w in 0..wc.len {
             let wp = fa.at_const(unsafe fa.list(wc)[w as usize]).as_data.where_predicate;
@@ -11445,6 +11473,7 @@ extend TypeChecker {
     }
 }
 
+/// `c ? a : b` for bytes.
 pub const fn if_u8(c: bool, a: u8, b: u8) u8 {
     if c {
         return a;
@@ -11453,7 +11482,7 @@ pub const fn if_u8(c: bool, a: u8, b: u8) u8 {
 }
 
 extend TypeChecker {
-    /// Is `ty` a closure's own type (not a fn pointer, not a named function)?
+    // Is `ty` a closure's own type (not a fn pointer, not a named function)?
     const fn tc_is_local_closure(self: &Self, ty: TypeId) bool {
         if ty == TYPE_NONE {
             return false;
@@ -11462,7 +11491,7 @@ extend TypeChecker {
         return y.kind == TypeKind::TYPE_FUNCTION && self.mod_ast(y.module).at_const(y.as_data.decl).kind == NodeKind::NODE_CLOSURE;
     }
 
-    /// Does `decl` carry type parameters of its own, or inherit an extend's?
+    // Does `decl` carry type parameters of its own, or inherit an extend's?
     fn tc_fn_is_generic(self: &mut Self, m: ModuleId, decl: NodeId) bool {
         if decl == NODE_NONE || self.mod_ast(m).at_const(decl).kind != NodeKind::NODE_FUNCTION {
             return false;
@@ -11474,9 +11503,9 @@ extend TypeChecker {
         return ext != NODE_NONE && self.mod_ast(m).at_const(ext).as_data.extend_def.generics.len != 0;
     }
 
-    /// One `Deref` step: the type behind `ty`, with the `deref` (or `deref_mut` for a mutable use)
-    /// that produces it written to `out`. TYPE_NONE when `ty` has no such method, or the method
-    /// does not return a reference/pointer.
+    // One `Deref` step: the type behind `ty`, with the `deref` (or `deref_mut` for a mutable use)
+    // that produces it written to `out`. TYPE_NONE when `ty` has no such method, or the method
+    // does not return a reference/pointer.
     fn tc_deref_step(self: &mut Self, ty: TypeId, out: &mut DefId, want_mut: bool) TypeId {
         *out = DefId { module: 0, node: NODE_NONE };
         let mut cm: ModuleId = 0;
@@ -11507,10 +11536,10 @@ extend TypeChecker {
         return dry.as_data.elem;
     }
 
-    /// Patch every method hop of the auto-deref chain recorded at `node` to `deref_mut`, so a
-    /// mutable place use (assignment, `&mut`, `&mut self` receiver) never mutates through the
-    /// shared `deref`. Returns TYPE_NONE on success (or when no chain is recorded), else the first
-    /// hop type that has `deref` but no `deref_mut`: that place stays read-only.
+    // Patch every method hop of the auto-deref chain recorded at `node` to `deref_mut`, so a
+    // mutable place use (assignment, `&mut`, `&mut self` receiver) never mutates through the
+    // shared `deref`. Returns TYPE_NONE on success (or when no chain is recorded), else the first
+    // hop type that has `deref` but no `deref_mut`: that place stays read-only.
     fn tc_deref_hops_mut(self: &mut Self, node: NodeId) TypeId {
         let du = self.cur_ast().deref_use_mut(node);
         if du == null {
@@ -11518,7 +11547,8 @@ extend TypeChecker {
         }
         for hi in 0..unsafe du.n {
             if unsafe du.method[hi as usize].node == NODE_NONE {
-                continue; // a raw pointer/reference hop has no method to swap
+                // A raw pointer/reference hop has no method to swap.
+                continue;
             }
             let recv = unsafe du.recv[hi as usize];
             let mut hm: ModuleId = 0;
@@ -11536,7 +11566,7 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    /// Record the single deref hop `node` needs, so codegen emits `T__deref(&x)` around it.
+    // Record the single deref hop `node` needs, so codegen emits `T__deref(&x)` around it.
     fn tc_record_deref(self: &mut Self, node: NodeId, recv: TypeId, dm: DefId, target: TypeId) {
         let mut du = DerefUse { node: node, target: target, n: 1 };
         du.recv[0] = recv;
@@ -11614,7 +11644,8 @@ extend TypeChecker {
                     );
                     return TYPE_NONE;
                 }
-                return base; // value's own type: one projection per binder, so generic callees unify
+                // Value's own type: one projection per binder, so generic callees unify.
+                return base;
             }
             if vmode && span_is(self.source, name, "other_active") {
                 if self.tc_binder_nsubj(blid) != 2 {
@@ -11741,13 +11772,13 @@ extend TypeChecker {
                 let fty = self.subst_type(self.decl_type_in(bmod, fhit), &gp[0], &ga[0], gn);
                 if self.mod_ast(bmod).at_const(fhit).kind == NodeKind::NODE_FIELD {
                     self.check_field_visibility(bmod, fhit, bdecl, name);
-                    // raw-pointer gate FIRST: tc_needs_unsafe() counts a use for the unnecessary-'unsafe'
-                    // lint, and a field access through a reference/value must not consume the marker
+                    // Raw-pointer gate FIRST: tc_needs_unsafe() counts a use for the unnecessary-'unsafe'
+                    // lint, and a field access through a reference/value must not consume the marker.
                     if self.through_raw_pointer(obj) && self.tc_needs_unsafe() {
                         self.err_unsafe(a.at_const(id).span, "accessing a field through a raw pointer");
                     }
                     // A reference-typed field of an untagged UNION overlaps every other field, so
-                    // accessing it materializes a `&T` from arbitrary bytes -- an int->reference
+                    // accessing it materializes a `&T` from arbitrary bytes: an int->reference
                     // transmute. Gate it behind `unsafe` (a raw *pointer* field stays free: its
                     // deref is already gated). is_union is on the aggregate decl.
                     let fty_is_ref = fty != TYPE_NONE && self.type_at(fty).kind == TypeKind::TYPE_REFERENCE;
@@ -11766,7 +11797,7 @@ extend TypeChecker {
                 }
             }
         }
-        // builtin method
+        // Builtin method.
         let bty = *self.type_at(base);
         if bty.kind == TypeKind::TYPE_BUILTIN && self.package != null {
             let bd = self.package.builtin_decl(bty.as_data.builtin);
@@ -11781,7 +11812,7 @@ extend TypeChecker {
                 }
             }
         }
-        // generic/dyn receiver bound method
+        // Generic/dyn receiver bound method.
         let bt2 = *self.type_at(base);
         if bt2.kind == TypeKind::TYPE_GENERIC || bt2.kind == TypeKind::TYPE_DYN {
             let bdecl = if bt2.kind == TypeKind::TYPE_DYN {
@@ -11805,7 +11836,7 @@ extend TypeChecker {
                 }
             }
         }
-        // into/try_into conversion
+        // Into/try_into conversion.
         if prefer_method {
             let conv = self.resolve_conversion(name, want);
             if conv.node != NODE_NONE {
@@ -11813,7 +11844,7 @@ extend TypeChecker {
                 return self.decl_type_in(conv.module, conv.node);
             }
         }
-        // auto-deref chain -- for fields as well as methods: `b.v` through a Deref is the same step
+        // Auto-deref chain, for fields as well as methods: `b.v` through a Deref is the same step
         // `b.peek()` takes, and stopping at methods left the field unreachable.
         let mut deref_capped = false;
         {
@@ -11971,7 +12002,8 @@ extend TypeChecker {
             let dnk = self.mod_ast(direct.module).at_const(direct.node).kind;
             if dnk == NodeKind::NODE_FUNCTION || dnk == NodeKind::NODE_CONST || dnk == NodeKind::NODE_LET {
                 self.cur_ast().set_resolution_def(mem, direct);
-                self.tc_static_mut_use(id, direct); // `mod::G` reaches the same shared state as a bare `G`
+                // `mod::G` reaches the same shared state as a bare `G`.
+                self.tc_static_mut_use(id, direct);
                 return self.decl_type_in(direct.module, direct.node);
             }
             return self.named_type_of(direct.module, direct.node);
@@ -12103,8 +12135,8 @@ extend TypeChecker {
         self.mark_recv = inst_ty;
         let mut method = self.find_method(bmod, bdecl, mname);
         if method.node == NODE_NONE {
-            // an interface DEFAULT the conformance inherits (a derived `default()`) is reachable
-            // through the qualified path too
+            // An interface DEFAULT the conformance inherits (a derived `default()`) is reachable
+            // through the qualified path too.
             method = self.find_default_method(bmod, bdecl, mname);
         }
         if method.node != NODE_NONE {
@@ -12158,11 +12190,10 @@ extend TypeChecker {
             let fnn = a.at_const(fid).as_data.field_initializer.name;
             let fval = a.at_const(fid).as_data.field_initializer.value;
             let fname = self.name_span(fnn);
-            // A field's own type is the expected type for its initializer -- the same contextual type a
+            // A field's own type is the expected type for its initializer: the same contextual type a
             // `let` with an annotation gives. Without it an array literal in field position has nothing to
             // widen towards, so `Plain { b: [3, 0, 0, 7] }` typed itself `[i32]` and was rejected against a
-            // `[i64; 4]` field. This used to be done only for an interface assoc call; the reason applies to
-            // every initializer.
+            // `[i64; 4]` field. The reason applies to every initializer, not only an interface assoc call.
             let mut fwant = TYPE_NONE;
             if variant == NODE_NONE && decl != NODE_NONE {
                 let field = self.find_member(smod, decl, fname);
@@ -12291,7 +12322,7 @@ extend TypeChecker {
         return false;
     }
 
-    // The shared pattern matrix (pattern::pattern) decides coverage; the legacy
+    // The shared pattern matrix (pattern::pattern) decides coverage; the sequential
     // walker below stays as the budget-overflow fallback, so adversarial or-expansions keep the old
     // verdicts. Messages are unchanged.
     fn check_match_exhaustive(self: &mut Self, id: NodeId, scrut: TypeId) {
@@ -12308,7 +12339,7 @@ extend TypeChecker {
         let agok2 = self.aggregate_of(base, &mut emod2, &mut edecl2, &mut gp2, &mut ga2, &mut gn2);
         let is_enum2 = agok2 && self.mod_ast(emod2).at_const(edecl2).kind == NodeKind::NODE_ENUM;
         // Short-circuit: an unguarded catch-all arm (wildcard or pure binding) makes the matrix
-        // verdict trivially "exhaustive" -- skip building it.
+        // verdict trivially "exhaustive": skip building it.
         let arms2 = a.at_const(id).as_data.match_expr.arms;
         for i in 0..arms2.len {
             let arm = a.at_const(unsafe a.list(arms2)[i as usize]);
@@ -12365,12 +12396,12 @@ extend TypeChecker {
                 }
             }
         }
-        // budget overflow (adversarial or-expansion): the matrix answers conservatively --
-        // assume exhaustive rather than error on a switch it could not analyze
+        // Budget overflow (adversarial or-expansion): the matrix answers conservatively;
+        // assume exhaustive rather than error on a switch it could not analyze.
     }
 
     // Matrix usefulness marks the first arm no value can reach (earlier GUARDED arms
-    // cover nothing for later arms -- their guard may fail). One report per switch; a budget
+    // cover nothing for later arms: their guard may fail). One report per switch; a budget
     // overflow reports nothing.
     fn lint_unreachable_arms(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
@@ -12393,9 +12424,8 @@ extend TypeChecker {
         }
     }
 
-    // ---- region variables (phase 1: allocation + slot counting; the solver consumes these later) ----
     //
-    // A RegionVid is an inference variable standing for a region -- ultimately a set of program points
+    // A RegionVid is an inference variable standing for a region: ultimately a set of program points
     // plus the universal regions it must outlive. `REGION_STATIC` outlives everything. A function's
     // declared lifetimes are UNIVERSAL (they outlive the body, and their relationships come from the
     // signature); every reference slot in a local's type gets a fresh EXISTENTIAL region.
@@ -12407,23 +12437,23 @@ extend TypeChecker {
 
     // The universal RegionVid a declared lifetime NAME denotes in the current function, or REGION_NONE.
 
-    // Record `sup: sub` -- sup outlives sub.
+    // Record `sup: sub`; sup outlives sub.
 
     // Does region `a` outlive region `b`? Reflexive, `'static` outlives everything, and TRANSITIVE
-    // over the declared edges -- so `'a: 'b, 'b: 'c` proves `'a: 'c`, which a one-hop scan could not.
+    // over the declared edges, so `'a: 'b, 'b: 'c` proves `'a: 'c`, which a one-hop scan could not.
     // The declared graph is tiny (signature lifetimes only), so a bounded worklist is ample; running
     // out of room answers "cannot prove", which only ever over-rejects.
 
     // How many lifetime SLOTS does a type have? This is the length of its region vector, so it must be
     // exact and stable. Well-founded because an aggregate contributes only its DECLARED lifetime params
-    // plus the regions of its generic arguments -- never its fields, which are expressed in terms of
+    // plus the regions of its generic arguments: never its fields, which are expressed in terms of
     // those params. So `struct Node<'a> { next: &'a Node<'a> }` is arity 1, not infinite.
     // Raw pointers contribute nothing: this language hands lifetime responsibility to the programmer
     // there, and `&T -> *T` coercion already erases the borrow.
 
-    /// The parameter a compound assignment's right operand answers to, when the overload takes it BY
-    /// VALUE. `x <<= 3` lowers to `x = x.shl(3)`, so 3 is a count and not another x. A by-reference
-    /// parameter (`add(self, other: &Self)`) keeps the plain same-type check, which is what it means.
+    // The parameter a compound assignment's right operand answers to, when the overload takes it BY
+    // VALUE. `x <<= 3` lowers to `x = x.shl(3)`, so 3 is a count and not another x. A by-reference
+    // parameter (`add(self, other: &Self)`) keeps the plain same-type check, which is what it means.
     fn compound_param_type(self: &mut Self, op: TokenType, l: TypeId) TypeId {
         let m = compound_method_name(op);
         if m.len() == 0 || l == TYPE_NONE {
@@ -12474,8 +12504,8 @@ extend TypeChecker {
         }
         return l;
     }
-    /// True when `t` still mentions unresolved generics. A decl-referenced function type reports
-    /// concrete, so its signature components are inspected one level deep.
+    // True when `t` still mentions unresolved generics. A decl-referenced function type reports
+    // concrete, so its signature components are inspected one level deep.
     fn tc_infer_ty_open(self: &mut Self, t: TypeId) bool {
         if t == TYPE_NONE {
             return false;
@@ -12499,8 +12529,8 @@ extend TypeChecker {
         return false;
     }
 
-    /// True when the closure has at least one parameter with no type annotation: the ones whose
-    /// check must wait for an expected function shape.
+    // True when the closure has at least one parameter with no type annotation: the ones whose
+    // check must wait for an expected function shape.
     const fn tc_closure_unannotated(self: &Self, cid: NodeId) bool {
         let a = self.cur_ast();
         let ps = a.at_const(cid).as_data.closure.params;
@@ -12513,7 +12543,7 @@ extend TypeChecker {
     }
 
     fn check_closure(self: &mut Self, id: NodeId, cwant: TypeId) TypeId {
-        // Inside a fields loop a closure is fine as long as it never touches the binder -- its one
+        // Inside a fields loop a closure is fine as long as it never touches the binder: its one
         // lifted C form serves every copy. Binder USES check the depth watermark (proj_cbase).
         self.icx.closure_depth = self.icx.closure_depth + 1;
         let cres = self.check_closure_in(id, cwant);
@@ -12578,7 +12608,7 @@ extend TypeChecker {
         }
         self.loop_floor = saved_lf;
         self.icx.nclos = self.icx.nclos - 1;
-        // capture validation
+        // Capture validation.
         let caps = a.at_const(id).as_data.closure.captures;
         let mut_caps = a.at_const(id).as_data.closure.mut_caps as u64;
         for i in 0..caps.len {
@@ -12605,7 +12635,7 @@ extend TypeChecker {
         }
         // A closure captures its free variables BY COPY into its environment. When a captured value
         // holds a borrow (a `&T` binding, or a struct/view carrying one), the environment carries
-        // that borrow -- but unlike a struct field, it is ERASED from the closure's stored type
+        // that borrow, but unlike a struct field, it is ERASED from the closure's stored type
         // (`dyn fn` / a bare `fn` bound), so no later type-based check can recover it. Re-expose each
         // captured borrow as a fresh transient borrow rooted at the same referent; the enclosing
         // `let`/assignment that stores the closure then ties it to the destination's region (see
@@ -12748,7 +12778,7 @@ extend TypeChecker {
             // A `[..]` view borrows its source's storage, but `index_range` dispatches INLINE here
             // rather than through check_call, so the receiver-result-borrow hook never sees it. Pin
             // the source (or, when the source is itself a view like `s[0..2]`, inherit its container
-            // borrow -- the reborrow rule). Both the `index_range` result and the `prelude_slice_type`
+            // borrow: the reborrow rule). Both the `index_range` result and the `prelude_slice_type`
             // result (slice-of-a-slice, which `slice_kind` routes here before index_range) go through
             // the shared hook.
             let mut sresult = user_result;
@@ -12865,8 +12895,8 @@ extend TypeChecker {
             }
             let body_never = body != TYPE_NONE && self.type_at(body).kind == TypeKind::TYPE_NEVER;
             if expected != TYPE_NONE {
-                // a context type is known: each arm coerces to IT (widening, adaptation, the works)
-                // instead of having to equal the first arm exactly
+                // A context type is known: each arm coerces to IT (widening, adaptation, the works)
+                // instead of having to equal the first arm exactly.
                 if body != TYPE_NONE && !body_never && !self.compatible(expected, arm.body) {
                     self.err_mismatch(arm.body, expected);
                 }
@@ -12899,9 +12929,9 @@ extend TypeChecker {
         return self.check_expr_w(id, TYPE_NONE);
     }
 
-    /// Bidirectional expression check (plan phase 5): `expected` is an explicit argument -- the
-    /// expectation a parent grants this one child -- never shared state, so a nested expectation
-    /// cannot leak to a sibling expression.
+    // Bidirectional expression check: `expected` is an explicit argument; the
+    // expectation a parent grants this one child: never shared state, so a nested expectation
+    // cannot leak to a sibling expression.
     fn check_expr_w(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
         if id == NODE_NONE {
             return TYPE_NONE;
@@ -12971,7 +13001,7 @@ extend TypeChecker {
                 if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_POINTER && self.type_at(
                     dst,
                 ).kind == TypeKind::TYPE_REFERENCE {
-                    // materializing a reference from a raw pointer asserts validity: unsafe territory
+                    // Materializing a reference from a raw pointer asserts validity: unsafe territory.
                     if self.tc_needs_unsafe() {
                         let sp = a.at_const(id).span;
                         self.errors.emit(
@@ -12983,7 +13013,7 @@ extend TypeChecker {
                 }
                 // Forming a MUTABLE raw pointer from an IMMUTABLE reference launders the shared-borrow
                 // guarantee into mutation (interior mutability). Rejected everywhere except UnsafeCell::get,
-                // the one sanctioned hole -- use `&mut`, or wrap the value in an `UnsafeCell`.
+                // the one sanctioned hole: use `&mut`, or wrap the value in an `UnsafeCell`.
                 if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_REFERENCE && self.type_at(
                     src,
                 ).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
@@ -13000,7 +13030,7 @@ extend TypeChecker {
                 }
                 // A cast whose source or target is a generic INSTANCE dispatches to a conversion: the
                 // implicit path first (`from`/`widen`, so `x as u256` behaves exactly like the binding
-                // it is redundant with), then the `cast_of` overloads, which carry C's cast semantics --
+                // it is redundant with), then the `cast_of` overloads, which carry C's cast semantics:
                 // truncate when narrower, sign- or zero-extend per the SOURCE's signedness when wider.
                 // A cast to a built-in integer goes through the value's own `to_u64`/`to_i64`, and the
                 // built-in cast then narrows that. Without a conversion the cast is invalid: the C a
@@ -13207,7 +13237,7 @@ extend TypeChecker {
             },
             NODE_RANGE => {
                 // An expected Range<E> reaches the bounds, so `0..100` against Range<usize> types
-                // its literals usize -- the same adoption a bare literal argument gets.
+                // its literals usize: the same adoption a bare literal argument gets.
                 let mut want = TYPE_NONE;
                 if self.prelude_instance_args_hit(expected, self.ph_range, &mut want, 1) != 1 {
                     want = TYPE_NONE;
@@ -13264,24 +13294,26 @@ extend TypeChecker {
         }
         let ay = *self.type_at(arg);
         if ay.kind != TypeKind::TYPE_CONST || ay.as_data.value < 1 || ay.as_data.value > 1024 {
-            return 0; // symbolic width: nothing to validate the digits against
+            // Symbolic width: nothing to validate the digits against.
+            return 0;
         }
         *bits = ay.as_data.value;
         return kind;
     }
 
-    /// A literal too wide for 64 bits (or a negative one past i64), where the context expects the
-    /// prelude's UInt<N>/Int<N>: the digits are parsed here, validated against N, stored as the
-    /// STORAGE's limbs (two's-complemented for a negative), and the node typed as the target --
-    /// codegen then emits the limbs directly. Everything 64-bit-sized keeps the From conversions.
-    /// A literal's `[iu]<width>` suffix as the prelude type it names -- `5i128` is Int<128>, `7u100`
-    /// is UInt<100> -- or TYPE_NONE when the literal carries none. The builtin suffixes never reach
-    /// here: ast_numeric_suffix takes them first.
+    // A literal too wide for 64 bits (or a negative one past i64), where the context expects the
+    // prelude's UInt<N>/Int<N>: the digits are parsed here, validated against N, stored as the
+    // STORAGE's limbs (two's-complemented for a negative), and the node typed as the target:
+    // codegen then emits the limbs directly. Everything 64-bit-sized keeps the From conversions.
+    // A literal's `[iu]<width>` suffix as the prelude type it names: `5i128` is Int<128>, `7u100`
+    // is UInt<100>, or TYPE_NONE when the literal carries none. The builtin suffixes never reach
+    // here: ast_numeric_suffix takes them first.
     fn tc_lit_wide_suffix(self: &mut Self, lr: tok::Span, sfx: &mut u32) TypeId {
         let src = self.source;
         let mut bsf = lr.end;
         if ast_numeric_suffix(src, lr.start, lr.end, &mut bsf) != BuiltinType::BT_COUNT {
-            return TYPE_NONE; // a BUILTIN suffix (`1i64`): never a library width
+            // A BUILTIN suffix (`1i64`): never a library width.
+            return TYPE_NONE;
         }
         let mut i = lr.end;
         while i > lr.start && src[(i - 1) as usize] >= b'0' && src[(i - 1) as usize] <= b'9' {
@@ -13338,17 +13370,20 @@ extend TypeChecker {
             return false;
         }
         if neg && kind == 1 {
-            return false; // a negative literal cannot be unsigned; the ordinary diagnostic says so
+            // A negative literal cannot be unsigned; the ordinary diagnostic says so.
+            return false;
         }
         let a = self.cur_ast();
         let lr = a.at_const(lit).as_data.literal.raw;
         let mut sfx = lr.end;
         if sfx_at != 0 {
-            sfx = sfx_at; // a `[iu]<width>` suffix: the caller resolved it, the digits end here
+            // A `[iu]<width>` suffix: the caller resolved it, the digits end here.
+            sfx = sfx_at;
         } else {
             let sb = ast_numeric_suffix(self.source, lr.start, lr.end, &mut sfx);
             if sb != BuiltinType::BT_COUNT {
-                return false; // a suffix names a BUILTIN type; it cannot also mean UInt<N>
+                // A suffix names a BUILTIN type; it cannot also mean UInt<N>.
+                return false;
             }
         }
         let mut p = unsafe (self.source.ptr() + lr.start as usize);
@@ -13388,7 +13423,7 @@ extend TypeChecker {
             } else {
                 (ch | 0x20u8) - b'a' + 10u8;
             };
-            // limbs = limbs * base + d, multi-precision: each limb splits so the partials stay in 64 bits.
+            // `limbs = limbs * base + d`, multi-precision: each limb splits so the partials stay in 64 bits.
             let mut carry = d;
             for j in 0..nl {
                 let v = unsafe limbs[j];
@@ -13404,7 +13439,8 @@ extend TypeChecker {
                         sp.end - sp.start,
                         format("integer literal is too large: 1024 bits is the widest a literal reaches"),
                     );
-                    return true; // consumed: the diagnostic here beats the 64-bit one
+                    // Consumed: the diagnostic here beats the 64-bit one.
+                    return true;
                 }
                 unsafe limbs[nl] = carry;
                 nl = nl + 1;
@@ -13428,7 +13464,7 @@ extend TypeChecker {
                 }
             }
         }
-        // 64-bit-sized values keep the From conversions (they fold; this table is for the rest) --
+        // 64-bit-sized values keep the From conversions (they fold; this table is for the rest):
         // except under a width SUFFIX, where the literal IS the type and always encodes directly.
         if !forced {
             if kind == 1 && top < 64 {
@@ -13443,14 +13479,17 @@ extend TypeChecker {
             }
         }
         let limit = if kind == 1 {
-            bits; // unsigned: the value needs at most `bits` bits
+            // Unsigned: the value needs at most `bits` bits.
+            bits;
         } else if neg {
-            bits; // -2^(bits-1) is in range: its magnitude has bit (bits-1) set and nothing above
+            // -2^(bits-1) is in range: its magnitude has bit (bits-1) set and nothing above.
+            bits;
         } else {
-            bits - 1; // positive signed: at most bits-1
+            // Positive signed: at most bits-1.
+            bits - 1;
         };
         let in_range = if kind == 2 && neg {
-            // magnitude <= 2^(bits-1): top bit at most bits-1, and if AT bits-1, nothing below it
+            // Magnitude <= 2^(bits-1): top bit at most bits-1, and if AT bits-1, nothing below it.
             let mut ok = top < bits;
             if ok && top == bits - 1 {
                 for j2 in 0..16 {
@@ -13530,7 +13569,8 @@ extend TypeChecker {
                     if self.tc_wide_literal_at(id, id, false, wt, ws, true) {
                         return self.cur_ast().type_of(id);
                     }
-                    return wt; // the range diagnostic already fired; the type still stands
+                    // The range diagnostic already fired; the type still stands.
+                    return wt;
                 }
                 // The lexer admits any `[iu]<digits>` tail; one that named no type must stop HERE,
                 // not surface as broken C.
@@ -13638,7 +13678,7 @@ extend TypeChecker {
 
     // The index extent an array literal covers: positional elements advance a cursor, a designated
     // element jumps it to its (const) index + 1, C-style. -1 when a designator cannot be folded (its
-    // own diagnostic already fired) -- callers skip length checking then. `sparse` reports whether any
+    // own diagnostic already fired): callers skip length checking then. `sparse` reports whether any
     // designator appeared: a designated literal intentionally underfills (zero-fill is the feature),
     // so only excess is an error for it.
     fn tc_array_lit_extent(self: &mut Self, id: NodeId, sparse: &mut bool) i64 {
@@ -13684,7 +13724,7 @@ extend TypeChecker {
     }
 
     // Would every element convert cleanly to `we`? Probing, so nothing is recorded and nothing is reported
-    // for the elements that would not -- the caller keeps its own inferred type and diagnoses from there.
+    // for the elements that would not: the caller keeps its own inferred type and diagnoses from there.
     fn elements_fit(self: &mut Self, elements: NodeList, we: TypeId) bool {
         for i in 0..elements.len {
             let eid = unsafe self.cur_ast().list(elements)[i as usize];
@@ -13793,10 +13833,10 @@ extend TypeChecker {
             // The context may want a WIDER element than the elements gave themselves. An integer literal is
             // i32 on its own, so `let a: [i64; 4] = [3, 0, 0, 7]` was rejected over a difference the same
             // lossless widening already smooths away for a scalar `let x: i64 = 3`. Adopt the wanted element
-            // type when every element converts to it cleanly -- also when elements DISAGREE among
+            // type when every element converts to it cleanly: also when elements DISAGREE among
             // themselves (`[0u64, 1, 2]`), where the wanted type (or, absent one, the first element's)
             // settles what each literal means. Otherwise leave the inferred type so the mismatch is
-            // reported against what was actually written.
+            // reported against what was written.
             let we = self.wanted_elem(expected);
             if we != TYPE_NONE && (we != elem || mis != NODE_NONE) && self.elements_fit(elements, we) {
                 elem = we;
@@ -13815,7 +13855,7 @@ extend TypeChecker {
         return TYPE_NONE;
     }
 
-    // `[v; N]`: one value and a count. The count must be a constant -- the length is part of the type -- so
+    // `[v; N]`: one value and a count. The count must be a constant (the length is part of the type) so
     // it is folded here, with the same const-eval every other array length goes through.
     fn check_array_repeat(self: &mut Self, elements: NodeList, expected: TypeId) TypeId {
         let a = self.cur_ast();
@@ -13866,7 +13906,7 @@ extend TypeChecker {
     }
 
     // Adapt a branch/arm/block-tail LITERAL to the expected type. Literal adaptation is the one
-    // implicit conversion that is position-sensitive -- it must run ON the literal node -- so the
+    // implicit conversion that is position-sensitive (it must run ON the literal node) so the
     // expected type is pushed into value-position branches and applied here; every other conversion
     // keeps working on the merged value at the outer coercion site, unchanged.
     fn tc_tail_adapt(self: &mut Self, expected: TypeId, lv: NodeId) {
@@ -13880,8 +13920,8 @@ extend TypeChecker {
             vid = v0.as_data.unary.operand;
         }
         if a.at_const(vid).kind != NodeKind::NODE_LITERAL {
-            // a non-literal tail needs no adaptation, but a cast tail that now matches the context
-            // type exactly is the redundant-cast lint's business (arms/tails see expected now)
+            // A non-literal tail needs no adaptation, but a cast tail that now matches the context
+            // type exactly is the redundant-cast lint's business (arms/tails see expected now).
             if self.lint && lv as usize < unsafe a.types.len() && a.type_of(lv) == expected {
                 self.tc_lint_redundant_coalesce(expected, lv);
             }
@@ -13947,8 +13987,8 @@ extend TypeChecker {
             return if_ty(then_never, else_ty, then_ty);
         }
         if expected != TYPE_NONE {
-            // a context type is known: each branch coerces to IT (widening, adaptation, the works)
-            // instead of having to equal the other branch exactly
+            // A context type is known: each branch coerces to IT (widening, adaptation, the works)
+            // instead of having to equal the other branch exactly.
             if then_ty != TYPE_NONE && !self.compatible(expected, ifd.then_branch) {
                 self.err_mismatch(ifd.then_branch, expected);
             }
@@ -14210,7 +14250,8 @@ extend TypeChecker {
                 return false;
             },
             NODE_IF | NODE_MATCH | NODE_BLOCK => {
-                return true; // requires execution just like a call
+                // Requires execution, like a call.
+                return true;
             },
             _ => {},
         };
@@ -14264,10 +14305,10 @@ extend TypeChecker {
         }
     }
 
-    /// `asm(..)` hands a template straight to the C compiler, so the checker owns the SHAPE, not the
-    /// contents: the template and every constraint must be string literals, an output must be assignable
-    /// (the assembly writes it), and the whole statement needs `unsafe` -- nothing here can know what the
-    /// instructions do.
+    // `asm(..)` hands a template straight to the C compiler, so the checker owns the SHAPE, not the
+    // contents: the template and every constraint must be string literals, an output must be assignable
+    // (the assembly writes it), and the whole statement needs `unsafe`: nothing here can know what the
+    // instructions do.
     fn tc_check_asm(self: &mut Self, id: NodeId) {
         let d = self.cur_ast().at_const(id).as_data.asm_stmt;
         let sp = self.cur_ast().at_const(id).span;
@@ -14447,7 +14488,7 @@ extend TypeChecker {
         let le = self.tc_loop_push(a.at_const(id).as_data.for_stmt.label, id, false);
         let iter = a.at_const(id).as_data.for_stmt.iterable;
         // `inline for f in fields(&v)`: the reflection binder mode. `f` (and `f.value`) get ONE
-        // symbolic type -- the field projection of v's type against this loop -- so the body checks
+        // symbolic type (the field projection of v's type against this loop) so the body checks
         // once; enumeration and the emitter's per-copy state make it each field's type in turn.
         if a.at_const(id).kind == NodeKind::NODE_INLINE_FOR && a.at_const(iter).kind == NodeKind::NODE_CALL {
             let fcallee = a.at_const(iter).as_data.call.callee;
@@ -14502,7 +14543,8 @@ extend TypeChecker {
                     let ay = *self.type_at(av);
                     if ay.kind == TypeKind::TYPE_REFERENCE {
                         owner = ay.as_data.elem;
-                        pq = ay.qualifier; // fields(&mut v): every f.value is a mutable place
+                        // Fields(&mut v): every f.value is a mutable place.
+                        pq = ay.qualifier;
                     } else if av != TYPE_NONE {
                         self.errors.emit(
                             fsp.start,
@@ -14571,7 +14613,7 @@ extend TypeChecker {
                 return;
             }
         }
-        // `inline for` unrolls at emission: its iterable must be a closed `a..b` range -- there is
+        // `inline for` unrolls at emission: its iterable must be a closed `a..b` range; there is
         // nothing to unroll over an iterator, and an open bound has no count.
         if a.at_const(id).kind == NodeKind::NODE_INLINE_FOR && (a.at_const(iter).kind != NodeKind::NODE_RANGE || a.at_const(
             iter,
@@ -14645,7 +14687,8 @@ extend TypeChecker {
                     if diverged && sk != NodeKind::NODE_STATIC_ASSERT {
                         let ssp = a.at_const(sid).span;
                         self.errors.warn(ssp.start, ssp.end - ssp.start, format("unreachable statement"));
-                        diverged = false; // once per block
+                        // Once per block.
+                        diverged = false;
                     }
                     self.check_stmt(sid);
                     if self.lint && !diverged {
@@ -14686,7 +14729,7 @@ extend TypeChecker {
                     binding = declared;
                 } else if valued {
                     binding = self.cur_ast().type_of(value);
-                    // A generic function has no type of its own -- only a fn POINTER to one of its
+                    // A generic function has no type of its own: only a fn POINTER to one of its
                     // instances does, and nothing here says which signature that pointer has (the type
                     // arguments fix the parameters, not the reverse). Reject it: codegen would
                     // otherwise emit the unsubstituted signature, which is not valid C.
@@ -14701,7 +14744,7 @@ extend TypeChecker {
                         );
                         binding = TYPE_NONE;
                     }
-                    // An array literal types with len 0 (unknown -- `compatible`'s extent sugar needs
+                    // An array literal types with len 0 (unknown: `compatible`'s extent sugar needs
                     // that), so an INFERRED binding would lose its length and every index on it would
                     // look unprovable to the raw-array unsafe gate: pin the literal's real extent here.
                     if binding != TYPE_NONE && self.type_at(binding).kind == TypeKind::TYPE_ARRAY && self.type_at(
@@ -15116,7 +15159,7 @@ extend TypeChecker {
                 }
                 let fnd = self.cur_ast().at_const(id).as_data.function;
                 // `@blocking` is implemented by packing the call's arguments into a frame the pool thread
-                // runs from, and a variadic call has no fixed shape to pack -- so say so here rather than
+                // runs from, and a variadic call has no fixed shape to pack, so say so here rather than
                 // let codegen quietly emit an ordinary (worker-blocking) call.
                 if fnd.is_variadic && self.tc_attr(self.cur_module(), id, AttrKind::ATTR_BLOCKING) != null {
                     let sp = self.name_span(fnd.name);
@@ -15247,8 +15290,8 @@ extend TypeChecker {
                 self.loop_depth = 0;
                 self.ndefers = 0;
                 if fnd.body != NODE_NONE {
-                    // an `unsafe fn` body is one big unsafe context: raw-pointer work inside needs
-                    // no per-statement markers -- the safety obligation moved to the call sites
+                    // An `unsafe fn` body is one big unsafe context: raw-pointer work inside needs
+                    // no per-statement markers; the safety obligation sits at the call sites.
                     if fnd.is_unsafe {
                         self.icx.unsafe_depth = self.icx.unsafe_depth + 1;
                     }
@@ -15264,8 +15307,8 @@ extend TypeChecker {
                     let ceptr = self.cir();
                     if ceptr != null && ceptr.fn_recheck(self.cur_module(), id) == iri::FX_NO {
                         let sp = self.name_span(fnd.name);
-                        // the actionable token is the `const` keyword itself: [pub] [unsafe] const fn
-                        // is the canonical order, so scan back from the name across `fn`
+                        // The actionable token is the `const` keyword itself: [pub] [unsafe] const fn
+                        // is the canonical order, so scan back from the name across `fn`.
                         let mut cstart = sp.start;
                         let mut cend = sp.end;
                         let mut i = sp.start as usize;
@@ -15393,7 +15436,7 @@ extend TypeChecker {
                 let declared = self.resolve_type(a.at_const(id).as_data.const_def.ty);
                 let cd = self.cur_ast().at_const(id).as_data.const_def;
                 let dtk = self.type_at(declared).kind;
-                // An owning (Free) type IS representable: its object graph -- heap blocks included --
+                // An owning (Free) type IS representable: its object graph, heap blocks included,
                 // materializes into static storage with relocations, exactly as a malloc'd graph does.
                 // What makes it sound is that nothing can ever free or mutate it: the value is
                 // immutable, and borrowck refuses to move it out of the const (bc_const_move), so no
@@ -15430,7 +15473,7 @@ extend TypeChecker {
                     }
                 }
                 // A raw pointer / reference never owns its pointee (`tc_type_is_free` peels them via
-                // `strip`, so it would wrongly report `*mut FreeStruct` as owning) -- a `static mut` holding
+                // `strip`, so it would wrongly report `*mut FreeStruct` as owning): a `static mut` holding
                 // one is fine, which is how a heap-managed global singleton is expressed.
                 if cd.is_static_mut && dtk != TypeKind::TYPE_POINTER && dtk != TypeKind::TYPE_REFERENCE && self.tc_type_is_free(
                     declared,
@@ -15483,7 +15526,7 @@ extend TypeChecker {
                 let iid = self.ext_items_at(it.module, i);
                 let itn = ma.at_const(iid);
                 // A plain generic extend's methods are instantiated per (instance, method) pair instead,
-                // by seed_mono_body_instances -- closing their signatures for every instance is what a
+                // by seed_mono_body_instances: closing their signatures for every instance is what a
                 // method returning a wider view of its own receiver turns into an endless chain.
                 let demand = itn.as_data.extend_def.interface_type == NODE_NONE && self.tc_attr(
                     it.module,
@@ -15539,8 +15582,7 @@ extend TypeChecker {
         }
     }
 
-    // ---- lint: bindings declared `mut` whose mutability is never required ------------------------
-    // is_assignable marks every binding whose mutability actually answered a requirement; a `mut`
+    // is_assignable marks every binding whose mutability answered a requirement; a `mut`
     // binding that is referenced but never marked can drop the keyword. Unreferenced bindings are
     // the unused-variable lint's business (and cover @platform-dropped items, which never resolve).
     @c.cold
@@ -15571,7 +15613,7 @@ extend TypeChecker {
         }
     }
 
-    // Lint: `(*e).member` -- member access strips its receiver's pointers/references (auto-deref), so the
+    // Lint: `(*e).member`; member access strips its receiver's pointers/references (auto-deref), so the
     // explicit `(*...)` deref is redundant; `e.member` resolves to the identical field/method. Warns and
     // offers a replace fix rewriting `(*e)` to `e`. Only the outer deref wrapping the receiver is removed;
     // the member's own unsafe obligation (a field through a raw pointer still needs `unsafe`) is unchanged.
@@ -15599,7 +15641,7 @@ extend TypeChecker {
         let n = self.source.len();
         // Postfix (`.`/`()`/`[]`) binds tighter than the deref, so `(*E).m` only parses with the receiver
         // parenthesized: the `(` sits immediately before the `*` (across horizontal whitespace). Its
-        // matching `)` is then found by a balanced scan -- the operand's own node span excludes any parens
+        // matching `)` is then found by a balanced scan: the operand's own node span excludes any parens
         // it carries, so a nested `(*(*pp))` needs true paren matching, not the span's end.
         let mut lp = star;
         while lp > 0 && (self.source[(lp - 1) as usize] == b' ' || self.source[(lp - 1) as usize] == b'\t') {
@@ -15608,14 +15650,15 @@ extend TypeChecker {
         if lp == 0 || self.source[(lp - 1) as usize] != b'(' {
             return;
         }
-        lp = lp - 1; // the `(`
+        // The `(`.
+        lp = lp - 1;
         let mut depth: i32 = 0;
         let mut j = lp;
         let mut rpe: u32 = 0; // past the matching `)`; 0 = not found
         while j as usize < n {
             let c = self.source[j as usize];
             if c == b'"' || c == b'\'' {
-                // skip a string/char literal so a `)` inside it never miscounts the depth
+                // Skip a string/char literal so a `)` inside it never miscounts the depth.
                 j = j + 1;
                 while j as usize < n {
                     let d = self.source[j as usize];
@@ -15644,7 +15687,7 @@ extend TypeChecker {
         if rpe == 0 {
             return;
         }
-        // Keep everything after the `*`, trimmed -- that is E exactly as written (its own parens included).
+        // Keep everything after the `*`, trimmed: that is E exactly as written (its own parens included).
         let mut ts = star + 1;
         while ts < rpe - 1 && (self.source[ts as usize] == b' ' || self.source[ts as usize] == b'\t') {
             ts = ts + 1;
@@ -15661,7 +15704,7 @@ extend TypeChecker {
         self.errors.fix_replace(lp, rpe, String::from_str(diag::span_str(self.source, ts, te)));
     }
 
-    // Attach the `mut ` deletion fix: the keyword sits just before the name, across whitespace.
+    // Attach the `mut ` deletion fix: the keyword sits right before the name, across whitespace.
     @c.cold
     fn tc_lint_mut_fix(self: &mut Self, nsp: tok::Span) {
         let mut i = nsp.start as usize;
@@ -15732,11 +15775,11 @@ extend TypeChecker {
         for i in 0..items.len {
             let it9 = unsafe self.cur_ast().list(items)[i as usize];
             self.check_item(it9);
-            // completion record: the constant engine interprets a function body only once its
-            // item is typed (an unchecked body would evaluate with degraded widths)
+            // Completion record: the constant engine interprets a function body only once its
+            // item is typed (an unchecked body would evaluate with degraded widths).
             if self.package != null {
                 {
-                    // lazily sized on the serial path; the parallel frontier pre-sizes it
+                    // Lazily sized on the serial path; the parallel frontier pre-sizes it.
                     let cm9 = self.cur_module() as usize;
                     while unsafe self.package.tc_done.len() <= cm9 {
                         unsafe self.package.tc_done.push(Set::<u64>::new());
@@ -15756,9 +15799,11 @@ extend TypeChecker {
         self.errors.finalize(self.source, file);
     }
 
+    /// True once any type error is recorded.
     pub const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
+    /// Print the accumulated diagnostics to stderr.
     pub fn log_errors(self: &Self) {
         self.errors.log();
     }

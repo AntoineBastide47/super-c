@@ -1,5 +1,5 @@
 // `super-c lsp` integration: drives the server as a subprocess over a framed JSON-RPC session file and
-// asserts on the raw responses -- initialize capabilities, publishDiagnostics for a type error, the
+// asserts on the raw responses: initialize capabilities, publishDiagnostics for a type error, the
 // error clearing after a fixing didChange, and a clean shutdown/exit. Also covers the cross-module
 // regression behind the server itself: a struct embedding loader::Package by value compiles (its
 // builtin_decls array length is an enum-cast const evaluated pre-typecheck).
@@ -28,7 +28,7 @@ fn uri_path_roundtrip() {
     uri_path_is("file:///C:/w/a.spc", "C:/w/a.spc");
     uri_path_is("file:///c%3A/w/a.spc", "c:/w/a.spc");
     uri_path_is("file:///home/u/a%20b.spc", "/home/u/a b.spc");
-    // a path this platform could actually hand us survives the round trip
+    // A path this platform could hand us survives the round trip.
     let p = if cli::on_windows() {
         "C:/w/a b.spc";
     } else {
@@ -128,7 +128,8 @@ fn lsp_diagnostics_lifecycle() {
     p.mkfile("session.bin", ses.as_str());
 
     let rc = lsp_run(root);
-    assert_eq(rc, 0); // exit after shutdown = success
+    // Exit after shutdown = success.
+    assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
@@ -138,8 +139,8 @@ fn lsp_diagnostics_lifecycle() {
     let o = out.as_str();
     assert(o.contains("\"hoverProvider\":true"));
     assert(o.contains("\"serverInfo\":{\"name\":\"super-c lsp\""));
-    // the on-disk revision publishes the type error at `initialized` (whole-workspace round), the
-    // identical opened revision once more; the fixed revision must not re-publish it
+    // The on-disk revision publishes the type error at `initialized` (whole-workspace round), the
+    // identical opened revision once more; the fixed revision must not re-publish it.
     assert_eq(count(o, "mismatched types: expected 'i32', found 'str'"), 2 as usize);
     assert(count(o, "textDocument/publishDiagnostics") >= 2);
     assert(o.contains("\"severity\":1"));
@@ -209,7 +210,7 @@ fn lsp_positional_features() {
     json::dump_escaped(MAIN_PT, &mut b);
     b.push_str("}}}");
     frame(&mut ses, &b);
-    // hover on `p` receiver (line 4 "let n = p.norm2()" -> char 12)
+    // Hover on `p` receiver (line 4 "let n = p.norm2()" -> char 12).
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -217,7 +218,7 @@ fn lsp_positional_features() {
     b.push_str(root);
     b.push_str("/src/main.spc\"},\"position\":{\"line\":4,\"character\":12}}}");
     frame(&mut ses, &b);
-    // definition of norm2 (line 4, char 15) -> util.spc method name
+    // Definition of norm2 (line 4, char 15) -> util.spc method name.
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -225,7 +226,7 @@ fn lsp_positional_features() {
     b.push_str(root);
     b.push_str("/src/main.spc\"},\"position\":{\"line\":4,\"character\":15}}}");
     frame(&mut ses, &b);
-    // hover on the `x` field initializer: the field's trailing same-line comment is its doc
+    // Hover on the `x` field initializer: the field's trailing same-line comment is its doc.
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -234,7 +235,7 @@ fn lsp_positional_features() {
     b.push_str("/src/main.spc\"},\"position\":{\"line\":3,\"character\":26}}}");
     frame(&mut ses, &b);
     // hover on norm2's `self` parameter (util.spc is in the package without being open): the fn
-    // docs must NOT leak onto it
+    // docs must NOT leak onto it.
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -242,7 +243,7 @@ fn lsp_positional_features() {
     b.push_str(root);
     b.push_str("/src/util.spc\"},\"position\":{\"line\":8,\"character\":20}}}");
     frame(&mut ses, &b);
-    // hover on norm2 itself: the doc comment above the method must travel into the hover
+    // Hover on norm2 itself: the doc comment above the method must travel into the hover.
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -250,7 +251,7 @@ fn lsp_positional_features() {
     b.push_str(root);
     b.push_str("/src/main.spc\"},\"position\":{\"line\":4,\"character\":15}}}");
     frame(&mut ses, &b);
-    // rename Point (line 3, char 19) -> Pt: edits must be the bare name, never the util:: prefix
+    // Rename Point (line 3, char 19) -> Pt: edits must be the bare name, never the util:: prefix.
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -258,7 +259,7 @@ fn lsp_positional_features() {
     b.push_str(root);
     b.push_str("/src/main.spc\"},\"position\":{\"line\":3,\"character\":19},\"newName\":\"Pt\"}}");
     frame(&mut ses, &b);
-    // renaming to a keyword must fail
+    // Renaming to a keyword must fail.
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -281,13 +282,16 @@ fn lsp_positional_features() {
     op.push_str("/out.txt");
     let out = loader::read_file(op.as_str()).unwrap();
     let o = out.as_str();
-    assert(o.contains("```super-c\\nPoint\\n```")); // hover: the receiver's rendered type
-    // the doc appears in norm2's hover (id 20) and ONLY there -- the param hover (id 21) must not
-    // inherit it
+    // Hover: the receiver's rendered type.
+    assert(o.contains("```super-c\\nPoint\\n```"));
+    // The doc appears in norm2's hover (id 20) and ONLY there: the param hover (id 21) must not
+    // inherit it.
     assert_eq(count(o, "The squared Euclidean norm."), 1 as usize);
-    assert(o.contains("horizontal component")); // the field's trailing comment travels into hover
-    assert(o.contains("/src/util.spc\",\"range\":{\"start\":{\"line\":8,\"character\":11}")); // norm2 def site
-    // the rename touches both files with the bare name span (line 3 char 18..23 in main)
+    // The field's trailing comment travels into hover.
+    assert(o.contains("horizontal component"));
+    // Norm2 def site.
+    assert(o.contains("/src/util.spc\",\"range\":{\"start\":{\"line\":8,\"character\":11}"));
+    // The rename touches both files with the bare name span (line 3 char 18..23 in main).
     assert(
         o.contains(
             "\"range\":{\"start\":{\"line\":3,\"character\":18},\"end\":{\"line\":3,\"character\":23}},\"newText\":\"Pt\"",
@@ -297,7 +301,7 @@ fn lsp_positional_features() {
     assert(o.contains("\"id\":5,\"error\":{\"code\":-32803"));
 }
 
-// Member completion after `.` runs a probe build (the buffer no longer parses mid-edit); formatting
+// Member completion after `.` runs a probe build (the buffer does not parse mid-edit); formatting
 // returns no edits for an already-canonical file; semantic tokens deliver a data array.
 const MAIN_DOT: str = "import util;\n\nfn main() i32 {\n    let p = util::Point { x: 3, y: 4 };\n    p.\n    let n = 1;\n    return n;\n}\n";
 
@@ -339,7 +343,7 @@ fn lsp_completion_formatting_tokens() {
     b.push_str(root);
     b.push_str("/src/main.spc\"}}}");
     frame(&mut ses, &b);
-    // break the buffer with a dangling `p.` and complete after the dot (line 4, char 6)
+    // Break the buffer with a dangling `p.` and complete after the dot (line 4, char 6).
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -371,9 +375,12 @@ fn lsp_completion_formatting_tokens() {
     op.push_str("/out.txt");
     let out = loader::read_file(op.as_str()).unwrap();
     let o = out.as_str();
-    assert(o.contains("\"id\":2,\"result\":[]")); // canonical file: no formatting edits
-    assert(o.contains("\"id\":3,\"result\":{\"data\":[")); // semantic tokens delivered
-    assert(o.contains("{\"label\":\"norm2\",\"kind\":2")); // probe-built member completion
+    // Canonical file: no formatting edits.
+    assert(o.contains("\"id\":2,\"result\":[]"));
+    // Semantic tokens delivered.
+    assert(o.contains("\"id\":3,\"result\":{\"data\":["));
+    // Probe-built member completion.
+    assert(o.contains("{\"label\":\"norm2\",\"kind\":2"));
     assert(o.contains("{\"label\":\"x\",\"kind\":5"));
 }
 
@@ -392,7 +399,7 @@ fn lsp_code_actions() {
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://",
     );
     b.push_str(root);
-    // code-action literals need the client capability (the server returns nothing without it)
+    // Code-action literals need the client capability (the server returns nothing without it).
     b.push_str(
         "\",\"capabilities\":{\"textDocument\":{\"codeAction\":{\"codeActionLiteralSupport\":{\"codeActionKind\":{\"valueSet\":[]}}}}}}}",
     );
@@ -432,7 +439,7 @@ fn lsp_code_actions() {
     let o = out.as_str();
     assert(o.contains("\"title\":\"Prefix with '_'\",\"kind\":\"quickfix\""));
     assert(o.contains("\"message\":\"unused variable 'unused'\""));
-    // the edit inserts '_' at the binding start (an empty range at line 1, char 8)
+    // The edit inserts '_' at the binding start (an empty range at line 1, char 8).
     assert(
         o.contains(
             "{\"range\":{\"start\":{\"line\":1,\"character\":8},\"end\":{\"line\":1,\"character\":8}},\"newText\":\"_\"}",
@@ -441,7 +448,7 @@ fn lsp_code_actions() {
 }
 
 // Regression: completion on a mid-edit buffer whose probe build contains switch-arm PATTERN nodes
-// (Some/None) once read a pattern node's bytes as a name Span (untagged NodeAs union) -- a negative
+// (Some/None) once read a pattern node's bytes as a name Span (untagged NodeAs union): a negative
 // length that made the server malloc 16 EB and abort. The probe splice lands at the broken cast's
 // end, exactly the crashing session.
 const MAIN_SWITCH: str = "fn pick(v: i64) i64 {\n    let r = (switch v > 0 {\n        true => v,\n        false => -1,\n    });\n    let w = r as i6\n    return w;\n}\n\nfn main() i64 {\n    return pick(1) - 1;\n}\n";
@@ -469,7 +476,7 @@ fn lsp_completion_survives_pattern_nodes() {
     json::dump_escaped(MAIN_SWITCH, &mut b);
     b.push_str("}}}");
     frame(&mut ses, &b);
-    // completion at the end of the dangling `r as i6` (line 5, char 19): general path via probe
+    // Completion at the end of the dangling `r as i6` (line 5, char 19): general path via probe.
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -486,18 +493,21 @@ fn lsp_completion_survives_pattern_nodes() {
     p.mkfile("session.bin", ses.as_str());
 
     let rc = lsp_run(root);
-    assert_eq(rc, 0); // the server must not crash
+    // The server must not crash.
+    assert_eq(rc, 0);
 
     let mut op = String::from_str(root);
     op.push_str("/out.txt");
     let out = loader::read_file(op.as_str()).unwrap();
     let o = out.as_str();
-    assert(o.contains("{\"label\":\"r\"")); // locals still complete through the probe build
-    assert(o.contains("{\"label\":\"i64\"")); // builtin type names present
+    // Locals still complete through the probe build.
+    assert(o.contains("{\"label\":\"r\""));
+    // Builtin type names present.
+    assert(o.contains("{\"label\":\"i64\""));
 }
 
 // Rename is workspace-relative: a definition outside the workspace (the installed std next to the
-// binary) refuses; a workspace that contains its own std -- this repo -- may rename std symbols.
+// binary) refuses; a workspace that contains its own std (this repo) may rename std symbols.
 const MAIN_VEC: str = "fn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    return v.len() as i32 - 1;\n}\n";
 
 fn rename_session(root: str, doc_uri_prefix: str, ses: &mut String) {
@@ -547,7 +557,7 @@ fn run_lsp_session(root: str, ses: &String) String {
 
 @test
 fn lsp_rename_workspace_relative() {
-    // outside: a temp workspace does not contain the installed std -> refused
+    // Outside: a temp workspace does not contain the installed std -> refused.
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", MAIN_VEC);
@@ -557,8 +567,8 @@ fn lsp_rename_workspace_relative() {
     let out = run_lsp_session(root, &ses);
     assert(out.as_str().contains("cannot rename: the definition is outside the workspace"));
 
-    // inside: this repo's workspace contains std/ -- renaming Vector::push answers with edits that
-    // reach std/vector.spc (nothing is written: rename only RETURNS a WorkspaceEdit)
+    // inside: this repo's workspace contains std/; renaming Vector::push answers with edits that
+    // reach std/vector.spc (nothing is written: rename only RETURNS a WorkspaceEdit).
     let mut rb = Array::<char, 4096>::new();
     let mut dot = String::from_str(".");
     assert(unsafe shim::sc_realpath(dot.cstr(), &mut rb[0]) != null);
@@ -656,7 +666,7 @@ fn lsp_build_toml() {
     b.push_str("}}}");
     frame(&mut ses, &b);
     b.clear();
-    // hover over `bin` on line 0
+    // Hover over `bin` on line 0.
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/hover\",\"params\":{\"textDocument\":{\"uri\":\"file://",
     );
@@ -664,7 +674,7 @@ fn lsp_build_toml() {
     b.push_str("/build.toml\"},\"position\":{\"line\":0,\"character\":1}}}");
     frame(&mut ses, &b);
     b.clear();
-    // completion at the start of a key line: the top-level keys
+    // Completion at the start of a key line: the top-level keys.
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file://",
     );
@@ -672,7 +682,7 @@ fn lsp_build_toml() {
     b.push_str("/build.toml\"},\"position\":{\"line\":2,\"character\":0}}}");
     frame(&mut ses, &b);
     b.clear();
-    // completion inside a section header: the section names
+    // Completion inside a section header: the section names.
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file://",
     );
@@ -696,12 +706,12 @@ fn lsp_build_toml() {
     assert(out_opt.is_some());
     let out = out_opt.unwrap();
     let o = out.as_str();
-    // the manifest's own checker produced these
+    // The manifest's own checker produced these.
     assert(o.contains("unknown key 'bogus'"));
     assert(o.contains("unknown profile key 'nope'"));
     assert(o.contains("cannot be overridden"));
     assert(o.contains("\"source\":\"build.toml\""));
-    // hover and both completion flavours
+    // Hover and both completion flavours.
     assert(o.contains("name of the binary this project builds"));
     assert(o.contains("\"label\":\"out-dir\""));
     assert(o.contains("\"label\":\"profile.\""));

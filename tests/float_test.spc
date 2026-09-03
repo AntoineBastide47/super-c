@@ -1,7 +1,7 @@
-// `std::float` -- Float<E, F>, the arbitrary-format IEEE binary floats. The strongest oracle available
+// `std::float`; Float<E, F>, the arbitrary-format IEEE binary floats. The strongest oracle available
 // is the hardware: `Float<11, 52>` and `Float<8, 23>` ARE the built-in f64/f32 formats, so every
 // operation is checked BIT FOR BIT against the native one over a value set that crosses the interesting
-// boundaries -- zeros of both signs, subnormals, the largest finite values, infinities, and fractions
+// boundaries: zeros of both signs, subnormals, the largest finite values, infinities, and fractions
 // that exercise every rounding path. The exotic widths (f16, f128, f256) then check known encodings and
 // identities the shared generic code must preserve.
 
@@ -34,7 +34,7 @@ const fn dvals() [f64; 22] {
     ];
 }
 
-// Two values are "the same result" when their bits are -- except NaN, which is one VALUE with many
+// Two values are "the same result" when their bits are: except NaN, which is one VALUE with many
 // encodings: 0/0 yields the platform's default quiet NaN, and x86's carries the sign bit set where
 // AArch64's does not. Comparing payloads would fail on hardware differences IEEE never promises.
 const fn same64(x: f64, y: f64) bool {
@@ -115,12 +115,17 @@ fn f16_known_encodings() {
     let two = f16::from_f64(2.0);
     assert_eq(one.to_raw().to_u64(), 0x3C00u64);
     assert_eq(two.neg().to_raw().to_u64(), 0xC000u64);
-    assert_eq((one + two).to_raw().to_u64(), 0x4200u64); // 3.0
-    assert_eq(f16::from_f64(0.1).to_raw().to_u64(), 0x2E66u64); // 0.1 rounded to 11 bits
-    assert_eq((one / (one + two)).to_raw().to_u64(), 0x3555u64); // 1/3
-    assert_eq(f16::min_positive().to_raw().to_u64(), 0x0001u64); // least subnormal
-    assert_eq(f16::max_finite(false).to_raw().to_u64(), 0x7BFFu64); // 65504
-    // overflow saturates to infinity, and NaN equals nothing (itself included)
+    // 3.0.
+    assert_eq((one + two).to_raw().to_u64(), 0x4200u64);
+    // 0.1 rounded to 11 bits.
+    assert_eq(f16::from_f64(0.1).to_raw().to_u64(), 0x2E66u64);
+    // 1/3.
+    assert_eq((one / (one + two)).to_raw().to_u64(), 0x3555u64);
+    // Least subnormal.
+    assert_eq(f16::min_positive().to_raw().to_u64(), 0x0001u64);
+    // 65504.
+    assert_eq(f16::max_finite(false).to_raw().to_u64(), 0x7BFFu64);
+    // Overflow saturates to infinity, and NaN equals nothing (itself included).
     assert((f16::max_finite(false) + f16::from_f64(32.0)).is_infinite());
     assert(f16::nan().is_nan());
     assert(!(f16::nan() == f16::nan()));
@@ -130,18 +135,18 @@ fn f16_known_encodings() {
 // correct multi-limb rounding, and exact round-trips through f64 for representable values.
 @test
 fn wide_formats_compute_exactly() {
-    // (1/3) * 3 at 113-bit precision differs from 1 by at most one ulp
+    // (1/3) * 3 at 113-bit precision differs from 1 by at most one ulp.
     let third = f128::one() / f128::from_f64(3.0);
     let back = third * f128::from_f64(3.0);
     let d = (back - f128::one()).abs();
     let eps = f128::from_f64(1.0e-33);
     assert(d.is_zero() || d.ieee_lt(&eps));
-    // f256 exact small arithmetic surfaces through f64 unchanged
+    // Exact small f256 arithmetic surfaces through f64 unchanged.
     let f4 = f256::from_f64(2.0) + f256::from_f64(2.0);
     assert(f4.to_f64() == 4.0);
     assert((f4 / f256::from_f64(4.0)).to_f64() == 1.0);
     assert((f256::from_f64(1024.25) * f256::one()).to_f64() == 1024.25);
-    // subnormal f128 arithmetic: the least positive value halves to zero and doubles back exactly
+    // Subnormal f128 arithmetic: the least positive value halves to zero and doubles back exactly.
     let ms = f128::min_positive();
     assert((ms / f128::from_f64(2.0)).is_zero());
     let dbl = ms * f128::from_f64(2.0);
@@ -160,19 +165,20 @@ fn finite_only_family_is_e4m3fn() {
     assert(mx.to_f64() == 448.0);
     assert_eq(f8e4m3fn::nan().to_raw().to_u64(), 0x7Fu64);
     assert_eq(f8e4m3fn::min_positive().to_raw().to_u64(), 0x01u64);
-    // overflow saturates instead of producing an infinity, converted infinities included
+    // Overflow saturates instead of producing an infinity, converted infinities included.
     assert((mx + mx).ieee_eq(&mx));
     assert(f8e4m3fn::from_f64(1.0e9).ieee_eq(&mx));
     let inf_in = f8e4m3fn::from_f64(1.0 / 0.0);
     assert(inf_in.ieee_eq(&mx));
     assert(!inf_in.is_infinite());
-    // division by zero: no infinity exists, so the answer is NaN
+    // Division by zero: no infinity exists, so the answer is NaN.
     assert((one / f8e4m3fn::zero()).is_nan());
     assert(f8e4m3fn::nan().is_nan());
     assert(!(f8e4m3fn::nan() == f8e4m3fn::nan()));
-    // the family is part of the TYPE: same bit budget, different meaning of the top encodings
-    assert(f8e5m2::from_f64(1.0e9).is_infinite()); // the IEEE sibling overflows to infinity
-    // round-trip of every representable value through f64 is exact
+    // The family is part of the TYPE: same bit budget, different meaning of the top encodings
+    // The IEEE sibling overflows to infinity.
+    assert(f8e5m2::from_f64(1.0e9).is_infinite());
+    // Round-trip of every representable value through f64 is exact.
     let mut i: u64 = 0;
     while i < 256 {
         let v = f8e4m3fn::from_raw(UInt::<8>::from_u64(i));
@@ -192,32 +198,32 @@ fn classification_and_comparison() {
     assert(f16::one().classify() == FpClass::FP_NORMAL);
     assert(f16::infinity(false).classify() == FpClass::FP_INFINITE);
     assert(f16::nan().classify() == FpClass::FP_NAN);
-    // the zeros are one value to ==, and neither is less than the other
+    // The zeros are one value to ==, and neither is less than the other.
     assert(f16::zero() == f16::neg_zero());
     let nz = f16::neg_zero();
     assert(!f16::zero().ieee_lt(&nz));
-    // sign and magnitude ordering, both signs
+    // Sign and magnitude ordering, both signs.
     let a = f16::from_f64(1.5);
     let b = f16::from_f64(2.5);
     assert(a.ieee_lt(&b));
     let na = a.neg();
     assert(b.neg().ieee_lt(&na));
     assert(na.ieee_lt(&b));
-    // `<` runs on the total order, so it agrees with ieee_lt wherever IEEE defines an answer
+    // `<` runs on the total order, so it agrees with ieee_lt wherever IEEE defines an answer.
     assert(a < b);
     assert(b.neg() < a.neg());
-    // nan propagates through arithmetic
+    // Nan propagates through arithmetic.
     assert((f16::nan() + f16::one()).is_nan());
     assert((f16::infinity(false) - f16::infinity(false)).is_nan());
     assert((f16::zero() * f16::infinity(true)).is_nan());
     assert((f16::zero() / f16::zero()).is_nan());
-    // signed-zero rules: exact cancellation gives +0; 1/-0 is -inf
+    // Signed-zero rules: exact cancellation gives +0; 1/-0 is -inf.
     assert(!(a - a).is_negative());
     let ninf = f16::one() / f16::neg_zero();
     assert(ninf.is_infinite() && ninf.is_negative());
 }
 
-// sqrt and fma, held to libm bit for bit; convert held to the identity it promises.
+// Sqrt and fma, held to libm bit for bit; convert held to the identity it promises.
 @test
 fn sqrt_fma_convert_match_libm() {
     let vs: [f64; 14] = [
@@ -249,17 +255,17 @@ fn sqrt_fma_convert_match_libm() {
                 assert(same64(fa.fma(&fb, &fc).to_f64(), unsafe math::fma(a, b, c)));
             }
         }
-        // widening then narrowing through f128 is the identity; direct narrowing agrees with from_f64
+        // Widening then narrowing through f128 is the identity; direct narrowing agrees with from_f64.
         let src = Float::<11, 52>::from_f64(a);
         let wide = f128::convert(&src);
         assert_eq(f64_bits(Float::<11, 52>::convert(&wide).to_f64()), f64_bits(a));
         assert_eq(f16::convert(&src).to_raw().to_u64(), f16::from_f64(a).to_raw().to_u64());
     }
-    // sqrt specials
+    // Sqrt specials.
     assert(f16::from_f64(0.0 - 4.0).sqrt().is_nan());
     assert(f16::neg_zero().sqrt().is_negative());
     assert(f16::infinity(false).sqrt().is_infinite());
-    // sqrt runs the same generic code at multi-limb widths: an exact square stays exact
+    // Sqrt runs the same generic code at multi-limb widths: an exact square stays exact.
     let nine = f128::from_f64(9.0);
     assert(nine.sqrt() == f128::from_f64(3.0));
 }
@@ -325,7 +331,7 @@ fn decimal_text_round_trips() {
     };
     assert(f16::from_str("12x").is_none());
     assert(f16::from_str("").is_none());
-    // a 36-digit f128 value survives its own text
+    // A 36-digit f128 value survives its own text.
     let third = f128::one() / f128::from_f64(3.0);
     let ts = third.to_string();
     switch f128::from_str(ts.as_str()) {
@@ -339,7 +345,7 @@ fn decimal_text_round_trips() {
 }
 
 // The remainder and the integer-rounding family, bit-for-bit against libm at the f64 format over the
-// same differential grid the arithmetic uses -- fmod's exactness claim is exactly what this checks.
+// same differential grid the arithmetic uses: fmod's exactness claim is exactly what this checks.
 @test
 fn rem_and_rounding_match_libm() {
     let vs = dvals();
@@ -355,7 +361,7 @@ fn rem_and_rounding_match_libm() {
             let fb = Float::<11, 52>::from_f64(b);
             assert(same64((fa % fb).to_f64(), unsafe math::fmod(a, b)));
             if a == 0.0 && b == 0.0 {
-                // C leaves fmin/fmax's zero sign unspecified; ours is IEEE-2019's -0 < +0
+                // C leaves fmin/fmax's zero sign unspecified; ours is IEEE-2019's -0 < +0.
                 let na = fa.signum().to_f64() < 0.0;
                 let nb = fb.signum().to_f64() < 0.0;
                 assert(fa.min(&fb).signum().to_f64() < 0.0 == (na || nb));
@@ -367,7 +373,7 @@ fn rem_and_rounding_match_libm() {
             assert(same64(fa.copysign(&fb).to_f64(), unsafe math::copysign(a, b)));
         }
     }
-    // ties: away for round, even for round_ties_even; fract is the exact complement
+    // Ties: away for round, even for round_ties_even; fract is the exact complement.
     let h = Float::<11, 52>::from_f64(2.5);
     assert(same64(h.round().to_f64(), 3.0));
     assert(same64(h.round_ties_even().to_f64(), 2.0));
@@ -376,10 +382,10 @@ fn rem_and_rounding_match_libm() {
     assert(same64(nh.round_ties_even().to_f64(), 0.0 - 2.0));
     let fr = Float::<11, 52>::from_f64(0.0 - 1.25);
     assert(same64(fr.fract().to_f64(), 0.0 - 0.25));
-    // signum reads the sign bit, zeros included
+    // Signum reads the sign bit, zeros included.
     assert(same64(Float::<11, 52>::from_f64(0.0).signum().to_f64(), 1.0));
     assert(same64(Float::<11, 52>::neg_zero().signum().to_f64(), 0.0 - 1.0));
-    // clamp: the range is checked, the value passes NaN through
+    // Clamp: the range is checked, the value passes NaN through.
     let lo = Float::<11, 52>::from_f64(0.0 - 1.0);
     let hi = Float::<11, 52>::from_f64(1.0);
     assert(same64(Float::<11, 52>::from_f64(7.0).clamp(&lo, &hi).to_f64(), 1.0));
@@ -391,14 +397,14 @@ fn rem_and_rounding_match_libm() {
 // like the built-in casts, and single-rounded (round to nearest even) past the significand.
 @test
 fn wide_integer_conversions_are_single_rounded() {
-    // more than 53 significant bits but under f128's 113: exact both ways, which f64 in the middle
-    // could not deliver
+    // More than 53 significant bits but under f128's 113: exact both ways, which f64 in the middle
+    // could not deliver.
     let w: u128 = 0x1000000000000F00000000000000;
     let y = f128::from_uint(&w);
     let mut rw = u128::zero();
     y.to_uint(&mut rw);
     assert(rw == w);
-    // the rounding is round-to-nearest-even at the 113-bit boundary, checked by hand
+    // The rounding is round-to-nearest-even at the 113-bit boundary, checked by hand.
     let a: u128 = (u128::one() << 114) + 1; // half below the tie: rounds down
     let fa = f128::from_uint(&a);
     let mut ra = u128::zero();
@@ -409,7 +415,7 @@ fn wide_integer_conversions_are_single_rounded() {
     let mut rb = u128::zero();
     fb.to_uint(&mut rb);
     assert(rb == (u128::one() << 114) + (u128::one() << 2));
-    // signed: MIN survives the round-trip, saturation clamps, NaN gives zero
+    // Signed: MIN survives the round-trip, saturation clamps, NaN gives zero.
     let mn = i128::min();
     let fm = f128::from_int(&mn);
     let mut rm = i128::zero();
@@ -425,7 +431,7 @@ fn wide_integer_conversions_are_single_rounded() {
     let mut neg = u128::zero();
     Float::<11, 52>::from_f64(0.0 - 3.5).to_uint(&mut neg);
     assert(neg.is_zero());
-    // and the f64 grid truncates exactly like the builtin casts
+    // And the f64 grid truncates exactly like the builtin casts.
     let g = Float::<11, 52>::from_f64(12345.75);
     let mut gv = UInt::<64>::zero();
     g.to_uint(&mut gv);
@@ -438,34 +444,35 @@ fn wide_integer_conversions_are_single_rounded() {
 @test
 fn neighbours_parts_and_scalbn() {
     let one = Float::<11, 52>::one();
-    // next_up(1) - 1 == ulp(1)
+    // next_up(1) - 1 == ulp(1).
     let up = one.next_up();
     assert(same64(up.sub(&one).to_f64(), one.ulp().to_f64()));
     let eps: f64 = 1.1102230246251565e-16; // 2^-53; a named binding, so the subtraction runs at f64
     assert(same64(one.next_down().to_f64(), 1.0 - eps));
-    // across zero: -0 steps to the smallest positive subnormal
+    // Across zero: -0 steps to the smallest positive subnormal.
     let tiny = Float::<11, 52>::neg_zero().next_up();
     assert(same64(tiny.to_f64(), 5.0e-324));
     let sd: f64 = 5.0e-324;
     assert(same64(Float::<11, 52>::zero().next_down().to_f64(), 0.0 - sd));
-    // the top: max_finite steps to infinity, and back down again
+    // The top: max_finite steps to infinity, and back down again.
     let mx = Float::<11, 52>::max_finite(false);
     assert(mx.next_up().is_infinite());
     assert(same64(Float::<11, 52>::infinity(false).next_down().to_f64(), mx.to_f64()));
-    // ulp of zero is the smallest subnormal; of a subnormal, the same
+    // Ulp of zero is the smallest subnormal; of a subnormal, the same.
     assert(same64(Float::<11, 52>::zero().ulp().to_f64(), 5.0e-324));
-    // scalbn against ldexp semantics: exact powers, subnormal entry, overflow exit
+    // Scalbn against ldexp semantics: exact powers, subnormal entry, overflow exit.
     let three = Float::<11, 52>::from_f64(3.0);
     assert(same64(three.scalbn(10).to_f64(), 3072.0));
     let step: f64 = 5.0e-324; // 2^-1074, the subnormal grid step
-    assert(same64(three.scalbn(0 - 1074).to_f64(), step * 3.0)); // 3 * 2^-1074 lies ON the grid: exact
+    // 3 * 2^-1074 lies ON the grid: exact.
+    assert(same64(three.scalbn(0 - 1074).to_f64(), step * 3.0));
     assert(three.scalbn(2000).is_infinite());
-    // parts round-trip the encoding exactly
+    // Parts round-trip the encoding exactly.
     let v = Float::<11, 52>::from_f64(0.0 - 123.456);
     let (sg, eb, fr) = v.to_parts();
     let back = Float::<11, 52>::from_parts(sg, eb, &fr);
     assert(same64(back.to_f64(), v.to_f64()));
-    // Hash follows Eq at the zeros
+    // Hash follows Eq at the zeros.
     assert_eq(Float::<11, 52>::zero().hash(), Float::<11, 52>::neg_zero().hash());
 }
 
@@ -480,7 +487,7 @@ fn finite_only_family_new_surface() {
             let y = f8e4m3fn::from_raw(UInt::<8>::from_u64(j as u64));
             let yf = y.to_f64();
             let r = x % y;
-            // every e4m3 value is exact in f64 and fmod is exact, so f64's fmod is the truth --
+            // Every e4m3 value is exact in f64 and fmod is exact, so f64's fmod is the truth:
             // except that this family calls x % 0 NaN, which fmod also does.
             let want = unsafe math::fmod(xf, yf);
             if r.is_nan() {

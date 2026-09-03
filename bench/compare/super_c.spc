@@ -1,6 +1,6 @@
 // Super-C's two answers to a blocking syscall, measured against Go, Rust threads and tokio (see README.md).
 //
-//   MODE=blocking  `blocking::call` -- the closure is MOVED to a pool of plain threads while the coroutine
+//   MODE=blocking  `blocking::call`; the closure is MOVED to a pool of plain threads while the coroutine
 //                  parks. Our equivalent of tokio's spawn_blocking, and what the runtime does today.
 //   MODE=direct    the coroutine makes the syscall itself, holding its worker for the duration. What Go
 //                  looks like WITHOUT the handoff, so the gap between the two is what a handoff would buy.
@@ -18,7 +18,7 @@ import std::parallel::blocking as blocking;
 import std::parallel::platform as platform;
 
 // One unit of work, identical in every lane: create a file, write 4 KiB, FSYNC it, close. The fsync is the
-// whole point -- a page-cache write returns in nanoseconds and says nothing about how a runtime handles a
+// whole point: a page-cache write returns in nanoseconds and says nothing about how a runtime handles a
 // blocking call, while this waits on the device. The original workload read /dev/urandom, which turned out
 // not to block enough to separate `spawn_blocking` from `block_in_place` at all: they measured identical.
 // Durability, matching what the other lanes' standard libraries do. On macOS `fsync` only pushes to the

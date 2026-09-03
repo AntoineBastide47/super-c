@@ -13,6 +13,7 @@ import ast::parser as parser;
 import std::parallel::sync as psy;
 import std::parallel::runtime as prt;
 
+/// The C `SEEK_END` whence value used to size a file before reading it.
 pub const SEEK_END: i32 = 2;
 
 /// Number of nominal builtin types; sizes Package.builtin_decls. Pinned to BuiltinType::BT_COUNT.
@@ -78,14 +79,14 @@ pub struct Package {
     pub inst_methods: Set<u64>,
     /// Coroutine-reachability for preemption safepoints: 0 = uncomputed (emit everywhere),
     /// 1 = computed (only bodies inside co_spans need safepoints), 2 = widened (a coroutine entry
-    /// could not be tracked -- emit everywhere). co_spans[m] holds sorted start<<32|end body spans
+    /// could not be tracked: emit everywhere). co_spans[m] holds sorted start<<32|end body spans
     /// of the functions and closures a `launch`ed coroutine can execute; everything else can never
     /// starve a worker, so its loops need no safepoint tick.
     pub co_state: u8,
     pub co_spans: Vector<Vector<u64>>,
     /// Cancellation-edge reachability: 0 = uncomputed (no cancellation checks anywhere), 1 =
     /// computed. cancel_marks[m] holds start<<32|end DECL spans of the functions and closures whose
-    /// bodies can reach `runtime::cancel_accept` -- a call to one of these from a task-reachable
+    /// bodies can reach `runtime::cancel_accept`; a call to one of these from a task-reachable
     /// body is followed by a compiled cancellation check with a cleanup edge.
     pub cancel_state: u8,
     pub cancel_marks: Vector<Set<u64>>,
@@ -94,13 +95,13 @@ pub struct Package {
     /// program that never cancels pays no per-loop ladder, and its shutdown reports a spinning task
     /// as unresponsive instead of reclaiming it.
     pub cancel_used: bool,
-    /// Methods resolved with NO receiver in hand -- the format helpers the print lowering reaches for,
+    /// Methods resolved with NO receiver in hand: the format helpers the print lowering reaches for,
     /// and anything else the compiler names by decl alone. Nothing says which instance wants them, so
     /// every instance does: (module << 32 | node), exempt from the per-instance demand test.
     pub always_methods: Set<u64>,
     /// Private, non-generic functions referenced from a GENERIC body of their own module, as
     /// (module << 32 | node). That generic may be monomorphized into ANOTHER TU, which cannot reach a
-    /// `static` symbol -- so its owner emits it with external linkage and declares it in its header.
+    /// `static` symbol, so its owner emits it with external linkage and declares it in its header.
     /// Filled once, serially, before codegen forks: every worker must answer this the same way.
     pub extern_privates: Set<u64>,
     /// The Core IR constant interpreter (a *mut ir::interp::Interp, kept opaque here to avoid a type
@@ -116,7 +117,7 @@ pub struct Package {
     pub tc_done: Vector<Set<u64>>,
     /// Parallel frontend: tc_mod_done[m] flips when module m's check() completed; the engine's
     /// index-aware gate treats a LOWER-indexed module's items as checked only once its flag is
-    /// set (waiting through `tc_wait`), and a HIGHER-indexed module's as unchecked regardless --
+    /// set (waiting through `tc_wait`), and a HIGHER-indexed module's as unchecked regardless:
     /// exactly the serial module-order visibility.
     pub tc_mod_done: Vector<u8>,
     /// Driver-installed waiter for the parallel frontend (null when serial): blocks the calling
@@ -146,7 +147,7 @@ pub struct Package {
     /// Recycled token vector: each module's lexer adopts it (capacity kept), the parser hands it back.
     pub tok_scratch: Vector<tok::Token>,
     /// Recycled codegen output buffer, lent to each TU's Codegen through the owner-swap idiom (field
-    /// assigns emit no frees, so a PRE-FIX bootstrap compiler lowers the swap correctly -- a
+    /// assigns emit no frees, so a PRE-FIX bootstrap compiler lowers the swap correctly: a
     /// reassigned Free LOCAL would trip the conditional-move bug older emitters carry).
     pub cg_scratch: String,
     /// Import-resolution directory cache (Opt 1): each candidate search directory is scanned ONCE (opendir/
@@ -167,7 +168,7 @@ pub struct Package {
     pub lint_pub: bool,
     /// In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
     /// overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
-    /// (realpath'd) absolute paths preferred -- overlay_index falls back to a raw compare for files not on
+    /// (realpath'd) absolute paths preferred: overlay_index falls back to a raw compare for files not on
     /// disk yet. Empty outside the LSP.
     pub overlay_files: Vector<String>,
     pub overlay_texts: Vector<String>,
@@ -369,8 +370,8 @@ pub struct PkgIndex {
     pub sugar_items: Vector<LookupHit>, // SugarItem -> std shim fn (node == NODE_NONE when absent)
     pub li_map: Map<u64, u32>, // sym*2 + want_type -> LangItem, the prelude_lookup fast path
     /// Function-item signatures as package metadata (see ensure_sigs): sig_of keys
-    /// skey_mix(module << 32 | fn node) -- MIXED, u64 maps hash by identity and structured keys
-    /// cluster -- to a `sigs` record whose types live in the `sig_types` CSR pool,
+    /// skey_mix(module << 32 | fn node) (MIXED: u64 maps hash by identity and structured keys
+    /// cluster) to a `sigs` record whose types live in the `sig_types` CSR pool,
     /// params first then returns, as TypeIds in the OWNER module's pool. Filled once from the owners'
     /// typed facts after the whole package is checked; signature queries read this, not the syntax.
     pub sigs: Vector<ItemSig>,
@@ -381,6 +382,7 @@ pub struct PkgIndex {
 }
 
 extend SymTab {
+    /// An empty interner.
     pub fn new() SymTab {
         return SymTab { names: Vector::<String>::new(), index: Map::<u64, u32>::new(), chain: Vector::<u32>::new() };
     }
@@ -416,7 +418,8 @@ extend SymTab {
         }
         let id = self.names.len() as SymbolId;
         self.names.push(String::from_str(name));
-        self.chain.push(head); // new entry heads the (~always empty) same-hash chain
+        // New entry heads the (~always empty) same-hash chain.
+        self.chain.push(head);
         self.index.insert(h, id);
         return id;
     }
@@ -431,6 +434,7 @@ extend SymTab as Free {
 }
 
 extend PkgIndex {
+    /// An empty index; `ensure_index` on the package builds it.
     pub fn new() PkgIndex {
         return PkgIndex {
             syms: SymTab::new(),
@@ -557,9 +561,7 @@ fn scc_build(n: usize, imports: &Vector<ModuleId>, mod_imports: &Vector<u32>, sc
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Path + string helpers (heap-allocated results; callers own them).
-// ---------------------------------------------------------------------------------------------------------
 
 // True if `path` names something that can be opened for reading (replaces access(path, F_OK)).
 fn path_exists(path: str) bool {
@@ -598,7 +600,7 @@ pub fn read_file(path: str) Option<String> {
     }
     unsafe stdio::fclose(f);
     // Pre-size to content + read-ahead padding so neither the content copy nor pad_nul reallocates, then
-    // append lexer::SOURCE_PAD trailing NUL bytes PAST len (len stays n) -- a read-ahead sentinel the lexer
+    // append lexer::SOURCE_PAD trailing NUL bytes PAST len (len stays n): a read-ahead sentinel the lexer
     // relies on to over-read safely (see lexer::SOURCE_PAD).
     let mut out = String::with_capacity(n + lexer::SOURCE_PAD);
     out.push_str(str::from_raw(buf.as_ptr(), n));
@@ -700,6 +702,7 @@ fn join2(a: str, b: str) String {
 }
 
 extend DirCache {
+    /// An empty cache of directory listings.
     pub fn new() DirCache {
         return DirCache {
             dirs: Vector::<String>::new(),
@@ -825,7 +828,8 @@ fn parse_source(source: &mut String, file: str, bootstrap_tags: bool, recycled: 
 
 fn parse_source_q(source: &mut String, file: str, bootstrap_tags: bool, recycled: Vector<tok::Token>, quiet: bool) ParseResult {
     let mut lx = lexer::Lexer::new(source, file);
-    lx.tokens = recycled; // adopt the recycled capacity (caller passes it cleared)
+    // Adopt the recycled capacity (caller passes it cleared).
+    lx.tokens = recycled;
     lx.scan_tokens();
     if lx.has_errors() {
         if !quiet {
@@ -852,9 +856,7 @@ fn parse_source_q(source: &mut String, file: str, bootstrap_tags: bool, recycled
     return ParseResult { ast: out, ok: true, tokens: ps.take_tokens() };
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Package construction + module loading.
-// ---------------------------------------------------------------------------------------------------------
 
 /// Worker count for parallel module discovery: 1 = the serial reference loader; 0 or >= 2 lets
 /// speculative parse tasks run on the coroutine pool. Set by the DRIVER before package_load; the
@@ -867,11 +869,12 @@ pub const PAR_MIN_USER_BYTES: usize = 262144; // 256 KiB
 
 static mut G_LOAD_JOBS: u32 = 1;
 
+/// Set the worker count for parallel module loading (1 = serial) before the first load.
 pub fn set_load_jobs(j: u32) {
     unsafe G_LOAD_JOBS = j;
     if j != 1 {
-        // compiler tasks recurse deeply (parser, checker); reserve thread-sized task stacks
-        // BEFORE the pool's first launch (a later call is ignored)
+        // Compiler tasks recurse deeply (parser, checker); reserve thread-sized task stacks
+        // BEFORE the pool's first launch (a later call is ignored).
         prt::set_stack_size(8usize << 20);
     }
 }
@@ -920,6 +923,7 @@ fn par_parse_one(t: PParse) {
     u.ok = true;
 }
 
+/// The `tc_wait` callback for serial builds: nothing to wait for.
 pub const fn loader_no_wait(_c: *mut void, _m: ModuleId) {}
 
 extend Package as Free {
@@ -948,11 +952,9 @@ extend Package as Free {
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Cross-module instance propagation + emit ordering (ports of loader.c's file-scope helpers). These thread
 // raw `*mut Ast`/`*const Ast` pointers to sidestep the by-value move rules on `&Ast`; the modules Vector is
 // never grown during propagation, so pointers into `modules[x].ast` stay valid throughout.
-// ---------------------------------------------------------------------------------------------------------
 
 /// Load `root_file` and, transitively, every module it imports, then append the std prelude found under
 /// `std_dir` (empty skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
@@ -1033,7 +1035,7 @@ pub fn package_load_prelude(
 }
 
 /// A batch-listed file's canonical module path: relative to the alt root when under it (the spelling
-/// manifest imports must use -- the alt root has no index form), else to the package root, `/` -> `::`.
+/// manifest imports must use: the alt root has no index form), else to the package root, `/` -> `::`.
 /// A root-level index file (<root>/x/x.spc with no <root>/x.spc beside it) collapses to `x`, mirroring
 /// module_index_path, so imports of it dedup against the listed copy.
 pub fn batch_mod_path(file: str, root: str, alt: str) String {
@@ -1084,7 +1086,7 @@ pub fn batch_mod_path(file: str, root: str, alt: str) String {
 }
 
 /// Like package_load, but the root module is an in-memory source STRING (path "main"), with no user-import
-/// recursion -- the analog of tests/test_harness.h's sc_compile. The prelude loads FIRST and the user
+/// recursion: the analog of tests/test_harness.h's sc_compile. The prelude loads FIRST and the user
 /// module is appended LAST (its module id past the prelude), matching sc_compile's layout exactly, so
 /// module-order-sensitive checks (Ty interning, generic-arg validation) reproduce the C test verdicts.
 /// The user module is always the last one: `p.modules.len() - 1`. Used by selfhost/tests.
@@ -1120,7 +1122,7 @@ struct RealBuf {
     pub b: [char; 4096],
 }
 
-// The final path component of `path` (a view into it) -- "dir/std/string.spc" -> "string.spc".
+// The final path component of `path` (a view into it): "dir/std/string.spc" -> "string.spc".
 fn basename_of(path: str) str {
     let n = path.len();
     let mut b: usize = 0;
@@ -1169,6 +1171,7 @@ extend Package {
         return jobs;
     }
 
+    /// An empty package for the host architecture; `load_module` fills it.
     pub fn new() Package {
         return Package {
             arch: unsafe shim::sc_host_arch(),
@@ -1253,13 +1256,14 @@ extend Package {
         }
         let rt = self.find("std::parallel::runtime");
         if rt < 0 {
-            return; // no coroutine runtime loaded: nothing can launch
+            // No coroutine runtime loaded: nothing can launch.
+            return;
         }
         let sub = self.glob_lookup(rt as ModuleId, "submit", false);
         if sub.node == NODE_NONE {
             return;
         }
-        // seeds
+        // Seeds.
         for m in 0..self.modules.len() {
             let a = unsafe &*self.module_ast_const(m as ModuleId);
             for ni in 0..a.nodes.len() {
@@ -1285,13 +1289,14 @@ extend Package {
                         let fsp = unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).span;
                         self.co_mark(fr.module, fsp);
                     } else {
-                        self.co_state = 2; // a coroutine entry the tracker cannot pin
+                        // A coroutine entry the tracker cannot pin.
+                        self.co_state = 2;
                         return;
                     }
                 }
             }
         }
-        // transitive closure over direct calls made inside marked spans
+        // Transitive closure over direct calls made inside marked spans.
         let mut changed = true;
         while changed && self.co_state == 1 {
             changed = false;
@@ -1327,12 +1332,14 @@ extend Package {
                         }
                     }
                     if t.node == NODE_NONE {
-                        self.co_state = 2; // fn value or dyn dispatch: cannot pin the callee
+                        // Fn value or dyn dispatch: cannot pin the callee.
+                        self.co_state = 2;
                         return;
                     }
                     let ta = unsafe &*self.module_ast_const(t.module);
                     if ta.at_const(t.node).kind != NodeKind::NODE_FUNCTION {
-                        continue; // ctor/variant/type call: no body to run
+                        // Ctor/variant/type call: no body to run.
+                        continue;
                     }
                     // The scan stops at the std boundary: std loops are bounded by their inputs
                     // (containers, strings), so they always return to a marked frame, and a closure
@@ -1368,7 +1375,7 @@ extend Package {
     /// Compute cancel_marks: the decl spans of every function and closure whose body can reach
     /// `runtime::cancel_accept`. Seeded at direct calls to the acceptance leaf, then closed upward:
     /// a call to a marked callee marks the decls enclosing the call site. A callee that cannot be
-    /// pinned (a fn value, a dyn method) is cancellation-MASKED (plan 10.3): the request stays
+    /// pinned (a fn value, a dyn method) is cancellation-MASKED: the request stays
     /// pending across it and the next pinned cancellation point delivers the edge. Treating unknown
     /// callees as reaching would mark nearly every task-reachable body and put a probe after nearly
     /// every call.
@@ -1380,7 +1387,8 @@ extend Package {
         }
         let rt = self.find("std::parallel::runtime");
         if rt < 0 {
-            return; // no coroutine runtime loaded: nothing can accept a cancellation
+            // No coroutine runtime loaded: nothing can accept a cancellation.
+            return;
         }
         let acc = self.glob_lookup(rt as ModuleId, "cancel_accept", false);
         if acc.node == NODE_NONE {
@@ -1427,7 +1435,8 @@ extend Package {
                     }
                 }
                 if t.node == NODE_NONE {
-                    continue; // fn value or dyn dispatch: cancellation-masked (plan 10.3)
+                    // Fn value or dyn dispatch: cancellation-masked.
+                    continue;
                 }
                 if !self.cancel_used && !self.modules.at(m).path.as_str().starts_with("std::") {
                     if task_mid >= 0 && t.module == task_mid as ModuleId {
@@ -1439,7 +1448,8 @@ extend Package {
                 if t.module != acc.mid || t.node != acc.node {
                     let ta = unsafe &*self.module_ast_const(t.module);
                     if ta.at_const(t.node).kind != NodeKind::NODE_FUNCTION {
-                        continue; // ctor/variant/type call: no body to run
+                        // Ctor/variant/type call: no body to run.
+                        continue;
                     }
                 }
                 rec_m.push(m as u32);
@@ -1554,13 +1564,13 @@ extend Package {
     }
 
     // DFS load: takes ownership of `mod_path` and `file_path`. Returns the module's id (or -1 if unreadable).
-    // A module already loaded (an import cycle) simply resolves to its id: modules are parsed whole before
+    // A module already loaded (an import cycle) resolves to its id: modules are parsed whole before
     // any resolution, so mutual imports need no special handling.
     // Load everything module `id` imports, depth-first, and return `id`.
     fn walk_children(self: &mut Self, id: i32, bootstrap_tags: bool, target: i32) i32 {
         // Collected BEFORE recursing: recursion pushes to self.modules, which may realloc and move this
         // module's by-value Ast, invalidating a live borrow. The dir-cache address is taken first for the same
-        // reason -- the cast releases the &mut immediately, and dir_cache is disjoint from modules.
+        // reason: the cast releases the &mut immediately, and dir_cache is disjoint from modules.
         let dca = ((&mut self.dir_cache) as *mut DirCache) as usize;
         let mut child_paths = Vector::<String>::new();
         let mut child_files = Vector::<String>::new();
@@ -1635,7 +1645,7 @@ extend Package {
             }
         }
         // Sugar-keyword dependency: the `launch` statement lowers to std::parallel::runtime::submit, so
-        // pull that module in (transitively) ONLY when the keyword is actually used -- a program that
+        // pull that module in (transitively) ONLY when the keyword is used: a program that
         // never launches never loads the runtime. load_module dedups, so a duplicate push is harmless.
         if std_root.len() != 0 {
             let mut has_launch = false;
@@ -1676,8 +1686,8 @@ extend Package {
                 child_files.push(df);
             }
             // Same bargain for `@blocking`: a call to one of those functions is emitted as a wrapper
-            // that hands the work to the blocking pool, so that module has to be linked in -- but only
-            // for a program that actually declares one.
+            // that hands the work to the blocking pool, so that module has to be linked in, but only
+            // for a program that declares one.
             let mut has_blocking = false;
             for ai in 0..a.attrs.len() {
                 if a.attrs[ai].kind == AttrKind::ATTR_BLOCKING as u8 {
@@ -1694,6 +1704,8 @@ extend Package {
         }
     }
 
+    /// Load `file_path` as module `mod_path` with its whole import closure (parallel when load jobs
+    /// are set and no overlays are active). Returns the module's id, or -1 when the root is unreadable.
     pub fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
         if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 {
             return self.load_module_par(mod_path, file_path, bootstrap_tags, target);
@@ -1791,7 +1803,7 @@ extend Package {
         return root9;
     }
 
-    // DFS in recorded import order over the parsed units -- the id-assignment replay. Consumes
+    // DFS in recorded import order over the parsed units: the id-assignment replay. Consumes
     // each unit's source/ast on first visit (later visits of the same path are find() hits).
     fn par_replay(self: &mut Self, units: &mut Vector<PUnit>, ui: usize, bootstrap_tags: bool, target: i32) i32 {
         {
@@ -1801,7 +1813,7 @@ extend Package {
             }
         }
         if !units.at(ui).ok {
-            // the serial loader re-reads, re-parses, prints, and recurses its own children
+            // The serial loader re-reads, re-parses, prints, and recurses its own children.
             let pth = String::from_str(units.at(ui).path.as_str());
             let fl = String::from_str(units.at(ui).file.as_str());
             let r = self.load_module_serial(pth.as_str(), fl.as_str(), bootstrap_tags, target);
@@ -1853,7 +1865,7 @@ extend Package {
         let mut source = String::new();
         let ovi = self.overlay_index(file_path);
         if ovi >= 0 {
-            // clone + pad exactly like read_file (the lexer relies on the read-ahead NUL sentinel)
+            // Clone + pad exactly like read_file (the lexer relies on the read-ahead NUL sentinel).
             let t = self.overlay_texts.at(ovi as usize);
             let mut s = String::with_capacity(t.len() + lexer::SOURCE_PAD);
             s.push_str(t.as_str());
@@ -1976,6 +1988,7 @@ extend Package {
         self.method_used[m].set(d.node as usize, true);
     }
 
+    /// True when method `d` was marked used (demanded) by any module.
     pub const fn method_used_get(self: &Self, d: DefId) bool {
         if d.node == NODE_NONE {
             return false;
@@ -2012,9 +2025,7 @@ extend Package {
         }
     }
 
-    // ------------------------------------------------------------------------------------------------------
     // Cross-module name lookup.
-    // ------------------------------------------------------------------------------------------------------
 
     /// (Re)build the package declaration index: symbols, items, name maps, import adjacency, SCCs,
     /// and the LangItem table, in deterministic module and source order. Called through ensure_index
@@ -2100,8 +2111,8 @@ extend Package {
                 continue;
             }
             let a = unsafe &*self.module_ast_ptr(it.module);
-            // an unchecked module (or a node past its typed range) records nothing: the query
-            // then answers null exactly where the typed facts hold no signature either
+            // An unchecked module (or a node past its typed range) records nothing: the query
+            // then answers null exactly where the typed facts hold no signature either.
             if it.node as usize >= a.types.len() || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION {
                 continue;
             }
@@ -2136,6 +2147,7 @@ extend Package {
         return null;
     }
 
+    /// Entry `i` of the signature type pool (see `sigs`).
     pub const fn sig_type(self: &Self, i: u32) TypeId {
         return self.idx.sig_types[i as usize];
     }
@@ -2205,7 +2217,7 @@ extend Package {
     // extend bodies additionally contribute IK_EXTEND/IK_METHOD/IK_ASSOC_CONST records.
     fn index_module(self: &mut Self, idx: &mut PkgIndex, mid: ModuleId) {
         let m = mid as usize;
-        // srcp is raw (Copy) so no borrow of self lingers across the &mut self index_decl calls below;
+        // Srcp is raw (Copy) so no borrow of self lingers across the &mut self index_decl calls below;
         // `ast` comes from a raw ptr (not a tracked self-borrow), so reading it across them is fine.
         let srcp = self.modules[m].source.as_str().ptr() as *const char;
         let src = str::from_raw(srcp as *const u8, self.modules[m].source.len());
@@ -2491,13 +2503,13 @@ extend Package {
 
     /// `mid`'s cached [mid, transitive imports...] list (built on first use; imports are load-final).
     /// The LSP's incremental rebuild reads it to decide which modules an edit can reach. NOTE: the
-    /// implicit prelude is NOT in the list -- a prelude edit must be treated as reaching everything.
+    /// implicit prelude is NOT in the list: a prelude edit must be treated as reaching everything.
     pub fn module_closure(self: &mut Self, mid: ModuleId) *const Vector<ModuleId> {
         self.ensure_closure(mid);
         return self.clo_lists.at(mid as usize);
     }
 
-    /// lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
+    /// Lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
     /// then every module it imports breadth-first in declaration order (the cached closure list). First hit
     /// wins.
     pub fn glob_lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) LookupHit {
@@ -2518,7 +2530,7 @@ extend Package {
     }
 
     /// The modules `mid` transitively imports (excluding `mid` itself), breadth-first in declaration
-    /// order -- a BFS over the index import adjacency (identical order to the old per-call AST walk).
+    /// order: a BFS over the index import adjacency (identical order to the old per-call AST walk).
     pub fn import_closure(self: &Self, mid: ModuleId) Vector<ModuleId> {
         let n = self.modules.len();
         let mut out = Vector::<ModuleId>::new();
@@ -2788,13 +2800,13 @@ extend Package {
             names.push(String::from_cstr(nm));
         }
         let _ = unsafe shim::sc_closedir(dir);
-        // sort by name (small: the std/ file list) -- byte-lexicographic with a length tiebreak (equivalent to
+        // Sort by name (small: the std/ file list), byte-lexicographic with a length tiebreak (equivalent to
         // strcmp over these NUL-free views).
         names.sort_by(|a: &String, b: &String| name_cmp(a, b));
         // Dedup: a std file is already loaded iff some already-loaded module has the SAME basename AND is the
         // same physical file (dev+ino). The basename pre-filter (a plain string compare, no syscall) keeps this
-        // O(std files) even for huge projects -- user modules almost never share a std/ basename, so we stat-
-        // confirm only the rare collisions -- and inode identity is exact + realpath-free (no getdirentries). The
+        // O(std files) even for huge projects (user modules almost never share a std/ basename, so we stat-
+        // confirm only the rare collisions), and inode identity is exact + realpath-free (no getdirentries). The
         // __std:: modules appended below have distinct names and never match, so scanning only the initial m0 is
         // sufficient.
         let m0 = self.modules.len();

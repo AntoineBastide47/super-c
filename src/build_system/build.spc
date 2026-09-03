@@ -4,7 +4,7 @@
 // and `super-c clean` live here too.
 //
 // Process discipline: every compiler, linker, archiver, strip, probe, and git invocation is an argv
-// child (sc_spawn_argv, no shell), so paths pass through verbatim -- spaces, quotes, non-ASCII. The
+// child (sc_spawn_argv, no shell), so paths pass through verbatim: spaces, quotes, non-ASCII. The
 // ONE shell survivor is `super-c run`, whose manifest lines are sh/cmd syntax by user contract. Flag
 // STRINGS keep their historic whitespace-splitting. compile_commands.json (one `arguments` row per
 // TU) lands beside gen/obj; .cmd fingerprints, the link record, and the emit stamp write through
@@ -22,9 +22,6 @@ import driver::emit as *;
 import driver::util as *;
 import build_system::manifest as mf;
 
-// ---------------------------------------------------------------------------------------------------------
-// small path/process helpers
-// ---------------------------------------------------------------------------------------------------------
 fn join2(a: str, b: str) String {
     let mut s = String::with_capacity(a.len() + 1 + b.len());
     s.push_str(a);
@@ -135,11 +132,9 @@ pub fn rm_rf(path: str) {
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// the global object cache: ~/.super-c/cache, content-addressed
-// ---------------------------------------------------------------------------------------------------------
+// The global object cache: ~/.super-c/cache, content-addressed
 // A translation unit whose C text, quoted-include closure, compiler version and flags all match a
-// previous compile -- in ANY project on this machine -- reuses that compile's object instead of
+// previous compile (in ANY project on this machine) reuses that compile's object instead of
 // running the C compiler again. The key hashes CONTENT, never paths, so the cache needs no
 // invalidation story: different content is a different key. System headers (<...>) are outside the
 // key; the compiler-version fingerprint stands in for them, the same bet ccache's direct mode makes.
@@ -206,7 +201,7 @@ fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
 
 // Hash a file and, recursively, every file its `#include "..."` lines name (resolved the way the C
 // compiler resolves them: relative to the INCLUDING file). False = something was unreadable, and the
-// unit is not cacheable -- a header outside the key would mean stale objects served as fresh.
+// unit is not cacheable: a header outside the key would mean stale objects served as fresh.
 fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, visited: &mut Vector<String>) bool {
     if depth > 64 {
         return false;
@@ -231,7 +226,7 @@ fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, visited: &mut
     let mut i: usize = 0;
     let n = s.len();
     while i < n {
-        // start of line: `#` [ws] `include` [ws] `"..."`
+        // start of line: `#` [ws] `include` [ws] `"..."`.
         let ls = i;
         while i < n && s[i] != b'\n' {
             i = i + 1;
@@ -322,10 +317,8 @@ fn dep_local(s: str, gen: str) String {
     return out;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // content-sync: <root_dir>/build -> <out>/gen. Unchanged files keep their mtime (the staleness anchor);
 // orphans in gen are deleted so removed modules do not linger in the link.
-// ---------------------------------------------------------------------------------------------------------
 fn file_eq(a: str, b: &String) bool {
     let cur = loader::read_file(a);
     if cur.is_none() {
@@ -350,7 +343,7 @@ fn sync_tree(srcdir: str, dstdir: str) i32 {
         }
         let body = content.unwrap();
         if !file_eq(dp.as_str(), &body) {
-            // ensure parent dirs, then write
+            // Ensure parent dirs, then write.
             let full = dp.as_str();
             let mut k = full.len();
             while k > 0 && full[k - 1] != b'/' {
@@ -369,7 +362,7 @@ fn sync_tree(srcdir: str, dstdir: str) i32 {
             unsafe stdio::fclose(f);
         }
     }
-    // drop orphans
+    // Drop orphans.
     let mut old = Vector::<String>::new();
     walk_files(dstdir, dstdir.len(), &mut old);
     for i in 0..old.len() {
@@ -381,9 +374,7 @@ fn sync_tree(srcdir: str, dstdir: str) i32 {
     return 0;
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// staleness: obj missing, or any dependency in its -MMD .d file newer than the object
-// ---------------------------------------------------------------------------------------------------------
+// Staleness: obj missing, or any dependency in its -MMD .d file newer than the object.
 fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str) bool {
     let omt = unsafe shim::sc_mtime(opath.cstr());
     if omt == 0 {
@@ -395,7 +386,7 @@ fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str) bool {
     }
     let d = dep.unwrap();
     let s = d.as_str();
-    // skip "target:" then walk whitespace-separated deps, ignoring line-continuation backslashes
+    // Skip "target:" then walk whitespace-separated deps, ignoring line-continuation backslashes.
     let mut i: usize = 0;
     while i < s.len() && s[i] != b':' {
         i = i + 1;
@@ -421,11 +412,9 @@ fn obj_stale(cpath: &mut String, opath: &mut String, dpath: str) bool {
     return stale;
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// the build itself
-// ---------------------------------------------------------------------------------------------------------
+// The build itself
 // The compiler named by manifest/$CC/default, WITHOUT the ccache decision (that probe costs a
-// shell round-trip, so the engine runs it in the background -- see CcStream::ensure_cc).
+// shell round-trip, so the engine runs it in the background: see CcStream::ensure_cc).
 fn resolve_cc_raw(m: &mf::Manifest) String {
     let mut cc = String::new();
     if m.cc.len() != 0 {
@@ -533,12 +522,12 @@ fn write_file_atomic(path: str, body: str) bool {
 }
 
 // Profile flags, minus what the target cannot honour. mingw ships no libasan/libubsan, so the built-in
-// dev/debug profiles' `-fsanitize*` would fail the link on Windows -- there they are dropped instead
+// dev/debug profiles' `-fsanitize*` would fail the link on Windows: there they are dropped instead
 // (SC_LEAK_CHECK, being self-hosted, still covers leaks, double-frees and use-after-free there).
 fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32, sdk: i32) {
     for i in 0..flags.len() {
         let f = flags.at(i).as_str();
-        // mingw ships no libasan/libubsan, and neither do the iOS, Android or wasm toolchains as used
+        // Mingw ships no libasan/libubsan, and neither do the iOS, Android or wasm toolchains as used
         // here: the sanitizer flags would fail the link, so they are dropped (SC_LEAK_CHECK still works).
         if (target == 0 || sdk != 0) && f.starts_with("-fsanitize") {
             continue;
@@ -549,7 +538,7 @@ fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32, sdk: i32)
 }
 
 /// The built-in flags for profile `name`, as one command-line fragment (cflags then ldflags), for a build
-/// with no manifest to read them from -- `super-c release foo.spc`, which compiles and links in one command.
+/// with no manifest to read them from: `super-c release foo.spc`, which compiles and links in one command.
 /// Empty for an unknown name, so an unrecognised `--profile=` degrades to the plain build rather than
 /// failing. `target` drops what that target cannot honour, exactly as a manifest build does.
 pub fn profile_flags(name: str, target: i32, sdk: i32) String {
@@ -660,7 +649,7 @@ extend Job as Free {
 }
 
 extend Job {
-    // On success, persist fingerprint + duration -- and install the object into the global cache, via a
+    // On success, persist fingerprint + duration, and install the object into the global cache, via a
     // key-named temp + rename so concurrent builds (which would write the SAME bytes) stay atomic. On
     // failure, surface the captured compiler output.
     fn finish(self: &mut Self, code: i32) i32 {
@@ -719,10 +708,6 @@ const fn base_name(p: str) str {
     return p.slice(k, p.len());
 }
 
-/// The name a linked binary must actually have on `target`: Windows executables carry `.exe`, and nothing
-/// supplies it for us -- the engine links to `<bin>.tmp` and renames, so the C compiler never sees a name
-/// without an extension to append one to. An extensionless PE cannot even be started: CreateProcess appends
-/// `.exe` to a name that has none and then fails to find it. `pub` because the driver names binaries too.
 /// Platform artifact name for a library target: static -> lib<name>.a everywhere (mingw uses ar
 /// archives too); shared -> <name>.dll (windows) / lib<name>.dylib (macos) / lib<name>.so (linux).
 pub fn lib_file(name: str, shared: bool, target: i32) String {
@@ -744,12 +729,16 @@ pub fn lib_file(name: str, shared: bool, target: i32) String {
     return s;
 }
 
-// macOS and iOS are one platform family for artifact shape (Mach-O, .dylib), even though they are
-// separate `@platform` values.
+/// MacOS and iOS are one platform family for artifact shape (Mach-O, .dylib), even though they are
+/// separate `@platform` values.
 pub const fn is_darwin(target: i32) bool {
     return target == 1 || target == 4;
 }
 
+/// The name a linked binary must have on `target`: Windows executables carry `.exe`, and nothing
+/// supplies it for us: the engine links to `<bin>.tmp` and renames, so the C compiler never sees a name
+/// without an extension to append one to. An extensionless PE cannot even be started: CreateProcess appends
+/// `.exe` to a name that has none and then fails to find it. `pub` because the driver names binaries too.
 pub fn exe_name(base: str, target: i32) String {
     let mut s = String::from_str(base);
     if target == 0 && !base.ends_with(".exe") {
@@ -759,7 +748,7 @@ pub fn exe_name(base: str, target: i32) String {
 }
 
 // Where a profile keeps its own copy of the manifest's binary: <out-dir>/<profile>/<name>. Each profile
-// links its own, so a `dev` build can never end up standing in for the release artifact -- the manifest's
+// links its own, so a `dev` build can never end up standing in for the release artifact: the manifest's
 // `bin` is a copy INSTALLED from here, and only by the commands whose job is to produce it.
 fn profile_bin(m: &mf::Manifest, prof_name: str, target: i32) String {
     let dir = join2(m.out_dir.as_str(), prof_name);
@@ -772,8 +761,8 @@ fn profile_bin(m: &mf::Manifest, prof_name: str, target: i32) String {
 // renamed onto it, never written over it: truncating an executable that is currently running corrupts the
 // image the OS is still paging from, and sc_rename knows how to displace a running one on Windows.
 fn install_bin(from: str, to: str) i32 {
-    // byte-compare first: an unchanged binary keeps its mtime (the emit stamp anchors on the
-    // compiler executable's mtime, and downstream tools get make-friendly timestamps)
+    // Byte-compare first: an unchanged binary keeps its mtime (the emit stamp anchors on the
+    // compiler executable's mtime, and downstream tools get make-friendly timestamps).
     {
         let cur = loader::read_file(from);
         if !cur.is_none() {
@@ -865,10 +854,10 @@ struct CcStream {
 }
 
 extend CcStream {
-    // Finish compiler resolution: collect the background probes (ccache presence by exit code,
-    // `cc --version` first line -- both overlap the transpile), or run either synchronously when its
-    // spawn failed. No shell anywhere: the probes are argv children with captured output. Idempotent;
-    // called before the first compile command is built and again before the link line.
+    /// Finish compiler resolution: collect the background probes (ccache presence by exit code,
+    /// `cc --version` first line: both overlap the transpile), or run either synchronously when its
+    /// spawn failed. No shell anywhere: the probes are argv children with captured output. Idempotent;
+    /// called before the first compile command is built and again before the link line.
     pub fn ensure_cc(self: &mut Self) {
         if self.cc_ready {
             return;
@@ -922,8 +911,8 @@ extend CcStream {
         }
     }
 
-    // Sync one finished file raw -> gen (byte-compare keeps the mtime anchor); a source also gets
-    // its compile planned and the pool pumped.
+    /// Sync one finished file raw -> gen (byte-compare keeps the mtime anchor); a source also gets
+    /// its compile planned and the pool pumped.
     pub fn on_file(self: &mut Self, path: str, kind: i32) {
         let rel = path.slice(self.src_len + 1, path.len());
         let content = loader::read_file(path);
@@ -960,8 +949,8 @@ extend CcStream {
         self.pump();
     }
 
-    // Staleness + command construction for one gen-relative .c; stale units join pend, every unit's
-    // object joins the link list.
+    /// Staleness + command construction for one gen-relative .c; stale units join pend, every unit's
+    /// object joins the link list.
     pub fn plan_c(self: &mut Self, rel: str) {
         self.ensure_cc();
         self.total_c = self.total_c + 1;
@@ -982,7 +971,7 @@ extend CcStream {
         let rendered = render_cmd(&args);
         fp.push_string(&rendered);
         // compile_commands.json row (every unit, stale or not): tooling attaches to the generated
-        // tree through it, so it reflects the exact argv this build would run
+        // tree through it, so it reflects the exact argv this build would run.
         {
             let mut row = String::from_str("  {\"directory\": \"");
             json_escape(&mut row, self.ccdb_dir.as_str());
@@ -1093,7 +1082,7 @@ extend CcStream {
         return true;
     }
 
-    // Fill free slots (longest-known-first) and reap whatever already exited; never blocks.
+    /// Fill free slots (longest-known-first) and reap whatever already exited; never blocks.
     pub fn pump(self: &mut Self) {
         loop {
             while self.window.len() != 0 {
@@ -1139,9 +1128,9 @@ extend CcStream {
         }
     }
 
-    // Run everything left to completion (blocking): only called once the emit workers are gone, so
-    // sc_wait_any's waitpid(-1) cannot reap anything but our compile jobs. `discard` abandons units
-    // not yet started -- the error path, which still must reap what is in flight.
+    /// Run everything left to completion (blocking): only called once the emit workers are gone, so
+    /// sc_wait_any's waitpid(-1) cannot reap anything but our compile jobs. `discard` abandons units
+    /// not yet started: the error path, which still must reap what is in flight.
     pub fn drain(self: &mut Self, discard: bool) {
         if discard {
             self.pend.truncate(0);
@@ -1201,15 +1190,13 @@ fn stream_notify(ctx: *mut void, path: str, kind: i32) {
 // Build `root`'s closure with `prof_name`'s flags into <out-dir>/<sub>/{gen,obj}, linking `bin`;
 // the transpiled C lands in <out-dir>/<raw> first.
 // link_kind: 0 = executable, 1 = static library (ar), 2 = shared library (cc -shared).
-// ---------------------------------------------------------------------------------------------------------
 // Emit stamp: skip the whole transpile when no input changed since the last successful emission.
-// The stamp records every input the emitted tree is a function of -- the compiler executable, the
-// emission-relevant options, every loaded module file, the manifest, and every external C input --
+// The stamp records every input the emitted tree is a function of: the compiler executable, the
+// emission-relevant options, every loaded module file, the manifest, and every external C input:
 // as (mtime, fnv64, len). A per-module skip would be UNSOUND here (owner-emitted instances and the
 // shared headers make every TU depend on the whole import closure); the whole-package check is
 // exact. mtime is only the fast path: a drifted mtime with matching content still counts as fresh
 // (and refreshes the stamp), so git checkouts do not force rebuilds. SC_NO_EMIT_CACHE disables.
-// ---------------------------------------------------------------------------------------------------------
 
 fn stamp_hash_file(path: str, h_out: &mut u64, len_out: &mut u64) bool {
     let f = stdio::fopen(path, "rb");
@@ -1333,7 +1320,7 @@ fn stamp_write_text(path: str, body: &String) {
     let _ = unsafe shim::sc_rename(tmp.cstr(), dst.cstr());
 }
 
-// Record the inputs of a just-completed emission. Written only on full success; an unreadable
+// Record the inputs of a completed emission. Written only on full success; an unreadable
 // input aborts the write (no cache beats a wrong one).
 fn stamp_push_env(out: &mut String, name: str) {
     let v = stdlib::getenv(name);
@@ -1379,8 +1366,8 @@ fn stamp_write(
     out.push_u64(stamp_gen_c_count(gen));
     out.push_str("\t");
     out.push_str(root_dir);
-    // emission-mode switches change the emitted C: a stamp written under one mode must not
-    // satisfy a build under another
+    // Emission-mode switches change the emitted C: a stamp written under one mode must not
+    // satisfy a build under another.
     out.push_str("\t");
     for i in 0..inl::EMIT_MODE_ENV_N {
         stamp_push_env(&mut out, inl::emit_mode_env(i));
@@ -1589,14 +1576,16 @@ fn engine_build(
     tail.push_byte(b' ');
     tail.push_string(&m.cstd);
     if m.lib_shared && target != 0 {
-        tail.push_str(" -fPIC"); // shared-library objects need it; harmless for the exe targets
+        // Shared-library objects need it; harmless for the exe targets.
+        tail.push_str(" -fPIC");
     }
-    push_sdk_flags(&mut tail, m.sdk, m.arch); // the cross triple comes first; manifest flags can override
+    // The cross triple comes first; manifest flags can override.
+    push_sdk_flags(&mut tail, m.sdk, m.arch);
     push_all(&mut tail, &m.cflags);
     push_profile(&mut tail, &prof.cflags, target, m.sdk);
     tail.push_str(" -MMD -c");
     // The ccache probe and `cc --version` cost ~50ms of process round-trips; two background argv
-    // children (no shell, on every platform) resolve both while the transpile runs -- ensure_cc
+    // children (no shell, on every platform) resolve both while the transpile runs: ensure_cc
     // collects the exit code and the captured version line at first use.
     let mut ccver_path = join2(pdir.as_str(), ".ccver");
     let mut ccprobe_path = join2(pdir.as_str(), ".ccprobe");
@@ -1608,7 +1597,7 @@ fn engine_build(
     split_args(&mut va, cc_raw.as_str());
     push_arg(&mut va, "--version");
     let probe_ver_pid = spawn_args(&mut va, ccver_path.cstr());
-    // the compile argv runs from the process working directory; record it for compile_commands.json
+    // The compile argv runs from the process working directory; record it for compile_commands.json.
     let mut cwdb = PathBuf {};
     let ccdb_dir = if unsafe shim::sc_realpath(".".ptr() as *const char, &mut cwdb[0]) != null {
         String::from_cstr(&cwdb[0]);
@@ -1643,7 +1632,7 @@ fn engine_build(
     };
     let mut sink = EmitSink { ctx: &mut stream, notify: stream_notify };
 
-    // 1) transpile the closure to <out-dir>/<raw>, streaming each finished TU into the pool --
+    // 1) transpile the closure to <out-dir>/<raw>, streaming each finished TU into the pool:
     // unless the emit stamp proves every input unchanged since the last successful emission, in
     // which case the generated tree is already exact and the pipeline skips straight to cc/link.
     let stamp_path = join2(pdir.as_str(), ".emit_stamp");
@@ -1667,7 +1656,8 @@ fn engine_build(
             eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
         }
         loader::set_load_jobs(1);
-        p.arch = m.arch; // the instruction-set axis `@arch` gates on
+        // The instruction-set axis `@arch` gates on.
+        p.arch = m.arch;
         if !p.ok {
             if jobs != 1 {
                 prt::shutdown(); // parallel loading started the pool
@@ -1686,18 +1676,20 @@ fn engine_build(
             cirv.max_steps = ce_steps;
         }
         if ce_mem != 0 {
-            cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
+            // Bytes -> IVal slots.
+            cirv.max_slots = ce_mem / 32;
         }
         let rc = run_package(&mut p, topts, "", target, lint, "", &mut sink);
         if rc != 0 {
-            stream.drain(true); // reap what is in flight; abandon what has not started
+            // Reap what is in flight; abandon what has not started.
+            stream.drain(true);
             return rc;
         }
         t_transpile = unsafe shim::sc_ticks_ms();
 
         // 2) whole-tree content-sync as the safety net: every file was already synced when its
         // notification arrived, so this is a byte-compare no-op that (a) unlinks gen/ orphans and
-        // (b) surfaces anything the stream never heard about -- planned below off the directory walk.
+        // (b) surfaces anything the stream never heard about: planned below off the directory walk.
         ret = stream.ret;
         if ret == 0 {
             ret = sync_tree(srcgen.as_str(), gen.as_str());
@@ -1716,7 +1708,7 @@ fn engine_build(
     let mut linked = false;
 
     if ret == 0 {
-        // 3) plan any .c the stream did not see (none expected), then run the pool dry
+        // 3) plan any .c the stream did not see (none expected), then run the pool dry.
         let mut rels = Vector::<String>::new();
         walk_files(gen.as_str(), gen.len(), &mut rels);
         for i in 0..rels.len() {
@@ -1731,7 +1723,8 @@ fn engine_build(
             }
         }
         stream.drain(false);
-        stream.ensure_cc(); // a build with zero .c files never planned one; the link still needs cc
+        // A build with zero .c files never planned one; the link still needs cc.
+        stream.ensure_cc();
         // compile_commands.json: one row per translation unit, argv exactly as compiled, written
         // atomically so tooling never reads a torn file. Refreshed on every build that plans units.
         // Rows sort by their text (a constant directory then the file path): plan order follows the
@@ -1755,7 +1748,7 @@ fn engine_build(
         stale_n = stream.stale_n;
         ret = stream.ret;
         let compiled = stale_n != 0;
-        // The link list is sorted so its order never depends on notification arrival order --
+        // The link list is sorted so its order never depends on notification arrival order:
         // the link fingerprint embeds the full command.
         let mut objs = replace(&mut stream.objs, Vector::<String>::new());
         objs.sort_by(name_cmp);
@@ -1763,7 +1756,7 @@ fn engine_build(
         t_link = t_compile;
 
         // 4) link when anything changed: a fresh object, a missing/out-of-date binary, or a link
-        // command (flags, libs, __ldflags, linker version) differing from the recorded one
+        // command (flags, libs, __ldflags, linker version) differing from the recorded one.
         if ret == 0 {
             let mut binb = String::from_str(bin);
             let bmt = unsafe shim::sc_mtime(binb.cstr());
@@ -1771,7 +1764,7 @@ fn engine_build(
             tmp.push_str(".tmp");
             let mut largs = Vector::<String>::new();
             if link_kind == 1 {
-                // a static library is an archive: no link flags, no libs
+                // A static library is an archive: no link flags, no libs.
                 push_arg(&mut largs, "ar");
                 push_arg(&mut largs, "rcs");
                 largs.push(tmp.clone());
@@ -1791,15 +1784,15 @@ fn engine_build(
                 for i in 0..objs.len() {
                     largs.push(objs.at(i).clone());
                 }
-                // flag STRINGS keep the historic whitespace-splitting contract; only the paths the
-                // engine controls (above) are single verbatim arguments
+                // Flag STRINGS keep the historic whitespace-splitting contract; only the paths the
+                // engine controls (above) are single verbatim arguments.
                 let mut fl = String::new();
                 push_sdk_flags(&mut fl, m.sdk, m.arch);
                 push_sdk_libs(&mut fl, m.sdk);
                 push_all(&mut fl, &m.ldflags);
                 push_profile(&mut fl, &prof.ldflags, target, m.sdk);
                 split_args(&mut largs, fl.as_str());
-                // @c.link flags recorded by the emitter
+                // @c.link flags recorded by the emitter.
                 let lfp = join2(gen.as_str(), "__ldflags");
                 let lf = loader::read_file(lfp.as_str());
                 if !lf.is_none() {
@@ -1826,8 +1819,8 @@ fn engine_build(
             if prof.strip {
                 fp.push_str(" +strip");
             }
-            // the fingerprint is per-binary and profile-agnostic (out-dir root): profiles share
-            // bin paths, so a dev binary left behind by a release link must read as out of date
+            // The fingerprint is per-binary and profile-agnostic (out-dir root): profiles share
+            // bin paths, so a dev binary left behind by a release link must read as out of date.
             let mut fpname = String::from_str("__link-");
             for i in 0..bin.len() {
                 fpname.push_byte(
@@ -2207,9 +2200,9 @@ fn copy_file(srcp: str, dstp: str) bool {
     return ok;
 }
 
-/// Recursive directory copy. Any `.git` entry is dropped AT EVERY LEVEL: vendored source belongs to
-/// the project's own history, and a nested repository (the dependency's, or a submodule's) would be
-/// invisible to -- and shadow files from -- the repository the project lives in.
+// Recursive directory copy. Any `.git` entry is dropped AT EVERY LEVEL: vendored source belongs to
+// the project's own history, and a nested repository (the dependency's, or a submodule's) would be
+// invisible to (and shadow files from) the repository the project lives in.
 fn copy_tree(srcd: str, dstd: str) bool {
     mkdir_p(dstd);
     let mut sp = String::from_str(srcd);
@@ -2248,11 +2241,11 @@ fn copy_tree(srcd: str, dstd: str) bool {
 }
 
 /// `super-c vendor <src> [name]`: copy a dependency's source into `<root>/vendor/<name>`, where the
-/// module loader already resolves it -- `import vendor::<name>::<module>;` -- so vendoring records
+/// module loader already resolves it (`import vendor::<name>::<module>;`) so vendoring records
 /// nothing in the manifest. A git source (a scheme, a `git@` remote, or a `.git` suffix) is cloned
 /// with its submodules and `--ref` pins a branch, tag or commit; anything else must be a local
-/// directory and is copied. No `.git` survives either way -- vendored source belongs to the project's
-/// history -- which is also why `.vendor` records the source and the exact commit: with the
+/// directory and is copied. No `.git` survives either way: vendored source belongs to the project's
+/// history, which is also why `.vendor` records the source and the exact commit: with the
 /// repository gone, that file is the only statement of WHAT was vendored.
 pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool) i32 {
     let mut base = src;
@@ -2322,7 +2315,7 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
                 return 1;
             }
         }
-        // The exact commit, captured BEFORE the repository is stripped -- afterwards nobody can ask.
+        // The exact commit, captured BEFORE the repository is stripped: afterwards nobody can ask.
         let head = git_head(dest.as_str());
         if head.len() != 0 {
             stamp.push_str("commit = \"");
@@ -2395,7 +2388,7 @@ fn scheme_len(s: str) usize {
 
 // Build the manifest's binary for `prof_name` into that profile's own directory; `out` receives its path.
 // Nothing is installed: the commands whose job is to PRODUCE the project binary (build, release) copy it
-// into place afterwards, and the ones that merely need to run it (test, run) use it where it lies -- which
+// into place afterwards, and the ones that merely need to run it (test, run) use it where it lies: which
 // is what keeps a `test` run from quietly leaving a dev binary where a release one was.
 fn build_into_profile(
     m: &mf::Manifest,
@@ -2452,7 +2445,7 @@ pub fn manifest_run_bin(
     let prof_name = resolve_profile(m, profile);
     let mut built = String::new();
     if sel_bin.len() != 0 && sel_bin != m.bin.as_str() {
-        // `run --bin=NAME`: build and execute that [bin.NAME] target
+        // `run --bin=NAME`: build and execute that [bin.NAME] target.
         let mut bi: i64 = -1;
         for i in 0..m.bins.len() {
             if m.bins.at(i).name.as_str() == sel_bin {
@@ -2540,7 +2533,8 @@ pub fn manifest_run_bin(
     path.push_string(&built);
     let mut ra = Vector::<String>::new();
     ra.push(path.clone());
-    return exec_args(&mut ra, null); // a built binary: argv exec, never through a shell
+    // A built binary: argv exec, never through a shell.
+    return exec_args(&mut ra, null);
 }
 
 /// `super-c test`: build the project, then discover <test-dir>/**/*.spc (default tests/), synthesize
@@ -2613,8 +2607,8 @@ pub fn manifest_test(
             return 1;
         }
     }
-    // the harness compiles+runs snippets through the binary we just built ("./" so it never
-    // resolves through PATH when the bin name is bare) -- unless SC_TEST_SUPERC names a different
+    // The harness compiles+runs snippets through the binary built above ("./" so it never
+    // resolves through PATH when the bin name is bare), unless SC_TEST_SUPERC names a different
     // compiler under test (the wasm lane's wasmtime wrapper), which then takes its place.
     let mut binb = String::new();
     let ov = stdlib::getenv("SC_TEST_SUPERC");
@@ -2693,7 +2687,7 @@ fn push_module_path(out: &mut String, stem: str) {
 }
 
 // Load the import-only root and collect every `@bench` function as "<module path>::<name>". Parsing is all
-// this needs -- an attribute is recorded by the parser -- so nothing here resolves or typechecks.
+// this needs (an attribute is recorded by the parser) so nothing here resolves or typechecks.
 fn bench_collect(
     rootp: str,
     prefix: str,
@@ -2715,7 +2709,8 @@ fn bench_collect(
         let mid = m as ModuleId;
         let path = p.modules[m].path.as_str();
         if !path.starts_with(prefix) {
-            continue; // the generated root itself, and anything it pulled in from elsewhere
+            // The generated root itself, and anything it pulled in from elsewhere.
+            continue;
         }
         let src = p.modules[m].source.as_str();
         let a = mod_ast_c(&p, mid);
@@ -2727,7 +2722,8 @@ fn bench_collect(
             }
             let fnode = a.at_const(at.owner);
             if fnode.kind != NodeKind::NODE_FUNCTION {
-                continue; // the parser already reported this
+                // The parser already reported this.
+                continue;
             }
             if !fnode.as_data.function.is_public {
                 let sp = fnode.span;
@@ -2741,7 +2737,8 @@ fn bench_collect(
             let nm = a.at_const(fnode.as_data.function.name).as_data.name.text;
             let mut entry = String::new();
             if at.arg != 0 {
-                entry.push_byte(b'-'); // `@bench(log_results = false)`: it prints for itself
+                // `@bench(log_results = false)`: it prints for itself.
+                entry.push_byte(b'-');
             }
             entry.push_str(path);
             entry.push_str("::");
@@ -2753,7 +2750,7 @@ fn bench_collect(
 }
 
 // The real root: a `main` that runs each discovered benchmark in turn. It imports only the modules that
-// actually contributed one -- NOT everything under bench/ -- so a file that merely lives there (a helper, or
+// contributed one (NOT everything under bench/) so a file that merely lives there (a helper, or
 // a standalone comparison program with a `main` of its own) is never linked into the runner. Anything a
 // benchmark genuinely needs arrives through that benchmark's own imports. Selection is a run-time argument
 // (`--filter=S`) rather than part of the generated root, so a filtered run never relinks the bench binary.
@@ -2844,13 +2841,13 @@ pub fn manifest_bench(
         eprintln("bench: no {}/ directory next to src/", bdir.as_str());
         return 1;
     }
-    // the module-path prefix the discovery root gives every bench module ("<bench-dir>::")
+    // The module-path prefix the discovery root gives every bench module ("<bench-dir>::").
     let mut bpref = String::new();
     push_module_path(&mut bpref, bdir.as_str());
     bpref.push_str("::");
     // Two passes, because a benchmark is DISCOVERED rather than registered. The first root imports every
     // module under bench/ so they all get parsed; walking those ASTs for `@bench` gives the list; the second
-    // root is written with a call to each one. Loading twice is cheap -- the first pass only parses -- and it
+    // root is written with a call to each one. Loading twice is cheap (the first pass only parses) and it
     // is what keeps a bench file from having to be wired into a hand-maintained `main`.
     let mut listing = String::new();
     let nmods = bench_import_root(bdir.as_str(), &mut listing);
@@ -2898,7 +2895,7 @@ pub fn manifest_bench(
     // a short name lives inside the String itself, so the borrow points at a dead stack slot.
     let leaf = exe_name("bench-bin", target);
     let bin = join2(m.out_dir.as_str(), leaf.as_str());
-    // rooted at the project root (like tests), so `import bench::x;` works for lint AND build
+    // Rooted at the project root (like tests), so `import bench::x;` works for lint AND build.
     let rc = engine_build(
         m,
         prof_name,
@@ -2928,7 +2925,8 @@ pub fn manifest_bench(
         fa.push_str(filter);
         ra.push(fa);
     }
-    return exec_args(&mut ra, null); // a built binary: argv exec, never through a shell
+    // A built binary: argv exec, never through a shell.
+    return exec_args(&mut ra, null);
 }
 
 /// `super-c run <name>`: run a manifest command, building first when it asks for it. Lines run in
@@ -2974,7 +2972,7 @@ pub fn manifest_run(
     return 0;
 }
 
-/// `super-c clean`: drop the manifest's outputs -- out-dir (raw*/ + per-profile gen/obj) plus the
+/// `super-c clean`: drop the manifest's outputs; out-dir (raw*/ + per-profile gen/obj) plus the
 /// trees bare `super-c <root.spc>` invocations and pre-raw layouts left next to the sources.
 pub fn manifest_clean(m: &mf::Manifest) i32 {
     rm_rf(m.out_dir.as_str());

@@ -1,11 +1,11 @@
-// Test assertions -- COMPILER BUILTINS. Every call is desugared at its call site (the typechecker
+// Test assertions: COMPILER BUILTINS. Every call is desugared at its call site (the typechecker
 // checks the arguments specially; codegen bakes in the failing expression's source text and its
 // file:line, prints the left/right values where the type is directly printable, and aborts), so the
 // bodies below are never emitted. The `unsafe abort()` bodies also keep CTFE honest: an interpreted
 // caller bails to runtime instead of silently skipping an assertion.
 //
-//   assert(cond)              assert(cond, "message")   -- the message must be a `str`
-//   assert_eq(left, right)    assert_ne(left, right)    -- one type; builtin/str/String/enum or Eq
+//   assert(cond)              assert(cond, "message")  : the message must be a `str`
+//   assert_eq(left, right)    assert_ne(left, right)   : one type; builtin/str/String/enum or Eq
 //
 // Arguments are READ, not moved: asserting on an owned String/Vector leaves it usable afterwards.
 
@@ -13,16 +13,22 @@ extern "C" {
     fn abort() void;
 }
 
+/// Abort the test process when `condition` is false; the compiler lowers calls to a message-carrying
+/// trap, this body is the fallback.
 pub fn assert(condition: bool, ...) {
     if !condition {
         unsafe abort();
     }
 }
 
+/// Placeholder: the compiler lowers `assert_eq(a, b)` to a comparing trap; calls never reach this body.
 pub fn assert_eq(_condition: bool, ...) {
-    unsafe abort(); // placeholder body (calls never reach it; see the header comment)
+    // Placeholder body (calls never reach it; see the header comment).
+    unsafe abort();
 }
 
+/// Placeholder: the compiler lowers `assert_ne(a, b)` to a comparing trap; calls never reach this body.
 pub fn assert_ne(_condition: bool, ...) {
-    unsafe abort(); // placeholder body (calls never reach it; see the header comment)
+    // Placeholder body (calls never reach it; see the header comment).
+    unsafe abort();
 }

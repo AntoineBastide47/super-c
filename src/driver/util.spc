@@ -20,31 +20,26 @@ import utils::errors as diag;
 
 /// A 4096-byte path scratch buffer; `PathBuf {}` partial init zero-fills the array.
 pub type PathBuf = Array<char, 4096>;
+/// Small zero-filled C string scratch buffers.
 pub type Buf64 = Array<char, 64>;
 pub type Buf128 = Array<char, 128>;
 
-// ---------------------------------------------------------------------------------------------------------
-// Raw-pointer accessors into a package module's held Ast (public fields, so no loader plumbing needed).
-// ---------------------------------------------------------------------------------------------------------
+/// Raw-pointer accessors into a package module's held Ast (public fields, so no loader plumbing needed).
 pub const fn mod_ast_c(p: &loader::Package, m: ModuleId) *const Ast {
     return &p.modules[m as usize].ast;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // The keep-list: every build output written this run (owns the heap paths; stale files not here are pruned).
-// ---------------------------------------------------------------------------------------------------------
 // A `Vector<String>` (owns each heap path; RAII-freed). `keep.push(path)` moves the String in.
 
-// ---------------------------------------------------------------------------------------------------------
 // Output paths + directories.
-// ---------------------------------------------------------------------------------------------------------
 
 /// Lex (trivia kept for the comment count), parse and canonically format `src` into `out` at `width`
-/// columns -- the shared core of `super-c fmt` and LSP textDocument/formatting. 0 = ok (`out` filled);
+/// columns; the shared core of `super-c fmt` and LSP textDocument/formatting. 0 = ok (`out` filled);
 /// 1 = lex/parse error (diagnostics printed against `path`); 2 = the dropped-comment safety check
 /// tripped. `out` must not be used unless 0.
 pub fn format_source(src: &String, path: str, width: i32, out: &mut String) bool {
-    // Reject sources that do not parse -- never rewrite something the compiler cannot read.
+    // Reject sources that do not parse: never rewrite something the compiler cannot read.
     // Lexed with trivia so the doc pipeline can count comments; the parser gets a filtered stream.
     let mut vsrc = src.clone();
     let mut lx = lex::Lexer::new(&mut vsrc, path);
@@ -108,14 +103,15 @@ pub fn build_out_path(gen_dir: str, mod_path: str, ext: str) String {
     return out;
 }
 
+/// True when `path` names an existing directory.
 pub fn is_dir(path: str) bool {
     let mut p = String::from_str(path);
     return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
 }
 
-// Whitespace-split `s` into argv entries: FLAG strings keep their historic shell-splitting contract
-// ("-framework Cocoa" is two arguments); paths the engine controls are pushed as single entries and
-// never split, which is what lets spaces, quotes and non-ASCII bytes pass through.
+/// Whitespace-split `s` into argv entries: FLAG strings keep their shell-splitting contract
+/// ("-framework Cocoa" is two arguments); paths the engine controls are pushed as single entries and
+/// never split, which is what lets spaces, quotes and non-ASCII bytes pass through.
 pub fn split_args(out: &mut Vector<String>, s: str) {
     let mut a: usize = 0;
     for i in 0..s.len() + 1 {
@@ -129,7 +125,7 @@ pub fn split_args(out: &mut Vector<String>, s: str) {
     }
 }
 
-// spawn_args + wait, output inherited (or captured when `log` is non-null): exit code, -1 on failure.
+/// Spawn `args` and wait, output inherited (or captured when `log` is non-null): exit code, -1 on failure.
 pub fn exec_args(args: &mut Vector<String>, log: *const char) i32 {
     let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
     for i in 0..args.len() {
@@ -177,7 +173,7 @@ pub fn open_out(path: str) *mut stdio::FILE {
 
 /// Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
 /// drop any directory left empty. The compiler overwrites build/ in place but must also remove outputs the
-/// program no longer produces (a removed module/instance/@test-runner/@c.source wrapper) -- a stale TU would
+/// program does not produce (a removed module/instance/@test-runner/@c.source wrapper); a stale TU would
 /// otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
 pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
     let d = unsafe shim::sc_opendir(dir);
@@ -205,7 +201,7 @@ pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
         let path = (&pb[0]) as *const char;
         if unsafe shim::sc_stat_isdir(path) != 0 {
             prune_orphans(path, keep);
-            let _ = unsafe shim::sc_rmdir(path); // no-op unless the recursion just emptied it
+            let _ = unsafe shim::sc_rmdir(path);
             continue;
         }
         let l = unsafe cstring::strlen(name); // only generated .c/.h translation units are ours to prune
@@ -246,10 +242,8 @@ pub fn write_super_rt(gen_dir: str) {
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// cross toolchains
-// ---------------------------------------------------------------------------------------------------------
-// Shared by BOTH link paths -- the build.toml engine and the single-file `super-c build foo.spc` -- because
+// Cross toolchains
+// Shared by BOTH link paths (the build.toml engine and the single-file `super-c build foo.spc`) because
 // a target that reaches only one of them mis-builds silently: the front end gates items on the target while
 // the C compiler still builds for the host.
 
@@ -269,11 +263,11 @@ pub const fn target_sdk(target: i32) i32 {
 }
 
 /// The cross compiler for `sdk`, found through the SDK's own environment variable so no path is baked
-/// into the compiler. Empty when the toolchain is not installed -- the caller then falls back and the
+/// into the compiler. Empty when the toolchain is not installed; the caller then falls back and the
 /// C compiler reports what is missing.
 pub fn sdk_cc(sdk: i32, out: &mut String) {
     if sdk == 1 {
-        // iOS: clang from the active Xcode, selected by `xcrun` so the SDK path comes from the toolchain
+        // IOS: clang from the active Xcode, selected by `xcrun` so the SDK path comes from the toolchain.
         out.push_str("xcrun --sdk iphoneos clang");
         return;
     }
@@ -311,13 +305,14 @@ const fn ndk_host_tag() str<'static> {
         return "windows-x86_64";
     }
     if unsafe shim::sc_host_platform() == 1 {
-        return "darwin-x86_64"; // the NDK ships one universal darwin toolchain under this name
+        // The NDK ships one universal darwin toolchain under this name.
+        return "darwin-x86_64";
     }
     return "linux-x86_64";
 }
 
 /// Flags every translation unit needs for a cross target: the triple, and for wasm the wasi sysroot's
-/// own defaults. Nothing here overrides the manifest -- these come first, manifest flags after.
+/// own defaults. Nothing here overrides the manifest: these come first, manifest flags after.
 pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
     if sdk == 1 {
         // The triple carries the deployment floor: without a version clang assumes an iOS old enough to
@@ -343,7 +338,7 @@ pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
     if sdk == 3 {
         // A wasi sysroot supplies the libc the emitted C needs. $WASI_SDK_PATH names a full wasi-sdk
         // (its sysroot sits under share/wasi-sysroot); $WASI_SYSROOT names a bare one. With neither,
-        // only freestanding code can build -- there is no libc to include.
+        // only freestanding code can build; there is no libc to include.
         let sdkp = stdlib::getenv("WASI_SDK_PATH");
         if sdkp != null && unsafe *sdkp != 0 as char {
             cmd.push_str(" -D_WASI_EMULATED_SIGNAL");

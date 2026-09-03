@@ -1,6 +1,6 @@
 // The concurrency stack, end to end, in one program: what CI runs on every platform to prove the runtime
-// works there and not just that it compiles. It is deliberately free of anything POSIX-only (no reactor, no
-// sockets), because its whole job is to be the same test on Linux, macOS and Windows -- the three legs of
+// works there and not only that it compiles. It is deliberately free of anything POSIX-only (no reactor, no
+// sockets), because its whole job is to be the same test on Linux, macOS and Windows: the three legs of
 // `ffi/sc_rt.c` are OS threads, locks and context switches, and every one of them is exercised below.
 //
 // Build and run it with the compiler under test:
@@ -23,7 +23,7 @@ const NTASKS: i64 = 32;
 const NITEMS: i64 = 500;
 
 // 1. OS threads: four of them, each returning a value through its join handle. This is the one check that
-// does not touch the coroutine scheduler at all -- just thread create/join and the value hand-back.
+// does not touch the coroutine scheduler at all: only thread create/join and the value hand-back.
 fn check_threads() i32 {
     let mut handles = Vector::<thread::JoinHandle<i64>>::new();
     for i in 0..4 {
@@ -45,7 +45,7 @@ fn check_threads() i32 {
         let h = handles.pop().unwrap();
         total = total + h.join();
     }
-    // sum over n in 0..3 of n * (0+..+999) = 6 * 499500
+    // Sum over n in 0..3 of n * (0+..+999) = 6 * 499500.
     if total != 2997000 {
         return 1;
     }
@@ -131,7 +131,7 @@ fn check_coroutines() i32 {
     if !joined {
         return 4;
     }
-    // sum over tasks n of sum over k of (n + k)
+    // Sum over tasks n of sum over k of (n + k).
     let per_task = NITEMS * (NITEMS - 1) / 2;
     if sum != NTASKS * per_task + NITEMS * (NTASKS * (NTASKS - 1) / 2) {
         return 5;
@@ -228,14 +228,14 @@ fn check_data_parallel() i32 {
             return a + b;
         },
     );
-    // 2 * (0 + .. + 4999)
+    // 2 * (0 + .. + 4999).
     if total != 24995000 {
         return 10;
     }
     return 0;
 }
 
-// 6. Timers: a sleep must actually sleep (the monotonic clock and the scheduler's timer list agree).
+// 6. Timers: a sleep must sleep (the monotonic clock and the scheduler's timer list agree).
 fn check_timers() i32 {
     let t0 = platform::now_ns();
     time::sleep(time::Duration::from_millis(50));

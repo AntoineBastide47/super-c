@@ -9,7 +9,7 @@
 // Elements flow BY VALUE through the pipeline (a borrowing source like `v.iter()` yields `&T`
 // references, which are values themselves). Adapters store the source iterator and the closure by
 // value; a `Free`-owning (`fn move`) closure is not accepted, and `filter` cannot pass owned `Free`
-// elements through (the predicate call would consume them) -- iterate those by reference instead.
+// elements through (the predicate call would consume them): iterate those by reference instead.
 
 /// Yields `f(x)` for every `x` the source yields.
 pub struct MapIter<I, T, U, F> {
@@ -17,6 +17,7 @@ pub struct MapIter<I, T, U, F> {
     pub f: F,
 }
 
+/// An iterator applying `f` to each item of `it`.
 pub fn map<I: Iterator<T>, T, U, F: fn(T) U>(it: I, f: F) MapIter<I, T, U, F> {
     return MapIter::<I, T, U, F> { it: it, f: f };
 }
@@ -36,6 +37,7 @@ pub struct FilterIter<I, T, P> {
     pub p: P,
 }
 
+/// An iterator yielding only the items of `it` for which `p` holds.
 pub fn filter<I: Iterator<T>, T, P: fn(T) bool>(it: I, p: P) FilterIter<I, T, P> {
     return FilterIter::<I, T, P> { it: it, p: p };
 }
@@ -63,6 +65,7 @@ pub struct EnumerateIter<I, T> {
     pub idx: usize,
 }
 
+/// An iterator pairing each item of `it` with its zero-based index.
 pub fn enumerate<I: Iterator<T>, T>(it: I) EnumerateIter<I, T> {
     return EnumerateIter::<I, T> { it: it, idx: 0 };
 }
@@ -87,6 +90,7 @@ pub struct ZipIter<A, B, TA, TB> {
     pub b: B,
 }
 
+/// An iterator of pairs, ending when either input ends.
 pub fn zip<A: Iterator<TA>, B: Iterator<TB>, TA, TB>(a: A, b: B) ZipIter<A, B, TA, TB> {
     return ZipIter::<A, B, TA, TB> { a: a, b: b };
 }

@@ -1,10 +1,10 @@
 // Self-hosted benchmark: how long does the compiler take to transpile the WHOLE super-c compiler to C?
-// The corpus is the compiler itself -- package_load(selfhost/main.spc) pulls in every module main.spc
+// The corpus is the compiler itself: package_load(selfhost/main.spc) pulls in every module main.spc
 // transitively imports (the entire lexer/ast/parser/resolver/typechecker/const-eval/codegen/loader stack,
 // plus the std prelude + ffi bindings it uses). Each iteration runs the real transpile pipeline in process
-// -- parse (lex+parse every module, via the loader) -> resolve-all -> typecheck-all (+ deferred asserts)
+// parse (lex+parse every module, via the loader) -> resolve-all -> typecheck-all (+ deferred asserts)
 // -> borrowck-all -> emit the whole package to C through the streaming backend (shared headers + every TU +
-// the instance TU, written to a real file) -- and times each phase with CPU time. It mirrors main.spc's
+// the instance TU, written to a real file), and times each phase with CPU time. It mirrors main.spc's
 // run_package (minus the C link step). Emission writes through a FILE exactly as a build does. The benchmark
 // binary IS the self-hosted compiler, so `make bench` measures the compiler transpiling its own source.
 import module::loader as loader;
@@ -28,7 +28,7 @@ import stdlib;
 import string as cstring;
 import time;
 
-// tmpfile(): an anonymous auto-removed stream -- the file-lane sink codegen emits into. Rides in
+// tmpfile(): an anonymous auto-removed stream; the file-lane sink codegen emits into. Rides in
 // <stdio.h>, always in super_rt. POSIX-only call sites (mingw's tmpfile() lands in the drive root
 // and fails unprivileged; Windows uses a %TEMP% file instead).
 extern "C" {
@@ -39,12 +39,12 @@ const ROOT: str = "src/main.spc";
 const STD_DIR: str = "std";
 const WARMUP: i32 = 1;
 const ITERS: i32 = 100;
-// The cc phase runs as a child process and compiles the whole emitted package -- orders of magnitude
+// The cc phase runs as a child process and compiles the whole emitted package: orders of magnitude
 // slower than an in-process transpile, so it gets its own small iteration count.
 const CC_ITERS: i32 = 3;
 
 // The codegen sink: a real file, on every platform. Codegen writes through a FILE, and this benchmark
-// exists to report what codegen costs -- so the sink is the one codegen actually uses in a build rather
+// exists to report what codegen costs, so the sink is the one codegen uses in a build rather
 // than an in-memory stream that would measure lowering with the writes taken out. POSIX gets an anonymous
 // auto-removed stream; mingw's tmpfile() lands in the drive root and fails unprivileged, so Windows names
 // a file under %TEMP% and removes it itself.
@@ -94,6 +94,7 @@ fn sink_close(f: *mut stdio::FILE) usize {
     return 0;
 }
 
+/// Per-stage wall times of one self-transpile, in milliseconds.
 pub struct Timing {
     pub lex: f64,
     pub parse: f64,
@@ -129,7 +130,7 @@ pub struct Timing {
     pub heap_bytes: i64,
 }
 
-// Deferred-assert sink: a clean self-transpile produces none, so this is never actually called; it just
+// Deferred-assert sink: a clean self-transpile produces none, so this is never called; it only
 // satisfies flush_asserts' callback signature.
 
 // Resolve module `i` in place (mirrors main.spc's resolve_module, without diagnostics logging).
@@ -167,7 +168,7 @@ fn write_c(dir: str, base: str, s: str) {
 }
 
 // Transpile the compiler once and write the emitted package into `dir` for the cc phase to compile.
-// Files land FLAT -- every TU beside the two shared headers -- mirroring the SC_CEMIT_TU lane, so each
+// Files land FLAT (every TU beside the two shared headers) mirroring the SC_CEMIT_TU lane, so each
 // TU's `#include "__sc_types.h"` resolves in place. Fills `names` with the .c basenames (super_rt first)
 // and returns the total emitted C size in bytes.
 fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
@@ -176,7 +177,8 @@ fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;
-    p.jobs = 1; // the bench is the SERIAL perf gate; parallel stages are timed by the driver
+    // The bench is the SERIAL perf gate; parallel stages are timed by the driver.
+    p.jobs = 1;
     let mut i: usize = 0;
     while i < n {
         resolve_one(&mut p, i);
@@ -288,7 +290,7 @@ fn transpile_once() Timing {
     let n = p.modules.len();
     r.modules = n;
     let mut i: usize = 0;
-    // Corpus stats: bytes, node pools, top-level decls (all fixed once parsed -- mono adds instance
+    // Corpus stats: bytes, node pools, top-level decls (all fixed once parsed; mono adds instance
     // records, not nodes, so the pool size is stable through resolve/typecheck).
     while i < n {
         let a = &p.modules[i].ast;
@@ -301,7 +303,8 @@ fn transpile_once() Timing {
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;
-    p.jobs = 1; // the bench is the SERIAL perf gate; parallel stages are timed by the driver
+    // The bench is the SERIAL perf gate; parallel stages are timed by the driver.
+    p.jobs = 1;
 
     i = 0;
     while i < n {
@@ -337,7 +340,7 @@ fn transpile_once() Timing {
         let tplan = dtest::TestPlan::new(n);
         let mut o = demit::CemitOut::new(n);
         demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut irkeep);
-        // write the whole package to the sink FILE exactly as a build does, so out_bytes is real
+        // Write the whole package to the sink FILE exactly as a build does, so out_bytes is real.
         unsafe stdio::fwrite(o.types_h.as_ptr(), 1, o.types_h.len(), f);
         unsafe stdio::fwrite(o.protos_h.as_ptr(), 1, o.protos_h.len(), f);
         for m in 0..n {
@@ -354,7 +357,7 @@ fn transpile_once() Timing {
 
     // Lex-only pass LAST so it can't perturb the pipeline phase timings: re-lex every module source to isolate
     // pure lexer throughput. Lexing is folded into `parse` (package_load -> scan_tokens), so it is NOT added to
-    // the total -- it is the lexer's share OF parse.
+    // the total: it is the lexer's share OF parse.
     let lx0 = time::cpu_seconds();
     let cl0 = unsafe shim::sc_cpu_cycles();
     let hl0 = unsafe shim::sc_alloc_count();
@@ -371,7 +374,7 @@ fn transpile_once() Timing {
     r.alc_lex = unsafe shim::sc_alloc_count() - hl0;
     r.byt_lex = unsafe shim::sc_alloc_bytes() - yl0;
 
-    // Count source lines (untimed -- a constant of the corpus) for a lines/sec figure.
+    // Count source lines (untimed: a constant of the corpus) for a lines/sec figure.
     i = 0;
     while i < n {
         let src = p.modules[i].source.as_str().ptr() as *const char;
@@ -411,10 +414,11 @@ fn transpile_once() Timing {
 }
 
 // This one keeps its own report: a per-phase table (lex/parse/resolve/typecheck/codegen with MB/s and
-// allocations) is the point of it, and no generic timing loop can produce that -- so it opts out of the
+// allocations) is the point of it, and no generic timing loop can produce that, so it opts out of the
 // runner's one-line summary, which would only restate a single round's wall time. It still runs under the
 // Bencher, so it appears in the same listing as every other benchmark.
 @bench(log_results = false)
+/// Benchmark lane: transpile the compiler's own source once per round.
 pub fn self_transpile(b: &mut bench::Bencher) {
     b.set_rounds(1);
     b.set_warmup(0);

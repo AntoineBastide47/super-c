@@ -10,10 +10,10 @@
 //     parallel::sections(|s| { s.add(|| load()); s.add(|| compile()); });
 //
 // Work is CHUNKED, never one task per iteration: a million-index loop becomes a few tasks per worker. Each
-// chunk runs as a stackless JOB (`runtime::spawn_job`) -- no per-chunk stack, no context switch -- and the
+// chunk runs as a stackless JOB (`runtime::spawn_job`); no per-chunk stack, no context switch, and the
 // calling *coroutine* parks until every chunk is done, so its worker keeps serving other tasks meanwhile;
 // a plain thread blocks instead. Because the call does not return until every chunk has finished, a body may
-// safely borrow the caller's locals -- which is how it reaches shared state:
+// safely borrow the caller's locals, which is how it reaches shared state:
 //
 //     let counter = Atomic::<i64>::new(0);
 //     let c = &counter;                                  // captures are by COPY, so share by reference:
@@ -22,14 +22,14 @@
 // The body is `fn(..) + Send + Sync`, and that bound is the safety story. A closure that owns a capture or
 // mutates one is `fn move`, not `fn`, so it does not satisfy the bound: the body is copied to every worker,
 // which would double-free an owned capture, and a mutated capture is an implicit `&mut` into the caller's
-// frame -- shared across workers, a data race. So this is rejected, exactly as it should be:
+// frame: shared across workers, a data race. So this is rejected, exactly as it should be:
 //
 //     parallel::range(0..n, |i| { values.set(i, 1); });   // error: not `fn(usize)`
 //
 // Mutation in parallel goes through a partition (`each_mut`, `chunks_mut`) whose disjointness this module
 // establishes with one audited `unsafe` split, or through an `Atomic`/`Mutex`.
 //
-// One wart: a range of two literals defaults to `Range<i32>`, so `0..1000` needs a `usize` bound --
+// One wart: a range of two literals defaults to `Range<i32>`, so `0..1000` needs a `usize` bound;
 // `0..1000usize`, or the far more common `0..values.len()`.
 
 import std::parallel::runtime as runtime;
@@ -37,7 +37,7 @@ import std::parallel::sync as sync;
 import std::parallel::atomics as atomics;
 
 // Chunks per worker. More than one lets a worker that finishes early pick up another chunk, which is most of
-// what dynamic scheduling buys, at no extra cost; many more would just add per-chunk overhead.
+// what dynamic scheduling buys, at no extra cost; many more would only add per-chunk overhead.
 const CHUNKS_PER_WORKER: usize = 4;
 
 /// How a parallel loop divides its index space.
@@ -54,17 +54,15 @@ pub struct Options {
 }
 
 extend Options {
-    /// Static scheduling with an automatic grain -- what the plain `range`/`each`/... forms use.
+    /// Static scheduling with an automatic grain: what the plain `range`/`each`/... forms use.
     pub const fn default() Options {
         return Options { schedule: Schedule::Static, grain_size: 0 };
     }
 }
 
-// -----------------------------------------------------------------------------------------------------
 // Chunk plumbing. Non-generic on purpose: it is compiled once, and each API entry point adds only a small
-// typed trampoline. `pub` on these types and functions is for linkage -- those trampolines are
+// typed trampoline. `pub` on these types and functions is for linkage: those trampolines are
 // monomorphized in the caller's module. None of it is user-facing.
-// -----------------------------------------------------------------------------------------------------
 
 /// The outstanding-chunk counter the caller waits on. Task-aware through `Condvar`: a calling coroutine
 /// parks, any other thread blocks. It lives in the caller's frame, which is sound because the caller does
@@ -107,7 +105,8 @@ pub fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
         }
         *lo = unsafe ce.lo;
         *hi = unsafe ce.hi;
-        unsafe ce.lo = unsafe ce.hi; // one-shot
+        // One-shot.
+        unsafe ce.lo = unsafe ce.hi;
         return true;
     }
     let cur = &unsafe b.cursor;
@@ -154,7 +153,8 @@ pub fn next_range(ce: *mut ChunkEnv, lo: &mut usize, hi: &mut usize) bool {
 pub fn finish(ce: *mut ChunkEnv) {
     let l = unsafe ce.batch.latch;
     if l == null {
-        return; // ran inline: the caller is this thread
+        // Ran inline: the caller is this thread.
+        return;
     }
     let lref = &unsafe l.left;
     let mut g = lref.lock();
@@ -171,7 +171,7 @@ pub fn finish(ce: *mut ChunkEnv) {
     }
 }
 
-/// How many chunks a call over `total` units will use -- one is "run it inline on this thread". `reduce`
+/// How many chunks a call over `total` units will use: one is "run it inline on this thread". `reduce`
 /// needs this up front to size its per-chunk accumulators, so the answer must be exactly what `dispatch`
 /// goes on to do.
 pub fn chunk_count(total: usize) usize {
@@ -227,7 +227,8 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
     }
     let mut grain = opts.grain_size;
     if grain == 0 {
-        grain = total / (nchunks * 2); // a few claims per chunk: responsive without thrashing the cursor
+        // A few claims per chunk: responsive without thrashing the cursor.
+        grain = total / (nchunks * 2);
     }
     if grain == 0 {
         grain = 1;
@@ -252,7 +253,8 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
     for i in 0..nchunks {
         let mut n = base;
         if i < extra {
-            n = n + 1; // spread the remainder over the first chunks
+            // Spread the remainder over the first chunks.
+            n = n + 1;
         }
         unsafe envs[i] = ChunkEnv { batch: bp, lo: at, hi: at + n, idx: i };
         at = at + n;
@@ -268,14 +270,12 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
     }
     unsafe g.dealloc(envs, nchunks * sizeof(ChunkEnv), alignof(ChunkEnv));
     // `latch` is auto-freed at scope exit (its mutex and condvar with it), which is safe only because no
-    // chunk touches it after the count reached zero -- and once `raw_mutex_unlock` publishes the release it
+    // chunk touches it after the count reached zero, and once `raw_mutex_unlock` publishes the release it
     // touches only memory that outlives the mutex (see `RawMutex`), so the last chunk's unlock cannot race
     // this free.
 }
 
-// -----------------------------------------------------------------------------------------------------
 // Index-parallel loop.
-// -----------------------------------------------------------------------------------------------------
 
 /// The body, held once and copied per chunk. `pub` for linkage.
 @no_const
@@ -320,16 +320,14 @@ pub fn range_with<F: fn(usize) + Send + Sync>(r: Range<usize>, opts: Options, bo
     dispatch(end - r.start, opts, range_chunk::<F>, &mut sh);
 }
 
-// -----------------------------------------------------------------------------------------------------
 // Per-element, read-only.
-// -----------------------------------------------------------------------------------------------------
 
 /// `pub` for linkage.
 @no_const
 pub struct EachShared<T, F> {
     pub body: F,
     pub items: *const T,
-    pub len: usize, // carried so a chunk can CHECK its range instead of trusting it -- see `each_chunk`
+    pub len: usize, // carried so a chunk can CHECK its range instead of trusting it: see `each_chunk`
 }
 
 /// The `each` chunk trampoline. `pub` for linkage.
@@ -368,16 +366,14 @@ pub fn each_with<T, F: fn(&T) + Send + Sync>(items: []T, opts: Options, body: F)
     dispatch(n, opts, each_chunk::<T, F>, &mut sh);
 }
 
-// -----------------------------------------------------------------------------------------------------
-// Per-element, mutable -- disjoint by construction.
-// -----------------------------------------------------------------------------------------------------
+// Per-element, mutable: disjoint by construction.
 
 /// `pub` for linkage.
 @no_const
 pub struct EachMutShared<T, F> {
     pub body: F,
     pub items: *mut T,
-    pub len: usize, // carried so a chunk can CHECK its range instead of trusting it -- see `each_mut_chunk`
+    pub len: usize, // carried so a chunk can CHECK its range instead of trusting it: see `each_mut_chunk`
 }
 
 /// The `each_mut` chunk trampoline. `pub` for linkage.
@@ -390,7 +386,7 @@ pub fn each_mut_chunk<T, F: fn(&mut T) + Send + Sync>(e: *mut void) {
     let mut lo: usize = 0;
     let mut hi: usize = 0;
     while next_range(ce, &mut lo, &mut hi) {
-        // ONE check per range, not per element -- see `each_chunk`.
+        // ONE check per range, not per element: see `each_chunk`.
         assert(hi <= len, "parallel::each_mut: chunk range past the end of the slice");
         for i in lo..hi {
             // Sound because index ranges never overlap: every element is handed to exactly one chunk.
@@ -401,7 +397,7 @@ pub fn each_mut_chunk<T, F: fn(&mut T) + Send + Sync>(e: *mut void) {
 }
 
 /// Run `body(&mut element)` for every element, in parallel. Each element goes to exactly one worker, so the
-/// mutations cannot race -- that partition is this module's one unsafe step, audited here instead of being
+/// mutations cannot race: that partition is this module's one unsafe step, audited here instead of being
 /// a hole in the type system.
 pub fn each_mut<T, F: fn(&mut T) + Send + Sync>(items: []mut T, body: F) {
     each_mut_with(items, Options::default(), body);
@@ -417,9 +413,7 @@ pub fn each_mut_with<T, F: fn(&mut T) + Send + Sync>(items: []mut T, opts: Optio
     dispatch(n, opts, each_mut_chunk::<T, F>, &mut sh);
 }
 
-// -----------------------------------------------------------------------------------------------------
 // Per-chunk, mutable: the body sees a whole `[]mut T` slice.
-// -----------------------------------------------------------------------------------------------------
 
 /// `pub` for linkage.
 @no_const
@@ -445,7 +439,8 @@ pub fn chunks_mut_chunk<T, F: fn([]mut T) + Send + Sync>(e: *mut void) {
             let at = k * size;
             let mut n = size;
             if at + n > total {
-                n = total - at; // the last chunk is short
+                // The last chunk is short.
+                n = total - at;
             }
             // Disjoint by construction: chunk `k` owns exactly `[k*size, k*size + n)`.
             b(SliceMut::<T> { ptr: unsafe (items + at), len: n });
@@ -455,7 +450,7 @@ pub fn chunks_mut_chunk<T, F: fn([]mut T) + Send + Sync>(e: *mut void) {
 }
 
 /// Hand each worker a whole `[]mut T` window of `size` elements (the last one may be shorter), in parallel.
-/// Use it when the work is per-window rather than per-element -- a blocked matrix pass, a batched encode.
+/// Use it when the work is per-window rather than per-element: a blocked matrix pass, a batched encode.
 pub fn chunks_mut<T, F: fn([]mut T) + Send + Sync>(items: []mut T, size: usize, body: F) {
     chunks_mut_with(items, size, Options::default(), body);
 }
@@ -476,9 +471,7 @@ pub fn chunks_mut_with<T, F: fn([]mut T) + Send + Sync>(items: []mut T, size: us
     dispatch(nchunks, opts, chunks_mut_chunk::<T, F>, &mut sh);
 }
 
-// -----------------------------------------------------------------------------------------------------
 // Parallel reduction.
-// -----------------------------------------------------------------------------------------------------
 
 /// `pub` for linkage.
 @no_const
@@ -504,13 +497,14 @@ pub fn reduce_chunk<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + S
             acc = fd(acc, &unsafe items[i]);
         }
     }
-    unsafe sh.out[unsafe ce.idx] = acc; // this chunk's slot, written once
+    // This chunk's slot, written once.
+    unsafe sh.out[unsafe ce.idx] = acc;
     finish(ce);
 }
 
 /// Fold `items` in parallel: every chunk starts from `make()`, folds its elements with `fold`, and the
 /// per-chunk results are `combine`d into one. `fold` and `combine` must be associative for the result to be
-/// deterministic -- chunk boundaries and combine order are up to the scheduler.
+/// deterministic: chunk boundaries and combine order are up to the scheduler.
 ///
 /// The identity is a closure, not a value, because each chunk needs its own: a single `init` value would
 /// have to be copied per chunk, which double-frees an accumulator that owns anything (a `String`, a
@@ -535,7 +529,8 @@ pub fn reduce_with<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sy
     let n = items.len();
     let nslots = chunk_count(n);
     if nslots == 0 {
-        return make(); // nothing to fold
+        // Nothing to fold.
+        return make();
     }
     let mut g = Global {};
     let out = (unsafe g.alloc(nslots * sizeof(A), alignof(A))) as *mut A;
@@ -555,9 +550,7 @@ pub fn reduce_with<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sy
     return acc;
 }
 
-// -----------------------------------------------------------------------------------------------------
 // Independent one-shot sections.
-// -----------------------------------------------------------------------------------------------------
 
 /// One registered section: a type-erased closure box and the trampoline that runs it. `pub` for linkage.
 @no_const
@@ -584,7 +577,7 @@ pub fn section_entry<F: fn() + Send + Sync>(env: *mut void) {
 }
 
 extend Sections {
-    /// Register a section. Each `add` may take a different closure type -- they are boxed and type-erased,
+    /// Register a section. Each `add` may take a different closure type: they are boxed and type-erased,
     /// so the sections need not be uniform.
     pub fn add<F: fn() + Send + Sync>(self: &mut Sections, f: F) {
         let mut g = Global {};
@@ -604,7 +597,7 @@ pub struct SectionsShared {
     pub jobs: *const SectionJob, // read-only: a section's closure box is reached through its own pointer
 }
 
-/// The `sections` chunk trampoline -- non-generic, since the sections are already type-erased.
+/// The `sections` chunk trampoline: non-generic, since the sections are already type-erased.
 pub fn sections_chunk(e: *mut void) {
     let ce = e as *mut ChunkEnv;
     let sh = (unsafe ce.batch.shared) as *mut SectionsShared;

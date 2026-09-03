@@ -6,7 +6,7 @@
 //
 // Raw strings are intentionally absent: matchertext literals (`M"(...)"`) replace them, so
 // `r"..."` lexes as an identifier followed by a string. Everything else the language offers has an
-// executable section below -- tuple structs, `for value in slice`, byte strings, and `&dyn`
+// executable section below: tuple structs, `for value in slice`, byte strings, and `&dyn`
 // parameters included.
 
 const ANSWER: i32 = 42;
@@ -64,10 +64,12 @@ interface Area {
 }
 
 extend Point {
+    /// The point translated by (dx, dy).
     pub const fn moved(self: &Point, dx: i32, dy: i32) Point {
         return Point { x: self.x + dx, y: self.y + dy };
     }
 
+    /// Component-wise sum.
     pub const fn add(self: &Point, other: &Point) Point {
         return Point { x: self.x + other.x, y: self.y + other.y };
     }

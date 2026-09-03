@@ -1,5 +1,5 @@
 // Self-hosted port of tests/ast_fprint_rtest.c: coverage of the AST pretty-printer (src/ast/ast.c's
-// ast_fprint, an NDEBUG debug dump). The printer is ported here (its only consumer is this test -- a debug
+// ast_fprint, an NDEBUG debug dump). The printer is ported here (its only consumer is this test: a debug
 // tool, kept out of the core ast.spc so the compiler's own build is untouched) and driven over a parsed
 // function, asserting the dump names each node kind, renders identifier text from the source span, prints
 // the operator name for binary nodes, and prints node spans as [start..end].

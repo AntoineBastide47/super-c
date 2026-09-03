@@ -1,5 +1,5 @@
 // Safe wrappers over the platform substrate (ffi/sc_runtime.c). The raw parking, guarded-stack and
-// context-switch primitives stay in `sc_runtime` -- they are inherently unsafe and used only by the
+// context-switch primitives stay in `sc_runtime`: they are inherently unsafe and used only by the
 // scheduler. This exposes the two that are safe on their own: the CPU count and the monotonic clock.
 // Import with `import std::parallel::platform;`.
 

@@ -1,16 +1,18 @@
 // TOML-subset parser for build.toml. Deliberately small: `key = value` pairs, `[section]` /
 // `[section.name]` headers, `#` comments. Values: "strings" (\" \\ \n \t \r escapes), integers,
 // booleans, [arrays of strings] (multiline ok, trailing comma ok), and { inline = "tables" } of
-// string values. No floats, dates, multiline strings, nested arrays, or arrays of tables -- the
+// string values. No floats, dates, multiline strings, nested arrays, or arrays of tables: the
 // manifest schema needs none of them and full TOML is not a goal.
 import utils::errors as diag;
 
+/// Value kinds (TomlVal.kind).
 pub const TV_STR: u8 = 0;
 pub const TV_INT: u8 = 1;
 pub const TV_BOOL: u8 = 2;
 pub const TV_ARR: u8 = 3;
 pub const TV_TBL: u8 = 4;
 
+/// One `key = "value"` entry of an inline table.
 pub struct TomlPair {
     pub k: String,
     pub v: String,
@@ -123,7 +125,7 @@ extend Parser {
 
     fn err(self: &mut Self, at: usize, msg: String) {
         self.errors.emit(at as u32, 1, msg);
-        // resync to the next line so one typo yields one diagnostic
+        // Resync to the next line so one typo yields one diagnostic.
         while !self.at_end() && self.peek() != b'\n' {
             self.i = self.i + 1;
         }
@@ -139,7 +141,8 @@ extend Parser {
 
     fn parse_string(self: &mut Self) Option<String> {
         let q = self.i;
-        self.i = self.i + 1; // opening quote
+        // Opening quote.
+        self.i = self.i + 1;
         let mut out = String::new();
         while !self.at_end() {
             let b = self.peek();
@@ -303,8 +306,8 @@ extend Parser {
             }
             self.i = self.i + 1;
             self.section = name;
-            // a bare header is still a fact (an empty [lib] means "this project has a library"):
-            // record it as a keyless item so the schema can see section PRESENCE
+            // A bare header is still a fact (an empty [lib] means "this project has a library"):
+            // record it as a keyless item so the schema can see section PRESENCE.
             self.items.push(
                 TomlItem {
                     section: self.section.clone(),
@@ -332,7 +335,7 @@ extend Parser {
             return;
         }
         self.items.push(TomlItem { section: self.section.clone(), key: key, at: at as u32, val: val.unwrap() });
-        // nothing else may follow the value on the line
+        // Nothing else may follow the value on the line.
         self.skip_ws(false);
         if !self.at_end() && self.peek() != b'\n' {
             self.err(self.i, format("unexpected trailing characters"));
@@ -341,9 +344,9 @@ extend Parser {
 }
 
 /// Parse `src` into items in file order; diagnostics (if any) are rendered against `file` and printed
-/// here. None on any error (one per offending line -- the parser resyncs at newlines).
+/// here. None on any error (one per offending line: the parser resyncs at newlines).
 /// Parse into `errs` instead of reporting: the caller decides what to do with the diagnostics (the
-/// build logs them, the language server turns them into editor squiggles). Spans stay raw -- `finalize`
+/// build logs them, the language server turns them into editor squiggles). Spans stay raw: `finalize`
 /// is the step that rewrites messages into rendered blocks, and an editor wants them unrendered.
 pub fn parse_into(src: str, errs: &mut diag::Errors) Option<Vector<TomlItem>> {
     let mut p = Parser {
@@ -371,6 +374,7 @@ pub fn parse_into(src: str, errs: &mut diag::Errors) Option<Vector<TomlItem>> {
     return Option::<Vector<TomlItem>>::Some(replace(&mut p.items, Vector::<TomlItem>::new()));
 }
 
+/// Parse a manifest text into its items; None after printing the parse errors for `file`.
 pub fn parse(src: str, file: str) Option<Vector<TomlItem>> {
     let mut errs = diag::Errors::new();
     let r = parse_into(src, &mut errs);

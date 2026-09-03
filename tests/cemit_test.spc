@@ -1,6 +1,6 @@
 // Streaming-backend cases: subset functions emit as strict C11, the result compiles
 // with a real C compiler under -Werror, RUNS, and returns the same values the language semantics
-// require -- the behavioral half of the exit gate on the current subset. Determinism: two serial
+// require: the behavioral half of the exit gate on the current subset. Determinism: two serial
 // emissions must be byte-identical.
 import stdio;
 import driver_shim as shim;
@@ -84,7 +84,7 @@ fn emit_tu(p: &loader::Package, names: *const str, n: usize, em: &mut cb::CEmit)
     em.out.clear();
     em.out.push_str("#include <stdint.h>\n#include <stdbool.h>\n#include <stdlib.h>\n");
     let u = (p.modules.len() - 1) as ModuleId;
-    // prototypes first so call order never matters
+    // Prototypes first so call order never matters.
     let mut bodies = Vector::<irl::Lowerer>::new();
     for i in 0..n {
         let node = find_fn(p, unsafe names[i]);
@@ -144,7 +144,7 @@ fn arithmetic_and_branches_behave() {
     emit_tu(&p, &names[0], 2, &mut em);
     let mut m1 = String::new();
     m1.push_str("int main(void) {\n");
-    // collatz(27) = 111; mix(45, 17) = ((45*3-17) ^ (17<<2)) then abs, % 251
+    // collatz(27) = 111; mix(45, 17) = ((45*3-17) ^ (17<<2)) then abs, % 251.
     m1.push_str("  if (collatz_steps(27ULL) != 111ULL) return 1;\n");
     m1.push_str("  int32_t acc = 45 * 3 - 17; acc = acc ^ (17 << 2); if (acc < 0) acc = -acc;\n");
     m1.push_str("  if (mix(45, 17) != acc % 251) return 2;\n  return 0;\n}\n");

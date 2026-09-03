@@ -2,7 +2,7 @@
 //
 // `sleep` is the reason this module exists in `parallel`: inside a coroutine it parks on the scheduler's
 // timer list, so the worker thread keeps running other tasks for the duration, while on any other thread it
-// sleeps outright. Deadlines are monotonic `platform::now_ns()` values -- the timed `sync` and `channel`
+// sleeps outright. Deadlines are monotonic `platform::now_ns()` values; the timed `sync` and `channel`
 // waits take one, and `remaining_ns` is how a wait loop asks how much of its budget is left.
 
 import std::parallel::runtime as runtime;
@@ -58,7 +58,7 @@ pub fn remaining_ns(deadline: u64) u64 {
     return deadline - now;
 }
 
-/// Suspend for `d`. A coroutine parks -- its worker runs other tasks meanwhile -- and any other thread
+/// Suspend for `d`. A coroutine parks (its worker runs other tasks meanwhile) and any other thread
 /// sleeps. Never blocks a worker thread inside a coroutine.
 pub fn sleep(d: Duration) {
     runtime::sleep_ns(d.ns as i64);

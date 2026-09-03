@@ -2,11 +2,11 @@
 // `JoinHandle<T>` hands back the closure's value from `join`. Import with `import std::parallel::thread;`.
 //
 // The thread itself comes from the platform substrate (`ffi/sc_rt.c`): pthreads on POSIX, `_beginthreadex`
-// on Windows, one opaque handle either way -- nothing here names a `pthread_t`.
+// on Windows, one opaque handle either way: nothing here names a `pthread_t`.
 //
 // The closure must OWN everything it touches (an owning `fn move` closure): a detached thread outlives the
 // launching call, so it may copy scalars and MOVE owned values (`String`, `Vector`, `Box`, `Arc`) in, but
-// may not borrow a local -- the borrow checker's escape rule rejects that at the call site. Cross-thread
+// may not borrow a local: the borrow checker's escape rule rejects that at the call site. Cross-thread
 // sharing goes through `Arc`; cross-thread mutation through an atomic or a lock.
 
 import sc_runtime;
@@ -35,7 +35,8 @@ const fn heap_alloc<T>(value: T) *mut T {
     if sizeof(T) == 0 {
         let p0 = zst_dangling::<T>();
         unsafe p0[0] = value;
-        return p0; // zero-sized payloads occupy no bytes: sentinel, no allocation
+        // Zero-sized payloads occupy no bytes: sentinel, no allocation.
+        return p0;
     }
     let mut g = Global {};
     let p = (unsafe g.alloc(sizeof(T), alignof(T))) as *mut T;
@@ -69,8 +70,8 @@ pub struct JoinHandle<T> {
 }
 
 extend<T> JoinHandle<T> {
-    // `pub` for external linkage: `spawn` is monomorphized in the CALLER's module, so its call to this
-    // constructor must reach a non-static symbol. Not part of the intended surface -- use `spawn`.
+    /// `pub` for external linkage: `spawn` is monomorphized in the CALLER's module, so its call to this
+    /// constructor must reach a non-static symbol. Not part of the intended surface: use `spawn`.
     pub fn from_parts(handle: *mut void, result: *mut T) JoinHandle<T> {
         return JoinHandle::<T> { handle: handle, result: result };
     }
@@ -90,7 +91,7 @@ extend<T> JoinHandle<T> {
 
 /// Spawn a new OS thread running `f`, returning a handle to await its result. `f` is an owning closure:
 /// values it uses are moved in and freed on the thread; it may not borrow the caller's locals. `F: Send`
-/// makes that safe -- every captured value must itself be `Send`, so a raw pointer (or anything holding
+/// makes that safe: every captured value must itself be `Send`, so a raw pointer (or anything holding
 /// one) cannot cross the boundary; share through `Arc` and mutate through an atomic or a lock instead.
 /// `F: 'static` is what forbids capturing a borrow of a caller local: the thread may outlive this call.
 pub fn spawn<F: fn move() T + Send + 'static, T>(f: F) JoinHandle<T> {

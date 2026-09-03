@@ -1,6 +1,6 @@
 // The incremental-analysis oracle: every scripted edit runs through analysis::recompile against a
 // retained package AND through a from-scratch analysis::compile of the same overlays, then the two
-// must agree -- diagnostics as a multiset, and name-resolution probes at sampled positions. The
+// must agree: diagnostics as a multiset, and name-resolution probes at sampled positions. The
 // RecompileStats counters additionally pin the exit-gate observables: a body edit re-analyzes ONE
 // module (importers untouched), a signature edit re-analyzes exactly the importers' closure, a
 // `const fn` body edit is interface-class (CTFE reads it cross-module), an import edit or syntax
@@ -139,7 +139,7 @@ fn diags_equal(a: &Vector<an::DiagRec>, b: &Vector<an::DiagRec>) bool {
 }
 
 // The resolution target of the first identifier spelling `needle` in module `mid`: packed
-// (target module << 32 | target decl's span start) -- node-id independent, so it compares across a
+// (target module << 32 | target decl's span start): node-id independent, so it compares across a
 // spliced arena and a fresh one.
 fn probe_res(p: &loader::Package, mid: usize, needle: str) u64 {
     let a = &p.modules.at(mid).ast;
@@ -226,7 +226,7 @@ fn incr_body_edit_stays_local() {
     let mut ovt = Vector::<String>::new();
     let mut diags = Vector::<an::DiagRec>::new();
     let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
-    // grow dee's body: strictly inside the braces of a plain fn
+    // Grow dee's body: strictly inside the braces of a plain fn.
     let d1: str = M"(pub fn dee(v: i32) i32 {
     let w = v + 2 + 100;
     return w;
@@ -251,7 +251,7 @@ fn incr_body_edit_diag_positions_shift() {
     let mut ovt = Vector::<String>::new();
     let mut diags = Vector::<an::DiagRec>::new();
     let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
-    // introduce a type error inside dee AND grow the text before `other`, so other's node spans shift
+    // Introduce a type error inside dee AND grow the text before `other`, so other's node spans shift.
     let d1: str = M"(pub fn dee(v: i32) i32 {
     let w = v + 1;
     let bad: i32 = true;
@@ -267,7 +267,7 @@ pub fn other() i32 {
     let mut st = an::RecompileStats {};
     round(&ws, &mut p, &mut diags, &ovf, &ovt, &mut st, "body diag oracle");
     assert(st.body_only == 1, "diag edit stays on the splice path");
-    // and fixing it clears the record again
+    // And fixing it clears the record again.
     let mut ovf2 = Vector::<String>::new();
     let mut ovt2 = Vector::<String>::new();
     ov(&ws, "d.spc", D0, &mut ovf2, &mut ovt2);
@@ -282,7 +282,7 @@ fn incr_signature_edit_invalidates_importers() {
     let mut ovt = Vector::<String>::new();
     let mut diags = Vector::<an::DiagRec>::new();
     let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
-    // bee grows a parameter: a's call site must now error, c and d must stay untouched
+    // Bee grows a parameter: a's call site must now error, c and d must stay untouched.
     let b1: str = M"(import c;
 
 pub fn bee(extra: i32) i32 {

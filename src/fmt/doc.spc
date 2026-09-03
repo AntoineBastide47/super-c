@@ -5,13 +5,15 @@
 // immutable once created, so DocIds may be shared (join() reuses one separator id); the flat width of
 // every node is memoized AT CREATION (children always exist before parents), making rendering linear.
 
+/// Index into `DocPool.docs`; 0 is the shared Nil.
 pub type DocId = u32;
 
 pub const W_INF: u32 = 0xFFFFFFFFu32; // "contains a hard break": never fits flat
 
+/// Layout intent of one node; the trailing phrases say what `a`, `b`, and `s` hold.
 pub enum DocKind {
     DOC_NIL,
-    DOC_TEXT_SPAN, // a: start, b: end -- byte slice of the source
+    DOC_TEXT_SPAN, // a: start, b: end (byte slice of the source)
     DOC_TEXT_STR, // s: static text (keywords, punctuation)
     DOC_LINE, // space when flat, break+indent when broken
     DOC_SOFTLINE, // nothing when flat, break+indent when broken
@@ -23,6 +25,7 @@ pub enum DocKind {
     DOC_IFBREAK, // s: text when the enclosing group broke, a: 1 if a space when flat else 0
 }
 
+/// One immutable layout node; `w` is the memoized flat width (W_INF when it can never be flat).
 pub struct DocNode<'a> {
     pub kind: DocKind,
     pub a: u32,
@@ -31,12 +34,14 @@ pub struct DocNode<'a> {
     pub s: str<'a>,
 }
 
+/// Arena of layout nodes for one source; also the renderer.
 pub struct DocPool<'a> {
     pub docs: Vector<DocNode<'a>>,
     pub kids: Vector<DocId>,
     pub src: *const u8, // backing bytes for DOC_TEXT_SPAN
 }
 
+/// Columns added per DOC_INDENT level.
 pub const INDENT_WIDTH: i32 = 4;
 
 const fn wadd(x: u32, y: u32) u32 {
@@ -84,6 +89,7 @@ extend Renderer {
 }
 
 extend DocPool {
+    /// An empty pool over `src`, the byte buffer DOC_TEXT_SPAN nodes slice. `src` must outlive the pool.
     pub fn new<'a>(src: *const u8) DocPool<'a> {
         let mut p = DocPool { docs: Vector::<DocNode>::new(), kids: Vector::<DocId>::new(), src: src };
         // Index 0 is the shared Nil.
@@ -97,6 +103,7 @@ extend DocPool {
         return id;
     }
 
+    /// The shared empty node (id 0).
     pub const fn nil(self: &Self) DocId {
         return 0;
     }
@@ -111,27 +118,33 @@ extend DocPool {
         return self.push(DocNode { kind: DocKind::DOC_TEXT_SPAN, a: start, b: end, w: end - start, s: "" });
     }
 
+    /// A space when flat, a break plus indent when the enclosing group breaks.
     pub fn line(self: &mut Self) DocId {
         return self.push(DocNode { kind: DocKind::DOC_LINE, a: 0, b: 0, w: 1, s: "" });
     }
 
+    /// Nothing when flat, a break plus indent when the enclosing group breaks.
     pub fn softline(self: &mut Self) DocId {
         return self.push(DocNode { kind: DocKind::DOC_SOFTLINE, a: 0, b: 0, w: 0, s: "" });
     }
 
+    /// An unconditional break; forces every enclosing group to break.
     pub fn hardline(self: &mut Self) DocId {
         return self.push(DocNode { kind: DocKind::DOC_HARDLINE, a: 0, b: 0, w: W_INF, s: "" });
     }
 
+    /// An unconditional break preceded by one empty line; forces every enclosing group to break.
     pub fn blankline(self: &mut Self) DocId {
         return self.push(DocNode { kind: DocKind::DOC_BLANKLINE, a: 0, b: 0, w: W_INF, s: "" });
     }
 
+    /// `child` with every break inside it indented one more level.
     pub fn indent(self: &mut Self, child: DocId) DocId {
         let w = self.docs.at(child as usize).w;
         return self.push(DocNode { kind: DocKind::DOC_INDENT, a: child, b: 0, w: w, s: "" });
     }
 
+    /// A layout choice point: `child` renders flat when it fits the remaining width, else broken.
     pub fn group(self: &mut Self, child: DocId) DocId {
         let w = self.docs.at(child as usize).w;
         return self.push(DocNode { kind: DocKind::DOC_GROUP, a: child, b: 0, w: w, s: "" });

@@ -12,7 +12,8 @@ fn resize_default_grows_and_truncates() {
     assert_eq(v.len(), 4);
     assert_eq(*v.at(3), 0u8);
     v.push(9u8);
-    v.resize_default(2); // shrinking frees the tail
+    // Shrinking frees the tail.
+    v.resize_default(2);
     assert_eq(v.len(), 2);
 }
 
@@ -24,7 +25,8 @@ fn push_pop_len() {
         v.push(i * i);
     }
     assert_eq(v.len(), 20);
-    assert_eq(*v.at(7), 49); // stored value preserved
+    // Stored value preserved.
+    assert_eq(*v.at(7), 49);
     let last = v.pop();
     assert(last.is_some() && last.unwrap() == 361 && v.len() == 19, "pop returns the last element (LIFO)");
     let mut empty = Vector::<i32>::new();
@@ -34,7 +36,8 @@ fn push_pop_len() {
 @test
 fn capacity_growth() {
     let mut v = Vector::<i32>::new();
-    assert_eq(v.capacity(), 0); // init allocates nothing
+    // Init allocates nothing.
+    assert_eq(v.capacity(), 0);
     v.reserve(10);
     assert(v.capacity() >= 10 && v.len() == 0, "reserve grows capacity, never len");
     for i in 0..200 {
@@ -63,7 +66,8 @@ fn insert_remove() {
     for i in 0..4 {
         v.push(i);
     } // [0,1,2,3]
-    v.insert(1, 99); // [0,99,1,2,3]
+    // [0,99,1,2,3].
+    v.insert(1, 99);
     assert(v.len() == 5 && *v.at(1) == 99 && *v.at(2) == 1, "insert shifts right");
     let r = v.remove(1); // -> Some(99), [0,1,2,3]
     assert(r.is_some() && r.unwrap() == 99 && v.len() == 4 && *v.at(1) == 1, "remove returns value + shifts left");

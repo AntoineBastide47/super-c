@@ -1,13 +1,14 @@
-// Place canonicalization and the move-path forest: one tracked node per local and per
-// field/downcast chain the body actually mentions. Dereference and index projections CUT tracking --
-// storage behind them is not owned by the tracked binding, so moves through them never change path
-// state. Path ids are dense; sibling order is first-mention order, which is Core IR order, so two
-// serial runs number identically.
+// Place canonicalization and the move-path forest: one tracked node per local and per field/downcast
+// chain the body mentions. Dereference and index projections cut tracking: storage behind them is not
+// owned by the tracked binding, so moves through them never change path state. Path ids are dense;
+// sibling order is first-mention order, which is Core IR order, so two serial runs number identically.
 import ast::ast as *;
 import ir::core as ir;
 
+/// The absent move path.
 pub const MP_NONE: u32 = 0xFFFFFFFF;
 
+/// One forest node: a local root or a field/downcast projection under `parent`.
 pub struct MovePath {
     pub base: ir::LocalId,
     pub parent: u32, // MP_NONE for a local root
@@ -17,6 +18,7 @@ pub struct MovePath {
     pub ty: TypeId,
 }
 
+/// Move-path forest of one Core body, indexed by LocalId (roots) and PlaceId (tracked path or cut).
 pub struct MoveForest {
     pub paths: Vector<MovePath>,
     pub local_root: Vector<u32>, // per local: root path id (every local gets one)
@@ -46,6 +48,7 @@ const fn elem_key(kind: u8, data: u32, sub: u32) u64 {
 }
 
 extend MoveForest {
+    /// A forest with no paths and no heap storage; `build_into` fills it.
     pub fn empty() MoveForest {
         return MoveForest {
             paths: Vector::<MovePath>::new(),
@@ -57,12 +60,16 @@ extend MoveForest {
         };
     }
 
+    /// Forest for body `b`; every local gets a root even when no place mentions it.
+    /// Panics: more than 2^24 paths (the Event encoding packs a path id into 24 bits).
     pub fn build(b: &ir::CoreBody) MoveForest {
         let mut f = MoveForest::empty();
         f.build_into(b);
         return f;
     }
 
+    /// Rebuild in place for body `b`, keeping heap capacity across bodies.
+    /// Panics: more than 2^24 paths.
     pub fn build_into(self: &mut Self, b: &ir::CoreBody) {
         let f = self;
         f.paths.truncate(0);
@@ -103,7 +110,7 @@ extend MoveForest {
             f.place_path.push(cur);
             f.place_cut.push(cut);
         }
-        // Mirror the replay-hot fields into dense rows (one pass; the tree is final here).
+        // The tree is final here, so the dense mirrors are filled in one pass.
         f.leaf.truncate(0);
         f.parent.truncate(0);
         for _i in 0..(f.paths.len() + 63) / 64 {
@@ -181,8 +188,7 @@ extend MoveForest {
     /// Visit `p` and every descendant (iterative; `scratch` is the caller's reusable stack).
     pub fn subtree(self: &Self, p: u32, scratch: &mut Vector<u32>, out: &mut Vector<u32>) {
         out.clear();
-        // Fast path for a leaf path (a scalar local, or any move path with no tracked children):
-        // the subtree is just the node itself, so skip the worklist DFS. This is the common case.
+        // Leaf fast path (the common case): the subtree is the node itself, so skip the worklist DFS.
         if self.paths.at(p as usize).first_child == MP_NONE {
             out.push(p);
             return;

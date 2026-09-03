@@ -27,7 +27,7 @@ pub struct DiagRec {
     pub msg: String,
     // machine-applicable fix: -1 = none, else a LintFix kind (0 delete [fix_start, fix_end),
     // 1 insert '_', 2 insert 'const ', 3 insert `fix_text`, 4 replace [fix_start, fix_end) with
-    // `fix_text`) surfaced as an LSP quick fix
+    // `fix_text`) surfaced as an LSP quick fix.
     pub fix_kind: i32,
     pub fix_start: u32,
     pub fix_end: u32,
@@ -42,7 +42,7 @@ extend DiagRec as Free {
 }
 
 // The editor-facing message for one structured record: the message's first line plus one "= note:"
-// line per attached note (its first line, trailing whitespace trimmed -- notes carry fix hints worth
+// line per attached note (its first line, trailing whitespace trimmed: notes carry fix hints worth
 // showing in the editor; a note's continuation lines are location blocks the editor renders itself).
 fn rec_msg(e: &diag::Errors, d: &diag::Diagnostic) String {
     let s = d.msg.as_str();
@@ -118,7 +118,8 @@ fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
                 if f.text != 0xFFFFFFFF && f.text as usize < e.fix_texts.len() {
                     ftx = e.fix_texts.at(f.text as usize).clone();
                 }
-                break; // one quick fix per warning
+                // One quick fix per warning.
+                break;
             }
         }
         let d = e.warns.at(k);
@@ -166,13 +167,13 @@ pub fn canon_path(path: str) String {
 }
 
 // Lints run for non-prelude modules (like `super-c build`), for the package's root file when it IS a
-// prelude module (the `super-c lint <std file>` recipe), and -- when `lint_dir` is non-empty (the
-// manifest root's build passes the canonical workspace root) -- for every prelude module under that
+// prelude module (the `super-c lint <std file>` recipe), and: when `lint_dir` is non-empty (the
+// manifest root's build passes the canonical workspace root): for every prelude module under that
 // directory, so a repo carrying its own std/ lints it like `super-c lint std`. Gating on the root
 // file rather than "any open doc" keeps each file's lint warnings owned by exactly one root.
 fn lsp_lint_wanted(p: &mut loader::Package, i: usize, root_file: str, lint_dir: str) bool {
-    // batch build: the mask names the member files; everything else (their closures, the prelude)
-    // is someone else's to lint
+    // Batch build: the mask names the member files; everything else (their closures, the prelude)
+    // is someone else's to lint.
     if p.lint_set.len() != 0 {
         return p.lint_set[i];
     }
@@ -221,7 +222,7 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
 }
 
 /// Load + resolve + typecheck (NO codegen), harvesting all diagnostics into `diags`. Takes ownership of
-/// the overlay vectors. The returned Package keeps every module's typed Ast -- the positional features
+/// the overlay vectors. The returned Package keeps every module's typed Ast: the positional features
 /// (hover/definition/references) query it until the next rebuild. Lint gating: see lsp_lint_wanted;
 /// `lint_dir` is the canonical workspace root when this build is the manifest root's, else "".
 pub fn compile(
@@ -249,7 +250,7 @@ pub fn compile(
     return p;
 }
 
-/// The LSP's workspace batch: like `super-c lint`'s one-package recipe -- the prelude loads first,
+/// The LSP's workspace batch: like `super-c lint`'s one-package recipe; the prelude loads first,
 /// every listed file joins the shared closure once, and `lint_set` marks the members so lints (and
 /// the always-panics pass) report exactly them. ONE resident package replaces the per-file sweep
 /// packages, which is what held a full prelude + closure copy per workspace file.
@@ -301,16 +302,14 @@ pub fn compile_batch(
     return p;
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// Incremental re-analysis: the LSP's query layer. A previously compiled package is updated in place
+// Incremental re-analysis: the LSP's query layer. An already compiled package is updated in place
 // against the CURRENT overlays; only the edit's reach re-runs. Module granularity: a changed module
 // re-parses (fresh node ids), so it AND every module whose import closure contains it re-resolve and
 // re-typecheck; everything else keeps its analysis and diagnostics verbatim (per-module type pools
 // reference other modules only by decl node id, so an analysis is stale exactly when a closure member
-// reparsed). Body granularity: an edit strictly inside one plain fn body reparses just that body into
+// reparsed). Body granularity: an edit strictly inside one plain fn body reparses only that body into
 // the SAME arena (every old node id survives, importers stay valid), and only that module re-analyzes.
 // Anything outside the incremental domain returns false and the caller falls back to a full compile.
-// ---------------------------------------------------------------------------------------------------------
 
 /// Outcome counters for one incremental round: the exit-gate observables (what re-ran and why).
 pub struct RecompileStats {
@@ -372,7 +371,7 @@ fn shift_spans(a: &mut Ast, old_nodes: usize, old_attrs: usize, old_metas: usize
         if n.span.end >= from {
             n.span.end = (n.span.end as i64 + delta) as u32;
         }
-        // literal/name payload spans ride the same source: shift the union arms that carry one
+        // Literal/name payload spans ride the same source: shift the union arms that carry one.
         if n.kind == NodeKind::NODE_IDENTIFIER || n.kind == NodeKind::NODE_LIFETIME {
             if n.as_data.name.text.start >= from {
                 n.as_data.name.text.start = (n.as_data.name.text.start as i64 + delta) as u32;
@@ -454,7 +453,7 @@ fn splice_candidate(a: &Ast, ws: u32, we: u32) NodeId {
 
 /// Incrementally re-analyze `p` against the current overlays. False = outside the incremental domain
 /// (import surface changed, a prelude module changed, a parse or resolve error appeared, the previous
-/// state was broken): the caller MUST fall back to a full compile -- the package may be part-updated.
+/// state was broken): the caller MUST fall back to a full compile; the package may be part-updated.
 /// True: `p` and `diags` (previous round's records in, merged records out) are current.
 pub fn recompile(
     p: &mut loader::Package,
@@ -475,7 +474,7 @@ pub fn recompile(
             return false;
         }
     }
-    // 1) the changed set: modules whose overlay text differs from the analyzed source
+    // 1) the changed set: modules whose overlay text differs from the analyzed source.
     let mut changed = Vector::<usize>::new();
     for i in 0..n {
         switch overlay_for(p, i, ov_files) {
@@ -488,17 +487,19 @@ pub fn recompile(
         };
     }
     if changed.len() == 0 {
-        return true; // no semantic work: the retained analysis and diagnostics stand
+        // No semantic work: the retained analysis and diagnostics stand.
+        return true;
     }
     let mut body_sliced = Vector::<bool>::new();
     for _ in 0..changed.len() {
         body_sliced.push(false);
     }
-    // 2) guards + reparse each changed module
+    // 2) Guards + reparse each changed module.
     for c in 0..changed.len() {
         let i = changed[c];
         if p.modules[i].prelude || !p.modules[i].has_ast {
-            return false; // prelude reaches everything implicitly; a broken prior state has no baseline
+            // Prelude reaches everything implicitly; a broken prior state has no baseline.
+            return false;
         }
         let k = overlay_for(p, i, ov_files).unwrap();
         let file = p.modules[i].file.clone();
@@ -509,7 +510,7 @@ pub fn recompile(
             return false;
         }
         let toks = lx.take_tokens();
-        // body-splice probe: common prefix/suffix window strictly inside one plain fn body
+        // Body-splice probe: common prefix/suffix window strictly inside one plain fn body.
         let mut ws: u32 = 0;
         let mut we: u32 = 0;
         let mut delta: i64 = 0;
@@ -545,7 +546,7 @@ pub fn recompile(
             body_sliced.set(c, true);
             st.body_only += 1;
         } else {
-            // full module reparse (fresh lex: the splice attempt consumed the first stream). Fresh
+            // Full module reparse (fresh lex: the splice attempt consumed the first stream). Fresh
             // ids, so the import surface must be unchanged or the loader's closure caches (and every
             // importer's decl references) would be wrong.
             let mut ns9 = String::from_str(ov_texts.at(k).as_str());
@@ -576,9 +577,9 @@ pub fn recompile(
         st.reparsed += 1;
     }
     // 3) decl spans (and for full reparses, decl ids) changed: rebuild the package index. The
-    // import-closure caches survive -- the guard above proved the edges identical.
+    // import-closure caches survive: the guard above proved the edges identical.
     p.build_index();
-    // 4) the affected closure: changed modules, plus every module that can reach one through imports
+    // 4) the affected closure: changed modules, plus every module that can reach one through imports.
     let mut aff = Vector::<bool>::new();
     for _ in 0..n {
         aff.push(false);
@@ -594,8 +595,8 @@ pub fn recompile(
         let mut hit = false;
         for j in 0..clo.len() {
             for c in 0..changed.len() {
-                // a body-spliced module's interface (decl ids, signatures, const bodies) is
-                // untouched, so reaching it does not stale the reacher
+                // A body-spliced module's interface (decl ids, signatures, const bodies) is
+                // untouched, so reaching it does not stale the reacher.
                 if !body_sliced[c] && clo[j] as usize == changed[c] {
                     hit = true;
                 }
@@ -605,7 +606,7 @@ pub fn recompile(
             aff.set(m, true);
         }
     }
-    // 5) re-run the pipeline over the affected set only, mirroring run_pipeline's phase order
+    // 5) re-run the pipeline over the affected set only, mirroring run_pipeline's phase order.
     let pkg = p as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;
@@ -616,8 +617,8 @@ pub fn recompile(
         }
         let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
         if !lsp_resolve_module(p, i, lw, &mut nd) {
-            // a resolve failure invalidates this module's retained analyses and its importers';
-            // rather than track that incrementally, hand the round to the full path
+            // A resolve failure invalidates this module's retained analyses and its importers';
+            // rather than track that incrementally, hand the round to the full path.
             p.cir = null;
             nd.free();
             return false;
@@ -646,7 +647,7 @@ pub fn recompile(
         }
     }
     p.cir = null;
-    // 6) merge: keep unaffected modules' records, replace the affected ones'
+    // 6) merge: keep unaffected modules' records, replace the affected ones'.
     let mut merged = Vector::<DiagRec>::new();
     while diags.len() > 0 {
         let d = diags.remove(diags.len() - 1).unwrap();
@@ -684,7 +685,7 @@ fn try_body_splice(
 ) bool {
     let bodyid = p.modules[i].ast.at_const(fnid).as_data.function.body;
     let bspan = p.modules[i].ast.at_const(bodyid).span;
-    // the body's '{' sits in the UNchanged prefix, so its offset is the same in both sources
+    // The body's '{' sits in the UNchanged prefix, so its offset is the same in both sources.
     let mut at: i64 = -1;
     for t in 0..toks.len() {
         if toks.at(t).start() == bspan.start {
@@ -712,7 +713,8 @@ fn try_body_splice(
     let hold = replace(&mut p.modules[i].ast, arena_back);
     hold.free();
     if bad || p.modules[i].ast.at_const(nb).span.end != want_end {
-        return false; // orphaned appends only; the caller full-reparses this module
+        // Orphaned appends only; the caller full-reparses this module.
+        return false;
     }
     let a = &mut p.modules[i].ast;
     shift_spans(a, old_nodes, old_attrs, old_metas, we_old, delta);
@@ -761,8 +763,8 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
         }
     }
     if all_ok {
-        // driver-parity post-typecheck phase: the always-panics check (an error) interprets
-        // cross-module `const fn` bodies, so it only runs once every module is typed
+        // Driver-parity post-typecheck phase: the always-panics check (an error) interprets
+        // cross-module `const fn` bodies, so it only runs once every module is typed.
         cirv.all_typed = true;
         for i in 0..n {
             if lsp_lint_wanted(p, i, root_file, lint_dir) {

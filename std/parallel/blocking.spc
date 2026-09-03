@@ -4,15 +4,15 @@
 //         return read_from_a_library_that_blocks();
 //     });
 //
-// A worker thread belongs to the scheduler: a coroutine that calls something which blocks the thread --
-// `read()`, a legacy C library, anything the runtime cannot park -- takes that worker out of circulation
+// A worker thread belongs to the scheduler: a coroutine that calls something which blocks the thread;
+// `read()`, a legacy C library, anything the runtime cannot park: takes that worker out of circulation
 // for the duration, and enough of them stall the whole pool. `call` moves the work onto a separate pool of
 // plain OS threads (which are allowed to block) and PARKS the calling coroutine until the result comes
 // back, so the worker keeps serving other tasks meanwhile. Called from a non-coroutine thread it still
-// works: the caller simply blocks, which is what it would have done anyway.
+// works: the caller blocks, which is what it would have done anyway.
 //
 // The pool starts on first use and grows on demand up to `MAX_THREADS`; `shutdown()` joins it. `f` must be
-// `Send + 'static` for the same reason a launched task must -- it runs on another thread, and it may still
+// `Send + 'static` for the same reason a launched task must: it runs on another thread, and it may still
 // be running when the call that submitted it is gone (if the caller panics, say).
 
 import atomic;
@@ -63,7 +63,8 @@ pub fn complete(d: *mut Done) {
         *v = 1;
     }
     let cv = &unsafe d.cv;
-    cv.notify_all(); // under the paired lock: it guards the wait queue
+    // Under the paired lock: it guards the wait queue.
+    cv.notify_all();
 }
 
 // The C-ABI thread body: take work, run it, repeat until shutdown drains the queue.
@@ -84,7 +85,8 @@ fn pool_main(arg: *mut void) *mut void {
         if j == null {
             unsafe p.live = unsafe p.live - 1;
             unsafe sc_runtime::sc_rt_mutex_unlock(p.lock);
-            break; // shutting down and drained, or idle for too long
+            // Shutting down and drained, or idle for too long.
+            break;
         }
         unsafe p.head = unsafe j.next;
         if unsafe p.head == null {
@@ -95,7 +97,8 @@ fn pool_main(arg: *mut void) *mut void {
         let env = unsafe j.env;
         let mut g = Global {};
         unsafe g.dealloc(j, sizeof(BJob), alignof(BJob));
-        run(env); // outside the lock: this is the part that is allowed to block
+        // Outside the lock: this is the part that is allowed to block.
+        run(env);
     }
     return null;
 }
@@ -210,7 +213,7 @@ const BS_COMPLETE: i32 = 2;
 const BS_ABANDONED: i32 = 3;
 
 /// A coroutine's blocking-call record: HEAP-owned and reference-counted, never a pointer into the waiting
-/// coroutine's stack -- so a cancelled task can abandon the call and the pool worker still has somewhere
+/// coroutine's stack, so a cancelled task can abandon the call and the pool worker still has somewhere
 /// safe to write. The task and the worker hold one reference each; the completion/abandonment race is one
 /// compare-and-swap on `state`, the loser of which owns nothing, and whichever side ends with the value
 /// (`Complete` read by the task, or `Complete` after `Abandoned` seen by the worker) frees it exactly
@@ -233,13 +236,18 @@ fn brec_drop<T>(rp: *mut BRec<T>) {
 }
 
 fn brec_wait_complete<T>(rp: *mut BRec<T>) {
+    // Reached only after the worker won the PENDING->COMPLETING CAS, so it is committed to storing
+    // COMPLETE next with no blocking step in between: the sole cause of a wait here is the worker being
+    // descheduled. Spin briefly, then yield the CPU so a preempted worker can finish. A fixed spin cap
+    // would turn a scheduler delay under load into a spurious panic.
     let mut spins: u32 = 0;
-    while atomic::load_i32(&mut unsafe rp.state, 1) == BS_COMPLETING && spins < 1000000 {
-        unsafe sc_runtime::sc_rt_cpu_relax();
-        spins += 1;
-    }
-    if atomic::load_i32(&mut unsafe rp.state, 1) != BS_COMPLETE {
-        panic("blocking completion did not settle");
+    while atomic::load_i32(&mut unsafe rp.state, 1) == BS_COMPLETING {
+        if spins < 64 {
+            unsafe sc_runtime::sc_rt_cpu_relax();
+            spins += 1;
+        } else {
+            unsafe sc_runtime::sc_rt_thread_yield();
+        }
     }
 }
 
@@ -251,7 +259,7 @@ struct CPayload<F, T> {
 }
 
 /// The per-`(F, T)` trampoline for a coroutine caller: run the closure, publish the value into the heap
-/// record, and settle the ownership race. If the task abandoned the call, the value is freed HERE -- the
+/// record, and settle the ownership race. If the task abandoned the call, the value is freed HERE: the
 /// blocking worker never touches the coroutine or its stack after an abandonment. `pub` for linkage.
 pub fn entry_rec<F: fn move() T + Send, T>(env: *mut void) {
     let pp = env as *mut CPayload<F, T>;
@@ -262,7 +270,8 @@ pub fn entry_rec<F: fn move() T + Send, T>(env: *mut void) {
     unsafe g.dealloc(env, sizeof(CPayload<F, T>), alignof(CPayload<F, T>));
     let f = pay.body;
     let rp = pay.rec;
-    unsafe rp.value = f(); // raw store into record storage the worker's reference keeps alive
+    // Raw store into record storage the worker's reference keeps alive.
+    unsafe rp.value = f();
     if atomic::cas_i32(&mut unsafe rp.state, BS_PENDING, BS_COMPLETING, false, 4, 0) {
         let _ = runtime::wake_as(unsafe rp.co, unsafe rp.token, runtime::WR_BLOCKING);
         atomic::store_i32(&mut unsafe rp.state, BS_COMPLETE, 2);
@@ -289,7 +298,7 @@ fn commit_submit(p: *mut void) {
 }
 
 /// Run `run(env)` on the blocking pool and park the caller until it returns. The non-generic core of
-/// `call`, and what a `@blocking` extern function's generated wrapper hands its work to -- hence the pinned
+/// `call`, and what a `@blocking` extern function's generated wrapper hands its work to: hence the pinned
 /// C symbol, which is the name codegen emits.
 @c.export("__sc_blocking_run")
 pub fn run_blocking(run: fn(*mut void) void, env: *mut void) {
@@ -316,7 +325,7 @@ struct RawJob {
     pub done: *mut Done,
 }
 
-// Runs one `run_blocking` job on a pool thread. `pub` for linkage.
+/// Runs one `run_blocking` job on a pool thread. `pub` for linkage.
 pub fn raw_entry(p: *mut void) {
     let j = p as *mut RawJob;
     let run = unsafe j.run;
@@ -355,8 +364,8 @@ fn call_park<F: fn move() T + Send + 'static, T: Send>(
 }
 
 /// Run `f` on the blocking pool and return its value. The calling coroutine PARKS while it runs, so the
-/// worker thread stays available; any other caller simply blocks. This is how a coroutine calls something
-/// that would otherwise hold a worker hostage -- a blocking `read`, a legacy library, a slow syscall.
+/// worker thread stays available; any other caller blocks. This is how a coroutine calls something
+/// that would otherwise hold a worker hostage: a blocking `read`, a legacy library, a slow syscall.
 pub fn call<F: fn move() T + Send + 'static, T: Send>(f: F) T {
     let co = runtime::current();
     if co != null {
@@ -389,13 +398,14 @@ pub fn call<F: fn move() T + Send + 'static, T: Send>(f: F) T {
 }
 
 /// `call`, but the park is a cancellation point: `None` means the wait was cancelled. The task's side of
-/// the job is ABANDONED -- the blocking operation is not stopped; when it returns, the pool worker frees
+/// the job is ABANDONED: the blocking operation is not stopped; when it returns, the pool worker frees
 /// the unclaimed result and the last reference frees the record. No pool thread ever writes into this
 /// coroutine's stack. The cancellable form for callers that can propagate cancellation.
 pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
     let co = runtime::current();
     if co == null {
-        return Option::<T>::Some(call::<F, T>(f)); // a plain thread has no task to cancel
+        // A plain thread has no task to cancel.
+        return Option::<T>::Some(call::<F, T>(f));
     }
     let mut reason: u32 = 0;
     let rp = call_park::<F, T>(f, co, true, &mut reason);
@@ -417,7 +427,7 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
 }
 
 /// Stop the blocking pool and join its threads. Idempotent; a no-op if it never started. Call it once, from
-/// the main thread, after every `call` has returned -- alongside `runtime::shutdown()`.
+/// the main thread, after every `call` has returned: alongside `runtime::shutdown()`.
 pub fn shutdown() {
     let sp = (&mut unsafe G_STATE) as *mut i32;
     if atomic_load(sp) != 2 {

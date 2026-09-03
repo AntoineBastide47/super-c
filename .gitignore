@@ -45,3 +45,4 @@ bench/compare/rust/target/
 bench/compare/go/sccompare
 super-c.wasm
 plans
+v2

@@ -3,7 +3,7 @@
 //
 // `str` is a non-owning (ptr, len) view: it never allocates, resizes, or mutates the bytes it points
 // at, so its whole API returns either sub-views (`str`) or scalar values. Owning/mutating operations
-// live on `String`. The `(ptr, len)` fields are PRIVATE -- read them through the `.ptr()` / `.len()`
+// live on `String`. The `(ptr, len)` fields are PRIVATE: read them through the `.ptr()` / `.len()`
 // accessors, and build a view from raw parts with `str::from_raw(ptr, len)` (the only way to make one).
 //
 // Borrowed iterators (`bytes`, `chars`, `split`, `lines`) live at the bottom of this module as small
@@ -14,7 +14,7 @@ extern "C" {
     fn memcmp(a: *const void, b: *const void, n: usize) i32;
 }
 
-/// A borrowed view over UTF-8 bytes -- the type of a string literal. Non-owning: the bytes outlive it.
+/// A borrowed view over UTF-8 bytes: the type of a string literal. Non-owning: the bytes outlive it.
 pub struct str<'a> {
     ptr: *const u8, // start of the bytes
     len: usize, // number of bytes
@@ -22,7 +22,7 @@ pub struct str<'a> {
 
 extend str {
     /// Construct a view over `len` bytes at `ptr`. The building block for the rest of std and for callers
-    /// bridging from a raw C buffer -- the fields are private, so this is the only way to make a `str`.
+    /// bridging from a raw C buffer: the fields are private, so this is the only way to make a `str`.
     pub const fn from_raw<'a>(ptr: *const u8, len: usize) str<'a> {
         return str { ptr: ptr, len: len };
     }
@@ -37,13 +37,14 @@ extend str {
         return str::from_raw(s as *const u8, n);
     }
 
-    // --- length & raw access -------------------------------------------------------------------
+    // --- length & raw access -------------------------------------------------------------------.
 
     /// Number of bytes in the view. `s.len()` is the accessor for the private `len` field.
     pub const fn len(self: &str) usize {
         return self.len;
     }
 
+    /// True when the view has no bytes.
     pub const fn is_empty(self: &str) bool {
         return self.len == 0;
     }
@@ -53,19 +54,20 @@ extend str {
         return self.ptr;
     }
 
-    /// The byte at `index` (0 <= index < len). No bounds check -- the caller owns the index.
+    /// The byte at `index` (0 <= index < len). No bounds check: the caller owns the index.
     pub const fn byte_at(self: &str, index: usize) u8 {
         return unsafe self.ptr[index];
     }
 
-    /// The sub-view of bytes [start, end) -- allocation-free, it borrows `self`'s bytes. The caller
+    /// The sub-view of bytes [start, end): allocation-free, it borrows `self`'s bytes. The caller
     /// keeps `start`/`end` on UTF-8 boundaries (and within bounds).
     pub const fn slice(self: &str, start: usize, end: usize) str {
         return str { ptr: unsafe (self.ptr + start), len: end - start };
     }
 
-    // --- search --------------------------------------------------------------------------------
+    // --- search --------------------------------------------------------------------------------.
 
+    /// True when the bytes begin with `prefix`.
     pub const fn starts_with(self: &str, prefix: str) bool {
         if prefix.len > self.len {
             return false;
@@ -76,6 +78,7 @@ extend str {
         return unsafe memcmp(self.ptr, prefix.ptr, prefix.len) == 0;
     }
 
+    /// True when the bytes end with `suffix`.
     pub const fn ends_with(self: &str, suffix: str) bool {
         if suffix.len > self.len {
             return false;
@@ -113,11 +116,12 @@ extend str {
         return -1;
     }
 
+    /// True when `needle` occurs as a substring.
     pub const fn contains(self: &str, needle: str) bool {
         return self.find(needle) >= 0;
     }
 
-    // --- trim (returns sub-views; no allocation) -----------------------------------------------
+    // --- trim (returns sub-views; no allocation) -----------------------------------------------.
 
     /// The view with leading ASCII whitespace (space, tab, newline, carriage return) removed.
     pub const fn trim_start(self: &str) str {
@@ -151,7 +155,7 @@ extend str {
         return t.trim_end();
     }
 
-    // --- UTF-8 queries -------------------------------------------------------------------------
+    // --- UTF-8 queries -------------------------------------------------------------------------.
 
     /// Number of UTF-8 scalar values: every byte that is not a 0b10xxxxxx continuation starts one.
     /// (Assumes valid UTF-8; pair with `is_valid_utf8` if the source is untrusted.)
@@ -166,7 +170,7 @@ extend str {
     }
 
     /// True if the bytes are structurally well-formed UTF-8: every leading byte announces a 1-4 byte
-    /// sequence that fits and whose tail bytes are all 0b10xxxxxx continuations. (Structural only --
+    /// sequence that fits and whose tail bytes are all 0b10xxxxxx continuations. (Structural only:
     /// it does not reject overlong encodings or surrogate-range scalars.)
     pub const fn is_valid_utf8(self: &str) bool {
         let mut i: usize = 0;
@@ -182,7 +186,8 @@ extend str {
             } else if (b & 0xF8) == 0xF0 {
                 n = 4;
             } else {
-                return false; // 0b10xxxxxx as a leader, or a 5+ byte form
+                // 0b10xxxxxx as a leader, or a 5+ byte form.
+                return false;
             }
             if i + n > self.len {
                 return false;
@@ -261,8 +266,8 @@ extend str as Default {
     }
 }
 
-// Index conformance: `s[i]` borrows the byte at `i`; `s[lo..hi]` -- any range form, `..=` including the
-// end byte, an open end meaning `len()` -- is the sub-view `slice(lo, hi)`. Byte-addressed and unchecked:
+// Index conformance: `s[i]` borrows the byte at `i`; `s[lo..hi]`; any range form, `..=` including the
+// end byte, an open end meaning `len()`: is the sub-view `slice(lo, hi)`. Byte-addressed and unchecked:
 // the caller keeps the bounds within `len` and on UTF-8 boundaries, exactly like `byte_at`/`slice`.
 // No IndexMut: a `str` is a read-only view.
 extend str as Index<u8, str> {
@@ -292,22 +297,27 @@ extend str as Index<u8, str> {
 // Borrowing cursors over a `str`. Each holds a copy of the (ptr, len) view, so the borrowed bytes must
 // outlive the iterator (the same borrowing contract as `Vector::iter`). Bind the source first: iterating a
 // TEMPORARY (`for c in make_string().chars() { .. }`) reads freed memory once the temporary is dropped at
-// the end of the construction expression -- bind it to a `let` whose scope covers the loop. They live in
+// the end of the construction expression: bind it to a `let` whose scope covers the loop. They live in
 // this module (alongside `str`), so no prelude header cycle arises.
 
+/// Iterator over the bytes of a `str`.
 pub struct Bytes<'a> {
     pub s: str<'a>,
     pub i: usize,
 }
+/// Iterator over the Unicode scalars of a `str` (assumes valid UTF-8).
 pub struct Chars<'a> {
     pub s: str<'a>,
     pub i: usize,
 }
+/// Iterator over the pieces of a `str` between occurrences of a separator; an empty input yields one
+/// empty piece.
 pub struct Split<'a> {
     pub s: str<'a>,
     pub i: usize,
     pub sep: str<'a>,
 }
+/// Iterator over the lines of a `str` without their terminators (`\n` or `\r\n`).
 pub struct Lines<'a> {
     pub s: str<'a>,
     pub i: usize,
@@ -342,6 +352,8 @@ extend str {
     // first). Radix forms accept 2..=36 with case-insensitive digits. Empty input, a stray sign,
     // an invalid digit, or overflow all yield `None`.
 
+    /// Parse an unsigned integer in `radix` (2..=36) with an optional leading `+`; None on an empty string,
+    /// a bad digit, or overflow.
     pub const fn parse_u64_radix(self: &str, radix: u32) Option<u64> {
         let mut start: usize = 0;
         if self.len > 0 && self.byte_at(0) == b'+' {
@@ -350,6 +362,8 @@ extend str {
         return __str_digits_u64(self, radix, start);
     }
 
+    /// Parse a signed integer in `radix` (2..=36) with an optional sign; None on an empty string, a bad
+    /// digit, or overflow.
     pub const fn parse_i64_radix(self: &str, radix: u32) Option<i64> {
         if self.len == 0 {
             return Option::<i64>::None;
@@ -362,7 +376,7 @@ extend str {
         }
         return switch __str_digits_u64(self, radix, start) {
             Some(v) => switch neg {
-                // |i64::MIN| = 2^63 is spellable only with the sign; unsigned negate avoids overflow
+                // |i64::MIN| = 2^63 is spellable only with the sign; unsigned negate avoids overflow.
                 true => switch v <= 0x8000_0000_0000_0000u64 {
                     true => Option::<i64>::Some((0 - v) as i64),
                     false => Option::<i64>::None,
@@ -376,24 +390,29 @@ extend str {
         };
     }
 
+    /// `parse_u64_radix(10)`.
     pub const fn parse_u64(self: &str) Option<u64> {
         return self.parse_u64_radix(10);
     }
+    /// `parse_i64_radix(10)`.
     pub const fn parse_i64(self: &str) Option<i64> {
         return self.parse_i64_radix(10);
     }
+    /// Decimal parse into usize; None on overflow for the target width.
     pub const fn parse_usize(self: &str) Option<usize> {
         return switch self.parse_u64() {
             Some(v) => Option::<usize>::Some(v as usize),
             None => Option::<usize>::None,
         };
     }
+    /// Decimal parse into isize; None on overflow for the target width.
     pub const fn parse_isize(self: &str) Option<isize> {
         return switch self.parse_i64() {
             Some(v) => Option::<isize>::Some(v as isize),
             None => Option::<isize>::None,
         };
     }
+    /// Decimal parse; None when the value does not fit.
     pub const fn parse_u32(self: &str) Option<u32> {
         return switch self.parse_u64() {
             Some(v) => switch v <= 0xFFFF_FFFFu64 {
@@ -403,6 +422,7 @@ extend str {
             None => Option::<u32>::None,
         };
     }
+    /// Decimal parse; None when the value does not fit.
     pub const fn parse_u16(self: &str) Option<u16> {
         return switch self.parse_u64() {
             Some(v) => switch v <= 65535 {
@@ -412,6 +432,7 @@ extend str {
             None => Option::<u16>::None,
         };
     }
+    /// Decimal parse; None when the value does not fit.
     pub const fn parse_u8(self: &str) Option<u8> {
         return switch self.parse_u64() {
             Some(v) => switch v <= 255 {
@@ -421,6 +442,7 @@ extend str {
             None => Option::<u8>::None,
         };
     }
+    /// Decimal parse; None when the value does not fit.
     pub const fn parse_i32(self: &str) Option<i32> {
         return switch self.parse_i64() {
             Some(v) => switch v >= -2_147_483_648 && v <= 2_147_483_647 {
@@ -430,6 +452,7 @@ extend str {
             None => Option::<i32>::None,
         };
     }
+    /// Decimal parse; None when the value does not fit.
     pub const fn parse_i16(self: &str) Option<i16> {
         return switch self.parse_i64() {
             Some(v) => switch v >= -32_768 && v <= 32_767 {
@@ -439,6 +462,7 @@ extend str {
             None => Option::<i16>::None,
         };
     }
+    /// Decimal parse; None when the value does not fit.
     pub const fn parse_i8(self: &str) Option<i8> {
         return switch self.parse_i64() {
             Some(v) => switch v >= -128 && v <= 127 {
@@ -450,7 +474,7 @@ extend str {
     }
 
     /// Decimal float: `[+|-] digits [. digits] [(e|E) [+|-] digits]`. Computed as an integer mantissa
-    /// scaled by a power of ten -- exact for the common cases; the last ulp is not guaranteed for
+    /// scaled by a power of ten: exact for the common cases; the last ulp is not guaranteed for
     /// extreme magnitudes.
     pub const fn parse_f64(self: &str) Option<f64> {
         let n = self.len;
@@ -475,7 +499,8 @@ extend str {
             if mant <= 1_844_674_407_370_955_160u64 {
                 mant = mant * 10 + (b - b'0') as u64;
             } else {
-                exp10 += 1; // mantissa saturated: keep the scale, drop precision
+                // Mantissa saturated: keep the scale, drop precision.
+                exp10 += 1;
             }
             i += 1;
         }
@@ -544,6 +569,7 @@ extend str {
         return Option::<f64>::Some(v);
     }
 
+    /// `parse_f64` narrowed to f32.
     pub const fn parse_f32(self: &str) Option<f32> {
         return switch self.parse_f64() {
             Some(v) => Option::<f32>::Some(v as f32),
@@ -576,7 +602,8 @@ fn __str_digits_u64(s: &str, radix: u32, start: usize) Option<u64> {
         }
         let dv = d as u64;
         if acc > (0xFFFF_FFFF_FFFF_FFFFu64 - dv) / r {
-            return Option::<u64>::None; // would overflow u64
+            // Would overflow u64.
+            return Option::<u64>::None;
         }
         acc = acc * r + dv;
         i += 1;
@@ -617,17 +644,19 @@ extend Chars as Iterator<u32> {
             n = 4;
         } else {
             self.i = self.i + 1;
-            return Option::<u32>::Some(0xFFFD); // a continuation byte or 5+ byte leader: not a valid start
+            // A continuation byte or 5+ byte leader: not a valid start.
+            return Option::<u32>::Some(0xFFFD);
         }
         if self.i + n > self.s.len() {
-            self.i = self.i + 1; // truncated sequence at the end of the view
+            // Truncated sequence at the end of the view.
+            self.i = self.i + 1;
             return Option::<u32>::Some(0xFFFD);
         }
         let mut k: usize = 1;
         while k < n {
             let cb = self.s.byte_at(self.i + k);
             if (cb & 0xC0) != 0x80 {
-                // a non-continuation byte where one is required -> malformed
+                // A non-continuation byte where one is required: malformed.
                 self.i = self.i + 1;
                 return Option::<u32>::Some(0xFFFD);
             }

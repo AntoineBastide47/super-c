@@ -5,7 +5,8 @@ import ast::ast as *;
 @test
 fn arena() {
     let mut a = Ast::new(8);
-    assert_eq(a.nodes.len(), 1); // node 0 is pre-seeded
+    // Node 0 is pre-seeded.
+    assert_eq(a.nodes.len(), 1);
     assert(a.at_const(NODE_NONE).kind == NodeKind::NODE_NONE_KIND, "node 0 is NODE_NONE_KIND");
     let n1 = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
     let n2 = a.add(Node { kind: NodeKind::NODE_LITERAL });
@@ -33,7 +34,8 @@ fn scratch_lists() {
     let lo = a.commit(outer);
     assert_eq(lo.len, 2);
     assert(unsafe a.list(lo)[0] == id0 && unsafe a.list(lo)[1] == id1, "outer list contents");
-    assert_eq(a.scratch.len(), 0); // scratch fully drained after commits
+    // Scratch fully drained after commits.
+    assert_eq(a.scratch.len(), 0);
 }
 
 @test
@@ -41,7 +43,8 @@ fn interner() {
     let mut a = Ast::new(8);
     let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
     a.init_types();
-    assert_eq(sizeof(Ty), 16); // the concreteness cache occupies padding, not a larger Ty
+    // The concreteness cache occupies padding, not a larger Ty.
+    assert_eq(sizeof(Ty), 16);
     assert(a.type_at(TYPE_NONE).kind == TypeKind::TYPE_ERROR, "slot 0 is TYPE_ERROR");
     assert_eq(Ast::builtin(BuiltinType::BT_I32), BuiltinType::BT_I32 as TypeId + 1);
     assert(a.type_at(Ast::builtin(BuiltinType::BT_I32)).kind == TypeKind::TYPE_BUILTIN, "builtin slot kind");

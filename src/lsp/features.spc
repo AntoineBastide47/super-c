@@ -1,5 +1,5 @@
 // Positional LSP queries over a built package: hover (rendered type + declaration signature),
-// go-to-definition, and find-references/rename spans. All package-scoped -- the server maps modules to
+// go-to-definition, and find-references/rename spans. All package-scoped: the server maps modules to
 // URIs and byte spans to LSP ranges. Queries read the semantic tables the typechecker left on each
 // module's Ast (`types`, `resolutions`); nothing here mutates the package.
 import lexer::token as tok;
@@ -22,7 +22,7 @@ const fn mod_ast(p: &loader::Package, m: usize) *const Ast {
 }
 
 /// The innermost node whose span contains `off` (ties prefer the later, more specific node). Linear over
-/// the node pool -- microseconds at compiler scale.
+/// the node pool: microseconds at compiler scale.
 pub fn node_at(a: *const Ast, off: u32) NodeId {
     let mut best: NodeId = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
@@ -115,12 +115,13 @@ fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
     let a = mod_ast(p, mi);
     let mut d = resolved_at(p, a, off);
     if d.node == NODE_NONE && off > 0 {
-        d = resolved_at(p, a, off - 1); // cursor just past the word
+        // Cursor right past the word.
+        d = resolved_at(p, a, off - 1);
     }
     if d.node != NODE_NONE {
         return d;
     }
-    // maybe the cursor is on a decl's own name: find the decl this name node belongs to
+    // Maybe the cursor is on a decl's own name: find the decl this name node belongs to.
     let id = node_at_or_before(a, off);
     if id != NODE_NONE {
         let n = unsafe a.nodes.len();
@@ -133,8 +134,8 @@ fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
     return DefId { module: 0, node: NODE_NONE };
 }
 
-// Trimmed source slice of a declaration's head -- a function up to its body, a type up to its name, a
-// binding up to its type -- capped so hover stays a one-liner-ish.
+// Trimmed source slice of a declaration's head: a function up to its body, a type up to its name, a
+// binding up to its type: capped so hover stays a one-liner-ish.
 fn decl_signature(p: &loader::Package, d: DefId) String {
     let da = mod_ast(p, d.module as usize);
     let src = p.modules.at(d.module as usize).source.as_str();
@@ -157,7 +158,8 @@ fn decl_signature(p: &loader::Package, d: DefId) String {
         e = src.len() as u32;
     }
     if e > s + 300 {
-        e = s + 300; // cap pathological heads
+        // Cap pathological heads.
+        e = s + 300;
     }
     if s >= e {
         return String::new();
@@ -175,7 +177,7 @@ fn line_start_of(src: str, pos: usize) usize {
 }
 
 // The contiguous `//`/`///` comment block sitting directly above the declaration (attribute lines
-// between the comments and the item are skipped) -- the item's documentation. Comments are lexer
+// between the comments and the item are skipped): the item's documentation. Comments are lexer
 // trivia, dropped before the AST, so hover recovers them straight from the defining module's source.
 fn decl_doc(p: &loader::Package, d: DefId) String {
     let da = mod_ast(p, d.module as usize);
@@ -185,7 +187,7 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
         return String::new();
     }
     let decl_ls = line_start_of(src, sp.start as usize);
-    // only a declaration that STARTS its line owns the comment block above it: a parameter's node
+    // Only a declaration that STARTS its line owns the comment block above it: a parameter's node
     // sits mid-line inside the fn header and must not inherit the function's docs. Item spans begin
     // after their visibility keyword, so a lone `pub` prefix still counts as line-leading.
     let pre = src.slice(decl_ls, sp.start as usize).trim();
@@ -201,7 +203,8 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
             top = pls;
             cur = pls;
         } else if line.starts_with("@") {
-            cur = pls; // an attribute between the comments and the item
+            // An attribute between the comments and the item.
+            cur = pls;
         } else {
             break;
         }
@@ -221,7 +224,8 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
             body = line.slice(2, line.len());
         } else {
             i = le + 1;
-            continue; // a skipped attribute line
+            // A skipped attribute line.
+            continue;
         }
         if body.starts_with(" ") {
             body = body.slice(1, body.len());
@@ -232,7 +236,7 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
         out.push_str(body);
         i = le + 1;
     }
-    // a trailing comment on the declaration's own line documents it too (the house style for
+    // A trailing comment on the declaration's own line documents it too (the house style for
     // fields: `pub obj: Vector<JSONPair>, // JT_OBJECT members`). Scanning AFTER the span end keeps
     // string literals containing "//" out of reach.
     let mut j = sp.end as usize;
@@ -333,16 +337,14 @@ const fn ref_span(a: *const Ast, i: NodeId) tok::Span {
     return n.span;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Semantic tokens.
-// ---------------------------------------------------------------------------------------------------------
 
 /// One classified token: a byte span + the server's legend indexes.
 pub struct Tok {
     pub start: u32,
     pub end: u32,
     pub ty: i32, // legend: 0 namespace, 1 type, 2 enum, 3 enumMember, 4 interface, 5 typeParameter,
-    // 6 parameter, 7 variable, 8 property, 9 function, 10 method
+    // 6 parameter, 7 variable, 8 property, 9 function, 10 method.
     pub mods: u32, // bit 0 declaration, bit 1 readonly
 }
 
@@ -379,7 +381,7 @@ fn fn_is_method(p: &loader::Package, dm: usize, id: NodeId, mc: &mut MethodCache
                     continue;
                 }
                 let ps = a.at_const(eid).as_data.function.params;
-                // an associated fn (constructor-shaped) still renders as a method
+                // An associated fn (constructor-shaped) still renders as a method.
                 let mut m = true;
                 if ps.len > 0 {
                     let p0 = unsafe a.list(ps)[0];
@@ -441,7 +443,7 @@ fn tok_push(out: &mut Vector<Tok>, start: u32, end: u32, ty: i32, mods: u32) {
     if ty < 0 || start >= end {
         return;
     }
-    // duplicates (a member and its name node classifying the same span) are removed after the sort
+    // Duplicates (a member and its name node classifying the same span) are removed after the sort.
     out.push(Tok { start: start, end: end, ty: ty, mods: mods });
 }
 
@@ -480,7 +482,8 @@ pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
         let mut mods: u32 = 0;
         let dk = mod_ast(p, d.module as usize).at_const(d.node).kind;
         if dk == NodeKind::NODE_CONST {
-            mods = 2; // readonly
+            // Readonly.
+            mods = 2;
         }
         tok_push(&mut out, sp.start, sp.end, token_type_of(p, d, &mut mc), mods);
     }
@@ -504,7 +507,7 @@ pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
         );
     }
     out.sort_by(tok_cmp);
-    // one pass over the sorted list removes the duplicate spans -- O(n log n) total, never quadratic
+    // One pass over the sorted list removes the duplicate spans: O(n log n) total, never quadratic.
     let mut w: usize = 0;
     for i in 0..out.len() {
         if w != 0 && out.at(w - 1).start == out.at(i).start && out.at(w - 1).end == out.at(i).end {
@@ -518,9 +521,7 @@ pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
     return out;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Completion.
-// ---------------------------------------------------------------------------------------------------------
 
 /// One completion candidate; `kind` is the LSP CompletionItemKind.
 pub struct CompItem {
@@ -550,7 +551,7 @@ fn comp_push(out: &mut Vector<CompItem>, label: str, kind: i32, detail: String) 
 
 // A name node's text; "" when the node is not a name-bearing kind or its span is malformed.
 // NodeAs is an untagged union: reading `name.text` of any other kind reinterprets a different
-// payload as a Span -- the negative-length slice that once made completion malloc 16 EB.
+// payload as a Span: the negative-length slice that once made completion malloc 16 EB.
 const fn name_str(p: &loader::Package, m: usize, name_node: NodeId) str {
     if name_node == NODE_NONE {
         return "";
@@ -668,7 +669,7 @@ fn comp_module_publics(p: &loader::Package, mm: usize, out: &mut Vector<CompItem
 pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     let a = mod_ast(p, mi);
-    // the enclosing member node whose NAME span contains the probe
+    // The enclosing member node whose NAME span contains the probe.
     let mut mem: NodeId = NODE_NONE;
     let n = unsafe a.nodes.len();
     for i in 1..n {
@@ -689,7 +690,7 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
         return out;
     }
     let mo = a.at_const(mem).as_data.member.object;
-    // a path object resolving to an enum or an import: variants / module publics
+    // A path object resolving to an enum or an import: variants / module publics.
     if mo as usize < a.resolutions_len() {
         let od = a.resolution_def(mo);
         if od.node != NODE_NONE && od.module as usize < p.modules.len() {
@@ -712,7 +713,7 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
                 return out;
             }
             if ok == NodeKind::NODE_IMPORT {
-                // resolve the import to its module by the '::'-joined path
+                // Resolve the import to its module by the '::'-joined path.
                 let parts = oa.at_const(od.node).as_data.import_decl.path;
                 let mut mp = String::new();
                 for i in 0..parts.len {
@@ -729,7 +730,7 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
             }
         }
     }
-    // a value receiver: its type, references/pointers peeled, names the aggregate
+    // A value receiver: its type, references/pointers peeled, names the aggregate.
     if mo as usize >= unsafe a.types.len() {
         return out;
     }
@@ -753,7 +754,7 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
     return out;
 }
 
-/// Keywords + builtin type names alone -- the floor every general completion includes, and the
+/// Keywords + builtin type names alone: the floor every general completion includes, and the
 /// fallback when no build (not even a probe build) parses the buffer.
 pub fn complete_keywords() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
@@ -814,8 +815,8 @@ pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompIte
                 }
             }
         }
-        // locals, lexically scoped: the enclosing function's parameters, plus each binder whose
-        // OWN scope contains the cursor -- a `let` from its statement to its enclosing block's end,
+        // Locals, lexically scoped: the enclosing function's parameters, plus each binder whose
+        // OWN scope contains the cursor: a `let` from its statement to its enclosing block's end,
         // a pattern name within its match arm / for loop / closure, a closure parameter within the
         // closure. Bindings from closed or sibling scopes are never offered.
         let nn = unsafe a.nodes.len();
@@ -876,9 +877,7 @@ pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompIte
     return out;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Lexical scope helpers for completion.
-// ---------------------------------------------------------------------------------------------------------
 
 // True when the innermost block containing a binder declared at `decl_start` also contains `off`:
 // the `let`-binding visibility rule (from its statement to its block's closing brace).
@@ -930,9 +929,7 @@ fn pattern_scope_has(a: *const Ast, pid: NodeId, off: u32) bool {
     return psp.start < off && binder_scope_has(a, psp.start, off);
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Attribute completion (the parser's inventory is the single source of truth).
-// ---------------------------------------------------------------------------------------------------------
 
 /// Every attribute the parser accepts, spelled as typed after `@`.
 pub fn complete_attributes() Vector<CompItem> {
@@ -1058,7 +1055,8 @@ pub fn complete_labels(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
         if lab.end as usize <= src.len() {
             let mut s = lab.start as usize;
             if src[s] == b'\'' {
-                s += 1; // the token span includes the quote; the user already typed it
+                // The token span includes the quote; the user already typed it.
+                s += 1;
             }
             comp_push(&mut out, src.slice(s, lab.end as usize), 14, String::from_str("label"));
         }
@@ -1066,10 +1064,8 @@ pub fn complete_labels(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
     return out;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Navigation queries: document symbols, workspace symbols, signature help, highlights, type
 // definition, implementations, folding, selection ranges, inlay hints.
-// ---------------------------------------------------------------------------------------------------------
 
 /// One document symbol; `parent` indexes the owning symbol in the same vector (-1 = top level).
 pub struct Sym {
@@ -1158,7 +1154,7 @@ pub fn document_symbols(p: &loader::Package, mi: usize) Vector<Sym> {
                 }
             }
         } else if n.kind == NodeKind::NODE_EXTEND {
-            // name the extend by its target's source text ("extend Vector as Free")
+            // Name the extend by its target's source text ("extend Vector as Free").
             let tgt = n.as_data.extend_def.target_type;
             let mut label = String::from_str("extend");
             if tgt != NODE_NONE {
@@ -1280,6 +1276,8 @@ extend SigInfo as Free {
     }
 }
 
+/// Signature help for the call enclosing byte offset `off` of module `mi`: the callee's label, its
+/// parameter labels, and the active parameter; None outside a call.
 pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> {
     let a = mod_ast(p, mi);
     let mut call: NodeId = NODE_NONE;
@@ -1317,7 +1315,8 @@ pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> 
     if ps.len > 0 && a.at_const(callee).kind == NodeKind::NODE_MEMBER {
         let p0 = unsafe da.list(ps)[0];
         if name_str(p, d.module as usize, da.at_const(p0).as_data.parameter.name) == "self" {
-            skip_self = true; // the receiver is not an argument slot
+            // The receiver is not an argument slot.
+            skip_self = true;
         }
     }
     for i in 0..ps.len {
@@ -1513,7 +1512,7 @@ pub fn folding_ranges(p: &loader::Package, mi: usize) Vector<Loc> {
             }
         }
     }
-    // comment runs: two or more consecutive lines whose first token is '//'
+    // Comment runs: two or more consecutive lines whose first token is '//'.
     let mut i: usize = 0;
     let mut run_start: i64 = -1;
     let mut run_lines = 0;
@@ -1573,7 +1572,7 @@ pub fn selection_ranges(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
         if s == prev_s && e == prev_e {
             continue;
         }
-        // each range must CONTAIN the previous (LSP requires a strict chain)
+        // Each range must CONTAIN the previous (LSP requires a strict chain).
         if prev_s != 0xFFFFFFFF && (s > prev_s || e < prev_e) {
             continue;
         }
@@ -1636,11 +1635,9 @@ pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<
     return out;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Cross-package symbol identity + rename validation. Until the compiler API owns stable symbol ids,
-// a definition travels between packages as (defining file, declaration kind, name text) -- the
+// a definition travels between packages as (defining file, declaration kind, name text): the
 // documented temporary adapter. Same-name same-kind decls in ONE file cannot collide at top level.
-// ---------------------------------------------------------------------------------------------------------
 
 /// The resolved definition under `off` (public wrapper over the internal resolver).
 pub fn def_ref(p: &loader::Package, mi: usize, off: u32) DefId {
@@ -1661,6 +1658,8 @@ extend SymKey as Free {
     }
 }
 
+/// The package-independent identity (file, kind, name) of declaration `d`, for cross-package
+/// symbol matching; None for an unresolved or out-of-range def.
 pub fn sym_key(p: &loader::Package, d: DefId) Option<SymKey> {
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
         return Option::<SymKey>::None;
@@ -1753,7 +1752,7 @@ pub fn cursor_ref_span(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
         return Option::<Loc>::None;
     }
     let a = mod_ast(p, mi);
-    // the narrowed span of the resolved node under the cursor
+    // The narrowed span of the resolved node under the cursor.
     let mut best: u32 = 0xFFFFFFFF;
     let mut hit = tok::Span::empty();
     let mut nn = a.resolutions_len();
@@ -1806,7 +1805,7 @@ fn owning_extend(p: &loader::Package, im: usize, fnid: NodeId) NodeId {
     return NODE_NONE;
 }
 
-/// The rename set for `d`: the definition itself plus its interface relations -- an interface
+/// The rename set for `d`: the definition itself plus its interface relations; an interface
 /// method renames its declaration AND every conformer's method; a conformance method renames the
 /// interface declaration and the sibling conformances with it.
 pub fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
@@ -1839,7 +1838,7 @@ pub fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
         return;
     }
     let name = name_str(p, dm, da.at_const(d.node).as_data.function.name);
-    // the interface's own declaration of this method
+    // The interface's own declaration of this method.
     let ia = mod_ast(p, iface.module as usize);
     if ia.at_const(iface.node).kind == NodeKind::NODE_INTERFACE {
         let ms = ia.at_const(iface.node).as_data.interface_def.items;
@@ -1863,7 +1862,7 @@ pub fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
             }
         }
     }
-    // every conformer's method with this name
+    // Every conformer's method with this name.
     for mm in 0..p.modules.len() {
         if !p.modules.at(mm).has_ast {
             continue;
@@ -1929,7 +1928,7 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
     let dm = d.module as usize;
     let a = mod_ast(p, dm);
     let k = a.at_const(d.node).kind;
-    // top-level item: another item of the same module with the new name
+    // Top-level item: another item of the same module with the new name.
     if is_top_level(a, d.node) {
         let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
@@ -1944,7 +1943,7 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
         }
         return String::new();
     }
-    // field: sibling members of the owning aggregate
+    // Field: sibling members of the owning aggregate.
     if k == NodeKind::NODE_FIELD || k == NodeKind::NODE_VARIANT {
         let n = unsafe a.nodes.len();
         for i in 1..n {
@@ -1976,7 +1975,7 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
         }
         return String::new();
     }
-    // method in an extend: the target type's other methods (any module)
+    // Method in an extend: the target type's other methods (any module).
     if k == NodeKind::NODE_FUNCTION {
         let ext = owning_extend(p, dm, d.node);
         if ext != NODE_NONE {
@@ -2024,7 +2023,7 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
             return String::new();
         }
     }
-    // local binder or parameter: any other binder of the enclosing function
+    // Local binder or parameter: any other binder of the enclosing function.
     if k == NodeKind::NODE_LET || k == NodeKind::NODE_PATTERN_NAME || k == NodeKind::NODE_PARAMETER {
         let dsp = a.at_const(d.node).span;
         let n = unsafe a.nodes.len();
@@ -2063,9 +2062,7 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
     return String::new();
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Call / type hierarchy and code-action queries.
-// ---------------------------------------------------------------------------------------------------------
 
 /// The smallest function item whose span contains `off` (NODE_NONE when none does).
 pub fn enclosing_function(p: &loader::Package, mi: usize, off: u32) NodeId {
@@ -2111,7 +2108,7 @@ pub fn calls_in(p: &loader::Package, mi: usize, fnid: NodeId) Vector<CallSite> {
         if callee == NODE_NONE {
             continue;
         }
-        // a generic specialization call resolves through its expression
+        // A generic specialization call resolves through its expression.
         if a.at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
             callee = a.at_const(callee).as_data.specialization.expression;
         }
@@ -2238,7 +2235,7 @@ pub fn iface_stub(p: &loader::Package, mi: usize, off: u32, method_name: str) Op
         }
         let sp = ia.at_const(fid).span;
         let mut sig = String::from_str(isrc.slice(sp.start as usize, sp.end as usize));
-        // the interface declaration ends in ';' (no body); the stub replaces it with a panicking body
+        // The interface declaration ends in ';' (no body); the stub replaces it with a panicking body.
         while sig.len() != 0 && (sig.as_str()[sig.len() - 1] == b';' || sig.as_str()[sig.len() - 1] == b' ' || sig.as_str()[sig.len() - 1] == b'\n') {
             sig.truncate(sig.len() - 1);
         }

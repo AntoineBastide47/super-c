@@ -7,6 +7,8 @@
 // `new_in`/`with_capacity_in`, or pick a non-default zero-sized allocator with a turbofish:
 // `Vector::<T, MyAlloc>::new()`.
 
+/// A growable heap array of T through allocator A; capacity grows geometrically, elements are freed
+/// with the vector.
 pub struct Vector<T, A = Global> {
     ptr: *mut T, // owned storage; null while cap == 0 (private)
     len: usize, // elements in use (private)
@@ -30,8 +32,8 @@ extend<T, A: Allocator> Vector<T, A> {
     pub const fn with_capacity_in(alloc: A, cap: usize) Vector<T, A> {
         let mut v = Vector::<T, A> { ptr: null, len: 0, cap: 0, alloc: alloc };
         if sizeof(T) == 0 {
-            // zero-sized elements occupy no bytes: an aligned sentinel and unbounded logical
-            // capacity, with no allocator call (the branch folds away per instantiation)
+            // Zero-sized elements occupy no bytes: an aligned sentinel and unbounded logical
+            // capacity, with no allocator call (the branch folds away per instantiation).
             v.ptr = zst_dangling::<T>();
             v.cap = ~(0 as usize);
             return v;
@@ -43,14 +45,17 @@ extend<T, A: Allocator> Vector<T, A> {
         return v;
     }
 
+    /// Number of elements.
     pub const fn len(self: &Vector<T, A>) usize {
         return self.len;
     }
 
+    /// Elements the current allocation can hold without growing.
     pub const fn capacity(self: &Vector<T, A>) usize {
         return self.cap;
     }
 
+    /// True when no element is stored.
     pub const fn is_empty(self: &Vector<T, A>) bool {
         return self.len == 0;
     }
@@ -103,13 +108,13 @@ extend<T, A: Allocator> Vector<T, A> {
         return &unsafe self.ptr[index];
     }
 
-    /// Unchecked element access -- the caller PROVES `index < len` (hot loops with an established
+    /// Unchecked element access: the caller PROVES `index < len` (hot loops with an established
     /// bound). Out of range is undefined behavior, hence `unsafe`.
     pub unsafe const fn get_unsafe(self: &Vector<T, A>, index: usize) &T {
         return &self.ptr[index];
     }
 
-    /// Bounds-checked element access -- borrows the element (`&T`) so the Vector keeps sole ownership.
+    /// Bounds-checked element access: borrows the element (`&T`) so the Vector keeps sole ownership.
     pub const fn get(self: &Vector<T, A>, index: usize) Option<&T> {
         if index >= self.len {
             return Option::<&T>::None;
@@ -126,10 +131,12 @@ extend<T, A: Allocator> Vector<T, A> {
         unsafe self.ptr[index] = value;
     }
 
+    /// The first element, None when empty.
     pub const fn first(self: &Vector<T, A>) Option<&T> {
         return self.get(0);
     }
 
+    /// The last element, None when empty.
     pub const fn last(self: &Vector<T, A>) Option<&T> {
         if self.len == 0 {
             return Option::<&T>::None;
@@ -264,9 +271,11 @@ extend<T, A: Allocator> Vector<T, A> {
 
 // Convenience constructors for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<T, A: Allocator + Default> Vector<T, A> {
+    /// An empty vector using the default allocator; no allocation until the first push.
     pub const fn new() Vector<T, A> {
         return Vector::<T, A>::new_in(A::default());
     }
+    /// An empty vector whose allocation already holds `cap` elements.
     pub const fn with_capacity(cap: usize) Vector<T, A> {
         return Vector::<T, A>::with_capacity_in(A::default(), cap);
     }
@@ -274,10 +283,10 @@ extend<T, A: Allocator + Default> Vector<T, A> {
 
 // Free the buffer (through `A`) AND deep-free every element. Auto-`Free`: the Vector is released at scope
 // exit. Sound because the peek accessors (`at`/`get`/`first`/`last`/`find`/`iter`) borrow (`&T`) rather than
-// hand out sharing copies, and the removers (`pop`/`remove`/`swap_remove`) move the element out -- so the
+// hand out sharing copies, and the removers (`pop`/`remove`/`swap_remove`) move the element out, so the
 // buffer is the only owner of each live element. Each element `.free()` is a no-op when `T` isn't a Free type.
 // Resizing needs a value for the slots it adds, and a `Free` element cannot be copied into them (filling
-// ten slots from one `String` would hand ten owners the same buffer) -- so it is available exactly for the
+// ten slots from one `String` would hand ten owners the same buffer), so it is available exactly for the
 // element types that can produce a fresh value on demand.
 extend<T: Default, A: Allocator> Vector<T, A> {
     /// Resize to exactly `n` elements: the tail beyond `n` is freed, and any new slot is `T::default()`.
@@ -299,7 +308,8 @@ extend<T, A: Allocator> Vector<T, A> as Free {
         if sizeof(T) == 0 {
             self.ptr = null;
             self.cap = 0;
-            return; // the sentinel was never allocated
+            // The sentinel was never allocated.
+            return;
         }
         unsafe self.alloc.dealloc(self.ptr, self.cap * sizeof(T), alignof(T));
         self.ptr = null;
@@ -315,7 +325,7 @@ extend<T, A: Allocator + Default> Vector<T, A> as Default {
 }
 
 // Build from a list of elements: `let v: Vector<i32> = [1, 2, 3].into();` (an array coerces to the
-// slice). The slice BORROWS, so each element is cloned in -- the source keeps its own copies and stays
+// slice). The slice BORROWS, so each element is cloned in: the source keeps its own copies and stays
 // responsible for them. Hence `T: Clone`, which every scalar satisfies.
 extend<T: Clone, A: Allocator + Default> Vector<T, A> as From<[]T> {
     pub fn from(value: []T) Vector<T, A> {
@@ -519,6 +529,7 @@ pub struct VecIter<'a, T> {
 }
 
 extend<T, A: Allocator> Vector<T, A> {
+    /// A by-reference iterator over the elements in order.
     pub const fn iter(self: &Vector<T, A>) VecIter<T> {
         return VecIter::<T> { data: self.as_ptr(), idx: 0, stop: self.len() };
     }
@@ -535,9 +546,9 @@ extend<T> VecIter<T> as Iterator<&T> {
     }
 }
 
-// Index conformances: `v[i]` borrows the element in place (unchecked, like `at` -- the caller keeps
-// `i < len`), and `v[lo..hi]` -- any range form, `..=` including the end, an open end meaning the
-// vector's `len()` -- is a borrowed `[]T` view of the elements. Views alias the buffer, so they are
+// Index conformances: `v[i]` borrows the element in place (unchecked, like `at`; the caller keeps
+// `i < len`), and `v[lo..hi]`: any range form, `..=` including the end, an open end meaning the
+// vector's `len()`: is a borrowed `[]T` view of the elements. Views alias the buffer, so they are
 // invalidated by any reallocating mutation (push/reserve).
 extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
     pub const fn index(self: &Vector<T, A>, i: usize) &T {
@@ -563,7 +574,7 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
 }
 
 // The writable counterpart: `v[i] = x` stores through the returned element pointer (a plain `=` over a
-// Free element frees the replaced value first, compiler-inserted -- same semantics as `set`);
+// Free element frees the replaced value first, compiler-inserted: same semantics as `set`);
 // `index_range_mut` is an in-place writable view.
 extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
     pub const fn index_mut(self: &mut Vector<T, A>, i: usize) &mut T {
@@ -611,7 +622,7 @@ extend<T: Eq, A: Allocator> Vector<T, A> as Eq {
             let a = self.at(i);
             let b = other.at(i);
             if !a.eq(b) {
-                // ERROR: a[i] != b[i] does not work
+                // ERROR: a[i] != b[i] does not work.
                 return false;
             }
         }

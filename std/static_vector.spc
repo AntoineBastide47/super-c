@@ -1,11 +1,12 @@
 // StaticVector<T, const N: usize>: a fixed-capacity, stack-based vector, monomorphized per (element
 // type, capacity). The backing store is N inline slots (no heap, no allocator); `len` tracks how many
-// hold live elements, so the full length-mutating Vector API exists -- `push`/`insert` panic when the
+// hold live elements, so the full length-mutating Vector API exists: `push`/`insert` panic when the
 // N slots are exhausted (capacity can never grow). Same ownership semantics as Vector: peek accessors
 // borrow (`at` -> `&T`, bounds-checked `get`/`first`/`last`/`find` -> `Option<&T>`), removers move the
 // element out, `set` frees the replaced element. Conditionally `Free`: a StaticVector of a Free element
 // type deep-frees its live elements at scope exit; one of plain values stays a plain value.
 
+/// A vector with inline storage for at most N elements and no heap allocation; pushing past N panics.
 pub struct StaticVector<T, const N: usize> {
     data: [T; N], // inline storage; only the first `len` slots hold live elements (private)
     len: usize, // elements in use (private)
@@ -19,23 +20,27 @@ extend<T, const N: usize> StaticVector<T, N> {
         return v;
     }
 
+    /// Number of live elements.
     pub const fn len(self: &StaticVector<T, N>) usize {
         return self.len;
     }
 
+    /// Always N.
     pub const fn capacity(self: &StaticVector<T, N>) usize {
         return N;
     }
 
+    /// True when no element is stored.
     pub const fn is_empty(self: &StaticVector<T, N>) bool {
         return self.len == 0;
     }
 
+    /// True when N elements are stored.
     pub const fn is_full(self: &StaticVector<T, N>) bool {
         return self.len == N;
     }
 
-    /// Append `value`. Panics when the N slots are exhausted -- the capacity is fixed.
+    /// Append `value`. Panics when the N slots are exhausted: the capacity is fixed.
     pub const fn push(self: &mut StaticVector<T, N>, value: T) {
         if self.len == N {
             panic("StaticVector::push on a full vector");
@@ -63,13 +68,13 @@ extend<T, const N: usize> StaticVector<T, N> {
         return &unsafe self.data[index];
     }
 
-    /// Unchecked element access -- the caller PROVES `index < len` (hot loops with an established
+    /// Unchecked element access: the caller PROVES `index < len` (hot loops with an established
     /// bound). Out of range is undefined behavior, hence `unsafe`.
     pub unsafe const fn get_unsafe(self: &StaticVector<T, N>, index: usize) &T {
         return &self.data[index];
     }
 
-    /// Bounds-checked element access -- borrows the element (`&T`) so the vector keeps sole ownership.
+    /// Bounds-checked element access: borrows the element (`&T`) so the vector keeps sole ownership.
     pub const fn get(self: &StaticVector<T, N>, index: usize) Option<&T> {
         if index >= self.len {
             return Option::<&T>::None;
@@ -86,10 +91,12 @@ extend<T, const N: usize> StaticVector<T, N> {
         unsafe p[index] = value;
     }
 
+    /// The first element, None when empty.
     pub const fn first(self: &StaticVector<T, N>) Option<&T> {
         return self.get(0);
     }
 
+    /// The last element, None when empty.
     pub const fn last(self: &StaticVector<T, N>) Option<&T> {
         if self.len == 0 {
             return Option::<&T>::None;
@@ -229,6 +236,7 @@ extend<T, const N: usize> StaticVector<T, N> {
         self.len = w;
     }
 
+    /// A by-reference iterator over the live elements in order.
     pub const fn iter(self: &StaticVector<T, N>) VecIter<T> {
         return VecIter::<T> { data: self.as_ptr(), idx: 0, stop: self.len };
     }
@@ -439,9 +447,9 @@ extend<T, const N: usize> StaticVector<T, N> {
     }
 }
 
-// Index conformances: `v[i]` borrows the element in place (unchecked, like `at` -- the caller keeps
-// `i < len`), and `v[lo..hi]` -- any range form, `..=` including the end, an open end meaning the
-// vector's `len()` -- is a borrowed `[]T` view of the elements. Views alias the inline buffer, so they
+// Index conformances: `v[i]` borrows the element in place (unchecked, like `at`; the caller keeps
+// `i < len`), and `v[lo..hi]`: any range form, `..=` including the end, an open end meaning the
+// vector's `len()`: is a borrowed `[]T` view of the elements. Views alias the inline buffer, so they
 // are invalidated when the StaticVector is moved.
 extend<T, const N: usize> StaticVector<T, N> as Index<T, []T> {
     pub const fn index(self: &StaticVector<T, N>, i: usize) &T {
@@ -467,7 +475,7 @@ extend<T, const N: usize> StaticVector<T, N> as Index<T, []T> {
 }
 
 // The writable counterpart: `v[i] = x` stores through the returned element pointer (a plain `=` over a
-// Free element frees the replaced value first, compiler-inserted -- same semantics as `set`);
+// Free element frees the replaced value first, compiler-inserted: same semantics as `set`);
 // `index_range_mut` is an in-place writable view.
 extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
     pub const fn index_mut(self: &mut StaticVector<T, N>, i: usize) &mut T {

@@ -2,16 +2,16 @@
 // behave as ordinary nominal types behind `T: Hash`/`Eq`/`Ord`/`Clone`/`Default`/`Free`/`Copy` bounds
 // (e.g. `Map<i32, V>`) and so user code may `extend i32 { .. }` with its own methods. The compiler seeds a
 // synthetic decl per builtin in this module; these `extend` blocks attach to them and lower to
-// `i32__eq`, etc. `free` is empty (a scalar owns nothing) -- the C compiler optimizes the call away.
+// `i32__eq`, etc. `free` is empty (a scalar owns nothing): the C compiler optimizes the call away.
 //
 // `void` and `va_list` are omitted: they are not ordinary scalar values. Floats implement `Eq`/`Ord`/
 // `Hash` through the IEEE-754 TOTAL order (`total_cmp`): -NaN < -inf < .. < -0.0 < +0.0 < .. < +inf < NaN,
-// every value equal to itself (including NaN), so sorting and Map/Set keys work -- note `-0.0 != 0.0`
+// every value equal to itself (including NaN), so sorting and Map/Set keys work: note `-0.0 != 0.0`
 // under this order, unlike `==`. Complex numbers stay out: they admit no total order.
 
 /// Branch-layout hint: this condition is expected to be TRUE. Semantically the identity function
 /// (and const-evaluable); codegen lowers direct calls to SC_LIKELY (__builtin_expect on GCC/Clang,
-/// the bare condition elsewhere), which steers hot-path block placement -- not the hardware predictor.
+/// the bare condition elsewhere), which steers hot-path block placement: not the hardware predictor.
 pub const fn likely(c: bool) bool {
     return c;
 }
@@ -93,7 +93,8 @@ extern "C" {
     fn fmaxf(x: f32, y: f32) f32;
     fn fmaf(x: f32, y: f32, z: f32) f32;
 
-    fn __sc_panic_str(msg: *const u8, len: usize) void; // the runtime trap: prints `panic: <msg>`, aborts
+    // The runtime trap: prints `panic: <msg>`, aborts.
+    fn __sc_panic_str(msg: *const u8, len: usize) void;
 }
 
 /// Abort the program with a message on stderr. There is no unwinding: no cleanup runs, the process
@@ -525,7 +526,7 @@ extend bool as Free {
 }
 
 // IEEE-754 totalOrder bit trick: flipping ALL bits of a negative float and only the sign bit of a
-// non-negative one yields unsigned integers that order exactly like totalOrder -- the basis for the
+// non-negative one yields unsigned integers that order exactly like totalOrder: the basis for the
 // float `Eq`/`Ord`/`Hash` conformances and the `total_cmp` methods below.
 union F32Bits {
     pub u: u32,
@@ -655,12 +656,14 @@ extend c64 as Free {
 }
 
 extend i8 {
+    /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: i8) i8 {
         if self < 0 {
             return (0 - self as u8) as i8;
         }
         return self;
     } // unsigned negate: no MIN overflow
+    /// -1, 0, or 1 by sign.
     pub const fn signum(self: i8) i8 {
         if self < 0 {
             return -1;
@@ -670,24 +673,29 @@ extend i8 {
         }
         return 0;
     }
+    /// True when greater than zero.
     pub const fn is_positive(self: i8) bool {
         return self > 0;
     }
+    /// True when less than zero.
     pub const fn is_negative(self: i8) bool {
         return self < 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: i8, other: i8) i8 {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: i8, other: i8) i8 {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: i8, min: i8, max: i8) i8 {
         if self < min {
             return min;
@@ -700,12 +708,14 @@ extend i8 {
 }
 
 extend i16 {
+    /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: i16) i16 {
         if self < 0 {
             return (0 - self as u16) as i16;
         }
         return self;
     } // unsigned negate: no MIN overflow
+    /// -1, 0, or 1 by sign.
     pub const fn signum(self: i16) i16 {
         if self < 0 {
             return -1;
@@ -715,24 +725,29 @@ extend i16 {
         }
         return 0;
     }
+    /// True when greater than zero.
     pub const fn is_positive(self: i16) bool {
         return self > 0;
     }
+    /// True when less than zero.
     pub const fn is_negative(self: i16) bool {
         return self < 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: i16, other: i16) i16 {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: i16, other: i16) i16 {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: i16, min: i16, max: i16) i16 {
         if self < min {
             return min;
@@ -745,12 +760,14 @@ extend i16 {
 }
 
 extend i32 {
+    /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: i32) i32 {
         if self < 0 {
             return (0 - self as u32) as i32;
         }
         return self;
     } // unsigned negate: no MIN overflow
+    /// -1, 0, or 1 by sign.
     pub const fn signum(self: i32) i32 {
         if self < 0 {
             return -1;
@@ -760,24 +777,29 @@ extend i32 {
         }
         return 0;
     }
+    /// True when greater than zero.
     pub const fn is_positive(self: i32) bool {
         return self > 0;
     }
+    /// True when less than zero.
     pub const fn is_negative(self: i32) bool {
         return self < 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: i32, other: i32) i32 {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: i32, other: i32) i32 {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: i32, min: i32, max: i32) i32 {
         if self < min {
             return min;
@@ -790,12 +812,14 @@ extend i32 {
 }
 
 extend i64 {
+    /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: i64) i64 {
         if self < 0 {
             return (0 - self as u64) as i64;
         }
         return self;
     } // unsigned negate: no MIN overflow
+    /// -1, 0, or 1 by sign.
     pub const fn signum(self: i64) i64 {
         if self < 0 {
             return -1;
@@ -805,24 +829,29 @@ extend i64 {
         }
         return 0;
     }
+    /// True when greater than zero.
     pub const fn is_positive(self: i64) bool {
         return self > 0;
     }
+    /// True when less than zero.
     pub const fn is_negative(self: i64) bool {
         return self < 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: i64, other: i64) i64 {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: i64, other: i64) i64 {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: i64, min: i64, max: i64) i64 {
         if self < min {
             return min;
@@ -835,12 +864,14 @@ extend i64 {
 }
 
 extend isize {
+    /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: isize) isize {
         if self < 0 {
             return (0 - self as usize) as isize;
         }
         return self;
     } // unsigned negate: no MIN overflow
+    /// -1, 0, or 1 by sign.
     pub const fn signum(self: isize) isize {
         if self < 0 {
             return -1;
@@ -850,24 +881,29 @@ extend isize {
         }
         return 0;
     }
+    /// True when greater than zero.
     pub const fn is_positive(self: isize) bool {
         return self > 0;
     }
+    /// True when less than zero.
     pub const fn is_negative(self: isize) bool {
         return self < 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: isize, other: isize) isize {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: isize, other: isize) isize {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: isize, min: isize, max: isize) isize {
         if self < min {
             return min;
@@ -880,21 +916,25 @@ extend isize {
 }
 
 extend u8 {
+    /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: u8) bool {
         return self != 0 && (self & self - 1) == 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: u8, other: u8) u8 {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: u8, other: u8) u8 {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: u8, min: u8, max: u8) u8 {
         if self < min {
             return min;
@@ -907,21 +947,25 @@ extend u8 {
 }
 
 extend u16 {
+    /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: u16) bool {
         return self != 0 && (self & self - 1) == 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: u16, other: u16) u16 {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: u16, other: u16) u16 {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: u16, min: u16, max: u16) u16 {
         if self < min {
             return min;
@@ -934,21 +978,25 @@ extend u16 {
 }
 
 extend u32 {
+    /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: u32) bool {
         return self != 0 && (self & self - 1) == 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: u32, other: u32) u32 {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: u32, other: u32) u32 {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: u32, min: u32, max: u32) u32 {
         if self < min {
             return min;
@@ -961,21 +1009,25 @@ extend u32 {
 }
 
 extend u64 {
+    /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: u64) bool {
         return self != 0 && (self & self - 1) == 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: u64, other: u64) u64 {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: u64, other: u64) u64 {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: u64, min: u64, max: u64) u64 {
         if self < min {
             return min;
@@ -988,21 +1040,25 @@ extend u64 {
 }
 
 extend usize {
+    /// True for exactly one set bit (0 is not a power of two).
     pub const fn is_power_of_two(self: usize) bool {
         return self != 0 && (self & self - 1) == 0;
     }
+    /// The smaller of the two.
     pub const fn min(self: usize, other: usize) usize {
         if self < other {
             return self;
         }
         return other;
     }
+    /// The larger of the two.
     pub const fn max(self: usize, other: usize) usize {
         if self > other {
             return self;
         }
         return other;
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: usize, min: usize, max: usize) usize {
         if self < min {
             return min;
@@ -1015,39 +1071,50 @@ extend usize {
 }
 
 extend f32 {
+    /// True for any NaN.
     pub const fn is_nan(self: f32) bool {
         return self != self;
     }
+    /// True for +inf or -inf.
     pub const fn is_infinite(self: f32) bool {
         return !self.is_nan() && self == 1.0 / 0.0 || self == -1.0 / 0.0;
     }
+    /// True when neither NaN nor infinite.
     pub const fn is_finite(self: f32) bool {
         return !self.is_nan() && !self.is_infinite();
     }
+    /// True when the sign bit is clear (+0.0 and positive NaN included).
     pub const fn is_sign_positive(self: f32) bool {
         return unsafe copysignf(1.0, self) > 0.0;
     }
+    /// True when the sign bit is set (-0.0 and negative NaN included).
     pub const fn is_sign_negative(self: f32) bool {
         return unsafe copysignf(1.0, self) < 0.0;
     }
+    /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: f32) f32 {
         return unsafe fabsf(self);
     }
+    /// -1, 0, or 1 by sign.
     pub const fn signum(self: f32) f32 {
         if self.is_nan() {
             return self;
         }
         return unsafe copysignf(1.0, self);
     }
+    /// `self`'s magnitude with `sign`'s sign.
     pub const fn copysign(self: f32, sign: f32) f32 {
         return unsafe copysignf(self, sign);
     }
+    /// The smaller of the two.
     pub const fn min(self: f32, other: f32) f32 {
         return unsafe fminf(self, other);
     }
+    /// The larger of the two.
     pub const fn max(self: f32, other: f32) f32 {
         return unsafe fmaxf(self, other);
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: f32, min: f32, max: f32) f32 {
         if self < min {
             return min;
@@ -1057,105 +1124,139 @@ extend f32 {
         }
         return self;
     }
+    /// Largest integral value not above `self`.
     pub const fn floor(self: f32) f32 {
         return unsafe floorf(self);
     }
+    /// Smallest integral value not below `self`.
     pub const fn ceil(self: f32) f32 {
         return unsafe ceilf(self);
     }
+    /// Nearest integral value, halves away from zero.
     pub const fn round(self: f32) f32 {
         return unsafe roundf(self);
     }
+    /// Integral part, toward zero.
     pub const fn trunc(self: f32) f32 {
         return unsafe truncf(self);
     }
+    /// `self - self.trunc()`, with `self`'s sign.
     pub const fn fract(self: f32) f32 {
         return self - unsafe truncf(self);
     }
+    /// `1 / self`.
     pub const fn recip(self: f32) f32 {
         return 1.0 / self;
     }
+    /// Square root; NaN for a negative value.
     pub const fn sqrt(self: f32) f32 {
         return unsafe sqrtf(self);
     }
+    /// Cube root (defined for negatives).
     pub const fn cbrt(self: f32) f32 {
         return unsafe cbrtf(self);
     }
+    /// `self` raised to `n`.
     pub const fn powf(self: f32, n: f32) f32 {
         return unsafe powf(self, n);
     }
+    /// `self` raised to the integer `n` (through `pow`).
     pub const fn powi(self: f32, n: i32) f32 {
         return unsafe powf(self, n as f32);
     }
+    /// e^self.
     pub const fn exp(self: f32) f32 {
         return unsafe expf(self);
     }
+    /// 2^self.
     pub const fn exp2(self: f32) f32 {
         return unsafe exp2f(self);
     }
+    /// e^self - 1, accurate near zero.
     pub const fn exp_m1(self: f32) f32 {
         return unsafe expm1f(self);
     }
+    /// Natural logarithm; -inf at 0, NaN below.
     pub const fn ln(self: f32) f32 {
         return unsafe logf(self);
     }
+    /// Logarithm in `base` (as ln(self) / ln(base)).
     pub const fn log(self: f32, base: f32) f32 {
         return unsafe logf(self) / unsafe logf(base);
     }
+    /// Base-2 logarithm.
     pub const fn log2(self: f32) f32 {
         return unsafe log2f(self);
     }
+    /// Base-10 logarithm.
     pub const fn log10(self: f32) f32 {
         return unsafe log10f(self);
     }
+    /// ln(1 + self), accurate near zero.
     pub const fn ln_1p(self: f32) f32 {
         return unsafe log1pf(self);
     }
+    /// sqrt(self^2 + other^2) without intermediate overflow.
     pub const fn hypot(self: f32, other: f32) f32 {
         return unsafe hypotf(self, other);
     }
+    /// Sine of an angle in radians.
     pub const fn sin(self: f32) f32 {
         return unsafe sinf(self);
     }
+    /// Cosine of an angle in radians.
     pub const fn cos(self: f32) f32 {
         return unsafe cosf(self);
     }
+    /// Tangent of an angle in radians.
     pub const fn tan(self: f32) f32 {
         return unsafe tanf(self);
     }
+    /// Arc sine in radians; NaN outside [-1, 1].
     pub const fn asin(self: f32) f32 {
         return unsafe asinf(self);
     }
+    /// Arc cosine in radians; NaN outside [-1, 1].
     pub const fn acos(self: f32) f32 {
         return unsafe acosf(self);
     }
+    /// Arc tangent in radians.
     pub const fn atan(self: f32) f32 {
         return unsafe atanf(self);
     }
+    /// Arc tangent of self/other using both signs to pick the quadrant.
     pub const fn atan2(self: f32, other: f32) f32 {
         return unsafe atan2f(self, other);
     }
+    /// (sin, cos) of an angle in radians.
     pub const fn sin_cos(self: f32) (f32, f32) {
         return unsafe sinf(self), unsafe cosf(self);
     }
+    /// Hyperbolic sine.
     pub const fn sinh(self: f32) f32 {
         return unsafe sinhf(self);
     }
+    /// Hyperbolic cosine.
     pub const fn cosh(self: f32) f32 {
         return unsafe coshf(self);
     }
+    /// Hyperbolic tangent.
     pub const fn tanh(self: f32) f32 {
         return unsafe tanhf(self);
     }
+    /// Inverse hyperbolic sine.
     pub const fn asinh(self: f32) f32 {
         return unsafe asinhf(self);
     }
+    /// Inverse hyperbolic cosine; NaN below 1.
     pub const fn acosh(self: f32) f32 {
         return unsafe acoshf(self);
     }
+    /// Inverse hyperbolic tangent; NaN outside [-1, 1].
     pub const fn atanh(self: f32) f32 {
         return unsafe atanhf(self);
     }
+    /// `self * a + b` with a single rounding.
     pub const fn mul_add(self: f32, a: f32, b: f32) f32 {
         return unsafe fmaf(self, a, b);
     }
@@ -1163,48 +1264,61 @@ extend f32 {
     pub const fn total_cmp(self: f32, other: f32) i32 {
         return self.cmp(&other);
     }
+    /// Radians to degrees.
     pub const fn to_degrees(self: f32) f32 {
         return self * 57.29577951308232;
     }
+    /// Degrees to radians.
     pub const fn to_radians(self: f32) f32 {
         return self * 0.017453292519943295;
     }
 }
 
 extend f64 {
+    /// True for any NaN.
     pub const fn is_nan(self: f64) bool {
         return self != self;
     }
+    /// True for +inf or -inf.
     pub const fn is_infinite(self: f64) bool {
         return !self.is_nan() && self == 1.0 as f64 / 0.0 as f64 || self == (-1.0) as f64 / 0.0 as f64;
     }
+    /// True when neither NaN nor infinite.
     pub const fn is_finite(self: f64) bool {
         return !self.is_nan() && !self.is_infinite();
     }
+    /// True when the sign bit is clear (+0.0 and positive NaN included).
     pub const fn is_sign_positive(self: f64) bool {
         return unsafe copysign(1.0, self) > 0.0;
     }
+    /// True when the sign bit is set (-0.0 and negative NaN included).
     pub const fn is_sign_negative(self: f64) bool {
         return unsafe copysign(1.0, self) < 0.0;
     }
+    /// Absolute value; MIN wraps to itself.
     pub const fn abs(self: f64) f64 {
         return unsafe fabs(self);
     }
+    /// -1, 0, or 1 by sign.
     pub const fn signum(self: f64) f64 {
         if self.is_nan() {
             return self;
         }
         return unsafe copysign(1.0, self);
     }
+    /// `self`'s magnitude with `sign`'s sign.
     pub const fn copysign(self: f64, sign: f64) f64 {
         return unsafe copysign(self, sign);
     }
+    /// The smaller of the two.
     pub const fn min(self: f64, other: f64) f64 {
         return unsafe fmin(self, other);
     }
+    /// The larger of the two.
     pub const fn max(self: f64, other: f64) f64 {
         return unsafe fmax(self, other);
     }
+    /// `self` limited to [min, max]; `min` must not exceed `max`.
     pub const fn clamp(self: f64, min: f64, max: f64) f64 {
         if self < min {
             return min;
@@ -1214,84 +1328,111 @@ extend f64 {
         }
         return self;
     }
+    /// Largest integral value not above `self`.
     pub const fn floor(self: f64) f64 {
         return unsafe floor(self);
     }
+    /// Smallest integral value not below `self`.
     pub const fn ceil(self: f64) f64 {
         return unsafe ceil(self);
     }
+    /// Nearest integral value, halves away from zero.
     pub const fn round(self: f64) f64 {
         return unsafe round(self);
     }
+    /// Integral part, toward zero.
     pub const fn trunc(self: f64) f64 {
         return unsafe trunc(self);
     }
+    /// `self - self.trunc()`, with `self`'s sign.
     pub const fn fract(self: f64) f64 {
         return self - unsafe trunc(self);
     }
+    /// `1 / self`.
     pub const fn recip(self: f64) f64 {
         return 1.0 / self;
     }
+    /// Square root; NaN for a negative value.
     pub const fn sqrt(self: f64) f64 {
         return unsafe sqrt(self);
     }
+    /// Cube root (defined for negatives).
     pub const fn cbrt(self: f64) f64 {
         return unsafe cbrt(self);
     }
+    /// `self` raised to `n`.
     pub const fn powf(self: f64, n: f64) f64 {
         return unsafe pow(self, n);
     }
+    /// `self` raised to the integer `n` (through `pow`).
     pub const fn powi(self: f64, n: i32) f64 {
         return unsafe pow(self, n as f64);
     }
+    /// e^self.
     pub const fn exp(self: f64) f64 {
         return unsafe exp(self);
     }
+    /// 2^self.
     pub const fn exp2(self: f64) f64 {
         return unsafe exp2(self);
     }
+    /// e^self - 1, accurate near zero.
     pub const fn exp_m1(self: f64) f64 {
         return unsafe expm1(self);
     }
+    /// Natural logarithm; -inf at 0, NaN below.
     pub const fn ln(self: f64) f64 {
         return unsafe log(self);
     }
+    /// Logarithm in `base` (as ln(self) / ln(base)).
     pub const fn log(self: f64, base: f64) f64 {
         return unsafe log(self) / unsafe log(base);
     }
+    /// Base-2 logarithm.
     pub const fn log2(self: f64) f64 {
         return unsafe log2(self);
     }
+    /// Base-10 logarithm.
     pub const fn log10(self: f64) f64 {
         return unsafe log10(self);
     }
+    /// ln(1 + self), accurate near zero.
     pub const fn ln_1p(self: f64) f64 {
         return unsafe log1p(self);
     }
+    /// sqrt(self^2 + other^2) without intermediate overflow.
     pub const fn hypot(self: f64, other: f64) f64 {
         return unsafe hypot(self, other);
     }
+    /// Sine of an angle in radians.
     pub const fn sin(self: f64) f64 {
         return unsafe sin(self);
     }
+    /// Cosine of an angle in radians.
     pub const fn cos(self: f64) f64 {
         return unsafe cos(self);
     }
+    /// Tangent of an angle in radians.
     pub const fn tan(self: f64) f64 {
         return unsafe tan(self);
     }
+    /// Arc sine in radians; NaN outside [-1, 1].
     pub const fn asin(self: f64) f64 {
         return unsafe asin(self);
     }
+    /// Arc cosine in radians; NaN outside [-1, 1].
     pub const fn acos(self: f64) f64 {
         return unsafe acos(self);
     }
+    /// Arc tangent in radians.
     pub const fn atan(self: f64) f64 {
         return unsafe atan(self);
     }
+    /// Arc tangent of self/other using both signs to pick the quadrant.
     pub const fn atan2(self: f64, other: f64) f64 {
         return unsafe atan2(self, other);
     }
+    /// (sin, cos) of an angle in radians.
     pub const fn sin_cos(self: f64) (f64, f64) {
         return unsafe sin(self), unsafe cos(self);
     }
@@ -1299,36 +1440,45 @@ extend f64 {
     pub const fn total_cmp(self: f64, other: f64) i32 {
         return self.cmp(&other);
     }
+    /// Hyperbolic sine.
     pub const fn sinh(self: f64) f64 {
         return unsafe sinh(self);
     }
+    /// Hyperbolic cosine.
     pub const fn cosh(self: f64) f64 {
         return unsafe cosh(self);
     }
+    /// Hyperbolic tangent.
     pub const fn tanh(self: f64) f64 {
         return unsafe tanh(self);
     }
+    /// Inverse hyperbolic sine.
     pub const fn asinh(self: f64) f64 {
         return unsafe asinh(self);
     }
+    /// Inverse hyperbolic cosine; NaN below 1.
     pub const fn acosh(self: f64) f64 {
         return unsafe acosh(self);
     }
+    /// Inverse hyperbolic tangent; NaN outside [-1, 1].
     pub const fn atanh(self: f64) f64 {
         return unsafe atanh(self);
     }
+    /// `self * a + b` with a single rounding.
     pub const fn mul_add(self: f64, a: f64, b: f64) f64 {
         return unsafe fma(self, a, b);
     }
+    /// Radians to degrees.
     pub const fn to_degrees(self: f64) f64 {
         return self * 57.29577951308232;
     }
+    /// Degrees to radians.
     pub const fn to_radians(self: f64) f64 {
         return self * 0.017453292519943295;
     }
 }
 
-/// Move the value out of `slot`, installing `value` in its place -- the ownership-safe way to take
+/// Move the value out of `slot`, installing `value` in its place: the ownership-safe way to take
 /// a field out of a value that implements Free (a plain `let x = v.field;` is rejected there: the
 /// destructor cannot run on a partial value). The raw-pointer read/write pair transfers ownership
 /// without dropping either side; drop-on-assign deliberately ignores raw places.
@@ -1344,7 +1494,7 @@ pub fn replace<T>(slot: &mut T, value: T) T {
 /// go through an `UnsafeCell`. Its storage is never emitted `const`, so writing through that pointer is
 /// sound even when the cell lives in an immutable binding. Atomics and the type checker's in-place AST are
 /// built on it. Sharing an `UnsafeCell` across threads without external synchronisation is still a data
-/// race -- it makes interior mutability *expressible*, not automatically safe.
+/// race: it makes interior mutability *expressible*, not automatically safe.
 pub struct UnsafeCell<T> {
     value: T,
 }
@@ -1376,7 +1526,7 @@ union ForgetCell<T> {
     pub none: u8,
 }
 
-/// Take ownership of `value` and never free it -- the SANCTIONED deliberate leak (tests,
+/// Take ownership of `value` and never free it: the SANCTIONED deliberate leak (tests,
 /// process-lifetime singletons, FFI handoffs that outlive the program). The leak tracker
 /// (SC_LEAK_CHECK) still reports the abandoned allocations, which is the point: every intentional
 /// leak stays visible and greppable instead of being laundered through raw pointers.
@@ -1387,14 +1537,14 @@ pub fn forget<T>(value: T) {
 
 /// Non-null, `T`-aligned pointer backed by NO storage: the canonical element pointer for
 /// zero-sized-type buffers (`Vector<ZST>`, `Box<ZST>`). It must never be dereferenced for a
-/// material `T`, never passed to an allocator, and never assumed unique -- distinct zero-sized
+/// material `T`, never passed to an allocator, and never assumed unique: distinct zero-sized
 /// values may share it.
 pub const fn dangling<T>() *mut T {
     return alignof(T) as *mut T;
 }
 
 /// What sort of type `type_info::<T>()` described. `Slice` covers `[]T`/`[]mut T`, `Str` is `str`;
-/// every other named struct instance -- `Vector<T>`, `Box<T>`, user structs -- reports `Struct`.
+/// every other named struct instance (`Vector<T>`, `Box<T>`, user structs) reports `Struct`.
 pub enum TypeTag {
     Void,
     Bool,
@@ -1436,8 +1586,8 @@ pub struct MetaInfo {
 }
 
 /// One field of a reflected struct or union. `offset` is the byte offset in the C layout the
-/// compiled program actually uses; for a union every field reports offset 0. `kind` is the tag of
-/// the field's own type (one level -- reflect that type itself to go deeper). `meta` holds the
+/// compiled program uses; for a union every field reports offset 0. `kind` is the tag of
+/// the field's own type (one level: reflect that type itself to go deeper). `meta` holds the
 /// declaration's `@reflect` entries, in written order.
 pub struct FieldInfo {
     pub name: str<'static>,
@@ -1459,12 +1609,13 @@ extend FieldInfo {
         return Option::<MetaInfo>::None;
     }
 
+    /// True when a `@reflect` entry named `name` is attached.
     pub const fn has_meta(self: &FieldInfo, name: str) bool {
         return self.meta(name).is_some();
     }
 }
 
-/// One variant of a reflected enum. `tag` is the value the variant has at runtime -- the declared
+/// One variant of a reflected enum. `tag` is the value the variant has at runtime: the declared
 /// constant for a payload-less enum, the declaration index for an enum with payloads. `payload` is
 /// the variant's number of payload values (0 = a unit variant).
 pub struct VariantInfo {
@@ -1486,12 +1637,13 @@ extend VariantInfo {
         return Option::<MetaInfo>::None;
     }
 
+    /// True when a `@reflect` entry named `name` is attached.
     pub const fn has_meta(self: &VariantInfo, name: str) bool {
         return self.meta(name).is_some();
     }
 }
 
-/// One method a reflected type declares in an `extend` block -- inherent or conformance, `self`
+/// One method a reflected type declares in an `extend` block: inherent or conformance, `self`
 /// receiver or associated. ENUMERATION only: reflection cannot invoke a method (there is no value
 /// call path through a descriptor); use the name to document, filter by `meta`, or dispatch by
 /// hand. `arity` counts the value parameters with the `self` receiver excluded; `ret` is the
@@ -1519,12 +1671,13 @@ extend MethodInfo {
         return Option::<MetaInfo>::None;
     }
 
+    /// True when a `@reflect` entry named `name` is attached.
     pub const fn has_meta(self: &MethodInfo, name: str) bool {
         return self.meta(name).is_some();
     }
 }
 
-/// The result of `type_info::<T>()`, a compiler intrinsic that folds at compile time -- there is no
+/// The result of `type_info::<T>()`, a compiler intrinsic that folds at compile time; there is no
 /// declaration of `type_info` anywhere, and the value costs nothing unless it is reached. Fully
 /// non-owning: every member is a scalar or a `'static` view into static data, so a `TypeInfo` is
 /// never freed and can be stored or passed anywhere. `fields` is empty unless `kind` is
@@ -1569,6 +1722,7 @@ extend TypeInfo {
         return Option::<MetaInfo>::None;
     }
 
+    /// True when a `@reflect` entry named `name` is attached.
     pub const fn has_meta(self: &TypeInfo, name: str) bool {
         return self.meta(name).is_some();
     }
@@ -1596,7 +1750,7 @@ extend TypeInfo {
         return Option::<MethodInfo>::None;
     }
 
-    /// The variant whose runtime value is `tag`, or None -- the reverse lookup a `Display` for a
+    /// The variant whose runtime value is `tag`, or None: the reverse lookup a `Display` for a
     /// C-valued enum needs.
     pub const fn variant_by_tag(self: &TypeInfo, tag: i32) Option<VariantInfo> {
         for i in 0..self.variants.len {

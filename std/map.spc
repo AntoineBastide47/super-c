@@ -9,6 +9,8 @@ extern "C" {
     fn memset(dst: *mut void, value: i32, n: usize) *mut void;
 }
 
+/// An open-addressing hash map from K to V through allocator A. Iteration order is slot order, not
+/// insertion order.
 pub struct Map<K, V, A = Global> {
     keys: *mut K, // parallel arrays, slot i valid when used[i] == 1 (private)
     vals: *mut V,
@@ -29,16 +31,18 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         return Map::<K, V, A> { keys: null, vals: null, used: null, len: 0, cap: 0, alloc: alloc };
     }
 
+    /// Number of entries.
     pub const fn len(self: &Map<K, V, A>) usize {
         return self.len;
     }
 
+    /// True when no entry is stored.
     pub const fn is_empty(self: &Map<K, V, A>) bool {
         return self.len == 0;
     }
 
     // The slot a key occupies, or the first empty slot on its probe sequence. Requires cap > 0.
-    // cap is always a power of two (grow doubles from 8), so the bucket modulo is a bit-mask --
+    // cap is always a power of two (grow doubles from 8), so the bucket modulo is a bit-mask:
     // same slot for every hash as `% cap`, without the 64-bit division.
     fn slot(self: &Map<K, V, A>, key: &K) usize {
         let mut i = key.hash() as usize & self.cap - 1;
@@ -56,7 +60,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
 
     // Reallocate to a larger table and rehash every occupied entry into it. (Three separate arrays
     // by REQUIREMENT, not oversight: the compile-time evaluator's abstract heap types each
-    // allocation by its element -- a single block carved with byte-offset interior pointers is not
+    // allocation by its element: a single block carved with byte-offset interior pointers is not
     // evaluable, and Map folds at compile time are a language feature.)
     fn grow(self: &mut Map<K, V, A>) {
         let mut newcap = self.cap * 2;
@@ -67,7 +71,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         let oldvals = self.vals;
         let oldused = self.used;
         let oldcap = self.cap;
-        // zero-sized keys or values occupy no bytes: the aligned sentinel, no allocator call
+        // Zero-sized keys or values occupy no bytes: the aligned sentinel, no allocator call.
         if sizeof(K) == 0 {
             self.keys = zst_dangling::<K>();
         } else {
@@ -79,7 +83,8 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             self.vals = (unsafe self.alloc.alloc(newcap * sizeof(V), alignof(V))) as *mut V;
         }
         self.used = (unsafe self.alloc.alloc(newcap, alignof(u8))) as *mut u8;
-        unsafe memset(self.used, 0, newcap); // mark every slot empty
+        // Mark every slot empty.
+        unsafe memset(self.used, 0, newcap);
         self.cap = newcap;
         self.len = 0;
         for i in 0..oldcap {
@@ -107,8 +112,10 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     pub fn clear(self: &mut Map<K, V, A>) {
         for i in 0..self.cap {
             if unsafe self.used[i] != 0 {
-                unsafe self.keys[i].free(); // no-op if K isn't Free
-                unsafe self.vals[i].free(); // no-op if V isn't Free
+                // No-op if K isn't Free.
+                unsafe self.keys[i].free();
+                // No-op if V isn't Free.
+                unsafe self.vals[i].free();
             }
         }
         if self.cap > 0 {
@@ -122,7 +129,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     @c.always_inline
     pub const fn insert(self: &mut Map<K, V, A>, key: K, value: V) {
         if self.cap == 0 || (self.len + 1) * 4 >= self.cap * 3 {
-            // grow past a 0.75 load factor
+            // Grow past a 0.75 load factor.
             self.grow();
         }
         let i = self.slot(&key);
@@ -161,12 +168,13 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         return Option::<&mut V>::Some(&mut unsafe self.vals[i]);
     }
 
+    /// True when `key` has an entry.
     pub const fn contains_key(self: &Map<K, V, A>, key: &K) bool {
         return self.get(key).is_some();
     }
 
     /// Remove `key`, returning its value (`None` if absent). Re-inserts the rest of the probe cluster so no
-    /// lookup is cut short (backward-shift deletion -- no tombstones).
+    /// lookup is cut short (backward-shift deletion: no tombstones).
     pub const fn remove(self: &mut Map<K, V, A>, key: &K) Option<V> {
         if self.cap == 0 {
             return Option::<V>::None;
@@ -199,6 +207,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
 
 // Convenience constructor for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<K: Hash + Eq, V, A: Allocator + Default> Map<K, V, A> {
+    /// An empty map using the default allocator; storage is allocated on the first insert.
     pub const fn new() Map<K, V, A> {
         return Map::<K, V, A>::new_in(A::default());
     }
@@ -211,8 +220,10 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> as Free {
     pub fn free(self: &mut Map<K, V, A>) {
         for i in 0..self.cap {
             if unsafe self.used[i] != 0 {
-                unsafe self.keys[i].free(); // no-op if K isn't Free
-                unsafe self.vals[i].free(); // no-op if V isn't Free
+                // No-op if K isn't Free.
+                unsafe self.keys[i].free();
+                // No-op if V isn't Free.
+                unsafe self.vals[i].free();
             }
         }
         if sizeof(K) != 0 {
@@ -258,6 +269,7 @@ pub struct MapKeys<K> {
     pub cap: usize,
 }
 
+/// Iterator over a map's values in slot order; borrows the map.
 pub struct MapValues<V> {
     pub vals: *const V,
     pub used: *const u8,

@@ -1,5 +1,5 @@
 // Canonical (document) formatter tests: goldens for spacing/indent/width breaking/comments/@fmt.skip,
-// idempotence (fmt(fmt(x)) == fmt(x)) baked into every golden, and the semantic oracle -- the emitted
+// idempotence (fmt(fmt(x)) == fmt(x)) baked into every golden, and the semantic oracle: the emitted
 // C of an ugly program and of its formatted form must be byte-identical.
 import fmt::builder as fbld;
 import ast::ast as *;
@@ -89,7 +89,7 @@ fn golden_basic() {
 @test
 fn golden_param_groups() {
     // A `a, b: T` group (shared ty node) round-trips as written; separately-typed params never merge,
-    // even when the types read the same -- the formatter preserves the author's form both ways.
+    // even when the types read the same: the formatter preserves the author's form both ways.
     expect_fmt(
         "fn f(a,b:*const void,n:usize)i32{return 0;}",
         "fn f(a, b: *const void, n: usize) i32 {\n    return 0;\n}\n",
@@ -161,7 +161,7 @@ fn golden_comments() {
 }
 
 // A comment inside an EXPRESSION list (struct literal, call arguments, array, tuple) has only one shape
-// that works: the list broken, one element per line -- printed flat, a line comment would swallow the rest
+// that works: the list broken, one element per line; printed flat, a line comment would swallow the rest
 // of the line including the closing delimiter. Before this, such comments had nowhere to go and the
 // whole-file comment count refused to write the file at all. A list with no comment must still print flat.
 @test
@@ -178,7 +178,7 @@ fn golden_comments_in_expression_lists() {
         "fn f()i32{let a=[1,2,// tail\n];return a[0];}",
         "fn f() i32 {\n    let a = [\n        1,\n        2, // tail\n    ];\n    return a[0];\n}\n",
     );
-    // no comment: the flat shape is unchanged
+    // No comment: the flat shape is unchanged.
     expect_fmt(
         "struct W{pub a:i32}\nfn f()W{return W{a:1};}",
         "struct W {\n    pub a: i32,\n}\nfn f() W {\n    return W { a: 1 };\n}\n",
@@ -201,8 +201,8 @@ fn golden_select() {
 }
 
 // A closure spells its params either way (`fn(x: i32) {}` / `|x: i32| {}`) but only the `fn` form has a
-// return-type slot, so normalising everything to `||` DELETED a declared return type -- the formatter
-// rewrote working source into source that no longer compiles. A closure that declares one keeps the `fn`
+// return-type slot, so normalising everything to `||` DELETED a declared return type: the formatter
+// rewrote working source into source that does not compile. A closure that declares one keeps the `fn`
 // spelling; one that does not still normalises.
 @test
 fn golden_closure_return_type() {
@@ -249,7 +249,7 @@ fn golden_const_fn() {
 fn golden_lifetimes() {
     // Lifetime params print merged back into the one `<...>`, lifetimes first; `&'a T` keeps its
     // annotation and `&'a mut T` keeps lifetime-before-mut. (The formatter must round-trip this
-    // BEFORE any src/std source uses it -- otherwise fmt would silently delete annotations.)
+    // BEFORE any src/std source uses it: otherwise fmt would silently delete annotations.)
     expect_fmt("struct Ref<'a>{pub p:&'a i32}", "struct Ref<'a> {\n    pub p: &'a i32,\n}\n");
     expect_fmt("fn borrow<'a>(x:&'a i32)&'a i32{return x;}", "fn borrow<'a>(x: &'a i32) &'a i32 {\n    return x;\n}\n");
     expect_fmt("fn m<'a>(x:&'a mut i32){*x=1;}", "fn m<'a>(x: &'a mut i32) {\n    *x = 1;\n}\n");
@@ -257,12 +257,12 @@ fn golden_lifetimes() {
         "fn two<'a,'b:'a,T>(x:&'a T,y:&'b T)&'a T where T:'a{return x;}",
         "fn two<'a, 'b: 'a, T>(x: &'a T, y: &'b T) &'a T where T: 'a {\n    return x;\n}\n",
     );
-    // higher-ranked bound: the `for<..>` prefix must survive, or fmt would silently drop the ranking
+    // higher-ranked bound: the `for<..>` prefix must survive, or fmt would silently drop the ranking.
     expect_fmt(
         "fn apply<F:for<'a>fn(&'a i32)i32>(f:F,x:&i32)i32{return f(x);}",
         "fn apply<F: for<'a> fn(&'a i32) i32>(f: F, x: &i32) i32 {\n    return f(x);\n}\n",
     );
-    // a lifetime-parameterised associated type (GAT)
+    // A lifetime-parameterised associated type (GAT).
     expect_fmt("interface Lend{type Item<'a>;}", "interface Lend {\n    type Item<'a>;\n}\n");
 }
 
@@ -286,7 +286,7 @@ fn golden_dyn_reference() {
 }
 
 // A `mut` binding inside a pattern is semantics, not style: the printer works from the pattern's
-// span, and a span that started at the identifier silently REWROTE `Some(mut x)` to `Some(x)` --
+// span, and a span that started at the identifier silently REWROTE `Some(mut x)` to `Some(x)`:
 // formatting then changed what the program means.
 @test
 fn golden_pattern_mut_binding() {

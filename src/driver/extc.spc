@@ -16,12 +16,10 @@ import typechecker::typechecker as tc;
 import utils::errors as diag;
 import driver::util as *;
 
-// ---------------------------------------------------------------------------------------------------------
 // External C sources/libs: `@c.source`/`@c.link` attrs + implicit backing-header `.c` siblings. Each resolved
 // source becomes a wrapper TU `build/__ext<N>_<stem>.c` (one absolute #include; the file stays in place so its
 // own relative includes keep resolving), deduped by resolved path. `@c.link` values become `-l<v>` (verbatim
 // when starting with '-'), written to `build/__ldflags`.
-// ---------------------------------------------------------------------------------------------------------
 
 // "<dir of file>/<v[0..vl]>" (or "<v>") into `out` (a 4096-byte buffer).
 fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) {
@@ -99,8 +97,8 @@ fn ext_c_wrap(
 pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &mut bool, target: i32) {
     let root = p.gen_root.as_str();
     let mut ld = Vector::<String>::new();
-    // libm, on every POSIX link line: the prelude's float methods (`f64::fma` and friends) are emitted into
-    // every program whether or not it calls them, and glibc keeps those out of libc -- so the link fails
+    // Libm, on every POSIX link line: the prelude's float methods (`f64::fma` and friends) are emitted into
+    // every program whether or not it calls them, and glibc keeps those out of libc, so the link fails
     // without it, which macOS hides because libSystem has them. It is seeded here rather than as a
     // `@c.link` on the prelude's extern block because that block DECLARES the functions for every target,
     // Windows included: gating it to carry the flag would take the declarations away from Windows, whose

@@ -1,5 +1,6 @@
 // Error: a tiny owned error value for APIs that want more context than a bare i32 code.
 
+/// A code plus an owned message; clones deep-copy the message.
 pub struct Error {
     pub code: i32,
     message: *mut String,
@@ -31,6 +32,7 @@ extend Error {
         return Error { code: code, message: Error::own_message(message) };
     }
 
+    /// The message text.
     pub fn message(self: &Error) &String {
         return unsafe &self.message[0];
     }

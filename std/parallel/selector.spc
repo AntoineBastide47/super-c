@@ -1,12 +1,12 @@
 // Wait on several channel operations at once. Import with `import std::parallel::selector;`.
 //
 // `recv_timeout` in a loop polls; this parks. A `Selector` registers a wait node on EVERY armed channel's
-// queue under one wake token, parks once, and the first channel to notify wins the token -- so a task
+// queue under one wake token, parks once, and the first channel to notify wins the token, so a task
 // waiting on four channels costs one park, not four, and wakes the instant any of them moves.
 //
 // It reports WHICH arm is ready, not the value: the arm indices `arm_recv`/`arm_send` hand back identify
 // the operation, and the caller performs it with `try_recv`/`try_send`. That is what lets one selector mix
-// channels of different element types -- the selector itself never knows `T`. The `select` keyword is sugar
+// channels of different element types: the selector itself never knows `T`. The `select` keyword is sugar
 // over exactly this.
 //
 //     let mut s = selector::Selector::new();
@@ -20,7 +20,7 @@
 //     }
 //
 // Fairness has two halves. When several arms are ready at once there is no notion of which became ready
-// first -- nothing records it, and recording it would cost an atomic on the channel send path -- so one is
+// first (nothing records it, and recording it would cost an atomic on the channel send path) so one is
 // picked uniformly at random, which is what keeps a busy arm from starving a quiet one. When nothing is
 // ready the selector parks, and then the order IS observable: the notify that wins the wake token names its
 // arm, and that arm is retried first.
@@ -38,11 +38,11 @@ import std::parallel::platform as platform;
 pub const MAX_ARMS: usize = 16;
 
 // How long a plain (non-coroutine) thread sleeps between re-checks. It cannot park on several queues at
-// once -- that needs a coroutine's single wake token -- so it polls; short enough to stay responsive,
+// once (that needs a coroutine's single wake token) so it polls; short enough to stay responsive,
 // long enough not to spin. Coroutines never take this path.
 const POLL_SLICE_NS: i64 = 200000;
 
-/// The outcome of a wait: the arm index that is ready, or nothing -- the deadline passed, or `poll` found
+/// The outcome of a wait: the arm index that is ready, or nothing; the deadline passed, or `poll` found
 /// no ready arm.
 pub enum Selected {
     Ready(usize),
@@ -66,7 +66,7 @@ struct Arm {
 @no_const
 pub struct Selector {
     arms: [Arm; MAX_ARMS],
-    order: [usize; MAX_ARMS], // arm indices sorted by lock address -- the deadlock-free lock-all order
+    order: [usize; MAX_ARMS], // arm indices sorted by lock address: the deadlock-free lock-all order
     n: usize,
     woken: i32, // the arm a notify named as the waker, or -1
     rng: u64,
@@ -116,7 +116,7 @@ extend Selector {
             cursor: 0,
         };
     }
-    /// Wait on ANY `Selectable` -- a channel endpoint, or a type of your own that conforms. Returns the arm
+    /// Wait on ANY `Selectable`: a channel endpoint, or a type of your own that conforms. Returns the arm
     /// index a `Ready` result will carry. This is the whole extension point: `select` knows nothing about
     /// channels beyond this interface.
     pub fn arm<S: sync::Selectable>(self: &mut Selector, s: &S) usize {
@@ -203,18 +203,19 @@ extend Selector {
         );
     }
     // Ask one arm whether it would proceed, under its channel's lock. Every index here is below `n`, which
-    // `push` keeps at or below `MAX_ARMS` -- the unsafety is the missing bounds check, nothing more.
+    // `push` keeps at or below `MAX_ARMS`: the unsafety is the missing bounds check, nothing more.
     fn arm_ready(self: &Selector, i: usize) bool {
         let f = unsafe self.arms[i].ready;
         let raw = unsafe self.arms[i].raw;
-        unsafe sync::raw_mutex_lock(raw); // `select_ready` is called WITH the lock held, per `Selectable`
+        // `select_ready` is called WITH the lock held, per `Selectable`.
+        unsafe sync::raw_mutex_lock(raw);
         let r = f(unsafe self.arms[i].obj);
         unsafe sync::raw_mutex_unlock(raw);
         return r;
     }
     // Park until some arm moves, returning the winning wake reason (`WR_NONE` when it never parked).
     // Takes every channel lock, re-checks readiness under them (a value that arrived since `ready_now`
-    // must not be missed -- with no node queued yet, its notify would be lost), queues one node per arm
+    // must not be missed: with no node queued yet, its notify would be lost), queues one node per arm
     // under a single wake token, and parks; the hand-off releases the locks.
     fn block(self: &mut Selector, deadline: u64) u32 {
         let co = runtime::current();
@@ -252,7 +253,8 @@ extend Selector {
             unsafe self.arms[i].w = sync::Waiter { co: co, token: token, arm: i as i32, next: null, claim: claim };
             let cv = unsafe self.arms[i].cv;
             let wp = &mut unsafe self.arms[i].w;
-            unsafe cv.register(wp); // every arm's lock is held: see `lock_all`
+            // Every arm's lock is held: see `lock_all`.
+            unsafe cv.register(wp);
         }
         let mut reason = runtime::park_timed(token, deadline, commit_unlock_all, self, true);
         if deadline != 0 {
@@ -265,7 +267,8 @@ extend Selector {
             let raw = unsafe self.arms[i].raw;
             unsafe sync::raw_mutex_lock(raw);
             let wp = &mut unsafe self.arms[i].w;
-            unsafe cv.unregister(wp); // unlinked before this frame dies, which is what the node's owner owes
+            // Unlinked before this frame dies, which is what the node's owner owes.
+            unsafe cv.unregister(wp);
             unsafe sync::raw_mutex_unlock(raw);
         }
         runtime::wait_clear();
@@ -294,19 +297,20 @@ extend Selector {
             unsafe sync::raw_mutex_lock(unsafe self.arms[i].raw);
         }
     }
-    // Release every lock `lock_all` took, skipping the duplicates it skipped. `pub` for linkage: the park
-    // hand-off reaches it through a raw pointer.
+    /// Release every lock `lock_all` took, skipping the duplicates it skipped. `pub` for linkage: the park
+    /// hand-off reaches it through a raw pointer.
     pub fn unlock_all(self: &Selector) {
         for k in 0..self.n {
             let i = unsafe self.order[k];
             if k > 0 && unsafe self.arms[i].raw == unsafe self.arms[self.order[k - 1]].raw {
-                continue; // one channel armed twice (send and recv): one lock, taken once
+                // One channel armed twice (send and recv): one lock, taken once.
+                continue;
             }
             unsafe sync::raw_mutex_unlock(unsafe self.arms[i].raw);
         }
     }
-    // Record one type-erased arm. `pub` for linkage: `arm_recv`/`arm_send` are generic, so they are
-    // monomorphized in the caller's module and call this from there. Not user-facing.
+    /// Record one type-erased arm. `pub` for linkage: `arm_recv`/`arm_send` are generic, so they are
+    /// monomorphized in the caller's module and call this from there. Not user-facing.
     pub fn push(
         self: &mut Selector,
         obj: *const void,
@@ -325,8 +329,8 @@ extend Selector {
         self.n = i + 1;
         return i;
     }
-    // Record the arm a `select` statement's wait settled on, and rewind the cursor `take_turn` walks.
-    // `pub` for linkage (the sugar shims below are what the desugar calls); not user-facing.
+    /// Record the arm a `select` statement's wait settled on, and rewind the cursor `take_turn` walks.
+    /// `pub` for linkage (the sugar shims below are what the desugar calls); not user-facing.
     pub fn settle(self: &mut Selector, hit: Selected) {
         self.winner = (switch hit {
             Ready(i) => i as i64,
@@ -334,7 +338,7 @@ extend Selector {
         });
         self.cursor = 0;
     }
-    // Is the next arm in registration order the one that won? `pub` for linkage; not user-facing.
+    /// Is the next arm in registration order the one that won? `pub` for linkage; not user-facing.
     pub fn take_turn(self: &mut Selector) bool {
         let hit = self.cursor as i64 == self.winner;
         self.cursor = self.cursor + 1;
@@ -350,11 +354,9 @@ extend Selector {
     }
 }
 
-// -----------------------------------------------------------------------------------------------------
-// The `select` keyword lowers to these -- see src/hir. Free functions, not methods: the sugar lowering
+// The `select` keyword lowers to these: see src/hir. Free functions, not methods: the sugar lowering
 // runs after name resolution and can only seed the resolution of a call it builds itself, so every piece
 // the lowered code needs must be reachable as a plain function. Nothing else should call them.
-// -----------------------------------------------------------------------------------------------------
 
 /// A selector for one `select` statement.
 pub fn sugar_new() Selector {
@@ -390,7 +392,7 @@ pub fn sugar_poll(sel: &mut Selector) {
 }
 
 /// Did the NEXT arm in registration order win? Called once per arm, in order, so the lowered code needs no
-/// arm indices -- a plain if/else chain over these calls picks exactly one arm.
+/// arm indices: a plain if/else chain over these calls picks exactly one arm.
 pub fn sugar_won(sel: &mut Selector) bool {
     return sel.take_turn();
 }

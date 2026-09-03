@@ -1,4 +1,4 @@
-// `std::int` (a prelude module) -- the arbitrary-width fixed integers. What is worth testing here is the places the limb
+// `std::int` (a prelude module); the arbitrary-width fixed integers. What is worth testing here is the places the limb
 // representation shows through: a carry crossing a limb boundary, a borrow crossing it the other way, a
 // product wider than one limb, the sign bit at the top of the top limb, and the ends of each range.
 // Widths are exercised at 128, 256 and 512 bits so the monomorphizer produces more than one instantiation.
@@ -9,24 +9,24 @@
 fn reads_like_a_builtin_integer() {
     let a: u128 = 42;
     assert_eq(a.to_u64(), 42u64);
-    // literal as an operand, on both sides of a comparison
+    // Literal as an operand, on both sides of a comparison.
     assert((a + 1).to_u64() == 43u64);
     assert(a == 42);
     assert(a > 41);
     assert(a < 43);
-    // a built-in value widens into it, and the arithmetic then happens at the wide width
+    // A built-in value widens into it, and the arithmetic then happens at the wide width.
     let n: u64 = 0xFFFFFFFFFFFFFFFF;
     let wide: u128 = n;
     let sum = wide + 2;
     let s = sum.to_string();
     assert(s.as_str() == "18446744073709551617");
-    // signed, including a negative literal
+    // Signed, including a negative literal.
     let neg: i128 = -5;
     assert(neg < i128::zero());
     assert(neg + 5 == i128::zero());
 }
 
-// Widths convert like the built-in integers too. Implicitly only WIDENING, which is lossless -- the
+// Widths convert like the built-in integers too. Implicitly only WIDENING, which is lossless: the
 // signed form extends the sign, so a negative value stays the same number. `as` carries exactly C's cast
 // semantics through the cast_unsigned/cast_signed pair: truncation when narrower, extension by the
 // SOURCE's signedness when wider, and a scalar cast lands on the value's own to_u64/to_i64.
@@ -38,32 +38,34 @@ fn widths_convert_like_builtins() {
     let sgn: i256 = -9;
     let wider: i512 = sgn; // sign-extended
     assert(wider.to_i64() == -9);
-    // as: down, across signedness, and to a built-in
+    // `as`: down, across signedness, and to a built-in.
     let big = u256::from_u64(0xFFFFFFFFFFFFFFFF) + 1;
     let low = big as u128;
     assert(low.limb(0) == 0);
     assert(low.limb(1) == 1);
     let n: i128 = -1;
-    assert(n as u128 == u128::max()); // two's complement reinterpret, as C casts do
-    assert((n as u256).limb(3) == 0xFFFFFFFFFFFFFFFF); // sign-extends because the SOURCE is signed
+    // Two's complement reinterpret, as C casts do.
+    assert(n as u128 == u128::max());
+    // Sign-extends because the SOURCE is signed.
+    assert((n as u256).limb(3) == 0xFFFFFFFFFFFFFFFF);
     assert(a as u64 == 7u64);
     assert(a as u32 == 7u32);
     assert(i128::from_i64(-2) as i64 == -2i64);
 }
 
 // Float casts round ONCE: the top 64 bits carry a sticky bit, so the single u64 conversion rounds
-// exactly as converting the full value would -- limb-by-limb accumulation would round at every step.
+// exactly as converting the full value would: limb-by-limb accumulation would round at every step.
 // The float-to-integer direction truncates and SATURATES (NaN gives zero), as Rust's float casts do.
 @test
 fn float_casts_round_once_and_saturate() {
     assert(u128::from_u64(7) as f64 == 7.0);
     assert(7.0 as u128 == u128::from_u64(7));
-    // 2^127 - 1 rounds up to 2^127 exactly; without the sticky bit it rounds wrong
+    // 2^127 - 1 rounds up to 2^127 exactly; without the sticky bit it rounds wrong.
     assert((u128::max() >> 1) as f64 == 170141183460469231731687303715884105728.0);
-    // a large power of two is exact and round-trips
+    // A large power of two is exact and round-trips.
     let p = u128::one() << 100;
     assert((p as f64) as u128 == p);
-    // signed, negative, fractional, and out-of-range saturation
+    // Signed, negative, fractional, and out-of-range saturation.
     assert(i128::from_i64(-9) as f64 == -9.0);
     assert((0.0 - 9.75) as i128 == i128::from_i64(-9));
     assert(1.0e60 as u128 == u128::max());
@@ -71,22 +73,23 @@ fn float_casts_round_once_and_saturate() {
     assert(1.0e60 as i128 == i128::max());
     assert((0.0 - 1.0e60) as i128 == i128::min());
     // f32 has its own path, not a double round through f64
-    assert(u128::from_u64(16777217) as f32 == 16777216.0f32); // rounds to even at 24 bits
+    // Rounds to even at 24 bits.
+    assert(u128::from_u64(16777217) as f32 == 16777216.0f32);
 }
 
 // A width need not be a whole number of limbs: the top limb's unused bits stay zero (an invariant the
 // one limb-write site enforces), so every operation wraps at exactly BITS. The float formats depend on
-// this -- Float<5, 10> stores 16 bits.
+// this: Float<5, 10> stores 16 bits.
 @test
 fn partial_limb_widths() {
-    // 16-bit: wraps at 16, and checked arithmetic sees the true carry
+    // 16-bit: wraps at 16, and checked arithmetic sees the true carry.
     let one16 = UInt::<16>::one();
     let m16 = UInt::<16>::from_u64(65535);
     assert(m16.wrapping_add(&one16).is_zero());
     assert(m16.checked_add(&one16).is_none());
     let s16 = m16.to_string();
     assert(s16.as_str() == "65535");
-    // 100-bit: the carry crosses limb 0 into the partial limb, and overflow detection sees bit 100
+    // 100-bit: the carry crosses limb 0 into the partial limb, and overflow detection sees bit 100.
     let big = UInt::<100>::max();
     let one100 = UInt::<100>::one();
     let two100 = UInt::<100>::from_u64(2);
@@ -94,7 +97,7 @@ fn partial_limb_widths() {
     assert_eq(big.bit_length(), 100);
     assert_eq(big.count_ones(), 100);
     assert(big.checked_mul(&two100).is_none());
-    // division and the full product at a partial width
+    // Division and the full product at a partial width.
     let three = UInt::<100>::from_u64(3);
     let mut r100 = UInt::<100>::zero();
     let q = big.divmod(&three, &mut r100);
@@ -104,14 +107,14 @@ fn partial_limb_widths() {
     let p = f.full_mul(&f);
     let ps = p.to_string();
     assert(ps.as_str() == "340282366920938463426481119284349108225");
-    // signed 20-bit: the sign bit sits mid-limb, and every signed operation reads it there
+    // Signed 20-bit: the sign bit sits mid-limb, and every signed operation reads it there.
     let m = Int::<20>::from_i64(-3);
     assert_eq(m.to_i64(), -3i64);
     assert(m.is_negative());
     assert_eq(m.shr(1).to_i64(), -2i64);
     assert_eq(Int::<20>::min().to_i64(), -524288i64);
     assert_eq(Int::<20>::max().to_i64(), 524287i64);
-    // widening across a mid-limb boundary sign-extends through it
+    // Widening across a mid-limb boundary sign-extends through it.
     let w = Int::<100>::widen(&m);
     assert_eq(w.to_i64(), -3i64);
     assert(w.is_negative());
@@ -140,7 +143,7 @@ fn addition_carries_across_limbs() {
     assert_eq(b.limb(1), 1u64);
     let back = b - one;
     assert(back == a);
-    // and a borrow back across it
+    // And a borrow back across it.
     let z = u128::zero();
     assert(z - one == u128::max());
 }
@@ -189,7 +192,7 @@ fn division_and_remainder() {
     let qs = q.to_string();
     assert(qs.as_str() == "142857142857142857");
     assert_eq(r.to_u64(), 1u64);
-    // q * b + r == a
+    // q * b + r == a.
     assert(q * b + r == a);
 }
 
@@ -210,7 +213,8 @@ fn shifts_move_bits_across_limbs() {
     assert_eq(hi.limb(1), 1u64);
     assert(hi.shr(64) == one);
     assert(one.shl(127).shr(127) == one);
-    assert(one.shl(128).is_zero()); // shifting past the width discards, as the builtins do
+    // Shifting past the width discards, as the builtins do.
+    assert(one.shl(128).is_zero());
     assert_eq(hi.bit_length(), 65);
     assert_eq(hi.leading_zeros(), 63);
     assert_eq(u128::max().count_ones(), 128);
@@ -227,7 +231,7 @@ fn bitwise_operations() {
     assert_eq((a ^ b).to_u64(), 0xFF00u64);
     assert(~~a == a);
     assert(~u128::zero() == u128::max());
-    // and the compound forms, which lower to `x = x.op(y)`
+    // and the compound forms, which lower to `x = x.op(y)`.
     let mut acc = a;
     acc &= b;
     assert(acc == (a & b));
@@ -235,7 +239,7 @@ fn bitwise_operations() {
     assert(acc == (a & b | u128::from_u64(0xF)));
     acc ^= acc;
     assert(acc.is_zero());
-    // signed values reach the same operators
+    // Signed values reach the same operators.
     assert(~i128::zero() == i128::from_i64(-1));
     assert((i128::from_i64(12) & i128::from_i64(10)) == i128::from_i64(8));
 }
@@ -271,7 +275,7 @@ fn signed_negative_values_round_trip() {
     let q = p.divmod(&b, &mut r);
     assert(q == a);
     assert(r.is_zero());
-    // sign extension: a negative 64-bit value fills every limb above it
+    // Sign extension: a negative 64-bit value fills every limb above it.
     assert_eq(a.limb(1), 0xFFFFFFFFFFFFFFFFu64);
 }
 
@@ -338,7 +342,7 @@ fn conformances() {
     assert(a.clone() == a);
     let f = a.fmt();
     assert(f.as_str() == "5");
-    // and they work as Map keys, which is what Hash + Eq are for
+    // They work as Map keys, which is what Hash + Eq are for.
     let mut m = Map::<u128, i32>::new();
     m.insert(a, 7);
     switch m.get(&b) {
@@ -373,7 +377,7 @@ fn min_divided_by_minus_one_traps() {
 }
 
 // The full product needs 2N bits, so it is returned either as two N-bit halves or as one value of twice
-// the width -- the latter through a const-generic EXPRESSION, `UInt<{BITS * 2}>`.
+// the width: the latter through a const-generic EXPRESSION, `UInt<{BITS * 2}>`.
 @test
 fn widening_and_full_multiplication() {
     let a = u128::max();
@@ -386,7 +390,7 @@ fn widening_and_full_multiplication() {
     assert_eq(u128::bits() * 2, 256);
     let s = p.to_string();
     assert(s.as_str() == "115792089237316195423570985008687907852589419931798687112530834793049593217025");
-    // and a width the aliases do not name, to show the expression is computed rather than looked up
+    // And a width the aliases do not name, to show the expression is computed rather than looked up.
     let b = UInt::<192>::from_u64(0xFFFFFFFFFFFFFFFF);
     let w = b.full_mul(&b);
     assert_eq(UInt::<384>::limbs(), 6);
@@ -395,7 +399,7 @@ fn widening_and_full_multiplication() {
 }
 
 // Widening composes: the result of one full product feeds the next, and the width the signature promises
-// is the one that arrives -- `{(B * 2) * 2}` and `{B * 4}` are the same width, not two that look alike.
+// is the one that arrives: `{(B * 2) * 2}` and `{B * 4}` are the same width, not two that look alike.
 fn square_twice<const B: usize>(x: &UInt<B>) UInt<{B * 4}> {
     let sq = x.full_mul(x);
     return sq.full_mul(&sq);
@@ -411,7 +415,7 @@ fn widening_composes_across_widths() {
 
 // The 128-bit width is the one that routes through the C compiler's native 128-bit type where one
 // exists; UInt<256> never does. Recomputing every 128-bit result inside u256 and truncating back is
-// therefore a differential test of the native path against the limb code -- and on a target without
+// therefore a differential test of the native path against the limb code, and on a target without
 // the native type both sides run limb code, so the test still holds.
 @test
 fn native_128_path_matches_the_limb_code() {
@@ -424,18 +428,18 @@ fn native_128_path_matches_the_limb_code() {
                     let b = u128::from_u64(unsafe vs[k]) << 64 | unsafe vs[l];
                     let wa: u256 = a;
                     let wb: u256 = b;
-                    // addition: the wrapped value, and the carry as bit 128 of the wide sum
+                    // Addition: the wrapped value, and the carry as bit 128 of the wide sum.
                     assert(a.wrapping_add(&b) == (wa + wb) as u128);
                     assert(a.checked_add(&b).is_none() == !(wa + wb >> 128).is_zero());
-                    // subtraction: round-trips, and the borrow is the unsigned order
+                    // Subtraction: round-trips, and the borrow is the unsigned order.
                     assert(a.wrapping_sub(&b).wrapping_add(&b) == a);
                     assert(a.checked_sub(&b).is_none() == a < b);
-                    // multiplication: the exact 256-bit product is the ground truth for all three forms
+                    // Multiplication: the exact 256-bit product is the ground truth for all three forms.
                     let p = wa * wb;
                     assert(a.wrapping_mul(&b) == p as u128);
                     assert(a.checked_mul(&b).is_none() == !(p >> 128).is_zero());
                     assert(a.full_mul(&b) == p);
-                    // division: quotient and remainder against the wide divider, plus reconstruction
+                    // Division: quotient and remainder against the wide divider, plus reconstruction.
                     if !b.is_zero() {
                         let mut r = u128::zero();
                         let q = a.divmod(&b, &mut r);
@@ -446,7 +450,7 @@ fn native_128_path_matches_the_limb_code() {
                     }
                 }
             }
-            // decimal text runs on the small divider; the wide width answers with the limb code
+            // Decimal text runs on the small divider; the wide width answers with the limb code.
             let w: u256 = a;
             let s1 = a.to_string();
             let s2 = w.to_string();
@@ -460,34 +464,34 @@ fn native_128_path_matches_the_limb_code() {
 @test
 fn bit_utilities_and_arithmetic_tail() {
     let x = u128::from_u64(0xDEADBEEF00000000u64) << 64 | 0x12345678u64;
-    // counts
+    // Counts.
     assert_eq(x.count_ones() + x.count_zeros(), 128);
     assert_eq(x.trailing_zeros(), 3);
     assert_eq(u128::zero().trailing_zeros(), 128);
     assert_eq(u128::one().trailing_zeros(), 0);
     assert_eq((u128::one() << 127).trailing_zeros(), 127);
-    // rotation: leaves one end, returns at the other; a full turn is identity
+    // Rotation: leaves one end, returns at the other; a full turn is identity.
     assert(x.rotate_left(0) == x);
     assert(x.rotate_left(128) == x);
     assert(x.rotate_left(40).rotate_right(40) == x);
     let rl = x << 1 | x >> 127;
     assert(x.rotate_left(1) == rl);
-    // a PARTIAL width rotates through its own BITS, not a limb's 64
+    // A PARTIAL width rotates through its own BITS, not a limb's 64.
     let p = UInt::<100>::one();
     assert(p.rotate_right(1) == UInt::<100>::one() << 99);
-    // byte and bit reversal are involutions, and land where they should
+    // Byte and bit reversal are involutions, and land where they should.
     assert(x.swap_bytes().swap_bytes() == x);
     assert_eq(x.swap_bytes().limb(1), 0x7856341200000000u64);
     assert(x.reverse_bits().reverse_bits() == x);
     assert(u128::one().reverse_bits() == u128::one() << 127);
-    // powers of two
+    // Powers of two.
     assert(!x.is_power_of_two());
     assert((u128::one() << 90).is_power_of_two());
     assert(u128::from_u64(100).next_power_of_two() == u128::from_u64(128));
     assert(u128::from_u64(128).next_power_of_two() == u128::from_u64(128));
     assert(u128::zero().next_power_of_two() == u128::one());
     assert(u128::max().checked_next_power_of_two().is_none());
-    // overflowing_*: value matches wrapping, flag matches checked
+    // overflowing_*: value matches wrapping, flag matches checked.
     let m = u128::max();
     let one = u128::one();
     let two = u128::from_u64(2);
@@ -500,7 +504,7 @@ fn bit_utilities_and_arithmetic_tail() {
     assert(mv == m.wrapping_mul(&two) && mo);
     let (nv, no) = u128::from_u64(3).overflowing_mul(&four);
     assert(nv == u128::from_u64(12) && !no);
-    // pow against repeated multiplication, and its overflow report
+    // Pow against repeated multiplication, and its overflow report.
     let three = u128::from_u64(3);
     let mut acc = u128::one();
     for _i in 0..77 {
@@ -508,9 +512,10 @@ fn bit_utilities_and_arithmetic_tail() {
     }
     assert(three.pow(77) == acc);
     assert(three.checked_pow(77).is_some());
-    assert(three.checked_pow(100).is_none()); // 3^100 needs 159 bits
+    // 3^100 needs 159 bits.
+    assert(three.checked_pow(100).is_none());
     assert(u128::from_u64(2).pow(0) == u128::one());
-    // abs_diff and checked_rem
+    // abs_diff and checked_rem.
     let seven = u128::from_u64(7);
     let nine = u128::from_u64(9);
     let z = u128::zero();
@@ -525,7 +530,8 @@ fn bit_utilities_and_arithmetic_tail() {
 @test
 fn signed_tail_and_euclid() {
     let n = i128::from_i64(-2);
-    assert_eq(n.count_ones(), 127); // two's complement -2: every bit but bit 0
+    // Two's complement -2: every bit but bit 0.
+    assert_eq(n.count_ones(), 127);
     assert_eq(n.trailing_zeros(), 1);
     assert(n.signum() == i128::from_i64(-1));
     assert(i128::zero().signum().is_zero());
@@ -534,7 +540,7 @@ fn signed_tail_and_euclid() {
     let ifour = i128::from_i64(4);
     assert(i128::min().abs_diff(&imax) == u128::max());
     assert(i128::from_i64(-3).abs_diff(&ifour) == u128::from_u64(7));
-    // euclid: d*q + r == self and 0 <= r < |d|, all four sign shapes
+    // Euclid: d*q + r == self and 0 <= r < |d|, all four sign shapes.
     let vals: [i64; 4] = [7i64, -7i64, 9i64, -9i64];
     for i in 0..4 {
         for j in 0..4 {
@@ -553,7 +559,7 @@ fn signed_tail_and_euclid() {
             assert(b * q + r == a);
         }
     }
-    // overflowing against checked
+    // Overflowing against checked.
     let ione = i128::one();
     let ineg1 = i128::from_i64(-1);
     let (av, ao) = i128::max().overflowing_add(&ione);
@@ -562,7 +568,7 @@ fn signed_tail_and_euclid() {
     assert(so && sv == i128::max());
     let (_mv, mo) = i128::min().overflowing_mul(&ineg1);
     assert(mo);
-    // pow traps are reported, and the plain form matches multiplication
+    // Pow traps are reported, and the plain form matches multiplication.
     assert(i128::from_i64(-3).pow(3) == i128::from_i64(-27));
     assert(i128::from_i64(2).checked_pow(126).is_some());
     assert(i128::from_i64(2).checked_pow(127).is_none());
@@ -583,7 +589,7 @@ fn bytes_and_radix_text() {
     assert_eq(be[0] as i32, 0x01);
     assert_eq(be[15] as i32, 0x10);
     assert(u128::from_be_bytes(be[0..16]) == x);
-    // a partial width: 100 bits = 13 bytes, 4 live bits in the top one, masked on the way back in
+    // A partial width: 100 bits = 13 bytes, 4 live bits in the top one, masked on the way back in.
     let p = UInt::<100>::max();
     let mut pb = Array::<u8, 13>::new();
     p.to_le_bytes(pb.index_range_mut(0usize..13));
@@ -593,17 +599,18 @@ fn bytes_and_radix_text() {
     for i in 0usize..13 {
         full[i] = 0xFF;
     }
-    assert(UInt::<100>::from_le_bytes(full[0..13]) == p); // bits past the width do not exist
-    // a missing high byte reads as the zero it is
+    // Bits past the width do not exist.
+    assert(UInt::<100>::from_le_bytes(full[0..13]) == p);
+    // A missing high byte reads as the zero it is.
     assert(u128::from_le_bytes(le[0..8]) == u128::from_u64(0x090A0B0C0D0E0F10u64));
-    // signed round-trip preserves the sign bits exactly
+    // Signed round-trip preserves the sign bits exactly.
     let sn = i128::from_i64(-123456789);
     let mut sb = Array::<u8, 16>::new();
     sn.to_le_bytes(sb.index_range_mut(0usize..16));
     assert(i128::from_le_bytes(sb[0..16]) == sn);
     sn.to_be_bytes(sb.index_range_mut(0usize..16));
     assert(i128::from_be_bytes(sb[0..16]) == sn);
-    // radix: hex, binary and base 36 against the decimal ground truth
+    // Radix: hex, binary and base 36 against the decimal ground truth.
     let v = u128::from_str("340282366920938463463374607431768211455").unwrap(); // 2^128 - 1
     let hex = v.to_string_radix(16);
     assert(hex.as_str() == "ffffffffffffffffffffffffffffffff");
@@ -613,8 +620,10 @@ fn bytes_and_radix_text() {
     assert(bin.as_str().byte_at(0) == b'1');
     assert(u128::from_str_radix("ffffffffffffffffffffffffffffffff", 16).unwrap() == v);
     assert(u128::from_str_radix("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", 16).unwrap() == v);
-    assert(u128::from_str_radix("100000000000000000000000000000000", 16).is_none()); // one too wide
-    assert(u128::from_str_radix("12", 2).is_none()); // digit outside the radix
+    // One too wide.
+    assert(u128::from_str_radix("100000000000000000000000000000000", 16).is_none());
+    // Digit outside the radix.
+    assert(u128::from_str_radix("12", 2).is_none());
     assert(u128::from_str_radix("10", 37).is_none());
     let rt = u128::from_str_radix("zz", 36).unwrap();
     assert(rt == u128::from_u64(1295));
@@ -644,22 +653,23 @@ fn wide_integer_literals() {
     assert(p == UInt::<100>::max());
     let big: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
     assert(big == u256::max());
-    // the operand position: the left side's width is what the literal means
+    // The operand position: the left side's width is what the literal means.
     let one: u128 = 1;
     let b = one + 18446744073709551616;
     assert_eq(b.limb(1), 1u64);
     assert(b == 18446744073709551617);
-    // separators and a negative hex magnitude
+    // Separators and a negative hex magnitude.
     let sep: u128 = 340_282_366_920_938_463_463_374_607_431_768_211_455;
     assert(sep == u128::max());
     let nh: i128 = -0x80000000000000000000000000000000;
     assert(nh == i128::min());
-    // and the SUFFIX spelling: the width rides on the literal, so no context is needed at all
+    // And the SUFFIX spelling: the width rides on the literal, so no context is needed at all.
     let sa = 5i128;
     assert(sa == i128::from_i64(5));
     assert(340282366920938463463374607431768211455u128 == u128::max());
     assert(-170141183460469231731687303715884105728i128 == i128::min());
     assert(0xFFu256 == u256::from_u64(255));
-    assert(7u100 == UInt::<100>::from_u64(7)); // ANY width, not just the aliased ones
+    // ANY width, not only the aliased ones.
+    assert(7u100 == UInt::<100>::from_u64(7));
     assert(sa + 1i128 == 6i128);
 }

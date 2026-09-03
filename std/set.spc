@@ -2,6 +2,7 @@
 // Elements must be `Hash + Eq`. The set owns its elements; `contains` borrows a lookup key, `insert`
 // takes ownership of a value, and `remove` frees the stored element through Map's key-removal path.
 
+/// A hash set of T (a Map<T, bool> underneath) through allocator A.
 pub struct Set<T, A = Global> {
     m: Map<T, bool, A>,
 }
@@ -12,10 +13,12 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> {
         return Set::<T, A> { m: Map::<T, bool, A>::new_in(alloc) };
     }
 
+    /// Number of elements.
     pub const fn len(self: &Set<T, A>) usize {
         return self.m.len();
     }
 
+    /// True when no element is stored.
     pub const fn is_empty(self: &Set<T, A>) bool {
         return self.m.is_empty();
     }
@@ -25,6 +28,7 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> {
         self.m.insert(value, true);
     }
 
+    /// True when `value` is a member.
     pub const fn contains(self: &Set<T, A>, value: &T) bool {
         return self.m.contains_key(value);
     }
@@ -43,6 +47,7 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> {
 
 // Convenience constructor for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<T: Hash + Eq, A: Allocator + Default> Set<T, A> {
+    /// An empty set using the default allocator.
     pub const fn new() Set<T, A> {
         return Set::<T, A>::new_in(A::default());
     }
@@ -62,7 +67,7 @@ extend<T: Hash + Eq + Default, A: Allocator + Default> Set<T, A> as Default {
 }
 
 // Build from a list of elements: `let s: Set<i32> = [1, 2, 2, 3].into();` (duplicates collapse). The
-// slice borrows, so each element is cloned in -- see Vector's conversion for why.
+// slice borrows, so each element is cloned in: see Vector's conversion for why.
 extend<T: Hash + Eq + Clone, A: Allocator + Default> Set<T, A> as From<[]T> {
     pub fn from(value: []T) Set<T, A> {
         let mut out = Set::<T, A>::new();

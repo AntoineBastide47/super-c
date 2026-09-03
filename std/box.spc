@@ -5,6 +5,7 @@
 // `new()` uses a default-constructed allocator; pass a stateful one (an arena/pool handle) with `new_in`, or
 // pick a non-default zero-sized allocator with a turbofish: `Box::<T, MyAlloc>::new(v)`.
 
+/// An owned heap allocation of one T through allocator A; freeing the box frees the value.
 pub struct Box<T, A = Global> {
     ptr: *mut T, // owns one T (private)
     alloc: A, // the allocator the block was obtained through (private; zero-sized for Global)
@@ -21,7 +22,7 @@ extend<T, A: Allocator> Box<T, A> {
     pub const fn new_in(alloc: A, value: T) Box<T, A> {
         let mut b = Box::<T, A> { ptr: null, alloc: alloc };
         if sizeof(T) == 0 {
-            // a zero-sized value occupies no bytes: the aligned sentinel, no allocator call
+            // A zero-sized value occupies no bytes: the aligned sentinel, no allocator call.
             b.ptr = zst_dangling::<T>();
             unsafe b.ptr[0] = value;
             return b;
@@ -31,6 +32,7 @@ extend<T, A: Allocator> Box<T, A> {
         return b;
     }
 
+    /// The boxed value.
     pub const fn get(self: &Box<T, A>) &T {
         return unsafe &self.ptr[0];
     }
@@ -60,6 +62,7 @@ extend<T, A: Allocator> Box<T, A> {
 
 // Convenience constructor for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<T, A: Allocator + Default> Box<T, A> {
+    /// Box `value` through the default allocator. Panics: allocation failure.
     pub const fn new(value: T) Box<T, A> {
         return Box::<T, A>::new_in(A::default(), value);
     }
@@ -84,10 +87,12 @@ extend<T, A: Allocator> Box<T, A> as DerefMut<T> {
 // value. The inner `.free()` is a no-op when `T` isn't a Free type.
 extend<T, A: Allocator> Box<T, A> as Free {
     pub fn free(self: &mut Box<T, A>) {
-        self.ptr.free(); // free the boxed value (no-op if T isn't Free)
+        // Free the boxed value (no-op if T isn't Free).
+        self.ptr.free();
         if sizeof(T) == 0 {
             self.ptr = null;
-            return; // the sentinel was never allocated
+            // The sentinel was never allocated.
+            return;
         }
         unsafe self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));
         self.ptr = null;

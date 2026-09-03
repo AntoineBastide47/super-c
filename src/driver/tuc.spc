@@ -1,9 +1,9 @@
 // Per-TU emission cache (see cemit_package): for every module whose fingerprint is unchanged the
-// seed loop skips lowering and replays the module's journaled side effects -- chunk texts, demand/
-// glue/agg/proto attempts, liveness edges -- through the emitter's own dedup gates. Sections are
+// seed loop skips lowering and replays the module's journaled side effects (chunk texts, demand/
+// glue/agg/proto attempts, liveness edges) through the emitter's own dedup gates. Sections are
 // POSITION-INDEPENDENT: every TypeId a journaled event carries is translated to a section-local
 // structural type table at record time and re-interned at replay, so a section records and replays
-// under any pool state -- including the parallel seed frontier, whose intern order is scheduling-
+// under any pool state, including the parallel seed frontier, whose intern order is scheduling-
 // dependent.
 // The fingerprint is deliberately package-aware where emission is: it hashes the module's transitive
 // import closure (plus the prelude), the ordered module path list (short-prefix collisions and
@@ -73,6 +73,7 @@ pub struct Rd {
     pub ok: bool,
 }
 
+/// The per-TU cache for one build: per-module keys, the previous image, and per-module hit flags.
 pub struct Tuc {
     pub on: bool,
     pub hdr: u64,
@@ -111,8 +112,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     h = fnv_str(h, ep);
     h = fnv_mix(h, mt as u64);
     h = fnv_mix(h, TUC_VER);
-    // emission-mode switches change the C a body renders to: a record written under one mode
-    // must never replay under another
+    // Emission-mode switches change the C a body renders to: a record written under one mode
+    // must never replay under another.
     for i in 0..inl::EMIT_MODE_ENV_N {
         let e = stdlib::getenv(inl::emit_mode_env(i));
         if e != null {
@@ -130,8 +131,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
         },
     );
     h = fnv_mix(h, p.modules.len() as u64);
-    // the ordered path list: prefixing (`user_mods > 1`), short-prefix collisions and ModuleId
-    // numbering are all pure functions of it
+    // The ordered path list: prefixing (`user_mods > 1`), short-prefix collisions and ModuleId
+    // numbering are all pure functions of it.
     for i in 0..p.modules.len() {
         h = fnv_str(h, p.modules[i].path.as_str());
         h = fnv_mix(
@@ -143,8 +144,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
             },
         );
     }
-    // the extend surface: method_by_name resolves first-match over EVERY module's extends, so a
-    // method added or renamed anywhere may respell calls in modules that never import it
+    // The extend surface: method_by_name resolves first-match over EVERY module's extends, so a
+    // method added or renamed anywhere may respell calls in modules that never import it.
     for i in 0..p.modules.len() {
         if !p.modules[i].has_ast {
             continue;
@@ -180,7 +181,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
                         );
                     }
                 } else {
-                    h = fnv_mix(h, tg.node); // rarer targets: node identity (over-invalidates only)
+                    // Rarer targets: node identity (over-invalidates only).
+                    h = fnv_mix(h, tg.node);
                 }
             }
             let ms = n.as_data.extend_def.items;
@@ -199,8 +201,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     return h;
 }
 
-/// Per-module fingerprint: sources of the transitive import closure (prelude included), the
-/// module's own identity, and its prelude-live bit. Everything package-shaped lives in the header.
+// Per-module fingerprint: sources of the transitive import closure (prelude included), the
+// module's own identity, and its prelude-live bit. Everything package-shaped lives in the header.
 fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) {
     let n = p.modules.len();
     let mut srch = Vector::<u64>::new();
@@ -261,6 +263,8 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
     }
 }
 
+/// Open the cache for this build: compute every live module's key, load the previous image from
+/// `gen_root`, and mark the modules whose sections still match. Off when SC_TU_CACHE=0.
 pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: str) Tuc {
     let mut t = Tuc {
         on: false,
@@ -290,7 +294,7 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
     t.path.push_str(gen_root);
     t.path.push_str("/.tu_cache");
     t.on = true;
-    // the next image starts now; sections append in module order as the seed loop runs
+    // The next image starts now; sections append in module order as the seed loop runs.
     w32(&mut t.out, TUC_MAGIC);
     w32(&mut t.out, TUC_VER);
     w64(&mut t.out, t.hdr);
@@ -305,7 +309,8 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
     t.raw = prev;
     let mut r = Rd { sp: t.raw.as_str().ptr(), at: 0, end: t.raw.len(), ok: true };
     if r.r32() != TUC_MAGIC || r.r32() != TUC_VER || r.r64() != t.hdr || r.r32() as usize != n {
-        return t; // stale image: every module misses; the new image still gets written
+        // Stale image: every module misses; the new image still gets written.
+        return t;
     }
     for m in 0..n {
         let key = r.r64();
@@ -320,14 +325,14 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
     }
     if r.at != r.end {
         for m in 0..n {
-            t.hit.set(m, false); // trailing garbage: distrust the whole image
+            // Trailing garbage: distrust the whole image.
+            t.hit.set(m, false);
         }
     }
     return t;
 }
 
-// ---- module payloads --------------------------------------------------------------------------
-// payload = ntab u32 | type-table entries | nev u32 | events
+// Payload layout: ntab u32 | type-table entries | nev u32 | events.
 // Events carry table INDICES where they carried TypeIds (0xFFFFFFFF = TYPE_NONE); the table entry
 // is a structural description whose children are earlier entries, re-interned at replay into the
 // pool the consuming field names. Node ids and declaring modules are stable under the key (the
@@ -341,6 +346,8 @@ const TT_INST: u8 = 3;
 const TT_PROJ: u8 = 4;
 const TT_LIN: u8 = 5;
 
+/// Structural type table under construction for one recorded section: types are written by
+/// structure, never by TypeId, so a replay re-interns them under any pool state.
 pub struct TtRec {
     pub memo: Map<u64, u64>, // (am << 32 | at) -> table index
     pub tab: String,
@@ -354,6 +361,7 @@ extend TtRec as Free {
     }
 }
 
+/// An empty type table.
 pub fn tt_new() TtRec {
     return TtRec { memo: Map::<u64, u64>::new(), tab: String::new(), count: 0 };
 }
@@ -464,7 +472,7 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
             w64(&mut r.tab, (unsafe l.c[i as usize]) as u64);
         }
     } else {
-        // nominal / leaf payloads carry no pool-relative data: raw bytes round-trip
+        // Nominal / leaf payloads carry no pool-relative data: raw bytes round-trip.
         w8(&mut r.tab, TT_RAW);
         let tp = ((&ty) as *const Ty) as *const u8;
         for b in 0..sizeof(Ty) {
@@ -671,7 +679,7 @@ pub fn ser_evs(p: &loader::Package, o: &mut String, evs: &Vector<mbe::RecEv>, fr
     for i in from..evs.len() {
         let ev = evs.at(i);
         if ev.kind == mbe::RK_CHUNK && ev.s1.len() == 0 {
-            // chunk text lives in the bodies buffer at record time (a/b are its bounds)
+            // Chunk text lives in the bodies buffer at record time (a/b are its bounds).
             w8(&mut eb, ev.kind);
             w32(&mut eb, 0);
             w32(&mut eb, 0);
@@ -729,6 +737,7 @@ extend Rd {
         self.at += n;
     }
 
+    /// Read the section's type table into `out`; false when the image is truncated or malformed.
     pub fn read_table(self: &mut Self, out: &mut Vector<TtEnt>) bool {
         let ntab = self.r32() as usize;
         for _i in 0..ntab {
@@ -812,10 +821,12 @@ extend Rd {
         return self.ok;
     }
 
+    /// Read the event count that follows the type table.
     pub const fn read_count(self: &mut Self) u32 {
         return self.r32();
     }
 
+    /// Read one journaled event into `ev` (its vectors are reused); false when the image is truncated.
     pub fn read_ev(self: &mut Self, ev: &mut mbe::RecEv) bool {
         ev.kind = self.r8();
         ev.a = self.r32();
@@ -847,6 +858,7 @@ extend Rd {
 }
 
 extend Tuc {
+    /// A reader over module `m`'s section of the previous image; the caller checked `hit[m]`.
     pub const fn open(self: &Self, m: usize) Rd {
         return Rd {
             sp: self.raw.as_str().ptr(),

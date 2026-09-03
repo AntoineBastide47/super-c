@@ -1,4 +1,4 @@
-// Slice<T> / SliceMut<T>: borrowed (ptr, len) views over a contiguous run of `T`. Non-owning -- they
+// Slice<T> / SliceMut<T>: borrowed (ptr, len) views over a contiguous run of `T`. Non-owning; they
 // never allocate or resize; the backing storage outlives them. `Slice<T>` is read-only; `SliceMut<T>`
 // permits in-place writes. These are the prelude types `[]T` and `[]mut T` lower to (the `[]` sugar and
 // array->slice coercion are wired separately); the two public fields make them plain fat pointers, so
@@ -16,6 +16,7 @@ extend<T> Slice<T> {
         return self.len;
     }
 
+    /// True when the view has no elements.
     pub const fn is_empty(self: &Slice<T>) bool {
         return self.len == 0;
     }
@@ -37,7 +38,7 @@ extend<T> Slice<T> {
         return &unsafe self.ptr[i];
     }
 
-    /// Unchecked borrow -- the caller PROVES `i < len` (hot loops with an established bound). Out of
+    /// Unchecked borrow: the caller PROVES `i < len` (hot loops with an established bound). Out of
     /// range is undefined behavior, hence `unsafe`.
     pub unsafe const fn get_unsafe(self: &Slice<T>, i: usize) &T {
         return &self.ptr[i];
@@ -80,6 +81,7 @@ pub struct SliceMut<'a, T> {
 }
 
 extend<T> SliceMut<T> {
+    /// Number of elements in the view.
     pub const fn len(self: &SliceMut<T>) usize {
         return self.len;
     }
@@ -105,7 +107,7 @@ extend<T> SliceMut<T> {
         return &unsafe self.ptr[i];
     }
 
-    /// Unchecked borrow -- the caller PROVES `i < len` (hot loops with an established bound). Out of
+    /// Unchecked borrow: the caller PROVES `i < len` (hot loops with an established bound). Out of
     /// range is undefined behavior, hence `unsafe`.
     pub unsafe const fn get_unsafe(self: &SliceMut<T>, i: usize) &T {
         return &self.ptr[i];
@@ -145,6 +147,7 @@ extend<T> SliceMut<T> {
         return &unsafe self.ptr[self.len - 1];
     }
 
+    /// Pointer to the first element; never dereferenced for an empty view.
     pub const fn as_ptr(self: &SliceMut<T>) *const T {
         return self.ptr;
     }

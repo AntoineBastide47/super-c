@@ -8,7 +8,7 @@
 //
 // Only a `CancelSource` can request cancellation; a `CancelToken` observes it. A group owns its children:
 // its drop requests cancellation and joins them, so a group can never leak a running task. Children
-// inherit the group's token and register their generation-checked `TaskKey` with it -- a raw task pointer
+// inherit the group's token and register their generation-checked `TaskKey` with it: a raw task pointer
 // is never exposed, so a stale handle cannot touch a recycled task block.
 
 import std::parallel::arc as arc;
@@ -100,8 +100,8 @@ struct ChildEnv<F> {
     pub refs: *mut GroupRefs,
 }
 
-// The per-`F` child trampoline: unbox, bind the group token, run the body. The finish runs from a
-// `defer`, so a body that ends through cancellation cleanup still reports. `pub` for linkage.
+/// The per-`F` child trampoline: unbox, bind the group token, run the body. The finish runs from a
+/// `defer`, so a body that ends through cancellation cleanup still reports. `pub` for linkage.
 pub fn child_entry<F: fn move() + Send + 'static>(env: *mut void) {
     let pp = env as *mut ChildEnv<F>;
     let e = unsafe {
@@ -224,11 +224,12 @@ extend TaskGroup {
         return self.src.token();
     }
     /// Spawn `f` as a child: it inherits the group's cancellation token, and `join` waits for it. The
-    /// bound is the `launch` bound -- the child may outlive this call, so it owns everything it touches.
+    /// bound is the `launch` bound: the child may outlive this call, so it owns everything it touches.
     /// A group cannot spawn once shutdown has closed the runtime; `f` is freed and no child is counted.
     pub fn spawn<F: fn move() + Send + 'static>(self: &mut TaskGroup, f: F) {
         if runtime::closed() {
-            return; // `f` and its captures are freed here
+            // `f` and its captures are freed here.
+            return;
         }
         self.wg.add(1);
         self.spawned = self.spawned + 1;
@@ -251,7 +252,8 @@ extend TaskGroup {
         let cancelled = c.cancelled.load(atomics::MemoryOrder::Acquire) as usize;
         let mut report = GroupReport { completed: completed, cancelled: cancelled, unresponsive: 0 };
         if self.spawned > completed + cancelled {
-            report.unresponsive = self.spawned - completed - cancelled; // join was cancelled out early
+            // Join was cancelled out early.
+            report.unresponsive = self.spawned - completed - cancelled;
         }
         return report;
     }

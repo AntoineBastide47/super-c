@@ -1,6 +1,6 @@
 // Production flow diagnostics from the Core IR loan/move analysis. `bc_fn` lowers every body,
 // replays its event tape, then analyzes the lowered bodies and emits the flow categories. A body
-// that fails to lower is a hard error (bc_lower_err) -- no body ever goes unchecked.
+// that fails to lower is a hard error (bc_lower_err): no body ever goes unchecked.
 import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
@@ -12,6 +12,7 @@ import borrowck::facts as bfx;
 import borrowck::dataflow as bdf;
 import borrowck::loans as bln;
 
+/// One move/init/borrow diagnostic in source-span form, before wording and dedup.
 pub struct FlowErr {
     pub start: u32,
     pub len: u32,
@@ -19,9 +20,9 @@ pub struct FlowErr {
     pub msg: String,
 }
 
-// Nesting stacks for the walk-tape replay (one per strictly-nested event family). Pooled in
-// BorrowCtx; pre/acc are depth-indexed SLOTS (never popped) so FlowState is copied row-wise
-// by save/clear instead of whole-struct by push.
+/// Nesting stacks for the walk-tape replay (one per strictly-nested event family). Pooled in
+/// BorrowCtx; pre/acc are depth-indexed SLOTS (never popped) so FlowState is copied row-wise
+/// by save/clear instead of whole-struct by push.
 pub struct RepSt {
     pub bms: Vector<u32>,
     pub les: Vector<i32>,
@@ -33,6 +34,7 @@ pub struct RepSt {
 }
 
 extend RepSt {
+    /// Empty reporting state with no heap storage.
     pub fn new() RepSt {
         return RepSt {
             bms: Vector::<u32>::new(),
@@ -45,6 +47,7 @@ extend RepSt {
         };
     }
 
+    /// Clear for the next body, keeping capacity.
     pub fn reset(self: &mut Self) {
         self.bms.truncate(0);
         self.les.truncate(0);
@@ -54,8 +57,8 @@ extend RepSt {
     }
 }
 
-// Reusable owner of the per-body borrow pipeline: one instance is built once per analyze pass and
-// reset-and-refilled for every body, so vector capacity is kept instead of reallocated 1873+ times.
+/// Reusable owner of the per-body borrow pipeline: one instance is built once per analyze pass and
+/// reset-and-refilled for every body, so vector capacity is kept instead of reallocated 1873+ times.
 pub struct BorrowCtx {
     pub forest: bmp::MoveForest,
     pub facts: bfx::BodyFacts,
@@ -75,6 +78,7 @@ pub struct BorrowCtx {
 }
 
 extend BorrowCtx {
+    /// A context with every analysis empty; the first body allocates.
     pub fn new() BorrowCtx {
         return BorrowCtx {
             forest: bmp::MoveForest::empty(),
@@ -107,12 +111,12 @@ fn bc_lw_take(ctx: &mut BorrowCtx, pkg: *const loader::Package, m: ModuleId, own
 }
 
 /// Run the six analysis stages for `body` into `ctx` (reset-and-refill keeps vector capacity
-/// across bodies). Returns true when any move or borrow error was recorded -- the wording pass
+/// across bodies). Returns true when any move or borrow error was recorded: the wording pass
 /// (or the module's serial replay) then has something to say. Pure over the frozen `body`, the
 /// package's read-only ASTs, and the two private accumulators, so workers may run it concurrently.
 pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBody) bool {
     // Conservative pre-classification, each check over-approximating a fact-generation trigger.
-    // `slim` (no carrier-typed local -- field-transitive -- and no ref/addr/slice/dyn/closure/asm)
+    // `slim` (no carrier-typed local, field-transitive, and no ref/addr/slice/dyn/closure/asm)
     // proves no loan, origin, universal, or access can exist: fact generation records only the
     // move/init events. `boring` additionally proves no owned local (no move or free event) and
     // no split-init declaration (no uninit): every stage is a no-op and all of them skip.
@@ -155,7 +159,7 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     // otherwise.
     let lv_need = ctx.facts.loans.len() != 0;
     // No move events and every local initializes at its declaration (which dominates its uses):
-    // no move, double-move, partial, or uninit error can exist -- skip the move/init dataflow.
+    // no move, double-move, partial, or uninit error can exist: skip the move/init dataflow.
     let mv_need = body.has_uninit_decl || ctx.facts.nmoves != 0;
     // The CFG feeds only those two; a body needing neither never walks it (the solver's early
     // return only stores the stale pointer).
@@ -163,7 +167,8 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
         ctx.cfg.build_into(body);
     }
     if lv_need {
-        ctx.cfg.build_preds(); // liveness is the only predecessor consumer
+        // Liveness is the only predecessor consumer.
+        ctx.cfg.build_preds();
         ctx.liveness.build_into(&ctx.facts, &ctx.cfg);
     }
     if mv_need {
@@ -196,8 +201,8 @@ const CAT_F_CAP: u8 = 16; // Free capture moved out of its closure
 const CAT_F_CONST: u8 = 17; // owning const moved
 
 extend tc::TypeChecker {
-    /// A body the lowering cannot express is a hard error (no body may go unchecked, and no other
-    /// checker exists): reported at the failing construct with the lowerer's reason slug.
+    // A body the lowering cannot express is a hard error (no body may go unchecked, and no other
+    // checker exists): reported at the failing construct with the lowerer's reason slug.
     fn bc_lower_err(self: &mut Self, lw: &irl::Lowerer, owner: NodeId) {
         let a = self.cur_ast();
         let sp = if lw.err_node != NODE_NONE {
@@ -294,11 +299,11 @@ extend tc::TypeChecker {
         }
     }
 
-    /// The walk's Free-move safety rules, ported over Core IR moves (the walk stays silent for
-    /// them under `bc_quiet`). Only USER-consumption moves (CoreBody.user_moves, set by the
-    /// lowerer at let/return/argument/aggregate/assign positions) are checked, so pattern binds
-    /// and spill plumbing never fire. Unsafe regions come from the walk's recorded spans; a
-    /// `.free()` receiver is exempt like the walk's bc_free_recv.
+    // The walk's Free-move safety rules, ported over Core IR moves (the walk stays silent for
+    // them under `bc_quiet`). Only USER-consumption moves (CoreBody.user_moves, set by the
+    // lowerer at let/return/argument/aggregate/assign positions) are checked, so pattern binds
+    // and spill plumbing never fire. Unsafe regions come from the walk's recorded spans; a
+    // `.free()` receiver is exempt like the walk's bc_free_recv.
     fn bc_ir_free_rules(
         self: &mut Self,
         ow: &mut bfx::Owner,
@@ -307,7 +312,7 @@ extend tc::TypeChecker {
         out: &mut Vector<FlowErr>,
     ) {
         // Every rule moves a Free value INTO some local (a binding or a temp), so a body with no
-        // owned-typed local cannot fire any of them -- skip the sweep.
+        // owned-typed local cannot fire any of them: skip the sweep.
         let mut owned = false;
         for l in 0..body.locals.len() {
             if ow.owns(body.module, body.locals.at(l).ty) {
@@ -398,7 +403,8 @@ extend tc::TypeChecker {
         }
         let uw = (oi / 64) as usize;
         if uw >= body.user_moves.len() || (body.user_moves[uw] >> (oi & 63) as u64 & 1u64) == 0 {
-            return; // plumbing move (pattern bind, spill), not a user consumption
+            // Plumbing move (pattern bind, spill), not a user consumption.
+            return;
         }
         let pl = *body.places.at(op.data as usize);
         if pl.proj_len == 0 {
@@ -484,7 +490,8 @@ extend tc::TypeChecker {
             return;
         }
         if bk == TypeKind::TYPE_POINTER {
-            return; // raw pointers are the unsafe world's escape hatch
+            // Raw pointers are the unsafe world's escape hatch.
+            return;
         }
         // Pointer-typed fields are HANDLES (raw pointers are borrows by rule): copying one out of
         // borrowed or owned content escapes no ownership.

@@ -1,51 +1,36 @@
-// The AST-to-HIR lowering stage: runs per module after resolution, before typecheck. The tree the
-// checker (and everything after it) consumes is the HIR: the resolved arena with every sugar-keyword
-// marker lowered to core-language nodes. A sugar node is produced only by the parser, seen otherwise
-// only by the formatter and the resolver (whose lint passes run before this stage), and eliminated
-// here -- typecheck, borrowck, const-eval and codegen never see one. Adding a sugar keyword is then a
-// lexer token, a parser marker, one lowering entry here, and a formatter arm; the rest of the
-// compiler stays unaware of it.
-//
-// Batch builds lower by MOVE: the parse arena becomes the HIR in place (releasing the syntax tree at
-// zero cost -- nothing after this stage reads pre-lowering syntax; the formatter parses its own).
-// Generated nodes get fresh ids appended to the HIR arena; their spans borrow source text that
-// already exists (a keyword's own bytes), so diagnostics and origin mapping stay exact.
-//
-// Two primitives do the work. `lower_to_core_call` turns a marker built as a call to a placeholder callee
-// into a real `NODE_CALL` by seeding the callee's resolution to a std shim (a resolved SugarItem value
-// from the package index -- no name lookup happens here) and flipping the kind -- everything downstream
-// then treats it as an ordinary generic call, so bound checking, monomorphization and emission all come
-// for free. `lower_select` goes further and BUILDS nodes: because resolve has already run, every
-// identifier it creates has its resolution seeded by hand (a std shim, or the synthetic local it
-// declares), and it never invents a name that is not already in the source text.
+// AST-to-HIR lowering: per module, after resolve and before typecheck, every sugar-keyword marker
+// (launch, select, parallel for) is rewritten in place into core-language nodes, so no later stage sees
+// a sugar node; a new sugar keyword needs a lexer token, a parser marker, one entry here, and a formatter
+// arm. Generated nodes take fresh ids appended to the arena and spans that borrow existing source text (a
+// keyword's own bytes), so diagnostics stay exact. Resolve has already run: every identifier built here
+// has its resolution seeded from the package's SugarItem table; this pass never performs a name lookup.
 
 import ast::ast as *;
 import lexer::token as tok;
 import lexer::token_type as tt;
 import module::loader as loader;
 
-/// Lower module `i` to HIR. Runs the sugar lowering over the module's resolved arena in place (the
-/// Ast never leaves its slot, so shim lookups that land back on this module read the live tree).
-/// Called unconditionally after resolve -- resolve errors leave markers unresolved, which the
-/// lowering already skips.
+/// Lower module `i` to HIR in place: the Ast never leaves its slot, so shim lookups that land back on
+/// this module read the live tree. Safe to call after resolve errors: unresolved markers are skipped.
 pub fn lower_module(p: &mut loader::Package, i: usize) {
+    // No markers parsed: the arena already is the HIR.
     if p.modules[i].ast.sugar_marks == 0 {
-        return; // no markers parsed: the arena already is the HIR
+        return;
     }
-    p.ensure_index(); // the SugarItem table below answers from it
+    // The SugarItem table answers from the package index.
+    p.ensure_index();
     let aptr = (&mut p.modules[i].ast) as *mut Ast;
     desugar_ast(unsafe &mut *aptr, p);
 }
 
-/// Lower every sugar-keyword marker in `ast` to its core form. `package` resolves the std shims each marker
-/// targets; a null package (or an unresolved shim) leaves the node untouched, so a later pass reports it.
+// A null package (or an unresolved shim) leaves the marker untouched, so a later pass reports it.
 fn desugar_ast(ast: &mut Ast, package: *const loader::Package) {
     if package == null {
         return;
     }
     // Nodes appended below hold no markers, so the pre-loop count is the whole search space. A nested
     // `select` has a LOWER id than the one containing it (the parser adds a parent after its children), so
-    // it is lowered first and the outer lowering just moves the finished block.
+    // it is lowered first and the outer lowering moves the finished block.
     let n = ast.nodes.len();
     for i in 0..n {
         let kind = ast.at_const(i as NodeId).kind;
@@ -59,11 +44,10 @@ fn desugar_ast(ast: &mut Ast, package: *const loader::Package) {
     }
 }
 
-/// Turn a marker node (SingleData wrapping a `NODE_CALL` with a placeholder callee) into a plain
-/// expression-statement call targeting the resolved shim `def`: seed the inner call's callee resolution,
-/// then flip the marker to NODE_EXPRESSION_STATEMENT (same SingleData layout). Reusable by any sugar
-/// keyword that lowers to a single std call in statement position. A NODE_NONE def (shim module not
-/// loaded) leaves the marker untouched, so a later pass reports it.
+// The marker is SingleData wrapping a `NODE_CALL` with a placeholder callee; seeding that callee's
+// resolution and flipping the kind to NODE_EXPRESSION_STATEMENT (same SingleData layout) makes it an
+// ordinary call. Any sugar keyword that lowers to one std call in statement position can use this.
+// A NODE_NONE def (shim module not loaded) leaves the marker untouched, so a later pass reports it.
 fn lower_to_core_call(ast: &mut Ast, def: DefId, id: NodeId) {
     if def.node == NODE_NONE {
         return;
@@ -73,8 +57,6 @@ fn lower_to_core_call(ast: &mut Ast, def: DefId, id: NodeId) {
     ast.set_resolution_def(callee, def);
     ast.at(id).kind = NodeKind::NODE_EXPRESSION_STATEMENT;
 }
-
-// --- select ----------------------------------------------------------------------------------------
 
 // `select { v = jobs.recv() => B0  out.send(x) => B1  timeout(d) => B2 }` becomes
 //
@@ -89,9 +71,9 @@ fn lower_to_core_call(ast: &mut Ast, def: DefId, id: NodeId) {
 //     }
 //
 // Every callee is a free function in std::parallel::selector, so the only name this pass invents is the
-// selector local -- and it borrows the `select` keyword's own span for that, which is text that exists and
-// which no user code can reference (it is a keyword). `sugar_won` walks the arms in registration order, so
-// the if-chain needs no integer literals; the channel expression is CLONED for its second use rather than
+// selector local, and it borrows the `select` keyword's own span for that: text that exists and that no
+// user code can reference (it is a keyword). `sugar_won` walks the arms in registration order, so the
+// if-chain needs no integer literals; the channel expression is CLONED for its second use rather than
 // shared, and the sent value is evaluated inside the winning branch, not before the wait.
 fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     let pkg = unsafe &*package;
@@ -111,7 +93,7 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     let kw = tok::Span::new(span.start, span.start + 6); // the `select` keyword itself: the local's name
     let arms = ast.at_const(id).as_data.block.statements;
 
-    // let mut select = sugar_new();
+    // Selector local: `let mut select = sugar_new();`.
     let selname = add_node(ast, ident_node(kw));
     let selinit = call_shim(ast, f_new, kw, NODE_NONE, NODE_NONE);
     let letsel = add_node(
@@ -124,7 +106,7 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     );
     let mark = ast.mark();
     ast.push(letsel);
-    // One registration per channel arm, in source order -- which is the order `sugar_won` reports them in.
+    // One registration per channel arm, in source order, which is the order `sugar_won` reports them in.
     let mut timeout_body = NODE_NONE;
     let mut timeout_dur = NODE_NONE;
     let mut has_default = false;
@@ -210,9 +192,9 @@ fn lower_select(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     ast.at(id).as_data.block.statements = stmts;
 }
 
-// `parallel for i in a..b { B }` becomes `std::parallel::data::range(a..b, fn(i) { B });` -- the
+// `parallel for i in a..b { B }` becomes `std::parallel::data::range(a..b, fn(i) { B });`. The
 // closure already exists (the parser built it as the marker's body so resolve filled its captures);
-// all that is left is the call around it and the marker flip to an expression statement.
+// only the call around it and the marker flip to an expression statement remain.
 fn lower_parallel_for(ast: &mut Ast, package: *const loader::Package, id: NodeId) {
     let pkg = unsafe &*package;
     let f = pkg.sugar_item(loader::SugarItem::SI_PAR_RANGE);

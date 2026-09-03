@@ -38,7 +38,7 @@ extend BinTarget as Free {
 }
 
 /// One [command.NAME] for `super-c command <name>`: shell lines executed in order, stopping at the
-/// first failure. Built-in subcommand names are reserved -- a command can never shadow one.
+/// first failure. Built-in subcommand names are reserved: a command can never shadow one.
 pub struct Command<'a> {
     pub name: str<'a>,
     pub run: Vector<String>,
@@ -57,8 +57,8 @@ extend Command as Free {
 
 /// The validated build.toml. `bin` is where the project's binary is INSTALLED: each profile links its own
 /// copy under `<out_dir>/<profile>/`, and only `build`/`release` (never `test` or `run`) copy one onto that
-/// name -- so a profile can never quietly stand in for another's artifact.
-/// Ownership: `toml` keeps the parsed items alive -- Profile/Command `name` views borrow into their
+/// name, so a profile can never quietly stand in for another's artifact.
+/// Ownership: `toml` keeps the parsed items alive; Profile/Command `name` views borrow into their
 /// section strings.
 pub struct Manifest<'a> {
     /// Instruction set `@arch` gates against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown. Defaults to the
@@ -79,8 +79,8 @@ pub struct Manifest<'a> {
     pub ldflags: Vector<String>,
     pub ldlibs: Vector<String>,
     pub jobs: u32,
-    pub ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M). CLI --const-eval-steps overrides.
-    pub ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default. CLI --const-eval-memory overrides.
+    pub ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M); CLI --const-eval-steps overrides
+    pub ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default; CLI --const-eval-memory overrides
     pub default_profile: String,
     pub profiles: Vector<Profile<'a>>,
     pub commands: Vector<Command<'a>>,
@@ -120,7 +120,7 @@ extend Profile {
 }
 
 fn push_flags(dst: &mut Vector<String>, flags: str) {
-    // split a flag string on spaces so built-in profiles can be written as one literal
+    // Split a flag string on spaces so built-in profiles can be written as one literal.
     let mut i: usize = 0;
     let n = flags.len();
     while i < n {
@@ -138,7 +138,7 @@ fn push_flags(dst: &mut Vector<String>, flags: str) {
 }
 
 /// A manifest holding nothing but the built-in profiles, for a build with no `build.toml` to read them
-/// from -- `super-c release foo.spc` compiles and links in one command and still has to honour the profile
+/// from: `super-c release foo.spc` compiles and links in one command and still has to honour the profile
 /// it was asked for. Free it like any other manifest.
 pub fn builtins_only<'a>() Manifest<'a> {
     let mut m = Manifest::new();
@@ -235,7 +235,7 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
         let sec = it.section.as_str();
         let key = it.key.as_str();
         if key.len() == 0 {
-            // a bare section header: only its presence matters (and only [lib] cares)
+            // A bare section header: only its presence matters (and only [lib] cares).
             if sec == "lib" {
                 saw_lib = true;
             }
@@ -405,9 +405,9 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
             errs.emit(it.at, key.len() as u32, format("unknown section '{}'", sec));
         }
     }
-    // the name views above point into the items' section Strings: the Manifest takes ownership
+    // The name views above point into the items' section Strings: the Manifest takes ownership.
     m.toml = items;
-    // defaults + validation
+    // Defaults + validation.
     if m.out_dir.len() == 0 {
         m.out_dir.push_str("build");
     }
@@ -426,7 +426,7 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
         m.default_profile.push_str("dev");
     }
     m.add_builtin_profiles();
-    // [lib] defaults: root src/lib.spc, name after the primary binary, static unless told otherwise
+    // [lib] defaults: root src/lib.spc, name after the primary binary, static unless told otherwise.
     if saw_lib {
         if m.lib_root.len() == 0 {
             m.lib_root.push_str("src/lib.spc");
@@ -442,7 +442,7 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
             m.lib_static = true;
         }
     }
-    // a library-only project needs no primary binary; its lib root anchors the source tree
+    // A library-only project needs no primary binary; its lib root anchors the source tree.
     if m.root.len() == 0 && saw_lib {
         m.root.push_string(&m.lib_root);
     }
@@ -557,7 +557,7 @@ extend Manifest {
         if self.profile_index("bench") < 0 {
             let mut p = Profile::new("bench");
             // Optimization parity with `release` (-O3 -DNDEBUG): the bench should measure the compiler
-            // users actually run. -g and frame pointers stay so samply profiles remain readable.
+            // users run. -g and frame pointers stay so samply profiles remain readable.
             push_flags(&mut p.cflags, "-O3 -DNDEBUG -g -fno-omit-frame-pointer -flto=auto");
             // Profile-guided optimization when local training data exists (build with --profile=pgogen,
             // run a self-transpile under LLVM_PROFILE_FILE, merge with llvm-profdata). Clang hard-errors
@@ -591,12 +591,12 @@ extend Manifest {
             self.profiles.push(p);
         }
         // ThreadSanitizer. Its own profile and NEVER part of `release`: TSan costs 5-15x runtime and several
-        // times the memory, and it needs its runtime linked in. No LTO -- it defeats the instrumentation the
+        // times the memory, and it needs its runtime linked in. No LTO: it defeats the instrumentation the
         // tool relies on. This is also what turns on the coroutine fiber annotations in `ffi/sc_rt.c`, without
         // which every coroutine that migrates between workers reports as a race against itself.
         //
         // `-fno-inline` is not tidiness, it is what makes a report TRUE. At plain -O1 this reports one race per
-        // run, on a closure's exit path, and the SAME source is clean at -O0 and clean at `-O1 -fno-inline` --
+        // run, on a closure's exit path, and the SAME source is clean at -O0 and clean at `-O1 -fno-inline`:
         // across five runs each. Inlining changes no memory operation and no lock, so a report that appears and
         // disappears with it is attribution, not a race: the allocation it blames is inlined into `worker_main`
         // from a callee, and the write it blames is inlined into a wrapper from the closure body. Losing the

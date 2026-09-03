@@ -1,6 +1,6 @@
 // LSP v2 integration: lifecycle gating, request validation, cancellation, context-aware completion
 // (attributes, attribute arguments, lexical scope, member privacy, labels, imports), rename safety
-// (prepareRename, conflicts, interface relations), and the navigation features -- all driven as
+// (prepareRename, conflicts, interface relations), and the navigation features: all driven as
 // framed JSON-RPC sessions against a `super-c lsp` subprocess, plus the parser's attribute
 // inventory as the completion source of truth.
 import tests::cli_harness as cli;
@@ -103,9 +103,7 @@ fn read_out(root: str) String {
     return loader::read_file(op.as_str()).unwrap();
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Lifecycle, validation, cancellation.
-// ---------------------------------------------------------------------------------------------------------
 
 const MAIN_OK: str = "fn main() i32 {\n    return 0;\n}\n";
 
@@ -118,23 +116,23 @@ fn lsp_lifecycle_and_cancellation() {
 
     let mut ses = String::new();
     let mut b = String::new();
-    // a request before initialize: -32002
+    // A request before initialize: -32002.
     b.push_str("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"textDocument/hover\",\"params\":{}}");
     frame(&mut ses, &b);
     push_init(&mut ses, root);
-    // a second initialize: rejected
+    // A second initialize: rejected.
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"initialize\",\"params\":{}}");
     frame(&mut ses, &b);
-    // a bad jsonrpc version: rejected
+    // A bad jsonrpc version: rejected.
     b.clear();
     b.push_str("{\"jsonrpc\":\"1.0\",\"id\":12,\"method\":\"textDocument/hover\",\"params\":{}}");
     frame(&mut ses, &b);
-    // an invalid id type: rejected without a crash
+    // An invalid id type: rejected without a crash.
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"id\":[1],\"method\":\"textDocument/hover\",\"params\":{}}");
     frame(&mut ses, &b);
-    // cancel id 13, then send request 13: RequestCancelled, no work
+    // Cancel id 13, then send request 13: RequestCancelled, no work.
     b.clear();
     b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\",\"params\":{\"id\":13}}");
     frame(&mut ses, &b);
@@ -148,17 +146,19 @@ fn lsp_lifecycle_and_cancellation() {
     assert_eq(rc, 0);
     let out = read_out(root);
     let o = out.as_str();
-    assert(o.contains("-32002")); // not initialized
-    assert(o.contains("already accepted")); // repeated initialize
-    assert(o.contains("\"id\":12") && o.contains("-32600")); // bad jsonrpc
-    assert(o.contains("-32800")); // canceled before dispatch
+    // Not initialized.
+    assert(o.contains("-32002"));
+    // Repeated initialize.
+    assert(o.contains("already accepted"));
+    // Bad jsonrpc.
+    assert(o.contains("\"id\":12") && o.contains("-32600"));
+    // Canceled before dispatch.
+    assert(o.contains("-32800"));
     assert(o.contains("\"positionEncoding\":\"utf-16\""));
     assert(o.contains("signatureHelpProvider"));
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Completion: attributes and attribute arguments.
-// ---------------------------------------------------------------------------------------------------------
 
 @test
 fn lsp_completion_attributes() {
@@ -171,14 +171,15 @@ fn lsp_completion_attributes() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", src);
-    push_completion(&mut ses, root, "src/main.spc", 2, 0, 1); // right after '@'
+    // Right after '@'.
+    push_completion(&mut ses, root, "src/main.spc", 2, 0, 1);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
-    // the parser's whole inventory is served: c-namespace, tests, derive, platform, formatter
+    // The parser's whole inventory is served: c-namespace, tests, derive, platform, formatter.
     assert(o.contains("{\"label\":\"c.cold\""));
     assert(o.contains("{\"label\":\"c.always_inline\""));
     assert(o.contains("{\"label\":\"c.export\""));
@@ -204,7 +205,8 @@ fn lsp_completion_attribute_args() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", src);
-    push_completion(&mut ses, root, "src/main.spc", 2, 0, 13); // inside @platform(...)
+    // Inside @platform(...)
+    push_completion(&mut ses, root, "src/main.spc", 2, 0, 13);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
 
@@ -228,14 +230,16 @@ fn lsp_completion_derive_args() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", src);
-    push_completion(&mut ses, root, "src/main.spc", 2, 0, 11); // inside @derive(...)
+    // Inside @derive(...)
+    push_completion(&mut ses, root, "src/main.spc", 2, 0, 11);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
-    assert(o.contains("{\"label\":\"Clone\"")); // prelude interfaces are the derive vocabulary
+    // Prelude interfaces are the derive vocabulary.
+    assert(o.contains("{\"label\":\"Clone\""));
     assert(o.contains("{\"label\":\"Format\""));
     assert(o.contains("{\"label\":\"Hash\""));
 }
@@ -246,7 +250,7 @@ fn lsp_completion_derive_visibility() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let src = "import util;\n\n@derive(Vis)\nstruct P {\n    pub x: i32,\n}\n\nfn main() i32 {\n    util::touch();\n    return 0;\n}\n";
     p.mkfile("src/main.spc", src);
-    // util imports hidden, so hidden is IN the package; main itself never imports it.
+    // Util imports hidden, so hidden is IN the package; main itself never imports it.
     p.mkfile(
         "src/util.spc",
         "import hidden;\n\npub interface VisibleIface {\n    fn probe(self: &Self) i32;\n}\n\npub fn touch() {\n    hidden::unused();\n}\n",
@@ -260,7 +264,8 @@ fn lsp_completion_derive_visibility() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", src);
-    push_completion(&mut ses, root, "src/main.spc", 2, 2, 11); // inside @derive(...)
+    // Inside @derive(...)
+    push_completion(&mut ses, root, "src/main.spc", 2, 2, 11);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
 
@@ -268,15 +273,13 @@ fn lsp_completion_derive_visibility() {
     let out = read_out(root);
     let o = out.as_str();
     // The imported module's public interface is offered; a package module the current module never
-    // imports is not -- an unqualified @derive of it would not resolve.
+    // imports is not: an unqualified @derive of it would not resolve.
     assert(o.contains("{\"label\":\"VisibleIface\""));
     assert(!o.contains("HiddenIface"));
     assert(o.contains("{\"label\":\"Clone\""));
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Completion: lexical scope, member privacy, labels, imports.
-// ---------------------------------------------------------------------------------------------------------
 
 const SCOPE_SRC: str = "fn first() i32 {\n    let alpha = 1;\n    return alpha;\n}\n\nfn second() i32 {\n    let beta = 2;\n    return beta;\n}\n\nfn third(o: Option<i32>) i32 {\n    switch o {\n        Some(inner) => {\n            return inner;\n        },\n        None => {},\n    };\n    return 0;\n}\n";
 
@@ -290,18 +293,24 @@ fn lsp_completion_lexical_scope() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/lib.spc", SCOPE_SRC);
-    push_completion(&mut ses, root, "src/lib.spc", 2, 7, 4); // inside second()
-    push_completion(&mut ses, root, "src/lib.spc", 3, 16, 4); // in third(), after the switch
+    // Inside second().
+    push_completion(&mut ses, root, "src/lib.spc", 2, 7, 4);
+    // In third(), after the switch.
+    push_completion(&mut ses, root, "src/lib.spc", 3, 16, 4);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
-    assert(o.contains("{\"label\":\"beta\"")); // in scope at the cursor
-    assert(!o.contains("{\"label\":\"alpha\"")); // a sibling function's local never leaks
-    assert(!o.contains("{\"label\":\"inner\"")); // a closed match-arm binder never leaks
-    assert(o.contains("{\"label\":\"o\"")); // the enclosing function's parameter is offered
+    // In scope at the cursor.
+    assert(o.contains("{\"label\":\"beta\""));
+    // A sibling function's local never leaks.
+    assert(!o.contains("{\"label\":\"alpha\""));
+    // A closed match-arm binder never leaks.
+    assert(!o.contains("{\"label\":\"inner\""));
+    // The enclosing function's parameter is offered.
+    assert(o.contains("{\"label\":\"o\""));
 }
 
 const UTIL_SRC: str = "pub struct Box2 {\n    pub w: i32,\n    h: i32,\n}\n\npub fn make() Box2 {\n    return Box2 { w: 1, h: 2 };\n}\n";
@@ -318,15 +327,18 @@ fn lsp_completion_member_privacy() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", PRIV_MAIN);
-    push_completion(&mut ses, root, "src/main.spc", 2, 4, 14); // after `b.`
+    // After `b.`.
+    push_completion(&mut ses, root, "src/main.spc", 2, 4, 14);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
-    assert(o.contains("{\"label\":\"w\"")); // public field offered cross-module
-    assert(!o.contains("{\"label\":\"h\"")); // private field never offered outside its module
+    // Public field offered cross-module.
+    assert(o.contains("{\"label\":\"w\""));
+    // Private field never offered outside its module.
+    assert(!o.contains("{\"label\":\"h\""));
 }
 
 const LABEL_SRC: str = "fn main() i32 {\n    'outer: while true {\n        break 'outer;\n    }\n    return 0;\n}\n";
@@ -341,7 +353,8 @@ fn lsp_completion_labels() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", LABEL_SRC);
-    push_completion(&mut ses, root, "src/main.spc", 2, 2, 15); // right after the label quote
+    // Right after the label quote.
+    push_completion(&mut ses, root, "src/main.spc", 2, 2, 15);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
 
@@ -361,18 +374,18 @@ fn lsp_completion_import_paths() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", src);
-    push_completion(&mut ses, root, "src/main.spc", 2, 0, 7); // after `import `
+    // After `import `.
+    push_completion(&mut ses, root, "src/main.spc", 2, 0, 7);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
 
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
-    assert(out.as_str().contains("\"kind\":9")); // module items offered
+    // Module items offered.
+    assert(out.as_str().contains("\"kind\":9"));
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Rename: prepare, conflicts, interface relations.
-// ---------------------------------------------------------------------------------------------------------
 
 const RENAME_SRC: str = "fn foo() i32 {\n    return 1;\n}\n\nfn bar() i32 {\n    return foo();\n}\n\nfn main() i32 {\n    return bar() - 1;\n}\n";
 
@@ -387,7 +400,7 @@ fn lsp_rename_conflicts_and_prepare() {
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", RENAME_SRC);
     push_req_at(&mut ses, root, "src/main.spc", 2, "textDocument/prepareRename", 0, 4);
-    // renaming foo to bar collides with the existing bar
+    // Renaming foo to bar collides with the existing bar.
     let mut b = String::new();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -395,7 +408,7 @@ fn lsp_rename_conflicts_and_prepare() {
     b.push_str(root);
     b.push_str("/src/main.spc\"},\"position\":{\"line\":0,\"character\":4},\"newName\":\"bar\"}}");
     frame(&mut ses, &b);
-    // renaming foo to baz is clean: the declaration and the call site both edit
+    // Renaming foo to baz is clean: the declaration and the call site both edit.
     b.clear();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -410,8 +423,10 @@ fn lsp_rename_conflicts_and_prepare() {
     let out = read_out(root);
     let o = out.as_str();
     assert(o.contains("\"placeholder\":\"foo\""));
-    assert(o.contains("already exists")); // the conflicting rename rejected
-    assert(count(o, "\"newText\":\"baz\"") >= 2); // declaration + call site
+    // The conflicting rename rejected.
+    assert(o.contains("already exists"));
+    // Declaration + call site.
+    assert(count(o, "\"newText\":\"baz\"") >= 2);
 }
 
 const IFACE_SRC: str = "interface Greet {\n    fn hi(self: &Self) i32;\n}\n\nstruct S {\n    pub x: i32,\n}\n\nextend S as Greet {\n    pub fn hi(self: &Self) i32 {\n        return self.x;\n    }\n}\n\nfn main() i32 {\n    let s = S { x: 1 };\n    return s.hi() - 1;\n}\n";
@@ -426,7 +441,7 @@ fn lsp_rename_interface_relations() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", IFACE_SRC);
-    // rename at the INTERFACE's method declaration: the conformer and the call rename with it
+    // Rename at the INTERFACE's method declaration: the conformer and the call rename with it.
     let mut b = String::new();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"file://",
@@ -434,7 +449,7 @@ fn lsp_rename_interface_relations() {
     b.push_str(root);
     b.push_str("/src/main.spc\"},\"position\":{\"line\":1,\"character\":8},\"newName\":\"yo\"}}");
     frame(&mut ses, &b);
-    // implementation navigation from the interface name
+    // Implementation navigation from the interface name.
     push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/implementation", 0, 11);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
@@ -442,13 +457,12 @@ fn lsp_rename_interface_relations() {
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
-    assert(count(o, "\"newText\":\"yo\"") >= 3); // interface decl + conformer + call site
+    // Interface decl + conformer + call site.
+    assert(count(o, "\"newText\":\"yo\"") >= 3);
     assert(o.contains("\"id\":3") && !o.contains("\"error\""));
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Navigation smoke: symbols, signature help, folding, selection, highlights, hints.
-// ---------------------------------------------------------------------------------------------------------
 
 const NAV_SRC: str = "struct Point {\n    pub x: i32,\n    pub y: i32,\n}\n\nfn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n\nfn main() i32 {\n    let p = Point { x: 1, y: 2 };\n    let s = add(p.x, p.y);\n    return s - 3;\n}\n";
 
@@ -514,18 +528,22 @@ fn lsp_navigation_features() {
     let out = read_out(root);
     let o = out.as_str();
     assert(!o.contains("\"error\""));
-    assert(o.contains("\"name\":\"Point\"")); // document + workspace symbols
+    // Document + workspace symbols.
+    assert(o.contains("\"name\":\"Point\""));
     assert(o.contains("\"name\":\"add\""));
-    assert(o.contains("fn add(a: i32, b: i32) i32")); // signature help label
-    assert(o.contains("\"startLine\"")); // folding
-    assert(o.contains("\"parent\"")); // selection range chain
-    assert(o.contains(": Point")); // inlay type hint for `let p`
-    assert(count(o, "\"data\":[") == 1); // the range token request answered
+    // Signature help label.
+    assert(o.contains("fn add(a: i32, b: i32) i32"));
+    // Folding.
+    assert(o.contains("\"startLine\""));
+    // Selection range chain.
+    assert(o.contains("\"parent\""));
+    // Inlay type hint for `let p`.
+    assert(o.contains(": Point"));
+    // The range token request answered.
+    assert(count(o, "\"data\":[") == 1);
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // The attribute inventory is real: every listed spelling must classify in the parser.
-// ---------------------------------------------------------------------------------------------------------
 
 @test
 fn attribute_inventory_is_complete() {
@@ -556,9 +574,7 @@ fn attribute_inventory_is_complete() {
     assert_eq(archs.len(), 3);
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Gap coverage: incremental sync, pull diagnostics, delta tokens, code actions, hierarchies, limits.
-// ---------------------------------------------------------------------------------------------------------
 
 // initialize with a caller-chosen capabilities object and initializationOptions ("" = none).
 fn push_init_caps(ses: &mut String, root: str, caps: str, opts: str) {
@@ -653,7 +669,7 @@ fn lsp_incremental_sync() {
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "");
     push_open(&mut ses, root, "src/main.spc", src);
-    // two in-order ranged edits; the second's coordinates assume the first is applied. The astral
+    // Two in-order ranged edits; the second's coordinates assume the first is applied. The astral
     // scalar before `t = 1` occupies TWO UTF-16 units, so `1` sits at character 26.
     push_did_change_ranged(
         &mut ses,
@@ -662,7 +678,7 @@ fn lsp_incremental_sync() {
         2,
         "[{\"range\":{\"start\":{\"line\":1,\"character\":26},\"end\":{\"line\":1,\"character\":27}},\"text\":\"9\"},{\"range\":{\"start\":{\"line\":2,\"character\":4},\"end\":{\"line\":2,\"character\":4}},\"text\":\"let u = t;\\n    \"}]",
     );
-    // an invalid range: the whole notification must be dropped (buffer keeps the edits above)
+    // An invalid range: the whole notification must be dropped (buffer keeps the edits above).
     push_did_change_ranged(
         &mut ses,
         root,
@@ -678,15 +694,18 @@ fn lsp_incremental_sync() {
     let out = read_out(root);
     let o = out.as_str();
     let fmt_resp = response_of(o, "\"id\":7");
-    assert(fmt_resp.contains("t = 9")); // edit past the astral char landed on the right byte
-    assert(fmt_resp.contains("let u = t;")); // second edit applied on the post-edit coordinates
-    assert(!o.contains("BAD")); // the invalid-range notification was dropped whole
+    // Edit past the astral char landed on the right byte.
+    assert(fmt_resp.contains("t = 9"));
+    // Second edit applied on the post-edit coordinates.
+    assert(fmt_resp.contains("let u = t;"));
+    // The invalid-range notification was dropped whole.
+    assert(!o.contains("BAD"));
 }
 
 @test
 fn lsp_incremental_matches_full_sync() {
-    // the same logical edit through ranged changes and through one full-text change must leave
-    // identical analysis results (the parity precondition for advertising sync kind 2)
+    // The same logical edit through ranged changes and through one full-text change must leave
+    // identical analysis results (the parity precondition for advertising sync kind 2).
     let src = "fn main() i32 {\n    let t = 1;\n    return t;\n}\n";
     let edited = "fn main() i32 {\n    let t = 2;\n    return t;\n}\n";
     let mut outs = Vector::<String>::new();
@@ -746,15 +765,16 @@ fn lsp_pull_diagnostics() {
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
-    assert(o.contains("\"diagnosticProvider\"")); // advertised because the client declared support
+    // Advertised because the client declared support.
+    assert(o.contains("\"diagnosticProvider\""));
     let resp = response_of(o, "\"id\":3");
     assert(resp.contains("\"kind\":\"full\""));
     assert(resp.contains("cannot find"));
     let rid = result_id_in(resp);
     assert(rid.len() != 0);
 
-    // a fresh server over identical content derives the SAME resultId (content-hashed), so passing
-    // it back yields `unchanged` with no items
+    // A fresh server over identical content derives the SAME resultId (content-hashed), so passing
+    // it back yields `unchanged` with no items.
     let mut ses2 = String::new();
     push_init_caps(&mut ses2, root, caps, "");
     push_open(&mut ses2, root, "src/main.spc", src);
@@ -784,7 +804,7 @@ fn lsp_delta_semantic_tokens() {
     let caps = "{\"textDocument\":{\"semanticTokens\":{\"requests\":{\"full\":{\"delta\":true}}}}}";
     let ins = "fn extra() i32 {\\n    return 1;\\n}\\n";
 
-    // session A: full (resultId 1), append a fn, delta against resultId 1
+    // Session A: full (resultId 1), append a fn, delta against resultId 1.
     let mut ses = String::new();
     push_init_caps(&mut ses, root, caps, "");
     push_open(&mut ses, root, "src/main.spc", src);
@@ -811,7 +831,7 @@ fn lsp_delta_semantic_tokens() {
     assert_eq(lsp_run(root), 0);
     let out_a = read_out(root);
 
-    // session B: the same edit, then a fresh FULL request (the ground truth for reconstruction)
+    // Session B: the same edit, then a fresh FULL request (the ground truth for reconstruction).
     let mut ses2 = String::new();
     push_init_caps(&mut ses2, root, caps, "");
     push_open(&mut ses2, root, "src/main.spc", src);
@@ -827,7 +847,7 @@ fn lsp_delta_semantic_tokens() {
     assert_eq(lsp_run(root), 0);
     let out_b = read_out(root);
 
-    // reconstruct: base data (A id 3) + splice edits (A id 4) == post-edit full data (B id 5)
+    // Reconstruct: base data (A id 3) + splice edits (A id 4) == post-edit full data (B id 5).
     let base = json::parse(response_of(out_a.as_str(), "\"id\":3")).unwrap();
     let delta = json::parse(response_of(out_a.as_str(), "\"id\":4")).unwrap();
     let full2 = json::parse(response_of(out_b.as_str(), "\"id\":5")).unwrap();
@@ -876,7 +896,7 @@ fn lsp_code_actions_eager_and_fixall() {
         root,
     );
     frame(&mut ses, &b);
-    // context.only = source.fixAll: quickfixes filtered out
+    // context.only = source.fixAll: quickfixes filtered out.
     b.clear();
     b.format_into(
         "{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/codeAction\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/main.spc\"}},\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":5,\"character\":0}}}},\"context\":{{\"diagnostics\":[],\"only\":[\"source.fixAll\"]}}}}}}",
@@ -889,7 +909,7 @@ fn lsp_code_actions_eager_and_fixall() {
     let out = read_out(root);
     let o = out.as_str();
     let r3 = response_of(o, "\"id\":3");
-    // two unused imports: each gets an eager quickfix (no client resolveSupport), plus one fix-all
+    // Two unused imports: each gets an eager quickfix (no client resolveSupport), plus one fix-all.
     assert(count(r3, "\"kind\":\"quickfix\"") >= 2);
     assert(r3.contains("\"kind\":\"source.fixAll\""));
     assert(r3.contains("\"edit\""));
@@ -909,21 +929,22 @@ fn lsp_code_action_resolve_and_stale() {
 
     let mut ses = String::new();
     push_init_caps(&mut ses, root, caps, "");
-    push_open(&mut ses, root, "src/main.spc", src); // revision 1
+    // Revision 1.
+    push_open(&mut ses, root, "src/main.spc", src);
     let mut b = String::new();
     b.format_into(
         "{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/codeAction\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/main.spc\"}},\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":4,\"character\":0}}}},\"context\":{{\"diagnostics\":[]}}}}}}",
         root,
     );
     frame(&mut ses, &b);
-    // resolve the fix-all lazily (data constructed as the server does: uri + revision + fixall)
+    // Resolve the fix-all lazily (data constructed as the server does: uri + revision + fixall).
     b.clear();
     b.format_into(
         "{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"codeAction/resolve\",\"params\":{{\"title\":\"Fix all\",\"kind\":\"source.fixAll\",\"data\":{{\"uri\":\"file://{}/src/main.spc\",\"rev\":1,\"fixall\":true}}}}}}",
         root,
     );
     frame(&mut ses, &b);
-    // a stale revision: rejected
+    // A stale revision: rejected.
     b.clear();
     b.format_into(
         "{{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"codeAction/resolve\",\"params\":{{\"title\":\"Fix all\",\"kind\":\"source.fixAll\",\"data\":{{\"uri\":\"file://{}/src/main.spc\",\"rev\":0,\"fixall\":true}}}}}}",
@@ -936,12 +957,16 @@ fn lsp_code_action_resolve_and_stale() {
     let out = read_out(root);
     let o = out.as_str();
     let r3 = response_of(o, "\"id\":3");
-    assert(r3.contains("\"data\"")); // lazy: data attached ...
-    assert(!r3.contains("\"edit\"")); // ... and no eager edit
+    // Lazy: data attached ...
+    assert(r3.contains("\"data\""));
+    // ... and no eager edit.
+    assert(!r3.contains("\"edit\""));
     let r4 = response_of(o, "\"id\":4");
-    assert(r4.contains("\"edit\"")); // resolve built it
+    // Resolve built it.
+    assert(r4.contains("\"edit\""));
     let r5 = response_of(o, "\"id\":5");
-    assert(r5.contains("-32803")); // stale revision rejected
+    // Stale revision rejected.
+    assert(r5.contains("-32803"));
 }
 
 @test
@@ -949,10 +974,10 @@ fn lsp_semantic_code_actions() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/util.spc", "pub fn helper() i32 {\n    return 1;\n}\n");
-    // main: a conformance with a missing method (a TYPECHECK error; names all resolve)
+    // main: a conformance with a missing method (a TYPECHECK error; names all resolve).
     let src = "interface I {\n    fn m(self: &Self) i32;\n}\n\nstruct S {\n    pub x: i32,\n}\n\nextend S as I {\n}\n\nfn main() i32 {\n    return 0;\n}\n";
     p.mkfile("src/main.spc", src);
-    // other: an unresolved call whose target lives in an unimported workspace module
+    // other: an unresolved call whose target lives in an unimported workspace module.
     let other = "pub fn go() i32 {\n    return helper();\n}\n";
     p.mkfile("src/other.spc", other);
     let root = str::from_cstr(p.rootp());
@@ -980,11 +1005,13 @@ fn lsp_semantic_code_actions() {
     let out = read_out(root);
     let o = out.as_str();
     let r3 = response_of(o, "\"id\":3");
-    assert(r3.contains("Implement 'm'")); // missing interface method stub
+    // Missing interface method stub.
+    assert(r3.contains("Implement 'm'"));
     assert(r3.contains("fn m(self: &Self) i32 {"));
     assert(r3.contains("panic("));
     let r4 = response_of(o, "\"id\":4");
-    assert(r4.contains("Import util")); // missing import offered from the workspace modules
+    // Missing import offered from the workspace modules.
+    assert(r4.contains("Import util"));
     assert(r4.contains("import util;\\n"));
 }
 
@@ -996,7 +1023,7 @@ fn lsp_call_and_type_hierarchy() {
     p.mkfile("src/main.spc", src);
     let root = str::from_cstr(p.rootp());
 
-    // byte offsets of the declaration names (the hierarchy item's `data.off`)
+    // Byte offsets of the declaration names (the hierarchy item's `data.off`).
     let sfind = String::from_str(src);
     let leaf_off = sfind.find("leaf");
     let caller_off = sfind.find("caller");
@@ -1006,7 +1033,7 @@ fn lsp_call_and_type_hierarchy() {
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "");
     push_open(&mut ses, root, "src/main.spc", src);
-    // prepare on `leaf`'s declaration (line 14, character 3 -> inside the name)
+    // Prepare on `leaf`'s declaration (line 14, character 3 -> inside the name).
     push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/prepareCallHierarchy", 14, 4);
     let mut b = String::new();
     b.format_into(
@@ -1022,7 +1049,7 @@ fn lsp_call_and_type_hierarchy() {
         caller_off,
     );
     frame(&mut ses, &b);
-    // type hierarchy: prepare on S, supertypes of S, subtypes of I
+    // Type hierarchy: prepare on S, supertypes of S, subtypes of I.
     push_req_at(&mut ses, root, "src/main.spc", 6, "textDocument/prepareTypeHierarchy", 4, 7);
     b.clear();
     b.format_into(
@@ -1047,15 +1074,18 @@ fn lsp_call_and_type_hierarchy() {
     assert(r3.contains("\"name\":\"leaf\""));
     let r4 = response_of(o, "\"id\":4");
     assert(r4.contains("\"from\"") && r4.contains("\"name\":\"caller\""));
-    assert(count(r4, "\"fromRanges\"") == 1); // both leaf() calls group under ONE caller entry
+    // Both leaf() calls group under ONE caller entry.
+    assert(count(r4, "\"fromRanges\"") == 1);
     let r5 = response_of(o, "\"id\":5");
     assert(r5.contains("\"to\"") && r5.contains("\"name\":\"leaf\""));
     let r6 = response_of(o, "\"id\":6");
     assert(r6.contains("\"name\":\"S\""));
     let r7 = response_of(o, "\"id\":7");
-    assert(r7.contains("\"name\":\"I\"")); // S's supertypes: the conformed interface
+    // S's supertypes: the conformed interface.
+    assert(r7.contains("\"name\":\"I\""));
     let r8 = response_of(o, "\"id\":8");
-    assert(r8.contains("\"name\":\"S\"")); // I's subtypes: the conformer
+    // I's subtypes: the conformer.
+    assert(r8.contains("\"name\":\"S\""));
 }
 
 @test
@@ -1066,8 +1096,8 @@ fn lsp_limits_and_eviction() {
     p.mkfile("src/main.spc", src);
     let root = str::from_cstr(p.rootp());
 
-    // maxResults=1 bounds the reference batch; budgetMb=1 forces eviction of unpinned packages
-    // after every round -- later requests must still answer (the root rebuilds on demand)
+    // MaxResults=1 bounds the reference batch; budgetMb=1 forces eviction of unpinned packages
+    // after every round: later requests must still answer (the root rebuilds on demand).
     let mut ses = String::new();
     push_init_caps(&mut ses, root, "{}", "{\"maxResults\":1,\"budgetMb\":1}");
     push_open(&mut ses, root, "src/main.spc", src);
@@ -1084,7 +1114,9 @@ fn lsp_limits_and_eviction() {
     let out = read_out(root);
     let o = out.as_str();
     let r3 = response_of(o, "\"id\":3");
-    assert_eq(count(r3, "\"uri\""), 1); // three call sites, capped to maxResults=1
+    // Three call sites, capped to maxResults=1.
+    assert_eq(count(r3, "\"uri\""), 1);
     let r4 = response_of(o, "\"id\":4");
-    assert(r4.contains("foo")); // the budget-evicted package rebuilt and answered
+    // The budget-evicted package rebuilt and answered.
+    assert(r4.contains("foo"));
 }

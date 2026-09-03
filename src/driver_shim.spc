@@ -7,7 +7,7 @@ extern "C" "driver_shim.h" {
     pub fn sc_dirent_name(entry: *mut void) *const char;
     /// 1 directory, 0 other file kind, -1 when `path` cannot be stat'd.
     pub fn sc_stat_isdir(path: *const char) i32;
-    /// d_type of a `sc_readdir` entry: 1 dir, 0 non-dir, -1 unknown (caller must stat; always -1 on Windows).
+    /// The d_type of a `sc_readdir` entry: 1 dir, 0 non-dir, -1 unknown (caller must stat; always -1 on Windows).
     pub fn sc_dirent_isdir(entry: *mut void) i32;
     /// 1 iff both paths resolve to the same physical file, 0 if distinct, -1 if either cannot be stat'd.
     pub fn sc_same_file(a: *const char, b: *const char) i32;
@@ -16,6 +16,7 @@ extern "C" "driver_shim.h" {
     pub fn sc_realpath(path: *const char, resolved: *mut char) *mut char;
     /// Running executable's path into `buf`: 0 on success, nonzero on failure or truncation.
     pub fn sc_exe_path(buf: *mut char, size: u32) i32;
+    /// This process's id.
     pub fn sc_getpid() i32;
     /// 1 while process `pid` is alive, 0 once it is gone (parent-death detection for the LSP).
     pub fn sc_process_alive(pid: i64) i32;
@@ -24,16 +25,25 @@ extern "C" "driver_shim.h" {
     /// Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other
     /// (the default --arch).
     pub fn sc_host_arch() i32;
+    /// chdir(2): 0 on success, -1 on failure.
     pub fn sc_chdir(path: *const char) i32;
+    /// Create one directory: 0 on success, -1 on failure (including an existing path).
     pub fn sc_mkdir(path: *const char) i32;
+    /// Remove an EMPTY directory: 0 on success, -1 otherwise.
     pub fn sc_rmdir(path: *const char) i32;
+    /// Delete a file: 0 on success, -1 on failure.
     pub fn sc_unlink(path: *const char) i32;
+    /// Make `path` owner-readable and writable (0644); 0 on success.
     pub fn sc_chmod_rw(path: *const char) i32;
+    /// Install the crash handler that prints a backtrace on a fatal signal.
     pub fn sc_trace_install() void;
+    /// Open a directory stream for sc_readdir; null on failure.
     pub fn sc_opendir(path: *const char) *mut void;
+    /// Next entry of the stream (including `.` and `..`), or null at the end.
     pub fn sc_readdir(dir: *mut void) *mut void;
+    /// Close a stream from sc_opendir; 0 on success.
     pub fn sc_closedir(dir: *mut void) i32;
-    /// Modification time in seconds; 0 when the file does not exist -- the build engine's staleness sentinel.
+    /// Modification time in seconds; 0 when the file does not exist (the build engine's staleness sentinel).
     pub fn sc_mtime(path: *const char) i64;
     /// Online core count; 4 when it cannot be determined.
     pub fn sc_ncpu() i32;
@@ -46,11 +56,11 @@ extern "C" "driver_shim.h" {
     /// Monotonic milliseconds (never wall clock).
     pub fn sc_ticks_ms() i64;
     /// Start argv[0..] (NULL-terminated pointer array) WITHOUT a shell: argv[0] is PATH-searched and
-    /// every later entry reaches the child verbatim -- spaces, quotes, and non-ASCII bytes included.
+    /// every later entry reaches the child verbatim, spaces, quotes, and non-ASCII bytes included.
     /// A non-null `out_path` truncate-redirects the child's stdout+stderr into it; null inherits.
     /// Returns a pid/handle for sc_wait_any/sc_try_wait/sc_waitpid, or -1 on spawn failure.
     pub fn sc_spawn_argv(argv: *const *const char, out_path: *const char) i64;
-    /// sc_spawn_argv + wait: the child's exit code, or -1 on spawn/wait failure.
+    /// Spawn through sc_spawn_argv and wait: the child's exit code, or -1 on spawn/wait failure.
     pub fn sc_exec_argv(argv: *const *const char, out_path: *const char) i32;
     /// Block until any of the `n` children exits: returns its index into `pids` and stores its exit
     /// code in `code`; -1 on wait error.
@@ -66,13 +76,14 @@ extern "C" "driver_shim.h" {
     pub fn sc_fd_read(fd: i32, buf: *mut void, n: i32) i32;
     /// Write all `n` bytes; -1 on error.
     pub fn sc_fd_write(fd: i32, buf: *const void, n: i32) i32;
+    /// close(2) on a pipe end; 0 on success.
     pub fn sc_fd_close(fd: i32) i32;
     /// `_exit()`: no atexit handlers, no stream flushing. Emit workers end here so the inherited
     /// leak registry and buffered stdio are not replayed once per child.
     pub fn sc_exit_now(code: i32);
     /// Wait for ONE specific child; its exit code via `code`. 0 on success, -1 on error/Windows.
     pub fn sc_waitpid(pid: i64, code: *mut i32) i32;
-    /// rename() that also replaces an existing destination on Windows -- including one that is a RUNNING
+    /// rename() that also replaces an existing destination on Windows, including one that is a RUNNING
     /// executable, which Windows will not delete but will let us rename aside (parked as `<to>.old`).
     pub fn sc_rename(from: *const char, to: *const char) i32;
     /// Make `path` executable (0755); a no-op on Windows, which goes by extension.
@@ -81,7 +92,7 @@ extern "C" "driver_shim.h" {
     pub fn sc_setenv(name: *const char, value: *const char) i32;
 
     /// Run `cmd` to completion and return its exit code (-1 if it could not start). The portable stand-in
-    /// for `system()` plus shell redirection -- the test harnesses use it so their command strings hold no
+    /// for `system()` plus shell redirection; the test harnesses use it so their command strings hold no
     /// shell syntax, which is what makes the suite run on Windows as well.
     /// `in_path` null reads nothing; `out_path` null discards stdout; `err_path` null merges stderr into
     /// stdout; `env` is space-separated `NAME=VALUE` applied to the child only.

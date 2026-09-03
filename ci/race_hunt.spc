@@ -3,13 +3,13 @@
 // WORKS; this one exists to be hostile to it.
 //
 // Two groups. The first is the primitives the smoke program never touches. The second is the intricate
-// paths -- timed waits reaching the scheduler's timer list, `select` taking several locks at once and
+// paths: timed waits reaching the scheduler's timer list, `select` taking several locks at once and
 // unwinding them, `close` landing while both ends are mid-operation, and OS threads sharing a mutex with
 // coroutines. The second group is where the real find was: `Condvar::wait_raw` armed a timer, then re-took
 // its lock, and re-taking could park AGAIN and rewrite the timer fields a worker was reading.
 //
 // Producers here are BOUNDED (`send_timeout`, not `send`). The consumers make a fixed number of timed
-// attempts and most expire, so they exit having taken far fewer items than a producer has to give -- and
+// attempts and most expire, so they exit having taken far fewer items than a producer has to give: and
 // `send` will not report "no receivers" while this frame still holds one. An unbounded producer waits for
 // room that never comes, which reads exactly like a runtime deadlock and is not one.
 
@@ -235,7 +235,7 @@ fn hunt_timers() i64 {
     }
     // Bounded on purpose. The consumers make a FIXED number of timed attempts, most of which expire, so
     // they exit having taken far fewer items than this loop has to give. `send` does not report "no
-    // receivers" while this frame still holds one, so an unbounded producer waits for room forever --
+    // receivers" while this frame still holds one, so an unbounded producer waits for room forever:
     // a stall in the probe, not in the runtime.
     for i in 0..200 {
         let _ = tx.send_timeout(i, time::Duration::from_millis(50));
@@ -305,7 +305,8 @@ fn hunt_close_race() i64 {
         launch || {
             if closer {
                 time::sleep(time::Duration::from_millis(2));
-                s.close(); // lands with every other task inside send or recv
+                // Lands with every other task inside send or recv.
+                s.close();
             } else {
                 for i in 0..100 {
                     let _ = s.send(i);
@@ -319,8 +320,8 @@ fn hunt_close_race() i64 {
     return 0;
 }
 
-// 4. OS threads and coroutines on ONE mutex. The lock takes two entirely different paths -- a thread parks
-// futex-style on a word in its own frame, a coroutine goes through the scheduler -- and here they interleave.
+// 4. OS threads and coroutines on ONE mutex. The lock takes two entirely different paths: a thread parks
+// futex-style on a word in its own frame, a coroutine goes through the scheduler, and here they interleave.
 fn hunt_mixed_threads() i64 {
     let m = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
     let wg = sync::WaitGroup::new();

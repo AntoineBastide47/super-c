@@ -1,4 +1,4 @@
-// CLI test harness: drives $SUPERC as a subprocess over on-disk source trees -- the analog of
+// CLI test harness: drives $SUPERC as a subprocess over on-disk source trees; the analog of
 // tests/cli_test.c's run_cmd / write_file / mkfile. A `Proj` is a temp project root under the system temp
 // directory; write a
 // source tree into it with `mkfile`, compile it with `compile` (compile-only mode, which emits a build/
@@ -18,12 +18,14 @@ static mut C_SEQ: u64 = 0;
 static mut SUPERC_RESOLVED: Path512 = Path512 {};
 
 // The captured result of a subprocess: its exit code and combined stdout+stderr (`out`, owned).
+/// Outcome of a CLI invocation: exit code and captured output.
 pub struct CliResult {
     pub exit: i32,
     pub out: *mut char,
 }
 
 extend CliResult {
+    /// True when the captured output contains `needle`.
     pub fn out_has(self: &CliResult, needle: str) bool {
         if self.out == null {
             return false;
@@ -48,7 +50,7 @@ extend CliResult {
         eprintln("--- end of captured output ---");
         return false;
     }
-    /// `exit == 0`, but it DUMPS what was captured when the answer is no -- out_shows' sibling for
+    /// `exit == 0`, but it DUMPS what was captured when the answer is no: out_shows' sibling for
     /// exit codes: a remote crash otherwise reports nothing beyond the number.
     pub fn ok(self: &CliResult) bool {
         if self.exit == 0 {
@@ -73,7 +75,7 @@ extend CliResult as Free {
     }
 }
 
-// Does the NUL-terminated `hay` contain `needle`? `needle` is a `str` -- a VIEW with no terminator -- so it
+// Does the NUL-terminated `hay` contain `needle`? `needle` is a `str` (a VIEW with no terminator) so it
 // is copied before it reaches C. Passing `needle.ptr()` to a C string function reads past its end until it
 // finds a zero byte, which is exactly the kind of bug that only shows up on one platform.
 pub fn contains_str(hay: *const char, needle: str) bool {
@@ -86,6 +88,7 @@ pub fn contains_str(hay: *const char, needle: str) bool {
 }
 
 // True on Windows: the executable suffix, the default C compiler and a few path habits differ there.
+/// True when the host platform is Windows.
 pub fn on_windows() bool {
     return unsafe shim::sc_host_platform() == 0;
 }
@@ -120,12 +123,14 @@ fn superc() *const char {
     return slot;
 }
 
-// The compiler under test, as an absolute path -- what a test needs when it builds its own command line.
+// The compiler under test, as an absolute path: what a test needs when it builds its own command line.
+/// Path of the compiler under test (SC_TEST_SUPERC, else the binary beside the test runner).
 pub fn superc_path() str<'static> {
     return str::from_cstr(superc());
 }
 
 // The C compiler for the emitted trees: $CC, else `cc` (POSIX) / `gcc` (mingw ships no `cc`).
+/// The C compiler name: $CC, else `cc`.
 pub fn cc_name() *const char {
     let cc = stdlib::getenv("CC");
     if cc != null && unsafe *cc != 0 as char {
@@ -139,6 +144,7 @@ pub fn cc_name() *const char {
 
 // The C standard the harness compiles emitted trees with. mingw hides POSIX prototypes behind
 // `__STRICT_ANSI__` under a strict `-std=c11`, so the Windows leg asks for the GNU dialect instead.
+/// The C standard the harness compiles with (c11, or gnu11 on Windows).
 pub fn cstd() *const char {
     if on_windows() {
         return "-std=gnu11 -D_POSIX_C_SOURCE=200809L".ptr() as *const char;
@@ -146,9 +152,10 @@ pub fn cstd() *const char {
     return "-std=c11 -D_POSIX_C_SOURCE=200809L".ptr() as *const char;
 }
 
-// The same, as a `--cstd=` flag for a nested `super-c build` -- EMPTY on POSIX, where the manifest default
+// The same, as a `--cstd=` flag for a nested `super-c build`: EMPTY on POSIX, where the manifest default
 // is already this exact string. Passing a partial override (`-std=c11` without the POSIX define) is worse
 // than passing nothing: glibc then hides the prototypes the emitted C needs, which Darwin never does.
+/// `cstd()` as a `-std=` flag.
 pub fn cstd_flag() *const char {
     if on_windows() {
         return "\"--cstd=-std=gnu11 -D_POSIX_C_SOURCE=200809L\"".ptr() as *const char;
@@ -158,6 +165,7 @@ pub fn cstd_flag() *const char {
 
 // The executable suffix a linked test binary gets ("" or ".exe"). mingw's gcc appends `.exe` to an output
 // name that has no extension, so the harness names its binaries with the suffix already on.
+/// The executable suffix: `.exe` on Windows, empty elsewhere.
 pub fn binext() *const char {
     if on_windows() {
         return ".exe".ptr() as *const char;
@@ -209,23 +217,28 @@ fn exec_env(basecmd: *const char, outpath: *const char, env: *const char) CliRes
     return r;
 }
 
-// Run a command with its output discarded and return its exit code -- the escape hatch for the few checks
+// Run a command with its output discarded and return its exit code: the escape hatch for the few checks
 // that drive a C compiler or a helper binary directly.
+/// Run `cmd` shell-free with all output discarded; its exit code.
 pub fn run_quiet(cmd: *const char) i32 {
     return unsafe shim::sc_run(cmd, null, null, null, null);
 }
 
 // Run a command with stdin, stdout and stderr each bound to a file (null: nothing / discarded). What the
 // LSP tests need, and the one shape a shell would have written as `< in > out 2> err`.
+/// Run `cmd` shell-free with stdin/stdout/stderr redirected to the given paths (null = discard/none).
 pub fn run_io(cmd: *const char, in_path: *const char, out_path: *const char, err_path: *const char) i32 {
     return unsafe shim::sc_run(cmd, in_path, out_path, err_path, null);
 }
 
 // A temp project root with helpers to write a source tree, compile it, and cc+run the emitted build/ tree.
+/// A scratch project directory (its absolute path, NUL-terminated).
 pub type Proj = Array<char, 256>;
 
+/// A fresh empty scratch project under the system temp directory, named by pid.
 pub fn proj_new() Proj {
-    unsafe C_SEQ = unsafe C_SEQ + 1; // process-local: one forked process per test, and the name carries the pid
+    // Process-local: one forked process per test, and the name carries the pid.
+    unsafe C_SEQ = unsafe C_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut p = Proj {};
     unsafe stdio::snprintf(
@@ -241,11 +254,13 @@ pub fn proj_new() Proj {
 }
 
 extend Proj {
+    /// The project root as a C string.
     pub const fn rootp(self: &Proj) *const char {
         return &self[0];
     }
 
     // Write <root>/rel (creating parent dirs); rel may contain a subdirectory (e.g. "lib/lib.spc").
+    /// Write `content` to `rel` under the root, creating directories.
     pub fn mkfile(self: &Proj, rel: str, content: str) {
         let mut dir = Path512 {};
         unsafe stdio::snprintf(
@@ -256,7 +271,7 @@ extend Proj {
             rel.len() as i32,
             rel.ptr(),
         );
-        // everything up to the last separator is the directory to create
+        // Everything up to the last separator is the directory to create.
         let mut cut: i32 = -1;
         let mut i: i32 = 0;
         while dir[i as usize] != 0 as char {
@@ -289,6 +304,7 @@ extend Proj {
 
     // Copy a repository file into this isolated project. This keeps large end-to-end fixtures in
     // normal source files instead of duplicating them inside matchertext literals.
+    /// Copy `source` to `rel` under the root; false on failure.
     pub fn copyfile(self: &Proj, rel: str, source: str) bool {
         let mut path = Path512 {};
         unsafe stdio::snprintf(&mut path[0], 512, "%.*s".ptr() as *const char, source.len() as i32, source.ptr());
@@ -302,6 +318,7 @@ extend Proj {
     }
 
     // Compile <root>/mainrel with the given extra flags (compile-only mode: emits <root>/build/, no link).
+    /// Run the compiler on `mainrel` with extra `flags`, capturing output.
     pub fn compile_flags(self: &Proj, flags: str, mainrel: str) CliResult {
         let mut base = Cmd8192 {};
         unsafe stdio::snprintf(
@@ -320,11 +337,13 @@ extend Proj {
         return exec(&base[0], &op[0]);
     }
 
+    /// Run the compiler on `mainrel`, capturing output.
     pub fn compile(self: &Proj, mainrel: str) CliResult {
         return self.compile_flags("", mainrel);
     }
 
     // Run `$SUPERC <args>` verbatim (for flag-only invocations like usage checks); no path is appended.
+    /// Run the compiler with `args` verbatim from the project root, capturing output.
     pub fn run_raw(self: &Proj, args: str) CliResult {
         let mut base = Cmd8192 {};
         unsafe stdio::snprintf(
@@ -340,8 +359,8 @@ extend Proj {
         return exec(&base[0], &op[0]);
     }
 
-    // Append every `*.c` under `dir` (recursively) to `out`, each double-quoted. This is the `find` the
-    // command line used to run: doing it here keeps the command shell-free, and a shell-free command is
+    // Append every `*.c` under `dir` (recursively) to `out`, each double-quoted: the `find` a shell
+    // command would run. Doing it here keeps the command shell-free, and a shell-free command is
     // the same command on Windows.
     fn append_c_files(self: &Proj, dir: *const char, out: *mut char, cap: usize) {
         let d = unsafe shim::sc_opendir(dir);
@@ -377,7 +396,7 @@ extend Proj {
     }
 
     // The `@c.link` flags the emit wrote to build/raw/__ldflags, space separated (empty when there are
-    // none) -- the `cat` the command line used to run.
+    // none): the `cat` a shell command would run.
     fn append_ldflags(self: &Proj, out: *mut char, cap: usize) {
         let mut path = Path512 {};
         unsafe stdio::snprintf(&mut path[0], 512, "%s/build/raw/__ldflags".ptr() as *const char, self.rootp());
@@ -397,7 +416,7 @@ extend Proj {
         unsafe stdlib::free(buf);
     }
 
-    // cc the whole emitted build/ tree -Werror (plus any `extra` flags and @c.link __ldflags) into
+    // Cc the whole emitted build/ tree -Werror (plus any `extra` flags and @c.link __ldflags) into
     // <root>/bin. `strict` adds -Wall -Wextra -Werror; without it this is the plain build (the analog of
     // cli_test's `cc -std=c11`, where a tree containing @test functions compiles as an ordinary program).
     fn cc_tree(self: &Proj, extra: str, strict: bool) CliResult {
@@ -434,16 +453,19 @@ extend Proj {
         return exec(&base[0], &op[0]);
     }
 
+    /// Compile every generated C file with the harness flags and link `bin`; the C compiler's result.
     pub fn cc_build(self: &Proj, extra: str) CliResult {
         return self.cc_tree(extra, true);
     }
 
+    /// `cc_build` without the pedantic warning set.
     pub fn cc_build_plain(self: &Proj, extra: str) CliResult {
         return self.cc_tree(extra, false);
     }
 
     // Run the linked <root>/bin with `env` ("VAR=v " assignments, trailing space; a literal) prefixed,
     // capturing its exit code and output.
+    /// Run the linked binary with `env` applied, capturing output.
     pub fn run_bin_env(self: &Proj, env: str) CliResult {
         let mut base = Path512 {};
         unsafe stdio::snprintf(&mut base[0], 512, "\"%s/bin%s\"".ptr() as *const char, self.rootp(), binext());
@@ -456,6 +478,7 @@ extend Proj {
     }
 
     // Run the linked <root>/bin and return its exit code.
+    /// Run the linked binary; its exit code.
     pub fn run_bin(self: &Proj) i32 {
         let mut base = Path512 {};
         unsafe stdio::snprintf(&mut base[0], 512, "\"%s/bin%s\"".ptr() as *const char, self.rootp(), binext());
@@ -467,6 +490,7 @@ extend Proj {
     }
 
     // True if the generated <root>/build/rel contains `needle` (the `grep -q` analog).
+    /// True when generated file `rel` (under build/raw) contains `needle`.
     pub fn gen_has(self: &Proj, rel: str, needle: str) bool {
         let mut path = Path512 {};
         unsafe stdio::snprintf(
@@ -486,8 +510,9 @@ extend Proj {
         return found;
     }
 
-    // How many entries under <root>/build/raw start with `prefix` -- the `find ... | wc -l` analog, used to
-    // assert that generated wrapper TUs are pruned.
+    // How many entries under <root>/build/raw start with `prefix`: the `find ... | wc -l` analog, which
+    // asserts that generated wrapper TUs are pruned.
+    /// Number of entries under build/raw whose name starts with `prefix`.
     pub fn gen_count(self: &Proj, prefix: str) i32 {
         let mut raw = Path512 {};
         unsafe stdio::snprintf(&mut raw[0], 512, "%s/build/raw".ptr() as *const char, self.rootp());
@@ -512,6 +537,7 @@ extend Proj {
     }
 
     // True if <root>/build/rel exists (the `access(.., F_OK)` analog).
+    /// True when `rel` exists under build/raw.
     pub fn gen_exists(self: &Proj, rel: str) bool {
         let mut path = Path512 {};
         unsafe stdio::snprintf(
@@ -531,6 +557,7 @@ extend Proj {
     }
 
     // Compile <root>/mainrel and assert a nonzero exit with a diagnostic containing `want` (expect_fail).
+    /// Assert that compiling `mainrel` fails with output containing `want`.
     pub fn expect_fail(self: &Proj, mainrel: str, want: str) {
         let r = self.compile(mainrel);
         assert(r.exit != 0, "expected nonzero exit on a bad program");
@@ -544,7 +571,7 @@ extend Proj as Free {
     }
 }
 
-/// Run the compiler under test FROM `dir` with one environment variable set -- the shape the global
+/// Run the compiler under test FROM `dir` with one environment variable set: the shape the global
 /// object-cache tests need: the engine resolves build.toml from its working directory and the cache
 /// from its environment. No shell syntax: Windows' sc_run hands the line to CreateProcess verbatim,
 /// so the directory moves via chdir (safe: the runner gives every test its own process) and the

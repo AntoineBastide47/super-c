@@ -1,8 +1,7 @@
 // `super-c lsp`: a Language Server Protocol server over stdio. Single-threaded and synchronous.
-// Document edits update built roots INCREMENTALLY (analysis::recompile: only the edit's import-closure
-// reach re-analyzes, and an edit inside one plain fn body re-analyzes one module); anything outside
-// that domain -- and every open/close/save/config change -- falls back to the full codegen-free
-// recompile. SC_LSP_NO_INCR=1 forces the full path everywhere (identical behavior, the parity mode);
+// Document edits update built roots incrementally (analysis::recompile re-analyzes only the edit's
+// import-closure reach); every open/close/config change and any edit outside that domain falls back
+// to the full codegen-free recompile. SC_LSP_NO_INCR=1 forces the full path everywhere (parity mode);
 // SC_LSP_BUDGET_MB bounds retained packages (closed-file roots evict first, open docs pin theirs).
 // The process chdir()s to the workspace root at initialize, so manifest discovery, import rooting and
 // the src/ alt-root convention behave exactly like CLI runs from the project root.
@@ -39,9 +38,9 @@ extend Doc as Free {
 }
 
 /// One compiled unit: the manifest root (build.toml's entry), a per-file root for an open doc outside
-/// the manifest closure, or THE workspace-batch root (sweep=true, origin "") -- ONE shared package for
-/// every closed .spc no other package owns, the `super-c lint` one-package recipe. The batch replaced
-/// the per-file sweep roots, whose per-file prelude + closure copies held ~1 GB on this repo.
+/// the manifest closure, or the workspace-batch root (sweep=true, origin ""): one shared package for
+/// every closed .spc no other package owns, the `super-c lint` one-package recipe. Per-file sweep
+/// roots are rejected: their prelude and closure copies held ~1 GB on this repo.
 pub struct Root {
     pub ws: String, // canonical workspace folder that owns this root ("" for a per-file root)
     pub root_file: String,
@@ -71,6 +70,8 @@ extend Root as Free {
     }
 }
 
+/// Whole-process server state: open documents, built roots, negotiated client capabilities and the
+/// per-URI semantic-token history that delta requests diff against.
 pub struct Server {
     pub docs: Vector<Doc>,
     pub roots: Vector<Root>, // roots[0] is the primary folder's manifest root when has_manifest
@@ -88,7 +89,7 @@ pub struct Server {
     pub initialized: bool, // initialize accepted exactly once
     pub revision: u64, // bumps on every workspace input transaction (open/change/close/disk/config)
     pub canceled: Vector<String>, // dumped ids of $/cancelRequest notifications not yet consumed
-    // negotiated client capabilities (read once at initialize)
+    // Negotiated client capabilities, read once at initialize.
     pub cap_hier_symbols: bool, // hierarchical documentSymbol trees
     pub cap_doc_changes: bool, // versioned documentChanges workspace edits
     pub cap_pull_diags: bool, // textDocument/diagnostic pull requests
@@ -156,9 +157,7 @@ const fn path_cmp(a: &String, b: &String) i32 {
     return la as i32 - lb as i32;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // JSON-RPC plumbing.
-// ---------------------------------------------------------------------------------------------------------
 
 fn respond(f: *mut stdio::FILE, id: &json::JSON, result: &json::JSON) {
     let mut body = String::with_capacity(256);
@@ -217,9 +216,7 @@ fn notify(f: *mut stdio::FILE, method: str, params: &json::JSON) {
     transport::write_message(f, body.as_str());
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Diagnostics: rebuild every root and republish.
-// ---------------------------------------------------------------------------------------------------------
 
 fn range_json(src: str, ls: &Vector<u32>, start: u32, len: u32) json::JSON {
     let s = text::offset_to_pos(src, ls, start);
@@ -275,9 +272,7 @@ extend PubSet {
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Lifecycle + document sync handlers.
-// ---------------------------------------------------------------------------------------------------------
 
 /// The server's advertised capability set. UTF-16 positions are advertised explicitly; the optional
 /// providers (pull diagnostics, token deltas, lazy code-action resolve) are advertised only when the
@@ -321,9 +316,7 @@ const fn is_manifest_path(path: str) bool {
     return path.ends_with("build.toml");
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Positional requests: hover / definition / references / rename.
-// ---------------------------------------------------------------------------------------------------------
 
 // A positional request resolved onto a built package: root r, module m, byte span [off, end]
 // (end == off for point requests).
@@ -335,7 +328,7 @@ struct Hit {
     pub end: u32,
 }
 
-// One cross-root reference site: root, module (within that root's package), byte span.
+// A reference site keyed by its canonical file path, the primary key of the deterministic result order.
 struct KeyedHit {
     pub path: String,
     pub h: RefHit,
@@ -363,6 +356,7 @@ fn keyed_hit_cmp(x: &KeyedHit, y: &KeyedHit) i32 {
     return 0;
 }
 
+// One cross-root reference site: root, module (within that root's package), byte span.
 struct RefHit {
     pub r: u32,
     pub m: u32,
@@ -385,9 +379,7 @@ fn valid_ident(nm: str) bool {
     return toks.len() == 2 && toks.at(0).kind() == ltt::TokenType::Identifier;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Main loop.
-// ---------------------------------------------------------------------------------------------------------
 
 // A request id is valid when it is a string or a number (LSP integer). Booleans, arrays, objects
 // and null are not request ids.
@@ -442,7 +434,8 @@ pub fn run(std_dir: str, target: i32) i32 {
     loop {
         let msgo = transport::read_message(fin);
         if msgo.is_none() {
-            return 1; // client vanished without exit
+            // EOF: the client vanished without exit.
+            return 1;
         }
         let msg = msgo.unwrap();
         let mut req = json::JSON::default();
@@ -472,8 +465,8 @@ pub fn run(std_dir: str, target: i32) i32 {
         let jr_ok = req.value_str("jsonrpc") == "2.0";
         let mo = req.value("method");
         let m_ok = mo.is_some() && mo.unwrap().kind == json::JT_STRING;
-        // a message with an id and a result/error but NO method is the client's RESPONSE to a
-        // server-to-client request (dynamic registration): consume it silently
+        // A message with an id and a result/error but no method is the client's response to a
+        // server-to-client request (dynamic registration): consume it silently.
         if jr_ok && !m_ok && is_req && (req.contains_key("result") || req.contains_key("error")) {
             continue;
         }
@@ -484,7 +477,7 @@ pub fn run(std_dir: str, target: i32) i32 {
             continue;
         }
         sv.tick += 1;
-        // parent-death detection: after the client's process dies, the next message (or EOF) ends us
+        // Parent-death detection: after the client's process dies, the next message (or EOF) ends the server.
         if sv.parent_pid > 0 && unsafe shim::sc_process_alive(sv.parent_pid) == 0 {
             return 1;
         }
@@ -561,13 +554,13 @@ pub fn run(std_dir: str, target: i32) i32 {
                 sv.on_initialize(&req, fout);
             }
         } else if method == "initialized" {
-            // dynamic watched-file registration first, so a client without static watcher support
-            // starts delivering **/*.spc and **/build.toml changes
+            // Dynamic watched-file registration first, so a client without static watcher support
+            // starts delivering **/*.spc and **/build.toml changes.
             if sv.cap_watch_dynreg {
                 register_watchers(fout);
             }
-            // first full round: the manifest build + workspace sweep publish diagnostics for the
-            // whole build.toml folder before any document opens
+            // First full round: the manifest build and workspace sweep publish diagnostics for the
+            // whole build.toml folder before any document opens.
             sv.rebuild_all(fout, false);
         } else if method == "shutdown" {
             sv.shutdown_seen = true;
@@ -580,7 +573,7 @@ pub fn run(std_dir: str, target: i32) i32 {
             sv.revision += 1;
             sv.on_did_change(&req, fout);
         } else if method == "textDocument/didSave" {
-            // overlays are already current
+            // Overlays are already current.
         } else if method == "textDocument/didClose" {
             sv.revision += 1;
             sv.on_did_close(&req, fout);
@@ -652,7 +645,7 @@ pub fn run(std_dir: str, target: i32) i32 {
         } else if is_req {
             send_error(fout, req.at_key("id"), -32601, "method not found");
         }
-        // remaining unknown notifications ($/setTrace, ...) are ignored
+        // Remaining unknown notifications ($/setTrace, ...) are ignored.
     }
 }
 
@@ -683,7 +676,7 @@ extend Server {
     }
 
     // First BUILT root containing `path` (manifest root first; the workspace batch LAST, so an open
-    // doc's per-file root -- built from the live overlay -- wins over the batch's disk-built copy),
+    // doc's per-file root, built from the live overlay, wins over the batch's disk-built copy),
     // -1 if none. A budget-evicted root (files kept for diag republishing, package dropped) owns
     // nothing: its module table is empty, so feature queries must not land on it.
     fn owning_root(self: &Self, path: str) i32 {
@@ -713,8 +706,8 @@ extend Server {
         for i in 0..self.docs.len() {
             let path = self.docs.at(i).path.as_str();
             // Only Super-C source compiles. An open build.toml is served by the manifest half of the
-            // server; giving it a package root made the parser read TOML as Super-C and report
-            // "expected top-level item" on its first line.
+            // server; a package root for it makes the parser read TOML as Super-C and report a
+            // parse error on its first line.
             if !path.ends_with(".spc") {
                 continue;
             }
@@ -776,7 +769,7 @@ extend Server {
     }
 
     // The workspace sweep: every .spc under the build.toml folder that no other package owns joins
-    // THE batch root -- one shared package (the `super-c lint` recipe) instead of a resident package
+    // THE batch root, one shared package (the `super-c lint` recipe) instead of a resident package
     // per file. Hidden entries and the manifest out-dir are skipped. The batch rebuilds only when its
     // member set changes (a file appears/vanishes, a doc opens into a per-file root or closes back);
     // otherwise its cached diagnostics republish.
@@ -785,8 +778,8 @@ extend Server {
             return;
         }
         for fi in 0..self.folders.len() {
-            // the primary folder sweeps only under a manifest (the historical behavior); extra
-            // folders always sweep so their files get diagnostics
+            // The primary folder sweeps only under a manifest; extra folders always sweep so their
+            // files get diagnostics.
             if fi == 0 && !self.has_manifest {
                 continue;
             }
@@ -1006,10 +999,10 @@ extend Server {
         let rf = self.roots.at(r).root_file.clone();
         let rd = self.roots.at(r).root_dir.clone();
         let ad = self.roots.at(r).alt_dir.clone();
-        // drop the previous build BEFORE compiling: holding both packages doubled the peak
+        // Drop the previous build BEFORE compiling: holding both packages doubled the peak.
         self.roots[r].pkg = loader::Package::new();
-        // a manifest root lints every workspace file it owns (incl. an in-repo std/); other roots
-        // lint only their own root file, so each file's lint warnings come from exactly one root
+        // A manifest root lints every workspace file it owns (incl. an in-repo std/); other roots
+        // lint only their own root file, so each file's lint warnings come from exactly one root.
         let ld = if self.roots.at(r).origin.len() == 0 && !self.roots.at(r).sweep {
             self.roots.at(r).ws.clone();
         } else {
@@ -1048,16 +1041,16 @@ extend Server {
         }
         self.roots[r].built = true;
         self.roots[r].last_used = self.tick;
-        // retain the records: publishing + codeAction read from them until the next rebuild
+        // Retain the records: publishing + codeAction read from them until the next rebuild.
         self.roots[r].diags = diags;
         self.publish_root_diags(r, ps);
     }
 
     // Convert root `r`'s retained diagnostics into per-URI publish entries (module ids are
-    // per-package). Also used to republish a cached sweep root without rebuilding it.
+    // per-package). Also republishes a cached sweep root without rebuilding it.
     fn publish_root_diags(self: &Self, r: usize, ps: &mut PubSet) {
-        // files a manifest package owns publish from it alone -- a per-file/sweep root's closure
-        // reaches std and friends, and republishing its (possibly stale) copies would duplicate them
+        // Files a manifest package owns publish from it alone: a per-file/sweep root's closure
+        // reaches std and friends, and republishing its (possibly stale) copies would duplicate them.
         let mut dedup = false;
         for q in 0..self.roots.len() {
             if q != r && self.roots.at(q).origin.len() == 0 && !self.roots.at(q).sweep && self.roots.at(q).built {
@@ -1086,8 +1079,8 @@ extend Server {
                     continue;
                 }
             }
-            // a batch module whose file has a live per-file root (its doc is open) publishes from
-            // that root's overlay-fresh build, not the batch's disk-built copy
+            // A batch module whose file has a live per-file root (its doc is open) publishes from
+            // that root's overlay-fresh build, not the batch's disk-built copy.
             if self.is_batch(r) {
                 let mut fresh = false;
                 for q in 0..self.roots.len() {
@@ -1117,7 +1110,7 @@ extend Server {
     }
 
     // Every OPEN build.toml gets the build's own verdict on it. An open manifest with no diagnostics
-    // still registers its URI, so a previously-reported problem is cleared once fixed.
+    // still registers its URI, so an earlier reported problem is cleared once fixed.
     fn publish_manifest_diags(self: &Self, ps: &mut PubSet) {
         for d in 0..self.docs.len() {
             let doc = self.docs.at(d);
@@ -1145,19 +1138,19 @@ extend Server {
     // last round but clean now gets an explicit empty list.
     fn rebuild_all(self: &mut Self, f: *mut stdio::FILE, incr: bool) {
         self.drop_orphan_roots();
-        // manifest roots build first: they decide which docs need per-file roots
+        // Manifest roots build first: they decide which docs need per-file roots.
         for r in 0..self.roots.len() {
             if self.roots.at(r).origin.len() == 0 && !self.roots.at(r).sweep && !self.roots.at(r).built {
                 let mut ps0 = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
                 self.build_root(r, &mut ps0, false);
-                // publishing waits for the full round below; this build only seeds ownership
+                // Publishing waits for the full round below; this build only seeds ownership.
             }
         }
         self.ensure_roots();
         let mut ps = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
         for r in 0..self.roots.len() {
-            // a built sweep root for a closed file republishes its cached diagnostics: rebuilding
-            // every workspace file on each keystroke would be unusable
+            // A built sweep root for a closed file republishes its cached diagnostics: rebuilding
+            // every workspace file on each keystroke would be unusable.
             if self.roots.at(r).sweep && self.roots.at(r).built && !self.doc_open(self.roots.at(r).origin.as_str()) {
                 self.publish_root_diags(r, &mut ps);
             } else {
@@ -1165,14 +1158,14 @@ extend Server {
             }
         }
         self.publish_manifest_diags(&mut ps);
-        // publish
+        // Publish.
         for i in 0..ps.uris.len() {
             let mut params = json::JSON::object();
             params.emplace("uri", json::JSON::str(ps.uris.at(i).as_str()));
             params.emplace("diagnostics", ps.arrs.at(i).clone());
             notify(f, "textDocument/publishDiagnostics", &params);
         }
-        // clear URIs that had diagnostics last round and none now
+        // Clear URIs that had diagnostics last round and none now.
         for i in 0..self.published.len() {
             let old = self.published.at(i).as_str();
             let mut still = false;
@@ -1196,7 +1189,7 @@ extend Server {
     }
 
     // Retention budget (SC_LSP_BUDGET_MB; unset = unlimited): when the retained packages exceed it,
-    // evict the ones no open document pins -- the workspace batch and per-file roots of closed docs --
+    // evict the ones no open document pins: the workspace batch and per-file roots of closed docs;
     // in LEAST-RECENTLY-USED order (each build stamps its root with the server tick; a closed root's
     // stamp freezes, so the longest-idle package goes first). Their diagnostics (and file maps) stay
     // for cached republishing; the next request that needs the package rebuilds it. Roots owning open
@@ -1219,7 +1212,7 @@ extend Server {
             total += self.roots.at(r).pkg.retained_bytes();
         }
         while total > budget {
-            // the least-recently-used evictable root with a resident package
+            // The least-recently-used evictable root with a resident package.
             let mut pick: i64 = -1;
             let mut oldest: u64 = 0xFFFFFFFFFFFFFFFF;
             for r in 0..self.roots.len() {
@@ -1233,7 +1226,8 @@ extend Server {
                 }
             }
             if pick < 0 {
-                break; // everything left is pinned
+                // Everything left is pinned.
+                break;
             }
             let b = self.roots.at(pick as usize).pkg.retained_bytes();
             self.roots[pick as usize].pkg = loader::Package::new();
@@ -1315,7 +1309,7 @@ extend Server {
                         }
                     }
                 }
-                // parent process: polled between messages so a dead client ends the server
+                // Parent process: polled between messages so a dead client ends the server.
                 switch params.value("processId") {
                     Some(pid) => {
                         if pid.kind == json::JT_NUMBER {
@@ -1324,7 +1318,7 @@ extend Server {
                     },
                     None => {},
                 };
-                // server settings (the plan's limit knobs live here, not in env vars alone)
+                // Server settings (the plan's limit knobs live here, not in env vars alone).
                 switch params.value("initializationOptions") {
                     Some(io) => {
                         let mr = io.value_i64("maxResults", 0);
@@ -1335,7 +1329,7 @@ extend Server {
                     },
                     None => {},
                 };
-                // negotiated client capabilities that change response SHAPES or gate providers
+                // Negotiated client capabilities that change response SHAPES or gate providers.
                 switch params.value("capabilities") {
                     Some(caps) => {
                         switch caps.value("textDocument") {
@@ -1417,7 +1411,7 @@ extend Server {
         if self.folders.len() != 0 {
             self.ws_root = self.folders.at(0).clone();
         }
-        // one manifest root per folder that carries a build.toml; the primary folder's sits first
+        // One manifest root per folder that carries a build.toml; the primary folder's sits first.
         for i in 0..self.folders.len() {
             let folder = self.folders.at(i).clone();
             let primary = i == 0;
@@ -1469,7 +1463,7 @@ extend Server {
     fn apply_change(txt: &mut String, ch: &json::JSON) bool {
         let ro = ch.value("range");
         if ro.is_none() {
-            // no range: a full-document replacement
+            // No range: a full-document replacement.
             let mut nt = String::from_str(ch.value_str("text"));
             *txt = replace(&mut nt, String::new());
             return true;
@@ -1552,7 +1546,8 @@ extend Server {
                 if di >= 0 {
                     self.docs.remove(di as usize).unwrap().free();
                 }
-                self.rebuild_all(f, false); // overlays revert to the on-disk content
+                // Overlays revert to the on-disk content.
+                self.rebuild_all(f, false);
             },
             None => {},
         };
@@ -1748,7 +1743,7 @@ extend Server {
 
     // Reference sites for definition `d` (resolved in root `r0`) across EVERY built root, deduped
     // by canonical file + span. The cross-package hop matches on (defining file, kind, name text)
-    // -- the temporary symbol identity until compiler-API symbol ids exist.
+    // the temporary symbol identity until compiler-API symbol ids exist.
     fn collect_refs(self: &Self, r0: usize, d: astn::DefId, include_decl: bool, out: &mut Vector<RefHit>) {
         let pkg0 = &self.roots.at(r0).pkg;
         let locs0 = feat::references_of_def(pkg0, d, include_decl);
@@ -1783,7 +1778,7 @@ extend Server {
             }
         }
         // dedupe by canonical file + span (the same file appears in several packages): sort keyed
-        // copies once, then drop equal neighbours -- deterministic order, O(n log n) not quadratic
+        // copies once, then drop equal neighbours: deterministic order, O(n log n) not quadratic.
         let mut keyed = Vector::<KeyedHit>::new();
         keyed.reserve(out.len());
         for i in 0..out.len() {
@@ -1828,7 +1823,8 @@ extend Server {
             self.collect_refs(h.r, d, include_decl, &mut hits);
         }
         if hits.len() > self.max_results {
-            hits.truncate(self.max_results); // bounded result batch (initializationOptions.maxResults)
+            // Bounded result batch (initializationOptions.maxResults).
+            hits.truncate(self.max_results);
         }
         let mut arr = json::JSON::array();
         for i in 0..hits.len() {
@@ -1862,7 +1858,7 @@ extend Server {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
-        // reject targets whose definition is outside the workspace (std/ffi of an installed compiler)
+        // Reject targets whose definition is outside the workspace (std/ffi of an installed compiler).
         let def_file = self.self_def_file(h.r, d.module as usize);
         if !self.in_workspace(def_file) {
             respond(f, req.at_key("id"), &nullv);
@@ -1906,16 +1902,16 @@ extend Server {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
-        // a rename may only touch files inside the workspace: in a normal project the installed std/ffi
+        // A rename may only touch files inside the workspace: in a normal project the installed std/ffi
         // live next to the compiler binary (outside) and stay protected; in a workspace that contains its
-        // own std -- the compiler repo itself -- renaming std symbols is legitimate first-party work
+        // own std (the compiler repo itself) renaming std symbols is legitimate first-party work.
         let def_file = self.self_def_file(h.r, d.module as usize);
         if !self.in_workspace(def_file) {
             send_error(f, req.at_key("id"), -32803, "cannot rename: the definition is outside the workspace (std/ffi)");
             return;
         }
-        // the rename set: the definition plus its interface relations (an interface method renames
-        // its declaration and every conformer together)
+        // The rename set: the definition plus its interface relations (an interface method renames
+        // its declaration and every conformer together).
         let mut related = Vector::<astn::DefId>::new();
         feat::related_decls(pkg, d, &mut related);
         for i in 0..related.len() {
@@ -1938,14 +1934,15 @@ extend Server {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
-        // group per canonical file, sort each group by DESCENDING offset, reject overlaps
+        // Group per canonical file, sort each group by DESCENDING offset, reject overlaps.
         let mut files = Vector::<String>::new();
         let mut per = Vector::<Vector<RefHit>>::new();
         for i in 0..hits.len() {
             let rh = *hits.at(i);
             let fp = self.roots.at(rh.r as usize).files.at(rh.m as usize).as_str();
             if !self.in_workspace(fp) {
-                continue; // outside files never receive edits
+                // Outside files never receive edits.
+                continue;
             }
             let mut idx: i64 = -1;
             for k in 0..files.len() {
@@ -1963,7 +1960,7 @@ extend Server {
         let mut doc_changes = json::JSON::array();
         let mut changes = json::JSON::object();
         for k in 0..files.len() {
-            // insertion sort by descending start (groups are small)
+            // Insertion sort by descending start (groups are small).
             let g = &mut per[k];
             for a in 1..g.len() {
                 let mut b = a;
@@ -2019,9 +2016,7 @@ extend Server {
         respond(f, req.at_key("id"), &we);
     }
 
-    // ---------------------------------------------------------------------------------------------------------
     // Formatting / semantic tokens / completion.
-    // ---------------------------------------------------------------------------------------------------------
 
     fn on_formatting(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
@@ -2043,7 +2038,8 @@ extend Server {
         let doc = self.docs.at(di as usize);
         let mut formatted = String::new();
         if !dutil::format_source(&doc.txt, doc.path.as_str(), 120, &mut formatted) {
-            respond(f, req.at_key("id"), &nullv); // unparseable or comment-check tripped: never destructive
+            // Unparseable or comment-check tripped: never destructive.
+            respond(f, req.at_key("id"), &nullv);
             return;
         }
         let mut arr = json::JSON::array();
@@ -2145,7 +2141,7 @@ extend Server {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
-        // range request: keep only tokens intersecting the requested window
+        // Range request: keep only tokens intersecting the requested window.
         let src_len = self.roots.at(r as usize).pkg.modules.at(m as usize).source.len();
         let mut w_start: u32 = 0;
         let mut w_end = src_len as u32;
@@ -2168,7 +2164,7 @@ extend Server {
         respond(f, req.at_key("id"), &res);
     }
 
-    // semanticTokens/full/delta: one splice edit (common prefix/suffix diff) against the cached
+    // SemanticTokens/full/delta: one splice edit (common prefix/suffix diff) against the cached
     // previous full result; an unknown or stale previousResultId answers with a fresh full result.
     fn on_semantic_tokens_delta(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
@@ -2202,7 +2198,7 @@ extend Server {
         }
         let src_len = self.roots.at(r as usize).pkg.modules.at(m as usize).source.len();
         let data = self.token_data(r as usize, m as usize, 0, src_len as u32);
-        // the cached previous result for this URI, when its id matches the request
+        // The cached previous result for this URI, when its id matches the request.
         let mut have_prev = false;
         let mut old = Vector::<i64>::new();
         for i in 0..self.tok_uris.len() {
@@ -2252,7 +2248,7 @@ extend Server {
     }
 
     // Completion through a probe: splice `__lsp_c` (then `__lsp_c;` if that still does not parse) at the
-    // cursor -- the mid-edit buffer rarely parses; the probe usually makes it -- compile a throwaway
+    // cursor: the mid-edit buffer rarely parses; the probe usually makes it; compile a throwaway
     // package with that overlay, and read completions from it. The probe's own type error is irrelevant:
     // the typechecker still assigns the receiver's type. `member` picks member vs general completion.
     fn complete_via_probe(self: &Self, path: str, txt: str, off: u32, member: bool) Vector<feat::CompItem> {
@@ -2276,7 +2272,7 @@ extend Server {
                     ovt.push(self.docs.at(i).txt.clone());
                 }
             }
-            // root parameters: the owning root when the doc has one, the per-file recipe otherwise
+            // Root parameters: the owning root when the doc has one, the per-file recipe otherwise.
             let mut rf = String::from_str(path);
             let mut rd = dir_of(path);
             let mut ad = self.folder_alt_of(path);
@@ -2326,22 +2322,28 @@ extend Server {
     // types, modules, keywords last. The label breaks ties, so order is stable across revisions.
     const fn sort_prefix(kind: i32) str<'static> {
         if kind == 6 {
-            return "0"; // locals / parameters
+            // Locals / parameters.
+            return "0";
         }
         if kind == 5 || kind == 2 || kind == 20 {
-            return "1"; // fields, methods, enum members
+            // Fields, methods, enum members.
+            return "1";
         }
         if kind == 3 {
-            return "2"; // functions
+            // Functions.
+            return "2";
         }
         if kind == 22 || kind == 13 || kind == 7 || kind == 8 || kind == 21 {
-            return "3"; // types, interfaces, constants
+            // Types, interfaces, constants.
+            return "3";
         }
         if kind == 9 {
-            return "4"; // modules
+            // Modules.
+            return "4";
         }
         if kind == 14 {
-            return "9"; // keywords
+            // Keywords.
+            return "9";
         }
         return "5";
     }
@@ -2395,7 +2397,7 @@ extend Server {
         if i == 0 {
             return String::new();
         }
-        // the word (possibly dotted) before the '('
+        // The word (possibly dotted) before the '('.
         let e = i - 1;
         let mut s = e;
         while s > 0 && (Server::ident_byte(txt[s - 1]) || txt[s - 1] == b'.') {
@@ -2416,7 +2418,8 @@ extend Server {
             for i in 0..items.len() {
                 let mut it = json::JSON::object();
                 it.emplace("label", json::JSON::str(items.at(i).label.as_str()));
-                it.emplace("kind", json::JSON::integer(14)); // Keyword
+                // Keyword.
+                it.emplace("kind", json::JSON::integer(14));
                 it.emplace("detail", json::JSON::str(items.at(i).doc.as_str()));
                 arr.push_back(it);
             }
@@ -2458,8 +2461,8 @@ extend Server {
         let ls = text::line_starts(txt);
         let off = text::pos_to_offset(txt, &ls, line as u32, ch as u32);
         let path = self.docs.at(di as usize).path.as_str();
-        // context detection: walk back over the identifier being typed, then classify by what
-        // precedes it -- '@' (attribute), an attribute argument list, '.', '::', a leading
+        // Context detection: walk back over the identifier being typed, then classify by what
+        // precedes it: '@' (attribute), an attribute argument list, '.', '::', a leading
         // `import`, or a label quote. Everything else is general scope completion.
         let mut ws = off as usize;
         while ws > 0 && Server::ident_byte(txt[ws - 1]) {
@@ -2470,7 +2473,7 @@ extend Server {
         } else {
             0u8;
         };
-        // an attribute path may continue with '.': "@c.al<cursor>" walks back over "c."
+        // An attribute path may continue with '.': "@c.al<cursor>" walks back over "c."
         let mut attr_ws = ws;
         while attr_ws > 0 && (Server::ident_byte(txt[attr_ws - 1]) || txt[attr_ws - 1] == b'.') {
             attr_ws -= 1;
@@ -2516,7 +2519,7 @@ extend Server {
                 } else if have_ast {
                     items = feat::complete_general(&self.roots.at(r as usize).pkg, m as usize, off);
                 } else {
-                    // broken buffer: complete from a probe build; keywords alone if even that fails
+                    // Broken buffer: complete from a probe build; keywords alone if even that fails.
                     items = self.complete_via_probe(path, txt, off, false);
                     if items.len() == 0 {
                         items = feat::complete_keywords();
@@ -2566,7 +2569,7 @@ extend Server {
         let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
         let ls = text::line_starts(src);
         let uri = text::path_to_uri(self.roots.at(r).files.at(m).as_str());
-        // collect (start, end, k), insertion-sorted by DESCENDING start
+        // Collect (start, end, k), insertion-sorted by DESCENDING start.
         let mut ks = Vector::<u32>::new();
         let mut ss = Vector::<u32>::new();
         let mut es = Vector::<u32>::new();
@@ -2593,7 +2596,8 @@ extend Server {
         let mut low: i64 = -1; // lowest start already emitted (descending walk): overlap guard
         for i in 0..ks.len() {
             if low >= 0 && (*es.at(i)) as i64 > low {
-                continue; // overlaps the previously kept fix: drop it
+                // Overlaps the fix kept before it: drop it.
+                continue;
             }
             let d = diags.at((*ks.at(i)) as usize);
             let mut te = json::JSON::object();
@@ -2675,7 +2679,7 @@ extend Server {
             respond(f, req.at_key("id"), &arr);
             return;
         }
-        // context.only: absent = everything; present = the listed kind prefixes
+        // context.only: absent = everything; present = the listed kind prefixes.
         let mut want_quickfix = true;
         let mut want_fixall = true;
         switch req.value("params") {
@@ -2720,7 +2724,8 @@ extend Server {
             }
             let dend = d.start + d.len;
             if d.start > h.end || dend < h.off {
-                continue; // no overlap with the requested range
+                // No overlap with the requested range.
+                continue;
             }
             if want_quickfix && d.fix_kind >= 0 && d.fix_kind <= 4 {
                 let mut title = String::from_str("Remove unused code");
@@ -2752,12 +2757,12 @@ extend Server {
                 }
                 arr.push_back(act);
             }
-            // semantic quick fixes from error diagnostics (always eager: the edits are cheap)
+            // Semantic quick fixes from error diagnostics (always eager: the edits are cheap).
             if want_quickfix && d.severity == 1 {
                 let nm = Server::quoted_name(d.msg.as_str());
                 if nm.len() != 0 && d.msg.as_str().starts_with("cannot find") {
-                    // candidates come from EVERY built root: an unimported module is by definition
-                    // outside this package's closure, so it usually lives in the workspace batch
+                    // Candidates come from EVERY built root: an unimported module is by definition
+                    // outside this package's closure, so it usually lives in the workspace batch.
                     let own_path = self.roots.at(h.r).pkg.modules.at(h.m).path.as_str();
                     let mut cands = feat::import_candidates(&self.roots.at(h.r).pkg, h.m, nm);
                     for r2 in 0..self.roots.len() {
@@ -2784,7 +2789,8 @@ extend Server {
                     let at = feat::import_insert_at(&self.roots.at(h.r).pkg, h.m);
                     for c in 0..cands.len() {
                         if c >= 3 {
-                            break; // several candidates: offer the closest few, not a wall
+                            // Several candidates: offer the closest few, not a wall.
+                            break;
                         }
                         let mut ins = String::from_str("import ");
                         ins.push_str(cands.at(c).as_str());
@@ -2853,7 +2859,7 @@ extend Server {
         respond(f, req.at_key("id"), &arr);
     }
 
-    // codeAction/resolve: build the deferred `edit` after revalidating that nothing changed since
+    // CodeAction/resolve: build the deferred `edit` after revalidating that nothing changed since
     // the action was offered (same revision, and the diagnostic still carries the same fix).
     fn on_code_action_resolve(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
         let po = req.value("params");
@@ -2864,7 +2870,7 @@ extend Server {
         let action = po.unwrap();
         let da = action.value("data");
         if da.is_none() {
-            // nothing deferred: hand the action back unchanged
+            // Nothing deferred: hand the action back unchanged.
             respond(f, req.at_key("id"), action);
             return;
         }
@@ -2902,9 +2908,7 @@ extend Server {
         respond(f, req.at_key("id"), &out);
     }
 
-    // ---------------------------------------------------------------------------------------------------------
     // Project-state notifications.
-    // ---------------------------------------------------------------------------------------------------------
 
     // Watched-file changes: a build.toml change reloads that folder's manifest (keeping the last
     // valid model when the new one fails to parse); a .spc create/change/delete invalidates the
@@ -2925,7 +2929,7 @@ extend Server {
                             if is_manifest_path(p.as_str()) {
                                 self.reload_manifest_for(p.as_str());
                             } else if p.as_str().ends_with(".spc") {
-                                // the owning packages are stale: force their rebuild
+                                // The owning packages are stale: force their rebuild.
                                 for r in 0..self.roots.len() {
                                     if self.root_module(r, p.as_str()) >= 0 {
                                         self.roots[r].built = false;
@@ -2945,13 +2949,14 @@ extend Server {
     }
 
     // Reload the manifest owning `manifest_path` (folder = its directory). An unparseable manifest
-    // keeps the previous project model -- the last valid model serves until the file parses again.
+    // keeps the previous project model: the last valid model serves until the file parses again.
     fn reload_manifest_for(self: &mut Self, manifest_path: str) {
         let folder = dir_of(manifest_path);
         let mp = Server::abs_under(folder.as_str(), "build.toml");
         let mano = bman::load(mp.as_str());
         if mano.is_none() {
-            return; // invalid: keep the last valid model
+            // Invalid: keep the last valid model.
+            return;
         }
         let man = mano.unwrap();
         let rf = Server::abs_under(folder.as_str(), man.root.as_str());
@@ -2967,7 +2972,7 @@ extend Server {
             }
         }
         if !found {
-            // a manifest appeared in a folder that had none
+            // A manifest appeared in a folder that had none.
             let primary = folder.as_str() == self.ws_root.as_str();
             let got = self.add_manifest_root(
                 folder.as_str(),
@@ -3058,9 +3063,7 @@ extend Server {
         self.rebuild_all(f, false);
     }
 
-    // ---------------------------------------------------------------------------------------------------------
     // Navigation and information requests.
-    // ---------------------------------------------------------------------------------------------------------
 
     fn on_type_definition(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
@@ -3110,7 +3113,8 @@ extend Server {
             let l = locs.at(i);
             let mut o = json::JSON::object();
             o.emplace("range", range_json(src, &ls, l.start, l.end - l.start));
-            o.emplace("kind", json::JSON::integer(1)); // Text
+            // Text.
+            o.emplace("kind", json::JSON::integer(1));
             arr.push_back(o);
         }
         respond(f, req.at_key("id"), &arr);
@@ -3250,7 +3254,8 @@ extend Server {
                 let hsym = hits.at(i);
                 let file = self.roots.at(r).files.at(hsym.module as usize).as_str();
                 if !self.in_workspace(file) {
-                    continue; // std/ffi noise stays out of workspace symbol lists
+                    // Std/ffi noise stays out of workspace symbol lists.
+                    continue;
                 }
                 let mut key = String::from_str(file);
                 key.push_byte(b':');
@@ -3366,7 +3371,7 @@ extend Server {
             let pv = positions.at(pi);
             let off = text::pos_to_offset(src, &ls, pv.value_i64("line", 0) as u32, pv.value_i64("character", 0) as u32);
             let chain = feat::selection_ranges(pkg, m as usize, off);
-            // innermost-first chain nests via `parent`
+            // Innermost-first chain nests via `parent`.
             let mut cur = json::JSON::default();
             let mut i = chain.len();
             while i > 0 {
@@ -3410,17 +3415,16 @@ extend Server {
             let mut o = json::JSON::object();
             o.emplace("position", po);
             o.emplace("label", json::JSON::str(hh.label.as_str()));
-            o.emplace("kind", json::JSON::integer(1)); // Type
+            // Type.
+            o.emplace("kind", json::JSON::integer(1));
             arr.push_back(o);
         }
         respond(f, req.at_key("id"), &arr);
     }
-    // ---------------------------------------------------------------------------------------------------------
     // Pull diagnostics.
-    // ---------------------------------------------------------------------------------------------------------
 
     // The complete current diagnostic list for `uri`, assembled from every built root's retained
-    // records -- exactly the sources a publish round uses.
+    // records: exactly the sources a publish round uses.
     fn current_diags_for(self: &Self, uri: str) json::JSON {
         let mut ps = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
         for r in 0..self.roots.len() {
@@ -3429,7 +3433,7 @@ extend Server {
             }
         }
         self.publish_manifest_diags(&mut ps);
-        // published URIs carry the CANONICAL path; normalize the request URI the same way
+        // Published URIs carry the CANONICAL path; normalize the request URI the same way.
         let want = text::path_to_uri(uri_doc_path(uri).as_str());
         for i in 0..ps.uris.len() {
             if ps.uris.at(i).as_str() == want.as_str() || ps.uris.at(i).as_str() == uri {
@@ -3447,7 +3451,7 @@ extend Server {
         return h;
     }
 
-    // textDocument/diagnostic: a full report with a content-derived stable resultId; when the
+    // TextDocument/diagnostic: a full report with a content-derived stable resultId; when the
     // client's previousResultId matches the current content, an `unchanged` report instead.
     fn on_pull_diagnostic(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
         let mut uri = "";
@@ -3485,9 +3489,7 @@ extend Server {
         respond(f, req.at_key("id"), &res);
     }
 
-    // ---------------------------------------------------------------------------------------------------------
     // Call and type hierarchy.
-    // ---------------------------------------------------------------------------------------------------------
 
     // A CallHierarchyItem / TypeHierarchyItem for declaration `d` in root `r`. `data` carries the
     // defining file's URI and the name-span offset, so a later incoming/outgoing/related request can
@@ -3561,7 +3563,7 @@ extend Server {
         let mut d = feat::def_ref(pkg, h.m, h.off);
         let named_fn = d.node != astn::NODE_NONE && unsafe (&*pkg.module_ast_const(d.module)).at_const(d.node).kind == astn::NodeKind::NODE_FUNCTION;
         if !named_fn {
-            // not on a function name: the function whose body contains the cursor
+            // Not on a function name: the function whose body contains the cursor.
             let fnid = feat::enclosing_function(pkg, h.m, h.off);
             if fnid == astn::NODE_NONE {
                 respond(f, req.at_key("id"), &nullv);
@@ -3589,7 +3591,7 @@ extend Server {
         }
         let mut hits = Vector::<RefHit>::new();
         self.collect_refs(h.r, d, false, &mut hits);
-        // group reference sites by their enclosing function (RefHit.s reused as the fn node id)
+        // Group reference sites by their enclosing function (RefHit.s reused as the fn node id).
         let mut froms = Vector::<RefHit>::new();
         let mut ranges = Vector::<json::JSON>::new();
         for i in 0..hits.len() {
@@ -3685,11 +3687,14 @@ extend Server {
         let k = unsafe (&*pkg.module_ast_const(d.module)).at_const(d.node).kind;
         let mut kind: i64 = 0;
         if k == astn::NodeKind::NODE_STRUCT {
-            kind = 23; // Struct
+            // Struct.
+            kind = 23;
         } else if k == astn::NodeKind::NODE_ENUM {
-            kind = 10; // Enum
+            // Enum.
+            kind = 10;
         } else if k == astn::NodeKind::NODE_INTERFACE {
-            kind = 11; // Interface
+            // Interface.
+            kind = 11;
         } else {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -3722,7 +3727,7 @@ extend Server {
         let mut arr = json::JSON::array();
         for i in 0..locs.len() {
             let l = locs.at(i);
-            // the name span resolves back to the declaration it names
+            // The name span resolves back to the declaration it names.
             let rd = feat::def_ref(pkg, l.module as usize, l.start);
             if rd.node == astn::NODE_NONE {
                 continue;

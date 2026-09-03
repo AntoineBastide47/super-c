@@ -101,16 +101,16 @@ fn main() i32 {
     assert(cc.ok());
     assert_eq(p.run_bin(), 54);
 
-    // a folded-FALSE static_assert is a SUPER-C error (with our span), not a downstream C error
+    // A folded-FALSE static_assert is a SUPER-C error (with our span), not a downstream C error.
     p.mkfile("main.spc", "static_assert(1 + 1 == 3, \"nope\");\nfn main() i32 { return 0; }\n");
     let e = p.compile("main.spc");
     assert(e.exit != 0, "folded-false static_assert fails the build");
     assert(e.out_has("static assertion failed"), "and names the failure");
-    // tiny budgets keep plain scalar folding working
+    // Tiny budgets keep plain scalar folding working.
     let b = p.compile_flags("--const-eval-steps=4096 --const-eval-memory=1M", "main.spc");
     assert(b.exit != 0, "tiny budgets still fold scalar asserts");
     assert(b.out_has("static assertion failed"), "same failure under tiny budgets");
-    // the retired --const-eval flag is rejected with usage
+    // The retired --const-eval flag is rejected with usage.
     let rt = p.compile_flags("--const-eval", "main.spc");
     assert(rt.exit != 0, "the retired --const-eval flag is rejected");
     assert(rt.out_has("USAGE:"), "and prints usage");
@@ -228,7 +228,7 @@ fn main() i32 {
     let rr = p.run_bin_env("");
     assert(rr.ok());
     assert(rr.out_shows("tail ok"), "payloads, CTFE mutation, and binder metadata all hold");
-    // three-module obligation chain: the diagnostic lands at the binding call, two hops out
+    // Three-module obligation chain: the diagnostic lands at the binding call, two hops out.
     let p2 = cli::proj_new();
     p2.mkfile(
         "hop.spc",
@@ -456,7 +456,7 @@ fn main() i32 {
 
 @test
 fn reflect_metadata() {
-    // instance-symbol assertions pin the NON-inlined emission (fork-isolated env)
+    // Instance-symbol assertions pin the NON-inlined emission (fork-isolated env).
     let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
     let p = cli::proj_new();
     p.mkfile(
@@ -913,7 +913,7 @@ fn main() i32 {
     assert(cc.ok());
     assert_eq(p.run_bin(), 8);
 
-    // an over-budget callee bails to a runtime call instead of hanging the compiler
+    // An over-budget callee bails to a runtime call instead of hanging the compiler.
     p.mkfile(
         "main.spc",
         M"(fn spin() i32 {
@@ -928,7 +928,7 @@ fn main() i32 { if spin() > 0 { return 3; } return 4; }
     assert(s.ok());
     assert(p.gen_has("main.c", "spin()"), "over-budget callee stays a runtime call");
 
-    // --const-eval-steps starves a loop-driven assert -> reports the budget
+    // --const-eval-steps starves a loop-driven assert -> reports the budget.
     p.mkfile(
         "main.spc",
         M"(fn burn() i32 { let mut i = 0; while i < 1_000_000 { i += 1; } return i; }
@@ -940,7 +940,7 @@ fn main() i32 { return 0; }
     assert(b.exit != 0, "a starved assert fails the build");
     assert(b.out_has("step budget exceeded"), "and blames the budget");
 
-    // the (fn, args) call memo folds fib(40) comfortably inside a 100k-step budget
+    // The (fn, args) call memo folds fib(40) comfortably inside a 100k-step budget.
     p.mkfile(
         "main.spc",
         M"(fn fib(n: i32) i32 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }
@@ -952,7 +952,7 @@ fn main() i32 { return 0; }
     assert(m.ok());
     assert(p.gen_has("main.c", M"(_Static_assert(true, "memoized"))"), "the call cache collapsed the recursion");
 
-    // matchertext literals are CTFE-visible (verbatim content with an interior quote folds like any literal)
+    // Matchertext literals are CTFE-visible (verbatim content with an interior quote folds like any literal).
     p.mkfile(
         "main.spc",
         M"(const G: str = M"[say "hi"]";
@@ -969,7 +969,7 @@ fn main() i32 { return 0; }
 }
 
 // CTFE over aggregates and the abstract heap: structs + methods + extend dispatch, local arrays, generics,
-// intercepted malloc/free, payload enums through switch, and a std Vector round trip -- all interpreted.
+// intercepted malloc/free, payload enums through switch, and a std Vector round trip: all interpreted.
 // Also: an assert may precede its callee (deferred re-check) and a would-be trap reports its reason.
 @test
 fn ctfe_memory() {
@@ -1030,7 +1030,7 @@ fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 
-    // a would-be runtime trap in a required-const context reports its reason
+    // A would-be runtime trap in a required-const context reports its reason.
     p.mkfile(
         "main.spc",
         M"(fn div0(n: i32) i32 { return 10 / n; }
@@ -1042,7 +1042,7 @@ fn main() i32 { return 0; }
     assert(d.exit != 0, "a trapping assert fails the build");
     assert(d.out_has("division by zero"), "and names the trap");
 
-    // use-after-free is caught by the abstract heap
+    // Use-after-free is caught by the abstract heap.
     p.mkfile(
         "main.spc",
         M"(extern "C" { fn malloc(size: usize) *mut void; fn free(ptr: *mut void) void; }
@@ -1133,7 +1133,7 @@ fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5(
 
 // RAII lowering of a reassignment to a binding whose move sits under control flow (a call argument
 // inside a loop): the free-before-assign must be guarded by the binding's runtime move flag and the
-// flag reset after -- an unguarded free double-frees the moved-out buffer (miscompile, not a
+// flag reset after: an unguarded free double-frees the moved-out buffer (miscompile, not a
 // borrow-check error: the source is legal).
 @test
 fn raii_cond_move_reassign() {
@@ -1151,8 +1151,8 @@ fn raii_cond_move_reassign() {
     assert_eq(p.run_bin(), 0);
 }
 
-// Drop-on-assign: `place = v` frees the place's old value for fields and indexes too, not just
-// locals -- overwriting a live Free field neither leaks nor needs manual glue. The owner-swap idiom
+// Drop-on-assign: `place = v` frees the place's old value for fields and indexes too, not only
+// locals: overwriting a live Free field neither leaks nor needs manual glue. The owner-swap idiom
 // (`let a = s.f; s.f = fresh;`) still lowers to a bare store (the previous statement moved the
 // place out), so no double-free.
 @test
@@ -1169,8 +1169,8 @@ fn raii_drop_on_field_assign() {
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 
-    // a field moved out ANYWHERE in the body (even conditionally) guards the assign-free for that
-    // place -- the take goes through an `unsafe` ref-take (the safe form is rejected: E0507)
+    // A field moved out ANYWHERE in the body (even conditionally) guards the assign-free for that
+    // place: the take goes through an `unsafe` ref-take (the safe form is rejected: E0507).
     p.mkfile(
         "cond.spc",
         "struct H {\n    pub name: String,\n}\n\nextend H as Free {\n    pub fn free(self: &mut H) {\n        self.name.free();\n    }\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn shuffle(h: &mut H) usize {\n    let mut n: usize = 0;\n    if h.name.len() > 3 {\n        let a = unsafe h.name;\n        n = n + sink(a);\n    }\n    h.name = String::from_str(\"next\");\n    return n + h.name.len();\n}\n\nfn main() i32 {\n    let mut h = H { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let n = shuffle(&mut h);\n    return n as i32 - 36;\n}\n",
@@ -1182,8 +1182,8 @@ fn raii_drop_on_field_assign() {
     assert(cc2.ok());
     assert_eq(p.run_bin(), 0);
 
-    // moving a field out of a value implementing Free is REJECTED (Rust's rule): the free body
-    // cannot run on a partial value -- `replace` is the sanctioned way
+    // Moving a field out of a value implementing Free is REJECTED (Rust's rule): the free body
+    // cannot run on a partial value: `replace` is the sanctioned way.
     p.mkfile(
         "condfree.spc",
         "struct G {\n    pub name: String,\n}\n\nextend G as Free {\n    pub fn free(self: &mut G) {\n        self.name.free();\n    }\n}\n\nfn sink(s: String) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    let g = G { name: String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\") };\n    let mut n: usize = 0;\n    if g.name.len() > 3 {\n        let a = g.name;\n        n = n + sink(a);\n    }\n    return n as i32 - 32;\n}\n",
@@ -1210,10 +1210,11 @@ fn raii_free_glue_tuple_fields() {
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(lk.ok()); // _1 is freed by the glue -- no leak under the fatal gate
+    // _1 is freed by the glue: no leak under the fatal gate.
+    assert(lk.ok());
 }
 
-// wrapper form). Complete impls emit without a wrapper; raw-pointer fields are borrows and exempt.
+// Wrapper form). Complete impls emit without a wrapper; raw-pointer fields are borrows and exempt.
 @test
 fn raii_free_glue_untouched_fields() {
     let p = cli::proj_new();
@@ -1249,10 +1250,11 @@ fn local_const_lifecycle() {
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(lk.ok()); // runs, and the owning const is freed (no leak under the fatal gate)
+    // Runs, and the owning const is freed (no leak under the fatal gate).
+    assert(lk.ok());
 
-    // a GLOBAL owning const is the other lifecycle: no scope exit, so it is materialized into the
-    // binary -- buffer included -- and never freed
+    // A GLOBAL owning const is the other lifecycle: no scope exit, so it is materialized into the
+    // binary (buffer included) and never freed.
     p.mkfile(
         "g.spc",
         "fn mk() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nconst V: Vector<u32> = mk();\n\nfn main() i32 {\n    return (V.len() - 1) as i32;\n}\n",
@@ -1264,7 +1266,7 @@ fn local_const_lifecycle() {
     assert(!p.gen_has("g.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
     let gr = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(gr.ok());
-    // moving an owning const out is rejected
+    // Moving an owning const out is rejected.
     p.mkfile(
         "m.spc",
         "fn eat(v: Vector<u32>) usize {\n    return v.len();\n}\n\nfn build() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nfn main() i32 {\n    const L: Vector<u32> = build();\n    return (eat(L) - 1) as i32;\n}\n",
@@ -1274,7 +1276,7 @@ fn local_const_lifecycle() {
 
 // A boxed `dyn fn` (an owning capturing closure moved to the heap) is allocated and freed through
 // the default Global allocator by generated glue. A module that uses no container still needs
-// `interfaces.h` for those Global references -- exercised here by a `Box<dyn fn>` returned, called,
+// `interfaces.h` for those Global references: exercised here by a `Box<dyn fn>` returned, called,
 // and freed, with nothing else pulling the allocator in.
 @test
 fn dyn_fn_box_roundtrip() {
@@ -1289,7 +1291,8 @@ fn dyn_fn_box_roundtrip() {
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
-    assert(lk.ok()); // the boxed closure env is freed -- no leak under the fatal gate
+    // The boxed closure env is freed: no leak under the fatal gate.
+    assert(lk.ok());
 }
 
 // The self-hosted leak tracker: super_rt.h interposes the emitted code's malloc/realloc/free call
@@ -1328,7 +1331,7 @@ fn leak_tracker() {
     assert(ok.ok());
     assert(!ok.out_has("super-c leaks"), "leak-free run reports nothing");
 
-    // fatal mode: survivors turn the exit code nonzero (23), so CI can gate on leak-freedom
+    // Fatal mode: survivors turn the exit code nonzero (23), so CI can gate on leak-freedom.
     let ft = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert_eq(ft.exit, 23);
     assert(ft.out_has("super-c leaks: 1 allocation"), "fatal mode still prints the report");
@@ -1346,7 +1349,7 @@ fn leak_tracker() {
     assert(child.out_has("super-c leaks: 1 allocation"), "child leak report is captured");
 
     // Double frees are detected via the freed-entry history: both sites report, exit 0 in
-    // report mode, abort in fatal mode
+    // report mode, abort in fatal mode.
     let d = cli::proj_new();
     d.mkfile(
         "main.spc",
@@ -1365,7 +1368,7 @@ fn leak_tracker() {
 }
 
 // Auto-derived Free: structs and enums whose members own memory get a SYNTHESIZED per-TU free
-// (`<T>__free__d`) -- fields, nested aggregates, enum payloads and container elements all free
+// (`<T>__free__d`): fields, nested aggregates, enum payloads and container elements all free
 // without an impl being written; partial moves out of derived values are rejected exactly like
 // explicit Free types (replace() is the take idiom).
 @test
@@ -1386,7 +1389,7 @@ fn auto_derive_free() {
     assert(lk.ok());
     assert(!lk.out_has("super-c leaks"), "derived aggregates are leak-free");
 
-    // partial moves out of a derived value are rejected (same rule as explicit Free impls)
+    // Partial moves out of a derived value are rejected (same rule as explicit Free impls).
     p.mkfile(
         "take.spc",
         "struct Plain {\n    pub s: String,\n}\n\nfn main() i32 {\n    let a = Plain { s: String::from_str(\"x\") };\n    let t = a.s;\n    return (t.len() - t.len()) as i32;\n}\n",
@@ -1552,11 +1555,11 @@ fn main() i32 { return 0; }
     assert(s2.out_has("test main::fails ... FAILED"), "second shard contains test one");
     assert(s2.out_has("test main::Counter::bumps ... ok"), "second shard contains test three");
     assert(!s2.out_has("main::drains"), "second shard excludes test zero");
-    // --test-no-fork runs in-process and skips should_panic tests
+    // --test-no-fork runs in-process and skips should_panic tests.
     let nf = p.compile_flags("--test --test-no-fork --test-filter=boom", "main.spc");
     assert(nf.ok());
     assert(nf.out_has("skipped (should_panic needs fork)"), "no-fork skips should_panic");
-    // a normal (non---test) build still compiles and runs its own main (tests not emitted)
+    // A normal (non---test) build still compiles and runs its own main (tests not emitted).
     let nb = p.compile("main.spc");
     assert(nb.ok());
     let cc = p.cc_build_plain("");
@@ -1658,7 +1661,7 @@ fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p
     assert(cc.ok());
     assert_eq(p.run_bin(), 7);
 
-    // a plain-C consumer instantiates the template over its own C type (no Super-C compiler involved)
+    // A plain-C consumer instantiates the template over its own C type (no Super-C compiler involved).
     p.mkfile(
         "cuser.c",
         M"(#include "emac.h"
@@ -1689,7 +1692,7 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
     unsafe stdio::snprintf(&mut cr.b[0], 2048, "\"%s/cbin%s\"".ptr() as *const char, p.rootp(), cli::binext());
     assert_eq(cli::run_quiet(&cr.b[0]), 0);
 
-    // the attribute is rejected on a non-generic type
+    // The attribute is rejected on a non-generic type.
     p.mkfile("bad.spc", "@emit_macro\npub struct Plain { pub a: i32 }\nfn main() i32 { return 0; }\n");
     let bad = p.compile("bad.spc");
     assert(bad.exit != 0, "@emit_macro on a non-generic is rejected");
@@ -1780,7 +1783,7 @@ fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(
 }
 
 // OS threads (std/parallel): an owning closure (a moved-in String) returns its value through the
-// JoinHandle, and four threads share one Atomic<i64> through an Arc -- the Send-safe way -- and race on
+// JoinHandle, and four threads share one Atomic<i64> through an Arc: the Send-safe way, and race on
 // fetch_add, so the total is exact. Leak-checked, so the String, the Arc block and every payload/slot are
 // accounted for.
 @test
@@ -1825,8 +1828,8 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// spawn requires F: Send, and a raw pointer is not Send (nor is a closure that captures one), so sending a
-// stack borrow to another thread is rejected at compile time -- the single-threaded escape hatch is closed.
+// Spawn requires F: Send, and a raw pointer is not Send (nor is a closure that captures one), so sending a
+// stack borrow to another thread is rejected at compile time: the single-threaded escape hatch is closed.
 @test
 fn thread_send_rejects_raw_pointer() {
     let p = cli::proj_new();
@@ -1846,7 +1849,7 @@ fn main() i32 {
     assert(r.out_has("Send"), "the rejection cites the Send bound");
 }
 
-// A detached task may outlive the call that launched it, so it may not borrow the launcher's frame -- the
+// A detached task may outlive the call that launched it, so it may not borrow the launcher's frame: the
 // escape rule of the design. `Send` does not catch this (a `&T` IS Send when `T` is Sync), so `launch` and
 // `thread::spawn` require `F: 'static`, and that bound looks THROUGH the closure at its captures, which its
 // type erases. Both spellings of a borrowed capture are rejected: an explicit `&local`, and a mutated
@@ -1978,7 +1981,7 @@ fn main() i32 {
 }
 
 // @platform gates @c.source/@c.link: a windows-only extern block (backing header + link flag) must not
-// contribute its wrapper TU or -l flag on a non-windows build -- else every target links every OS's runtime
+// contribute its wrapper TU or -l flag on a non-windows build: else every target links every OS's runtime
 // C. Regression guard for the extc gating fix.
 // usize/isize literal ranges follow the SELECTED target's pointer width, not the host's: a 64-bit
 // usize literal is legal for 64-bit targets and rejected for wasm32.
@@ -2077,8 +2080,8 @@ fn main() i32 {
 }
 
 // Preemption: the scheduler is cooperative, so a task that never blocks would own its worker
-// forever. Codegen emits a `__sc_safepoint()` at every loop backedge -- but ONLY in a program that uses the
-// coroutine runtime -- and the scheduler installs a hook that yields when the worker has other work queued.
+// forever. Codegen emits a `__sc_safepoint()` at every loop backedge, but ONLY in a program that uses the
+// coroutine runtime, and the scheduler installs a hook that yields when the worker has other work queued.
 // Proven here with one worker and a task that spins on a flag only a SECOND task can set: without
 // preemption the first task never yields, the second never runs, and the flag never flips.
 @test
@@ -2153,8 +2156,8 @@ fn main() i32 {
     assert(!q.gen_has("main.c", "__sc_spc"), "a program that never launches gets no safepoints");
 }
 
-// Blocking FFI: a worker thread belongs to the scheduler, so a call that blocks it -- a
-// legacy library, a slow syscall -- must move off the pool. `blocking::call` runs the closure on a separate
+// Blocking FFI: a worker thread belongs to the scheduler, so a call that blocks it; a
+// legacy library, a slow syscall: must move off the pool. `blocking::call` runs the closure on a separate
 // pool of plain threads and PARKS the calling coroutine until it returns. Proven by ORDER rather than by the
 // clock, which is what makes it reliable under a loaded machine: with ONE worker, four tasks each make a
 // 50ms blocking call and a fifth does no blocking at all. If the calls held the worker, that fifth task
@@ -2225,8 +2228,8 @@ fn main() i32 {
 }
 
 // A coroutine stack that runs out must SAY so. The guard page turns an overflow into a fault, and without
-// a handler that is a bare SIGSEGV/SIGBUS with no message -- the failure mode this test exists to prevent.
-// The other half matters just as much: a wild pointer is NOT a stack overflow and must still crash as one,
+// a handler that is a bare SIGSEGV/SIGBUS with no message: the failure mode this test exists to prevent.
+// The other half matters as much: a wild pointer is NOT a stack overflow and must still crash as one,
 // or the diagnosis would be a lie that hides real bugs. `set_stack_size` is what makes the first program
 // pass rather than die, so all three are checked against the same recursion.
 @test
@@ -2306,7 +2309,8 @@ fn main() i32 {
     assert(r2.ok());
     let cc2 = p.cc_build("");
     assert(cc2.ok());
-    assert_eq(p.run_bin(), 0); // 4 MiB is enough
+    // 4 MiB is enough.
+    assert_eq(p.run_bin(), 0);
 
     // A wild pointer is a crash, not a stack overflow: the message must not appear.
     p.mkfile(
@@ -2340,7 +2344,7 @@ fn main() i32 {
 }
 
 // Diagnostics: every task carries a process-unique id, the runtime accounts for tasks created
-// versus finished, and a panic inside a task names it instead of just saying the process died.
+// versus finished, and a panic inside a task names it instead of only saying the process died.
 @test
 fn task_diagnostics() {
     let p = cli::proj_new();
@@ -2426,7 +2430,7 @@ fn main() i32 {
 }
 
 // The reactor (std/parallel/io + net): a coroutine parks on a SOCKET instead of a thread. A
-// server task accepts and echoes while a client task connects, writes and reads back -- every one of those
+// server task accepts and echoes while a client task connects, writes and reads back: every one of those
 // operations parking on kqueue/epoll rather than blocking a worker. POSIX only, like the reactor itself.
 @test
 fn reactor_tcp_echo() {
@@ -2757,7 +2761,7 @@ fn main() i32 {
 // `@blocking`: the attribute makes a call to an extern function go through a generated
 // wrapper that hands it to the blocking pool, so the call site is unchanged but the coroutine parks instead
 // of holding its worker. Two one-second blocking sleeps on ONE worker: serialized they would take two
-// seconds, so finishing under 1.8s is the proof they overlapped -- plus the emitted C is checked for the
+// seconds, so finishing under 1.8s is the proof they overlapped: plus the emitted C is checked for the
 // wrapper, since a missing one would still pass a looser timing bound.
 @test
 fn blocking_attribute() {
@@ -2952,7 +2956,7 @@ fn main() i32 {
 // preemption decision to the seed, so the SAME binary run twice with the same seed takes the same
 // interleaving. Proven by the interleaving itself, not by a summary: four tasks compete for one mutex and
 // each append their id, so the logged order IS the schedule. Two runs at one seed must match byte for byte,
-// and the same must hold at a second seed -- one matching pair could be a program with only one possible
+// and the same must hold at a second seed: one matching pair could be a program with only one possible
 // order. Not asserted: that two DIFFERENT seeds disagree; nothing promises a given seed pair diverges.
 @test
 fn deterministic_replay() {
@@ -3013,7 +3017,7 @@ fn main() i32 {
 }
 
 // A bounded MPMC channel (std/parallel/channel): four producer tasks each push 25 items into a bounded(8)
-// channel -- forcing the ring buffer to block and drain -- while the main thread receives until the channel
+// channel (forcing the ring buffer to block and drain) while the main thread receives until the channel
 // closes (every producer's Sender dropped). The receiver is taken before launching, so no early send is
 // rejected; the exact item count and sum verify nothing is lost or duplicated. Leak-checked, so the slot
 // array, every buffered payload, and all Arc handles are accounted for. Also exercises the cross-module
@@ -3064,7 +3068,7 @@ fn main() i32 {
 }
 
 // Lock-order tracking (`SC_LOCK_ORDER`): a deadlock is reported the first time two locks are taken in
-// OPPOSITE orders, not the first time the program hangs. That is what makes it testable at all -- this
+// OPPOSITE orders, not the first time the program hangs. That is what makes it testable at all: this
 // program takes A then B, releases both, then takes B then A, and never blocks for a moment. Off by
 // default (silent, exit 0), reporting at `=1`, aborting at `=fatal`.
 @test
@@ -3104,11 +3108,11 @@ fn main() i32 {
 }
 
 // Batched channel traffic (`send_batch` / `recv_batch`): 100 items through a bounded(8) ring, so the batch
-// send fills the buffer, blocks, and resumes mid-batch several times while the batched receiver drains it --
+// send fills the buffer, blocks, and resumes mid-batch several times while the batched receiver drains it:
 // the interleaving the per-item path never exercises. Three properties are checked: every item arrives
 // exactly once (count and sum), a batch the channel refuses outright leaves its items in the caller's vector
 // IN THE ORIGINAL ORDER (the method reverses internally to pop in O(1), and must reverse back), and nothing
-// leaks -- neither the un-sent remainder nor the payloads still buffered when the channel is freed.
+// leaks: neither the un-sent remainder nor the payloads still buffered when the channel is freed.
 @test
 fn channel_batch_send_recv() {
     let p = cli::proj_new();
@@ -3176,7 +3180,7 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// Task-aware parking: 50 coroutines (30 producers + 20 consumers) share a bounded(2) channel -- MORE
+// Task-aware parking: 50 coroutines (30 producers + 20 consumers) share a bounded(2) channel; MORE
 // coroutines than worker threads. When a coroutine blocks on send/recv it PARKS (via the dual-mode
 // `Condvar`), freeing its worker to run others; under the old block-the-OS-thread model this would deadlock
 // (every worker stuck inside a blocked coroutine, none left to make progress). All 300 items are delivered
@@ -3250,7 +3254,7 @@ fn main() i32 {
 }
 
 // `sleep` and the scheduler's timer list: a sleeping coroutine parks on its deadline instead of holding its
-// worker. Proven structurally, not by timing -- with exactly ONE worker, a task that sleeps 50ms and a task
+// worker. Proven structurally, not by timing: with exactly ONE worker, a task that sleeps 50ms and a task
 // that sleeps not at all race to claim an atomic; only a parking sleep lets the second one win. The elapsed
 // time then confirms the sleep really slept, and the plain-thread path (no coroutine) sleeps outright.
 @test
@@ -3316,7 +3320,7 @@ fn main() i32 {
 // Task-aware `Mutex` / `RwLock` acquisition. On ONE worker: task A takes the mutex and then blocks on a
 // semaphore (parking while HOLDING the lock), task B tries to take that mutex (it must park, not sit on the
 // worker), and task C sleeps, releases the semaphore and lets both finish. Under an OS-blocking acquire, B
-// would occupy the only worker and C could never run -- the run deadlocks instead of returning. Also covers
+// would occupy the only worker and C could never run: the run deadlocks instead of returning. Also covers
 // read/write guards taken from coroutines and a timed acquire that expires and then succeeds. Leak-checked.
 @test
 fn task_aware_locks() {
@@ -3508,7 +3512,7 @@ fn main() i32 {
 // Every timed wait racing its own deadline, on purpose: with one-nanosecond timeouts the timer fires while
 // the parking worker is still handing the coroutine off, so a wakeup must be claimed by exactly ONE waker
 // (notify or deadline) and the hand-off must not read fields the resumed coroutine has already reused. Both
-// were real bugs -- a stale wait node resuming a later park, and a double release through a cleared commit
+// were real bugs: a stale wait node resuming a later park, and a double release through a cleared commit
 // argument (`pthread_mutex_unlock(NULL)`). 40 tasks x 25 rounds over a semaphore, a bounded channel, sleeps,
 // yields and a shared mutex; the exact counter proves no wakeup was lost or double-spent. Leak-checked.
 @test
@@ -3744,7 +3748,7 @@ fn main() i32 {
 // The rest of the selector's surface. A send arm on a FULL channel is not ready until a drainer makes room
 // 60ms later, and the wait must have blocked for it. A closed, drained receive arm is ready at once (its
 // `try_recv` reports `None`), which is what stops a select from hanging on a dead channel. And with two
-// arms permanently ready, 200 waits must pick BOTH -- the uniform pick among ready arms is what keeps a
+// arms permanently ready, 200 waits must pick BOTH: the uniform pick among ready arms is what keeps a
 // busy channel from starving a quiet one (declaration order would return arm 0 every time). Leak-checked.
 @test
 fn select_arms_and_fairness() {
@@ -3878,7 +3882,7 @@ fn main() i32 {
 }
 
 // The `select` keyword end to end: it lowers (src/hir) to the same `Selector` the test above drives by
-// hand, so what is checked here is the LOWERING -- an arm binds exactly what its operation returns, only the
+// hand, so what is checked here is the LOWERING: an arm binds exactly what its operation returns, only the
 // winning arm's body runs, a `timeout` arm bounds the wait, a `default` arm makes it never wait at all, the
 // sent value is evaluated only in the branch that won, and a select nested inside an arm body works (the
 // desugar lowers inner markers first). Also covers a field-path channel and a select that PARKS inside a
@@ -4034,8 +4038,8 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// A `select` whose arms are malformed. Each one is reported on its own -- a bad arm still consumes its
-// `=> { .. }`, so one mistake does not cascade into the rest of the function -- and the whole-statement
+// A `select` whose arms are malformed. Each one is reported on its own: a bad arm still consumes its
+// `=> { .. }`, so one mistake does not cascade into the rest of the function, and the whole-statement
 // rules (at least one channel arm; `timeout` and `default` are mutually exclusive) are checked too.
 @test
 fn select_keyword_diagnostics() {
@@ -4080,7 +4084,7 @@ fn main() i32 {
 }
 
 // A module whose functions are only PARTLY used. Codegen expands nested instantiations by borrowing the
-// defining module's ast and truncating the instances it added back off it -- but the types interned during
+// defining module's ast and truncating the instances it added back off it, but the types interned during
 // that pass survive, so a leftover type can name an instance that is gone. Reading it crashed the compiler
 // (`Vector::at: index out of bounds`) rather than emitting anything. `std::parallel::selector` reaches that
 // shape whenever a program touches only part of it, which a plain `Selector::new()` does.
@@ -4105,7 +4109,7 @@ fn main() i32 {
     assert(run.ok());
 }
 
-// The data-parallel API (std/parallel/data): the whole surface over 5000 elements -- `each` reading every
+// The data-parallel API (std/parallel/data): the whole surface over 5000 elements; `each` reading every
 // element, `each_mut` mutating disjoint partitions in place, `chunks_mut` handing out whole `[]mut T`
 // windows, `reduce` folding per-chunk accumulators and combining them, `range_with` under Dynamic
 // scheduling, and `sections` running unrelated one-shot tasks. Chunks run as stackless jobs, so no
@@ -4286,7 +4290,7 @@ fn main() i32 {
 }
 
 // A parallel body is copied to every worker and run from several at once, so it may neither own a capture nor
-// mutate one. Both are `fn move` closures, which do not satisfy the `fn(..) + Send + Sync` bound -- so the
+// mutate one. Both are `fn move` closures, which do not satisfy the `fn(..) + Send + Sync` bound, so the
 // classic data race (`|i| values.set(i, ..)`, a `&mut` capture shared across workers) is a compile error
 // rather than a documented hazard.
 @test
@@ -4313,7 +4317,7 @@ fn main() i32 {
 
 // Interior mutability is gated: casting an immutable `&T` to `*mut T` is a hard error (it launders the
 // shared-borrow guarantee), so mutation through a shared reference must go through `UnsafeCell`, whose
-// contents are stored non-`const` and mutated soundly -- exercised here by an `UnsafeCell<i32>` in an
+// contents are stored non-`const` and mutated soundly: exercised here by an `UnsafeCell<i32>` in an
 // IMMUTABLE binding whose value is still changed through `get()`.
 @test
 fn interior_mutability_via_unsafe_cell() {
@@ -4340,7 +4344,7 @@ fn interior_mutability_via_unsafe_cell() {
 
 // Blocking sync primitives (std/parallel/sync, backed by pthread through the auto-discovered pthread_ext.c
 // shim): a shared Arc<Mutex<i64>> counter with RAII guards, a WaitGroup barrier for completion, and an
-// RwLock -- all leak-checked. Exercises the cross-module include scan (Arc's atomic/Global deps pulled into
+// RwLock: all leak-checked. Exercises the cross-module include scan (Arc's atomic/Global deps pulled into
 // the sync TU) and the C-shim backing-.c discovery.
 @test
 fn sync_primitives() {
@@ -4516,7 +4520,7 @@ fn main() i32 {
 }
 
 // The bundled ffi/ bindings, imported by a C header's bare name (import math; -> ffi/math.spc): a raw pub
-// extern binding with its real unmangled C symbol, and a thin wrapper -- compiled -Werror + linked -lm.
+// extern binding with its real unmangled C symbol, and a thin wrapper: compiled -Werror + linked -lm.
 @test
 fn ffi_bindings() {
     let p = cli::proj_new();
@@ -4543,9 +4547,9 @@ fn main() i32 {
 
 // The POSIX bindings (unistd, fcntl, filesystem) declare a BACKING HEADER, and this is what proves they
 // need to: none of `<unistd.h>`, `<sys/stat.h>` or `<dirent.h>` is among the standard headers the runtime
-// prologue carries, so an unnamed extern block leaves every one of these calls an implicit declaration --
+// prologue carries, so an unnamed extern block leaves every one of these calls an implicit declaration:
 // an error under C99, which is exactly how `unistd` and `filesystem` shipped unusable. Compiled -Werror and
-// actually run: create a directory, open + write + close a file in it, walk it with opendir/readdir, then
+// run: create a directory, open + write + close a file in it, walk it with opendir/readdir, then
 // unlink and rmdir.
 @test
 fn ffi_posix_bindings() {
@@ -4658,7 +4662,7 @@ fn external_c_sources() {
     assert(cc.ok());
     assert_eq(p.run_bin(), 48);
 
-    // drop the extern blocks: the wrapper TUs go, and so does the flag they contributed. `-lm` stays --
+    // Drop the extern blocks: the wrapper TUs go, and so does the flag they contributed. `-lm` stays;
     // the prelude's float methods are emitted into every program, so libm is on every POSIX link line.
     p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n");
     let r2 = p.compile("main.spc");
@@ -4669,7 +4673,7 @@ fn external_c_sources() {
         assert(p.gen_has("__ldflags", "-lm"), "the prelude's own libm flag stays: every program emits float methods");
     }
 
-    // a missing source file is a hard error
+    // A missing source file is a hard error.
     p.mkfile(
         "main.spc",
         "@c.source(\"nope.c\")\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); }\n",
@@ -4795,7 +4799,7 @@ fn main() i32 {
     assert(cc.ok());
     assert_eq(p.run_bin(), 42);
 
-    // a mutual by-value embedding is infinite size
+    // A mutual by-value embedding is infinite size.
     let bad = cli::proj_new();
     bad.mkfile("main.spc", "import a;\nfn main() i32 { return 0; }\n");
     bad.mkfile("a.spc", "import b;\npub struct A { pub x: b::B }\n");
@@ -4847,7 +4851,7 @@ fn missing_file() {
     assert(r.out_has("does_not_exist.spc"), "the error names the path");
 }
 
-// argc > 2 exits 1 with usage.
+// Argc > 2 exits 1 with usage.
 @test
 fn usage() {
     let p = cli::proj_new();
@@ -4935,7 +4939,7 @@ fn main() i32 { if Z != 0 && 10 / Z > 1 { return 1; } return 0; }
 )");
     p4.expect_fail("len.spc", "array length must be a constant expression");
 
-    // a provable panic in a NON-const fn stays runtime behavior (build ok, binary aborts)
+    // A provable panic in a NON-const fn stays runtime behavior (build ok, binary aborts).
     let p5 = cli::proj_new();
     p5.mkfile("pan.spc", M"(fn boom() i32 { panic("boom"); }
 fn main() i32 { return boom(); }
@@ -4973,8 +4977,8 @@ fn main() i32 { return 0; }
     );
     p2.expect_fail("trans.spc", "calls a function that cannot be evaluated at compile time");
 
-    // a dangling-sentinel pointer (`alignof(T) as *mut T`) folds: the shape every ZST buffer in
-    // std relies on, and a `const fn` caller with known arguments must evaluate through it
+    // A dangling-sentinel pointer (`alignof(T) as *mut T`) folds: the shape every ZST buffer in
+    // std relies on, and a `const fn` caller with known arguments must evaluate through it.
     let pz = cli::proj_new();
     pz.mkfile(
         "dang.spc",
@@ -5008,7 +5012,7 @@ fn main() i32 { let x = spin(100000000u64); if x == 0 { return 1; } return 0; }
     );
     p3.expect_fail("budget.spc", "'const fn' call has compile-time-known arguments but failed to evaluate");
 
-    // identical body without `const`: silent fallback to a runtime call
+    // Identical body without `const`: silent fallback to a runtime call.
     let p4 = cli::proj_new();
     p4.mkfile(
         "runtime.spc",
@@ -5027,7 +5031,7 @@ fn main() i32 { let x = spin(1000u64); if x != 499500u64 { return 1; } return 0;
     assert(cc4.ok());
     assert_eq(p4.run_bin(), 0);
 
-    // mutually recursive const fns are legal; const fn also runs as a normal function at runtime
+    // Mutually recursive const fns are legal; const fn also runs as a normal function at runtime.
     let p5 = cli::proj_new();
     p5.mkfile(
         "rec.spc",
@@ -5086,7 +5090,7 @@ fn main() i32 { return T - 27; }
     assert(cc3.ok());
     assert_eq(p3.run_bin(), 0);
 
-    // a const pointing at freed compile-time memory is rejected
+    // A const pointing at freed compile-time memory is rejected.
     let p4 = cli::proj_new();
     p4.mkfile(
         "dang.spc",
@@ -5163,7 +5167,7 @@ fn main() i32 {
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 
-    // An owning (Free) type materializes too -- buffer and all. What keeps it sound is that no copy
+    // An owning (Free) type materializes too: buffer and all. What keeps it sound is that no copy
     // can exist to free it: the value is immutable and cannot be moved out of the constant.
     let p2 = cli::proj_new();
     p2.mkfile(
@@ -5188,11 +5192,11 @@ fn main() i32 {
     assert(!p2.gen_has("__sc_inst.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
     let cc2 = p2.cc_build("");
     assert(cc2.ok());
-    // bind it: run_bin_env hands the captured output to the caller, and dropping it leaks the buffer
+    // Bind it: run_bin_env hands the captured output to the caller, and dropping it leaks the buffer.
     let lk2 = p2.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(lk2.ok());
 
-    // and nothing can obtain a copy to free, or mutate it in place
+    // And nothing can obtain a copy to free, or mutate it in place.
     let p3 = cli::proj_new();
     p3.mkfile(
         "own2.spc",
@@ -5275,7 +5279,7 @@ fn explicit_std_module_import() {
 // A generic body is emitted in whichever TU instantiates it, so everything it names has to be reachable
 // from there. Its module's PRIVATE items are not: a const is `static` in its own TU (folded at the use
 // site now) and so is a plain function (given external linkage and a header prototype now). A `str` value
-// it passes -- `panic("..")` -- needs that type's LAYOUT, which this TU's header only forward-declares
+// it passes (`panic("..")`) needs that type's LAYOUT, which this TU's header only forward-declares
 // unless the include set follows the owner's.
 @test
 fn generic_body_reaches_its_own_module() {
@@ -5351,7 +5355,8 @@ fn bindgen_generates_callable_bindings() {
     assert(spc.as_str().contains("bump: u64") || spc.as_str().contains("bump: u32"));
     assert(spc.as_str().contains("usize"));
     assert(spc.as_str().contains("cb: fn(*const char, *mut void) i32"));
-    assert(!spc.as_str().contains("lib_inline")); // a static inline has no symbol to bind
+    // A static inline has no symbol to bind.
+    assert(!spc.as_str().contains("lib_inline"));
 
     p.mkfile(
         "main.spc",
@@ -5364,9 +5369,9 @@ fn bindgen_generates_callable_bindings() {
     assert_eq(p.run_bin(), 0);
 }
 
-// The bindings a C library actually needs: its records, its enums and its constants, not just its
-// functions. A record declared inside the extern block IS the header's type -- the emitted C uses the
-// header's own definition and asserts this layout against it -- so the test passes a struct BY POINTER
+// The bindings a C library needs: its records, its enums and its constants, not just its
+// functions. A record declared inside the extern block IS the header's type: the emitted C uses the
+// header's own definition and asserts this layout against it, so the test passes a struct BY POINTER
 // and BY VALUE, reads an enumerator back through C, and compares a generated const.
 @test
 fn bindgen_generates_records_enums_and_consts() {
@@ -5396,13 +5401,19 @@ fn bindgen_generates_records_enums_and_consts() {
     assert(spc.as_str().contains("pub const LIB_VERSION: i32 = 7;"));
     assert(spc.as_str().contains("pub const LIB_NAME: str<'static> = \"lib\";"));
     assert(spc.as_str().contains("pub const LIB_SCALE: f64 = 0.5;"));
-    assert(spc.as_str().contains("pub const LIB_FLAG_B: i32 = 2;")); // an anonymous enum is a const block
-    assert(spc.as_str().contains("pub const LIB_EXPR: i32 = 8;")); // folded from LIB_VERSION + 1
+    // An anonymous enum is a const block.
+    assert(spc.as_str().contains("pub const LIB_FLAG_B: i32 = 2;"));
+    // Folded from LIB_VERSION + 1.
+    assert(spc.as_str().contains("pub const LIB_EXPR: i32 = 8;"));
     assert(spc.as_str().contains("LIB_SLOW = 10"));
-    assert(spc.as_str().contains("LIB_LAST = 11")); // C's auto-increment continues from the explicit value
-    assert(spc.as_str().contains("@c.import(\"struct lib_cfg\")")); // a tag C never typedef'd
-    assert(spc.as_str().contains("pub tag: [char; 8]")); // an array field keeps its extent
-    assert(!spc.as_str().contains("lib_bits")); // a bitfield has no field-list form
+    // C's auto-increment continues from the explicit value.
+    assert(spc.as_str().contains("LIB_LAST = 11"));
+    // A tag C never typedef'd.
+    assert(spc.as_str().contains("@c.import(\"struct lib_cfg\")"));
+    // An array field keeps its extent.
+    assert(spc.as_str().contains("pub tag: [char; 8]"));
+    // A bitfield has no field-list form.
+    assert(!spc.as_str().contains("lib_bits"));
 
     p.mkfile(
         "main.spc",
@@ -5505,14 +5516,20 @@ fn bindgen_expressions_anonymous_types_and_globals() {
         None => {},
     };
     assert(spc.as_str().contains("pub const LIB_SHIFT: i32 = 8;"));
-    assert(spc.as_str().contains("pub const LIB_SUM: i32 = 12;")); // one macro in terms of others
+    // One macro in terms of others.
+    assert(spc.as_str().contains("pub const LIB_SUM: i32 = 12;"));
     assert(spc.as_str().contains("pub const LIB_MIX: i32 = 5;"));
-    assert(!spc.as_str().contains("LIB_CALL")); // function-like macros have no const form
-    assert(spc.as_str().contains("pub struct lib_pt")); // named by its typedef, having no tag
+    // Function-like macros have no const form.
+    assert(!spc.as_str().contains("LIB_CALL"));
+    // Named by its typedef, having no tag.
+    assert(spc.as_str().contains("pub struct lib_pt"));
     assert(spc.as_str().contains("pub union lib_val"));
-    assert(spc.as_str().contains("LIB_B = 8")); // an enumerator written as an expression
-    assert(spc.as_str().contains("LIB_C = 9")); // and C's auto-increment continues from it
-    assert(spc.as_str().contains("pub static mut lib_counter: i32;")); // an exported WRITABLE global
+    // An enumerator written as an expression.
+    assert(spc.as_str().contains("LIB_B = 8"));
+    // And C's auto-increment continues from it.
+    assert(spc.as_str().contains("LIB_C = 9"));
+    // An exported WRITABLE global.
+    assert(spc.as_str().contains("pub static mut lib_counter: i32;"));
 
     p.mkfile(
         "main.spc",
@@ -5526,7 +5543,7 @@ fn bindgen_expressions_anonymous_types_and_globals() {
 }
 
 // `super-c vendor` copies a dependency into vendor/<name>, where the loader's project-root-relative
-// import resolution already finds it -- no manifest entry, no search path. A git source is recognized
+// import resolution already finds it: no manifest entry, no search path. A git source is recognized
 // by a scheme, a `git@` remote, or a `.git` suffix and is cloned; anything else must be a local
 // directory and is copied. The vendored modules then import as `vendor::<name>::<module>`, which is
 // checked end to end by running a program through two of them.
@@ -5545,19 +5562,19 @@ fn vendor_copies_and_imports_resolve() {
     nested.format_into("{}/vendor/dep/util/more.spc", root);
     assert(loader::read_file(nested.as_str()).is_some(), "nested files arrive");
     nested.free();
-    // the same name again is refused, not overwritten
+    // The same name again is refused, not overwritten.
     let r2 = p.run_raw(args.as_str());
     assert(r2.exit != 0);
     assert(r2.out_has("already exists"));
     args.free();
-    // a missing source is an error, not an empty vendor directory
+    // A missing source is an error, not an empty vendor directory.
     let mut bad = String::new();
     bad.format_into("vendor \"{}/nope\" --dir=\"{}\"", root, root);
     let rb = p.run_raw(bad.as_str());
     assert(rb.exit != 0);
     assert(rb.out_has("not a directory"));
     bad.free();
-    // the vendored modules resolve through ordinary imports and run
+    // The vendored modules resolve through ordinary imports and run.
     p.mkfile(
         "main.spc",
         "import vendor::dep::geo;\nimport vendor::dep::util::more;\nfn main() i32 { return geo::area(6, 7) + more::twice(0) - 42; }\n",
@@ -5570,7 +5587,7 @@ fn vendor_copies_and_imports_resolve() {
 }
 
 // The clone path, against a local bare repository (offline), with the `.git` suffix as the trigger.
-// What matters beyond arrival: the clone's own `.git` is gone -- vendored source belongs to the
+// What matters beyond arrival: the clone's own `.git` is gone; vendored source belongs to the
 // project's history, and a nested repository would shadow it from the outer one.
 @test
 fn vendor_clones_git_and_strips_the_repository() {
@@ -5581,7 +5598,8 @@ fn vendor_clones_git_and_strips_the_repository() {
     g.format_into("git -C \"{}/srcrepo\" init -q", root);
     if cli::run_quiet(g.cstr()) != 0 {
         g.free();
-        return; // no git on this machine: the clone path cannot be exercised
+        // No git on this machine: the clone path cannot be exercised.
+        return;
     }
     g.free();
     let mut ga = String::new();
@@ -5595,7 +5613,7 @@ fn vendor_clones_git_and_strips_the_repository() {
     );
     assert_eq(cli::run_quiet(gc.cstr()), 0);
     gc.free();
-    // tag the first state, then move the tip past it: --ref must be able to reach back
+    // Tag the first state, then move the tip past it: --ref must be able to reach back.
     let mut gt = String::new();
     gt.format_into("git -C \"{}/srcrepo\" tag v1", root);
     assert_eq(cli::run_quiet(gt.cstr()), 0);
@@ -5612,7 +5630,7 @@ fn vendor_clones_git_and_strips_the_repository() {
     gb.format_into("git clone -q --bare \"{}/srcrepo\" \"{}/dep.git\"", root, root);
     assert_eq(cli::run_quiet(gb.cstr()), 0);
     gb.free();
-    // pinned to the tag: the vendored tree is the FIRST state, not the tip
+    // Pinned to the tag: the vendored tree is the FIRST state, not the tip.
     let mut args = String::new();
     args.format_into("vendor \"{}/dep.git\" mylib --ref=v1 --dir=\"{}\"", root, root);
     let r = p.run_raw(args.as_str());
@@ -5633,7 +5651,7 @@ fn vendor_clones_git_and_strips_the_repository() {
     head.format_into("{}/vendor/mylib/.git/HEAD", root);
     assert(loader::read_file(head.as_str()).is_none(), "no .git survives vendoring");
     head.free();
-    // provenance: the stamp names the source and the exact commit the repository can no longer answer for
+    // provenance: the stamp names the source and the exact commit the repository cannot answer for.
     let mut st = String::new();
     st.format_into("{}/vendor/mylib/.vendor", root);
     switch loader::read_file(st.as_str()) {
@@ -5647,7 +5665,7 @@ fn vendor_clones_git_and_strips_the_repository() {
         },
     };
     st.free();
-    // --force re-vendors in place; without a ref that lands the tip, proving the replace really happened
+    // --force re-vendors in place; without a ref that lands the tip, proving the replace really happened.
     let mut fargs = String::new();
     fargs.format_into("vendor \"{}/dep.git\" mylib --force --dir=\"{}\"", root, root);
     assert_eq(p.run_raw(fargs.as_str()).exit, 0);
@@ -5662,7 +5680,7 @@ fn vendor_clones_git_and_strips_the_repository() {
         },
     };
     lib.free();
-    // a ref the repository does not have is an error, and leaves nothing behind
+    // A ref the repository does not have is an error, and leaves nothing behind.
     let mut bargs = String::new();
     bargs.format_into("vendor \"{}/dep.git\" other --ref=nope --dir=\"{}\"", root, root);
     assert(p.run_raw(bargs.as_str()).exit != 0);
@@ -5681,7 +5699,7 @@ fn vendor_clones_git_and_strips_the_repository() {
 
 // A writable C global: `static mut` inside an extern block DECLARES what the C side defines. The
 // access carries static mut's unsafe rule across the FFI, codegen emits no definition and no mangled
-// name -- the emitted C reads and writes the library's own symbol.
+// name: the emitted C reads and writes the library's own symbol.
 @test
 fn extern_static_mut_binds_a_writable_global() {
     let p = cli::proj_new();
@@ -5696,13 +5714,13 @@ fn extern_static_mut_binds_a_writable_global() {
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
-    // the write is guarded exactly like any static mut
+    // The write is guarded exactly like any static mut.
     p.mkfile(
         "main.spc",
         "extern \"C\" \"g.h\" {\n    pub static mut counter: i32;\n}\nfn main() i32 {\n    counter = 5;\n    return 0;\n}\n",
     );
     p.expect_fail("main.spc", "requires an 'unsafe' block");
-    // and the C side owns the storage: an initializer here is refused
+    // And the C side owns the storage: an initializer here is refused.
     p.mkfile(
         "main.spc",
         "extern \"C\" \"g.h\" {\n    pub static mut counter: i32 = 3;\n}\nfn main() i32 { return 0; }\n",
@@ -5710,8 +5728,8 @@ fn extern_static_mut_binds_a_writable_global() {
     p.expect_fail("main.spc", "the C side defines it");
 }
 
-// bindgen binds globals by what C itself declares -- writable ones as `static mut`, const-qualified
-// ones as `const` -- and --cflag reaches the preprocessor, so a feature-gated declaration appears
+// Bindgen binds globals by what C itself declares: writable ones as `static mut`, const-qualified
+// ones as `const`, and --cflag reaches the preprocessor, so a feature-gated declaration appears
 // exactly when the flag says so. The generated module is then used end to end: the .c sibling of the
 // backing header supplies the definitions, and the program mutates the bound global through it.
 @test
@@ -5743,7 +5761,7 @@ fn bindgen_globals_and_cflag() {
             assert(false, "bindgen wrote the module");
         },
     };
-    // --cflag reaches the preprocessor: the gate opens
+    // --cflag reaches the preprocessor: the gate opens.
     let mut args2 = String::new();
     args2.format_into("bindgen \"{}/lib.h\" --header=lib.h --cflag=-DFEATURE_ON -o \"{}/lib.spc\"", root, root);
     assert_eq(p.run_raw(args2.as_str()).exit, 0);
@@ -5758,7 +5776,7 @@ fn bindgen_globals_and_cflag() {
         },
     };
     gp.free();
-    // the generated module works: read the const, mutate the global directly and through the library
+    // The generated module works: read the const, mutate the global directly and through the library.
     p.mkfile(
         "main.spc",
         "import lib;\nfn main() i32 {\n    unsafe {\n        lib::counter = lib::counter + 1;\n    }\n    let n = unsafe lib::bump(2);\n    return n + lib::limit - 45;\n}\n",
@@ -5884,8 +5902,8 @@ fn main() i32 {
     assert(e.out_has("more `{}` placeholders than arguments"), "and says which way");
 }
 
-// `TypeInfo.methods` enumerates the `extend` functions declared for a type -- across modules, for
-// builtins and generic instances too -- and carries `@reflect` entries on methods. Enumeration
+// `TypeInfo.methods` enumerates the `extend` functions declared for a type: across modules, for
+// builtins and generic instances too, and carries `@reflect` entries on methods. Enumeration
 // only: a descriptor cannot invoke.
 @test
 fn method_reflection() {
@@ -5927,7 +5945,7 @@ fn main() i32 {
 }
 
 // `zeroed::<T>()` folds recursively (so a derived `Default` folds through it), and `static_assert`
-// runs INSIDE fn bodies -- per instantiation for a generic fn, where a violated guard is a
+// runs INSIDE fn bodies: per instantiation for a generic fn, where a violated guard is a
 // compile error naming the offending type argument.
 @test
 fn ctfe_zeroed_and_body_asserts() {
@@ -5998,7 +6016,7 @@ fn main() i32 {
 
 // Payload-less enums project through `variants` in CTFE (tags are the declared constants),
 // `payloads` folds, and a binder `meta_str` comparison in a binder-const `if` elides the untaken
-// copies -- so a generic touched only under an untaken guard is never instantiated.
+// copies, so a generic touched only under an untaken guard is never instantiated.
 @test
 fn tagless_variants_and_meta_elision() {
     let _ = unsafe p13shim::sc_setenv("SC_INLINE".ptr() as *const char, "0".ptr() as *const char);
@@ -6070,10 +6088,8 @@ fn main() i32 {
     assert(rr.out_shows("ok"), "tagless tags, payload folds, and guard elision agree at runtime");
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // Build-engine hardening gates: shell-free process spawning (paths pass through verbatim), no-change
 // builds rewriting nothing, -MMD header invalidation, flag invalidation, compile_commands.json.
-// ---------------------------------------------------------------------------------------------------------
 import driver_shim as p13shim;
 import std::parallel::runtime as p13rt;
 
@@ -6082,7 +6098,7 @@ fn p13_mtime(path: str) i64 {
     return unsafe p13shim::sc_mtime(p9.cstr());
 }
 
-// mtimes are second-granular: put a real gap between builds whose mtimes the assertions compare.
+// Mtimes are second-granular: put a real gap between builds whose mtimes the assertions compare.
 fn p13_tick() {
     p13rt::sleep_ns(1_100_000_000);
 }
@@ -6149,7 +6165,7 @@ fn build_staleness_gates() {
     assert(p13_mtime(objo.as_str()) == o1, "a no-change build does not rewrite objects");
     assert(p13_mtime(bin.as_str()) == b1, "a no-change build does not relink");
     p13_tick();
-    // rename the struct field: __sc_types.h changes, main.c's own text does not
+    // Rename the struct field: __sc_types.h changes, main.c's own text does not.
     p.mkfile(
         "src/util.spc",
         "pub struct S {\n    pub b: i32,\n}\n\npub fn v() i32 {\n    let s = S { b: 0 };\n    return s.b;\n}\n",
@@ -6159,7 +6175,7 @@ fn build_staleness_gates() {
     let o2 = p13_mtime(objo.as_str());
     assert(o2 > o1, "a changed included header rebuilds every dependent object");
     p13_tick();
-    // a semantic flag change invalidates through the command fingerprint, not through file times
+    // A semantic flag change invalidates through the command fingerprint, not through file times.
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\ncflags = [\"-DP13_FLAG=1\"]\n");
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "flag-change build");
     assert(p13_mtime(genc.as_str()) == g1, "a flag change rewrites no generated C");

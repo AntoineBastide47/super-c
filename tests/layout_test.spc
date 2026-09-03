@@ -1,5 +1,5 @@
 // Layout-service cases: C data-model sizes, alignments, field offsets, and enum
-// shapes computed from the target record -- including the 4-byte-pointer target -- with results read
+// shapes computed from the target record: including the 4-byte-pointer target; with results read
 // off probe-function parameter types.
 import driver_shim as shim;
 import module::loader as loader;
@@ -115,23 +115,23 @@ fn c_data_model_sizes() {
     let p = typed_package(PROBES);
     let mut svc = lay::Svc::new(&p);
     let mut m: ModuleId = 0;
-    // S: i32 @0, i64 @8, u8 @16 -> 24/8
+    // S: i32 @0, i64 @8, u8 @16 -> 24/8.
     let ts = probe_ty(&p, "p_s", &mut m);
     let l = svc.layout(m, ts);
     assert(l.ok && l.size == 24 && l.align == 8, "struct pads to the C rules");
-    // Nested: S @0 (24/8), u16 @24 -> 32/8
+    // Nested: S @0 (24/8), u16 @24 -> 32/8.
     let tn = probe_ty(&p, "p_n", &mut m);
     let ln = svc.layout(m, tn);
     assert(ln.ok && ln.size == 32 && ln.align == 8, "nested aggregate accumulates");
-    // U: max(8, 3) -> 8/8
+    // U: max(8, 3) -> 8/8.
     let tu = probe_ty(&p, "p_u", &mut m);
     let lu = svc.layout(m, tu);
     assert(lu.ok && lu.size == 8 && lu.align == 8, "union takes the widest member");
-    // [i32; 3] -> 12/4
+    // [i32; 3] -> 12/4.
     let ta = probe_ty(&p, "p_arr", &mut m);
     let la = svc.layout(m, ta);
     assert(la.ok && la.size == 12 && la.align == 4, "array multiplies the element");
-    // &i64 -> pointer-sized
+    // &i64 -> pointer-sized.
     let tr = probe_ty(&p, "p_ref", &mut m);
     let lr = svc.layout(m, tr);
     assert(lr.ok && lr.size == 8 && lr.align == 8, "reference is a pointer");
@@ -150,7 +150,7 @@ fn field_offsets() {
     assert(svc.field_offset(m, tn, field_decl(&p, m, tn, "t")) == 24, "after the nested struct");
     let tu = probe_ty(&p, "p_u", &mut m);
     assert(svc.field_offset(m, tu, field_decl(&p, m, tu, "y")) == 0, "union members at zero");
-    // Gen<i64>: v @0 (8), k @8
+    // Gen<i64>: v @0 (8), k @8.
     let tg = probe_ty(&p, "p_gen", &mut m);
     let lg = svc.layout(m, tg);
     assert(lg.ok && lg.size == 16 && lg.align == 8, "instance substitutes the argument");
@@ -165,7 +165,7 @@ fn enum_shapes() {
     let tp = probe_ty(&p, "p_plain", &mut m);
     let lp = svc.layout(m, tp);
     assert(lp.ok && lp.size == 4 && lp.align == 4, "payload-less enum is a bare C enum");
-    // Pay: tag u32 @0, payload union {i64, i32} at 8 -> 24/8 with the variant struct padded
+    // Pay: tag u32 @0, payload union {i64, i32} at 8 -> 24/8 with the variant struct padded.
     let ty = probe_ty(&p, "p_pay", &mut m);
     let el = svc.enum_layout(m, ty);
     assert(el.ok && el.payload_off == 8, "payload after the aligned tag");

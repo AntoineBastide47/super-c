@@ -72,7 +72,7 @@ fn case_pre(pre: str, body: str, label: str, ok: bool) {
     check_case(label, buf_str(&src.b[0]), ok);
 }
 
-// Family A -- aliasing: two borrows of p, both kept live. Reject iff their places overlap and at least
+// Family A: aliasing: two borrows of p, both kept live. Reject iff their places overlap and at least
 // one is `&mut`.
 @test
 fn aliasing() {
@@ -107,7 +107,7 @@ fn aliasing() {
     }
 }
 
-// Family B -- use-while-borrowed: a stored `&[mut] p<P1>` kept live across a plain READ of p<P2>.
+// Family B: use-while-borrowed: a stored `&[mut] p<P1>` kept live across a plain READ of p<P2>.
 // Reject iff the read overlaps the borrow and the borrow is `&mut`.
 @test
 fn use_while_borrowed() {
@@ -136,7 +136,7 @@ fn use_while_borrowed() {
     }
 }
 
-// Family C -- NLL: identical to B but the reference's LAST use precedes the read, so EVERY case accepts.
+// Family C: NLL: identical to B but the reference's LAST use precedes the read, so EVERY case accepts.
 @test
 fn nll() {
     let kinds: [str; 2] = ["", "mut "];
@@ -163,7 +163,7 @@ fn nll() {
     }
 }
 
-// Family D -- moves under a borrow on a Free type. Reject iff the move happens while the borrow is live.
+// Family D: moves under a borrow on a Free type. Reject iff the move happens while the borrow is live.
 @test
 fn moves() {
     case_pre(
@@ -180,7 +180,7 @@ fn moves() {
     );
 }
 
-// Family E -- lifetimes / dangling returns and their safe counterparts (no prefix macro).
+// Family E: lifetimes / dangling returns and their safe counterparts (no prefix macro).
 @test
 fn lifetimes() {
     check_case("return &local", "fn f() &i32 { let x = 5; return &x; }\nfn main() i32 { return *f(); }\n", false);
@@ -212,7 +212,7 @@ fn lifetimes() {
     );
 }
 
-// Family F -- scope-scoped borrows and disjoint-field mutation: valid patterns the checker must ACCEPT.
+// Family F: scope-scoped borrows and disjoint-field mutation: valid patterns the checker must ACCEPT.
 @test
 fn valid_patterns() {
     check_case(
@@ -238,7 +238,7 @@ fn valid_patterns() {
     );
 }
 
-// Family G -- the gaps closed after the first audit: implicit method-receiver borrows, assign-while-borrowed,
+// Family G: the gaps closed after the first audit: implicit method-receiver borrows, assign-while-borrowed,
 // reborrows, returned-reference provenance, moves across a loop back-edge; each with its valid counterpart.
 @test
 fn closed_gaps() {
@@ -326,7 +326,7 @@ fn closed_gaps() {
     );
 }
 
-// Family J -- reference-binding semantics (second-audit fixes): reassign rebinds (A1), &mut moves / & copies
+// Family J: reference-binding semantics (second-audit fixes): reassign rebinds (A1), &mut moves / & copies
 // (A2), a reborrow freezes its origin (A3), field-through-&mut is tracked (A4), constant array slots are
 // disjoint (B5). Each rejection must be a borrow error; each has a valid counterpart.
 @test
@@ -417,7 +417,7 @@ fn ref_semantics() {
     );
 }
 
-// Family K -- third-audit fixes: binding-scoped borrow regions, dangling stored refs, method-returned ref
+// Family K: third-audit fixes: binding-scoped borrow regions, dangling stored refs, method-returned ref
 // tracking, flow-accurate return-escape, `move` transparency, loop-aware definite-init, free-through-ref,
 // places through ref params, union aliasing, tuple-let roots, same-call double use, unaddressable temporaries,
 // defer replay, sub-statement NLL, `&mut`-out-param init. Each rejection paired with its nearest valid program.
@@ -594,7 +594,7 @@ fn third_audit() {
     );
 }
 
-// Family H -- THREE simultaneous borrows of one variable, all kept live. Valid iff every overlapping pair
+// Family H: THREE simultaneous borrows of one variable, all kept live. Valid iff every overlapping pair
 // is shared+shared (no overlapping pair includes a `&mut`).
 @test
 fn aliasing3() {
@@ -722,7 +722,7 @@ fn bundle(idx: *const i32, n: i32, label: str) {
     check_case(label, buf_str(&src.b[0]), ok);
 }
 
-// Family I -- composition: independent scenarios must not interfere, an invalid one must not be masked by
+// Family I: composition: independent scenarios must not interfere, an invalid one must not be masked by
 // valids, and per-function borrow state must not leak between them.
 @test
 fn composition() {

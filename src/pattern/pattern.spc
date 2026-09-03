@@ -19,6 +19,7 @@ import module::loader as loader;
 
 /// Normalized constructor kinds.
 pub const PC_WILD: u8 = 0; // wildcard or a pure binding
+/// Pattern constructor kinds (Pat.kind); PC_WILD is 0.
 pub const PC_VARIANT: u8 = 1; // val = ordinal; decl = variant; subs = payload
 pub const PC_BOOL: u8 = 2; // val = 0/1
 pub const PC_INT: u8 = 3; // val = literal value (decimal fast path; opaque otherwise)
@@ -27,6 +28,7 @@ pub const PC_TUPLE: u8 = 5; // subs = elements (single, always-complete construc
 pub const PC_STRUCT: u8 = 6; // decl = struct; subs = every field in decl order (absent = wild)
 pub const PC_OPAQUE: u8 = 7; // string/float/const-path literal: only a wildcard covers it
 
+/// The absent pattern, path, or node index.
 pub const P_NONE: u32 = 0xFFFFFFFF;
 
 /// One normalized pattern node (flat pools; subs index `subs` which indexes `pats`).
@@ -41,7 +43,7 @@ pub struct NPat {
     pub arity: u32, // constructor arity (payload/field/element count); PC_RANGE: 1 = inclusive
 }
 
-/// One matrix row: a pattern per column plus its arm.
+// One matrix row: a pattern per column plus its arm.
 struct Row {
     pub start: u32, // into ctx.cols (NPat ids)
     pub len: u32,
@@ -57,7 +59,7 @@ pub struct PatCx {
     pub subs: Vector<u32>, // flat sub-pattern id pool
     cols: Vector<u32>, // flat row storage (NPat ids)
     rows: Vector<Row>,
-    // usefulness arena: matrices live as (start, len) row descriptors over a flat cell pool;
+    // Usefulness arena: matrices live as (start, len) row descriptors over a flat cell pool;
     // every recursion level appends behind a watermark and truncates on return, so a whole
     // query allocates only on first-capacity growth (the plan's flat-row requirement).
     mcells: Vector<u32>,
@@ -69,6 +71,7 @@ pub struct PatCx {
 
 /// Decision-tree node kinds.
 pub const DT_LEAF: u8 = 0; // arm chosen
+/// Decision-tree node kinds (DtNode.kind); DT_LEAF is 0.
 pub const DT_TEST: u8 = 1; // test `place` against edge constructors; default child otherwise
 pub const DT_FAIL: u8 = 2; // no row matches (unreachable for exhaustive matches)
 
@@ -88,6 +91,8 @@ pub struct DtEdge {
     pub child: u32,
 }
 
+/// One decision-tree node: a leaf naming its arm, a test over a place with an edge range, or a
+/// failure.
 pub struct DtNode {
     pub kind: u8,
     pub arm: u32, // DT_LEAF
@@ -220,6 +225,7 @@ fn dec_of(src: str, sp: tok::Span) Option<i64> {
 }
 
 extend PatCx {
+    /// A pattern context over module `ast` of `pkg` (both must outlive it) with empty pools.
     pub fn new(pkg: *const loader::Package, ast: *const Ast, src: str) PatCx {
         return PatCx {
             pkg: pkg,
@@ -263,7 +269,7 @@ extend PatCx {
         return self.pats.len() as u32 - 1;
     }
 
-    // The enum decl containing variant `vd`, its ordinal, and the member count; ord -1 = unknown.
+    /// The enum decl containing variant `vd`, its ordinal, and the member count; ord -1 = unknown.
     pub fn variant_ordinal(self: &Self, vd: DefId, count: &mut u32) i64 {
         let a = unsafe &*(&*self.pkg).module_ast_const(vd.module);
         let items = a.at_const(a.root).as_data.program.items;
@@ -302,8 +308,8 @@ extend PatCx {
         return -1;
     }
 
-    // Normalize pattern `pid` into one or more alternatives appended to `out` (or-patterns fan
-    // out; every other shape contributes exactly one id).
+    /// Normalize pattern `pid` into one or more alternatives appended to `out` (or-patterns fan
+    /// out; every other shape contributes exactly one id).
     pub fn normalize(self: &mut Self, pid: NodeId, out: &mut Vector<u32>) {
         if !self.spend(1) {
             return;
@@ -360,9 +366,9 @@ extend PatCx {
             let hi_ok = hiv.is_some();
             let lo = lov.unwrap_or(0);
             let hi = hiv.unwrap_or(0);
-            // bounds the matrix cannot value (const paths, hex, open ends) key the range by its
-            // NODE with the arity-2 sentinel: it covers nothing and equals only itself -- garbage
-            // (0,0) bounds once merged every char range into one edge
+            // Bounds the matrix cannot value (const paths, hex, open ends) key the range by its
+            // NODE with the arity-2 sentinel: it covers nothing and equals only itself; garbage
+            // (0,0) bounds once merged every char range into one edge.
             let opaque = !(lo_ok && hi_ok);
             self.pats.push(
                 NPat {
@@ -405,7 +411,7 @@ extend PatCx {
                 return;
             }
             if pd.children.len == 1 {
-                // parenthesized pattern
+                // Parenthesized pattern.
                 self.normalize(unsafe self.f.list(pd.children)[0], out);
                 return;
             }
@@ -532,7 +538,7 @@ extend PatCx {
 
     fn norm_struct(self: &mut Self, pid: NodeId, sd: DefId, out: &mut Vector<u32>) {
         if sd.node == NODE_NONE || self.decl_kind(sd) != NodeKind::NODE_STRUCT {
-            // an unresolved struct pattern covers nothing beyond itself
+            // An unresolved struct pattern covers nothing beyond itself.
             self.pats.push(
                 NPat {
                     kind: PC_OPAQUE,
@@ -616,7 +622,7 @@ extend PatCx {
                 return;
             }
             let sub_start = self.subs.len() as u32;
-            // default every slot to wild, then place the children
+            // Default every slot to wild, then place the children.
             let mut slot_pat = Vector::<u32>::new();
             for s in 0..arity {
                 slot_pat.push(P_NONE);
@@ -647,7 +653,7 @@ extend PatCx {
                 },
             );
             out.push(self.pats.len() as u32 - 1);
-            // advance the cartesian cursor
+            // Advance the cartesian cursor.
             let mut carried = true;
             let mut i2: usize = 0;
             while carried && i2 < cursors.len() {
@@ -665,8 +671,6 @@ extend PatCx {
             }
         }
     }
-
-    // ---- matrix rows ------------------------------------------------------------------------------
 
     /// Append arm pattern `pid` (all alternatives) as single-column rows for arm `arm`.
     pub fn add_arm(self: &mut Self, pid: NodeId, arm: u32) {
@@ -687,7 +691,7 @@ extend PatCx {
             return true;
         }
         if rp.kind != qp.kind {
-            // a range head covers an integer constructor inside its bounds
+            // A range head covers an integer constructor inside its bounds.
             if rp.kind == PC_RANGE && qp.kind == PC_INT && rp.arity <= 1 {
                 let hi_in = if rp.arity == 1 {
                     qp.val <= rp.hi;
@@ -710,7 +714,8 @@ extend PatCx {
         if rp.kind == PC_OPAQUE {
             return rp.val == qp.val;
         }
-        return true; // tuple/struct: single constructor
+        // Tuple/struct: single constructor.
+        return true;
     }
 
     // Usefulness of the query row at mrows[qrow] against the matrix rows mrows[rs..rs+rn]
@@ -718,7 +723,8 @@ extend PatCx {
     // watermarked arena: each level appends its specialized matrix + query and truncates on return.
     fn useful_rec(self: &mut Self, rs: usize, rn: usize, qrow: usize) bool {
         if !self.spend(rn as u32 + 1) {
-            return false; // conservative: not useful => assume covered / unreachable never fires
+            // Conservative: not useful => assume covered / unreachable never fires.
+            return false;
         }
         let q = self.mrows[qrow];
         let qs = (q >> 32) as usize;
@@ -738,7 +744,7 @@ extend PatCx {
             self.pats.truncate(wm_p);
             return r;
         }
-        // q0 wild: distinct head constructors + completeness
+        // Wildcard q0: distinct head constructors + completeness.
         let wm_s = self.seen.len();
         let mut complete = false;
         let mut variant_count: u32 = 0;
@@ -801,7 +807,7 @@ extend PatCx {
             complete = n >= variant_count;
         }
         if !complete {
-            // default matrix: wild-headed rows, minus the column
+            // Default matrix: wild-headed rows, minus the column.
             let drs = self.mrows.len();
             let mut drn: usize = 0;
             for r in 0..rn {
@@ -831,7 +837,7 @@ extend PatCx {
             self.seen.truncate(wm_s);
             return r;
         }
-        // complete head set: useful iff useful under some constructor
+        // Complete head set: useful iff useful under some constructor.
         let seen_end = self.seen.len();
         let mut s2 = wm_s;
         while s2 < seen_end {
@@ -1063,7 +1069,7 @@ extend PatCx {
             root: 0,
             ok: true,
         };
-        // path 0 = the scrutinee itself
+        // Path 0 is the scrutinee itself.
         t.paths.push(
             DtPath {
                 parent: P_NONE,
@@ -1104,7 +1110,7 @@ extend PatCx {
         if rows.len() == 0 {
             return self.tree_leaf(t, DT_FAIL, 0);
         }
-        // first row all-wild: it matches; later rows are this path's dead tail
+        // First row all-wild: it matches; later rows are this path's dead tail.
         let r0 = rows.at(0);
         let mut col: i64 = -1;
         for c in 0..r0.pats.len() {
@@ -1114,7 +1120,7 @@ extend PatCx {
             }
         }
         if col < 0 {
-            // pick the leftmost column any row tests, else the first row wins outright
+            // Pick the leftmost column any row tests, else the first row wins outright.
             for c in 0..r0.pats.len() {
                 let mut any = false;
                 for r in 1..rows.len() {
@@ -1130,12 +1136,12 @@ extend PatCx {
             if col < 0 {
                 return self.tree_leaf(t, DT_LEAF, r0.arm);
             }
-            // the first row is wild in the test column too, so it still wins: emitting the test
+            // The first row is wild in the test column too, so it still wins: emitting the test
             // first would only grow the tree; take the leaf directly (bindings re-walk the arm).
             return self.tree_leaf(t, DT_LEAF, r0.arm);
         }
         let c = col as usize;
-        // distinct head constructors in the column
+        // Distinct head constructors in the column.
         let mut seen = Vector::<u32>::new();
         for r in 0..rows.len() {
             let h = rows.at(r).pats[c];
@@ -1153,13 +1159,13 @@ extend PatCx {
             }
         }
         let complete = self.ctors_complete(&seen);
-        // build one child per constructor
+        // Build one child per constructor.
         let mut children = Vector::<u32>::new();
         for s2 in 0..seen.len() {
             let rep = seen[s2];
             let arity = self.pats.at(rep as usize).sub_len;
             let repp = *self.pats.at(rep as usize);
-            // sub-occurrence paths for this constructor
+            // Sub-occurrence paths for this constructor.
             let occ = rows.at(0).occs[c];
             let mut sub_paths = Vector::<u32>::new();
             for f in 0..arity {
@@ -1218,7 +1224,7 @@ extend PatCx {
             let child = self.tree_rec(t, &nrs);
             children.push(child);
         }
-        // default child for an incomplete constructor set
+        // Default child for an incomplete constructor set.
         let mut dchild = P_NONE;
         if !complete {
             let mut nrs = Vector::<RowB>::new();

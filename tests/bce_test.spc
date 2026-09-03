@@ -1,4 +1,4 @@
-// Bounds-check normalization and elimination (plans/1_bounds_check_elimination.md §13):
+// Bounds-check normalization and elimination:
 // safety cases panic at the semantic operation, removal cases inspect the generated C for the
 // explicit check calls, and the verifier rejects malformed check operations. Dynamic values are
 // derived from argv so compile-time evaluation cannot fold the failing access away.
@@ -26,21 +26,19 @@ fn expect_panics(label: str, src: str) {
     assert(r.exit != 0, label);
 }
 
-// ---- §13.1 safety: every failing safe access panics before pointer arithmetic ------------------
-
 @test
 fn safety_element_checks() {
-    // element index equal to the length
+    // Element index equal to the length.
     expect_panics(
         "index == len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 2] = [1, 2];\n    let s: []i32 = a[0..2];\n    let i = argv.len() + 1; // == 2 at runtime\n    return s[i];\n}\n",
     );
-    // empty view element access
+    // Empty view element access.
     expect_panics(
         "empty view access panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 2] = [1, 2];\n    let s: []i32 = a[0..0];\n    let i = argv.len() - 1; // == 0\n    return s[i];\n}\n",
     );
-    // a valid dynamic access still works
+    // A valid dynamic access still works.
     h::expect_exit(
         "valid dynamic access",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 3] = [7, 8, 9];\n    let s: []i32 = a[0..3];\n    let i = argv.len() - 1; // == 0\n    return s[i] - 7;\n}\n",
@@ -50,32 +48,32 @@ fn safety_element_checks() {
 
 @test
 fn safety_range_checks() {
-    // exclusive range with start > end
+    // Exclusive range with start > end.
     expect_panics(
         "start > end panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let lo = argv.len() + 2; // == 3\n    let t: []i32 = s[lo..1];\n    return t.len() as i32;\n}\n",
     );
-    // exclusive range with end > len
+    // Exclusive range with end > len.
     expect_panics(
         "end > len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = argv.len() + 4; // == 5\n    let t: []i32 = s[0..hi];\n    return t.len() as i32;\n}\n",
     );
-    // inclusive range with end == len
+    // Inclusive range with end == len.
     expect_panics(
         "inclusive end == len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = argv.len() + 3; // == 4\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32;\n}\n",
     );
-    // inclusive range with end == usize::MAX: `end + 1` must NOT wrap past the check
+    // inclusive range with end == usize::MAX: `end + 1` must NOT wrap past the check.
     expect_panics(
         "inclusive end == usize::MAX panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = 0xFFFFFFFFFFFFFFFFu64 as usize - 1 + argv.len(); // == usize::MAX\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32;\n}\n",
     );
-    // a range whose length subtraction would underflow without the ordered check
+    // A range whose length subtraction would underflow without the ordered check.
     expect_panics(
         "underflowing range panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let lo = argv.len() + 3; // == 4\n    let t: []i32 = s[lo..2];\n    return t.len() as i32;\n}\n",
     );
-    // valid inclusive range still slices
+    // Valid inclusive range still slices.
     h::expect_exit(
         "valid inclusive range",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = argv.len() + 1; // == 2\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32 - 3;\n}\n",
@@ -85,13 +83,13 @@ fn safety_range_checks() {
 
 @test
 fn safety_mutation_and_zst() {
-    // a vector mutation between the proof and the access keeps the (passing) check honest
+    // A vector mutation between the proof and the access keeps the (passing) check honest.
     h::expect_exit(
         "mutation between proof and access",
         "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let n = v.len() - argv.len() + 1; // == 1\n    v.push(6);\n    return v[n] - 6;\n}\n",
         0,
     );
-    // zero-sized elements use logical lengths: in-range works, out-of-range panics
+    // Zero-sized elements use logical lengths: in-range works, out-of-range panics.
     h::expect_exit(
         "zst logical length in range",
         "struct Z {}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<Z>::new();\n    v.push(Z {});\n    v.push(Z {});\n    let i = argv.len(); // == 1\n    let _ = v[i];\n    return v.len() as i32 - 2;\n}\n",
@@ -103,29 +101,27 @@ fn safety_mutation_and_zst() {
     );
 }
 
-// ---- §13.2 removal: proved checks vanish from the generated C, retained ones stay --------------
-
 @test
 fn removal_canonical_loops() {
-    // the canonical indexed `for` loop body carries no element check
+    // The canonical indexed `for` loop body carries no element check.
     expect_c_user_absent(
         "for-in-slice loop has no bounds call",
         "fn sum(s: []i32) i32 {\n    let mut t = 0;\n    for v in s { t += v; }\n    return t;\n}\n",
         "__sc_bounds(",
     );
-    // `for i in 0..s.len()` with a same-index access proves through the guard
+    // `for i in 0..s.len()` with a same-index access proves through the guard.
     expect_c_user_absent(
         "indexed range loop has no bounds call",
         "fn sum(s: []i32) i32 {\n    let mut t = 0;\n    for i in 0..s.len() { t += s[i]; }\n    return t;\n}\n",
         "__sc_bounds(",
     );
-    // a dominating guard proves the guarded access
+    // A dominating guard proves the guarded access.
     expect_c_user_absent(
         "dominating guard proves access",
         "fn get(s: []i32, i: usize) i32 {\n    if i < s.len() {\n        return s[i];\n    }\n    return 0;\n}\n",
         "__sc_bounds(",
     );
-    // the full-view range check is proved away
+    // The full-view range check is proved away.
     expect_c_user_absent(
         "full-view slice has no range call",
         "fn all(s: []i32) []i32 { return s[0..s.len()]; }\n",
@@ -135,16 +131,16 @@ fn removal_canonical_loops() {
 
 @test
 fn removal_keeps_unproved() {
-    // an arbitrary dynamic index keeps exactly its check
+    // An arbitrary dynamic index keeps exactly its check.
     h::expect_c("unproved index keeps its check", "fn get(s: []i32, i: usize) i32 { return s[i]; }\n", "__sc_bounds(");
-    // a mutation between the guard and the access keeps the check
+    // A mutation between the guard and the access keeps the check.
     h::expect_c(
         "mutating call between guard and access keeps the check",
         "fn get(v: &mut Vector<i32>, i: usize) i32 {\n    if i < v.len() {\n        v.push(0);\n        return (*v)[i];\n    }\n    return 0;\n}\n",
         "__sc_bounds(",
     );
     // an unclassifiable call (a fn value) between guard and access keeps the check; a direct
-    // call of a harmless local fn is transparent and no longer retains it
+    // call of a harmless local fn is transparent and does not retain it.
     {
         let c = h::compile_c_user(
             "fn poke() {}\nfn get(s: []i32, i: usize) i32 {\n    if i < s.len() {\n        let f: fn() = poke;\n        f();\n        return s[i];\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(3);\n    let s: []i32 = v[0..1];\n    return get(s, argv.len() - 1) - 3;\n}\n",
@@ -152,7 +148,7 @@ fn removal_keeps_unproved() {
         assert(c.ok(), "fn-value call snippet compiles");
         assert(c.code_has("__sc_bounds("), "a fn-value call between guard and access keeps the check");
     }
-    // a dynamic range keeps its range check
+    // A dynamic range keeps its range check.
     h::expect_c(
         "dynamic range keeps its check",
         "fn cut(s: []i32, a: usize, b: usize) []i32 { return s[a..b]; }\n",
@@ -162,15 +158,13 @@ fn removal_keeps_unproved() {
 
 @test
 fn removal_behavior_parity() {
-    // the same program computes the same result with the pass disabled
+    // The same program computes the same result with the pass disabled.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 5] = [1, 2, 3, 4, 5];\n    let s: []i32 = a[0..5];\n    let mut t = 0;\n    for v in s { t += v; }\n    for i in 0..s.len() { t += s[i]; }\n    let m: []i32 = s[1..=3];\n    for v in m { t += v; }\n    return t - 39 - (argv.len() as i32 - 1);\n}\n";
     h::expect_exit("bce enabled computes 39", SRC, 0);
-    // the fork-per-test runner isolates this env change; the spawned build inherits it
+    // The fork-per-test runner isolates this env change; the spawned build inherits it.
     let _ = unsafe shim::sc_setenv("SC_BCE".ptr() as *const char, "0".ptr() as *const char);
     h::expect_exit("bce disabled computes 39", SRC, 0);
 }
-
-// ---- §13.3 verifier: malformed check operations are rejected -----------------------------------
 
 fn check_body(opers: u32) ir::CoreBody {
     let mut b = ir::CoreBody::new(DefId { module: 0, node: 0 }, 0);
@@ -225,19 +219,17 @@ const fn tok_span() tok::Span {
 
 @test
 fn verifier_rejects_malformed_checks() {
-    // wrong operand count
+    // Wrong operand count.
     let bad = check_body(1);
     assert_eq(irv::verify(&bad, 4096, null), "check-operand-count");
-    // operand range past the pool
+    // Operand range past the pool.
     let mut bad2 = check_body(2);
     bad2.oper_pool.truncate(1);
     assert_eq(irv::verify(&bad2, 4096, null), "check-operand-out-of-range");
-    // a well-formed check verifies
+    // A well-formed check verifies.
     let good = check_body(2);
     assert_eq(irv::verify(&good, 4096, null), "");
 }
-
-// ---- §8.5 affine offsets and §9 range-check coalescing -----------------------------------------
 
 fn expect_c_user_present(label: str, src: str, needle: str) {
     let c = h::compile_c_user(src);
@@ -247,7 +239,7 @@ fn expect_c_user_present(label: str, src: str, needle: str) {
 
 @test
 fn affine_guard_removes_check() {
-    // the exact `k + 1` value proven by the dominating guard re-proves at the access
+    // the exact `k + 1` value proven by the dominating guard re-proves at the access.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let k = argv.len() + 20;\n    let mut s = 0;\n    if k + 1 < v.len() {\n        s += v[k + 1];\n    }\n    return s - 22;\n}\n";
     expect_c_user_absent("affine guard removes the body check", SRC, "__sc_bounds(");
     h::expect_exit("affine guard behavior", SRC, 0);
@@ -255,7 +247,7 @@ fn affine_guard_removes_check() {
 
 @test
 fn coalescing_groups_adjacent_checks() {
-    // three adjacent accesses collapse to ONE group check at the first site
+    // Three adjacent accesses collapse to ONE group check at the first site.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 40;\n    let mut s = 0;\n    s += v[j] + v[j + 1] + v[j + 2];\n    return s - 126;\n}\n";
     expect_c_user_present("group check emitted", SRC, "__sc_bounds_group(");
     expect_c_user_absent("no per-element checks in the group", SRC, "__sc_bounds(");
@@ -264,24 +256,22 @@ fn coalescing_groups_adjacent_checks() {
 
 @test
 fn coalescing_panic_parity() {
-    // a failing group panics (earlier site, same panic class); disabled BCE panics too
+    // A failing group panics (earlier site, same panic class); disabled BCE panics too.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 61; // == 62: j + 2 is out of bounds\n    let mut s = 0;\n    s += v[j] + v[j + 1] + v[j + 2];\n    return s;\n}\n";
     expect_panics("group check panics", SRC);
-    // the fork-per-test runner isolates this env change; the spawned build inherits it
+    // The fork-per-test runner isolates this env change; the spawned build inherits it.
     let _ = unsafe shim::sc_setenv("SC_BCE".ptr() as *const char, "0".ptr() as *const char);
     expect_panics("disabled pass panics identically", SRC);
 }
 
 @test
 fn coalescing_blocked_by_mutation() {
-    // a growth call between the accesses invalidates the group: per-element checks stay
+    // A growth call between the accesses invalidates the group: per-element checks stay.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 40;\n    let mut s = 0;\n    s += v[j];\n    v.push(64);\n    s += v[j + 1];\n    return s - 83;\n}\n";
     expect_c_user_absent("no group across a mutating call", SRC, "__sc_bounds_group(");
     expect_c_user_present("per-element checks retained", SRC, "__sc_bounds(");
     h::expect_exit("blocked group behavior", SRC, 0);
 }
-
-// ---- §13.3 verifier def-chain rules: safe accesses address through their checks ----------------
 
 fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let pkg = p as *const loader::Package;
@@ -359,7 +349,7 @@ fn verifier_rejects_unchecked_projection() {
     assert(lw.lower_fn(node), "body lowers");
     let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
     assert_eq(irv::verify(&lw.body, tp, &p), "");
-    // corrupt: route the projection operand through the raw `i` parameter, not the check result
+    // corrupt: route the projection operand through the raw `i` parameter, not the check result.
     let mut hit = false;
     for j in 0..lw.body.projections.len() {
         if lw.body.projections.at(j).kind != ir::PJ_INDEX_OP {
@@ -388,7 +378,7 @@ fn verifier_rejects_unvalidated_slice_end() {
     assert(lw.lower_fn(node), "body lowers");
     let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
     assert_eq(irv::verify(&lw.body, tp, &p), "");
-    // corrupt: hand RV_SLICE the raw `b2` parameter instead of the validated exclusive end
+    // corrupt: hand RV_SLICE the raw `b2` parameter instead of the validated exclusive end.
     let mut hit = false;
     for j in 0..lw.body.rvalues.len() {
         if lw.body.rvalues.at(j).kind != ir::RV_SLICE {
@@ -405,12 +395,10 @@ fn verifier_rejects_unvalidated_slice_end() {
     assert_eq(irv::verify(&lw.body, tp, &p), "slice-end-not-validated");
 }
 
-// ---- Core IR inliner + panic-guard folding -----------------------------------------------------
-
 @test
 fn inline_fold_canonical_at_loop() {
-    // the inlined Vector::at guard folds against the cached loop bound: no panic branch survives
-    // in the user TU (the standalone at() instance lives in the owner TU, not here)
+    // The inlined Vector::at guard folds against the cached loop bound: no panic branch survives
+    // in the user TU (the standalone at() instance lives in the owner TU, not here).
     expect_c_user_absent(
         "canonical at() loop folds its guard",
         "fn sum(v: &Vector<i32>) i32 {\n    let mut t = 0;\n    for i in 0..v.len() {\n        t += *v.at(i);\n    }\n    return t;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    return sum(&v) - 3 - (argv.len() as i32 - 1);\n}\n",
@@ -420,7 +408,7 @@ fn inline_fold_canonical_at_loop() {
 
 @test
 fn inline_unproven_at_keeps_guard() {
-    // an unproven index keeps the inlined guard, with the callee's exact panic message
+    // An unproven index keeps the inlined guard, with the callee's exact panic message.
     let c = h::compile_c_user(
         "fn get(v: &Vector<i32>, k: usize) i32 {\n    return *v.at(k);\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(7);\n    return get(&v, argv.len() - 1) - 7;\n}\n",
     );
@@ -430,7 +418,7 @@ fn inline_unproven_at_keeps_guard() {
 
 @test
 fn inline_fold_blocked_by_mutation() {
-    // a mutating call between the bound and the access keeps the inlined guard
+    // A mutating call between the bound and the access keeps the inlined guard.
     let c = h::compile_c_user(
         "fn poke(v: &mut Vector<i32>) i32 {\n    let mut t = 0;\n    for i in 0..v.len() {\n        v.push(0);\n        t += *v.at(i);\n    }\n    return t;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    return poke(&mut v) - 1;\n}\n",
     );
@@ -440,7 +428,7 @@ fn inline_fold_blocked_by_mutation() {
 
 @test
 fn inline_behavior_parity() {
-    // identical results with the inliner off, the fold rule off, and both off
+    // Identical results with the inliner off, the fold rule off, and both off.
     let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..10 {\n        v.push(k);\n    }\n    let mut t = 0;\n    for i in 0..v.len() {\n        t += *v.at(i);\n    }\n    let mut s = String::new();\n    s.push_str(\"ab\");\n    t += s.len() as i32;\n    return t - 47 - (argv.len() as i32 - 1);\n}\n";
     h::expect_exit("inline+fold on", SRC, 0);
     let _ = unsafe shim::sc_setenv("SC_BCE_DISABLE".ptr() as *const char, "fold".ptr() as *const char);
@@ -453,7 +441,7 @@ fn inline_behavior_parity() {
 
 @test
 fn inline_panic_site_parity() {
-    // an out-of-range at() panics under every switch combination
+    // An out-of-range at() panics under every switch combination.
     let BAD: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    return *v.at(argv.len() + 5);\n}\n";
     expect_panics("oob panics (inline+fold on)", BAD);
     let _ = unsafe shim::sc_setenv("SC_BCE_DISABLE".ptr() as *const char, "fold".ptr() as *const char);
@@ -464,7 +452,7 @@ fn inline_panic_site_parity() {
 
 @test
 fn inline_omitted_aggregate_members() {
-    // spelled-count array literals carry IR_NONE oper-pool entries: the splice must keep them
+    // Spelled-count array literals carry IR_NONE oper-pool entries: the splice must keep them.
     h::expect_exit(
         "inlined callee with omitted aggregate members",
         "fn mk(x: i32) [i32; 4] {\n    let a: [i32; 4] = [[0] = x];\n    return a;\n}\nfn main(argv: Vector<str>) i32 {\n    let a = mk(argv.len() as i32);\n    return a[0] + a[1] + a[2] + a[3] - 1;\n}\n",
@@ -474,7 +462,7 @@ fn inline_omitted_aggregate_members() {
 
 @test
 fn inline_deterministic_emission() {
-    // two in-process emissions of the same snippet are byte-identical
+    // Two in-process emissions of the same snippet are byte-identical.
     let src: str = "fn sum(v: &Vector<i32>) i32 {\n    let mut t = 0;\n    for i in 0..v.len() {\n        t += *v.at(i);\n    }\n    return t;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(4);\n    return sum(&v) - 4 - (argv.len() as i32 - 1);\n}\n";
     let a = h::compile_c_user(src);
     let b2 = h::compile_c_user(src);
@@ -483,12 +471,10 @@ fn inline_deterministic_emission() {
     assert(str::from_cstr(a.code) == str::from_cstr(b2.code), "byte-identical emissions");
 }
 
-// ---- signature-based call transparency ---------------------------------------------------------
-
 @test
 fn sig_fact_survives_readonly_call() {
-    // a shared-reference helper between the guard and the access cannot resize the vector, so the
-    // guard fact survives and the check proves away
+    // A shared-reference helper between the guard and the access cannot resize the vector, so the
+    // guard fact survives and the check proves away.
     expect_c_user_absent(
         "read-only call keeps the guard fact",
         "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    if v.len() > 2 {\n        return *v.at(0);\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 {\n        v.push(i);\n    }\n    let mut s = 0;\n    let k = argv.len() + 3;\n    if k < v.len() {\n        s += peek(&v);\n        s += v[k];\n    }\n    return s - 4 - (argv.len() as i32 - 1);\n}\n",
@@ -498,7 +484,7 @@ fn sig_fact_survives_readonly_call() {
 
 @test
 fn sig_mut_call_kills() {
-    // a &mut argument names the vector: its facts die at the call and the check stays
+    // A &mut argument names the vector: its facts die at the call and the check stays.
     let c = h::compile_c_user(
         "@c.noinline\nfn grow(v: &mut Vector<i32>) {\n    v.push(9);\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let k = argv.len() - 1;\n    if k < v.len() {\n        grow(&mut v);\n        return v[k] - 1;\n    }\n    return 1;\n}\n",
     );
@@ -508,7 +494,7 @@ fn sig_mut_call_kills() {
 
 @test
 fn sig_raw_arg_kills() {
-    // a raw-pointer argument is unclassifiable: the call keeps the old kill-everything behavior
+    // A raw-pointer argument is unclassifiable: the call keeps the old kill-everything behavior.
     let c = h::compile_c_user(
         "@c.noinline\nfn taker(p: *const i32) i32 {\n    return unsafe *p;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let q = v.as_ptr();\n    let k = argv.len() - 1;\n    if k < v.len() {\n        let t = taker(q);\n        return v[k] - t;\n    }\n    return 1;\n}\n",
     );
@@ -518,7 +504,7 @@ fn sig_raw_arg_kills() {
 
 @test
 fn sig_static_kills() {
-    // a static collection is reachable from any callee: transparency never keeps its facts
+    // A static collection is reachable from any callee: transparency never keeps its facts.
     let c = h::compile_c_user(
         "static mut G: str = \"abcd\";\n@c.noinline\nfn shrink() {\n    unsafe {\n        G = \"a\";\n    }\n}\nfn main(argv: Vector<str>) i32 {\n    let k = argv.len() + 1;\n    if k < unsafe G.len() {\n        shrink();\n        return unsafe G[k] as i32 - 99;\n    }\n    return 1;\n}\n",
     );
@@ -528,8 +514,8 @@ fn sig_static_kills() {
 
 @test
 fn sig_escaped_ref_kills() {
-    // a &mut stored into memory escapes: later calls kill the escaped root even when their own
-    // arguments are harmless
+    // A &mut stored into memory escapes: later calls kill the escaped root even when their own
+    // arguments are harmless.
     let c = h::compile_c_user(
         "struct Slot<'a> {\n    pub m: &'a mut Vector<i32>,\n}\n@c.noinline\nfn touch() i32 {\n    return 1;\n}\n@c.noinline\nfn use_slot(s: &Slot) i32 {\n    return s.m.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let k = argv.len() - 1;\n    let mut out = 0;\n    {\n        let s = Slot { m: &mut v };\n        out += use_slot(&s);\n    }\n    if k < v.len() {\n        let t = touch();\n        return v[k] + out - t - 2;\n    }\n    return 1;\n}\n",
     );
@@ -539,8 +525,8 @@ fn sig_escaped_ref_kills() {
 
 @test
 fn sig_disable_and_inline_parity() {
-    // identical behavior with transparency off and with the inliner off; the OOB path panics the
-    // same way in every mode
+    // Identical behavior with transparency off and with the inliner off; the OOB path panics the
+    // same way in every mode.
     let SRC: str = "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    if v.len() > 2 {\n        return *v.at(0);\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 {\n        v.push(i);\n    }\n    let mut s = 0;\n    let k = argv.len() + 3;\n    if k < v.len() {\n        s += peek(&v);\n        s += v[k];\n    }\n    return s - 4 - (argv.len() as i32 - 1);\n}\n";
     let BAD: str = "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    return v.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let k = argv.len() + 4;\n    let _ = peek(&v);\n    return v[k];\n}\n";
     h::expect_exit("sig on", SRC, 0);

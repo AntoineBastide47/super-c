@@ -1,6 +1,6 @@
 // Input-fact generation for the Core IR loan analysis: dense points, origins, loans,
 // point-local subset edges, accesses, kills, and the init/move event stream, produced in one walk of
-// a verified CoreBody. Facts are integers in Core IR order -- two serial runs generate identical
+// a verified CoreBody. Facts are integers in Core IR order: two serial runs generate identical
 // vectors. Raw pointers, `str`, and slice views carry no origin here: their storage discipline is the
 // unsafe world's contract, and tracking them would reject programs the language accepts.
 import ast::ast as *;
@@ -9,10 +9,12 @@ import module::loader as loader;
 import ir::core as ir;
 import borrowck::move_paths as mp;
 
+/// The absent fact index, place, local, or origin.
 pub const BF_NONE: u32 = 0xFFFFFFFF;
 
 /// Loan kinds.
 pub const LK_SHARED: u8 = 0;
+/// Loan kinds (Loan.kind); LK_SHARED is 0.
 pub const LK_MUT: u8 = 1;
 pub const LK_RESERVED: u8 = 2; // two-phase mutable: reads stay legal until activation
 pub const LK_CAP: u8 = 3; // closure mutable capture: invalidated only by storage death (parity)
@@ -33,11 +35,12 @@ pub const EV_USE: u8 = 2; // path read (init required)
 pub const EV_DEAD: u8 = 3; // local storage ends (path = local root)
 pub const EV_MOVE_CUT: u8 = 4; // moved THROUGH a reference (unsafe ref-take): drops-visible only
 
+/// One borrow the body issues: the borrowed place, its kind, and the point and origin it lives at.
 pub struct Loan {
     pub view: bool, // the borrowed place is itself a borrow-carrying VALUE (a view): reborrow,
-    // never an escape of this body's storage
+    // Never an escape of this body's storage.
     pub pin: bool, // a receiver pin from a carrying call result: element views ride a whole-value
-    // MOVE of the container (heap storage is stable), so moves do not invalidate it
+    // MOVE of the container (heap storage is stable), so moves do not invalidate it.
     pub place: ir::PlaceId,
     pub kind: u8,
     pub origin: u32,
@@ -46,6 +49,7 @@ pub struct Loan {
     pub span: tok::Span,
 }
 
+/// One access to a place or a whole local at a point, with its ACC_* kind.
 pub struct Access {
     pub place: ir::PlaceId, // BF_NONE for a whole-local access (storage death)
     pub local: u32, // BF_NONE for a place access
@@ -54,12 +58,14 @@ pub struct Access {
     pub span: tok::Span,
 }
 
+/// An origin subset edge `from: to` established at `point`.
 pub struct SubsetAt {
     pub from: u32,
     pub to: u32,
     pub point: u32,
 }
 
+/// A loan killed (its storage or reference overwritten) at `point`.
 pub struct KillAt {
     pub loan: u32,
     pub point: u32,
@@ -75,20 +81,25 @@ pub struct Event {
 
 static_assert(sizeof(Event) == 16, "Event is deliberately packed to a quarter cache line");
 
+/// An init/move event of `kind` on move path `path` (packed into 24 bits) at `point`.
 pub const fn ev(kind: u8, path: u32, point: u32, span: tok::Span) Event {
     return Event { pk: kind as u32 << 24 | path, point: point, span: span };
 }
 
 extend Event {
+    /// The EV_* kind.
     pub const fn kind(self: &Self) u8 {
         return (self.pk >> 24) as u8;
     }
 
+    /// The move path the event is on.
     pub const fn path(self: &Self) u32 {
         return self.pk & 0xFFFFFF;
     }
 }
 
+/// Every fact the loan and move analyses read for one body: points, loans, accesses, origin
+/// subsets, kills, and init/move events, all in Core IR order.
 pub struct BodyFacts {
     pub npoints: u32,
     pub nmoves: u32, // move/move-cut events in the body: 0 (with no split-init decl) skips MoveFlow
@@ -153,10 +164,8 @@ extend BodyFacts as Free {
     }
 }
 
-// ---- ownership and borrow-carrying oracle ---------------------------------------------------------
-
-/// One substitution entry for member walks under a generic instance: parameter decl -> the argument
-/// as a (module, TypeId) pair in the QUERYING pool.
+// One substitution entry for member walks under a generic instance: parameter decl -> the argument
+// as a (module, TypeId) pair in the QUERYING pool.
 struct OwnSubst {
     pub pmod: ModuleId,
     pub pdecl: NodeId,
@@ -172,7 +181,7 @@ pub struct Owner {
     pub pkg: *const loader::Package,
     free_ext: Map<u64, u64>, // (tmod << 32 | tdecl) -> extend (emod << 32 | enode) + 1; absent = none
     ext_built: bool,
-    // owns/carries are pure functions of (mid, ty) on concrete types, and type ids are dense per
+    // Owns/carries are pure functions of (mid, ty) on concrete types, and type ids are dense per
     // module, so a `[mid][ty]` byte array replaces the u64-keyed hashmap on these very hot recursive
     // queries (the single biggest borrowck cost was the Map probe). -1 = unknown, 0 = no, 1 = yes.
     owns_arr: Vector<Vector<i8>>,
@@ -229,8 +238,6 @@ fn cache_set(arr: &mut Vector<Vector<i8>>, mid: ModuleId, ty: TypeId, r: bool) {
     row.set(ty as usize, cv);
 }
 
-// ---- fact generation ------------------------------------------------------------------------------
-
 /// One statement-order walk of a verified body. Reads happen at a statement's entry point, writes,
 /// loan issues, and kills at its exit point, so an assignment's own read never conflicts with the
 /// loan or kill it produces.
@@ -259,6 +266,7 @@ const fn no_span() tok::Span {
 }
 
 extend BodyFacts {
+    /// Facts with no body and no heap storage; `generate_into` fills them.
     pub fn empty() BodyFacts {
         return BodyFacts {
             npoints: 0,
@@ -293,7 +301,7 @@ extend BodyFacts {
         };
     }
 
-    // Truncate every vector (keeping heap capacity) and clear scalars, for reuse across bodies.
+    /// Truncate every vector (keeping heap capacity) and clear scalars, for reuse across bodies.
     pub fn reset(self: &mut Self) {
         self.npoints = 0;
         self.nmoves = 0;
@@ -340,8 +348,6 @@ extend Gen {
         return unsafe &mut *self.ow;
     }
 
-    // ---- points -----------------------------------------------------------------------------------
-
     fn number_points(self: &mut Self) {
         let mut acc: u32 = 0;
         let nb = self.body().blocks.len();
@@ -359,8 +365,6 @@ extend Gen {
     const fn term_entry(self: &Self, blk: u32) u32 {
         return self.f.block_base[blk as usize] + self.body().blocks.at(blk as usize).stmt_len * 2;
     }
-
-    // ---- origins ----------------------------------------------------------------------------------
 
     fn lt_name(self: &Self, a: &Ast, lt: NodeId) tok::Span {
         if lt == NODE_NONE {
@@ -505,8 +509,6 @@ extend Gen {
         }
     }
 
-    // ---- walk -------------------------------------------------------------------------------------
-
     const fn place_of(self: &Self, p: ir::PlaceId) ir::Place {
         return *self.body().places.at(p as usize);
     }
@@ -528,7 +530,7 @@ extend Gen {
 
     // True when the place derefs a SHARED reference on the way: a `&mut` of such a place is the
     // language's unsafe interior-mutability escape (type checking already demanded the `unsafe`),
-    // so no loan tracks it -- exactly like a raw-pointer base.
+    // so no loan tracks it: exactly like a raw-pointer base.
     fn shared_deref(self: &Self, p: ir::PlaceId) bool {
         let pl = self.place_of(p);
         let mut prev = self.body().locals.at(pl.base as usize).ty;
@@ -596,9 +598,9 @@ extend Gen {
         }
         let owned = self.owner().owns(self.body().module, pl.ty) && !self.calling;
         if owned {
-            // a move THROUGH a reference has no full path: it lands on the nearest tracked
+            // A move THROUGH a reference has no full path: it lands on the nearest tracked
             // ancestor (the cut), so overwrite guards learn the maybe-moved state AND the drop
-            // rewriter can clear the guard flag at this point
+            // rewriter can clear the guard flag at this point.
             let mut mpath = path;
             if mpath == mp::MP_NONE {
                 mpath = self.forest().place_cut[op.data as usize];
@@ -611,7 +613,8 @@ extend Gen {
                 let ek = if mpath == path {
                     EV_MOVE;
                 } else {
-                    EV_MOVE_CUT; // through-a-reference: invisible to the checker, real to drops
+                    // Through-a-reference: invisible to the checker, real to drops.
+                    EV_MOVE_CUT;
                 };
                 self.push_ev(ek, mpath, point, sp);
                 self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ak, point: point, span: sp });
@@ -737,7 +740,7 @@ extend Gen {
         self.owner().kinds_memo.insert(kkey, kst2 as u64 << 16 | tys.len() as u64);
     }
 
-    // Can values of `ty` STORE borrows by type -- declared lifetime params, or borrow-carrying
+    // Can values of `ty` STORE borrows by type: declared lifetime params, or borrow-carrying
     // instance arguments (`Vector<&T>`)? A struct merely embedding a view field has no slot a
     // caller-side store could legally fill, so it is not a store target.
     fn stores_borrows(self: &mut Self, mid: ModuleId, ty: TypeId) bool {
@@ -940,7 +943,7 @@ extend Gen {
         }
         self.f.accesses.push(Access { place: pid, local: BF_NONE, kind: ak, point: entry, span: sp });
         if dorigin != BF_NONE && !self.base_is_raw(pid) {
-            // The pin a carrying RESULT holds is SHARED whatever the parameter's mutability -- the
+            // The pin a carrying RESULT holds is SHARED whatever the parameter's mutability: the
             // exclusive claim lives in the access above and ends with the call. A receiver that
             // itself CARRIES borrows contributes what it holds instead of a fresh pin (the walk's
             // reborrow-inherit): a view-of-a-view chains, only the owning leaf pins.
@@ -1006,7 +1009,7 @@ extend Gen {
                     self.assign_sites.push(KillSite { place: BF_NONE, local: s.a, point: exit });
                     if s.kind == ir::ST_STORAGE_DEAD {
                         // An owned carrier's destruction observes what it stores (`Free` runs), so
-                        // the local counts as USED here -- stored borrows must survive to this point.
+                        // the local counts as USED here: stored borrows must survive to this point.
                         if self.f.observed[s.a as usize] {
                             self.live_use(s.a);
                         }
@@ -1021,7 +1024,7 @@ extend Gen {
             let exit = entry + 1;
             if t.kind == ir::TM_SWITCH || t.kind == ir::TM_ASSERT {
                 self.op_read(t.a, entry, t.span);
-                // an assert's optional message operand is read, never moved
+                // An assert's optional message operand is read, never moved.
                 for i2 in 0..t.args_len {
                     self.op_read(self.body().oper_pool[(t.args_start + i2) as usize], entry, t.span);
                 }
@@ -1326,7 +1329,7 @@ extend Gen {
                         }
                         self.lt_tokens(t.callee.module, rn, &mut rtok, 0);
                     }
-                    // No named token on the return: any borrow-carrying result elides -- its
+                    // No named token on the return: any borrow-carrying result elides; its
                     // borrows come from the single borrowing input (rule 2/3; receiver ties are
                     // separate). The dest-origin guard below keeps this to carrying results.
                     relide = rtok.len() == 0;
@@ -1355,7 +1358,8 @@ extend Gen {
                         }
                         let mut tie = i == 0 && recv;
                         if !tie && relide && nborrowing == 1 && i == bidx {
-                            tie = true; // elision: the single borrowing input feeds the return
+                            // Elision: the single borrowing input feeds the return.
+                            tie = true;
                         }
                         if !tie && rtok.len() != 0 && t.callee.node != NODE_NONE {
                             let mut itok2 = Vector::<u64>::new();
@@ -1417,7 +1421,7 @@ extend Gen {
     // Push one event, mirroring it into the fixpoint's mutating stream and the block's report and
     // easy flags as it lands, so no later pass re-reads the whole stream. A block stays "easy"
     // while it holds only assigns (which strictly improve state) and uses of root-leaf paths
-    // (whose error checks reduce to that path's own entry bits) -- the reporting pass can then
+    // (whose error checks reduce to that path's own entry bits): the reporting pass can then
     // clear it against the entry rows in O(words) instead of replaying.
     @c.always_inline
     fn push_ev(self: &mut Self, kind: u8, path: u32, point: u32, sp: tok::Span) {
@@ -1458,7 +1462,7 @@ extend Gen {
             let spl = self.place_of(src);
             self.live_use(spl.base);
             // The borrow itself reads (shared) or claims (mutable) the place. A two-phase `&mut`
-            // (temp destination) claims nothing at issue -- its activation carries the claim.
+            // (temp destination) claims nothing at issue: its activation carries the claim.
             let mut ak = ACC_READ;
             if rv.b == 1 && self.body().locals.at(self.place_of(s.place).base as usize).storage != ir::LS_TEMP {
                 ak = ACC_WRITE;
@@ -1506,7 +1510,7 @@ extend Gen {
                 );
             }
             // A reborrow's validity chains to the reference it went through; a borrow of a slot
-            // that itself HOLDS borrows links the slot's origin -- both ways when mutable, because
+            // that itself HOLDS borrows links the slot's origin: both ways when mutable, because
             // stores through the reference land in the slot (invariance).
             let src_carries = self.owner().carries(self.body().module, self.place_of(src).ty);
             if self.through_deref(src) || src_carries {
@@ -1619,9 +1623,9 @@ extend Gen {
                 }
             }
         } else if rv.kind == ir::RV_SLICE {
-            // structural slicing reads the container and yields a VIEW: origin flows from the
+            // Structural slicing reads the container and yields a VIEW: origin flows from the
             // container, and a carrying view of a non-carrying container pins it (the same rule
-            // as the projected-copy path above)
+            // as the projected-copy path above).
             let bpl = self.place_of(rv.a);
             self.live_use(bpl.base);
             self.f.accesses.push(Access { place: rv.a, local: BF_NONE, kind: ACC_READ, point: entry, span: s.span });
@@ -1657,12 +1661,13 @@ extend Gen {
             self.op_read(rv.a, entry, s.span);
             self.op_read(rv.b, entry, s.span);
         } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING) {
-            // no operands: `b` is the measured/described type
+            // No operands: `b` is the measured/described type.
         } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_INTRINSIC {
             for i in 0..rv.b {
                 let opid = self.body().oper_pool[(rv.a + i) as usize];
                 if opid == ir::IR_NONE {
-                    continue; // omitted struct member: no operand, C zero-fills
+                    // Omitted struct member: no operand, C zero-fills.
+                    continue;
                 }
                 self.op_read(opid, entry, s.span);
                 if rv.kind == ir::RV_AGGREGATE {
@@ -1680,8 +1685,6 @@ extend Gen {
         }
         self.write_place(s.place, exit, s.span);
     }
-
-    // ---- post-passes ------------------------------------------------------------------------------
 
     // Kills: an assignment that overwrites a loan's borrowed storage (its path is a must-equal
     // prefix of the loan's) ends the loan. Storage markers kill every loan based on their local.
@@ -1704,7 +1707,7 @@ extend Gen {
         if na * nl >= 1024 {
             // Loans bucketed by their place's base local: a site can only kill loans on its own
             // base (kill_covers demands equal bases), so the na*nl sweep shrinks to the matches.
-            // Bucket order is ascending loan id -- exactly the subsequence the sweep pushed.
+            // Bucket order is ascending loan id: exactly the subsequence the sweep pushed.
             let nlc = self.body().locals.len();
             let mut lb_start = Vector::<u32>::new();
             let mut lb_flat = Vector::<u32>::new();
@@ -1760,7 +1763,7 @@ extend Gen {
         // Reserved loans activate at the first later read of the holder temp. The pre-activation
         // access list is point-sorted (the walk emits blocks and statements in order; ACC_ACT
         // records appended below stay past the snapshot), so a lower bound plus a short forward
-        // scan replaces the full sweeps -- the first ascending match IS the earliest point.
+        // scan replaces the full sweeps: the first ascending match IS the earliest point.
         let nacc = self.f.accesses.len();
         for l in 0..nl {
             if self.f.loans.at(l).kind != LK_RESERVED {
@@ -1833,7 +1836,8 @@ extend Gen {
                 }
             }
             if ea.kind == ir::PJ_INDEX_OP {
-                return false; // a dynamic index cannot prove it hits the borrowed element
+                // A dynamic index cannot prove it hits the borrowed element.
+                return false;
             }
         }
         return true;
@@ -1866,7 +1870,8 @@ pub fn places_conflict(b: &ir::CoreBody, a: ir::PlaceId, c: ir::PlaceId) bool {
             return false;
         }
         if ea.kind == ir::PJ_FIELD && ea.data == ir::PJ_UNION_FIELD && ec.data == ir::PJ_UNION_FIELD {
-            return true; // union members share storage whatever the field
+            // Union members share storage whatever the field.
+            return true;
         }
         if ea.kind == ir::PJ_FIELD || ea.kind == ir::PJ_DOWNCAST || ea.kind == ir::PJ_INDEX_CONST {
             if ea.data != ec.data || ea.sub != ec.sub {
@@ -1878,6 +1883,7 @@ pub fn places_conflict(b: &ir::CoreBody, a: ir::PlaceId, c: ir::PlaceId) bool {
 }
 
 extend Owner {
+    /// An ownership oracle over `pkg` (which must outlive it) with empty memo tables.
     pub fn new(pkg: *const loader::Package) Owner {
         return Owner {
             pkg: pkg,
@@ -2181,7 +2187,7 @@ extend Owner {
             for i in 0..ms.len {
                 let mid2 = unsafe oa.list(ms)[i as usize];
                 let mn = *oa.at_const(mid2);
-                // tuple members are bare type nodes; named members are NODE_FIELD
+                // Tuple members are bare type nodes; named members are NODE_FIELD.
                 if !is_enum && (mn.kind == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple) {
                     let tn9 = if mn.kind == NodeKind::NODE_FIELD {
                         mn.as_data.field.ty;
@@ -2250,7 +2256,7 @@ extend Owner {
             for i in 0..ms.len {
                 let mid2 = unsafe oa.list(ms)[i as usize];
                 let mn = *oa.at_const(mid2);
-                // tuple members are bare type nodes named `_i`; named members are NODE_FIELD
+                // Tuple members are bare type nodes named `_i`; named members are NODE_FIELD.
                 if is_tuple {
                     decls.push(mid2);
                     tys.push(oa.type_of(mid2));
@@ -2276,7 +2282,7 @@ extend Owner {
             return false;
         }
         // Front cache: mut_caps bits are final before any Owner query runs (bc_ir_lower sets
-        // them), so closure-typed results are stable -- unlike the walk-side memo.
+        // them), so closure-typed results are stable, unlike the walk-side memo.
         let front = self.ast_of(mid).type_concrete(ty);
         if front {
             let c = cache_get(&mut self.carry_arr, mid, ty);
@@ -2301,7 +2307,8 @@ extend Owner {
             return self.carries_f(mid, e, depth + 1);
         }
         if y.kind == TypeKind::TYPE_DYN {
-            return true; // an erased value can hold captured borrows whatever its ownership
+            // An erased value can hold captured borrows whatever its ownership.
+            return true;
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
             let mut cap_tys = Vector::<TypeId>::new();
@@ -2367,7 +2374,7 @@ extend Owner {
                 for i in 0..ms.len {
                     let mid2 = unsafe oa.list(ms)[i as usize];
                     let mn = *oa.at_const(mid2);
-                    // tuple members are bare type nodes; named members are NODE_FIELD
+                    // Tuple members are bare type nodes; named members are NODE_FIELD.
                     if !is_enum && (mn.kind == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple) {
                         let tn9 = if mn.kind == NodeKind::NODE_FIELD {
                             mn.as_data.field.ty;
@@ -2400,14 +2407,15 @@ extend Owner {
         return r;
     }
 
+    /// The facts of body `b` over move forest `mf`, freshly allocated.
     pub fn generate(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts {
         let mut f = BodyFacts::empty();
         self.generate_into(b, mf, &mut f);
         return f;
     }
 
-    // Fill `dst` in place, reusing its vector capacity across bodies (the reusable-context path). The
-    // generator owns a BodyFacts by value, so `dst`'s reset storage is moved in, filled, and moved back.
+    /// Fill `dst` in place, reusing its vector capacity across bodies (the reusable-context path). The
+    /// generator owns a BodyFacts by value, so `dst`'s reset storage is moved in, filled, and moved back.
     pub fn generate_into(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest, dst: &mut BodyFacts) {
         dst.reset();
         let mut g = Gen {

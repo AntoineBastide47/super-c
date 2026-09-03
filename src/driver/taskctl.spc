@@ -14,6 +14,7 @@ pub struct Ctl {
 }
 
 extend Ctl {
+    /// A gate with `budget` bytes; 0 disables it.
     pub fn new(budget: u64) Ctl {
         return Ctl { mu: psy::Mutex::<u64>::new(0), cv: psy::Condvar::new(), budget: budget };
     }
@@ -30,6 +31,7 @@ extend Ctl {
         *g.get_mut() += bytes;
     }
 
+    /// Return `bytes` taken by `acquire` and wake parked submitters.
     pub fn release(self: &Self, bytes: u64) {
         if self.budget == 0 || bytes == 0 {
             return;

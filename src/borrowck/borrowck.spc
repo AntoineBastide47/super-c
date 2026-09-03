@@ -62,7 +62,7 @@ extend tc::TypeChecker {
     /// build, so their memo tables and vector capacities survive across modules.
     pub fn borrowck(self: &mut Self, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
         if self.package != null && unsafe (&*self.package).co_state == 0 {
-            // single-threaded phase: the const package pointer is the one place mutated (cir precedent)
+            // Single-threaded phase: the const package pointer is the one place mutated (cir precedent).
             unsafe (&mut *self.package).co_compute();
         }
         if self.package != null && unsafe (&*self.package).cancel_state == 0 {
@@ -81,6 +81,9 @@ extend tc::TypeChecker {
         self.errors.finalize(self.source, file);
     }
 
+    /// Borrow-check one top-level item: functions get the body walk, aggregates their field-lifetime
+
+    /// checks, extends recurse into their methods.
     pub fn bc_item(self: &mut Self, id: NodeId, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
         let a = self.cur_ast();
         let nk = a.at_const(id).kind;
@@ -122,7 +125,8 @@ extend tc::TypeChecker {
             }
         }
         if has_self || inputs == 1 {
-            return; // rule 3, then rule 2
+            // Rule 3, then rule 2.
+            return;
         }
         for i in 0..fnd.returns.len {
             let r = unsafe a.list(fnd.returns)[i as usize];
@@ -146,6 +150,9 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Number of lifetime positions in type node `tyn` of module `m` (each reference, plus path
+
+    /// lifetime args); 0 past depth 6.
     pub fn tc_count_lt_positions(self: &mut Self, m: ModuleId, tyn: NodeId, depth: i32) i32 {
         if tyn == NODE_NONE || depth > 6 {
             return 0;
@@ -175,6 +182,7 @@ extend tc::TypeChecker {
         return c;
     }
 
+    /// True when type node `tyn` has a reference with no lifetime annotation (an elided position).
     pub fn tc_has_elided_lt(self: &mut Self, m: ModuleId, tyn: NodeId, depth: i32) bool {
         if tyn == NODE_NONE || depth > 6 {
             return false;
@@ -212,11 +220,14 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// Report fields of aggregate `decl` whose reference types name a lifetime the declaration does not
+
+    /// declare.
     pub fn tc_check_field_lifetimes(self: &mut Self, decl: NodeId, members: NodeList) {
         let is_tuple = self.cur_ast().at_const(decl).as_data.aggregate.is_tuple;
         for i in 0..members.len {
             let mid = unsafe self.cur_ast().list(members)[i as usize];
-            // tuple members are bare type nodes; named members carry their type in field.ty
+            // Tuple members are bare type nodes; named members carry their type in field.ty.
             let tn = if self.cur_ast().at_const(mid).kind == NodeKind::NODE_FIELD {
                 self.cur_ast().at_const(mid).as_data.field.ty;
             } else if is_tuple {
@@ -231,6 +242,9 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Report a reference type node of `decl` whose lifetime is neither `'static` nor one of `decl`'s
+
+    /// own lifetime params.
     pub fn tc_check_ref_lifetime_named(self: &mut Self, decl: NodeId, tyn: NodeId, depth: i32) {
         if tyn == NODE_NONE || depth > 6 {
             return;
@@ -354,6 +368,9 @@ extend tc::TypeChecker {
         unsafe self.borrows[i as usize].binding = NODE_NONE;
     }
 
+    /// Tombstone every live borrow produced by expression `origin` (a reference erased into a raw
+
+    /// pointer).
     pub fn borrow_erase_origin(self: &mut Self, origin: NodeId) {
         if origin == NODE_NONE {
             return;
@@ -391,7 +408,8 @@ extend tc::TypeChecker {
                 self.borrow_tombstone_at(i);
                 continue;
             }
-            return true; // the IR loan analysis owns the conflict wording
+            // The IR loan analysis owns the conflict wording.
+            return true;
         }
         return false;
     }
@@ -420,7 +438,7 @@ extend tc::TypeChecker {
     }
 
     /// `let r2 = r1` with a reference RHS: a `&mut` borrow MOVES to the new binding (the source is
-    /// marked moved -- `&mut` is not duplicable); shared borrows are duplicated onto it.
+    /// marked moved: `&mut` is not duplicable); shared borrows are duplicated onto it.
     pub fn borrow_transfer_ref(self: &mut Self, init: NodeId, binding: NodeId) {
         let a = self.cur_ast();
         let mut e = init;
@@ -500,7 +518,7 @@ extend tc::TypeChecker {
 
     /// Per-statement NLL: after statement `si`, drop borrows bound at this scope whose binding is not
     /// mentioned again in the block; borrows reaching a kept binding are kept too. The mention scan
-    /// walks node ids in (stmt id, block id) -- a block node is allocated after its children, so that
+    /// walks node ids in (stmt id, block id): a block node is allocated after its children, so that
     /// range is exactly the later statements' subtrees.
     pub fn borrow_nll_drop(self: &mut Self, block_id: NodeId, ids: *const NodeId, si: u32) {
         if self.nborrows == 0 {
@@ -548,12 +566,18 @@ extend tc::TypeChecker {
         self.nborrows = w;
     }
 
+    /// The base binding of place expression `place` through at most PLACE_MAX_STEPS projections, or
+
+    /// NODE_NONE.
     pub fn borrow_place_root(self: &mut Self, place: NodeId) NodeId {
         let mut steps = Steps16 {};
         let mut n: i32 = 0;
         return self.place_decompose(place, &mut steps[0], &mut n, PLACE_MAX_STEPS);
     }
 
+    /// Escape class of what `binding`'s live borrows point at: 0 none, 1 a local, 2 a parameter
+
+    /// (caller-owned storage). Bounded at depth 8.
     pub fn borrow_escape_of_binding(self: &mut Self, binding: NodeId, depth: u32) i32 {
         if depth > 8 {
             return 0;
@@ -573,10 +597,12 @@ extend tc::TypeChecker {
         return esc;
     }
 
+    /// True when two borrow records name the same root, kind, region, and origin.
     pub const fn borrow_same(self: &Self, a: Borrow, b: Borrow) bool {
         return a.root == b.root && a.kind == b.kind && a.region == b.region && a.origin == b.origin;
     }
 
+    /// Copy the move/uninit/borrow flow state into `s` (a branch checkpoint).
     pub fn tc_flow_save(self: &Self, s: &mut FlowState) {
         s.nmoved = self.nmoved;
         for i in 0..self.nmoved {
@@ -604,6 +630,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Restore the flow state saved in `s`, rebuilding the moved-bit index.
     pub fn tc_flow_set(self: &mut Self, s: &FlowState) {
         for i in 0..self.nmoved {
             self.ms_bit_clear(unsafe self.moved[i as usize]);
@@ -635,6 +662,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Reset `s` to the empty flow state.
     pub const fn tc_flow_clear(self: &Self, s: &mut FlowState) {
         s.nmoved = 0;
         s.nmoved_places = 0;
@@ -811,7 +839,7 @@ extend tc::TypeChecker {
             return;
         }
         let dk = self.mod_ast(d.module).at_const(d.node).kind;
-        // An owning `const` stays put -- read it or borrow it, never move it. A local one is a runtime
+        // An owning `const` stays put: read it or borrow it, never move it. A local one is a runtime
         // value freed at scope exit, so a copy would double-free; a top-level one lives in the binary,
         // so a copy would free storage the allocator never handed out.
         if dk == NodeKind::NODE_CONST {
@@ -839,17 +867,18 @@ extend tc::TypeChecker {
             return;
         }
         // A reference-typed binding never owns its pointee: passing it borrows through it (an
-        // implicit reborrow -- the same pointer `p` would produce), so the binding is not
+        // implicit reborrow: the same pointer `p` would produce), so the binding is not
         // consumed. Shared `&` is freely duplicable; `&mut` stays usable after the callee returns.
         let ek = self.type_at(a.type_of(expr)).kind;
         if ek == TypeKind::TYPE_REFERENCE || ek == TypeKind::TYPE_POINTER {
             return;
         }
-        // the borrow scan's error, the capture-move guard, and the whole-binding moved-state were
+        // The borrow scan's error, the capture-move guard, and the whole-binding moved-state were
         // walk-only: the Core IR move analysis and free-move rules own them (closure captures
-        // still push moved[] entries, unguarded)
+        // still push moved[] entries, unguarded).
     }
 
+    /// Revive `decl` after a store: remove one moved entry and clear its bit once no duplicate remains.
     pub fn tc_unmark_move(self: &mut Self, decl: NodeId) {
         let mut i: u32 = 0;
         while i < self.nmoved {
@@ -860,7 +889,7 @@ extend tc::TypeChecker {
             }
             i = i + 1;
         }
-        // moved[] can hold duplicates (closure captures push unguarded) -- only drop the bit once
+        // Moved[] can hold duplicates (closure captures push unguarded): only drop the bit once
         // no entry remains.
         let mut still = false;
         i = 0;
@@ -894,6 +923,7 @@ extend tc::TypeChecker {
         return (self.moved_bits[idx] >> (decl & 63u32) as u64 & 1u64) != 0u64;
     }
 
+    /// Set `d`'s moved bit, growing the bitset on demand.
     pub fn ms_bit_set(self: &mut Self, d: NodeId) {
         let idx = (d >> 6) as usize;
         while self.moved_bits.len() <= idx {
@@ -902,6 +932,7 @@ extend tc::TypeChecker {
         self.moved_bits.set(idx, self.moved_bits[idx] | 1u64 << (d & 63u32) as u64);
     }
 
+    /// Clear `d`'s moved bit; a no-op when the bitset is shorter.
     pub const fn ms_bit_clear(self: &mut Self, d: NodeId) {
         let idx = (d >> 6) as usize;
         if idx < self.moved_bits.len() {
@@ -909,6 +940,9 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Leave the current scope: drop every borrow whose region is this scope, keeping borrows rooted in
+
+    /// reference bindings that point outward.
     pub fn tc_scope_exit(self: &mut Self) {
         let d = self.scope_depth;
         let mut w: u32 = 0;
@@ -918,7 +952,7 @@ extend tc::TypeChecker {
                 continue;
             }
             // A borrow whose ROOT is a reference-typed binding borrows that reference's REFERENT, and
-            // a reference cannot outlive what it points at -- so leaving this scope destroys the
+            // a reference cannot outlive what it points at, so leaving this scope destroys the
             // reference variable, not the data (`td: &JSON` bound from a parameter stays valid).
             // Whenever such a reference does borrow a local, that local is the root of its OWN borrow
             // and is still reported here, so this is not a hole.
@@ -928,7 +962,8 @@ extend tc::TypeChecker {
                 continue;
             }
             if b.binding != NODE_NONE && b.root != NODE_NONE && self.tc_binding_depth(b.root) >= d {
-                continue; // the loan solver owns the block-scope dangle wording
+                // The loan solver owns the block-scope dangle wording.
+                continue;
             }
             unsafe self.borrows[w as usize] = unsafe self.borrows[i as usize];
             w = w + 1;
@@ -939,12 +974,14 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Record that `decl` was bound at the current scope depth.
     pub fn tc_record_binding_depth(self: &mut Self, decl: NodeId) {
         if decl != NODE_NONE {
             self.binding_depth.insert(decl, self.scope_depth);
         }
     }
 
+    /// The scope depth `decl` was bound at; 0 for parameters and unknown bindings.
     pub fn tc_binding_depth(self: &Self, decl: NodeId) u32 {
         if decl == NODE_NONE || self.cur_ast().at_const(decl).kind == NodeKind::NODE_PARAMETER {
             return 0;
@@ -958,6 +995,7 @@ extend tc::TypeChecker {
         return 0;
     }
 
+    /// True when `binding` was bound inside the innermost enclosing loop body.
     pub fn tc_binding_in_innermost_loop(self: &Self, binding: NodeId) bool {
         if self.nloops == 0 {
             return false;
@@ -965,6 +1003,7 @@ extend tc::TypeChecker {
         return self.tc_binding_depth(binding) > unsafe self.loop_stack[(self.nloops - 1) as usize].depth;
     }
 
+    /// Mark `decl` initialized: remove it from the uninitialized set.
     pub fn tc_init(self: &mut Self, decl: NodeId) {
         let mut i: u32 = 0;
         while i < self.nuninit {
@@ -1012,6 +1051,9 @@ extend tc::TypeChecker {
         return 0;
     }
 
+    /// Escape class of storing a borrow of `place`: 0 none (through a parameter reference), 1 a local,
+
+    /// 2 a parameter.
     pub fn place_escape(self: &mut Self, place: NodeId, depth: u32) i32 {
         let mut steps = Steps16 {};
         let mut ns: i32 = 0;
@@ -1039,7 +1081,7 @@ extend tc::TypeChecker {
 
     /// The lifetime slots a type NODE denotes, in order: `&'l T` -> ['l]; an aggregate `S<'l, ..>` ->
     /// its lifetime args. Returns the count; fills `out` (up to `cap`). This is the structural lifetime
-    /// vector of a signature type, used to relate a returned value's lifetimes to the return type's.
+    /// vector of a signature type, which relates a returned value's lifetimes to the return type's.
     pub fn tc_collect_slot_lts(self: &mut Self, m: ModuleId, tyn: NodeId, out: &mut Spans8) i32 {
         if tyn == NODE_NONE {
             return 0;
@@ -1078,7 +1120,7 @@ extend tc::TypeChecker {
     }
 
     /// The lifetime a return TYPE node denotes overall (first slot), for call-site precision.
-    /// `m` is the module whose ast `ret_tyn` indexes -- the CALLEE's for a cross-module call; a
+    /// `m` is the module whose ast `ret_tyn` indexes: the CALLEE's for a cross-module call; a
     /// foreign id read against the caller's pool answers from unrelated storage (or past its end).
     pub fn tc_return_dest_lifetime(self: &mut Self, m: ModuleId, ret_tyn: NodeId) tok::Span {
         let mut dest = Spans8 {};
@@ -1090,7 +1132,7 @@ extend tc::TypeChecker {
     }
 
     /// MODULAR definition-site check: each lifetime a returned value borrows for must be DECLARED to
-    /// outlive the return type's lifetime in the same slot, using only the signature's outlives edges --
+    /// outlive the return type's lifetime in the same slot, using only the signature's outlives edges:
     /// exactly Rust's rule. `fn f<'a,'b>(x:&'a,y:&'b) &'a { return y; }` (and its aggregate form) needs
     /// `'b: 'a`; without it the body does not honour its signature, so it is wrong at the DEFINITION
     /// regardless of any caller. This is what lets call sites TRUST the signature (relate_result_precision)
@@ -1135,6 +1177,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// A fresh RegionVid.
     pub const fn region_new(self: &mut Self) u32 {
         let r = self.region_next;
         self.region_next = r + 1;
@@ -1180,6 +1223,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Number of region slots a value of `ty` carries (memoized per module and type).
     pub fn region_arity(self: &mut Self, ty: TypeId) u32 {
         if ty == TYPE_NONE {
             return 0;
@@ -1196,6 +1240,7 @@ extend tc::TypeChecker {
         return r;
     }
 
+    /// `region_arity` without the memo; `depth` bounds nested aggregates (0 past 8).
     pub fn region_arity_at(self: &mut Self, ty: TypeId, depth: i32) u32 {
         if ty == TYPE_NONE || depth > 8 {
             return 0;
@@ -1225,6 +1270,9 @@ extend tc::TypeChecker {
         return n;
     }
 
+    /// Give `node` its own run of fresh regions, one per region slot of `ty`; a no-op for region-free
+
+    /// types.
     pub fn region_alloc_for(self: &mut Self, node: NodeId, ty: TypeId) {
         if node == NODE_NONE {
             return;
@@ -1243,6 +1291,9 @@ extend tc::TypeChecker {
         self.rv_of.insert(node, start as u64 << 32 | n as u64);
     }
 
+    /// The RegionVid a lifetime name denotes in the current function: REGION_STATIC for `'static`,
+
+    /// REGION_NONE when undeclared.
     pub fn tc_lt_region_of_name(self: &Self, name: tok::Span) u32 {
         if self.tc_span_empty(name) {
             return REGION_NONE;
@@ -1271,6 +1322,9 @@ extend tc::TypeChecker {
         return REGION_NONE;
     }
 
+    /// Record the declared edge `sup: sub` (sup outlives sub); trivial or REGION_NONE edges are
+
+    /// dropped.
     pub fn region_add_outlives(self: &mut Self, sup: u32, sub: u32) {
         if sup == REGION_NONE || sub == REGION_NONE || sup == sub {
             return;
@@ -1328,6 +1382,9 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// True when lifetime name `src` provably outlives `dst`: the same name, or a path in the declared
+
+    /// outlives graph.
     pub fn tc_lifetime_outlives(self: &mut Self, src: tok::Span, dst: tok::Span) bool {
         if self.tc_span_empty(src) || self.tc_span_empty(dst) {
             return false;
@@ -1338,12 +1395,11 @@ extend tc::TypeChecker {
         return self.region_outlives(self.tc_lt_region_of_name(src), self.tc_lt_region_of_name(dst));
     }
 
-    // ---- variance inference over aggregate declarations ---------------------------------------
-    // `C<'a>` is a subtype of `C<'b>` only if 'a and 'b relate per C's variance in that slot:
-    // covariant needs 'a: 'b, contravariant 'b: 'a, invariant both directions. Inferred by rustc's
-    // algorithm over the field types -- `&T` covariant, `&mut T` invariant in the pointee, a nested
-    // aggregate composes with ITS variance, fn params contravariant. Lazy + memoized; a recursion
-    // cycle resolves to all-invariant (sound: over-restricts only recursive types).
+    /// `C<'a>` is a subtype of `C<'b>` only if 'a and 'b relate per C's variance in that slot:
+    /// covariant needs 'a: 'b, contravariant 'b: 'a, invariant both directions. Inferred by rustc's
+    /// algorithm over the field types: `&T` covariant, `&mut T` invariant in the pointee, a nested
+    /// aggregate composes with ITS variance, fn params contravariant. Lazy + memoized; a recursion
+    /// cycle resolves to all-invariant (sound: over-restricts only recursive types).
     pub const fn v_flip(self: &Self, v: u32) u32 {
         if v == V_COVARIANT {
             return V_CONTRAVARIANT;
@@ -1354,6 +1410,7 @@ extend tc::TypeChecker {
         return v;
     }
 
+    /// Lattice join of two variances (BIVARIANT is the identity, mismatches become INVARIANT).
     pub const fn v_join(self: &Self, a: u32, b: u32) u32 {
         if a == V_BIVARIANT {
             return b;
@@ -1367,6 +1424,7 @@ extend tc::TypeChecker {
         return V_INVARIANT;
     }
 
+    /// The variance of a position with variance `v` nested inside a context of variance `ctx`.
     pub const fn v_transform(self: &Self, ctx: u32, v: u32) u32 {
         if ctx == V_COVARIANT {
             return v;
@@ -1380,10 +1438,12 @@ extend tc::TypeChecker {
         return V_INVARIANT;
     }
 
+    /// Number of lifetime params declared by aggregate `dd`.
     pub fn variance_nlt(self: &Self, dd: DefId) i32 {
         return self.mod_ast(dd.module).lifetimes_of(dd.node).len as i32;
     }
 
+    /// Number of variance slots of aggregate `dd`: lifetime params then type params.
     pub fn variance_nparams(self: &Self, dd: DefId) i32 {
         let sa = self.mod_ast(dd.module);
         let nk = sa.at_const(dd.node).kind;
@@ -1394,6 +1454,7 @@ extend tc::TypeChecker {
         return self.variance_nlt(dd) + nty;
     }
 
+    /// `packed` with slot `idx` set to `v` (2 bits per slot); indexes past 32 leave it unchanged.
     pub const fn variance_pack_set(self: &Self, packed: u64, idx: i32, v: u32) u64 {
         if idx < 0 || idx >= 32 {
             return packed;
@@ -1404,6 +1465,7 @@ extend tc::TypeChecker {
         return packed & ~(0x3u64 << sh) | nv as u64 << sh;
     }
 
+    /// The packed variance vector with every slot of `dd` INVARIANT (the conservative answer).
     pub fn variance_all_invariant(self: &Self, dd: DefId) u64 {
         let n = self.variance_nparams(dd);
         let mut packed: u64 = 0;
@@ -1415,6 +1477,7 @@ extend tc::TypeChecker {
         return packed;
     }
 
+    /// The inferred variance of slot `idx` of aggregate `dd`; INVARIANT past 32 slots.
     pub fn variance_param(self: &mut Self, dd: DefId, idx: i32) u32 {
         if idx < 0 || idx >= 32 {
             return V_INVARIANT;
@@ -1454,6 +1517,9 @@ extend tc::TypeChecker {
         return -1;
     }
 
+    /// The packed variance vector of aggregate `dd`, inferred from its field types and memoized; a
+
+    /// recursive query answers INVARIANT.
     pub fn variance_infer(self: &mut Self, dd: DefId) u64 {
         if dd.node == NODE_NONE {
             return 0;
@@ -1483,7 +1549,7 @@ extend tc::TypeChecker {
         for i in 0..members.len {
             let mid = unsafe self.mod_ast(dd.module).list(members)[i as usize];
             let mk = self.mod_ast(dd.module).at_const(mid).kind;
-            // tuple members are bare type nodes; named members carry the type in field.ty
+            // Tuple members are bare type nodes; named members carry the type in field.ty.
             if mk == NodeKind::NODE_FIELD || is_tuple {
                 let tn = if mk == NodeKind::NODE_FIELD {
                     self.mod_ast(dd.module).at_const(mid).as_data.field.ty;
@@ -1534,7 +1600,8 @@ extend tc::TypeChecker {
             return self.variance_walk(dd, n.as_data.indirect_type.ty, inner, p, depth + 1);
         }
         if nk == NodeKind::NODE_POINTER_TYPE {
-            return packed; // raw pointer: regions/borrows erased -- no lifetime slot, so variance is moot
+            // Raw pointer: regions/borrows erased; no lifetime slot, so variance is moot.
+            return packed;
         }
         if nk == NodeKind::NODE_ARRAY_TYPE {
             return self.variance_walk(dd, n.as_data.array_type.element, ctx, packed, depth + 1);
@@ -1596,10 +1663,13 @@ extend tc::TypeChecker {
         return packed;
     }
 
+    /// Report a store of a shorter-lived reference into a reference slot reached through a reference
+
+    /// parameter.
     pub fn tc_check_store_escape(self: &mut Self, place: NodeId, value: NodeId, place_ty: TypeId) {
         // Only a bare `&T` reference SLOT is the direct escape vector checked here. A borrow-carrying
         // aggregate slot (`str`/`Slice`/a view field) is a long-lived value in practice and pinning
-        // its producer is the reborrow/conflict machinery's job -- gating on it here would reject the
+        // its producer is the reborrow/conflict machinery's job: gating on it here would reject the
         // pervasive `self.source: str = ..` assignments (the str-as-a-value explosion).
         if place_ty == TYPE_NONE || self.type_at(place_ty).kind != TypeKind::TYPE_REFERENCE {
             return;
@@ -1613,7 +1683,8 @@ extend tc::TypeChecker {
             return;
         }
         if self.tc_ref_arg_referent(value) == base {
-            return; // reborrow of the same parameter's own data
+            // Reborrow of the same parameter's own data.
+            return;
         }
         if self.tc_lifetime_outlives(self.tc_value_source_lifetime(value), self.tc_place_slot_lifetime(place, base)) {
             return;
@@ -1632,6 +1703,9 @@ extend tc::TypeChecker {
         );
     }
 
+    /// The lifetime name of the reference `value` evaluates to (through casts, `move`, `unsafe`), or
+
+    /// the empty span.
     pub fn tc_value_source_lifetime(self: &mut Self, value: NodeId) tok::Span {
         let a = self.cur_ast();
         let mut e = value;
@@ -1655,6 +1729,9 @@ extend tc::TypeChecker {
         return self.tc_ref_typenode_lt(a.at_const(d.node).as_data.parameter.ty);
     }
 
+    /// The declared lifetime of the reference slot `place` names inside parameter `base`'s type, or the
+
+    /// empty span.
     pub fn tc_place_slot_lifetime(self: &mut Self, place: NodeId, base: NodeId) tok::Span {
         let a = self.cur_ast();
         let pn = a.at_const(place);
@@ -1705,7 +1782,7 @@ extend tc::TypeChecker {
                 return tok::Span { start: 0, end: 0 };
             }
             if k == 0 {
-                // leaf: the slot itself must be a reference; map its lifetime out to this function
+                // Leaf: the slot itself must be a reference; map its lifetime out to this function.
                 if self.mod_ast(dd.module).at_const(ftyn).kind != NodeKind::NODE_REFERENCE_TYPE {
                     return tok::Span { start: 0, end: 0 };
                 }
@@ -1715,7 +1792,7 @@ extend tc::TypeChecker {
                 );
                 return self.tc_map_lt(dd, fl, &args[0], nargs);
             }
-            // interior hop: re-instantiate the next aggregate's lifetime args through this one
+            // Interior hop: re-instantiate the next aggregate's lifetime args through this one.
             let mut sub = Spans8 {};
             let ns = self.tc_collect_lt_args(dd.module, ftyn, &mut sub);
             let mut mapped = Spans8 {};
@@ -1733,6 +1810,9 @@ extend tc::TypeChecker {
         return tok::Span { start: 0, end: 0 };
     }
 
+    /// The lifetime arguments written on type path `tyn` of module `m` into `out` (at most 8); returns
+
+    /// the count.
     pub fn tc_collect_lt_args(self: &Self, m: ModuleId, tyn: NodeId, out: &mut Spans8) i32 {
         if tyn == NODE_NONE || self.mod_ast(m).at_const(tyn).kind != NodeKind::NODE_TYPE_PATH {
             return 0;
@@ -1749,6 +1829,9 @@ extend tc::TypeChecker {
         return n;
     }
 
+    /// Map lifetime param `name` of aggregate `dd` onto the corresponding entry of `args` (an
+
+    /// instantiation's lifetime args); the empty span when unmapped.
     pub fn tc_map_lt(self: &Self, dd: DefId, name: tok::Span, args: *const tok::Span, nargs: i32) tok::Span {
         if self.tc_span_empty(name) {
             return tok::Span { start: 0, end: 0 };
@@ -1766,6 +1849,7 @@ extend tc::TypeChecker {
         return tok::Span { start: 0, end: 0 };
     }
 
+    /// The type node of the field named `fname` in aggregate `dd`, or NODE_NONE.
     pub fn tc_field_type_node(self: &Self, dd: DefId, fname: tok::Span) NodeId {
         let sa = self.mod_ast(dd.module);
         let members = sa.at_const(dd.node).as_data.aggregate.members;
@@ -1786,6 +1870,9 @@ extend tc::TypeChecker {
         return NODE_NONE;
     }
 
+    /// The first lifetime argument written on parameter type node `ptyn` (through references), or the
+
+    /// empty span.
     pub fn tc_container_elem_lt(self: &Self, m: ModuleId, ptyn: NodeId) tok::Span {
         if ptyn == NODE_NONE {
             return tok::Span { start: 0, end: 0 };
@@ -1806,6 +1893,9 @@ extend tc::TypeChecker {
         return tok::Span { start: 0, end: 0 };
     }
 
+    /// The reference-typed parameter that argument expression `arg0` names directly (through casts,
+
+    /// `move`, `unsafe`), or NODE_NONE.
     pub fn tc_ident_ref_param(self: &mut Self, arg0: NodeId) NodeId {
         let a = self.cur_ast();
         let mut e = arg0;
@@ -1829,6 +1919,7 @@ extend tc::TypeChecker {
         return d.node;
     }
 
+    /// True when `node` is a parameter declared with a reference type.
     pub fn tc_is_ref_param(self: &mut Self, node: NodeId) bool {
         if node == NODE_NONE {
             return false;
@@ -1845,6 +1936,9 @@ extend tc::TypeChecker {
         return t != TYPE_NONE && self.type_at(t).kind == TypeKind::TYPE_REFERENCE;
     }
 
+    /// The binding a `&place` / `&mut place` argument borrows, or the argument's own base binding;
+
+    /// NODE_NONE when neither.
     pub fn tc_ref_arg_referent(self: &Self, arg0: NodeId) NodeId {
         let a = self.cur_ast();
         let mut e = arg0;
@@ -1865,6 +1959,7 @@ extend tc::TypeChecker {
         return self.tc_place_base_binding(e);
     }
 
+    /// True when `elem` is generic param `(vm, vd)` itself or an aggregate instantiated with it.
     pub fn tc_ref_covers_generic(self: &mut Self, elem: TypeId, vd: NodeId, vm: ModuleId) bool {
         if elem == TYPE_NONE {
             return false;
@@ -1892,6 +1987,9 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// Append every lifetime name written in type node `tyn` to `out` (at most 8, `*n` is the fill
+
+    /// count).
     pub fn tc_typenode_lifetimes(self: &Self, m: ModuleId, tyn: NodeId, out: &mut Spans8, n: &mut i32, depth: i32) {
         if tyn == NODE_NONE || depth > 6 || (*n) as usize >= out.len() {
             return;
@@ -1927,6 +2025,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// True when type node `node` of module `m` mentions lifetime `lt` anywhere.
     pub fn tc_typenode_covers_lt(self: &Self, m: ModuleId, node: NodeId, lt: tok::Span) bool {
         if node == NODE_NONE || self.tc_span_empty(lt) {
             return false;
@@ -1956,6 +2055,9 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// For a `&mut T` parameter type node, the pointee type when writes through it can smuggle a
+
+    /// shorter borrow (T mentions a callee type variable or is invariant); TYPE_NONE otherwise.
     pub fn tc_mut_ref_invariant_elem(self: &mut Self, fmod: ModuleId, ptyn: NodeId) TypeId {
         if ptyn == NODE_NONE {
             return TYPE_NONE;
@@ -1965,12 +2067,12 @@ extend tc::TypeChecker {
             return TYPE_NONE;
         }
         let elem = self.type_at(lt).as_data.elem;
-        // (a) `&mut <ref/ptr mentioning a callee type variable>` -- two such args can be swapped by
+        // (a) `&mut <ref/ptr mentioning a callee type variable>`: two such args can be swapped by
         // the callee, so a too-short borrow in one is stored into the other (the original rule).
         if self.tc_type_mentions_generic(elem, 0) {
             return elem;
         }
-        // (b) `&mut <aggregate invariant in one of its lifetime/type params>` -- the variance
+        // (b) `&mut <aggregate invariant in one of its lifetime/type params>`: the variance
         // generalization: an invariant param means the pointee cannot be shortened, so two such args
         // are likewise swappable. `&'a mut i32` alone is covariant in 'a (the invariance is in the
         // pointee), so this only fires when a lifetime reaches an invariant slot, e.g. `&'a mut &'a i32`.
@@ -1980,6 +2082,7 @@ extend tc::TypeChecker {
         return TYPE_NONE;
     }
 
+    /// True when `ty` is an aggregate with at least one INVARIANT parameter slot.
     pub fn tc_aggregate_has_invariant_param(self: &mut Self, ty: TypeId) bool {
         let mut om: ModuleId = 0;
         let mut od = NODE_NONE;
@@ -1999,6 +2102,7 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// True when `ty` contains a generic parameter anywhere (bounded at depth 6).
     pub fn tc_type_mentions_generic(self: &mut Self, ty: TypeId, depth: i32) bool {
         if ty == TYPE_NONE || depth > 6 {
             return false;
@@ -2045,6 +2149,9 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Report call arguments passed to invariant `&mut` parameters whose borrows could be swapped into
+
+    /// longer-lived storage. `skip` leading params are the receiver.
     pub fn tc_check_invariant_args(
         self: &mut Self,
         fmod: ModuleId,
@@ -2098,6 +2205,9 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Report call arguments that violate a `T: 'static` bound on the callee's generic params. `skip`
+
+    /// leading params are the receiver.
     pub fn tc_check_type_outlives_bounds(
         self: &mut Self,
         fmod: ModuleId,
@@ -2119,7 +2229,7 @@ extend tc::TypeChecker {
             if !self.tc_generic_has_static_bound(fmod, fdecl, g) {
                 continue;
             }
-            // every parameter declared as exactly this type variable must receive a borrow-free type
+            // Every parameter declared as exactly this type variable must receive a borrow-free type.
             for pi in 0..params.len {
                 if pi < skip {
                     continue;
@@ -2163,6 +2273,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// True when generic param `g` of function `(fmod, fdecl)` carries a `'static` bound.
     pub fn tc_generic_has_static_bound(self: &mut Self, fmod: ModuleId, fdecl: NodeId, g: NodeId) bool {
         let fa = self.mod_ast(fmod);
         let bnds = fa.at_const(g).as_data.generic_param.bounds;
@@ -2196,6 +2307,9 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// True when method `md`'s parameter `idx` is a bare type variable the receiver instantiates with a
+
+    /// borrow-carrying type, so the argument must outlive the receiver.
     pub fn tc_param_shares_recv_region(self: &mut Self, md: DefId, recv_ty: TypeId, idx: i32, arg: NodeId) bool {
         let fa = self.mod_ast(md.module);
         let fnn = fa.at_const(md.node);
@@ -2208,7 +2322,7 @@ extend tc::TypeChecker {
             return false;
         }
         // The DECLARED param type must be a bare type variable (`value: T`), not `&T` or a concrete
-        // type -- that is what shares its region with the container's elements. `x: &T` (as in
+        // type: that is what shares its region with the container's elements. `x: &T` (as in
         // `contains`) reads through a fresh reference and is excluded here.
         let pt = self.lower_type_in(md.module, ptyn);
         if pt == TYPE_NONE || self.type_at(pt).kind != TypeKind::TYPE_GENERIC {
@@ -2227,15 +2341,15 @@ extend tc::TypeChecker {
         }
         // Receiver-inherited type variable: is it a borrow-carrying type in THIS instantiation?
         // A capturing closure argument counts even when its substituted type is `dyn fn` (which
-        // erases the captured borrow) -- the closure VALUE carries a borrow of its captured referent,
-        // and storing it as an element ties that referent to the container just as `push(&local)` does.
+        // erases the captured borrow): the closure VALUE carries a borrow of its captured referent,
+        // and storing it as an element ties that referent to the container exactly as `push(&local)` does.
         let subst = self.tc_method_param(recv_ty, md, idx);
         return self.tc_carries_borrow(subst) || arg != NODE_NONE && self.tc_expr_is_closure(arg);
     }
 
     /// Is `e` a closure literal (possibly wrapped in `move`/`unsafe`)? Store sites use this to decide
     /// whether the RHS may have re-exposed captured borrows (bc_closure) that must be tied to the
-    /// destination's region -- the closure's own stored type is `dyn fn` and cannot carry that borrow.
+    /// destination's region: the closure's own stored type is `dyn fn` and cannot carry that borrow.
     pub fn tc_expr_is_closure(self: &Self, e0: NodeId) bool {
         let a = self.cur_ast();
         let mut e = e0;
@@ -2249,6 +2363,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// True when binding `root` has a reference type.
     pub const fn tc_root_is_reference(self: &mut Self, root: NodeId) bool {
         if root == NODE_NONE {
             return false;
@@ -2275,7 +2390,7 @@ extend tc::TypeChecker {
         return r;
     }
 
-    // Memoized per (ty, depth) -- the depth cutoff makes results depth-dependent -- but ONLY for
+    // Memoized per (ty, depth) (the depth cutoff makes results depth-dependent), but ONLY for
     // computations whose recursion never touched a TYPE_FUNCTION: a closure's answer reads the
     // capture analysis' mut_caps bits and the current module, both of which change under the walk.
     fn tc_carries_borrow_rec(self: &mut Self, ty: TypeId, depth: i32, pure: &mut bool) bool {
@@ -2309,18 +2424,21 @@ extend tc::TypeChecker {
             return true;
         }
         // A closure's ENVIRONMENT is where its borrows live, and none of it shows in its type: `fn(..)`
-        // erases the captures. So look at them directly -- a captured `&T` (or a value the capture
+        // erases the captures. So look at them directly: a captured `&T` (or a value the capture
         // analysis turned into an implicit `&mut`, i.e. a mutated capture) is a borrow of the enclosing
         // frame, and a closure holding one is not `'static` no matter what its signature says.
         if self.type_at(ty).kind == TypeKind::TYPE_FUNCTION {
-            *pure = false; // capture state and the current module change under the walk
+            // Capture state and the current module change under the walk.
+            *pure = false;
             let fmod = self.type_at(ty).module;
             if fmod != self.cur_module() {
-                return false; // a foreign closure cannot have captured one of our locals
+                // A foreign closure cannot have captured one of our locals.
+                return false;
             }
             let fdecl = self.type_at(ty).as_data.decl;
             if fdecl == NODE_NONE || self.cur_ast().at_const(fdecl).kind != NodeKind::NODE_CLOSURE {
-                return false; // a plain function pointer captures nothing
+                // A plain function pointer captures nothing.
+                return false;
             }
             let cl = self.cur_ast().at_const(fdecl).as_data.closure;
             if cl.mut_caps != 0 {
@@ -2358,13 +2476,14 @@ extend tc::TypeChecker {
         }
         let ma = self.mod_ast(om);
         if ma.lifetimes_of(od).len != 0 {
-            return true; // `struct S<'a>` borrows by construction
+            // `struct S<'a>` borrows by construction.
+            return true;
         }
         let is_tuple = ma.at_const(od).as_data.aggregate.is_tuple;
         let members = ma.at_const(od).as_data.aggregate.members;
         for i in 0..members.len {
             let mid = unsafe ma.list(members)[i as usize];
-            // tuple members are bare type nodes; named members carry the type in field.ty
+            // Tuple members are bare type nodes; named members carry the type in field.ty.
             let fnode = if ma.at_const(mid).kind == NodeKind::NODE_FIELD {
                 ma.at_const(mid).as_data.field.ty;
             } else if is_tuple {
@@ -2401,6 +2520,9 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Record the borrow a slicing result holds on `obj_n`: a fresh shared borrow of an owner, or the
+
+    /// inherited borrows of a view.
     pub fn tc_slice_result_borrows(self: &mut Self, obj_n: NodeId, result: TypeId) {
         if result == TYPE_NONE || !self.tc_carries_borrow(result) {
             return;
@@ -2414,7 +2536,7 @@ extend tc::TypeChecker {
     }
 
     /// Moving a whole borrow-carrying value out of one binding into another (`outer = inner`,
-    /// `let x = inner`) must carry the borrows the source holds to the destination -- otherwise the
+    /// `let x = inner`) must carry the borrows the source holds to the destination: otherwise the
     /// destination silently outlives them. Borrows freshly minted by a struct-literal or call RHS are
     /// already retied by the [bm, nborrows) scan at the store; this covers the identifier-RHS whole-value
     /// move that scan misses (the source holds the borrows from an earlier statement, not this one).
@@ -2451,6 +2573,7 @@ extend tc::TypeChecker {
         }
     }
 
+    /// The local binding a place expression is rooted in, or NODE_NONE (foreign items, paths, rvalues).
     pub fn tc_place_base_binding(self: &Self, place: NodeId) NodeId {
         let a = self.cur_ast();
         let pn = a.at_const(place);
@@ -2485,10 +2608,14 @@ extend tc::TypeChecker {
         return self.errors.emit_ordered(self.err_wm, at, len, msg);
     }
 
+    /// Attach a note to diagnostic `index` (see Errors::note_at).
     pub fn tc_region_note(self: &mut Self, index: usize, msg: String) {
         self.errors.note_at(index, msg);
     }
 
+    /// The name span of lifetime node `lt` (a NODE_LIFETIME or the generic param wrapping one); the
+
+    /// empty span for NODE_NONE.
     pub fn tc_lt_name(self: &Self, lt: NodeId) tok::Span {
         if lt == NODE_NONE {
             return tok::Span { start: 0, end: 0 };
@@ -2500,6 +2627,7 @@ extend tc::TypeChecker {
         return n.as_data.name.text;
     }
 
+    /// `tc_lt_name` for a node of module `m`.
     pub fn tc_lt_name_in(self: &Self, m: ModuleId, lt: NodeId) tok::Span {
         if lt == NODE_NONE {
             return tok::Span { start: 0, end: 0 };
@@ -2511,11 +2639,11 @@ extend tc::TypeChecker {
         return n.as_data.name.text;
     }
 
+    /// True for an empty or unset span.
     pub const fn tc_span_empty(self: &Self, s: tok::Span) bool {
         return s.end <= s.start;
     }
 
-    // ---- the flow walk ----
     // Mirrors the typechecker's evaluation order over an already-typed AST, firing only the
     // borrow/move/lifetime analyses. Types and resolutions are read back from the AST; nothing here
     // types anything.
@@ -2543,7 +2671,7 @@ extend tc::TypeChecker {
         // Lower first (the tape and the facts come from the lowerings), replay the tape (the same
         // helper calls the walk made, without traversing the expression tree), then analyze the
         // lowered bodies against the final side tables and emit the flow diagnostics. A body that
-        // fails to lower was reported as an error by bc_ir_lower -- nothing further to check.
+        // fails to lower was reported as an error by bc_ir_lower: nothing further to check.
         self.bc_unsafe_spans.truncate(0);
         let mut irbodies = Vector::<irl::Lowerer>::new();
         let quiet = self.bc_ir_lower(id, ctx, &mut irbodies);
@@ -2651,7 +2779,7 @@ extend tc::TypeChecker {
                 self.bc_return_post(node, bm);
             } else if k == ir::TP_CALL {
                 if aux == 1 {
-                    // `d.free()` on a dyn receiver: destruction consumes the value
+                    // `d.free()` on a dyn receiver: destruction consumes the value.
                     let obj = a.at_const(a.at_const(node).as_data.call.callee).as_data.member.object;
                     self.bc_free_recv = true;
                     self.tc_mark_move(obj);
@@ -2820,7 +2948,8 @@ extend tc::TypeChecker {
                 let vt2 = a.type_of(vid);
                 let vt2k = if_u8(vt2 != TYPE_NONE, self.type_at(vt2).kind as u8, 0xFF);
                 if !ret_ptr && vt2 != TYPE_NONE && vt2k != TypeKind::TYPE_POINTER as u8 && self.tc_carries_borrow(vt2) {
-                    continue; // the Core IR path reports carrying-return escapes
+                    // The Core IR path reports carrying-return escapes.
+                    continue;
                 }
                 let sp = a.at_const(vid).span;
                 let mut w = "local variable".ptr() as *const char;
@@ -2833,7 +2962,7 @@ extend tc::TypeChecker {
                     format("returning a pointer/reference to a {}, which does not outlive the call", diag::cstr(w)),
                 );
             }
-            // carrying returns: the loan solver owns the borrowed-from-local escape wording
+            // Carrying returns: the loan solver owns the borrowed-from-local escape wording.
         }
         self.borrow_release_to(bm);
     }
@@ -2883,7 +3012,7 @@ extend tc::TypeChecker {
         } else if binding_carries && !binding_is_ref && value != NODE_NONE {
             // Whole-value move of a borrow-carrying aggregate out of an identifier (`let x =
             // inner`): the RHS holds the borrows from an earlier statement, so no fresh borrow
-            // was minted to retie -- carry them across. A bare reference stays on the
+            // was minted to retie: carry them across. A bare reference stays on the
             // transfer-ref path below (copying a `&mut` must MOVE it, not duplicate it).
             self.bc_move_held_borrows(value, id, self.scope_depth as u16);
         } else {
@@ -2894,12 +3023,14 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Leave the loop entered at stack height `le` (a negative `le` means no loop was pushed).
     pub const fn bc_loop_pop(self: &mut Self, le: i32) {
         if le >= 0 {
             self.nloops = le as u32;
         }
     }
 
+    /// True when any element of tuple pattern `nm` binds a reference-typed value.
     pub fn bc_tuple_binds_reference(self: &mut Self, nm: NodeId) bool {
         let a = self.cur_ast();
         let eids = a.at_const(nm).as_data.pattern.children;
@@ -2912,6 +3043,9 @@ extend tc::TypeChecker {
         return false;
     }
 
+    /// Record the scope depth of every binding in `pat` and revive names the arm rebinds from the
+
+    /// scrutinee.
     pub fn bc_pattern_depths(self: &mut Self, pat: NodeId) {
         if pat == NODE_NONE {
             return;
@@ -2921,7 +3055,7 @@ extend tc::TypeChecker {
         if n.kind == NodeKind::NODE_PATTERN_NAME {
             self.tc_record_binding_depth(pat);
             // Entering the arm BINDS this name afresh from the scrutinee, exactly as a `let` with a value
-            // does -- so any move recorded for it is from a previous binding and no longer applies. Without
+            // does, so any move recorded for it is from an earlier binding and does not apply. Without
             // this, the second pass `bc_loop_body` makes over a loop sees a binding the first pass moved
             // (captured into an owning closure, say) and reports the arm's own use as a use-after-move.
             self.tc_unmark_move(pat);
@@ -2935,7 +3069,7 @@ extend tc::TypeChecker {
         }
     }
 
-    /// Assignment pre-pass: split-init enforcement and rebind tombstones -- everything the walk
+    /// Assignment pre-pass: split-init enforcement and rebind tombstones; everything the walk
     /// does BEFORE evaluating either side. Shared with the tape replay.
     pub fn bc_assign_pre(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
@@ -2973,7 +3107,7 @@ extend tc::TypeChecker {
             }
         }
         // A plain whole-local assignment re-initializes AFTER its RHS runs (real evaluation order),
-        // so `x = f(x)` moves x into f and the store revives it -- and an RHS that reads an
+        // so `x = f(x)` moves x into f and the store revives it, and an RHS that reads an
         // already-moved x is caught instead of being hidden by an early unmark.
         let selfref = plain && lhs_local;
         if lhs_local && !selfref {
@@ -2998,7 +3132,7 @@ extend tc::TypeChecker {
     }
 
     /// Assignment post-pass: retie the fresh borrows, then the store-escape and write-conflict
-    /// checks -- everything the walk does AFTER both sides. Shared with the tape replay.
+    /// checks: everything the walk does AFTER both sides. Shared with the tape replay.
     pub fn bc_assign_post(self: &mut Self, id: NodeId, bm: u32) {
         let a = self.cur_ast();
         let bd = a.at_const(id).as_data.binary;
@@ -3045,7 +3179,7 @@ extend tc::TypeChecker {
     /// borrow/move effects, result reborrows, and the call-boundary lifetime relation. Everything
     /// the walk does after evaluating receiver and arguments; shared with the tape replay.
     pub fn bc_call_post(self: &mut Self, id: NodeId, arg_bm: u32, arg_end: u32) {
-        // callee resolution is the one the typechecker computed for this call node -- recorded there
+        // Callee resolution is the one the typechecker computed for this call node: recorded there
         // (call_info) so the flow pass never re-derives generic instantiation or receiver skip and can
         // never disagree with it.
         let packed = self.bc_call_info(id);
@@ -3064,7 +3198,7 @@ extend tc::TypeChecker {
         let fa = self.mod_ast(md.module);
         let params = fa.at_const(md.node).as_data.function.params;
         let returns = fa.at_const(md.node).as_data.function.returns;
-        // ref->ptr coercion at an argument erases the borrow
+        // A ref->ptr coercion at an argument erases the borrow.
         for i in 0..args.len {
             let pi = i + skip;
             if pi >= params.len {
@@ -3080,14 +3214,14 @@ extend tc::TypeChecker {
                 self.borrow_erase_origin(aid);
             }
         }
-        // receiver borrow/move effects, with this call's own arg borrows two-phase exempted
+        // Receiver borrow/move effects, with this call's own arg borrows two-phase exempted.
         if recv_n != NODE_NONE && skip == 1 {
             let saved_tp = self.tc_twophase_wm;
             self.tc_twophase_wm = arg_bm;
             self.check_call_receiver(callee_id, md.module, params, returns);
             self.tc_twophase_wm = saved_tp;
         }
-        // a result that carries a borrow pins (or reborrows through) its receiver
+        // A result that carries a borrow pins (or reborrows through) its receiver.
         let ret = a.type_of(id);
         let ret_kind = if_u8(ret != TYPE_NONE, self.type_at(ret).kind as u8, 0xFF);
         if recv_n != NODE_NONE && skip == 1 && ret != TYPE_NONE && ret_kind != TypeKind::TYPE_REFERENCE as u8 && self.tc_carries_borrow(
@@ -3109,7 +3243,7 @@ extend tc::TypeChecker {
         // Call-site PRECISION: the signature is verified modularly (tc_check_return_lifetime), so the
         // result borrows ONLY the arguments whose lifetime the return type names. Release the transient
         // borrows of arguments that do not flow into the result, instead of conservatively tying every
-        // argument to it -- this is what makes `fn first<'a,'b>(x:&'a,y:&'b) &'a { x }` usable with a
+        // argument to it: this is what makes `fn first<'a,'b>(x:&'a,y:&'b) &'a { x }` usable with a
         // short-lived second argument.
         if ret != TYPE_NONE && self.tc_carries_borrow(ret) && recv_n == NODE_NONE {
             let rtn = if_node(returns.len > 0, unsafe fa.list(returns)[0], NODE_NONE);
@@ -3120,7 +3254,7 @@ extend tc::TypeChecker {
     /// Is `md`'s result lifetime fully attributable to bare-parameter returns? Only then has the modular
     /// return check verified exactly which parameters the result borrows, so a caller may release the
     /// non-flowing arguments. A return of a local, a call result, or a value laundered through a local
-    /// is NOT attributable -- the signature may be dishonoured there, so the caller stays conservative.
+    /// is NOT attributable: the signature may be dishonoured there, so the caller stays conservative.
     pub fn tc_result_attributable(self: &mut Self, md: DefId) bool {
         let key = md.module as u64 << 32 | md.node as u64;
         switch self.attributable_memo.get(&key) {
@@ -3129,7 +3263,7 @@ extend tc::TypeChecker {
             },
             None => {},
         };
-        // memoize a provisional TRUE first so a recursive body cannot loop.
+        // Memoize a provisional TRUE first so a recursive body cannot loop.
         self.attributable_memo.insert(key, true);
         let fa = self.mod_ast(md.module);
         let body = fa.at_const(md.node).as_data.function.body;
@@ -3138,6 +3272,9 @@ extend tc::TypeChecker {
         return ok;
     }
 
+    /// True when every `return` reachable in `node` returns a value whose borrows attribute to the
+
+    /// function's inputs (depth-bounded, conservative).
     pub fn tc_scan_returns_attributable(self: &mut Self, m: ModuleId, node: NodeId, depth: i32) bool {
         if node == NODE_NONE || depth > 64 {
             return true;
@@ -3150,11 +3287,11 @@ extend tc::TypeChecker {
                 for i in 0..vals.len {
                     let vid = unsafe fa.list(vals)[i as usize];
                     let vt = fa.type_of(vid);
-                    // an owned (borrow-free) result attributes to nothing -- fine to release all args.
+                    // An owned (borrow-free) result attributes to nothing: fine to release all args.
                     if vt != TYPE_NONE && !self.tc_carries_borrow(vt) {
                         continue;
                     }
-                    // a borrow-carrying result must be a bare parameter for the modular check to have
+                    // A borrow-carrying result must be a bare parameter for the modular check to have
                     // pinned exactly which lifetimes it carries.
                     if self.tc_returned_param_typenode_in(m, vid) == NODE_NONE {
                         return false;
@@ -3231,7 +3368,7 @@ extend tc::TypeChecker {
     /// Tombstone the transient, UNSTORED borrows of arguments that do not flow into the call's result,
     /// so the enclosing let/assign ties the result to only the flowing arguments. Sound because the
     /// signature was verified: a param flows iff the return type names one of the lifetimes its type
-    /// carries. Only borrows still `binding == NONE` are touched -- anything relate_call tied to a
+    /// carries. Only borrows still `binding == NONE` are touched: anything relate_call tied to a
     /// storage keeps its binding and is left alone.
     pub fn relate_result_precision(
         self: &mut Self,
@@ -3264,7 +3401,8 @@ extend tc::TypeChecker {
             }
         }
         if self.tc_span_empty(dest) && nref != 1 {
-            return; // cannot pin the flowing input -- keep the conservative all-args tie
+            // Cannot pin the flowing input: keep the conservative all-args tie.
+            return;
         }
         // A param flows into the result if the return type names a lifetime its type carries (or it is
         // the single elided input). Collect the flowing arguments' referents first.
@@ -3312,7 +3450,8 @@ extend tc::TypeChecker {
                 }
             }
             if shared {
-                continue; // same referent also flows -- do not release
+                // Same referent also flows: do not release.
+                continue;
             }
             for bi in arg_bm..arg_end {
                 if unsafe self.borrows[bi as usize].binding == NODE_NONE && unsafe self.borrows[bi as usize].root == referent {
@@ -3323,7 +3462,7 @@ extend tc::TypeChecker {
     }
 
     /// Unified call-boundary lifetime relation. A parameter (or the method receiver) can denote STORAGE
-    /// that outlives the call -- the receiver's container, or a `&mut C<..>` referent. Any parameter
+    /// that outlives the call: the receiver's container, or a `&mut C<..>` referent. Any parameter
     /// sharing a type variable or named lifetime with that storage's contents has its argument flow in,
     /// so the argument's borrows are tied to (and must outlive) the storage. ONE storage x consumer
     /// enumeration replaces the two per-shape store hooks; 'static bounds and &mut invariance stay
@@ -3542,7 +3681,7 @@ extend tc::TypeChecker {
             if cty == TYPE_NONE || is_mut || !self.tc_type_is_free(cty) {
                 continue;
             }
-            // capture-of-moved is IR-owned (CAT_C_CAP)
+            // Capture-of-moved is IR-owned (CAT_C_CAP).
             for f in 0..self.icx.nclos {
                 if self.tc_capture_index(unsafe self.icx.clos_stack[f as usize], cid) >= 0 {
                     let sp = a.at_const(id).span;
@@ -3559,7 +3698,8 @@ extend tc::TypeChecker {
                     unsafe self.borrows[b as usize],
                     id,
                 ) {
-                    self.borrow_tombstone_at(b); // capture-while-borrowed is IR-owned
+                    // Capture-while-borrowed is IR-owned.
+                    self.borrow_tombstone_at(b);
                 }
             }
             if self.nmoved < 1024 {
@@ -3582,7 +3722,7 @@ extend tc::TypeChecker {
             }
         }
         // A MUTATED capture of a plain local (`mut_caps` bit set, not a reference/pointer binding)
-        // is an implicit `&mut` of that local -- the env holds a pointer to it. Give the closure
+        // is an implicit `&mut` of that local: the env holds a pointer to it. Give the closure
         // value a mutable borrow rooted at the local so storing or returning it past the local's
         // scope is caught exactly like an explicit `&local` capture; a synchronously-consumed
         // closure never ties the borrow to an outer place, so it stays fine.
@@ -3597,20 +3737,24 @@ extend tc::TypeChecker {
             }
             let ck = self.type_at(cty).kind;
             if ck == TypeKind::TYPE_REFERENCE || ck == TypeKind::TYPE_POINTER {
-                continue; // a reference/pointer binding's own borrow is re-exposed above
+                // A reference/pointer binding's own borrow is re-exposed above.
+                continue;
             }
             self.borrow_push(cid, BORROW_MUT, cid, id);
         }
     }
 
+    /// Check a method call's receiver: reject a reference-returning method on an owned temporary and
+
+    /// tie the returned borrow to the receiver.
     pub fn check_call_receiver(self: &mut Self, callee_id: NodeId, fmod: ModuleId, params: NodeList, returns: NodeList) {
         let a = self.cur_ast();
         let mem = a.at_const(callee_id).as_data.member.member;
         let recv = a.at_const(callee_id).as_data.member.object;
         // A method returning a reference borrows its receiver (elision). If the receiver is a
-        // TEMPORARY (an rvalue -- a call/constructor result, not a named place), the returned
+        // TEMPORARY (an rvalue: a call/constructor result, not a named place), the returned
         // reference would outlive the temporary: today the temporary is kept alive to back it but
-        // never freed (leak), and any other lowering would dangle. Reject it -- bind the receiver to
+        // never freed (leak), and any other lowering would dangle. Reject it: bind the receiver to
         // a variable first. (`self`-by-value methods return an owned value, not a borrow of a temp.)
         let rvk = self.type_at(a.type_of(recv)).kind;
         let recv_is_owned_temp = !self.is_place(recv) && rvk != TypeKind::TYPE_REFERENCE && rvk != TypeKind::TYPE_POINTER;
@@ -3711,6 +3855,7 @@ extend tc::TypeChecker {
             }
         }
     }
+    /// The lifetime name written on reference type node `tyn`, or the empty span.
     pub fn tc_ref_typenode_lt(self: &Self, tyn: NodeId) tok::Span {
         if tyn == NODE_NONE {
             return tok::Span { start: 0, end: 0 };

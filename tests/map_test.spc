@@ -23,8 +23,10 @@ fn insert_get_len() {
 fn overwrite() {
     let mut m = Map::<i32, i32>::new();
     m.insert(1, 10);
-    m.insert(1, 111); // same key
-    assert_eq(m.len(), 1); // no growth on overwrite
+    // Same key.
+    m.insert(1, 111);
+    // No growth on overwrite.
+    assert_eq(m.len(), 1);
     let k1: i32 = 1;
     assert(*m.get(&k1).unwrap() == 111, "value overwritten");
 }

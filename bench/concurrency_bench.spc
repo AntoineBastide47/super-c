@@ -1,5 +1,5 @@
 // M7's concurrency lanes: what the runtime costs at HIGH TASK COUNTS, in the three shapes that stress
-// different parts of it. Run with `super-c bench` (the bench profile, -O2 -flto -- a benchmark built through
+// different parts of it. Run with `super-c bench` (the bench profile, -O2 -flto: a benchmark built through
 // the script path would compile at -O0 and measure nothing).
 //
 //   no-io    N tasks that only compute and yield  -> the scheduler alone: spawn, switch, run-queue, stealing
@@ -10,7 +10,7 @@
 // built around (each task reads 10 bytes from /dev/urandom and writes them to /dev/null), so our number can
 // be put next to Go's goroutines, Rust's OS threads, tokio's spawn_blocking and tokio's block_in_place
 // without arguing about what was measured. `block_in_place` is the interesting one: it does not move the
-// closure to a pool, it moves the OTHER tasks off the worker and blocks in place -- the strategy Go uses for
+// closure to a pool, it moves the OTHER tasks off the worker and blocks in place: the strategy Go uses for
 // blocking syscalls, and the one we would have to adopt to close that lane.
 //
 // Every lane reports the same distribution as the transpile bench, plus allocations and peak RSS: for a task
@@ -32,7 +32,7 @@ const TASKS: i64 = 1000; // concurrent tasks per iteration, as in the comparison
 const ITERS: i32 = 20; // iterations per lane (the comparison runs 1000; 20 keeps `bench` interactive)
 const YIELDS: i64 = 10; // how many times a compute task hands the worker back
 
-// A compute task: touch some memory and yield, so the scheduler actually has to move it around rather than
+// A compute task: touch some memory and yield, so the scheduler has to move it around rather than
 // running it to completion the moment it starts.
 fn compute_task(rounds: i64) i64 {
     let mut acc: i64 = 0;
@@ -94,7 +94,7 @@ fn one_iteration(io_share: i64) f64 {
 }
 
 // One lane, driven by the Bencher: it owns the warm-up, the repetition and the statistics, so a lane here
-// is just "what one round does" plus the two facts the timings alone would not carry -- how many tasks a
+// is "what one round does" plus the two facts the timings alone would not carry: how many tasks a
 // round runs, and how many allocations each one cost.
 fn run_lane(b: &mut bench::Bencher, io_share: i64) {
     b.each(TASKS);
@@ -114,6 +114,7 @@ fn run_lane(b: &mut bench::Bencher, io_share: i64) {
 }
 
 @bench
+/// Benchmark lane: compute-only tasks.
 pub fn no_io(b: &mut bench::Bencher) {
     run_lane(b, 0);
 }
@@ -122,12 +123,14 @@ pub fn no_io(b: &mut bench::Bencher) {
 // same number against, so these two lanes measure nothing there rather than measuring a different thing.
 @platform(macos | linux)
 @bench
+/// Benchmark lane: I/O-parking tasks only.
 pub fn io_only(b: &mut bench::Bencher) {
     run_lane(b, 4);
 }
 
 @platform(macos | linux)
 @bench
+/// Benchmark lane: half compute, half I/O.
 pub fn mixed(b: &mut bench::Bencher) {
     run_lane(b, 2);
 }

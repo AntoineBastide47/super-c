@@ -119,13 +119,13 @@ pub enum TokenType {
     Launch,
     Select,
     // Contextual for-modifiers: the LEXER fuses `inline`/`parallel` into these only when the next
-    // word is `for`; everywhere else both spellings stay ordinary identifiers (std::parallel!).
+    // word is `for`; everywhere else both spellings stay ordinary identifiers (std::parallel!)
     InlineFor,
     ParallelFor,
     // Matchertext literals (`M"(...)"`, delimiters () [] {}): content is verbatim, matchers must
     // match. A whole literal with no interpolation holes is one MatchertextLiteral token; an
     // interpolating literal (`M{}"(a {hole} b)"`) lexes as Begin, ordinary hole tokens, Mid...,
-    // End -- the delimiter chain is re-read from the Begin token's text.
+    // End; the delimiter chain is re-read from the Begin token's text.
     MatchertextLiteral,
     MatchertextBegin,
     MatchertextMid,
@@ -133,6 +133,7 @@ pub enum TokenType {
 }
 
 extend TokenType {
+    /// The variant's spelling, for diagnostics and AST dumps.
     pub const fn name(self: Self) str<'static> {
         return switch self {
             Identifier => "Identifier",

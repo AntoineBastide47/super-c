@@ -1,5 +1,5 @@
 // The shared pattern compiler: matrix usefulness drives exhaustiveness and
-// unreachable-arm verdicts, and the decision tree drives Core IR match lowering. The legacy
+// unreachable-arm verdicts, and the decision tree drives Core IR match lowering. The sequential walker's
 // verdicts are pinned by tests/typechecker_test.spc::switch_exhaustiveness; this file pins the
 // matrix's added precision and the engine's direct answers.
 import tests::harness as h;
@@ -11,7 +11,7 @@ import pattern::pattern as pat;
 
 @test
 fn deep_split_coverage_is_exhaustive() {
-    // The legacy walker demanded a whole-variant cover per arm; the matrix proves the split
+    // The sequential walker demanded a whole-variant cover per arm; the matrix proves the split
     // covers Some entirely. A reviewed precision improvement, kept deliberately.
     h::expect_ok(
         "payload split across arms covers the variant",
@@ -90,27 +90,27 @@ fn engine_over(src: str, probe_arm: i64) bool {
 
 @test
 fn usefulness_verdicts() {
-    // integers stay never-complete: the catch-all is reachable behind any literal set
+    // Integers stay never-complete: the catch-all is reachable behind any literal set.
     assert(
         engine_over("fn f(n: i32) i32 { return switch n { 1 => 1, 2 => 2, _ => 0 }; }\n", 2),
         "catch-all reachable behind integer literals",
     );
-    // a duplicate literal arm is not
+    // A duplicate literal arm is not.
     assert(
         !engine_over("fn f(n: i32) i32 { return switch n { 1 => 1, 1 => 2, _ => 0 }; }\n", 1),
         "duplicate literal arm unreachable",
     );
-    // an arm behind a complete or-cover is not
+    // An arm behind a complete or-cover is not.
     assert(
         !engine_over("enum E { A, B }\nfn f(e: E) i32 { return switch e { A | B => 1, B => 2 }; }\n", 1),
         "arm behind a complete or-cover unreachable",
     );
-    // a complete variant switch leaves no wildcard useful
+    // A complete variant switch leaves no wildcard useful.
     assert(
         !engine_over("enum E { A, B(i32), C }\nfn f(e: E) i32 { return switch e { A => 0, B(x) => x, C => 2 }; }\n", -1),
         "complete variant switch exhaustive",
     );
-    // range coverage never proves integers complete (established diagnostics)
+    // Range coverage never proves integers complete (established diagnostics).
     assert(
         engine_over("fn f(n: u8) i32 { return switch n { 0..=255 => 1, _ => 0 }; }\n", -1) == false,
         "a catch-all row absorbs the wildcard probe",

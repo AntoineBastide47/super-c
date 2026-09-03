@@ -21,7 +21,8 @@ fn redundant_coalescing_cast_lint_and_fix() {
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
     let fr = p.run_raw(fargs.as_str());
-    assert(fr.ok()); // clean after the fix
+    // Clean after the fix.
+    assert(fr.ok());
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
     let fixed = loader::read_file(mp.as_str()).unwrap();
@@ -48,11 +49,12 @@ fn redundant_cast_lint_covers_all_implicits() {
     assert(r.out_has("'u8' converts to 'i64' implicitly here"));
     assert(r.out_has("'i32' converts to 'i64' implicitly here"));
     assert(r.out_has("'null' converts to '*mut i32' implicitly here"));
-    assert(!r.out_has("'&mut i32' converts to '*mut i32'")); // the unannotated-let cast is load-bearing: quiet
+    // The unannotated-let cast is load-bearing: quiet.
+    assert(!r.out_has("'&mut i32' converts to '*mut i32'"));
 }
 
 // `--const`: the deep (all-paths) CTFE scan flags functions provably evaluable at compile
-// time -- through branches, matches and statically-resolved method calls -- and stays silent on
+// time: through branches, matches and statically-resolved method calls, and stays silent on
 // loops, extern calls, recursion, and declared `const fn`s. Off by default (no warning without the
 // flag).
 @test
@@ -67,7 +69,8 @@ fn const_suggestion_lint() {
     args.push_str(root);
     args.push_str("/main.spc\"");
     let r = p.run_raw(args.as_str());
-    assert(r.exit != 0); // warnings exit 1, compiler-warning semantics
+    // Warnings exit 1, compiler-warning semantics.
+    assert(r.exit != 0);
     assert(r.out_has("function 'norm' can be declared 'const fn'"));
     assert(r.out_has("function 'branchy' can be declared 'const fn'"));
     assert(r.out_has("function 'use_method' can be declared 'const fn'"));
@@ -77,7 +80,7 @@ fn const_suggestion_lint() {
     assert(!r.out_has("'rec'"));
     assert(!r.out_has("'main'"));
 
-    // off by default: the same file lints clean
+    // Off by default: the same file lints clean.
     let mut dargs = String::from_str("lint \"");
     dargs.push_str(root);
     dargs.push_str("/main.spc\"");
@@ -85,7 +88,7 @@ fn const_suggestion_lint() {
     assert_eq(d.exit, 0);
     assert(!d.out_has("can be declared 'const fn'"));
 
-    // `--fix` inserts `const ` before the `fn` keyword; the re-lint fixpoint then reports nothing
+    // `--fix` inserts `const ` before the `fn` keyword; the re-lint fixpoint then reports nothing.
     let mut fargs = String::from_str("lint --fix --const \"");
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
@@ -96,16 +99,18 @@ fn const_suggestion_lint() {
     let fixed = loader::read_file(mp.as_str()).unwrap();
     assert(fixed.as_str().contains("const fn branchy"));
     assert(fixed.as_str().contains("const fn use_method"));
-    assert(fixed.as_str().contains("const fn norm")); // extend member
+    // Extend member.
+    assert(fixed.as_str().contains("const fn norm"));
     assert(!fixed.as_str().contains("const fn looping"));
     assert(!fixed.as_str().contains("const fn prints"));
     assert(!fixed.as_str().contains("const fn rec"));
     assert(!fixed.as_str().contains("const fn main"));
-    assert(!fixed.as_str().contains("const const")); // `already` was const before the fix
+    // `already` was const before the fix.
+    assert(!fixed.as_str().contains("const const"));
 }
 
 // Ownership is DERIVED for structs and enums (their members' frees are synthesized), so plain
-// aggregates lint clean -- but a UNION cannot derive (only the author knows the active member):
+// aggregates lint clean, but a UNION cannot derive (only the author knows the active member):
 // an owning union without an explicit Free impl is an error, with no machine fix.
 @test
 fn union_free_lint() {
@@ -121,8 +126,10 @@ fn union_free_lint() {
     let d = p.run_raw(dargs.as_str());
     assert(d.exit != 0);
     assert(d.out_has("union 'Bad' has owning fields ('s') but no 'free'"));
-    assert(!d.out_has("'Derived'")); // structs derive: never flagged
-    assert(!d.out_has("union 'Good'")); // explicit impl satisfies the rule
+    // Structs derive: never flagged.
+    assert(!d.out_has("'Derived'"));
+    // Explicit impl satisfies the rule.
+    assert(!d.out_has("union 'Good'"));
 }
 
 // The local-analysis lints: unnecessary `mut`, back-to-back dead stores, unused loop labels,
@@ -144,7 +151,8 @@ fn local_analysis_lints() {
     assert(r.exit != 0);
     assert(r.out_has("'extra' does not need to be mutable"));
     assert(!r.out_has("'kept' does not need"));
-    assert(!r.out_has("'v' does not need")); // mutated: the dead store still requires mut
+    // Mutated: the dead store still requires mut.
+    assert(!r.out_has("'v' does not need"));
     assert(r.out_has("value assigned to 'v' is overwritten before it is read"));
     assert(r.out_has("unused label ''outer'"));
     assert(!r.out_has("''used'"));
@@ -156,14 +164,19 @@ fn local_analysis_lints() {
     let mut fargs = String::from_str("lint --fix \"");
     fargs.push_str(root);
     fargs.push_str("/main.spc\"");
-    p.run_raw(fargs.as_str()); // report-only findings remain, so the final pass still exits 1
+    // Report-only findings remain, so the final pass still exits 1.
+    p.run_raw(fargs.as_str());
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
     let fixed = loader::read_file(mp.as_str()).unwrap();
-    assert(fixed.as_str().contains("let extra = a;")); // mut dropped
-    assert(fixed.as_str().contains("let mut kept = a;")); // mut kept
-    assert(fixed.as_str().contains("let b = a;")); // *& dropped
-    assert(fixed.as_str().contains("let c = r;")); // &* dropped
+    // Mut dropped.
+    assert(fixed.as_str().contains("let extra = a;"));
+    // Mut kept.
+    assert(fixed.as_str().contains("let mut kept = a;"));
+    // *& dropped.
+    assert(fixed.as_str().contains("let b = a;"));
+    // &* dropped.
+    assert(fixed.as_str().contains("let c = r;"));
 }
 
 // The driver lints: unused imports (fixable), never-read private fields, unused tagged-enum
@@ -196,13 +209,14 @@ fn driver_lints() {
     let mut mp = String::from_str(root);
     mp.push_str("/main.spc");
     let fixed = loader::read_file(mp.as_str()).unwrap();
-    assert(!fixed.as_str().contains("import stdio;")); // unused import deleted
+    // Unused import deleted.
+    assert(!fixed.as_str().contains("import stdio;"));
     assert(fixed.as_str().contains("import string as cstring;"));
 }
 
 // The always-panics check (the `unconditional_panic` analog, an ERROR): a fully const-foldable
-// statement chain that DETERMINISTICALLY traps -- UB, or a panic reached inside a `const fn` (the
-// checked-accessor class) -- fails the build; explicit user `panic(..)` calls and anything
+// statement chain that DETERMINISTICALLY traps: UB, or a panic reached inside a `const fn` (the
+// checked-accessor class): fails the build; explicit user `panic(..)` calls and anything
 // runtime-dependent stay silent.
 @test
 fn always_panics_lint() {
@@ -211,7 +225,7 @@ fn always_panics_lint() {
         "main.spc",
         "fn main() i32 {\n    let y = 13i32;\n    let arr = Array::<i32, 512>::filled(&y);\n    let x = arr.at(1000000);\n    return *x;\n}\n",
     );
-    // an error on the PLAIN compile path, not only under `lint`
+    // An error on the PLAIN compile path, not only under `lint`.
     let c = p.compile("main.spc");
     assert(c.exit != 0, "a provable panic fails the build");
     assert(c.out_has("error: this statement always panics at runtime"));
@@ -224,7 +238,7 @@ fn always_panics_lint() {
     assert(r.exit != 0);
     assert(r.out_has("error: this statement always panics at runtime"));
 
-    // UB through folded locals errors too (its own wording: UB is not a panic)
+    // UB through folded locals errors too (its own wording: UB is not a panic).
     p.mkfile("ub.spc", "fn main() i32 {\n    let z = 0;\n    let q = 1 / z;\n    return q;\n}\n");
     let mut uargs = String::from_str("lint \"");
     uargs.push_str(root);
@@ -233,7 +247,7 @@ fn always_panics_lint() {
     assert(u.exit != 0);
     assert(u.out_has("error: this statement is undefined behavior when executed: division by zero"));
 
-    // silent: an explicit panic helper (intent), a runtime-dependent index, and a guard that folds false
+    // Silent: an explicit panic helper (intent), a runtime-dependent index, and a guard that folds false.
     p.mkfile(
         "quiet.spc",
         "fn die(msg: str) {\n    panic(msg);\n}\n\nfn with_param(i: usize) i32 {\n    let a = [1, 2, 3];\n    return unsafe a[i];\n}\n\nfn main() i32 {\n    let ok = [1, 2, 3];\n    let v = ok[1];\n    if v > 5 {\n        die(\"big\");\n    }\n    return with_param(0) + v;\n}\n",

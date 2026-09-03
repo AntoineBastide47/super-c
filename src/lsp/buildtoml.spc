@@ -1,6 +1,6 @@
 // The manifest half of the language server: `build.toml` gets diagnostics, key/section completion and
 // hover, from the SAME parser and validator the build runs (bsys::parse_check). Nothing here re-states
-// the schema's rules -- a manifest key that the build accepts is a key the editor accepts, because both
+// the schema's rules: a manifest key that the build accepts is a key the editor accepts, because both
 // ask the same function. Only the documentation strings below are the editor's own.
 
 import build_system::manifest as bsys;
@@ -159,7 +159,7 @@ extend Item as Free {
 }
 
 /// What may be written at `at`: section names inside a `[...]` header, else the keys of the section in
-/// force. Already-present keys are not filtered out -- a duplicate is the validator's business, and
+/// force. Already-present keys are not filtered out: a duplicate is the validator's business, and
 /// hiding a key the cursor is currently retyping would be worse.
 pub fn completions(src: str, at: usize) Vector<Item> {
     let mut out = Vector::<Item>::new();

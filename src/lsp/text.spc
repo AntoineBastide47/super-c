@@ -1,6 +1,6 @@
 // Text position mapping and URI conversion for the LSP. The compiler speaks byte offsets; LSP positions
-// are (line, character) with character counted in UTF-16 code units -- the walk below converts between
-// them (1 unit for BMP scalars, 2 for the 4-byte astral plane).
+// are (line, character) with character counted in UTF-16 code units (1 unit per BMP scalar, 2 per 4-byte
+// astral scalar).
 
 /// An LSP position: 0-based line, `character` counted in UTF-16 code units (not bytes).
 pub struct Pos {
@@ -34,7 +34,8 @@ pub fn utf16_len(src: str, start: u32, end: u32) u32 {
             n += 1;
             i += 1;
         } else if b < 0xC0 {
-            i += 1; // stray continuation byte: zero width
+            // Stray continuation byte: zero width.
+            i += 1;
         } else if b < 0xE0 {
             n += 1;
             i += 2;
@@ -42,7 +43,8 @@ pub fn utf16_len(src: str, start: u32, end: u32) u32 {
             n += 1;
             i += 3;
         } else {
-            n += 2; // astral plane: a UTF-16 surrogate pair
+            // Astral plane: one UTF-16 surrogate pair.
+            n += 2;
             i += 4;
         }
     }
@@ -55,7 +57,7 @@ pub fn offset_to_pos(src: str, ls: &Vector<u32>, off: u32) Pos {
     if o as usize > src.len() {
         o = src.len() as u32;
     }
-    // largest line start <= o (ls is never empty: line 0 is always pushed)
+    // Largest line start <= o; ls is never empty because line 0 is always pushed.
     let mut lo: usize = 0;
     let mut hi = ls.len();
     while hi - lo > 1 {
@@ -133,8 +135,8 @@ pub fn uri_to_path(uri: str) String {
     let mut i: usize = 0;
     if uri.starts_with("file://") {
         i = 7;
-        // skip the (usually empty) authority up to the path's leading '/' -- but a drive letter there is
-        // part of the path, not a host, so consuming it would silently strip the drive
+        // Skip the (usually empty) authority up to the path's leading '/'. A drive letter there is part of
+        // the path, not a host; consuming it would strip the drive.
         if !(i + 1 < uri.len() && is_drive_letter(uri[i]) && uri[i + 1] == b':') {
             while i < uri.len() && uri[i] != b'/' {
                 i += 1;
@@ -172,7 +174,8 @@ pub fn path_to_uri(path: str) String {
     let mut out = String::with_capacity(path.len() + 8);
     out.push_str("file://");
     if path.len() != 0 && path[0] != b'/' {
-        out.push_byte(b'/'); // a drive path is still an absolute URI path: C:/x -> file:///C%3A/x
+        // A drive path is still an absolute URI path: C:/x -> file:///C%3A/x.
+        out.push_byte(b'/');
     }
     for i in 0..path.len() {
         let b = path[i];

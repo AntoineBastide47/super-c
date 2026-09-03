@@ -1,11 +1,11 @@
-// In-process compile driver for the self-hosted test suite -- the analog of tests/test_harness.h's
+// In-process compile driver for the self-hosted test suite: the analog of tests/test_harness.h's
 // `sc_compile`. Given a source STRING it runs the real selfhost pipeline (lexer -> parser -> resolver ->
 // typechecker) against a freshly-loaded std prelude and reports the user module's error count + first
 // message, so resolver/typechecker/errors/borrow tests can assert accept-vs-reject and diagnostics.
 //
 // The prelude is found at "std" relative to the CWD (the repo root, where `make selfhost-test` runs),
 // matching tests/test_harness.h's default SUPERC_STD_DIR. The snippet is loaded from memory via
-// loader::package_from_source as the LAST module (after the prelude, module id past it -- exactly like
+// loader::package_from_source as the LAST module (after the prelude, module id past it; exactly like
 // the C harness's sc_compile layout, so module-order-sensitive checks reproduce the C verdicts).
 import lexer::lexer as lex;
 import lexer::token as *;
@@ -27,17 +27,19 @@ import stdlib;
 import string as cstring;
 
 // `tmpfile` (an anonymous, auto-removed temp stream) is declared in <stdio.h>, which super_rt always
-// includes -- so a bare extern binding resolves without needing a header string.
+// includes, so a bare extern binding resolves without needing a header string.
 extern "C" {
     fn tmpfile() *mut stdio::FILE;
 }
 
+/// Pipeline stages `compile` can stop after.
 pub const STAGE_PARSE: i32 = 0;
 pub const STAGE_RESOLVE: i32 = 1;
 pub const STAGE_TYPECHECK: i32 = 2;
 
 // A stage result: how many errors the USER module produced, at which stage, and the first message text
 // (copied out before the compiler frees it). `ok()` is the accept/reject verdict the oracle asserts on.
+/// Outcome of an in-process compile: error count and the first message.
 pub struct Compiled {
     pub errors: usize,
     pub stage: i32,
@@ -45,10 +47,12 @@ pub struct Compiled {
 }
 
 extend Compiled {
+    /// True when no error was reported.
     pub const fn ok(self: &Self) bool {
         return self.errors == 0;
     }
     // Whether the first error message contains `needle` (matched as a substring).
+    /// True when the first diagnostic contains `needle`.
     pub fn msg_has(self: &Self, needle: str) bool {
         return cli::contains_str(&self.first[0], needle);
     }
@@ -69,6 +73,7 @@ const fn copy_msg(dst: *mut char, s: &String) {
 }
 
 // Run `src` through the pipeline up to `stop`, reporting the user module (index 0) diagnostics.
+/// Compile `src` in process through stage `stop` (STAGE_*), collecting diagnostics.
 pub fn compile(src: str, stop: i32) Compiled {
     let mut r = Compiled {};
 
@@ -136,6 +141,7 @@ pub fn compile(src: str, stop: i32) Compiled {
 
 // Lex + parse a source standalone (no package/prelude) and hand back the AST for shape inspection.
 // `errors` > 0 means the snippet failed to lex or parse. RAII frees the AST with the result.
+/// A parsed module kept alive for AST inspection (formatter path when trivia is kept).
 pub struct ParsedAst {
     pub errors: usize,
     pub ast: Ast,
@@ -153,6 +159,7 @@ pub fn parse_ast(src: str) ParsedAst {
 
 // The formatter's parse: `@derive` stays attribute trivia (no synthesized extends), exactly as
 // format_source parses.
+/// Parse `src` keeping comment tokens, as the formatter does.
 pub fn parse_ast_for_fmt(src: str) ParsedAst {
     return parse_ast_opt(src, false);
 }
@@ -178,6 +185,7 @@ fn parse_ast_opt(src: str, expand_derive: bool) ParsedAst {
 }
 
 // True if `src` fails to lex or parse (the parse-stage rejection oracle).
+/// True when parsing `src` reports an error.
 pub fn parse_has_error(src: str) bool {
     let mut s = String::from_str(src);
     let mut lx = lex::Lexer::new(&mut s, "");
@@ -195,6 +203,7 @@ pub fn parse_has_error(src: str) bool {
 // A stage result that also hands back the user module's (resolved/typed) AST for target inspection
 // (RAII frees it with the result); span text is looked up against the caller's own source literal,
 // which outlives this call.
+/// A typechecked module kept alive for AST inspection.
 pub struct CompiledAst {
     pub errors: usize,
     pub stage: i32,
@@ -237,6 +246,7 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
 
 // Inspection helpers over a returned AST (mirror tests/test_harness.h's th_* / ast_resolution).
 // The n-th node (0-based) of the given kind, in creation order; NODE_NONE if fewer than n+1 exist.
+/// The `nth` (0-based) node of `kind` in arena order, or NODE_NONE.
 pub fn nth_kind(a: &Ast, kind: NodeKind, nth: usize) NodeId {
     let mut seen: usize = 0;
     let mut id: NodeId = 1;
@@ -253,6 +263,7 @@ pub fn nth_kind(a: &Ast, kind: NodeKind, nth: usize) NodeId {
 }
 
 // True if node `id` is a NODE_IDENTIFIER whose source text equals `name` (a NUL-terminated cstring).
+/// True when identifier node `id` spells `name`.
 pub fn ident_is(a: &Ast, src: *const char, id: NodeId, name: *const char) bool {
     let nd = a.at_const(id);
     if nd.kind != NodeKind::NODE_IDENTIFIER {
@@ -268,7 +279,7 @@ pub fn ident_is(a: &Ast, src: *const char, id: NodeId, name: *const char) bool {
 }
 
 // Read a whole stream into a fresh NUL-terminated heap buffer (caller frees). Seeks to the end for the
-// length first, so it works both for a just-written temp stream and a freshly-opened file (position 0).
+// length first, so it works both for a freshly written temp stream and a freshly-opened file (position 0).
 fn read_stream(f: *mut stdio::FILE) *mut char {
     unsafe stdio::fflush(f);
     let _ = unsafe stdio::fseek(f, 0, stdio::SEEK_END);
@@ -286,8 +297,9 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
     return buf;
 }
 
-// The generated C for the user snippet (module 0's header + .c concatenated), for substring inspection --
+// The generated C for the user snippet (module 0's header + .c concatenated), for substring inspection:
 // the analog of tests/test_harness.h's sc_codegen. `code` is owned (call `.free()`).
+/// Outcome of emitting C in process: error count and the generated text.
 pub struct CompiledC {
     pub errors: usize,
     pub code: *mut char,
@@ -297,6 +309,7 @@ extend CompiledC {
     pub const fn ok(self: &Self) bool {
         return self.errors == 0;
     }
+    /// True when the emitted C contains `needle`.
     pub fn code_has(self: &Self, needle: str) bool {
         if self.code == null {
             return false;
@@ -385,7 +398,6 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
     return out;
 }
 
-// ---- compile-and-run: build a snippet into a real program and execute it (for behavior tests) ----------
 // Path scratch buffers (`{}` zero-fills; no `[v;N]` repeat literal).
 struct Path256 {
     pub b: [char; 256],
@@ -400,6 +412,7 @@ struct Path1024 {
 static mut R_SEQ: u64 = 0;
 
 // The captured result of compiling+running a snippet: whether it built, its exit code, and stdout+stderr.
+/// Outcome of compiling and running a snippet: whether it built, its exit code, and captured output.
 pub struct RunResult {
     pub built: bool,
     pub exit: i32,
@@ -433,17 +446,20 @@ fn rm_dir(dir: *const char) {
 
 // Build `src` into a standalone program via `super-c build`, run it, and capture stdout+stderr + exit code.
 // The compiler is $SUPERC (default "./super-c", matching the CWD=repo-root that `make selfhost-test` uses).
-// Each snippet gets its own temp dir (<tmp>/scr_<pid>_<seq>) so build trees never collide -- fork-per-test
+// Each snippet gets its own temp dir (<tmp>/scr_<pid>_<seq>) so build trees never collide: fork-per-test
 // safe. No shell is involved: the process runner binds the output file and applies `env` itself, which is
 // what lets these tests run on Windows.
+/// Build `src` as a program and run it, capturing stdout.
 pub fn compile_and_run(src: str) RunResult {
     return compile_and_run_env(src, "");
 }
 
 // As compile_and_run, but with `env` ("VAR=v " assignments, trailing space) prefixed to the run command.
+/// `compile_and_run` with `env` (space-separated NAME=VALUE) applied to the program.
 pub fn compile_and_run_env(src: str, env: str) RunResult {
     let mut r = RunResult { built: false, exit: -1, out: null };
-    unsafe R_SEQ = unsafe R_SEQ + 1; // process-local: one forked process per test, and the name carries the pid
+    // Process-local: one forked process per test, and the name carries the pid.
+    unsafe R_SEQ = unsafe R_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut dir = Path256 {};
     unsafe stdio::snprintf(
@@ -501,7 +517,8 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
 }
 
 // Build+run `src` and require it to terminate with exit code `code` (the analog of tests/codegen_run's
-// `sc_run_program(name, src, code, "")` -- the program signals its result via `exit(code)`).
+// `sc_run_program(name, src, code, "")`: the program signals its result via `exit(code)`).
+/// Assert that `src` builds and exits with `code`, naming `label` on failure.
 pub fn expect_exit(label: str, src: str, code: i32) {
     let r = compile_and_run(src);
     assert(r.built, label);
@@ -509,12 +526,14 @@ pub fn expect_exit(label: str, src: str, code: i32) {
 }
 
 // Require the snippet to compile cleanly AND its generated C to contain `needle`.
+/// Assert that `src` emits C containing `needle`.
 pub fn expect_c(label: str, src: str, needle: str) {
     let c = compile_c(src);
     assert(c.ok(), label);
     assert(c.code_has(needle), label);
 }
 // Require the snippet to compile cleanly AND its generated C to NOT contain `needle`.
+/// Assert that `src` emits C not containing `needle`.
 pub fn expect_c_absent(label: str, src: str, needle: str) {
     let c = compile_c(src);
     assert(c.ok(), label);
@@ -522,20 +541,24 @@ pub fn expect_c_absent(label: str, src: str, needle: str) {
 }
 
 // expect_ok / expect_err: the accept-vs-reject oracle for semantic tests.
+/// Assert that `src` typechecks without errors.
 pub fn expect_ok(label: str, src: str) {
     let c = compile(src, STAGE_TYPECHECK);
     assert(c.ok(), label);
 }
+/// Assert that `src` resolves without errors.
 pub fn expect_resolve_ok(label: str, src: str) {
     let c = compile(src, STAGE_RESOLVE);
     assert(c.ok(), label);
 }
 // Reject at the given stage AND require the first message to contain `needle`.
+/// Assert that typechecking `src` reports an error containing `needle`.
 pub fn expect_err_msg(label: str, src: str, needle: str) {
     let c = compile(src, STAGE_TYPECHECK);
     assert(!c.ok(), label);
     assert(c.msg_has(needle), label);
 }
+/// Assert that resolving `src` reports an error containing `needle`.
 pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
     let c = compile(src, STAGE_RESOLVE);
     assert(!c.ok(), label);

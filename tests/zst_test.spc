@@ -1,9 +1,9 @@
 // Zero-sized-type elision (Phase 10.5): semantic size/alignment/offsets are unchanged while the
-// generated C carries NO storage for a ZST -- no empty struct definition, no member, no local, no
+// generated C carries NO storage for a ZST: no empty struct definition, no member, no local, no
 // parameter, no element bytes. These are end-to-end build+run oracles: each program checks the
 // SEMANTIC contract (sizes, drop counts, lengths, reference validity) that elision must preserve,
-// and the strict-C11 gates elsewhere prove the representation side. Every required ZST effect --
-// construction, moves, drops -- must run exactly once per logical value.
+// and the strict-C11 gates elsewhere prove the representation side. Every required ZST effect:
+// construction, moves, drops: must run exactly once per logical value.
 import tests::harness as h;
 
 @test
@@ -45,7 +45,7 @@ fn zst_box_and_map_and_set() {
 @test
 fn zst_arrays_construct_and_iterate() {
     // NOTE: [T; N] locals with Free elements refuse emission for MATERIAL elements too (a
-    // pre-existing drop gap) -- ZST arrays keep parity, so this covers trivially-droppable ones.
+    // pre-existing drop gap): ZST arrays keep parity, so this covers trivially-droppable ones.
     h::expect_exit(
         "[ZST; N] constructs and iterates by count",
         "struct Z {}\nfn main() i32 {\n    let a: [Z; 4] = [Z {}, Z {}, Z {}, Z {}];\n    let mut c = 0;\n    for _z in a {\n        c += 1;\n    }\n    if c != 4 { return 1; }\n    let r = &a;\n    let _ = r;\n    return 0;\n}\n",

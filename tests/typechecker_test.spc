@@ -341,11 +341,12 @@ fn interface_bounds() {
         "interface Writer { fn write(self: *mut Self) i32; fn flush(self: *mut Self) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self) i32 { return unsafe self.count; } }\nfn main() i32 { return 0; }\n",
         "missing method 'flush'",
     );
+    // Selfhost worded: "does not satisfy a where-clause bound".
     h::expect_err_msg(
         "where clause not satisfied",
         "interface Writer { fn write(self: *mut Self, n: i32) i32; }\nstruct Plain { pub x: i32 }\nfn use_w<T>(w: &mut T, n: i32) i32 where T: Writer { return w.write(n); }\nfn main() i32 { let mut p = Plain { x: 0 }; return use_w::<Plain>(&mut p, 1); }\n",
         "does not satisfy",
-    ); // selfhost worded: "does not satisfy a where-clause bound"
+    );
     h::expect_err_msg(
         "conditional extension: inner type lacks the bound",
         "interface Free { fn free(self: *mut Self) i32; }\nstruct Plain { pub n: i32 }\nstruct Box<T> { pub inner: T }\nextend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\nfn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\nfn main() i32 { let mut b = Box::<Plain> { inner: Plain { n: 1 } }; return dispose(&mut b); }\n",
@@ -676,8 +677,8 @@ fn bug_regressions() {
         "fn add2<T>(a: T, b: T) T { return a + b; }\nfn main() i32 { let n: i32 = add2::<i32>(1, 2); return n; }\n",
         "no 'add' method for this operator",
     );
-    // The bitwise operators report the same way, unary `~` included -- "requires an integer operand"
-    // would name the wrong problem for a type that simply has no such method.
+    // The bitwise operators report the same way, unary `~` included: "requires an integer operand"
+    // would name the wrong problem for a type that has no such method.
     h::expect_err_msg(
         "bitwise operator without method",
         "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; let b = P { x: 2 }; let c = a & b; return 0; }\n",
@@ -728,7 +729,7 @@ fn bug_regressions() {
     );
     // Enum-valued const generic parameters: the argument is a named constant descriptor, the value
     // participates in the type's identity, and the parameter folds in expression position. A DEFAULT on a
-    // const parameter fills an omitted argument -- `S` alone means `S<FB>`.
+    // const parameter fills an omitted argument: `S` alone means `S<FB>`.
     h::expect_exit(
         "enum-valued const generics with a default",
         "enum Fam { A, B }\nconst FA: Fam = Fam::A;\nconst FB: Fam = Fam::B;\nstruct S<const K: Fam = FB> { pub v: u64 }\nextend<const K: Fam> S<K> {\n    fn which(self: &Self) i32 {\n        if K == Fam::B { return 2; }\n        return 1;\n    }\n}\nfn main() i32 {\n    let a = S::<FA> { v: 1 };\n    let b: S = S { v: 2 };\n    return a.which() + b.which() - 3;\n}\n",
@@ -772,13 +773,13 @@ fn bug_regressions() {
         "too large to fit in a 64-bit integer",
     );
     // NOTE(divergence): tests/typechecker_test.c expects this REJECTED, but that verdict is specific to the
-    // C sc_compile package layout -- the standalone compiler (C and self-hosted) accepts `Wrap::<[i32;3]>`,
+    // C sc_compile package layout: the standalone compiler (C and self-hosted) accepts `Wrap::<[i32;3]>`,
     // so the in-process harness cannot reproduce the interning-order rejection. Case omitted.
 }
 
 @test
 fn switch_exhaustiveness() {
-    // selfhost worded exhaustiveness as "switch is not exhaustive: missing N variant" (counts, not named).
+    // Selfhost worded exhaustiveness as "switch is not exhaustive: missing N variant" (counts, not named).
     h::expect_err_msg(
         "switch missing a variant",
         "enum E { A, B, C }\nfn f(e: E) i32 { return switch e { A => 1, B => 2 }; }\n",
@@ -1184,7 +1185,7 @@ fn deref() {
     );
     // NOTE(divergence): tests/typechecker_test.c accepts this. The standalone compiler does too, but the
     // self-hosted typechecker, driven in-process, fails to infer `T` for `Box::new(String::from_str(..))`
-    // ("expected 'T', found 'String'") -- a cross-module assoc-fn inference gap this harness surfaces. Omitted.
+    // ("expected 'T', found 'String'"): a cross-module assoc-fn inference gap this harness surfaces. Omitted.
     h::expect_err_msg(
         "a by-value aggregate method never auto-derefs",
         "struct Inner { pub k: i32 }\nextend Inner { pub fn consume(self: Inner) i32 { return self.k; } }\nstruct W { pub inner: Inner }\nextend W { pub fn deref(self: &W) &Inner { return &self.inner; } }\nfn main() i32 { let w = W { inner: Inner { k: 1 } }; return w.consume(); }\n",
@@ -1348,8 +1349,8 @@ fn static_mut() {
     );
 }
 
-// An interface whose contract the compiler cannot check -- a raw pointer that must outlive the call, a lock
-// the caller must already hold -- has nowhere to say so unless the REQUIREMENT itself can be `unsafe`. The
+// An interface whose contract the compiler cannot check: a raw pointer that must outlive the call, a lock
+// the caller must already hold: has nowhere to say so unless the REQUIREMENT itself can be `unsafe`. The
 // mark then rides through the bound: a generic caller has to make the same promise the concrete one does.
 @test
 fn unsafe_interface_methods() {
@@ -1381,7 +1382,7 @@ fn unsafe_interface_methods() {
 
 // An interface method's `const`/`unsafe` are part of the requirement. The direction that matters is an
 // implementation MORE unsafe than its declaration: a caller through the bound sees the safe declaration,
-// promises nothing, and lands in an unsafe body -- the mark laundered away by the interface.
+// promises nothing, and lands in an unsafe body: the mark laundered away by the interface.
 @test
 fn interface_method_qualifiers() {
     h::expect_err_msg(
@@ -1434,8 +1435,8 @@ fn marker_conformance_requires_unsafe() {
 }
 
 // `UnsafeCell` hands out a `*mut T` from a SHARED borrow, so sharing one across threads is the definition of
-// a data race. The structural walk used to read through the cell to its payload and grant `Sync` for free,
-// which made every interior-mutable type shareable by accident -- including ones with no synchronisation at
+// a data race. A structural walk that read through the cell to its payload would grant `Sync` for free,
+// making every interior-mutable type shareable by accident: including ones with no synchronisation at
 // all. Now the cell stops the walk, and a type built on one has to say what makes it safe.
 @test
 fn unsafe_cell_is_not_sync() {
@@ -1470,7 +1471,7 @@ fn dyn_t() {
         "fn main() i32 { let x = dyn_cast::<i32>(0); return 0; }\n",
         "dyn_cast expects",
     );
-    // superinterface hierarchy: inherited dispatch, upcasts, bound satisfaction, name collisions
+    // Superinterface hierarchy: inherited dispatch, upcasts, bound satisfaction, name collisions.
     h::expect_ok(
         "dyn superinterface dispatch + upcast",
         "interface A { fn a(self: &Self) i32; }\ninterface B: A { fn b(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return 1; } }\nextend S as B { pub fn b(self: &S) i32 { return self.v; } }\nfn f(x: &dyn B) i32 { let up: &dyn A = x; return x.a() + x.b() + up.a(); }\nfn main() i32 { let s = S { v: 2 }; return f(&s); }\n",
@@ -1621,7 +1622,7 @@ fn array_literal_arity() {
 
 @test
 fn ref_pointer_coalescing() {
-    // implicit reference -> pointer, the five legal forms
+    // Implicit reference -> pointer, the five legal forms.
     h::expect_ok(
         "&mut T -> *mut T",
         "fn f(p: *mut i32) i32 { return unsafe *p; }\nfn main() i32 { let mut x = 1; return f(&mut x); }\n",
@@ -1639,13 +1640,13 @@ fn ref_pointer_coalescing() {
         "&mut T -> *const T",
         "fn f(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 { let mut x = 1; return f(&mut x); }\n",
     );
-    // a shared reference never coalesces to a mutable pointer
+    // A shared reference never coalesces to a mutable pointer.
     h::expect_err_msg(
         "&T -> *mut T rejected",
         "fn f(p: *mut i32) i32 { return unsafe *p; }\nfn main() i32 { let x = 1; return f(&x); }\n",
         "mismatched types",
     );
-    // pointer -> reference is never implicit
+    // Pointer -> reference is never implicit.
     h::expect_err_msg(
         "*const T -> &T rejected",
         "fn f(r: &i32) i32 { return *r; }\nfn main() i32 { let x = 1; let p: *const i32 = &x; return f(p); }\n",
@@ -1661,7 +1662,7 @@ fn ref_pointer_coalescing() {
         "fn f(r: &i32) i32 { return *r; }\nfn main() i32 { let mut x = 1; let p: *i32 = &mut x; return f(p); }\n",
         "mismatched types",
     );
-    // pointer -> reference casts demand an unsafe context
+    // Pointer -> reference casts demand an unsafe context.
     h::expect_err_msg(
         "ptr as ref outside unsafe",
         "fn f(r: &i32) i32 { return *r; }\nfn main() i32 { let x = 1; let p: *const i32 = &x; return f(p as &i32); }\n",
@@ -1687,7 +1688,7 @@ fn int_widening_matrix() {
         "implicit integer widenings",
         "fn s0(v: i16) i16 { return v; }\nfn s1(v: i32) i32 { return v; }\nfn s2(v: i64) i64 { return v; }\nfn s3(v: i16) i16 { return v; }\nfn s4(v: u16) u16 { return v; }\nfn s5(v: i32) i32 { return v; }\nfn s6(v: u32) u32 { return v; }\nfn s7(v: i64) i64 { return v; }\nfn s8(v: u64) u64 { return v; }\nfn s9(v: i32) i32 { return v; }\nfn s10(v: i64) i64 { return v; }\nfn s11(v: i32) i32 { return v; }\nfn s12(v: u32) u32 { return v; }\nfn s13(v: i64) i64 { return v; }\nfn s14(v: u64) u64 { return v; }\nfn s15(v: i64) i64 { return v; }\nfn s16(v: i64) i64 { return v; }\nfn s17(v: u64) u64 { return v; }\nfn main() i32 {\n    let x0: i8 = 1;\n    let r0 = s0(x0);\n    let x1: i8 = 1;\n    let r1 = s1(x1);\n    let x2: i8 = 1;\n    let r2 = s2(x2);\n    let x3: u8 = 1;\n    let r3 = s3(x3);\n    let x4: u8 = 1;\n    let r4 = s4(x4);\n    let x5: u8 = 1;\n    let r5 = s5(x5);\n    let x6: u8 = 1;\n    let r6 = s6(x6);\n    let x7: u8 = 1;\n    let r7 = s7(x7);\n    let x8: u8 = 1;\n    let r8 = s8(x8);\n    let x9: i16 = 1;\n    let r9 = s9(x9);\n    let x10: i16 = 1;\n    let r10 = s10(x10);\n    let x11: u16 = 1;\n    let r11 = s11(x11);\n    let x12: u16 = 1;\n    let r12 = s12(x12);\n    let x13: u16 = 1;\n    let r13 = s13(x13);\n    let x14: u16 = 1;\n    let r14 = s14(x14);\n    let x15: i32 = 1;\n    let r15 = s15(x15);\n    let x16: u32 = 1;\n    let r16 = s16(x16);\n    let x17: u32 = 1;\n    let r17 = s17(x17);\n    return 0;\n}\n",
     );
-    // and all 38 forbidden pairs, one mismatch diagnostic each:
+    // And all 38 forbidden pairs, one mismatch diagnostic each:
     let c = h::compile(
         "fn s0(v: u8) u8 { return v; }\nfn s1(v: u16) u16 { return v; }\nfn s2(v: u32) u32 { return v; }\nfn s3(v: u64) u64 { return v; }\nfn s4(v: i8) i8 { return v; }\nfn s5(v: i8) i8 { return v; }\nfn s6(v: u8) u8 { return v; }\nfn s7(v: u16) u16 { return v; }\nfn s8(v: u32) u32 { return v; }\nfn s9(v: u64) u64 { return v; }\nfn s10(v: i8) i8 { return v; }\nfn s11(v: u8) u8 { return v; }\nfn s12(v: i16) i16 { return v; }\nfn s13(v: i8) i8 { return v; }\nfn s14(v: u8) u8 { return v; }\nfn s15(v: i16) i16 { return v; }\nfn s16(v: u16) u16 { return v; }\nfn s17(v: u32) u32 { return v; }\nfn s18(v: u64) u64 { return v; }\nfn s19(v: i8) i8 { return v; }\nfn s20(v: u8) u8 { return v; }\nfn s21(v: i16) i16 { return v; }\nfn s22(v: u16) u16 { return v; }\nfn s23(v: i32) i32 { return v; }\nfn s24(v: i8) i8 { return v; }\nfn s25(v: u8) u8 { return v; }\nfn s26(v: i16) i16 { return v; }\nfn s27(v: u16) u16 { return v; }\nfn s28(v: i32) i32 { return v; }\nfn s29(v: u32) u32 { return v; }\nfn s30(v: u64) u64 { return v; }\nfn s31(v: i8) i8 { return v; }\nfn s32(v: u8) u8 { return v; }\nfn s33(v: i16) i16 { return v; }\nfn s34(v: u16) u16 { return v; }\nfn s35(v: i32) i32 { return v; }\nfn s36(v: u32) u32 { return v; }\nfn s37(v: i64) i64 { return v; }\nfn main() i32 {\n    let x0: i8 = 1;\n    let r0 = s0(x0);\n    let x1: i8 = 1;\n    let r1 = s1(x1);\n    let x2: i8 = 1;\n    let r2 = s2(x2);\n    let x3: i8 = 1;\n    let r3 = s3(x3);\n    let x4: u8 = 1;\n    let r4 = s4(x4);\n    let x5: i16 = 1;\n    let r5 = s5(x5);\n    let x6: i16 = 1;\n    let r6 = s6(x6);\n    let x7: i16 = 1;\n    let r7 = s7(x7);\n    let x8: i16 = 1;\n    let r8 = s8(x8);\n    let x9: i16 = 1;\n    let r9 = s9(x9);\n    let x10: u16 = 1;\n    let r10 = s10(x10);\n    let x11: u16 = 1;\n    let r11 = s11(x11);\n    let x12: u16 = 1;\n    let r12 = s12(x12);\n    let x13: i32 = 1;\n    let r13 = s13(x13);\n    let x14: i32 = 1;\n    let r14 = s14(x14);\n    let x15: i32 = 1;\n    let r15 = s15(x15);\n    let x16: i32 = 1;\n    let r16 = s16(x16);\n    let x17: i32 = 1;\n    let r17 = s17(x17);\n    let x18: i32 = 1;\n    let r18 = s18(x18);\n    let x19: u32 = 1;\n    let r19 = s19(x19);\n    let x20: u32 = 1;\n    let r20 = s20(x20);\n    let x21: u32 = 1;\n    let r21 = s21(x21);\n    let x22: u32 = 1;\n    let r22 = s22(x22);\n    let x23: u32 = 1;\n    let r23 = s23(x23);\n    let x24: i64 = 1;\n    let r24 = s24(x24);\n    let x25: i64 = 1;\n    let r25 = s25(x25);\n    let x26: i64 = 1;\n    let r26 = s26(x26);\n    let x27: i64 = 1;\n    let r27 = s27(x27);\n    let x28: i64 = 1;\n    let r28 = s28(x28);\n    let x29: i64 = 1;\n    let r29 = s29(x29);\n    let x30: i64 = 1;\n    let r30 = s30(x30);\n    let x31: u64 = 1;\n    let r31 = s31(x31);\n    let x32: u64 = 1;\n    let r32 = s32(x32);\n    let x33: u64 = 1;\n    let r33 = s33(x33);\n    let x34: u64 = 1;\n    let r34 = s34(x34);\n    let x35: u64 = 1;\n    let r35 = s35(x35);\n    let x36: u64 = 1;\n    let r36 = s36(x36);\n    let x37: u64 = 1;\n    let r37 = s37(x37);\n    return 0;\n}\n",
         h::STAGE_TYPECHECK,
@@ -1697,18 +1698,18 @@ fn int_widening_matrix() {
 
 @test
 fn void_pointer_coalescing() {
-    // the six implicit forms, one program
+    // The six implicit forms, one program.
     h::expect_ok(
         "implicit void-pointer coalescing",
         "fn mv(p: *mut void) i32 { return 1; }\nfn cv(p: *const void) i32 { return 1; }\nfn main() i32 {\n    let mut x = 1;\n    let pm: *mut i32 = &mut x;\n    let pc: *const i32 = &x;\n    let a = mv(&mut x);\n    let b = cv(&mut x);\n    let c = cv(&x);\n    let d = mv(pm);\n    let e = cv(pm);\n    let f = cv(pc);\n    return a + b + c + d + e + f - 6;\n}\n",
     );
-    // write-access gains and void -> typed reversals are never implicit (5 rejections)
+    // Write-access gains and void -> typed reversals are never implicit (5 rejections).
     let c = h::compile(
         "fn mv(p: *mut void) i32 { return 1; }\nfn mt(p: *mut i32) i32 { return 1; }\nfn ct(p: *const i32) i32 { return 1; }\nfn main() i32 {\n    let mut x = 1;\n    let pc: *const i32 = &x;\n    let vm: *mut void = &mut x;\n    let vc: *const void = &x;\n    let a = mv(&x);\n    let b = mv(pc);\n    let c = mt(vm);\n    let d = ct(vc);\n    let e = ct(vm);\n    return a + b + c + d + e - 5;\n}\n",
         h::STAGE_TYPECHECK,
     );
     assert_eq(c.errors, 5 as usize);
-    // the reversals work as explicit casts (no unsafe needed for pointer -> pointer)
+    // The reversals work as explicit casts (no unsafe needed for pointer -> pointer).
     h::expect_ok(
         "explicit void -> typed pointer casts",
         "fn mt(p: *mut i32) i32 { return unsafe *p; }\nfn ct(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 {\n    let mut x = 1;\n    let vm: *mut void = &mut x;\n    let vc: *const void = &x;\n    return mt(vm as *mut i32) + ct(vc as *const i32) - 2;\n}\n",
@@ -1717,7 +1718,7 @@ fn void_pointer_coalescing() {
 
 @test
 fn unsafe_functions() {
-    // declaring and calling with a marker, in every position
+    // Declaring and calling with a marker, in every position.
     h::expect_ok(
         "unsafe fn called with prefix",
         "unsafe fn raw(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 { let x = 1; return unsafe raw(&x) - 1; }\n",
@@ -1730,7 +1731,7 @@ fn unsafe_functions() {
         "unsafe method in extend",
         "struct T { pub v: i32, }\nextend T { pub unsafe fn peek(self: &T, p: *const i32) i32 { return unsafe *p + self.v; } }\nfn main() i32 { let x = 1; let t = T { v: 1 }; return unsafe t.peek(&x) - 2; }\n",
     );
-    // calls without a marker are rejected, direct and through a method
+    // Calls without a marker are rejected, direct and through a method.
     h::expect_err_msg(
         "unmarked call rejected",
         "unsafe fn raw(p: *const i32) i32 { return unsafe *p; }\nfn main() i32 { let x = 1; return raw(&x) - 1; }\n",
@@ -1741,12 +1742,12 @@ fn unsafe_functions() {
         "struct T { pub v: i32, }\nextend T { pub unsafe fn peek(self: &T, p: *const i32) i32 { return unsafe *p + self.v; } }\nfn main() i32 { let x = 1; let t = T { v: 1 }; return t.peek(&x) - 2; }\n",
         "calling an unsafe function requires an 'unsafe' block",
     );
-    // the body of an unsafe fn IS one unsafe context: inner operations need no markers
+    // The body of an unsafe fn IS one unsafe context: inner operations need no markers.
     h::expect_ok(
         "unsafe fn body is an unsafe context",
         "unsafe fn raw(p: *const i32) i32 { return *p; }\nfn main() i32 { let x = 1; return unsafe raw(&x) - 1; }\n",
     );
-    // `unsafe` at item scope introduces a function or an extend, nothing else
+    // `unsafe` at item scope introduces a function or an extend, nothing else.
     h::expect_err_msg(
         "unsafe struct rejected",
         "unsafe struct T { pub v: i32, }\nfn main() i32 { return 0; }\n",
@@ -1756,7 +1757,7 @@ fn unsafe_functions() {
 
 @test
 fn expected_type_reaches_branches() {
-    // literals in if/switch value branches adapt to the context type (no suffixes, no casts)
+    // Literals in if/switch value branches adapt to the context type (no suffixes, no casts).
     h::expect_ok(
         "if-value literals adapt",
         "fn main() i32 { let f = true; let i: usize = if f { 1; } else { 2; }; return i as i32 - 1; }\n",
@@ -1773,13 +1774,13 @@ fn expected_type_reaches_branches() {
         "string literal branches reach *const char",
         "fn main() i32 { let f = true; let p: *const char = if f { \"a\"; } else { \"b\"; }; return (p as usize * 0) as i32; }\n",
     );
-    // range checking still applies at the adapted literal
+    // Range checking still applies at the adapted literal.
     h::expect_err_msg(
         "branch literal out of range",
         "fn main() i32 { let f = true; let x: u8 = if f { 300; } else { 1; }; return x as i32; }\n",
         "integer literal is out of range for 'u8'",
     );
-    // pinned (suffixed) literals never adapt
+    // Pinned (suffixed) literals never adapt.
     h::expect_err_msg(
         "pinned branch literal stays pinned",
         "fn main() i32 { let f = true; let i: usize = if f { 1i32; } else { 2i32; }; return i as i32; }\n",
@@ -1789,7 +1790,7 @@ fn expected_type_reaches_branches() {
 
 @test
 fn unsafe_const_fn() {
-    // both modifier orders parse (LL(1) chains); calls need `unsafe`, const folding still applies
+    // Both modifier orders parse (LL(1) chains); calls need `unsafe`, const folding still applies.
     h::expect_ok(
         "unsafe const fn, both orders, folds at compile time",
         "pub unsafe const fn double(x: i32) i32 {\n    return x * 2;\n}\n\npub const unsafe fn bump(x: i32) i32 {\n    return x + 1;\n}\n\nconst D: i32 = unsafe double(21);\n\nstatic_assert(unsafe bump(41) == 42);\n\nfn main() i32 {\n    return (unsafe double(2)) + (unsafe bump(3)) - 8 + D - 42;\n}\n",
@@ -1818,12 +1819,12 @@ fn unsafe_fn_body_is_unsafe_context() {
         "unsafe fn body needs no inner markers",
         "unsafe fn read(p: *const i32) i32 {\n    return *p + p[0];\n}\n\nfn main() i32 {\n    let x = 21;\n    return (unsafe read(&x)) - 42;\n}\n",
     );
-    // ...and calling other unsafe/extern fns inside one is marker-free too
+    // ...and calling other unsafe/extern fns inside one is marker-free too.
     h::expect_ok(
         "unsafe fn may call unsafe fns bare",
         "unsafe fn a(p: *const i32) i32 {\n    return *p;\n}\n\nunsafe fn b(p: *const i32) i32 {\n    return a(p);\n}\n\nfn main() i32 {\n    let x = 1;\n    return (unsafe b(&x)) - 1;\n}\n",
     );
-    // a normal fn still requires the markers
+    // A normal fn still requires the markers.
     h::expect_err_msg(
         "safe fn still needs unsafe for raw deref",
         "fn read(p: *const i32) i32 {\n    return *p;\n}\n\nfn main() i32 {\n    let x = 1;\n    return read(&x) - 1;\n}\n",
@@ -1833,7 +1834,7 @@ fn unsafe_fn_body_is_unsafe_context() {
 
 @test
 fn reference_comparison_by_value() {
-    // references compare by VALUE (deref), raw pointers by ADDRESS
+    // References compare by VALUE (deref), raw pointers by ADDRESS.
     h::expect_ok(
         "scalar refs compare by value, pointers by address",
         "fn main() i32 {\n    let a: i32 = 5;\n    let b: i32 = 5;\n    let mut r = 0;\n    if &a == &b { r = r + 1; }\n    if &a < &b { r = r + 100; }\n    let pa: *const i32 = &a;\n    let pb: *const i32 = &b;\n    if pa == pb { r = r + 1000; }\n    if r != 1 { return 1; }\n    return 0;\n}\n",
@@ -1846,7 +1847,7 @@ fn reference_comparison_by_value() {
         "byte via str index compares by value",
         "fn main() i32 {\n    let s: str = \"ab\";\n    if s[0] == b\'a\' { return 0; }\n    return 1;\n}\n",
     );
-    // one side by address, the other by value: rejected instead of silently picking a side
+    // One side by address, the other by value: rejected instead of silently picking a side.
     h::expect_err_msg(
         "raw pointer vs reference comparison is rejected",
         "fn main() i32 {\n    let mut a: i32 = 5;\n    let p: *mut i32 = &mut a;\n    if p == &mut a { return 1; }\n    return 0;\n}\n",
@@ -1879,13 +1880,13 @@ fn safety_holes_closed() {
         "union U<'a> { pub i: i64, pub r: &'a i32 }\nfn main() i32 {\n    let mut u = U { i: 0 };\n    u.i = 4919;\n    let p = u.r;\n    return *p;\n}\n",
         "accessing a reference-typed field of a union requires an 'unsafe' block",
     );
-    // a raw *pointer* union field stays free (its deref is already gated separately).
+    // A raw *pointer* union field stays free (its deref is already gated separately).
     h::expect_ok(
         "raw-pointer union field read stays safe",
         "union U { pub i: i64, pub p: *const i32 }\nfn main() i32 {\n    let u = U { i: 0 };\n    let q = u.p;\n    if q == null { return 0; }\n    return 1;\n}\n",
     );
     // bug3: a method returning &T on a TEMPORARY receiver borrows into a value that will not
-    // outlive the borrow (today: leaked to keep it alive) -- rejected; a named receiver is fine.
+    // outlive the borrow (today: leaked to keep it alive); rejected; a named receiver is fine.
     h::expect_err_msg(
         "borrowing into a temporary receiver is rejected",
         "fn mk() Vector<i32> {\n    let mut v = Vector::<i32>::new();\n    v.push(9);\n    return v;\n}\nfn main() i32 {\n    let r = mk().at(0);\n    return *r;\n}\n",
@@ -1902,11 +1903,11 @@ fn safety_holes_closed() {
 }
 
 // DROPPED (needs AST/codegen inspection): computed_scalar_types, computed_pointer_types,
-// computed_reference_type, literal_types, inferred_let_types, str_member_types
+// computed_reference_type, literal_types, inferred_let_types, str_member_types.
 
 // Region-aware return (lifetimes Release B). `addr_escape` only sees a reference taken DIRECTLY of a
-// local (`return &x`); these escape indirectly -- through a local's owned heap cell, or buried in an
-// aggregate -- and were ASan-confirmed dangling reads before this check existed.
+// local (`return &x`); these escape indirectly: through a local's owned heap cell, or buried in an
+// aggregate, and were ASan-confirmed dangling reads before this check existed.
 @test
 fn return_region_escapes() {
     // bug9: the reference points into the local Box's heap cell, freed when the Box drops at return.
@@ -1927,7 +1928,7 @@ fn return_region_escapes() {
         "struct R<'a> { pub p: &'a i32 }\nfn f() R<'a> {\n    let x = 1;\n    return R::<'a> { p: &x };\n}\n",
         "returning a value borrowing from a local",
     );
-    // Borrows of PARAMETERS still return fine -- the caller owns the referent.
+    // Borrows of PARAMETERS still return fine: the caller owns the referent.
     h::expect_ok(
         "returning a borrow of a parameter stays legal",
         "fn pass(x: &i32) &i32 {\n    return x;\n}\nstruct W { pub v: i32 }\nfn field(w: &W) &i32 {\n    return &w.v;\n}\nfn main() i32 {\n    let a = 7;\n    let w = W { v: 1 };\n    return *pass(&a) + *field(&w) - 8;\n}\n",
@@ -1979,7 +1980,7 @@ fn laundered_borrow_retained() {
     );
 }
 
-// A method whose RESULT carries a borrow (not just a bare `&T`) borrows its receiver. The declared
+// A method whose RESULT carries a borrow (not only a bare `&T`) borrows its receiver. The declared
 // return node cannot tell us this: `Map::get` is declared `Option<T>` and is only `Option<&V>` after
 // substitution at the call site, so the check runs on the RESOLVED type.
 @test
@@ -1990,13 +1991,13 @@ fn borrow_carrying_result_borrows_receiver() {
         "fn main() i32 {\n    let mut m = Map::<i32, i64>::new();\n    m.insert(1, 5);\n    let r = m.get(&1).unwrap();\n    m.insert(2, 6);\n    return *r as i32;\n}\n",
         "cannot borrow this value as mutable while it is already borrowed as immutable",
     );
-    // the Option itself counts -- the borrow is inside the generic argument
+    // The Option itself counts: the borrow is inside the generic argument.
     h::expect_err_msg(
         "holding Option<&V> across an insert is rejected",
         "fn main() i32 {\n    let mut m = Map::<i32, i64>::new();\n    m.insert(1, 5);\n    let o = m.get(&1);\n    m.insert(2, 6);\n    return switch o { Some(x) => *x as i32, None => 0, };\n}\n",
         "cannot borrow this value as mutable while it is already borrowed as immutable",
     );
-    // a result that owns (no borrow inside) leaves the receiver free
+    // A result that owns (no borrow inside) leaves the receiver free.
     h::expect_ok(
         "an owning result does not pin the receiver",
         "fn main() i32 {\n    let mut m = Map::<i32, i64>::new();\n    m.insert(1, 5);\n    let n = m.len();\n    m.insert(2, 6);\n    return (n + m.len()) as i32 - 3;\n}\n",
@@ -2004,7 +2005,7 @@ fn borrow_carrying_result_borrows_receiver() {
 }
 
 // A borrow taken through an `Index` conformance is a borrow OF the container: `v[i]` is a sub-place
-// of `v` (place_decompose no longer bails on a non-array indexed base), so `&v[i]` pins `v` exactly
+// of `v` (place_decompose does not bail on a non-array indexed base), so `&v[i]` pins `v` exactly
 // like the `v.at(i)` method form.
 @test
 fn index_conformance_borrows_container() {
@@ -2018,7 +2019,7 @@ fn index_conformance_borrows_container() {
         "fn main() i32 {\n    let mut a = Array::<i64, 4>::filled(&1i64);\n    let r = &a[0];\n    let m = &mut a;\n    m[1] = 9;\n    return *r as i32;\n}\n",
         "cannot borrow this value as mutable while it is already borrowed as immutable",
     );
-    // a plain copy out of the element leaves the container free
+    // A plain copy out of the element leaves the container free.
     h::expect_ok(
         "v[0] read by value does not pin the Vector",
         "fn main() i32 {\n    let mut v = Vector::<i64>::new();\n    v.push(1);\n    let x = v[0];\n    v.push(2);\n    return (x + v[1]) as i32 - 3;\n}\n",
@@ -2049,7 +2050,7 @@ fn two_phase_borrows() {
 }
 
 // bug7: a `str` view held across a mutation of its backing String. `str` carries a lifetime param
-// (erased before monomorphization) purely so the borrow checker knows a `str` VALUE borrows -- so
+// (erased before monomorphization) purely so the borrow checker knows a `str` VALUE borrows: so
 // `s.as_str()` pins `s` and a later `push`/`push_byte` that could reallocate the buffer conflicts.
 // This was ASan-confirmed heap-use-after-free before the lifetime landed.
 @test
@@ -2073,7 +2074,7 @@ fn str_view_pins_its_string() {
 
 // bug6: a borrow stored into a container that outlives its referent. The Rust argument-boundary
 // rule: `Vector<&'a T>::push(value: T)` and the container's elements are the SAME `T`, so passing a
-// too-short `&local` for `value` violates outlives -- no "does it store" flag needed. The pushed
+// too-short `&local` for `value` violates outlives: no "does it store" flag needed. The pushed
 // borrow is tied to the container's binding; the existing scope-exit check reports the escape.
 @test
 fn stored_borrow_outlives_container() {
@@ -2096,7 +2097,7 @@ fn stored_borrow_outlives_container() {
 
 // Uniform region propagation (adversarial round 2): the region tie was wired into a few syntactic
 // sites, so borrow-carriers reaching a scope boundary another way escaped. These three are closed at
-// the checker level -- deep (memoized) carries-borrow, carried-borrow return scan, and a place tie on
+// the checker level: deep (memoized) carries-borrow, carried-borrow return scan, and a place tie on
 // assignment.
 @test
 fn region_propagation_uniform() {
@@ -2106,7 +2107,7 @@ fn region_propagation_uniform() {
         "struct W<'a> { pub r: &'a i32 }\nfn main() i32 {\n    let mut v = Vector::<W>::new();\n    {\n        let local = 77;\n        v.push(W { r: &local });\n    }\n    return *v.at(0).r;\n}\n",
         "borrowed value does not live long enough",
     );
-    // Hoisting a return-of-borrow into a local no longer bypasses the return check.
+    // Hoisting a return-of-borrow into a local does not bypass the return check.
     h::expect_err_msg(
         "returning a pre-bound struct holding &local is rejected",
         "struct R<'a> { pub p: &'a i32 }\nfn f<'a>() R<'a> {\n    let x = 1;\n    let r = R { p: &x };\n    return r;\n}\n",
@@ -2134,7 +2135,7 @@ fn region_propagation_uniform() {
     );
 }
 
-// A generic type with BOTH a lifetime param and a type param -- `P<'a, T>` -- must resolve `T` in
+// A generic type with BOTH a lifetime param and a type param (`P<'a, T>`) must resolve `T` in
 // method bodies. The type-path arg loop was not skipping the erased lifetime argument, so the type
 // param bound to the lifetime slot and every `T` came out as `?`. (Found while giving view types a
 // lifetime; the same bug blocks `Slice<'a, T>`.)
@@ -2144,7 +2145,7 @@ fn generic_with_lifetime_and_type_param() {
         "a <'a, T> type resolves T in its methods, fields, and returns",
         "struct P<'a, T> { pub v: T }\nextend<'a, T> P<'a, T> {\n    pub fn get(self: &P<'a, T>) &T { return &self.v; }\n    pub fn raw(self: &P<'a, T>) *const T { return &self.v; }\n}\nfn main() i32 {\n    let x = 42;\n    let p = P::<i32> { v: x };\n    return *p.get() - 42;\n}\n",
     );
-    // and it still monomorphizes ignoring the lifetime (erased): one symbol per (type args).
+    // And it still monomorphizes ignoring the lifetime (erased): one symbol per (type args).
     h::expect_c(
         "a <'a, T> generic mangles only the type arg",
         "struct P<'a, T> { pub v: T }\nextend<'a, T> P<'a, T> { pub fn g(self: &P<'a, T>) T { return self.v; } }\nfn main() i32 { let a = P::<i32> { v: 1 }; let b = P::<i32> { v: 2 }; return a.g() + b.g() - 3; }\n",
@@ -2152,7 +2153,7 @@ fn generic_with_lifetime_and_type_param() {
     );
 }
 
-// View types (`Slice<'a, T>`, `VecIter<'a, T>`) carry a lifetime just like `str`, so a `[]T` slice or
+// View types (`Slice<'a, T>`, `VecIter<'a, T>`) carry a lifetime exactly like `str`, so a `[]T` slice or
 // an iterator borrows its container and the container cannot be reallocated while the view is live.
 // nbug2 (`v[0..2]` held across a push) dispatches index_range inline, so check_index mints the
 // receiver borrow itself; nbug4 (`v.iter()` held across a push) rides the check_call result-borrow hook.
@@ -2233,7 +2234,7 @@ fn closure_capture_regions() {
 }
 
 // Adversarial round 3. A view REBORROW (a sub-slice `s[0..2]`, a `str` sub-view `sv.trim()`) must
-// INHERIT the receiver's borrow of the real container, not drop it -- otherwise the sub-view outlives
+// INHERIT the receiver's borrow of the real container, not drop it: otherwise the sub-view outlives
 // the container borrow and dangles once the intermediate view's own borrow ends. Both were
 // ASan-confirmed (heap-use-after-free) before this.
 @test
@@ -2256,7 +2257,7 @@ fn view_reborrow_inherits_container() {
 }
 
 // Adversarial round 3, Family B. A borrow passed for a bare value parameter `x: T` that another
-// parameter STORES through (`&mut T` or `&mut C<..T..>`) must outlive that storage's referent -- the
+// parameter STORES through (`&mut T` or `&mut C<..T..>`) must outlive that storage's referent: the
 // argument-boundary variance rule across a PLAIN FUNCTION boundary (bug6 covered only a method
 // receiver). All three were ASan-confirmed (stack-use-after-scope) before this. Sound without any
 // annotation because the two parameters share the callee type variable.
@@ -2295,13 +2296,13 @@ fn stored_borrow_through_function() {
 // fn_sig_regions / lifetime elision. A borrow stored into CALLER-VISIBLE data (reachable through a
 // `&`/`&mut` parameter) escapes the callee, so it is sound only when the signature DECLARES that the
 // stored value outlives the destination. Elision gives each unannotated reference its own independent
-// lifetime, so an unannotated cross-parameter store is unprovable and rejected (Rust's rule) -- the
+// lifetime, so an unannotated cross-parameter store is unprovable and rejected (Rust's rule): the
 // region tie cannot catch these because a parameter does not die inside its own body. Writing the
 // shared `<'a>` makes them compile, and the call site then enforces it. All the rejected forms below
 // were ASan-confirmed (stack-use-after-scope) before this.
 @test
 fn fn_sig_region_store_escape() {
-    // Concrete store into a parameter's reference FIELD -- unannotated, so the lifetimes are unrelated.
+    // Concrete store into a parameter's reference FIELD: unannotated, so the lifetimes are unrelated.
     h::expect_err_msg(
         "storing a param borrow into a param struct's ref field needs a declared lifetime",
         "struct Slot<'a> { pub r: &'a i32 }\nfn put(s: &mut Slot, x: &i32) { s.r = x; }\nfn main() i32 {\n    let anchor = 1;\n    let mut s = Slot { r: &anchor };\n    {\n        let inner = 9;\n        put(&mut s, &inner);\n    }\n    return *s.r;\n}\n",
@@ -2328,7 +2329,7 @@ fn fn_sig_region_store_escape() {
         "struct Slot<'a> { pub r: &'a i32 }\nfn put<'a>(s: &mut Slot<'a>, x: &'a i32) { s.r = x; }\nfn main() i32 {\n    let anchor = 1;\n    let mut sl = Slot::<i32> { r: &anchor };\n    {\n        let inner = 9;\n        put(&mut sl, &inner);\n    }\n    return *sl.r;\n}\n",
         "borrowed value does not live long enough",
     );
-    // A reborrow of the parameter's own data has exactly the destination's lifetime -- always fine.
+    // A reborrow of the parameter's own data has exactly the destination's lifetime: always fine.
     h::expect_ok(
         "a store that only reads the container does not over-reject",
         "fn firstof<T>(v: &Vector<T>) usize { return v.len(); }\nfn main() i32 {\n    let x = 5;\n    let mut v = Vector::<&i32>::new();\n    v.push(&x);\n    {\n        let y = 9;\n        let n = firstof(&v);\n    }\n    return **v.at(0) - 5;\n}\n",
@@ -2391,7 +2392,7 @@ fn nested_slot_lifetime() {
 }
 
 // A value parameter shares a region with a storage parameter whenever it mentions that lifetime
-// ANYWHERE, not just as the annotation on an outermost reference. `src: Ref<'a>` borrows exactly as
+// ANYWHERE, not only as the annotation on an outermost reference. `src: Ref<'a>` borrows exactly as
 // much as `&'a i32` does, and a local passed for it already HOLDS its borrows (bound at its `let`), so
 // the container must adopt those rather than only the call's transient ones. ASan-confirmed before.
 @test
@@ -2407,7 +2408,7 @@ fn aggregate_value_arg_regions() {
     );
 }
 
-// Multiple conformances of ONE generic interface at different arguments -- `extend X as Conv<i32>`
+// Multiple conformances of ONE generic interface at different arguments: `extend X as Conv<i32>`
 // and `extend X as Conv<bool>` both providing `conv`. Both must genuinely work: each definition gets
 // its own C symbol (the interface instantiation is mangled in, collision-conditionally, so existing
 // single-conformance symbols are byte-identical), and the call site resolves by the EXPECTED type
@@ -2429,7 +2430,7 @@ fn multi_conformance_overloads() {
 
 // Higher-ranked bounds and lifetime-parameterised associated types, semantically. An HRTB fn value
 // works for EVERY lifetime, so calls at different scopes are fine while a result borrowing a local
-// still cannot escape -- the existing region machinery composes with the ranking. An interface's
+// still cannot escape: the existing region machinery composes with the ranking. An interface's
 // `type Item<'a>;` is a shape contract the impl must match in lifetime and type arity, and a
 // lifetime-parameterised type ALIAS must not launder a region.
 @test
@@ -2476,7 +2477,7 @@ fn hrtb_and_gat_semantics() {
 // Lifetime elision, Rust's three rules. Rule 1 is structural (every elided input position is its own
 // lifetime). Rules 2 and 3 say which lifetime an elided OUTPUT takes: with exactly one input position
 // it takes that one, and a `self` receiver wins over everything. When neither applies the output's
-// region is unconstrained -- a caller cannot tell what it borrows -- so it must be written.
+// region is unconstrained (a caller cannot tell what it borrows) so it must be written.
 @test
 fn lifetime_elision() {
     h::expect_err_msg(
@@ -2538,7 +2539,7 @@ fn type_outlives_bounds() {
     );
 }
 
-// A reference stored in an aggregate must NAME a lifetime the aggregate declares (or `'static`) --
+// A reference stored in an aggregate must NAME a lifetime the aggregate declares (or `'static`):
 // Rust's "missing lifetime specifier". Without it the field's region is unrelated to anything the type
 // says, so no caller can reason about how long the aggregate may be kept.
 @test
@@ -2562,7 +2563,7 @@ fn field_lifetime_required() {
         "missing lifetime specifier",
     );
     // A field whose TYPE borrows (`str`, a view, any lifetime-carrying aggregate) must name the
-    // lifetime it borrows for, just as a bare reference must -- otherwise a type could hold a view of
+    // lifetime it borrows for, exactly as a bare reference must: otherwise a type could hold a view of
     // data with no declared relationship to its own lifetime.
     h::expect_err_msg(
         "a view-typed field with no lifetime is rejected",
@@ -2595,17 +2596,17 @@ fn region_outlives_transitive() {
     );
 }
 
-// Loop precision. `borrow_dead_after` used to bail unconditionally inside ANY loop ("never dead"),
-// which rejected a borrow that genuinely ended before a later mutation in the same iteration. Source-
-// order last-use is valid for a binding CONFINED to the loop body -- it is re-created every iteration
+// Loop precision. A `borrow_dead_after` that bails unconditionally inside ANY loop ("never dead")
+// rejects a borrow that genuinely ended before a later mutation in the same iteration. Source-
+// order last-use is valid for a binding CONFINED to the loop body: it is re-created every iteration
 // and dies at the end of each one, so no use of it can execute after a given point via the back edge.
 // A longer-lived binding stays conservatively live, because a use earlier in the source can execute
 // after the mutation on the next iteration.
 // A pattern binding is bound afresh every time its arm is entered, so a move recorded on a PREVIOUS binding
 // says nothing about this one. The loop-body walk runs twice on purpose (to catch conflicts that only show
 // up across the back edge), and without that reset the second pass saw the first pass's move and rejected
-// the arm's own use -- while the identical code outside a loop, or with a `let` binding, was accepted.
-// The repeat count is part of the type, so it has to be constant; and every slot holds its own copy, which
+// the arm's own use: while the identical code outside a loop, or with a `let` binding, was accepted.
+// The repeat count is part of the type, so it has to be constant, and every slot holds its own copy, which
 // a value that owns resources cannot provide.
 @test
 fn array_repeat_requirements() {
@@ -2700,7 +2701,7 @@ fn mut_ref_invariance() {
     );
 }
 
-// A generic function has no type of its own -- only a fn pointer to one of its instances does. Naming
+// A generic function has no type of its own: only a fn pointer to one of its instances does. Naming
 // one where a fn-pointer type is wanted binds its type parameters from that signature; with nothing to
 // bind them, the value is rejected instead of reaching codegen unsubstituted.
 @test
@@ -2740,7 +2741,7 @@ fn generic_fn_as_value() {
         "fn id<T>(v: T) T { return v; }\nfn main() i32 {\n    let f = id::<i32>;\n    return f(0);\n}\n",
         "cannot infer the type of a generic function used as a value",
     );
-    // The two sides of a fn-type mismatch must be distinguishable; both used to print bare "fn".
+    // The two sides of a fn-type mismatch must be distinguishable, never both a bare "fn".
     h::expect_err_msg(
         "a fn-type mismatch names both signatures",
         "fn take(v: i64) i64 { return v; }\nfn main() i32 {\n    let f: fn(i32) i32 = take;\n    return f(0);\n}\n",
@@ -2800,8 +2801,8 @@ fn split_init_reference_to_free() {
     );
 }
 
-// A constant of an OWNING type is materialized into the binary -- its heap blocks become static data
-// with relocations -- and is then read or borrowed only. Nothing can obtain a copy to free, because
+// A constant of an OWNING type is materialized into the binary: its heap blocks become static data
+// with relocations, and is then read or borrowed only. Nothing can obtain a copy to free, because
 // moving out of a constant is rejected, and nothing can mutate it in place.
 @test
 fn owning_constants() {
@@ -2839,7 +2840,7 @@ fn owning_constants() {
     );
     // A constant's storage is static data no allocator provided, so it cannot embed allocator STATE.
     // A zero-sized allocator carries none and is fine; a stateful one would freeze bookkeeping that
-    // describes memory that does not exist -- and a pointer field would bake its block into the binary.
+    // describes memory that does not exist, and a pointer field would bake its block into the binary.
     h::expect_exit(
         "a zero-sized allocator is fine in a constant",
         "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Tag {}\nextend Tag as Allocator {\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe malloc(size); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe realloc(p, n); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Tag> {\n    let mut v = Vector::<i32, Tag>::new();\n    v.push(7);\n    return v;\n}\nconst V: Vector<i32, Tag> = mk();\nfn main() i32 { return (V.len() as i32) - 1; }\n",
@@ -2925,9 +2926,9 @@ fn platform_gate_values() {
     );
 }
 
-// A `static_assert` about a layout is precisely what a cross target has to be able to exclude -- a size
-// written for 8-byte pointers is false on wasm32 and says nothing about a bug. The parser used to read the
-// attribute list before one and then throw it away, so the assert fired on every target regardless.
+// A `static_assert` about a layout is precisely what a cross target has to be able to exclude: a size
+// written for 8-byte pointers is false on wasm32 and says nothing about a bug. The parser must keep the
+// attribute list before one; throwing it away fires the assert on every target regardless.
 @test
 fn gated_static_assert() {
     // `wasm` on both axes: no host the suite runs on is ever wasm, so these two stay gated away wherever
@@ -2951,8 +2952,8 @@ fn gated_static_assert() {
 
 // A struct/union/enum declared inside an `extern "C" "hdr.h"` block is the HEADER's type: the members
 // only state its layout, so field access and sizeof work while the emitted C keeps using the header's own
-// definition. That claim is checked -- the layout static_assert compares the model against the header, per
-// target -- and `@c.import` pins the C spelling for a tag the header never typedef'd.
+// definition. That claim is checked: the layout static_assert compares the model against the header, per
+// target, and `@c.import` pins the C spelling for a tag the header never typedef'd.
 @test
 fn extern_aggregates() {
     h::expect_err_msg(
@@ -2968,7 +2969,7 @@ fn extern_aggregates() {
 }
 
 // A const-generic argument written as an EXPRESSION over the enclosing generic's own parameters. Braced
-// so the grammar stays LL(1) -- `A<B * 2>` cannot be told from a type until well past the `<`. The
+// so the grammar stays LL(1): `A<B * 2>` cannot be told from a type until well past the `<`. The
 // expression is carried unfolded until a substitution binds the parameters, then folded to a width.
 @test
 fn const_generic_expressions() {
@@ -2996,8 +2997,8 @@ fn const_generic_expressions() {
         0,
     );
     // A METHOD may widen its own receiver. Instantiating one width must not demand the next: the pair
-    // (instance, method) is what gets emitted, so `A<2>::dbl` exists and `A<4>::dbl` -- which nothing
-    // calls -- does not. Without that this program never finishes compiling.
+    // (instance, method) is what gets emitted, so `A<2>::dbl` exists and `A<4>::dbl`, which nothing
+    // calls: does not. Without that this program never finishes compiling.
     h::expect_exit(
         "a widening method does not demand the next width",
         "struct A<const N: usize> { pub v: [u64; N] }\nextend<const N: usize> A<N> {\n    fn dbl(self: &Self) A<{N * 2}> { return A::<{N * 2}> {}; }\n    fn width(self: &Self) usize { return N; }\n}\nfn main() i32 {\n    let a = A::<2> {};\n    let b = a.dbl();\n    return (b.width() as i32) - 4 + (unsafe b.v[3]) as i32;\n}\n",
@@ -3010,8 +3011,8 @@ fn const_generic_expressions() {
         "expected 'A<{3 * Q}>', found 'A<{2 * Q}>'",
     );
     // Floor division rides the canonical form as a trailing divisor: `{(W + 7) / 8}` is the byte
-    // count every serialization API is generic over. It does not distribute -- only an exact
-    // division simplifies -- so the form carries the divisor whole and folds at instantiation.
+    // count every serialization API is generic over. It does not distribute: only an exact
+    // division simplifies, so the form carries the divisor whole and folds at instantiation.
     h::expect_exit(
         "a floor-divided width folds at instantiation",
         "struct A<const N: usize> { pub v: [u64; N] }\nfn bytes<const W: usize>(a: &A<W>) A<{(W + 7) / 8}> {\n    return A::<{(W + 7) / 8}> {};\n}\nfn main() i32 {\n    let a = A::<20> {};\n    let b = bytes(&a);\n    return (sizeof(A<3>) as i32) - 24 + (unsafe b.v[2]) as i32;\n}\n",

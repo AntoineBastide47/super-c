@@ -55,8 +55,8 @@ fn repeated_generic_params() {
         "fn pick<T>(a: T, b: T) T { return a; }\nfn main() i32 { let x: i32 = 1; let y: f64 = 2.0; let z = pick(x, y); return 0; }\n",
         "mismatched types",
     );
-    // Fixed by the phase-2 engine (plan sections 10.2/10.3): directional evidence joins under the
-    // safe-conversion oracle, so acceptance no longer depends on argument order. Both orders bind
+    // Directional evidence joins under the safe-conversion oracle, so acceptance does not depend
+    // on argument order. Both orders bind
     // T = &i32 and the `&mut` argument coerces.
     h::expect_exit(
         "shared ref first then mut ref coerces",
@@ -119,7 +119,7 @@ fn const_generic_inference() {
 
 @test
 fn bound_dependency_chains() {
-    // Phase-3 worklist (plan section 19, phase 3): a bound-dependency chain resolves to a fixed
+    // The changed-slot worklist: a bound-dependency chain resolves to a fixed
     // point in any declaration order. The replaced two-pass repair resolved this chain only when
     // its parameters were declared in chain order.
     h::expect_exit(
@@ -177,7 +177,7 @@ fn expected_result_flow() {
         "cannot infer the generic argument",
     );
     // Argument, expected-result, and bound evidence together infer one call's parameters
-    // (plan phase 4 exit gate).
+    // at once.
     h::expect_exit(
         "argument and destination evidence combine in one call",
         "struct Pair<A, B> { pub a: A, pub b: B }\nfn wrap<A, B: Default>(a: A) Pair<A, B> { return Pair::<A, B> { a: a, b: B::default() }; }\nfn main() i32 { let p: Pair<i32, i64> = wrap(1); return (p.a as i64 + p.b) as i32 - 1; }\n",
@@ -252,7 +252,7 @@ fn candidate_selection() {
         "interface A { fn m(self: &Self, x: i32) i32; }\ninterface B { fn m(self: &Self, x: str) i32; }\nstruct V {}\nextend V as B { pub fn m(self: &V, x: str) i32 { return 2; } }\nextend V as A { pub fn m(self: &V, x: i32) i32 { return 1; } }\nfn main() i32 { let v = V {}; let s: str = \"hi\"; return v.m(s) - 2; }\n",
         0,
     );
-    // Full lexicographic score (plan 13.3): a literal argument scores by its adaptability class,
+    // Full lexicographic score: a literal argument scores by its adaptability class,
     // so an inseparable tie errors even though the literal's exact type is not yet known, and the
     // literal's default type is the preferred exact match.
     h::expect_err_msg(

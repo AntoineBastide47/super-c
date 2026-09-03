@@ -8,7 +8,7 @@
 //
 // The preprocessor also says where each declaration CAME FROM (`# <line> "<file>"` markers), which is what
 // separates the requested header's own declarations from the thousands its includes drag in. Everything is
-// parsed -- a typedef from <stddef.h> is needed to resolve one in the target -- but only declarations whose
+// parsed (a typedef from <stddef.h> is needed to resolve one in the target) but only declarations whose
 // origin is the requested header are emitted.
 //
 // Scope: functions, the typedefs needed to spell their signatures, enums (tagged ones as `enum`, anonymous
@@ -25,18 +25,14 @@ import module::loader as loader;
 import string as cstring;
 import driver::util as *;
 
-// ---------------------------------------------------------------------------------------------------------
-// scanning
-// ---------------------------------------------------------------------------------------------------------
-
 const TK_EOF: i32 = 0;
 const TK_IDENT: i32 = 1;
 const TK_NUM: i32 = 2;
 const TK_PUNCT: i32 = 3;
 const TK_STR: i32 = 4;
 
-/// A token cursor over preprocessed C. Line markers are consumed by the scanner itself and published as
-/// `file`, so the parser never sees a directive and always knows the declaration's origin.
+// A token cursor over preprocessed C. Line markers are consumed by the scanner itself and published as
+// `file`, so the parser never sees a directive and always knows the declaration's origin.
 struct Lexer<'a> {
     pub src: str<'a>,
     pub pos: usize,
@@ -208,15 +204,11 @@ extend Lexer<'a> {
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// C types
-// ---------------------------------------------------------------------------------------------------------
-
 const MAX_PTR: usize = 8;
 
-/// One C type as far as this tool models it: a base name already mapped to Super-C, a pointer depth, and
-/// a bit per level saying whether THAT level's pointee is const (bit 0 is the base's own `const`). A
-/// function pointer carries its rendered Super-C signature instead, since `fn(..) T` is already a pointer.
+// One C type as far as this tool models it: a base name already mapped to Super-C, a pointer depth, and
+// a bit per level saying whether THAT level's pointee is const (bit 0 is the base's own `const`). A
+// function pointer carries its rendered Super-C signature instead, since `fn(..) T` is already a pointer.
 struct CType {
     pub base: String,
     pub ptr: usize,
@@ -251,9 +243,9 @@ extend CType {
         return (self.qual >> level as u32 & 1u32) != 0;
     }
 
-    /// The Super-C spelling. Pointers render outermost first, each one `*const` or `*mut` by what it points
-    /// at -- C's `const char *` is a pointer to const, C's `char *const` is a const binding and says nothing
-    /// about the pointee, which is why only the pointee's qualifier survives here.
+    // The Super-C spelling. Pointers render outermost first, each one `*const` or `*mut` by what it points
+    // at: C's `const char *` is a pointer to const, C's `char *const` is a const binding and says nothing
+    // about the pointee, which is why only the pointee's qualifier survives here.
     fn render(self: &CType, out: &mut String) {
         if self.fnsig.len() != 0 {
             out.push_str(self.fnsig.as_str());
@@ -341,7 +333,7 @@ fn wellknown(name: str, out: &mut String) bool {
     return true;
 }
 
-/// Widths this toolchain reports through `cc -E -dM`, so `long` and friends map by measurement.
+// Widths this toolchain reports through `cc -E -dM`, so `long` and friends map by measurement.
 struct Widths {
     pub short_b: i32,
     pub int_b: i32,
@@ -366,10 +358,6 @@ fn int_name(bytes: i32, signed: bool, out: &mut String) {
         out.push_str("32");
     }
 }
-
-// ---------------------------------------------------------------------------------------------------------
-// what was collected
-// ---------------------------------------------------------------------------------------------------------
 
 struct Param {
     pub name: String,
@@ -414,8 +402,8 @@ extend Alias as Free {
     }
 }
 
-/// Everything the parse produced: the type environment (every typedef in the whole translation unit, since
-/// the target header's signatures are spelled with them) and the declarations from the target header alone.
+// Everything the parse produced: the type environment (every typedef in the whole translation unit, since
+// the target header's signatures are spelled with them) and the declarations from the target header alone.
 struct Field {
     pub name: String,
     pub ty: String,
@@ -428,10 +416,10 @@ extend Field as Free {
     }
 }
 
-/// A struct or union DEFINED in the target header. `ok` is false as soon as one member has no faithful
-/// Super-C form -- a bitfield, an anonymous member, a flexible array, an unmodelled type -- because a
-/// record with a field silently dropped has the wrong LAYOUT, and every call through it would corrupt
-/// memory. Such a record falls back to the opaque `pub type`, which is merely limited rather than wrong.
+// A struct or union DEFINED in the target header. `ok` is false as soon as one member has no faithful
+// Super-C form (a bitfield, an anonymous member, a flexible array, an unmodelled type) because a
+// record with a field silently dropped has the wrong LAYOUT, and every call through it would corrupt
+// memory. Such a record falls back to the opaque `pub type`, which is merely limited rather than wrong.
 struct Record {
     pub tag: String,
     pub fields: Vector<Field>,
@@ -458,8 +446,8 @@ extend EnumVal as Free {
     }
 }
 
-/// A C enum. A TAGGED one becomes a Super-C `enum` (its tag is a type a signature can name); an anonymous
-/// one is the "block of constants" idiom and becomes plain consts, which is how C code uses it.
+// A C enum. A TAGGED one becomes a Super-C `enum` (its tag is a type a signature can name); an anonymous
+// one is the "block of constants" idiom and becomes plain consts, which is how C code uses it.
 struct EnumDef {
     pub tag: String,
     pub vals: Vector<EnumVal>,
@@ -500,7 +488,7 @@ struct Collected {
     pub globals: Vector<ConstDef>, // `extern` variables the library exports
     pub widths: Widths,
     pub cur_mine: bool, // whether the declaration being parsed comes from the target header
-    /// The anonymous struct/union/enum body just parsed, waiting for the typedef that names it
+    /// The anonymous struct/union/enum body parsed last, waiting for the typedef that names it
     /// (`typedef struct { .. } Foo;` is how most C libraries declare their types). -1 when there is none.
     pub pending_agg: i32,
     pub pending_is_enum: bool,
@@ -521,10 +509,6 @@ extend Collected as Free {
         self.opaques.free();
     }
 }
-
-// ---------------------------------------------------------------------------------------------------------
-// parsing declarations
-// ---------------------------------------------------------------------------------------------------------
 
 // Vendor noise that carries no meaning for a binding. `__attribute__`, `__declspec` and `asm` take a
 // parenthesised argument; the rest are bare words.
@@ -573,7 +557,8 @@ fn int_literal(t: str) i64 {
         } else if base == 16 && ch >= b'A' && ch <= b'F' {
             d = (ch - b'A') as i64 + 10;
         } else if ch == b'u' || ch == b'U' || ch == b'l' || ch == b'L' {
-            break; // a width suffix, not a digit
+            // A width suffix, not a digit.
+            break;
         } else {
             return -1;
         }
@@ -621,7 +606,7 @@ fn path_contains(a: str, needle: str) bool {
 }
 
 // The preprocessor prints the path it opened, which is only the same STRING as the requested header when
-// the request was already absolute -- compare by identity, not by spelling. `--from=` widens the set: a
+// the request was already absolute: compare by identity, not by spelling. `--from=` widens the set: a
 // platform that splits its headers (macOS declares `printf` in `_printf.h`, not `stdio.h`) puts the
 // declarations somewhere the request never named, and only the caller knows which of those to accept.
 fn same_origin(a: str, want: str, extra: &Vector<String>) bool {
@@ -641,10 +626,6 @@ fn same_origin(a: str, want: str, extra: &Vector<String>) bool {
     let same = unsafe shim::sc_same_file(sa.cstr(), sw.cstr()) == 1;
     return same;
 }
-
-// ---------------------------------------------------------------------------------------------------------
-// driving the preprocessor
-// ---------------------------------------------------------------------------------------------------------
 
 fn temp_path(tag: str) String {
     let mut p = String::from_str(str::from_cstr(unsafe shim::sc_tmpdir()));
@@ -694,7 +675,7 @@ fn bg_exec(args: &mut Vector<String>, out: *const char) i32 {
 }
 
 // One line of `text` starting at `i`, without its terminator. A `\r` is dropped with the `\n`: the
-// preprocessor's output is CRLF on Windows, and a value read as `7\r` parses as nothing at all -- which
+// preprocessor's output is CRLF on Windows, and a value read as `7\r` parses as nothing at all: which
 // silently cost every macro constant there, and `__SIZEOF_LONG__` with them (Windows' `long` is 4 bytes,
 // so falling back to the 8-byte default mistyped every `long` in a signature).
 fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
@@ -711,7 +692,7 @@ fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
     return text.slice(i, t);
 }
 
-// `__SIZEOF_*__` is what the toolchain itself reports, so `long` maps to what it will actually be.
+// `__SIZEOF_*__` is what the toolchain itself reports, so `long` maps to what it will be.
 fn read_widths(text: str) Widths {
     let mut w = Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 };
     let n = text.len();
@@ -750,8 +731,8 @@ fn macro_int(line: str) i32 {
     while i > 0 && line.byte_at(i - 1) != b' ' {
         i = i - 1;
     }
-    // Only the `__SIZEOF_*__` widths matter, so anything that is not a small run of digits -- a suffixed
-    // `9223372036854775807LL`, a parenthesised expression -- is simply not one of them.
+    // Only the `__SIZEOF_*__` widths matter, so anything that is not a small run of digits: a suffixed
+    // `9223372036854775807LL`, a parenthesised expression: is not one of them.
     if n - i > 4 || n == i {
         return 0;
     }
@@ -767,12 +748,10 @@ fn macro_int(line: str) i32 {
     return v;
 }
 
-// ---------------------------------------------------------------------------------------------------------
 // C constant expressions
-// ---------------------------------------------------------------------------------------------------------
-// Enumerators and object-like macros are rarely bare literals -- `(1 << 8)`, `A | B`, `SOME_OTHER_MACRO` --
+// Enumerators and object-like macros are rarely bare literals: `(1 << 8)`, `A | B`, `SOME_OTHER_MACRO`;
 // and dropping every one of those loses most of a library's constants (91 of them in curl.h alone). This is
-// the integer subset of C's constant expressions: enough for the shapes headers actually use, and it
+// the integer subset of C's constant expressions: enough for the shapes headers use, and it
 // REFUSES anything else rather than guessing, because a constant that is subtly wrong is worse than absent.
 
 struct CExpr<'a> {
@@ -790,7 +769,7 @@ const CE_DEPTH: i32 = 8;
 
 extend CExpr {
     // One name: an enumerator of the enum being built, a constant already collected, any enum's value, or
-    // another macro -- resolved recursively, since headers define constants in terms of each other.
+    // another macro: resolved recursively, since headers define constants in terms of each other.
     fn ex_ident(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32, name: str) i64 {
         if e != null {
             let ed: &EnumDef = unsafe &*e;
@@ -886,7 +865,8 @@ extend CExpr {
         }
         if self.lx.at_punct(b'~') {
             self.lx.advance();
-            return 0 - self.ex_unary(c, e, dump, depth) - 1; // ~v == -v - 1
+            // ~v == -v - 1.
+            return 0 - self.ex_unary(c, e, dump, depth) - 1;
         }
         if self.lx.at_punct(b'!') {
             self.lx.advance();
@@ -982,7 +962,8 @@ extend CExpr {
         while self.lx.at_punct(b'&') {
             self.lx.advance();
             if self.lx.at_punct(b'&') {
-                self.ok = false; // `&&` is a logical operator, not a constant this models
+                // `&&` is a logical operator, not a constant this models.
+                self.ok = false;
                 return 0;
             }
             v = v & self.ex_shift(c, e, dump, depth);
@@ -1013,28 +994,24 @@ extend CExpr {
     }
 }
 
-/// The value of a C integer constant expression, or `ok = false` when any part of it is outside this
-/// subset. `e` (may be null) is an enum under construction, whose earlier enumerators are in scope.
+// The value of a C integer constant expression, or `ok = false` when any part of it is outside this
+// subset. `e` (may be null) is an enum under construction, whose earlier enumerators are in scope.
 fn ce_eval(text: str, c: &Collected, e: *const EnumDef, dump: str, depth: i32) Option<i64> {
     if text.len() == 0 || depth > CE_DEPTH {
         return Option::<i64>::None;
     }
     let mut x = CExpr::<'_> { lx: Lexer::new(text), ok: true };
     let v = x.ex_or(c, e, dump, depth);
-    // Trailing tokens mean the text was never a constant expression -- a cast, a call, a comma.
+    // Trailing tokens mean the text was never a constant expression: a cast, a call, a comma.
     if x.ok && x.lx.kind == TK_EOF {
         return Option::<i64>::Some(v);
     }
     return Option::<i64>::None;
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// object-like macros
-// ---------------------------------------------------------------------------------------------------------
-
-// Which names the TARGET header defines. `-dM` gives every macro in scope -- thousands of them, from the
-// compiler and every include -- and says nothing about where each came from, so the names are taken from
-// the header's own text and only their VALUES are read from the dump (which is the value that actually
+// Which names the TARGET header defines. `-dM` gives every macro in scope: thousands of them, from the
+// compiler and every include, and says nothing about where each came from, so the names are taken from
+// the header's own text and only their VALUES are read from the dump (which is the value that
 // survived the `#if`s). Function-like macros are skipped: a Super-C const cannot stand in for one.
 fn header_macro_names(src: str, out: &mut Vector<String>) {
     let n = src.len();
@@ -1100,7 +1077,7 @@ fn strip_parens(v: str) str {
         if s.len() < 2 || s.byte_at(0) != b'(' || s.byte_at(s.len() - 1) != b')' {
             return s;
         }
-        // Only when the two are each other's partner -- `(a)+(b)` must survive intact.
+        // Only when the two are each other's partner: `(a)+(b)` must survive intact.
         let mut depth: i32 = 0;
         let mut k: usize = 0;
         let mut matched = true;
@@ -1137,9 +1114,9 @@ fn is_float_text(v: str) bool {
     return dot;
 }
 
-/// Turn one macro replacement into a typed Super-C constant. Only literals: an integer, a float or a
-/// string. An expression macro (`(SIZE_MAX >> 1)`, `INT32_MAX`) is left alone -- folding C expressions is
-/// the C compiler's job, and a const that is subtly different from the macro is worse than no const.
+// Turn one macro replacement into a typed Super-C constant. Only literals: an integer, a float or a
+// string. An expression macro (`(SIZE_MAX >> 1)`, `INT32_MAX`) is left alone: folding C expressions is
+// the C compiler's job, and a const that is subtly different from the macro is worse than no const.
 fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef) bool {
     let v = strip_parens(raw);
     if v.len() == 0 {
@@ -1178,7 +1155,7 @@ fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef
     let mut iv = int_literal(body);
     if iv < 0 {
         // Not a literal: `(1 << 8)`, `A | B`, or a name standing for another macro. The evaluator settles
-        // whether it is a constant at all -- and refuses when any part of it is outside C's integer subset.
+        // whether it is a constant at all, and refuses when any part of it is outside C's integer subset.
         let evo = ce_eval(v, c, null, dump, 0);
         if evo.is_none() {
             return false;
@@ -1229,10 +1206,6 @@ fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef
     return true;
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// emitting
-// ---------------------------------------------------------------------------------------------------------
-
 fn type_mentions(ty: str, name: str) bool {
     let n = ty.len();
     let m = name.len();
@@ -1253,12 +1226,8 @@ fn type_mentions(ty: str, name: str) bool {
     return false;
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// entry point
-// ---------------------------------------------------------------------------------------------------------
-
-/// `super-c bindgen <header.h> [-o out.spc] [--link=NAME] [--header=SPELLING] [-I dir]... [--from=PART]...`
-/// Returns a process exit code.
+// `super-c bindgen <header.h> [-o out.spc] [--link=NAME] [--header=SPELLING] [-I dir]... [--from=PART]...`
+// Returns a process exit code.
 fn run_one(
     header: str,
     out_path: str,
@@ -1379,12 +1348,8 @@ fn write_out(text: str, out_path: str, nfns: usize, skipped: usize) i32 {
     return 0;
 }
 
-// ---------------------------------------------------------------------------------------------------------
-// path expansion
-// ---------------------------------------------------------------------------------------------------------
-
-/// One header to convert: where it is, how the generated module spells its `#include`, and where the
-/// result goes.
+// One header to convert: where it is, how the generated module spells its `#include`, and where the
+// result goes.
 struct Job {
     pub path: String,
     pub spelling: String,
@@ -1432,9 +1397,9 @@ fn stem_of(p: str) str {
     return base;
 }
 
-/// The generated file's stem. A module is imported by its file name, so anything that cannot appear in an
-/// identifier becomes `_` -- `typecheck-gcc.h` would otherwise produce a module nothing can import. Only
-/// the FILE name is rewritten; the `#include` spelling has to stay exactly what C wrote.
+// The generated file's stem. A module is imported by its file name, so anything that cannot appear in an
+// identifier becomes `_`: `typecheck-gcc.h` would otherwise produce a module nothing can import. Only
+// the FILE name is rewritten; the `#include` spelling has to stay exactly what C wrote.
 fn module_stem(p: str, out: &mut String) {
     let st = stem_of(p);
     for i in 0..st.len() {
@@ -1447,9 +1412,9 @@ fn module_stem(p: str, out: &mut String) {
     }
 }
 
-/// Every `.h` under `dir`, recursively. `rel` is the path so far BELOW the directory the user named,
-/// which is what the generated module uses to `#include` it -- name the include root and the spellings
-/// come out the way C code writes them (`curl/curl.h`).
+// Every `.h` under `dir`, recursively. `rel` is the path so far BELOW the directory the user named,
+// which is what the generated module uses to `#include` it: name the include root and the spellings
+// come out the way C code writes them (`curl/curl.h`).
 fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
     let mut d = String::from_str(dir);
     let dh = unsafe shim::sc_opendir(d.cstr());
@@ -1514,7 +1479,7 @@ const fn name_cmp(a: &String, b: &String) i32 {
 }
 
 /// `super-c bindgen <header.h|dir>... [-o out]`. A directory is walked recursively for `.h` files, so a
-/// whole library's include tree converts in one call -- `-o` then names a DIRECTORY, and the tree under it
+/// whole library's include tree converts in one call: `-o` then names a DIRECTORY, and the tree under it
 /// mirrors the headers'. A single header with no `-o` still writes to stdout.
 pub fn run(
     paths: &Vector<String>,
@@ -1643,12 +1608,13 @@ extend Lexer {
         }
     }
 
-    /// `{ NAME [= <int>] , ... }`. Auto-increment is C's, so a bare name is one past the previous value. An
-    /// enumerator this cannot evaluate marks the whole enum unusable rather than guessing a discriminant --
-    /// a wrong constant is a bug at every call site that compares against it.
+    // `{ NAME [= <int>] , ... }`. Auto-increment is C's, so a bare name is one past the previous value. An
+    // enumerator this cannot evaluate marks the whole enum unusable rather than guessing a discriminant:
+    // a wrong constant is a bug at every call site that compares against it.
     fn parse_enum_body(self: &mut Self, c: &mut Collected, tag: str, dump: str) {
         let mut e = EnumDef { tag: String::from_str(tag), vals: Vector::<EnumVal>::new(), ok: true, mine: c.cur_mine };
-        self.advance(); // '{'
+        // '{'.
+        self.advance();
         let mut next: i64 = 0;
         let mut known = true;
         loop {
@@ -1694,7 +1660,7 @@ extend Lexer {
                 }
                 let v = ce_eval(self.src.slice(vstart, vend), c, &e, dump, 0);
                 // An enumerator this cannot evaluate makes the NEXT one unknown too, since C's auto-increment
-                // counts from it. Only those are dropped -- the rest of the enum is still worth having.
+                // counts from it. Only those are dropped: the rest of the enum is still worth having.
                 known = v.is_some();
                 next = v.unwrap_or(0);
             }
@@ -1727,10 +1693,10 @@ extend Lexer {
         c.enums.push(e);
     }
 
-    /// `{ <member declarations> }`. Members are ordinary declarations, so the same specifier/declarator parse
-    /// runs recursively. Bitfields, anonymous members and flexible arrays make the record unusable: each one
-    /// changes the LAYOUT in a way a field list cannot express, and a record with the wrong layout is worse
-    /// than no record at all.
+    // `{ <member declarations> }`. Members are ordinary declarations, so the same specifier/declarator parse
+    // runs recursively. Bitfields, anonymous members and flexible arrays make the record unusable: each one
+    // changes the LAYOUT in a way a field list cannot express, and a record with the wrong layout is worse
+    // than no record at all.
     fn parse_record_body(self: &mut Self, c: &mut Collected, tag: str, is_union: bool, dump: str) {
         let mut r = Record {
             tag: String::from_str(tag),
@@ -1739,7 +1705,8 @@ extend Lexer {
             ok: true, // a nameless body is named by the typedef that follows; emission re-checks the tag
             mine: c.cur_mine,
         };
-        self.advance(); // '{'
+        // '{'.
+        self.advance();
         let mut depth: i32 = 1;
         loop {
             self.skip_noise();
@@ -1747,7 +1714,7 @@ extend Lexer {
                 break;
             }
             // A member shape this parser does not model would otherwise consume nothing and spin here
-            // forever. Stepping over one token loses that member -- which `ok` already records -- instead
+            // forever. Stepping over one token loses that member (which `ok` already records) instead
             // of the whole run.
             let before = self.pos;
             if self.at_punct(b'}') {
@@ -1787,14 +1754,16 @@ extend Lexer {
                 );
 
                 if self.at_punct(b':') {
-                    r.ok = false; // a bitfield: its width is not a field type
+                    // A bitfield: its width is not a field type.
+                    r.ok = false;
                     self.advance();
                     if self.kind == TK_NUM {
                         self.advance();
                     }
                 }
                 if nm.len() == 0 || isfn || !ty.ok || adim == -2 {
-                    r.ok = false; // an anonymous member, a function member, or an extent with no constant
+                    // An anonymous member, a function member, or an extent with no constant.
+                    r.ok = false;
                 } else {
                     let mut rt = String::new();
                     if adim >= 0 {
@@ -1832,9 +1801,9 @@ extend Lexer {
         c.records.push(r);
     }
 
-    /// Declaration specifiers: the type part of a declaration, up to the first declarator. Returns the base
-    /// type; `is_typedef` reports a leading `typedef`. A `struct`/`union`/`enum` body is skipped -- only its tag
-    /// is kept, and the tag becomes an opaque type if the emitted signatures need it.
+    // Declaration specifiers: the type part of a declaration, up to the first declarator. Returns the base
+    // type; `is_typedef` reports a leading `typedef`. A `struct`/`union`/`enum` body is skipped: only its tag
+    // is kept, and the tag becomes an opaque type if the emitted signatures need it.
     fn parse_specs(
         self: &mut Self,
         c: &mut Collected,
@@ -1924,10 +1893,11 @@ extend Lexer {
                 if is_enum {
                     // A TAGGED enum defined here becomes a Super-C enum, so its tag names a type a signature
                     // can use; anything else is an `int` as far as a call is concerned.
-                    // Named by its tag exactly when that enum is one this module emits -- including at a USE
+                    // Named by its tag exactly when that enum is one this module emits: including at a USE
                     // site, which carries no body and is where most of them appear.
                     if tag.len() == 0 && defined {
-                        c.pending_agg = c.enums.len() as i32 - 1; // the typedef below names it, if one follows
+                        // The typedef below names it, if one follows.
+                        c.pending_agg = c.enums.len() as i32 - 1;
                         c.pending_is_enum = true;
                         ty.ok = false;
                     } else if tag.len() != 0 && c.enum_emitted(tag.as_str()) {
@@ -1941,21 +1911,23 @@ extend Lexer {
                 } else if defined {
                     c.pending_agg = c.records.len() as i32 - 1;
                     c.pending_is_enum = false;
-                    ty.ok = false; // nameless until the typedef below names it
+                    // Nameless until the typedef below names it.
+                    ty.ok = false;
                 } else {
-                    ty.ok = false; // an anonymous struct has no name to refer to
+                    // An anonymous struct has no name to refer to.
+                    ty.ok = false;
                 }
                 named = true;
                 break;
             }
-            // The type is complete -- this identifier starts the declarator. `unsigned long n` counts as
+            // The type is complete: this identifier starts the declarator. `unsigned long n` counts as
             // complete even though no type NAME was written, or the parameter's own name is swallowed as one.
             if named || prim.len() != 0 || longs > 0 || shorts > 0 || explicit_sign {
                 break;
             }
             // A typedef name, or a type this tool has never heard of.
             // `size_t` means `usize` because that is what it means, not because this host happens to spell
-            // it `unsigned long` -- so the standard names are consulted before the typedef table.
+            // it `unsigned long`, so the standard names are consulted before the typedef table.
             if wellknown(t, &mut ty.base) {
                 named = true;
                 self.advance();
@@ -1994,7 +1966,8 @@ extend Lexer {
                 ty.base.push_str("f32");
             } else if p == "double" {
                 if longs > 0 {
-                    ty.ok = false; // long double has no Super-C counterpart
+                    // Long double has no Super-C counterpart.
+                    ty.ok = false;
                 }
                 ty.base.push_str("f64");
             } else if p == "char" {
@@ -2023,9 +1996,9 @@ extend Lexer {
         return ty;
     }
 
-    /// One declarator: pointers, an optional name, then array/function suffixes. `name` receives the declared
-    /// identifier (empty for an abstract declarator). `is_fn` reports a function declarator and `params`/
-    /// `variadic` its signature.
+    // One declarator: pointers, an optional name, then array/function suffixes. `name` receives the declared
+    // identifier (empty for an abstract declarator). `is_fn` reports a function declarator and `params`/
+    // `variadic` its signature.
     fn parse_declarator(
         self: &mut Self,
         c: &mut Collected,
@@ -2127,7 +2100,7 @@ extend Lexer {
                 );
             }
         }
-        // An array PARAMETER is a pointer -- that is C's own rule. An array FIELD is not: dropping its extent
+        // An array PARAMETER is a pointer: that is C's own rule. An array FIELD is not: dropping its extent
         // would change the record's layout, so the bound is carried out and the field keeps `[T; N]`.
         let mut first = true;
         while self.at_punct(b'[') {
@@ -2161,7 +2134,8 @@ extend Lexer {
             if first {
                 *arr_len = n;
             } else {
-                *arr_len = -2; // a second dimension: not modelled
+                // A second dimension: not modelled.
+                *arr_len = -2;
             }
             first = false;
         }
@@ -2169,7 +2143,8 @@ extend Lexer {
     }
 
     fn parse_params(self: &mut Self, c: &mut Collected, out: &mut Vector<Param>, variadic: &mut bool, dump: str) {
-        self.advance(); // '('
+        // '('.
+        self.advance();
         let mut idx: i32 = 0;
         loop {
             self.skip_noise();
@@ -2219,7 +2194,8 @@ extend Lexer {
             if self.at_punct(b',') {
                 self.advance();
             } else if !self.at_punct(b')') {
-                break; // something unmodelled: stop before it desynchronises the whole file
+                // Something unmodelled: stop before it desynchronises the whole file.
+                break;
             }
         }
         if self.at_punct(b')') {
@@ -2227,8 +2203,8 @@ extend Lexer {
         }
     }
 
-    /// Walk the whole preprocessed unit. Every typedef is recorded (the target's signatures are spelled with
-    /// them, wherever they were declared); only declarations whose origin file is `want` are emitted.
+    // Walk the whole preprocessed unit. Every typedef is recorded (the target's signatures are spelled with
+    // them, wherever they were declared); only declarations whose origin file is `want` are emitted.
     fn parse_unit(self: &mut Self, c: &mut Collected, want: str, extra: &Vector<String>, dump: str) {
         loop {
             self.skip_noise();
@@ -2240,7 +2216,8 @@ extend Lexer {
                 continue;
             }
             if self.at_punct(b'{') {
-                self.skip_group(b'{', b'}'); // a `static inline` body left in the header
+                // A `static inline` body left in the header.
+                self.skip_group(b'{', b'}');
                 continue;
             }
             if self.kind != TK_IDENT {
@@ -2250,7 +2227,7 @@ extend Lexer {
             let here = String::from_str(self.file.as_str());
             let mine = same_origin(here.as_str(), want, extra);
             // Published for parse_specs: a struct or enum BODY is parsed from inside the specifier, which is
-            // where its origin has to be known -- only the target header's own records are emitted.
+            // where its origin has to be known: only the target header's own records are emitted.
             c.cur_mine = mine;
             c.pending_agg = -1;
             c.saw_extern = false;
@@ -2321,7 +2298,8 @@ extend Lexer {
             } else if self.at_punct(b';') {
                 self.advance();
             } else if self.kind != TK_EOF {
-                self.advance(); // unmodelled: step over one token and resynchronise on the next `;`
+                // Unmodelled: step over one token and resynchronise on the next `;`.
+                self.advance();
             }
         }
     }
@@ -2364,8 +2342,8 @@ extend Collected {
         if is_fn || self.alias_of(name) >= 0 {
             return;
         }
-        // `typedef struct { .. } Foo;` -- the body carried no tag, so the typedef IS the name. Most C
-        // libraries declare their types this way, and a nameless record was previously dropped outright.
+        // `typedef struct { .. } Foo;`: the body carried no tag, so the typedef IS the name. Most C
+        // libraries declare their types this way, so a nameless record must not be dropped.
         if pend >= 0 && ty.ptr == 0 && ty.fnsig.len() == 0 {
             let idx = pend as usize;
             if pend_enum && idx < self.enums.len() && self.enums[idx].tag.len() == 0 {
@@ -2389,7 +2367,7 @@ extend Collected {
         self.aliases.push(Alias { name: String::from_str(name), sub: sub, opaque: opaque, ok: ty.ok || opaque });
     }
 
-    // Only the opaque tags the emitted signatures actually mention: a header pulls in hundreds of struct names
+    // Only the opaque tags the emitted signatures mention: a header pulls in hundreds of struct names
     // through its own includes, and binding all of them would bury the ones a caller needs.
     fn opaque_used(self: &Self, name: str) bool {
         for i in 0..self.fns.len() {
@@ -2406,7 +2384,7 @@ extend Collected {
         return false;
     }
 
-    // A tag emitted as a real `pub struct`/`pub union` must not ALSO be declared opaque -- one name, one
+    // A tag emitted as a real `pub struct`/`pub union` must not ALSO be declared opaque: one name, one
     // definition.
     fn record_emitted(self: &Self, tag: str) bool {
         let ri = self.record_of(tag);
@@ -2426,8 +2404,8 @@ extend Collected {
         return false;
     }
 
-    // A name already spoken for. C's namespaces are separate -- a macro, an enumerator and a function may all
-    // be called `FOO` -- but Super-C has one, so the first definition wins and the rest are left out.
+    // A name already spoken for. C's namespaces are separate: a macro, an enumerator and a function may all
+    // be called `FOO`, but Super-C has one, so the first definition wins and the rest are left out.
     fn name_taken(self: &Self, upto: usize, name: str) bool {
         for i in 0..self.fns.len() {
             if self.fns[i].name.as_str() == name {
@@ -2452,9 +2430,9 @@ extend Collected {
         return false;
     }
 
-    /// The constants the module exposes: an anonymous enum's enumerators (C's "block of constants" idiom),
-    /// then the target header's own object-like macros. Order matters -- an enumerator is a real declaration
-    /// and a macro is textual, so the declaration wins any name they share.
+    // The constants the module exposes: an anonymous enum's enumerators (C's "block of constants" idiom),
+    // then the target header's own object-like macros. Order matters: an enumerator is a real declaration
+    // and a macro is textual, so the declaration wins any name they share.
     fn collect_consts(self: &mut Self, header: str, dump: str) {
         for i in 0..self.enums.len() {
             if !self.enums[i].mine || !self.enums[i].ok || self.enums[i].tag.len() != 0 {

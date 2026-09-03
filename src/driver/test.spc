@@ -605,7 +605,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
 
 // Headers the generated test runner needs: POSIX forks + reaps (unistd/sys/wait), Windows spawns a pool of
 // subprocesses (process.h/_spawnv, stdint.h/intptr_t, windows.h to wait on their handles). Chosen by the C
-// preprocessor rather than by `@platform`, because this text is compiled for the TARGET -- which is not
+// preprocessor rather than by `@platform`, because this text is compiled for the TARGET, which is not
 // necessarily the platform this compiler is running on. It also keeps both runners in every build, so
 // neither can rot unnoticed.
 const fn test_runner_includes() *const char {
@@ -863,7 +863,7 @@ int main(int argc, char **argv) {
 
 // Windows has no fork(); isolate each test in its own subprocess (`self --run-one=<i> --capture=<file>`)
 // so should_panic and crashing tests are caught via the child's exit code. The PARENT runs the global
-// @test_init/@test_free pair once, exactly as POSIX does -- that pair's output is the visible one, since
+// @test_init/@test_free pair once, exactly as POSIX does: that pair's output is the visible one, since
 // every child's stdout goes to its capture file (deleted for passing tests). Each child then rebuilds a
 // private env for its own test: no fork means the parent's pointer cannot cross the process boundary.
 // The child redirects its own stdout and stderr into the capture file; the parent reads it back for a
@@ -1182,8 +1182,8 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
 }
 
 /// Compile the emitted build tree with $CC. When `out_bin` is set (the `build` subcommand) the program is
-/// linked to that path and we return; otherwise it links `<gen_root>/__tests` and runs it as the test
-/// runner, forwarding `topts`' options.
+/// linked to that path and nothing runs; otherwise it links `<gen_root>/__tests` and runs it as the test
+/// runner, forwarding `topts`' options. Returns the compile's or the runner's exit code.
 pub fn test_build_and_run(
     p: &loader::Package,
     topts: *const TestOpts,
@@ -1192,9 +1192,8 @@ pub fn test_build_and_run(
     cflags: str,
     target: i32,
 ) i32 {
-    // A cross target brings its own compiler, and $CC on the host would be the wrong one. Without this the
-    // front end gated items on `--target=` while the C compiler still built for the host, so `super-c build
-    // app.spc --target=ios` produced a HOST binary and said nothing.
+    // A cross target brings its own compiler: $CC on the host would build a host binary while the front end
+    // gated items on `--target=`, with no diagnostic.
     let sdk = target_sdk(target);
     let mut ccs = String::new();
     if sdk != 0 {
@@ -1209,10 +1208,9 @@ pub fn test_build_and_run(
         }
     }
     let root = p.gen_root.as_str();
-    // No shell anywhere: the compile is an argv child, so paths pass through verbatim (spaces,
-    // quotes, non-ASCII). Flag STRINGS keep the whitespace-splitting contract they always had. The
-    // runner is named with an explicit `.exe` on Windows so running it below never depends on the
-    // spawn filling the extension in.
+    // No shell anywhere: the compile is an argv child, so paths pass through verbatim (spaces, quotes,
+    // non-ASCII) while flag strings are split on whitespace. The runner is named with an explicit `.exe`
+    // on Windows so running it below never depends on the spawn filling the extension in.
     let exe = if unsafe shim::sc_host_platform() == 0 {
         ".exe";
     } else {
@@ -1221,12 +1219,14 @@ pub fn test_build_and_run(
     let mut args = Vector::<String>::new();
     split_args(&mut args, ccs.as_str());
     split_args(&mut args, "-std=c11 -D_POSIX_C_SOURCE=200809L");
+    // The cross triple comes first so the profile's flags (`cflags`, empty for a bare build) can override it.
     let mut fl = String::new();
-    push_sdk_flags(&mut fl, sdk, p.arch); // the cross triple first; the profile's flags can override
+    push_sdk_flags(&mut fl, sdk, p.arch);
     split_args(&mut args, fl.as_str());
-    split_args(&mut args, cflags); // the requested profile; a bare build passes none
+    split_args(&mut args, cflags);
+    // One command compiles and links, so the link-only SDK libs ride along.
     let mut ll = String::new();
-    push_sdk_libs(&mut ll, sdk); // one command compiles AND links here, so the link-only libs ride along
+    push_sdk_libs(&mut ll, sdk);
     split_args(&mut args, ll.as_str());
     args.push(String::from_str("-o"));
     let mut outp = String::new();
@@ -1244,7 +1244,7 @@ pub fn test_build_and_run(
             args.push(String::from_str(cf));
         }
     }
-    // @c.link flags (one per line in build/__ldflags)
+    // @c.link flags, one per line in build/__ldflags.
     let ldpath = build_out_path(root, "__ldflags", "");
     let lf = stdio::fopen(ldpath.as_str(), "rb");
     if lf != null {
@@ -1269,9 +1269,10 @@ pub fn test_build_and_run(
         unsafe stdio::fprintf(stdio::stderr(), "super-c: %s failed (%s)\n".ptr() as *const char, what, ccs.cstr());
         return 1;
     }
+    // The `build` subcommand: the program is linked, nothing to run.
     if out_bin.len() != 0 {
         return 0;
-    } // the `build` subcommand: linked the program, nothing to run
+    }
     return test_run_runner(topts, outp.as_str());
 }
 

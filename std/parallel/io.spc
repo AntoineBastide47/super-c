@@ -9,14 +9,14 @@
 // platform poller (kqueue, epoll or select) and turns readiness into a wake, so ten thousand tasks waiting
 // on ten thousand descriptors are ten thousand parked coroutines and one thread.
 //
-// Two things make it safe. The registration is armed by the park hand-off -- AFTER the coroutine's context
-// is saved -- so an event can never be delivered to a task that is still switching out. And the
+// Two things make it safe. The registration is armed by the park hand-off: AFTER the coroutine's context
+// is saved, so an event can never be delivered to a task that is still switching out. And the
 // registration itself is heap-owned with a claim: the reactor and a timing-out waiter race a CAS for it,
 // the winner decides what happens, and the loser touches nothing. Without that, an event already in flight
-// when a timed wait gives up would write into a stack frame that no longer exists.
+// when a timed wait gives up would write into a dead stack frame.
 //
-// Readiness-based on every platform. Windows watches SOCKETS ONLY -- a socket is not a CRT file descriptor
-// there -- and its select() backend caps the simultaneously parked descriptors at FD_SETSIZE; arming past
+// Readiness-based on every platform. Windows watches SOCKETS ONLY: a socket is not a CRT file descriptor
+// there, and its select() backend caps the simultaneously parked descriptors at FD_SETSIZE; arming past
 // that fails loudly rather than silently. IOCP would lift both, at the cost of a completion-model interface.
 
 import sc_runtime;
@@ -78,7 +78,7 @@ fn reactor_main(arg: *mut void) *mut void {
             if it == null {
                 continue;
             }
-            // Claim it. Losing means a timed-out waiter already took it and freed it -- so this event is
+            // Claim it. Losing means a timed-out waiter already took it and freed it, so this event is
             // stale and nothing here may touch the node again.
             if atomic::cas_i32(&mut unsafe it.state, 0, 1, false, 4, 0) {
                 let _ = runtime::wake_as(unsafe it.co, unsafe it.token, runtime::WR_IO);
@@ -122,7 +122,7 @@ pub fn ensure_reactor() *mut Reactor {
 }
 
 // The park hand-off: arm the registration once the coroutine's context is saved. Doing it here rather than
-// before the park is the whole trick -- the reactor cannot deliver an event to a coroutine it does not know
+// before the park is the whole trick: the reactor cannot deliver an event to a coroutine it does not know
 // about yet, and it does not know about this one until its context is safely stored.
 fn commit_arm(p: *mut void) {
     let it = p as *mut Interest;
@@ -140,7 +140,7 @@ fn commit_arm(p: *mut void) {
 }
 
 /// Wait until `fd` is ready in the given direction, or until `deadline` (a `time::deadline_in` value; 0
-/// waits indefinitely). Reports whether it became ready -- `false` means the deadline passed first.
+/// waits indefinitely). Reports whether it became ready: `false` means the deadline passed first.
 ///
 /// From a coroutine this PARKS, freeing the worker. From any other thread it blocks that thread, which is
 /// what it would have done anyway.
@@ -153,8 +153,8 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
     };
     let co = runtime::current();
     if co == null {
-        // Not a coroutine: nothing to park, so just wait on the one descriptor. A poll(2) rather than a
-        // poller of its own -- that meant building and tearing down a kqueue per call.
+        // Not a coroutine: nothing to park, so wait on the one descriptor. A poll(2) rather than a
+        // poller of its own: that meant building and tearing down a kqueue per call.
         let ms = if deadline == 0 {
             -1;
         } else {
@@ -169,7 +169,7 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
     unsafe it[0] = Interest { refs: 2, co: co, token: token, fd: fd, write: w, state: 0 };
     let reason = runtime::park_timed(token, deadline, commit_arm, it, true);
     // Back: the descriptor is ready, or the deadline or a cancellation claimed us first. Take the node off
-    // the poller either way, then settle the ownership race for it -- closing the descriptor is never a
+    // the poller either way, then settle the ownership race for it: closing the descriptor is never a
     // substitute for this removal.
     if deadline != 0 {
         runtime::cancel_timer(co);
@@ -182,12 +182,15 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
     if atomic::cas_i32(&mut unsafe it.state, 0, 2, false, 4, 0) {
         ready = false;
         if removed > 0 {
-            interest_drop(it); // removal returned the reactor's registration reference to this task
+            // Removal returned the reactor's registration reference to this task.
+            interest_drop(it);
         }
     } else {
-        ready = reason == runtime::WR_IO; // a cancel that beat an in-flight event still reports not-ready
+        // A cancel that beat an in-flight event still reports not-ready.
+        ready = reason == runtime::WR_IO;
     }
-    interest_drop(it); // the task's reference
+    // The task's reference.
+    interest_drop(it);
     runtime::wait_clear();
     runtime::park_done(co);
     if runtime::cancel_after_wait(true) {
@@ -219,7 +222,8 @@ pub fn read(fd: i32, buf: []mut u8) isize {
             return n;
         }
         if !wait_until(fd, false, 0) {
-            return -1; // with no deadline, not-ready means the wait was cancelled
+            // With no deadline, not-ready means the wait was cancelled.
+            return -1;
         }
     }
 }
@@ -241,7 +245,8 @@ pub fn write(fd: i32, buf: []u8) isize {
             return n;
         }
         if !wait_until(fd, true, 0) {
-            break; // cancelled: report the partial write
+            // Cancelled: report the partial write.
+            break;
         }
     }
     return at as isize;
