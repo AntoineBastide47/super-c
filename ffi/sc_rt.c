@@ -109,6 +109,10 @@ static struct {
   char pad2[40];
 } __attribute__((aligned(64))) sc_rt_mlot[SC_RT_MLOT];
 
+/* ---- combined-safepoint cancellation hook (see sc_rt.h) --------------------------------------------- */
+int32_t (*__sc_cancel_hook)(void) = 0;
+void __sc_set_cancel_hook(int32_t (*f)(void)) { __sc_cancel_hook = f; }
+
 /* ---- lock-order tracking (SC_LOCK_ORDER=1, or =fatal to abort) --------------------------------------
    A deadlock is reported the first time two locks are taken in OPPOSITE orders, not the first time the
    program actually hangs. That difference is the whole point: an inversion that deadlocks one run in a

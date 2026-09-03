@@ -191,6 +191,12 @@ pub const IN_RANGE_BOUNDS_PROVEN: u8 = 18;
 /// only by BCE range-check coalescing: one group check at the FIRST access site covers the
 /// accesses index .. index + width - 1, whose own element checks become IN_BOUNDS_PROVEN.
 pub const IN_BOUNDS_GROUP: u8 = 19;
+/// Combined preemption + cancellation safepoint (i32 result): the emitted hot path is the same
+/// tick decrement as IN_SAFEPOINT; the cold half additionally asks the runtime's cancel hook
+/// whether an unmasked request is pending, ACCEPTS it, and reports 1 -- the following switch then
+/// enters the frame's cancellation ladder. Emitted instead of IN_SAFEPOINT when the body can carry
+/// a cancellation edge.
+pub const IN_SAFEPOINT_C: u8 = 20;
 
 /// True for the five safe-access check intrinsics.
 pub const fn is_check(c: u8) bool {
@@ -239,7 +245,11 @@ pub struct Statement {
 pub const TM_GOTO: u8 = 0; // t0 = successor
 pub const TM_SWITCH: u8 = 1; // a = discriminant OperandId; values/targets in switch pool; t0 = otherwise
 pub const TM_CALL: u8 = 2; // callee item or fn-value operand; args in operand range; t0 = normal
-pub const TM_RETURN: u8 = 3;
+pub const TM_RETURN: u8 = 3; // args_len = RET_CANCEL marks a cancellation return (zero-valued, unread)
+
+/// TM_RETURN.args_len value marking a cancellation-edge return: the frame's cleanup already ran and
+/// the caller (itself unwinding) never reads the value, so the backend spells a zero literal.
+pub const RET_CANCEL: u32 = 1;
 pub const TM_DROP: u8 = 4; // place; t0 = successor
 pub const TM_ASSERT: u8 = 5; // a = condition OperandId; t0 = success
 pub const TM_UNREACHABLE: u8 = 6;

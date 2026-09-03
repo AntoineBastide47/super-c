@@ -261,7 +261,9 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
     {
         let g2 = latch.left.lock();
         while *g2.get() > 0 {
-            latch.cv.wait(&g2);
+            // Masked: the chunks write through pointers into this frame, so the join must never unwind
+            // early. A pending cancellation is observed after the last chunk lands.
+            latch.cv.wait_masked(&g2);
         }
     }
     unsafe g.dealloc(envs, nchunks * sizeof(ChunkEnv), alignof(ChunkEnv));

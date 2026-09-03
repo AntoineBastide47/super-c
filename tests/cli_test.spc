@@ -2109,8 +2109,9 @@ fn main() i32 {
     assert(r.ok());
     assert(
         p.gen_has("main.c", "if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();"),
-        "a loop in a launching program gets a safepoint",
+        "a loop in a program that never cancels gets the plain safepoint",
     );
+    assert(!p.gen_has("main.c", "__sc_cancel_tick"), "no cancellation tick without a cancellation requester");
     assert(p.gen_has("main.c", "int32_t __sc_spc = 2048;"), "the function-local preemption tick is declared");
     let cc = p.cc_build("");
     assert(cc.ok());

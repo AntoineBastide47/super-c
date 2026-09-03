@@ -240,6 +240,9 @@ pub fn print_body(b: &ir::CoreBody) String {
             p_u(&mut out, t.t0);
         } else if t.kind == ir::TM_RETURN {
             out.push_str("return");
+            if t.args_len == ir::RET_CANCEL {
+                out.push_str(" (cancel)");
+            }
         } else if t.kind == ir::TM_DROP {
             out.push_str("drop -> bb");
             p_u(&mut out, t.t0);

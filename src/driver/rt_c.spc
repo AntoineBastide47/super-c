@@ -205,6 +205,14 @@ static inline __attribute__((unused)) int32_t __sc_preempt_check(void) {
   if (__sc_pre_hook) __sc_pre_hook();
   return 2048;
 }
+/* Cancellation half of a combined safepoint (emitted only on its cold path): asks the runtime
+   whether the current task has an unmasked pending cancellation, ACCEPTING it on yes -- the
+   emitted branch then enters the frame's cancellation ladder. The hook lives in sc_rt.c and is
+   inert until the scheduler installs it. */
+extern int32_t (*__sc_cancel_hook)(void);
+static inline __attribute__((unused)) int32_t __sc_cancel_tick(void) {
+  return __sc_cancel_hook ? __sc_cancel_hook() : 0;
+}
 /* reflection registry (super_rt.c): `@reflect`-tagged concrete types register their exported
    `sc_typeinfo_<name>` descriptor at startup (constructor order). External tools dlopen the binary
    and walk the SAME static descriptors the program reads: __sc_reflect_types yields the registered

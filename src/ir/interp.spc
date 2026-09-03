@@ -3627,6 +3627,10 @@ extend Interp {
                 // a runtime preemption marker: nothing to evaluate
                 return IVal { kind: IV_UNIT, tm: b.module, ty: rv.target, i: 0, f: 0.0 };
             }
+            if rv.c == ir::IN_SAFEPOINT_C {
+                // no task exists at compile time: the combined safepoint never cancels
+                return iv_int(b.module, rv.target, 0);
+            }
             if rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN {
                 // PROVEN keeps the identical check here: CTFE catches a false proof as a trap
                 let iv = self.operand(b, env, b.oper_pool[rv.a as usize]);
@@ -5879,7 +5883,7 @@ extend Interp {
             self.elock_depth += 1;
             return;
         }
-        self.elock_sem.acquire();
+        self.elock_sem.acquire_masked();
         atomic::store_usize(&mut self.elock_owner, tok, 0);
         self.elock_depth = 1;
     }

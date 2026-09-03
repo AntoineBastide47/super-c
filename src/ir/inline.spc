@@ -477,6 +477,17 @@ extend InlineCtx {
             }
         }
         if rej == 0 {
+            for i in 0..lw.body.blocks.len() {
+                let t9 = lw.body.blocks.at(i).term;
+                if t9.kind == ir::TM_RETURN && t9.args_len == ir::RET_CANCEL {
+                    // A cancellation-edge return unwinds the CALLER too; rewiring it as a goto
+                    // would read the poison value and resume normal flow.
+                    rej = REJ_BASE | IJ_SHAPE as u64;
+                    break;
+                }
+            }
+        }
+        if rej == 0 {
             for i in 0..lw.body.rvalues.len() {
                 let rv = lw.body.rvalues.at(i);
                 let mut bad = rv.kind == ir::RV_CLOSURE;

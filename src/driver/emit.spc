@@ -224,7 +224,7 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
                 wgc.done();
             };
         }
-        wg.wait();
+        wg.wait_masked();
     } else {
         for m in 0..n {
             if p.modules[m].has_ast {
@@ -414,7 +414,7 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
             wgc.done();
         };
     }
-    wg.wait();
+    wg.wait_masked();
     for i in 0..n {
         p.modules[i].ast.nodes.thaw();
         p.modules[i].ast.children.thaw();
@@ -466,7 +466,7 @@ fn tc_wait_impl(ctx: *mut void, m: ModuleId) {
     let p = unsafe (&*st).p;
     let g = (unsafe &(&*st).mu).lock();
     while *(unsafe &*p).tc_mod_done.at(m as usize) == 0 {
-        (unsafe &(&*st).cv).wait(&g);
+        (unsafe &(&*st).cv).wait_masked(&g);
     }
 }
 
@@ -692,7 +692,7 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool, stats: *mut tc::TcStat
             };
         }
         if launched != 0 {
-            wg.wait();
+            wg.wait_masked();
         }
         level += 1;
     }
@@ -2083,7 +2083,7 @@ fn cemit_seed_take(
     closure: bool,
 ) bool {
     if kl != null {
-        (unsafe &*kl).acquire();
+        (unsafe &*kl).acquire_masked();
     }
     let r = if closure {
         cemit_take_closure(&mut *g, p, m, nid, lw);
@@ -3203,7 +3203,7 @@ fn cemit_low_launch(
             wgc.done();
         };
     }
-    wgl.wait();
+    wgl.wait_masked();
 }
 
 fn cemit_drain_launch(
@@ -3265,7 +3265,7 @@ fn cemit_drain_launch(
         };
         lo9 = hi9;
     }
-    wgd.wait();
+    wgd.wait_masked();
 }
 
 fn cemit_seed_merge_um(cem: &mut cbe::CEmit, o: &mut SeedShard) {
@@ -3711,7 +3711,7 @@ pub fn cemit_package(
             };
         }
         if launched9 != 0 {
-            wg.wait();
+            wg.wait_masked();
         }
         if tstat {
             eprint("cemit-frontier seed: {} tasks\n", launched9);
@@ -6464,6 +6464,9 @@ fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
         p.co_compute();
         p.co_dump();
     }
+    if p.cancel_state == 0 {
+        p.cancel_compute();
+    }
     let cirp = p.cir as *mut iri::Interp;
     if cirp != null {
         unsafe cirp.elock_on = true;
@@ -6491,7 +6494,7 @@ fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
             wgc.done();
         };
     }
-    wg.wait();
+    wg.wait_masked();
     let mut ok = true;
     for i in 0..n {
         let o = outs.index_mut(i);
@@ -7667,7 +7670,7 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
             };
         }
         if launched != 0 {
-            wg.wait();
+            wg.wait_masked();
         }
         for i in 0..n {
             p.modules[i].ast.ilock_on = false;

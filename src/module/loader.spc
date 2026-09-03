@@ -89,6 +89,17 @@ pub struct Package {
     /// starve a worker, so its loops need no safepoint tick.
     pub co_state: u8,
     pub co_spans: Vector<Vector<u64>>,
+    /// Cancellation-edge reachability: 0 = uncomputed (no cancellation checks anywhere), 1 =
+    /// computed. cancel_marks[m] holds start<<32|end DECL spans of the functions and closures whose
+    /// bodies can reach `runtime::cancel_accept` -- a call to one of these from a task-reachable
+    /// body is followed by a compiled cancellation check with a cleanup edge.
+    pub cancel_state: u8,
+    pub cancel_marks: Vector<Set<u64>>,
+    /// Does any non-std module request cancellation (runtime::request_cancel, runtime::try_shutdown,
+    /// or anything in std::parallel::task)? Combined loop safepoints are emitted only then: a
+    /// program that never cancels pays no per-loop ladder, and its shutdown reports a spinning task
+    /// as unresponsive instead of reclaiming it.
+    pub cancel_used: bool,
     /// Methods resolved with NO receiver in hand -- the format helpers the print lowering reaches for,
     /// and anything else the compiler names by decl alone. Nothing says which instance wants them, so
     /// every instance does: (module << 32 | node), exempt from the per-instance demand test.
@@ -306,6 +317,9 @@ pub enum SugarItem {
     SI_SEL_WON,
     SI_SEL_RECV,
     SI_SEL_SEND,
+    SI_CANCEL_PROBE, // the compiled cancellation-edge probe
+    SI_CANCEL_LBEGIN, // ladder open: cleanup masked
+    SI_CANCEL_LEND, // ladder close: hand the edge to the caller
     SI_COUNT,
 }
 
@@ -324,6 +338,9 @@ const SI_MODULES: [str<'static>; SI_COUNT_N] = [
     "std::parallel::selector",
     "std::parallel::selector",
     "std::parallel::selector",
+    "std::parallel::runtime",
+    "std::parallel::runtime",
+    "std::parallel::runtime",
 ];
 const SI_NAMES: [str<'static>; SI_COUNT_N] = [
     "submit",
@@ -337,6 +354,9 @@ const SI_NAMES: [str<'static>; SI_COUNT_N] = [
     "sugar_won",
     "sugar_recv",
     "sugar_send",
+    "cancel_probe",
+    "cancel_ladder_begin",
+    "cancel_ladder_end",
 ];
 
 /// The package declaration index: the immutable package interface built once after every module has
@@ -1148,6 +1168,9 @@ extend Package {
             inst_methods: Set::<u64>::new(),
             co_state: 0,
             co_spans: Vector::<Vector<u64>>::new(),
+            cancel_state: 0,
+            cancel_marks: Vector::<Set<u64>>::new(),
+            cancel_used: false,
             always_methods: Set::<u64>::new(),
             method_edges: Vector::<u64>::new(),
             edge_seen: Set::<u64>::new(),
@@ -1339,6 +1362,143 @@ extend Package {
             }
         }
         eprint("co state {} total {}\n", self.co_state, tot);
+    }
+
+    /// Can the function or closure declared exactly at `sp` reach the runtime's cancellation
+    /// acceptance? False whenever the pass has not run (no coroutine runtime loaded): no
+    /// cancellation checks. Exact-span membership: the queried span is always a decl's own span.
+    pub fn cancel_on(self: &Self, m: ModuleId, sp: tok::Span) bool {
+        if self.cancel_state != 1 {
+            return false;
+        }
+        if m as usize >= self.cancel_marks.len() {
+            return false;
+        }
+        return self.cancel_marks.at(m as usize).contains(&(sp.start as u64 << 32 | sp.end as u64));
+    }
+
+    /// Compute cancel_marks: the decl spans of every function and closure whose body can reach
+    /// `runtime::cancel_accept`. Seeded at direct calls to the acceptance leaf, then closed upward:
+    /// a call to a marked callee marks the decls enclosing the call site. A callee that cannot be
+    /// pinned (a fn value, a dyn method) is cancellation-MASKED (plan 10.3): the request stays
+    /// pending across it and the next pinned cancellation point delivers the edge. Treating unknown
+    /// callees as reaching would mark nearly every task-reachable body and put a probe after nearly
+    /// every call.
+    pub fn cancel_compute(self: &mut Self) {
+        self.cancel_state = 1;
+        self.cancel_marks.truncate(0);
+        for _m in 0..self.modules.len() {
+            self.cancel_marks.push(Set::<u64>::new());
+        }
+        let rt = self.find("std::parallel::runtime");
+        if rt < 0 {
+            return; // no coroutine runtime loaded: nothing can accept a cancellation
+        }
+        let acc = self.glob_lookup(rt as ModuleId, "cancel_accept", false);
+        if acc.node == NODE_NONE {
+            return;
+        }
+        let req = self.glob_lookup(rt as ModuleId, "request_cancel", false);
+        let tsh = self.glob_lookup(rt as ModuleId, "try_shutdown", false);
+        let task_mid = self.find("std::parallel::task");
+        // The enclosing-decl index: per module, the span of every function and closure, so marking
+        // a call site's owners is a scan of decls rather than of every node.
+        let mut decls = Vector::<Vector<u64>>::new();
+        // Pinned calls, collected in ONE pass over each module's nodes: the fixpoint below then
+        // iterates only these records, never the full node arrays again.
+        let mut rec_m = Vector::<u32>::new();
+        let mut rec_span = Vector::<u64>::new();
+        let mut rec_t = Vector::<u64>::new();
+        for m in 0..self.modules.len() {
+            let a = unsafe &*self.module_ast_const(m as ModuleId);
+            let mut row = Vector::<u64>::new();
+            for ni in 0..a.nodes.len() {
+                let n = a.at_const(ni as NodeId);
+                if n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_CLOSURE {
+                    row.push(n.span.start as u64 << 32 | n.span.end as u64);
+                }
+                if n.kind != NodeKind::NODE_CALL {
+                    continue;
+                }
+                let cd = n.as_data.call;
+                let mut t = DefId { module: 0, node: NODE_NONE };
+                let ni32 = ni as u32;
+                switch a.call_info.get(&ni32) {
+                    Some(v) => {
+                        t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
+                    },
+                    _ => {},
+                };
+                if t.node == NODE_NONE {
+                    t = a.resolution_def(cd.callee);
+                }
+                if t.node == NODE_NONE {
+                    let ck = a.at_const(cd.callee).kind;
+                    if ck == NodeKind::NODE_MEMBER {
+                        t = a.resolution_def(a.at_const(cd.callee).as_data.member.member);
+                    }
+                }
+                if t.node == NODE_NONE {
+                    continue; // fn value or dyn dispatch: cancellation-masked (plan 10.3)
+                }
+                if !self.cancel_used && !self.modules.at(m).path.as_str().starts_with("std::") {
+                    if task_mid >= 0 && t.module == task_mid as ModuleId {
+                        self.cancel_used = true;
+                    } else if t.module == acc.mid && (t.node == req.node || t.node == tsh.node) {
+                        self.cancel_used = true;
+                    }
+                }
+                if t.module != acc.mid || t.node != acc.node {
+                    let ta = unsafe &*self.module_ast_const(t.module);
+                    if ta.at_const(t.node).kind != NodeKind::NODE_FUNCTION {
+                        continue; // ctor/variant/type call: no body to run
+                    }
+                }
+                rec_m.push(m as u32);
+                rec_span.push(n.span.start as u64 << 32 | n.span.end as u64);
+                rec_t.push(t.module as u64 << 32 | t.node as u64);
+            }
+            decls.push(row);
+        }
+        // Fixpoint over the call records. A record fires at most once: firing marks its enclosing
+        // decls, and only a fresh mark can make another record's target newly reach acceptance.
+        let mut fired = Vector::<u8>::new();
+        for _i in 0..rec_m.len() {
+            fired.push(0);
+        }
+        let acck = acc.mid as u64 << 32 | acc.node as u64;
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for i in 0..rec_m.len() {
+                if fired[i] != 0 {
+                    continue;
+                }
+                let tk = rec_t[i];
+                if tk != acck {
+                    let tm = (tk >> 32) as ModuleId;
+                    let ta = unsafe &*self.module_ast_const(tm);
+                    let tsp = ta.at_const((tk & 0xFFFFFFFFu64) as NodeId).span;
+                    if !self.cancel_on(tm, tsp) {
+                        continue;
+                    }
+                }
+                fired.set(i, 1);
+                let m = rec_m[i] as usize;
+                let cs = (rec_span[i] >> 32) as u32;
+                let ce = (rec_span[i] & 0xFFFFFFFFu64) as u32;
+                let row = decls.at(m);
+                for di in 0..row.len() {
+                    let e = *row.at(di);
+                    if (e >> 32) as u32 <= cs && ce <= (e & 0xFFFFFFFFu64) as u32 {
+                        if !self.cancel_marks.at(m).contains(&e) {
+                            self.cancel_marks.index_mut(m).insert(e);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn co_mark(self: &mut Self, m: ModuleId, sp: tok::Span) {
@@ -1599,7 +1759,7 @@ extend Package {
                     wgc.done();
                 };
             }
-            wg.wait();
+            wg.wait_masked();
             for k in next..wave_end {
                 if !units.at(k).ok {
                     continue;

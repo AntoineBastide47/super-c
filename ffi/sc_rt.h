@@ -115,4 +115,10 @@ void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), 
 void sc_rt_ctx_switch(void *from, void *to);
 void sc_rt_ctx_free(void *ctx);
 
+/* Combined-safepoint cancellation hook: the cold half of a compiled combined safepoint calls it
+   through `__sc_cancel_tick` (super_rt.h); 1 means an unmasked pending cancellation was accepted.
+   Installed by the scheduler before it starts any worker; inert (null) until then. */
+extern int32_t (*__sc_cancel_hook)(void);
+void __sc_set_cancel_hook(int32_t (*f)(void));
+
 #endif

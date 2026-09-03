@@ -18,6 +18,7 @@
 import atomic;
 import sc_runtime;
 import std::parallel::sync as sync;
+import std::parallel::runtime as runtime;
 
 const MAX_THREADS: usize = 64; // enough concurrent blocking calls for real programs, bounded for safety
 const IDLE_NS: i64 = 10000000000; // a thread with nothing to do for ten seconds goes away again
@@ -179,7 +180,8 @@ pub fn submit(run: fn(*mut void) void, env: *mut void) {
     }
 }
 
-// What one `call` hands to the pool: the closure, where to put its value, and who to wake.
+// What one `call` from a plain thread hands to the pool: the closure, where to put its value, and who to
+// wake. Sound only because that caller blocks until the latch flips, so the slot pointer stays alive.
 @no_const
 struct Payload<F, T> {
     pub body: F,
@@ -187,8 +189,8 @@ struct Payload<F, T> {
     pub done: *mut Done,
 }
 
-/// The per-`(F, T)` trampoline: run the closure on the blocking thread, store its value, wake the caller.
-/// `pub` for linkage.
+/// The per-`(F, T)` trampoline for a plain-thread caller: run the closure on the blocking thread, store
+/// its value, wake the caller. `pub` for linkage.
 pub fn entry<F: fn move() T + Send, T>(env: *mut void) {
     let pp = env as *mut Payload<F, T>;
     let pay = unsafe {
@@ -199,6 +201,91 @@ pub fn entry<F: fn move() T + Send, T>(env: *mut void) {
     let f = pay.body;
     unsafe pay.slot[0] = f();
     complete(pay.done);
+}
+
+// The blocking-result states: the single-winner race between completion and task-side abandonment.
+const BS_PENDING: i32 = 0;
+const BS_COMPLETING: i32 = 1;
+const BS_COMPLETE: i32 = 2;
+const BS_ABANDONED: i32 = 3;
+
+/// A coroutine's blocking-call record: HEAP-owned and reference-counted, never a pointer into the waiting
+/// coroutine's stack -- so a cancelled task can abandon the call and the pool worker still has somewhere
+/// safe to write. The task and the worker hold one reference each; the completion/abandonment race is one
+/// compare-and-swap on `state`, the loser of which owns nothing, and whichever side ends with the value
+/// (`Complete` read by the task, or `Complete` after `Abandoned` seen by the worker) frees it exactly
+/// once. The last reference frees the record. `pub` for linkage.
+@no_const
+pub struct BRec<T> {
+    pub refs: i32, // atomic: task + worker
+    pub state: i32, // atomic BS_*
+    pub co: *mut runtime::Coroutine,
+    pub token: u32,
+    pub value: T, // written by the worker before the state CAS; raw storage until then
+}
+
+// Drop one reference; the last one frees the record (the value inside was already settled).
+fn brec_drop<T>(rp: *mut BRec<T>) {
+    if atomic::sub_i32(&mut unsafe rp.refs, 1, 3) == 1 {
+        let mut g = Global {};
+        unsafe g.dealloc(rp, sizeof(BRec<T>), alignof(BRec<T>));
+    }
+}
+
+fn brec_wait_complete<T>(rp: *mut BRec<T>) {
+    let mut spins: u32 = 0;
+    while atomic::load_i32(&mut unsafe rp.state, 1) == BS_COMPLETING && spins < 1000000 {
+        unsafe sc_runtime::sc_rt_cpu_relax();
+        spins += 1;
+    }
+    if atomic::load_i32(&mut unsafe rp.state, 1) != BS_COMPLETE {
+        panic("blocking completion did not settle");
+    }
+}
+
+// What a coroutine `call` hands to the pool: the closure and the shared record.
+@no_const
+struct CPayload<F, T> {
+    pub body: F,
+    pub rec: *mut BRec<T>,
+}
+
+/// The per-`(F, T)` trampoline for a coroutine caller: run the closure, publish the value into the heap
+/// record, and settle the ownership race. If the task abandoned the call, the value is freed HERE -- the
+/// blocking worker never touches the coroutine or its stack after an abandonment. `pub` for linkage.
+pub fn entry_rec<F: fn move() T + Send, T>(env: *mut void) {
+    let pp = env as *mut CPayload<F, T>;
+    let pay = unsafe {
+        pp[0];
+    };
+    let mut g = Global {};
+    unsafe g.dealloc(env, sizeof(CPayload<F, T>), alignof(CPayload<F, T>));
+    let f = pay.body;
+    let rp = pay.rec;
+    unsafe rp.value = f(); // raw store into record storage the worker's reference keeps alive
+    if atomic::cas_i32(&mut unsafe rp.state, BS_PENDING, BS_COMPLETING, false, 4, 0) {
+        let _ = runtime::wake_as(unsafe rp.co, unsafe rp.token, runtime::WR_BLOCKING);
+        atomic::store_i32(&mut unsafe rp.state, BS_COMPLETE, 2);
+    } else {
+        // Abandoned: the task is gone from the record. Drop the unclaimed result.
+        let vp = (&mut unsafe rp.value) as *mut T;
+        vp.free();
+    }
+    brec_drop(rp);
+}
+
+// The submit hand-off for a coroutine `call`: runs on the worker once the caller's context is saved, so
+// the pool cannot complete (and wake) a task that is still switching out. `cs` lives in the caller's
+// frame, which is alive because the caller cannot resume before this commit runs.
+@no_const
+struct CSubmit {
+    pub run: fn(*mut void) void,
+    pub env: *mut void,
+}
+
+fn commit_submit(p: *mut void) {
+    let cs = p as *mut CSubmit;
+    submit(unsafe cs.run, unsafe cs.env);
 }
 
 /// Run `run(env)` on the blocking pool and park the caller until it returns. The non-generic core of
@@ -214,7 +301,9 @@ pub fn run_blocking(run: fn(*mut void) void, env: *mut void) {
     {
         let gd = done.state.lock();
         while *gd.get() == 0 {
-            done.cv.wait(&gd);
+            // Masked: a `@blocking` extern call is foreign code whose result lands through `env`, so the
+            // waiter can never unwind early. An unreturned call is reported, never freed under.
+            let _ = unsafe done.cv.wait_raw(gd.lock_handle(), 0, false, runtime::WK_BLOCKING);
         }
     }
 }
@@ -239,10 +328,51 @@ pub fn raw_entry(p: *mut void) {
     complete(d);
 }
 
+// The coroutine path shared by `call` and `call_c`: build the record, park (submitting from the commit
+// hand-off), and settle. Returns the record pointer and the wake reason through out-parameters; the
+// callers decide what a cancel means.
+fn call_park<F: fn move() T + Send + 'static, T: Send>(
+    f: F,
+    co: *mut runtime::Coroutine,
+    cancellable: bool,
+    reason: &mut u32,
+) *mut BRec<T> {
+    let mut g = Global {};
+    let rp = (unsafe g.alloc(sizeof(BRec<T>), alignof(BRec<T>))) as *mut BRec<T>;
+    runtime::wait_note(runtime::WK_BLOCKING, rp as usize);
+    let token = runtime::park_begin(co);
+    unsafe rp.refs = 2;
+    unsafe rp.state = BS_PENDING;
+    unsafe rp.co = co;
+    unsafe rp.token = token;
+    let env = (unsafe g.alloc(sizeof(CPayload<F, T>), alignof(CPayload<F, T>))) as *mut CPayload<F, T>;
+    unsafe env[0] = CPayload::<F, T> { body: f, rec: rp };
+    let mut cs = CSubmit { run: entry_rec::<F, T>, env: env };
+    *reason = runtime::park_timed(token, 0, commit_submit, &mut cs, cancellable);
+    runtime::wait_clear();
+    runtime::park_done(co);
+    return rp;
+}
+
 /// Run `f` on the blocking pool and return its value. The calling coroutine PARKS while it runs, so the
 /// worker thread stays available; any other caller simply blocks. This is how a coroutine calls something
 /// that would otherwise hold a worker hostage -- a blocking `read`, a legacy library, a slow syscall.
 pub fn call<F: fn move() T + Send + 'static, T: Send>(f: F) T {
+    let co = runtime::current();
+    if co != null {
+        let mut reason: u32 = 0;
+        let rp = call_park::<F, T>(f, co, false, &mut reason);
+        if reason != runtime::WR_BLOCKING {
+            panic("a non-cancellable blocking park has exactly one waker");
+        }
+        brec_wait_complete(rp);
+        let v = unsafe {
+            rp.value;
+        };
+        brec_drop(rp);
+        return v;
+    }
+    // A plain thread blocks anyway: latch in this frame, result slot in this frame.
     let mut slot: T;
     let mut done = Done { state: sync::Mutex::<i32>::new(0), cv: sync::Condvar::new() };
     let mut g = Global {};
@@ -252,10 +382,38 @@ pub fn call<F: fn move() T + Send + 'static, T: Send>(f: F) T {
     {
         let gd = done.state.lock();
         while *gd.get() == 0 {
-            done.cv.wait(&gd);
+            done.cv.wait_masked(&gd);
         }
     }
     return slot;
+}
+
+/// `call`, but the park is a cancellation point: `None` means the wait was cancelled. The task's side of
+/// the job is ABANDONED -- the blocking operation is not stopped; when it returns, the pool worker frees
+/// the unclaimed result and the last reference frees the record. No pool thread ever writes into this
+/// coroutine's stack. The cancellable form for callers that can propagate cancellation.
+pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
+    let co = runtime::current();
+    if co == null {
+        return Option::<T>::Some(call::<F, T>(f)); // a plain thread has no task to cancel
+    }
+    let mut reason: u32 = 0;
+    let rp = call_park::<F, T>(f, co, true, &mut reason);
+    if runtime::cancel_after_wait(true) {
+        if !atomic::cas_i32(&mut unsafe rp.state, BS_PENDING, BS_ABANDONED, false, 4, 0) {
+            brec_wait_complete(rp);
+            let vp = (&mut unsafe rp.value) as *mut T;
+            vp.free();
+        }
+        brec_drop(rp);
+        return Option::<T>::None;
+    }
+    brec_wait_complete(rp);
+    let v = unsafe {
+        rp.value;
+    };
+    brec_drop(rp);
+    return Option::<T>::Some(v);
 }
 
 /// Stop the blocking pool and join its threads. Idempotent; a no-op if it never started. Call it once, from

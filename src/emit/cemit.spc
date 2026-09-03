@@ -245,7 +245,7 @@ fn body_has_safepoint(b: &ir::CoreBody) bool {
         let s = *b.statements.at(si);
         if s.kind == ir::ST_ASSIGN {
             let rv = *b.rvalues.at(s.rvalue as usize);
-            if rv.kind == ir::RV_INTRINSIC && rv.c as u32 == ir::IN_SAFEPOINT as u32 {
+            if rv.kind == ir::RV_INTRINSIC && (rv.c as u32 == ir::IN_SAFEPOINT as u32 || rv.c as u32 == ir::IN_SAFEPOINT_C as u32) {
                 return true;
             }
         }
@@ -3554,7 +3554,7 @@ extend CEmit {
     // `return <operand>` -- the last real statement of a single-value return block, skipping trailing
     // storage/nop markers. IR_NONE when the block is not that exact shape.
     fn ret_fwd_idx(self: &Self, b: &ir::CoreBody, blk: &ir::BasicBlock) u32 {
-        if blk.term.kind != ir::TM_RETURN || b.returns != 1 || self.arr_ret {
+        if blk.term.kind != ir::TM_RETURN || blk.term.args_len == ir::RET_CANCEL || b.returns != 1 || self.arr_ret {
             return ir::IR_NONE;
         }
         if self.erased(b, b.locals.at(0).ty) {
@@ -3621,8 +3621,8 @@ extend CEmit {
             }
             let blk = *b.blocks.at(bi);
             let skip = self.ret_fwd_idx(b, &blk);
-            if blk.term.kind == ir::TM_RETURN && skip == ir::IR_NONE {
-                return true;
+            if blk.term.kind == ir::TM_RETURN && blk.term.args_len != ir::RET_CANCEL && skip == ir::IR_NONE {
+                return true; // a cancellation return spells a zero literal, never the slot
             }
             for si in 0..blk.stmt_len {
                 if si == skip {
@@ -4954,6 +4954,23 @@ extend CEmit {
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_SAFEPOINT as u32 {
                 if self.safepoints_on(b.module) {
                     self.out.push_str("  if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();\n");
+                }
+                return true;
+            }
+            if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_SAFEPOINT_C as u32 {
+                // Combined form: identical hot tick; the cold half also asks the runtime's cancel
+                // hook, and the switch on the result enters the frame's cancellation ladder.
+                let mut cp = String::new();
+                if !self.emit_place(b, s.place, &mut cp) {
+                    return false;
+                }
+                self.out.push_str("  ");
+                self.out.push_string(&cp);
+                self.out.push_str(" = 0;\n");
+                if self.safepoints_on(b.module) {
+                    self.out.push_str("  if (--__sc_spc == 0) { __sc_spc = __sc_preempt_check(); ");
+                    self.out.push_string(&cp);
+                    self.out.push_str(" = __sc_cancel_tick(); }\n");
                 }
                 return true;
             }
@@ -9810,6 +9827,36 @@ extend CEmit {
         if y.kind == TypeKind::TYPE_ARRAY {
             return self.is_destructible(rm, y.as_data.arr.elem, depth + 1);
         }
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            // A closure is destructible when any non-mut capture owns memory (mirrors the borrowck
+            // owner's rule); a plain function pointer never is.
+            let fa = self.p().module_ast_const(y.module);
+            let fnn = *fa.at_const(y.as_data.decl);
+            if fnn.kind != NodeKind::NODE_CLOSURE {
+                return false;
+            }
+            let caps = fnn.as_data.closure.captures;
+            let mut_caps = fnn.as_data.closure.mut_caps as u64;
+            for i in 0..caps.len {
+                if (mut_caps >> i as u64 & 1u64) != 0 {
+                    continue;
+                }
+                let cid = unsafe fa.list(caps)[i as usize];
+                let cty = fa.type_of(cid);
+                if cty == TYPE_NONE {
+                    continue;
+                }
+                let mut crm = y.module;
+                let mut crt = cty;
+                if !self.mg.resolve(y.module, cty, &mut crm, &mut crt) {
+                    continue;
+                }
+                if self.is_destructible(crm, crt, depth + 1) {
+                    return true;
+                }
+            }
+            return false;
+        }
         if y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_ENUM && y.kind != TypeKind::TYPE_INSTANCE {
             return false;
         }
@@ -9932,6 +9979,13 @@ extend CEmit {
         }
         if !ok0 {
             return false;
+        }
+        {
+            let a9 = self.p().module_ast_const(rm);
+            let y9 = *a9.type_at(rt);
+            if y9.kind == TypeKind::TYPE_FUNCTION {
+                return self.emit_closure_glue(&y9);
+            }
         }
         let decl = self.agg_decl_res(rm, rt);
         if decl == NODE_NONE {
@@ -10072,6 +10126,65 @@ extend CEmit {
         return ok;
     }
 
+    // The derived destructor body for a closure env dropped without ever being called: one free per
+    // owning non-mut capture, in declaration order (the same fields, names and erasure rules as the
+    // env struct emission). The caller already opened `void <sym>(<env> *const self) {`.
+    fn emit_closure_glue(self: &mut Self, y: &Ty) bool {
+        let fa = self.p().module_ast_const(y.module);
+        let fnn = *fa.at_const(y.as_data.decl);
+        if fnn.kind != NodeKind::NODE_CLOSURE {
+            return self.fail("closure-glue");
+        }
+        let caps = fnn.as_data.closure.captures;
+        let mut_caps = fnn.as_data.closure.mut_caps as u64;
+        let mut body = String::new();
+        let mut ok = true;
+        for i in 0..caps.len {
+            if !ok {
+                break;
+            }
+            if (mut_caps >> i as u64 & 1u64) != 0 {
+                continue;
+            }
+            let cid = unsafe fa.list(caps)[i as usize];
+            let cty = fa.type_of(cid);
+            if cty == TYPE_NONE {
+                continue;
+            }
+            let mut crm = y.module;
+            let mut crt = cty;
+            if !self.mg.resolve(y.module, cty, &mut crm, &mut crt) || !self.is_destructible(crm, crt, 0) {
+                continue;
+            }
+            let mut fsym = String::new();
+            ok = self.free_expr(crm, crt, &mut fsym);
+            if ok {
+                body.push_str("  ");
+                body.push_string(&fsym);
+                if self.mg.is_zst(crm, crt) {
+                    // no C member exists: the capture's destructor runs on the sentinel
+                    body.push_str("(");
+                    let _ = self.zst_sentinel_ref(crm, crt, &mut body);
+                    body.push_str(");\n");
+                } else {
+                    let csp = self.mg.decl_name_span(y.module, cid);
+                    if csp.end <= csp.start {
+                        ok = self.fail("closure-glue-name");
+                    } else {
+                        body.push_str("(&self->");
+                        self.mg.ident(y.module, csp, &mut body);
+                        body.push_str(");\n");
+                    }
+                }
+            }
+        }
+        if ok {
+            self.out.push_string(&body);
+            self.out.push_str("}\n");
+        }
+        return ok;
+    }
+
     // The side effect of a terminator -- a drop's free, a call's statement, an assert's check, a
     // return's value, an unreachable abort -- with NO control transfer: the structured driver owns
     // every goto, break, continue, and fall-through. GOTO and SWITCH carry no effect here.
@@ -10152,9 +10265,10 @@ extend CEmit {
                     return ok9;
                 }
             }
-            if y.kind == TypeKind::TYPE_FUNCTION {
-                // a closure value's captures are freed by ITS OWN body on the (exactly-once) call
-                // -- a drop of the value itself owns nothing further
+            if y.kind == TypeKind::TYPE_FUNCTION && !self.is_destructible(rm, rt, 0) {
+                // A called closure freed its captures in its own body (the call is a move, so no
+                // drop survives it); a plain fn pointer owns nothing. Only a closure dropped
+                // UNCALLED with owning captures falls through to the env-glue free below.
                 return true;
             }
             if y.kind != TypeKind::TYPE_BUILTIN && y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
@@ -10195,6 +10309,43 @@ extend CEmit {
             return true;
         }
         if t.kind == ir::TM_RETURN {
+            if t.args_len == ir::RET_CANCEL {
+                // A cancellation return: this frame's defers and drops already ran, and every caller
+                // on the path is itself unwinding, so the value is never read -- spell a zero of the
+                // return type rather than the (never-assigned) return slot.
+                if self.noret {
+                    self.out.push_str("  abort();\n"); // a noreturn frame has nothing to unwind to
+                } else if b.returns == 1 && self.arr_ret {
+                    self.out.push_str("  return (");
+                    self.out.push_string(&self.cur_name);
+                    self.out.push_str("_ret){0};\n");
+                } else if b.returns == 1 && !self.erased(b, b.locals.at(0).ty) {
+                    let mut zt = String::new();
+                    if !self.ty_c(b.module, b.locals.at(0).ty, "", &mut zt) {
+                        return false;
+                    }
+                    self.out.push_str("  return (");
+                    self.out.push_string(&zt);
+                    self.out.push_str("){0};\n");
+                } else if b.returns > 1 {
+                    let mut rz9: u32 = 0;
+                    for r in 0..b.returns {
+                        if !self.erased(b, b.locals.at(r as usize).ty) {
+                            rz9 += 1;
+                        }
+                    }
+                    if rz9 == 0 {
+                        self.out.push_str("  return;\n");
+                    } else {
+                        self.out.push_str("  return (");
+                        self.out.push_string(&self.cur_name);
+                        self.out.push_str("_ret){0};\n");
+                    }
+                } else {
+                    self.out.push_str("  return;\n");
+                }
+                return true;
+            }
             if b.returns == 1 && self.arr_ret {
                 self.out.push_str("  { ");
                 self.out.push_string(&self.cur_name);

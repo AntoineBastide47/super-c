@@ -66,6 +66,9 @@ extend tc::TypeChecker {
             unsafe (&mut *self.package).co_compute();
             unsafe (&*self.package).co_dump();
         }
+        if self.package != null && unsafe (&*self.package).cancel_state == 0 {
+            unsafe (&mut *self.package).cancel_compute();
+        }
         let a = self.cur_ast();
         let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {

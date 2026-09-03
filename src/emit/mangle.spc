@@ -1555,6 +1555,19 @@ extend Mangler {
     pub fn free_target(self: &mut Self, rm: ModuleId, rt: TypeId, out: &mut String) bool {
         let a = self.p().module_ast_const(rm);
         let y = *a.type_at(rt);
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            // A closure dropped without ever being called: no user `free` can extend a closure, so
+            // its destructor is always the derived env glue (which frees the owning captures).
+            let fnn = self.p().module_ast_const(y.module).at_const(y.as_data.decl);
+            if fnn.kind != NodeKind::NODE_CLOSURE {
+                return false;
+            }
+            if !self.type_m(rm, rt, out) {
+                return false;
+            }
+            out.push_str("__free__d");
+            return true;
+        }
         let mut dm = y.module;
         let mut dd = NODE_NONE;
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {

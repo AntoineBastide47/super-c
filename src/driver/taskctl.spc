@@ -48,7 +48,7 @@ extend Ctl {
         }
         let mut g = self.mu.lock();
         while *g.get() != 0 && *g.get() + d.estimated_memory > self.budget {
-            self.cv.wait(&g);
+            self.cv.wait_masked(&g);
         }
         *g.get_mut() += d.estimated_memory;
     }

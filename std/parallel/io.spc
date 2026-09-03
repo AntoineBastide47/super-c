@@ -30,6 +30,7 @@ import std::parallel::time as time;
 // by the waiter. Whoever wins the CAS owns what happens next, and exactly one of them frees it.
 @no_const
 struct Interest {
+    pub refs: i32,
     pub co: *mut runtime::Coroutine,
     pub token: u32,
     pub fd: i32,
@@ -55,9 +56,11 @@ static mut G_STATE: i32 = 0; // 0 uninit / 1 building / 2 ready
 
 static mut G_REACTOR: *mut Reactor = null;
 
-fn free_interest(it: *mut Interest) {
-    let mut g = Global {};
-    unsafe g.dealloc(it, sizeof(Interest), alignof(Interest));
+fn interest_drop(it: *mut Interest) {
+    if atomic::sub_i32(&mut unsafe it.refs, 1, 3) == 1 {
+        let mut g = Global {};
+        unsafe g.dealloc(it, sizeof(Interest), alignof(Interest));
+    }
 }
 
 // The reactor thread: block in the poller, turn every ready registration back into a wake. One thread for
@@ -77,10 +80,10 @@ fn reactor_main(arg: *mut void) *mut void {
             }
             // Claim it. Losing means a timed-out waiter already took it and freed it -- so this event is
             // stale and nothing here may touch the node again.
-            if !atomic::cas_i32(&mut unsafe it.state, 0, 1, false, 4, 0) {
-                continue;
+            if atomic::cas_i32(&mut unsafe it.state, 0, 1, false, 4, 0) {
+                let _ = runtime::wake_as(unsafe it.co, unsafe it.token, runtime::WR_IO);
             }
-            let _ = runtime::wake(unsafe it.co, unsafe it.token);
+            interest_drop(it);
         }
     }
     return null;
@@ -128,10 +131,12 @@ fn commit_arm(p: *mut void) {
         return;
     }
     // Arming failed (a closed or invalid descriptor): wake the waiter straight back up rather than leave it
-    // parked forever. It re-checks the descriptor and gets the real error from the syscall.
+    // parked forever. It re-checks the descriptor and gets the real error from the syscall. Claimed as an
+    // I/O wake: to the waiter this is indistinguishable from readiness, which is exactly the contract.
     if atomic::cas_i32(&mut unsafe it.state, 0, 1, false, 4, 0) {
-        let _ = runtime::wake(unsafe it.co, unsafe it.token);
+        let _ = runtime::wake_as(unsafe it.co, unsafe it.token, runtime::WR_IO);
     }
+    interest_drop(it);
 }
 
 /// Wait until `fd` is ready in the given direction, or until `deadline` (a `time::deadline_in` value; 0
@@ -159,21 +164,36 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
     }
     let mut g = Global {};
     let it = (unsafe g.alloc(sizeof(Interest), alignof(Interest))) as *mut Interest;
+    runtime::wait_note(runtime::WK_IO, fd as usize);
     let token = runtime::park_begin(co);
-    unsafe it[0] = Interest { co: co, token: token, fd: fd, write: w, state: 0 };
-    runtime::park_timed(token, deadline, commit_arm, it);
-    // Back: the descriptor is ready, or the deadline claimed us first. Take the node off the poller either
-    // way, then settle the race for it.
+    unsafe it[0] = Interest { refs: 2, co: co, token: token, fd: fd, write: w, state: 0 };
+    let reason = runtime::park_timed(token, deadline, commit_arm, it, true);
+    // Back: the descriptor is ready, or the deadline or a cancellation claimed us first. Take the node off
+    // the poller either way, then settle the ownership race for it -- closing the descriptor is never a
+    // substitute for this removal.
     if deadline != 0 {
         runtime::cancel_timer(co);
     }
-    let _ = unsafe sc_io::sc_io_disarm(r.poller, fd, w);
+    let removed = unsafe sc_io::sc_io_disarm(r.poller, fd, w);
+    if removed < 0 {
+        panic("reactor interest removal failed");
+    }
+    let mut ready = true;
     if atomic::cas_i32(&mut unsafe it.state, 0, 2, false, 4, 0) {
-        free_interest(it); // still armed: the deadline is what woke us, and the reactor will not touch it
+        ready = false;
+        if removed > 0 {
+            interest_drop(it); // removal returned the reactor's registration reference to this task
+        }
+    } else {
+        ready = reason == runtime::WR_IO; // a cancel that beat an in-flight event still reports not-ready
+    }
+    interest_drop(it); // the task's reference
+    runtime::wait_clear();
+    runtime::park_done(co);
+    if runtime::cancel_after_wait(true) {
         return false;
     }
-    free_interest(it); // the reactor claimed it, so it fired -- and left the freeing to us
-    return true;
+    return ready;
 }
 
 /// Wait until `fd` can be read without blocking.
@@ -186,8 +206,9 @@ pub fn wait_writable(fd: i32) {
     let _ = wait_until(fd, true, 0);
 }
 
-/// Read from `fd`, parking whenever it is not ready. Returns what the read returned: the byte count, `0` at
-/// end of file, or negative for a real error (one that is not "would block").
+/// Read from `fd`, parking whenever it is not ready. Returns what the read returned: the byte count, `0`
+/// at end of file, or negative for a real error (one that is not "would block"). A cancelled wait also
+/// returns `-1`: the task's cancellation is accepted and its caller must stop reading.
 pub fn read(fd: i32, buf: []mut u8) isize {
     loop {
         let n = unsafe sc_io::sc_io_read(fd, buf.ptr, buf.len());
@@ -197,12 +218,14 @@ pub fn read(fd: i32, buf: []mut u8) isize {
         if unsafe sc_io::sc_io_would_block() == 0 {
             return n;
         }
-        wait_readable(fd);
+        if !wait_until(fd, false, 0) {
+            return -1; // with no deadline, not-ready means the wait was cancelled
+        }
     }
 }
 
 /// Write all of `buf` to `fd`, parking whenever it is not ready. Returns the number of bytes written, or
-/// negative on a real error.
+/// negative on a real error. A cancelled wait returns the bytes written so far (cancellation accepted).
 pub fn write(fd: i32, buf: []u8) isize {
     let mut at: usize = 0;
     while at < buf.len() {
@@ -217,7 +240,9 @@ pub fn write(fd: i32, buf: []u8) isize {
         if unsafe sc_io::sc_io_would_block() == 0 {
             return n;
         }
-        wait_writable(fd);
+        if !wait_until(fd, true, 0) {
+            break; // cancelled: report the partial write
+        }
     }
     return at as isize;
 }

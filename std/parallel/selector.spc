@@ -164,7 +164,12 @@ extend Selector {
             if deadline != 0 && time::remaining_ns(deadline) == 0 {
                 return Selected::TimedOut;
             }
-            self.block(deadline);
+            let r = self.block(deadline);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                // Cancelled: every arm was unregistered (in the stable lock order) before the acceptance
+                // inside `block`, so no queue holds a pointer into this frame. No arm is reported ready.
+                return Selected::TimedOut;
+            }
         }
     }
     /// Check the armed operations once, without waiting.
@@ -207,10 +212,11 @@ extend Selector {
         unsafe sync::raw_mutex_unlock(raw);
         return r;
     }
-    // Park until some arm moves. Takes every channel lock, re-checks readiness under them (a value that
-    // arrived since `ready_now` must not be missed -- with no node queued yet, its notify would be lost),
-    // queues one node per arm under a single wake token, and parks; the hand-off releases the locks.
-    fn block(self: &mut Selector, deadline: u64) {
+    // Park until some arm moves, returning the winning wake reason (`WR_NONE` when it never parked).
+    // Takes every channel lock, re-checks readiness under them (a value that arrived since `ready_now`
+    // must not be missed -- with no node queued yet, its notify would be lost), queues one node per arm
+    // under a single wake token, and parks; the hand-off releases the locks.
+    fn block(self: &mut Selector, deadline: u64) u32 {
         let co = runtime::current();
         if co == null || self.n == 0 {
             // A plain thread has no wake token to share across queues, so it re-checks on a timer instead.
@@ -226,16 +232,17 @@ extend Selector {
                 }
             }
             runtime::sleep_ns(ns);
-            return;
+            return runtime::WR_NONE;
         }
         self.lock_all();
         for i in 0..self.n {
             let f = unsafe self.arms[i].ready;
             if f(unsafe self.arms[i].obj) {
                 self.unlock_all();
-                return;
+                return runtime::WR_NONE;
             }
         }
+        runtime::wait_note(runtime::WK_SELECT, self as usize);
         self.woken = -1;
         let claim = &mut self.woken;
         // AFTER lock_all: a contended `raw_mutex_lock` parks, and that park would take a token of its own,
@@ -247,11 +254,12 @@ extend Selector {
             let wp = &mut unsafe self.arms[i].w;
             unsafe cv.register(wp); // every arm's lock is held: see `lock_all`
         }
-        runtime::park_timed(token, deadline, commit_unlock_all, self);
+        let mut reason = runtime::park_timed(token, deadline, commit_unlock_all, self, true);
         if deadline != 0 {
             runtime::cancel_timer(co); // drop the timer if a notify got here first
         }
-        // Our nodes outlive the wake: a notify pops only the one it used, and a deadline pops none.
+        // Our nodes outlive the wake: a notify pops only the one it used, and a deadline or a cancel pops
+        // none. Every losing arm is unregistered in the stable lock order before anything else happens.
         for i in 0..self.n {
             let cv = unsafe self.arms[i].cv;
             let raw = unsafe self.arms[i].raw;
@@ -260,6 +268,12 @@ extend Selector {
             unsafe cv.unregister(wp); // unlinked before this frame dies, which is what the node's owner owes
             unsafe sync::raw_mutex_unlock(raw);
         }
+        runtime::wait_clear();
+        runtime::park_done(co);
+        if runtime::cancel_after_wait(true) {
+            reason = runtime::WR_CANCEL;
+        }
+        return reason;
     }
     // Take every armed channel's lock, in address order. Two selectors sharing channels therefore take the
     // shared locks in the same order and cannot deadlock; one channel armed twice is locked once.

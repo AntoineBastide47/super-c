@@ -25,6 +25,9 @@ extern "C" {
     // Preemption safepoint hook (super_rt.c): codegen emits a `__sc_safepoint()` at every loop backedge of a
     // program that uses `launch`, and this is what those safepoints call.
     fn __sc_set_preempt_hook(f: fn() void) void;
+    // Combined-safepoint cancellation hook (super_rt.c): the cold half of a compiled combined
+    // safepoint calls it; 1 means an unmasked request was accepted and the ladder must run.
+    fn __sc_set_cancel_hook(f: fn() i32) void;
     // Task attribution (super_rt.c): a panic inside a coroutine names the task it happened in.
     fn __sc_set_task_id(id: u64) void;
 }
@@ -34,6 +37,82 @@ extern "C" {
 // task at the 256 KiB default). Raising it therefore buys depth, not memory -- see `set_stack_size`.
 const STACK_SIZE_DEFAULT: usize = 262144;
 static mut G_STACK_SIZE: usize = 262144;
+
+// --- cancellation semantics (frozen) -------------------------------------------------------------------
+// Cancellation is COOPERATIVE: it takes effect only at a cancellation point (a cancellable task-aware
+// wait, a task-aware sleep, an explicit `cancel_point()`, or a compiler safepoint with a valid cleanup
+// edge). It is not failure recovery: a request is idempotent, the first reason is retained, cleanup runs
+// once, and the cancelled computation never resumes past its cleanup. Normal completion wins if it
+// publishes completion before the cancellation is accepted; an accepted cancellation wins once the task
+// reaches its root cancellation exit. After acceptance, further cancellation is MASKED: cleanup may use
+// any runtime wait, and those waits park non-cancellably.
+//
+// A coroutine is NEVER freed while it is running user code, inside the park hand-off window, linked to a
+// wait queue, timer, reactor or blocking result, inside an unreturned foreign call, or inside cleanup.
+// A task that cannot accept cancellation is reported as unresponsive and its block stays allocated.
+
+// Wake reasons: the low `WR_BITS` bits of `park_state`. Exactly one waker moves them from `WR_NONE` with
+// one compare-and-swap per park generation -- notify, timeout, I/O readiness, blocking completion and
+// cancellation all race through the same single-winner claim.
+pub const WR_NONE: u32 = 0;
+pub const WR_NOTIFY: u32 = 1;
+pub const WR_TIMEOUT: u32 = 2;
+pub const WR_CANCEL: u32 = 3;
+pub const WR_SHUTDOWN: u32 = 4;
+pub const WR_IO: u32 = 5;
+pub const WR_BLOCKING: u32 = 6;
+const WR_BITS: u32 = 3;
+const WR_MASK: u32 = 7;
+static_assert(WR_BLOCKING <= WR_MASK, "every wake reason must fit the park_state claim bits");
+static_assert(WR_NONE == 0, "an open park must read as unclaimed");
+
+// Park phases: the low `WR_BITS` bits of `park_phase`; the high bits carry the park token, so a late
+// phase write for an already-finished park cannot corrupt the next one (every worker-side transition is a
+// token-tagged compare-and-swap).
+const PH_NOT_PARKING: u32 = 0;
+const PH_PREPARING: u32 = 1;
+const PH_SWITCHING: u32 = 2;
+const PH_PARKED: u32 = 3;
+const PH_RESUMING: u32 = 4;
+static_assert(PH_RESUMING <= WR_MASK, "every park phase must fit the park_phase tag bits");
+
+// Task lifecycle states, for the registry and diagnostics. Parking detail lives in `park_phase`; a task
+// whose state is `TS_RUNNING` with a parked phase is parked, and one that parks while `TS_CLEANING` is
+// the `CleaningBlocked` diagnostic case.
+pub const TS_RUNNABLE: i32 = 0;
+pub const TS_RUNNING: i32 = 1;
+pub const TS_CLEANING: i32 = 2;
+pub const TS_COMPLETED: i32 = 3;
+
+// Cancellation request states.
+pub const CS_NONE: i32 = 0;
+pub const CS_REQUESTED: i32 = 1;
+pub const CS_ACCEPTED: i32 = 2;
+pub const CS_FINISHED: i32 = 3;
+
+// Cancellation reasons; the first request's reason is retained.
+pub const CR_NONE: u32 = 0;
+pub const CR_USER: u32 = 1;
+pub const CR_SHUTDOWN: u32 = 2;
+pub const CR_POLICY: u32 = 3;
+
+// Wait kinds, for diagnostics: what a parked task is waiting on.
+pub const WK_NONE: i32 = 0;
+pub const WK_MUTEX: i32 = 1;
+pub const WK_CONDVAR: i32 = 2;
+pub const WK_CHANNEL_SEND: i32 = 3;
+pub const WK_CHANNEL_RECV: i32 = 4;
+pub const WK_SELECT: i32 = 5;
+pub const WK_SLEEP: i32 = 6;
+pub const WK_IO: i32 = 7;
+pub const WK_BLOCKING: i32 = 8;
+pub const WK_WAIT_GROUP: i32 = 9;
+pub const WK_SEMAPHORE: i32 = 10;
+pub const WK_BARRIER: i32 = 11;
+pub const WK_RWLOCK: i32 = 12;
+
+// A job or a plain thread holds no registry slot.
+const SLOT_NONE: u32 = 4294967295;
 
 /// A schedulable task: either a stackful coroutine, or (`is_job`) a run-to-completion JOB that the worker
 /// simply calls on its own stack -- no stack allocation, no context switch, and no ability to park. Jobs are
@@ -61,9 +140,68 @@ pub struct Coroutine {
     pub park_state: u32, // (park generation << 1) | claimed -- see park_begin
     pub timed: i32, // currently linked into the scheduler's timer list
     pub deadline: u64, // monotonic wake time (ns) while `timed`
-    pub tm_token: u32, // the token that pending timer will wake, while `timed`
+    pub tm_token: u32, // the token of the CURRENT park (every park stores it, timed or not)
     pub tnext: *mut Coroutine, // timer-list link (sorted by `deadline`)
+    pub slot: u32, // registry slot, fixed for the block's life (SLOT_NONE for a job)
+    pub tstate: i32, // atomic TS_* lifecycle state
+    pub cancel: i32, // atomic CS_* cancellation state
+    pub cancel_reason: u32, // atomic CR_*: the first request's reason, set once
+    pub cancel_wake: u32, // atomic: the WakeReason the first request claims with (WR_CANCEL or WR_SHUTDOWN)
+    pub park_phase: u32, // atomic: park token | PH_* -- see park_begin and worker_main
+    pub park_cancellable: i32, // atomic: may the CURRENT park be claimed with a cancel wake?
+    pub cmask: i32, // cancellation-mask depth; only the task's own thread touches it
+    pub wait_kind: i32, // atomic WK_* while parked, for diagnostics
+    pub wait_obj: usize, // atomic: address identifying the wait object, for diagnostics
+    pub handoff: i32, // atomic: the parking worker still owns the hand-off tail -- see worker_main
+    pub unwound: i32, // the last checked call edge-returned: its value is poison -- see cancel_probe
 }
+
+/// A generation-checked handle to one task registry slot. A stale key (its task finished and the slot was
+/// reused) can neither cancel nor observe the new occupant.
+pub struct TaskKey {
+    pub slot: u32,
+    pub gen: u32,
+}
+
+/// One diagnostic snapshot row: the stable identity and current lifecycle of a live task.
+pub struct TaskInfo {
+    pub key: TaskKey,
+    pub id: u64,
+    pub state: i32, // TS_*
+    pub phase: u32, // PH_*
+    pub cancel: i32, // CS_*
+    pub cancel_reason: u32, // CR_*
+    pub wait_kind: i32, // WK_*
+    pub wait_obj: usize,
+    pub masked: bool, // parked non-cancellably, or running with the cancel mask held
+}
+
+// One registry slot. `gen` bumps once per task assigned to the slot and once per retirement, so a key
+// captured for one task can never name another. `spin` orders a key-based cancel against block reuse.
+@no_const
+struct TaskSlot {
+    pub co: *mut Coroutine,
+    pub gen: u32,
+    pub spin: i32,
+    pub next_free: i64, // retired-slot freelist link; -1 = none
+}
+
+// The task registry: segment-allocated slots, so growth never moves a slot and a scan never chases a
+// resize. The segment directory is allocated once; segments appear as concurrent task capacity grows.
+const REG_SEG_SIZE: usize = 256;
+const REG_MAX_SEGS: usize = 4096;
+static_assert(REG_SEG_SIZE * REG_MAX_SEGS >= 1000000, "the registry must hold a large fan-out");
+
+@no_const
+struct Registry {
+    pub segs: *mut *mut TaskSlot, // REG_MAX_SEGS pointers, allocated with the registry
+    pub nsegs: usize,
+    pub len: usize, // slots handed out so far (monotonic bump; retired slots recycle via free_head)
+    pub free_head: i64,
+    pub spin: i32, // guards slot allocation, retirement, and scans
+}
+
+static mut G_REG: *mut Registry = null;
 
 const DEQUE_CAP: usize = 256; // power of two; an overflowing push spills to the injection queue
 const BATCH_MAX: usize = 16; // injected tasks moved to a deque per lock -- see `take_injection`
@@ -159,6 +297,8 @@ static mut G_SCHED: *mut Scheduler = null;
 static mut G_NWORKERS: usize = 0; // 0 = one worker per CPU
 static mut G_NEXT_ID: u64 = 0; // atomic: task-id source, and so also the count of tasks ever created
 static mut G_DONE: usize = 0; // atomic: tasks that ran to completion
+static mut G_CANCELLED: usize = 0; // atomic: completions that were accepted cancellations
+static mut G_CLOSED: i32 = 0; // atomic: shutdown has stopped accepting new tasks
 
 static mut G_TRACE: i32 = 0; // 0 unknown / 1 off / 2 on
 
@@ -206,12 +346,204 @@ fn next_task_id() u64 {
     return atomic::add_u64(&mut unsafe G_NEXT_ID, 1, 0) + 1;
 }
 
-// Claim the right to resume the park identified by `token`: succeeds once, for one waker, and only while
-// that exact park is still current. A registration left behind by an expired timed wait therefore cannot
-// resume a LATER park -- which would run a coroutine that never actually acquired what it waited for.
-fn claim(co: *mut Coroutine, token: u32) bool {
+// Claim the right to resume the park identified by `token`, recording `reason` as the winning wake:
+// succeeds once, for one waker, and only while that exact park is still current. A registration left
+// behind by an expired timed wait therefore cannot resume a LATER park -- which would run a coroutine
+// that never actually acquired what it waited for.
+fn claim(co: *mut Coroutine, token: u32, reason: u32) bool {
     let p = &mut unsafe co.park_state;
-    return atomic::cas_u32(p, token, token + 1, false, 4, 0); // SeqCst on success, Relaxed on failure
+    return atomic::cas_u32(p, token, token | reason, false, 4, 0); // SeqCst on success, Relaxed on failure
+}
+
+// --- the task registry ---------------------------------------------------------------------------------
+// Every coroutine block owns one generation-checked slot for its whole life: assigned on the block's first
+// spawn, generation-bumped per reuse, retired only when the block itself is released. Spawn and completion
+// therefore never touch the registry lock on the recycled path; only cold block allocation, block release,
+// and diagnostic scans take it.
+
+fn reg_ensure() *mut Registry {
+    if unsafe G_REG != null {
+        return unsafe G_REG;
+    }
+    let mut g = Global {};
+    let r = (unsafe g.alloc(sizeof(Registry), alignof(Registry))) as *mut Registry;
+    let segs = (unsafe g.alloc(REG_MAX_SEGS * sizeof(*mut TaskSlot), alignof(*mut TaskSlot))) as *mut *mut TaskSlot;
+    for i in 0..REG_MAX_SEGS {
+        unsafe segs[i] = null;
+    }
+    unsafe r[0] = Registry { segs: segs, nsegs: 0, len: 0, free_head: -1, spin: 0 };
+    unsafe G_REG = r;
+    return r;
+}
+
+fn reg_slot(r: *mut Registry, idx: usize) *mut TaskSlot {
+    let seg = unsafe r.segs[idx / REG_SEG_SIZE];
+    return unsafe (seg + idx % REG_SEG_SIZE);
+}
+
+// Give a freshly-built block its slot. Called once per block, before the task is published to any queue.
+fn reg_assign(co: *mut Coroutine) {
+    let r = reg_ensure();
+    unsafe sc_runtime::sc_rt_spin_lock(&mut r.spin);
+    let mut idx: usize = 0;
+    if unsafe r.free_head >= 0 {
+        idx = (unsafe r.free_head) as usize;
+        let sl0 = reg_slot(r, idx);
+        unsafe r.free_head = unsafe sl0.next_free;
+    } else {
+        idx = unsafe r.len;
+        if idx >= REG_SEG_SIZE * REG_MAX_SEGS {
+            // Registry exhausted: the task runs unregistered (it cannot be cancelled by key). Bounded by
+            // design; a program holding a million live tasks has larger problems than this.
+            unsafe sc_runtime::sc_rt_spin_unlock(&mut r.spin);
+            unsafe co.slot = SLOT_NONE;
+            return;
+        }
+        if unsafe r.segs[idx / REG_SEG_SIZE] == null {
+            let mut g = Global {};
+            let seg = (unsafe g.alloc(REG_SEG_SIZE * sizeof(TaskSlot), alignof(TaskSlot))) as *mut TaskSlot;
+            for i in 0..REG_SEG_SIZE {
+                unsafe seg[i] = TaskSlot { co: null, gen: 0, spin: 0, next_free: -1 };
+            }
+            unsafe r.segs[idx / REG_SEG_SIZE] = seg;
+            unsafe r.nsegs = unsafe r.nsegs + 1;
+        }
+        atomic::store_usize(&mut unsafe r.len, idx + 1, 2); // atomic: key validation reads it unlocked
+    }
+    let sl = reg_slot(r, idx);
+    unsafe sl.co = co;
+    atomic::store_u32(&mut unsafe sl.gen, unsafe sl.gen + 1, 2);
+    unsafe co.slot = idx as u32;
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut r.spin);
+}
+
+// A recycled block keeps its slot; a new task in it is a new generation. The bump happens under the slot's
+// own spinlock, BEFORE the block's task fields are rewritten, so a canceller that validated a stale key
+// under the same lock can never touch the new task.
+fn reg_reuse_lock(co: *mut Coroutine) *mut TaskSlot {
+    if unsafe co.slot == SLOT_NONE {
+        return null;
+    }
+    let r = unsafe G_REG;
+    let sl = reg_slot(r, (unsafe co.slot) as usize);
+    unsafe sc_runtime::sc_rt_spin_lock(&mut sl.spin);
+    atomic::store_u32(&mut unsafe sl.gen, unsafe sl.gen + 1, 2);
+    return sl;
+}
+
+// Retire a released block's slot. After this no key can reach the block, so its memory may be freed.
+fn reg_retire(co: *mut Coroutine) {
+    if unsafe co.slot == SLOT_NONE || unsafe G_REG == null {
+        return;
+    }
+    let r = unsafe G_REG;
+    unsafe sc_runtime::sc_rt_spin_lock(&mut r.spin);
+    let sl = reg_slot(r, (unsafe co.slot) as usize);
+    unsafe sc_runtime::sc_rt_spin_lock(&mut sl.spin);
+    unsafe sl.co = null;
+    atomic::store_u32(&mut unsafe sl.gen, unsafe sl.gen + 1, 2);
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut sl.spin);
+    unsafe sl.next_free = unsafe r.free_head;
+    unsafe r.free_head = unsafe co.slot;
+    unsafe co.slot = SLOT_NONE;
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut r.spin);
+}
+
+// Free the registry itself. Only shutdown calls it, after every block is released.
+fn reg_free() {
+    let r = unsafe G_REG;
+    if r == null {
+        return;
+    }
+    let mut g = Global {};
+    for i in 0..unsafe r.nsegs {
+        unsafe g.dealloc(unsafe r.segs[i], REG_SEG_SIZE * sizeof(TaskSlot), alignof(TaskSlot));
+    }
+    unsafe g.dealloc(unsafe r.segs, REG_MAX_SEGS * sizeof(*mut TaskSlot), alignof(*mut TaskSlot));
+    unsafe g.dealloc(r, sizeof(Registry), alignof(Registry));
+    unsafe G_REG = null;
+}
+
+// Read one live slot into a TaskInfo row. Caller holds the registry spinlock. The slot lock pins the
+// generation to the coroutine fields while a recycled block is initialized for its next task.
+fn reg_read(sl: *mut TaskSlot, idx: usize, out: &mut TaskInfo) bool {
+    unsafe sc_runtime::sc_rt_spin_lock(&mut sl.spin);
+    let co = unsafe sl.co;
+    if co == null {
+        unsafe sc_runtime::sc_rt_spin_unlock(&mut sl.spin);
+        return false;
+    }
+    let mut st = atomic::load_i32(&mut unsafe co.tstate, 1);
+    if st == TS_COMPLETED {
+        unsafe sc_runtime::sc_rt_spin_unlock(&mut sl.spin);
+        return false;
+    }
+    if atomic::load_i32(&mut unsafe co.cancel, 1) == CS_ACCEPTED {
+        st = TS_CLEANING; // cleanup owns the task from acceptance to completion
+    }
+    let ph = atomic::load_u32(&mut unsafe co.park_phase, 1);
+    let parked_masked = (ph & WR_MASK) == PH_PARKED && atomic::load_i32(&mut unsafe co.park_cancellable, 1) == 0;
+    *out = TaskInfo {
+        key: TaskKey { slot: idx as u32, gen: atomic::load_u32(&mut unsafe sl.gen, 1) },
+        id: atomic::load_u64(&mut unsafe co.id, 1),
+        state: st,
+        phase: ph & WR_MASK,
+        cancel: atomic::load_i32(&mut unsafe co.cancel, 1),
+        cancel_reason: atomic::load_u32(&mut unsafe co.cancel_reason, 1),
+        wait_kind: atomic::load_i32(&mut unsafe co.wait_kind, 1),
+        wait_obj: atomic::load_usize(&mut unsafe co.wait_obj, 1),
+        masked: parked_masked,
+    };
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut sl.spin);
+    return true;
+}
+
+/// Snapshot every live registered task into `out`, in stable slot order. A diagnostic scan: the rows are
+/// a consistent identity (key, id) with a racy-but-monotone view of state. `pub` for shutdown reports and
+/// the task-leak sanitizer.
+pub fn task_snapshot(out: &mut Vector<TaskInfo>) {
+    if unsafe G_REG == null {
+        return;
+    }
+    let r = unsafe G_REG;
+    unsafe sc_runtime::sc_rt_spin_lock(&mut r.spin);
+    for idx in 0..unsafe r.len {
+        let sl = reg_slot(r, idx);
+        let mut info = TaskInfo {
+            key: TaskKey { slot: 0, gen: 0 },
+            id: 0,
+            state: 0,
+            phase: 0,
+            cancel: 0,
+            cancel_reason: 0,
+            wait_kind: 0,
+            wait_obj: 0,
+            masked: false,
+        };
+        if reg_read(sl, idx, &mut info) {
+            out.push(info);
+        }
+    }
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut r.spin);
+}
+
+/// The registry key of the task running on this thread. `slot` is `SLOT_NONE`-valued (`is_task` false) on
+/// a plain thread or inside a data-parallel job.
+pub fn current_key() TaskKey {
+    let co = current();
+    if co == null || unsafe co.slot == SLOT_NONE {
+        return TaskKey { slot: SLOT_NONE, gen: 0 };
+    }
+    let r = unsafe G_REG;
+    let sl = reg_slot(r, (unsafe co.slot) as usize);
+    return TaskKey { slot: unsafe co.slot, gen: atomic::load_u32(&mut unsafe sl.gen, 1) };
+}
+
+extend TaskKey {
+    /// Does this key name a real registered task (as opposed to a plain thread or job)?
+    pub fn is_task(self: &TaskKey) bool {
+        return self.slot != SLOT_NONE;
+    }
 }
 
 // Memory-order codes for the atomic builtins: 0 Relaxed, 1 Acquire, 2 Release, 3 AcqRel, 4 SeqCst.
@@ -493,6 +825,7 @@ fn signal_work(s: *mut Scheduler) {
 // Make `co` runnable. From a worker thread it goes on that worker's own deque -- no lock, and the task stays
 // where its data is warm; from anywhere else (or a full deque) it goes to the injection queue.
 fn enqueue_runnable(s: *mut Scheduler, co: *mut Coroutine) {
+    atomic::store_i32(&mut unsafe co.tstate, TS_RUNNABLE, 0);
     let wi = unsafe sc_runtime::sc_rt_widx_get();
     if wi >= 0 && wi as usize < unsafe s.nw {
         let w = unsafe (s.deques + wi as usize);
@@ -567,7 +900,7 @@ fn promote_expired(s: *mut Scheduler) bool {
         unsafe co.timed = 0;
         atomic::store_i32(&mut unsafe s.timer_len, unsafe s.timer_len - 1, 2);
         any = true;
-        if claim(co, unsafe co.tm_token) {
+        if claim(co, unsafe co.tm_token, WR_TIMEOUT) {
             qlock(s); // `lock` then `qlock` is the one nesting order the two are ever taken in
             push_injection(s, co);
             qunlock(s);
@@ -899,6 +1232,7 @@ fn pool_put(s: *mut Scheduler, co: *mut Coroutine) bool {
 }
 
 fn release_block(co: *mut Coroutine) {
+    reg_retire(co); // after this no key or scan can reach the block
     unsafe sc_runtime::sc_rt_stack_free(co.stack, G_STACK_SIZE);
     unsafe sc_runtime::sc_rt_ctx_free(co.ctx);
     let mut g = Global {};
@@ -1057,6 +1391,7 @@ fn worker_main(arg: *mut void) *mut void {
             continue;
         }
         unsafe co.sched_ctx = sched_ctx;
+        atomic::store_i32(&mut unsafe co.tstate, TS_RUNNING, 0);
         if unsafe co.inited == 0 {
             // Arm the context on the worker that first runs it, not at spawn: arming writes the initial
             // frame to the coroutine's own stack, so a task that is queued but never reached never faults
@@ -1075,6 +1410,23 @@ fn worker_main(arg: *mut void) *mut void {
             if tracing() {
                 trace("complete", unsafe co.id);
             }
+            // The previous run slice's parking worker may still own the hand-off tail (its Parked
+            // publication and cancel check). The block must not be recycled under it; the wait is bounded
+            // by that worker's dozen remaining instructions.
+            while atomic::load_i32(&mut unsafe co.handoff, 1) != 0 {
+                unsafe sc_runtime::sc_rt_cpu_relax();
+            }
+            // Completion accounting BEFORE the block is recycled: an accepted cancellation that reaches
+            // this point was reclaimed; publish Completed last so a registry scan never reads a half-done
+            // retirement.
+            if atomic::load_i32(&mut unsafe co.cancel, 1) == CS_ACCEPTED {
+                atomic::store_i32(&mut unsafe co.cancel, CS_FINISHED, 2);
+                let _ = atomic::add_usize(&mut unsafe G_CANCELLED, 1, 0);
+                if tracing() {
+                    trace("task reclaimed", unsafe co.id);
+                }
+            }
+            atomic::store_i32(&mut unsafe co.tstate, TS_COMPLETED, 2);
             free_coroutine(s, co);
             let _ = atomic::add_usize(&mut unsafe G_DONE, 1, 0);
         } else if unsafe co.commit_requeue != 0 {
@@ -1089,6 +1441,11 @@ fn worker_main(arg: *mut void) *mut void {
             let commit = unsafe co.commit_fn;
             let arg = unsafe co.commit_arg;
             let dl = unsafe co.deadline;
+            let token = unsafe co.tm_token;
+            // Own the hand-off tail before the task becomes visible to any waker: a worker that resumes
+            // and completes this task spins on `handoff` before recycling the block, so the tail below can
+            // never touch freed memory.
+            atomic::store_i32(&mut unsafe co.handoff, 1, 2);
             // Then arm its timer (if the wait was timed) and only last release the lock that kept its waker
             // out: by now its context is fully saved, so any waker may resume it.
             if dl != 0 {
@@ -1097,6 +1454,25 @@ fn worker_main(arg: *mut void) *mut void {
                 unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
             }
             commit(arg);
+            // Publish Parked for THIS park generation. The tag makes a late publication harmless: if a
+            // waker already resumed the task (and it moved to another park), the compare fails and the
+            // hand-off is over. On success, look at the cancellation flag AFTER the publication -- paired
+            // with request_cancel's Requested-store-then-phase-read, one side always sees the other, so a
+            // request that lands during the hand-off window is never lost.
+            if atomic::cas_u32(&mut unsafe co.park_phase, token | PH_SWITCHING, token | PH_PARKED, false, 4, 0) {
+                if atomic::load_i32(&mut unsafe co.cancel, 4) == CS_REQUESTED {
+                    if atomic::load_i32(&mut unsafe co.park_cancellable, 1) != 0 {
+                        let wr = atomic::load_u32(&mut unsafe co.cancel_wake, 1);
+                        if claim(co, token, wr) {
+                            if tracing() {
+                                trace("cancel wake won", unsafe co.id);
+                            }
+                            enqueue_runnable(s, co);
+                        }
+                    }
+                }
+            }
+            atomic::store_i32(&mut unsafe co.handoff, 0, 2); // the tail is over: the block may be recycled
         }
     }
     stash_flush(s, w); // before widx goes: `free_coroutine` keys off it
@@ -1178,6 +1554,7 @@ fn build_scheduler() *mut Scheduler {
     }
     // Before any worker exists, so every safepoint's read of the hook happens-after this write.
     unsafe __sc_set_preempt_hook(preempt_yield);
+    unsafe __sc_set_cancel_hook(cancel_safepoint_tick);
     for i in 0..nw {
         let mut h: *mut void = null;
         let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, worker_main, unsafe (deques + i));
@@ -1229,7 +1606,10 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
     let mut stk: *mut void = null;
     let mut ctx: *mut void = null;
     let mut pst: u32 = 0;
-    if co == null {
+    let mut slot: u32 = SLOT_NONE;
+    let mut reuse_slot: *mut TaskSlot = null;
+    let fresh = co == null;
+    if fresh {
         let mut g = Global {};
         co = (unsafe g.alloc(sizeof(Coroutine), alignof(Coroutine))) as *mut Coroutine;
         stk = unsafe sc_runtime::sc_rt_stack_alloc(G_STACK_SIZE);
@@ -1238,6 +1618,10 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
         stk = unsafe co.stack;
         ctx = unsafe co.ctx;
         pst = unsafe co.park_state;
+        slot = unsafe co.slot;
+        // Open the slot's next generation BEFORE the task fields are rewritten: a canceller validates its
+        // key under the slot lock, so once the bump lands a stale key can no longer reach this block.
+        reuse_slot = reg_reuse_lock(co);
     }
     unsafe co[0] = Coroutine {
         id: next_task_id(),
@@ -1258,7 +1642,24 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
         deadline: 0,
         tm_token: 0,
         tnext: null,
+        slot: slot,
+        tstate: TS_RUNNABLE,
+        cancel: CS_NONE,
+        cancel_reason: CR_NONE,
+        cancel_wake: 0,
+        park_phase: pst & ~WR_MASK | PH_NOT_PARKING,
+        park_cancellable: 0,
+        cmask: 0,
+        wait_kind: WK_NONE,
+        wait_obj: 0,
+        handoff: 0,
+        unwound: 0,
     };
+    if fresh {
+        reg_assign(co);
+    } else if reuse_slot != null {
+        unsafe sc_runtime::sc_rt_spin_unlock(&mut reuse_slot.spin);
+    }
     if tracing() {
         trace("spawn coroutine", unsafe co.id);
     }
@@ -1292,6 +1693,18 @@ pub fn spawn_job(entry: fn(*mut void) void, env: *mut void) {
         deadline: 0,
         tm_token: 0,
         tnext: null,
+        slot: SLOT_NONE,
+        tstate: TS_RUNNABLE,
+        cancel: CS_NONE,
+        cancel_reason: CR_NONE,
+        cancel_wake: 0,
+        park_phase: 0,
+        park_cancellable: 0,
+        cmask: 0,
+        wait_kind: WK_NONE,
+        wait_obj: 0,
+        handoff: 0,
+        unwound: 0,
     };
     if tracing() {
         trace("spawn job", unsafe co.id);
@@ -1307,7 +1720,15 @@ pub fn spawn_job(entry: fn(*mut void) void, env: *mut void) {
 /// is what makes DETACHING sound -- the task may outlive this call, so `f` may not capture a borrow of a
 /// caller local (nor mutate a capture, which captures `&mut` into this frame). Move values in, or share
 /// them through an `Arc`.
+/// Has shutdown stopped the runtime from accepting new tasks?
+pub fn closed() bool {
+    return atomic::load_i32(&mut unsafe G_CLOSED, 1) != 0;
+}
+
 pub fn submit<F: fn move() + Send + 'static>(f: F) {
+    if closed() {
+        return; // shutdown has stopped accepting tasks; `f` and its captures are freed here
+    }
     let mut g = Global {};
     let slot = (unsafe g.alloc(sizeof(F), alignof(F))) as *mut F;
     unsafe slot[0] = f;
@@ -1339,20 +1760,27 @@ pub fn in_job() bool {
 /// managed to unlink itself.
 pub fn park_begin(co: *mut Coroutine) u32 {
     let p = &mut unsafe co.park_state;
-    let t = ((atomic::load_u32(p, 0) >> 1) + 1) * 2; // next generation, claim bit clear; wraps at width
-    atomic::store_u32(p, t, 0);
+    let t = (atomic::load_u32(p, 0) >> WR_BITS) + 1 << WR_BITS; // next generation, reason clear; wraps at width
+    atomic::store_u32(p, t, 4); // SeqCst: a cancel claim reads this without holding the wait-queue lock
+    atomic::store_u32(&mut unsafe co.park_phase, t | PH_PREPARING, 2);
     return t;
 }
 
-/// Suspend the current coroutine until woken, or until `deadline` (a `platform::now_ns()` value; 0 means no
-/// timeout, in which case `token` is unused). Only valid from inside a coroutine (`current() != null`).
+/// Suspend the current coroutine until woken, or until `deadline` (a `platform::now_ns()` value; 0 means
+/// no timeout), and return the winning `WR_*` wake reason. Only valid from inside a coroutine
+/// (`current() != null`).
 ///
 /// The caller MUST, before calling: take a `park_begin` token, place a node carrying it on the primitive's
 /// wait queue, and hold the lock guarding that queue -- `commit(arg)` releases that lock once the context is
 /// saved (`commit_nop`/`null` when there is none), which is what keeps a waker from resuming a coroutine
 /// that is still switching out. On return the lock is NOT held; the caller must re-acquire it, call
-/// `cancel_timer` if the wait was timed, unlink its node, and re-check its condition.
-pub fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, arg: *mut void) {
+/// `cancel_timer` if the wait was timed, unlink its node, and re-check its condition (or, on a cancel
+/// reason, follow the wait cleanup contract: timer, lock, unlink, metadata, then `cancel_accept`).
+///
+/// `cancellable` opts the park into the cancellation wake. A cancel claim is possible only when it is set
+/// AND the task's cancel mask is clear AND cleanup has not already started; the wait that sets it promises
+/// that a `WR_CANCEL`/`WR_SHUTDOWN` return leaves no registration behind.
+pub fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, arg: *mut void, cancellable: bool) u32 {
     let co = current();
     if tracing() {
         trace(
@@ -1364,25 +1792,54 @@ pub fn park_timed(token: u32, deadline: u64, commit: fn(*mut void) void, arg: *m
             unsafe co.id,
         );
     }
+    let c = cancellable && unsafe co.cmask == 0 && atomic::load_i32(&mut unsafe co.cancel, 0) != CS_ACCEPTED;
+    atomic::store_i32(
+        &mut unsafe co.park_cancellable,
+        if c {
+            1;
+        } else {
+            0;
+        },
+        2,
+    );
     unsafe co.commit_fn = commit;
     unsafe co.commit_arg = arg;
     unsafe co.deadline = deadline;
     unsafe co.tm_token = token;
+    atomic::store_u32(&mut unsafe co.park_phase, token | PH_SWITCHING, 2);
     unsafe sc_runtime::sc_rt_ctx_switch(co.ctx, co.sched_ctx);
+    // Back: exactly one waker claimed `token`, and wrote its reason before the enqueue that ran us -- so
+    // the reason is stable until the next park_begin.
+    let reason = atomic::load_u32(&mut unsafe co.park_state, 1) & WR_MASK;
+    atomic::store_u32(&mut unsafe co.park_phase, token | PH_RESUMING, 0);
+    atomic::store_i32(&mut unsafe co.park_cancellable, 0, 0);
+    return reason;
 }
 
-/// `park_timed` with no deadline: park until woken.
-pub fn park_current(commit: fn(*mut void) void, arg: *mut void) {
-    park_timed(0, 0, commit, arg);
+/// `park_timed` with no deadline: park until woken, and return the winning wake reason.
+pub fn park_current(token: u32, commit: fn(*mut void) void, arg: *mut void, cancellable: bool) u32 {
+    return park_timed(token, 0, commit, arg, cancellable);
 }
 
-/// Resume the park `token` identifies, and report whether this call is the one that did it. Exactly one
-/// waker wins per park, so a notify racing a timeout can never enqueue a coroutine twice; `false` means the
-/// wakeup was not consumed (the token is stale, or another waker got there first) and should go to the next
-/// waiter. Safe to call while holding the primitive's wait-queue lock (it takes only the scheduler's lock,
-/// always in that order).
+/// The current park is fully over: registrations removed, wait metadata cleared. Diagnostics only.
+pub fn park_done(co: *mut Coroutine) {
+    let t = atomic::load_u32(&mut unsafe co.park_state, 0) & ~WR_MASK;
+    atomic::store_u32(&mut unsafe co.park_phase, t | PH_NOT_PARKING, 0);
+}
+
+/// Resume the park `token` identifies with a notify wake, and report whether this call is the one that did
+/// it. Exactly one waker wins per park, so a notify racing a timeout can never enqueue a coroutine twice;
+/// `false` means the wakeup was not consumed (the token is stale, or another waker got there first) and
+/// should go to the next waiter. Safe to call while holding the primitive's wait-queue lock (it takes only
+/// the scheduler's lock, always in that order).
 pub fn wake(co: *mut Coroutine, token: u32) bool {
-    if !claim(co, token) {
+    return wake_as(co, token, WR_NOTIFY);
+}
+
+/// `wake`, claiming with an explicit `WR_*` reason (the reactor claims `WR_IO`, blocking completion claims
+/// `WR_BLOCKING`). The parked task reads the reason back from `park_timed`.
+pub fn wake_as(co: *mut Coroutine, token: u32, reason: u32) bool {
+    if !claim(co, token, reason) {
         return false;
     }
     if tracing() {
@@ -1405,6 +1862,282 @@ pub fn cancel_timer(co: *mut Coroutine) {
     unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
 }
 
+// --- cancellation --------------------------------------------------------------------------------------
+
+/// Request cancellation of the task `key` names, with a `CR_*` reason. Idempotent: the first request's
+/// reason is retained and later requests change nothing. Reports whether the key still named a live task.
+/// Delivery is cooperative: a task parked in a cancellable wait is woken through the single-winner park
+/// claim; a running (or non-cancellably parked) task observes the request at its next cancellation point.
+pub fn request_cancel(key: TaskKey, reason: u32) bool {
+    return request_cancel_wake(key, reason, WR_CANCEL);
+}
+
+// `request_cancel` with an explicit claim reason: shutdown claims with `WR_SHUTDOWN`.
+fn request_cancel_wake(key: TaskKey, reason: u32, wr: u32) bool {
+    if key.slot == SLOT_NONE || unsafe G_REG == null {
+        return false;
+    }
+    let r = unsafe G_REG;
+    if key.slot as usize >= atomic::load_usize(&mut unsafe r.len, 1) {
+        return false;
+    }
+    let sl = reg_slot(r, key.slot as usize);
+    // The slot lock orders this request against block reuse: `reg_reuse` bumps the generation under it
+    // before the block's task fields are rewritten, so a stale key can never mark the slot's next task.
+    unsafe sc_runtime::sc_rt_spin_lock(&mut sl.spin);
+    let co = unsafe sl.co;
+    let mut live = co != null;
+    if live {
+        live = atomic::load_u32(&mut unsafe sl.gen, 0) == key.gen;
+    }
+    if live {
+        live = atomic::load_i32(&mut unsafe co.tstate, 1) != TS_COMPLETED;
+    }
+    if live {
+        request_cancel_co(co, reason, wr);
+    }
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut sl.spin);
+    return live;
+}
+
+// The request core, given the coroutine itself. `wr` is the wake reason a park claim will carry.
+fn request_cancel_co(co: *mut Coroutine, reason: u32, wr: u32) {
+    let _ = atomic::cas_u32(&mut unsafe co.cancel_reason, CR_NONE, reason, false, 4, 0);
+    let _ = atomic::cas_u32(&mut unsafe co.cancel_wake, 0, wr, false, 4, 0);
+    if !atomic::cas_i32(&mut unsafe co.cancel, CS_NONE, CS_REQUESTED, false, 4, 0) {
+        return; // already requested, accepted or finished
+    }
+    if tracing() {
+        trace("cancel requested", unsafe co.id);
+    }
+    cancel_nudge(co);
+}
+
+// Try to win the task's current park with the cancel wake. Failing is fine: the Requested flag is sticky,
+// the park hand-off re-checks it after publishing Parked, and every cancellation point observes it -- so a
+// request can be delayed but never lost. The retry bound is real: each retry means the task completed a
+// park transition under us, and after 64 of them the flag alone is the delivery.
+fn cancel_nudge(co: *mut Coroutine) {
+    let mut looks: i32 = 0;
+    while looks < 64 {
+        looks = looks + 1;
+        let ps = atomic::load_u32(&mut unsafe co.park_state, 4);
+        if (ps & WR_MASK) != 0 {
+            if tracing() {
+                trace("cancel wake lost to another waker", unsafe co.id);
+            }
+            return; // this park already has a winner; the wait exit observes the flag
+        }
+        let ph = atomic::load_u32(&mut unsafe co.park_phase, 4);
+        if ph == (ps | PH_PARKED) {
+            if atomic::load_i32(&mut unsafe co.park_cancellable, 1) == 0 {
+                return; // a masked or non-cancellable wait: report it, never force it
+            }
+            let wr = atomic::load_u32(&mut unsafe co.cancel_wake, 1);
+            if claim(co, ps, wr) {
+                if tracing() {
+                    trace("cancel wake won", unsafe co.id);
+                }
+                enqueue_runnable(unsafe G_SCHED, co);
+                return;
+            }
+            continue; // lost the claim race: re-read who won
+        }
+        if ph >> WR_BITS != ps >> WR_BITS {
+            continue; // a park transition is in flight: look again
+        }
+        return; // not parked: the next cancellation point or park commit sees the flag
+    }
+}
+
+/// Is a cancellation request pending (not yet accepted) for the current task?
+pub fn cancel_requested() bool {
+    let co = current();
+    if co == null {
+        return false;
+    }
+    return atomic::load_i32(&mut unsafe co.cancel, 1) == CS_REQUESTED;
+}
+
+/// Has the current task accepted cancellation? From acceptance to completion the task is in cleanup:
+/// every wait it enters parks non-cancellably, and its callers must unwind rather than continue.
+pub fn cancelling() bool {
+    let co = current();
+    if co == null {
+        return false;
+    }
+    return atomic::load_i32(&mut unsafe co.cancel, 1) == CS_ACCEPTED;
+}
+
+/// Accept a pending cancellation for the current task. The wait cleanup contract calls this LAST -- after
+/// the timer is cancelled, registrations are unlinked, guards are settled and wait metadata is cleared.
+/// Idempotent. `pub` for the task-aware primitives; user code uses `cancel_point`.
+pub fn cancel_accept() {
+    let co = current();
+    if co == null {
+        return;
+    }
+    if atomic::cas_i32(&mut unsafe co.cancel, CS_REQUESTED, CS_ACCEPTED, false, 4, 0) {
+        if tracing() {
+            trace("cleanup begin", unsafe co.id);
+        }
+    }
+}
+
+/// Read-only form of the wait-exit acceptance test: is an unmasked request pending (or already
+/// accepted) for the current task? Wait internals that must not syntactically reach `cancel_accept`
+/// (the cancel-mark seed) test this and leave the acceptance to their cancellable wrapper.
+pub fn cancel_pending() bool {
+    let co = current();
+    if co == null || unsafe co.cmask != 0 {
+        return false;
+    }
+    let c = atomic::load_i32(&mut unsafe co.cancel, 1);
+    return c == CS_REQUESTED || c == CS_ACCEPTED;
+}
+
+/// Accept a request after a cancellable wait has removed every external registration. Returns true when
+/// cleanup must start. This also covers a request that arrived during `Resuming` after another wake reason
+/// won the park token.
+pub fn cancel_after_wait(cancellable: bool) bool {
+    if !cancellable {
+        return false;
+    }
+    let co = current();
+    if co == null || unsafe co.cmask != 0 {
+        return false;
+    }
+    if atomic::load_i32(&mut unsafe co.cancel, 1) == CS_REQUESTED {
+        cancel_accept();
+    }
+    return atomic::load_i32(&mut unsafe co.cancel, 1) == CS_ACCEPTED;
+}
+
+/// The compiled cancellation-edge probe, inserted by the compiler after a call that can reach
+/// cancellation acceptance; user code never calls it. Returns:
+///   0 -- continue normally (no accepted cancellation, or off a task, or masked).
+///   1 -- the callee itself returned through its cancellation ladder: its result is POISON (a zero
+///        the callee never constructed) and must be abandoned, never freed.
+///   2 -- the callee returned a real value but the task has accepted cancellation: the caller must
+///        take ownership of the result (its cleanup frees it) and unwind.
+pub fn cancel_probe() i32 {
+    // A PURE read: the backend may evaluate a probe more than once per check, so the poison flag is
+    // consumed by `cancel_ladder_begin`, never here.
+    let co = current();
+    if co == null {
+        return 0;
+    }
+    if unsafe co.unwound != 0 {
+        return 1;
+    }
+    if unsafe co.cmask != 0 {
+        return 0;
+    }
+    if atomic::load_i32(&mut unsafe co.cancel, 1) == CS_ACCEPTED {
+        return 2;
+    }
+    return 0;
+}
+
+/// Open a compiled cancellation ladder: consume the callee's poison flag and MASK cleanup from here
+/// (a wait inside a defer or a destructor parks non-cancellably and no nested edge fires).
+/// Compiler-inserted; never call it.
+pub fn cancel_ladder_begin() {
+    let co = current();
+    if co == null {
+        return;
+    }
+    unsafe co.unwound = 0;
+    unsafe co.cmask = unsafe co.cmask + 1;
+}
+
+/// Close a compiled cancellation ladder: lift the cleanup mask and hand the edge to the caller (its
+/// probe reads the returned value as poison). Compiler-inserted; never call it.
+pub fn cancel_ladder_end() {
+    let co = current();
+    if co == null {
+        return;
+    }
+    unsafe co.cmask = unsafe co.cmask - 1;
+    unsafe co.unwound = 1;
+}
+
+// The combined safepoint's cancellation tick (rt_c's `__sc_cancel_tick`): `cancel_point` behind
+// the C hook ABI. Runs on a safepoint's cold half only.
+fn cancel_safepoint_tick() i32 {
+    if cancel_point() {
+        return 1;
+    }
+    return 0;
+}
+
+/// An explicit cancellation point. Accepts a pending request when the task is unmasked, and reports
+/// whether the task is cancelling -- a `true` return means the caller must stop its work and return
+/// through its cleanup.
+pub fn cancel_point() bool {
+    let co = current();
+    if co == null {
+        return false;
+    }
+    if unsafe co.cmask != 0 {
+        return false;
+    }
+    if atomic::load_i32(&mut unsafe co.cancel, 1) == CS_REQUESTED {
+        cancel_accept();
+    }
+    return atomic::load_i32(&mut unsafe co.cancel, 1) == CS_ACCEPTED;
+}
+
+/// Enter a cancellation-masked region: parks inside it are never claimed by a cancel wake and
+/// `cancel_point` is inert. Foreign and otherwise non-cancellable calls run under a mask. Re-entrant.
+pub fn cancel_mask_enter() {
+    let co = current();
+    if co == null {
+        return;
+    }
+    unsafe co.cmask = unsafe co.cmask + 1;
+}
+
+/// Leave a cancellation-masked region. A pending request is then observed at the next cancellation point.
+pub fn cancel_mask_exit() {
+    let co = current();
+    if co == null {
+        return;
+    }
+    // A panic, not an assert: demanded std code must not embed source paths (the fixpoint compares
+    // emissions whose std roots differ).
+    if unsafe co.cmask <= 0 {
+        panic("cancel_mask_exit without a matching cancel_mask_enter");
+    }
+    unsafe co.cmask = unsafe co.cmask - 1;
+}
+
+/// Record what the current task is about to wait on, for diagnostics and shutdown reports.
+pub fn wait_note(kind: i32, obj: usize) {
+    let co = current();
+    if co == null {
+        return;
+    }
+    atomic::store_i32(&mut unsafe co.wait_kind, kind, 0);
+    atomic::store_usize(&mut unsafe co.wait_obj, obj, 0);
+}
+
+/// Clear the current task's wait record (step 6 of the wait cleanup contract: metadata is cleared before
+/// cancellation propagates).
+pub fn wait_clear() {
+    let co = current();
+    if co == null {
+        return;
+    }
+    atomic::store_i32(&mut unsafe co.wait_kind, WK_NONE, 0);
+    atomic::store_usize(&mut unsafe co.wait_obj, 0, 0);
+}
+
+/// Completions that were accepted cancellations (the task was reclaimed rather than finishing normally).
+pub fn cancelled_tasks() usize {
+    return atomic::load_usize(&mut unsafe G_CANCELLED, 1);
+}
+
 /// Suspend for `ns` nanoseconds. A coroutine parks on the scheduler's timer list, so its worker keeps
 /// running other tasks; any other thread sleeps outright. `std::parallel::time::sleep` is the friendly form.
 pub fn sleep_ns(ns: i64) {
@@ -1421,9 +2154,13 @@ pub fn sleep_ns(ns: i64) {
         unsafe sc_runtime::sc_rt_sleep_ns(ns);
         return;
     }
-    let token = park_begin(co); // on no wait queue: the timer is the only waker
-    park_timed(token, platform::now_ns() + ns as u64, commit_nop, null);
+    wait_note(WK_SLEEP, 0);
+    let token = park_begin(co); // on no wait queue: the timer and a cancel are the only wakers
+    let _ = park_timed(token, platform::now_ns() + ns as u64, commit_nop, null, true);
     cancel_timer(co);
+    wait_clear();
+    park_done(co);
+    let _ = cancel_after_wait(true);
 }
 
 /// The id of the task running on this thread, or 0 on a plain thread. Ids are unique for the process and
@@ -1567,20 +2304,115 @@ pub fn yield_now() {
     if co == null {
         return;
     }
-    let _ = park_begin(co); // retire the current token: nothing may wake a coroutine the worker requeues
+    let t = park_begin(co); // retire the current token: nothing may wake a coroutine the worker requeues
     unsafe co.commit_requeue = 1;
     unsafe sc_runtime::sc_rt_ctx_switch(co.ctx, co.sched_ctx);
+    atomic::store_u32(&mut unsafe co.park_phase, t | PH_NOT_PARKING, 0); // a yield is not a park
 }
 
-/// Drain the run queue and every pending timer, stop and join all workers, and free the pool. Idempotent;
-/// a no-op if never started. Call once from the main thread after all launched work has completed: a
-/// coroutine still parked on a lock, a channel or a `WaitGroup` will never be woken, so its stack leaks.
-pub fn shutdown() {
-    let sp = (&mut unsafe G_STATE) as *mut i32;
-    if atomic::load_i32(sp, 1) != 2 {
-        return;
+/// The default `shutdown` grace period: how long cancelled tasks get to run their cleanup.
+pub const SHUTDOWN_GRACE_NS: u64 = 1000000000;
+
+/// Bounded-shutdown policy for `try_shutdown`.
+pub struct ShutdownOptions {
+    pub grace_ns: u64, // how long to wait for cancelled tasks to finish cleanup
+    pub report_unresponsive: bool, // print a stable per-task report for what did not finish
+    pub abort_on_unresponsive: bool, // abort the process instead of returning an unresponsive result
+}
+
+/// What a shutdown attempt achieved. `unresponsive > 0` means the runtime was NOT destroyed: those tasks
+/// keep their stacks, and the caller may wait longer, report, or terminate the process.
+pub struct ShutdownResult {
+    pub completed: usize,
+    pub cancelled: usize,
+    pub unresponsive: usize,
+}
+
+extend ShutdownOptions {
+    /// The `shutdown()` defaults, minus the abort: default grace, report unresponsive tasks, return.
+    pub fn defaults() ShutdownOptions {
+        return ShutdownOptions { grace_ns: SHUTDOWN_GRACE_NS, report_unresponsive: true, abort_on_unresponsive: false };
     }
-    let s = unsafe G_SCHED;
+}
+
+// A stable name for a wait kind, for the unresponsive-task report.
+fn wk_name(kind: i32) str<'static> {
+    if kind == WK_MUTEX {
+        return "mutex";
+    }
+    if kind == WK_CONDVAR {
+        return "condvar";
+    }
+    if kind == WK_CHANNEL_SEND {
+        return "channel send";
+    }
+    if kind == WK_CHANNEL_RECV {
+        return "channel recv";
+    }
+    if kind == WK_SELECT {
+        return "select";
+    }
+    if kind == WK_SLEEP {
+        return "sleep";
+    }
+    if kind == WK_IO {
+        return "io";
+    }
+    if kind == WK_BLOCKING {
+        return "blocking call";
+    }
+    if kind == WK_WAIT_GROUP {
+        return "wait group";
+    }
+    if kind == WK_SEMAPHORE {
+        return "semaphore";
+    }
+    if kind == WK_BARRIER {
+        return "barrier";
+    }
+    if kind == WK_RWLOCK {
+        return "rwlock";
+    }
+    return "none";
+}
+
+// One stable line per unresponsive task, in ascending task-ID order (never worker completion order).
+fn report_unresponsive(tasks: &mut Vector<TaskInfo>) {
+    // Insertion sort by task ID: the report is small and the order contract matters more than the sort.
+    for i in 1..tasks.len() {
+        let mut j = i;
+        while j > 0 && tasks.at(j - 1).id > tasks.at(j).id {
+            tasks.swap(j - 1, j);
+            j = j - 1;
+        }
+    }
+    eprintln("super-c: {} unresponsive task(s) at shutdown (stacks kept allocated):", tasks.len());
+    for i in 0..tasks.len() {
+        let t = tasks.at(i);
+        let why = if t.cancel == CS_ACCEPTED {
+            "cleaning";
+        } else if t.masked {
+            "wait is not cancellable";
+        } else if t.cancel == CS_REQUESTED {
+            "cancellation not yet accepted";
+        } else {
+            "running";
+        };
+        eprintln(
+            "  task {} (slot {} gen {}): waiting on {} ({}); {}",
+            t.id,
+            t.key.slot,
+            t.key.gen,
+            wk_name(t.wait_kind),
+            t.wait_obj,
+            why,
+        );
+    }
+}
+
+// Tear the pool down: drain the workers, join them, and free every scheduler structure. Callable only
+// once every task has completed -- nothing may still refer to a task stack or the scheduler.
+fn destroy_pool(sp: *mut i32, s: *mut Scheduler) {
     unsafe sc_runtime::sc_rt_mutex_lock(s.lock);
     unsafe s.shutting_down = 1;
     unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
@@ -1596,6 +2428,7 @@ pub fn shutdown() {
     }
     unsafe s.workers.free();
     pool_drain(s); // every recycled block, now that no worker can ask for one
+    reg_free(); // after pool_drain: releasing a block retires its registry slot
     let mut g = Global {};
     for i in 0..unsafe s.nw {
         unsafe g.dealloc(unsafe (s.deques + i).buf, DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine));
@@ -1610,12 +2443,74 @@ pub fn shutdown() {
     unsafe g.dealloc(unsafe s.idle, unsafe s.idle_words * sizeof(u64), alignof(u64));
     unsafe sc_runtime::sc_rt_mutex_free(s.lock);
     unsafe g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
+    atomic::store_i32(&mut unsafe G_CLOSED, 0, 2);
     atomic::store_i32(sp, 0, 2);
     unsafe G_SCHED = null;
-    // Anything still unfinished here is parked on something nothing will ever signal -- a deadlock the
-    // program has already lost. Report it: the stacks it leaks are otherwise the only visible symptom.
-    let stuck = live_tasks();
-    if stuck > 0 {
-        eprintln("super-c: {} task(s) still parked at shutdown (nothing will wake them)", stuck);
+}
+
+/// Bounded, safe shutdown. In order: stop accepting new tasks, snapshot the registry, request `Shutdown`
+/// cancellation for every live task (waking safely parked ones through their current park generation),
+/// keep the workers running cleanup, and wait until everything completes or `grace_ns` expires. Only when
+/// no task remains is the scheduler destroyed. Otherwise the runtime stays fully alive -- an unresponsive
+/// task keeps its stack, and the caller may wait longer, report, or exit the process.
+///
+/// Call from outside the pool (the main thread), after `io::shutdown()` and `blocking::shutdown()` if the
+/// program started them: the reactor and blocking pool must outlive the tasks parked on them.
+pub fn try_shutdown(opts: ShutdownOptions) ShutdownResult {
+    let mut res = ShutdownResult { completed: 0, cancelled: 0, unresponsive: 0 };
+    let sp = (&mut unsafe G_STATE) as *mut i32;
+    if atomic::load_i32(sp, 1) != 2 {
+        return res; // never started, or already destroyed
     }
+    if current() != null {
+        panic("try_shutdown must be called from outside the pool");
+    }
+    let s = unsafe G_SCHED;
+    // 1. Stop accepting new tasks before anything is cancelled or counted.
+    atomic::store_i32(&mut unsafe G_CLOSED, 1, 4);
+    // 2. A stable snapshot of every live registered task.
+    let base_cancelled = cancelled_tasks();
+    let mut snap = Vector::<TaskInfo>::new();
+    task_snapshot(&mut snap);
+    // 3-5. Request Shutdown cancellation. Already completed tasks fail the key check and retire normally.
+    for i in 0..snap.len() {
+        let key = snap.at(i).key;
+        let _ = request_cancel_wake(key, CR_SHUTDOWN, WR_SHUTDOWN);
+    }
+    // 6-9. Workers keep running cleanup; wait for full completion or the deadline. Timers, reactor
+    // interests and blocking-job sides are removed by each cancelled task through its own wait cleanup.
+    let deadline = platform::now_ns() + opts.grace_ns;
+    while live_tasks() > 0 && platform::now_ns() < deadline {
+        sleep_ns(200000);
+    }
+    res.cancelled = cancelled_tasks() - base_cancelled;
+    let left = live_tasks();
+    if snap.len() >= left + res.cancelled {
+        res.completed = snap.len() - left - res.cancelled;
+    }
+    if left == 0 {
+        // 10-12. Nothing can refer to a task stack any more: destroy workers, registry and scheduler.
+        destroy_pool(sp, s);
+        return res;
+    }
+    res.unresponsive = left;
+    if opts.report_unresponsive {
+        let mut stuck = Vector::<TaskInfo>::new();
+        task_snapshot(&mut stuck);
+        report_unresponsive(&mut stuck);
+    }
+    if opts.abort_on_unresponsive {
+        unsafe stdlib::abort();
+    }
+    return res;
+}
+
+/// The simple process-exit shutdown: `try_shutdown` with the default grace period. All launched work
+/// should have been awaited first. If an unresponsive task remains, its stack cannot be safely freed and
+/// the scheduler cannot be safely destroyed -- the report above names it, and the process aborts rather
+/// than run on over a runtime it can no longer release. Idempotent; a no-op if the pool never started.
+pub fn shutdown() {
+    let mut opts = ShutdownOptions::defaults();
+    opts.abort_on_unresponsive = true;
+    let _ = try_shutdown(opts);
 }

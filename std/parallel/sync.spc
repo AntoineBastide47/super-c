@@ -91,6 +91,29 @@ fn lot_push(b: *mut LotBucket, n: *mut LotNode) {
     unsafe b.tail = n;
 }
 
+// Unlink one specific node, if it is still queued (a racing pop may have taken it). Caller holds the
+// bucket lock. A cancelled lock waiter removes its own node through this before its frame dies.
+fn lot_remove(b: *mut LotBucket, n: *mut LotNode) {
+    let mut prev: *mut LotNode = null;
+    let mut cur = unsafe b.head;
+    while cur != null && cur != n {
+        prev = cur;
+        cur = unsafe cur.next;
+    }
+    if cur != n {
+        return;
+    }
+    if prev == null {
+        unsafe b.head = unsafe n.next;
+    } else {
+        unsafe prev.next = unsafe n.next;
+    }
+    if unsafe b.tail == n {
+        unsafe b.tail = prev;
+    }
+    unsafe n.next = null;
+}
+
 // Unlink and return the first node waiting on `addr`; `more` reports whether another remains behind it.
 // Caller holds the bucket lock.
 fn lot_pop(b: *mut LotBucket, addr: *mut void, more: &mut bool) *mut LotNode {
@@ -155,11 +178,32 @@ pub unsafe fn raw_mutex_lock(m: *mut RawMutex) {
         unsafe sc_runtime::sc_rt_lockdep_acquire(m);
         return; // uncontended: one CAS
     }
-    raw_mutex_lock_slow(m);
+    let _ = raw_mutex_lock_slow(m, false);
     unsafe sc_runtime::sc_rt_lockdep_acquire(m);
 }
 
-fn raw_mutex_lock_slow(m: *mut RawMutex) {
+/// `raw_mutex_lock`, but the park is a cancellation point: a `false` return means the wait was cancelled,
+/// the lock is NOT held, the waiter's queue node is removed, and the cancellation is accepted. Only a
+/// caller that can propagate cancellation (the compiler's cancellation edge) may use this form -- it must
+/// never hand a guard to code that would unlock a lock it does not hold. `pub` for linkage.
+pub unsafe fn raw_mutex_lock_c(m: *mut RawMutex) bool {
+    if atomic::cas_i32(&mut unsafe m.locked, 0, 1, false, 1, 0) {
+        unsafe sc_runtime::sc_rt_lockdep_acquire(m);
+        return true;
+    }
+    if !raw_mutex_lock_slow(m, true) {
+        let _ = runtime::cancel_after_wait(true);
+        return false;
+    }
+    unsafe sc_runtime::sc_rt_lockdep_acquire(m);
+    return true;
+}
+
+// The contended path. Reports whether the lock was acquired: always true when `cancellable` is false;
+// false only for a cancelled cancellable wait, after the waiter unlinked its own node. Acceptance is
+// the cancellable wrapper's job: this body must not reach `cancel_accept`, or every plain `lock`
+// caller in a task-reachable body would carry a compiled cancellation check.
+fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
     let w = &mut unsafe m.locked;
     let mut spins: i32 = 0;
     loop {
@@ -168,7 +212,7 @@ fn raw_mutex_lock_slow(m: *mut RawMutex) {
             // Free: take it, PRESERVING the parked bit -- waiters may remain, and clearing it would let
             // the next unlock take its fast path straight past them.
             if atomic::cas_i32(w, c, c | 1, false, 1, 0) {
-                return;
+                return true;
             }
             continue;
         }
@@ -194,9 +238,28 @@ fn raw_mutex_lock_slow(m: *mut RawMutex) {
             // The node lives in this frame and is popped by the unlock that wakes us; the runtime releases
             // the bucket lock once our context is saved, so that unlock can never resume a coroutine that
             // is still switching out.
-            let mut n = LotNode { co: co, token: runtime::park_begin(co), oswake: 0, addr: m, next: null };
+            runtime::wait_note(runtime::WK_MUTEX, m as usize);
+            let token = runtime::park_begin(co);
+            let mut n = LotNode { co: co, token: token, oswake: 0, addr: m, next: null };
             lot_push(b, &mut n);
-            runtime::park_current(commit_lot_unlock, &mut unsafe b.lock);
+            let reason = runtime::park_current(token, commit_lot_unlock, &mut unsafe b.lock, cancellable);
+            if reason == runtime::WR_CANCEL || reason == runtime::WR_SHUTDOWN {
+                // Cancelled without the lock. Unlink our node (an unlock racing us may have popped it
+                // already -- then the pop consumed it and `lot_remove` finds nothing), clear the wait
+                // record, and only then accept. A stale parked bit left on the word is harmless: the next
+                // unlock takes its slow path, pops nobody, and clears it.
+                unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
+                lot_remove(b, &mut n);
+                unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+                runtime::wait_clear();
+                runtime::park_done(co);
+                return false;
+            }
+            runtime::wait_clear();
+            runtime::park_done(co);
+            if cancellable && runtime::cancel_pending() {
+                return false;
+            }
         } else {
             let mut n = LotNode { co: null, token: 0, oswake: 0, addr: m, next: null };
             lot_push(b, &mut n);
@@ -236,30 +299,47 @@ pub unsafe fn raw_mutex_unlock(m: *mut RawMutex) {
 
 fn raw_mutex_unlock_slow(m: *mut RawMutex) {
     let b = lot_bucket(m);
-    unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
-    let mut more = false;
-    let n = lot_pop(b, m, &mut more);
-    // The release store, and the LAST touch of the lock (see `RawMutex`): whoever acquires from here on may
-    // legitimately free it. Everything below touches only the static bucket and the popped waiter's frame.
-    let next_word = if more {
-        2;
-    } else {
-        0;
-    };
-    atomic::store_i32(&mut unsafe m.locked, next_word, 2);
-    unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
-    if n == null {
-        return; // a waiter set the bit but has not enqueued yet: it revalidates and sees the release
-    }
-    if unsafe n.co != null {
-        // Cannot fail: a lock park is untimed, so nothing else can claim its token. The wakee RE-CONTENDS
-        // rather than being handed the lock: with a ~2.3us wake latency, a hand-off serializes every
-        // acquisition behind a wake (measured 781ns/lock on the contended-hammer lane against 296ns for
-        // barging, and it tripled the batched pipeline floor), so losing to a spinner is throughput, not loss.
-        let _ = runtime::wake(unsafe n.co, unsafe n.token);
-    } else {
-        atomic::store_i32(&mut unsafe n.oswake, 1, 2);
-        unsafe sc_runtime::sc_rt_unpark_one(&mut n.oswake);
+    let mut released = false;
+    // Usually one pass. A second pass happens only when the popped waiter's park was already claimed by a
+    // cancellation: that wakeup was consumed elsewhere, so the release must go to the next waiter or the
+    // bit self-corrects on the next unlock. Bounded by the number of queued waiters.
+    loop {
+        unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
+        let mut more = false;
+        let n = lot_pop(b, m, &mut more);
+        if !released {
+            // The release store, and the LAST touch of the lock (see `RawMutex`): whoever acquires from
+            // here on may legitimately free it. Everything below touches only the static bucket and the
+            // popped waiter's frame -- and that frame only under the bucket lock, because a cancelled
+            // waiter may otherwise unlink and die at any moment.
+            let next_word = if more {
+                2;
+            } else {
+                0;
+            };
+            atomic::store_i32(&mut unsafe m.locked, next_word, 2);
+            released = true;
+        }
+        if n == null {
+            unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+            return; // a waiter set the bit but has not enqueued yet: it revalidates and sees the release
+        }
+        let wco = unsafe n.co;
+        let wtoken = unsafe n.token;
+        if wco == null {
+            atomic::store_i32(&mut unsafe n.oswake, 1, 2);
+            unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+            unsafe sc_runtime::sc_rt_unpark_one(&mut n.oswake);
+            return;
+        }
+        unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+        // The wakee RE-CONTENDS rather than being handed the lock: with a ~2.3us wake latency, a hand-off
+        // serializes every acquisition behind a wake (measured 781ns/lock on the contended-hammer lane
+        // against 296ns for barging), so losing to a spinner is throughput, not loss. A false return means
+        // a cancellation claimed that park first: spend the release on the next waiter.
+        if runtime::wake(wco, wtoken) {
+            return;
+        }
     }
 }
 
@@ -308,6 +388,15 @@ extend<T> Mutex<T> {
             return Option::<MutexGuard<T>>::Some(MutexGuard::<T>::hold(self));
         }
         return Option::<MutexGuard<T>>::None;
+    }
+    /// `lock`, but the wait is a cancellation point: `None` means the wait was cancelled -- no guard
+    /// exists, the lock is not held, and the cancellation is accepted. The cancellable form of `lock` for
+    /// callers that can propagate cancellation; ordinary code uses `lock`.
+    pub fn lock_c(self: &Mutex<T>) Option<MutexGuard<T>> {
+        if !unsafe raw_mutex_lock_c(self.raw) {
+            return Option::<MutexGuard<T>>::None;
+        }
+        return Option::<MutexGuard<T>>::Some(MutexGuard::<T>::hold(self));
     }
     /// Direct `&mut` access when the mutex is owned uniquely (`&mut self`) -- no locking needed.
     pub fn get_mut(self: &mut Mutex<T>) &mut T {
@@ -451,11 +540,34 @@ extend<T> RwLock<T> {
             if ready {
                 break;
             }
-            self.cv.wait(&g);
+            self.cv.wait_masked(&g); // a plain acquisition cannot unwind: never cancelled here
         }
         let s = g.get_mut();
         s.readers = s.readers + 1;
         return RwLockReadGuard::<T>::hold(self);
+    }
+    /// `read`, but the wait is a cancellation point: `None` means cancelled, no read lock is held, and the
+    /// cancellation is accepted. For callers that can propagate cancellation; ordinary code uses `read`.
+    pub fn read_c(self: &RwLock<T>) Option<RwLockReadGuard<T>> {
+        let mut g = self.state.lock();
+        loop {
+            let mut ready = false;
+            {
+                let s = g.get();
+                ready = !s.writer && s.waiting_writers == 0;
+            }
+            if ready {
+                break;
+            }
+            let r = unsafe self.cv.wait_raw(g.lock_handle(), 0, true, runtime::WK_RWLOCK);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                let _ = runtime::cancel_after_wait(true);
+                return Option::<RwLockReadGuard<T>>::None; // cancelled: reader count untouched
+            }
+        }
+        let s = g.get_mut();
+        s.readers = s.readers + 1;
+        return Option::<RwLockReadGuard<T>>::Some(RwLockReadGuard::<T>::hold(self));
     }
     /// Wait for exclusive write access.
     pub fn write(self: &RwLock<T>) RwLockWriteGuard<T> {
@@ -473,12 +585,45 @@ extend<T> RwLock<T> {
             if ready {
                 break;
             }
-            self.cv.wait(&g);
+            self.cv.wait_masked(&g); // a plain acquisition cannot unwind: never cancelled here
         }
         let s = g.get_mut();
         s.waiting_writers = s.waiting_writers - 1;
         s.writer = true;
         return RwLockWriteGuard::<T>::hold(self);
+    }
+    /// `write`, but the wait is a cancellation point: `None` means cancelled. The queued-writer count is
+    /// restored (and readers a gone writer no longer blocks are woken) before the cancellation propagates.
+    pub fn write_c(self: &RwLock<T>) Option<RwLockWriteGuard<T>> {
+        let mut g = self.state.lock();
+        {
+            let s = g.get_mut();
+            s.waiting_writers = s.waiting_writers + 1;
+        }
+        loop {
+            let mut ready = false;
+            {
+                let s = g.get();
+                ready = !s.writer && s.readers == 0;
+            }
+            if ready {
+                break;
+            }
+            let r = unsafe self.cv.wait_raw(g.lock_handle(), 0, true, runtime::WK_RWLOCK);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                let s = g.get_mut();
+                s.waiting_writers = s.waiting_writers - 1;
+                if s.waiting_writers == 0 {
+                    self.cv.notify_all(); // readers held back by this writer may go now
+                }
+                let _ = runtime::cancel_after_wait(true);
+                return Option::<RwLockWriteGuard<T>>::None;
+            }
+        }
+        let s = g.get_mut();
+        s.waiting_writers = s.waiting_writers - 1;
+        s.writer = true;
+        return Option::<RwLockWriteGuard<T>>::Some(RwLockWriteGuard::<T>::hold(self));
     }
     /// Take shared read access only if it is free right now; `None` if a writer holds or wants the lock.
     pub fn try_read(self: &RwLock<T>) Option<RwLockReadGuard<T>> {
@@ -622,6 +767,16 @@ struct CondQ {
     pub os_waiters: i32,
 }
 
+// Did this wake reason leave the wait in its normal (notified, timed out, or spurious) course, as opposed
+// to a cancellation the caller must unwind through?
+fn cv_normal(reason: u32) bool {
+    return reason != runtime::WR_CANCEL && reason != runtime::WR_SHUTDOWN;
+}
+
+fn wait_cancel_requested(reason: u32) bool {
+    return reason == runtime::WR_CANCEL || reason == runtime::WR_SHUTDOWN || runtime::cancel_requested();
+}
+
 // Tell a multi-queue waiter (a `select`) which queue this notify came from, before waking it. Written under
 // the queue's own mutex, which the waiter re-takes to unlink the node before it reads the value -- so the
 // write always lands while the node is still alive. It is a HINT: a notify that goes on to LOSE the wake
@@ -655,24 +810,45 @@ extend Condvar {
     }
     /// Atomically release `guard`'s lock and wait until notified, then take it again before returning.
     /// A coroutine parks (freeing its worker); any other thread blocks. Re-check the condition in a loop --
-    /// wakeups may be spurious.
-    pub fn wait<T>(self: &Condvar, guard: &MutexGuard<T>) {
-        unsafe self.wait_raw(guard.lock_handle(), 0); // the guard proves the paired lock is held
+    /// wakeups may be spurious. Reports `false` when the wait was CANCELLED: the paired mutex is re-held
+    /// (so the guard stays sound and unlocks on drop), the wait node is removed, and the cancellation is
+    /// accepted -- the caller must stop waiting and return through its cleanup.
+    pub fn wait<T>(self: &Condvar, guard: &MutexGuard<T>) bool {
+        let reason = unsafe self.wait_raw(guard.lock_handle(), 0, true, runtime::WK_CONDVAR);
+        if wait_cancel_requested(reason) {
+            let _ = runtime::cancel_after_wait(true);
+            return false;
+        }
+        return cv_normal(reason);
     }
     /// `wait`, but also returning once the monotonic `deadline` (a `time::deadline_in` value) has passed.
-    /// It reports nothing: as with `wait`, re-check the condition -- and the deadline -- in a loop.
-    pub fn wait_until<T>(self: &Condvar, guard: &MutexGuard<T>, deadline: u64) {
-        unsafe self.wait_raw(guard.lock_handle(), deadline); // the guard proves the paired lock is held
+    /// A timeout reports `true`: as with `wait`, re-check the condition -- and the deadline -- in a loop.
+    /// `false` means cancelled, exactly as for `wait`.
+    pub fn wait_until<T>(self: &Condvar, guard: &MutexGuard<T>, deadline: u64) bool {
+        let reason = unsafe self.wait_raw(guard.lock_handle(), deadline, true, runtime::WK_CONDVAR);
+        if wait_cancel_requested(reason) {
+            let _ = runtime::cancel_after_wait(true);
+            return false;
+        }
+        return cv_normal(reason);
     }
-    // The whole wait, minus the generic guard: `wait` and `wait_until` differ only in the deadline, so this
-    // is monomorphized once instead of per `T`. `pub` for linkage.
-    pub unsafe fn wait_raw(self: &Condvar, m: *mut RawMutex, deadline: u64) {
+    /// `wait` for a caller that cannot unwind (a lock acquisition loop, or cleanup): the park is never
+    /// claimed by a cancellation, and a pending request stays for the next cancellation point.
+    pub fn wait_masked<T>(self: &Condvar, guard: &MutexGuard<T>) {
+        let _ = unsafe self.wait_raw(guard.lock_handle(), 0, false, runtime::WK_CONDVAR);
+    }
+    // The whole wait, minus the generic guard: the public forms differ only in deadline and
+    // cancellability, so this is monomorphized once instead of per `T`. Returns the winning `WR_*` wake
+    // reason (plain threads always report a notify). `kind` is the wait-kind diagnostic the primitives
+    // above this condvar record (`WK_CONDVAR` for a bare wait). `pub` for linkage.
+    pub unsafe fn wait_raw(self: &Condvar, m: *mut RawMutex, deadline: u64, cancellable: bool, kind: i32) u32 {
         let co = runtime::current();
         if co != null {
             // Queue up under the held lock, then park; the runtime releases the lock once our context is
             // saved. On resume, take it again -- exactly the pthread_cond_wait contract. Re-taking the lock
             // may park us a second time while this node is still queued (when a deadline, not a notify, woke
             // us): harmless, because the node's token is spent and no notify can act on it.
+            runtime::wait_note(kind, self.wq as usize);
             let token = runtime::park_begin(co);
             let mut w = Waiter { co: co, token: token, arm: 0, next: null, claim: null };
             let wp = &mut w;
@@ -682,7 +858,7 @@ extend Condvar {
                 unsafe self.wq.tail.next = wp;
             }
             unsafe self.wq.tail = wp;
-            runtime::park_timed(token, deadline, commit_raw_unlock, m);
+            let reason = runtime::park_timed(token, deadline, commit_raw_unlock, m, cancellable);
             // Disarm BEFORE re-taking the lock, not after. Re-taking it may park us a second time, and a
             // park rewrites this coroutine's `deadline` and `tm_token` -- while a stale timer entry still
             // points at us, and a worker walking that list under the scheduler lock is reading the very
@@ -691,8 +867,14 @@ extend Condvar {
             if deadline != 0 {
                 runtime::cancel_timer(co);
             }
+            // On cancellation too, the paired mutex is REACQUIRED before the node is unlinked (the queue
+            // is guarded by it) and before anything propagates: the caller's guard must own the mutex
+            // again so its destructor can release it. The reacquire itself never cancels.
             raw_mutex_lock(m);
-            self.unlink(wp); // still queued if the deadline is what woke us
+            self.unlink(wp); // still queued if the deadline or a cancellation is what woke us
+            runtime::wait_clear();
+            runtime::park_done(co);
+            return reason;
         } else {
             // No coroutine to park: publish that we are waiting, drop the lock and sleep on `gen`, which
             // every notify bumps before unparking -- so a notify in that window cannot be missed.
@@ -709,6 +891,7 @@ extend Condvar {
             unsafe sc_runtime::sc_rt_park(w, g, rel);
             raw_mutex_lock(m);
             unsafe self.wq.os_waiters = unsafe self.wq.os_waiters - 1;
+            return runtime::WR_NOTIFY; // a plain thread has no task to cancel
         }
     }
     /// Queue an externally-owned wait node. For a waiter that must sit on several queues at once (`select`);
@@ -931,7 +1114,20 @@ extend WaitGroup {
         let _g = inner.gate.lock(); // held for the duration; unlocks at scope exit, as in `call_once`
         inner.cv.notify_all();
     }
-    /// Wait until the outstanding count reaches zero.
+    /// `wait` for a caller that cannot unwind (runtime and compiler infrastructure): the park is never
+    /// claimed by a cancellation, and a pending request stays for the next cancellation point.
+    pub fn wait_masked(self: &WaitGroup) {
+        let inner = self.inner.get();
+        if inner.count.load(atomics::MemoryOrder::Acquire) <= 0 {
+            return;
+        }
+        let g = inner.gate.lock();
+        while inner.count.load(atomics::MemoryOrder::Acquire) > 0 {
+            let _ = unsafe inner.cv.wait_raw(g.lock_handle(), 0, false, runtime::WK_WAIT_GROUP);
+        }
+    }
+    /// Wait until the outstanding count reaches zero. A cancelled wait returns early with the count
+    /// untouched (only the waiter is removed); the caller's cancellation cleanup takes over.
     pub fn wait(self: &WaitGroup) {
         let inner = self.inner.get();
         if inner.count.load(atomics::MemoryOrder::Acquire) <= 0 {
@@ -939,10 +1135,15 @@ extend WaitGroup {
         }
         let g = inner.gate.lock();
         while inner.count.load(atomics::MemoryOrder::Acquire) > 0 {
-            inner.cv.wait(&g);
+            let r = unsafe inner.cv.wait_raw(g.lock_handle(), 0, true, runtime::WK_WAIT_GROUP);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                let _ = runtime::cancel_after_wait(true);
+                return; // cancelled: no state to restore, the group keeps its count
+            }
         }
     }
-    /// Wait for the count to reach zero, giving up after `d`; reports whether it reached zero.
+    /// Wait for the count to reach zero, giving up after `d`; reports whether it reached zero. A cancelled
+    /// wait reports `false` with the count untouched.
     pub fn wait_timeout(self: &WaitGroup, d: time::Duration) bool {
         let inner = self.inner.get();
         let deadline = time::deadline_in(d);
@@ -954,7 +1155,11 @@ extend WaitGroup {
             if time::remaining_ns(deadline) == 0 {
                 return false;
             }
-            inner.cv.wait_until(&g, deadline);
+            let r = unsafe inner.cv.wait_raw(g.lock_handle(), deadline, true, runtime::WK_WAIT_GROUP);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                let _ = runtime::cancel_after_wait(true);
+                return false;
+            }
         }
         return true;
     }
@@ -974,6 +1179,7 @@ extend WaitGroup as Free {
 struct BarrierState {
     pub arrived: i64,
     pub generation: i64,
+    pub broken: bool, // a participant was cancelled: this generation can never complete
 }
 
 @no_const
@@ -996,7 +1202,7 @@ extend Barrier {
         return Barrier {
             inner: arc::Arc::<BarrierInner>::new(
                 BarrierInner {
-                    state: Mutex::<BarrierState>::new(BarrierState { arrived: 0, generation: 0 }),
+                    state: Mutex::<BarrierState>::new(BarrierState { arrived: 0, generation: 0, broken: false }),
                     cv: Condvar::new(),
                     threshold: n,
                 },
@@ -1007,10 +1213,16 @@ extend Barrier {
     pub fn clone(self: &Barrier) Barrier {
         return Barrier { inner: self.inner.clone() };
     }
-    /// Block until `n` threads have arrived at this barrier.
-    pub fn wait(self: &Barrier) {
+    /// Block until `n` threads have arrived at this barrier. Reports `true` when the generation completed
+    /// normally. `false` means the barrier is BROKEN: a participant was cancelled, so this generation can
+    /// never complete -- every current and later waiter observes the break (the required participant count
+    /// is never silently lowered) until an explicit `reset`.
+    pub fn wait(self: &Barrier) bool {
         let inner = self.inner.get();
         let mut g = inner.state.lock();
+        if g.get().broken {
+            return false;
+        }
         let gen = g.get().generation;
         let mut last = false;
         {
@@ -1023,11 +1235,32 @@ extend Barrier {
             s.arrived = 0;
             s.generation = s.generation + 1;
             inner.cv.notify_all();
-            return;
+            return true;
         }
-        while g.get().generation == gen {
-            inner.cv.wait(&g);
+        while g.get().generation == gen && !g.get().broken {
+            let r = unsafe inner.cv.wait_raw(g.lock_handle(), 0, true, runtime::WK_BARRIER);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                // A cancelled participant makes this generation impossible: break it and wake everyone,
+                // so no other participant waits for an arrival that can never come.
+                let s = g.get_mut();
+                s.broken = true;
+                inner.cv.notify_all();
+                let _ = runtime::cancel_after_wait(true);
+                return false;
+            }
         }
+        return !g.get().broken;
+    }
+    /// Clear a broken barrier and start a fresh generation. The only way a later generation can begin
+    /// after a break; the caller decides when the participant set is whole again.
+    pub fn reset(self: &Barrier) {
+        let inner = self.inner.get();
+        let mut g = inner.state.lock();
+        let s = g.get_mut();
+        s.arrived = 0;
+        s.generation = s.generation + 1;
+        s.broken = false;
+        inner.cv.notify_all();
     }
 }
 
@@ -1067,17 +1300,34 @@ extend Semaphore {
     pub fn clone(self: &Semaphore) Semaphore {
         return Semaphore { inner: self.inner.clone() };
     }
-    /// Block until a permit is available, then take it.
-    pub fn acquire(self: &Semaphore) {
+    /// `acquire` for a caller that cannot unwind (runtime and compiler infrastructure): the park is
+    /// never claimed by a cancellation, and a pending request stays for the next cancellation point.
+    pub fn acquire_masked(self: &Semaphore) {
         let inner = self.inner.get();
         let mut g = inner.permits.lock();
         while *g.get() <= 0 {
-            inner.cv.wait(&g);
+            let _ = unsafe inner.cv.wait_raw(g.lock_handle(), 0, false, runtime::WK_SEMAPHORE);
         }
         let c = g.get_mut();
         *c = *c - 1;
     }
-    /// Take a permit, giving up after `d`; reports whether one was taken.
+    /// Block until a permit is available, then take it. A cancelled wait returns early WITHOUT a permit
+    /// (none is consumed or created); the caller's cancellation cleanup takes over.
+    pub fn acquire(self: &Semaphore) {
+        let inner = self.inner.get();
+        let mut g = inner.permits.lock();
+        while *g.get() <= 0 {
+            let r = unsafe inner.cv.wait_raw(g.lock_handle(), 0, true, runtime::WK_SEMAPHORE);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                let _ = runtime::cancel_after_wait(true);
+                return; // cancelled: only the waiter is removed
+            }
+        }
+        let c = g.get_mut();
+        *c = *c - 1;
+    }
+    /// Take a permit, giving up after `d`; reports whether one was taken. A cancelled wait reports `false`
+    /// and consumes nothing.
     pub fn acquire_timeout(self: &Semaphore, d: time::Duration) bool {
         let inner = self.inner.get();
         let deadline = time::deadline_in(d);
@@ -1086,7 +1336,11 @@ extend Semaphore {
             if time::remaining_ns(deadline) == 0 {
                 return false;
             }
-            inner.cv.wait_until(&g, deadline);
+            let r = unsafe inner.cv.wait_raw(g.lock_handle(), deadline, true, runtime::WK_SEMAPHORE);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                let _ = runtime::cancel_after_wait(true);
+                return false;
+            }
         }
         let c = g.get_mut();
         *c = *c - 1;

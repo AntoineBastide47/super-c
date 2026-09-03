@@ -107,6 +107,23 @@ pub struct Lowerer {
     pub unsafe_spans: Vector<u64>, // start<<32|end per unsafe expr; licenses the IR free-move rules
     pub tape: Vector<u64>, // borrowck replay events (ir::TP_*), in walk order; muted inside desugars
     tape_mute: u32,
+    in_defer: u32, // lowering a defer body (an exit path): cancellation checks are masked there
+    // The one call node this STATEMENT may put a cancellation check after: the root call of an
+    // expression statement or a plain `let`. Mid-expression checks would unwind past pending
+    // sibling temporaries the ladder cannot see.
+    chk_root: NodeId,
+    // scope_locals length the ladder deads down from: excludes a plain-let's own local, which is
+    // registered before its initializer and is still UNINITIALIZED on the check's cancel edge (a
+    // dead there is a drop-use that poisons loan liveness across loop back edges).
+    chk_base: usize,
+    // Per-body cache of the check-eligibility test (cancel pass ran, sugar items present, owner on
+    // a coroutine stack, not the runtime module): 0 uncomputed, 1 off, 2 on.
+    chk_on: u8,
+    // Combined-safepoint ladder sharing: sibling loops with the same live scope state jump to one
+    // ladder block instead of each emitting their own defers-then-deads sequence.
+    sp_ladder_b: u32, // 0xFFFFFFFF = none cached
+    sp_ladder_locals: Vector<ir::LocalId>,
+    sp_ladder_defers: Vector<NodeId>,
     // Reusable u32 buffers (argument lists, match work lists): call/aggregate lowering builds one
     // per expression, so the pool keeps their capacity across the whole body and package.
     u32_pool: Vector<Vector<u32>>,
@@ -192,6 +209,13 @@ extend Lowerer {
             unsafe_spans: Vector::<u64>::new(),
             tape: Vector::<u64>::new(),
             tape_mute: 0,
+            in_defer: 0,
+            chk_root: NODE_NONE,
+            chk_base: 0,
+            chk_on: 0,
+            sp_ladder_b: 0xFFFFFFFFu32,
+            sp_ladder_locals: Vector::<ir::LocalId>::new(),
+            sp_ladder_defers: Vector::<NodeId>::new(),
             u32_pool: Vector::<Vector<u32>>::new(),
             views: ViewDecls {
                 ok: false,
@@ -265,6 +289,13 @@ extend Lowerer {
         self.unsafe_spans.truncate(0);
         self.tape.truncate(0);
         self.tape_mute = 0;
+        self.in_defer = 0;
+        self.chk_root = NODE_NONE;
+        self.chk_base = 0;
+        self.chk_on = 0;
+        self.sp_ladder_b = 0xFFFFFFFFu32;
+        self.sp_ladder_locals.truncate(0);
+        self.sp_ladder_defers.truncate(0);
         self.cur = 0;
         self.run_start = 0;
         self.ret_locals = 0;
@@ -589,7 +620,11 @@ extend Lowerer {
             i -= 1;
             let d = self.defers[i];
             self.tp(ir::TP_MARK_PUSH, 0, d);
+            // A defer body is cleanup: cancellation checks are masked inside it (a synthetic return
+            // from within a defer would abandon the rest of the exit path).
+            self.in_defer += 1;
             self.lower_stmt(self.f.node(d).as_data.single.value);
+            self.in_defer -= 1;
             self.tp(ir::TP_MARK_POP, 0, d);
         }
     }
@@ -776,7 +811,10 @@ extend Lowerer {
         self.body.entry = self.open_block();
         self.cur = self.body.entry;
         self.run_start = 0;
-        for i in 0..params.len + caps.len {
+        // Parameters are the body's to destroy; CAPTURES are not. The env stays whole across any
+        // number of calls, and whoever owns the closure VALUE frees the env (and so the captures)
+        // exactly once when it drops -- the derived closure glue in the emitter.
+        for i in 0..params.len {
             self.scope_locals.push(rets.len + i);
         }
         self.scope_enter();
@@ -898,7 +936,12 @@ extend Lowerer {
         } else if k == NodeKind::NODE_EXPRESSION_STATEMENT {
             let v = self.f.node(id).as_data.single.value;
             self.tp(ir::TP_MARK_PUSH, 0, id);
+            if self.f.node(v).kind == NodeKind::NODE_CALL {
+                self.chk_root = v; // a statement-root call may carry a cancellation check
+                self.chk_base = self.scope_locals.len();
+            }
             let op = self.lower_expr(v);
+            self.chk_root = NODE_NONE;
             self.tp(ir::TP_MARK_POP, 0, id);
             // A fully discarded result still OWNS its value: register the fresh dest temp for
             // scope-exit drop so an owning call result (`foo();`) is not leaked. Drop elaboration
@@ -1084,7 +1127,12 @@ extend Lowerer {
             self.body.has_uninit_decl = true; // split init: only this form can use-before-init
         }
         if ld.value != NODE_NONE {
+            if self.f.node(ld.value).kind == NodeKind::NODE_CALL {
+                self.chk_root = ld.value; // a plain-let root call may carry a cancellation check
+                self.chk_base = self.scope_locals.len() - 1; // exclude `l`: uninit until the assign
+            }
             let op = self.lower_expr(ld.value);
+            self.chk_root = NODE_NONE;
             if op == ir::IR_NONE {
                 return;
             }
@@ -1244,7 +1292,10 @@ extend Lowerer {
     }
 
     // A preemption safepoint marker at the top of a loop body; the backend prints it only for
-    // programs that use the coroutine runtime, and never inside std::parallel itself.
+    // programs that use the coroutine runtime, and never inside std::parallel itself. In a body
+    // that can carry a cancellation edge, the combined form (plan 10.4) is emitted instead: the
+    // same tick, whose cold half also accepts a pending unmasked cancellation and enters this
+    // frame's cleanup ladder -- a compute-bound task that never waits still cleanly stops.
     fn loop_safepoint(self: &mut Self, sp: tok::Span) {
         // Only a body a launched coroutine can execute needs the preemption tick; every other
         // loop skips the intrinsic (and so the emitted `__sc_safepoint()` and its TLS decrement).
@@ -1254,6 +1305,10 @@ extend Lowerer {
             if !unsafe (&*self.pkg).co_on(ow9.module, osp) {
                 return;
             }
+        }
+        if self.in_defer == 0 && unsafe (&*self.pkg).cancel_used && self.chk_enabled() {
+            self.safepoint_cancel(sp);
+            return;
         }
         let ut = Ast::builtin(BuiltinType::BT_VOID);
         let t = self.temp(ut, sp);
@@ -1270,6 +1325,92 @@ extend Lowerer {
             },
             sp,
         );
+    }
+
+    // The combined preemption + cancellation safepoint: tick result 1 means the cold half accepted
+    // a pending request -- run this frame's cancellation ladder. All locals in scope at a loop-body
+    // top are initialized (a pending mid-let cannot exist here), so the ladder deads everything.
+    // Safepoints whose live scope state matches a previously emitted ladder JUMP to that ladder
+    // instead of duplicating it -- sibling loops in one body then share one cleanup sequence.
+    fn safepoint_cancel(self: &mut Self, sp: tok::Span) {
+        let it = Ast::builtin(BuiltinType::BT_I32);
+        let t = self.temp(it, sp);
+        let pl = self.place_of_local(t);
+        self.assign(
+            pl,
+            ir::Rvalue {
+                kind: ir::RV_INTRINSIC,
+                a: 0,
+                b: 0,
+                c: ir::IN_SAFEPOINT_C,
+                target: it,
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+            sp,
+        );
+        let cond = self.copy_op(pl);
+        let mut reuse = self.sp_ladder_b != 0xFFFFFFFFu32;
+        if reuse {
+            reuse = self.sp_ladder_locals.len() == self.scope_locals.len() && self.sp_ladder_defers.len() == self.defers.len();
+        }
+        if reuse {
+            for i in 0..self.scope_locals.len() {
+                if self.sp_ladder_locals[i] != self.scope_locals[i] {
+                    reuse = false;
+                    break;
+                }
+            }
+        }
+        if reuse {
+            for i in 0..self.defers.len() {
+                if self.sp_ladder_defers[i] != self.defers[i] {
+                    reuse = false;
+                    break;
+                }
+            }
+        }
+        if reuse {
+            let cont0 = self.open_block();
+            let mut ts = self.term0(ir::TM_SWITCH, sp);
+            ts.a = cond;
+            ts.sw_start = self.body.switch_pool.len() as u32;
+            self.body.switch_pool.push(1u64 << 32 | self.sp_ladder_b as u64);
+            ts.sw_len = 1;
+            ts.t0 = cont0;
+            self.seal(ts, cont0);
+            return;
+        }
+        let pk = unsafe &*self.pkg;
+        let lbegin = pk.sugar_item(loader::SugarItem::SI_CANCEL_LBEGIN);
+        let lend = pk.sugar_item(loader::SugarItem::SI_CANCEL_LEND);
+        let ut = Ast::builtin(BuiltinType::BT_VOID);
+        let ladder_b = self.open_block();
+        let cont_b = self.open_block();
+        let mut t9 = self.term0(ir::TM_SWITCH, sp);
+        t9.a = cond;
+        t9.sw_start = self.body.switch_pool.len() as u32;
+        self.body.switch_pool.push(1u64 << 32 | ladder_b as u64);
+        t9.sw_len = 1;
+        t9.t0 = cont_b;
+        self.seal(t9, ladder_b);
+        let b0 = self.body.oper_pool.len() as u32;
+        let _ = self.emit_call(lbegin, ir::IR_NONE, b0, 0, 0, 0, ut, sp);
+        self.emit_defers_down_to(0);
+        self.emit_deads_down_to(0);
+        let e0 = self.body.oper_pool.len() as u32;
+        let _ = self.emit_call(lend, ir::IR_NONE, e0, 0, 0, 0, ut, sp);
+        let mut rt = self.term0(ir::TM_RETURN, sp);
+        rt.args_len = ir::RET_CANCEL;
+        self.seal(rt, cont_b);
+        self.sp_ladder_b = ladder_b;
+        self.sp_ladder_locals.truncate(0);
+        for i in 0..self.scope_locals.len() {
+            self.sp_ladder_locals.push(self.scope_locals[i]);
+        }
+        self.sp_ladder_defers.truncate(0);
+        for i in 0..self.defers.len() {
+            self.sp_ladder_defers.push(self.defers[i]);
+        }
     }
 
     fn lower_while(self: &mut Self, id: NodeId) {
@@ -4795,7 +4936,167 @@ extend Lowerer {
         let start = self.pool_ops(&argv);
         let n = argv.len() as u32;
         self.avput(argv);
-        return self.emit_call(target, callee_op, start, n, ts, tn, ty, sp);
+        let res = self.emit_call(target, callee_op, start, n, ts, tn, ty, sp);
+        self.maybe_cancel_check(id, target, callee_op != ir::IR_NONE, res, ty, sp);
+        return res;
+    }
+
+    // The compiled cancellation edge. After a call that can reach cancellation acceptance, a
+    // task-reachable body outside the runtime's own modules probes for an accepted cancellation:
+    //
+    //   probe == 2  the callee returned a REAL value: move it into a tracked spill (the ladder
+    //               frees it exactly once), then unwind.
+    //   probe == 1  the callee itself edge-returned: its value is poison, abandon it, unwind.
+    //   probe == 0  continue.
+    //
+    // The ladder is the same defers-then-deads sequence an early return takes, bracketed by the
+    // runtime's ladder mask (cleanup can wait, but never re-cancel), and ends in a flagged return
+    // the backend spells as a zero the (also unwinding) caller never reads. An unpinned fn-value
+    // callee is cancellation-masked (plan 10.3): no check follows it, and the next pinned
+    // cancellation point delivers a pending edge.
+    // The per-body half of the check-eligibility test, cached in `chk_on`: everything that does
+    // not depend on the callee. The sugar items are re-read (cheaply) by the emitting path.
+    fn chk_enabled(self: &mut Self) bool {
+        if self.chk_on == 0 {
+            self.chk_on = 1;
+            let pk = unsafe &*self.pkg;
+            let ow = self.body.owner;
+            if pk.cancel_state == 1 && ow.node != NODE_NONE {
+                let probe = pk.sugar_item(loader::SugarItem::SI_CANCEL_PROBE);
+                let lbegin = pk.sugar_item(loader::SugarItem::SI_CANCEL_LBEGIN);
+                let lend = pk.sugar_item(loader::SugarItem::SI_CANCEL_LEND);
+                if probe.node != NODE_NONE && lbegin.node != NODE_NONE && lend.node != NODE_NONE {
+                    let osp = unsafe (&*pk.module_ast_const(ow.module)).at_const(ow.node).span;
+                    if pk.co_on(ow.module, osp) && pk.modules.at(ow.module as usize).path.as_str() != "std::parallel::runtime" {
+                        self.chk_on = 2;
+                    }
+                }
+            }
+        }
+        return self.chk_on == 2;
+    }
+
+    fn maybe_cancel_check(
+        self: &mut Self,
+        id: NodeId,
+        target: DefId,
+        is_fn_value: bool,
+        res: ir::OperandId,
+        ty: TypeId,
+        sp: tok::Span,
+    ) {
+        if id != self.chk_root {
+            return; // only a statement-root call: no pending sibling temporaries to unwind past
+        }
+        if self.in_defer != 0 {
+            return; // cleanup is masked: no edge inside a defer body
+        }
+        if is_fn_value {
+            return; // unpinned callee: cancellation-masked across the call (plan 10.3)
+        }
+        if !self.chk_enabled() {
+            return;
+        }
+        let pk = unsafe &*self.pkg;
+        if target.node == NODE_NONE {
+            return;
+        }
+        let ta = unsafe &*pk.module_ast_const(target.module);
+        if ta.at_const(target.node).kind != NodeKind::NODE_FUNCTION {
+            return;
+        }
+        if !pk.cancel_on(target.module, ta.at_const(target.node).span) {
+            return; // this callee can never accept a cancellation
+        }
+        let probe = pk.sugar_item(loader::SugarItem::SI_CANCEL_PROBE);
+        let lbegin = pk.sugar_item(loader::SugarItem::SI_CANCEL_LBEGIN);
+        let lend = pk.sugar_item(loader::SugarItem::SI_CANCEL_LEND);
+        let it = Ast::builtin(BuiltinType::BT_I32);
+        let ut = Ast::builtin(BuiltinType::BT_VOID);
+        let c0 = self.body.oper_pool.len() as u32;
+        let cond = self.emit_call(probe, ir::IR_NONE, c0, 0, 0, 0, it, sp);
+        let real_b = self.open_block();
+        let ladder_b = self.open_block();
+        let cont_b = self.open_block();
+        let mut t = self.term0(ir::TM_SWITCH, sp);
+        t.a = cond;
+        t.sw_start = self.body.switch_pool.len() as u32;
+        self.body.switch_pool.push(2u64 << 32 | real_b as u64);
+        self.body.switch_pool.push(1u64 << 32 | ladder_b as u64);
+        t.sw_len = 2;
+        t.t0 = cont_b;
+        self.seal(t, real_b);
+        // Real value: spill it into a tracked local so the ladder (and any later exit) frees it.
+        let mut spillable = res != ir::IR_NONE && ty != TYPE_NONE && ty != ut;
+        if spillable {
+            let rk = self.body.operands.at(res as usize).kind;
+            spillable = rk == ir::OP_COPY || rk == ir::OP_MOVE;
+        }
+        if spillable {
+            // The spill's whole lifetime is THIS block: live, take the value, die (the drop
+            // elaborates unconditionally right here, before the defers -- temporary operation state
+            // is removed first). Nothing outside the block can see it, so no loan the value carries
+            // outlives the check.
+            let rpl = self.body.operands.at(res as usize).data;
+            let sl = self.body.add_local(
+                ir::LocalDecl {
+                    ty: ty,
+                    storage: ir::LS_INL,
+                    is_mutable: false,
+                    span: sp,
+                    decl: NODE_NONE,
+                    item: DefId { module: 0, node: NODE_NONE },
+                },
+            );
+            self.stmt(
+                ir::Statement {
+                    kind: ir::ST_STORAGE_LIVE,
+                    place: ir::IR_NONE,
+                    rvalue: ir::IR_NONE,
+                    a: sl,
+                    b: 0,
+                    span: sp,
+                },
+            );
+            let op2 = self.copy_op(rpl);
+            let pl = self.place_of_local(sl);
+            let rv = self.rv_use(op2, ty);
+            self.assign(pl, rv, sp);
+            self.stmt(
+                ir::Statement {
+                    kind: ir::ST_STORAGE_DEAD,
+                    place: ir::IR_NONE,
+                    rvalue: ir::IR_NONE,
+                    a: sl,
+                    b: 0,
+                    span: sp,
+                },
+            );
+        }
+        self.seal(self.goto_term(ladder_b, sp), ladder_b);
+        // The ladder: masked cleanup, then hand the edge to the caller. A pending plain-let local
+        // (registered above chk_base) is uninitialized on this path: no dead for it.
+        let mut pending: i64 = -1;
+        if self.chk_base < self.scope_locals.len() {
+            switch self.scope_locals.pop() {
+                Some(pl0) => {
+                    pending = pl0;
+                },
+                _ => {},
+            };
+        }
+        let b0 = self.body.oper_pool.len() as u32;
+        let _ = self.emit_call(lbegin, ir::IR_NONE, b0, 0, 0, 0, ut, sp);
+        self.emit_defers_down_to(0);
+        self.emit_deads_down_to(0);
+        let e0 = self.body.oper_pool.len() as u32;
+        let _ = self.emit_call(lend, ir::IR_NONE, e0, 0, 0, 0, ut, sp);
+        if pending >= 0 {
+            self.scope_locals.push(pending as ir::LocalId);
+        }
+        let mut rt = self.term0(ir::TM_RETURN, sp);
+        rt.args_len = ir::RET_CANCEL;
+        self.seal(rt, cont_b);
     }
 
     fn intrinsic_value(self: &mut Self, ik: u8, bv: TypeId, ty: TypeId, sp: tok::Span) ir::OperandId {

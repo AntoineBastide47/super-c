@@ -1509,7 +1509,7 @@ extend Ast {
             self.ilock_depth += 1;
             return;
         }
-        self.ilock_sem.acquire();
+        self.ilock_sem.acquire_masked();
         atomic::store_usize(&mut self.ilock_owner, tok, 0);
         self.ilock_depth = 1;
     }

@@ -229,13 +229,15 @@ extend<T> Sender<T> {
             if runtime::tracing() {
                 runtime::trace("channel: send blocks (full)", runtime::current_id());
             }
-            if deadline != 0 {
-                if time::remaining_ns(deadline) == 0 {
-                    return SendResult::<T>::Rejected(value);
-                }
-                inner.not_full.wait_until(&g, deadline);
-            } else {
-                inner.not_full.wait(&g);
+            if deadline != 0 && time::remaining_ns(deadline) == 0 {
+                return SendResult::<T>::Rejected(value);
+            }
+            let r = unsafe inner.not_full.wait_raw(g.lock_handle(), deadline, true, runtime::WK_CHANNEL_SEND);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                // Cancelled: the send wait is removed and the unsent payload is handed back, so the
+                // caller's cancellation cleanup frees it exactly once.
+                let _ = runtime::cancel_after_wait(true);
+                return SendResult::<T>::Rejected(value);
             }
         }
         let sm = g.get_mut();
@@ -283,7 +285,8 @@ extend<T> Sender<T> {
         let inner = self.inner.get();
         let mut sent: usize = 0;
         let mut open = true;
-        while open && !items.is_empty() {
+        let mut cancelled = false;
+        while open && !cancelled && !items.is_empty() {
             let mut g = inner.state.lock();
             loop {
                 let mut ready = false;
@@ -298,9 +301,14 @@ extend<T> Sender<T> {
                 if runtime::tracing() {
                     runtime::trace("channel: send_batch blocks (full)", runtime::current_id());
                 }
-                inner.not_full.wait(&g);
+                let r = unsafe inner.not_full.wait_raw(g.lock_handle(), 0, true, runtime::WK_CHANNEL_SEND);
+                if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                    let _ = runtime::cancel_after_wait(true);
+                    cancelled = true; // the unsent remainder stays in `items`, in order
+                    break;
+                }
             }
-            if open {
+            if open && !cancelled {
                 let sm = g.get_mut();
                 let mut n: usize = 0;
                 while !items.is_empty() && (sm.count < sm.cap || sm.unbounded) {
@@ -398,13 +406,13 @@ extend<T> Receiver<T> {
             if runtime::tracing() {
                 runtime::trace("channel: recv blocks (empty)", runtime::current_id());
             }
-            if deadline != 0 {
-                if time::remaining_ns(deadline) == 0 {
-                    return Option::<T>::None;
-                }
-                inner.not_empty.wait_until(&g, deadline);
-            } else {
-                inner.not_empty.wait(&g);
+            if deadline != 0 && time::remaining_ns(deadline) == 0 {
+                return Option::<T>::None;
+            }
+            let r = unsafe inner.not_empty.wait_raw(g.lock_handle(), deadline, true, runtime::WK_CHANNEL_RECV);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                let _ = runtime::cancel_after_wait(true);
+                return Option::<T>::None; // cancelled: the receive wait is removed and no value is taken
             }
         }
         let sm = g.get_mut();
@@ -466,7 +474,11 @@ extend<T> Receiver<T> {
             if runtime::tracing() {
                 runtime::trace("channel: recv_batch blocks (empty)", runtime::current_id());
             }
-            inner.not_empty.wait(&g);
+            let r = unsafe inner.not_empty.wait_raw(g.lock_handle(), 0, true, runtime::WK_CHANNEL_RECV);
+            if r == runtime::WR_CANCEL || r == runtime::WR_SHUTDOWN {
+                let _ = runtime::cancel_after_wait(true);
+                return 0; // cancelled: nothing taken
+            }
         }
         let sm = g.get_mut();
         let n = if max < sm.count {
