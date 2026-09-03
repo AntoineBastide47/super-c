@@ -11,10 +11,6 @@ extern "C" "driver_shim.h" {
     pub fn sc_dirent_isdir(entry: *mut void) i32;
     /// 1 iff both paths resolve to the same physical file, 0 if distinct, -1 if either cannot be stat'd.
     pub fn sc_same_file(a: *const char, b: *const char) i32;
-    /// WIFEXITED as 0/1 on a wait status; always 1 on Windows, where system() returns the exit code directly.
-    pub fn sc_wifexited(status: i32) i32;
-    /// WEXITSTATUS of a wait status (identity on Windows).
-    pub fn sc_wexitstatus(status: i32) i32;
     /// Absolute path of `path` written into `resolved` ('\' normalized to '/' on Windows); null on failure.
     /// Safety: `resolved` must hold at least 4096 bytes.
     pub fn sc_realpath(path: *const char, resolved: *mut char) *mut char;
@@ -49,9 +45,6 @@ extern "C" "driver_shim.h" {
     pub fn sc_jobserver_release_claim() void;
     /// Monotonic milliseconds (never wall clock).
     pub fn sc_ticks_ms() i64;
-    /// Start `cmd` through the shell without waiting (redirections go inside the string); returns a
-    /// pid/handle that must be claimed by `sc_wait_any`, or -1 on spawn failure.
-    pub fn sc_spawn(cmd: *const char) i64;
     /// Start argv[0..] (NULL-terminated pointer array) WITHOUT a shell: argv[0] is PATH-searched and
     /// every later entry reaches the child verbatim -- spaces, quotes, and non-ASCII bytes included.
     /// A non-null `out_path` truncate-redirects the child's stdout+stderr into it; null inherits.
@@ -77,9 +70,6 @@ extern "C" "driver_shim.h" {
     /// `_exit()`: no atexit handlers, no stream flushing. Emit workers end here so the inherited
     /// leak registry and buffered stdio are not replayed once per child.
     pub fn sc_exit_now(code: i32);
-    /// 1 when this binary is ASan-instrumented: fork() copy-on-write-faults the whole shadow per
-    /// child there, costing more than the parallel emit saves, so such a binary stays serial.
-    pub fn sc_asan() i32;
     /// Wait for ONE specific child; its exit code via `code`. 0 on success, -1 on error/Windows.
     pub fn sc_waitpid(pid: i64, code: *mut i32) i32;
     /// rename() that also replaces an existing destination on Windows -- including one that is a RUNNING

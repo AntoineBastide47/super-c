@@ -135,18 +135,6 @@ fn dir_of(path: str) String {
     return String::from_str(".");
 }
 
-type RB = Array<char, 4096>;
-
-// Canonicalize `path` via realpath; a file not on disk yet keeps the given form.
-fn canon(path: str) String {
-    let mut pb = String::from_str(path);
-    let mut rb = RB {};
-    if unsafe shim::sc_realpath(pb.cstr(), &mut rb[0]) != null {
-        return String::from_cstr(&rb[0]);
-    }
-    return pb;
-}
-
 // Byte-lexicographic path order with a length tiebreak: a deterministic batch member list.
 const fn path_cmp(a: &String, b: &String) i32 {
     let la = a.len();
@@ -166,11 +154,6 @@ const fn path_cmp(a: &String, b: &String) i32 {
         i += 1;
     }
     return la as i32 - lb as i32;
-}
-
-fn is_dir(path: str) bool {
-    let mut p = String::from_str(path);
-    return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -300,7 +283,7 @@ extend PubSet {
 /// providers (pull diagnostics, token deltas, lazy code-action resolve) are advertised only when the
 /// CLIENT declared support for them at initialize; response shapes that depend on client capabilities
 /// (hierarchical symbols, versioned document edits) are negotiated and applied per response.
-fn capabilities_with(pull: bool, delta: bool, resolve: bool) String {
+pub fn capabilities_with(pull: bool, delta: bool, resolve: bool) String {
     let mut s = String::from_str(
         "{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":{\"openClose\":true,\"change\":2},\"hoverProvider\":true,\"definitionProvider\":true,\"typeDefinitionProvider\":true,\"implementationProvider\":true,\"referencesProvider\":true,\"documentHighlightProvider\":true,\"renameProvider\":{\"prepareProvider\":true},\"documentFormattingProvider\":true,\"callHierarchyProvider\":true,\"typeHierarchyProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\",\"@\",\"'\"]},\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"documentSymbolProvider\":true,\"workspaceSymbolProvider\":true,\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true",
     );
@@ -326,15 +309,10 @@ fn capabilities_with(pull: bool, delta: bool, resolve: bool) String {
     return s;
 }
 
-/// The full capability shape (every optional provider on): `super-c lsp --capabilities` output.
-pub fn capabilities_json() String {
-    return capabilities_with(true, true, true);
-}
-
 // A doc's canonical path from its URI (realpath when the file exists on disk).
 fn uri_doc_path(uri: str) String {
     let raw = text::uri_to_path(uri);
-    return canon(raw.as_str());
+    return analysis::canon_path(raw.as_str());
 }
 
 // `build.toml` is served by the manifest half of the server (src/lsp/buildtoml.spc): it is not Super-C
@@ -511,7 +489,6 @@ pub fn run(std_dir: str, target: i32) i32 {
             return 1;
         }
         let method = req.value_str("method");
-        let t0 = unsafe shim::sc_ticks_ms();
         // Lifecycle gates (LSP 3.17): before initialize only `initialize` and `exit` proceed;
         // requests get -32002, other notifications are dropped. After shutdown only `exit`.
         if method == "exit" {
@@ -676,9 +653,6 @@ pub fn run(std_dir: str, target: i32) i32 {
             send_error(fout, req.at_key("id"), -32601, "method not found");
         }
         // remaining unknown notifications ($/setTrace, ...) are ignored
-        if stdlib::getenv("SC_LSP_TRACE") != null {
-            eprintln("lsp trace: rev {} {} ms method {}", sv.revision, unsafe shim::sc_ticks_ms() - t0, method);
-        }
     }
 }
 
@@ -794,7 +768,7 @@ extend Server {
         let fo = self.folder_of(path);
         if fo.len() != 0 {
             let alt = Server::abs_under(fo, "src");
-            if is_dir(alt.as_str()) {
+            if dutil::is_dir(alt.as_str()) {
                 return alt;
             }
         }
@@ -826,7 +800,7 @@ extend Server {
         let mut alt = String::new();
         {
             let a = Server::abs_under(folder, "src");
-            if is_dir(a.as_str()) {
+            if dutil::is_dir(a.as_str()) {
                 alt = a;
             }
         }
@@ -931,7 +905,7 @@ extend Server {
             if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
                 self.sweep_dir(folder, p.as_str(), cand);
             } else if p.as_str().ends_with(".spc") {
-                let cp = canon(p.as_str());
+                let cp = analysis::canon_path(p.as_str());
                 let own = self.owning_root(cp.as_str());
                 let mut have = own >= 0 && !self.is_batch(own as usize);
                 for r in 0..self.roots.len() {
@@ -1023,15 +997,6 @@ extend Server {
             );
             if ok {
                 self.roots[r].diags = old_diags;
-                if stdlib::getenv("SC_LSP_DEBUG") != null {
-                    eprintln(
-                        "lsp incr: root {} reparsed {} analyzed {} body_only {}",
-                        r,
-                        st.reparsed,
-                        st.analyzed,
-                        st.body_only,
-                    );
-                }
                 self.publish_root_diags(r, ps);
                 return;
             }
@@ -1078,7 +1043,7 @@ extend Server {
         self.roots[r].files = Vector::<String>::new();
         let nmods = self.roots.at(r).pkg.modules.len();
         for m in 0..nmods {
-            let fp = canon(self.roots.at(r).pkg.modules.at(m).file.as_str());
+            let fp = analysis::canon_path(self.roots.at(r).pkg.modules.at(m).file.as_str());
             self.roots[r].files.push(fp);
         }
         self.roots[r].built = true;
@@ -1331,7 +1296,7 @@ extend Server {
                                 let u = wfs.at(i).value_str("uri");
                                 if u.len() != 0 {
                                     let p = text::uri_to_path(u);
-                                    self.folders.push(canon(p.as_str()));
+                                    self.folders.push(analysis::canon_path(p.as_str()));
                                 }
                             }
                         }
@@ -1342,11 +1307,11 @@ extend Server {
                     let ru = params.value_str("rootUri");
                     if ru.len() != 0 {
                         let p = text::uri_to_path(ru);
-                        self.folders.push(canon(p.as_str()));
+                        self.folders.push(analysis::canon_path(p.as_str()));
                     } else {
                         let rp = params.value_str("rootPath");
                         if rp.len() != 0 {
-                            self.folders.push(canon(rp));
+                            self.folders.push(analysis::canon_path(rp));
                         }
                     }
                 }
@@ -1795,7 +1760,7 @@ extend Server {
             return;
         }
         let key = keyo.unwrap();
-        let kfile = canon(key.file.as_str());
+        let kfile = analysis::canon_path(key.file.as_str());
         for r2 in 0..self.roots.len() {
             if r2 == r0 || !self.roots.at(r2).built || self.roots.at(r2).pkg.modules.len() == 0 {
                 continue;
@@ -2335,7 +2300,7 @@ extend Server {
             );
             let mut parsed = false;
             for m in 0..pkg.modules.len() {
-                let c = canon(pkg.modules.at(m).file.as_str());
+                let c = analysis::canon_path(pkg.modules.at(m).file.as_str());
                 let hit = c.as_str() == path;
                 if hit {
                     parsed = pkg.modules.at(m).has_ast;
@@ -3032,7 +2997,7 @@ extend Server {
                                     let u = ad.at(i).value_str("uri");
                                     if u.len() != 0 {
                                         let p = text::uri_to_path(u);
-                                        let c = canon(p.as_str());
+                                        let c = analysis::canon_path(p.as_str());
                                         let mut have = false;
                                         for k in 0..self.folders.len() {
                                             if self.folders.at(k).as_str() == c.as_str() {
@@ -3059,7 +3024,7 @@ extend Server {
                                         continue;
                                     }
                                     let p = text::uri_to_path(u);
-                                    let c = canon(p.as_str());
+                                    let c = analysis::canon_path(p.as_str());
                                     let mut k: usize = 0;
                                     while k < self.folders.len() {
                                         if self.folders.at(k).as_str() == c.as_str() {

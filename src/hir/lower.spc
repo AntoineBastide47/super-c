@@ -8,10 +8,8 @@
 //
 // Batch builds lower by MOVE: the parse arena becomes the HIR in place (releasing the syntax tree at
 // zero cost -- nothing after this stage reads pre-lowering syntax; the formatter parses its own).
-// Under SC_KEEP_SYNTAX=1 the module keeps a pristine pre-lowering snapshot in `Module.syntax`, the
-// retention the incremental-query work builds on. Generated nodes get fresh ids appended to the HIR
-// arena; their spans borrow source text that already exists (a keyword's own bytes), so diagnostics
-// and origin mapping stay exact.
+// Generated nodes get fresh ids appended to the HIR arena; their spans borrow source text that
+// already exists (a keyword's own bytes), so diagnostics and origin mapping stay exact.
 //
 // Two primitives do the work. `lower_to_core_call` turns a marker built as a call to a placeholder callee
 // into a real `NODE_CALL` by seeding the callee's resolution to a std shim (a resolved SugarItem value
@@ -25,50 +23,18 @@ import ast::ast as *;
 import lexer::token as tok;
 import lexer::token_type as tt;
 import module::loader as loader;
-import stdlib;
 
 /// Lower module `i` to HIR. Runs the sugar lowering over the module's resolved arena in place (the
 /// Ast never leaves its slot, so shim lookups that land back on this module read the live tree).
 /// Called unconditionally after resolve -- resolve errors leave markers unresolved, which the
 /// lowering already skips.
 pub fn lower_module(p: &mut loader::Package, i: usize) {
-    if stdlib::getenv("SC_KEEP_SYNTAX") != null {
-        p.modules[i].syntax.free();
-        p.modules[i].syntax = syntax_snapshot(&p.modules[i].ast);
-    }
     if p.modules[i].ast.sugar_marks == 0 {
         return; // no markers parsed: the arena already is the HIR
     }
     p.ensure_index(); // the SugarItem table below answers from it
     let aptr = (&mut p.modules[i].ast) as *mut Ast;
     desugar_ast(unsafe &mut *aptr, p);
-}
-
-// A pristine pre-lowering copy of the pure syntax arenas (no semantic tables: those belong to the HIR).
-fn syntax_snapshot(a: &Ast) Ast {
-    let mut s = Ast::new(0);
-    s.root = a.root;
-    s.module = a.module;
-    s.sugar_marks = a.sugar_marks;
-    s.nodes.clear();
-    s.nodes.reserve(a.nodes.len());
-    for i in 0..a.nodes.len() {
-        s.nodes.push(*a.nodes.at(i));
-    }
-    s.children.reserve(a.children.len());
-    for i in 0..a.children.len() {
-        s.children.push(*a.children.at(i));
-    }
-    for i in 0..a.attrs.len() {
-        s.attrs.push(*a.attrs.at(i));
-    }
-    for i in 0..a.metas.len() {
-        s.metas.push(*a.metas.at(i));
-    }
-    for i in 0..a.lifetime_decls.len() {
-        s.lifetime_decls.push(*a.lifetime_decls.at(i));
-    }
-    return s;
 }
 
 /// Lower every sugar-keyword marker in `ast` to its core form. `package` resolves the std shims each marker
@@ -359,9 +325,7 @@ fn clone_place(ast: &mut Ast, id: NodeId) NodeId {
             Node {
                 kind: NodeKind::NODE_MEMBER,
                 span: n.span,
-                as_data: NodeAs {
-                    member: MemberData { object: obj, member: md.member, pointer: md.pointer, path: md.path },
-                },
+                as_data: NodeAs { member: MemberData { object: obj, member: md.member, path: md.path } },
             },
         );
     } else {

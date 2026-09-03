@@ -1219,15 +1219,15 @@ pub fn test_build_and_run(
         "";
     };
     let mut args = Vector::<String>::new();
-    tsplit_args(&mut args, ccs.as_str());
-    tsplit_args(&mut args, "-std=c11 -D_POSIX_C_SOURCE=200809L");
+    split_args(&mut args, ccs.as_str());
+    split_args(&mut args, "-std=c11 -D_POSIX_C_SOURCE=200809L");
     let mut fl = String::new();
     push_sdk_flags(&mut fl, sdk, p.arch); // the cross triple first; the profile's flags can override
-    tsplit_args(&mut args, fl.as_str());
-    tsplit_args(&mut args, cflags); // the requested profile; a bare build passes none
+    split_args(&mut args, fl.as_str());
+    split_args(&mut args, cflags); // the requested profile; a bare build passes none
     let mut ll = String::new();
     push_sdk_libs(&mut ll, sdk); // one command compiles AND links here, so the link-only libs ride along
-    tsplit_args(&mut args, ll.as_str());
+    split_args(&mut args, ll.as_str());
     args.push(String::from_str("-o"));
     let mut outp = String::new();
     if out_bin.len() != 0 {
@@ -1255,12 +1255,12 @@ pub fn test_build_and_run(
                 line[ll2 - 1] = 0 as char;
             }
             if line[0] != 0 as char {
-                tsplit_args(&mut args, str::from_cstr(&line[0]));
+                split_args(&mut args, str::from_cstr(&line[0]));
             }
         }
         unsafe stdio::fclose(lf);
     }
-    let brc = texec_args(&mut args);
+    let brc = exec_args(&mut args, null);
     if brc != 0 {
         let mut what = "test build".ptr() as *const char;
         if out_bin.len() != 0 {
@@ -1309,35 +1309,11 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
         run.push(String::from_cstr(&sb[0]));
     }
     unsafe shim::sc_jobserver_release_claim();
-    let rrc = texec_args(&mut run);
+    let rrc = exec_args(&mut run, null);
     if rrc < 0 {
         return 1;
     }
     return rrc;
-}
-
-// Whitespace-split `s` into argv entries (the flag strings' historic shell-splitting contract).
-fn tsplit_args(out: &mut Vector<String>, s: str) {
-    let mut a: usize = 0;
-    for i in 0..s.len() + 1 {
-        let ws = i == s.len() || s[i] == b' ' || s[i] == b'\t';
-        if ws {
-            if i > a {
-                out.push(String::from_str(s.slice(a, i)));
-            }
-            a = i + 1;
-        }
-    }
-}
-
-// Run `args` without a shell, output inherited: the child's exit code, or -1 on spawn failure.
-fn texec_args(args: &mut Vector<String>) i32 {
-    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
-    for i in 0..args.len() {
-        ptrs.push(args[i].cstr() as usize);
-    }
-    ptrs.push(0);
-    return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, null);
 }
 
 extend TestPlan {

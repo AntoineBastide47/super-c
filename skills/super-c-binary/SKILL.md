@@ -218,40 +218,22 @@ sanitizer frames dominate the samples.
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
 | `SC_NO_TU_CACHE` | Disable per-TU journal/replay cache |
 | `SC_BUILD_MEM_BUDGET` | Cap parallel emission bytes in flight (`64M`, `2G`) |
-| `SC_STAMP_DEBUG` | Trace emit-stamp decisions |
 
 ### Verification (dev gates, each runs only when set)
 
 | Variable | Effect |
 |----------|--------|
 | `SC_FACTS_CHECK` | Snapshot semantic tables after typecheck; report mutations |
-| `SC_CORE_IR` | Core IR coverage pass (`=print` dumps bodies) |
-| `SC_BORROW_IR` | Borrow-IR shadow pass (`=ref` runs reference lane) |
+| `SC_CORE_IR` | Re-verify inlined bodies and re-prove bounds-check eliminations |
 | `SC_LAYOUT` | Validate pool types against C layout invariants |
-| `SC_CEMIT` | Double-hash streaming emitter verification |
-| `SC_AST_STATS` | Print AST/node statistics |
-| `SC_TC_STATS` | Print package-total type-inference counters after typechecking |
-| `SC_CEMIT_TU` | Verbose per-TU emission |
 | `SC_CEMIT_STATS` | Per-phase wall times and const/reflect statistics |
-
-### Debug traces
-
-| Variable | Effect |
-|----------|--------|
-| `SC_IRI_DBG` | Const-engine failure traces |
-| `SC_BORROW_TRACE` | Dump borrow-check errors with context |
-| `SC_ZC_DBG` | ZST-elision layout decisions |
-| `SC_PROJ_DBG` | Parallel-for field-projection lowering |
-| `SC_CO_DEBUG` | Coroutine-launch reachability widening |
-| `SC_TCPAR_DBG` | Trace parallel type-check start/end per module |
-| `SC_KEEP_SYNTAX` | Retain each module's pristine pre-lowering parse tree (incremental-query/LSP debugging) |
+| `SC_INLINE_STATS` | Per-body inliner decision counters |
+| `SC_BCE_STATS` | Per-body bounds-check elimination counters |
 
 ### LSP
 
 | Variable | Effect |
 |----------|--------|
-| `SC_LSP_DEBUG` | Server-side logging |
-| `SC_LSP_TRACE` | Request/response tracing |
 | `SC_LSP_NO_INCR` | Disable incremental per-edit recompilation (full rebuild, parity mode) |
 | `SC_LSP_BUDGET_MB` | Bound retained packages (closed-file roots evict first; open docs pinned) |
 

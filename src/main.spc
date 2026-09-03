@@ -812,11 +812,6 @@ extend BuildOpts {
     }
 }
 
-fn is_dir(path: str) bool {
-    let mut p = String::from_str(path);
-    return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
-}
-
 fn canon_cwd() String {
     let mut dot = String::from_str(".");
     let mut buf = PathBuf {};
@@ -1368,7 +1363,7 @@ OPTIONS:
         // readable; editors and tests read it without a protocol session)
         for i in 2..argv.len() {
             if argv[i] == "--capabilities" {
-                let caps = lsp_srv::capabilities_json();
+                let caps = lsp_srv::capabilities_with(true, true, true);
                 println("{}", caps.as_str());
                 return 0;
             }

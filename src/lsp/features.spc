@@ -333,48 +333,6 @@ const fn ref_span(a: *const Ast, i: NodeId) tok::Span {
     return n.span;
 }
 
-/// Every reference to the definition under the position, DefId-exact across all modules (same-name
-/// different-def sites never match). `include_decl` appends the declaration's name span.
-pub fn references(p: &loader::Package, mi: usize, off: u32, include_decl: bool) Vector<Loc> {
-    let mut out = Vector::<Loc>::new();
-    let d = def_at(p, mi, off);
-    if d.node == NODE_NONE {
-        return out;
-    }
-    for mm in 0..p.modules.len() {
-        let am = mod_ast(p, mm);
-        let mut nn = am.resolutions_len();
-        if unsafe am.nodes.len() < nn {
-            nn = unsafe am.nodes.len();
-        }
-        for i in 1..nn {
-            let r = am.resolution_def(i as NodeId);
-            if r.module == d.module && r.node == d.node {
-                let sp = ref_span(am, i as NodeId);
-                // dedupe identical spans (a member and its name node can both resolve here)
-                let mut seen = false;
-                for k in 0..out.len() {
-                    if out.at(k).module == mm as u32 && out.at(k).start == sp.start && out.at(k).end == sp.end {
-                        seen = true;
-                    }
-                }
-                if !seen {
-                    out.push(Loc { module: mm as u32, start: sp.start, end: sp.end });
-                }
-            }
-        }
-    }
-    if include_decl {
-        let da = mod_ast(p, d.module as usize);
-        let nm = decl_name(da, d.node);
-        if nm != NODE_NONE {
-            let sp = da.at_const(nm).span;
-            out.push(Loc { module: d.module, start: sp.start, end: sp.end });
-        }
-    }
-    return out;
-}
-
 // ---------------------------------------------------------------------------------------------------------
 // Semantic tokens.
 // ---------------------------------------------------------------------------------------------------------
@@ -1388,7 +1346,7 @@ pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> 
 
 /// All same-document reference spans for the symbol under `off` (document highlights).
 pub fn document_highlights(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
-    let all = references(p, mi, off, true);
+    let all = references_of_def(p, def_at(p, mi, off), true);
     let mut out = Vector::<Loc>::new();
     for i in 0..all.len() {
         if all.at(i).module as usize == mi {

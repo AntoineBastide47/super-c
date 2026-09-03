@@ -277,7 +277,6 @@ const void **__sc_reflect_types(size_t *__n) {
   if (__n) *__n = __sc_refl_n;
   return __sc_refl;
 }
-#include <stdint.h>
 #if defined(__has_include) && !defined(__ANDROID__)
 /* bionic ships <execinfo.h> but only declares its functions from API 33. Keep site symbolization off there. */
 #if __has_include(<execinfo.h>)
@@ -338,6 +337,17 @@ static void sc_lk_acquire(sc_lk_shard *s) {
   while (__sync_lock_test_and_set(&s->lock, 1)) {}
 }
 static void sc_lk_release(sc_lk_shard *s) { __sync_lock_release(&s->lock); }
+/* Drop a shard's table and counters (the lock word is left to the caller). */
+static void sc_lk_shard_clear(sc_lk_shard *s) {
+  (free)(s->tab);
+  s->tab = NULL;
+  s->cap = 0;
+  s->live = 0;
+  s->bytes = 0;
+  s->dbl = 0;
+  s->freed_next = 0;
+  s->freed_count = 0;
+}
 static size_t sc_lk_slot(const void *p, size_t cap) {
   return (size_t)(sc_lk_hash(p) >> SC_LK_SHARD_BITS) & (cap - 1);
 }
@@ -483,14 +493,7 @@ static void sc_lk_report(void) {
   sc_lk_state = 1; /* the report's own prints may allocate: stop tracking */
   for (size_t h = 0; h < SC_LK_SHARDS; h++) {
     sc_lk_shard *s = &sc_lk_shards[h];
-    (free)(s->tab);
-    s->tab = NULL;
-    s->cap = 0;
-    s->live = 0;
-    s->bytes = 0;
-    s->dbl = 0;
-    s->freed_next = 0;
-    s->freed_count = 0;
+    sc_lk_shard_clear(s);
     sc_lk_release(s);
   }
   if (n != 0) {
@@ -533,14 +536,7 @@ void sc_lk_fork_child_reset(void) {
   for (size_t h = 0; h < SC_LK_SHARDS; h++) {
     sc_lk_shard *s = &sc_lk_shards[h];
     s->lock = 0;
-    (free)(s->tab);
-    s->tab = NULL;
-    s->cap = 0;
-    s->live = 0;
-    s->bytes = 0;
-    s->dbl = 0;
-    s->freed_next = 0;
-    s->freed_count = 0;
+    sc_lk_shard_clear(s);
   }
 }
 void sc_lk_report_now(void) {

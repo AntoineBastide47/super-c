@@ -1,32 +1,8 @@
-// The compiler task contract: every parallel frontier submits work under a TaskKey/TaskDesc, and
-// one resource controller bounds live estimated memory across in-flight tasks. CPU credits are the
-// requested --jobs worker count, bounded further by the process-tree jobserver. Compute tasks and
-// C-compiler processes never overlap, so no second in-process credit pool exists.
+// One resource controller bounds live estimated memory across in-flight compiler tasks. CPU
+// credits are the requested --jobs worker count, bounded further by the process-tree jobserver.
+// Compute tasks and C-compiler processes never overlap, so no second in-process credit pool exists.
 import stdlib;
 import std::parallel::sync as psy;
-
-pub const ST_PARSE: u32 = 1;
-pub const ST_RESOLVE: u32 = 2;
-pub const ST_TYPECHECK: u32 = 3;
-pub const ST_BORROWCK: u32 = 4;
-pub const ST_PANICS: u32 = 5;
-pub const ST_LIVE: u32 = 6;
-pub const ST_SEED: u32 = 7;
-pub const ST_LOWER: u32 = 8;
-pub const ST_INSTANCE: u32 = 9;
-
-pub struct TaskKey {
-    pub stage: u32,
-    pub module: u32, // 0xFFFFFFFF = none (the instance TU, a slice)
-    pub item: u64, // stable item, body, instance or slice identity within the stage
-}
-
-pub struct TaskDesc {
-    pub key: TaskKey,
-    pub estimated_cpu: u32,
-    pub estimated_memory: u64,
-    pub priority: u32, // larger submits first within a frontier; ties break on key order
-}
 
 /// Weighted memory gate: `acquire` parks the SUBMITTER until the live estimate fits the budget, so
 /// a frontier never puts more estimated bytes in flight than the build allows. A task larger than
@@ -42,24 +18,25 @@ extend Ctl {
         return Ctl { mu: psy::Mutex::<u64>::new(0), cv: psy::Condvar::new(), budget: budget };
     }
 
-    pub fn acquire(self: &Self, d: &TaskDesc) {
-        if self.budget == 0 || d.estimated_memory == 0 {
+    /// `bytes` is the task's estimated memory.
+    pub fn acquire(self: &Self, bytes: u64) {
+        if self.budget == 0 || bytes == 0 {
             return;
         }
         let mut g = self.mu.lock();
-        while *g.get() != 0 && *g.get() + d.estimated_memory > self.budget {
+        while *g.get() != 0 && *g.get() + bytes > self.budget {
             self.cv.wait_masked(&g);
         }
-        *g.get_mut() += d.estimated_memory;
+        *g.get_mut() += bytes;
     }
 
-    pub fn release(self: &Self, d: &TaskDesc) {
-        if self.budget == 0 || d.estimated_memory == 0 {
+    pub fn release(self: &Self, bytes: u64) {
+        if self.budget == 0 || bytes == 0 {
             return;
         }
         {
             let mut g = self.mu.lock();
-            *g.get_mut() -= d.estimated_memory;
+            *g.get_mut() -= bytes;
         }
         self.cv.notify_all();
     }

@@ -5,7 +5,6 @@
 // (owner-emits, to a fixpoint) and computes the dependency-first module emit order for codegen.
 import string as cstring;
 import stdio;
-import stdlib;
 import driver_shim as shim;
 import lexer::token as tok;
 import lexer::lexer as lexer;
@@ -20,16 +19,12 @@ pub const SEEK_END: i32 = 2;
 pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
 
 /// One loaded module: its `::`-joined module path (the mangling/lookup key), the file it came from, its
-/// source text and parsed Ast. The C loader used a NULL `Ast*` to mean "failed to lex/parse"; here the Ast
-/// is held by value (like Parser.ast), so `has_ast` records that validity instead.
+/// source text and parsed Ast. The Ast is held by value, so `has_ast` records whether lex/parse succeeded.
 pub struct Module {
     pub path: String, // "std::string"; the root module is its file stem (owned)
     pub file: String, // filesystem path the source was read from (owned)
     pub source: String, // file contents (owned; span offsets index into it)
     pub ast: Ast, // parsed AST; after hir::lower runs it IS the module's HIR (desugared, resolved)
-    /// Pristine pre-lowering parse tree, retained only under SC_KEEP_SYNTAX=1 (incremental-query
-    /// groundwork): pure syntax arenas, no semantic tables, and nothing in the pipeline writes to it.
-    pub syntax: Ast,
     pub has_ast: bool,
     pub prelude: bool, // part of the auto-imported std prelude
 }
@@ -40,7 +35,6 @@ extend Module as Free {
         self.file.free();
         self.source.free();
         self.ast.free();
-        self.syntax.free();
     }
 }
 
@@ -228,9 +222,9 @@ pub enum ItemKind {
     IK_COUNT,
 }
 
-/// One record per top-level or associated declaration. `node` is the legacy declaration NodeId:
-/// DefId{module, node} identity and C mangling key off it. Signatures and
-/// attributes stay reachable through the node (the Ast side tables are their owner).
+/// One record per top-level or associated declaration. `node` is the declaration NodeId:
+/// DefId{module, node} identity and C mangling key off it. Signatures and attributes stay
+/// reachable through the node (the Ast side tables are their owner).
 pub struct ItemMeta {
     pub module: ModuleId,
     pub node: NodeId,
@@ -1291,14 +1285,6 @@ extend Package {
                         let fsp = unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).span;
                         self.co_mark(fr.module, fsp);
                     } else {
-                        if stdlib::getenv("SC_CO_DEBUG") != null {
-                            eprint(
-                                "co widen: seed in {} span {}..{}\n",
-                                self.modules.at(m).path.as_str(),
-                                a.at_const(a0).span.start,
-                                a.at_const(a0).span.end,
-                            );
-                        }
                         self.co_state = 2; // a coroutine entry the tracker cannot pin
                         return;
                     }
@@ -1341,14 +1327,6 @@ extend Package {
                         }
                     }
                     if t.node == NODE_NONE {
-                        if stdlib::getenv("SC_CO_DEBUG") != null {
-                            eprint(
-                                "co widen: call in {} span {}..{}\n",
-                                self.modules.at(m).path.as_str(),
-                                n.span.start,
-                                n.span.end,
-                            );
-                        }
                         self.co_state = 2; // fn value or dyn dispatch: cannot pin the callee
                         return;
                     }
@@ -1372,20 +1350,6 @@ extend Package {
                 }
             }
         }
-    }
-
-    pub fn co_dump(self: &Self) {
-        if stdlib::getenv("SC_CO_DEBUG") == null {
-            return;
-        }
-        let mut tot: usize = 0;
-        for m in 0..self.co_spans.len() {
-            if self.co_spans.at(m).len() != 0 {
-                eprint("co marks {}: {}\n", self.modules.at(m).path.as_str(), self.co_spans.at(m).len());
-                tot += self.co_spans.at(m).len();
-            }
-        }
-        eprint("co state {} total {}\n", self.co_state, tot);
     }
 
     /// Can the function or closure declared exactly at `sp` reach the runtime's cancellation
@@ -1535,12 +1499,12 @@ extend Package {
     }
 
     /// Approximate owned bytes across the package's retained analyses (the LSP budget's accounting
-    /// unit): per-module sources + arenas, plus the syntax snapshots when kept.
+    /// unit): per-module sources + arenas.
     pub const fn retained_bytes(self: &Self) usize {
         let mut b: usize = 0;
         for i in 0..self.modules.len() {
             let m = self.modules.at(i);
-            b += m.source.capacity() + m.ast.retained_bytes() + m.syntax.retained_bytes();
+            b += m.source.capacity() + m.ast.retained_bytes();
         }
         return b;
     }
@@ -1558,17 +1522,7 @@ extend Package {
     // Add a module slot (taking ownership of `path`/`file`/`source`/`ast`) and return its id.
     fn add_module(self: &mut Self, path: String, file: String, source: String, ast: Ast, has_ast: bool) i32 {
         let id = self.modules.len() as i32;
-        self.modules.push(
-            Module {
-                path: path,
-                file: file,
-                source: source,
-                ast: ast,
-                syntax: Ast::new(0),
-                has_ast: has_ast,
-                prelude: false,
-            },
-        );
+        self.modules.push(Module { path: path, file: file, source: source, ast: ast, has_ast: has_ast, prelude: false });
         return id;
     }
 

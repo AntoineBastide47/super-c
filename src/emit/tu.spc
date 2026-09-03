@@ -127,27 +127,26 @@ extend TuEmit {
         }
         self.state.insert(key, 1);
         self.emit_fwd(it);
-        let ok = self.emit_agg_body(it, nm.as_str());
+        self.emit_agg_body(it, nm.as_str());
         self.state.insert(key, 2);
-        return ok;
+        return true;
     }
 
-    fn emit_agg_body(self: &mut Self, it: &AggItem, nm: str) bool {
+    fn emit_agg_body(self: &mut Self, it: &AggItem, nm: str) {
         let da = self.p().module_ast_const(it.m);
         let n = da.at_const(it.decl);
         let is_enum = n.kind == NodeKind::NODE_ENUM;
         let nb = self.bind_item(it);
         if nb < 0 {
             self.skipped += 1;
-            return true;
+            return;
         }
         let mut body = String::new();
-        let mut ok = true;
-        if is_enum {
-            ok = self.enum_body(it, nm, &mut body);
+        let ok = if is_enum {
+            self.enum_body(it, nm, &mut body);
         } else {
-            ok = self.struct_body(it, nm, &mut body);
-        }
+            self.struct_body(it, nm, &mut body);
+        };
         self.mg.pop_subs(nb as usize);
         if ok {
             self.out.push_string(&body);
@@ -155,7 +154,6 @@ extend TuEmit {
         } else {
             self.skipped += 1;
         }
-        return true;
     }
 
     // Emit dependencies of a by-value field type, then spell it. Pointers/references need only the
@@ -517,8 +515,6 @@ extend TuEmit {
         return true;
     }
 
-    // The concrete length of a generic `[T; N]` field: the annotation's length expression folded
-    // under the instance env (its pool type interns len 0, indistinguishable from a real []).
     // Evaluate a symbolic `[T; expr]` length under the instance env: literals, + - * / % << >>
     // arithmetic, and params folded through the substitution stack (`(BITS + 63) / 64` = 2 at
     // BITS=128). The checker interns these fields at len 0, so the value only exists HERE.
@@ -880,8 +876,6 @@ extend TuEmit {
         self.fwd2.push_str(";\n");
     }
 
-    /// Define an instance aggregate first named by a demand-driven body: no anchor TypeId exists,
-    /// so the generics bind straight from the descriptor before the usual dependency DFS.
     /// Mark an env-struct name (FNV) as defined; `env_done` queries it.
     pub fn mark_env_done(self: &mut Self, h: u64) {
         self.state.insert(h, 2);
@@ -893,6 +887,8 @@ extend TuEmit {
         };
     }
 
+    /// Define an instance aggregate first named by a demand-driven body: no anchor TypeId exists,
+    /// so the generics bind straight from the descriptor before the usual dependency DFS.
     pub fn emit_agg_inst(self: &mut Self, pm: ModuleId, inst0: TyInstance) bool {
         let inst = &inst0;
         let mut nm = String::new();

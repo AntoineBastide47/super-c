@@ -4,7 +4,6 @@
 // it may produce false candidates but can never hide one, because every edge it drops exists at
 // SOME point. The reference solver at the bottom materializes the full product graph and must agree
 // with the optimized path on small bodies; only tests run it.
-import stdlib;
 import lexer::token as tok;
 import ir::core as ir;
 import borrowck::facts as bf;
@@ -15,7 +14,6 @@ import utils::bits as bits;
 /// Borrow error kinds.
 pub const BE_CONFLICT: u8 = 0; // access invalidates a loan that is still required
 pub const BE_ESCAPE: u8 = 1; // borrow of body-local storage escapes through a placeholder
-pub const BE_PLACEHOLDER: u8 = 2; // placeholder flows into another without a declared relation
 
 /// BorrowErr.acc for a conflict caused by storage death (the borrowed local leaves scope).
 pub const ACC_DEAD: u8 = 5;
@@ -29,76 +27,12 @@ pub struct BorrowErr {
     pub loan_span: tok::Span,
 }
 
-/// Per-body solver counters (aggregated by the driver's report).
-pub struct Stats {
-    pub origins: u64,
-    pub universals: u64,
-    pub loans: u64,
-    pub points: u64,
-    pub cfg_edges: u64,
-    pub subset_facts: u64,
-    pub issue_facts: u64,
-    pub kill_facts: u64,
-    pub activation_facts: u64,
-    pub access_facts: u64,
-    pub candidates: u64,
-    pub clean_bodies: u64,
-    pub queries: u64,
-    pub cache_hits: u64,
-    pub steps: u64,
-    pub loanset_bytes: u64,
-    pub scratch_bytes: u64,
-}
-
-pub const fn stats_zero() Stats {
-    return Stats {
-        origins: 0,
-        universals: 0,
-        loans: 0,
-        points: 0,
-        cfg_edges: 0,
-        subset_facts: 0,
-        issue_facts: 0,
-        kill_facts: 0,
-        activation_facts: 0,
-        access_facts: 0,
-        candidates: 0,
-        clean_bodies: 0,
-        queries: 0,
-        cache_hits: 0,
-        steps: 0,
-        loanset_bytes: 0,
-        scratch_bytes: 0,
-    };
-}
-
-pub const fn stats_add(a: &mut Stats, b: &Stats) {
-    a.origins += b.origins;
-    a.universals += b.universals;
-    a.loans += b.loans;
-    a.points += b.points;
-    a.cfg_edges += b.cfg_edges;
-    a.subset_facts += b.subset_facts;
-    a.issue_facts += b.issue_facts;
-    a.kill_facts += b.kill_facts;
-    a.activation_facts += b.activation_facts;
-    a.access_facts += b.access_facts;
-    a.candidates += b.candidates;
-    a.clean_bodies += b.clean_bodies;
-    a.queries += b.queries;
-    a.cache_hits += b.cache_hits;
-    a.steps += b.steps;
-    a.loanset_bytes += b.loanset_bytes;
-    a.scratch_bytes += b.scratch_bytes;
-}
-
 pub struct Solver {
     pub b: *const ir::CoreBody,
     pub f: *const bf::BodyFacts,
     pub c: *const df::Cfg,
     pub lv: *const df::Liveness,
     pub errs: Vector<BorrowErr>,
-    pub stats: Stats,
     pub point_block: Vector<u32>, // per point: its block
     pub sub_by_point: Vector<u32>, // subset indexes sorted by point
     pub sub_pt_start: Vector<u32>, // per point (+1): range into sub_by_point (entry seeds at 0)
@@ -252,7 +186,6 @@ extend Solver {
             c: null,
             lv: null,
             errs: Vector::<BorrowErr>::new(),
-            stats: stats_zero(),
             point_block: Vector::<u32>::new(),
             sub_by_point: Vector::<u32>::new(),
             sub_pt_start: Vector::<u32>::new(),
@@ -288,9 +221,8 @@ extend Solver {
         };
     }
 
-    // Truncate every vector (keeping heap capacity) and clear scalars/stats/scope, for reuse.
+    // Truncate every vector (keeping heap capacity) and clear scalars and scope, for reuse.
     pub fn reset(self: &mut Self) {
-        self.stats = stats_zero();
         self.pwords = 0;
         self.owords = 0;
         self.errs.truncate(0);
@@ -329,40 +261,9 @@ extend Solver {
         s.f = f;
         s.c = c;
         s.lv = lv;
-        s.stats.origins = f.norigins;
-        s.stats.universals = f.nuniversal;
-        s.stats.loans = f.loans.len() as u64;
-        s.stats.points = f.npoints;
-        s.stats.subset_facts = f.subsets.len() as u64;
-        s.stats.issue_facts = f.loans.len() as u64;
-        s.stats.kill_facts = f.kills.len() as u64;
-        s.stats.access_facts = f.accesses.len() as u64;
-        for l in 0..f.loans.len() {
-            if f.loans.at(l).activated_at != bf::BF_NONE {
-                s.stats.activation_facts += 1;
-            }
-        }
         // Zero loans: conflict, scope, and escape analysis have nothing to feed (each of their
-        // errors names a loan). Only a flow into a DECLARED return-lifetime placeholder can still
-        // error, so run the signature-relation stages (whose flood reads origin liveness) exactly
-        // when one exists and skip everything otherwise.
+        // errors names a loan).
         if f.loans.len() == 0 {
-            // `placeholders` pairs distinct universals, so a lone universal cannot error.
-            let mut ph = f.nuniversal > 1;
-            if ph {
-                ph = false;
-                for r in 0..f.ret_origin.len() {
-                    if !f.ret_elided[r] {
-                        ph = true;
-                    }
-                }
-            }
-            if ph {
-                s.index_points();
-                s.origin_live_points();
-                s.prepass();
-                s.placeholders();
-            }
             return;
         }
         s.index_points();
@@ -371,12 +272,6 @@ extend Solver {
         s.scope_flow();
         s.conflicts();
         s.escapes();
-        s.placeholders();
-        s.stats.loanset_bytes = s.scope.retained_bytes() as u64;
-        s.stats.scratch_bytes = (s.visit.capacity() * 8 + s.live_pts.capacity() * 8 + s.req_cache.capacity() * 8) as u64;
-        if s.errs.len() == 0 {
-            s.stats.clean_bodies = 1;
-        }
     }
 }
 
@@ -408,7 +303,6 @@ extend Solver {
                 self.point_block.push(bi);
             }
         }
-        self.stats.cfg_edges = c.succ.len() as u64;
         // Subsets sorted by point (counting sort: two passes over the fact vector).
         let n = f.subsets.len();
         // Grows only past the high-water mark, then re-zeroes through raw stores (see MoveFlow).
@@ -898,10 +792,8 @@ extend Solver {
         }
         let row = (li * self.pwords) as usize;
         if self.req_have[li as usize] {
-            self.stats.cache_hits += 1;
             return row;
         }
-        self.stats.queries += 1;
         self.req_have.set(li as usize, true);
         let vwords = ((f.norigins as u64 * f.npoints as u64 + 63) / 64) as usize;
         // Keep `visit` sized once per body and clear only the words the previous query set: the flood
@@ -935,7 +827,6 @@ extend Solver {
                 self.visit_dirty.push(w as u32);
             }
             self.visit.set(w, self.visit[w] | msk);
-            self.stats.steps += 1;
             if self.origin_live_at(o, p) {
                 self.req_cache.set(
                     row + (p / 64) as usize,
@@ -1108,7 +999,6 @@ extend Solver {
                         continue;
                     }
                 }
-                self.stats.candidates += 1;
                 // In scope at the access?
                 let bi = self.point_block[ac.point as usize];
                 self.transfer_block(bi, ac.point - 1, &mut scratch);
@@ -1232,121 +1122,6 @@ extend Solver {
             }
         }
     }
-
-    // Placeholder-to-placeholder flow must be declared. Elided return placeholders accept every
-    // input; 'static (origin 0) flows anywhere.
-    fn placeholders(self: &mut Self) {
-        let f = unsafe &*self.f;
-        for u in 1..f.nuniversal {
-            for v in 0..f.nuniversal {
-                if u == v || !self.prereach(u, v) {
-                    continue;
-                }
-                // Only flows into a DECLARED return placeholder are checkable relations; elided
-                // returns accept every input, and argument placeholders are the store-escape
-                // analysis' concern, not a signature relation.
-                let mut is_ret = false;
-                let mut ok = u == 0;
-                for r in 0..f.ret_origin.len() {
-                    if f.ret_origin[r] == v {
-                        is_ret = true;
-                        if f.ret_elided[r] {
-                            ok = true;
-                        }
-                    }
-                }
-                if !is_ret {
-                    ok = true;
-                }
-                for k in 0..f.known_subsets.len() {
-                    let rec = f.known_subsets[k];
-                    if (rec >> 32) as u32 == u && (rec & 0xFFFFFFFFu64) as u32 == v {
-                        ok = true;
-                    }
-                }
-                if !ok {
-                    if stdlib::getenv("SC_BORROW_TRACE") != null {
-                        eprint("ph-flow u={} v={} nuni={} known={}\n", u, v, f.nuniversal, f.known_subsets.len());
-                        for kk in 0..f.known_subsets.len() {
-                            eprint(
-                                "  known {} -> {}\n",
-                                (f.known_subsets[kk] >> 32) as u32,
-                                (f.known_subsets[kk] & 0xFFFFFFFFu64) as u32,
-                            );
-                        }
-                    }
-                    // Location-sensitive confirmation: some point-local chain must actually connect
-                    // the two placeholders (the prepass alone may be a false candidate).
-                    if self.uni_reaches(u, v) {
-                        self.errs.push(
-                            BorrowErr {
-                                kind: BE_PLACEHOLDER,
-                                acc: 0,
-                                loan: bf::BF_NONE,
-                                point: 0,
-                                span: f.uni_name[u as usize],
-                                loan_span: f.uni_name[v as usize],
-                            },
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Full location-sensitive placeholder query: flood from (u, entry) like a loan.
-    fn uni_reaches(self: &mut Self, u: u32, v: u32) bool {
-        let f = unsafe &*self.f;
-        let vwords = ((f.norigins as u64 * f.npoints as u64 + 63) / 64) as usize;
-        self.visit.clear();
-        for _i in 0..vwords {
-            self.visit.push(0u64);
-        }
-        self.work.clear();
-        self.work.push(u as u64 << 32 | 0u64);
-        let mut succs = Vector::<u32>::new();
-        let mut found = false;
-        while self.work.len() != 0 && !found {
-            let node = self.work[self.work.len() - 1];
-            let _ = self.work.pop();
-            let o = (node >> 32) as u32;
-            let p = (node & 0xFFFFFFFFu64) as u32;
-            let bit = o as u64 * f.npoints as u64 + p as u64;
-            let w = (bit / 64) as usize;
-            let msk = 1u64 << (bit & 63);
-            if (self.visit[w] & msk) != 0 {
-                continue;
-            }
-            if self.visit[w] == 0 {
-                self.visit_dirty.push(w as u32);
-            }
-            self.visit.set(w, self.visit[w] | msk);
-            self.stats.steps += 1;
-            if o == v {
-                found = true;
-                break;
-            }
-            for i in self.sub_pt_start[p as usize]..self.sub_pt_start[p as usize + 1] {
-                let e = *f.subsets.at(self.sub_by_point[i as usize] as usize);
-                if e.from == o {
-                    self.work.push(e.to as u64 << 32 | p as u64);
-                }
-            }
-            for u2 in 0..f.uni_flows.len() {
-                if (f.uni_flows[u2] >> 32) as u32 == o {
-                    self.work.push((f.uni_flows[u2] & 0xFFFFFFFFu64) << 32 | p as u64);
-                }
-            }
-            self.point_succs(p, &mut succs);
-            for s in 0..succs.len() {
-                let q = succs[s];
-                if o < f.nuniversal || self.origin_live_at(o, q) {
-                    self.work.push(o as u64 << 32 | q as u64);
-                }
-            }
-        }
-        return found;
-    }
 }
 
 // ---- reference solver -----------------------------------------------------------------------------
@@ -1356,13 +1131,11 @@ extend Solver {
 pub struct RefResult {
     pub required: Vector<u64>, // per loan: point bitset rows (pwords each)
     pub pwords: u32,
-    pub errs: Vector<BorrowErr>,
 }
 
 extend RefResult as Free {
     pub fn free(self: &mut Self) {
         self.required.free();
-        self.errs.free();
     }
 }
 
@@ -1374,7 +1147,7 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
     if pwords == 0 {
         pwords = 1;
     }
-    let mut r = RefResult { required: Vector::<u64>::new(), pwords: pwords, errs: Vector::<BorrowErr>::new() };
+    let mut r = RefResult { required: Vector::<u64>::new(), pwords: pwords };
     // Explicit edges: (o, p) -> (o2, p) for subsets at p; (o, p) -> (o, q) for point succ q.
     for li in 0..f.loans.len() {
         let lo = *f.loans.at(li);
@@ -1433,11 +1206,6 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
         for w in 0..pwords {
             r.required.push(req[w as usize]);
         }
-    }
-    // The error list comes from the optimized solver run above (same facts, same rules); the
-    // comparison value of this path is the independently computed `required` sets.
-    for e in 0..sv.errs.len() {
-        r.errs.push(*sv.errs.at(e));
     }
     return r;
 }

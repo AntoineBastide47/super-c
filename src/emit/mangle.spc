@@ -1,9 +1,7 @@
-// The frozen C symbol-naming authority for the streaming backend. Every rule here reproduces the
-// established emitter's output byte-for-byte and is verified against it by the SC_MANGLE replay
-// (driver::emit): the old emitter records each replayable render as (pool module, TypeId, symbol)
-// and this module must regenerate the identical bytes from the pools alone. Inputs are concrete,
-// pool-local types under an empty substitution frame -- resolution happens before naming, never
-// inside it. Renders outside the frozen subset refuse (false) instead of guessing.
+// The frozen C symbol-naming authority for the streaming backend: every symbol regenerates from
+// the pools alone. Inputs are concrete, pool-local types under an empty substitution frame --
+// resolution happens before naming, never inside it. Renders outside the frozen subset refuse
+// (false) instead of guessing.
 import ast::ast as *;
 import ir::layout as lay;
 import lexer::token as tok;
@@ -748,7 +746,6 @@ extend Mangler {
         return ok;
     }
 
-    /// `""` | `<seg>__` | `<a>__<b>__` -- the module prefix of every prefixed symbol.
     /// Record the cross-TU edge for module `m` exactly as spelling it would (replay path for
     /// memoized renders).
     pub fn mark_used(self: &mut Self, m: ModuleId) {
@@ -782,7 +779,6 @@ extend Mangler {
         self.used_mods.set(row * n + dst as usize, 1);
     }
 
-    /// Was a (spelling TU `src` -> module `dst`) edge recorded? `src` 65534 = the instance TU.
     /// Frontier merge: absorb shard `o`'s cross-TU row for TU `m` and its instance-aggregate
     /// requests (first module-order claimant wins, matching the serial loop).
     /// The used-mods row is an idempotent OR: absorbed once per shard, outside any demand range.

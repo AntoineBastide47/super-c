@@ -3,10 +3,6 @@
 // the aliases resolve unqualified everywhere and these read like the built-in integers: `let a: u128 = 42`
 // converts the literal through the `From` conformances below, exactly as a narrower built-in widens.
 //
-// It sat under `std/num/` until a release could compile it. The storage `[u64; BITS / 64]` needs a compiler
-// that substitutes a const-generic ARGUMENT into an array length expression, and a prelude module is
-// compiled by the release the bootstrap starts from; that release now carries the substitution.
-//
 // The generic argument is the BIT width, not a limb count: `UInt<256>` says what it is at every use site
 // and in every diagnostic, and the storage `[u64; (BITS + 63) / 64]` follows from it. ANY positive width
 // works, 64-multiple or not: the top limb's unused bits stay zero, an invariant `set` enforces at the one

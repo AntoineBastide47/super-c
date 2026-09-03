@@ -833,7 +833,6 @@ All knobs are environment variables prefixed `SC_`; none is required for normal 
 | `SC_NO_EMIT_CACHE` | disable the emit stamp (the whole-transpile skip when no input changed) |
 | `SC_NO_TU_CACHE` | disable the per-TU journal/replay cache |
 | `SC_BUILD_MEM_BUDGET` | cap the estimated bytes the parallel emission holds in flight (`64M`, `2G`; unset = unlimited) |
-| `SC_STAMP_DEBUG` | trace emit-stamp decisions (why a build was or was not skipped) |
 | `SC_TIMINGS` | print per-phase timing for a build |
 
 ### Verification passes (dev gates in `src/driver/emit.spc`; each runs only when set)
@@ -841,28 +840,21 @@ All knobs are environment variables prefixed `SC_`; none is required for normal 
 | Variable | Effect |
 | --- | --- |
 | `SC_FACTS_CHECK` | snapshot semantic-table watermarks after typecheck; report any table a later stage changed (the freeze contract) |
-| `SC_CORE_IR` | Core IR coverage pass; `=print` dumps lowered bodies |
-| `SC_BORROW_IR` | borrow-IR shadow pass; `=ref` runs the reference lane |
+| `SC_CORE_IR` | re-verify every inlined body and re-prove every bounds-check elimination |
 | `SC_LAYOUT` | validate every concrete pool type against the C layout invariants |
-| `SC_CEMIT` | run the streaming C emitter over every body twice and verify the hashes match |
-| `SC_AST_STATS` | print AST/node statistics |
-| `SC_CEMIT_TU` / `SC_CEMIT_STATS` | verbose per-TU emission and const/reflect group statistics; `SC_CEMIT_STATS` also prints per-phase wall times (load/resolve/typecheck/borrowck/panics/emission stages) |
+| `SC_CEMIT_STATS` | per-phase wall times (load/resolve/typecheck/borrowck/panics/emission stages) and const/reflect group statistics |
 
 ### Debug traces
 
 | Variable | Effect |
 | --- | --- |
-| `SC_IRI_DBG` | const-engine failure traces (failed rvalues, failed runs, flush results) |
-| `SC_BORROW_TRACE` | dump borrow-check errors with context |
-| `SC_ZC_DBG` | ZST-elision layout decisions in lowering |
-| `SC_PROJ_DBG` | parallel-for field-projection lowering decisions |
-| `SC_CO_DEBUG` | coroutine-launch reachability widening in the loader |
+| `SC_INLINE_STATS` | per-body inliner decision counters |
+| `SC_BCE_STATS` | per-body bounds-check elimination counters |
 
 ### LSP (`src/lsp/server.spc`)
 
 | Variable | Effect |
 | --- | --- |
-| `SC_LSP_DEBUG` | server-side logging |
 | `SC_LSP_NO_INCR` | disable incremental per-edit recompilation (full rebuild each edit) |
 | `SC_LSP_BUDGET_MB` | memory budget for the analysis cache |
 

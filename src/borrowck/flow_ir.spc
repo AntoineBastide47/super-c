@@ -1,7 +1,6 @@
 // Production flow diagnostics from the Core IR loan/move analysis. `bc_fn` lowers every body,
-// replays its event tape (the helper-call sequence the old walk made), then analyzes the lowered
-// bodies and emits the flow categories, worded exactly as the walk worded them. A body that fails
-// to lower is a hard error (bc_lower_err) -- no body ever goes unchecked.
+// replays its event tape, then analyzes the lowered bodies and emits the flow categories. A body
+// that fails to lower is a hard error (bc_lower_err) -- no body ever goes unchecked.
 import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
@@ -143,14 +142,6 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
             }
         }
     }
-    if !synt {
-        for s in 0..body.statements.len() {
-            if body.statements.at(s).kind == ir::ST_ASM {
-                synt = true;
-                break;
-            }
-        }
-    }
     let slim = !carrier && !synt;
     if slim && !owned && !body.has_uninit_decl {
         ctx.moves.errs.truncate(0);
@@ -160,21 +151,14 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     ctx.forest.build_into(body);
     ow.generate_into(body, &ctx.forest, &mut ctx.facts);
     // Boundary liveness only feeds the loan solver's origin-liveness stage, which runs for
-    // loan-bearing bodies and for declared return-lifetime placeholders (the solver's
-    // zero-loan gate, mirrored); leave the stale rows unread otherwise.
-    let mut lv_need = ctx.facts.loans.len() != 0;
-    if !lv_need && ctx.facts.nuniversal > 1 {
-        for r in 0..ctx.facts.ret_origin.len() {
-            if !ctx.facts.ret_elided[r] {
-                lv_need = true;
-            }
-        }
-    }
+    // loan-bearing bodies (the solver's zero-loan gate, mirrored); leave the stale rows unread
+    // otherwise.
+    let lv_need = ctx.facts.loans.len() != 0;
     // No move events and every local initializes at its declaration (which dominates its uses):
     // no move, double-move, partial, or uninit error can exist -- skip the move/init dataflow.
     let mv_need = body.has_uninit_decl || ctx.facts.nmoves != 0;
-    // The CFG feeds only those two and the solver's placeholder flood; a body needing none of
-    // them never walks it (the solver's early return only stores the stale pointer).
+    // The CFG feeds only those two; a body needing neither never walks it (the solver's early
+    // return only stores the stale pointer).
     if lv_need || mv_need {
         ctx.cfg.build_into(body);
     }
@@ -649,7 +633,6 @@ extend tc::TypeChecker {
             } else if er.kind == bln::BE_ESCAPE {
                 self.bc_ir_escape(body, &ctx.facts, &mut ctx.solver, &er, seen, out);
             }
-            // BE_PLACEHOLDER stays with the walk's signature-level lifetime checks.
         }
     }
 

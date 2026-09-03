@@ -477,7 +477,6 @@ pub struct IndexData {
 pub struct MemberData {
     pub object: NodeId,
     pub member: NodeId,
-    pub pointer: bool,
     pub path: bool,
 }
 pub struct CastData {
@@ -1304,7 +1303,6 @@ pub struct Ast {
     pub instance_index: Vector<u32>,
     pub inst_ix_used: u32,
     pub method_inst_index: Vector<u32>,
-    pub mi_ix_used: u32,
     pub dyn_uses: Vector<DynUse>,
     pub dyn_at: Vector<u32>,
     pub deref_uses: Vector<DerefUse>,
@@ -1353,7 +1351,6 @@ extend Ast {
             instance_index: Vector::<u32>::new(),
             inst_ix_used: 0,
             method_inst_index: Vector::<u32>::new(),
-            mi_ix_used: 0,
             dyn_uses: Vector::<DynUse>::new(),
             dyn_at: Vector::<u32>::new(),
             deref_uses: Vector::<DerefUse>::new(),

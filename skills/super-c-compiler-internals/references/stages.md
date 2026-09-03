@@ -35,9 +35,8 @@ One parallel frontier; for each module, `Resolver::resolve()` runs and then
 - HIR lowering IS the desugar stage: sugar-keyword markers become core nodes
   (`launch` → the `SI_SUBMIT` shim call via `lower_to_core_call`; `select` via
   `lower_select`, which builds nodes with hand-seeded resolutions). Lowering is by MOVE
-  — the parse arena becomes the HIR in place; `SC_KEEP_SYNTAX=1` retains a pristine
-  snapshot in `Module.syntax`. Typecheck, borrowck, const-eval and codegen never see a
-  sugar node.
+  — the parse arena becomes the HIR in place. Typecheck, borrowck, const-eval and codegen
+  never see a sugar node.
 
 ## 4. Typecheck, per module (`src/typechecker/`)
 
@@ -81,10 +80,8 @@ modular return-lifetime check) run alongside.
 | Gate | Pass | What it checks |
 |------|------|----------------|
 | `SC_FACTS_CHECK` | `facts_verify("borrowck")` | No decision table changed since typecheck |
-| `SC_CORE_IR` | `core_ir_pass` | Core IR lowering coverage (`=print` dumps bodies) |
-| `SC_BORROW_IR` | `borrow_ir_pass` | Borrow-IR shadow comparison |
 | `SC_LAYOUT` | `layout_pass` | Every concrete pool type vs the C layout invariants |
-| `SC_CEMIT` / `SC_CEMIT_TU` | `cemit_pass` / `cemit_tu_pass` | Emitter double-run hash comparison / per-TU stats |
+| `SC_CORE_IR` | `apply_drops_of` (emission) | Inlined bodies re-verify; every PROVEN bounds check re-proves |
 
 ## 7. Lint, Panic Check, Const Flush
 

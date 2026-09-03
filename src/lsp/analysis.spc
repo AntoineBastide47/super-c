@@ -15,6 +15,7 @@ import typechecker::typechecker as tc;
 import ir::interp as iri;
 import utils::errors as diag;
 import driver::emit as emit;
+import driver::util as dutil;
 
 /// One harvested diagnostic: the cross-pass record the server publishes and codeAction later reads
 /// (the fix fields carry the machine-applicable quick fix, if any).
@@ -154,11 +155,10 @@ fn harvest_parse_errors(p: &loader::Package, i: usize, diags: &mut Vector<DiagRe
     drain_errors(&ps.errors, i as u32, diags);
 }
 
-type CanonBuf = Array<char, 4096>;
-
-fn canon_path(path: str) String {
+/// Canonicalize `path` via realpath; a file not on disk yet keeps the given form.
+pub fn canon_path(path: str) String {
     let mut pb = String::from_str(path);
-    let mut rb = CanonBuf {};
+    let mut rb = dutil::PathBuf {};
     if unsafe shim::sc_realpath(pb.cstr(), &mut rb[0]) != null {
         return String::from_cstr(&rb[0]);
     }

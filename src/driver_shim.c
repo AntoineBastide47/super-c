@@ -109,19 +109,6 @@ int sc_same_file(const char *a, const char *b) {
 #endif
 }
 
-#if defined(_WIN32) || defined(__wasi__)
-/* system() returns the child's exit code directly on Windows (no wait-status encoding), and WASI
-   has no child processes at all -- the stubs below never produce a status to decode. */
-int sc_wifexited(int status) {
-  (void)status;
-  return 1;
-}
-int sc_wexitstatus(int status) { return status; }
-#else
-int sc_wifexited(int status) { return WIFEXITED(status) ? 1 : 0; }
-int sc_wexitstatus(int status) { return WEXITSTATUS(status); }
-#endif
-
 char *sc_realpath(const char *path, char *resolved) {
 #if defined(_WIN32)
   if (_access(path, 0) != 0)
@@ -465,41 +452,6 @@ long long sc_ticks_ms(void) {
 #endif
 }
 
-/* Start `cmd` through the shell without waiting (redirections live inside the string); the returned
-   pid/handle is claimed by sc_wait_any. -1 on spawn failure. */
-long long sc_spawn(const char *cmd) {
-#if defined(__wasi__)
-  (void)cmd;
-  return -1; /* WASI has no processes; the caller's spawn-failure path reports it */
-#elif defined(_WIN32)
-  const char *sh = getenv("COMSPEC");
-  if (!sh)
-    sh = "cmd.exe";
-  size_t n = strlen(sh) + strlen(cmd) + 5;
-  char *line = malloc(n);
-  if (!line)
-    return -1;
-  snprintf(line, n, "%s /c %s", sh, cmd);
-  STARTUPINFOA si;
-  PROCESS_INFORMATION pi;
-  memset(&si, 0, sizeof si);
-  si.cb = sizeof si;
-  BOOL ok = CreateProcessA(NULL, line, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
-  free(line);
-  if (!ok)
-    return -1;
-  CloseHandle(pi.hThread);
-  return (long long)(intptr_t)pi.hProcess;
-#else
-  extern char **environ;
-  pid_t pid;
-  char *argv[] = {"sh", "-c", (char *)cmd, NULL};
-  if (posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ) != 0)
-    return -1;
-  return (long long)pid;
-#endif
-}
-
 #if defined(_WIN32)
 /* One CreateProcess command-line argument under the MSVCRT parsing rules: quote when the argument
    contains a space, tab, quote, or is empty; inside quotes, N backslashes before a '"' become 2N+1
@@ -785,23 +737,6 @@ int sc_fd_close(int fd) {
    registry and buffered stdio are not replayed once per child. */
 void sc_exit_now(int code) {
   _exit(code);
-}
-
-/* 1 when this binary is ASan-instrumented. fork() under ASan copy-on-write-faults the entire
-   shadow region per child, which costs more than the parallel emit saves -- such a binary keeps
-   the serial path. Compile-time of the shim, which is built with the profile's own cflags. */
-int sc_asan(void) {
-#if defined(__SANITIZE_ADDRESS__)
-  return 1;
-#elif defined(__has_feature)
-#  if __has_feature(address_sanitizer)
-  return 1;
-#  else
-  return 0;
-#  endif
-#else
-  return 0;
-#endif
 }
 
 /* Block for ONE specific child; its exit code via *code, 0 on success, -1 on error/Windows.

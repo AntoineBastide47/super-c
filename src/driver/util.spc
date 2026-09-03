@@ -108,6 +108,37 @@ pub fn build_out_path(gen_dir: str, mod_path: str, ext: str) String {
     return out;
 }
 
+pub fn is_dir(path: str) bool {
+    let mut p = String::from_str(path);
+    return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
+}
+
+// Whitespace-split `s` into argv entries: FLAG strings keep their historic shell-splitting contract
+// ("-framework Cocoa" is two arguments); paths the engine controls are pushed as single entries and
+// never split, which is what lets spaces, quotes and non-ASCII bytes pass through.
+pub fn split_args(out: &mut Vector<String>, s: str) {
+    let mut a: usize = 0;
+    for i in 0..s.len() + 1 {
+        let ws = i == s.len() || s[i] == b' ' || s[i] == b'\t';
+        if ws {
+            if i > a {
+                out.push(String::from_str(s.slice(a, i)));
+            }
+            a = i + 1;
+        }
+    }
+}
+
+// spawn_args + wait, output inherited (or captured when `log` is non-null): exit code, -1 on failure.
+pub fn exec_args(args: &mut Vector<String>, log: *const char) i32 {
+    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
+    for i in 0..args.len() {
+        ptrs.push(args[i].cstr() as usize);
+    }
+    ptrs.push(0);
+    return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, log);
+}
+
 /// Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
 pub fn mkdir_p(path: str) {
     let n = path.len();

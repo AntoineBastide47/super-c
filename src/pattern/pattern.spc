@@ -10,7 +10,7 @@
 // ranges, strings, floats, and every other literal are treated as never-complete, matching the
 // established diagnostics (an integer switch needs a catch-all even when its ranges cover the
 // domain). A work budget bounds adversarial or-pattern expansion; on overflow every query answers
-// conservatively (assume exhaustive, assume reachable) and callers keep their legacy path.
+// conservatively (assume exhaustive, assume reachable).
 import lexer::token as tok;
 import lexer::token_type as tt;
 import ast::ast as *;
@@ -126,7 +126,6 @@ extend PatCx as Free {
     }
 }
 
-// Decimal literal fast path (sign included); ok=false for any other spelling.
 /// The code point of a `'x'` / `b'x'` literal (escape rules mirror the checker's decode).
 pub fn char_of(src: str, sp: tok::Span) Option<i64> {
     if sp.end <= sp.start + 2 {

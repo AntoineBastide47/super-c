@@ -45,7 +45,7 @@ fn published_identity(fx: &mut Fx) {
 
 @test
 fn var_binds_and_resolves(fx: &mut Fx) {
-    let v = fx.sv.var_new(inf::VK_GENERAL, 0);
+    let v = fx.sv.var_new();
     let i32t = inf::it_pub(Ast::builtin(BuiltinType::BT_I32));
     assert(fx.sv.unify(inf::it_var(v), i32t), "unbound var binds");
     assert_eq(fx.sv.resolve(inf::it_var(v)), i32t);
@@ -53,8 +53,8 @@ fn var_binds_and_resolves(fx: &mut Fx) {
 
 @test
 fn union_then_bind_flows(fx: &mut Fx) {
-    let a = fx.sv.var_new(inf::VK_GENERAL, 0);
-    let b = fx.sv.var_new(inf::VK_GENERAL, 0);
+    let a = fx.sv.var_new();
+    let b = fx.sv.var_new();
     assert(fx.sv.union_vars(a, b), "two unbound vars join");
     let i64t = inf::it_pub(Ast::builtin(BuiltinType::BT_I64));
     assert(fx.sv.unify(inf::it_var(a), i64t), "binding one root binds the class");
@@ -63,7 +63,7 @@ fn union_then_bind_flows(fx: &mut Fx) {
 
 @test
 fn existing_binding_must_unify(fx: &mut Fx) {
-    let v = fx.sv.var_new(inf::VK_GENERAL, 0);
+    let v = fx.sv.var_new();
     let i32t = inf::it_pub(Ast::builtin(BuiltinType::BT_I32));
     let i64t = inf::it_pub(Ast::builtin(BuiltinType::BT_I64));
     assert(fx.sv.unify(inf::it_var(v), i32t), "first use binds");
@@ -81,7 +81,7 @@ fn local_compound_decomposes(fx: &mut Fx) {
             as_data: TyAs { elem: i32t },
         },
     );
-    let v = fx.sv.var_new(inf::VK_GENERAL, 0);
+    let v = fx.sv.var_new();
     let lp = fx.sv.local_elem(TypeKind::TYPE_POINTER, TypeQualifier::TYPE_QUAL_CONST as u8, inf::it_var(v));
     assert(fx.sv.unify(lp, inf::it_pub(pptr)), "local pointer unifies with published pointer");
     assert_eq(fx.sv.resolve(inf::it_var(v)), inf::it_pub(i32t));
@@ -89,15 +89,15 @@ fn local_compound_decomposes(fx: &mut Fx) {
     let mptr = fx.c.ast.intern_type(
         Ty { kind: TypeKind::TYPE_POINTER, qualifier: TypeQualifier::TYPE_QUAL_MUT as u8, as_data: TyAs { elem: i32t } },
     );
-    let w = fx.sv.var_new(inf::VK_GENERAL, 0);
+    let w = fx.sv.var_new();
     let lw = fx.sv.local_elem(TypeKind::TYPE_POINTER, TypeQualifier::TYPE_QUAL_CONST as u8, inf::it_var(w));
     assert(!fx.sv.unify(lw, inf::it_pub(mptr)), "qualifier mismatch fails");
 }
 
 @test
 fn local_instances_decompose(fx: &mut Fx) {
-    let va = fx.sv.var_new(inf::VK_GENERAL, 0);
-    let vb = fx.sv.var_new(inf::VK_GENERAL, 0);
+    let va = fx.sv.var_new();
+    let vb = fx.sv.var_new();
     let i32t = inf::it_pub(Ast::builtin(BuiltinType::BT_I32));
     let args1: [u32; 2] = [inf::it_var(va), i32t];
     let args2: [u32; 2] = [i32t, inf::it_var(vb)];
@@ -112,7 +112,7 @@ fn local_instances_decompose(fx: &mut Fx) {
 
 @test
 fn occurs_check_refuses_cycle(fx: &mut Fx) {
-    let v = fx.sv.var_new(inf::VK_GENERAL, 0);
+    let v = fx.sv.var_new();
     let lp = fx.sv.local_elem(TypeKind::TYPE_POINTER, TypeQualifier::TYPE_QUAL_CONST as u8, inf::it_var(v));
     assert(!fx.sv.unify(inf::it_var(v), lp), "a var cannot bind to a term containing itself");
 }
@@ -120,21 +120,21 @@ fn occurs_check_refuses_cycle(fx: &mut Fx) {
 @test
 fn rollback_restores_every_cell(fx: &mut Fx) {
     // Pre-snapshot state: two joined vars and one binding.
-    let a = fx.sv.var_new(inf::VK_GENERAL, 0);
-    let b = fx.sv.var_new(inf::VK_GENERAL, 0);
+    let a = fx.sv.var_new();
+    let b = fx.sv.var_new();
     let _ = fx.sv.union_vars(a, b);
     let i32t = inf::it_pub(Ast::builtin(BuiltinType::BT_I32));
     let before = fx.sv.state_hash();
     let snap = fx.sv.snapshot();
     // Speculative work: new vars, a union across the snapshot boundary, binds, a local, const work.
-    let c = fx.sv.var_new(inf::VK_GENERAL, 0);
-    let d = fx.sv.var_new(inf::VK_GENERAL, 0);
+    let c = fx.sv.var_new();
+    let d = fx.sv.var_new();
     let _ = fx.sv.union_vars(c, a);
     let _ = fx.sv.unify(inf::it_var(d), i32t);
     let _ = fx.sv.unify(inf::it_var(b), i32t);
     let lv = fx.sv.local_elem(TypeKind::TYPE_SLICE, 0, inf::it_var(c));
     let cv = fx.sv.cvar_new(0);
-    let _ = fx.sv.cbind(cv, 41, 0);
+    let _ = fx.sv.cbind(cv, 41);
     let _ = lv;
     assert(before != fx.sv.state_hash(), "speculative work changed the state");
     fx.sv.rollback(&snap);
@@ -150,12 +150,12 @@ fn const_conflicts_are_recorded(fx: &mut Fx) {
     let two = fx.c.ast.const_value(2);
     let three = fx.c.ast.const_value(3);
     let c = fx.sv.cvar_new(0);
-    assert(fx.sv.cbind(c, two, 10), "first const value binds");
-    assert(!fx.sv.cbind(c, three, 11), "a later disagreeing value is a conflict");
+    assert(fx.sv.cbind(c, two), "first const value binds");
+    assert(!fx.sv.cbind(c, three), "a later disagreeing value is a conflict");
     assert_eq(fx.sv.cconflicts.len(), 1);
     assert_eq(fx.sv.cconflicts[0].old, two);
     assert_eq(fx.sv.cconflicts[0].later, three);
-    assert(fx.sv.cbind(c, two, 12), "the equal value still binds");
+    assert(fx.sv.cbind(c, two), "the equal value still binds");
 }
 
 @test

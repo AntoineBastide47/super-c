@@ -16,12 +16,9 @@ import module::loader as loader;
 // Error is distinct from an unbound variable: an unbound variable is unresolved input, Error is a
 // recovered diagnostic state that must not satisfy a bound or select a candidate.
 pub type InferTy = u32;
-pub const IT_TAG_SHIFT: u32 = 30;
-pub const IT_PAYLOAD: u32 = 0x3FFFFFFF;
 pub const IT_TAG_PUB: u32 = 0;
 pub const IT_TAG_VAR: u32 = 1;
 pub const IT_TAG_LOCAL: u32 = 2;
-pub const IT_TAG_SPECIAL: u32 = 3;
 pub const IT_ERROR: InferTy = 3u32 << 30;
 pub const IT_UNBOUND: u32 = 0xFFFFFFFF; // binding-slot sentinel, never a valid InferTy
 
@@ -49,11 +46,6 @@ pub const fn it_is_cvar(t: InferTy) bool {
 pub const fn it_cvar_id(t: InferTy) u32 {
     return it_payload(t) - 1;
 }
-
-// Variable kinds: a literal variable only ever binds inside its numeric class.
-pub const VK_GENERAL: u8 = 0;
-pub const VK_INTEGER: u8 = 1;
-pub const VK_FLOAT: u8 = 2;
 
 // Rollback log cell kinds.
 const LK_PARENT: u8 = 0;
@@ -99,17 +91,14 @@ struct BoundRec {
 /// A const-value conflict: two exact uses disagreed. Recorded, not emitted -- the adapter turns
 /// these into one diagnostic at the call.
 pub struct CConflict {
-    pub cvar: u32,
     pub old: TypeId,
     pub later: TypeId,
-    pub node: NodeId,
 }
 
 /// Two directional uses of one type variable that have no unique safe-conversion join.
 pub struct TypeConflict {
     pub first: TypeId,
     pub later: TypeId,
-    pub node: NodeId,
 }
 
 /// The per-body mutable inference state. One live context serves one body at a time; check_item
@@ -229,8 +218,6 @@ pub struct Solver {
     v_parent: Vector<u32>,
     v_size: Vector<u32>,
     v_binding: Vector<u32>, // InferTy or IT_UNBOUND
-    v_kind: Vector<u8>,
-    v_origin: Vector<u32>,
     // ---- const variables (separate array: a type operation cannot accept one by accident) ----
     c_ty: Vector<u32>, // TYPE_CONST or TYPE_CONST_EXPR TypeId; canonical interning makes id equality value equality
     c_bound: Vector<bool>,
@@ -260,8 +247,6 @@ extend Solver {
             v_parent: Vector::<u32>::new(),
             v_size: Vector::<u32>::new(),
             v_binding: Vector::<u32>::new(),
-            v_kind: Vector::<u8>::new(),
-            v_origin: Vector::<u32>::new(),
             c_ty: Vector::<u32>::new(),
             c_bound: Vector::<bool>::new(),
             c_origin: Vector::<u32>::new(),
@@ -281,13 +266,11 @@ extend Solver {
 
     // ---- variables ----
 
-    pub fn var_new(self: &mut Self, kind: u8, origin: u32) u32 {
+    pub fn var_new(self: &mut Self) u32 {
         let v = self.v_parent.len() as u32;
         self.v_parent.push(v);
         self.v_size.push(1);
         self.v_binding.push(IT_UNBOUND);
-        self.v_kind.push(kind);
-        self.v_origin.push(origin);
         return v;
     }
 
@@ -367,8 +350,6 @@ extend Solver {
         self.v_parent.truncate(s.nvars as usize);
         self.v_size.truncate(s.nvars as usize);
         self.v_binding.truncate(s.nvars as usize);
-        self.v_kind.truncate(s.nvars as usize);
-        self.v_origin.truncate(s.nvars as usize);
         self.c_ty.truncate(s.ncvars as usize);
         self.c_bound.truncate(s.ncvars as usize);
         self.c_origin.truncate(s.ncvars as usize);
@@ -448,29 +429,9 @@ extend Solver {
         return false;
     }
 
-    /// Does published type `t` fit variable kind `kind`? General accepts everything; a literal
-    /// variable only binds inside its numeric class.
-    const fn kind_ok(self: &Self, kind: u8, t: TypeId) bool {
-        if kind == VK_GENERAL {
-            return true;
-        }
-        let y = unsafe (&*self.ast).type_at(t);
-        if y.kind != TypeKind::TYPE_BUILTIN {
-            return false;
-        }
-        let b = y.as_data.builtin as u32;
-        if kind == VK_INTEGER {
-            return b >= BuiltinType::BT_CHAR as u32 && b <= BuiltinType::BT_USIZE as u32;
-        }
-        return b >= BuiltinType::BT_F32 as u32 && b <= BuiltinType::BT_C64 as u32;
-    }
-
-    /// Bind root variable `r` to term `t` (not a variable). Occurs- and kind-checked; logged.
+    /// Bind root variable `r` to term `t` (not a variable). Occurs-checked; logged.
     pub fn bind(self: &mut Self, r: u32, t: InferTy) bool {
         assert(self.v_binding[r as usize] == IT_UNBOUND, "bind on a bound root");
-        if it_tag(t) == IT_TAG_PUB && !self.kind_ok(self.v_kind[r as usize], it_payload(t)) {
-            return false;
-        }
         if it_tag(t) == IT_TAG_LOCAL && self.occurs(r, t) {
             return false;
         }
@@ -480,18 +441,13 @@ extend Solver {
     }
 
     /// Join two variable classes; both must be roots with no binding (`unify`'s resolve step
-    /// guarantees that). Union by size; the winning root takes the more specific kind.
-    fn union_roots(self: &mut Self, ra: u32, rb: u32) bool {
+    /// guarantees that). Union by size.
+    fn union_roots(self: &mut Self, ra: u32, rb: u32) {
         if ra == rb {
-            return true;
+            return;
         }
         assert(self.v_binding[ra as usize] == IT_UNBOUND, "union of a bound root");
         assert(self.v_binding[rb as usize] == IT_UNBOUND, "union of a bound root");
-        let ka = self.v_kind[ra as usize];
-        let kb = self.v_kind[rb as usize];
-        if ka != kb && ka != VK_GENERAL && kb != VK_GENERAL {
-            return false;
-        }
         let mut win = ra;
         let mut lose = rb;
         if self.v_size[rb as usize] > self.v_size[ra as usize] {
@@ -502,12 +458,6 @@ extend Solver {
         self.log_size(win);
         self.v_parent.set(lose as usize, win);
         self.v_size.set(win as usize, self.v_size[win as usize] + self.v_size[lose as usize]);
-        // The winning root carries the more specific kind. Kind cells need no individual rollback:
-        // a snapshot never spans a var's creation without spanning this union too.
-        if self.v_kind[win as usize] == VK_GENERAL && self.v_kind[lose as usize] != VK_GENERAL {
-            self.v_kind.set(win as usize, self.v_kind[lose as usize]);
-        }
-        return true;
     }
 
     /// Join two variables through full unification (bindings included).
@@ -541,9 +491,7 @@ extend Solver {
             let ta = it_tag(a);
             let tb = it_tag(b);
             if ta == IT_TAG_VAR && tb == IT_TAG_VAR {
-                if !self.union_roots(it_payload(a), it_payload(b)) {
-                    return false;
-                }
+                self.union_roots(it_payload(a), it_payload(b));
                 continue;
             }
             if ta == IT_TAG_VAR {
@@ -595,10 +543,10 @@ extend Solver {
             }
             // Copy a known value across; a full const union-find waits for the const solver phase.
             if self.c_bound[c as usize] {
-                return self.cbind(d, self.c_ty[c as usize], self.c_origin[d as usize]);
+                return self.cbind(d, self.c_ty[c as usize]);
             }
             if self.c_bound[d as usize] {
-                return self.cbind(c, self.c_ty[d as usize], self.c_origin[c as usize]);
+                return self.cbind(c, self.c_ty[d as usize]);
             }
             return true;
         }
@@ -609,18 +557,18 @@ extend Solver {
         if y.kind != TypeKind::TYPE_CONST && y.kind != TypeKind::TYPE_CONST_EXPR {
             return false;
         }
-        return self.cbind(c, it_payload(other), self.c_origin[c as usize]);
+        return self.cbind(c, it_payload(other));
     }
 
     /// Bind const variable `c` to an exact const argument (a TYPE_CONST or TYPE_CONST_EXPR id;
     /// canonical interning makes id equality value equality). A disagreeing later value records a
     /// conflict and keeps the first binding (the adapter reports the conflict once per call).
-    pub fn cbind(self: &mut Self, c: u32, ty: TypeId, node: u32) bool {
+    pub fn cbind(self: &mut Self, c: u32, ty: TypeId) bool {
         if self.c_bound[c as usize] {
             if self.c_ty[c as usize] == ty {
                 return true;
             }
-            self.cconflicts.push(CConflict { cvar: c, old: self.c_ty[c as usize], later: ty, node: node });
+            self.cconflicts.push(CConflict { old: self.c_ty[c as usize], later: ty });
             return false;
         }
         self.log_cbind(c);
@@ -702,7 +650,6 @@ extend Solver {
             h = fnv(h, self.v_parent[i]);
             h = fnv(h, self.v_size[i]);
             h = fnv(h, self.v_binding[i]);
-            h = fnv(h, self.v_kind[i]);
         }
         for i in 0..self.c_ty.len() {
             h = fnv(h, self.c_ty[i]);
@@ -754,7 +701,7 @@ extend Solver {
         if is_const {
             self.s_slot.push(it_cvar(self.cvar_new(origin)));
         } else {
-            self.s_slot.push(it_var(self.var_new(VK_GENERAL, origin)));
+            self.s_slot.push(it_var(self.var_new()));
         }
         return slot;
     }
@@ -777,7 +724,7 @@ extend Solver {
             // TYPE_GENERIC covers a symbolic reference to another const parameter: the binding
             // propagates the reference exactly as the pre-rewrite array did.
             if k == TypeKind::TYPE_CONST || k == TypeKind::TYPE_CONST_EXPR || k == TypeKind::TYPE_GENERIC {
-                let _ = self.cbind(it_cvar_id(t), ty, 0);
+                let _ = self.cbind(it_cvar_id(t), ty);
             }
             return;
         }
@@ -796,7 +743,7 @@ extend Solver {
             // TYPE_GENERIC covers a symbolic reference to another const parameter: the binding
             // propagates the reference exactly as the pre-rewrite array did.
             if k == TypeKind::TYPE_CONST || k == TypeKind::TYPE_CONST_EXPR || k == TypeKind::TYPE_GENERIC {
-                let _ = self.cbind(it_cvar_id(t), ty, node);
+                let _ = self.cbind(it_cvar_id(t), ty);
             }
             return;
         }
@@ -816,7 +763,7 @@ extend Solver {
             // TYPE_GENERIC covers a symbolic reference to another const parameter: the binding
             // propagates the reference exactly as the pre-rewrite array did.
             if k == TypeKind::TYPE_CONST || k == TypeKind::TYPE_CONST_EXPR || k == TypeKind::TYPE_GENERIC {
-                let _ = self.cbind(it_cvar_id(t), ty, node);
+                let _ = self.cbind(it_cvar_id(t), ty);
             }
             return;
         }
@@ -824,11 +771,11 @@ extend Solver {
     }
 
     /// Exact const-value evidence for a slot (the array-length walk counts elements directly).
-    pub fn s_cval(self: &mut Self, slot: u32, v: i64, node: NodeId) {
+    pub fn s_cval(self: &mut Self, slot: u32, v: i64) {
         let t = self.s_slot[slot as usize];
         if it_is_cvar(t) {
             let cv = unsafe (&mut *self.ast).const_value(v);
-            let _ = self.cbind(it_cvar_id(t), cv, node);
+            let _ = self.cbind(it_cvar_id(t), cv);
         }
     }
 
@@ -865,7 +812,7 @@ extend Solver {
                 if conv(self.ast, best, bnd.ty) && !conv(self.ast, bnd.ty, best) {
                     best = bnd.ty;
                 } else if !conv(self.ast, bnd.ty, best) {
-                    self.type_conflicts.push(TypeConflict { first: best, later: bnd.ty, node: bnd.node });
+                    self.type_conflicts.push(TypeConflict { first: best, later: bnd.ty });
                     best = TYPE_NONE;
                     break;
                 }
@@ -897,8 +844,6 @@ extend Solver as Free {
         self.v_parent.free();
         self.v_size.free();
         self.v_binding.free();
-        self.v_kind.free();
-        self.v_origin.free();
         self.c_ty.free();
         self.c_bound.free();
         self.c_origin.free();

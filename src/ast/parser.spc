@@ -2647,9 +2647,7 @@ extend Parser {
                     Node {
                         kind: NodeKind::NODE_MEMBER,
                         span: Span::new(start, self.node_span(member).end),
-                        as_data: NodeAs {
-                            member: MemberData { object: expr, member: member, pointer: pointer, path: false },
-                        },
+                        as_data: NodeAs { member: MemberData { object: expr, member: member, path: false } },
                     },
                 );
             } else if self.match(TokenType::PathSeparator) {
@@ -2692,9 +2690,7 @@ extend Parser {
                         Node {
                             kind: NodeKind::NODE_MEMBER,
                             span: Span::new(start, self.node_span(member).end),
-                            as_data: NodeAs {
-                                member: MemberData { object: expr, member: member, pointer: false, path: true },
-                            },
+                            as_data: NodeAs { member: MemberData { object: expr, member: member, path: true } },
                         },
                     );
                     if grammar == ExpressionGrammar::EXPR_FULL && self.check(TokenType::LeftBrace) {

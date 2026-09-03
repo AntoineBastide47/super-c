@@ -9,7 +9,6 @@ import string as cstring;
 import atomic;
 import sc_runtime;
 import std::parallel::sync as psy;
-import stdlib;
 import math;
 import ast::ast as *;
 import module::loader as loader;
@@ -1382,9 +1381,6 @@ extend Interp {
         let mut r = none();
         loop {
             if blk as usize >= b.blocks.len() {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: block out of range blk={} nblocks={}\n", blk, b.blocks.len());
-                }
                 let _ = self.bail();
                 break;
             }
@@ -1401,41 +1397,6 @@ extend Interp {
                     }
                     let v = self.rvalue(b, env, s.rvalue);
                     if self.failed {
-                        if stdlib::getenv("SC_IRI_DBG") != null {
-                            let rv9 = *b.rvalues.at(s.rvalue as usize);
-                            let mut ok9: u32 = 999;
-                            let mut ck9: u32 = 999;
-                            if rv9.kind == ir::RV_USE {
-                                let op9 = *b.operands.at(rv9.a as usize);
-                                ok9 = op9.kind;
-                                if op9.kind == ir::OP_CONST {
-                                    ck9 = b.constants.at(op9.data as usize).kind;
-                                } else {
-                                    let pl9 = *b.places.at(op9.data as usize);
-                                    let ld9 = *b.locals.at(pl9.base as usize);
-                                    eprint(
-                                        "iri:   place base={} storage={} proj={} item={}:{}\n",
-                                        pl9.base,
-                                        ld9.storage,
-                                        pl9.proj_len,
-                                        ld9.item.module,
-                                        ld9.item.node,
-                                    );
-                                }
-                            }
-                            eprint(
-                                "iri: rvalue failed own={}:{} blk={} si={} rvkind={} b={} c={} opk={} ck={}\n",
-                                b.owner.module,
-                                b.owner.node,
-                                blk,
-                                si,
-                                rv9.kind,
-                                rv9.b,
-                                rv9.c,
-                                ok9,
-                                ck9,
-                            );
-                        }
                         break;
                     }
                     self.write_place(b, env, s.place, v);
@@ -1459,9 +1420,6 @@ extend Interp {
             } else if t.kind == ir::TM_SWITCH {
                 let d = self.operand(b, env, t.a);
                 if d.kind != IV_INT && d.kind != IV_BOOL {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: switch operand kind={} blk={}\n", d.kind, blk);
-                    }
                     let _ = self.bail();
                     break;
                 }
@@ -1476,9 +1434,6 @@ extend Interp {
             } else if t.kind == ir::TM_ASSERT {
                 let c = self.operand(b, env, t.a);
                 if c.kind != IV_BOOL || c.i == 0 {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: assert failed kind={} blk={}\n", c.kind, blk);
-                    }
                     let _ = self.bail();
                     break;
                 }
@@ -1500,9 +1455,6 @@ extend Interp {
                 }
                 blk = t.t0;
             } else {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: terminator refused kind={} blk={}\n", t.kind, blk);
-                }
                 let _ = self.bail();
                 break;
             }
@@ -1568,9 +1520,6 @@ extend Interp {
                     done9 = self.p().tc_done.at(m as usize).contains(&(m as u64 << 32 | item9 as u64));
                 }
                 if !done9 {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: tc_done gate m={} fn={} item={} ck={}\n", m, fnode, item9, ck9);
-                    }
                     return -1;
                 }
             }
@@ -1586,9 +1535,6 @@ extend Interp {
             lw.lower_fn(fnode);
         };
         if !ok {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: lower err=`{}` m={} n={}\n", lw.err, m, fnode);
-            }
             return -1;
         }
         self.bodies.push(Box::new(lw));
@@ -1885,17 +1831,6 @@ extend Interp {
         }
         let bidx = self.body_of(fm, fnode, &binds, closure);
         if bidx < 0 {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                let da9 = unsafe &*self.p().module_ast_const(fm);
-                let nm9 = da9.at_const(da9.at_const(fnode).as_data.function.name).as_data.name.text;
-                let src9 = self.src_of(fm);
-                eprint(
-                    "iri: body_of failed `{}` const={} binds={}\n",
-                    src9.slice(nm9.start as usize, nm9.end as usize),
-                    is_constfn,
-                    binds.len(),
-                );
-            }
             if is_constfn {
                 if self.trap.len() == 0 && self.all_typed {
                     self.it_trap(
@@ -1929,17 +1864,6 @@ extend Interp {
         self.subst.truncate(sb0);
 
         if self.failed {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                let da9 = unsafe &*self.p().module_ast_const(fm);
-                let nm9 = da9.at_const(da9.at_const(fnode).as_data.function.name).as_data.name.text;
-                let src9 = self.src_of(fm);
-                eprint(
-                    "iri: run failed `{}` const={} trap=`{}`\n",
-                    src9.slice(nm9.start as usize, nm9.end as usize),
-                    is_constfn,
-                    self.trap,
-                );
-            }
             if is_constfn {
                 if self.trap.len() == 0 && self.all_typed {
                     self.it_trap(
@@ -1966,9 +1890,6 @@ extend Interp {
             };
             let dp = b.dest_pool[(t.dests_start + di) as usize];
             self.write_place(b, env, dp, dv);
-            if self.failed && stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: dest write failed di={} dvkind={}\n", di, dv.kind);
-            }
         }
         return !self.failed;
     }
@@ -2368,8 +2289,8 @@ extend Interp {
 
     // ---- places -----------------------------------------------------------------------------------
 
-    // Field/tuple-member count of aggregate decl `(dm, dn)`.
-    fn field_count(self: &Self, dm: ModuleId, dn: NodeId) u32 {
+    /// Field/tuple-member count of aggregate decl `(dm, dn)` -- `type_info::<T>().fields.len`.
+    pub fn field_count(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let a = unsafe &*self.p().module_ast_const(dm);
         let is_tuple = a.at_const(dn).as_data.aggregate.is_tuple;
         let ms = a.at_const(dn).as_data.aggregate.members;
@@ -2534,9 +2455,6 @@ extend Interp {
             let args = Vector::<IVal>::new();
             r = self.run(&lw.body, &args);
         } else {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: item lower failed m={} n={} err=`{}`\n", m, cnode, lw.err);
-            }
             let _ = self.bail();
         }
         let _ = self.item_active.pop();
@@ -2894,15 +2812,6 @@ extend Interp {
             if cur.kind == IV_STR {
                 let sv = self.str_materialize(cur.tm, cur);
                 if self.failed || sv.kind != IV_OBJ {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint(
-                            "iri: str_materialize failed tm={} ty={} span={}..{}\n",
-                            cur.tm,
-                            cur.ty,
-                            (cur.i >> 32) as u32,
-                            (cur.i & 0xFFFFFFFF) as u32,
-                        );
-                    }
                     self.failed = true;
                     return false;
                 }
@@ -2916,15 +2825,6 @@ extend Interp {
                 // the UB ladder, WITHOUT requiring the target initialized (a store through the
                 // pointer addresses uninitialized storage legitimately)
                 if cur.kind != IV_PTR {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint(
-                            "iri: deref failed curkind={} obj={} off={} live={}\n",
-                            cur.kind,
-                            pv_obj(cur),
-                            pv_off(cur),
-                            self.objs_live,
-                        );
-                    }
                     self.failed = true;
                     return false;
                 }
@@ -3390,41 +3290,9 @@ extend Interp {
             return self.unary(v, rv.b as u8, b.module, rv.target);
         }
         if rv.kind == ir::RV_CAST {
-            if rv.b == ir::CAST_NEVER {
-                return self.bail();
-            }
             let v = self.operand(b, env, rv.a);
             if self.failed {
                 return none();
-            }
-            if rv.b == ir::CAST_POINTER {
-                return self.cast_pointer(v, b.module, rv.target);
-            }
-            if rv.b == ir::CAST_ARRAY_SLICE {
-                // an array coerces to a view over its own storage
-                let mut av = v;
-                let mut peel2 = 0;
-                while av.kind == IV_PTR && peel2 < 2 {
-                    let mut lv2 = none();
-                    if !self.loadp(av, &mut lv2) {
-                        return none();
-                    }
-                    av = lv2;
-                    peel2 += 1;
-                }
-                if av.kind != IV_OBJ {
-                    return self.bail();
-                }
-                let ap2 = self.obj_ptr(av.i as u32);
-                if ap2 == null {
-                    return self.bail();
-                }
-                let alen = (unsafe ap2.slots.len()) as i64;
-                let sv = self.slice_view(b.module, rv.target, av.i as u32, 0, alen);
-                if sv.kind != IV_OBJ {
-                    return self.bail();
-                }
-                return sv;
             }
             if rv.b != ir::CAST_NUMERIC {
                 return self.bail(); // coerce-from conversions never fold here
@@ -3610,9 +3478,6 @@ extend Interp {
                 return iv_int(b.module, rv.target, v.i);
             }
             if v.kind != IV_OBJ {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: discr place kind={} failed={}\n", v.kind, self.failed);
-                }
                 return self.bail();
             }
             let op = self.obj_ptr(v.i as u32);
@@ -3674,22 +3539,10 @@ extend Interp {
                 let mut lm: ModuleId = 0;
                 let mut lt = TYPE_NONE;
                 if !self.rty(b.module, rv.b, &mut lm, &mut lt) {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint(
-                            "iri: sizeof rty failed m={} t={} subs={} base={}\n",
-                            b.module,
-                            rv.b,
-                            self.subst.len(),
-                            self.sub_base,
-                        );
-                    }
                     return self.bail();
                 }
                 let l = self.lsvc.layout(lm, lt);
                 if !l.ok {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: sizeof layout failed m={} t={}\n", lm, lt);
-                    }
                     return self.bail();
                 }
                 let mut v = l.size;
@@ -3719,9 +3572,6 @@ extend Interp {
                 let mut tm2: ModuleId = 0;
                 let mut tt2 = TYPE_NONE;
                 if !self.rty(b.module, rv.b, &mut tm2, &mut tt2) {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: ti rty failed m={} b={}\n", b.module, rv.b);
-                    }
                     return self.bail();
                 }
                 if rv.target == TYPE_NONE {
@@ -3729,16 +3579,10 @@ extend Interp {
                 }
                 let yt = *(unsafe &*self.p().module_ast_const(b.module)).type_at(rv.target);
                 if yt.kind != TypeKind::TYPE_STRUCT {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: ti target kind={} m={} t={}\n", yt.kind as u32, b.module, rv.target);
-                    }
                     return self.bail();
                 }
                 let v = self.type_info_decl(b.module, yt.module, yt.as_data.decl, rv.target, tm2, tt2);
                 if v.kind != IV_OBJ {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: ti decl build failed\n");
-                    }
                     return self.bail();
                 }
                 return v;
@@ -4230,9 +4074,6 @@ extend Interp {
             }
             lb.free();
             rb2.free();
-        }
-        if stdlib::getenv("SC_IRI_DBG") != null {
-            eprint("iri: binary refused lk={} rk={} tok={}\n", l.kind, r.kind, tok2);
         }
         return self.bail();
     }
@@ -6089,11 +5930,6 @@ extend Interp {
         return none();
     }
 
-    /// Field/tuple-member count of aggregate decl `(dm, dn)` -- `type_info::<T>().fields.len`.
-    pub fn field_count_of(self: &Self, dm: ModuleId, dn: NodeId) u32 {
-        return self.field_count(dm, dn);
-    }
-
     /// Variant count of enum decl `(dm, dn)` -- `type_info::<T>().variants.len`.
     pub const fn variant_count_of(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let a = unsafe &*self.p().module_ast_const(dm);
@@ -6260,9 +6096,6 @@ extend Interp {
             let decl = (pk & 0xFFFFFFFFu64) as NodeId;
             let value = (unsafe &*self.p().module_ast_const(m)).at_const(decl).as_data.const_def.value;
             let v = self.eval(m, value);
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: flush const m={} decl={} value={} -> kind={}\n", m, decl, value, v.kind);
-            }
             if v.kind != IV_NONE {
                 continue;
             }
@@ -6862,16 +6695,10 @@ extend Interp {
             }
         }
         if sty == TYPE_NONE || kty == TYPE_NONE || flty == TYPE_NONE || vrty == TYPE_NONE {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: tid exit 1 tim={} tin={} sty={} kty={} flty={} vrty={}\n", tim, tin, sty, kty, flty, vrty);
-            }
             return none();
         }
         let ys = *da.type_at(sty);
         if ys.kind != TypeKind::TYPE_STRUCT {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: tid exit 2\n");
-            }
             return none();
         }
         let strm = ys.module;
@@ -6879,9 +6706,6 @@ extend Interp {
         let yf = *da.type_at(flty);
         let yv = *da.type_at(vrty);
         if yf.kind != TypeKind::TYPE_INSTANCE || yv.kind != TypeKind::TYPE_INSTANCE {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: tid exit 3\n");
-            }
             return none();
         }
         let fit = *da.instance(yf.as_data.inst);
@@ -6949,9 +6773,6 @@ extend Interp {
         }
         let tag = self.ti_tag(tm, tt, strm, strn, slm, sln);
         if tag < 0 {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: tid exit 4\n");
-            }
             return none();
         }
         // Size and align; void is the one kind with no C layout.
@@ -6960,9 +6781,6 @@ extend Interp {
         if tag != 0 {
             let lay0 = self.lsvc.layout(tm, tt);
             if !lay0.ok {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: tid exit 5\n");
-                }
                 return none();
             }
             size = lay0.size;
@@ -7014,9 +6832,6 @@ extend Interp {
             }
             let fesz = self.lsvc.layout_of(tim, fity, null, 0);
             if !fesz.ok {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: tid exit 6\n");
-                }
                 return none();
             }
             let da2 = unsafe &*self.p().module_ast_const(dm2);
@@ -7040,9 +6855,6 @@ extend Interp {
                 let fl = self.lsvc.layout_of(dm2, ft, envp, 1);
                 if ft == TYPE_NONE || !fl.ok {
                     fobjs.free();
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: tid exit 7\n");
-                    }
                     return none();
                 }
                 let mut fa3 = fl.align;
@@ -7077,9 +6889,6 @@ extend Interp {
                 let fv = self.ti_member(strm, strn, tim, sty, kty, fity, fname, off, fl.size, 0 - 1, ftag as u64);
                 if fv.kind != IV_OBJ {
                     fobjs.free();
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: tid exit 8\n");
-                    }
                     return none();
                 }
                 if mety != TYPE_NONE && !self.ti_attach_meta(
@@ -7098,9 +6907,6 @@ extend Interp {
                     mesz,
                 ) {
                     fobjs.free();
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: tid exit 9\n");
-                    }
                     return none();
                 }
                 fobjs.push(fv);
@@ -7110,9 +6916,6 @@ extend Interp {
             let failed2 = fblock == 0 && nfields != 0;
             fobjs.free();
             if failed2 {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: tid exit 10\n");
-                }
                 return none();
             }
         }
@@ -7126,9 +6929,6 @@ extend Interp {
             }
             let vesz = self.lsvc.layout_of(tim, vity, null, 0);
             if !vesz.ok {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: tid exit 11\n");
-                }
                 return none();
             }
             let da2 = unsafe &*self.p().module_ast_const(dm2);
@@ -7149,9 +6949,6 @@ extend Interp {
                         let e = self.eval(dm2, vval);
                         if e.kind != IV_INT {
                             vobjs.free();
-                            if stdlib::getenv("SC_IRI_DBG") != null {
-                                eprint("iri: tid exit 12\n");
-                            }
                             return none();
                         }
                         next = e.i;
@@ -7179,9 +6976,6 @@ extend Interp {
                 );
                 if vv.kind != IV_OBJ {
                     vobjs.free();
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: tid exit 13\n");
-                    }
                     return none();
                 }
                 if mety != TYPE_NONE && !self.ti_attach_meta(
@@ -7200,9 +6994,6 @@ extend Interp {
                     mesz,
                 ) {
                     vobjs.free();
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: tid exit 14\n");
-                    }
                     return none();
                 }
                 vobjs.push(vv);
@@ -7212,9 +7003,6 @@ extend Interp {
             let failed2 = vblock == 0 && nvars != 0;
             vobjs.free();
             if failed2 {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: tid exit 15\n");
-                }
                 return none();
             }
         }
@@ -7310,9 +7098,6 @@ extend Interp {
                 }
                 if fail {
                     hobjs.free();
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: tid exit 16\n");
-                    }
                     return none();
                 }
                 nmeths = hobjs.len() as u32;
@@ -7320,9 +7105,6 @@ extend Interp {
                 let hfailed = hblock == 0 && nmeths != 0;
                 hobjs.free();
                 if hfailed {
-                    if stdlib::getenv("SC_IRI_DBG") != null {
-                        eprint("iri: tid exit 17\n");
-                    }
                     return none();
                 }
             }
@@ -7353,16 +7135,10 @@ extend Interp {
         let vsl = self.ti_slice(slm, sln, tim, vity, vrty, vblock, nvars);
         let nmv = self.ti_str(strm, strn, tim, sty, nm);
         if fsl.kind != IV_OBJ || vsl.kind != IV_OBJ || nmv.kind != IV_OBJ {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: tid exit 18\n");
-            }
             return none();
         }
         let to = self.obj_new(self.field_count(tim, tin));
         if to == 0 {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: tid exit 19\n");
-            }
             return none();
         }
         unsafe self.obj_ptr(to).dm = tim;
@@ -7376,9 +7152,6 @@ extend Interp {
         let i_fields = self.ti_findf(tim, tin, "fields");
         let i_vars = self.ti_findf(tim, tin, "variants");
         if i_name < 0 || i_kind < 0 || i_size < 0 || i_align < 0 || i_elem < 0 || i_len < 0 || i_fields < 0 || i_vars < 0 {
-            if stdlib::getenv("SC_IRI_DBG") != null {
-                eprint("iri: tid exit 20\n");
-            }
             return none();
         }
         unsafe self.obj_ptr(to).slots.set(i_elem as usize, iv_int(tim, kty, etag));
@@ -7407,9 +7180,6 @@ extend Interp {
             let tms = self.ti_meta_slice(tdm, tdn, tim, strm, strn, slm, sln, sty, mety, mkty, mty, mesz);
             let i_meta = self.ti_findf(tim, tin, "meta");
             if tms.kind != IV_OBJ || i_meta < 0 {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: tid exit 21\n");
-                }
                 return none();
             }
             unsafe self.obj_ptr(to).slots.set(i_meta as usize, tms);
@@ -7418,9 +7188,6 @@ extend Interp {
             let hsl = self.ti_slice(slm, sln, tim, mhty, mmty, hblock, nmeths);
             let i_meth = self.ti_findf(tim, tin, "methods");
             if hsl.kind != IV_OBJ || i_meth < 0 {
-                if stdlib::getenv("SC_IRI_DBG") != null {
-                    eprint("iri: tid exit 22\n");
-                }
                 return none();
             }
             unsafe self.obj_ptr(to).slots.set(i_meth as usize, hsl);
