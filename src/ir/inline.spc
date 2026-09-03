@@ -46,19 +46,16 @@ pub const IJ_COUNT: usize = 9;
 /// Emission-mode env switches: every setting that changes the C a body renders to. Build stamps
 /// and TU-cache keys read the list by index, so a new switch joins here once and every consumer
 /// follows; the order is part of the recorded keys.
-pub const EMIT_MODE_ENV_N: usize = 4;
+pub const EMIT_MODE_ENV_N: usize = 3;
 
 pub fn emit_mode_env(i: usize) str<'static> {
     if i == 0 {
         return "SC_INLINE";
     }
     if i == 1 {
-        return "SC_INLINE_LIMIT";
-    }
-    if i == 2 {
         return "SC_BCE";
     }
-    assert(i == 3);
+    assert(i == 2);
     return "SC_BCE_DISABLE";
 }
 
@@ -72,46 +69,6 @@ const MAX_DEPTH: usize = 3;
 
 // keep_ix value encoding: slot index, or REJ_BASE | reason for a cached rejection.
 const REJ_BASE: u64 = 0xFFFFFFFF00000000u64;
-
-// Miscompile-bisect knob: SC_INLINE_LIMIT=N caps total splices per process and names the last
-// allowed site (use with --jobs=1 for a stable splice order). Both stamps and TU-cache keys
-// include it, so limited builds never mix with normal ones. -2 = env unread, -1 = unlimited.
-static mut G_INL_LIMIT: i64 = -2;
-static mut G_INL_LAST: i64 = 0;
-
-fn inl_limit_take(cm: ModuleId, cn: NodeId, km: ModuleId, kn: NodeId) bool {
-    unsafe {
-        if G_INL_LIMIT == -2 {
-            let e = stdlib::getenv("SC_INLINE_LIMIT");
-            G_INL_LIMIT = -1;
-            if e != null {
-                let s = str::from_cstr(e);
-                let mut v: i64 = 0;
-                for i in 0..s.len() {
-                    let c = s.byte_at(i);
-                    if c >= 48 && c <= 57 {
-                        v = v * 10 + (c - 48) as i64;
-                    }
-                }
-                G_INL_LIMIT = v;
-            }
-        }
-        if G_INL_LIMIT < 0 {
-            return true;
-        }
-        if G_INL_LIMIT == 0 {
-            return false;
-        }
-        if G_INL_LIMIT == 1 {
-            eprint("inline-last in {}:{} callee {}:{}\n", cm, cn, km, kn);
-            unsafe {
-                G_INL_LAST = 1;
-            }
-        }
-        G_INL_LIMIT -= 1;
-    }
-    return true;
-}
 
 /// One cached callee: its lowered pre-elaboration body plus the generic-parameter decl list in
 /// targ order (extend parameters first, then the function's own).
@@ -151,7 +108,6 @@ extend InlineStats {
 pub struct InlineCtx {
     pub off: bool,
     pub stats_on: bool,
-    pub dbg_on: bool,
     pub keep_ix: Map<u64, u64>,
     pub kept: Vector<CalleeInfo>,
     /// Type-translation cache: one entry per distinct (callee slot, caller module, binds) call
@@ -359,7 +315,6 @@ extend InlineCtx {
         return InlineCtx {
             off: off,
             stats_on: stdlib::getenv("SC_INLINE_STATS") != null,
-            dbg_on: stdlib::getenv("SC_INLINE_DBG") != null,
             keep_ix: Map::<u64, u64>::new(),
             kept: Vector::<CalleeInfo>::new(),
             vlw: Vector::<irl::Lowerer>::new(),
@@ -441,14 +396,6 @@ extend InlineCtx {
             rej = REJ_BASE | IJ_TOO_BIG as u64;
         }
         if rej == 0 {
-            for i in 0..lw.body.statements.len() {
-                if lw.body.statements.at(i).kind == ir::ST_ASM {
-                    rej = REJ_BASE | IJ_SHAPE as u64;
-                    break;
-                }
-            }
-        }
-        if rej == 0 {
             for i in 0..lw.body.blocks.len() {
                 let tk = &lw.body.blocks.at(i).term;
                 if tk.kind == ir::TM_ASSERT {
@@ -494,7 +441,7 @@ extend InlineCtx {
                 if rv.kind == ir::RV_CAST && rv.b == ir::CAST_COERCE_FROM as u32 {
                     bad = true;
                 }
-                if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_VA_START || rv.c == ir::IN_VA_ARG || rv.c == ir::IN_VA_END || rv.c == ir::IN_ASM || rv.c == ir::IN_REFLECT || rv.c == ir::IN_ASM_OPERAND) {
+                if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_VA_START || rv.c == ir::IN_VA_ARG || rv.c == ir::IN_VA_END || rv.c == ir::IN_ASM || rv.c == ir::IN_REFLECT) {
                     bad = true;
                 }
                 if rv.kind == ir::RV_REPEAT && lw.body.is_generic {
@@ -509,7 +456,7 @@ extend InlineCtx {
         if rej == 0 {
             for i in 0..lw.body.constants.len() {
                 let c9 = lw.body.constants.at(i);
-                if c9.kind == ir::CK_WIDE || c9.kind == ir::CK_ERROR {
+                if c9.kind == ir::CK_WIDE {
                     rej = REJ_BASE | IJ_SHAPE as u64; // wide-literal records index the callee module's Ast
                     break;
                 }
@@ -665,31 +612,12 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             unsafe {
                 st.reasons[rr] = st.reasons[rr] + 1;
             }
-            if cx.dbg_on {
-                eprint(
-                    "inline-rej in {}:{} callee {}:{} reason {}\n",
-                    lw.body.module,
-                    lw.body.owner.node,
-                    t.callee.module,
-                    t.callee.node,
-                    rr,
-                );
-            }
             continue;
         }
         let ki = cx.kept.at(slot as usize);
         let k = &ki.body;
         if k.args != t.args_len || k.returns != t.dests_len {
             st.reasons[IJ_ARITY as usize] = st.reasons[IJ_ARITY as usize] + 1;
-            if cx.dbg_on {
-                eprint(
-                    "inline-rej in {}:{} callee {}:{} arity\n",
-                    lw.body.module,
-                    lw.body.owner.node,
-                    t.callee.module,
-                    t.callee.node,
-                );
-            }
             continue;
         }
         if added + k.statements.len() + k.args as usize + k.returns as usize > MAX_ADDED_STMTS {
@@ -796,18 +724,6 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
                 }
                 let nt = xty(pkg, km, kt, cm, &binds, 0);
                 if nt == TYPE_NONE {
-                    if cx.dbg_on {
-                        let yk = (unsafe &*(&*pkg).module_ast_const(km)).type_at(kt).kind;
-                        eprint(
-                            "inline-xty-fail kt {} kind {} binds {} targs {} gp {} fg {}\n",
-                            kt,
-                            yk as u32,
-                            binds.len(),
-                            t.targs_len,
-                            ki.gp.len(),
-                            ki.fg,
-                        );
-                    }
                     tok9 = false;
                     break;
                 }
@@ -826,15 +742,6 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         }
         if !tok9 {
             st.reasons[IJ_GENERIC as usize] = st.reasons[IJ_GENERIC as usize] + 1;
-            if cx.dbg_on {
-                eprint(
-                    "inline-rej in {}:{} callee {}:{} type-translate\n",
-                    lw.body.module,
-                    lw.body.owner.node,
-                    t.callee.module,
-                    t.callee.node,
-                );
-            }
             continue;
         }
         let tyx: *const Map<u64, u64> = if cix >= 0 {
@@ -901,38 +808,9 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         }
         if !wok {
             st.reasons[IJ_GENERIC as usize] = st.reasons[IJ_GENERIC as usize] + 1;
-            if cx.dbg_on {
-                eprint(
-                    "inline-rej in {}:{} callee {}:{} wire\n",
-                    lw.body.module,
-                    lw.body.owner.node,
-                    t.callee.module,
-                    t.callee.node,
-                );
-            }
             continue;
         }
         // ---- splice (infallible from here) -----------------------------------------------------
-        if !inl_limit_take(lw.body.module, lw.body.owner.node, t.callee.module, t.callee.node) {
-            continue;
-        }
-        if unsafe G_INL_LAST == 1 {
-            unsafe {
-                G_INL_LAST = 0;
-            }
-            let p9 = unsafe &*pkg;
-            let ca9 = unsafe &*p9.module_ast_const(lw.body.module);
-            let ka9 = unsafe &*p9.module_ast_const(t.callee.module);
-            let cn9 = ca9.at_const(ca9.at_const(lw.body.owner.node).as_data.function.name).as_data.name.text;
-            let kn9 = ka9.at_const(ka9.at_const(t.callee.node).as_data.function.name).as_data.name.text;
-            let cs9 = p9.modules.at(lw.body.module as usize).source.as_str();
-            let ks9 = p9.modules.at(t.callee.module as usize).source.as_str();
-            eprint(
-                "inline-last fns {} -> {}\n",
-                cs9.slice(cn9.start as usize, cn9.end as usize),
-                ks9.slice(kn9.start as usize, kn9.end as usize),
-            );
-        }
         splice(lw, ki, &t, bi - 1, tyr, &wire, &mut blk_origin, &mut origins);
         added += k.statements.len() + k.args as usize + k.returns as usize;
         st.inlined += 1;

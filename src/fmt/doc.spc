@@ -161,14 +161,6 @@ extend DocPool {
         return self.push(DocNode { kind: DocKind::DOC_CONCAT, a: start, b: parts.len() as u32, w: w, s: "" });
     }
 
-    pub fn pair(self: &mut Self, a: DocId, b: DocId) DocId {
-        let mut v = Vector::<DocId>::with_capacity(2);
-        v.push(a);
-        v.push(b);
-        let d = self.concat(&v);
-        return d;
-    }
-
     fn render_doc(self: &Self, r: &mut Renderer, id: DocId, indent: i32, flat: bool) {
         let n = *self.docs.at(id as usize);
         switch n.kind {

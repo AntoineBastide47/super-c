@@ -15,7 +15,6 @@ import ir::core as ir;
 import lexer::token as tok;
 import lexer::token_type as tt;
 import module::loader as loader;
-import stdlib;
 
 pub struct CEmit {
     pub pkg: *const loader::Package,
@@ -202,8 +201,6 @@ pub struct CEmit {
     tmod_pool: Vector<ModuleId>,
 }
 
-/// One referenced const/static item: its declaration, C symbol, and the module whose prefix
-/// spelled it (associated consts carry the emitting module's prefix).
 /// The substitution env a glue entry was RECORDED under (its type may still name generics).
 pub struct GlueEnv {
     pub subs: Vector<mbe::MSub>,
@@ -577,27 +574,6 @@ extend CEmit {
             return true;
         }
         if !self.mg.ctype(m, t, decl, out) {
-            if stdlib::getenv("SC_CEMIT_STATS") != null {
-                let y9 = *self.p().module_ast_const(m).type_at(t);
-                eprint("ctype-fail: in `{}` m{} t{} kind {}", self.cur_name.as_str(), m, t, y9.kind as u32);
-                if y9.kind == TypeKind::TYPE_INSTANCE {
-                    let it9 = *self.p().module_ast_const(m).instance(y9.as_data.inst);
-                    eprint(" decl n{}", it9.decl);
-                    for k9 in 0..it9.n {
-                        let ay9 = *self.p().module_ast_const(m).type_at(unsafe it9.args[k9 as usize]);
-                        eprint(" a{}k{}", k9, ay9.kind as u32);
-                        if ay9.kind == TypeKind::TYPE_GENERIC {
-                            eprint("(pm{} pn{})", ay9.module, ay9.as_data.decl);
-                        }
-                    }
-                    eprint(" subs:");
-                    for si9 in 0..self.mg.subs.len() {
-                        let sb9 = *self.mg.subs.at(si9);
-                        eprint(" ({},{})->({},{})l{}", sb9.pm, sb9.pnode, sb9.am, sb9.at, sb9.lim);
-                    }
-                }
-                eprint("\n");
-            }
             return self.fail("ctype");
         }
         return true;
@@ -1363,12 +1339,6 @@ extend CEmit {
                     let rb = b.places.at(rv.a as usize).base as usize;
                     reads.set(rb, *reads.at(rb) + 1);
                 }
-            } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
-                self.count_place(b, s.place, false, refs, defs);
-                reads.set(
-                    b.places.at(s.place as usize).base as usize,
-                    *reads.at(b.places.at(s.place as usize).base as usize) + 1,
-                );
             }
         }
         for bi in 0..b.blocks.len() {
@@ -1489,7 +1459,7 @@ extend CEmit {
             while i > start {
                 i -= 1;
                 let s = *b.statements.at(i);
-                if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+                if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
                     continue;
                 }
                 if s.kind != ir::ST_ASSIGN {
@@ -1773,15 +1743,10 @@ extend CEmit {
         self.bput(hardw);
     }
 
-    // The C spelling of local `l` for the body most recently emitted through `emit_fn`: its coalesce
-    // target's preserved name, or `_<id>`. A driver synthesizing a wrapper reads the receiver name
-    // here instead of parsing emitted text.
-    pub fn local_cname(self: &Self, l: u32, dst: &mut String) {
-        self.lspell(l, dst);
-    }
-
-    // Append the C spelling of local `l`: its coalesce target's preserved name, or `_<id>`.
-    fn lspell(self: &Self, l: u32, dst: &mut String) {
+    // Append the C spelling of local `l` for the body most recently emitted through `emit_fn`: its
+    // coalesce target's preserved name, or `_<id>`. A driver synthesizing a wrapper reads the
+    // receiver name here instead of parsing emitted text.
+    pub fn lspell(self: &Self, l: u32, dst: &mut String) {
         let c = *self.sx_coal.at(l as usize);
         let nm = self.sx_name.at(c as usize);
         if nm.len() != 0 {
@@ -2158,19 +2123,10 @@ extend CEmit {
     // reads memory iff `reads_mem`) and its read, leaves that definition's value unchanged -- so the
     // definition may fold past it. Safe when: a marker; or a pure whole/projected store that neither
     // writes an input the definition reads nor writes memory the definition depends on. Any effecting
-    // statement (asm, allocation, discriminant/deinit against a memory-reading definition) blocks it.
+    // statement (asm, allocation) blocks it.
     fn inline_safe_between(self: &Self, b: &ir::CoreBody, s: &ir::Statement, def_rv: u32, reads_mem: bool) bool {
-        if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+        if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
             return true;
-        }
-        if s.kind == ir::ST_ASM {
-            return false;
-        }
-        if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
-            if reads_mem {
-                return false;
-            }
-            return !self.rvalue_reads_base(b, def_rv, b.places.at(s.place as usize).base);
         }
         if s.kind != ir::ST_ASSIGN {
             return false;
@@ -2251,15 +2207,6 @@ extend CEmit {
                     }
                     if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
                         blocked.set(b.places.at(rv.a as usize).base as usize, true);
-                    }
-                } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
-                    blocked.set(b.places.at(s.place as usize).base as usize, true);
-                } else if s.kind == ir::ST_ASM {
-                    for i in 0..s.b {
-                        let op = *b.operands.at(b.oper_pool[(s.a + i) as usize] as usize);
-                        if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                            blocked.set(b.places.at(op.data as usize).base as usize, true);
-                        }
                     }
                 }
             }
@@ -2603,16 +2550,6 @@ extend CEmit {
                     wl = *self.sx_coal.at(pl.base as usize);
                     ok_init = pl.proj_len == 0 && self.fusable_init_rvalue(b, &rv0);
                     is_array_init = rv0.kind == ir::RV_AGGREGATE && rv0.c == ir::AGG_ARRAY;
-                } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
-                    wl = b.places.at(s.place as usize).base;
-                } else if s.kind == ir::ST_ASM {
-                    // an asm output writes a local through a form the fused declaration cannot host
-                    for i in 0..s.b {
-                        let op = *b.operands.at(b.oper_pool[(s.a + i) as usize] as usize);
-                        if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                            bad.set(b.places.at(op.data as usize).base as usize, true);
-                        }
-                    }
                 }
                 if wl != ir::IR_NONE && !*seen.at(wl as usize) {
                     seen.set(wl as usize, true);
@@ -2662,7 +2599,7 @@ extend CEmit {
             let blk = *b.blocks.at(bi as usize);
             for si in 0..blk.stmt_len {
                 let s = *b.statements.at((blk.stmt_start + si) as usize);
-                if s.kind == ir::ST_ASSIGN || s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
+                if s.kind == ir::ST_ASSIGN {
                     self.dom_check_place(b, cf, s.place, bi, &init_blk, &mut bad);
                 }
             }
@@ -2730,7 +2667,7 @@ extend CEmit {
 
     // Whether a statement produces C output (so it "runs" between a forwarded call and its use).
     fn stmt_emits(self: &Self, b: &ir::CoreBody, s: &ir::Statement) bool {
-        if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+        if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
             return false;
         }
         if self.is_dead_store(b, s) || self.is_coalesced_store(b, s) || self.is_inlined_store(b, s) {
@@ -2790,15 +2727,6 @@ extend CEmit {
                 let rv = *b.rvalues.at(s.rvalue as usize);
                 if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
                     bad.set(b.places.at(rv.a as usize).base as usize, true);
-                }
-            } else if s.kind == ir::ST_SET_DISCR || s.kind == ir::ST_DEINIT {
-                bad.set(b.places.at(s.place as usize).base as usize, true);
-            } else if s.kind == ir::ST_ASM {
-                for i in 0..s.b {
-                    let op = *b.operands.at(b.oper_pool[(s.a + i) as usize] as usize);
-                    if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                        bad.set(b.places.at(op.data as usize).base as usize, true);
-                    }
                 }
             }
         }
@@ -3563,7 +3491,7 @@ extend CEmit {
         let mut i = blk.stmt_len;
         while i > 0 {
             let k = b.statements.at((blk.stmt_start + i - 1) as usize).kind;
-            if k == ir::ST_STORAGE_LIVE || k == ir::ST_STORAGE_DEAD || k == ir::ST_NOP {
+            if k == ir::ST_STORAGE_LIVE || k == ir::ST_STORAGE_DEAD {
                 i -= 1;
                 continue;
             }
@@ -4091,7 +4019,7 @@ extend CEmit {
         let blk = *b.blocks.at(h as usize);
         for si in 0..blk.stmt_len {
             let s = *b.statements.at((blk.stmt_start + si) as usize);
-            if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+            if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
                 continue;
             }
             if self.is_dead_store(b, &s) || self.is_coalesced_store(b, &s) || self.is_inlined_store(b, &s) {
@@ -4158,7 +4086,7 @@ extend CEmit {
             while si > 0 {
                 si -= 1;
                 let s = *b.statements.at((bb.stmt_start + si) as usize);
-                if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+                if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
                     continue;
                 }
                 if s.kind != ir::ST_ASSIGN {
@@ -4928,7 +4856,7 @@ extend CEmit {
     }
 
     fn emit_stmt(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement) bool {
-        if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+        if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
             return true; // markers carry no C
         }
         if s.kind == ir::ST_ASSIGN && s.place == self.sx_skip_place && s.rvalue == self.sx_skip_rvalue {
@@ -7676,12 +7604,13 @@ extend CEmit {
         self.demand_seen.insert(k);
     }
 
-    pub const fn assert_helpers_get(self: &Self) u8 {
-        return self.assert_helpers;
-    }
-
-    pub const fn assert_helpers_or(self: &mut Self, bit: u8) {
+    /// Claim assert-helper `bit` for this emitter: true when it was not yet claimed.
+    pub const fn assert_helpers_claim(self: &mut Self, bit: u8) bool {
+        if (self.assert_helpers & bit) != 0u8 {
+            return false;
+        }
         self.assert_helpers |= bit;
+        return true;
     }
 
     fn ensure_assert_helper(self: &mut Self, kind: u8) {
@@ -8530,7 +8459,7 @@ extend CEmit {
                 }
                 return ok;
             }
-            if rv.b != ir::CAST_NUMERIC && rv.b != ir::CAST_POINTER {
+            if rv.b != ir::CAST_NUMERIC {
                 return self.fail("cast");
             }
             let mut ts = String::new();

@@ -5,10 +5,10 @@
 //
 // Two layers: the DECLARATION-LEVEL lifetime analyses (Rust's elision rules on return types, the
 // requirement that a reference or borrowing type stored in an aggregate names the lifetime it
-// borrows for, the modular return-lifetime check), and the flow walk (bc_fn/bc_stmt/bc_expr), which
-// mirrors the typechecker's evaluation order over the typed AST and tracks moves, partial moves,
-// borrows, definite-init, frees and region ties. Callee resolution is never re-derived here: the
-// typechecker's call_info side table is the bridge (bc_call_info).
+// borrows for, the modular return-lifetime check), and the flow analysis (bc_fn), which lowers each
+// body to Core IR, replays its event tape, and tracks moves, partial moves, borrows, definite-init,
+// frees and region ties. Callee resolution is never re-derived here: the typechecker's call_info
+// side table is the bridge (bc_call_info).
 import lexer::token as tok;
 import ast::ast as *;
 import utils::errors as diag;
@@ -64,7 +64,6 @@ extend tc::TypeChecker {
         if self.package != null && unsafe (&*self.package).co_state == 0 {
             // single-threaded phase: the const package pointer is the one place mutated (cir precedent)
             unsafe (&mut *self.package).co_compute();
-            unsafe (&*self.package).co_dump();
         }
         if self.package != null && unsafe (&*self.package).cancel_state == 0 {
             unsafe (&mut *self.package).cancel_compute();
@@ -978,12 +977,8 @@ extend tc::TypeChecker {
         }
     }
 
-    /// Escape class of `e` used as an address/reference source: 0 = none, 1 = borrows a local,
+    /// Escape class of `e0` used as an address/reference source: 0 = none, 1 = borrows a local,
     /// 2 = borrows a by-value parameter.
-    pub fn addr_escape(self: &mut Self, e: NodeId) i32 {
-        return self.addr_escape_at(e, 0);
-    }
-
     pub fn addr_escape_at(self: &mut Self, e0: NodeId, depth: u32) i32 {
         let a = self.cur_ast();
         let mut e = e0;
@@ -2274,14 +2269,10 @@ extend tc::TypeChecker {
             },
             None => {},
         };
-        let r = self.tc_type_carries_borrow(ty, 0);
+        let mut pure = true;
+        let r = self.tc_carries_borrow_rec(ty, 0, &mut pure);
         self.carries_memo.insert(key, if_u8(r, 1, 0));
         return r;
-    }
-
-    pub fn tc_type_carries_borrow(self: &mut Self, ty: TypeId, depth: i32) bool {
-        let mut pure = true;
-        return self.tc_carries_borrow_rec(ty, depth, &mut pure);
     }
 
     // Memoized per (ty, depth) -- the depth cutoff makes results depth-dependent -- but ONLY for
@@ -2555,7 +2546,7 @@ extend tc::TypeChecker {
         // fails to lower was reported as an error by bc_ir_lower -- nothing further to check.
         self.bc_unsafe_spans.truncate(0);
         let mut irbodies = Vector::<irl::Lowerer>::new();
-        self.bc_quiet = self.bc_ir_lower(id, ctx, &mut irbodies);
+        let quiet = self.bc_ir_lower(id, ctx, &mut irbodies);
         for b in 0..irbodies.len() {
             let bw = irbodies.at(b);
             for u in 0..bw.unsafe_spans.len() {
@@ -2567,7 +2558,7 @@ extend tc::TypeChecker {
             let pid = unsafe a.list(fnd.params)[pi as usize];
             self.region_alloc_for(pid, a.type_of(pid));
         }
-        if self.bc_quiet && irbodies.len() != 0 {
+        if quiet && irbodies.len() != 0 {
             ctx.rep.reset();
             let tn = irbodies.at(0).tape.len();
             self.bc_replay(&irbodies, 0, 0, tn, &mut ctx.rep);
@@ -2590,7 +2581,6 @@ extend tc::TypeChecker {
             };
         }
 
-        self.bc_quiet = false;
         for mi in 0..self.nmoved {
             self.ms_bit_clear(unsafe self.moved[mi as usize]);
         }
@@ -2812,7 +2802,7 @@ extend tc::TypeChecker {
         }
         for i in 0..values.len {
             let vid = unsafe a.list(values)[i as usize];
-            let esc = self.addr_escape(vid);
+            let esc = self.addr_escape_at(vid, 0);
             if esc != 0 {
                 // The Core IR path reports escapes only for borrow-CARRYING returns; addresses
                 // that leave as raw pointers or integers carry no loan there, so this depth-based

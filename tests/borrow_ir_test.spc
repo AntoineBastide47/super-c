@@ -86,7 +86,6 @@ struct BorrowOut {
     pub moves: u32, // distinct move/init error sites
     pub conflicts: u32,
     pub escapes: u32,
-    pub placeholders: u32,
 }
 
 // Lower `name`, run the full pipeline, and count DISTINCT error sites (loops and defers replay
@@ -106,7 +105,7 @@ fn analyze(p: &loader::Package, name: str) BorrowOut {
     let lv = bdf::solve_liveness(&bfacts, &cfg);
     let mv = bdf::solve_moves(&lw.body, &forest, &bfacts, &cfg);
     let sv = bln::solve(&lw.body, &bfacts, &cfg, &lv);
-    let mut out = BorrowOut { moves: 0, conflicts: 0, escapes: 0, placeholders: 0 };
+    let mut out = BorrowOut { moves: 0, conflicts: 0, escapes: 0 };
     let mut seen = Vector::<u64>::new();
     for e in 0..mv.errs.len() {
         let er = *mv.errs.at(e);
@@ -137,17 +136,16 @@ fn analyze(p: &loader::Package, name: str) BorrowOut {
         seen.push(key);
         if er.kind == bln::BE_CONFLICT {
             out.conflicts += 1;
-        } else if er.kind == bln::BE_ESCAPE {
-            out.escapes += 1;
         } else {
-            out.placeholders += 1;
+            assert(er.kind == bln::BE_ESCAPE, "solver error kinds are conflict or escape");
+            out.escapes += 1;
         }
     }
     return out;
 }
 
 const fn clean(o: &BorrowOut) bool {
-    return o.moves == 0 && o.conflicts == 0 && o.escapes == 0 && o.placeholders == 0;
+    return o.moves == 0 && o.conflicts == 0 && o.escapes == 0;
 }
 
 // The optimized and reference solvers must produce identical required-point sets per loan.
@@ -328,7 +326,7 @@ fn two_phase_receiver_accepted() {
     assert(clean(&o), "reserved receiver borrow tolerates argument reads");
 }
 
-// ---- placeholders and escapes ---------------------------------------------------------------------
+// ---- escapes --------------------------------------------------------------------------------------
 
 @test
 fn local_escape_rejected() {
@@ -346,26 +344,6 @@ fn arg_passthrough_accepted() {
     );
     let o = analyze(&p, "f");
     assert(clean(&o), "argument reborrow returns");
-}
-
-@test
-fn undeclared_placeholder_rejected() {
-    // universal lifetime bounds: returning 'b storage as 'a needs a declared relation
-    let p = typed_package(
-        "fn f<'a, 'b>(x: &'a i32, y: &'b i32) &'a i32 { let _ = x; return y; }\nfn main() i32 { let a = 1; let b = 2; return *f(&a, &b); }",
-    );
-    let o = analyze(&p, "f");
-    assert(o.placeholders != 0, "undeclared placeholder flow reported");
-}
-
-@test
-fn declared_placeholder_accepted() {
-    // universal lifetime bounds: the declared `'b: 'a` relation legalizes the same flow
-    let p = typed_package(
-        "fn f<'a, 'b: 'a>(x: &'a i32, y: &'b i32) &'a i32 { let _ = x; return y; }\nfn main() i32 { let a = 1; let b = 2; return *f(&a, &b); }",
-    );
-    let o = analyze(&p, "f");
-    assert(o.placeholders == 0, "declared bound accepted");
 }
 
 // ---- solver scaling and reference agreement -------------------------------------------------------

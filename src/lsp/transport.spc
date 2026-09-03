@@ -13,23 +13,8 @@ const fn ascii_lower(b: u8) u8 {
     return b;
 }
 
-// Case-insensitive "content-length:" prefix test (header names are case-insensitive).
-fn is_content_length(line: str) bool {
-    let name = "content-length:";
-    if line.len() < name.len() {
-        return false;
-    }
-    for i in 0..name.len() {
-        if ascii_lower(line[i]) != name[i] {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Case-insensitive "content-type:" prefix test.
-fn is_content_type(line: str) bool {
-    let name = "content-type:";
+// Case-insensitive header-name prefix test (`name` is the lowercase spelling with its colon).
+fn header_is(line: str, name: str) bool {
     if line.len() < name.len() {
         return false;
     }
@@ -95,7 +80,7 @@ pub fn read_message(f: *mut stdio::FILE) Option<String> {
         if headers > 32 {
             return Option::<String>::None;
         }
-        if is_content_length(l) {
+        if header_is(l, "content-length:") {
             if clen >= 0 {
                 return Option::<String>::None; // duplicate Content-Length
             }
@@ -106,7 +91,7 @@ pub fn read_message(f: *mut stdio::FILE) Option<String> {
             if clen < 0 {
                 return Option::<String>::None; // present but invalid
             }
-        } else if is_content_type(l) {
+        } else if header_is(l, "content-type:") {
             if !charset_ok(l.slice(13, l.len())) {
                 return Option::<String>::None;
             }

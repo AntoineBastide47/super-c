@@ -40,7 +40,6 @@ import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
 import borrowck::dataflow as bdf;
 import borrowck::loans as bln;
-import borrowck::explain as bex;
 import utils::errors as diag;
 import driver::tuc as tuc;
 import driver::taskctl as tctl;
@@ -439,7 +438,6 @@ struct TcOut {
     pub fixable: u32,
     pub errors: diag::Errors,
     pub log: tc::TcMarkLog,
-    pub stats: tc::TcStats,
 }
 
 struct TcTask {
@@ -483,13 +481,7 @@ fn tc_run_one(t: TcTask) {
         let mut tck = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
         tck.lint = want;
         tck.mark_log = &mut (unsafe &mut *out).log;
-        if stdlib::getenv("SC_TCPAR_DBG") != null {
-            eprint("tcpar: start m={}\n", i);
-        }
         tck.check();
-        if stdlib::getenv("SC_TCPAR_DBG") != null {
-            eprint("tcpar: end m={}\n", i);
-        }
         {
             // publish completion: everything check() wrote happens-before a waiter's wake
             let st = t.wc;
@@ -502,7 +494,6 @@ fn tc_run_one(t: TcTask) {
         o.warns = tck.errors.warns.len() as u32;
         o.errs = tck.errors.errors.len() as u32;
         o.fixable = tck.errors.fixable_errs;
-        o.stats = tck.stats;
         o.errors = replace(&mut tck.errors, diag::Errors::new());
     }
 }
@@ -537,7 +528,7 @@ fn dup_run_one(t: DupTask) {
     }
 }
 
-fn typecheck_all_par(p: &mut loader::Package, lint: bool, stats: *mut tc::TcStats) bool {
+fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
     let n = p.modules.len();
     p.ensure_index();
     for i in 0..n {
@@ -569,15 +560,7 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool, stats: *mut tc::TcStat
     let mut outs = Vector::<TcOut>::with_capacity(n);
     for _ in 0..n {
         outs.push(
-            TcOut {
-                ok: true,
-                warns: 0,
-                errs: 0,
-                fixable: 0,
-                errors: diag::Errors::new(),
-                log: tc::TcMarkLog::new(),
-                stats: tc::TcStats {},
-            },
+            TcOut { ok: true, warns: 0, errs: 0, fixable: 0, errors: diag::Errors::new(), log: tc::TcMarkLog::new() },
         );
     }
     prt::set_stack_size(8usize << 20); // the checker's expression recursion outgrows the default task stack
@@ -652,18 +635,6 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool, stats: *mut tc::TcStat
         }
     }
     let ngrp = nscc + 1;
-    if stdlib::getenv("SC_TCPAR_DBG") != null {
-        for i in 0..n {
-            eprint(
-                "tcpar: m={} lvl={} prelude={} base={} path={}\n",
-                i,
-                *lvl.at((*p.idx.scc_of.at(i)) as usize),
-                p.modules[i].prelude,
-                p.modules[i].ast.nodes.ptr_at(0) as usize,
-                p.modules[i].path.as_str(),
-            );
-        }
-    }
     let pp = p as *mut loader::Package;
     let wcp = (&mut wc) as *mut TcWaitSt;
     let want_lint = lint;
@@ -742,9 +713,6 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool, stats: *mut tc::TcStat
         p.lint_warnings = p.lint_warnings + o.warns;
         p.lint_errs = p.lint_errs + o.errs;
         p.lint_fixable = p.lint_fixable + o.fixable;
-        if stats != null {
-            unsafe (&mut *stats).merge(&o.stats);
-        }
         // module-order replay of the package-global marks, through the real visibility checks
         let lg = &o.log;
         for k in 0..lg.kinds.len() {
@@ -777,7 +745,6 @@ fn typecheck_module(
     lint: bool,
     fixes: *mut Vector<diag::LintFix>,
     ftexts: *mut Vector<String>,
-    stats: *mut tc::TcStats,
 ) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
@@ -786,9 +753,6 @@ fn typecheck_module(
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     t.check();
-    if stats != null {
-        unsafe (&mut *stats).merge(&t.stats);
-    }
     let had = t.has_errors();
     if had || fixes == null && t.errors.has_warnings() {
         t.log_errors();
@@ -820,76 +784,9 @@ fn typecheck_module(
     return !had;
 }
 
-// Borrow-check module `i`, serially: the pipeline stage after typechecking. A fresh TypeChecker context
-// over the typed AST carries the recorded types and resolutions; only the borrow/move/lifetime analyses
-// run. This is the one-module primitive borrowck_all iterates.
 // Dev gate (SC_FACTS_CHECK=1): snapshot every module's semantic-table watermarks right after
 // type checking, then assert -- after borrow checking AND after codegen -- that no later stage
 // changed a semantic decision table (intern pools excepted; see ast::facts). Off without the env var.
-// Dev gate (SC_AST_STATS=1): per-kind node census plus arena byte totals over the whole package,
-// printed after typechecking (post-HIR, so desugar-built nodes are counted). Off without the env var.
-fn ast_stats(p: &loader::Package) {
-    if stdlib::getenv("SC_AST_STATS") == null {
-        return;
-    }
-    let mut counts = Vector::<u64>::new();
-    counts.reserve(128);
-    for _ in 0..128 {
-        counts.push(0);
-    }
-    let mut nodes: u64 = 0;
-    let mut children: u64 = 0;
-    let mut bytes: u64 = 0;
-    for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast {
-            continue;
-        }
-        let a = &p.modules[m].ast;
-        nodes += a.nodes.len() as u64;
-        children += a.children.len() as u64;
-        bytes += a.retained_bytes() as u64;
-        for i in 0..a.nodes.len() {
-            let k = a.nodes.at(i).kind as usize;
-            if k < 128 {
-                counts[k] += 1;
-            }
-        }
-    }
-    unsafe stdio::fprintf(
-        stdio::stderr(),
-        "ast-stats: %llu nodes, %llu children, %llu KiB retained, sizeof(Node)=%zu\n".ptr() as *const char,
-        nodes,
-        children,
-        bytes / 1024,
-        sizeof(Node),
-    );
-    for k in 0..counts.len() {
-        if counts[k] != 0 {
-            unsafe stdio::fprintf(stdio::stderr(), "  kind %3zu: %llu\n".ptr() as *const char, k, counts[k]);
-        }
-    }
-}
-
-// Dev gate (SC_TC_STATS=1): package-total inference counters, printed after typechecking.
-// Off without the env var.
-fn tc_stats_print(s: &tc::TcStats) {
-    if stdlib::getenv("SC_TC_STATS") == null {
-        return;
-    }
-    eprint(
-        "tc-stats: unify={} conflicts={} len-binds={} generic-calls={} owner-infer={} bound-infer={} closure-expected={} iface-scans={} types-interned={}\n",
-        s.unify_calls,
-        s.unify_conflicts,
-        s.len_binds,
-        s.generic_calls,
-        s.owner_infer,
-        s.bound_infer,
-        s.closure_expected,
-        s.iface_scans,
-        s.types_interned,
-    );
-}
-
 fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) {
     if stdlib::getenv("SC_FACTS_CHECK") == null {
         return;
@@ -915,387 +812,6 @@ fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, stage:
         eprint("facts-check: stage '{}' changed semantic type-check tables\n", stage);
     }
     return d;
-}
-
-// ---------------------------------------------------------------------------------------------------------
-// Development mode (SC_CORE_IR=1): after borrow checking, lower every function, method,
-// closure, and constant body to Core IR and run the structural verifier. Reports bodies/failures,
-// lowering time, and retained bytes; failures name the module, node, and first unsupported reason.
-// SC_CORE_IR=print additionally dumps each body's deterministic text form to stderr.
-// ---------------------------------------------------------------------------------------------------------
-
-struct CoreIrStats {
-    pub bodies: u64,
-    pub failed: u64,
-    pub blocks: u64,
-    pub stmts: u64,
-    pub bytes: u64,
-    pub print_all: bool,
-}
-
-fn core_ir_body(p: &loader::Package, m: usize, node: NodeId, is_const: bool, st: &mut CoreIrStats) {
-    let mut lw = irl::Lowerer::new(p, m as ModuleId, node);
-    let ok = if is_const {
-        lw.lower_const(node);
-    } else {
-        lw.lower_fn(node);
-    };
-    st.bodies += 1;
-    if !ok {
-        st.failed += 1;
-        let mut snip = "";
-        if lw.err_node != NODE_NONE {
-            let a2 = unsafe &*p.module_ast_const(m as ModuleId);
-            let esp = a2.at_const(lw.err_node).span;
-            let src = p.modules.at(m).source.as_str();
-            let mut e2 = esp.end as usize;
-            if e2 > esp.start as usize + 48 {
-                e2 = esp.start as usize + 48;
-            }
-            if e2 > src.len() {
-                e2 = src.len();
-            }
-            snip = src.slice(esp.start as usize, e2);
-        }
-        let mut ek: u32 = 0;
-        if lw.err_node != NODE_NONE {
-            let a3 = unsafe &*p.module_ast_const(m as ModuleId);
-            ek = a3.at_const(lw.err_node).kind as u32;
-        }
-        eprint("core-ir: module {} node {}: {} k{} `{}`\n", m, node, lw.err, ek, snip);
-        return;
-    }
-    let tp = unsafe (&*p.module_ast_const(m as ModuleId)).type_pool.len();
-    let v = irv::verify(&lw.body, tp, p);
-    if v.len() != 0 {
-        st.failed += 1;
-        eprint("core-ir: module {} node {}: verify: {}\n", m, node, v);
-        let dump = irp::print_body(&lw.body);
-        dump.eprintln();
-        return;
-    }
-    st.blocks += lw.body.blocks.len() as u64;
-    st.stmts += lw.body.statements.len() as u64;
-    st.bytes += lw.body.retained_bytes() as u64;
-    if st.print_all {
-        let dump = irp::print_body(&lw.body);
-        dump.eprintln();
-    }
-    // Closures lower as their own bodies against the parent's capture environment.
-    for c in 0..lw.closures.len() {
-        let cn = lw.closures[c];
-        let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
-        let cok = cl.lower_closure_body(cn);
-        st.bodies += 1;
-        if !cok {
-            st.failed += 1;
-            eprint("core-ir: module {} closure {}: {}\n", m, cn, cl.err);
-        } else {
-            let cv = irv::verify(&cl.body, tp, p);
-            if cv.len() != 0 {
-                st.failed += 1;
-                eprint("core-ir: module {} closure {}: verify: {}\n", m, cn, cv);
-            } else {
-                st.blocks += cl.body.blocks.len() as u64;
-                st.stmts += cl.body.statements.len() as u64;
-                st.bytes += cl.body.retained_bytes() as u64;
-            }
-        }
-    }
-}
-
-fn core_ir_pass(p: &mut loader::Package) u32 {
-    let mode = stdlib::getenv("SC_CORE_IR");
-    if mode == null {
-        return 0;
-    }
-    let t0 = unsafe shim::sc_ticks_ms();
-    let mut st = CoreIrStats { bodies: 0, failed: 0, blocks: 0, stmts: 0, bytes: 0, print_all: false };
-    let ms = diag::cstr(mode);
-    st.print_all = ms == "print";
-    for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast {
-            continue;
-        }
-        let a = unsafe &*p.module_ast_const(m as ModuleId);
-        let items = a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let nid = unsafe a.list(items)[i as usize];
-            let n = a.at_const(nid);
-            if n.kind == NodeKind::NODE_FUNCTION {
-                if !n.as_data.function.is_extern && n.as_data.function.body != NODE_NONE {
-                    core_ir_body(p, m, nid, false, &mut st);
-                }
-            } else if n.kind == NodeKind::NODE_CONST {
-                if !n.as_data.const_def.is_extern && n.as_data.const_def.value != NODE_NONE {
-                    core_ir_body(p, m, nid, true, &mut st);
-                }
-            } else if n.kind == NodeKind::NODE_EXTEND {
-                let inner = n.as_data.extend_def.items;
-                for j in 0..inner.len {
-                    let iid = unsafe a.list(inner)[j as usize];
-                    let it = a.at_const(iid);
-                    if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.body != NODE_NONE {
-                        core_ir_body(p, m, iid, false, &mut st);
-                    } else if it.kind == NodeKind::NODE_CONST && it.as_data.const_def.value != NODE_NONE {
-                        core_ir_body(p, m, iid, true, &mut st);
-                    }
-                }
-            }
-        }
-    }
-    let dt = unsafe shim::sc_ticks_ms() - t0;
-    eprint(
-        "core-ir: {} bodies, {} failed, {} blocks, {} stmts, {} KiB retained, {} ms\n",
-        st.bodies,
-        st.failed,
-        st.blocks,
-        st.stmts,
-        st.bytes / 1024,
-        dt,
-    );
-    return st.failed as u32;
-}
-
-// Differential mode (SC_BORROW_IR=1): run the Core IR loan analysis over every lowered body while
-// the established AST checker stays authoritative. The corpus gate is zero reports here -- anything
-// printed is either a false reject to fix or a reviewed precision case. SC_BORROW_IR=ref also runs
-// the reference solver per body and compares required-point sets.
-struct BorrowIrStats {
-    pub bodies: u64,
-    pub skipped: u64, // failed to lower (already counted by SC_CORE_IR)
-    pub move_errs: u64,
-    pub loan_errs: u64,
-    pub ref_diffs: u64,
-    pub ms_facts: u64,
-    pub ms_solve: u64,
-    pub s: bln::Stats,
-}
-
-fn borrow_ir_body(
-    p: &loader::Package,
-    ow: &mut bfx::Owner,
-    m: usize,
-    node: NodeId,
-    is_const: bool,
-    st: &mut BorrowIrStats,
-    run_ref: bool,
-) {
-    let mut lw = irl::Lowerer::new(p, m as ModuleId, node);
-    let ok = if is_const {
-        lw.lower_const(node);
-    } else {
-        lw.lower_fn(node);
-    };
-    if !ok {
-        st.skipped += 1;
-        return;
-    }
-    borrow_ir_run(p, ow, m, &lw.body, st, run_ref);
-    for c in 0..lw.closures.len() {
-        let cn = lw.closures[c];
-        let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
-        if cl.lower_closure_body(cn) {
-            borrow_ir_run(p, ow, m, &cl.body, st, run_ref);
-        } else {
-            st.skipped += 1;
-        }
-    }
-}
-
-fn borrow_ir_run(
-    p: &loader::Package,
-    ow: &mut bfx::Owner,
-    m: usize,
-    body: &irc::CoreBody,
-    st: &mut BorrowIrStats,
-    run_ref: bool,
-) {
-    st.bodies += 1;
-    let t0 = unsafe shim::sc_ticks_ms();
-    let forest = bmp::MoveForest::build(body);
-    let bfacts = ow.generate(body, &forest);
-    let cfg = bdf::build_cfg(body);
-    let lv = bdf::solve_liveness(&bfacts, &cfg);
-    let t1 = unsafe shim::sc_ticks_ms();
-    let mv = bdf::solve_moves(body, &forest, &bfacts, &cfg);
-    let sv = bln::solve(body, &bfacts, &cfg, &lv);
-    let t2 = unsafe shim::sc_ticks_ms();
-    st.ms_facts += (t1 - t0) as u64;
-    st.ms_solve += (t2 - t1) as u64;
-    bln::stats_add(&mut st.s, &sv.stats);
-    // Deduplicate by (kind, source position): loops replay blocks, defers duplicate statements.
-    let mut seen = Vector::<u64>::new();
-    for e in 0..mv.errs.len() {
-        let er = *mv.errs.at(e);
-        let key = er.kind as u64 << 32 | er.span.start as u64;
-        let mut dup = false;
-        for k in 0..seen.len() {
-            if seen[k] == key {
-                dup = true;
-            }
-        }
-        if dup {
-            continue;
-        }
-        seen.push(key);
-        st.move_errs += 1;
-        let line = bex::render_move(p, m as ModuleId, er.kind, er.span);
-        eprint("borrow-ir: module {} node {}: ", m, body.owner.node);
-        line.eprintln();
-    }
-    if sv.errs.len() != 0 && stdlib::getenv("SC_BORROW_TRACE") != null {
-        for li in 0..bfacts.loans.len() {
-            let lo = *bfacts.loans.at(li);
-            let pl = *body.places.at(lo.place as usize);
-            eprint(
-                "  loan {} kind {} base {} storage {} projs {} origin {} issued {} act {}\n",
-                li,
-                lo.kind,
-                pl.base,
-                body.locals.at(pl.base as usize).storage,
-                pl.proj_len,
-                lo.origin,
-                lo.issued_at,
-                lo.activated_at,
-            );
-        }
-        for e2 in 0..sv.errs.len() {
-            let er2 = *sv.errs.at(e2);
-            eprint("  err kind {} loan {} point {}\n", er2.kind, er2.loan, er2.point);
-        }
-        eprint(
-            "  origins {} uni {} subsets {} uniflows {}\n",
-            bfacts.norigins,
-            bfacts.nuniversal,
-            bfacts.subsets.len(),
-            bfacts.uni_flows.len(),
-        );
-        for si in 0..bfacts.subsets.len() {
-            let sb = *bfacts.subsets.at(si);
-            eprint("  sub {} -> {} @{}\n", sb.from, sb.to, sb.point);
-        }
-    }
-    for e in 0..sv.errs.len() {
-        let er = *sv.errs.at(e);
-        let key = 0x8000000000000000u64 | er.kind as u64 << 32 | er.span.start as u64;
-        let mut dup = false;
-        for k in 0..seen.len() {
-            if seen[k] == key {
-                dup = true;
-            }
-        }
-        if dup {
-            continue;
-        }
-        seen.push(key);
-        st.loan_errs += 1;
-        let line = bex::render(p, m as ModuleId, &bfacts, &er);
-        eprint("borrow-ir: module {} node {}: ", m, body.owner.node);
-        line.eprintln();
-    }
-
-    if run_ref && bfacts.npoints < 2000 {
-        let rr = bln::solve_reference(body, &bfacts, &cfg, &lv);
-        // Compare required-point sets loan by loan against a fresh optimized run.
-        let mut sv2 = bln::solve(body, &bfacts, &cfg, &lv);
-        for li in 0..bfacts.loans.len() {
-            let row = sv2.required_row(li as u32);
-            for w in 0..rr.pwords {
-                if *rr.required.at((li as u32 * rr.pwords + w) as usize) != sv2.req_word(row, w) {
-                    st.ref_diffs += 1;
-                    eprint("borrow-ir: module {} node {}: ref-solver mismatch loan {}\n", m, body.owner.node, li);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-fn borrow_ir_pass(p: &mut loader::Package) u32 {
-    let mode = stdlib::getenv("SC_BORROW_IR");
-    if mode == null {
-        return 0;
-    }
-    let run_ref = diag::cstr(mode) == "ref";
-    let t0 = unsafe shim::sc_ticks_ms();
-    let mut ow = bfx::Owner::new(p);
-    let mut st = BorrowIrStats {
-        bodies: 0,
-        skipped: 0,
-        move_errs: 0,
-        loan_errs: 0,
-        ref_diffs: 0,
-        ms_facts: 0,
-        ms_solve: 0,
-        s: bln::stats_zero(),
-    };
-    for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast {
-            continue;
-        }
-        let a = unsafe &*p.module_ast_const(m as ModuleId);
-        let items = a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let nid = unsafe a.list(items)[i as usize];
-            let n = a.at_const(nid);
-            if n.kind == NodeKind::NODE_FUNCTION {
-                if !n.as_data.function.is_extern && n.as_data.function.body != NODE_NONE {
-                    borrow_ir_body(p, &mut ow, m, nid, false, &mut st, run_ref);
-                }
-            } else if n.kind == NodeKind::NODE_CONST {
-                if !n.as_data.const_def.is_extern && n.as_data.const_def.value != NODE_NONE {
-                    borrow_ir_body(p, &mut ow, m, nid, true, &mut st, run_ref);
-                }
-            } else if n.kind == NodeKind::NODE_EXTEND {
-                let inner = n.as_data.extend_def.items;
-                for j in 0..inner.len {
-                    let iid = unsafe a.list(inner)[j as usize];
-                    let it = a.at_const(iid);
-                    if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.body != NODE_NONE {
-                        borrow_ir_body(p, &mut ow, m, iid, false, &mut st, run_ref);
-                    } else if it.kind == NodeKind::NODE_CONST && it.as_data.const_def.value != NODE_NONE {
-                        borrow_ir_body(p, &mut ow, m, iid, true, &mut st, run_ref);
-                    }
-                }
-            }
-        }
-    }
-    let dt = unsafe shim::sc_ticks_ms() - t0;
-    eprint(
-        "borrow-ir: {} bodies ({} skipped), {} move-errs, {} loan-errs, {} ref-diffs, {} ms ({} facts, {} solve)\n",
-        st.bodies,
-        st.skipped,
-        st.move_errs,
-        st.loan_errs,
-        st.ref_diffs,
-        dt,
-        st.ms_facts,
-        st.ms_solve,
-    );
-    eprint(
-        "borrow-ir: origins {} (uni {}), loans {}, points {}, cfg-edges {}, subsets {}, kills {}, activations {}, accesses {}\n",
-        st.s.origins,
-        st.s.universals,
-        st.s.loans,
-        st.s.points,
-        st.s.cfg_edges,
-        st.s.subset_facts,
-        st.s.kill_facts,
-        st.s.activation_facts,
-        st.s.access_facts,
-    );
-    eprint(
-        "borrow-ir: candidates {}, clean {}, queries {} (hits {}), steps {}, loanset-KiB {}, scratch-KiB {}\n",
-        st.s.candidates,
-        st.s.clean_bodies,
-        st.s.queries,
-        st.s.cache_hits,
-        st.s.steps,
-        st.s.loanset_bytes / 1024,
-        st.s.scratch_bytes / 1024,
-    );
-    return (st.move_errs + st.loan_errs + st.ref_diffs) as u32;
 }
 
 // Validation mode (SC_LAYOUT=1): every concrete pool type must satisfy the C layout invariants --
@@ -1385,115 +901,6 @@ fn layout_pass(p: &mut loader::Package) {
         bad,
         dt,
     );
-}
-
-// Coverage mode (SC_CEMIT=1): run the streaming C emitter over every lowered body, count the
-// emittable subset, and verify two serial emissions hash identically.
-fn cemit_pass(p: &mut loader::Package) {
-    if stdlib::getenv("SC_CEMIT") == null {
-        return;
-    }
-    let t0 = unsafe shim::sc_ticks_ms();
-    let mut em = cbe::CEmit::new(p);
-    let mut bodies: u64 = 0;
-    let mut emitted: u64 = 0;
-    let mut bytes: u64 = 0;
-    let mut h1: u64 = 1469598103934665603u64;
-    let mut h2: u64 = 1469598103934665603u64;
-    let mut generic: u64 = 0;
-    let mut reasons = Vector::<str<'static>>::new();
-    let mut rcounts = Vector::<u64>::new();
-    let mut cands = Vector::<NodeId>::new();
-    for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast {
-            continue;
-        }
-        let a = unsafe &*p.module_ast_const(m as ModuleId);
-        let items = a.at_const(a.root).as_data.program.items;
-        cands.truncate(0);
-        for i in 0..items.len {
-            let nid = unsafe a.list(items)[i as usize];
-            let n = a.at_const(nid);
-            if n.kind == NodeKind::NODE_FUNCTION {
-                cands.push(nid);
-            } else if n.kind == NodeKind::NODE_EXTEND {
-                let ms = n.as_data.extend_def.items;
-                for j in 0..ms.len {
-                    let mid2 = unsafe a.list(ms)[j as usize];
-                    if a.at_const(mid2).kind == NodeKind::NODE_FUNCTION {
-                        cands.push(mid2);
-                    }
-                }
-            }
-        }
-        for i in 0..cands.len() {
-            let nid = cands[i];
-            let n = a.at_const(nid);
-            if n.as_data.function.is_extern || n.as_data.function.body == NODE_NONE {
-                continue;
-            }
-            let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
-            if !lw.lower_fn(nid) {
-                continue;
-            }
-            if lw.body.is_generic || em.mg.in_generic_extend(m as ModuleId, nid) {
-                generic += 1; // generic-extend methods emit per receiver instance, not standalone
-                continue;
-            }
-            bodies += 1;
-            let mut sym = String::new();
-            let tgt = em.mg.method_target(m as ModuleId, nid);
-            if !em.mg.fn_sym(m as ModuleId, nid, tgt, true, &mut sym) {
-                continue;
-            }
-            em.out.clear();
-            if em.emit_fn(&lw.body, sym.as_str()) {
-                emitted += 1;
-                bytes += em.out.len() as u64;
-                let s1 = em.out.as_str();
-                for k in 0..s1.len() {
-                    h1 = (h1 ^ s1.byte_at(k) as u64) * 1099511628211u64;
-                }
-                em.out.clear();
-                let _ = em.emit_fn(&lw.body, sym.as_str());
-                let s2 = em.out.as_str();
-                for k in 0..s2.len() {
-                    h2 = (h2 ^ s2.byte_at(k) as u64) * 1099511628211u64;
-                }
-            } else {
-                let mut found = false;
-                for r in 0..reasons.len() {
-                    if reasons[r] == em.err {
-                        rcounts.set(r, rcounts[r] + 1);
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    reasons.push(em.err);
-                    rcounts.push(1);
-                }
-            }
-        }
-    }
-
-    let dt = unsafe shim::sc_ticks_ms() - t0;
-    let mut det = "identical";
-    if h1 != h2 {
-        det = "DIVERGENT";
-    }
-    eprint(
-        "cemit: {} bodies ({} generic skipped), {} emitted, {} KiB, serial hashes {}, {} ms\n",
-        bodies,
-        generic,
-        emitted,
-        bytes / 1024,
-        det,
-        dt,
-    );
-    for r in 0..reasons.len() {
-        eprint("cemit-miss: {} x{}\n", reasons[r], rcounts[r]);
-    }
 }
 
 // SC_CEMIT_TU=1: the backend's declaration layer over the whole package -- every concrete
@@ -2232,7 +1639,7 @@ fn cemit_seed_module(
                 // The receiver is the first argument (locals are return-slots then args): ask the
                 // emitter for its C spelling -- it may preserve the source name (`self`) over `_N`.
                 let mut selfp = String::new();
-                cem.local_cname(lw.body.returns, &mut selfp);
+                cem.lspell(lw.body.returns, &mut selfp);
                 wr.push_str("\n  ");
                 wr.push_str(sym.as_str());
                 wr.push_str("(");
@@ -2520,13 +1927,7 @@ fn cemit_seed_task(t: SeedTask) {
         &mut o.clos_skip,
     );
     if t.ctl != null {
-        let d9 = tctl::TaskDesc {
-            key: tctl::TaskKey { stage: tctl::ST_SEED, module: t.m as u32, item: 0 },
-            estimated_cpu: 1,
-            estimated_memory: t.est,
-            priority: 0,
-        };
-        (unsafe &*t.ctl).release(&d9);
+        (unsafe &*t.ctl).release(t.est);
     }
     dctx_put(dow);
 }
@@ -2616,9 +2017,6 @@ fn cemit_drain_demand(
     // its args -- every material instantiation folds identically and shares one body.
     let mut li2 = li;
     if lws.at(li as usize).body.has_reflect {
-        if stdlib::getenv("SC_PROJ_DBG") != null {
-            eprint("proj-relower: `{}` subs {}\n", d_sym.as_str(), d_subs.len());
-        }
         let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
         for i2 in 0..d_subs.len() {
             let sb2 = *d_subs.at(i2);
@@ -3448,8 +2846,7 @@ fn cemit_seed_merge_range(cem: &mut cbe::CEmit, o: &mut SeedShard, a: &CapMark, 
             cem.aux.push_str(sc.aux.as_str().slice(pe as usize, e as usize));
         } else {
             let bit = (k >> 1) as u8;
-            if (cem.assert_helpers_get() & bit) == 0u8 {
-                cem.assert_helpers_or(bit);
+            if cem.assert_helpers_claim(bit) {
                 cem.aux.push_str(sc.aux.as_str().slice(pe as usize, e as usize));
             }
         }
@@ -3487,7 +2884,7 @@ pub fn cemit_package(
     o: &mut CemitOut,
     irkeep: *mut irl::Keep,
 ) {
-    let verbose = stdlib::getenv("SC_CEMIT_TU") != null || stdlib::getenv("SC_CEMIT_STATS") != null;
+    let verbose = stdlib::getenv("SC_CEMIT_STATS") != null;
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tt0 = unsafe shim::sc_ticks_ms();
     p.ensure_sigs(); // the planner's signature-level propagation reads the package metadata
@@ -3541,7 +2938,6 @@ pub fn cemit_package(
     // on, then drain the queue -- each demanded instance re-emits the generic Core body under its
     // recorded substitution chain. The drained symbol set is the closed instance set the old
     // propagation computed, derived from Core IR alone.
-    dctx_reset();
     let mut cem = cbe::CEmit::new(p);
     cem.collect_demand = true;
     cem.mg.agg_on = true;
@@ -3683,13 +3079,7 @@ pub fn cemit_package(
         for oi9 in 0..order9.len() {
             let m = (order9[oi9] & 0xFFFFFu64) as usize;
             let est9 = p.modules[m].source.len() as u64 * 12 + (1u64 << 20);
-            let d9 = tctl::TaskDesc {
-                key: tctl::TaskKey { stage: tctl::ST_SEED, module: m as u32, item: 0 },
-                estimated_cpu: 1,
-                estimated_memory: est9,
-                priority: p.modules[m].source.len() as u32,
-            };
-            mctl.acquire(&d9);
+            mctl.acquire(est9);
             wg.add(1);
             launched9 += 1;
             let op9 = (shards.index_mut(m) as *mut SeedShard) as *mut void;
@@ -5330,119 +4720,6 @@ pub fn cemit_package(
     dctx_drop();
 }
 
-// The verification lane (SC_CEMIT_TU=1|2): run the whole-package emission, write the scratch tree
-// under build/cemit_mod, compile + link it against the runtime (plus the fork-per-test runner when
-// the package has no main), and run the produced stage.
-fn cemit_tu_pass(p: &mut loader::Package) {
-    if stdlib::getenv("SC_CEMIT_TU") == null {
-        return;
-    }
-    let t0 = unsafe shim::sc_ticks_ms();
-    let mut tplan = TestPlan::new(p.modules.len());
-    test_plan_build(p, &mut tplan);
-    let mut o = CemitOut::new(p.modules.len());
-    cemit_package(p, true, &tplan, null, -1, &mut o, null);
-    let _ = unsafe shim::sc_run("mkdir -p build/cemit_mod".ptr() as *const char, null, null, null, null);
-    write_super_rt("build/cemit_mod");
-    let mut ok9 = cemit_write("build/cemit_mod/__sc_types.h", &o.types_h) && cemit_write(
-        "build/cemit_mod/__sc_protos.h",
-        &o.protos_h,
-    );
-    let mut cc_cmd = String::from_str(
-        "cc -std=c11 -Wall -Werror -Wno-implicit-function-declaration -Wno-error=implicit-function-declaration -Wno-uninitialized -Wno-sometimes-uninitialized -Wno-unused-function",
-    );
-    let mut ntu: u64 = 0;
-    for t in 0..p.modules.len() + 1 {
-        let is_inst = t == p.modules.len();
-        let src9 = if is_inst {
-            o.inst_c.as_str();
-        } else {
-            o.tus.at(t).as_str();
-        };
-        if src9.len() == 0 {
-            continue;
-        }
-        let mut tu2 = String::from_str("#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n");
-        tu2.push_str(src9);
-        let mut path = String::from_str("build/cemit_mod/");
-        if is_inst {
-            path.push_str("__sc_inst");
-        } else {
-            let mp = p.modules[t].path.as_str();
-            for k in 0..mp.len() {
-                let c2 = mp.byte_at(k);
-                let okc = c2 >= b'a' && c2 <= b'z' || c2 >= b'A' && c2 <= b'Z' || c2 >= b'0' && c2 <= b'9';
-                path.push_byte(
-                    if okc {
-                        c2;
-                    } else {
-                        b'_';
-                    },
-                );
-            }
-        }
-        path.push_str(".c");
-        ok9 = ok9 && cemit_write(path.as_str(), &tu2);
-        cc_cmd.push_str(" ");
-        cc_cmd.push_string(&path);
-        ntu += 1;
-        // part files of an oversized TU compile alongside part 0
-        let nex = if is_inst {
-            o.inst_extra.len();
-        } else {
-            o.tu_extra.at(t).len();
-        };
-        for x in 0..nex {
-            let px = if is_inst {
-                o.inst_extra.at(x);
-            } else {
-                o.tu_extra.at(t).at(x);
-            };
-            let mut tux = String::from_str("#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n");
-            tux.push_string(px);
-            let mut xpath = String::from_str(path.as_str().slice(0, path.len() - 2));
-            xpath.push_str("__p");
-            xpath.push_u64(x as u64 + 1);
-            xpath.push_str(".c");
-            ok9 = ok9 && cemit_write(xpath.as_str(), &tux);
-            cc_cmd.push_str(" ");
-            cc_cmd.push_string(&xpath);
-            ntu += 1;
-        }
-    }
-    if !o.have_main && tplan.ok && tplan.cases.len() != 0 {
-        // no user main: the fork-per-test runner TU is the program (the lane runs before codegen
-        // defaults gen_root and creates the tree, so do both here; idempotent)
-        if p.gen_root.len() == 0 {
-            p.gen_root = String::from_str(p.root_dir.as_str());
-            p.gen_root.push_str("/build/raw");
-        }
-        let mut mk = String::from_str("mkdir -p ");
-        mk.push_str(p.gen_root.as_str());
-        let _ = unsafe shim::sc_run(mk.cstr(), null, null, null, null);
-        switch write_test_main(p, &tplan) {
-            Some(rp) => {
-                cc_cmd.push_str(" ");
-                cc_cmd.push_str(rp.as_str());
-            },
-            None => {
-                ok9 = false;
-            },
-        };
-    }
-    cc_cmd.push_str(" build/raw/__ext*.c build/cemit_mod/super_rt.c -o build/cemit_mod/sc_gen1");
-    let mut mrc: i32 = -1;
-    if ok9 {
-        mrc = unsafe shim::sc_run(cc_cmd.cstr(), null, "build/cemit_mod/cc.log", null, null);
-    }
-    let mut rrc: i32 = -1;
-    if mrc == 0 {
-        rrc = unsafe shim::sc_run("build/cemit_mod/sc_gen1 --help".ptr() as *const char, null, null, null, null);
-    }
-    let dt = unsafe shim::sc_ticks_ms() - t0;
-    eprint("cemit-mod: {} TUs, {} skips, cc {}, run {}, {} ms\n", ntu, o.skips, mrc, rrc, dt);
-}
-
 // A literal const-initializer element as C: string literals become str views, integers copy
 // their digits, struct literals recurse positionally. Anything else refuses.
 fn render_const_elem(a: &Ast, src: str, eid: NodeId, out: &mut String) bool {
@@ -6080,14 +5357,6 @@ fn dctx_put(d: DropCtx) {
     unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
 }
 
-fn dctx_reset() {
-    unsafe sc_runtime::sc_rt_spin_lock(&mut G_DPOOL_LOCK);
-    if unsafe G_DPOOL != null {
-        (unsafe &mut *G_DPOOL).truncate(0);
-    }
-    unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
-}
-
 // End-of-phase teardown: the pooled contexts and the pool holder itself are released, so a compile
 // exits with no live pool allocation (the leak gate audits every process).
 fn dctx_drop() {
@@ -6145,22 +5414,6 @@ extend DropCtx {
                 let mut iline = String::new();
                 inl::stats_line(&ist, &mut iline);
                 eprint("{} owner {}:{}\n", iline.as_str(), lw.body.module, lw.body.owner.node);
-            }
-            if ist.inlined != 0 && self.inl.dbg_on {
-                let want9 = stdlib::getenv("SC_INLINE_DBG_OWNER");
-                let mut show9 = true;
-                if want9 != null {
-                    let mut key9 = String::new();
-                    key9.push_u64(lw.body.module);
-                    key9.push_str(":");
-                    key9.push_u64(lw.body.owner.node);
-                    show9 = key9.as_str() == str::from_cstr(want9);
-                }
-                if show9 {
-                    eprint("inline-dbg owner {}:{}\n", lw.body.module, lw.body.owner.node);
-                    let dump9 = irp::print_body(&lw.body);
-                    dump9.eprintln();
-                }
             }
             if ist.inlined != 0 && self.core_ir {
                 let tp9 = unsafe (&*(&*lw.pkg).module_ast_const(lw.body.module)).type_pool.len();
@@ -6380,6 +5633,9 @@ fn proto_of(body: &String, out: &mut String) {
     out.push_str(";\n");
 }
 
+// Borrow-check module `i`, serially: the pipeline stage after typechecking. A fresh TypeChecker context
+// over the typed AST carries the recorded types and resolutions; only the borrow/move/lifetime analyses
+// run. This is the one-module primitive borrowck_all iterates.
 fn borrowck_module(p: &mut loader::Package, i: usize, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
@@ -6462,7 +5718,6 @@ fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     // package-wide lazy state the tasks would otherwise race to build
     if p.co_state == 0 {
         p.co_compute();
-        p.co_dump();
     }
     if p.cancel_state == 0 {
         p.cancel_compute();
@@ -7753,7 +7008,7 @@ fn lint_package_i(
         } else {
             null;
         };
-        let ok = typecheck_module(p, i, sel, fx, ftexts, null);
+        let ok = typecheck_module(p, i, sel, fx, ftexts);
         p.ok = ok && p.ok;
     }
     if !p.ok {
@@ -7771,12 +7026,7 @@ fn lint_package_i(
     if facts_verify(p, &wms, "borrowck") != 0 {
         return 1;
     }
-    if core_ir_pass(p) != 0 {
-        return 1;
-    }
-    let _ = borrow_ir_pass(p);
     layout_pass(p);
-    cemit_pass(p);
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
     // duplicates). The const suggestion is the exception: opt-in (`--const`, warning every
     // eligible function at once would swamp default lints), and under `--fix` it contributes its
@@ -7871,16 +7121,14 @@ fn run_package_i(
         eprint("phase resolve: {} ms\n", t9 - tp0);
         tp0 = t9;
     }
-    let mut tcs = tc::TcStats {};
     if p.jobs != 1 && n > 1 {
-        p.ok = typecheck_all_par(p, lint, &mut tcs) && p.ok;
+        p.ok = typecheck_all_par(p, lint) && p.ok;
     } else {
         for i in 0..n {
-            let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null, &mut tcs);
+            let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null);
             p.ok = ok && p.ok;
         }
     }
-    tc_stats_print(&tcs);
     if p.ok {
         discharge_obligations(p, n, p.jobs != 1 && n > 1);
     }
@@ -7892,7 +7140,6 @@ fn run_package_i(
         eprint("phase typecheck: {} ms\n", t9 - tp0);
         tp0 = t9;
     }
-    ast_stats(p);
     let mut wms = Vector::<facts::FactsWatermark>::new();
     facts_snapshot(p, &mut wms);
     // The backend consumes borrowck's lowerings (irkeep), so the evaluator must reach its final
@@ -7913,9 +7160,6 @@ fn run_package_i(
     if p.jobs != 1 {
         prt::shutdown();
     }
-    // Release the pool as soon as the one parallel stage is done: the test runner FORKS after this,
-    // and a forked child inherits the pool's state but none of its worker threads. (Also what keeps
-    // the leak gate green.) The bench calls borrowck_all directly, so its iterations keep a warm pool.
     if !p.ok {
         return 1;
     }
@@ -7927,13 +7171,7 @@ fn run_package_i(
     if facts_verify(p, &wms, "borrowck") != 0 {
         return 1;
     }
-    if core_ir_pass(p) != 0 {
-        return 1;
-    }
-    let _ = borrow_ir_pass(p);
     layout_pass(p);
-    cemit_pass(p);
-    cemit_tu_pass(p);
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase verify+layout: {} ms\n", t9 - tp0);

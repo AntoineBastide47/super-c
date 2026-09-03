@@ -79,7 +79,6 @@ pub const CK_STR: u8 = 3; // raw span = content
 pub const CK_UNIT: u8 = 4; // no value (void/empty)
 pub const CK_ITEM: u8 = 5; // item = resolved fn/const DefId
 pub const CK_WIDE: u8 = 6; // val = wide-literal record index in the module Ast
-pub const CK_ERROR: u8 = 7; // error-recovery constant (error-typed)
 
 pub struct Constant {
     pub kind: u8,
@@ -146,10 +145,7 @@ pub const RV_SLICE: u8 = 13;
 
 /// Cast kinds (RV_CAST.b).
 pub const CAST_NUMERIC: u8 = 0;
-pub const CAST_POINTER: u8 = 1;
-pub const CAST_COERCE_FROM: u8 = 2; // library `from` conversion; item = selected method
-pub const CAST_NEVER: u8 = 3; // never-to-any
-pub const CAST_ARRAY_SLICE: u8 = 4; // array -> slice view
+pub const CAST_COERCE_FROM: u8 = 1; // library `from` conversion; item = selected method
 
 /// Aggregate kinds (RV_AGGREGATE.c).
 pub const AGG_STRUCT: u8 = 0;
@@ -166,7 +162,6 @@ pub const IN_VA_END: u8 = 4;
 pub const IN_TYPE_INFO: u8 = 5;
 pub const IN_ZEROED: u8 = 6;
 pub const IN_REFLECT: u8 = 7; // angle-3 compatibility: reflection binder/projection forms
-pub const IN_ASM_OPERAND: u8 = 8;
 pub const IN_NEW: u8 = 9; // heap allocation of the initializer operand (`new T { .. }`)
 // Inline assembly: `item` names the NODE_ASM (template/constraints/clobbers read from the AST);
 // operands are the outputs' places (as copies) then the input values, in source order.
@@ -227,10 +222,6 @@ pub struct Rvalue {
 pub const ST_ASSIGN: u8 = 0; // place = rvalue
 pub const ST_STORAGE_LIVE: u8 = 1; // a = LocalId
 pub const ST_STORAGE_DEAD: u8 = 2; // a = LocalId
-pub const ST_SET_DISCR: u8 = 3; // place, a = variant index
-pub const ST_DEINIT: u8 = 4; // place
-pub const ST_ASM: u8 = 5; // a = operand range start, b = len; raw span = template
-pub const ST_NOP: u8 = 6;
 
 pub struct Statement {
     pub kind: u8,
@@ -428,20 +419,6 @@ extend CoreBody {
             out.targ_pool.push(*src.targ_pool.at(i));
         }
         return out;
-    }
-
-    /// Retained bytes across every pool (capacity, the number that reaches RSS).
-    pub const fn retained_bytes(self: &Self) usize {
-        let mut b = self.locals.capacity() * sizeof(LocalDecl);
-        b += self.blocks.capacity() * sizeof(BasicBlock);
-        b += self.statements.capacity() * sizeof(Statement);
-        b += self.places.capacity() * sizeof(Place);
-        b += self.projections.capacity() * sizeof(Projection);
-        b += self.operands.capacity() * sizeof(Operand);
-        b += self.rvalues.capacity() * sizeof(Rvalue);
-        b += self.constants.capacity() * sizeof(Constant);
-        b += self.oper_pool.capacity() * 4 + self.dest_pool.capacity() * 4 + self.switch_pool.capacity() * 8 + self.targ_pool.capacity() * 4;
-        return b;
     }
 
     pub fn add_local(self: &mut Self, d: LocalDecl) LocalId {

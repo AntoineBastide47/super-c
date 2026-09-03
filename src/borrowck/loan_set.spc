@@ -57,8 +57,4 @@ extend LoanMat {
         }
         return changed;
     }
-
-    pub const fn retained_bytes(self: &Self) usize {
-        return self.pool.capacity() * 8;
-    }
 }

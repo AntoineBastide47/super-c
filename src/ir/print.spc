@@ -1,5 +1,4 @@
-// Deterministic Core IR debug printer: a stable text form used only by the
-// SC_CORE_IR development mode and the IR expected-output tests. Never runs in a normal build.
+// Deterministic Core IR debug printer: a stable text form for the IR expected-output tests.
 import ast::ast as *;
 import ir::core as ir;
 
@@ -186,8 +185,6 @@ pub fn print_body(b: &ir::CoreBody) String {
                 p_place(&mut out, b, s.place);
                 out.push_str(" = ");
                 p_rvalue(&mut out, b, s.rvalue);
-            } else if s.kind == ir::ST_ASM {
-                out.push_str("asm");
             } else if s.kind == ir::ST_STORAGE_LIVE {
                 out.push_str("live _");
                 p_u(&mut out, s.a);

@@ -674,7 +674,7 @@ extend Lowerer {
         let rets = fd.returns;
         for i in 0..rets.len {
             let rn = unsafe self.f.list(rets)[i as usize];
-            let rt = self.ret_slot_type(rn);
+            let rt = self.nty(rn);
             let _ = self.body.add_local(
                 ir::LocalDecl {
                     ty: rt,
@@ -903,11 +903,6 @@ extend Lowerer {
             let _ = self.body.blocks.pop();
         }
         return self.err.len() == 0;
-    }
-
-    // A return slot's declared type: returns are PARAMETER nodes (named) or bare type nodes.
-    fn ret_slot_type(self: &mut Self, rn: NodeId) TypeId {
-        return self.nty(rn);
     }
 
     // ---- statements -------------------------------------------------------------------------------
@@ -2439,9 +2434,6 @@ extend Lowerer {
         let mut svc = lay::Svc::new(self.pkg);
         let lo = svc.layout_of(self.module, measured, head, 0);
         svc.free();
-        if stdlib::getenv("SC_ZC_DBG") != null {
-            eprint("zst-cond: env {} ok {} size {}\n", self.env.len(), lo.ok, lo.size);
-        }
         if !lo.ok {
             self.body.has_zst_cond = true; // symbolic here; instances re-lower and fold
             return -1;
@@ -2736,7 +2728,7 @@ extend Lowerer {
         }
         let cev = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
         *out = if is_fields {
-            cev.field_count_of(dm, dn);
+            cev.field_count(dm, dn);
         } else {
             cev.variant_count_of(dm, dn);
         };
@@ -3179,7 +3171,7 @@ extend Lowerer {
         let a1 = self.bool_and(inc_op2, le_op, sp);
         let nop = self.copy_op(npl);
         let a2 = self.bool_and(nop, lt_op, sp);
-        let cond = self.bool_or(a1, a2, sp);
+        let cond = self.bool_bin(a1, a2, tt::TokenType::PipePipe, sp);
         self.branch_bool(cond, body_b, exit, sp);
         self.loops.push(
             LoopCtx {
@@ -3231,10 +3223,6 @@ extend Lowerer {
 
     fn bool_and(self: &mut Self, a: ir::OperandId, b: ir::OperandId, sp: tok::Span) ir::OperandId {
         return self.bool_bin(a, b, tt::TokenType::AmpersandAmpersand, sp);
-    }
-
-    fn bool_or(self: &mut Self, a: ir::OperandId, b: ir::OperandId, sp: tok::Span) ir::OperandId {
-        return self.bool_bin(a, b, tt::TokenType::PipePipe, sp);
     }
 
     fn bool_bin(self: &mut Self, a: ir::OperandId, b: ir::OperandId, op: tt::TokenType, sp: tok::Span) ir::OperandId {

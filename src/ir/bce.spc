@@ -158,7 +158,6 @@ pub struct Bce {
     pub total_facts: usize,
     pub limited: bool,
     pub off: bool, // SC_BCE=0
-    pub dbg: bool, // SC_BCE_DBG
     pub no_dom: bool, // SC_BCE_DISABLE rule switches
     pub no_const: bool,
     pub no_loop: bool,
@@ -254,7 +253,6 @@ extend Bce {
             total_facts: 0,
             limited: false,
             off: e != null && str::from_cstr(e) == "0",
-            dbg: stdlib::getenv("SC_BCE_DBG") != null,
             no_dom: d.contains("dom"),
             no_const: d.contains("const"),
             no_loop: d.contains("loop"),
@@ -529,7 +527,7 @@ extend Bce {
             let bb = b.blocks.at(cur as usize);
             for si in 0..bb.stmt_len {
                 let s = *b.statements.at((bb.stmt_start + si) as usize);
-                if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD || s.kind == ir::ST_NOP {
+                if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
                     continue;
                 }
                 if s.kind != ir::ST_ASSIGN {
@@ -658,37 +656,10 @@ extend Bce {
                 if f.kind != 0 {
                     continue;
                 }
-                if self.dbg {
-                    eprint(
-                        "bce-dbg: fact il={} iv={} ioff={} ln_l={} ln_v={} lnoff={} lp_ok={} | ik l={} v={} off={} loc={} | im={} lm={}\n",
-                        f.il,
-                        f.iv,
-                        f.ioff,
-                        f.ln_l,
-                        f.ln_v,
-                        f.ln_off,
-                        f.lp_ok,
-                        ik.l,
-                        ik.v,
-                        ik.off,
-                        ik.is_local,
-                        self.idx_matches(&f, &ik, true),
-                        self.len_matches(b, &f, lop),
-                    );
-                }
                 if self.idx_matches(&f, &ik, true) && self.len_matches(b, &f, lop) {
                     return true;
                 }
             }
-        }
-        if self.dbg {
-            eprint(
-                "bce-dbg: no fact hit; facts={} ik loc={} l={} off={}\n",
-                self.facts.len(),
-                ik.is_local,
-                ik.l,
-                ik.off,
-            );
         }
         if self.limited {
             *reason = BR_RESOURCE_LIMIT;
@@ -1027,9 +998,6 @@ extend Bce {
             }
         }
         for i in 0..nk {
-            if self.dbg {
-                eprint("bce-dbg: call kill root {}\n", unsafe kills[i]);
-            }
             self.kill_root(unsafe kills[i]);
         }
         self.kill_ambient();
@@ -1810,10 +1778,6 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                         }
                     }
                     z.write_place(b, stm.place);
-                } else if stm.kind == ir::ST_SET_DISCR || stm.kind == ir::ST_DEINIT {
-                    z.write_place(b, stm.place);
-                } else if stm.kind == ir::ST_ASM {
-                    z.heapgen += 1;
                 } else if stm.kind == ir::ST_STORAGE_DEAD {
                     z.bump_local(stm.a);
                 }

@@ -1937,6 +1937,16 @@ fn return_region_escapes() {
         "returning an owned value read through a local borrow stays legal",
         "fn f() i32 {\n    let b = Box::<i32>::new(9);\n    return *b.get();\n}\n",
     );
+    // Returning 'b storage as 'a needs a declared `'b: 'a` relation in the signature.
+    h::expect_err_msg(
+        "returning an undeclared placeholder flow is rejected",
+        "fn f<'a, 'b>(x: &'a i32, y: &'b i32) &'a i32 {\n    let _ = x;\n    return y;\n}\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    return *f(&a, &b);\n}\n",
+        "not declared to outlive the return type's lifetime",
+    );
+    h::expect_ok(
+        "a declared outlives bound legalizes the same flow",
+        "fn f<'a, 'b: 'a>(x: &'a i32, y: &'b i32) &'a i32 {\n    let _ = x;\n    return y;\n}\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    return *f(&a, &b);\n}\n",
+    );
 }
 
 // Borrows laundered through an aggregate (lifetimes Release B). Storing a borrow into a struct used

@@ -112,6 +112,9 @@ fn flat_width_memo() {
     let cc = p.concat(&parts);
     assert_eq(p.docs.at(cc as usize).w, 9u32); // 4 + 1 + 4
     let h = p.hardline();
-    let ph = p.pair(cc, h);
+    let mut pair = Vector::<d::DocId>::new();
+    pair.push(cc);
+    pair.push(h);
+    let ph = p.concat(&pair);
     assert_eq(p.docs.at(ph as usize).w, d::W_INF);
 }

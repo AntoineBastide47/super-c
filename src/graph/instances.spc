@@ -1,14 +1,7 @@
 // The instance and reachability graph: discovers every concrete generic instantiation by walking
 // lowered Core IR bodies from concrete roots, expanding generic bodies under substitution frames.
 // Keys are package-stable: a declaration DefId plus the skey of every concrete argument, so records
-// from different module pools compare equal without touching any pool. Runs in SHADOW mode behind
-// SC_INSTANCES=1: the established propagation stays authoritative and the driver reports set
-// differences; the graph becomes the production planner only after drop-glue edges join it.
-//
-// Comparison caveat (measured on the self-host corpus): the module pools OVERAPPROXIMATE -- the
-// established propagation interns Slice/Option/tuple instances for every method of every instance
-// regardless of demand, so raw-pool diffing reports the graph "missing" records nothing emits.
-// The production switch must compare against the per-TU emitted set instead.
+// from different module pools compare equal without touching any pool.
 import ast::ast as *;
 import module::loader as loader;
 import ir::core as ir;

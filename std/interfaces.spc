@@ -3,11 +3,9 @@
 // shapes mention String / Option / Result / Range / slices. Part of the auto-imported prelude, so all these
 // names resolve unqualified everywhere.
 //
-// The type-coupled half used to be a separate `traits` module, split off so a value type could conform to
-// the base interfaces without an include cycle. There is no cycle to avoid: an interface has no C
-// representation, so this module emits no struct body and no call that needs another module's DEFINITIONS
-// -- only its names, which arrive as forward declarations. The emitted header includes `super_rt.h` and
-// nothing else, whatever a signature here mentions.
+// An interface has no C representation, so this module emits no struct body and no call that needs
+// another module's DEFINITIONS -- only its names, which arrive as forward declarations. The emitted
+// header includes `super_rt.h` and nothing else, whatever a signature here mentions.
 
 /// A type that owns resources and must run cleanup when it goes out of scope. `free` is run automatically
 /// at scope exit (move/defer RAII, spec 7.7) for a value that was not moved out; it may also be called

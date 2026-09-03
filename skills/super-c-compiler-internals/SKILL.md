@@ -33,8 +33,8 @@ discharge_obligations     -- cross-module reflection-bound obligations, once all
   |
 borrowck_all              -- lowers every body to Core IR (kept in irl::Keep), replays the
   |                          event tape, runs the loan analysis (the one other parallel stage)
-[verification gates]      -- SC_FACTS_CHECK / SC_CORE_IR / SC_BORROW_IR / SC_LAYOUT / SC_CEMIT:
-  |                          each pass is a NO-OP unless its env var is set
+[verification gates]      -- SC_FACTS_CHECK / SC_LAYOUT: each pass is a NO-OP unless its env
+  |                          var is set
 lint + panics + flush     -- lint_unused_items, check_always_panics (an error, every build),
   |                          then cir.flush_asserts / flush_consts (deferred static_asserts
   |                          and consts undecidable in module order)
@@ -104,7 +104,6 @@ pub struct Module {
     pub file: String,   // filesystem path the source was read from
     pub source: String, // file contents (span offsets index into it)
     pub ast: Ast,       // parsed AST; after hir::lower runs it IS the module's HIR
-    pub syntax: Ast,    // pristine pre-lowering snapshot, only under SC_KEEP_SYNTAX=1
     pub has_ast: bool,
     pub prelude: bool,
 }
@@ -129,8 +128,7 @@ leaves its slot, so lookups that land back on the in-flight module read the live
 decl. It is **O(1)** — a byte-exact symbol probe plus one name-map probe into the package
 declaration index (`ensure_index`, built in deterministic module and source order).
 
-**Mangling** (`src/emit/mangle.spc`, the frozen symbol-naming authority, replay-verified
-under SC_MANGLE):
+**Mangling** (`src/emit/mangle.spc`, the frozen symbol-naming authority):
 
 - Module prefixing is on only when the package holds **more than one non-prelude
   module**; single-file programs emit plain C names.
@@ -169,9 +167,7 @@ codegen never see one.
   name lookup) and flipping the node kind. `launch` → `SI_SUBMIT`, etc.
 - `lower_select` builds nodes: every identifier it creates has its resolution seeded by
   hand.
-- Batch builds lower **by move**: the parse arena becomes the HIR in place. Under
-  `SC_KEEP_SYNTAX=1` the module keeps a pristine pre-lowering snapshot in
-  `Module.syntax`.
+- Batch builds lower **by move**: the parse arena becomes the HIR in place.
 - Adding a sugar keyword = a lexer token, a parser marker, one lowering entry here, and
   a formatter arm.
 

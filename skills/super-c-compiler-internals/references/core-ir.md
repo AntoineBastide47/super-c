@@ -155,8 +155,7 @@ need.
   source order; match scrutinee once, arm tests in order, guard after bindings; `defer`
   bodies run LIFO at every scope exit; multi-return destinations written in declaration
   order.
-- A body that reaches a construct the lowering cannot handle fails with a reason string;
-  `SC_CORE_IR` counts reasons.
+- A body that reaches a construct the lowering cannot handle fails with a reason string.
 - **One lowering per body:** `irl::Keep` caches spent Lowerers keyed by body; borrowck
   fills it, emission's InstGraph walks it. Bodies with `has_reflect` / `has_zst_cond`
   re-lower per instance.
@@ -173,4 +172,4 @@ need.
 | Instance graph | Walks bodies from concrete roots to discover instantiations |
 | C emitter | Renders bodies to readable C |
 | Verifier (`ir/verify.spc`) | Structural rules (sealed blocks, type agreement) |
-| Printer (`ir/print.spc`) | `SC_CORE_IR=print` dumps |
+| Printer (`ir/print.spc`) | The IR expected-output tests |

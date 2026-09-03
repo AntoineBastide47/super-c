@@ -28,8 +28,6 @@ pub struct CFlow {
     pub loop_parent: Vector<u32>, // [n] loop header -> immediately enclosing loop header
     pub follow: Vector<u32>, // [n] branch block -> its join block, NONE if arms do not rejoin
     pub reducible: bool, // every retreating edge is a back edge
-    pub simple: bool, // reducible AND every loop-exit edge targets the loop header or its follow;
-    // structured emission applies only when simple, else the goto layout is used
     // Scratch storage for build_into and its passes, kept across functions so a pooled CFlow
     // rebuilds without allocating (every vector clears and refills in place).
     s_tdone: Vector<bool>,
@@ -95,7 +93,7 @@ fn trivial(b: &ir::CoreBody, x: u32) bool {
     }
     for i in 0..blk.stmt_len {
         let k = b.statements.at((blk.stmt_start + i) as usize).kind;
-        if k != ir::ST_STORAGE_LIVE && k != ir::ST_STORAGE_DEAD && k != ir::ST_NOP {
+        if k != ir::ST_STORAGE_LIVE && k != ir::ST_STORAGE_DEAD {
             return false;
         }
     }
@@ -185,7 +183,6 @@ extend CFlow {
             loop_parent: Vector::<u32>::new(),
             follow: Vector::<u32>::new(),
             reducible: true,
-            simple: true,
             s_tdone: Vector::<bool>::new(),
             s_onpath: Vector::<bool>::new(),
             s_tpath: Vector::<u32>::new(),
@@ -212,7 +209,6 @@ extend CFlow {
         self.n = n;
         self.entry = 0;
         self.reducible = true;
-        self.simple = true;
         self.thread.clear();
         self.reach.clear();
         self.rpo.clear();
@@ -457,26 +453,6 @@ extend CFlow {
         }
         self.compute_loops(b);
         self.compute_follows(b);
-        // simple loops: every edge leaving a node's innermost loop targets that loop's header
-        // (continue) or its follow (break). A multi-level break/continue or irreducibility forces
-        // the goto layout instead.
-        self.simple = self.reducible;
-        for x in 0..n {
-            if !*self.reach.at(x as usize) {
-                continue;
-            }
-            let lx = *self.loop_of.at(x as usize);
-            if lx == NONE {
-                continue;
-            }
-            for k in 0..n_succ(b, x) {
-                let s = self.succ(b, x, k);
-                if s == lx || s == *self.loop_follow.at(lx as usize) || self.dominates(lx, s) {
-                    continue;
-                }
-                self.simple = false;
-            }
-        }
     }
 
     // Cooper-Harvey-Kennedy immediate dominators over the reachable RPO.

@@ -347,9 +347,9 @@ struct FlowCtx {
 }
 
 // Unchecked bit ops on a dataflow row. Precondition (held everywhere they are called): `i` is a
-// move-path id < npaths and `v` holds ceil(npaths/64) words, so `w = i/64 < v.len()`. The super-c
-// compiler has no bounds-check-elimination pass, so it emits a guard the id<npaths<->word-count
-// invariant makes redundant; this hot inner loop drops it by hand until BCE lands.
+// move-path id < npaths and `v` holds ceil(npaths/64) words, so `w = i/64 < v.len()`. The
+// id<npaths<->word-count invariant is not one bounds-check elimination proves, so this hot inner
+// loop drops the guard by hand.
 const fn bit_get(v: &Vector<u64>, i: u32) bool {
     let w = (i / 64) as usize;
     return (unsafe *(v.as_ptr() + w) >> (i & 63) as u64 & 1u64) != 0;

@@ -2189,9 +2189,6 @@ pub fn live_tasks() usize {
     return spawned_tasks() - completed_tasks();
 }
 
-/// Fix the pool's worker-thread count. Must be called before the first `launch` (the pool is built on
-/// demand and never resized); `0` restores the default of one worker per CPU. Setting it to 1 makes
-/// scheduling deterministic, which is what concurrency tests want.
 /// Set the per-coroutine stack size, in bytes, before the pool starts (a later call is ignored, like
 /// `set_worker_count`). The stack is RESERVED, not consumed -- pages arrive as the task uses them -- so this
 /// buys depth for deeply recursive tasks rather than costing memory for shallow ones. Rounded up to 64 KiB;
@@ -2208,6 +2205,9 @@ pub fn set_stack_size(bytes: usize) {
     unsafe G_STACK_SIZE = (bytes + unit - 1) / unit * unit;
 }
 
+/// Fix the pool's worker-thread count. Must be called before the first `launch` (the pool is built on
+/// demand and never resized); `0` restores the default of one worker per CPU. Setting it to 1 makes
+/// scheduling deterministic, which is what concurrency tests want.
 pub fn set_worker_count(n: usize) {
     unsafe G_NWORKERS = n;
 }

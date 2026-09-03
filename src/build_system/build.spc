@@ -33,24 +33,6 @@ fn join2(a: str, b: str) String {
     return s;
 }
 
-fn mkdirs(path: str) {
-    let mut acc = String::with_capacity(path.len());
-    for i in 0..path.len() {
-        if path[i] == b'/' && acc.len() != 0 {
-            unsafe shim::sc_mkdir(acc.cstr());
-        }
-        acc.push_byte(path[i]);
-    }
-    if acc.len() != 0 {
-        unsafe shim::sc_mkdir(acc.cstr());
-    }
-}
-
-fn shell(cmd: str) i32 {
-    let mut c = String::from_str(cmd);
-    return unsafe shim::sc_exec(c.cstr());
-}
-
 fn cat_file(path: str) {
     let f = stdio::fopen(path, "rb");
     if f == null {
@@ -376,7 +358,7 @@ fn sync_tree(srcdir: str, dstdir: str) i32 {
             }
             if k > 0 {
                 let dir = String::from_str(full.slice(0, k - 1));
-                mkdirs(dir.as_str());
+                mkdir_p(dir.as_str());
             }
             let f = stdio::fopen(dp.as_str(), "wb");
             if f == null {
@@ -474,22 +456,6 @@ fn push_all(cmd: &mut String, flags: &Vector<String>) {
     }
 }
 
-// Whitespace-split `s` into argv entries: FLAG strings keep their historic shell-splitting contract
-// ("-framework Cocoa" is two arguments); paths the engine controls are pushed as single entries and
-// never split, which is what lets spaces, quotes and non-ASCII bytes pass through.
-fn split_args(out: &mut Vector<String>, s: str) {
-    let mut a: usize = 0;
-    for i in 0..s.len() + 1 {
-        let ws = i == s.len() || s[i] == b' ' || s[i] == b'\t';
-        if ws {
-            if i > a {
-                out.push(String::from_str(s.slice(a, i)));
-            }
-            a = i + 1;
-        }
-    }
-}
-
 fn clone_args(src: &Vector<String>) Vector<String> {
     let mut out = Vector::<String>::with_capacity(src.len());
     for i in 0..src.len() {
@@ -536,16 +502,6 @@ fn spawn_args(args: &mut Vector<String>, log: *const char) i64 {
     }
     ptrs.push(0);
     return unsafe shim::sc_spawn_argv(ptrs.as_ptr() as *const *const char, log);
-}
-
-// spawn_args + wait, output inherited (or captured when `log` is non-null): exit code, -1 on failure.
-fn exec_args(args: &mut Vector<String>, log: *const char) i32 {
-    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
-    for i in 0..args.len() {
-        ptrs.push(args[i].cstr() as usize);
-    }
-    ptrs.push(0);
-    return unsafe shim::sc_exec_argv(ptrs.as_ptr() as *const *const char, log);
 }
 
 fn json_escape(out: &mut String, s: str) {
@@ -962,7 +918,7 @@ extend CcStream {
         self.prefix_args = clone_args(&self.cc_args);
         split_args(&mut self.prefix_args, self.cc_tail.as_str());
         if self.cache.len() != 0 {
-            mkdirs(self.cache.as_str());
+            mkdir_p(self.cache.as_str());
         }
     }
 
@@ -986,7 +942,7 @@ extend CcStream {
             }
             if k > 0 {
                 let dir = String::from_str(full.slice(0, k - 1));
-                mkdirs(dir.as_str());
+                mkdir_p(dir.as_str());
             }
             let f = stdio::fopen(dp.as_str(), "wb");
             if f == null {
@@ -1071,7 +1027,7 @@ extend CcStream {
                 k = k - 1;
             }
             let dir = String::from_str(full.slice(0, k - 1));
-            mkdirs(dir.as_str());
+            mkdir_p(dir.as_str());
             let mut cobj = String::new();
             if self.cache.len() != 0 {
                 let mut h1: u64 = 0xcbf29ce484222325;
@@ -1461,9 +1417,6 @@ fn stamp_write(
 fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool, lint: bool, gen: str) bool {
     let body0 = loader::read_file(path);
     if body0.is_none() {
-        if stdlib::getenv("SC_STAMP_DEBUG") != null {
-            eprintln("stamp: reject #1");
-        }
         return false;
     }
     let body = body0.unwrap();
@@ -1490,9 +1443,6 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
         }
         if lno == 0 {
             if line != "sc-emit-stamp v1" {
-                if stdlib::getenv("SC_STAMP_DEBUG") != null {
-                    eprintln("stamp: reject #2");
-                }
                 return false;
             }
             rewritten.push_str(line);
@@ -1505,17 +1455,11 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
         if kind == "exe" {
             let mut cur = String::new();
             if !stamp_exe_line(&mut cur) {
-                if stdlib::getenv("SC_STAMP_DEBUG") != null {
-                    eprintln("stamp: reject #3");
-                }
                 return false;
             }
             let mut want = String::from_str(line);
             want.push_str("\n");
             if cur.as_str() != want.as_str() {
-                if stdlib::getenv("SC_STAMP_DEBUG") != null {
-                    eprintln("stamp: reject #4");
-                }
                 return false;
             }
             rewritten.push_string(&cur);
@@ -1540,9 +1484,6 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
                 line,
                 7,
             ) != wenv.as_str() {
-                if stdlib::getenv("SC_STAMP_DEBUG") != null {
-                    eprintln("stamp: reject #5");
-                }
                 return false;
             }
             ccount = stamp_u64(stamp_field(line, 5));
@@ -1554,9 +1495,6 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
             let mut pp = String::from_str(fp);
             let mt = unsafe shim::sc_mtime(pp.cstr());
             if mt == 0 {
-                if stdlib::getenv("SC_STAMP_DEBUG") != null {
-                    eprintln("stamp: reject #6");
-                }
                 return false;
             }
             if mt as u64 == mt0 && mt0 < recent as u64 {
@@ -1567,9 +1505,6 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
             let mut h: u64 = 0;
             let mut ln: u64 = 0;
             if !stamp_hash_file(fp, &mut h, &mut ln) {
-                if stdlib::getenv("SC_STAMP_DEBUG") != null {
-                    eprintln("stamp: reject #7");
-                }
                 return false;
             }
             if h != stamp_u64(stamp_field(line, 2)) || ln != stamp_u64(stamp_field(line, 3)) {
@@ -1592,22 +1527,13 @@ fn stamp_fresh(path: str, root_dir: str, target: i32, arch: i32, bootstrap: bool
             saw_end = true;
             rewritten.push_str("end\n");
         } else {
-            if stdlib::getenv("SC_STAMP_DEBUG") != null {
-                eprintln("stamp: reject #8");
-            }
             return false;
         }
     }
     if !fresh || !saw_end {
-        if stdlib::getenv("SC_STAMP_DEBUG") != null {
-            eprintln("stamp: reject #9");
-        }
         return false;
     }
     if ccount == 0 || stamp_gen_c_count(gen) != ccount {
-        if stdlib::getenv("SC_STAMP_DEBUG") != null {
-            eprintln("stamp: reject #10");
-        }
         return false;
     }
     if drift {
@@ -1649,8 +1575,8 @@ fn engine_build(
     let pdir = join2(m.out_dir.as_str(), sub);
     let gen = join2(pdir.as_str(), "gen");
     let obj = join2(pdir.as_str(), "obj");
-    mkdirs(gen.as_str());
-    mkdirs(obj.as_str());
+    mkdir_p(gen.as_str());
+    mkdir_p(obj.as_str());
     let jobs: u32 = if jobs_override != 0 {
         jobs_override;
     } else if m.jobs != 0 {
@@ -1722,9 +1648,6 @@ fn engine_build(
     // which case the generated tree is already exact and the pipeline skips straight to cc/link.
     let stamp_path = join2(pdir.as_str(), ".emit_stamp");
     let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null;
-    if stdlib::getenv("SC_STAMP_DEBUG") != null {
-        eprintln("stamp: pre-check at {}ms", unsafe shim::sc_ticks_ms() - t0);
-    }
     let skip_emit = cache_on && stamp_fresh(
         stamp_path.as_str(),
         root_dir,
@@ -1734,9 +1657,6 @@ fn engine_build(
         lint,
         gen.as_str(),
     );
-    if stdlib::getenv("SC_STAMP_DEBUG") != null {
-        eprintln("stamp: checked at {}ms, skip={}", unsafe shim::sc_ticks_ms() - t0, skip_emit);
-    }
     let mut t_transpile = t0;
     let mut ret: i32 = 0;
     if !skip_emit {
@@ -2219,7 +2139,7 @@ pub fn scaffold_project(dir: str, name: str) i32 {
         return 1;
     }
     let srcdir = join2(dir, "src");
-    mkdirs(srcdir.as_str());
+    mkdir_p(srcdir.as_str());
     let mut toml = String::new();
     toml.push_str("bin = \"");
     toml.push_str(name);
@@ -2291,7 +2211,7 @@ fn copy_file(srcp: str, dstp: str) bool {
 /// the project's own history, and a nested repository (the dependency's, or a submodule's) would be
 /// invisible to -- and shadow files from -- the repository the project lives in.
 fn copy_tree(srcd: str, dstd: str) bool {
-    mkdirs(dstd);
+    mkdir_p(dstd);
     let mut sp = String::from_str(srcd);
     let dh = unsafe shim::sc_opendir(sp.cstr());
     if dh == null {
@@ -2370,7 +2290,7 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
         eprintln("vendor: --ref pins a git source; '{}' is a local directory", src);
         return 1;
     }
-    mkdirs(vdir.as_str());
+    mkdir_p(vdir.as_str());
     let mut stamp = String::from_str("source = \"");
     stamp.push_str(src);
     stamp.push_str("\"\n");
@@ -2683,7 +2603,7 @@ pub fn manifest_test(
         return 1;
     }
     src.push_str("\nfn main() i32 {\n    return 0;\n}\n");
-    mkdirs(m.out_dir.as_str());
+    mkdir_p(m.out_dir.as_str());
     let rootp = join2(m.out_dir.as_str(), "test_root.spc");
     // Rewrite the root only when its content changed: an unchanged root keeps its mtime, so the emit
     // stamp proves the suite unchanged without hashing every input.
@@ -2938,7 +2858,7 @@ pub fn manifest_bench(
         eprintln("bench: no .spc files under {}/", bdir.as_str());
         return 1;
     }
-    mkdirs(m.out_dir.as_str());
+    mkdir_p(m.out_dir.as_str());
     let scanp = join2(m.out_dir.as_str(), "bench_scan.spc");
     if !write_file(scanp.as_str(), listing.as_str()) {
         eprintln("bench: cannot write '{}'", scanp.as_str());
@@ -3046,7 +2966,7 @@ pub fn manifest_run(
             cmd.push_str("' ");
         }
         cmd.push_string(c.run.at(i));
-        let rc = shell(cmd.as_str());
+        let rc = unsafe shim::sc_exec(cmd.cstr());
         if rc != 0 {
             return rc;
         }

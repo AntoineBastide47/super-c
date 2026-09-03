@@ -1,6 +1,6 @@
 // Word-packed bit rows over a caller-held Vector<u64> (bit i lives in word i/64). Bounds-checked;
 // the borrowck dataflow core keeps its own unchecked copies for the hot inner loops (see
-// borrowck/dataflow.spc) until bounds-check elimination lands.
+// borrowck/dataflow.spc).
 
 pub fn bit_set(v: &mut Vector<u64>, i: u32) {
     let w = (i / 64) as usize;

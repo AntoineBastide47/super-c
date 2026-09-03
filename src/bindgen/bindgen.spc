@@ -347,7 +347,6 @@ struct Widths {
     pub int_b: i32,
     pub long_b: i32,
     pub llong_b: i32,
-    pub ptr_b: i32,
 }
 
 fn int_name(bytes: i32, signed: bool, out: &mut String) {
@@ -714,7 +713,7 @@ fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
 
 // `__SIZEOF_*__` is what the toolchain itself reports, so `long` maps to what it will actually be.
 fn read_widths(text: str) Widths {
-    let mut w = Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8, ptr_b: 8 };
+    let mut w = Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 };
     let n = text.len();
     let mut i: usize = 0;
     while i < n {
@@ -730,8 +729,6 @@ fn read_widths(text: str) Widths {
                 w.long_b = v;
             } else if line_defines(line, "__SIZEOF_LONG_LONG__") {
                 w.llong_b = v;
-            } else if line_defines(line, "__SIZEOF_POINTER__") {
-                w.ptr_b = v;
             }
         }
         i = e + 1;
@@ -1295,7 +1292,7 @@ fn run_one(
         enums: Vector::<EnumDef>::new(),
         consts: Vector::<ConstDef>::new(),
         globals: Vector::<ConstDef>::new(),
-        widths: Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8, ptr_b: 8 },
+        widths: Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 },
         cur_mine: false,
         pending_agg: -1,
         pending_is_enum: false,

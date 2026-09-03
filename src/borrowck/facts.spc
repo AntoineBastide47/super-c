@@ -100,8 +100,6 @@ pub struct BodyFacts {
     pub uni_name: Vector<tok::Span>, // per universal origin: declared lifetime name (empty = elided)
     pub arg_universal: Vector<u32>, // per local: seeded placeholder, or BF_NONE
     pub ret_origin: Vector<u32>, // per return slot: placeholder origin
-    pub ret_elided: Vector<bool>, // per return slot: no declared lifetime (accepts every input)
-    pub known_subsets: Vector<u64>, // declared placeholder relations, from << 32 | to
     pub uni_flows: Vector<u64>, // omnipresent origin -> universal flows (stores through &mut args)
     pub loans: Vector<Loan>,
     pub subsets: Vector<SubsetAt>,
@@ -134,8 +132,6 @@ extend BodyFacts as Free {
         self.uni_name.free();
         self.arg_universal.free();
         self.ret_origin.free();
-        self.ret_elided.free();
-        self.known_subsets.free();
         self.uni_flows.free();
         self.loans.free();
         self.subsets.free();
@@ -275,8 +271,6 @@ extend BodyFacts {
             uni_name: Vector::<tok::Span>::new(),
             arg_universal: Vector::<u32>::new(),
             ret_origin: Vector::<u32>::new(),
-            ret_elided: Vector::<bool>::new(),
-            known_subsets: Vector::<u64>::new(),
             uni_flows: Vector::<u64>::new(),
             loans: Vector::<Loan>::new(),
             subsets: Vector::<SubsetAt>::new(),
@@ -312,8 +306,6 @@ extend BodyFacts {
         self.uni_name.truncate(0);
         self.arg_universal.truncate(0);
         self.ret_origin.truncate(0);
-        self.ret_elided.truncate(0);
-        self.known_subsets.truncate(0);
         self.uni_flows.truncate(0);
         self.loans.truncate(0);
         self.subsets.truncate(0);
@@ -471,7 +463,6 @@ extend Gen {
             let lty = self.body().locals.at(r as usize).ty;
             if !self.owner().carries(bmod, lty) {
                 self.f.ret_origin.push(BF_NONE);
-                self.f.ret_elided.push(false);
                 continue;
             }
             let mut nm = no_span();
@@ -479,60 +470,8 @@ extend Gen {
                 let slot = unsafe self.owner().ast_of(bmod).list(rets)[r as usize];
                 nm = self.slot_lifetime(self.owner().ast_of(bmod), slot);
             }
-            if nm.end > nm.start {
-                let u = self.universal_for(nm);
-                self.f.ret_origin.push(u);
-                self.f.ret_elided.push(false);
-            } else {
-                let u = self.universal_for(no_span());
-                self.f.ret_origin.push(u);
-                self.f.ret_elided.push(true);
-            }
-        }
-        // Declared outlives bounds (`'a: 'b`) become known placeholder relations.
-        if fnode != NODE_NONE {
-            let mut names = Vector::<tok::Span>::new();
-            let mut bounds = Vector::<tok::Span>::new();
-            {
-                let a = self.owner().ast_of(bmod);
-                let n = a.at_const(fnode);
-                if n.kind == NodeKind::NODE_FUNCTION {
-                    let gens = n.as_data.function.generics;
-                    for i in 0..gens.len {
-                        let gid = unsafe a.list(gens)[i as usize];
-                        let gp = a.at_const(gid);
-                        if !gp.as_data.generic_param.is_lifetime {
-                            continue;
-                        }
-                        let un = self.lt_name(a, gp.as_data.generic_param.name);
-                        let bs = gp.as_data.generic_param.bounds;
-                        for k in 0..bs.len {
-                            names.push(un);
-                            bounds.push(self.lt_name(a, unsafe a.list(bs)[k as usize]));
-                        }
-                    }
-                }
-                // Lifetime parameters live in the side table, not the generics list.
-                let lts = a.lifetimes_of(fnode);
-                for i in 0..lts.len {
-                    let gid = unsafe a.list(lts)[i as usize];
-                    let gp = a.at_const(gid);
-                    if gp.kind != NodeKind::NODE_GENERIC_PARAM || !gp.as_data.generic_param.is_lifetime {
-                        continue;
-                    }
-                    let un = self.lt_name(a, gp.as_data.generic_param.name);
-                    let bs = gp.as_data.generic_param.bounds;
-                    for k in 0..bs.len {
-                        names.push(un);
-                        bounds.push(self.lt_name(a, unsafe a.list(bs)[k as usize]));
-                    }
-                }
-            }
-            for i in 0..names.len() {
-                let u = self.universal_for(names[i]);
-                let v = self.universal_for(bounds[i]);
-                self.f.known_subsets.push(u as u64 << 32 | v as u64);
-            }
+            let u = self.universal_for(nm);
+            self.f.ret_origin.push(u);
         }
         // Inference origins: one per borrow-carrying local.
         for l in 0..nlocals {
@@ -697,13 +636,6 @@ extend Gen {
             self.push_ev(EV_USE, upath, point, sp);
         }
         self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ACC_READ, point: point, span: sp });
-    }
-
-    fn op_range_read(self: &mut Self, start: u32, len: u32, point: u32, sp: tok::Span) {
-        for i in 0..len {
-            let opid = self.body().oper_pool[(start + i) as usize];
-            self.op_read(opid, point, sp);
-        }
     }
 
     // A write of a place: liveness def, init event, write access, and a kill site. A whole-local
@@ -1068,12 +1000,6 @@ extend Gen {
                 let exit = entry + 1;
                 if s.kind == ir::ST_ASSIGN {
                     self.stmt_assign(&s, entry, exit);
-                } else if s.kind == ir::ST_SET_DISCR {
-                    self.live_use(self.place_of(s.place).base);
-                    self.f.accesses.push(
-                        Access { place: s.place, local: BF_NONE, kind: ACC_WRITE, point: exit, span: s.span },
-                    );
-                    self.assign_sites.push(KillSite { place: s.place, local: BF_NONE, point: exit });
                 } else if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
                     let root = self.forest().local_root[s.a as usize];
                     self.push_ev(EV_DEAD, root, exit, s.span);
@@ -1088,13 +1014,6 @@ extend Gen {
                             Access { place: BF_NONE, local: s.a, kind: ACC_WRITE, point: exit, span: s.span },
                         );
                     }
-                } else if s.kind == ir::ST_DEINIT {
-                    let path = self.forest().place_path[s.place as usize];
-                    if path != mp::MP_NONE {
-                        self.push_ev(EV_DEAD, path, exit, s.span);
-                    }
-                } else if s.kind == ir::ST_ASM {
-                    self.op_range_read(s.a, s.b, entry, s.span);
                 }
             }
             let t = blk.term;
