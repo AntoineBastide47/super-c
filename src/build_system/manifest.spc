@@ -573,6 +573,14 @@ extend Manifest {
             push_flags(&mut p.ldflags, "-flto=auto");
             self.profiles.push(p);
         }
+        if self.profile_index("test") < 0 {
+            // The `super-c test` runner. The harness drives thousands of in-process compiles, and -O1 runs
+            // them two to four times cheaper than an unoptimized build with every assert kept. No
+            // sanitizers here: the compiler under test carries the selected profile's.
+            let mut p = Profile::new("test");
+            push_flags(&mut p.cflags, "-O1");
+            self.profiles.push(p);
+        }
         // PGO training build: instrument, run a representative workload (a self-transpile) under
         // LLVM_PROFILE_FILE, merge the raw profiles with llvm-profdata into build/pgo.profdata, and the
         // bench profile above picks it up on its next build.

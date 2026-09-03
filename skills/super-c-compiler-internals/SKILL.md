@@ -25,7 +25,8 @@ load                      -- module discovery, lex + parse per module (src/modul
 platform_filter           -- @platform/@arch gating: compact items by target mask
   |
 resolve + HIR, per module -- resolver::resolve, then hir::lower_module immediately after
-  |                          (parallel frontier under --jobs; HIR = the sugar-keyword desugar)
+  |                          (parallel frontier under --jobs, serial below 256 KiB of user
+  |                          source: Package::analysis_jobs; HIR = the sugar-keyword desugar)
 typecheck, per module     -- type inference, obligations, instance recording (parallel frontier)
   |
 discharge_obligations     -- cross-module reflection-bound obligations, once all modules typed
@@ -41,7 +42,8 @@ runtime + external C      -- write super_rt.h/.c; ext_c_collect (@c.source wrapp
   |
 emission planning         -- compute_emit_live scan; Package::emit_order (Kahn, owner-first)
   |
-cemit_package             -- InstGraph.collect() over the kept Core IR bodies, then per-module
+cemit_package             -- InstGraph.collect() over the kept Core IR bodies of every module that
+  |                          emits (dead prelude modules seed nothing), then per-module
   |                          TU emission (emit/tu.spc); drop elaboration runs per body here
   |                          (DropCtx::apply_drops); parallel frontier under --jobs
 serial write-out          -- __sc_types.h, __sc_protos.h, per-module .h/.c, __p<k> parts,
@@ -255,7 +257,9 @@ Full monomorphization is the only generic backend.
 - **During emission:** `cemit_package` builds an `InstGraph` (`src/graph/instances.spc`)
   seeded with the `irl::Keep` cache and calls `collect()` — it discovers every concrete
   instantiation by walking lowered Core IR bodies from concrete roots, expanding generic
-  bodies under substitution frames. Keys are package-stable (decl DefId + skey per
+  bodies under substitution frames. Roots are the concrete bodies of every module that
+  emits: a prelude module `compute_emit_live` marks dead seeds nothing, and the shared
+  type header lists aggregates from live modules only. Keys are package-stable (decl DefId + skey per
   argument), so records from different module pools compare equal without touching any
   pool.
 - **Emit order:** `Package::emit_order` — if module `a` re-homes a concrete instance of

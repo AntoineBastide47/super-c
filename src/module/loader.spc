@@ -865,6 +865,12 @@ fn parse_source_q(source: &mut String, file: str, bootstrap_tags: bool, recycled
 /// Worker count for parallel module discovery: 1 = the serial reference loader; 0 or >= 2 lets
 /// speculative parse tasks run on the coroutine pool. Set by the DRIVER before package_load; the
 /// LSP and library users keep the serial default (overlaid loads always stay serial).
+/// Parallel analysis pays for itself only past this much user (non-prelude) source. Below it the
+/// worker pool costs about as much CPU as the whole serial compile and saves a few milliseconds of
+/// wall time at most (release build, serial vs parallel: 30 KiB 24 vs 23 ms, 118 KiB 30 vs 25 ms,
+/// 472 KiB 57 vs 36 ms).
+pub const PAR_MIN_USER_BYTES: usize = 262144; // 256 KiB
+
 static mut G_LOAD_JOBS: u32 = 1;
 
 pub fn set_load_jobs(j: u32) {
@@ -1151,6 +1157,24 @@ const fn name_cmp(a: &String, b: &String) i32 {
 }
 
 extend Package {
+    /// The analysis worker count for this loaded package: `jobs` when the user source is large enough
+    /// for the parallel frontiers to pay for themselves, else 1 (see PAR_MIN_USER_BYTES).
+    pub fn analysis_jobs(self: &Self, jobs: u32) u32 {
+        if jobs == 1 {
+            return 1;
+        }
+        let mut bytes: usize = 0;
+        for i in 0..self.modules.len() {
+            if !self.modules.at(i).prelude {
+                bytes += self.modules.at(i).source.len();
+            }
+        }
+        if bytes < PAR_MIN_USER_BYTES {
+            return 1;
+        }
+        return jobs;
+    }
+
     pub fn new() Package {
         return Package {
             arch: unsafe shim::sc_host_arch(),
@@ -1749,17 +1773,23 @@ extend Package {
         let mut next: usize = 0;
         while next < units.len() {
             let wave_end = units.len();
-            let wg = psy::WaitGroup::new();
-            wg.add((wave_end - next) as i64);
-            for k in next..wave_end {
-                let t = PParse { u: units.index_mut(k), tags: bootstrap_tags };
-                let wgc = wg.clone();
-                launch || {
-                    par_parse_one(t);
-                    wgc.done();
-                };
+            if wave_end - next == 1 {
+                // A one-unit wave (the root, every prelude file) parses inline: a task could overlap
+                // with nothing and would start the worker pool for it.
+                par_parse_one(PParse { u: units.index_mut(next), tags: bootstrap_tags });
+            } else {
+                let wg = psy::WaitGroup::new();
+                wg.add((wave_end - next) as i64);
+                for k in next..wave_end {
+                    let t = PParse { u: units.index_mut(k), tags: bootstrap_tags };
+                    let wgc = wg.clone();
+                    launch || {
+                        par_parse_one(t);
+                        wgc.done();
+                    };
+                }
+                wg.wait_masked();
             }
-            wg.wait_masked();
             for k in next..wave_end {
                 if !units.at(k).ok {
                     continue;

@@ -181,6 +181,7 @@ run = [
 | `bench` | `-O3 -DNDEBUG -g -flto=auto -fno-omit-frame-pointer` (+ PGO ingest when present) | Benchmarking/profiling |
 | `pgogen` | `-O2 -fprofile-generate -flto=auto` | PGO profile generation |
 | `race` | `-O1 -g -fsanitize=thread -DSC_LOCKDEP` | TSan + lock-order checking |
+| `test` | `-O1`, no sanitizers | The `super-c test` runner binary only (the compiler under test keeps the selected profile) |
 
 The exact cc flag strings live in `src/build_system/manifest.spc`; the table shows the
 character of each profile, not the verbatim flags. **Never profile the `dev` build** —
@@ -301,7 +302,16 @@ build/
 A manifest build (`super-c build` with `build.toml`) adds per-profile directories next
 to `raw/`: emitted C is content-synced into `<out-dir>/<profile>/gen` (unchanged files
 keep their mtime), objects compile into `<out-dir>/<profile>/obj` with `-MMD` dep
-tracking, and `compile_commands.json` lands beside them.
+tracking, and `compile_commands.json` lands beside them. `super-c test` runs the same
+engine on the generated test root under the `test` profile: emitted C in `raw-test/`,
+objects and the runner in `<out-dir>/test/` (`build/test/__tests`), with the emit stamp
+and object cache making an unchanged suite a link check.
+
+Parallel analysis (resolve, typecheck, borrowck, emit frontiers) is used only when the
+package holds at least 256 KiB of non-prelude source (`Package::analysis_jobs`,
+`loader::PAR_MIN_USER_BYTES`); below that the worker pool costs about as much CPU as the
+serial compile and gains a few milliseconds at most, so small compiles run serially and
+hand their jobserver slots back. The parallel C compile is unaffected.
 
 Includes are relative — `cc build/**/*.c $(cat build/raw/__ldflags)` builds the whole
 tree with no `-I` flags (verified: the tree compiles and runs with bare `clang`).

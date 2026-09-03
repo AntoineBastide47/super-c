@@ -609,11 +609,61 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
 // necessarily the platform this compiler is running on. It also keeps both runners in every build, so
 // neither can rot unnoticed.
 const fn test_runner_includes() *const char {
-    return "#ifdef _WIN32\n#include <io.h>\n#include <process.h>\n#include <stdint.h>\n#include <windows.h>\n#else\n#include <unistd.h>\n#include <sys/wait.h>\n#endif\n\n".ptr() as *const char;
+    return M"(void sc_lk_fork_child_reset(void);
+void sc_lk_report_now(void);
+#ifdef _WIN32
+#include <io.h>
+#include <process.h>
+#include <stdint.h>
+#include <windows.h>
+static HANDLE sc_runner_js;
+static int sc_runner_jobserver_active(void) {
+  if (sc_runner_js != NULL) return 1;
+  const char *name = getenv("SC_JOBSERVER_SEMAPHORE");
+  if (name == NULL || name[0] == '\0') return 0;
+  sc_runner_js = OpenSemaphoreA(SEMAPHORE_MODIFY_STATE | SYNCHRONIZE, FALSE, name);
+  return sc_runner_js != NULL;
+}
+static int sc_runner_jobserver_try_acquire(void) {
+  return sc_runner_jobserver_active() && WaitForSingleObject(sc_runner_js, 0) == WAIT_OBJECT_0;
+}
+static int sc_runner_jobserver_release(void) {
+  return sc_runner_jobserver_active() && ReleaseSemaphore(sc_runner_js, 1, NULL);
+}
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/wait.h>
+static int sc_runner_js_read = -1;
+static int sc_runner_js_write = -1;
+static int sc_runner_jobserver_active(void) {
+  if (sc_runner_js_read >= 0 && sc_runner_js_write >= 0) return 1;
+  const char *fds = getenv("SC_JOBSERVER_FDS");
+  int r = -1;
+  int w = -1;
+  char tail = 0;
+  if (fds == NULL || sscanf(fds, "%d,%d%c", &r, &w, &tail) != 2 || r < 0 || w < 0) return 0;
+  if (fcntl(r, F_GETFL) < 0 || fcntl(w, F_GETFL) < 0) return 0;
+  sc_runner_js_read = r;
+  sc_runner_js_write = w;
+  return 1;
+}
+static int sc_runner_jobserver_try_acquire(void) {
+  char token = 0;
+  return sc_runner_jobserver_active() && read(sc_runner_js_read, &token, 1) == 1;
+}
+static int sc_runner_jobserver_release(void) {
+  const char token = '+';
+  return sc_runner_jobserver_active() && write(sc_runner_js_write, &token, 1) == 1;
+}
+#endif
+
+)".ptr() as *const char;
 }
 
 // The fixed part of the generated test runner: option parsing, fork-per-test isolation with a waitpid job
-// pool, an in-process fallback (--no-fork), substring selection, per-test reporting, and the exit code.
+// pool bounded by the inherited process-tree jobserver, an in-process fallback (--no-fork), substring
+// selection, per-test reporting, and the exit code.
 // Each forked child writes to its own capture file, so a test's output is attributed to that test rather
 // than interleaved with the pool's. The captured text is replayed only for tests that fail, in a
 // `failures:` section after the run; `--quiet` also drops the per-test `ok` lines.
@@ -727,21 +777,44 @@ int main(int argc, char **argv) {
   } else {
     pid_t pid_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
     FILE *cap_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
+    int token_of[SC_NTESTS > 0 ? SC_NTESTS : 1];
+    int shared = sc_runner_jobserver_active();
+    int implicit_available = 1;
     int active = 0, next = 0;
     while (next < nsel || active > 0) {
       while (active < jobs && next < nsel) {
+        int token = 0;
+        if (shared) {
+          if (implicit_available) implicit_available = 0;
+          else {
+            token = sc_runner_jobserver_try_acquire();
+            if (!token) break;
+          }
+        }
         FILE *cap = tmpfile();
-        if (!cap) { perror("tmpfile"); return 101; }
+        if (!cap) {
+          if (token && !sc_runner_jobserver_release()) abort();
+          perror("tmpfile");
+          return 101;
+        }
         const pid_t pid = fork();
         if (pid == 0) {
           if (dup2(fileno(cap), 1) < 0 || dup2(fileno(cap), 2) < 0) { perror("dup2"); _exit(101); }
+          sc_lk_fork_child_reset();
           SC_TESTS[sel[next]].fn(genv);
+          fflush(NULL);
+          sc_lk_report_now();
           fflush(NULL);
           _exit(0);
         }
-        if (pid < 0) { perror("fork"); return 101; }
+        if (pid < 0) {
+          if (token && !sc_runner_jobserver_release()) abort();
+          perror("fork");
+          return 101;
+        }
         pid_of[next] = pid;
         cap_of[next] = cap;
+        token_of[next] = token;
         next++;
         active++;
       }
@@ -751,9 +824,17 @@ int main(int argc, char **argv) {
       active--;
       int ti = -1;
       FILE *cap = NULL;
+      int token = 0;
       for (int k = 0; k < next; k++)
-        if (pid_of[k] == done) { ti = sel[k]; cap = cap_of[k]; pid_of[k] = -1; break; }
+        if (pid_of[k] == done) { ti = sel[k]; cap = cap_of[k]; token = token_of[k]; pid_of[k] = -1; break; }
       if (ti < 0) continue;
+      if (shared) {
+        if (token) {
+          if (!sc_runner_jobserver_release()) abort();
+        } else {
+          implicit_available = 1;
+        }
+      }
       const int crashed = !(WIFEXITED(st) && WEXITSTATUS(st) == 0);
       if (crashed == SC_TESTS[ti].should_panic) {
         if (!quiet) printf("test %s ... ok%s\n", SC_TESTS[ti].name, SC_TESTS[ti].should_panic ? " (panicked as expected)" : "");
@@ -925,9 +1006,20 @@ int main(int argc, char **argv) {
        first. Serial spawning was what made this runner several times slower than its POSIX siblings. */
     HANDLE running[MAXIMUM_WAIT_OBJECTS];
     int running_test[MAXIMUM_WAIT_OBJECTS];
+    int running_token[MAXIMUM_WAIT_OBJECTS];
+    int shared = sc_runner_jobserver_active();
+    int implicit_available = 1;
     int active = 0, next = 0;
     while (next < nsel || active > 0) {
       while (active < jobs && next < nsel) {
+        int token = 0;
+        if (shared) {
+          if (implicit_available) implicit_available = 0;
+          else {
+            token = sc_runner_jobserver_try_acquire();
+            if (!token) break;
+          }
+        }
         const int i = sel[next++];
         char idbuf[24];
         snprintf(idbuf, sizeof idbuf, "--run-one=%d", i);
@@ -940,6 +1032,8 @@ int main(int argc, char **argv) {
         const char *const args[] = { self, idbuf, capbuf, NULL };
         const intptr_t ph = _spawnv(_P_NOWAIT, self, args);
         if (ph == -1) {
+          if (token && !sc_runner_jobserver_release()) abort();
+          if (shared && !token) implicit_available = 1;
           printf("test %s ... FAILED (could not start)\n", SC_TESTS[i].name);
           fail_test[failed] = i;
           fail_out[failed] = sc_strdup("");
@@ -950,6 +1044,7 @@ int main(int argc, char **argv) {
         }
         running[active] = (HANDLE)ph;
         running_test[active] = i;
+        running_token[active] = token;
         active++;
       }
       if (active == 0) continue;
@@ -960,9 +1055,18 @@ int main(int argc, char **argv) {
       GetExitCodeProcess(running[slot], &code);
       CloseHandle(running[slot]);
       const int ti = running_test[slot];
+      const int token = running_token[slot];
       running[slot] = running[active - 1]; /* the pool is unordered: backfill from the end */
       running_test[slot] = running_test[active - 1];
+      running_token[slot] = running_token[active - 1];
       active--;
+      if (shared) {
+        if (token) {
+          if (!sc_runner_jobserver_release()) abort();
+        } else {
+          implicit_available = 1;
+        }
+      }
       const int crashed = (code != 0);
       char cappath[MAX_PATH];
       sc_cap_path(cappath, sizeof cappath, tmpdir, ti);
@@ -1168,8 +1272,15 @@ pub fn test_build_and_run(
     if out_bin.len() != 0 {
         return 0;
     } // the `build` subcommand: linked the program, nothing to run
+    return test_run_runner(topts, outp.as_str());
+}
+
+/// Run the linked test runner `bin` with the pool, fork, filter, quiet and shard options in `topts`.
+/// Releases this process's jobserver slot first so the runner's test pool inherits it. Returns the
+/// runner's exit code, or 1 when it could not be spawned.
+pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
     let mut run = Vector::<String>::new();
-    run.push(outp);
+    run.push(String::from_str(bin));
     if unsafe topts.jobs > 0 {
         let mut jb = Buf64 {};
         unsafe stdio::snprintf(&mut jb[0], 64, "--jobs=%d".ptr() as *const char, unsafe topts.jobs);
@@ -1197,6 +1308,7 @@ pub fn test_build_and_run(
         );
         run.push(String::from_cstr(&sb[0]));
     }
+    unsafe shim::sc_jobserver_release_claim();
     let rrc = texec_args(&mut run);
     if rrc < 0 {
         return 1;

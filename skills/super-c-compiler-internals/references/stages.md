@@ -112,7 +112,8 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 
 - `ensure_sigs`, then `InstGraph` (`src/graph/instances.spc`) seeded with the `irl::Keep`
   cache; `collect()` discovers every concrete instantiation by walking the kept Core IR
-  bodies from concrete roots, expanding generics under substitution frames
+  bodies from concrete roots (every concrete body of every module that emits; dead
+  prelude modules seed nothing), expanding generics under substitution frames
   (package-stable keys: decl DefId + per-argument skey). Bodies flagged `has_reflect` or
   `has_zst_cond` re-lower per instance instead of sharing.
 - `TuEmit` (`emit/tu.spc`) renders each module's TU into `CemitOut` buffers (`tus`,

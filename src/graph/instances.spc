@@ -101,6 +101,10 @@ pub struct InstGraph {
     /// Borrowck's finished lowerings (null = none): `body_idx` moves an entry into `kept` on first
     /// demand instead of lowering the body a second time.
     keep: *mut irl::Keep,
+    /// Per-module emission liveness (null = every module emits). A prelude module marked dead emits no
+    /// TU, so nothing seeds from its bodies: the instances they alone reach would land in the shared
+    /// type header with no code naming them.
+    live: *const bool,
     pub bodies: u64, // walked body count (roots + expansions)
     pub overflow: bool, // budget exhausted; the report marks itself partial
     budget: u32,
@@ -157,9 +161,10 @@ pub fn skey_norm(a: &Ast, t: TypeId, depth: i32) u64 {
 }
 
 extend InstGraph {
-    pub fn new(pkg: *const loader::Package, keep: *mut irl::Keep) InstGraph {
+    pub fn new(pkg: *const loader::Package, keep: *mut irl::Keep, live: *const bool) InstGraph {
         return InstGraph {
             keep: keep,
+            live: live,
             pkg: pkg,
             recs: Vector::<InstRec>::new(),
             keys: Vector::<ArgKey>::new(),
@@ -1302,8 +1307,8 @@ extend InstGraph {
         }
     }
 
-    /// Seed every concrete body in the package (functions, methods, constant initializers) and run
-    /// the expansion worklist to its fixed point.
+    /// Seed every concrete body of every emitted module (functions, methods, constant initializers)
+    /// and run the expansion worklist to its fixed point.
     pub fn collect(self: &mut Self) {
         let p = unsafe &*self.pkg;
         let empty = Vector::<Subst>::new();
@@ -1348,7 +1353,7 @@ extend InstGraph {
             }
         }
         for m in 0..p.modules.len() {
-            if !p.modules.at(m).has_ast {
+            if !p.modules.at(m).has_ast || self.module_elided(m) {
                 continue;
             }
             let a = unsafe &*p.module_ast_const(m as ModuleId);
@@ -1396,6 +1401,15 @@ extend InstGraph {
             }
         }
         self.run();
+    }
+
+    // True for a prelude module the emitter skips (see `live`).
+    fn module_elided(self: &Self, m: usize) bool {
+        if self.live == null {
+            return false;
+        }
+        let p = unsafe &*self.pkg;
+        return p.modules.at(m).prelude && !unsafe self.live[m];
     }
 
     fn seed_body(self: &mut Self, m: ModuleId, fnode: NodeId, a: &Ast, empty: &Vector<Subst>) {

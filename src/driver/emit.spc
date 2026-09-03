@@ -3491,7 +3491,7 @@ pub fn cemit_package(
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tt0 = unsafe shim::sc_ticks_ms();
     p.ensure_sigs(); // the planner's signature-level propagation reads the package metadata
-    let mut g = ig::InstGraph::new(p, irkeep);
+    let mut g = ig::InstGraph::new(p, irkeep, live);
     g.collect();
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
@@ -3502,7 +3502,7 @@ pub fn cemit_package(
     em.mg.agg_on = true;
     let mut items = Vector::<tbe::AggItem>::new();
     for m in 0..p.modules.len() {
-        if !p.modules[m].has_ast {
+        if !p.modules[m].has_ast || live != null && p.modules[m].prelude && !unsafe live[m] {
             continue;
         }
         let a = unsafe &*p.module_ast_const(m as ModuleId);
@@ -7819,9 +7819,10 @@ fn sink_notify(sink: *mut EmitSink, path: str, kind: i32) {
 
 /// then codegen of the live modules (headers first, then sources across `jobs` forked workers),
 /// pruning stale outputs afterwards. A non-empty `out_bin` also compiles + links the program there
-/// (`build`); `topts.enabled` synthesizes, builds and runs the test runner instead. `sink` (may be
-/// null) hears about every finished output file, which is what lets the build engine compile a TU
-/// while later ones are still being emitted. `jobs` 0 means the online core count. Returns the
+/// (`build`); `topts.enabled` synthesizes the test runner and, without a `sink`, builds and runs it
+/// too. `sink` (may be null) hears about every finished output file, which is what lets the build
+/// engine compile a TU while later ones are still being emitted; the engine then owns the runner's
+/// compile, link and launch. `jobs` 0 means the online core count. Returns the
 /// process exit code (0 = success).
 pub fn run_package(
     p: &mut loader::Package,
@@ -8198,7 +8199,9 @@ fn run_package_i(
                 Some(runner) => {
                     sink_notify(sink, runner.as_str(), 1);
                     keep.push(runner);
-                    rc = test_build_and_run(p, topts, &keep, "", cflags, target);
+                    if sink == null {
+                        rc = test_build_and_run(p, topts, &keep, "", cflags, target);
+                    }
                 },
                 None => {
                     rc = 1;

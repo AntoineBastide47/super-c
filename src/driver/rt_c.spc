@@ -227,9 +227,10 @@ void *sc_lk_malloc(size_t __n);
 void *sc_lk_calloc(size_t __n, size_t __m);
 void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
-/* Suspend/resume per-thread backtrace capture: a coroutine runtime brackets a task's execution with these
-   so the tracker never unwinds a makecontext/fiber stack (which has no clean base frame). Leak DETECTION is
-   unaffected -- only the per-allocation call stack is skipped while paused. Balanced; safe to nest. */
+void sc_lk_fork_child_reset(void);
+void sc_lk_report_now(void);
+/* Suspend/resume per-thread allocation-site capture. A coroutine runtime brackets task execution with
+   these because a makecontext/fiber stack has no standard frame base. Detection stays active. */
 void sc_lk_bt_pause(void);
 void sc_lk_bt_resume(void);
 #ifndef SC_NO_LEAK_CHECK
@@ -244,8 +245,8 @@ void sc_lk_bt_resume(void);
 /// The leak-tracker runtime backing the `super_rt.h` interposition macros, written as `super_rt.c`
 /// next to the header (the build engine compiles every `.c` in the generated tree). Runtime-gated by
 /// the SC_LEAK_CHECK environment variable: when unset the hooks are a branch over the real calls;
-/// when set, live allocations are recorded (with call stacks where <execinfo.h> exists) and the
-/// survivors are reported to stderr at process exit, grouped by allocation stack. Every libc call is
+/// when set, live allocations are recorded with their call-site address and the survivors are reported
+/// to stderr at process exit, grouped by allocation site. Every libc call is
 /// spelled `(malloc)(...)`-parenthesized so the same text also compiles inlined after the macros.
 pub const fn super_rt_source() *const char {
     return M"(/* super-c runtime: leak tracker (see super_rt.h). Generated; do not edit. */
@@ -278,175 +279,220 @@ const void **__sc_reflect_types(size_t *__n) {
 }
 #include <stdint.h>
 #if defined(__has_include) && !defined(__ANDROID__)
-/* bionic ships <execinfo.h> but only DECLARES backtrace()/backtrace_symbols() from API 33, so the
-   header alone does not mean they are callable: leaks are still tracked there, without call stacks. */
+/* bionic ships <execinfo.h> but only declares its functions from API 33. Keep site symbolization off there. */
 #if __has_include(<execinfo.h>)
 #include <execinfo.h>
-#define SC_LK_BT 10
 #define SC_LK_SYMS 1
 #endif
 #endif
 #if defined(_WIN32)
 void *GetModuleHandleA(const char *lpModuleName);
 #endif
-#if !defined(SC_LK_BT) && defined(_WIN32)
-unsigned short RtlCaptureStackBackTrace(unsigned long FramesToSkip, unsigned long FramesToCapture, void **BackTrace, unsigned long *BackTraceHash);
-#define SC_LK_BT 10
+#if defined(__wasm__)
+/* No frame walk on wasm: leaks and double frees are still counted and reported, without call sites. */
+#define SC_LK_SITE() NULL
+#elif defined(__GNUC__) || defined(__clang__)
+#define SC_LK_SITE() __builtin_extract_return_addr(__builtin_return_address(0))
+#elif defined(_MSC_VER)
+#include <intrin.h>
+#define SC_LK_SITE() _ReturnAddress()
+#else
+#define SC_LK_SITE() NULL
 #endif
 void *sc_lk_malloc(size_t __n);
 void *sc_lk_calloc(size_t __n, size_t __m);
 void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
+void sc_lk_fork_child_reset(void);
+void sc_lk_report_now(void);
 typedef struct {
   void *ptr;
+  void *site;
   size_t size;
-  int nbt;
-  unsigned char st; /* 1 = live, 2 = freed (kept until rehash for double-free detection) */
-#ifdef SC_LK_BT
-  void *bt[SC_LK_BT];
-#endif
 } sc_lk_ent;
-static sc_lk_ent *sc_lk_tab;
-static size_t sc_lk_cap;  /* power of two */
-static size_t sc_lk_used; /* live + freed-history */
-static size_t sc_lk_live;
-static size_t sc_lk_bytes;
-static size_t sc_lk_dbl;
-static volatile int sc_lk_lock;
+#define SC_LK_SHARDS 64
+#define SC_LK_SHARD_BITS 6
+#define SC_LK_FREED_HISTORY 32
+_Static_assert((SC_LK_SHARDS & (SC_LK_SHARDS - 1)) == 0, "leak shard count must be a power of two");
+_Static_assert(SC_LK_SHARDS == (1U << SC_LK_SHARD_BITS), "leak shard bits must match the shard count");
+typedef struct {
+  sc_lk_ent *tab;
+  size_t cap;  /* power of two */
+  size_t live;
+  size_t bytes;
+  size_t dbl;
+  sc_lk_ent freed[SC_LK_FREED_HISTORY];
+  size_t freed_next;
+  size_t freed_count;
+  volatile int lock;
+} sc_lk_shard;
+static sc_lk_shard sc_lk_shards[SC_LK_SHARDS];
 static int sc_lk_state; /* 0 = unprobed, 1 = off, 2 = report, 3 = fatal */
-static void sc_lk_acquire(void) {
-  while (__sync_lock_test_and_set(&sc_lk_lock, 1)) {}
+static uintptr_t sc_lk_hash(const void *p) {
+  return ((uintptr_t)p >> 4) * (uintptr_t)0x9E3779B97F4A7C15ULL;
 }
-static void sc_lk_release(void) { __sync_lock_release(&sc_lk_lock); }
+static sc_lk_shard *sc_lk_shard_for(const void *p) {
+  return &sc_lk_shards[sc_lk_hash(p) & (SC_LK_SHARDS - 1)];
+}
+static void sc_lk_acquire(sc_lk_shard *s) {
+  while (__sync_lock_test_and_set(&s->lock, 1)) {}
+}
+static void sc_lk_release(sc_lk_shard *s) { __sync_lock_release(&s->lock); }
 static size_t sc_lk_slot(const void *p, size_t cap) {
-  return (size_t)(((uintptr_t)p >> 4) * (uintptr_t)0x9E3779B97F4A7C15ULL) & (cap - 1);
+  return (size_t)(sc_lk_hash(p) >> SC_LK_SHARD_BITS) & (cap - 1);
 }
-static sc_lk_ent *sc_lk_find(void *p) {
-  if (sc_lk_cap == 0) return NULL;
-  size_t i = sc_lk_slot(p, sc_lk_cap);
-  while (sc_lk_tab[i].st != 0) {
-    if (sc_lk_tab[i].ptr == p) return &sc_lk_tab[i];
-    i = (i + 1) & (sc_lk_cap - 1);
+static sc_lk_ent *sc_lk_find(sc_lk_shard *s, void *p) {
+  if (s->cap == 0) return NULL;
+  size_t i = sc_lk_slot(p, s->cap);
+  for (size_t probes = 0; probes < s->cap && s->tab[i].ptr != NULL; probes++) {
+    if (s->tab[i].ptr == p) return &s->tab[i];
+    i = (i + 1) & (s->cap - 1);
   }
   return NULL;
 }
 static void sc_lk_put(sc_lk_ent *tab, size_t cap, const sc_lk_ent *e) {
   size_t i = sc_lk_slot(e->ptr, cap);
-  while (tab[i].st != 0) i = (i + 1) & (cap - 1);
-  tab[i] = *e;
+  for (size_t probes = 0; probes < cap; probes++) {
+    if (tab[i].ptr == NULL) {
+      tab[i] = *e;
+      return;
+    }
+    i = (i + 1) & (cap - 1);
+  }
+  abort();
 }
-static int sc_lk_grow(void) {
-  size_t ncap = sc_lk_cap != 0 ? sc_lk_cap * 2 : 4096;
+/* Per-thread site-suppression depth for coroutine and fiber stacks. */
+static _Thread_local int sc_lk_bt_off = 0;
+static int sc_lk_grow(sc_lk_shard *s) {
+  if (s->cap > SIZE_MAX / 2) return 0;
+  size_t ncap = s->cap != 0 ? s->cap * 2 : 64;
   sc_lk_ent *nt = (sc_lk_ent *)(calloc)(ncap, sizeof(sc_lk_ent));
   if (nt == NULL) return 0;
-  size_t kept = 0;
-  for (size_t i = 0; i < sc_lk_cap; i++) {
-    if (sc_lk_tab[i].st == 1) {
-      sc_lk_put(nt, ncap, &sc_lk_tab[i]);
-      kept++;
-    }
+  for (size_t i = 0; i < s->cap; i++) {
+    if (s->tab[i].ptr != NULL) sc_lk_put(nt, ncap, &s->tab[i]);
   }
-  (free)(sc_lk_tab);
-  sc_lk_tab = nt;
-  sc_lk_cap = ncap;
-  sc_lk_used = kept; /* freed-history entries are dropped: detection is best-effort */
+  (free)(s->tab);
+  s->tab = nt;
+  s->cap = ncap;
   return 1;
 }
-/* Per-thread backtrace-suppression depth: nonzero while this thread runs on a coroutine/fiber stack, whose
-   frame chain has no clean terminator for backtrace() to stop at. */
-static _Thread_local int sc_lk_bt_off = 0;
+static void sc_lk_erase(sc_lk_shard *s, sc_lk_ent *entry) {
+  size_t hole = (size_t)(entry - s->tab);
+  size_t i = (hole + 1) & (s->cap - 1);
+  for (size_t probes = 0; probes < s->cap && s->tab[i].ptr != NULL; probes++) {
+    size_t home = sc_lk_slot(s->tab[i].ptr, s->cap);
+    if (((i - home) & (s->cap - 1)) >= ((i - hole) & (s->cap - 1))) {
+      s->tab[hole] = s->tab[i];
+      hole = i;
+    }
+    i = (i + 1) & (s->cap - 1);
+  }
+  s->tab[hole].ptr = NULL;
+  s->tab[hole].site = NULL;
+  s->tab[hole].size = 0;
+}
+static void sc_lk_remember_free(sc_lk_shard *s, const sc_lk_ent *entry, void *site) {
+  sc_lk_ent freed = *entry;
+  freed.site = sc_lk_bt_off == 0 ? site : NULL;
+  s->freed[s->freed_next] = freed;
+  s->freed_next = (s->freed_next + 1) % SC_LK_FREED_HISTORY;
+  if (s->freed_count < SC_LK_FREED_HISTORY) s->freed_count++;
+}
+static sc_lk_ent *sc_lk_find_freed(sc_lk_shard *s, void *p) {
+  size_t i = s->freed_next;
+  for (size_t n = 0; n < s->freed_count; n++) {
+    i = (i + SC_LK_FREED_HISTORY - 1) % SC_LK_FREED_HISTORY;
+    if (s->freed[i].ptr == p) return &s->freed[i];
+  }
+  return NULL;
+}
 void sc_lk_bt_pause(void) { sc_lk_bt_off++; }
 void sc_lk_bt_resume(void) { sc_lk_bt_off--; }
-static void sc_lk_capture(sc_lk_ent *e, void *p, size_t n) {
+static void sc_lk_capture(sc_lk_ent *e, void *p, size_t n, void *site) {
   e->ptr = p;
+  e->site = sc_lk_bt_off == 0 ? site : NULL;
   e->size = n;
-  e->st = 1;
-  e->nbt = 0;
-  if (sc_lk_bt_off == 0) {
-#ifdef SC_LK_SYMS
-    e->nbt = backtrace(e->bt, SC_LK_BT);
-#elif defined(SC_LK_BT)
-    e->nbt = (int)RtlCaptureStackBackTrace(0UL, (unsigned long)SC_LK_BT, e->bt, (unsigned long *)0);
-#endif
-  }
 }
-#ifdef SC_LK_BT
-static void sc_lk_bt_print(void *const *bt, int n) {
+static void sc_lk_site_print(void *site) {
+  if (site == NULL) return;
 #ifdef SC_LK_SYMS
-  char **syms = backtrace_symbols(bt, n);
+  char **syms = backtrace_symbols(&site, 1);
   if (syms != NULL) {
-    for (int f = 0; f < n; f++) {
-      if (strstr(syms[f], "sc_lk_") == NULL) fprintf(stderr, "    %s\n", syms[f]);
-    }
+    fprintf(stderr, "    %s\n", syms[0]);
     (free)(syms);
     return;
   }
 #endif
 #ifdef _WIN32
-  /* No runtime DWARF symbolizer: print each frame as an ASLR-stable PE-base offset, like the crash
-     trace, so `addr2line` against the same binary resolves it. */
+  /* No runtime DWARF symbolizer: print an ASLR-stable PE-base offset so `addr2line` resolves it. */
   {
     char *base = (char *)GetModuleHandleA(NULL);
-    for (int f = 0; f < n; f++)
-      fprintf(stderr, "    leak-frame +0x%llx\n", (unsigned long long)((char *)bt[f] - base));
+    fprintf(stderr, "    leak-site +0x%llx\n", (unsigned long long)((char *)site - base));
     return;
   }
 #endif
-  for (int f = 0; f < n; f++) fprintf(stderr, "    %p\n", bt[f]);
+  fprintf(stderr, "    %p\n", site);
 }
-#endif
-/* `snap` holds the entry recorded when the block was FIRST freed (its stack is the freeing site). */
-static void sc_lk_double(void *p, const sc_lk_ent *snap) {
+/* `snap` holds the entry recorded when the block was first freed. */
+static void sc_lk_double(void *p, const sc_lk_ent *snap, void *site) {
   fprintf(stderr, "== super-c double free: %p (%llu byte(s)) ==\n", p, (unsigned long long)snap->size);
-#ifdef SC_LK_BT
   fprintf(stderr, "previously freed at:\n");
-  sc_lk_bt_print(snap->bt, snap->nbt);
-  sc_lk_ent now;
-  sc_lk_capture(&now, p, 0);
+  sc_lk_site_print(snap->site);
   fprintf(stderr, "freed again at:\n");
-  sc_lk_bt_print(now.bt, now.nbt);
-#endif
+  sc_lk_site_print(site);
   if (sc_lk_state == 3) abort();
 }
 static void sc_lk_disable(void) {
   sc_lk_state = 1;
-  (free)(sc_lk_tab);
-  sc_lk_tab = NULL;
-  sc_lk_cap = 0;
-  sc_lk_used = 0;
-  sc_lk_live = 0;
-  sc_lk_bytes = 0;
 }
 static int sc_lk_group_cmp(const void *va, const void *vb) {
   const sc_lk_ent *a = (const sc_lk_ent *)va;
   const sc_lk_ent *b = (const sc_lk_ent *)vb;
-#ifdef SC_LK_BT
-  if (a->nbt != b->nbt) return a->nbt < b->nbt ? -1 : 1;
-  int c = memcmp(a->bt, b->bt, (size_t)(a->nbt < 0 ? 0 : a->nbt) * sizeof(void *));
-  if (c != 0) return c;
-#endif
+  if (a->site != b->site) return (uintptr_t)a->site < (uintptr_t)b->site ? -1 : 1;
   if (a->size != b->size) return a->size < b->size ? -1 : 1;
   return 0;
 }
 static void sc_lk_report(void) {
-  sc_lk_acquire();
-  size_t n = sc_lk_live;
-  size_t bytes = sc_lk_bytes;
+  for (size_t h = 0; h < SC_LK_SHARDS; h++) sc_lk_acquire(&sc_lk_shards[h]);
+  int enabled = sc_lk_state >= 2;
+  size_t n = 0;
+  size_t bytes = 0;
+  size_t dbl = 0;
+  if (enabled) {
+    for (size_t h = 0; h < SC_LK_SHARDS; h++) {
+      n += sc_lk_shards[h].live;
+      bytes += sc_lk_shards[h].bytes;
+      dbl += sc_lk_shards[h].dbl;
+    }
+  }
   sc_lk_ent *v = NULL;
   if (n != 0) v = (sc_lk_ent *)(malloc)(n * sizeof(sc_lk_ent));
   if (v != NULL) {
     size_t k = 0;
-    for (size_t i = 0; i < sc_lk_cap && k < n; i++) {
-      if (sc_lk_tab[i].st == 1) v[k++] = sc_lk_tab[i];
+    for (size_t h = 0; h < SC_LK_SHARDS; h++) {
+      sc_lk_shard *s = &sc_lk_shards[h];
+      for (size_t i = 0; i < s->cap && k < n; i++) {
+        if (s->tab[i].ptr != NULL) v[k++] = s->tab[i];
+      }
     }
     n = k;
   } else {
     n = 0;
   }
-  int fatal = sc_lk_state == 3;
-  size_t dbl = sc_lk_dbl;
+  int fatal = enabled && sc_lk_state == 3;
   sc_lk_state = 1; /* the report's own prints may allocate: stop tracking */
-  sc_lk_release();
+  for (size_t h = 0; h < SC_LK_SHARDS; h++) {
+    sc_lk_shard *s = &sc_lk_shards[h];
+    (free)(s->tab);
+    s->tab = NULL;
+    s->cap = 0;
+    s->live = 0;
+    s->bytes = 0;
+    s->dbl = 0;
+    s->freed_next = 0;
+    s->freed_count = 0;
+    sc_lk_release(s);
+  }
   if (n != 0) {
     qsort(v, n, sizeof(sc_lk_ent), sc_lk_group_cmp);
     fprintf(stderr, "== super-c leaks: %llu allocation(s), %llu byte(s) ==\n",
@@ -459,9 +505,7 @@ static void sc_lk_report(void) {
       if (shown < 64) {
         fprintf(stderr, "leak: %llu allocation(s), %llu byte(s)\n",
                 (unsigned long long)(j - i), (unsigned long long)gbytes);
-#ifdef SC_LK_BT
-        sc_lk_bt_print(v[i].bt, v[i].nbt);
-#endif
+        sc_lk_site_print(v[i].site);
       }
       shown++;
       i = j;
@@ -484,76 +528,68 @@ static int sc_lk_on(void) {
   }
   return sc_lk_state >= 2;
 }
-/* Insert under the held lock. An existing entry at `p` is overwritten: freed-history means the
-   address was legitimately reused; a live one means the block was freed behind the tracker's back
-   (a foreign free) and then reused. Returns 0 when bookkeeping memory ran out. */
-static int sc_lk_insert(const sc_lk_ent *e) {
-  sc_lk_ent *old = sc_lk_find(e->ptr);
+void sc_lk_fork_child_reset(void) {
+  if (!sc_lk_on()) return;
+  for (size_t h = 0; h < SC_LK_SHARDS; h++) {
+    sc_lk_shard *s = &sc_lk_shards[h];
+    s->lock = 0;
+    (free)(s->tab);
+    s->tab = NULL;
+    s->cap = 0;
+    s->live = 0;
+    s->bytes = 0;
+    s->dbl = 0;
+    s->freed_next = 0;
+    s->freed_count = 0;
+  }
+}
+void sc_lk_report_now(void) {
+  if (sc_lk_on()) sc_lk_report();
+}
+/* Insert under the held lock. An existing live entry means the block was freed behind the tracker's
+   back and then reused. Returns 0 when bookkeeping memory ran out. */
+static int sc_lk_insert(sc_lk_shard *s, const sc_lk_ent *e) {
+  sc_lk_ent *old = sc_lk_find(s, e->ptr);
   if (old != NULL) {
-    if (old->st == 1) {
-      sc_lk_bytes -= old->size;
-      sc_lk_live--;
-    }
+    s->bytes -= old->size;
     *old = *e;
-    sc_lk_live++;
-    sc_lk_bytes += e->size;
+    s->bytes += e->size;
     return 1;
   }
-  if ((sc_lk_used + 1) * 10 >= sc_lk_cap * 7 && !sc_lk_grow()) return 0;
-  sc_lk_put(sc_lk_tab, sc_lk_cap, e);
-  sc_lk_used++;
-  sc_lk_live++;
-  sc_lk_bytes += e->size;
+  if ((s->live + 1) * 10 >= s->cap * 7 && !sc_lk_grow(s)) return 0;
+  sc_lk_put(s->tab, s->cap, e);
+  s->live++;
+  s->bytes += e->size;
   return 1;
 }
 void *sc_lk_malloc(size_t __n) {
+  void *site = SC_LK_SITE();
   void *p = (malloc)(__n);
   if (p != NULL && sc_lk_on()) {
     sc_lk_ent e;
-    sc_lk_capture(&e, p, __n);
-    sc_lk_acquire();
-    if (sc_lk_state >= 2 && !sc_lk_insert(&e)) sc_lk_disable();
-    sc_lk_release();
+    sc_lk_capture(&e, p, __n, site);
+    sc_lk_shard *s = sc_lk_shard_for(p);
+    sc_lk_acquire(s);
+    if (sc_lk_state >= 2 && !sc_lk_insert(s, &e)) sc_lk_disable();
+    sc_lk_release(s);
   }
   return p;
 }
 void *sc_lk_calloc(size_t __n, size_t __m) {
+  void *site = SC_LK_SITE();
   void *p = (calloc)(__n, __m);
   if (p != NULL && sc_lk_on()) {
     sc_lk_ent e;
-    sc_lk_capture(&e, p, __n * __m);
-    sc_lk_acquire();
-    if (sc_lk_state >= 2 && !sc_lk_insert(&e)) sc_lk_disable();
-    sc_lk_release();
+    sc_lk_capture(&e, p, __n * __m, site);
+    sc_lk_shard *s = sc_lk_shard_for(p);
+    sc_lk_acquire(s);
+    if (sc_lk_state >= 2 && !sc_lk_insert(s, &e)) sc_lk_disable();
+    sc_lk_release(s);
   }
   return p;
 }
 void *sc_lk_realloc(void *__p, size_t __n) {
-  if (__p != NULL && sc_lk_on()) {
-    int uaf = 0;
-    sc_lk_ent snap;
-    snap.size = 0;
-    snap.nbt = 0;
-    sc_lk_acquire();
-    if (sc_lk_state >= 2) {
-      sc_lk_ent *e0 = sc_lk_find(__p);
-      if (e0 != NULL && e0->st == 2) {
-        snap = *e0;
-        uaf = 1;
-        sc_lk_dbl++;
-      }
-    }
-    sc_lk_release();
-    if (uaf) {
-      fprintf(stderr, "== super-c realloc of freed pointer: %p ==\n", __p);
-#ifdef SC_LK_BT
-      fprintf(stderr, "previously freed at:\n");
-      sc_lk_bt_print(snap.bt, snap.nbt);
-#endif
-      if (sc_lk_state == 3) abort();
-      return sc_lk_malloc(__n); /* the old block is gone: hand back fresh memory */
-    }
-  }
+  void *site = SC_LK_SITE();
   /* The registry key is an ADDRESS, and an address survives the realloc that invalidates the pointer
      holding it: reading `__p` again after this call is undefined (and GCC's -Wuse-after-free says so).
      The lock is held ACROSS the realloc: the moment it returns, the old block is free for another
@@ -561,55 +597,86 @@ void *sc_lk_realloc(void *__p, size_t __n) {
      thread's fresh entry at the same address be marked freed here -- a false use-after-free later. */
   const uintptr_t __pa = (uintptr_t)__p;
   int track = sc_lk_on();
-  if (track) sc_lk_acquire();
+  sc_lk_shard *held = NULL;
+  sc_lk_ent *old = NULL;
+  if (__p != NULL && track) {
+    held = sc_lk_shard_for(__p);
+    sc_lk_acquire(held);
+  }
+  if (__p != NULL && track && sc_lk_state >= 2) {
+    old = sc_lk_find(held, __p);
+    sc_lk_ent *freed = old == NULL ? sc_lk_find_freed(held, __p) : NULL;
+    if (freed != NULL) {
+      sc_lk_ent snap = *freed;
+      held->dbl++;
+      sc_lk_release(held);
+      fprintf(stderr, "== super-c realloc of freed pointer: %p ==\n", __p);
+      fprintf(stderr, "previously freed at:\n");
+      sc_lk_site_print(snap.site);
+      fprintf(stderr, "reallocated again at:\n");
+      sc_lk_site_print(site);
+      if (sc_lk_state == 3) abort();
+      return sc_lk_malloc(__n); /* the old block is gone: hand back fresh memory */
+    }
+  }
   void *q = (realloc)(__p, __n);
   if (q != NULL && track && sc_lk_state >= 2) {
     sc_lk_ent e;
-    sc_lk_capture(&e, q, __n);
-    sc_lk_ent *old = __pa != 0 ? sc_lk_find((void *)__pa) : NULL;
+    sc_lk_capture(&e, q, __n, site);
     int was_tracked = 0;
-    if (old != NULL && old->st == 1) {
-      sc_lk_bytes -= old->size;
-      sc_lk_live--;
-      size_t osz = old->size;
-      void *op = old->ptr;
-      sc_lk_capture(old, op, osz); /* the realloc consumed it: record this site */
-      old->st = 2;
+    if (old != NULL) {
+      sc_lk_ent consumed = *old;
+      held->bytes -= old->size;
+      held->live--;
+      sc_lk_erase(held, old);
+      sc_lk_remember_free(held, &consumed, site);
       was_tracked = 1;
     }
     /* memory the tracker never saw (a foreign allocator) stays untracked */
-    if ((was_tracked || __pa == 0) && !sc_lk_insert(&e)) sc_lk_disable();
+    if (was_tracked || __pa == 0) {
+      sc_lk_shard *next = sc_lk_shard_for(q);
+      if (next != held) {
+        if (held != NULL) sc_lk_release(held);
+        sc_lk_acquire(next);
+        held = next;
+      }
+      if (sc_lk_state >= 2 && !sc_lk_insert(held, &e)) sc_lk_disable();
+    }
   }
-  if (track) sc_lk_release();
+  if (held != NULL) sc_lk_release(held);
   return q;
 }
 void sc_lk_free(void *__p) {
+  void *site = SC_LK_SITE();
   int skip = 0;
   if (__p != NULL && sc_lk_on()) {
     int dbl = 0;
     sc_lk_ent snap;
+    snap.ptr = NULL;
     snap.size = 0;
-    snap.nbt = 0;
-    sc_lk_acquire();
+    snap.site = NULL;
+    sc_lk_shard *s = sc_lk_shard_for(__p);
+    sc_lk_acquire(s);
     if (sc_lk_state >= 2) {
-      sc_lk_ent *e = sc_lk_find(__p);
+      sc_lk_ent *e = sc_lk_find(s, __p);
       if (e != NULL) {
-        if (e->st == 2) {
-          snap = *e;
+        sc_lk_ent freed = *e;
+        s->bytes -= e->size;
+        s->live--;
+        sc_lk_erase(s, e);
+        sc_lk_remember_free(s, &freed, site);
+      } else {
+        sc_lk_ent *freed = sc_lk_find_freed(s, __p);
+        if (freed != NULL) {
+          snap = *freed;
           dbl = 1;
           skip = 1; /* the block may belong to someone else now: never free it twice */
-          sc_lk_dbl++;
-        } else {
-          sc_lk_bytes -= e->size;
-          sc_lk_live--;
-          size_t sz = e->size;
-          sc_lk_capture(e, __p, sz); /* record the freeing site for double-free reports */
-          e->st = 2;
+          s->dbl++;
         }
       }
     }
-    sc_lk_release();
-    if (dbl) sc_lk_double(__p, &snap);
+    sc_lk_release(s);
+    if (dbl) sc_lk_double(__p, &snap, site);
   }
   if (!skip) (free)(__p);
 }

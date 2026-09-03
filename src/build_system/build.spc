@@ -1633,6 +1633,7 @@ fn engine_build(
     bootstrap_tags: bool,
     lint: bool,
     link_kind: i32,
+    topts: *const TestOpts,
 ) i32 {
     let pi = m.profile_index(prof_name);
     if pi < 0 {
@@ -1754,7 +1755,10 @@ fn engine_build(
             return 1;
         }
         p.gen_root = srcgen.clone();
-        p.jobs = jobs;
+        p.jobs = p.analysis_jobs(jobs);
+        if p.jobs == 1 && jobs != 1 {
+            prt::shutdown(); // parallel loading may have started the pool
+        }
         let pkg = (&mut p) as *mut loader::Package;
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
@@ -1764,7 +1768,7 @@ fn engine_build(
         if ce_mem != 0 {
             cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
         }
-        let rc = run_package(&mut p, null, "", target, lint, "", &mut sink);
+        let rc = run_package(&mut p, topts, "", target, lint, "", &mut sink);
         if rc != 0 {
             stream.drain(true); // reap what is in flight; abandon what has not started
             return rc;
@@ -2011,6 +2015,7 @@ pub fn manifest_build(
             bootstrap_tags,
             lint,
             0,
+            null,
         );
     }
     let mut path = String::new();
@@ -2073,6 +2078,7 @@ fn target_build(
         bootstrap_tags,
         lint,
         link_kind,
+        null,
     );
     *out = path;
     return rc;
@@ -2501,6 +2507,7 @@ fn build_into_profile(
         bootstrap_tags,
         lint,
         0,
+        null,
     );
     *out = path;
     return rc;
@@ -2586,6 +2593,7 @@ pub fn manifest_run_bin(
             bootstrap_tags,
             lint,
             0,
+            null,
         );
     } else {
         // Run the profile's own binary where it was linked; `run` builds to run, it does not install.
@@ -2677,13 +2685,14 @@ pub fn manifest_test(
     src.push_str("\nfn main() i32 {\n    return 0;\n}\n");
     mkdirs(m.out_dir.as_str());
     let rootp = join2(m.out_dir.as_str(), "test_root.spc");
-    let f = stdio::fopen(rootp.as_str(), "wb");
-    if f == null {
-        eprintln("test: cannot write '{}'", rootp.as_str());
-        return 1;
+    // Rewrite the root only when its content changed: an unchanged root keeps its mtime, so the emit
+    // stamp proves the suite unchanged without hashing every input.
+    if !file_eq(rootp.as_str(), &src) {
+        if !write_file(rootp.as_str(), src.as_str()) {
+            eprintln("test: cannot write '{}'", rootp.as_str());
+            return 1;
+        }
     }
-    unsafe stdio::fwrite(src.as_str().ptr(), 1, src.len(), f);
-    unsafe stdio::fclose(f);
     // the harness compiles+runs snippets through the binary we just built ("./" so it never
     // resolves through PATH when the bin name is bare) -- unless SC_TEST_SUPERC names a different
     // compiler under test (the wasm lane's wasmtime wrapper), which then takes its place.
@@ -2698,40 +2707,35 @@ pub fn manifest_test(
         binb.push_string(&binp);
     }
     unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
-    let tjobs: u32 = if jobs_override != 0 {
-        jobs_override;
-    } else if m.jobs != 0 {
-        m.jobs;
-    } else {
-        (unsafe shim::sc_ncpu()) as u32;
-    };
-    loader::set_load_jobs(tjobs);
-    let mut p = loader::package_load_rooted(
+    // The runner is built through the engine under the `test` profile, in its own <out-dir>/test tree:
+    // per-TU parallel compiles, the object cache and the emit stamp turn an unchanged suite into a
+    // link check instead of a serial rebuild of every unit.
+    let tsub = "test";
+    let tdir_out = join2(m.out_dir.as_str(), tsub);
+    let tbin = join2(tdir_out.as_str(), exe_name("__tests", target).as_str());
+    let brc = engine_build(
+        m,
+        tsub,
         rootp.as_str(),
         ".",
         dirname_of(m.root.as_str()),
+        tsub,
+        "raw-test",
+        tbin.as_str(),
+        jobs_override,
         std_dir,
-        bootstrap_tags,
+        ce_steps,
+        ce_mem,
         target,
+        bootstrap_tags,
+        false,
+        0,
+        topts,
     );
-    loader::set_load_jobs(1);
-    p.arch = m.arch;
-    if !p.ok {
-        prt::shutdown(); // parallel loading may have started the pool
-        return 1;
+    if brc != 0 {
+        return brc;
     }
-    p.gen_root = join2(m.out_dir.as_str(), "raw-test");
-    p.jobs = tjobs;
-    let pkg = (&mut p) as *mut loader::Package;
-    let mut cirv = iri::interp_new(pkg);
-    p.cir = &mut cirv;
-    if ce_steps != 0 {
-        cirv.max_steps = ce_steps;
-    }
-    if ce_mem != 0 {
-        cirv.max_slots = ce_mem / 32; // bytes -> IVal slots
-    }
-    return run_package(&mut p, topts, "", target, false, "", null);
+    return test_run_runner(topts, tbin.as_str());
 }
 
 // Every .spc under <bench-dir>, as `import <bench-dir>::<path>;` lines. Returns how many were found.
@@ -2992,6 +2996,7 @@ pub fn manifest_bench(
         bootstrap_tags,
         false,
         0,
+        null,
     );
     if rc != 0 || no_run {
         return rc;

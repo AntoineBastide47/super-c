@@ -41,6 +41,12 @@ extern "C" "driver_shim.h" {
     pub fn sc_mtime(path: *const char) i64;
     /// Online core count; 4 when it cannot be determined.
     pub fn sc_ncpu() i32;
+    /// Create the process-tree jobserver when none exists. Returns 1 when a shared budget is active.
+    pub fn sc_jobserver_init(capacity: i32) i32;
+    /// Reserve up to `wanted` worker slots, including this process's inherited slot.
+    pub fn sc_jobserver_claim(wanted: i32) i32;
+    /// Return all extra worker slots before this process waits on child work.
+    pub fn sc_jobserver_release_claim() void;
     /// Monotonic milliseconds (never wall clock).
     pub fn sc_ticks_ms() i64;
     /// Start `cmd` through the shell without waiting (redirections go inside the string); returns a

@@ -969,9 +969,9 @@ fn group_drop_leaves_no_child() {
         time::sleep(short());
         // The group goes out of scope here: its drop cancels and joins every child.
     }
+    rt::shutdown();
     assert_eq(rt::cancelled_tasks(), 4);
     assert_eq(rt::live_tasks(), 0);
-    rt::shutdown();
 }
 
 @test

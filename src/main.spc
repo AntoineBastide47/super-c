@@ -64,7 +64,11 @@ fn run_file(
         prt::shutdown(); // parallel loading started the pool; the leak gate needs it gone
     }
     if p.ok {
-        p.jobs = jobs;
+        p.jobs = p.analysis_jobs(jobs);
+        if p.jobs == 1 && jobs != 1 {
+            prt::shutdown(); // parallel loading may have started the pool
+            unsafe shim::sc_jobserver_release_claim(); // a serial compile hands its slots back
+        }
         let mut cirv = iri::interp_new((&mut p) as *mut loader::Package);
         p.cir = &mut cirv;
         if ce_steps != 0 {
@@ -385,7 +389,10 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
         if !p.ok {
             return 1;
         }
-        p.jobs = (unsafe shim::sc_ncpu()) as u32; // parallel analysis; resolves to 1 on wasm
+        p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32); // parallel analysis; resolves to 1 on wasm
+        if p.jobs == 1 {
+            prt::shutdown(); // parallel loading may have started the pool
+        }
         let pkg = (&mut p) as *mut loader::Package;
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
@@ -519,7 +526,10 @@ fn lint_batch(
         if !p.ok {
             return 1;
         }
-        p.jobs = (unsafe shim::sc_ncpu()) as u32; // parallel analysis; resolves to 1 on wasm
+        p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32); // parallel analysis; resolves to 1 on wasm
+        if p.jobs == 1 {
+            prt::shutdown(); // parallel loading may have started the pool
+        }
         let pkg = (&mut p) as *mut loader::Package;
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
@@ -1197,7 +1207,7 @@ COMMANDS:
 
 OPTIONS:
     -o <path>              output binary path (build/release with a file)
-    --profile=P            build profile: debug|dev|release|bench, or a custom one
+    --profile=P            build profile: debug|dev|release|bench|test, or a custom one
     --out-dir=D            output directory (default: build)
     --jobs=N               parallel C compile jobs (default: one per core)
     --cstd=F               C standard passed to the C compiler
@@ -1243,11 +1253,16 @@ OPTIONS:
     let cstd = bo.cstd;
     // resolve "0 = core count" HERE: the p.jobs != 1 frontier gates need a real number, and a
     // single-threaded host (wasm) must resolve to the serial path
-    let jobs = if bo.jobs != 0 {
+    let jobs_wanted = if bo.jobs != 0 {
         bo.jobs;
     } else {
         (unsafe shim::sc_ncpu()) as u32;
     };
+    // Waiting test parents transfer their slots to nested compilers. One process-tree slot per core keeps
+    // independent tests parallel while nested compilers run serially instead of competing for the same cores.
+    let tree_jobs = jobs_wanted;
+    unsafe shim::sc_jobserver_init(tree_jobs as i32);
+    let jobs = (unsafe shim::sc_jobserver_claim(jobs_wanted as i32)) as u32;
     // fmt/lint take any number of paths; with none, the project discovers itself.
     let mut paths = Vector::<String>::new();
     if mode == Mode::MODE_FMT || mode == Mode::MODE_LINT {
@@ -1505,11 +1520,7 @@ OPTIONS:
         bootstrap_tags,
         lint,
         pflags.as_str(),
-        if bo.jobs != 0 {
-            bo.jobs;
-        } else {
-            (unsafe shim::sc_ncpu()) as u32; // "0 = core count", resolved so wasm goes serial
-        },
+        jobs,
     );
     return rc;
 }

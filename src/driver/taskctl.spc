@@ -1,7 +1,7 @@
 // The compiler task contract: every parallel frontier submits work under a TaskKey/TaskDesc, and
 // one resource controller bounds live estimated memory across in-flight tasks. CPU credits are the
-// single --jobs worker count: compute tasks and C-compiler processes never overlap (the task pool
-// shuts down before the TU writers hand sources to cc), so no second credit pool exists.
+// requested --jobs worker count, bounded further by the process-tree jobserver. Compute tasks and
+// C-compiler processes never overlap, so no second in-process credit pool exists.
 import stdlib;
 import std::parallel::sync as psy;
 

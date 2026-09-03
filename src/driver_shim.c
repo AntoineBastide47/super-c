@@ -300,6 +300,160 @@ int sc_ncpu(void) {
 #endif
 }
 
+static int sc_js_claimed;
+static int sc_js_release_registered;
+#if defined(_WIN32)
+static HANDLE sc_js_sem;
+
+static int sc_jobserver_load(void) {
+  if (sc_js_sem != NULL)
+    return 1;
+  const char *name = getenv("SC_JOBSERVER_SEMAPHORE");
+  if (name == NULL || name[0] == '\0')
+    return 0;
+  sc_js_sem = OpenSemaphoreA(SEMAPHORE_MODIFY_STATE | SYNCHRONIZE, FALSE, name);
+  return sc_js_sem != NULL;
+}
+
+int sc_jobserver_init(int capacity) {
+  if (sc_jobserver_load())
+    return 1;
+  if (capacity < 1)
+    capacity = 1;
+  char name[96];
+  int n = snprintf(name, sizeof name, "Local\\super-c-jobs-%lu-%llu", (unsigned long)GetCurrentProcessId(),
+                   (unsigned long long)GetTickCount64());
+  if (n < 1 || (size_t)n >= sizeof name)
+    return 0;
+  sc_js_sem = CreateSemaphoreA(NULL, capacity - 1, capacity, name);
+  if (sc_js_sem == NULL)
+    return 0;
+  if (!SetEnvironmentVariableA("SC_JOBSERVER_SEMAPHORE", name)) {
+    CloseHandle(sc_js_sem);
+    sc_js_sem = NULL;
+    return 0;
+  }
+  return 1;
+}
+
+static int sc_jobserver_active(void) { return sc_jobserver_load(); }
+
+static int sc_jobserver_try_acquire(void) {
+  if (!sc_jobserver_load())
+    return 0;
+  return WaitForSingleObject(sc_js_sem, 0) == WAIT_OBJECT_0;
+}
+
+static int sc_jobserver_release(void) {
+  if (!sc_jobserver_load())
+    return 0;
+  return ReleaseSemaphore(sc_js_sem, 1, NULL) ? 1 : 0;
+}
+#elif !defined(__wasi__)
+static int sc_js_read = -1;
+static int sc_js_write = -1;
+
+static int sc_jobserver_load(void) {
+  if (sc_js_read >= 0 && sc_js_write >= 0)
+    return 1;
+  const char *fds = getenv("SC_JOBSERVER_FDS");
+  int r = -1;
+  int w = -1;
+  char tail = 0;
+  if (fds == NULL || sscanf(fds, "%d,%d%c", &r, &w, &tail) != 2 || r < 0 || w < 0)
+    return 0;
+  if (fcntl(r, F_GETFL) < 0 || fcntl(w, F_GETFL) < 0)
+    return 0;
+  sc_js_read = r;
+  sc_js_write = w;
+  return 1;
+}
+
+int sc_jobserver_init(int capacity) {
+  if (sc_jobserver_load())
+    return 1;
+  if (capacity < 1)
+    capacity = 1;
+  int fds[2];
+  if (pipe(fds) != 0)
+    return 0;
+  int rf = fcntl(fds[0], F_GETFL);
+  int wf = fcntl(fds[1], F_GETFL);
+  if (rf < 0 || wf < 0 || fcntl(fds[0], F_SETFL, rf | O_NONBLOCK) != 0 ||
+      fcntl(fds[1], F_SETFL, wf | O_NONBLOCK) != 0) {
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+  const char token = '+';
+  for (int i = 1; i < capacity; i++) {
+    if (write(fds[1], &token, 1) != 1)
+      break;
+  }
+  char text[64];
+  int n = snprintf(text, sizeof text, "%d,%d", fds[0], fds[1]);
+  if (n < 1 || (size_t)n >= sizeof text || setenv("SC_JOBSERVER_FDS", text, 1) != 0) {
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+  }
+  sc_js_read = fds[0];
+  sc_js_write = fds[1];
+  return 1;
+}
+
+static int sc_jobserver_active(void) { return sc_jobserver_load(); }
+
+static int sc_jobserver_try_acquire(void) {
+  if (!sc_jobserver_load())
+    return 0;
+  char token = 0;
+  return read(sc_js_read, &token, 1) == 1;
+}
+
+static int sc_jobserver_release(void) {
+  if (!sc_jobserver_load())
+    return 0;
+  const char token = '+';
+  return write(sc_js_write, &token, 1) == 1;
+}
+#else
+int sc_jobserver_init(int capacity) {
+  (void)capacity;
+  return 0;
+}
+static int sc_jobserver_active(void) { return 0; }
+static int sc_jobserver_try_acquire(void) { return 0; }
+static int sc_jobserver_release(void) { return 0; }
+#endif
+
+void sc_jobserver_release_claim(void) {
+  while (sc_js_claimed > 1) {
+    if (!sc_jobserver_release())
+      abort();
+    sc_js_claimed--;
+  }
+  sc_js_claimed = 0;
+}
+
+int sc_jobserver_claim(int wanted) {
+  if (wanted < 1)
+    wanted = 1;
+  if (!sc_jobserver_active())
+    return wanted;
+  if (sc_js_claimed != 0)
+    return sc_js_claimed;
+  sc_js_claimed = 1;
+  while (sc_js_claimed < wanted && sc_jobserver_try_acquire())
+    sc_js_claimed++;
+  if (!sc_js_release_registered) {
+    if (atexit(sc_jobserver_release_claim) != 0)
+      abort();
+    sc_js_release_registered = 1;
+  }
+  return sc_js_claimed;
+}
+
 /* Monotonic milliseconds for build-phase timing. */
 long long sc_ticks_ms(void) {
 #if defined(_WIN32)

@@ -7,6 +7,7 @@ import tests::cli_harness as cli;
 import stdio;
 import module::loader as loader;
 import build_system::build as bsys;
+import driver_shim as shim;
 
 struct Cmd {
     pub b: [char; 2048],
@@ -1334,7 +1335,17 @@ fn leak_tracker() {
     let ftc = q.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(ftc.ok());
 
-    // double frees are detected via the freed-entry history: both stacks reported, exit 0 in
+    let t = cli::proj_new();
+    t.mkfile(
+        "main.spc",
+        "@test\nfn leaks_in_child() {\n    forget(String::from_str(\"deliberate test child leak past the inline budget\"));\n}\n\nfn main() i32 { return 0; }\n",
+    );
+    let child = t.compile_flags("--test --quiet", "main.spc");
+    assert_eq(child.exit, 1);
+    assert(child.out_has("test main::leaks_in_child ... FAILED"), "child leak fails the test");
+    assert(child.out_has("super-c leaks: 1 allocation"), "child leak report is captured");
+
+    // Double frees are detected via the freed-entry history: both sites report, exit 0 in
     // report mode, abort in fatal mode
     let d = cli::proj_new();
     d.mkfile(
@@ -1446,6 +1457,12 @@ fn main() i32 {
 // suites (fixture-as-self), should_panic, fork isolation, filtering, sharding, and --test-no-fork.
 @test
 fn test_pipeline() {
+    let claimed = unsafe shim::sc_jobserver_claim(1000000);
+    assert(claimed >= 1, "a test process keeps its implicit worker slot");
+    assert(claimed < 1000000, "the inherited process-tree budget bounds a nested claim");
+    assert_eq(unsafe shim::sc_jobserver_claim(1000000), claimed);
+    unsafe shim::sc_jobserver_release_claim();
+
     let p = cli::proj_new();
     p.mkfile(
         "env.spc",

@@ -34,6 +34,10 @@ int sc_closedir(void *dir);
 
 long long sc_mtime(const char *path); /* mtime seconds; 0 if missing */
 int sc_ncpu(void);                    /* online core count; >= 1 */
+/* One inherited process-tree worker budget. A process owns one implicit slot and can claim free extras. */
+int sc_jobserver_init(int capacity);
+int sc_jobserver_claim(int wanted);
+void sc_jobserver_release_claim(void);
 long long sc_ticks_ms(void);          /* monotonic milliseconds (build-phase timing) */
 long long sc_spawn(const char *cmd);  /* start cmd via the shell, no wait; pid/handle or -1 */
 long long sc_spawn_argv(const char *const *argv, const char *out_path); /* argv spawn, NO shell; out_path (may be NULL) captures stdout+stderr */
