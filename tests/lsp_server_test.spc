@@ -716,3 +716,75 @@ fn lsp_build_toml() {
     assert(o.contains("\"label\":\"out-dir\""));
     assert(o.contains("\"label\":\"profile.\""));
 }
+
+// The file/workspace lifecycle: dynamic watcher registration on `initialized`, didClose, a
+// build.toml change through didChangeWatchedFiles (manifest reload), and a workspace-folder addition.
+@test
+fn lsp_workspace_lifecycle() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_OK);
+    let root = str::from_cstr(p.rootp());
+
+    let mut ses = String::new();
+    let mut b = String::new();
+    // initialize with dynamic didChangeWatchedFiles registration advertised -> register_watchers fires.
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{\"workspace\":{\"didChangeWatchedFiles\":{\"dynamicRegistration\":true}}},\"rootUri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("\"}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
+    frame(&mut ses, &b);
+    b.clear();
+    // Open then close the document.
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/src/main.spc\",\"languageId\":\"super-c\",\"version\":1,\"text\":");
+    json::dump_escaped(MAIN_OK, &mut b);
+    b.push_str("}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/src/main.spc\"}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    // A build.toml change arrives as a watched-file event: the manifest reloads.
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"workspace/didChangeWatchedFiles\",\"params\":{\"changes\":[{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("/build.toml\",\"type\":2}]}}");
+    frame(&mut ses, &b);
+    b.clear();
+    // A workspace folder is added.
+    b.push_str(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"workspace/didChangeWorkspaceFolders\",\"params\":{\"event\":{\"added\":[{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_str("\",\"name\":\"w\"}],\"removed\":[]}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\",\"params\":null}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
+    frame(&mut ses, &b);
+    p.mkfile("session.bin", ses.as_str());
+
+    let rc = lsp_run(root);
+    assert_eq(rc, 0);
+    let mut op = String::from_str(root);
+    op.push_str("/out.txt");
+    let out = loader::read_file(op.as_str()).unwrap();
+    // The dynamic watcher registration was sent in response to `initialized`.
+    assert(out.as_str().contains("client/registerCapability"), "watchers were registered");
+    assert(out.as_str().contains("workspace/didChangeWatchedFiles"), "the watch registration names the method");
+}

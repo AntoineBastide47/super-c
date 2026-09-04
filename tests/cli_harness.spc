@@ -93,6 +93,15 @@ pub fn on_windows() bool {
     return unsafe shim::sc_host_platform() == 0;
 }
 
+// True when the compiler under test is the wasm lane's shim (ci/wasm-superc.sh routes transpile-class
+// commands into wasmtime). The wasm guest runs with a fixed --dir mount, so it does NOT inherit a
+// test's chdir and cannot spawn subprocesses: a CLI test that depends on the working directory for a
+// guest command (fmt/lint/clean of relative paths, project sweeps) or that runs `command` (a shell
+// line) must early-return under this.
+pub fn on_wasm() bool {
+    return contains_str(superc(), "wasm");
+}
+
 // $SUPERC, or the built compiler beside the CWD when unset (gen1 for the self-hosted check). Resolved to an
 // ABSOLUTE path: Windows' CreateProcess does not take a `./`-relative program the way a POSIX shell does.
 fn superc() *const char {
@@ -574,7 +583,7 @@ extend Proj as Free {
 /// Run the compiler under test FROM `dir` with one environment variable set: the shape the global
 /// object-cache tests need: the engine resolves build.toml from its working directory and the cache
 /// from its environment. No shell syntax: Windows' sc_run hands the line to CreateProcess verbatim,
-/// so the directory moves via chdir (safe: the runner gives every test its own process) and the
+/// so the directory moves via chdir (the runner restores it after the test) and the
 /// variable rides sc_run's env parameter. superc_path() resolves before the chdir moves ".".
 pub fn superc_env_in(dir: str, key: str, val: str, args: str) CliResult {
     let mut cmd = String::new();

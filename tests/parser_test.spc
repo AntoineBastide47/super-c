@@ -827,3 +827,176 @@ fn hrtb_and_gat() {
     assert(c.ast.at_const(assoc).kind == NodeKind::NODE_TYPE_ALIAS, "assoc type is a type alias");
     assert(c.ast.lifetimes_of(assoc).len == 1, "GAT lifetime param recorded");
 }
+
+// Parser diagnostics by message: each snippet stops at the parse stage with the named first error.
+@test
+fn diagnostics_by_message() {
+    h::expect_err_msg(
+        "derive on fn",
+        "@derive(Clone)\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "'@derive' may only be applied to a struct, union, or enum declaration",
+    );
+    h::expect_err_msg(
+        "no_const on fn",
+        "@no_const\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "'@no_const' may only be applied to a struct, union, or enum declaration",
+    );
+    h::expect_err_msg(
+        "const fn in body",
+        "fn main() i32 { const fn g() {} return 0; }\n",
+        "'const fn' is only allowed at item scope",
+    );
+    h::expect_err_msg(
+        "two timeouts",
+        "import std::parallel::channel as chan;\nimport std::parallel::time as time;\nfn main() i32 { let c = chan::Channel::<i32>::bounded(1); let rx = c.receiver(); let d = time::Duration::from_millis(1); select { v = rx.recv() => {} timeout(d) => {} timeout(d) => {} } return 0; }\n",
+        "'select' allows at most one 'timeout' and one 'default' arm",
+    );
+    h::expect_err_msg(
+        "timeout arity",
+        "fn main() i32 { select { timeout() => {} } return 0; }\n",
+        "'timeout' takes one duration",
+    );
+    h::expect_err_msg(
+        "reflect value",
+        "struct S { @reflect(k = 1.5) pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "a '@reflect' value is an integer, a string, 'true', or 'false'",
+    );
+    h::expect_err_msg(
+        "select arm binder",
+        "fn main() i32 { select { (a, b) = rx.recv() => {} } return 0; }\n",
+        "a 'select' arm binds a plain name",
+    );
+    h::expect_err_msg(
+        "default binder",
+        "fn main() i32 { select { x = default => {} } return 0; }\n",
+        "a 'timeout' or 'default' arm binds nothing",
+    );
+    h::expect_err_msg(
+        "designated index",
+        "fn main() i32 { let a: [i32; 4] = [[0, 1] = 5]; return 0; }\n",
+        "a designated element needs a single index expression",
+    );
+    h::expect_err_msg(
+        "label target",
+        "fn main() i32 { 'a: if true {} return 0; }\n",
+        "a label must be followed by 'loop', 'while', 'do', or 'for'",
+    );
+    h::expect_err_msg("empty range", "fn main() i32 { let x = ..; return 0; }\n", "a range needs a start and/or an end");
+    h::expect_err_msg(
+        "parenthesized return",
+        "fn f() (i32) { return 0; }\nfn main() i32 { return 0; }\n",
+        "a single unnamed return type must not be parenthesized",
+    );
+    h::expect_err_msg(
+        "one-element tuple",
+        "fn f(x: (i32)) {}\nfn main() i32 { return 0; }\n",
+        "a tuple type needs at least 2 elements",
+    );
+    h::expect_err_msg(
+        "open inclusive range",
+        "fn main() i32 { let x = 0..=; return 0; }\n",
+        "an inclusive range '..=' needs an end",
+    );
+    h::expect_err_msg(
+        "mixed named returns",
+        "fn f() (a: i32, i32) { return 0, 0; }\nfn main() i32 { return 0; }\n",
+        "either all return values are named or none",
+    );
+    h::expect_err_msg("ABI string", "extern 5 { }\nfn main() i32 { return 0; }\n", "expected ABI string");
+    h::expect_err_msg("lifetime slot", "fn f<'a: T, T>() {}\nfn main() i32 { return 0; }\n", "expected a lifetime");
+    h::expect_err_msg(
+        "platform name",
+        "@platform(5)\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "expected a platform name: windows, macos, linux, wasm, ios, or android",
+    );
+    h::expect_err_msg(
+        "unknown platform",
+        "@platform(foo)\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "unknown platform 'foo'",
+    );
+    h::expect_err_msg(
+        "arch name",
+        "@arch(5)\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "expected an architecture name: x86_64, aarch64, or wasm32",
+    );
+    h::expect_err_msg(
+        "unknown arch",
+        "@arch(foo)\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "unknown architecture 'foo'",
+    );
+    h::expect_err_msg(
+        "attribute after dot",
+        "@c.5\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "expected an attribute name after '.'",
+    );
+    h::expect_err_msg(
+        "attribute path",
+        "@5\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "expected an attribute path after '@'",
+    );
+    h::expect_err_msg(
+        "integer attribute argument",
+        "@c.align(x)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "expected an integer argument",
+    );
+    h::expect_err_msg("missing expression", "fn main() i32 { let x = ; return 0; }\n", "expected expression");
+    h::expect_err_msg(
+        "extern item",
+        "extern \"C\" { let x = 1; }\nfn main() i32 { return 0; }\n",
+        "expected extern item",
+    );
+    h::expect_err_msg("missing identifier", "fn () {}\nfn main() i32 { return 0; }\n", "expected identifier");
+    h::expect_err_msg(
+        "negated pattern literal",
+        "fn main() i32 { switch 1 { -x => {}, _ => {} } return 0; }\n",
+        "expected literal",
+    );
+    h::expect_err_msg("missing pattern", "fn main() i32 { switch 1 { => 1, _ => 0 }; return 0; }\n", "expected pattern");
+    h::expect_err_msg(
+        "matchertext hole tail",
+        "fn main() i32 { let s = M{}\"(a{1 2}b)\"; return 0; }\n",
+        "expected the rest of the matchertext literal",
+    );
+    h::expect_err_msg("top-level item", "5\nfn main() i32 { return 0; }\n", "expected top-level item");
+    h::expect_err_msg("bare let", "fn main() i32 { let x; return 0; }\n", "expected type annotation or initializer");
+    h::expect_err_msg(
+        "extern const initializer",
+        "extern \"C\" { const X: i32 = 1; }\nfn main() i32 { return 0; }\n",
+        "extern const declarations cannot have an initializer",
+    );
+    h::expect_err_msg(
+        "lifetime order",
+        "fn f<T, 'a>() {}\nfn main() i32 { return 0; }\n",
+        "lifetime parameters must come before type parameters",
+    );
+    h::expect_err_msg(
+        "empty hole",
+        "fn main() i32 { let s = M{}\"(a{}b)\"; return 0; }\n",
+        "matchertext interpolation hole is empty",
+    );
+    h::expect_err_msg(
+        "nested tuple access",
+        "fn main() i32 { let t = ((1, 2), 3); let x = t.0.1; return 0; }\n",
+        "nested tuple access needs parentheses: write '(t.0).1'",
+    );
+    h::expect_err_msg(
+        "field attribute",
+        "struct S { @test pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "only '@reflect' applies to a field declaration",
+    );
+    h::expect_err_msg(
+        "variant attribute",
+        "enum E { @test A }\nfn main() i32 { return 0; }\n",
+        "only '@reflect' applies to a variant declaration",
+    );
+    h::expect_err_msg(
+        "&const",
+        "fn f(x: &const i32) {}\nfn main() i32 { return 0; }\n",
+        "references use '&T' or '&mut T', not '&const T'",
+    );
+    h::expect_err_msg(
+        "fmt attribute",
+        "@fmt.foo\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "unknown attribute; the 'fmt' namespace supports only '@fmt.skip'",
+    );
+}

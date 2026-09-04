@@ -149,3 +149,14 @@ fn closures() {
     );
     assert(n == 2 && caps[0] == 1 && caps[1] == 1, "both closures capture 'base'");
 }
+
+// An associated type referenced through Self:: that the interface never declares is a name-resolution
+// error, distinct from a missing value.
+@test
+fn missing_associated_type() {
+    h::expect_resolve_err_msg(
+        "unknown associated type",
+        "interface I { type A; fn m(self: &Self) Self::B; }\nfn main() i32 { return 0; }\n",
+        "no associated type by this name in scope",
+    );
+}

@@ -667,6 +667,9 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
             }
         }
     } else {
+        // Windows opens stdout in text mode, which would rewrite the formatter's "\n" as "\r\n"; the
+        // formatted output must reach the pipe byte for byte. A no-op off Windows.
+        let _ = stdio::set_binary(stdio::stdout());
         unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), stdio::stdout());
     }
     return rc;

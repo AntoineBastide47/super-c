@@ -612,6 +612,7 @@ const fn test_runner_includes() *const char {
     return M"(void sc_lk_fork_child_reset(void);
 void sc_lk_report_now(void);
 #ifdef _WIN32
+#include <direct.h>
 #include <io.h>
 #include <process.h>
 #include <stdint.h>
@@ -676,6 +677,48 @@ static char *sc_strdup(const char *s) {
   if (!d) { perror("malloc"); exit(101); }
   strcpy(d, s);
   return d;
+}
+/* The in-process leg has no per-test process, so it restores the environment itself: tests set
+   compiler switches (SC_INLINE, SC_BCE, ...) and rely on the fork for isolation. */
+extern char **environ;
+static char *sc_getcwd_alloc(void) {
+  char *d = getcwd(NULL, 0);
+  if (!d) { perror("getcwd"); exit(101); }
+  return d;
+}
+static int sc_chdir_back(const char *d) { return chdir(d); }
+static char **sc_env_snapshot(void) {
+  int n = 0;
+  while (environ[n]) n++;
+  char **snap = malloc(((size_t)n + 1) * sizeof *snap);
+  if (!snap) { perror("malloc"); exit(101); }
+  for (int i = 0; i < n; i++) snap[i] = sc_strdup(environ[i]);
+  snap[n] = NULL;
+  return snap;
+}
+static void sc_env_restore(char **snap) {
+  /* unsetenv compacts environ, so the index only advances past kept entries */
+  for (int i = 0; environ[i];) {
+    const char *eq = strchr(environ[i], '=');
+    const size_t nl = eq ? (size_t)(eq - environ[i]) : strlen(environ[i]);
+    int keep = 0;
+    for (int k = 0; snap[k] && !keep; k++) keep = !strncmp(snap[k], environ[i], nl) && snap[k][nl] == '=';
+    if (keep) { i++; continue; }
+    char *name = sc_strdup(environ[i]);
+    name[nl] = 0;
+    unsetenv(name);
+    free(name);
+  }
+  for (int k = 0; snap[k]; k++) {
+    char *eq = strchr(snap[k], '=');
+    if (eq) {
+      *eq = 0;
+      const char *cur = getenv(snap[k]);
+      if (!cur || strcmp(cur, eq + 1)) setenv(snap[k], eq + 1, 1);
+    }
+    free(snap[k]);
+  }
+  free(snap);
 }
 /* Everything the test wrote, as one owned NUL-terminated buffer (empty when it wrote nothing). */
 static char *sc_slurp(FILE *f) {
@@ -770,7 +813,12 @@ int main(int argc, char **argv) {
         skipped++;
         continue;
       }
+      char **env = sc_env_snapshot();
+      char *cwd = sc_getcwd_alloc();
       SC_TESTS[i].fn(genv);
+      sc_env_restore(env);
+      if (sc_chdir_back(cwd) != 0) { perror("chdir"); return 101; }
+      free(cwd);
       if (!quiet) printf("test %s ... ok\n", SC_TESTS[i].name);
       passed++;
     }
@@ -877,6 +925,47 @@ static char *sc_strdup(const char *s) {
   if (!d) { perror("malloc"); exit(101); }
   strcpy(d, s);
   return d;
+}
+/* The in-process leg has no per-test process, so it restores the environment itself: tests set
+   compiler switches (SC_INLINE, SC_BCE, ...) and rely on the fork for isolation. */
+static char *sc_getcwd_alloc(void) {
+  char *d = _getcwd(NULL, 0);
+  if (!d) { perror("getcwd"); exit(101); }
+  return d;
+}
+static int sc_chdir_back(const char *d) { return _chdir(d); }
+static char **sc_env_snapshot(void) {
+  int n = 0;
+  while (_environ[n]) n++;
+  char **snap = malloc(((size_t)n + 1) * sizeof *snap);
+  if (!snap) { perror("malloc"); exit(101); }
+  for (int i = 0; i < n; i++) snap[i] = sc_strdup(_environ[i]);
+  snap[n] = NULL;
+  return snap;
+}
+static void sc_env_restore(char **snap) {
+  /* _putenv_s compacts _environ, so the index only advances past kept entries */
+  for (int i = 0; _environ[i];) {
+    const char *eq = strchr(_environ[i], '=');
+    const size_t nl = eq ? (size_t)(eq - _environ[i]) : strlen(_environ[i]);
+    int keep = 0;
+    for (int k = 0; snap[k] && !keep; k++) keep = !strncmp(snap[k], _environ[i], nl) && snap[k][nl] == '=';
+    if (keep) { i++; continue; }
+    char *name = sc_strdup(_environ[i]);
+    name[nl] = 0;
+    _putenv_s(name, "");
+    free(name);
+  }
+  for (int k = 0; snap[k]; k++) {
+    char *eq = strchr(snap[k], '=');
+    if (eq) {
+      *eq = 0;
+      const char *cur = getenv(snap[k]);
+      if (!cur || strcmp(cur, eq + 1)) _putenv_s(snap[k], eq + 1);
+    }
+    free(snap[k]);
+  }
+  free(snap);
 }
 /* Everything the test wrote, as one owned NUL-terminated buffer (empty when it wrote nothing). */
 static char *sc_slurp(FILE *f) {
@@ -993,7 +1082,12 @@ int main(int argc, char **argv) {
         skipped++;
         continue;
       }
+      char **env = sc_env_snapshot();
+      char *cwd = sc_getcwd_alloc();
       SC_TESTS[i].fn(genv);
+      sc_env_restore(env);
+      if (sc_chdir_back(cwd) != 0) { perror("chdir"); return 101; }
+      free(cwd);
       if (!quiet) printf("test %s ... ok\n", SC_TESTS[i].name);
       passed++;
     }

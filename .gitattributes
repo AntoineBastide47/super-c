@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Source is LF-canonical (the formatter emits LF); keep it LF in the working tree on every
+# platform so `fmt --check` and byte-exact test fixtures do not trip over a CRLF checkout on Windows.
+*.spc text eol=lf

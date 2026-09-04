@@ -186,3 +186,51 @@ fn pathological_exponent_is_bounded() {
         },
     };
 }
+
+// Every reject path the parser can reach through `parse`, by message. `parse_err` already asserts
+// is_err and exact text; this batch closes the diagnostics the earlier cases did not touch.
+@test
+fn json_parse_error_messages() {
+    parse_err("", "Empty input is not valid JSON");
+    parse_err("\"a\x01b\"", "Control character in string");
+    parse_err("{true}", "Expected a key before adding a boolean or null value");
+    parse_err("{[1]}", "Expected a key before adding an inner value");
+    parse_err("{1:2}", "Expected a key before adding a number");
+    parse_err("1.2.3", "Invalid character in number");
+    parse_err("\"\\uD800\\u0041\"", "Invalid low surrogate: expected value in range \\uDC00..\\uDFFF, got \\u0041");
+    parse_err("null\x00", "Unexpected null byte after JSON end");
+    parse_err("[1", "Missing closing ']' for array");
+    parse_err("{\"a\":1", "Missing closing '}' for object");
+    parse_err("[1 2]", "Missing ',' between array members");
+    parse_err("{\"a\":1 \"b\":2}", "Missing ',' between object members");
+    parse_err("[1:2]", "Unexpected ':' in an array, did you mean ','?");
+    parse_err("]", "Unexpected ']'");
+    parse_err("}", "Unexpected '}'");
+    parse_err("[1,,2]", "Duplicate ','");
+    parse_err("{\"a\" 1}", "Expected a key before adding a number");
+    parse_err("[1}", "Expected ']' but found '}'");
+    parse_err("{\"a\":1]", "Expected '}' but found ']'");
+    parse_err("\"\\uD800x\"", "Unexpected end of input: missing low surrogate after high surrogate (\\uXXXX)");
+    parse_err("\"\\u12\"", "Incomplete unicode escape");
+    parse_err("\"\\uXYZW\"", "Invalid hex digit in \\uXXXX");
+    parse_err("\"\\x\"", "Invalid escape sequence");
+    parse_err("{\"a\":}", "Missing value for key 'a' in object");
+    parse_err("@", "Unexpected character '@'");
+    parse_err("{:1}", "Expected a string key before ':'");
+    parse_err("01", "Invalid number: Leading zeros are not allowed");
+    parse_err("-x", "Invalid number: digit expected after '-'");
+    parse_err("1.x", "Invalid number: digit expected after '.'");
+    parse_err("1ex", "Invalid number: digit expected after exponent");
+    parse_err("[1,]", "Trailing ',' before closing ']'");
+    parse_err("{\"a\":1,}", "Trailing ',' before closing '}'");
+}
+
+// The parser is iterative with an explicit slot stack: past the cap it rejects rather than recurse.
+@test
+fn json_nesting_depth_limit() {
+    let mut d = String::new();
+    for _i in 0..1100 {
+        d.push_byte(b'[');
+    }
+    parse_err(d.as_str(), "Nesting depth limit exceeded");
+}

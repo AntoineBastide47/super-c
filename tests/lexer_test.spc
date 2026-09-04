@@ -3,6 +3,7 @@
 import lexer::token as *;
 import lexer::token_type as *;
 import lexer::lexer as *;
+import tests::harness as h;
 
 fn expect_tokens(src: str, expected: []TokenType) {
     let mut s = String::from_str(src);
@@ -205,4 +206,119 @@ fn matchertext_errors() {
     expect_error("M{}\"(hole {)} bad)\"");
     // EOF inside an interpolation hole.
     expect_error("M{}\"(open {x");
+}
+
+// Every lexer diagnostic, by message: the harness stops at the lex stage and reports the first one.
+@test
+fn diagnostics_by_message() {
+    h::expect_err_msg(
+        "preprocessor",
+        "#define X 1\nfn main() i32 { return 0; }\n",
+        "'#' is not valid in Super-C source; Super-C has no preprocessor",
+    );
+    h::expect_err_msg("dollar", "fn main() i32 { $ return 0; }\n", "'$' is reserved");
+    h::expect_err_msg("backtick", "fn main() i32 { ` return 0; }\n", "'`' is reserved");
+    h::expect_err_msg(
+        "nul in char",
+        "fn main() i32 { let c = '\x00'; return 0; }\n",
+        "NUL byte is not allowed in character literals",
+    );
+    h::expect_err_msg(
+        "nul in comment",
+        "// a\x00b\nfn main() i32 { return 0; }\n",
+        "NUL byte is not allowed in comments",
+    );
+    h::expect_err_msg(
+        "nul in matchertext",
+        "fn main() i32 { let s = M\"(a\x00b)\"; return 0; }\n",
+        "NUL byte is not allowed in matchertext literals",
+    );
+    h::expect_err_msg("nul in source", "fn\x00main() i32 { return 0; }\n", "NUL byte is not allowed in source");
+    h::expect_err_msg(
+        "late BOM",
+        "fn main() i32 { return 0; }\n\xEF\xBB\xBF",
+        "UTF-8 BOM is allowed only at the start of a file",
+    );
+    h::expect_err_msg(
+        "surrogate escape",
+        "fn main() i32 { let c = '\\u{D800}'; return 0; }\n",
+        "Unicode escape is not a valid Unicode scalar value",
+    );
+    h::expect_err_msg(
+        "bare \\u",
+        "fn main() i32 { let c = '\\u0041'; return 0; }\n",
+        "Unicode escape must use \\u{...} syntax",
+    );
+    h::expect_err_msg(
+        "empty \\u{}",
+        "fn main() i32 { let c = '\\u{}'; return 0; }\n",
+        "Unicode escape requires 1 to 6 hexadecimal digits",
+    );
+    h::expect_err_msg(
+        "seven-digit \\u{}",
+        "fn main() i32 { let c = '\\u{1234567}'; return 0; }\n",
+        "Unicode escape requires 1 to 6 hexadecimal digits",
+    );
+    h::expect_err_msg(
+        "\\u in byte char",
+        "fn main() i32 { let c = b'\\u{41}'; return 0; }\n",
+        "Unicode escapes are not allowed in byte character literals",
+    );
+    h::expect_err_msg(
+        "short \\x",
+        "fn main() i32 { let c = '\\xG1'; return 0; }\n",
+        "\\x escape requires exactly two hexadecimal digits",
+    );
+    h::expect_err_msg(
+        "non-ASCII byte char",
+        "fn main() i32 { let c = b'\xC3\xA9'; return 0; }\n",
+        "byte character literal may contain only ASCII or a \\xNN escape",
+    );
+    h::expect_err_msg(
+        "two-byte byte char",
+        "fn main() i32 { let c = b'ab'; return 0; }\n",
+        "byte character literal must contain exactly one byte",
+    );
+    h::expect_err_msg(
+        "two-scalar char",
+        "fn main() i32 { let c = 'ab'; return 0; }\n",
+        "character literal must contain exactly one Unicode scalar value",
+    );
+    h::expect_err_msg(
+        "non-ASCII identifier",
+        "fn main() i32 { let caf\xC3\xA9 = 1; return 0; }\n",
+        "identifiers may contain only ASCII letters, digits, and '_'",
+    );
+    h::expect_err_msg(
+        "undelimited matchertext",
+        "fn main() i32 { let s = M\"abc\"; return 0; }\n",
+        "matchertext content must be delimited by '(', '[', or '{' inside the quotes",
+    );
+    h::expect_err_msg(
+        "matchertext tail",
+        "fn main() i32 { let s = M\"(abc)x\"; return 0; }\n",
+        "matchertext literal must end with '\"' right after the closing matcher",
+    );
+    h::expect_err_msg("invalid UTF-8", "fn main() i32 { \xFF return 0; }\n", "source is not valid UTF-8");
+    h::expect_err_msg(
+        "unbalanced hole",
+        "fn main() i32 { let s = M{}\"(a{)}b)\"; return 0; }\n",
+        "unbalanced matcher in matchertext interpolation hole",
+    );
+    h::expect_err_msg("stray backslash", "fn main() i32 { \\ return 0; }\n", "unexpected character '\\'");
+    h::expect_err_msg("unknown escape", "fn main() i32 { let s = \"\\q\"; return 0; }\n", "unknown escape sequence");
+    h::expect_err_msg("open block comment", "/* abc\nfn main() i32 { return 0; }\n", "unterminated block comment");
+    h::expect_err_msg(
+        "open char literal",
+        "fn f(x: &'5 i32) {}\nfn main() i32 { return 0; }\n",
+        "unterminated character literal",
+    );
+    h::expect_err_msg("open escape", "fn main() i32 { let s = \"\\", "unterminated escape sequence");
+    h::expect_err_msg("open matchertext", "fn main() i32 { let s = M\"(abc", "unterminated matchertext literal");
+    h::expect_err_msg(
+        "open hole",
+        "fn main() i32 { let s = M{}\"(a{b",
+        "unterminated matchertext literal (unclosed interpolation hole)",
+    );
+    h::expect_err_msg("open string", "fn main() i32 { let s = \"abc; return 0; }\n", "unterminated string literal");
 }

@@ -19,6 +19,9 @@ if [ "$(uname -s)" = Linux ]; then HOST_TARGET=linux; fi
 if [ "$(uname -m)" = x86_64 ]; then HOST_ARCH=x86_64; fi
 PIN="--target=$HOST_TARGET --arch=$HOST_ARCH"
 case "$*" in *--target=*) PIN="" ;; esac
+# `fmt` takes no target/arch flags (it neither emits C nor gates on platform), so pinning them would
+# make it reject its own command line: the one guest subcommand that must not be pinned.
+case "$1" in fmt) PIN="" ;; esac
 # wasmtime forwards only the env it is told to, so a test that sets an SC_* compiler switch
 # (SC_INLINE, SC_BCE, SC_CONST_EVAL_*, SC_LEAK_CHECK ...) would otherwise have no effect in the
 # guest -- its assertions on emitted C would silently test the default path. Forward every SC_*

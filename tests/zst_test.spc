@@ -97,3 +97,15 @@ fn zst_ffi_by_value_rejected() {
         "zero-sized",
     );
 }
+
+// An over-aligned zero-sized field (an empty struct with a larger @c.align than its non-ZST sibling)
+// is elided, but its alignment still shapes the enclosing struct: the emitter plans the padding so
+// the C layout matches the semantic one. Covers the ZST over-alignment padding planner.
+@test
+fn over_aligned_zst_field_pads_the_layout() {
+    h::expect_exit(
+        "over-aligned elided field keeps the sibling's value",
+        "@c.align(16)\nstruct Marker {}\nstruct Holder { pub m: Marker, pub b: i32 }\nfn main() i32 {\n    let h = Holder { m: Marker {}, b: 9 };\n    return h.b - 9;\n}\n",
+        0,
+    );
+}

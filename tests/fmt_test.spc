@@ -295,3 +295,13 @@ fn golden_pattern_mut_binding() {
         "fn f(o: i32) i32 {\n    switch o {\n        1 => {\n            return 1;\n        },\n        _ => {\n            return 0;\n        },\n    };\n}\nenum O {\n    N,\n    S(i32),\n}\nfn g(o: O) i32 {\n    return switch o {\n        S(mut x) => {\n            x = x + 1;\n            x;\n        },\n        N => {\n            0;\n        },\n    };\n}\n",
     );
 }
+
+// Inline assembly: the operand list (outputs, inputs, clobbers) is passed through verbatim, each
+// section separated by a colon; empty sections keep their colons. Covers the asm-operand formatter.
+@test
+fn asm_statement_formatting() {
+    // Inline assembly operands (outputs, inputs, clobbers) pass through verbatim, colon-separated;
+    // empty sections keep their colons. Canonical form is stable and covers the asm-operand formatter.
+    let SRC: str = "fn add_one(x: i32) i32 {\n    let mut out: i32 = 0;\n    asm(\"addl $1, %0\" : \"=r\"(out) : \"r\"(x));\n    return out;\n}\nfn barrier() {\n    asm(\"\" :  :  : \"memory\");\n}\n";
+    expect_fmt(SRC, SRC);
+}

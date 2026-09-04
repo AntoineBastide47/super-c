@@ -259,3 +259,47 @@ fn iterator_for_lowers_to_next_calls() {
     assert(has(&out, "discr "), "one discriminant read per iteration");
     assert(has(&out, ".variant"), "the element loads through a downcast");
 }
+
+// A feature-dense body drives the printer across its rvalue and terminator variants: references,
+// casts, an aggregate literal, a repeat array, a length read, an enum discriminant switch, a dyn
+// coercion, and a closure. The exact text is not pinned (that is other tests' job); this asserts the
+// printer emits a marker for each construct so every print branch runs.
+@test
+fn printer_covers_rvalue_variants() {
+    let p = typed_package(
+        M"(interface Shape2 { fn area(self: &Self) i32; }
+struct Sq { pub s: i32 }
+extend Sq as Shape2 { fn area(self: &Sq) i32 { return self.s * self.s; } }
+enum E { A, B, C }
+fn pick(e: E) i32 {
+    return switch e {
+        A => 1,
+        B => 2,
+        C => 3,
+    };
+}
+fn dense(n: i32) i32 {
+    let sq = Sq { s: n };
+    let r = &sq;
+    let d: &dyn Shape2 = &sq;
+    let a: [i32; 3] = [n; 3];
+    let sl: []i32 = a[0..3];
+    let mut acc = sl.len() as i32;
+    acc = acc + r.s + d.area() + pick(E::B) + (n as i64 as i32);
+    let f = |x: i32| x + acc;
+    return f(1);
+}
+fn main() i32 { let _ = dense(2); let _ = pick(E::A); return 0; })",
+    );
+    let out = lowered(&p, "dense");
+    assert(has(&out, "body"), "the body header prints");
+    assert(has(&out, "cast "), "a cast rvalue prints");
+    assert(has(&out, "agg"), "an aggregate rvalue prints");
+    assert(has(&out, "repeat("), "a repeat rvalue prints");
+    assert(has(&out, "len "), "a length rvalue prints");
+    assert(has(&out, "dyn "), "a dyn coercion prints");
+    assert(has(&out, "closure n"), "a closure rvalue prints");
+    // The discriminant read and switch terminator live in `pick`.
+    let po = lowered(&p, "pick");
+    assert(has(&po, "discr ") || has(&po, "switch("), "a discriminant/switch prints");
+}

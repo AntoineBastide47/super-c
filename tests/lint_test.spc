@@ -259,3 +259,68 @@ fn always_panics_lint() {
     assert_eq(q.exit, 0);
     assert(!q.out_has("always panics"));
 }
+
+// Linting a standalone file from a directory with no `src/` layout takes the per-path `run_lint`
+// route (not the whole-workspace batch), so it covers that arm and its single-file lint.
+@test
+fn standalone_file_lint_clean() {
+    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
+    // dependent guest command, so it runs on native and Windows only.
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("solo.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    // Chdir into the project (no `src/` dir) so lint resolves against it via the per-path route.
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint solo.spc");
+    assert(r.ok(), "a clean standalone file lints without findings");
+}
+
+@test
+fn standalone_file_lint_and_fix() {
+    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
+    // dependent guest command, so it runs on native and Windows only.
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "solo.spc",
+        "fn take(q: *mut i32) i32 {\n    return unsafe *q;\n}\n\nfn main() i32 {\n    let mut x = 1;\n    return take((&mut x) as *mut i32) - 1;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint solo.spc");
+    // The redundant coalescing cast is reported through the per-path route.
+    assert(r.out_has("unnecessary cast"), "the standalone lint reports the redundant cast");
+    // --fix removes it in place.
+    let fr = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint --fix solo.spc");
+    assert(fr.ok(), "the fix run succeeds");
+    let mut sp = String::from_str(root);
+    sp.push_str("/solo.spc");
+    let fixed = loader::read_file(sp.as_str()).unwrap();
+    assert(fixed.as_str().contains("return take(&mut x) - 1;"), "the cast was removed");
+    assert(!fixed.as_str().contains("as *mut i32"), "no cast remains");
+}
+
+// The const-suggestion lint (`lint --const`) proves whether a function is fully compile-time
+// evaluable. Its deep effect scan recurses into `switch`/`match` arms and their patterns, so a
+// const-foldable function built around a switch exercises that scan.
+@test
+fn const_suggestion_scans_a_switch() {
+    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
+    // dependent guest command, so it runs on native and Windows only.
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    // `classify` is scanned through its switch arms and patterns; `dbl` is a straight-line
+    // const-eligible function the lint flags, proving the sweep ran.
+    p.mkfile(
+        "solo.spc",
+        "fn classify(n: i32) i32 {\n    return switch n {\n        0 => 10,\n        1..=5 => 20,\n        _ => 0,\n    };\n}\nfn dbl(n: i32) i32 {\n    return n * 2;\n}\nfn main() i32 { return classify(1) + dbl(0) - 20; }\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint --const solo.spc");
+    assert(r.out_has("can be declared 'const fn'"), "the const-suggestion sweep ran and flagged an eligible function");
+}

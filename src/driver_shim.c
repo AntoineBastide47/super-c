@@ -807,6 +807,16 @@ int sc_setenv(const char *name, const char *value) {
 #endif
 }
 
+/* Remove `name` from the environment: a switch the compiler reads as `getenv(...) != NULL` must not
+   survive as an empty string. */
+int sc_unsetenv(const char *name) {
+#if defined(_WIN32)
+  return _putenv_s(name, "");
+#else
+  return unsetenv(name);
+#endif
+}
+
 /* ---- portable process + filesystem helpers for the test harnesses ---------------------------------- */
 /* strdup is POSIX, not C11, and the Windows spelling differs; one copy here keeps both legs identical. */
 static char *sc_strdup_local(const char *s) {
@@ -868,7 +878,7 @@ static void sc_env_restore(sc_env_save *saves, int n) {
     if (saves[i].had && saves[i].old)
       sc_setenv(saves[i].name, saves[i].old);
     else
-      sc_setenv(saves[i].name, "");
+      sc_unsetenv(saves[i].name);
     free(saves[i].old);
   }
 }

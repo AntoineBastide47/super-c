@@ -3078,3 +3078,177 @@ fn array_literals_adopt_the_element_type() {
         "mismatched types",
     );
 }
+
+// Typechecker rejection diagnostics by message: self-contained snippets that reach a specific
+// type error. Complements the accept-vs-reject oracles above with exact wording.
+@test
+fn rejection_messages() {
+    h::expect_err_msg(
+        "deref of a non-pointer",
+        "fn main() i32 { let x = 1; let y = *x; return 0; }\n",
+        "cannot dereference a non-pointer",
+    );
+    h::expect_err_msg(
+        "unary minus on non-numeric",
+        "fn main() i32 { let b = true; let n = -b; return 0; }\n",
+        "unary '-' requires a numeric operand",
+    );
+    h::expect_err_msg(
+        "array repeat count",
+        "fn main() i32 { let a = [0; true]; return 0; }\n",
+        "an array repeat count must be an integer",
+    );
+    h::expect_err_msg(
+        "cyclic type alias",
+        "type A = B;\ntype B = A;\nfn f(x: A) {}\nfn main() i32 { return 0; }\n",
+        "type alias is cyclic",
+    );
+    h::expect_err_msg(
+        "dyn needs an interface",
+        "fn f(x: &dyn i32) {}\nfn main() i32 { return 0; }\n",
+        "'dyn' requires an interface",
+    );
+    h::expect_err_msg(
+        "assert arity",
+        "fn main() i32 { assert(true, \"a\", \"b\"); return 0; }\n",
+        "'assert' takes a condition and an optional str message",
+    );
+    h::expect_err_msg(
+        "iterate a scalar",
+        "fn main() i32 { for x in 5 {} return 0; }\n",
+        "cannot iterate over this value (need an array, slice, range, or an Iterator)",
+    );
+    h::expect_err_msg(
+        "bare dyn type",
+        "fn f(x: dyn i32) {}\nfn main() i32 { return 0; }\n",
+        "a 'dyn' type must be '&dyn I', '&mut dyn I', or 'Box<dyn I>'",
+    );
+    h::expect_err_msg(
+        "range bounds not integers",
+        "fn main() i32 { for i in true..false {} return 0; }\n",
+        "range bounds must be integers",
+    );
+    h::expect_err_msg(
+        "slice a scalar",
+        "fn main() i32 { let x = 5; let s = x[0..1]; return 0; }\n",
+        "cannot slice this expression",
+    );
+    h::expect_err_msg("non-bool if condition", "fn main() i32 { if 5 {} return 0; }\n", "if condition must be 'bool'");
+    h::expect_err_msg(
+        "struct embeds itself",
+        "struct A { pub b: B }\nstruct B { pub a: A }\nfn main() i32 { return 0; }\n",
+        "this type embeds itself by value, so it would have infinite size",
+    );
+    h::expect_err_msg(
+        "no such variant",
+        "enum E { A, B }\nfn main() i32 { let e = E::C; return 0; }\n",
+        "no variant, method, or constant 'C' on this type",
+    );
+}
+
+// Format-string, indexing, reflection, conformance, and operator sad paths, by message. These run
+// in-process through the harness (no subprocess), so they are portable to every target.
+@test
+fn more_rejection_messages() {
+    h::expect_err_msg(
+        "float precision on an int",
+        "fn main() i32 { print(\"{:.2}\", 5); return 0; }\n",
+        "`{:.N}` precision requires a float argument",
+    );
+    h::expect_err_msg(
+        "hex format on a float",
+        "fn main() i32 { print(\"{:x}\", 1.5); return 0; }\n",
+        "`{:x}`/`{:X}`/`{:b}` formats require an integer argument",
+    );
+    h::expect_err_msg(
+        "too few arguments",
+        "fn main() i32 { print(\"{}\"); return 0; }\n",
+        "more `{}` placeholders than arguments",
+    );
+    h::expect_err_msg(
+        "too many arguments",
+        "fn main() i32 { print(\"x\", 1); return 0; }\n",
+        "more arguments than `{}` placeholders",
+    );
+    h::expect_err_msg(
+        "designator index not integer",
+        "fn main() i32 { let a: [i32; 3] = [[true] = 1]; return 0; }\n",
+        "array designator index must be an integer",
+    );
+    h::expect_err_msg(
+        "enum discriminant not integer",
+        "enum E { A = true }\nfn main() i32 { return 0; }\n",
+        "enum discriminant must be an integer",
+    );
+    h::expect_err_msg(
+        "non-constant array range needs unsafe",
+        "fn main() i32 { let a: [i32; 3] = [1, 2, 3]; let s: []i32 = a[true..2]; return 0; }\n",
+        "slicing an array with a non-constant range requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "slicing a raw pointer needs unsafe",
+        "fn f(p: *const i32) i32 { let s = p[0..2]; return 0; }\nfn main() i32 { return 0; }\n",
+        "slicing a raw pointer requires an 'unsafe' block",
+    );
+    h::expect_err_msg(
+        "question on a non-carrier",
+        "fn f() i32 { let x = 5?; return x; }\nfn main() i32 { return 0; }\n",
+        "'?' requires an Option or Result operand",
+    );
+    h::expect_err_msg(
+        "fields needs a reference",
+        "fn main() i32 { inline for f in fields(5) {} return 0; }\n",
+        "fields borrows its subject: write fields(&v)",
+    );
+    h::expect_err_msg(
+        "variants needs an enum",
+        "struct S { pub x: i32 }\nfn main() i32 { let s = S { x: 1 }; inline for v in variants(&s) {} return 0; }\n",
+        "variants iterates an enum with payload variants",
+    );
+    h::expect_err_msg(
+        "no operator method",
+        "struct P { pub x: i32 }\nfn main() i32 { let a = P { x: 1 }; let b = P { x: 2 }; let c = a + b; return 0; }\n",
+        "has no 'add' method for this operator",
+    );
+    h::expect_err_msg(
+        "duplicate conformance",
+        "struct P { pub x: i32 }\ninterface I { fn m(self: &Self) i32; }\nextend P as I { fn m(self: &P) i32 { return 1; } }\nextend P as I { fn m(self: &P) i32 { return 2; } }\nfn main() i32 { return 0; }\n",
+        "duplicate conformance",
+    );
+    h::expect_err_msg(
+        "owning static mut",
+        "static mut G: Vector<i32> = Vector::<i32>::new();\nfn main() i32 { return 0; }\n",
+        "a 'static mut' cannot hold an owning (Free) type",
+    );
+    h::expect_err_msg(
+        "non-formattable argument",
+        "struct P { pub x: i32 }\nfn main() i32 { let p = P { x: 1 }; print(\"{}\", p); return 0; }\n",
+        "does not satisfy bound 'Format'",
+    );
+    h::expect_err_msg(
+        "integer literal over 64 bits",
+        "fn main() i32 { let x = 100000000000000000000000000000000000000000000000000000000000000000000000000000; return 0; }\n",
+        "integer literal is too large to fit in a 64-bit integer",
+    );
+}
+
+// A few more reachable type errors: a const-fn signature naming a @no_const type, misuse of the
+// payloads binder, and type_info of an opaque extern type. In-process, portable to every target.
+@test
+fn const_fn_and_reflection_rejections() {
+    h::expect_err_msg(
+        "const fn cannot take a @no_const type",
+        "@no_const\nstruct R { pub p: *mut i32 }\nconst fn f(r: R) i32 { return 0; }\nfn main() i32 { return 0; }\n",
+        "a 'const fn' signature cannot use a '@no_const' type",
+    );
+    h::expect_err_msg(
+        "payloads used outside a variants binder",
+        "enum E { A(i32) }\nfn main() i32 { let e = E::A(1); inline for p in payloads(&e) {} return 0; }\n",
+        "payloads takes the variants binder itself",
+    );
+    h::expect_err_msg(
+        "type_info of an opaque type",
+        "extern \"C\" { type Opaque; }\nfn main() i32 { let s = type_info::<Opaque>().size; return 0; }\n",
+        "type_info cannot describe an opaque type",
+    );
+}

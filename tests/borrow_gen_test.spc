@@ -806,3 +806,50 @@ fn split_init() {
         false,
     );
 }
+
+// Specific rejection diagnostics by message. The generated oracle above proves accept-vs-reject
+// verdicts; this batch pins the exact wording of the rules that the oracle does not name.
+@test
+fn rejection_messages() {
+    h::expect_err_msg(
+        "move out of const",
+        "struct O { pub id: i32 }\nextend O as Free { fn free(self: &mut O) {} }\nconst S: O = O { id: 1 };\nfn take(v: O) i32 { return v.id; }\nfn main() i32 { return take(S); }\n",
+        "cannot move a value out of a 'const' binding",
+    );
+    h::expect_err_msg(
+        "free through a borrow",
+        "struct O { pub id: i32 }\nextend O as Free { fn free(self: &mut O) {} }\nfn main() i32 { let mut o = O { id: 1 }; let r = &mut o; r.free(); return 0; }\n",
+        "cannot free a borrowed value",
+    );
+    h::expect_err_msg(
+        "immutable init inside a loop",
+        "fn main() i32 { let x: i32; for _i in 0..2 { x = 1; } return 0; }\n",
+        "cannot initialize an immutable binding inside a loop it was declared outside of",
+    );
+    h::expect_err_msg(
+        "move a value captured by an enclosing closure",
+        "struct O { pub id: i32 }\nextend O as Free { fn free(self: &mut O) {} }\nfn main() i32 { let o = O { id: 1 }; let f = || { let g = || { let t = o; let _ = t.id; }; g(); }; f(); return 0; }\n",
+        "cannot take ownership of a value also captured by an enclosing closure",
+    );
+    h::expect_err_msg(
+        "return lifetime cannot be inferred",
+        "struct T { pub a: i32 }\nfn pick(x: &T, y: &T) &T { return x; }\nfn main() i32 { return 0; }\n",
+        "missing lifetime specifier",
+    );
+    h::expect_err_msg(
+        "mutable borrow while shared borrow is live",
+        "fn main() i32 { let mut v = 1; let a = &v; let b = &mut v; *b = 2; let _ = *a; return 0; }\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+}
+
+// A second live '&mut' to the same place while the first is still used: the many-vs-one borrow rule
+// names the mutable-mutable conflict specifically.
+@test
+fn two_live_mutable_borrows() {
+    h::expect_err_msg(
+        "two mutable borrows of one place",
+        "fn main() i32 { let mut x = 1; let a = &mut x; let b = &mut x; *a = 2; *b = 3; return 0; }\n",
+        "cannot borrow this value as mutable while it is already borrowed as mutable",
+    );
+}

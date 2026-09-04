@@ -1,5 +1,5 @@
 // Stuck-coroutine cancellation and reclamation: the verification cases from the reclamation plan.
-// Every test runs in a forked child, starts its own scheduler, and must end with a successful runtime
+// Every test starts its own scheduler, and must end with a successful runtime
 // shutdown: the suite's SC_LEAK_CHECK=fatal gate then proves that reclamation left no coroutine-owned
 // allocation behind.
 
@@ -76,6 +76,25 @@ fn edge_helper(rx: &chan::Receiver<i64>) i64 {
     return got.unwrap_or(-1);
 }
 
+// The counters are process-lifetime values (the runtime's survive shutdown by contract), so a test
+// starts from a zeroed file counter set and a recorded runtime baseline instead of a fresh process.
+struct Base {
+    pub cancelled: usize,
+}
+
+@test_init
+fn fresh_counters() Base {
+    atomic::store_i64(&mut unsafe G_FREES, 0, 0);
+    atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
+    atomic::store_i64(&mut unsafe G_UNWOUND, 0, 0);
+    atomic::store_i64(&mut unsafe G_HELPER_DEFERS, 0, 0);
+    return Base { cancelled: rt::cancelled_tasks() };
+}
+
+fn cancelled(b: &Base) usize {
+    return rt::cancelled_tasks() - b.cancelled;
+}
+
 fn short() time::Duration {
     return time::Duration::from_millis(20);
 }
@@ -87,7 +106,7 @@ fn forever() time::Duration {
 // --- cancellation of parked waits: one test per wait kind --------------------------------------------.
 
 @test
-fn sleep_cancel_wakes_and_reclaims() {
+fn sleep_cancel_wakes_and_reclaims(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -106,7 +125,7 @@ fn sleep_cancel_wakes_and_reclaims() {
     assert(rt::request_cancel(key, rt::CR_USER), "the key names a live task");
     assert(wg.wait_timeout(time::Duration::from_secs(5)), "the cancelled sleeper finishes");
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     // The defer saw the task cancelling.
     assert_eq(unwounds(), 1);
     // Nothing after the cancelled sleep ran.
@@ -114,7 +133,7 @@ fn sleep_cancel_wakes_and_reclaims() {
 }
 
 @test
-fn edge_unwinds_through_helper_frames_exactly_once() {
+fn edge_unwinds_through_helper_frames_exactly_once(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -138,7 +157,7 @@ fn edge_unwinds_through_helper_frames_exactly_once() {
     assert(rt::request_cancel(key, rt::CR_USER), "the task is live");
     assert(wg.wait_timeout(time::Duration::from_secs(5)), "the cancelled task finishes");
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     // Neither frame ran past its cancelled wait.
     assert_eq(afters(), 0);
@@ -149,7 +168,7 @@ fn edge_unwinds_through_helper_frames_exactly_once() {
 }
 
 @test
-fn request_cancel_is_idempotent() {
+fn request_cancel_is_idempotent(fx: &mut Base) {
     rt::set_worker_count(1);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -163,11 +182,11 @@ fn request_cancel_is_idempotent() {
     assert(rt::request_cancel(key, rt::CR_USER), "first request lands");
     let _ = rt::request_cancel(key, rt::CR_POLICY); // later request changes nothing
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
 }
 
 @test
-fn wait_group_cancel_leaves_count() {
+fn wait_group_cancel_leaves_count(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -192,13 +211,13 @@ fn wait_group_cancel_leaves_count() {
     // The count is untouched: only the waiter was removed.
     assert(!gate.wait_timeout(time::Duration::from_millis(5)), "the gate count survives the cancel");
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
 }
 
 @test
-fn semaphore_cancel_consumes_no_permit() {
+fn semaphore_cancel_consumes_no_permit(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -222,13 +241,13 @@ fn semaphore_cancel_consumes_no_permit() {
     sem.release();
     assert(sem.try_acquire(), "the released permit was not consumed by the cancelled waiter");
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
 }
 
 @test
-fn barrier_cancel_breaks_generation_and_reset_recovers() {
+fn barrier_cancel_breaks_generation_and_reset_recovers(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -262,11 +281,11 @@ fn barrier_cancel_breaks_generation_and_reset_recovers() {
     assert(b.wait(), "the second participant of the reset generation passes");
     assert(done2.wait_timeout(time::Duration::from_secs(5)), "the partner finishes");
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
 }
 
 @test
-fn channel_send_cancel_keeps_payload_ownership() {
+fn channel_send_cancel_keeps_payload_ownership(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -304,7 +323,7 @@ fn channel_send_cancel_keeps_payload_ownership() {
         },
     };
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
     // The received value was freed exactly once.
@@ -312,7 +331,7 @@ fn channel_send_cancel_keeps_payload_ownership() {
 }
 
 @test
-fn channel_recv_cancel_takes_nothing() {
+fn channel_recv_cancel_takes_nothing(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -344,13 +363,13 @@ fn channel_recv_cancel_takes_nothing() {
     };
     assert_eq(frees(), 0);
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
 }
 
 @test
-fn select_cancel_unregisters_every_arm() {
+fn select_cancel_unregisters_every_arm(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -383,13 +402,13 @@ fn select_cancel_unregisters_every_arm() {
     let _ = atx.send(1);
     let _ = btx.send(2);
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
 }
 
 @test
-fn mutex_lock_c_cancel_never_returns_a_guard() {
+fn mutex_lock_c_cancel_never_returns_a_guard(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -431,14 +450,14 @@ fn mutex_lock_c_cancel_never_returns_a_guard() {
         assert_eq(*g.get(), 0);
     }
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     // No guard reached the cancelled waiter's frame.
     assert_eq(afters(), 0);
 }
 
 @test
-fn mutex_unlock_passes_over_a_cancelled_waiter() {
+fn mutex_unlock_passes_over_a_cancelled_waiter(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -490,13 +509,13 @@ fn mutex_unlock_passes_over_a_cancelled_waiter() {
         assert_eq(*g.get(), 7);
     }
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
 }
 
 @test
-fn rwlock_write_c_cancel_restores_writer_count() {
+fn rwlock_write_c_cancel_restores_writer_count(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -535,7 +554,7 @@ fn rwlock_write_c_cancel_restores_writer_count() {
     assert(r.is_some(), "no phantom writer blocks readers after the cancel");
     hold.done();
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     // No guard reached the cancelled writer's frame.
     assert_eq(afters(), 0);
@@ -544,7 +563,7 @@ fn rwlock_write_c_cancel_restores_writer_count() {
 // --- blocking pool: heap-owned results and abandonment ------------------------------------------------.
 
 @test
-fn blocking_call_c_cancel_abandons_job() {
+fn blocking_call_c_cancel_abandons_job(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -573,13 +592,13 @@ fn blocking_call_c_cancel_abandons_job() {
     blocking::shutdown();
     assert_eq(frees(), 1);
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
 }
 
 @test
-fn blocking_completion_races_cancel_to_one_owner() {
+fn blocking_completion_races_cancel_to_one_owner(_fx: &mut Base) {
     rt::set_worker_count(2);
     // Repeated short calls with a racing cancel: whichever side wins, the value is freed exactly once.
     let rounds: i64 = 20;
@@ -618,7 +637,7 @@ fn blocking_completion_races_cancel_to_one_owner() {
 // --- I/O: reactor interests and cancellation ----------------------------------------------------------.
 
 @test
-fn io_read_cancel_settles_interest() {
+fn io_read_cancel_settles_interest(fx: &mut Base) {
     rt::set_worker_count(2);
     let listener = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let port = listener.port();
@@ -657,7 +676,7 @@ fn io_read_cancel_settles_interest() {
     let _ = peer.write(msg); // the socket still works; nothing dangles on the reactor
     io::shutdown();
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
 }
@@ -665,7 +684,7 @@ fn io_read_cancel_settles_interest() {
 // --- pairwise races -----------------------------------------------------------------------------------.
 
 @test
-fn notify_races_cancel_single_winner() {
+fn notify_races_cancel_single_winner(fx: &mut Base) {
     rt::set_worker_count(2);
     let rounds: i64 = 30;
     let mut cancelled_total: usize = 0;
@@ -698,13 +717,13 @@ fn notify_races_cancel_single_winner() {
         let _ = rt::request_cancel(key, rt::CR_USER);
         assert(done.wait_timeout(time::Duration::from_secs(5)), "the racer finishes exactly once");
     }
-    cancelled_total = rt::cancelled_tasks();
+    cancelled_total = cancelled(fx);
     assert(cancelled_total <= rounds as usize, "at most one outcome per round");
     rt::shutdown();
 }
 
 @test
-fn timeout_races_cancel_single_winner() {
+fn timeout_races_cancel_single_winner(_fx: &mut Base) {
     rt::set_worker_count(2);
     let rounds: i64 = 30;
     for _i in 0..rounds {
@@ -735,7 +754,7 @@ fn timeout_races_cancel_single_winner() {
 }
 
 @test
-fn completion_races_cancel_to_one_outcome() {
+fn completion_races_cancel_to_one_outcome(_fx: &mut Base) {
     rt::set_worker_count(2);
     let rounds: i64 = 40;
     for _i in 0..rounds {
@@ -751,7 +770,7 @@ fn completion_races_cancel_to_one_outcome() {
 }
 
 @test
-fn stale_key_cannot_touch_a_recycled_task() {
+fn stale_key_cannot_touch_a_recycled_task(fx: &mut Base) {
     rt::set_worker_count(1);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -780,11 +799,11 @@ fn stale_key_cannot_touch_a_recycled_task() {
     wg2.wait();
     rt::shutdown();
     // Nothing was cancelled by the stale key.
-    assert_eq(rt::cancelled_tasks(), 0);
+    assert_eq(cancelled(fx), 0);
 }
 
 @test
-fn shutdown_races_spawn_and_rejects_new_tasks() {
+fn shutdown_races_spawn_and_rejects_new_tasks(_fx: &mut Base) {
     rt::set_worker_count(2);
     launch || {
         time::sleep(time::Duration::from_millis(1));
@@ -802,7 +821,7 @@ fn shutdown_races_spawn_and_rejects_new_tasks() {
 }
 
 @test
-fn closed_runtime_frees_rejected_closures() {
+fn closed_runtime_frees_rejected_closures(fx: &mut Base) {
     rt::set_worker_count(2);
     let gate = sync::WaitGroup::new();
     gate.add(1);
@@ -833,11 +852,11 @@ fn closed_runtime_frees_rejected_closures() {
     let res2 = rt::try_shutdown(rt::ShutdownOptions::defaults());
     assert_eq(res2.unresponsive, 0);
     // The masked task was never cancelled, only reported.
-    assert_eq(rt::cancelled_tasks(), 0);
+    assert_eq(cancelled(fx), 0);
 }
 
 @test
-fn snapshot_names_wait_kind_and_masked_state() {
+fn snapshot_names_wait_kind_and_masked_state(_fx: &mut Base) {
     rt::set_worker_count(1);
     let gate = sync::WaitGroup::new();
     gate.add(1);
@@ -856,7 +875,7 @@ fn snapshot_names_wait_kind_and_masked_state() {
 }
 
 @test
-fn cancel_point_stops_a_compute_task() {
+fn cancel_point_stops_a_compute_task(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -881,11 +900,11 @@ fn cancel_point_stops_a_compute_task() {
     assert(rt::request_cancel(key, rt::CR_USER), "the spinner is live");
     assert(done.wait_timeout(time::Duration::from_secs(5)), "the spinner stops at a cancellation point");
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
 }
 
 @test
-fn safepoint_cancels_a_compute_loop() {
+fn safepoint_cancels_a_compute_loop(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -917,7 +936,7 @@ fn safepoint_cancels_a_compute_loop() {
     assert(rt::request_cancel(key, rt::CR_USER), "the compute task is live");
     assert(done.wait_timeout(time::Duration::from_secs(5)), "the safepoint stops the compute loop");
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     // Nothing after the cancelled loop ran.
     assert_eq(afters(), 0);
@@ -926,7 +945,7 @@ fn safepoint_cancels_a_compute_loop() {
 }
 
 @test
-fn mask_defers_cancellation_until_exit() {
+fn mask_defers_cancellation_until_exit(fx: &mut Base) {
     rt::set_worker_count(2);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
@@ -953,13 +972,13 @@ fn mask_defers_cancellation_until_exit() {
     let _ = rtx.send(1); // release the masked park now that the cancel is pending
     assert(done.wait_timeout(time::Duration::from_secs(5)), "the masked task finishes");
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
 }
 
 // --- task groups and sources --------------------------------------------------------------------------.
 
 @test
-fn group_cancel_reclaims_children_at_any_worker_count() {
+fn group_cancel_reclaims_children_at_any_worker_count(_fx: &mut Base) {
     let counts: [usize; 3] = [1usize, 2usize, 4usize];
     // One worker count per forked test would triple the file; the pool is rebuilt between rounds
     // through a full shutdown, which is itself part of what the plan verifies.
@@ -984,7 +1003,7 @@ fn group_cancel_reclaims_children_at_any_worker_count() {
 }
 
 @test
-fn group_drop_leaves_no_child() {
+fn group_drop_leaves_no_child(fx: &mut Base) {
     rt::set_worker_count(2);
     {
         let mut g = task::TaskGroup::new();
@@ -999,12 +1018,12 @@ fn group_drop_leaves_no_child() {
         // The group goes out of scope here: its drop cancels and joins every child.
     }
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 4);
+    assert_eq(cancelled(fx), 4);
     assert_eq(rt::live_tasks(), 0);
 }
 
 @test
-fn token_observes_source_and_late_binding_cancels() {
+fn token_observes_source_and_late_binding_cancels(fx: &mut Base) {
     rt::set_worker_count(2);
     let (src, tok) = task::CancelSource::new();
     assert(!tok.is_cancelled());
@@ -1023,13 +1042,13 @@ fn token_observes_source_and_late_binding_cancels() {
     };
     assert(done.wait_timeout(time::Duration::from_secs(5)), "the late-bound task is reclaimed");
     rt::shutdown();
-    assert_eq(rt::cancelled_tasks(), 1);
+    assert_eq(cancelled(fx), 1);
     assert_eq(unwounds(), 1);
     assert_eq(afters(), 0);
 }
 
 @test
-fn shutdown_cancels_detached_sleepers() {
+fn shutdown_cancels_detached_sleepers(_fx: &mut Base) {
     rt::set_worker_count(2);
     for _k in 0..3 {
         launch || {

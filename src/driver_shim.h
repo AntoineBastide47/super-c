@@ -56,6 +56,7 @@ int sc_chmod_exec(const char *path);
    "<to>.old" (Windows cannot delete a live one) and the next call sweeps it. */
 int sc_rename(const char *from, const char *to); /* rename(2); replaces an existing target on Windows too */
 int sc_setenv(const char *name, const char *value); /* setenv(3) overwrite / _putenv_s */
+int sc_unsetenv(const char *name);                        /* unsetenv(3) / _putenv_s(name, "") */
 
 /* Run `cmd` to completion and return its exit code (-1 if it could not be started or did not exit
    normally). This is the portable stand-in for `system()` plus shell redirection: the test harnesses use
