@@ -2,12 +2,12 @@
    bench_shim.spc (see src/driver_shim.spc for the mechanism). */
 
 #if defined(__APPLE__)
-/* The build compiles C with -D_POSIX_C_SOURCE=200809L; strict POSIX on Darwin hides ru_maxrss and
-   breaks <sys/sysctl.h> (u_int). _DARWIN_C_SOURCE restores the full API level (same landmine as the
-   test runner's sysctl note in src/driver/test.spc). */
+/* The build compiles C with -D_POSIX_C_SOURCE=200809L; strict POSIX on Darwin breaks <sys/sysctl.h>
+   (u_int). _DARWIN_C_SOURCE restores the full API level (same landmine as the test runner's sysctl
+   note in src/driver/test.spc). */
 #define _DARWIN_C_SOURCE 1
 #elif defined(__linux__) && !defined(_POSIX_C_SOURCE)
-#define _POSIX_C_SOURCE 200809L /* open_memstream + getrusage under any -std strictness */
+#define _POSIX_C_SOURCE 200809L /* perf_event_open and friends under any -std strictness */
 #endif
 
 #include "bench_shim.h"
@@ -15,15 +15,7 @@
 #if defined(_WIN32)
 
 #define WIN32_LEAN_AND_MEAN
-#define PSAPI_VERSION 2 /* GetProcessMemoryInfo resolves to K32... in kernel32: no -lpsapi needed */
 #include <windows.h>
-#include <psapi.h>
-
-long long sc_peak_rss(void) {
-  PROCESS_MEMORY_COUNTERS pmc;
-  if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) return 0;
-  return (long long)pmc.PeakWorkingSetSize;
-}
 
 long long sc_cpu_cycles(void) {
   ULONG64 c = 0;
@@ -47,7 +39,6 @@ long long sc_alloc_bytes(void) { return 0; }
 #else /* POSIX */
 
 #include <stdio.h>
-#include <sys/resource.h>
 
 /* Allocation counting: this TU defines the malloc family, and at static link every OTHER object of
    the binary binds its malloc/realloc/... references here (object files win over shared libc), so
@@ -58,16 +49,6 @@ static unsigned long long g_alloc_count = 0;
 static unsigned long long g_alloc_bytes = 0;
 long long sc_alloc_count(void) { return (long long)g_alloc_count; }
 long long sc_alloc_bytes(void) { return (long long)g_alloc_bytes; }
-
-long long sc_peak_rss(void) {
-  struct rusage ru;
-  if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
-#if defined(__APPLE__)
-  return (long long)ru.ru_maxrss; /* bytes */
-#else
-  return (long long)ru.ru_maxrss * 1024LL; /* KiB */
-#endif
-}
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>

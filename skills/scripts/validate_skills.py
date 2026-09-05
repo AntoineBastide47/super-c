@@ -53,12 +53,13 @@ def markdown_files() -> list[Path]:
 
 
 def source_text() -> str:
-    paths = [ROOT / "src", ROOT / "std", ROOT / "ffi", ROOT / "tests"]
+    paths = [ROOT / "src", ROOT / "std", ROOT / "ffi", ROOT / "tests", ROOT / "bench", ROOT / "ci"]
     return "\n".join(
         path.read_text(encoding="utf-8")
         for root in paths
         if root.exists()
-        for path in sorted(root.rglob("*.spc"))
+        for pattern in ("*.spc", "*.sh")
+        for path in sorted(root.rglob(pattern))
     )
 
 

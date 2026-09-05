@@ -35,6 +35,7 @@ int sc_jobserver_init(int capacity);
 int sc_jobserver_claim(int wanted);
 void sc_jobserver_release_claim(void);
 long long sc_ticks_ms(void);          /* monotonic milliseconds (build-phase timing) */
+long long sc_peak_rss(void);          /* peak resident set size in bytes; 0 when unavailable */
 long long sc_spawn_argv(const char *const *argv, const char *out_path); /* argv spawn, NO shell; out_path (may be NULL) captures stdout+stderr */
 int sc_exec_argv(const char *const *argv, const char *out_path);        /* sc_spawn_argv + wait: exit code, or -1 */
 int sc_wait_any(const int64_t *pids, int n, int *code); /* index of the first child to exit; -1 on error */

@@ -11,6 +11,10 @@
 #ifndef _DEFAULT_SOURCE
 #  define _DEFAULT_SOURCE 1
 #endif
+/* Strict POSIX on Darwin hides ru_maxrss; the full API level restores it. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#  define _DARWIN_C_SOURCE 1
+#endif
 
 #include "driver_shim.h"
 
@@ -31,9 +35,12 @@
 #  include <direct.h>  /* _mkdir, _rmdir */
 #  include <io.h>      /* _access, _unlink */
 #  include <process.h> /* _getpid */
+#  define PSAPI_VERSION 2 /* GetProcessMemoryInfo resolves to K32... in kernel32: no -lpsapi needed */
 #  include <windows.h>
+#  include <psapi.h>
 #elif !defined(__wasi__)
 #  include <signal.h>   /* kill(pid, 0) liveness probe */
+#  include <sys/resource.h> /* getrusage: peak RSS */
 #  include <sys/wait.h> /* WIFEXITED/WEXITSTATUS */
 #endif
 #if defined(__APPLE__)
@@ -449,6 +456,26 @@ long long sc_ticks_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
+long long sc_peak_rss(void) {
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS pmc;
+  if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc))
+    return 0;
+  return (long long)pmc.PeakWorkingSetSize;
+#elif defined(__wasi__)
+  return 0;
+#else
+  struct rusage ru;
+  if (getrusage(RUSAGE_SELF, &ru) != 0)
+    return 0;
+#  if defined(__APPLE__)
+  return (long long)ru.ru_maxrss; /* bytes */
+#  else
+  return (long long)ru.ru_maxrss * 1024LL; /* KiB */
+#  endif
 #endif
 }
 

@@ -3,8 +3,6 @@
 // and compiled automatically. Every platform split lives in the C file (#ifdef), so this surface
 // is platform-neutral.
 extern "C" "bench_shim.h" {
-    /// Peak resident set size in bytes.
-    pub fn sc_peak_rss() i64;
     /// CPU cycles consumed by this process so far (0 when unsupported).
     pub fn sc_cpu_cycles() i64;
     /// Heap allocations so far, from the counting allocator hooks.

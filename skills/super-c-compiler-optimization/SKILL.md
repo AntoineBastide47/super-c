@@ -32,10 +32,17 @@ Before any optimization work, understand these non-negotiable constraints:
    checkpoint before implementing. If a target shows ~0 samples under LTO, the
    optimization will not produce a corpus-level win.
 
-3. **Benchmark protocol.** Measure with `super-c bench` (100 serial self-transpile
-   iterations). Judge on **Mcyc/Kalloc**, not wall-clock ms (clock frequency varies
-   2.0–3.8 GHz between E/P cores and thermal state). First run after a rebuild is a cold
-   outlier — ignore it. Run 3x interleaved A/B on a quiet machine.
+3. **Benchmark protocol.** Measure with `super-c bench --bench-filter=self_transpile`
+   (100 serial self-transpile rounds, then one cold real build through the engine).
+   Judge on **Mcyc/Kalloc**, not wall-clock ms (clock frequency varies 2.0–3.8 GHz
+   between E/P cores and thermal state); the run prints min/median/p95/sd of every
+   round, and a wide spread means the box was not quiet. First run after a rebuild is
+   a cold outlier — ignore it. Run 3x interleaved A/B on a quiet machine. A run that
+   reports a C compiler or linker failure exits nonzero and measures nothing.
+   `sh ci/perf_gate.sh` compares a run with the accepted constants in `ci/baseline.env`
+   (every later percentage gate resolves against those); run the benchmark binary
+   directly (`build/bench-bin`), never as a child of the ASan dev compiler, whose
+   injected sanitizer runtime changes the allocator and the peak RSS it reports.
 
 ## Optimization Phases
 
@@ -296,11 +303,23 @@ super-c build
 
 ### What to report
 
-- Mcyc change (cycles, not wall-clock)
+- Mcyc change (cycles, not wall-clock), with the run's median and p95
 - Kalloc change (allocation count)
 - Heap delta (peak RSS if available)
 - Whether the fixpoint holds (gen-1 vs gen-2 diff)
 - Whether tests pass
+
+### Whole-build phases
+
+`SC_BUILD_STATS=- super-c build` prints one JSON record for the real build path: every
+phase of the partition (stamp, load, resolve, typecheck, borrowck, checks, prepare,
+plan, render, publish, sync, compile, link; their sum is `total`), the streamed C
+compile that overlapped emission (`cc`, never added to the total), and peak RSS at
+the frontend, borrowck, plan, publish and build boundaries. `SC_BUILD_MEM=1` adds the
+allocation tracker's counts, requested and live bytes, and the survivors of each
+phase (slower: only for memory questions). `sh ci/bench_matrix.sh` runs the clean /
+unchanged / body-edit / signature-edit / layout-edit / release-relink matrix with
+those records and writes `build/matrix/report.md`.
 
 ### Bench gate policy
 

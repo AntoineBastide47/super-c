@@ -6,7 +6,10 @@
 // -> borrowck-all -> emit the whole package to C through the streaming backend (shared headers + every TU +
 // the instance TU, written to a real file), and times each phase with CPU time. It mirrors main.spc's
 // run_package (minus the C link step). Emission writes through a FILE exactly as a build does. The benchmark
-// binary IS the self-hosted compiler, so `make bench` measures the compiler transpiling its own source.
+// binary IS the self-hosted compiler, so `super-c bench` measures the compiler transpiling its own source.
+// After the rounds, one cold build of the compiler runs through the real build engine (the same sources,
+// flags, streamed C compile and link a `super-c build` runs) and its phase record is reported; a C compiler
+// or linker failure there fails the benchmark.
 import module::loader as loader;
 import lexer::lexer as lexer;
 import resolver::resolver as res;
@@ -16,13 +19,14 @@ import borrowck::borrowck as bck;
 import ir::lower as irl;
 import ir::interp as iri;
 import driver::emit as demit;
+import driver::stats as bst;
 import driver::test as dtest;
-import driver::util as dutil;
+import build_system::build as bsys;
+import build_system::manifest as mf;
 import ast::ast as *;
 import bench::bench_shim as shim;
 import std::testing::bench as bench;
 import driver_shim as dshim;
-import math;
 import stdio;
 import stdlib;
 import string as cstring;
@@ -37,11 +41,7 @@ extern "C" {
 
 const ROOT: str = "src/main.spc";
 const STD_DIR: str = "std";
-const WARMUP: i32 = 1;
 const ITERS: i32 = 100;
-// The cc phase runs as a child process and compiles the whole emitted package: orders of magnitude
-// slower than an in-process transpile, so it gets its own small iteration count.
-const CC_ITERS: i32 = 3;
 
 // The codegen sink: a real file, on every platform. Codegen writes through a FILE, and this benchmark
 // exists to report what codegen costs, so the sink is the one codegen uses in a build rather
@@ -130,9 +130,6 @@ pub struct Timing {
     pub heap_bytes: i64,
 }
 
-// Deferred-assert sink: a clean self-transpile produces none, so this is never called; it only
-// satisfies flush_asserts' callback signature.
-
 // Resolve module `i` in place (mirrors main.spc's resolve_module, without diagnostics logging).
 fn resolve_one(p: &mut loader::Package, i: usize) {
     let pkg = p as *const loader::Package;
@@ -153,91 +150,6 @@ fn typecheck_one(p: &mut loader::Package, i: usize) {
     let len = m.source.len();
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.check();
-}
-
-// Overwrite `dir/base` with `s` (the emitted C is ASCII, so a byte copy is exact).
-fn write_c(dir: str, base: str, s: str) {
-    let mut path = String::from_str(dir);
-    path.push_str("/");
-    path.push_str(base);
-    let f = stdio::fopen(path.as_str(), "wb");
-    if f != null {
-        unsafe stdio::fwrite(s.ptr(), 1, s.len(), f);
-        unsafe stdio::fclose(f);
-    }
-}
-
-// Transpile the compiler once and write the emitted package into `dir` for the cc phase to compile.
-// Files land FLAT (every TU beside the two shared headers) mirroring the SC_CEMIT_TU lane, so each
-// TU's `#include "__sc_types.h"` resolves in place. Fills `names` with the .c basenames (super_rt first)
-// and returns the total emitted C size in bytes.
-fn emit_package_to_dir(dir: str, names: &mut Vector<String>) usize {
-    let mut p = loader::package_load(ROOT, STD_DIR, false, unsafe dshim::sc_host_platform());
-    let n = p.modules.len();
-    let pkg = (&mut p) as *mut loader::Package;
-    let mut cirv = iri::interp_new(pkg);
-    p.cir = &mut cirv;
-    // The bench is the SERIAL perf gate; parallel stages are timed by the driver.
-    p.jobs = 1;
-    let mut i: usize = 0;
-    while i < n {
-        resolve_one(&mut p, i);
-        i = i + 1;
-    }
-    i = 0;
-    while i < n {
-        typecheck_one(&mut p, i);
-        i = i + 1;
-    }
-    cirv.all_typed = true;
-    cirv.record_folds = true;
-    let mut irkeep = irl::Keep::new();
-    let _ = demit::borrowck_all(&mut p, &mut irkeep);
-
-    let tplan = dtest::TestPlan::new(n);
-    let mut o = demit::CemitOut::new(n);
-    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut irkeep);
-
-    dutil::write_super_rt(dir);
-    write_c(dir, "__sc_types.h", o.types_h.as_str());
-    write_c(dir, "__sc_protos.h", o.protos_h.as_str());
-    names.push(String::from_str("super_rt.c"));
-    let mut bytes: usize = 0;
-    for t in 0..n + 1 {
-        let is_inst = t == n;
-        let src9 = if is_inst {
-            o.inst_c.as_str();
-        } else {
-            o.tus.at(t).as_str();
-        };
-        if src9.len() == 0 {
-            continue;
-        }
-        bytes = bytes + src9.len();
-        let mut base = String::new();
-        if is_inst {
-            base.push_str("__sc_inst");
-        } else {
-            let mp = p.modules[t].path.as_str();
-            for k in 0..mp.len() {
-                let c2 = mp.byte_at(k);
-                let okc = c2 >= b'a' && c2 <= b'z' || c2 >= b'A' && c2 <= b'Z' || c2 >= b'0' && c2 <= b'9';
-                base.push_byte(
-                    if okc {
-                        c2;
-                    } else {
-                        b'_';
-                    },
-                );
-            }
-        }
-        base.push_str(".c");
-        let mut body = String::from_str("#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n");
-        body.push_str(src9);
-        write_c(dir, base.as_str(), body.as_str());
-        names.push(base);
-    }
-    return bytes;
 }
 
 // One full transpile of the compiler, timed per phase.
@@ -413,21 +325,211 @@ fn transpile_once() Timing {
     return r;
 }
 
-// This one keeps its own report: a per-phase table (lex/parse/resolve/typecheck/codegen with MB/s and
-// allocations) is the point of it, and no generic timing loop can produce that, so it opts out of the
-// runner's one-line summary, which would only restate a single round's wall time. It still runs under the
-// Bencher, so it appears in the same listing as every other benchmark.
+// This one keeps its own report: a per-phase table (lex/parse/resolve/typecheck/borrowck/codegen with MB/s
+// and allocations) is the point of it, and no generic timing loop can produce that. The Bencher still
+// drives the rounds and keeps the wall-time distribution of every round; the table sums the in-process
+// counters of the same rounds. Any failure (a corpus that does not load, a real build whose C compiler
+// or linker fails) is reported to the runner, so the run exits nonzero.
 @bench(log_results = false)
-/// Benchmark lane: transpile the compiler's own source once per round.
+/// Benchmark lane: the compiler transpiles its own source, ITERS timed rounds, then one real cold build.
 pub fn self_transpile(b: &mut bench::Bencher) {
-    b.set_rounds(1);
+    // The corpus probe below is the warm-up; every round the Bencher runs is a sample.
+    b.set_rounds(ITERS);
     b.set_warmup(0);
-    while b.running() {
-        let _ = run_report();
+    if !run_report(b) {
+        bench::fail("self_transpile");
     }
 }
 
-fn run_report() i32 {
+// Sums of one phase over every round, converted to per-round averages by `avg`.
+struct PhaseSum {
+    pub secs: f64,
+    pub cyc: i64,
+    pub alc: i64,
+    pub byt: i64,
+}
+
+// The report's per-phase row: averages over ITERS rounds.
+struct PhaseAvg {
+    pub ms: f64,
+    pub mcyc: f64,
+    pub kalloc: f64,
+    pub mib: f64,
+}
+
+fn phase_sum_new() PhaseSum {
+    return PhaseSum { secs: 0.0, cyc: 0, alc: 0, byt: 0 };
+}
+
+fn phase_add(s: &mut PhaseSum, secs: f64, cyc: i64, alc: i64, byt: i64) {
+    s.secs = s.secs + secs;
+    s.cyc = s.cyc + cyc;
+    s.alc = s.alc + alc;
+    s.byt = s.byt + byt;
+}
+
+fn avg(s: &PhaseSum, rounds: f64) PhaseAvg {
+    return PhaseAvg {
+        ms: s.secs / rounds * 1000.0,
+        mcyc: s.cyc as f64 / rounds / 1e6,
+        kalloc: s.alc as f64 / rounds / 1e3,
+        mib: s.byt as f64 / rounds / 1048576.0,
+    };
+}
+
+// One table row. `share` is the phase's share of the total in percent, or negative for "(of parse)".
+fn print_row(name: str, a: &PhaseAvg, src_bytes: f64, lines: f64, share: f64) {
+    unsafe stdio::printf(
+        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f".ptr() as *const char,
+        name.ptr() as *const char,
+        a.ms,
+        src_bytes / a.ms / 1000.0,
+        lines / a.ms,
+        a.mcyc,
+        a.kalloc,
+        a.mib,
+    );
+    if share < 0.0 {
+        unsafe stdio::printf("   (of parse)\n".ptr() as *const char);
+    } else {
+        unsafe stdio::printf(" %7.1f%%\n".ptr() as *const char, share);
+    }
+}
+
+fn json_phase(js: &mut String, name: str, a: &PhaseAvg) {
+    js.push_str(",\"");
+    js.push_str(name);
+    js.push_str("\":{\"ms\":");
+    js.push_f64_prec(a.ms, 3);
+    js.push_str(",\"mcyc\":");
+    js.push_f64_prec(a.mcyc, 2);
+    js.push_str(",\"kalloc\":");
+    js.push_f64_prec(a.kalloc, 2);
+    js.push_str(",\"mib\":");
+    js.push_f64_prec(a.mib, 3);
+    js.push_byte(b'}');
+}
+
+// A distribution as JSON; `scale` converts the samples' unit to the reported one.
+fn json_dist(js: &mut String, name: str, sm: &bench::Summary, scale: f64) {
+    js.push_str(",\"");
+    js.push_str(name);
+    js.push_str("\":{\"min\":");
+    js.push_f64_prec(sm.min * scale, 3);
+    js.push_str(",\"median\":");
+    js.push_f64_prec(sm.median * scale, 3);
+    js.push_str(",\"p95\":");
+    js.push_f64_prec(sm.p95 * scale, 3);
+    js.push_str(",\"mean\":");
+    js.push_f64_prec(sm.mean * scale, 3);
+    js.push_str(",\"sd\":");
+    js.push_f64_prec(sm.sd * scale, 3);
+    js.push_byte(b'}');
+}
+
+fn json_str(js: &mut String, s: str) {
+    js.push_byte(b'"');
+    for i in 0..s.len() {
+        let c = s[i];
+        if c == b'"' || c == b'\\' {
+            js.push_byte(b'\\');
+        }
+        js.push_byte(c);
+    }
+    js.push_byte(b'"');
+}
+
+fn set_env(name: str, value: str) {
+    let mut n = String::from_str(name);
+    let mut v = String::from_str(value);
+    let _ = unsafe dshim::sc_setenv(n.cstr(), v.cstr());
+}
+
+// Milliseconds between two boundaries of a build record.
+fn build_ms(g: &bst::BuildStats, from: usize, to: usize) f64 {
+    return (g.t[to] - g.t[from]) as f64 / 1000000.0;
+}
+
+// The C phase: one cold build of the compiler through the real engine (the same sources, profile flags,
+// streamed compile and link a `super-c build` runs), from a scratch out-dir with every cache off. The
+// engine's own record is appended to `js` and summarized; a failing compiler, C compiler or linker fails
+// the benchmark and the scratch tree stays for inspection.
+fn real_build(js: &mut String) bool {
+    let mut dir = String::from_str(str::from_cstr(unsafe dshim::sc_tmpdir()));
+    dir.push_str("/sc_bench_build");
+    let _ = unsafe dshim::sc_rm_rf(dir.cstr());
+    let m0 = mf::load("build.toml");
+    if m0.is_none() {
+        eprintln("bench: cannot load build.toml (run from the repo root)");
+        return false;
+    }
+    let mut m = m0.unwrap();
+    m.out_dir = dir.clone();
+    // Cold on every axis the engine caches on: no global object cache, no emit stamp, no ccache; the
+    // scratch out-dir starts without a per-TU cache.
+    set_env("SC_NO_CACHE", "1");
+    set_env("SC_NO_EMIT_CACHE", "1");
+    set_env("CCACHE_DISABLE", "1");
+    let jobs = (unsafe dshim::sc_ncpu()) as u32;
+    let mut bin = dir.clone();
+    bin.push_str("/super-c");
+    bst::arm();
+    let rc = bsys::manifest_build(
+        &m,
+        "dev",
+        bin.as_str(),
+        jobs,
+        STD_DIR,
+        0,
+        0,
+        unsafe dshim::sc_host_platform(),
+        false,
+        true,
+    );
+    let gp = bst::last();
+    if gp == null {
+        eprintln("bench: the build produced no statistics record");
+        return false;
+    }
+    let g = unsafe &*gp;
+    js.push_str(",\"build\":");
+    bst::json(g, js);
+    let overlap_ms = bst::cc_overlap_ns(g) as f64 / 1000000.0;
+    unsafe stdio::printf(
+        "  build (dev, jobs=%u, cold): transpile %.1f ms | sync %.1f ms | compile %.1f ms after emit (streamed span %.1f ms, busy %.1f ms, overlap %.1f ms) | link %.1f ms | total %.1f ms\n".ptr() as *const char,
+        g.jobs,
+        build_ms(g, bst::B_START, bst::B_PUBLISH),
+        build_ms(g, bst::B_PUBLISH, bst::B_SYNC),
+        build_ms(g, bst::B_SYNC, bst::B_COMPILE),
+        (g.cc_last_ns - g.cc_first_ns) as f64 / 1000000.0,
+        g.cc_busy_ns as f64 / 1000000.0,
+        overlap_ms,
+        build_ms(g, bst::B_COMPILE, bst::B_LINK),
+        build_ms(g, bst::B_START, bst::B_LINK),
+    );
+    unsafe stdio::printf(
+        "    %zu C units, %zu compiled, %.*s, ccache wrapper %s (CCACHE_DISABLE=1), object cache off, emit cache off, peak RSS %.1f MiB\n".ptr() as *const char,
+        g.total_c,
+        g.stale_n,
+        g.cc_version.len() as i32,
+        g.cc_version.as_str().ptr() as *const char,
+        if g.ccache {
+            "present".ptr() as *const char;
+        } else {
+            "absent".ptr() as *const char;
+        },
+        g.rss[4] as f64 / 1048576.0,
+    );
+    bst::release();
+    if rc != 0 {
+        eprintln("bench: the real build failed (exit {}); its outputs are kept under {}", rc, dir.as_str());
+        return false;
+    }
+    let _ = unsafe dshim::sc_rm_rf(dir.cstr());
+    return true;
+}
+
+fn run_report(b: &mut bench::Bencher) bool {
     let warm = transpile_once(); // warm caches + report corpus size
     if warm.modules == 0 || warm.out_bytes == 0 {
         unsafe stdio::fprintf(
@@ -435,7 +537,7 @@ fn run_report() i32 {
             "transpile-bench: failed to transpile %s (run from the repo root)\n".ptr() as *const char,
             ROOT.ptr() as *const char,
         );
-        return 1;
+        return false;
     }
     unsafe stdio::printf("transpiling the super-c compiler: %s\n".ptr() as *const char, ROOT.ptr() as *const char);
     unsafe stdio::printf(
@@ -451,109 +553,59 @@ fn run_report() i32 {
     if unsafe shim::sc_cpu_model(&mut cpu[0], 256) != 0 {
         unsafe stdio::snprintf(&mut cpu[0], 256, "%s".ptr() as *const char, "unknown CPU".ptr() as *const char);
     }
+    let mut bid = String::from_str(bench::build_id());
     unsafe stdio::printf(
-        "  %zu AST nodes;  %s;  single-threaded, %d iterations\n\n".ptr() as *const char,
+        "  %zu AST nodes;  %s;  build %s;  single-threaded, %d rounds\n\n".ptr() as *const char,
         warm.nodes,
         (&cpu[0]) as *const char,
+        bid.cstr(),
         ITERS,
     );
 
-    let mut sp: f64 = 0.0;
-    let mut sr: f64 = 0.0;
-    let mut st: f64 = 0.0;
-    let mut sl: f64 = 0.0;
-    let mut sc_f: f64 = 0.0;
-    let mut scy_l: i64 = 0;
-    let mut scy_p: i64 = 0;
-    let mut scy_r: i64 = 0;
-    let mut scy_t: i64 = 0;
-    let mut scy_cf: i64 = 0;
-    let mut sal_l: i64 = 0;
-    let mut sal_p: i64 = 0;
-    let mut sal_r: i64 = 0;
-    let mut sal_t: i64 = 0;
-    let mut sal_cf: i64 = 0;
-    let mut sb: f64 = 0.0;
-    let mut scy_b: i64 = 0;
-    let mut sal_b: i64 = 0;
-    let mut sby_l: i64 = 0;
-    let mut sby_p: i64 = 0;
-    let mut sby_r: i64 = 0;
-    let mut sby_t: i64 = 0;
-    let mut sby_b: i64 = 0;
-    let mut sby_cf: i64 = 0;
-    let mut sheap: i64 = 0;
-    let mut totals = Vector::<f64>::with_capacity(ITERS as usize);
-    let mut k: i32 = 0;
-    while k < ITERS {
+    let mut s_lex = phase_sum_new();
+    let mut s_parse = phase_sum_new();
+    let mut s_resolve = phase_sum_new();
+    let mut s_tc = phase_sum_new();
+    let mut s_bck = phase_sum_new();
+    let mut s_cg = phase_sum_new();
+    let mut heap_bytes: i64 = 0;
+    let mut totals_ms = Vector::<f64>::with_capacity(ITERS as usize);
+    let mut totals_mcyc = Vector::<f64>::with_capacity(ITERS as usize);
+    while b.running() {
         let t = transpile_once();
-        sp = sp + t.parse;
-        sr = sr + t.resolve;
-        st = st + t.typecheck;
-        sb = sb + t.borrowck;
-        sl = sl + t.lex;
-        scy_l = scy_l + t.cyc_lex;
-        scy_p = scy_p + t.cyc_parse;
-        scy_r = scy_r + t.cyc_resolve;
-        scy_t = scy_t + t.cyc_typecheck;
-        scy_b = scy_b + t.cyc_borrowck;
-        sal_l = sal_l + t.alc_lex;
-        sal_p = sal_p + t.alc_parse;
-        sal_r = sal_r + t.alc_resolve;
-        sal_t = sal_t + t.alc_typecheck;
-        sal_b = sal_b + t.alc_borrowck;
-        sby_l = sby_l + t.byt_lex;
-        sby_p = sby_p + t.byt_parse;
-        sby_r = sby_r + t.byt_resolve;
-        sby_t = sby_t + t.byt_typecheck;
-        sby_b = sby_b + t.byt_borrowck;
-        sheap = sheap + t.heap_bytes;
-        let total = t.parse + t.resolve + t.typecheck + t.borrowck + t.codegen;
-        sc_f = sc_f + t.codegen;
-        scy_cf = scy_cf + t.cyc_codegen;
-        sal_cf = sal_cf + t.alc_codegen;
-        sby_cf = sby_cf + t.byt_codegen;
-        totals.push(total);
-        k = k + 1;
+        phase_add(&mut s_lex, t.lex, t.cyc_lex, t.alc_lex, t.byt_lex);
+        phase_add(&mut s_parse, t.parse, t.cyc_parse, t.alc_parse, t.byt_parse);
+        phase_add(&mut s_resolve, t.resolve, t.cyc_resolve, t.alc_resolve, t.byt_resolve);
+        phase_add(&mut s_tc, t.typecheck, t.cyc_typecheck, t.alc_typecheck, t.byt_typecheck);
+        phase_add(&mut s_bck, t.borrowck, t.cyc_borrowck, t.alc_borrowck, t.byt_borrowck);
+        phase_add(&mut s_cg, t.codegen, t.cyc_codegen, t.alc_codegen, t.byt_codegen);
+        heap_bytes = heap_bytes + t.heap_bytes;
+        totals_ms.push((t.parse + t.resolve + t.typecheck + t.borrowck + t.codegen) * 1000.0);
+        totals_mcyc.push((t.cyc_parse + t.cyc_resolve + t.cyc_typecheck + t.cyc_borrowck + t.cyc_codegen) as f64 / 1e6);
     }
-    let fi = ITERS as f64;
-    let ac = sc_f / fi * 1000.0;
-    let ap = sp / fi * 1000.0;
-    let ar = sr / fi * 1000.0;
-    let at = st / fi * 1000.0;
-    let ab = sb / fi * 1000.0;
-    let al = sl / fi * 1000.0;
-    let avg_total = ap + ar + at + ab + ac;
+    let rounds = totals_ms.len();
+    assert(rounds == ITERS as usize);
+    let fi = rounds as f64;
+    let a_lex = avg(&s_lex, fi);
+    let a_parse = avg(&s_parse, fi);
+    let a_resolve = avg(&s_resolve, fi);
+    let a_tc = avg(&s_tc, fi);
+    let a_bck = avg(&s_bck, fi);
+    let a_cg = avg(&s_cg, fi);
+    // Lexing is the lexer's share OF parse (package_load scans while it parses), so it is not a term.
+    let a_total = PhaseAvg {
+        ms: a_parse.ms + a_resolve.ms + a_tc.ms + a_bck.ms + a_cg.ms,
+        mcyc: a_parse.mcyc + a_resolve.mcyc + a_tc.mcyc + a_bck.mcyc + a_cg.mcyc,
+        kalloc: a_parse.kalloc + a_resolve.kalloc + a_tc.kalloc + a_bck.kalloc + a_cg.kalloc,
+        mib: a_parse.mib + a_resolve.mib + a_tc.mib + a_bck.mib + a_cg.mib,
+    };
     let srcf = warm.src_bytes as f64; // source MB/s for an avg-ms figure = srcf / ms / 1000
     let linesf = warm.src_lines as f64; // lines/sec in thousands (kloc/s) for an avg-ms figure = linesf / ms
-    // Per-phase CPU cycles at the same boundaries as the ms timings;
-    // all-zero when this box has no cycle source. Effective clock: Mcyc/ms == GHz (counted only
-    // while on-core, so P/E scheduling shows up here).
-    let ml = scy_l as f64 / fi / 1e6;
-    let mp = scy_p as f64 / fi / 1e6;
-    let mr = scy_r as f64 / fi / 1e6;
-    let mt = scy_t as f64 / fi / 1e6;
-    let mb = scy_b as f64 / fi / 1e6;
-    let mc = scy_cf as f64 / fi / 1e6;
-    let mtot = mp + mr + mt + mb + mc;
-    // Heap allocations (malloc/calloc/realloc calls by the compiler's own code) per iteration, in
-    // thousands. All-zero when the shim has no counting on this platform.
-    let kal = sal_l as f64 / fi / 1e3;
-    let kap = sal_p as f64 / fi / 1e3;
-    let kar = sal_r as f64 / fi / 1e3;
-    let kat = sal_t as f64 / fi / 1e3;
-    let kab = sal_b as f64 / fi / 1e3;
-    let kac = sal_cf as f64 / fi / 1e3;
-    let katot = kap + kar + kat + kab + kac;
-    // Bytes requested from the allocator per phase, per iteration, in MiB.
-    let mbl = sby_l as f64 / fi / 1048576.0;
-    let mbp = sby_p as f64 / fi / 1048576.0;
-    let mbr = sby_r as f64 / fi / 1048576.0;
-    let mbt = sby_t as f64 / fi / 1048576.0;
-    let mbb = sby_b as f64 / fi / 1048576.0;
-    let mbc = sby_cf as f64 / fi / 1048576.0;
-    let mbtot = mbp + mbr + mbt + mbb + mbc;
 
+    // Per-phase CPU cycles at the same boundaries as the ms timings; all-zero when this box has no
+    // cycle source. Effective clock: Mcyc/ms == GHz (counted only while on-core, so P/E scheduling
+    // shows up here). Kalloc counts malloc/calloc/realloc calls by the compiler's own code (all-zero
+    // when the shim has no counting on this platform); MiB is the bytes those calls requested.
     unsafe stdio::printf(
         "  %-11s %9s %9s %9s %9s %9s %9s %8s\n".ptr() as *const char,
         "phase".ptr() as *const char,
@@ -565,151 +617,128 @@ fn run_report() i32 {
         "MiB".ptr() as *const char,
         "share".ptr() as *const char,
     );
-    unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f   (of parse)\n".ptr() as *const char,
-        "lex".ptr() as *const char,
-        al,
-        srcf / al / 1000.0,
-        linesf / al,
-        ml,
-        kal,
-        mbl,
-    );
-    unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
-        "parse".ptr() as *const char,
-        ap,
-        srcf / ap / 1000.0,
-        linesf / ap,
-        mp,
-        kap,
-        mbp,
-        ap / avg_total * 100.0,
-    );
-    unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
-        "resolve".ptr() as *const char,
-        ar,
-        srcf / ar / 1000.0,
-        linesf / ar,
-        mr,
-        kar,
-        mbr,
-        ar / avg_total * 100.0,
-    );
-    unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
-        "typecheck".ptr() as *const char,
-        at,
-        srcf / at / 1000.0,
-        linesf / at,
-        mt,
-        kat,
-        mbt,
-        at / avg_total * 100.0,
-    );
-    unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
-        "borrowck".ptr() as *const char,
-        ab,
-        srcf / ab / 1000.0,
-        linesf / ab,
-        mb,
-        kab,
-        mbb,
-        ab / avg_total * 100.0,
-    );
-    unsafe stdio::printf(
-        "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f %7.1f%%\n".ptr() as *const char,
-        "codegen".ptr() as *const char,
-        ac,
-        srcf / ac / 1000.0,
-        linesf / ac,
-        mc,
-        kac,
-        mbc,
-        ac / avg_total * 100.0,
-    );
+    print_row("lex", &a_lex, srcf, linesf, -1.0);
+    print_row("parse", &a_parse, srcf, linesf, a_parse.ms / a_total.ms * 100.0);
+    print_row("resolve", &a_resolve, srcf, linesf, a_resolve.ms / a_total.ms * 100.0);
+    print_row("typecheck", &a_tc, srcf, linesf, a_tc.ms / a_total.ms * 100.0);
+    print_row("borrowck", &a_bck, srcf, linesf, a_bck.ms / a_total.ms * 100.0);
+    print_row("codegen", &a_cg, srcf, linesf, a_cg.ms / a_total.ms * 100.0);
     unsafe stdio::printf(
         "  %-11s %9.2f %9.1f %9.1f %9.0f %9.1f %9.2f   (%.2f GHz)\n\n".ptr() as *const char,
         "total".ptr() as *const char,
-        avg_total,
-        srcf / avg_total / 1000.0,
-        linesf / avg_total,
-        mtot,
-        katot,
-        mbtot,
-        mtot / avg_total,
+        a_total.ms,
+        srcf / a_total.ms / 1000.0,
+        linesf / a_total.ms,
+        a_total.mcyc,
+        a_total.kalloc,
+        a_total.mib,
+        a_total.mcyc / a_total.ms,
     );
 
-    // The best end-to-end run, scanned rather than indexed: nothing sorts `totals`.
-    let mut best = totals[0];
-    for i in 1..totals.len() {
-        if totals[i] < best {
-            best = totals[i];
-        }
+    // The distributions over the rounds: CPU ms and cycles of the pipeline, and the Bencher's wall
+    // clock of the same rounds (its line, below). A wide spread means the box was not quiet.
+    let sm_ms = bench::summarize(&mut totals_ms);
+    let sm_cyc = bench::summarize(&mut totals_mcyc);
+    unsafe stdio::printf(
+        "  cpu ms      min %8.2f | median %8.2f | p95 %8.2f | sd %7.2f\n".ptr() as *const char,
+        sm_ms.min,
+        sm_ms.median,
+        sm_ms.p95,
+        sm_ms.sd,
+    );
+    unsafe stdio::printf(
+        "  Mcyc        min %8.1f | median %8.1f | p95 %8.1f | sd %7.1f\n".ptr() as *const char,
+        sm_cyc.min,
+        sm_cyc.median,
+        sm_cyc.p95,
+        sm_cyc.sd,
+    );
+    b.report();
+    let mut wall = Vector::<f64>::with_capacity(rounds);
+    let ws = b.samples();
+    for i in 0..ws.len() {
+        wall.push(ws[i]);
     }
+    let sm_wall = bench::summarize(&mut wall);
     unsafe stdio::printf(
         "  codegen emits %.1f KiB C at %.1f MB/s;  best end-to-end %.2f MB/s source\n".ptr() as *const char,
         warm.out_bytes as f64 / 1024.0,
-        warm.out_bytes as f64 / ac / 1000.0,
-        srcf / best / 1e6,
+        warm.out_bytes as f64 / a_cg.ms / 1000.0,
+        srcf / sm_ms.min / 1000.0,
     );
-    let rss = unsafe shim::sc_peak_rss();
+    let rss = unsafe dshim::sc_peak_rss();
     unsafe stdio::printf(
-        "  heap: %.1f MiB requested per iteration;  peak RSS %.1f MiB\n".ptr() as *const char,
-        sheap as f64 / fi / (1024.0 * 1024.0),
+        "  heap: %.1f MiB requested per round;  peak RSS %.1f MiB\n\n".ptr() as *const char,
+        heap_bytes as f64 / fi / (1024.0 * 1024.0),
         rss as f64 / (1024.0 * 1024.0),
     );
 
-    // The cc phase, on its own AFTER emit and never folded into codegen: emit the package to a scratch tree
-    // once, then compile it with the C compiler. cc is a child process, so it is timed on the monotonic wall
-    // clock (a child's CPU time never lands in this process's getrusage) rather than cpu_seconds like the
-    // in-process phases. Compile-only (`-c`): pure C-front-end/codegen cost, no link and no missing @c.source
-    // symbols to satisfy.
-    let mut ccdir = String::from_str(str::from_cstr(unsafe dshim::sc_tmpdir()));
-    ccdir.push_str("/sc_bench_cc");
-    let _ = unsafe dshim::sc_rm_rf(ccdir.cstr());
-    let _ = unsafe dshim::sc_mkdir_p(ccdir.cstr());
-    let mut names = Vector::<String>::new();
-    let cbytes = emit_package_to_dir(ccdir.as_str(), &mut names);
-    let mut cmd = String::new();
-    if unsafe dshim::sc_host_platform() == 0 {
-        cmd.push_str("cd /d \"");
-    } else {
-        cmd.push_str("cd \"");
-    }
-    cmd.push_str(ccdir.as_str());
-    cmd.push_str("\" && cc -std=c11 -D_POSIX_C_SOURCE=200809L -c");
-    for i in 0..names.len() {
-        cmd.push_str(" ");
-        cmd.push_string(names.at(i));
-    }
-    let mut scc: i64 = 0;
-    let mut crc: i32 = 0;
-    let mut kk: i32 = 0;
-    while kk < CC_ITERS {
-        let t0 = unsafe dshim::sc_ticks_ms();
-        crc = unsafe dshim::sc_run(cmd.cstr(), null, null, null, null);
-        scc = scc + (unsafe dshim::sc_ticks_ms() - t0);
-        kk = kk + 1;
-    }
-    let _ = unsafe dshim::sc_rm_rf(ccdir.cstr());
-    let acc = scc as f64 / CC_ITERS as f64;
-    if crc != 0 {
-        unsafe stdio::fprintf(
-            stdio::stderr(),
-            "  cc: compile FAILED (rc %d) -- timing below is unreliable\n".ptr() as *const char,
-            crc,
-        );
-    }
-    unsafe stdio::printf(
-        "  cc (compile-only): %.1f ms avg over %d;  %zu C files, %.1f KiB C -> objects, %.1f MB/s\n".ptr() as *const char,
-        acc,
-        CC_ITERS,
-        names.len(),
-        cbytes as f64 / 1024.0,
-        cbytes as f64 / acc / 1000.0,
+    let mut js = String::with_capacity(4096);
+    js.push_str("{\"v\":1,\"build_id\":");
+    json_str(&mut js, bid.as_str());
+    js.push_str(",\"cpu\":");
+    json_str(&mut js, str::from_cstr(&cpu[0]));
+    js.push_str(",\"rounds\":");
+    js.push_u64(rounds as u64);
+    js.push_str(",\"jobs\":1,\"corpus\":{\"modules\":");
+    js.push_u64(warm.modules as u64);
+    js.push_str(",\"decls\":");
+    js.push_u64(warm.decls as u64);
+    js.push_str(",\"lines\":");
+    js.push_u64(warm.src_lines as u64);
+    js.push_str(",\"tokens\":");
+    js.push_u64(warm.tokens as u64);
+    js.push_str(",\"nodes\":");
+    js.push_u64(warm.nodes as u64);
+    js.push_str(",\"src_bytes\":");
+    js.push_u64(warm.src_bytes as u64);
+    js.push_str(",\"c_bytes\":");
+    js.push_u64(warm.out_bytes as u64);
+    js.push_str("},\"phases\":{\"lex\":{\"ms\":");
+    js.push_f64_prec(a_lex.ms, 3);
+    js.push_str(",\"mcyc\":");
+    js.push_f64_prec(a_lex.mcyc, 2);
+    js.push_str(",\"kalloc\":");
+    js.push_f64_prec(a_lex.kalloc, 2);
+    js.push_str(",\"mib\":");
+    js.push_f64_prec(a_lex.mib, 3);
+    js.push_byte(b'}');
+    json_phase(&mut js, "parse", &a_parse);
+    json_phase(&mut js, "resolve", &a_resolve);
+    json_phase(&mut js, "typecheck", &a_tc);
+    json_phase(&mut js, "borrowck", &a_bck);
+    json_phase(&mut js, "codegen", &a_cg);
+    json_phase(&mut js, "total", &a_total);
+    js.push_byte(b'}');
+    json_dist(&mut js, "cpu_ms", &sm_ms, 1.0);
+    json_dist(&mut js, "mcyc", &sm_cyc, 1.0);
+    json_dist(&mut js, "wall_ms", &sm_wall, 1000.0);
+    js.push_str(",\"heap_mib\":");
+    js.push_f64_prec(heap_bytes as f64 / fi / 1048576.0, 3);
+    js.push_str(",\"peak_rss_mib\":");
+    js.push_f64_prec(rss as f64 / 1048576.0, 3);
+
+    let ok = real_build(&mut js);
+    js.push_str(",\"ok\":");
+    js.push_str(
+        if ok {
+            "true";
+        } else {
+            "false";
+        },
     );
-    return 0;
+    js.push_str("}\n");
+    let outp = stdlib::getenv("SC_BENCH_OUT");
+    if outp != null {
+        let path = str::from_cstr(outp);
+        let f = stdio::fopen(path, "wb");
+        if f == null {
+            eprintln("bench: cannot write '{}'", path);
+            return false;
+        }
+        unsafe stdio::fwrite(js.as_str().ptr(), 1, js.len(), f);
+        unsafe stdio::fclose(f);
+        unsafe stdio::printf("  record: %.*s\n".ptr() as *const char, path.len() as i32, path.ptr() as *const char);
+    }
+    return ok;
 }

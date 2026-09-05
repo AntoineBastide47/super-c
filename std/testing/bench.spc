@@ -35,6 +35,42 @@ import std::parallel::platform as platform;
 const DEFAULT_ROUNDS: i32 = 20; // samples kept per benchmark
 const DEFAULT_WARMUP: i32 = 1; // rounds run and discarded first
 
+static mut G_BUILD_ID: str<'static> = ""; // what the runner was built from (see `begin`)
+static mut G_FAILED: bool = false; // a benchmark reported a failure (see `fail`)
+
+/// The distribution of a sample set: `summarize` fills one.
+pub struct Summary {
+    pub min: f64,
+    pub median: f64,
+    pub p95: f64,
+    pub mean: f64,
+    pub sd: f64, // population standard deviation
+}
+
+/// Sort `samples` in place and describe them. Panics: `samples` is empty (assert).
+pub fn summarize(samples: &mut Vector<f64>) Summary {
+    let n = samples.len();
+    assert(n > 0);
+    sort_secs(samples);
+    let mut sum: f64 = 0.0;
+    for i in 0..n {
+        sum = sum + samples[i];
+    }
+    let mean = sum / n as f64;
+    let mut var: f64 = 0.0;
+    for i in 0..n {
+        let d = samples[i] - mean;
+        var = var + d * d;
+    }
+    return Summary {
+        min: samples[0],
+        median: median_of(samples),
+        p95: samples[(n * 95 + 99) / 100 - 1],
+        mean: mean,
+        sd: unsafe math::sqrt(var / n as f64),
+    };
+}
+
 /// One benchmark's driver: the loop condition, the clock, and the samples it collects. The runner makes one
 /// per `@bench` function; a benchmark only ever calls the methods below.
 @no_const
@@ -153,32 +189,19 @@ extend Bencher {
             println("  {:<28} (no samples)", self.name.as_str());
             return;
         }
-        sort_secs(&mut self.samples);
-        let med = median_of(&self.samples);
-        let p95 = self.samples[(n * 95 + 99) / 100 - 1];
-        let mut sum: f64 = 0.0;
-        for i in 0..n {
-            sum = sum + self.samples[i];
-        }
-        let mean = sum / n as f64;
-        let mut var: f64 = 0.0;
-        for i in 0..n {
-            let d = self.samples[i] - mean;
-            var = var + d * d;
-        }
-        let sd = unsafe math::sqrt(var / n as f64);
+        let sm = summarize(&mut self.samples);
         unsafe stdio::printf(
             "  %-28s min %8.3f | median %8.3f | p95 %8.3f | sd %7.3f ms".ptr() as *const char,
             self.name.cstr(),
-            self.samples[0] * 1000.0,
-            med * 1000.0,
-            p95 * 1000.0,
-            sd * 1000.0,
+            sm.min * 1000.0,
+            sm.median * 1000.0,
+            sm.p95 * 1000.0,
+            sm.sd * 1000.0,
         );
         if self.units > 0 {
             unsafe stdio::printf(
                 "  | %9.1f ns/%s".ptr() as *const char,
-                med * 1000000000.0 / self.units as f64,
+                sm.median * 1000000000.0 / self.units as f64,
                 self.unit_name.cstr(),
             );
         }
@@ -240,19 +263,36 @@ pub fn selected(name: str, filter: str) bool {
     return filter.len() == 0 || name.contains(filter);
 }
 
-/// Printed once before the first benchmark. `pub` for the generated runner.
-pub fn begin() {
+/// Printed once before the first benchmark. `build_id` names the sources the runner was built from
+/// (the checkout's commit, "-dirty" appended when it had local changes). `pub` for the generated runner.
+pub fn begin(build_id: str<'static>) {
+    unsafe G_BUILD_ID = build_id;
     println("");
-    println("running benchmarks");
+    println("running benchmarks (build {})", build_id);
+}
+
+/// The identity `begin` was given.
+pub fn build_id() str<'static> {
+    return unsafe G_BUILD_ID;
+}
+
+/// A benchmark could not measure what it claims to: the run exits nonzero after every benchmark ran.
+pub fn fail(what: str) {
+    unsafe G_FAILED = true;
+    eprintln("bench: FAILED: {}", what);
 }
 
 /// Printed once after the last one; `n` is how many ran. A `filter` that selected nothing is an error, as
-/// a mistyped name would otherwise report success. `pub` for the generated runner.
+/// a mistyped name would otherwise report success; so is any `fail`. `pub` for the generated runner.
 pub fn end(n: i32, filter: str) i32 {
     println("");
     println("{} benchmark(s)", n);
     if n == 0 && filter.len() != 0 {
         eprintln("bench: no benchmark name contains '{}'", filter);
+        return 1;
+    }
+    if unsafe G_FAILED {
+        eprintln("bench: a benchmark reported a failure (see above)");
         return 1;
     }
     return 0;

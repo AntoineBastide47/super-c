@@ -13,3 +13,12 @@ run = [
     "./super-c bench --no-run",
     "samply record --rate 1000 build/bench-bin",
 ]
+
+[command.gate]
+run = ["sh ci/gate.sh"]
+
+[command.perf]
+run = ["sh ci/perf_gate.sh"]
+
+[command.matrix]
+run = ["sh ci/bench_matrix.sh"]

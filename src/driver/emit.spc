@@ -6,6 +6,7 @@
 import stdio;
 import stdlib;
 import driver_shim as shim;
+import driver::stats as bst;
 import lexer::token as tok;
 import lexer::lexer as lex;
 import lexer::token_type as ltt;
@@ -2924,6 +2925,7 @@ pub fn cemit_package(
         let it = *items.at(i);
         let _ = em.emit_agg(&it);
     }
+    bst::mark(bst::B_PLAN);
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage collect+aggs: {} ms\n", t9 - tt0);
@@ -4723,6 +4725,7 @@ pub fn cemit_package(
     }
     let _ = fwd_end;
     dctx_drop();
+    bst::mark(bst::B_RENDER);
 }
 
 // A literal const-initializer element as C: string literals become str views, integers copy
@@ -7124,6 +7127,7 @@ fn run_package_i(
     if !p.ok {
         return 1;
     }
+    bst::mark(bst::B_RESOLVE);
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase resolve: {} ms\n", t9 - tp0);
@@ -7143,6 +7147,7 @@ fn run_package_i(
     if !p.ok {
         return 1;
     }
+    bst::mark(bst::B_TYPECHECK);
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase typecheck: {} ms\n", t9 - tp0);
@@ -7171,6 +7176,7 @@ fn run_package_i(
     if !p.ok {
         return 1;
     }
+    bst::mark(bst::B_BORROWCK);
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase borrowck: {} ms\n", t9 - tp0);
@@ -7207,6 +7213,7 @@ fn run_package_i(
     if !p.ok {
         return 1;
     }
+    bst::mark(bst::B_CHECKS);
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase lint+panics: {} ms\n", t9 - tp0);
@@ -7263,6 +7270,7 @@ fn run_package_i(
     }
     let mut order = Vector::<ModuleId>::new();
     p.emit_order(&mut order);
+    bst::mark(bst::B_PREPARE);
     // The whole-package Core-IR emission runs BEFORE the live-module list: it seeds every module
     // unconditionally, so any module with a non-empty TU must be written even when the reference
     // scan finds no direct use (prelude bodies the instance TU calls into).
@@ -7429,6 +7437,7 @@ fn run_package_i(
     if bn > 0 && bn as usize < 4096 {
         prune_orphans(&broot[0], &keep);
     }
+    bst::mark(bst::B_PUBLISH);
     let mut rc: i32 = if err {
         1;
     } else {

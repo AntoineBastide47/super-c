@@ -55,6 +55,8 @@ extern "C" "driver_shim.h" {
     pub fn sc_jobserver_release_claim() void;
     /// Monotonic milliseconds (never wall clock).
     pub fn sc_ticks_ms() i64;
+    /// Peak resident set size of this process in bytes; 0 when the platform cannot report it.
+    pub fn sc_peak_rss() i64;
     /// Start argv[0..] (NULL-terminated pointer array) WITHOUT a shell: argv[0] is PATH-searched and
     /// every later entry reaches the child verbatim, spaces, quotes, and non-ASCII bytes included.
     /// A non-null `out_path` truncate-redirects the child's stdout+stderr into it; null inherits.

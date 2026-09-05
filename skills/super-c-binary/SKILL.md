@@ -77,11 +77,31 @@ super-c command profile      # build then run under samply (if [command.profile]
 ```
 
 `super-c bench` writes an import-only root covering every `.spc` under `bench/` and
-collects `pub @bench` functions. The filter is forwarded to the bench binary as a run-time
-argument, so a filtered run never relinks; a filter that selects no benchmark exits
-nonzero. The compiler's own transpile bench runs 100 serial
-self-transpile iterations and prints per-phase averages, throughput (MB/s), the best
-end-to-end run, heap requested per iteration, and peak RSS.
+collects `pub @bench` functions. The generated runner carries the checkout's identity
+(the short commit, `-dirty` when tracked files differ, `unknown` without version
+control) and prints it as `running benchmarks (build <id>)`. The filter is forwarded to the
+bench binary as a run-time argument, so a filtered run never relinks; a filter that
+selects no benchmark exits nonzero, and so does any benchmark that calls
+`bench::fail`. The compiler's own transpile bench (`self_transpile`) runs 100 serial
+self-transpile rounds and prints per-phase averages (CPU ms, Mcyc, Kalloc, MiB),
+throughput, the min/median/p95/sd of CPU ms, Mcyc and wall ms over the rounds, heap
+requested per round and peak RSS; then it runs one cold build of the compiler through
+the real build engine (dev profile, every core, object cache, emit stamp and ccache off)
+and reports the engine's phase record. A C compiler or linker failure there fails the
+run and keeps the scratch tree. `SC_BENCH_OUT=<file>` writes the whole record as JSON.
+
+### Gates
+
+```sh
+super-c command gate         # ci/gate.sh: the full correctness gate (contract ci/contract.sh)
+super-c command perf         # ci/perf_gate.sh: the 100-round performance gate against ci/baseline.env
+super-c command matrix       # ci/bench_matrix.sh: the whole-build benchmark matrix (tens of minutes)
+```
+
+`ci/contract.sh` is the versioned compatibility contract: every input file, option and
+command the gates use. `ci/baseline.env` holds the accepted baseline constants
+(`SC_PERF_RECORD=1 sh ci/perf_gate.sh` rewrites it; `SC_PERF_TOL` is the allowed
+regression in percent).
 
 ### Formatting
 
@@ -212,7 +232,9 @@ sanitizer frames dominate the samples.
 
 | Variable | Effect |
 |----------|--------|
-| `SC_TIMINGS` | Print per-phase timing |
+| `SC_TIMINGS` | Print a one-line per-phase timing summary |
+| `SC_BUILD_STATS` | Append one JSON record per engine build to the named file (`-` = stderr): every phase of the partition in ms, the streamed C compile span apart from it, cache switches, peak RSS at five boundaries (`src/driver/stats.spc`) |
+| `SC_BUILD_MEM` | With `SC_BUILD_STATS`: turn the runtime allocation tracker on for the build, so the record carries allocation calls, requested bytes, live bytes and per-phase survivors (slower; never for timing runs) |
 | `SC_CACHE_DIR` | Override build-record cache directory |
 | `SC_NO_CACHE` | Disable the build-record cache |
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |

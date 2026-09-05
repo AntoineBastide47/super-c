@@ -304,11 +304,16 @@ void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
 void sc_lk_fork_child_reset(void);
 void sc_lk_report_now(void);
+void sc_lk_stats_enable(void);
+void sc_lk_epoch_set(uint32_t __e);
+void sc_lk_stats(uint64_t *__out);
 typedef struct {
   void *ptr;
   void *site;
   size_t size;
+  uint32_t epoch; /* sc_lk_epoch when the block was recorded */
 } sc_lk_ent;
+#define SC_LK_EPOCHS 8
 #define SC_LK_SHARDS 64
 #define SC_LK_SHARD_BITS 6
 #define SC_LK_FREED_HISTORY 32
@@ -320,6 +325,8 @@ typedef struct {
   size_t live;
   size_t bytes;
   size_t dbl;
+  size_t alloc_n;     /* recorded allocation calls, cumulative */
+  size_t alloc_bytes; /* bytes those calls requested, cumulative */
   sc_lk_ent freed[SC_LK_FREED_HISTORY];
   size_t freed_next;
   size_t freed_count;
@@ -327,6 +334,7 @@ typedef struct {
 } sc_lk_shard;
 static sc_lk_shard sc_lk_shards[SC_LK_SHARDS];
 static int sc_lk_state; /* 0 = unprobed, 1 = off, 2 = report, 3 = fatal */
+static uint32_t sc_lk_epoch; /* tag for every allocation recorded from now on (sc_lk_epoch_set) */
 static uintptr_t sc_lk_hash(const void *p) {
   return ((uintptr_t)p >> 4) * (uintptr_t)0x9E3779B97F4A7C15ULL;
 }
@@ -345,6 +353,8 @@ static void sc_lk_shard_clear(sc_lk_shard *s) {
   s->live = 0;
   s->bytes = 0;
   s->dbl = 0;
+  s->alloc_n = 0;
+  s->alloc_bytes = 0;
   s->freed_next = 0;
   s->freed_count = 0;
 }
@@ -422,6 +432,7 @@ static void sc_lk_capture(sc_lk_ent *e, void *p, size_t n, void *site) {
   e->ptr = p;
   e->site = sc_lk_bt_off == 0 ? site : NULL;
   e->size = n;
+  e->epoch = __atomic_load_n(&sc_lk_epoch, __ATOMIC_RELAXED);
 }
 static void sc_lk_site_print(void *site) {
   if (site == NULL) return;
@@ -542,9 +553,36 @@ void sc_lk_fork_child_reset(void) {
 void sc_lk_report_now(void) {
   if (sc_lk_on()) sc_lk_report();
 }
+/* Track from here on without an exit report (SC_LEAK_CHECK, when set, keeps its own state). */
+void sc_lk_stats_enable(void) {
+  sc_lk_on();
+  if (sc_lk_state == 1) sc_lk_state = 2;
+}
+void sc_lk_epoch_set(uint32_t __e) { __atomic_store_n(&sc_lk_epoch, __e, __ATOMIC_RELAXED); }
+/* out[0] allocation calls, out[1] bytes requested, out[2 + 2e] / out[3 + 2e] live count / bytes of epoch e
+   (epochs past SC_LK_EPOCHS - 1 fold into the last slot). All zero while tracking is off. */
+void sc_lk_stats(uint64_t *__out) {
+  memset(__out, 0, (2 + 2 * SC_LK_EPOCHS) * sizeof *__out);
+  for (size_t h = 0; h < SC_LK_SHARDS; h++) {
+    sc_lk_shard *s = &sc_lk_shards[h];
+    sc_lk_acquire(s);
+    __out[0] += s->alloc_n;
+    __out[1] += s->alloc_bytes;
+    for (size_t i = 0; i < s->cap; i++) {
+      const sc_lk_ent *e = &s->tab[i];
+      if (e->ptr == NULL) continue;
+      size_t k = e->epoch < SC_LK_EPOCHS ? e->epoch : SC_LK_EPOCHS - 1;
+      __out[2 + 2 * k] += 1;
+      __out[3 + 2 * k] += e->size;
+    }
+    sc_lk_release(s);
+  }
+}
 /* Insert under the held lock. An existing live entry means the block was freed behind the tracker's
    back and then reused. Returns 0 when bookkeeping memory ran out. */
 static int sc_lk_insert(sc_lk_shard *s, const sc_lk_ent *e) {
+  s->alloc_n++;
+  s->alloc_bytes += e->size;
   sc_lk_ent *old = sc_lk_find(s, e->ptr);
   if (old != NULL) {
     s->bytes -= old->size;
