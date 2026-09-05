@@ -2,31 +2,38 @@
 
 The clean-room protocol for verifying the byte-identical two-generation fixpoint.
 
-**Emission is path-dependent** — emitted hashes mix path strings — so gen-1 and gen-2
-must emit at the **same path**. One work tree, two generations; never compare trees
-built at two different locations.
+Emission hashes include paths. Both generations must use the same source, output,
+standard-library, and FFI paths. Place the bootstrap binary beside the copied `std/`
+and `ffi/` directories so executable-relative library lookup stays consistent.
 
-## Steps (mirrors the CI fixpoint job)
+## Steps
+
+Run from the repository root with a rebuilt `./super-c`.
 
 ```sh
 set -eu
-# 1. Clean work tree: sources only, no build/ dirs, no build.toml, no caches
-rm -rf /tmp/fix && mkdir /tmp/fix
-cp -R src std ffi /tmp/fix/ && rm -rf /tmp/fix/src/build
+# Fresh sources, no build directories or manifest.
+fix_dir=$(mktemp -d /tmp/super-c-fix.XXXXXX)
+rsync -a --exclude=build src std ffi "$fix_dir/"
+cp ./super-c "$fix_dir/bootstrap-bin"
 
-# 2. Gen-1: the current compiler emits the whole compiler
-super-c build /tmp/fix/src/main.spc -o /tmp/fix/gen1-bin
-mv /tmp/fix/src/build /tmp/fix/gen1          # C tree is under gen1/raw/
+export SC_NO_CACHE=1
+export SC_NO_EMIT_CACHE=1
+export SC_NO_TU_CACHE=1
 
-# 3. Gen-2 binary: compile gen-1's emitted C directly
-cc -O1 -std=gnu11 $(find /tmp/fix/gen1/raw -name '*.c') \
-   $(cat /tmp/fix/gen1/raw/__ldflags) -o /tmp/fix/gen2-bin
+# Gen-1 emits the compiler using the copied libraries.
+"$fix_dir/bootstrap-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/gen1-bin"
+mv "$fix_dir/src/build" "$fix_dir/gen1"
 
-# 4. Gen-2 emits the SAME input at the SAME path
-/tmp/fix/gen2-bin build /tmp/fix/src/main.spc -o /tmp/fix/discard-bin
+# Compile gen-1's emitted C directly.
+cc -O1 -std=gnu11 -Wall -Wextra -Werror $(rg --files "$fix_dir/gen1/raw" -g '*.c') \
+   $(cat "$fix_dir/gen1/raw/__ldflags") -o "$fix_dir/gen2-bin"
 
-# 5. Diff the two emissions — expect empty, no exclusions
-diff -r /tmp/fix/gen1 /tmp/fix/src/build
+# Gen-2 uses the same inputs and output path, with no previous build tree.
+"$fix_dir/gen2-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/discard-bin"
+
+# Require an empty diff, with no exclusions or normalization.
+diff -r "$fix_dir/gen1" "$fix_dir/src/build"
 ```
 
 An empty diff means the fixpoint holds. **Any** difference is a semantic regression
@@ -34,17 +41,21 @@ unless the contract itself is intentionally changed.
 
 ## Absolute Paths in the Emitted Tree
 
-Three emitted files embed absolute `#include` paths (the ExtC wrappers and the types
-header): `__ext0_sc_rt.c`, `__ext1_driver_shim.c`, `__sc_types.h`. In this protocol both
-generations emit in the same tree, so the paths are identical and **no exclusion is
-needed**. Only a comparison across two different tree copies would need those three
-files normalized — and path-dependent emission makes such a comparison invalid anyway.
+External-C wrappers and `__sc_types.h` embed absolute include paths. A bootstrap binary
+outside the temporary tree can select a different `std/` and `ffi/` even when the source
+and output paths match. Correct the library selection and repeat from clean output
+trees; do not normalize or exclude these files.
 
 ## Do Not Trust the Cache
 
-The build engine's content-hash cache can serve stale bytes. Never verify the fixpoint
-with an incremental build; always start from a tree with no `build/` directory. Do not
-use `touch` to invalidate — content hashes ignore timestamps.
+Disable build-record, emit-stamp, and per-TU caches for both generations with the three
+environment variables above. Start each generation without a `build/` directory.
+`touch` does not invalidate content-hash caches.
+
+The per-TU cache header includes the running compiler's path and modification time
+(`src/driver/tuc.spc:header_hash`). Even a fresh cache file can differ between generations.
+`SC_NO_TU_CACHE=1` prevents that file from being written; deleting it after emission
+would hide a difference instead of checking the complete output tree.
 
 ## Common Breakages
 
@@ -55,3 +66,5 @@ use `touch` to invalidate — content hashes ignore timestamps.
 | Missing or extra function | Dead code elimination changed |
 | Different constant values | Compile-time evaluation order dependency |
 | Whole-tree diff from a path change | Trees emitted at different paths (see above) |
+| Different absolute include paths | Compilers selected different library roots |
+| Only `.tu_cache` differs | Per-TU caching was not disabled |

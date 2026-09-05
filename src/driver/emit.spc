@@ -61,7 +61,7 @@ fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool 
     if t == TYPE_NONE {
         return false;
     }
-    let y = *mod_ast_c(p, am).type_at(t);
+    let y = *p.module_ast_const(am).type_at(t);
     if y.kind == TypeKind::TYPE_BUILTIN {
         return true;
     }
@@ -69,7 +69,7 @@ fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool 
         return ast_type_mentions_builtin(p, am, y.as_data.elem);
     }
     if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = *mod_ast_c(p, am).instance(y.as_data.inst);
+        let it = *p.module_ast_const(am).instance(y.as_data.inst);
         for i in 0..it.n {
             if ast_type_mentions_builtin(p, am, unsafe it.args[i as usize]) {
                 return true;
@@ -84,7 +84,7 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
     if t == TYPE_NONE {
         return false;
     }
-    let y = *mod_ast_c(p, am).type_at(t);
+    let y = *p.module_ast_const(am).type_at(t);
     let mut changed = false;
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
         if mark_type_modules(p, am, y.as_data.elem, live) {
@@ -97,14 +97,14 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
             }
         }
     } else if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = *mod_ast_c(p, am).instance(y.as_data.inst);
+        let it = *p.module_ast_const(am).instance(y.as_data.inst);
         let np = p.modules.len();
         if it.module as usize < np {
             if mark_live(live, np, it.module) {
                 changed = true;
             }
         }
-        let home = p.instance_home_mid(am, &it);
+        let home = p.instance_home_in(am, &it);
         if home as usize < np {
             if mark_live(live, np, home) {
                 changed = true;
@@ -128,7 +128,7 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
 // rows compute in parallel; the closure walk over them is order-insensitive (a set union).
 fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
     let n = p.modules.len();
-    let a = mod_ast_c(p, m as ModuleId);
+    let a = p.module_ast_const(m as ModuleId);
     let nr = a.resolutions_len();
     for r in 0..nr {
         let d = a.resolution_def(r as NodeId);
@@ -146,7 +146,7 @@ fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
         if it.module as usize < n {
             let _ = mark_live(row, n, it.module);
         }
-        let home = p.instance_home_mid(m as ModuleId, &it);
+        let home = p.instance_home_in(m as ModuleId, &it);
         if home as usize < n {
             let _ = mark_live(row, n, home);
         }
@@ -922,20 +922,6 @@ pub struct CemitOut {
     pub tuc_path: String,
 }
 
-extend CemitOut as Free {
-    pub fn free(self: &mut Self) {
-        self.types_h.free();
-        self.protos_h.free();
-        self.tus.free();
-        self.tu_extra.free();
-        self.inst_c.free();
-        self.inst_extra.free();
-        self.edges.free();
-        self.tuc_img.free();
-        self.tuc_path.free();
-    }
-}
-
 extend CemitOut {
     /// Empty output buffers for a package of `n` modules.
     pub fn new(n: usize) CemitOut {
@@ -1440,7 +1426,7 @@ fn cemit_tuc_replay(
         return 1;
     }
     let mut idc = Map::<u64, u64>::new();
-    let nev = rd.read_count() as usize;
+    let nev = rd.r32() as usize; // the event count follows the type table
     let mut ev = mbe::RecEv::blank(0);
     for _i in 0..nev {
         if !rd.read_ev(&mut ev) {
@@ -6058,7 +6044,7 @@ const fn lint_root_mod(p: &loader::Package, m: usize) bool {
 }
 
 fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut Vector<LintEnt>) {
-    let a = mod_ast_c(p, m as ModuleId);
+    let a = p.module_ast_const(m as ModuleId);
     // Items of a module reported this run are candidates; everything else roots the graph.
     let reported = lint_reported(p, m, only_mod);
     let src = p.modules[m].source.as_str();
@@ -6279,7 +6265,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
         if ents[m].len() == 0 {
             continue;
         }
-        let a = mod_ast_c(p, m as ModuleId);
+        let a = p.module_ast_const(m as ModuleId);
         for i in 0..a.resolutions_len() {
             let d = a.resolution_def(i as NodeId);
             if d.node == NODE_NONE || d.module as usize >= nm {
@@ -6293,7 +6279,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
             if si < 0 {
                 continue;
             }
-            let ta = mod_ast_c(p, d.module);
+            let ta = p.module_ast_const(d.module);
             let di = lint_owner(ents.at(dm), ta.at_const(d.node).span.start);
             if di < 0 {
                 continue;
@@ -6312,7 +6298,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
             if r.callee.node == NODE_NONE || dm >= nm || ents[dm].len() == 0 {
                 continue;
             }
-            let ta = mod_ast_c(p, r.callee.module);
+            let ta = p.module_ast_const(r.callee.module);
             let di = lint_owner(ents.at(dm), ta.at_const(r.callee.node).span.start);
             if di < 0 {
                 continue;
@@ -6364,7 +6350,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
         if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
             continue;
         }
-        let a = mod_ast_c(p, m as ModuleId);
+        let a = p.module_ast_const(m as ModuleId);
         let mut errs = diag::Errors::new();
         let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
@@ -6440,7 +6426,7 @@ fn ap_check_module_on(p: &mut loader::Package, m: usize, errs: &mut diag::Errors
     if !p.modules[m].has_ast {
         return;
     }
-    let a = mod_ast_c(p, m as ModuleId);
+    let a = p.module_ast_const(m as ModuleId);
     let items = unsafe a.at_const(a.root).as_data.program.items;
     for i in 0..items.len {
         let iid = unsafe a.list(items)[i as usize];
@@ -6502,7 +6488,7 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
         if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
             continue;
         }
-        let a = mod_ast_c(p, m as ModuleId);
+        let a = p.module_ast_const(m as ModuleId);
         let mut errs = diag::Errors::new();
         let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
@@ -6556,7 +6542,7 @@ fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
         // Unknowable: keep the import.
         return true;
     }
-    let a = mod_ast_c(p, mid);
+    let a = p.module_ast_const(mid);
     for i in 0..unsafe a.attrs.len() {
         let k = unsafe a.attrs.at(i).kind;
         if k == AttrKind::ATTR_C_SOURCE as u8 || k == AttrKind::ATTR_C_LINK as u8 {
@@ -6583,7 +6569,7 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
         if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
             continue;
         }
-        let a = mod_ast_c(p, m as ModuleId);
+        let a = p.module_ast_const(m as ModuleId);
         if module_platform_gated(a) {
             continue;
         }
@@ -6683,7 +6669,7 @@ fn dp_check_stmt(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m:
     if fd.node == NODE_NONE || fd.module as usize >= p.modules.len() || !p.modules[fd.module as usize].has_ast {
         return;
     }
-    let fa = mod_ast_c(p, fd.module);
+    let fa = p.module_ast_const(fd.module);
     if fa.at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
         return;
     }
@@ -6724,7 +6710,7 @@ fn lint_discarded_results(p: &mut loader::Package, only_mod: i32) {
         if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
             continue;
         }
-        let a = mod_ast_c(p, m as ModuleId);
+        let a = p.module_ast_const(m as ModuleId);
         let mut errs = diag::Errors::new();
         let n = unsafe a.nodes.len();
         let mut i: u32 = 1;
@@ -6774,7 +6760,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
         if !p.modules[m].has_ast {
             continue;
         }
-        let a = mod_ast_c(p, m as ModuleId);
+        let a = p.module_ast_const(m as ModuleId);
         // Struct-literal initializer names resolve to the field decl but only WRITE it: exclude
         // them from the read set (fields warn on never-READ, Rust semantics).
         let an = unsafe a.nodes.len();
@@ -6807,7 +6793,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
         if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
             continue;
         }
-        let a = mod_ast_c(p, m as ModuleId);
+        let a = p.module_ast_const(m as ModuleId);
         if module_platform_gated(a) {
             continue;
         }

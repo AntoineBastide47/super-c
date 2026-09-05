@@ -9,12 +9,6 @@ pub struct LoanMat {
     pub pool: Vector<u64>, // rows * words, zero-initialized
 }
 
-extend LoanMat as Free {
-    pub fn free(self: &mut Self) {
-        self.pool.free();
-    }
-}
-
 extend LoanMat {
     /// A matrix of `rows` zeroed rows sized for `nloans` loans; zero loans still get one word per row.
     pub fn new(nloans: u32, rows: u32) LoanMat {

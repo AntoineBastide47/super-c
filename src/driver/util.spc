@@ -1,7 +1,3 @@
-// Driver-shared helpers for the emit/test/ext_c stages: output paths + mkdir/open under <gen_root>, the
-// keep-list orphan pruner, the runtime-header writer, raw package-Ast accessors, format_source (the
-// canonical-formatting core behind `super-c fmt` and LSP formatting), and the cross-toolchain selection
-// both link paths share.
 import stdio;
 import stdlib;
 import string as cstring;
@@ -24,23 +20,9 @@ pub type PathBuf = Array<char, 4096>;
 pub type Buf64 = Array<char, 64>;
 pub type Buf128 = Array<char, 128>;
 
-/// Raw-pointer accessors into a package module's held Ast (public fields, so no loader plumbing needed).
-pub const fn mod_ast_c(p: &loader::Package, m: ModuleId) *const Ast {
-    return &p.modules[m as usize].ast;
-}
-
-// The keep-list: every build output written this run (owns the heap paths; stale files not here are pruned).
-// A `Vector<String>` (owns each heap path; RAII-freed). `keep.push(path)` moves the String in.
-
-// Output paths + directories.
-
-/// Lex (trivia kept for the comment count), parse and canonically format `src` into `out` at `width`
-/// columns; the shared core of `super-c fmt` and LSP textDocument/formatting. 0 = ok (`out` filled);
-/// 1 = lex/parse error (diagnostics printed against `path`); 2 = the dropped-comment safety check
-/// tripped. `out` must not be used unless 0.
+/// Format `src` into `out` at `width` columns. Returns false on lex/parse errors or a
+/// comment-count mismatch; callers must not use `out` after failure.
 pub fn format_source(src: &String, path: str, width: i32, out: &mut String) bool {
-    // Reject sources that do not parse: never rewrite something the compiler cannot read.
-    // Lexed with trivia so the doc pipeline can count comments; the parser gets a filtered stream.
     let mut vsrc = src.clone();
     let mut lx = lex::Lexer::new(&mut vsrc, path);
     lx.keep_trivia = true;

@@ -121,24 +121,6 @@ pub struct InlineCtx {
     pub xms: Vector<Map<u64, u64>>,
 }
 
-extend CalleeInfo as Free {
-    pub fn free(self: &mut Self) {
-        self.body.free();
-        self.gp.free();
-    }
-}
-
-extend InlineCtx as Free {
-    pub fn free(self: &mut Self) {
-        self.keep_ix.free();
-        self.kept.free();
-        self.vlw.free();
-        self.xm_ix.free();
-        self.xm_key.free();
-        self.xms.free();
-    }
-}
-
 fn bind_add(binds: &mut Vector<GBind>, pm: ModuleId, pnode: NodeId, at: TypeId) {
     for i in 0..binds.len() {
         if binds.at(i).pm == pm && binds.at(i).pnode == pnode {

@@ -190,33 +190,6 @@ pub struct Bce {
     pub ll_pl: Vector<u32>,
 }
 
-extend Bce as Free {
-    pub fn free(self: &mut Self) {
-        self.lver.free();
-        self.basegen.free();
-        self.lenof.free();
-        self.cmpof.free();
-        self.copyof.free();
-        self.affof.free();
-        self.refof.free();
-        self.facts.free();
-        self.in_facts.free();
-        self.in_set.free();
-        self.preds.free();
-        self.rpo.free();
-        self.escroot.free();
-        self.esclist.free();
-        self.statics.free();
-        self.pend_t.free();
-        self.pend_r.free();
-        self.cwritten.free();
-        self.la_dest.free();
-        self.la_off.free();
-        self.ll_dest.free();
-        self.ll_pl.free();
-    }
-}
-
 const fn vkey_none() VKey {
     return VKey { is_const: false, c: 0, is_local: false, l: 0, v: 0, off: 0 };
 }

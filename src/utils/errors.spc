@@ -356,18 +356,6 @@ extend Errors {
     }
 }
 
-extend Errors as Free {
-    pub fn free(self: &mut Self) {
-        self.errors.free();
-        self.warns.free();
-        self.note_pool.free();
-        self.rendered_errors.free();
-        self.rendered_warns.free();
-        self.fixes.free();
-        self.fix_texts.free();
-    }
-}
-
 fn line_index(line_starts: &Vector<u32>, off: u32) usize {
     let mut lo: usize = 0;
     let mut hi = line_starts.len();

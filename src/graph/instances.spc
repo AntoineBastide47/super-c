@@ -107,28 +107,6 @@ pub struct InstGraph {
     budget: u32,
 }
 
-extend InstGraph as Free {
-    pub fn free(self: &mut Self) {
-        self.recs.free();
-        self.keys.free();
-        self.index.free();
-        self.exts.free();
-        self.ext_of.free();
-        self.iface_of.free();
-        self.noted.free();
-        self.kept.free();
-        self.kept_ix.free();
-        self.argbuf.free();
-        self.low.free();
-        self.wcache.free();
-        self.wt_seen.free();
-    }
-}
-
-const fn mix(h: u64, v: u64) u64 {
-    return skey_mix(h, v);
-}
-
 /// type_skey with shared-reference spellings unified: a REFERENCE's CONST qualifier (written
 /// `&'a T`) keys as NONE (the checker-inserted form), so the two spellings of one shared borrow
 /// cannot split a record. Both sides of every instance comparison key through this.
@@ -200,10 +178,10 @@ extend InstGraph {
     /// new. Hash + equality use skeys only (the value is derived data riding along for frame
     /// evaluation).
     pub fn add(self: &mut Self, kind: u8, def: DefId, fresh: &mut bool) u32 {
-        let mut h = mix(mix(1469598103934665603u64, kind), def.module);
-        h = mix(h, def.node);
+        let mut h = skey_mix(skey_mix(1469598103934665603u64, kind), def.module);
+        h = skey_mix(h, def.node);
         for i in 0..self.argbuf.len() {
-            h = mix(h, self.argbuf.at(i).skey);
+            h = skey_mix(h, self.argbuf.at(i).skey);
         }
         if self.index.len() == 0 || (self.ix_used as usize + 1) * 4 >= self.index.len() * 3 {
             let mut cap: usize = 64;
@@ -293,17 +271,23 @@ extend InstGraph {
                 return bound.skey;
             }
         }
-        let h = mix(mix(14695981039346656037u64, y.kind as u64), y.qualifier);
+        let h = skey_mix(skey_mix(14695981039346656037u64, y.kind as u64), y.qualifier);
         return switch y.kind {
-            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => mix(h, self.skey_subst(a, y.as_data.elem, frame, depth + 1)),
-            TYPE_ARRAY => mix(mix(h, self.skey_subst(a, y.as_data.arr.elem, frame, depth + 1)), y.as_data.arr.len),
-            TYPE_BUILTIN => mix(h, y.as_data.builtin as u64),
-            TYPE_CONST => mix(h, y.as_data.value as u64),
+            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => skey_mix(
+                h,
+                self.skey_subst(a, y.as_data.elem, frame, depth + 1),
+            ),
+            TYPE_ARRAY => skey_mix(
+                skey_mix(h, self.skey_subst(a, y.as_data.arr.elem, frame, depth + 1)),
+                y.as_data.arr.len,
+            ),
+            TYPE_BUILTIN => skey_mix(h, y.as_data.builtin as u64),
+            TYPE_CONST => skey_mix(h, y.as_data.value as u64),
             TYPE_INSTANCE | TYPE_DYN => {
                 let it = a.instance(y.as_data.inst);
-                let mut k = mix(mix(h, it.module), it.decl);
+                let mut k = skey_mix(skey_mix(h, it.module), it.decl);
                 for i in 0..it.n {
-                    k = mix(k, self.skey_subst(a, unsafe it.args[i], frame, depth + 1));
+                    k = skey_mix(k, self.skey_subst(a, unsafe it.args[i], frame, depth + 1));
                 }
                 k;
             },
@@ -364,8 +348,8 @@ extend InstGraph {
             v = v / d;
         }
         // Key exactly as type_skey keys the folded TYPE_CONST (qualifier 0).
-        let h = mix(mix(14695981039346656037u64, TypeKind::TYPE_CONST as u64), 0);
-        return ArgKey { skey: mix(h, v as u64), val: v, has_val: true };
+        let h = skey_mix(skey_mix(14695981039346656037u64, TypeKind::TYPE_CONST as u64), 0);
+        return ArgKey { skey: skey_mix(h, v as u64), val: v, has_val: true };
     }
 
     // The full ArgKey of `t` under `frame`: the substituted skey plus the folded value when the

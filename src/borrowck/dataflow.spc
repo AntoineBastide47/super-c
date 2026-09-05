@@ -36,20 +36,6 @@ pub struct Cfg {
     s_stack: Vector<u64>, // reused DFS frames: block << 32 | next successor index
 }
 
-extend Cfg as Free {
-    pub fn free(self: &mut Self) {
-        self.succ.free();
-        self.succ_start.free();
-        self.pred.free();
-        self.pred_start.free();
-        self.rpo.free();
-        self.rpo_pos.free();
-        self.s_cnt.free();
-        self.s_color.free();
-        self.s_stack.free();
-    }
-}
-
 extend Cfg {
     /// A graph with no blocks and no heap storage; `build_into` fills it.
     pub fn empty() Cfg {
@@ -197,15 +183,6 @@ pub struct Liveness {
     s_queued: Vector<bool>,
 }
 
-extend Liveness as Free {
-    pub fn free(self: &mut Self) {
-        self.live_in.free();
-        self.live_out.free();
-        self.s_queue.free();
-        self.s_queued.free();
-    }
-}
-
 extend Liveness {
     /// A solution with no rows; `build_into` fills it.
     pub fn empty() Liveness {
@@ -329,23 +306,6 @@ pub struct MoveFlow {
     s_ctx: FlowCtx, // reused per-block scratch state (mi/di/mm) applied during event replay
     s_scratch: Vector<u32>, // reused move-forest DFS stack + subtree buffer
     s_sub: Vector<u32>,
-}
-
-extend MoveFlow as Free {
-    pub fn free(self: &mut Self) {
-        self.mi.free();
-        self.di.free();
-        self.mm.free();
-        self.errs.free();
-        self.s_reached.free();
-        self.s_queue.free();
-        self.s_queued.free();
-        self.s_ctx.mi.free();
-        self.s_ctx.di.free();
-        self.s_ctx.mm.free();
-        self.s_scratch.free();
-        self.s_sub.free();
-    }
 }
 
 struct FlowCtx {

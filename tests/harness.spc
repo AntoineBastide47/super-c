@@ -1,12 +1,5 @@
-// In-process compile driver for the self-hosted test suite: the analog of tests/test_harness.h's
-// `sc_compile`. Given a source STRING it runs the real selfhost pipeline (lexer -> parser -> resolver ->
-// typechecker) against a freshly-loaded std prelude and reports the user module's error count + first
-// message, so resolver/typechecker/errors/borrow tests can assert accept-vs-reject and diagnostics.
-//
-// The prelude is found at "std" relative to the CWD (the repo root, where `make selfhost-test` runs),
-// matching tests/test_harness.h's default SUPERC_STD_DIR. The snippet is loaded from memory via
-// loader::package_from_source as the LAST module (after the prelude, module id past it; exactly like
-// the C harness's sc_compile layout, so module-order-sensitive checks reproduce the C verdicts).
+// In-process compiler tests load source snippets through loader::package_from_source.
+// Run from the repository root so the prelude resolves at std/.
 import lexer::lexer as lex;
 import lexer::token as *;
 import ast::ast as *;
@@ -444,11 +437,6 @@ fn rm_dir(dir: *const char) {
     let _ = unsafe shim::sc_rm_rf(dir);
 }
 
-// Build `src` into a standalone program via `super-c build`, run it, and capture stdout+stderr + exit code.
-// The compiler is $SUPERC (default "./super-c", matching the CWD=repo-root that `make selfhost-test` uses).
-// Each snippet gets its own temp dir (<tmp>/scr_<pid>_<seq>) so build trees never collide: fork-per-test
-// safe. No shell is involved: the process runner binds the output file and applies `env` itself, which is
-// what lets these tests run on Windows.
 /// Build `src` as a program and run it, capturing stdout.
 pub fn compile_and_run(src: str) RunResult {
     return compile_and_run_env(src, "");

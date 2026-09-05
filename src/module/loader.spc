@@ -30,18 +30,8 @@ pub struct Module {
     pub prelude: bool, // part of the auto-imported std prelude
 }
 
-extend Module as Free {
-    pub fn free(self: &mut Self) {
-        self.path.free();
-        self.file.free();
-        self.source.free();
-        self.ast.free();
-    }
-}
-
 /// The whole compilation: the root module plus every module reachable through `import`. Modules are kept as
-/// separate Asts; cross-module references are DefId{module, node} into this array. (`cir` and the codegen
-/// emit-order/instance-propagation fields are added when those stages are ported.)
+/// separate Asts; cross-module references are DefId{module, node} into this array.
 pub struct Package {
     pub modules: Vector<Module>,
     /// Instruction set `@arch` items are gated against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown.
@@ -139,7 +129,7 @@ pub struct Package {
     /// is appended later (the LSP's batch load). `lookup`/`glob_lookup`/`prelude_lookup` and the
     /// import-closure cache are adapters over it.
     pub idx: PkgIndex,
-    /// Per-module transitive import closure (LD-3): clo_lists[mid] = [mid, BFS over its imports...],
+    /// Per-module transitive import closure: clo_lists[mid] = [mid, BFS over its imports...],
     /// built lazily on first glob_lookup into `mid` (imports are load-final). Replaces glob_lookup's
     /// per-call seen/queue vectors and per-import path re-joins with a flat cached walk.
     pub clo_lists: Vector<Vector<ModuleId>>,
@@ -150,7 +140,7 @@ pub struct Package {
     /// assigns emit no frees, so a PRE-FIX bootstrap compiler lowers the swap correctly: a
     /// reassigned Free LOCAL would trip the conditional-move bug older emitters carry).
     pub cg_scratch: String,
-    /// Import-resolution directory cache (Opt 1): each candidate search directory is scanned ONCE (opendir/
+    /// Import-resolution directory cache: each candidate search directory is scanned once (opendir/
     /// readdir) and its entry names cached, so resolve_import_file answers "does <dir>/<file> exist?" from
     /// memory instead of an fopen probe per candidate. Scales: a directory with N modules imported M times
     /// costs 1 scan, not M*<up to 3> fopens. A listing MISS still falls back to fopen (byte-identical vs the
@@ -186,13 +176,6 @@ pub struct ParseResult {
     pub ast: Ast,
     pub ok: bool,
     pub tokens: Vector<tok::Token>, // handed back for capacity recycling (Package.tok_scratch)
-}
-
-extend ParseResult as Free {
-    pub fn free(self: &mut Self) {
-        self.ast.free();
-        self.tokens.free();
-    }
 }
 
 /// A module-qualified declaration hit: the decl's NodeId within module `mid`. `node == NODE_NONE` means miss.
@@ -425,14 +408,6 @@ extend SymTab {
     }
 }
 
-extend SymTab as Free {
-    pub fn free(self: &mut Self) {
-        self.names.free();
-        self.index.free();
-        self.chain.free();
-    }
-}
-
 extend PkgIndex {
     /// An empty index; `ensure_index` on the package builds it.
     pub fn new() PkgIndex {
@@ -453,24 +428,6 @@ extend PkgIndex {
             sigs_built: false,
             built_mods: 0,
         };
-    }
-}
-
-extend PkgIndex as Free {
-    pub fn free(self: &mut Self) {
-        self.syms.free();
-        self.items.free();
-        self.mod_items.free();
-        self.name_maps.free();
-        self.imports.free();
-        self.mod_imports.free();
-        self.scc_of.free();
-        self.lang_items.free();
-        self.sugar_items.free();
-        self.li_map.free();
-        self.sigs.free();
-        self.sig_types.free();
-        self.sig_of.free();
     }
 }
 
@@ -773,14 +730,6 @@ extend DirCache {
         return path_exists(path);
     }
 }
-extend DirCache as Free {
-    pub fn free(self: &mut Self) {
-        self.dirs.free();
-        self.entries.free();
-        self.ok.free();
-    }
-}
-
 // Resolve an import's file by searching the project root first, then the std root (so `import std::x;`
 // finds <std_root>/std/x.spc), then the bundled `ffi/` bindings (so a bare `import stdio;` finds
 // <std_root>/ffi/stdio.spc). Returns the first path that exists, else the project-relative path. Owned.
@@ -913,10 +862,8 @@ fn par_parse_one(t: PParse) {
         },
     };
     let mut parsed = parse_source_q(&mut u.source, u.file.as_str(), t.tags, Vector::<tok::Token>::new(), true);
-    parsed.tokens.free();
     if !parsed.ok {
         u.ok = false;
-        parsed.ast.free();
         return;
     }
     u.ast = replace(&mut parsed.ast, Ast::new(0));
@@ -926,35 +873,9 @@ fn par_parse_one(t: PParse) {
 /// The `tc_wait` callback for serial builds: nothing to wait for.
 pub const fn loader_no_wait(_c: *mut void, _m: ModuleId) {}
 
-extend Package as Free {
-    pub fn free(self: &mut Self) {
-        self.modules.free();
-        self.root_dir.free();
-        self.gen_root.free();
-        self.std_root.free();
-        self.alt_root.free();
-        self.method_used.free();
-        self.method_edges.free();
-        self.edge_seen.free();
-        self.inst_methods.free();
-        self.always_methods.free();
-        self.extern_privates.free();
-        self.mod_refs.free();
-        self.idx.free();
-        self.clo_lists.free();
-        self.clo_built.free();
-        self.tok_scratch.free();
-        self.cg_scratch.free();
-        self.dir_cache.free();
-        self.lint_set.free();
-        self.overlay_files.free();
-        self.overlay_texts.free();
-    }
-}
-
-// Cross-module instance propagation + emit ordering (ports of loader.c's file-scope helpers). These thread
-// raw `*mut Ast`/`*const Ast` pointers to sidestep the by-value move rules on `&Ast`; the modules Vector is
-// never grown during propagation, so pointers into `modules[x].ast` stay valid throughout.
+// Cross-module instance propagation + emit ordering. These thread raw `*mut Ast`/`*const Ast` pointers to
+// sidestep the by-value move rules on `&Ast`; the modules Vector is never grown during propagation, so
+// pointers into `modules[x].ast` stay valid throughout.
 
 /// Load `root_file` and, transitively, every module it imports, then append the std prelude found under
 /// `std_dir` (empty skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
@@ -1222,10 +1143,6 @@ extend Package {
     // The Ast to read for module `mid` from package-level lookups. Asts live IN PLACE in the module
     // table for their whole life: a stage mutates its module's Ast through a raw pointer into this
     // slot, never by moving it out, so this read is always the live tree (no override indirection).
-    const fn module_ast_ptr(self: &Self, mid: ModuleId) *const Ast {
-        return &self.modules[mid as usize].ast;
-    }
-
     /// True when a loop in the body whose span is `osp` (module `m`) can run inside a coroutine
     /// and therefore needs a preemption safepoint at its backedges.
     pub fn co_on(self: &Self, m: ModuleId, osp: tok::Span) bool {
@@ -1332,6 +1249,10 @@ extend Package {
                         }
                     }
                     if t.node == NODE_NONE {
+                        if a.is_free_call(ni as NodeId, self.modules.at(m).source.as_str()) {
+                            // An explicit drop: no callee body to run.
+                            continue;
+                        }
                         // Fn value or dyn dispatch: cannot pin the callee.
                         self.co_state = 2;
                         return;
@@ -1505,7 +1426,7 @@ extend Package {
 
     /// Read-only view of module `mid`'s Ast for consumers outside the package (the Core IR lowerer).
     pub const fn module_ast_const(self: &Self, mid: ModuleId) *const Ast {
-        return self.module_ast_ptr(mid);
+        return &self.modules[mid as usize].ast;
     }
 
     /// Approximate owned bytes across the package's retained analyses (the LSP budget's accounting
@@ -1975,7 +1896,7 @@ extend Package {
         }
         if self.method_used[m].len() <= d.node as usize {
             // Size once to the module's node count so later marks are pure set()s.
-            let mut n = unsafe self.module_ast_ptr(d.module).nodes.len();
+            let mut n = unsafe self.module_ast_const(d.module).nodes.len();
             if n <= d.node as usize {
                 n = d.node as usize + 1;
             }
@@ -2110,7 +2031,7 @@ extend Package {
             if it.kind != ItemKind::IK_FUNCTION as u8 && it.kind != ItemKind::IK_METHOD as u8 {
                 continue;
             }
-            let a = unsafe &*self.module_ast_ptr(it.module);
+            let a = unsafe &*self.module_ast_const(it.module);
             // An unchecked module (or a node past its typed range) records nothing: the query
             // then answers null exactly where the typed facts hold no signature either.
             if it.node as usize >= a.types.len() || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION {
@@ -2173,7 +2094,7 @@ extend Package {
         is_public: bool,
         is_type: bool,
     ) {
-        let ast = unsafe &*self.module_ast_ptr(mid);
+        let ast = unsafe &*self.module_ast_const(mid);
         if name_node == NODE_NONE {
             return;
         }
@@ -2221,7 +2142,7 @@ extend Package {
         // `ast` comes from a raw ptr (not a tracked self-borrow), so reading it across them is fine.
         let srcp = self.modules[m].source.as_str().ptr() as *const char;
         let src = str::from_raw(srcp as *const u8, self.modules[m].source.len());
-        let ast = unsafe &*self.module_ast_ptr(mid);
+        let ast = unsafe &*self.module_ast_const(mid);
         let items = ast.at_const(ast.root).as_data.program.items;
         let ids = ast.list(items);
         for i in 0..items.len {
@@ -2620,7 +2541,9 @@ extend Package {
     }
 
     // The module a concrete instance must be emitted in (re-homed to a by-value user-type arg, else the owner).
-    fn instance_home_in(self: &Self, am: ModuleId, it: &TyInstance) ModuleId {
+    /// The module that emits instance `it` seen from module `am`: the first argument type whose
+    /// home is a user module or imports the instance's own module, else the instance's module.
+    pub fn instance_home_in(self: &Self, am: ModuleId, it: &TyInstance) ModuleId {
         for i in 0..it.n {
             let h = self.type_user_home(am, unsafe it.args[i as usize]);
             if h != 0xFFFF as ModuleId && (self.module_is_user(h) || self.module_imports(h, it.module)) {
@@ -2628,15 +2551,6 @@ extend Package {
             }
         }
         return it.module;
-    }
-
-    /// Mid-based entry for the free-function propagation/emit-order ports (they hold raw `*mut Ast`).
-    pub fn instance_home_mid(self: &Self, am: ModuleId, it: &TyInstance) ModuleId {
-        return self.instance_home_in(am, it);
-    }
-
-    const fn ast_c(self: &Self, m: ModuleId) *const Ast {
-        return &self.modules[m as usize].ast;
     }
 
     /// Dependency-first module emit order: if module `a` full-monomorphizes a generic owned by `b` (re-homing a
@@ -2657,7 +2571,7 @@ extend Package {
             if !self.modules[a].has_ast {
                 continue;
             }
-            let aa = self.ast_c(a as ModuleId);
+            let aa = self.module_ast_const(a as ModuleId);
             let mut i: usize = 0;
             while i < unsafe aa.instances.len() {
                 let it = *aa.instance(i as u32);
@@ -2672,7 +2586,7 @@ extend Package {
                         concrete = false;
                     }
                 }
-                if concrete && self.instance_home_mid(a as ModuleId, &it) == a as ModuleId {
+                if concrete && self.instance_home_in(a as ModuleId, &it) == a as ModuleId {
                     dep[a * n + bi] = true;
                     indeg[a] = indeg[a] + 1;
                 }
@@ -2719,7 +2633,7 @@ extend Package {
                     i = i + 1;
                     continue;
                 }
-                let bast = self.ast_c(fd.module);
+                let bast = self.module_ast_const(fd.module);
                 if bast.at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
                     i = i + 1;
                     continue;

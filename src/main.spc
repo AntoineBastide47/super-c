@@ -1,10 +1,3 @@
-// The self-hosted super-c driver. The first argument selects the mode: build/release (emit + link,
-// through build.toml when no root is given), fmt, lint, run/command/clean/test/bench (build.toml engine),
-// lsp, or a bare <root.spc> (compile only, MODE_DEFAULT). Compiling modes share CommonOpts
-// (--const-eval-*, --target, --bootstrap-tags, --no-lint); manifest modes add BuildOpts
-// (--profile/--out-dir/--cstd/--jobs). A compiled root runs the global phases (resolve all ->
-// type-check all -> flush deferred static_asserts -> propagate instances -> emit all), writing a
-// `<root>/build/` tree (super_rt.h + one .c/.h per module).
 import stdio;
 import stdlib;
 import string as cstring;
@@ -125,6 +118,28 @@ fn parse_test_shard(s: *const char, topts: &mut TestOpts) bool {
     }
     topts.shard = shard as i32;
     topts.shards = shards as i32;
+    return true;
+}
+
+fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
+    if arg.starts_with("--test-jobs=") {
+        topts.jobs = unsafe stdlib::atoi((&arg[12]) as *const char);
+        if topts.jobs < 1 {
+            *bad = true;
+        }
+    } else if arg == "--test-no-fork" {
+        topts.no_fork = true;
+    } else if arg == "--quiet" {
+        topts.quiet = true;
+    } else if arg.starts_with("--test-filter=") {
+        topts.filter = (&arg[14]) as *const char;
+    } else if arg.starts_with("--test-shard=") {
+        if !parse_test_shard((&arg[13]) as *const char, topts) {
+            *bad = true;
+        }
+    } else {
+        return false;
+    }
     return true;
 }
 
@@ -922,22 +937,7 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 if co.common_flag(arg) {} else if arg == "--test" {
                     topts.enabled = true;
-                } else if arg.starts_with("--test-jobs=") {
-                    topts.jobs = unsafe stdlib::atoi((&arg[12]) as *const char);
-                    if topts.jobs < 1 {
-                        co.bad = true;
-                    }
-                } else if arg == "--test-no-fork" {
-                    topts.no_fork = true;
-                } else if arg == "--quiet" {
-                    topts.quiet = true;
-                } else if arg.starts_with("--test-filter=") {
-                    topts.filter = (&arg[14]) as *const char;
-                } else if arg.starts_with("--test-shard=") {
-                    if !parse_test_shard((&arg[13]) as *const char, &mut topts) {
-                        co.bad = true;
-                    }
-                } else if arg.starts_with("--") {
+                } else if parse_test_flag(arg, &mut topts, &mut co.bad) {} else if arg.starts_with("--") {
                     co.bad = true;
                 } else if file.len() == 0 {
                     file = arg;
@@ -1049,28 +1049,10 @@ fn main(argv: Vector<str>) i32 {
             }
         },
         MODE_TEST => {
-            // `super-c test` IS the test mode, which is what makes its flags legal.
             topts.enabled = true;
             while i < argc {
                 let arg = argv[i];
-                // The test flags belong here as much as in script mode (`file.spc --test`): `super-c test`
-                // is how the suite is normally run, so it is where filtering one test out of it matters.
-                if arg.starts_with("--test-jobs=") {
-                    topts.jobs = unsafe stdlib::atoi((&arg[12]) as *const char);
-                    if topts.jobs < 1 {
-                        co.bad = true;
-                    }
-                } else if arg == "--test-no-fork" {
-                    topts.no_fork = true;
-                } else if arg == "--quiet" {
-                    topts.quiet = true;
-                } else if arg.starts_with("--test-filter=") {
-                    topts.filter = (&arg[14]) as *const char;
-                } else if arg.starts_with("--test-shard=") {
-                    if !parse_test_shard((&arg[13]) as *const char, &mut topts) {
-                        co.bad = true;
-                    }
-                } else {
+                if !parse_test_flag(arg, &mut topts, &mut co.bad) {
                     let common = co.common_flag(arg);
                     if !common && !bo.build_flag(&mut co, arg) {
                         co.bad = true;

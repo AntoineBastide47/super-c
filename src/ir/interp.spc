@@ -530,36 +530,6 @@ pub struct Interp {
     pub pending_consts: Vector<u64>, // deferred call-bearing const decls
 }
 
-extend Interp as Free {
-    pub fn free(self: &mut Self) {
-        self.objs.free();
-        self.bodies.free();
-        self.body_keys.free();
-        self.body_ix.free();
-        self.cont_memo.free();
-        self.method_memo.free();
-        self.call_memo.free();
-        self.item_memo.free();
-        self.item_active.free();
-        self.rets.free();
-        self.ufree.free();
-        self.subst.free();
-        self.ext_memo.free();
-        self.statics.free();
-        self.fold_errs.free();
-        self.ememo.free();
-        self.dbuf.free();
-        self.sref.free();
-        self.elock_sem.free();
-        self.fx.free();
-        self.fxd.free();
-        self.fx_no.free();
-        self.pending.free();
-        self.pending_consts.free();
-        self.lsvc.free();
-    }
-}
-
 pub fn interp_new(pkg: *const loader::Package) Interp {
     return Interp {
         pkg: pkg,
@@ -628,69 +598,6 @@ const fn ti_round_up(v: u64, a: u64) u64 {
         return v;
     }
     return v + (a - r);
-}
-
-// The source spelling of a builtin type, as `type_info` reports it.
-const fn builtin_name(bt: BuiltinType) str<'static> {
-    switch bt {
-        BT_BOOL => {
-            return "bool";
-        },
-        BT_CHAR => {
-            return "char";
-        },
-        BT_I8 => {
-            return "i8";
-        },
-        BT_I16 => {
-            return "i16";
-        },
-        BT_I32 => {
-            return "i32";
-        },
-        BT_I64 => {
-            return "i64";
-        },
-        BT_ISIZE => {
-            return "isize";
-        },
-        BT_U8 => {
-            return "u8";
-        },
-        BT_U16 => {
-            return "u16";
-        },
-        BT_U32 => {
-            return "u32";
-        },
-        BT_U64 => {
-            return "u64";
-        },
-        BT_USIZE => {
-            return "usize";
-        },
-        BT_F32 => {
-            return "f32";
-        },
-        BT_F64 => {
-            return "f64";
-        },
-        BT_C32 => {
-            return "c32";
-        },
-        BT_C64 => {
-            return "c64";
-        },
-        BT_VALIST => {
-            return "va_list";
-        },
-        BT_VOID => {
-            return "void";
-        },
-        _ => {
-            return "";
-        },
-    };
 }
 
 // "_<k>" into `buf` (32 bytes): the field names a tuple's members answer to.
@@ -5089,8 +4996,7 @@ extend Interp {
     }
 
     // ---- effect summary (fx) ----------------------------------------------------------------------
-    // Lazy, memoized, per-function CTFE-eligibility verdicts, ported from the established
-    // evaluator: FX_NO is kept tight (it must imply the interpreter would fail anyway). The
+    // Lazy, memoized, per-function CTFE-eligibility verdicts. FX_NO implies the interpreter would fail. The
     // shallow scan covers the body's leading straight-line statements; deep mode recurses into
     // if/match/defer so FX_YES means every path is provably evaluable.
 
@@ -6847,7 +6753,7 @@ extend Interp {
         let y = *(unsafe &*self.p().module_ast_const(tm)).type_at(tt);
         let mut nm = "";
         if y.kind == TypeKind::TYPE_BUILTIN {
-            nm = builtin_name(y.as_data.builtin);
+            nm = bt_name(y.as_data.builtin);
         } else if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_INSTANCE {
             let mut dm = y.module;
             let mut dn = y.as_data.decl;

@@ -135,35 +135,6 @@ pub struct BodyFacts {
     pub ldef: Vector<u64>, // per block: locals fully defined
 }
 
-extend BodyFacts as Free {
-    pub fn free(self: &mut Self) {
-        self.block_base.free();
-        self.local_origin.free();
-        self.origin_local.free();
-        self.uni_name.free();
-        self.arg_universal.free();
-        self.ret_origin.free();
-        self.uni_flows.free();
-        self.loans.free();
-        self.subsets.free();
-        self.accesses.free();
-        self.kills.free();
-        self.events.free();
-        self.ev_start.free();
-        self.mev.free();
-        self.mev_start.free();
-        self.rep_blk.free();
-        self.easy_blk.free();
-        self.easy_use.free();
-        self.freed.free();
-        self.observed.free();
-        self.moved_whole.free();
-        self.cuts.free();
-        self.luse.free();
-        self.ldef.free();
-    }
-}
-
 // One substitution entry for member walks under a generic instance: parameter decl -> the argument
 // as a (module, TypeId) pair in the QUERYING pool.
 struct OwnSubst {
@@ -193,20 +164,6 @@ pub struct Owner {
     pub kinds_pool: Vector<u8>,
     pub tok_memo: Map<u64, u64>, // (mod << 32 | type node) -> start << 16 | len into tok_pool
     pub tok_pool: Vector<u64>,
-}
-
-extend Owner as Free {
-    pub fn free(self: &mut Self) {
-        self.free_ext.free();
-        self.owns_arr.free();
-        self.carry_arr.free();
-        self.busy.free();
-        self.callee_flags.free();
-        self.kinds_memo.free();
-        self.kinds_pool.free();
-        self.tok_memo.free();
-        self.tok_pool.free();
-    }
 }
 
 // Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
@@ -259,10 +216,6 @@ pub struct KillSite {
     pub place: ir::PlaceId, // BF_NONE for a whole-local site
     pub local: u32, // BF_NONE for a place site
     pub point: u32,
-}
-
-const fn no_span() tok::Span {
-    return tok::Span { start: 0, end: 0 };
 }
 
 extend BodyFacts {
@@ -368,7 +321,7 @@ extend Gen {
 
     fn lt_name(self: &Self, a: &Ast, lt: NodeId) tok::Span {
         if lt == NODE_NONE {
-            return no_span();
+            return tok::Span::empty();
         }
         let n = a.at_const(lt);
         if n.kind == NodeKind::NODE_GENERIC_PARAM {
@@ -380,14 +333,14 @@ extend Gen {
     // The declared lifetime on a parameter/return slot's outermost reference type, or empty.
     fn slot_lifetime(self: &Self, a: &Ast, slot: NodeId) tok::Span {
         if slot == NODE_NONE {
-            return no_span();
+            return tok::Span::empty();
         }
         let mut tyn = slot;
         if a.at_const(slot).kind == NodeKind::NODE_PARAMETER {
             tyn = a.at_const(slot).as_data.parameter.ty;
         }
         if tyn == NODE_NONE || a.at_const(tyn).kind != NodeKind::NODE_REFERENCE_TYPE {
-            return no_span();
+            return tok::Span::empty();
         }
         return self.lt_name(a, a.at_const(tyn).as_data.indirect_type.lifetime);
     }
@@ -422,7 +375,7 @@ extend Gen {
         self.f.norigins = 1;
         self.f.nuniversal = 1;
         self.f.origin_local.push(BF_NONE);
-        self.f.uni_name.push(no_span());
+        self.f.uni_name.push(tok::Span::empty());
         let bmod = self.body().module;
         let fnode = self.body().owner.node;
         let nlocals = self.body().locals.len();
@@ -454,7 +407,7 @@ extend Gen {
             if !self.owner().carries(bmod, lty) {
                 continue;
             }
-            let mut nm = no_span();
+            let mut nm = tok::Span::empty();
             if i < params.len {
                 let slot = unsafe self.owner().ast_of(bmod).list(params)[i as usize];
                 nm = self.slot_lifetime(self.owner().ast_of(bmod), slot);
@@ -469,7 +422,7 @@ extend Gen {
                 self.f.ret_origin.push(BF_NONE);
                 continue;
             }
-            let mut nm = no_span();
+            let mut nm = tok::Span::empty();
             if r < rets.len {
                 let slot = unsafe self.owner().ast_of(bmod).list(rets)[r as usize];
                 nm = self.slot_lifetime(self.owner().ast_of(bmod), slot);

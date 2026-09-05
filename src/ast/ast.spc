@@ -1122,7 +1122,9 @@ extend<T> ChunkPool<T> {
     pub const fn retained(self: &Self) usize {
         return self.nchunks as usize * POOL_CHUNK * sizeof(T);
     }
+}
 
+extend<T> ChunkPool<T> as Free {
     pub fn free(self: &mut Self) {
         if self.tab == null {
             return;
@@ -1254,11 +1256,6 @@ extend<T> SplitVec<T> {
         self.ovf.clear();
         self.split = SV_UNFROZEN;
     }
-
-    pub fn free(self: &mut Self) {
-        self.base.free();
-        self.ovf.free();
-    }
 }
 
 pub struct Ast {
@@ -1321,6 +1318,42 @@ pub struct Ast {
     /// Number of sugar-keyword marker nodes (`launch`/`select`/`parallel for`) the parser built.
     /// Zero lets the HIR lowering skip its whole-arena marker scan -- the overwhelmingly common case.
     pub sugar_marks: u32,
+}
+
+// Bootstrap constraint: the release compiler skips fields it never typed when it synthesizes a
+// destructor, and leaks `call_info` and `op_method`.
+extend Ast as Free {
+    pub fn free(self: &mut Self) {
+        self.nodes.free();
+        self.children.free();
+        self.scratch.free();
+        self.ilock_sem.free();
+        self.resolutions.free();
+        self.type_pool.free();
+        self.type_index.free();
+        self.types.free();
+        self.mono.free();
+        self.proj_obs.free();
+        self.mono_at.free();
+        self.instances.free();
+        self.method_refs.free();
+        self.wide_lits.free();
+        self.coerces.free();
+        self.coerce_at.free();
+        self.const_lins.free();
+        self.method_insts.free();
+        self.instance_index.free();
+        self.method_inst_index.free();
+        self.dyn_uses.free();
+        self.dyn_at.free();
+        self.deref_uses.free();
+        self.deref_at.free();
+        self.attrs.free();
+        self.metas.free();
+        self.lifetime_decls.free();
+        self.call_info.free();
+        self.op_method.free();
+    }
 }
 
 extend Ast {
@@ -1950,6 +1983,24 @@ extend Ast {
     pub const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
         self.resolutions.set(ref_id as usize, decl);
     }
+    /// Is call `id` spelled `x.free()`: a member call with no path and no arguments whose member is
+    /// named `free`? When no method resolves for it, the call is an explicit drop: destruction IS
+    /// the call, and there is no callee declaration to run or to pin.
+    pub const fn is_free_call(self: &Self, id: NodeId, src: str) bool {
+        let d = self.at_const(id).as_data.call;
+        if d.args.len != 0 {
+            return false;
+        }
+        let c = self.at_const(d.callee);
+        if c.kind != NodeKind::NODE_MEMBER || c.as_data.member.path {
+            return false;
+        }
+        let msp = self.at_const(c.as_data.member.member).as_data.name.text;
+        if (msp.end - msp.start) as usize != 4 {
+            return false;
+        }
+        return src.slice(msp.start as usize, msp.end as usize) == "free";
+    }
     /// Builtin TypeIds are fixed by init_types' seeding: pool slot 0 is TYPE_ERROR, then the
     /// builtins in enum order -- hence b + 1.
     pub const fn builtin(b: BuiltinType) TypeId {
@@ -1986,39 +2037,6 @@ fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) {
     v.reserve(want);
     while v.len() < want {
         v.push(0);
-    }
-}
-
-extend Ast as Free {
-    pub fn free(self: &mut Self) {
-        self.nodes.free();
-        self.children.free();
-        self.scratch.free();
-        self.resolutions.free();
-        self.type_pool.free();
-        self.ilock_sem.free();
-        self.type_index.free();
-        self.types.free();
-        self.mono.free();
-        self.mono_at.free();
-        self.instances.free();
-        self.const_lins.free();
-        self.method_insts.free();
-        self.instance_index.free();
-        self.method_inst_index.free();
-        self.dyn_uses.free();
-        self.dyn_at.free();
-        self.deref_uses.free();
-        self.deref_at.free();
-        self.attrs.free();
-        self.metas.free();
-        self.lifetime_decls.free();
-        self.call_info.free();
-        self.op_method.free();
-        self.method_refs.free();
-        self.wide_lits.free();
-        self.coerces.free();
-        self.coerce_at.free();
     }
 }
 

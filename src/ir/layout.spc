@@ -67,13 +67,6 @@ pub struct Svc {
     active: Vector<u64>, // aggregate decls under query (module << 32 | decl): cycle mark
 }
 
-extend Svc as Free {
-    pub fn free(self: &mut Self) {
-        self.cache.free();
-        self.active.free();
-    }
-}
-
 extend Svc {
     pub fn new(pkg: *const loader::Package) Svc {
         return Svc { pkg: pkg, cache: Map::<u64, u64>::new(), active: Vector::<u64>::new() };

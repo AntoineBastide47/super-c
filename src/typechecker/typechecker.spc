@@ -139,7 +139,7 @@ pub struct LoopEntry {
 }
 
 /// Snapshot of the flow-sensitive state (moves, partial moves, uninit, freed, borrows), saved/merged
-/// around branches (TC-4b: filled via out-param; only the counted prefixes are touched).
+/// Around branches (filled via out-param; only the counted prefixes are touched).
 pub struct FlowState {
     pub moved: [NodeId; 256],
     pub nmoved: u32,
@@ -155,7 +155,7 @@ pub struct FlowState {
     pub nborrows: u32,
 }
 
-/// TC-11: method/assoc-const/default-method query key. `name` is a CONTENT view (span slice of the
+/// Method/assoc-const/default-method query key. `name` is a CONTENT view (span slice of the
 /// querying module's source, or the caller's literal), so span- and cstr-form queries for the same
 /// name share one entry. Exact-keyed (Hash + full Eq), so collisions cannot alias.
 pub struct MQKey<'a> {
@@ -222,7 +222,7 @@ pub struct TypeChecker<'a> {
     pub alias_depth: u32,
     pub ext_scope: Vector<ModuleId>,
     pub n_ext_scope: i32,
-    // TC-1: per-module list of EXTEND item ids (item order), built lazily. The find_*/dispatch scans iterate
+    // Per-module list of EXTEND item ids (item order), built lazily. The find_*/dispatch scans iterate
     // this instead of every top-level item; targets are still peeled on-demand in the same order, so type
     // interning (hence emitted C) is byte-identical.
     pub ext_items: Vector<Vector<NodeId>>,
@@ -309,16 +309,16 @@ pub struct TypeChecker<'a> {
     pub nloops: u32,
     pub loop_floor: u32,
     pub errors: diag::Errors,
-    // TC-3: per-decl index of the LAST node whose resolution targets it (built lazily from the
+    // Per-decl index of the LAST node whose resolution targets it (built lazily from the
     // resolver's tables; the one typechecker-added resolution kind that can target a binding
     // (break/continue -> loop node) is folded in at its set site). Replaces the full-arena scan
     // in borrow_dead_after; answers are identical by construction.
     pub last_use: Vector<NodeId>,
     pub last_use_built: bool,
-    // TC-5: presence bitset mirroring moved[0..nmoved] (bit index = decl NodeId), so is_moved is
+    // Presence bitset mirroring moved[0..nmoved] (bit index = decl NodeId), so is_moved is
     // O(1) per identifier. Kept in sync at every moved[] mutation site.
     pub moved_bits: Vector<u64>,
-    // TC-6: (module<<32|decl) -> packed (module<<32|extend) of the type's Free extend (0 = none).
+    // (module<<32|decl) -> packed (module<<32|extend) of the type's Free extend (0 = none).
     // Same shape as codegen's CG-3 memo; the first full scan already interned everything the
     // repeat scans would, so pool order is unchanged.
     pub free_ext_memo: Map<u64, u64>,
@@ -328,16 +328,16 @@ pub struct TypeChecker<'a> {
     // Per (TypeId, depth 0..4) `tc_carries_borrow_rec` result, same encoding; only computations
     // that never touched a TYPE_FUNCTION are cached (closure answers move under the walk).
     pub carries_borrow_memo: Vector<i8>,
-    // TC-8: (module<<32|method) -> enclosing extend/interface item (NODE_NONE misses included).
+    // (module<<32|method) -> enclosing extend/interface item (NODE_NONE misses included).
     pub encl_ext_memo: Map<u64, NodeId>,
     pub encl_trait_memo: Map<u64, NodeId>,
-    // TC-7: dyn-fn canonicalization worklist; pool indices of TYPE_DYN-over-fn entries, collected
+    // Dyn-fn canonicalization worklist; pool indices of TYPE_DYN-over-fn entries, collected
     // incrementally (each pool index scanned once); list order == pool order == old rescan order.
     pub dynfn_list: Vector<TypeId>,
     pub dynfn_scan: TypeId,
-    // TC-9: format helpers are marked used once per module, not once per print call.
+    // Format helpers are marked used once per module, not once per print call.
     pub fmt_marked: bool,
-    // TC-11: (target, name-content, query kind) -> packed DefId (module<<32|node), misses included
+    // (target, name-content, query kind) -> packed DefId (module<<32|node), misses included
     // (node == NODE_NONE). Valid for the whole check: the ext scope, ASTs and self.cur_module() (the
     // privacy filter input) are all fixed per checker. mark_method_used is re-fired on method hits
     // (idempotent set), so used-lint marking is unchanged.
@@ -347,10 +347,10 @@ pub struct TypeChecker<'a> {
     /// The receiver type the last aggregate lookup resolved on: what tc_mark_method_used pairs a method
     /// with, since the lookups themselves are keyed by the receiver's DECL and never carry its arguments.
     pub mark_recv: TypeId,
-    // TC-12: tc_peel_target memo, (module<<32|node) -> packed DefId. The first peel does the
+    // Tc_peel_target memo, (module<<32|node) -> packed DefId. The first peel does the
     // named_type_of interning; repeats re-derived the same DefId from frozen inputs.
     pub peel_memo: Map<u64, u64>,
-    // TC-13: foreign generic-instance lowering memo, (module<<32|node) -> current-pool TypeId,
+    // Foreign generic-instance lowering memo, (module<<32|node) -> current-pool TypeId,
     // HEAVY NODES ONLY (type paths with generic args; anything cheaper loses to the hash probe).
     // Foreign lowering is context-free (resolution_def/builtin_of_decl/const-eval only; Self and
     // generic params lower to identity types, substitution happens in callers). DIAGNOSTICS GATE:
@@ -361,7 +361,7 @@ pub struct TypeChecker<'a> {
     // caching per (module, TypeId) makes the DEEP structural check O(1) after first use (it runs on
     // every method call and every binding/return). 1 = carries, 0 = does not.
     pub carries_memo: Map<u64, u8>,
-    // TC-10: prelude lookup hits resolved once at construction (prelude_lookup is a linear scan).
+    // Prelude lookup hits resolved once at construction (prelude_lookup is a linear scan).
     pub ph_str: loader::LookupHit,
     pub ph_slice: loader::LookupHit,
     pub ph_slicemut: loader::LookupHit,
@@ -420,14 +420,6 @@ pub const fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
         return false;
     }
     return unsafe cstring::memcmp(sa.ptr() + a.start as usize, sb.ptr() + b.start as usize, la as usize) == 0;
-}
-
-const fn builtin_name(b: BuiltinType) str<'static> {
-    return bt_name(b);
-}
-
-const fn builtin_of(src: str, s: tok::Span) i32 {
-    return bt_of_name(src, s);
 }
 
 const fn bt_is_int(b: BuiltinType) bool {
@@ -706,9 +698,6 @@ extend TypeChecker {
     /// The interned record of `x` in the current module's pool.
     pub const fn type_at(self: &Self, x: TypeId) &Ty {
         return self.cur_ast().type_at(x);
-    }
-    const fn at_not_fn(self: &Self, x: TypeId) bool {
-        return self.type_at(x).kind != TypeKind::TYPE_FUNCTION;
     }
 
     const fn is_bool(self: &Self, x: TypeId) bool {
@@ -1563,12 +1552,7 @@ pub fn render_type_into(
         return;
     }
     if ty.kind == TypeKind::TYPE_BUILTIN {
-        unsafe stdio::snprintf(
-            buf,
-            cap,
-            "%s".ptr() as *const char,
-            builtin_name(ty.as_data.builtin).ptr() as *const char,
-        );
+        unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, bt_name(ty.as_data.builtin).ptr() as *const char);
     } else if ty.kind == TypeKind::TYPE_NEVER {
         unsafe stdio::snprintf(buf, cap, "%s".ptr() as *const char, "never".ptr() as *const char);
     } else if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE {
@@ -2591,7 +2575,7 @@ extend TypeChecker {
             }
             return self.named_type_of(d.module, d.node);
         }
-        let b = builtin_of(self.source, self.name_span(id));
+        let b = bt_of_name(self.source, self.name_span(id));
         if b >= 0 {
             return Ast::builtin(b as BuiltinType);
         }
@@ -2819,7 +2803,7 @@ extend TypeChecker {
 
     /// Lower a type node of module `m` to a TypeId interned in the CURRENT module's pool: the current
     /// module goes through resolve_type's per-node cache, foreign modules through the memoized
-    /// context-free lowering (TC-13).
+    /// Context-free lowering.
     pub fn lower_type_in(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
         if self.package == null || m == self.cur_module() {
             return self.resolve_type(id);
@@ -2827,7 +2811,7 @@ extend TypeChecker {
         if id == NODE_NONE {
             return TYPE_NONE;
         }
-        // TC-13: memoized foreign lowering with the diagnostics gate. Only generic-instance
+        // Memoized foreign lowering with the diagnostics gate. Only generic-instance
         // paths take the memo: they re-lower every argument and probe the instance maps, so a
         // hash probe wins; plain paths/builtins are CHEAPER than the probe itself (measured:
         // an unconditional memo made typechecking 32% slower).
@@ -2928,7 +2912,7 @@ extend TypeChecker {
             let mut b: i32 = -1;
             if parts.len != 0 {
                 let p0 = unsafe a.list(parts)[0];
-                b = builtin_of(self.mod_src(m), a.at_const(p0).as_data.name.text);
+                b = bt_of_name(self.mod_src(m), a.at_const(p0).as_data.name.text);
             }
             if b >= 0 {
                 return Ast::builtin(b as BuiltinType);
@@ -3141,7 +3125,7 @@ extend TypeChecker {
                         }
                     }
                 } else if parts.len > 0 {
-                    let b = builtin_of(self.source, self.name_span(unsafe a.list(parts)[0]));
+                    let b = bt_of_name(self.source, self.name_span(unsafe a.list(parts)[0]));
                     if b >= 0 {
                         result = Ast::builtin(b as BuiltinType);
                     } else {
@@ -3213,7 +3197,7 @@ extend TypeChecker {
 
     fn tc_intern_dynfn(self: &mut Self, m: ModuleId, sig: NodeId, qual: TypeQualifier) TypeId {
         let mysig = self.lower_type_in(m, sig);
-        // TC-7: candidates come from dynfn_list instead of a full pool rescan. New pool entries
+        // Candidates come from dynfn_list instead of a full pool rescan. New pool entries
         // (including ones interned by the compares below) are absorbed before each compare, so the
         // candidate sequence is exactly the old in-order scan's.
         let mut idx: usize = 0;
@@ -3540,9 +3524,6 @@ extend TypeChecker {
         }
         return self.n_ext_scope;
     }
-    const fn ext_scope_at(self: &Self, i: i32) ModuleId {
-        return self.ext_scope[i as usize];
-    }
 
     // Build (once) module `mm`'s list of top-level EXTEND item ids. No type interning happens here, so it is
     // safe to build lazily at any point during type-checking.
@@ -3568,19 +3549,13 @@ extend TypeChecker {
             }
         }
     }
-    const fn ext_items_len(self: &Self, mm: ModuleId) usize {
-        return self.ext_items[mm as usize].len();
-    }
-    const fn ext_items_at(self: &Self, mm: ModuleId, i: usize) NodeId {
-        return self.ext_items[mm as usize][i];
-    }
 
     /// The type-identity an extend's target dispatches on (peeling a transparent alias).
     pub fn tc_peel_target(self: &mut Self, tg: DefId) DefId {
         if tg.node == NODE_NONE {
             return tg;
         }
-        // TC-12: peel is a pure function of frozen decls; the uncached path's named_type_of
+        // Peel is a pure function of frozen decls; the uncached path's named_type_of
         // interning happens on the first peel, so pool order is unchanged.
         let pk = tg.module as u64 << 32 | tg.node as u64;
         switch self.peel_memo.get(&pk) {
@@ -3841,7 +3816,7 @@ extend TypeChecker {
     // Find a method named `name`/`lit` in an extend of (m,decl); marks it used. Searches the type's home
     // module, then the current module + imports.
     fn find_method_impl(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, lit: str) DefId {
-        // TC-11: memoized by (target, name content), misses included; a hit re-fires the
+        // Memoized by (target, name content), misses included; a hit re-fires the
         // idempotent mark_method_used exactly as the scan's hit path did. Only span-form queries
         // are memoized: a span slices self.source (stable for the checker's life), while a caller's
         // `lit` may view a stack buffer (e.g. dyn_coerce_alloc) that dies before the next lookup.
@@ -3869,7 +3844,7 @@ extend TypeChecker {
         while s < ni {
             let mut mm = m;
             if s >= 0 {
-                mm = self.ext_scope_at(s);
+                mm = self.ext_scope[s as usize];
             }
             if s >= 0 && mm == m {
                 s = s + 1;
@@ -3877,9 +3852,9 @@ extend TypeChecker {
             }
             self.ensure_ext_items(mm);
             let a = self.mod_ast(mm);
-            let ne = self.ext_items_len(mm);
+            let ne = self.ext_items[mm as usize].len();
             for i in 0..ne {
-                let iid = self.ext_items_at(mm, i);
+                let iid = self.ext_items[mm as usize][i];
                 let it = a.at_const(iid);
                 if it.as_data.extend_def.target_type != NODE_NONE {
                     let tg = self.tc_peel_target(a.resolution_def(it.as_data.extend_def.target_type));
@@ -3941,7 +3916,7 @@ extend TypeChecker {
         while s < ni {
             let mut mm = m;
             if s >= 0 {
-                mm = self.ext_scope_at(s);
+                mm = self.ext_scope[s as usize];
             }
             if s >= 0 && mm == m {
                 s = s + 1;
@@ -3949,9 +3924,9 @@ extend TypeChecker {
             }
             self.ensure_ext_items(mm);
             let a = self.mod_ast(mm);
-            let ne = self.ext_items_len(mm);
+            let ne = self.ext_items[mm as usize].len();
             for i in 0..ne {
-                let iid = self.ext_items_at(mm, i);
+                let iid = self.ext_items[mm as usize][i];
                 let it = a.at_const(iid);
                 if it.as_data.extend_def.target_type == NODE_NONE {
                     continue;
@@ -4358,7 +4333,7 @@ extend TypeChecker {
     }
 
     fn find_assoc_const(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span) DefId {
-        // TC-11 (kind 1): same memo, no used-marking on this query family.
+        // Kind 1: same memo, no used-marking on this query family.
         let mq = MQKey { m: m, decl: decl, kind: 1, name: self.source.slice(name.start as usize, name.end as usize) };
         switch self.method_memo.get(&mq) {
             Some(v) => {
@@ -4376,7 +4351,7 @@ extend TypeChecker {
         while s < ni {
             let mut sm = m;
             if s >= 0 {
-                sm = self.ext_scope_at(s);
+                sm = self.ext_scope[s as usize];
             }
             if s >= 0 && sm == m {
                 s = s + 1;
@@ -4384,9 +4359,9 @@ extend TypeChecker {
             }
             self.ensure_ext_items(sm);
             let a = self.mod_ast(sm);
-            let ne = self.ext_items_len(sm);
+            let ne = self.ext_items[sm as usize].len();
             for i in 0..ne {
-                let iid = self.ext_items_at(sm, i);
+                let iid = self.ext_items[sm as usize][i];
                 let it = a.at_const(iid);
                 if it.as_data.extend_def.generics.len == 0 {
                     let tg = self.tc_peel_target(a.resolution_def(it.as_data.extend_def.target_type));
@@ -4420,7 +4395,7 @@ extend TypeChecker {
         while s < ni {
             let mut m = tmod;
             if s >= 0 {
-                m = self.ext_scope_at(s);
+                m = self.ext_scope[s as usize];
             }
             if s >= 0 && m == tmod {
                 s = s + 1;
@@ -4428,9 +4403,9 @@ extend TypeChecker {
             }
             self.ensure_ext_items(m);
             let a = self.mod_ast(m);
-            let ne = self.ext_items_len(m);
+            let ne = self.ext_items[m as usize].len();
             for i in 0..ne {
-                let iid = self.ext_items_at(m, i);
+                let iid = self.ext_items[m as usize][i];
                 let it = a.at_const(iid);
                 if it.as_data.extend_def.interface_type != NODE_NONE && it.as_data.extend_def.target_type != NODE_NONE {
                     let tr = a.resolution_def(it.as_data.extend_def.interface_type);
@@ -4483,7 +4458,7 @@ extend TypeChecker {
     }
 
     fn find_default_method(self: &mut Self, tmod: ModuleId, tdecl: NodeId, name: tok::Span) DefId {
-        // TC-11 (kind 2): same memo; find_interface_method reads only frozen interface bodies.
+        // Kind 2: same memo; find_interface_method reads only frozen interface bodies.
         let mq = MQKey {
             m: tmod,
             decl: tdecl,
@@ -4507,7 +4482,7 @@ extend TypeChecker {
         while s < ni {
             let mut m = tmod;
             if s >= 0 {
-                m = self.ext_scope_at(s);
+                m = self.ext_scope[s as usize];
             }
             if s >= 0 && m == tmod {
                 s = s + 1;
@@ -4515,9 +4490,9 @@ extend TypeChecker {
             }
             self.ensure_ext_items(m);
             let a = self.mod_ast(m);
-            let ne = self.ext_items_len(m);
+            let ne = self.ext_items[m as usize].len();
             for i in 0..ne {
-                let iid = self.ext_items_at(m, i);
+                let iid = self.ext_items[m as usize][i];
                 let it = a.at_const(iid);
                 if it.as_data.extend_def.interface_type == NODE_NONE {
                     continue;
@@ -4555,7 +4530,7 @@ extend TypeChecker {
         while s < ni {
             let mut m = tmod;
             if s >= 0 {
-                m = self.ext_scope_at(s);
+                m = self.ext_scope[s as usize];
             }
             if s >= 0 && m == tmod {
                 s = s + 1;
@@ -4563,9 +4538,9 @@ extend TypeChecker {
             }
             self.ensure_ext_items(m);
             let a = self.mod_ast(m);
-            let ne = self.ext_items_len(m);
+            let ne = self.ext_items[m as usize].len();
             for i in 0..ne {
-                let iid = self.ext_items_at(m, i);
+                let iid = self.ext_items[m as usize][i];
                 let it = a.at_const(iid);
                 if it.as_data.extend_def.interface_type != NODE_NONE {
                     let tg = self.tc_peel_target(a.resolution_def(it.as_data.extend_def.target_type));
@@ -5770,7 +5745,7 @@ extend TypeChecker {
         if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) {
             return false;
         }
-        // TC-6: the (first) Free extend of a (module, decl) is a parse-time fact; memoize it and
+        // The (first) Free extend of a (module, decl) is a parse-time fact; memoize it and
         // re-run only the per-instance bound check below. 0 = "no Free extend".
         let key = om as u64 << 32 | od as u64;
         let mut fm: ModuleId = 0;
@@ -5793,7 +5768,7 @@ extend TypeChecker {
             while s < ni && !have {
                 let mut m = om;
                 if s >= 0 {
-                    m = self.ext_scope_at(s);
+                    m = self.ext_scope[s as usize];
                 }
                 if s >= 0 && m == om {
                     s = s + 1;
@@ -5801,10 +5776,10 @@ extend TypeChecker {
                 }
                 self.ensure_ext_items(m);
                 let a = self.mod_ast(m);
-                let ne = self.ext_items_len(m);
+                let ne = self.ext_items[m as usize].len();
                 let mut i: usize = 0;
                 while i < ne && !have {
-                    let iid = self.ext_items_at(m, i);
+                    let iid = self.ext_items[m as usize][i];
                     let it = a.at_const(iid);
                     if it.as_data.extend_def.interface_type != NODE_NONE && it.as_data.extend_def.target_type != NODE_NONE {
                         let tg = self.tc_peel_target(a.resolution_def(it.as_data.extend_def.target_type));
@@ -6010,7 +5985,7 @@ extend TypeChecker {
         while s < ni {
             let mut mm = m;
             if s >= 0 {
-                mm = self.ext_scope_at(s);
+                mm = self.ext_scope[s as usize];
             }
             if s >= 0 && mm == m {
                 s = s + 1;
@@ -6018,9 +5993,9 @@ extend TypeChecker {
             }
             self.ensure_ext_items(mm);
             let a = self.mod_ast(mm);
-            let ne = self.ext_items_len(mm);
+            let ne = self.ext_items[mm as usize].len();
             for i in 0..ne {
-                let iid = self.ext_items_at(mm, i);
+                let iid = self.ext_items[mm as usize][i];
                 let it = a.at_const(iid);
                 if it.as_data.extend_def.target_type != NODE_NONE && it.as_data.extend_def.generics.len == 0 {
                     let tg = self.tc_peel_target(a.resolution_def(it.as_data.extend_def.target_type));
@@ -7362,7 +7337,7 @@ extend TypeChecker {
 
     // Drop the borrow(s) produced by `origin`: used where a reference is erased into a raw pointer.
 
-    /// TC-3: one pass over the resolution table records, per local decl, the LAST node that
+    /// One pass over the resolution table records, per local decl, the LAST node that
     /// resolves to it. "any use after `after`" then collapses to one compare. Typechecker-added
     /// resolutions never target a value binding except break/continue -> loop node (a `for` node IS
     /// its loop binding), which tc_note_resolution folds in at the set site.
@@ -10900,9 +10875,7 @@ extend TypeChecker {
                 let mut processed: u32 = 0; // bit k = slot k's obligations ran
                 let mut infer_ops: u32 = 0;
                 self.tc_infer_worklist(id, sp, fmod, fdecl, gens, &mut bound[0], g, &mut processed, &mut infer_ops);
-                // Expected-result inference (plan section 11 step 5): a parameter the arguments and
-                // bounds left unresolved takes evidence from the call's expected type against the
-                // declared result, before declared and literal defaults.
+                // Use the expected result to resolve parameters before applying defaults.
                 if want != TYPE_NONE && returns.len == 1 {
                     let mut unresolved = false;
                     for k in 0..g {
@@ -11087,9 +11060,7 @@ extend TypeChecker {
                     for k in 0..og {
                         obound[k as usize] = self.icx.sv.s_resolve(k as u32, it_conv_join);
                     }
-                    // Expected-result inference for a constructor (plan section 11 step 5): an
-                    // owner parameter the arguments left unresolved takes evidence from the call's
-                    // expected type against the declared result, before the declared defaults.
+                    // Use the expected result to resolve owner parameters before applying defaults.
                     if want != TYPE_NONE && returns.len == 1 {
                         let mut ounresolved = false;
                         for k in 0..og {
@@ -11203,7 +11174,7 @@ extend TypeChecker {
                             asp.end - asp.start,
                             format("a capturing closure cannot be passed as a bare 'fn' pointer"),
                         );
-                    } else if at == TYPE_NONE || self.at_not_fn(at) || !self.fn_compatible_subst(
+                    } else if at == TYPE_NONE || self.type_at(at).kind != TypeKind::TYPE_FUNCTION || !self.fn_compatible_subst(
                         pt,
                         at,
                         &gparams[0],
@@ -12018,7 +11989,7 @@ extend TypeChecker {
             bmod = b.module;
             bdecl = b.node;
             if bdecl == NODE_NONE && self.package != null {
-                let bb = builtin_of(self.source, a.at_const(obj).span);
+                let bb = bt_of_name(self.source, a.at_const(obj).span);
                 let mut bnd = NODE_NONE;
                 if bb >= 0 {
                     bnd = self.package.builtin_decl(bb as BuiltinType);
@@ -15521,9 +15492,9 @@ extend TypeChecker {
             }
             self.ensure_ext_items(it.module);
             let ma = self.mod_ast(it.module);
-            let ne = self.ext_items_len(it.module);
+            let ne = self.ext_items[it.module as usize].len();
             for i in 0..ne {
-                let iid = self.ext_items_at(it.module, i);
+                let iid = self.ext_items[it.module as usize][i];
                 let itn = ma.at_const(iid);
                 // A plain generic extend's methods are instantiated per (instance, method) pair instead,
                 // by seed_mono_body_instances: closing their signatures for every instance is what a
@@ -15806,43 +15777,6 @@ extend TypeChecker {
     /// Print the accumulated diagnostics to stderr.
     pub fn log_errors(self: &Self) {
         self.errors.log();
-    }
-}
-
-extend TypeChecker as Free {
-    pub fn free(self: &mut Self) {
-        self.icx.free();
-        self.ext_scope.free();
-        self.ext_items.free();
-        self.len_reported.free();
-        self.free_derive_memo.free();
-        self.derive_busy.free();
-        self.mut_used.free();
-        self.ext_items_built.free();
-        self.binding_depth.free();
-        self.last_use.free();
-        self.moved_bits.free();
-        self.free_ext_memo.free();
-        self.type_free_memo.free();
-        self.carries_borrow_memo.free();
-        self.encl_ext_memo.free();
-        self.encl_trait_memo.free();
-        self.method_memo.free();
-        self.method_all_memo.free();
-        self.method_all_pool.free();
-        self.peel_memo.free();
-        self.lower_memo.free();
-        self.dynfn_list.free();
-        self.rv_pool.free();
-        self.rv_of.free();
-        self.arity_memo.free();
-        self.variance_of.free();
-        self.variance_wip.free();
-        self.attributable_memo.free();
-        self.lt_region.free();
-        self.outlives.free();
-        self.carries_memo.free();
-        self.errors.free();
     }
 }
 

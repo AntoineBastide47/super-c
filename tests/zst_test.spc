@@ -1,4 +1,4 @@
-// Zero-sized-type elision (Phase 10.5): semantic size/alignment/offsets are unchanged while the
+// Zero-sized-type elision: semantic size/alignment/offsets are unchanged while the
 // generated C carries NO storage for a ZST: no empty struct definition, no member, no local, no
 // parameter, no element bytes. These are end-to-end build+run oracles: each program checks the
 // SEMANTIC contract (sizes, drop counts, lengths, reference validity) that elision must preserve,

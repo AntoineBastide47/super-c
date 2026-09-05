@@ -205,12 +205,6 @@ pub struct GlueEnv {
     pub subs: Vector<mbe::MSub>,
 }
 
-extend GlueEnv as Free {
-    pub fn free(self: &mut Self) {
-        self.subs.free();
-    }
-}
-
 /// One static/const definition demanded by an emitted body, keyed for the instance TU.
 pub struct StatRef {
     pub em: ModuleId,
@@ -248,70 +242,6 @@ fn body_has_safepoint(b: &ir::CoreBody) bool {
         }
     }
     return false;
-}
-
-extend CEmit as Free {
-    pub fn free(self: &mut Self) {
-        self.out.free();
-        self.mg.free();
-        self.demand.free();
-        self.glue_envs.free();
-        self.cap_names.free();
-        self.aux.free();
-        self.env_fwd.free();
-        self.env_skip.free();
-        self.env_hashes.free();
-        self.cur_name.free();
-        self.stat_decls.free();
-        self.fn_attrs.free();
-        self.blk_defs.free();
-        self.blk_seen.free();
-        self.stat_seen.free();
-        self.stat_items.free();
-        self.glue.free();
-        self.glue_seen.free();
-        self.extern_protos.free();
-        self.extern_seen.free();
-        self.dyn_defs.free();
-        self.dyn_def_seen.free();
-        self.dyn_tabs.free();
-        self.dyn_tab_seen.free();
-        self.dyn_decls.free();
-        self.ti_reqs.free();
-        self.ti_seen.free();
-        self.ext_backed.free();
-        self.sent_decls.free();
-        self.sent_defs.free();
-        self.sent_seen.free();
-        self.sx_emitted.free();
-        self.sx_lbl.free();
-        self.sx_coal.free();
-        self.sx_name.free();
-        self.sx_used.free();
-        self.sx_inline.free();
-        self.sx_fuse.free();
-        self.sx_declared.free();
-        self.sx_call_fwd.free();
-        self.sx_call_str.free();
-        self.line_pool.free();
-        self.line_off.free();
-        self.sym_memo.free();
-        self.scratch.free();
-        self.cf_pool.free();
-        self.u32_pool.free();
-        self.bool_pool.free();
-        self.decl_memo.free();
-        self.decl_txt.free();
-        self.decl_mode.free();
-        self.sx_reserved.free();
-        self.sx_assigned.free();
-        self.demand_seen.free();
-        self.ti_memo2.free();
-        self.tid_start.free();
-        self.tmod_start.free();
-        self.tid_pool.free();
-        self.tmod_pool.free();
-    }
 }
 
 extend CEmit {
@@ -6581,6 +6511,19 @@ extend CEmit {
                 dst.push_string(&impl_sym);
                 return true;
             }
+            if mname8 == "free" {
+                let interface_decl = self.mg.in_interface(callee.module, callee.node);
+                assert(interface_decl != NODE_NONE);
+                let interface_name = ca8.at_const(interface_decl).as_data.interface_def.name;
+                let interface_span = ca8.at_const(interface_name).as_data.name.text;
+                if msrc8.slice(interface_span.start as usize, interface_span.end as usize) == "Free" {
+                    if !self.free_expr(rm6, rt6, &mut impl_sym) {
+                        return false;
+                    }
+                    dst.push_string(&impl_sym);
+                    return true;
+                }
+            }
         }
         let y7 = *self.p().module_ast_const(rm6).type_at(rt6);
         if y7.kind == TypeKind::TYPE_BUILTIN {
@@ -9895,9 +9838,13 @@ extend CEmit {
         for i in 0..ms2.len {
             let fid = unsafe da.list(ms2)[i as usize];
             let fk = da.at_const(fid).kind;
-            // Tuple members are bare type nodes; type_of reads either uniformly.
             if fk == NodeKind::NODE_FIELD || is_tuple {
-                let fty = da.type_of(fid);
+                let type_node = if is_tuple {
+                    fid;
+                } else {
+                    da.at_const(fid).as_data.field.ty;
+                };
+                let fty = da.type_of(type_node);
                 if fty != TYPE_NONE {
                     let mut frm = am;
                     let mut frt = fty;
@@ -10084,7 +10031,12 @@ extend CEmit {
                 if !is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
                     continue;
                 }
-                let fty = da.type_of(fid);
+                let type_node = if is_tuple {
+                    fid;
+                } else {
+                    da.at_const(fid).as_data.field.ty;
+                };
+                let fty = da.type_of(type_node);
                 if fty == TYPE_NONE {
                     continue;
                 }

@@ -29,14 +29,6 @@ pub struct Doc {
     pub version: i64,
 }
 
-extend Doc as Free {
-    pub fn free(self: &mut Self) {
-        self.uri.free();
-        self.path.free();
-        self.txt.free();
-    }
-}
-
 /// One compiled unit: the manifest root (build.toml's entry), a per-file root for an open doc outside
 /// the manifest closure, or the workspace-batch root (sweep=true, origin ""): one shared package for
 /// every closed .spc no other package owns, the `super-c lint` one-package recipe. Per-file sweep
@@ -54,20 +46,6 @@ pub struct Root {
     pub diags: Vector<analysis::DiagRec>, // last build's records (codeAction reads the fixes)
     pub built: bool,
     pub last_used: u64, // server tick of the last build or input touching this root (LRU eviction order)
-}
-
-extend Root as Free {
-    pub fn free(self: &mut Self) {
-        self.ws.free();
-        self.root_file.free();
-        self.root_dir.free();
-        self.alt_dir.free();
-        self.origin.free();
-        self.members.free();
-        self.pkg.free();
-        self.files.free();
-        self.diags.free();
-    }
 }
 
 /// Whole-process server state: open documents, built roots, negotiated client capabilities and the
@@ -105,24 +83,6 @@ pub struct Server {
     pub tok_ids: Vector<u64>, // ... the resultId of the last full response ...
     pub tok_data: Vector<Vector<i64>>, // ... and its encoded token data
     pub tok_next: u64, // monotonically increasing semantic-token resultId source
-}
-
-extend Server as Free {
-    pub fn free(self: &mut Self) {
-        self.docs.free();
-        self.roots.free();
-        self.published.free();
-        self.ws_root.free();
-        self.folders.free();
-        self.out_folders.free();
-        self.out_skips.free();
-        self.canceled_tick.free();
-        self.std_dir.free();
-        self.canceled.free();
-        self.tok_uris.free();
-        self.tok_ids.free();
-        self.tok_data.free();
-    }
 }
 
 fn dir_of(path: str) String {
@@ -237,13 +197,6 @@ fn range_json(src: str, ls: &Vector<u32>, start: u32, len: u32) json::JSON {
 struct PubSet {
     pub uris: Vector<String>,
     pub arrs: Vector<json::JSON>,
-}
-
-extend PubSet as Free {
-    pub fn free(self: &mut Self) {
-        self.uris.free();
-        self.arrs.free();
-    }
 }
 
 extend PubSet {
@@ -1817,7 +1770,7 @@ extend Server {
             },
             None => {},
         };
-        let d = feat::def_ref(&self.roots.at(h.r).pkg, h.m, h.off);
+        let d = feat::def_at(&self.roots.at(h.r).pkg, h.m, h.off);
         let mut hits = Vector::<RefHit>::new();
         if d.node != astn::NODE_NONE {
             self.collect_refs(h.r, d, include_decl, &mut hits);
@@ -1853,7 +1806,7 @@ extend Server {
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
-        let d = feat::def_ref(pkg, h.m, h.off);
+        let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -1897,7 +1850,7 @@ extend Server {
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
-        let d = feat::def_ref(pkg, h.m, h.off);
+        let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -3560,7 +3513,7 @@ extend Server {
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
-        let mut d = feat::def_ref(pkg, h.m, h.off);
+        let mut d = feat::def_at(pkg, h.m, h.off);
         let named_fn = d.node != astn::NODE_NONE && unsafe (&*pkg.module_ast_const(d.module)).at_const(d.node).kind == astn::NodeKind::NODE_FUNCTION;
         if !named_fn {
             // Not on a function name: the function whose body contains the cursor.
@@ -3584,7 +3537,7 @@ extend Server {
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
-        let d = feat::def_ref(pkg, h.m, h.off);
+        let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -3636,7 +3589,7 @@ extend Server {
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
-        let d = feat::def_ref(pkg, h.m, h.off);
+        let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -3679,7 +3632,7 @@ extend Server {
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
-        let d = feat::def_ref(pkg, h.m, h.off);
+        let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -3714,7 +3667,7 @@ extend Server {
             return;
         }
         let pkg = &self.roots.at(h.r).pkg;
-        let d = feat::def_ref(pkg, h.m, h.off);
+        let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -3728,7 +3681,7 @@ extend Server {
         for i in 0..locs.len() {
             let l = locs.at(i);
             // The name span resolves back to the declaration it names.
-            let rd = feat::def_ref(pkg, l.module as usize, l.start);
+            let rd = feat::def_at(pkg, l.module as usize, l.start);
             if rd.node == astn::NODE_NONE {
                 continue;
             }

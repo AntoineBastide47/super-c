@@ -36,12 +36,6 @@ pub struct ClosureScope {
     pub caps: Vector<NodeId>,
 }
 
-extend ClosureScope as Free {
-    pub fn free(self: &mut Self) {
-        self.caps.free();
-    }
-}
-
 /// Single-module resolver. Mutates the module's Ast IN PLACE through a borrowed reference: the Ast
 /// never leaves its `Package.modules` slot, so package-level lookups that land back on this module
 /// read the live tree with no override indirection.
@@ -1673,13 +1667,8 @@ extend Resolver {
         self.errors.log();
     }
 
-    // A decl is "used" when any node's resolution points at it. Only lets, and params of fns/closures
-    // that have bodies, are considered; `self` and `_`-prefixed names opt out.
-    const fn lint_name_span(self: &Self, name: NodeId) tok::Span {
-        return self.ast.at_const(name).as_data.name.text;
-    }
     fn lint_warn_unused(self: &mut Self, what: str, name: NodeId) {
-        let sp = self.lint_name_span(name);
+        let sp = self.name_span(name);
         if sp.end <= sp.start {
             return;
         }
@@ -1696,6 +1685,8 @@ extend Resolver {
         );
         self.errors.fix(sp.start, sp.start, 1);
     }
+    // A decl is used when a node's resolution points at it. Only lets and parameters of
+    // functions with bodies are checked; `self` and `_`-prefixed names opt out.
     fn lint_unused(self: &mut Self) {
         let n = self.ast.nodes.len();
         let mut used = Vector::<bool>::new();
@@ -1815,12 +1806,12 @@ extend Resolver {
     const fn ds_decl_name(self: &Self, decl: NodeId) tok::Span {
         let dn = self.ast.at_const(decl);
         if dn.kind == NodeKind::NODE_LET {
-            return self.lint_name_span(dn.as_data.let_stmt.name);
+            return self.name_span(dn.as_data.let_stmt.name);
         }
         if dn.kind == NodeKind::NODE_PARAMETER {
-            return self.lint_name_span(dn.as_data.parameter.name);
+            return self.name_span(dn.as_data.parameter.name);
         }
-        return self.lint_name_span(dn.as_data.pattern.name);
+        return self.name_span(dn.as_data.pattern.name);
     }
 
     fn lint_dead_stores(self: &mut Self) {
@@ -1967,19 +1958,5 @@ extend Resolver {
             }
             i = i + 1;
         }
-    }
-}
-
-extend Resolver as Free {
-    pub fn free(self: &mut Self) {
-        self.symbols.free();
-        self.symbol_previous.free();
-        self.scope_starts.free();
-        self.symbol_index.free();
-        self.closures.free();
-        self.mod_names.free();
-        self.glob_mids.free();
-        self.errors.free();
-        self.lint_decls.free();
     }
 }

@@ -1399,6 +1399,54 @@ fn auto_derive_free() {
     assert(r2.out_has("cannot move a field out of a value implementing Free"));
 }
 
+@test
+fn auto_derive_free_in_generic_drop() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "owned.spc",
+        M"(extern "C" { fn putchar(c: i32) i32; }
+pub struct Trace { pub text: String, pub tag: i32 }
+extend Trace as Free {
+    pub fn free(self: &mut Trace) {
+        unsafe putchar(self.tag);
+        self.text.free();
+    }
+}
+pub fn trace(tag: i32) Trace {
+    return Trace { text: String::from_str("heap allocation beyond the small string capacity"), tag: tag };
+}
+pub struct Record { pub trace: Trace }
+pub enum Event { Empty, Live(Trace) }
+pub struct Wrapper<T> { pub value: T }
+)",
+    );
+    p.mkfile(
+        "main.spc",
+        M"(import owned;
+fn main() i32 {
+    {
+        let _value = Option::<owned::Record>::Some(owned::Record { trace: owned::trace(83) });
+    }
+    {
+        let _value = Option::<owned::Event>::Some(owned::Event::Live(owned::trace(69)));
+    }
+    {
+        let _value = Option::<owned::Wrapper<owned::Trace>>::Some(
+            owned::Wrapper::<owned::Trace> { value: owned::trace(71) });
+    }
+    return 0;
+}
+)",
+    );
+    let compiled = p.compile("main.spc");
+    assert(compiled.ok());
+    let linked = p.cc_build("");
+    assert(linked.ok());
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(run.ok());
+    assert(run.out_shows("SEG"));
+}
+
 // Cross-module language features: a public const, a public type alias used as a type, qualified struct
 // construction, and a local extension method on an imported type.
 @test
@@ -2154,6 +2202,118 @@ fn main() i32 {
     let r2 = q.compile("main.spc");
     assert(r2.ok());
     assert(!q.gen_has("main.c", "__sc_spc"), "a program that never launches gets no safepoints");
+}
+
+// The coroutine-reachability scan pins every call inside a launched body to a declaration; one callee it
+// cannot pin widens the scan, and every loop in the program pays a safepoint. An explicit `x.free()` on a
+// value whose destructor is synthesized resolves to no declaration: it is a drop, not an unpinned call.
+@test
+fn explicit_drop_in_a_task_keeps_safepoints_scoped() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+
+struct Bag {
+    pub items: Vector<i64>,
+}
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wa = wg.clone();
+    launch fn() {
+        let mut bag = Bag { items: Vector::<i64>::new() };
+        bag.items.push(1);
+        bag.free();
+        wa.done();
+    };
+    wg.wait();
+    rt::shutdown();
+    let mut t: i64 = 0;
+    for i in 0..10 {
+        t = t + i as i64;
+    }
+    return (t - 45) as i32;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(!p.gen_has("main.c", "__sc_spc"), "a loop outside every launched body gets no safepoint");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
+    assert(run.ok());
+}
+
+// The per-TU cache replays a module's emitted C while its own import closure is unchanged, but the
+// safepoints in that C follow coroutine reachability, which any module in the package can change: a
+// launched body added in main must reach the loop of a module main imports on the next build.
+@test
+fn tu_cache_follows_coroutine_reachability() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "work.spc",
+        M"(pub fn spin(n: i64) i64 {
+    let mut t: i64 = 0;
+    for i in 0..n {
+        t = t + i;
+    }
+    return t;
+}
+)",
+    );
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import work;
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wa = wg.clone();
+    launch fn() {
+        wa.done();
+    };
+    wg.wait();
+    rt::shutdown();
+    return (work::spin(10) - 45) as i32;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(!p.gen_has("work.c", "__sc_spc"), "a loop no launched body reaches gets no safepoint");
+    // The same module set and the same import closure for work.spc: only main's launched body changes.
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import work;
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wa = wg.clone();
+    launch fn() {
+        let _ = work::spin(10);
+        wa.done();
+    };
+    wg.wait();
+    rt::shutdown();
+    return (work::spin(10) - 45) as i32;
+}
+)",
+    );
+    let r2 = p.compile("main.spc");
+    assert(r2.ok());
+    assert(p.gen_has("work.c", "__sc_spc"), "the rebuilt program reaches the loop from a launched body");
 }
 
 // Blocking FFI: a worker thread belongs to the scheduler, so a call that blocks it; a

@@ -37,17 +37,6 @@ pub struct TuEmit {
     fwds: Map<u64, u64>, // forward-typedef'd names (deps discovered mid-DFS need one too)
 }
 
-extend TuEmit as Free {
-    pub fn free(self: &mut Self) {
-        self.mg.free();
-        self.out.free();
-        self.fwd2.free();
-        self.env_defined.free();
-        self.state.free();
-        self.fwds.free();
-    }
-}
-
 const fn fnv(s: str) u64 {
     let mut h = 1469598103934665603u64;
     for i in 0..s.len() {

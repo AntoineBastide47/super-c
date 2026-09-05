@@ -454,21 +454,3 @@ extend CoreBody {
         return self.blocks.len() as BlockId - 1;
     }
 }
-
-extend CoreBody as Free {
-    pub fn free(self: &mut Self) {
-        self.locals.free();
-        self.blocks.free();
-        self.statements.free();
-        self.places.free();
-        self.projections.free();
-        self.operands.free();
-        self.rvalues.free();
-        self.constants.free();
-        self.oper_pool.free();
-        self.dest_pool.free();
-        self.switch_pool.free();
-        self.targ_pool.free();
-        self.user_moves.free();
-    }
-}

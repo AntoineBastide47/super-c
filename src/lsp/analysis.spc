@@ -34,13 +34,6 @@ pub struct DiagRec {
     pub fix_text: String, // kind-3/4 payload (generated / replacement text); empty otherwise
 }
 
-extend DiagRec as Free {
-    pub fn free(self: &mut Self) {
-        self.msg.free();
-        self.fix_text.free();
-    }
-}
-
 // The editor-facing message for one structured record: the message's first line plus one "= note:"
 // line per attached note (its first line, trailing whitespace trimmed: notes carry fix hints worth
 // showing in the editor; a note's continuation lines are location blocks the editor renders itself).
@@ -74,68 +67,51 @@ fn rec_msg(e: &diag::Errors, d: &diag::Diagnostic) String {
 // Append every error/warning record in `e` as a DiagRec against module `m` (the records carry their
 // spans and note chains directly; nothing is parsed back out of rendered text).
 fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
-    for k in 0..e.errors.len() {
-        let mut fk: i32 = -1;
-        let mut fs: u32 = 0;
-        let mut ftx = String::new();
-        for j in 0..e.fixes.len() {
-            let f = *e.fixes.at(j);
-            if f.warn == (0x80000000 | k as u32) {
-                fk = f.kind;
-                fs = f.start;
-                if f.text != 0xFFFFFFFF && f.text as usize < e.fix_texts.len() {
-                    ftx = e.fix_texts.at(f.text as usize).clone();
+    for severity in 1u8..3u8 {
+        let records = if severity == 1 {
+            &e.errors;
+        } else {
+            &e.warns;
+        };
+        for k in 0..records.len() {
+            let fix_id = if severity == 1 {
+                0x80000000 | k as u32;
+            } else {
+                k as u32;
+            };
+            let mut fk: i32 = -1;
+            let mut fs: u32 = 0;
+            let mut fe: u32 = 0;
+            let mut ftx = String::new();
+            for j in 0..e.fixes.len() {
+                let f = *e.fixes.at(j);
+                if f.warn == fix_id {
+                    fk = f.kind;
+                    fs = f.start;
+                    if severity == 2 {
+                        fe = f.end;
+                    }
+                    if f.text != 0xFFFFFFFF && f.text as usize < e.fix_texts.len() {
+                        ftx = e.fix_texts.at(f.text as usize).clone();
+                    }
+                    break;
                 }
-                break;
             }
+            let d = records.at(k);
+            diags.push(
+                DiagRec {
+                    module: m,
+                    start: d.start,
+                    len: d.len,
+                    severity: severity,
+                    msg: rec_msg(e, d),
+                    fix_kind: fk,
+                    fix_start: fs,
+                    fix_end: fe,
+                    fix_text: ftx,
+                },
+            );
         }
-        let d = e.errors.at(k);
-        diags.push(
-            DiagRec {
-                module: m,
-                start: d.start,
-                len: d.len,
-                severity: 1,
-                msg: rec_msg(e, d),
-                fix_kind: fk,
-                fix_start: fs,
-                fix_end: 0,
-                fix_text: ftx,
-            },
-        );
-    }
-    for k in 0..e.warns.len() {
-        let mut fk: i32 = -1;
-        let mut fs: u32 = 0;
-        let mut fe: u32 = 0;
-        let mut ftx = String::new();
-        for j in 0..e.fixes.len() {
-            let f = *e.fixes.at(j);
-            if f.warn == k as u32 {
-                fk = f.kind;
-                fs = f.start;
-                fe = f.end;
-                if f.text != 0xFFFFFFFF && f.text as usize < e.fix_texts.len() {
-                    ftx = e.fix_texts.at(f.text as usize).clone();
-                }
-                // One quick fix per warning.
-                break;
-            }
-        }
-        let d = e.warns.at(k);
-        diags.push(
-            DiagRec {
-                module: m,
-                start: d.start,
-                len: d.len,
-                severity: 2,
-                msg: rec_msg(e, d),
-                fix_kind: fk,
-                fix_start: fs,
-                fix_end: fe,
-                fix_text: ftx,
-            },
-        );
     }
 }
 

@@ -86,18 +86,6 @@ pub struct Tuc {
     pub path: String,
 }
 
-extend Tuc as Free {
-    pub fn free(self: &mut Self) {
-        self.keys.free();
-        self.raw.free();
-        self.hit.free();
-        self.soff.free();
-        self.slen.free();
-        self.out.free();
-        self.path.free();
-    }
-}
-
 fn header_hash(p: &loader::Package, target: i32) u64 {
     let mut exe = PathBuf {};
     if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
@@ -198,6 +186,38 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
             }
         }
     }
+    // Coroutine and cancellation reachability are package-wide: a launched body in one module decides
+    // the safepoints and cancellation probes emitted in modules it never imports.
+    let mut reach = p.co_state as u64 | p.cancel_state as u64 << 8;
+    if p.cancel_used {
+        reach = reach | 1u64 << 16;
+    }
+    h = fnv_mix(h, reach);
+    for i in 0..p.co_spans.len() {
+        let row = p.co_spans.at(i);
+        h = fnv_mix(h, row.len() as u64);
+        for k in 0..row.len() {
+            h = fnv_mix(h, *row.at(k));
+        }
+    }
+    for i in 0..p.cancel_marks.len() {
+        let marks = p.cancel_marks.at(i);
+        h = fnv_mix(h, marks.len() as u64);
+        // Order-independent fold: the set's iteration order is not part of the key.
+        let mut acc: u64 = 0;
+        let mut it = marks.iter();
+        loop {
+            switch it.next() {
+                Some(e) => {
+                    acc = acc ^ fnv_mix(1469598103934665603u64, *e);
+                },
+                _ => {
+                    break;
+                },
+            };
+        }
+        h = fnv_mix(h, acc);
+    }
     return h;
 }
 
@@ -264,7 +284,7 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
 }
 
 /// Open the cache for this build: compute every live module's key, load the previous image from
-/// `gen_root`, and mark the modules whose sections still match. Off when SC_TU_CACHE=0.
+/// `gen_root`, and mark the modules whose sections still match. Off when SC_NO_TU_CACHE is set.
 pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: str) Tuc {
     let mut t = Tuc {
         on: false,
@@ -352,13 +372,6 @@ pub struct TtRec {
     pub memo: Map<u64, u64>, // (am << 32 | at) -> table index
     pub tab: String,
     pub count: u32,
-}
-
-extend TtRec as Free {
-    pub fn free(self: &mut Self) {
-        self.memo.free();
-        self.tab.free();
-    }
 }
 
 /// An empty type table.
@@ -711,7 +724,7 @@ extend Rd {
         return v;
     }
 
-    const fn r32(self: &mut Self) u32 {
+    pub const fn r32(self: &mut Self) u32 {
         if !self.ok || self.at + 4 > self.end {
             self.ok = false;
             return 0;
@@ -819,11 +832,6 @@ extend Rd {
             out.push(e);
         }
         return self.ok;
-    }
-
-    /// Read the event count that follows the type table.
-    pub const fn read_count(self: &mut Self) u32 {
-        return self.r32();
     }
 
     /// Read one journaled event into `ev` (its vectors are reused); false when the image is truncated.

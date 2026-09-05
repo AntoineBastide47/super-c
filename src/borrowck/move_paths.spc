@@ -30,17 +30,6 @@ pub struct MoveForest {
     pub parent: Vector<u32>, // per path: parent id (MP_NONE for a root)
 }
 
-extend MoveForest as Free {
-    pub fn free(self: &mut Self) {
-        self.paths.free();
-        self.local_root.free();
-        self.place_path.free();
-        self.place_cut.free();
-        self.leaf.free();
-        self.parent.free();
-    }
-}
-
 // Field identity lives in `sub` (the field decl node; `data` is IR_NONE on member places), variant
 // and index identity in `data`. Pack both under the kind tag.
 const fn elem_key(kind: u8, data: u32, sub: u32) u64 {

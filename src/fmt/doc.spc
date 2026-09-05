@@ -51,13 +51,6 @@ const fn wadd(x: u32, y: u32) u32 {
     return x + y;
 }
 
-extend DocPool as Free {
-    pub fn free(self: &mut Self) {
-        self.docs.free();
-        self.kids.free();
-    }
-}
-
 struct Renderer {
     pub col: i32,
     pub width: i32,

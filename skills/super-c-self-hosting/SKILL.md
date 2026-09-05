@@ -9,7 +9,7 @@ allowed-tools: Bash Read
 ## Agent checklist
 
 - Treat any gen-1 versus gen-2 diff as a correctness failure.
-- Use the clean-room fixpoint reference at the same filesystem path.
+- Follow the clean-room fixpoint reference: identical source and library paths, caches disabled.
 - Fix compiler defects instead of adding source workarounds.
 - Check bootstrap-tag ordering when parser or attribute syntax changes.
 

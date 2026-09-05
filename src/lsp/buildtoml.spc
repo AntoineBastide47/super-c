@@ -13,12 +13,6 @@ pub struct TomlDiag {
     pub msg: String,
 }
 
-extend TomlDiag as Free {
-    pub fn free(self: &mut Self) {
-        self.msg.free();
-    }
-}
-
 /// Validate `src` as a manifest. The build's own checker produces these, so the editor never disagrees
 /// with `super-c build` about what is wrong.
 pub fn diagnostics(src: str) Vector<TomlDiag> {
@@ -149,13 +143,6 @@ pub fn in_header(src: str, at: usize) bool {
 pub struct Item {
     pub label: String,
     pub doc: String,
-}
-
-extend Item as Free {
-    pub fn free(self: &mut Self) {
-        self.label.free();
-        self.doc.free();
-    }
 }
 
 /// What may be written at `at`: section names inside a `[...]` header, else the keys of the section in

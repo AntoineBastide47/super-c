@@ -22,13 +22,6 @@ pub struct JSONPair {
     pub value: JSON,
 }
 
-extend JSONPair as Free {
-    pub fn free(self: &mut Self) {
-        self.key.free();
-        self.value.free();
-    }
-}
-
 /// A JSON value tagged by `kind`; only the payload matching `kind` is meaningful, the rest stay empty.
 pub struct JSON {
     pub kind: u8,
@@ -338,14 +331,6 @@ extend JSON as Default {
     }
 }
 
-extend JSON as Free {
-    pub fn free(self: &mut Self) {
-        self.s.free();
-        self.arr.free();
-        self.obj.free();
-    }
-}
-
 fn dump_indent(out: &mut String, level: u32) {
     out.push_byte(b'\n');
     for k in 0..level * 2 {
@@ -452,15 +437,6 @@ struct JSONParser<'a> {
     pub found_data: bool,
     pub depth: usize,
     pub err: String, // first error message; empty = no error so far
-}
-
-extend JSONParser as Free {
-    pub fn free(self: &mut Self) {
-        self.stack.free();
-        self.pending_key.free();
-        self.candidate_key.free();
-        self.err.free();
-    }
 }
 
 extend JSONParser {

@@ -50,43 +50,6 @@ pub struct CFlow {
     s_work: Vector<u32>,
 }
 
-extend CFlow as Free {
-    pub fn free(self: &mut Self) {
-        self.thread.free();
-        self.reach.free();
-        self.rpo.free();
-        self.order.free();
-        self.preds.free();
-        self.pred_start.free();
-        self.pred_list.free();
-        self.idom.free();
-        self.tin.free();
-        self.tout.free();
-        self.ipdom.free();
-        self.is_header.free();
-        self.loop_follow.free();
-        self.loop_of.free();
-        self.loop_parent.free();
-        self.follow.free();
-        self.s_tdone.free();
-        self.s_onpath.free();
-        self.s_tpath.free();
-        self.s_state.free();
-        self.s_stack.free();
-        self.s_kidx.free();
-        self.s_post.free();
-        self.s_fill.free();
-        self.s_cnt.free();
-        self.s_cstart.free();
-        self.s_clist.free();
-        self.s_rrpo.free();
-        self.s_sinks.free();
-        self.s_inloop.free();
-        self.s_members.free();
-        self.s_work.free();
-    }
-}
-
 // A block that only forwards: no statements, an unconditional goto. Predecessors thread through it.
 fn trivial(b: &ir::CoreBody, x: u32) bool {
     let blk = b.blocks.at(x as usize);

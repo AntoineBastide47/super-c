@@ -161,12 +161,6 @@ extend InferenceContext {
     }
 }
 
-extend InferenceContext as Free {
-    pub fn free(self: &mut Self) {
-        self.sv.free();
-    }
-}
-
 /// Read-only access to published package state: module Asts, sources, and declaration lookup.
 /// A body job reads through this boundary only; it never mutates another module's state. The
 /// pointers borrow the Package (may be null for single-file checks without one).
@@ -849,28 +843,6 @@ extend Solver {
             let _ = self.bind(r, it_pub(best));
         }
         return best;
-    }
-}
-
-extend Solver as Free {
-    pub fn free(self: &mut Self) {
-        self.v_parent.free();
-        self.v_size.free();
-        self.v_binding.free();
-        self.c_ty.free();
-        self.c_bound.free();
-        self.c_origin.free();
-        self.locals.free();
-        self.lt_args.free();
-        self.log.free();
-        self.bounds.free();
-        self.cconflicts.free();
-        self.type_conflicts.free();
-        self.s_pd.free();
-        self.s_slot.free();
-        self.st_a.free();
-        self.st_b.free();
-        self.oc.free();
     }
 }
 

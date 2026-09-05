@@ -37,13 +37,6 @@ pub struct Schedule {
     pub concrete: bool, // every local type concrete: comparable against the emitter's decisions
 }
 
-extend Schedule as Free {
-    pub fn free(self: &mut Self) {
-        self.drops.free();
-        self.moves.free();
-    }
-}
-
 // Overwrite classification of an assignment target: 2 = fully tracked (dataflow decides),
 // 1 = the chain's only cuts are REFERENCE derefs (the checker guarantees an initialized
 // referent: overwrite frees unconditionally), 0 = raw-pointer or index storage (never
@@ -101,17 +94,6 @@ extend ElabCtx {
             scratch: Vector::<u32>::new(),
             sub: Vector::<u32>::new(),
         };
-    }
-}
-
-extend ElabCtx as Free {
-    pub fn free(self: &mut Self) {
-        self.sched.free();
-        self.mi.free();
-        self.di.free();
-        self.mm.free();
-        self.scratch.free();
-        self.sub.free();
     }
 }
 

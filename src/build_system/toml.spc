@@ -18,13 +18,6 @@ pub struct TomlPair {
     pub v: String,
 }
 
-extend TomlPair as Free {
-    pub fn free(self: &mut Self) {
-        self.k.free();
-        self.v.free();
-    }
-}
-
 /// A parsed value tagged by `kind` (TV_*): only the matching payload field is meaningful, the rest
 /// keep their empty defaults.
 pub struct TomlVal {
@@ -34,6 +27,16 @@ pub struct TomlVal {
     pub b: bool,
     pub arr: Vector<String>,
     pub tbl: Vector<TomlPair>,
+}
+
+// Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
+// symbol, and a synthesized destructor has none.
+extend TomlVal as Free {
+    pub fn free(self: &mut Self) {
+        self.s.free();
+        self.arr.free();
+        self.tbl.free();
+    }
 }
 
 extend TomlVal {
@@ -49,14 +52,6 @@ extend TomlVal {
     }
 }
 
-extend TomlVal as Free {
-    pub fn free(self: &mut Self) {
-        self.s.free();
-        self.arr.free();
-        self.tbl.free();
-    }
-}
-
 /// One `key = value` under its (possibly empty) section; `at` is the key's byte offset for diagnostics.
 pub struct TomlItem {
     pub section: String,
@@ -65,28 +60,12 @@ pub struct TomlItem {
     pub val: TomlVal,
 }
 
-extend TomlItem as Free {
-    pub fn free(self: &mut Self) {
-        self.section.free();
-        self.key.free();
-        self.val.free();
-    }
-}
-
 struct Parser<'a> {
     pub src: str<'a>,
     pub i: usize,
     pub section: String,
     pub items: Vector<TomlItem>,
     pub errors: diag::Errors,
-}
-
-extend Parser as Free {
-    pub fn free(self: &mut Self) {
-        self.section.free();
-        self.items.free();
-        self.errors.free();
-    }
 }
 
 const fn is_key_byte(b: u8) bool {

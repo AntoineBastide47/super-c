@@ -108,10 +108,10 @@ fn resolved_at(p: &loader::Package, a: *const Ast, off: u32) DefId {
     return best;
 }
 
-// The resolved definition under `off` in module `mi`; DefId{0, NODE_NONE} when nothing resolves. A
-// cursor ON a declaration's own name resolves to that declaration (so rename/references work from the
-// definition site too).
-fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
+/// The resolved definition under `off` in module `mi`; DefId{0, NODE_NONE} when nothing resolves. A
+/// cursor ON a declaration's own name resolves to that declaration (so rename/references work from the
+/// definition site too).
+pub fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
     let a = mod_ast(p, mi);
     let mut d = resolved_at(p, a, off);
     if d.node == NODE_NONE && off > 0 {
@@ -528,13 +528,6 @@ pub struct CompItem {
     pub label: String,
     pub kind: i32,
     pub detail: String,
-}
-
-extend CompItem as Free {
-    pub fn free(self: &mut Self) {
-        self.label.free();
-        self.detail.free();
-    }
 }
 
 fn comp_push(out: &mut Vector<CompItem>, label: str, kind: i32, detail: String) {
@@ -1079,13 +1072,6 @@ pub struct Sym {
     pub parent: i32,
 }
 
-extend Sym as Free {
-    pub fn free(self: &mut Self) {
-        self.name.free();
-        self.detail.free();
-    }
-}
-
 fn sym_push(p: &loader::Package, mi: usize, out: &mut Vector<Sym>, id: NodeId, nm: NodeId, kind: i32, parent: i32) i32 {
     let a = mod_ast(p, mi);
     let name = name_str(p, mi, nm);
@@ -1202,12 +1188,6 @@ pub struct WsSym {
     pub end: u32,
 }
 
-extend WsSym as Free {
-    pub fn free(self: &mut Self) {
-        self.name.free();
-    }
-}
-
 const fn ascii_low(b: u8) u8 {
     if b >= b'A' && b <= b'Z' {
         return b + 32;
@@ -1267,13 +1247,6 @@ pub struct SigInfo {
     pub label: String,
     pub params: Vector<String>,
     pub active: i32,
-}
-
-extend SigInfo as Free {
-    pub fn free(self: &mut Self) {
-        self.label.free();
-        self.params.free();
-    }
 }
 
 /// Signature help for the call enclosing byte offset `off` of module `mi`: the callee's label, its
@@ -1589,12 +1562,6 @@ pub struct Hint {
     pub label: String,
 }
 
-extend Hint as Free {
-    pub fn free(self: &mut Self) {
-        self.label.free();
-    }
-}
-
 /// Type hints for `let` bindings without a written type in [start, end).
 pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<Hint> {
     let mut out = Vector::<Hint>::new();
@@ -1639,11 +1606,6 @@ pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<
 // a definition travels between packages as (defining file, declaration kind, name text): the
 // documented temporary adapter. Same-name same-kind decls in ONE file cannot collide at top level.
 
-/// The resolved definition under `off` (public wrapper over the internal resolver).
-pub fn def_ref(p: &loader::Package, mi: usize, off: u32) DefId {
-    return def_at(p, mi, off);
-}
-
 /// The defining module's FILE (as the loader spelled it), declaration kind, and name text of `d`.
 pub struct SymKey {
     pub file: String,
@@ -1651,6 +1613,8 @@ pub struct SymKey {
     pub name: String,
 }
 
+// Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
+// symbol, and a synthesized destructor has none.
 extend SymKey as Free {
     pub fn free(self: &mut Self) {
         self.file.free();
@@ -2181,6 +2145,8 @@ pub struct StubIns {
     pub text: String,
 }
 
+// Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
+// symbol, and a synthesized destructor has none.
 extend StubIns as Free {
     pub fn free(self: &mut Self) {
         self.text.free();

@@ -63,17 +63,6 @@ pub struct TestPlan {
     pub genv_is_enum: bool,
     pub ok: bool,
 }
-extend TestPlan as Free {
-    pub fn free(self: &mut Self) {
-        self.cases.free();
-        self.fx_init.free();
-        self.fx_free.free();
-        self.fx_type.free();
-        self.fx_is_enum.free();
-        self.suites.free();
-    }
-}
-
 // A test-plan validation error, rendered with the compiler's usual source excerpt.
 fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: *const char) {
     let src = p.modules[m as usize].source.as_str();
@@ -91,7 +80,7 @@ const fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enu
     if tnode == NODE_NONE {
         return none;
     }
-    let a = mod_ast_c(p, am);
+    let a = p.module_ast_const(am);
     let tk = a.at_const(tnode).kind;
     if tk != NodeKind::NODE_TYPE_PATH && tk != NodeKind::NODE_IDENTIFIER {
         return none;
@@ -100,7 +89,7 @@ const fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enu
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
         return none;
     }
-    let da = mod_ast_c(p, d.module);
+    let da = p.module_ast_const(d.module);
     let dk = da.at_const(d.node).kind;
     let gen = da.at_const(d.node).as_data.aggregate.generics;
     if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM || gen.len != 0 {
@@ -112,7 +101,7 @@ const fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId, is_enu
 
 // A function's single return type node (unwrapping a named return), or NODE_NONE.
 const fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) NodeId {
-    let a = mod_ast_c(p, am);
+    let a = p.module_ast_const(am);
     let rets = a.at_const(fnode).as_data.function.returns;
     if rets.len != 1 {
         return NODE_NONE;
@@ -126,7 +115,7 @@ const fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) Node
 }
 
 const fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const char, fnode: NodeId) bool {
-    let a = mod_ast_c(p, am);
+    let a = p.module_ast_const(am);
     let rets = a.at_const(fnode).as_data.function.returns;
     if rets.len == 0 {
         return true;
@@ -148,7 +137,7 @@ const fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const 
 
 // Classify one @test parameter: 1 = fixture/receiver, 2 = global env, 0 with an error emitted.
 fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId, genv: DefId) u8 {
-    let a = mod_ast_c(p, m);
+    let a = p.module_ast_const(m);
     let sp = a.at_const(pnode).span;
     let tnode = a.at_const(pnode).as_data.parameter.ty;
     let tk = if tnode != NODE_NONE {
@@ -190,7 +179,7 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
 // The inherent, non-generic extend whose items contain `fnode`, or NODE_NONE. `*bad` is set when it IS a
 // method but of a conformance/generic extend (not suite-able).
 fn test_owner_extend(p: &loader::Package, am: ModuleId, fnode: NodeId, bad: &mut bool) NodeId {
-    let a = mod_ast_c(p, am);
+    let a = p.module_ast_const(am);
     let items = unsafe a.at_const(a.root).as_data.program.items;
     let ids = a.list(items);
     for i in 0..items.len {
@@ -218,13 +207,13 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             continue;
         }
         let src = p.modules[m].source.as_str().ptr() as *const char;
-        let nattr = unsafe mod_ast_c(p, m as ModuleId).attrs.len();
+        let nattr = unsafe p.module_ast_const(m as ModuleId).attrs.len();
         for ai in 0..nattr {
-            let at = unsafe mod_ast_c(p, m as ModuleId).attrs[ai];
+            let at = unsafe p.module_ast_const(m as ModuleId).attrs[ai];
             if at.kind != AttrKind::ATTR_TEST_INIT as u8 && at.kind != AttrKind::ATTR_TEST_FREE as u8 {
                 continue;
             }
-            let sp = mod_ast_c(p, m as ModuleId).at_const(at.owner).span;
+            let sp = p.module_ast_const(m as ModuleId).at_const(at.owner).span;
             let mut bad_ext = false;
             let ext = test_owner_extend(p, m as ModuleId, at.owner, &mut bad_ext);
             if ext != NODE_NONE && bad_ext {
@@ -248,7 +237,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                     );
                     continue;
                 }
-                let tt = mod_ast_c(p, m as ModuleId).at_const(ext).as_data.extend_def.target_type;
+                let tt = p.module_ast_const(m as ModuleId).at_const(ext).as_data.extend_def.target_type;
                 target = test_type_decl(p, m as ModuleId, tt, &mut target_is_enum);
                 if target.node == NODE_NONE {
                     test_err(
@@ -261,7 +250,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 }
             }
             if at.kind == AttrKind::ATTR_TEST_INIT as u8 {
-                let plen = mod_ast_c(p, m as ModuleId).at_const(at.owner).as_data.function.params.len;
+                let plen = p.module_ast_const(m as ModuleId).at_const(at.owner).as_data.function.params.len;
                 if plen != 0 {
                     test_err(p, m as ModuleId, sp, "'@test_init' takes no parameters".ptr() as *const char);
                     continue;
@@ -327,17 +316,17 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                     continue;
                 }
                 let mut ok = false;
-                let params = mod_ast_c(p, m as ModuleId).at_const(at.owner).as_data.function.params;
+                let params = p.module_ast_const(m as ModuleId).at_const(at.owner).as_data.function.params;
                 if params.len == 1 && test_fn_returns_nothing(p, m as ModuleId, src, at.owner) {
-                    let p0 = unsafe mod_ast_c(p, m as ModuleId).list(params)[0];
-                    let pty = mod_ast_c(p, m as ModuleId).at_const(p0).as_data.parameter.ty;
+                    let p0 = unsafe p.module_ast_const(m as ModuleId).list(params)[0];
+                    let pty = p.module_ast_const(m as ModuleId).at_const(p0).as_data.parameter.ty;
                     let ptk = if pty != NODE_NONE {
-                        mod_ast_c(p, m as ModuleId).at_const(pty).kind;
+                        p.module_ast_const(m as ModuleId).at_const(pty).kind;
                     } else {
                         NodeKind::NODE_NONE_KIND;
                     };
                     if pty != NODE_NONE && ptk == NodeKind::NODE_REFERENCE_TYPE {
-                        let it = mod_ast_c(p, m as ModuleId).at_const(pty).as_data.indirect_type;
+                        let it = p.module_ast_const(m as ModuleId).at_const(pty).as_data.indirect_type;
                         let mut ie = false;
                         let d = test_type_decl(p, m as ModuleId, it.ty, &mut ie);
                         ok = it.qualifier == TypeQualifier::TYPE_QUAL_MUT && d.module == target.module && d.node == target.node;
@@ -367,9 +356,9 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             continue;
         }
         let src = p.modules[m].source.as_str().ptr() as *const char;
-        let nattr = unsafe mod_ast_c(p, m as ModuleId).attrs.len();
+        let nattr = unsafe p.module_ast_const(m as ModuleId).attrs.len();
         for ai in 0..nattr {
-            let at = unsafe mod_ast_c(p, m as ModuleId).attrs[ai];
+            let at = unsafe p.module_ast_const(m as ModuleId).attrs[ai];
             if at.kind != AttrKind::ATTR_TEST_FREE as u8 {
                 continue;
             }
@@ -377,7 +366,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             if test_owner_extend(p, m as ModuleId, at.owner, &mut be) != NODE_NONE {
                 continue;
             }
-            let sp = mod_ast_c(p, m as ModuleId).at_const(at.owner).span;
+            let sp = p.module_ast_const(m as ModuleId).at_const(at.owner).span;
             let global = at.arg != 0;
             let want = if global {
                 plan.genv_type;
@@ -403,17 +392,17 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 continue;
             }
             let mut ok = false;
-            let params = mod_ast_c(p, m as ModuleId).at_const(at.owner).as_data.function.params;
+            let params = p.module_ast_const(m as ModuleId).at_const(at.owner).as_data.function.params;
             if params.len == 1 && test_fn_returns_nothing(p, m as ModuleId, src, at.owner) {
-                let p0 = unsafe mod_ast_c(p, m as ModuleId).list(params)[0];
-                let pty = mod_ast_c(p, m as ModuleId).at_const(p0).as_data.parameter.ty;
+                let p0 = unsafe p.module_ast_const(m as ModuleId).list(params)[0];
+                let pty = p.module_ast_const(m as ModuleId).at_const(p0).as_data.parameter.ty;
                 let ptk = if pty != NODE_NONE {
-                    mod_ast_c(p, m as ModuleId).at_const(pty).kind;
+                    p.module_ast_const(m as ModuleId).at_const(pty).kind;
                 } else {
                     NodeKind::NODE_NONE_KIND;
                 };
                 if pty != NODE_NONE && ptk == NodeKind::NODE_REFERENCE_TYPE {
-                    let it = mod_ast_c(p, m as ModuleId).at_const(pty).as_data.indirect_type;
+                    let it = p.module_ast_const(m as ModuleId).at_const(pty).as_data.indirect_type;
                     let mut ie = false;
                     let d = test_type_decl(p, m as ModuleId, it.ty, &mut ie);
                     ok = it.qualifier == TypeQualifier::TYPE_QUAL_MUT && d.module == want.module && d.node == want.node;
@@ -451,7 +440,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
     for si in 0..plan.suites.len() {
         let s = plan.suites[si];
         if s.init == NODE_NONE && s.fre != NODE_NONE {
-            let sp = mod_ast_c(p, s.mod).at_const(s.fre).span;
+            let sp = p.module_ast_const(s.mod).at_const(s.fre).span;
             test_err(
                 p,
                 s.mod,
@@ -466,13 +455,13 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             continue;
         }
         let src = p.modules[m].source.as_str().ptr() as *const char;
-        let nattr = unsafe mod_ast_c(p, m as ModuleId).attrs.len();
+        let nattr = unsafe p.module_ast_const(m as ModuleId).attrs.len();
         for ai in 0..nattr {
-            let at = unsafe mod_ast_c(p, m as ModuleId).attrs[ai];
+            let at = unsafe p.module_ast_const(m as ModuleId).attrs[ai];
             if at.kind != AttrKind::ATTR_TEST as u8 {
                 continue;
             }
-            let sp = mod_ast_c(p, m as ModuleId).at_const(at.owner).span;
+            let sp = p.module_ast_const(m as ModuleId).at_const(at.owner).span;
             let mut bad_ext = false;
             let ext = test_owner_extend(p, m as ModuleId, at.owner, &mut bad_ext);
             if ext != NODE_NONE && bad_ext {
@@ -487,7 +476,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             let mut suite = DefId { module: 0, node: NODE_NONE };
             let mut suite_is_enum = false;
             if ext != NODE_NONE {
-                let tt = mod_ast_c(p, m as ModuleId).at_const(ext).as_data.extend_def.target_type;
+                let tt = p.module_ast_const(m as ModuleId).at_const(ext).as_data.extend_def.target_type;
                 suite = test_type_decl(p, m as ModuleId, tt, &mut suite_is_enum);
                 if suite.node == NODE_NONE {
                     test_err(
@@ -503,8 +492,8 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 test_err(p, m as ModuleId, sp, "a '@test' function returns nothing".ptr() as *const char);
                 continue;
             }
-            let nmnode = mod_ast_c(p, m as ModuleId).at_const(at.owner).as_data.function.name;
-            let nmsp = mod_ast_c(p, m as ModuleId).at_const(nmnode).as_data.name.text;
+            let nmnode = p.module_ast_const(m as ModuleId).at_const(at.owner).as_data.function.name;
+            let nmsp = p.module_ast_const(m as ModuleId).at_const(nmnode).as_data.name.text;
             if ext == NODE_NONE && nmsp.end - nmsp.start == 4 && unsafe cstring::memcmp(
                 src + nmsp.start as usize,
                 "main".ptr(),
@@ -518,7 +507,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 );
                 continue;
             }
-            let params = mod_ast_c(p, m as ModuleId).at_const(at.owner).as_data.function.params;
+            let params = p.module_ast_const(m as ModuleId).at_const(at.owner).as_data.function.params;
             if params.len > 2 {
                 test_err(
                     p,
@@ -542,7 +531,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             let mut bad = false;
             let mut k: u32 = 0;
             while k < params.len && !bad {
-                let pid = unsafe mod_ast_c(p, m as ModuleId).list(params)[k as usize];
+                let pid = unsafe p.module_ast_const(m as ModuleId).list(params)[k as usize];
                 let bit = test_param_bit(p, m as ModuleId, pid, fx, genv_ty);
                 if bit == 0 {
                     bad = true;
@@ -1221,14 +1210,14 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan) Option<String> 
     );
     for ci in 0..plan.cases.len() {
         let tc = plan.cases[ci];
-        let a = mod_ast_c(p, tc.mod);
+        let a = p.module_ast_const(tc.mod);
         let nmnode = a.at_const(tc.func).as_data.function.name;
         let nm = a.at_const(nmnode).as_data.name.text;
         let modpath = p.modules[tc.mod as usize].path.as_str();
         let msrc = p.modules[tc.mod as usize].source.as_str().ptr() as *const char;
         unsafe stdio::fprintf(f, "  { \"%.*s::".ptr() as *const char, modpath.len() as i32, modpath.ptr());
         if tc.suite.node != NODE_NONE {
-            let sa = mod_ast_c(p, tc.suite.module);
+            let sa = p.module_ast_const(tc.suite.module);
             let snmn = sa.at_const(tc.suite.node).as_data.aggregate.name;
             let snm = sa.at_const(snmn).as_data.name.text;
             let ssrc = p.modules[tc.suite.module as usize].source.as_str().ptr() as *const char;

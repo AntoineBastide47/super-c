@@ -123,9 +123,6 @@ const fn bt_c_decl(b: BuiltinType) str<'static> {
 
 // Names an identifier cannot keep in C: keywords plus the <iso646.h> alternative-token macros
 // (the runtime header includes it, so `and` would expand to `&&`).
-const fn kw(s: str, lit: str) bool {
-    return s.len() == lit.len() && s == lit;
-}
 /// True when `s` is a C keyword or a reserved C library identifier the emitter must rename.
 pub const fn c_keyword(s: str) bool {
     if s.len() == 0 {
@@ -133,70 +130,64 @@ pub const fn c_keyword(s: str) bool {
     }
     let c0 = s.byte_at(0);
     if c0 == b'N' {
-        return kw(s, "NULL");
+        return s == "NULL";
     }
     if c0 == b'_' {
-        return kw(s, "_Bool") || kw(s, "_Complex") || kw(s, "_Atomic") || kw(s, "_Noreturn") || kw(s, "_Generic") || kw(
-            s,
-            "_Static_assert",
-        ) || kw(s, "_Thread_local");
+        return s == "_Bool" || s == "_Complex" || s == "_Atomic" || s == "_Noreturn" || s == "_Generic" || s == "_Static_assert" || s == "_Thread_local";
     }
     if c0 == b'a' {
-        return kw(s, "auto") || kw(s, "and") || kw(s, "and_eq");
+        return s == "auto" || s == "and" || s == "and_eq";
     }
     if c0 == b'b' {
-        return kw(s, "break") || kw(s, "bool") || kw(s, "bitand") || kw(s, "bitor");
+        return s == "break" || s == "bool" || s == "bitand" || s == "bitor";
     }
     if c0 == b'c' {
-        return kw(s, "case") || kw(s, "char") || kw(s, "const") || kw(s, "continue") || kw(s, "compl");
+        return s == "case" || s == "char" || s == "const" || s == "continue" || s == "compl";
     }
     if c0 == b'd' {
-        return kw(s, "default") || kw(s, "do") || kw(s, "double");
+        return s == "default" || s == "do" || s == "double";
     }
     if c0 == b'e' {
-        return kw(s, "else") || kw(s, "enum") || kw(s, "extern");
+        return s == "else" || s == "enum" || s == "extern";
     }
     if c0 == b'f' {
-        return kw(s, "float") || kw(s, "for") || kw(s, "false");
+        return s == "float" || s == "for" || s == "false";
     }
     if c0 == b'g' {
-        return kw(s, "goto");
+        return s == "goto";
     }
     if c0 == b'i' {
-        return kw(s, "if") || kw(s, "inline") || kw(s, "int");
+        return s == "if" || s == "inline" || s == "int";
     }
     if c0 == b'l' {
-        return kw(s, "long");
+        return s == "long";
     }
     if c0 == b'n' {
-        return kw(s, "not") || kw(s, "not_eq");
+        return s == "not" || s == "not_eq";
     }
     if c0 == b'o' {
-        return kw(s, "or") || kw(s, "or_eq");
+        return s == "or" || s == "or_eq";
     }
     if c0 == b'r' {
-        return kw(s, "register") || kw(s, "restrict") || kw(s, "return");
+        return s == "register" || s == "restrict" || s == "return";
     }
     if c0 == b's' {
-        return kw(s, "short") || kw(s, "signed") || kw(s, "sizeof") || kw(s, "static") || kw(s, "struct") || kw(
-            s,
-            "switch",
-        );
+        return s == "short" || s == "signed" || s == "sizeof" || s == "static" || s == "struct" || s == "switch";
     }
     if c0 == b't' {
-        return kw(s, "typedef") || kw(s, "true");
+        return s == "typedef" || s == "true";
     }
     if c0 == b'u' {
-        return kw(s, "union") || kw(s, "unsigned");
+        return s == "union" || s == "unsigned";
     }
     if c0 == b'v' {
-        return kw(s, "void") || kw(s, "volatile");
+        return s == "void" || s == "volatile";
     }
     if c0 == b'w' {
-        return kw(s, "while");
+        return s == "while";
     }
     if c0 == b'x' {
-        return kw(s, "xor") || kw(s, "xor_eq");
+        return s == "xor" || s == "xor_eq";
     }
     return false;
 }
@@ -321,15 +312,6 @@ pub struct RecEv {
     pub xs: Vector<u32>,
 }
 
-extend RecEv as Free {
-    pub fn free(self: &mut Self) {
-        self.s1.free();
-        self.s2.free();
-        self.subs.free();
-        self.xs.free();
-    }
-}
-
 extend RecEv {
     /// An event of `kind` with every field zero or empty.
     pub fn blank(kind: u8) RecEv {
@@ -355,12 +337,6 @@ pub struct AggReq {
     pub subs: Vector<MSub>,
 }
 
-extend AggReq as Free {
-    pub fn free(self: &mut Self) {
-        self.subs.free();
-    }
-}
-
 /// One dyn spelling site: the pool the TYPE_DYN lives in.
 pub struct DynReq {
     pub pm: ModuleId,
@@ -377,27 +353,6 @@ pub struct MSub {
     pub am: ModuleId,
     pub at: TypeId,
     pub lim: u32,
-}
-
-extend Mangler as Free {
-    pub fn free(self: &mut Self) {
-        self.short_ok.free();
-        self.subs.free();
-        self.clos_sfx.free();
-        self.clos_ids.free();
-        self.dyn_reqs.free();
-        self.agg_reqs.free();
-        self.agg_seen.free();
-        self.used_mods.free();
-        self.own_built.free();
-        self.own_idx.free();
-        self.ovl_memo.free();
-        self.edge_log.free();
-        self.rec.free();
-        self.rec_dups.free();
-        self.lay.free();
-        self.zmemo.free();
-    }
 }
 
 extend Mangler {

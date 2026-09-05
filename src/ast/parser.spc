@@ -4675,17 +4675,6 @@ extend Parser {
     }
 }
 
-extend Parser as Free {
-    pub fn free(self: &mut Self) {
-        self.tokens.free();
-        self.ast.free();
-        self.errors.free();
-        self.nrets.free();
-        self.derive_ifaces.free();
-        self.pending_metas.free();
-    }
-}
-
 /// Every attribute spelling this parser classifies, exactly as written after `@` (namespace-qualified
 /// where required). The inventory mirrors `attr_kind_of` and `parse_attribute` above -- update all
 /// three together when an attribute is added; LSP completion serves this list.

@@ -111,26 +111,6 @@ pub struct DecisionTree {
     pub ok: bool, // false: budget exceeded; the caller keeps sequential lowering
 }
 
-extend DecisionTree as Free {
-    pub fn free(self: &mut Self) {
-        self.nodes.free();
-        self.edges.free();
-        self.paths.free();
-    }
-}
-
-extend PatCx as Free {
-    pub fn free(self: &mut Self) {
-        self.pats.free();
-        self.subs.free();
-        self.cols.free();
-        self.rows.free();
-        self.mcells.free();
-        self.mrows.free();
-        self.seen.free();
-    }
-}
-
 /// The code point of a `'x'` / `b'x'` literal (escape rules mirror the checker's decode).
 pub fn char_of(src: str, sp: tok::Span) Option<i64> {
     if sp.end <= sp.start + 2 {

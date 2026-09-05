@@ -261,7 +261,7 @@ pub fn verify(b: &ir::CoreBody, type_pool_len: usize, pkg: *const loader::Packag
             return "return-slot-layout";
         }
     }
-    // Def-chain rules (plan 6.4): a safe indexed projection addresses through an element-check
+    // Def-chain rules: a safe indexed projection addresses through an element-check
     // result, and a safe RV_SLICE takes its exclusive end from a range-check result. Marks: 0 =
     // untouched, 1 = element-check temp, 2 = range-check temp, 3 = anything else (poisoned).
     if pkg != null {

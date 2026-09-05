@@ -28,12 +28,6 @@ pub struct Builder<'a> {
     pub emitted_trivia: usize, // comment segments emitted (attrs are separate and not counted)
 }
 
-extend Builder as Free {
-    pub fn free(self: &mut Self) {
-        self.p.free();
-    }
-}
-
 struct TriviaSeg {
     pub start: u32,
     pub end: u32,
@@ -1081,12 +1075,12 @@ extend Builder {
             },
             NODE_SIZEOF => {
                 v.push(self.p.txt("sizeof("));
-                v.push(self.b_sizeof_arg(n.as_data.single.value));
+                v.push(self.b_type(n.as_data.single.value));
                 v.push(self.p.txt(")"));
             },
             NODE_ALIGNOF => {
                 v.push(self.p.txt("alignof("));
-                v.push(self.b_sizeof_arg(n.as_data.single.value));
+                v.push(self.b_type(n.as_data.single.value));
                 v.push(self.p.txt(")"));
             },
             NODE_VA_EXPR => {
@@ -1224,11 +1218,6 @@ extend Builder {
         v.push(self.b_expr(id));
         v.push(self.p.txt("}"));
         return self.p.concat(&v);
-    }
-
-    // sizeof/alignof accept a type (usual); the parser stores a type node.
-    fn b_sizeof_arg(self: &mut Self, id: NodeId) d::DocId {
-        return self.b_type(id);
     }
 
     fn b_struct_init_fields(self: &mut Self, fields: NodeList, open_end: u32, close_pos: u32) d::DocId {

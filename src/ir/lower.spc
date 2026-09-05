@@ -1040,7 +1040,7 @@ extend Lowerer {
         let mut i: u32 = 0;
         while i + 1 < d.outputs.len {
             let pe = unsafe self.f.list(d.outputs)[(i + 1) as usize];
-            let pl = self.lower_place_or_spill(pe);
+            let pl = self.lower_place(pe);
             if pl == ir::IR_NONE {
                 return;
             }
@@ -1288,7 +1288,7 @@ extend Lowerer {
 
     // A preemption safepoint marker at the top of a loop body; the backend prints it only for
     // programs that use the coroutine runtime, and never inside std::parallel itself. In a body
-    // that can carry a cancellation edge, the combined form (plan 10.4) is emitted instead: the
+    // that can carry a cancellation edge, the combined form is emitted instead: the
     // same tick, whose cold half also accepts a pending unmasked cancellation and enters this
     // frame's cleanup ladder -- a compute-bound task that never waits still cleanly stops.
     fn loop_safepoint(self: &mut Self, sp: tok::Span) {
@@ -4770,25 +4770,22 @@ extend Lowerer {
                 }
             }
         }
-        // `d.free()` on a dyn value has no resolved method: destruction IS the call. Lower it as
-        // an explicit drop so the analyses see the consume and the backend prints glue.
-        if target.node == NODE_NONE && ck == NodeKind::NODE_MEMBER && !self.f.node(d.callee).as_data.member.path && d.args.len == 0 {
-            let mem = self.f.node(d.callee).as_data.member.member;
-            let msp = self.f.node(mem).as_data.name.text;
-            if (msp.end - msp.start) as usize == 4 && self.src.slice(msp.start as usize, msp.end as usize) == "free" {
-                let obj = self.f.node(d.callee).as_data.member.object;
-                let opl = self.lower_place_or_spill(obj);
-                if opl == ir::IR_NONE {
-                    return ir::IR_NONE;
-                }
-                self.tp(ir::TP_CALL, 1, id);
-                let mut tm = self.term0(ir::TM_DROP, sp);
-                tm.a = opl;
-                let cont = self.open_block();
-                tm.t0 = cont;
-                self.seal(tm, cont);
-                return self.unit_op(ty, sp);
+        // `x.free()` with no resolved method (a dyn value, or a synthesized destructor): destruction
+        // IS the call. Lower it as an explicit drop so the analyses see the consume and the backend
+        // prints glue.
+        if target.node == NODE_NONE && unsafe (&*self.f.ast).is_free_call(id, self.src) {
+            let obj = self.f.node(d.callee).as_data.member.object;
+            let opl = self.lower_place(obj);
+            if opl == ir::IR_NONE {
+                return ir::IR_NONE;
             }
+            self.tp(ir::TP_CALL, 1, id);
+            let mut tm = self.term0(ir::TM_DROP, sp);
+            tm.a = opl;
+            let cont = self.open_block();
+            tm.t0 = cont;
+            self.seal(tm, cont);
+            return self.unit_op(ty, sp);
         }
         let mut argv = self.avget();
         let mut callee_op = ir::IR_NONE;
@@ -4800,7 +4797,7 @@ extend Lowerer {
             let du9 = self.f.derefs(self.f.node(d.callee).as_data.member.member);
             let mut rop = ir::IR_NONE;
             if du9 != null && unsafe du9.n > 0 {
-                let mut base9 = self.lower_place_or_spill(recv);
+                let mut base9 = self.lower_place(recv);
                 if base9 == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
@@ -4940,7 +4937,7 @@ extend Lowerer {
     // The ladder is the same defers-then-deads sequence an early return takes, bracketed by the
     // runtime's ladder mask (cleanup can wait, but never re-cancel), and ends in a flagged return
     // the backend spells as a zero the (also unwinding) caller never reads. An unpinned fn-value
-    // callee is cancellation-masked (plan 10.3): no check follows it, and the next pinned
+    // callee is cancellation-masked: no check follows it, and the next pinned
     // cancellation point delivers a pending edge.
     // The per-body half of the check-eligibility test, cached in `chk_on`: everything that does
     // not depend on the callee. The sugar items are re-read (cheaply) by the emitting path.
@@ -4980,7 +4977,7 @@ extend Lowerer {
             return; // cleanup is masked: no edge inside a defer body
         }
         if is_fn_value {
-            return; // unpinned callee: cancellation-masked across the call (plan 10.3)
+            return; // unpinned callee: cancellation-masked across the call
         }
         if !self.chk_enabled() {
             return;
@@ -5700,7 +5697,7 @@ extend Lowerer {
             // Both write the `va_list` itself (va_start also INITIALIZES it -- the init analysis
             // must see the write, never a read of the not-yet-started list), so the list is the
             // assignment's PLACE and the C prints the macro over that lvalue.
-            let apl = self.lower_place_or_spill(d.ap);
+            let apl = self.lower_place(d.ap);
             if apl == ir::IR_NONE {
                 return ir::IR_NONE;
             }
@@ -6044,7 +6041,7 @@ extend Lowerer {
             return self.lower_index_place(id);
         }
         if k == NodeKind::NODE_UNARY && self.f.node(id).as_data.unary.op == tt::TokenType::Star {
-            let mut base = self.lower_place_or_spill(self.f.node(id).as_data.unary.operand);
+            let mut base = self.lower_place(self.f.node(id).as_data.unary.operand);
             if base == ir::IR_NONE {
                 return ir::IR_NONE;
             }
@@ -6099,10 +6096,6 @@ extend Lowerer {
             }
         }
         return self.spill(op, sp);
-    }
-
-    fn lower_place_or_spill(self: &mut Self, id: NodeId) ir::PlaceId {
-        return self.lower_place(id);
     }
 
     // The SUBSTITUTED `&Target` a deref impl returns for receiver type `recv` (self pool): the
@@ -6174,7 +6167,7 @@ extend Lowerer {
             }
             return self.spill(op, sp);
         }
-        let mut base = self.lower_place_or_spill(d.object);
+        let mut base = self.lower_place(d.object);
         if base == ir::IR_NONE {
             return ir::IR_NONE;
         }
@@ -6422,7 +6415,7 @@ extend Lowerer {
             },
             None => {},
         };
-        let base = self.lower_place_or_spill(d.object);
+        let base = self.lower_place(d.object);
         if base == ir::IR_NONE {
             return ir::IR_NONE;
         }

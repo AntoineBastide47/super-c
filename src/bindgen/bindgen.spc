@@ -54,12 +54,6 @@ const fn is_digit(c: u8) bool {
     return c >= b'0' && c <= b'9';
 }
 
-extend Lexer<'a> as Free {
-    fn free(self: &mut Lexer<'a>) {
-        self.file.free();
-    }
-}
-
 extend Lexer<'a> {
     fn new(src: str<'a>) Lexer<'a> {
         let mut lx = Lexer::<'a> { src: src, pos: 0, kind: TK_EOF, start: 0, end: 0, file: String::new() };
@@ -221,13 +215,6 @@ fn ctype_new() CType {
     return CType { base: String::new(), ptr: 0, qual: 0, fnsig: String::new(), ok: true };
 }
 
-extend CType as Free {
-    fn free(self: &mut CType) {
-        self.base.free();
-        self.fnsig.free();
-    }
-}
-
 extend CType {
     fn clone(self: &CType) CType {
         return CType {
@@ -364,26 +351,11 @@ struct Param {
     pub ty: String,
 }
 
-extend Param as Free {
-    fn free(self: &mut Param) {
-        self.name.free();
-        self.ty.free();
-    }
-}
-
 struct FnDecl {
     pub name: String,
     pub params: Vector<Param>,
     pub ret: String,
     pub variadic: bool,
-}
-
-extend FnDecl as Free {
-    fn free(self: &mut FnDecl) {
-        self.name.free();
-        self.params.free();
-        self.ret.free();
-    }
 }
 
 struct Alias {
@@ -395,25 +367,11 @@ struct Alias {
     pub ok: bool,
 }
 
-extend Alias as Free {
-    fn free(self: &mut Alias) {
-        self.name.free();
-        self.sub.free();
-    }
-}
-
 // Everything the parse produced: the type environment (every typedef in the whole translation unit, since
 // the target header's signatures are spelled with them) and the declarations from the target header alone.
 struct Field {
     pub name: String,
     pub ty: String,
-}
-
-extend Field as Free {
-    fn free(self: &mut Field) {
-        self.name.free();
-        self.ty.free();
-    }
 }
 
 // A struct or union DEFINED in the target header. `ok` is false as soon as one member has no faithful
@@ -428,22 +386,9 @@ struct Record {
     pub mine: bool,
 }
 
-extend Record as Free {
-    fn free(self: &mut Record) {
-        self.tag.free();
-        self.fields.free();
-    }
-}
-
 struct EnumVal {
     pub name: String,
     pub value: i64,
-}
-
-extend EnumVal as Free {
-    fn free(self: &mut EnumVal) {
-        self.name.free();
-    }
 }
 
 // A C enum. A TAGGED one becomes a Super-C `enum` (its tag is a type a signature can name); an anonymous
@@ -456,26 +401,11 @@ struct EnumDef {
     pub mine: bool,
 }
 
-extend EnumDef as Free {
-    fn free(self: &mut EnumDef) {
-        self.tag.free();
-        self.vals.free();
-    }
-}
-
 struct ConstDef {
     pub name: String,
     pub ty: String,
     pub value: String,
     pub mutable: bool, // a global whose C declaration is not const: bound as `static mut`
-}
-
-extend ConstDef as Free {
-    fn free(self: &mut ConstDef) {
-        self.name.free();
-        self.ty.free();
-        self.value.free();
-    }
 }
 
 struct Collected {
@@ -496,18 +426,6 @@ struct Collected {
     /// Functions from the target header whose signature this tool could not model. Reported rather than
     /// swallowed: a binding file that is quietly short is worse than one that says what it left out.
     pub skipped: usize,
-}
-
-extend Collected as Free {
-    fn free(self: &mut Collected) {
-        self.records.free();
-        self.enums.free();
-        self.consts.free();
-        self.globals.free();
-        self.aliases.free();
-        self.fns.free();
-        self.opaques.free();
-    }
 }
 
 // Vendor noise that carries no meaning for a binding. `__attribute__`, `__declspec` and `asm` take a
@@ -757,12 +675,6 @@ fn macro_int(line: str) i32 {
 struct CExpr<'a> {
     pub lx: Lexer<'a>,
     pub ok: bool,
-}
-
-extend CExpr<'a> as Free {
-    fn free(self: &mut CExpr<'a>) {
-        self.lx.free();
-    }
 }
 
 const CE_DEPTH: i32 = 8;
@@ -1354,14 +1266,6 @@ struct Job {
     pub path: String,
     pub spelling: String,
     pub out: String,
-}
-
-extend Job as Free {
-    fn free(self: &mut Job) {
-        self.path.free();
-        self.spelling.free();
-        self.out.free();
-    }
 }
 
 fn join_path(a: str, b: str) String {

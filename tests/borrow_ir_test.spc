@@ -163,7 +163,7 @@ fn ref_agrees(p: &loader::Package, name: str) bool {
     let mut sv = bln::solve(&lw.body, &bfacts, &cfg, &lv);
     let mut same = true;
     for li in 0..bfacts.loans.len() {
-        let row = sv.required_row(li as u32);
+        let row = sv.required(li as u32);
         for w in 0..rr.pwords {
             if *rr.required.at((li as u32 * rr.pwords + w) as usize) != sv.req_word(row, w) {
                 same = false;

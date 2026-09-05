@@ -74,15 +74,6 @@ pub struct Lexer<'a> {
     pub mt_stack: Vector<u8>, // open matchers of ALL paused templates (frames slice it via `base`)
 }
 
-extend Lexer as Free {
-    pub fn free(self: &mut Self) {
-        self.tokens.free();
-        self.errors.free();
-        self.mt.free();
-        self.mt_stack.free();
-    }
-}
-
 const fn is_id_start(b: u8) bool {
     return b == '_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z';
 }

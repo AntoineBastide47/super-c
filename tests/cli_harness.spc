@@ -1,10 +1,5 @@
-// CLI test harness: drives $SUPERC as a subprocess over on-disk source trees; the analog of
-// tests/cli_test.c's run_cmd / write_file / mkfile. A `Proj` is a temp project root under the system temp
-// directory; write a
-// source tree into it with `mkfile`, compile it with `compile` (compile-only mode, which emits a build/
-// tree next to the root file), then cc the emitted tree -Werror with `cc_build` and run it with `run_bin`.
-// Generated C is inspected via `gen_has` / `gen_exists`. The compiler is $SUPERC (default "./super-c",
-// matching the CWD=repo-root that `make selfhost-test` runs), so the suite dogfoods the self-hosted driver.
+// CLI tests use $SUPERC (default ./super-c) and isolated temporary source trees.
+// Run from the repository root so the default compiler path resolves.
 import stdio;
 import stdlib;
 import string as cstring;
@@ -17,8 +12,7 @@ static mut C_SEQ: u64 = 0;
 // The compiler path, resolved once (see `superc`).
 static mut SUPERC_RESOLVED: Path512 = Path512 {};
 
-// The captured result of a subprocess: its exit code and combined stdout+stderr (`out`, owned).
-/// Outcome of a CLI invocation: exit code and captured output.
+/// Exit code and owned stdout/stderr from a CLI invocation.
 pub struct CliResult {
     pub exit: i32,
     pub out: *mut char,
@@ -32,10 +26,7 @@ extend CliResult {
         }
         return contains_str(self.out, needle);
     }
-    /// `out_has`, but it DUMPS what was captured when the answer is no. A remote CI failure that says only
-    /// "expected `right: 7`" cannot be diagnosed: it does not say whether the line was absent, truncated, or
-    /// interleaved with a concurrent test's output. Use this wherever a missed expectation would otherwise
-    /// have to be investigated by guessing.
+    /// Check for `needle`; print the captured output if absent.
     pub fn out_shows(self: &CliResult, needle: str) bool {
         if self.out_has(needle) {
             return true;
@@ -50,8 +41,7 @@ extend CliResult {
         eprintln("--- end of captured output ---");
         return false;
     }
-    /// `exit == 0`, but it DUMPS what was captured when the answer is no: out_shows' sibling for
-    /// exit codes: a remote crash otherwise reports nothing beyond the number.
+    /// Check for exit code 0; print the captured output on failure.
     pub fn ok(self: &CliResult) bool {
         if self.exit == 0 {
             return true;
@@ -75,9 +65,7 @@ extend CliResult as Free {
     }
 }
 
-// Does the NUL-terminated `hay` contain `needle`? `needle` is a `str` (a VIEW with no terminator) so it
-// is copied before it reaches C. Passing `needle.ptr()` to a C string function reads past its end until it
-// finds a zero byte, which is exactly the kind of bug that only shows up on one platform.
+// Copy `needle` to provide the NUL terminator required by strstr.
 pub fn contains_str(hay: *const char, needle: str) bool {
     if hay == null {
         return false;
@@ -87,7 +75,6 @@ pub fn contains_str(hay: *const char, needle: str) bool {
     return unsafe cstring::strstr(hay, &nb[0]) != null;
 }
 
-// True on Windows: the executable suffix, the default C compiler and a few path habits differ there.
 /// True when the host platform is Windows.
 pub fn on_windows() bool {
     return unsafe shim::sc_host_platform() == 0;
@@ -102,8 +89,7 @@ pub fn on_wasm() bool {
     return contains_str(superc(), "wasm");
 }
 
-// $SUPERC, or the built compiler beside the CWD when unset (gen1 for the self-hosted check). Resolved to an
-// ABSOLUTE path: Windows' CreateProcess does not take a `./`-relative program the way a POSIX shell does.
+// Resolve an absolute compiler path so child processes can change directories.
 fn superc() *const char {
     // Process-local: the runner forks one process per test, so this resolve-once cache is never shared.
     if unsafe SUPERC_RESOLVED[0] != 0 as char {
@@ -132,14 +118,12 @@ fn superc() *const char {
     return slot;
 }
 
-// The compiler under test, as an absolute path: what a test needs when it builds its own command line.
-/// Path of the compiler under test (SC_TEST_SUPERC, else the binary beside the test runner).
+/// Absolute path from $SUPERC, or ./super-c when unset.
 pub fn superc_path() str<'static> {
     return str::from_cstr(superc());
 }
 
-// The C compiler for the emitted trees: $CC, else `cc` (POSIX) / `gcc` (mingw ships no `cc`).
-/// The C compiler name: $CC, else `cc`.
+/// C compiler from $CC, or gcc on Windows and cc elsewhere.
 pub fn cc_name() *const char {
     let cc = stdlib::getenv("CC");
     if cc != null && unsafe *cc != 0 as char {

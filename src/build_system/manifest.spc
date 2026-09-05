@@ -16,25 +16,11 @@ pub struct Profile<'a> {
     pub strip: bool,
 }
 
-extend Profile as Free {
-    pub fn free(self: &mut Self) {
-        self.cflags.free();
-        self.ldflags.free();
-    }
-}
-
 /// One extra binary target: `[bin.NAME] root = "..."` (the top-level `bin`/`root` pair is the
 /// primary binary). `super-c build` builds every target; `--bin=NAME` selects one.
 pub struct BinTarget {
     pub name: String,
     pub root: String,
-}
-
-extend BinTarget as Free {
-    pub fn free(self: &mut Self) {
-        self.name.free();
-        self.root.free();
-    }
 }
 
 /// One [command.NAME] for `super-c command <name>`: shell lines executed in order, stopping at the
@@ -45,14 +31,6 @@ pub struct Command<'a> {
     pub needs_build: bool, // needs-build = true: run a manifest build before the lines
     pub env_k: Vector<String>, // parallel with env_v: KEY='VALUE' prefixes applied to every line
     pub env_v: Vector<String>,
-}
-
-extend Command as Free {
-    pub fn free(self: &mut Self) {
-        self.run.free();
-        self.env_k.free();
-        self.env_v.free();
-    }
 }
 
 /// The validated build.toml. `bin` is where the project's binary is INSTALLED: each profile links its own
@@ -91,6 +69,8 @@ pub struct Manifest<'a> {
     pub lib_shared: bool, // [lib] type contains "shared"
 }
 
+// Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
+// symbol, and a synthesized destructor has none.
 extend Manifest as Free {
     pub fn free(self: &mut Self) {
         self.toml.free();

@@ -115,7 +115,7 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
         }
         let file = p.modules[m].file.cstr();
         let src = p.modules[m].source.as_str().ptr() as *const char;
-        let ap = mod_ast_c(p, m as ModuleId);
+        let ap = p.module_ast_const(m as ModuleId);
         // Live top-level items, after `platform_filter` compacted `program.items`: a `@platform`-gated-out
         // `@c.source`/`@c.link` leaves its attr in the table, so skip attrs whose owning item is gone (else
         // every OS would pull in every other OS's runtime C and `-l` flags).

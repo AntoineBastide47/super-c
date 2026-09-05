@@ -599,19 +599,6 @@ struct Pend {
     pub genpfx: String, // gen root, for the portable .d rewrite
 }
 
-extend Pend as Free {
-    pub fn free(self: &mut Self) {
-        self.args.free();
-        self.fp.free();
-        self.log.free();
-        self.cmdpath.free();
-        self.cobj.free();
-        self.oout.free();
-        self.dout.free();
-        self.genpfx.free();
-    }
-}
-
 // Longest previous compile first, so the slowest unit never starts last.
 const fn pend_cmp(a: &Pend, b: &Pend) i32 {
     return if b.prev_ms > a.prev_ms {
@@ -634,18 +621,6 @@ struct Job {
     pub oout: String,
     pub dout: String,
     pub genpfx: String,
-}
-
-extend Job as Free {
-    pub fn free(self: &mut Self) {
-        self.fp.free();
-        self.log.free();
-        self.cmdpath.free();
-        self.cobj.free();
-        self.oout.free();
-        self.dout.free();
-        self.genpfx.free();
-    }
 }
 
 extend Job {
@@ -2713,7 +2688,7 @@ fn bench_collect(
             continue;
         }
         let src = p.modules[m].source.as_str();
-        let a = mod_ast_c(&p, mid);
+        let a = p.module_ast_const(mid);
         let nattr = unsafe a.attrs.len();
         for ai in 0..nattr {
             let at = unsafe a.attrs[ai];

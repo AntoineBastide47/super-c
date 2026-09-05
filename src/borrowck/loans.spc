@@ -146,42 +146,6 @@ const fn tz64(b: u64) usize {
     return tab[(p >> 58) as usize] as usize;
 }
 
-extend Solver as Free {
-    pub fn free(self: &mut Self) {
-        self.errs.free();
-        self.point_block.free();
-        self.sub_by_point.free();
-        self.sub_pt_start.free();
-        self.live_pts.free();
-        self.oreach.free();
-        self.req_cache.free();
-        self.req_have.free();
-        self.scope.free();
-        self.issues_blk.free();
-        self.issue_start.free();
-        self.kills_blk.free();
-        self.kill_start.free();
-        self.visit.free();
-        self.visit_dirty.free();
-        self.work.free();
-        self.succs.free();
-        self.s_cur32.free();
-        self.s_ic.free();
-        self.s_kc.free();
-        self.s_uses.free();
-        self.s_cur64.free();
-        self.s_dset.free();
-        self.s_uset.free();
-        self.s_flow.free();
-        self.s_flow_queued.free();
-        self.s_flow_queue.free();
-        self.s_lo_start.free();
-        self.s_lo_flat.free();
-        self.s_lb_start.free();
-        self.s_lb_flat.free();
-    }
-}
-
 extend Solver {
     /// A solver with no body attached and no heap storage; `build_into` fills it.
     pub fn empty() Solver {
@@ -781,8 +745,8 @@ extend Solver {
         }
     }
 
-    // The point bitset where loan `li` is required: some origin that can hold it is live there.
-    fn required(self: &mut Self, li: u32) usize {
+    /// The point bitset row where loan `li` is required: some origin that can hold it is live there.
+    pub fn required(self: &mut Self, li: u32) usize {
         let f = unsafe &*self.f;
         if self.req_have.len() == 0 {
             for _i in 0..f.loans.len() {
@@ -870,11 +834,6 @@ extend Solver {
 
     const fn req_at(self: &Self, row: usize, p: u32) bool {
         return (*self.req_cache.at(row + (p / 64) as usize) >> (p & 63) as u64 & 1u64) != 0;
-    }
-
-    /// Comparison hooks for the reference solver: the required-point row of a loan, and its words.
-    pub fn required_row(self: &mut Self, li: u32) usize {
-        return self.required(li);
     }
 
     /// Word `w` of the cached required-loan row starting at `row`.
@@ -1139,12 +1098,6 @@ extend Solver {
 pub struct RefResult {
     pub required: Vector<u64>, // per loan: point bitset rows (pwords each)
     pub pwords: u32,
-}
-
-extend RefResult as Free {
-    pub fn free(self: &mut Self) {
-        self.required.free();
-    }
 }
 
 pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) RefResult {
