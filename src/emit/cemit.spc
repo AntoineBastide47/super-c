@@ -7,11 +7,17 @@
 import ast::ast as *;
 import emit::mangle as mbe;
 import emit::cflow as cfl;
+import emit::probe as prb;
 import ir::interp as iri;
 import ir::core as ir;
 import lexer::token as tok;
 import lexer::token_type as tt;
 import module::loader as loader;
+
+/// Nesting bound for the recursive renderers (operands through inlined temporaries, structured
+/// control flow through regions): clang's default bracket depth, past which the C would not
+/// compile either. Exceeding it fails the body with a diagnostic instead of exhausting the stack.
+const RENDER_NEST_MAX: u32 = 256;
 
 /// The body emitter: per-TU output buffers, the mangler, the dedup gates every demand kind goes
 /// through, and the per-body scratch (local names, coalescing, inlining decisions).
@@ -93,6 +99,7 @@ pub struct CEmit {
     /// region), cleared when it returned by a terminator/transfer. A switch case reads it to decide
     /// whether a trailing `break;` is reachable.
     sx_fell: bool,
+    sx_nest: u32, // live depth of the recursive renderers, bounded by RENDER_NEST_MAX
     /// Set during the label-planning pass when the structure would need a `goto` (a cross edge or a
     /// secondary merge the region tree cannot place). Its presence makes the whole body fall back to
     /// the goto layout, so structured output never emits an unplaceable jump.
@@ -102,7 +109,10 @@ pub struct CEmit {
     /// nowhere else shares one C variable. `sx_name[l]` is the C identifier for local `l`: the
     /// preserved user name (keyword/collision-disambiguated) or `_N` for temps and return slots.
     sx_coal: Vector<u32>,
-    sx_name: Vector<String>,
+    // `sx_nm_pool[sx_nm_off[l] .. +sx_nm_len[l]]`; a zero length spells `_<id>`.
+    sx_nm_pool: String,
+    sx_nm_off: Vector<u32>,
+    sx_nm_len: Vector<u32>,
     /// `sx_used[l]` is false when local `l` is referenced nowhere in the body; its declaration is
     /// then dropped (a dead temporary the plan requires we not emit).
     sx_used: Vector<bool>,
@@ -122,7 +132,10 @@ pub struct CEmit {
     /// `sx_call_fwd[l]` marks such a destination; the call terminator writes its `f(..)` spelling into
     /// `sx_call_str[l]` (emitting nothing itself), which the single read then spells in place.
     sx_call_fwd: Vector<bool>,
-    sx_call_str: Vector<String>,
+    // `sx_cs_pool[sx_cs_off[l] .. +sx_cs_len[l]]` is local `l`'s forwarded call text.
+    sx_cs_pool: String,
+    sx_cs_off: Vector<u32>,
+    sx_cs_len: Vector<u32>,
     assert_helpers: u8,
     /// One induction update moved into the active C `for` clause.
     sx_skip_place: u32,
@@ -134,8 +147,15 @@ pub struct CEmit {
     // Plain concrete-call symbols per (fm, fnode), valid for one mark_ctx (cleared on change so
     // cross-TU used_mods edges still record once per spelling TU). Every body re-spells the same
     // callees; the mangle walk must not repeat per call site.
-    sym_memo: Map<u64, String>,
+    // The memo maps the callee key to a slot: `sym_pool[sym_off[slot] .. +sym_len[slot]]` is the
+    // symbol, `sym_hash[slot]` its reserved-identifier hash (setup_locals reserves it without a
+    // second spelling).
+    sym_memo: Map<u64, u64>,
     sym_memo_ctx: i64,
+    sym_pool: String,
+    sym_off: Vector<u32>,
+    sym_len: Vector<u32>,
+    sym_hash: Vector<u64>,
     // Reusable spelling buffers: the statement/place emitters build every C fragment in a
     // temporary String, so the pool keeps their capacity across the whole emission.
     scratch: Vector<String>,
@@ -198,6 +218,8 @@ pub struct CEmit {
     tmod_start: Vector<u32>,
     tid_pool: Vector<u64>,
     tmod_pool: Vector<ModuleId>,
+    /// Emission counters (SC_CEMIT_STATS): declaration planning, rendering, symbol construction.
+    pub pr: prb::Probe,
 }
 
 /// The substitution env a glue entry was RECORDED under (its type may still name generics).
@@ -290,13 +312,18 @@ extend CEmit {
             sx_emitted: Vector::<bool>::new(),
             sx_lbl: Vector::<bool>::new(),
             sx_fell: false,
+            sx_nest: 0,
             sx_goto: false,
             sx_coal: Vector::<u32>::new(),
-            sx_name: Vector::<String>::new(),
+            sx_nm_pool: String::new(),
+            sx_nm_off: Vector::<u32>::new(),
+            sx_nm_len: Vector::<u32>::new(),
             sx_used: Vector::<bool>::new(),
             sx_inline: Vector::<u32>::new(),
             sx_call_fwd: Vector::<bool>::new(),
-            sx_call_str: Vector::<String>::new(),
+            sx_cs_pool: String::new(),
+            sx_cs_off: Vector::<u32>::new(),
+            sx_cs_len: Vector::<u32>::new(),
             assert_helpers: 0,
             sx_fuse: Vector::<bool>::new(),
             sx_declared: Vector::<bool>::new(),
@@ -304,8 +331,12 @@ extend CEmit {
             sx_skip_rvalue: ir::IR_NONE,
             line_pool: Vector::<u32>::new(),
             line_off: Vector::<u64>::new(),
-            sym_memo: Map::<u64, String>::new(),
+            sym_memo: Map::<u64, u64>::new(),
             sym_memo_ctx: -2,
+            sym_pool: String::new(),
+            sym_off: Vector::<u32>::new(),
+            sym_len: Vector::<u32>::new(),
+            sym_hash: Vector::<u64>::new(),
             scratch: Vector::<String>::new(),
             cf_pool: Vector::<cfl::CFlow>::new(),
             u32_pool: Vector::<Vector<u32>>::new(),
@@ -347,6 +378,7 @@ extend CEmit {
             tmod_start: Vector::<u32>::new(),
             tid_pool: Vector::<u64>::new(),
             tmod_pool: Vector::<ModuleId>::new(),
+            pr: prb::Probe::new(stdlib::getenv("SC_CEMIT_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null),
         };
     }
 
@@ -458,20 +490,27 @@ extend CEmit {
     // 1-based line of byte offset `pos` in module `m`'s source (newlines strictly before `pos`).
     fn src_line(self: &mut Self, m: ModuleId, pos: u64) u64 {
         if self.line_off.len() == 0 {
-            for mi in 0..self.p().modules.len() {
-                self.line_off.push(self.line_pool.len() as u64);
-                let src = self.p().modules.at(mi).source.as_str();
-                for k in 0..src.len() {
-                    if src.byte_at(k) == 10 {
-                        self.line_pool.push(k as u32);
-                    }
+            // Slots for every module; a module's newline table fills on its first lookup (most
+            // modules never ask, and scanning every source per emitter was measurable).
+            for _mi in 0..self.p().modules.len() {
+                self.line_off.push(0xFFFFFFFFFFFFFFFFu64);
+                self.line_off.push(0);
+            }
+        }
+        if self.line_off[m as usize * 2] == 0xFFFFFFFFFFFFFFFFu64 {
+            let start = self.line_pool.len() as u64;
+            let src = self.p().modules.at(m as usize).source.as_str();
+            for k in 0..src.len() {
+                if src.byte_at(k) == 10 {
+                    self.line_pool.push(k as u32);
                 }
             }
-            self.line_off.push(self.line_pool.len() as u64);
+            self.line_off.set(m as usize * 2, start);
+            self.line_off.set(m as usize * 2 + 1, self.line_pool.len() as u64);
         }
-        let s = self.line_off[m as usize] as usize;
+        let s = self.line_off[m as usize * 2] as usize;
         let mut lo = s;
-        let mut hi = self.line_off[m as usize + 1] as usize;
+        let mut hi = self.line_off[m as usize * 2 + 1] as usize;
         while lo < hi {
             let mid = (lo + hi) / 2;
             if self.line_pool[mid] as u64 < pos {
@@ -774,10 +813,9 @@ extend CEmit {
                                         nsi.end as usize,
                                     );
                                     if nmi == "Slice" || nmi == "SliceMut" {
-                                        let mut cs0 = String::new();
-                                        if self.mg.ctype(callee.module, pty0, "", &mut cs0) {
-                                            dst.push_str("(");
-                                            dst.push_string(&cs0);
+                                        let mk0 = dst.len();
+                                        dst.push_str("(");
+                                        if self.mg.ctype(callee.module, pty0, "", dst) {
                                             dst.push_str("){ .ptr = ");
                                             let okA = self.emit_operand(b, opid, dst);
                                             dst.push_str(", .len = ");
@@ -785,6 +823,7 @@ extend CEmit {
                                             dst.push_str(" }");
                                             return okA;
                                         }
+                                        dst.truncate(mk0);
                                     }
                                 }
                             }
@@ -1020,12 +1059,19 @@ extend CEmit {
     pub fn emit_fn(self: &mut Self, b: &ir::CoreBody, name: str) bool {
         self.err = "";
         let mark = self.out.len();
+        let pm = self.pr.start();
+        let d0 = self.pr.ns[prb::P_DECL];
+        let a0 = self.pr.an[prb::P_DECL];
+        let b0 = self.pr.ab[prb::P_DECL];
         let ok = self.emit_fn_inner(b, name);
+        self.pr.stop_less(prb::P_RENDER, pm, prb::P_DECL, d0, a0, b0);
         self.noret = false;
         if !ok {
             self.out.truncate(mark);
             return false;
         }
+        self.pr.count(prb::C_BODIES, 1);
+        self.pr.count(prb::C_OUT_BYTES, (self.out.len() - mark) as u64);
         return true;
     }
 
@@ -1035,7 +1081,9 @@ extend CEmit {
         self.arr_ret = false;
         // A plain function has no captured locals.
         self.cap_on = false;
+        let dm = self.pr.start();
         self.setup_locals(b);
+        self.pr.stop(prb::P_DECL, dm);
         let mut ok0 = true;
         if self.fn_attrs.len() != 0 {
             self.out.push_string(&self.fn_attrs);
@@ -1111,18 +1159,16 @@ extend CEmit {
                 self.out.push_str(name);
                 self.out.push_str("(");
             } else {
-                let mut rt = String::new();
+                if self.noret {
+                    self.out.push_str("_Noreturn ");
+                }
                 if rty != TYPE_NONE && self.erased(b, rty) {
                     // Zero-sized results have no C carrier.
-                    rt.push_str("void");
+                    self.out.push_str("void");
                 } else {
-                    ok0 = self.ty_c(b.module, rty, "", &mut rt);
+                    ok0 = self.ty_c(b.module, rty, "", &mut self.out);
                 }
                 if ok0 {
-                    if self.noret {
-                        self.out.push_str("_Noreturn ");
-                    }
-                    self.out.push_string(&rt);
                     self.out.push_str(" ");
                     self.out.push_str(name);
                     self.out.push_str("(");
@@ -1144,7 +1190,7 @@ extend CEmit {
                 self.out.push_str(", ");
             }
             np9 += 1;
-            let mut nm = String::new();
+            let mut nm = self.sget();
             self.lspell(l as u32, &mut nm);
             // A `mut` fixed-array VALUE param: C hands a pointer to the caller's array, so the
             // body works on an entry copy (writes must not reach the caller).
@@ -1158,11 +1204,8 @@ extend CEmit {
                     arrcp.push(l as u32);
                 }
             }
-            let mut ts = String::new();
-            let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
-            if ok {
-                self.out.push_string(&ts);
-            }
+            let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut self.out);
+            self.sput(nm);
             if !ok {
                 return false;
             }
@@ -1416,8 +1459,9 @@ extend CEmit {
     fn setup_locals(self: &mut Self, b: &ir::CoreBody) {
         let n = b.locals.len();
         self.sx_coal.clear();
-        // Frees each String, keeps the Vector's capacity across functions.
-        self.sx_name.clear();
+        self.sx_nm_pool.clear();
+        self.sx_nm_off.clear();
+        self.sx_nm_len.clear();
         for l in 0..n {
             self.sx_coal.push(l as u32);
         }
@@ -1614,6 +1658,15 @@ extend CEmit {
                 if t.dests_len == 1 {
                     dty2 = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
                 }
+                let mh = if t.targs_len == 0 {
+                    self.sym_memo_hash(t.callee);
+                } else {
+                    0u64;
+                };
+                if mh != 0 {
+                    self.sx_reserved.insert(mh, 1);
+                    continue;
+                }
                 let mut sym = self.sget();
                 let saved = self.collect_demand;
                 self.collect_demand = false;
@@ -1630,7 +1683,7 @@ extend CEmit {
         // assigned names live in a hash set, so the whole pass is near-linear.
         self.sx_assigned.clear();
         for l in 0..n {
-            let mut nm = String::new();
+            let start = self.sx_nm_pool.len();
             if *self.sx_coal.at(l) == l as u32 && l >= b.returns as usize {
                 let st = b.locals.at(l).storage;
                 if st != ir::LS_TEMP && st != ir::LS_STATIC_REF {
@@ -1638,28 +1691,30 @@ extend CEmit {
                     if decl != NODE_NONE {
                         let sp = self.mg.decl_name_span(b.module, decl);
                         if sp.end > sp.start {
-                            self.mg.ident(b.module, sp, &mut nm);
-                            if CEmit::templike(nm.as_str()) || ident_in(nm.as_str(), &self.sx_reserved) || self.sx_assigned.contains_key(
-                                &ident_hash(nm.as_str()),
+                            self.mg.ident(b.module, sp, &mut self.sx_nm_pool);
+                            let nm0 = self.sx_nm_pool.as_str().slice(start, self.sx_nm_pool.len());
+                            if CEmit::templike(nm0) || ident_in(nm0, &self.sx_reserved) || self.sx_assigned.contains_key(
+                                &ident_hash(nm0),
                             ) {
-                                nm.push_str("_");
-                                nm.push_u64(l as u64);
+                                self.sx_nm_pool.push_str("_");
+                                self.sx_nm_pool.push_u64(l as u64);
                                 // The suffixed name must clear BOTH sets: `<name>_<id>` can itself be
                                 // a reserved symbol or an earlier local's name.
-                                if ident_in(nm.as_str(), &self.sx_reserved) || self.sx_assigned.contains_key(
-                                    &ident_hash(nm.as_str()),
-                                ) {
-                                    nm.truncate(0);
+                                let nm1 = self.sx_nm_pool.as_str().slice(start, self.sx_nm_pool.len());
+                                if ident_in(nm1, &self.sx_reserved) || self.sx_assigned.contains_key(&ident_hash(nm1)) {
+                                    self.sx_nm_pool.truncate(start);
                                 }
                             }
-                            if nm.len() != 0 {
-                                self.sx_assigned.insert(ident_hash(nm.as_str()), 1);
+                            if self.sx_nm_pool.len() != start {
+                                let nm2 = self.sx_nm_pool.as_str().slice(start, self.sx_nm_pool.len());
+                                self.sx_assigned.insert(ident_hash(nm2), 1);
                             }
                         }
                     }
                 }
             }
-            self.sx_name.push(nm);
+            self.sx_nm_off.push(start as u32);
+            self.sx_nm_len.push((self.sx_nm_pool.len() - start) as u32);
         }
 
         // Liveness for declaration + dead-store removal: a local needs a declaration when it is read
@@ -1683,13 +1738,14 @@ extend CEmit {
     /// coalesce target's preserved name, or `_<id>`. A driver synthesizing a wrapper reads the
     /// receiver name here instead of parsing emitted text.
     pub fn lspell(self: &Self, l: u32, dst: &mut String) {
-        let c = *self.sx_coal.at(l as usize);
-        let nm = self.sx_name.at(c as usize);
-        if nm.len() != 0 {
-            dst.push_string(nm);
+        let c = (*self.sx_coal.at(l as usize)) as usize;
+        let ln = self.sx_nm_len[c] as usize;
+        if ln != 0 {
+            let off = self.sx_nm_off[c] as usize;
+            dst.push_str(self.sx_nm_pool.as_str().slice(off, off + ln));
         } else {
             dst.push_str("_");
-            dst.push_u64(c);
+            dst.push_u64(c as u64);
         }
     }
 
@@ -1798,7 +1854,7 @@ extend CEmit {
     // `x = x op y` reads better as `x op= y`, and evaluates the destination once. Applies only to the
     // scalar C-operator path (aggregates dispatch through a method) when the binary's left operand is
     // the destination place itself. Returns whether it emitted the statement.
-    fn try_compound_assign(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement) bool {
+    fn try_compound_assign(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement) bool {
         if s.kind != ir::ST_ASSIGN {
             return false;
         }
@@ -1833,20 +1889,17 @@ extend CEmit {
         }
         // Committed: a later failure sets self.err rather than returning false, so the caller does not
         // re-run the general path and double emit_place's collection side effects.
-        let mut lhs = String::new();
-        let mut rhs = String::new();
         let mut bm = b.module;
         let mut bt = TYPE_NONE;
         let bref = self.bin_op_ty(b, rv.b, &mut bm, &mut bt);
-        if self.emit_place(b, s.place, &mut lhs) && self.emit_op_d(b, rv.b, bref, &mut rhs) {
-            self.out.push_str("  ");
-            self.out.push_string(&lhs);
-            self.out.push_str(" ");
-            self.out.push_str(opstr);
-            self.out.push_str(" ");
-            self.out.push_string(&rhs);
-            self.out.push_str(";\n");
+        o.push_str("  ");
+        if self.emit_place(b, s.place, o) {
+            o.push_str(" ");
+            o.push_str(opstr);
+            o.push_str(" ");
+            let _ = self.emit_op_d(b, rv.b, bref, o);
         }
+        o.push_str(";\n");
         return true;
     }
 
@@ -2095,12 +2148,12 @@ extend CEmit {
         for _l in 0..n {
             self.sx_inline.push(ir::IR_NONE);
         }
-        let mut bare_read = Vector::<u32>::new();
-        let mut ndef = Vector::<u32>::new();
-        let mut blocked = Vector::<bool>::new();
-        let mut def_rv = Vector::<u32>::new();
-        let mut def_blk = Vector::<u32>::new();
-        let mut def_idx = Vector::<u32>::new();
+        let mut bare_read = self.uget();
+        let mut ndef = self.uget();
+        let mut blocked = self.bget();
+        let mut def_rv = self.uget();
+        let mut def_blk = self.uget();
+        let mut def_idx = self.uget();
         for _l in 0..n {
             bare_read.push(0);
             ndef.push(0);
@@ -2168,7 +2221,7 @@ extend CEmit {
         // against. Taint every single-def foldable local whose spelled expression may contain a
         // memory read once substitution bottoms out, and use that as the local's reads_mem below.
         // Over-approximates (assumes every eligible link folds): only blocks a fold, never admits.
-        let mut mem_taint = Vector::<bool>::new();
+        let mut mem_taint = self.bget();
         for l in 0..n {
             let single = !*blocked.at(l) && *ndef.at(l) == 1 && *def_rv.at(l) != ir::IR_NONE;
             mem_taint.push(single && self.rvalue_reads_mem(b, *def_rv.at(l)));
@@ -2293,6 +2346,13 @@ extend CEmit {
                 }
             }
         }
+        self.uput(bare_read);
+        self.uput(ndef);
+        self.uput(def_rv);
+        self.uput(def_blk);
+        self.uput(def_idx);
+        self.bput(blocked);
+        self.bput(mem_taint);
     }
 
     // Inline a single-use slice/array length into a loop comparison when its source is not written
@@ -2631,10 +2691,13 @@ extend CEmit {
     fn compute_call_fwd(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) {
         let n = b.locals.len();
         self.sx_call_fwd.clear();
-        self.sx_call_str.clear();
+        self.sx_cs_pool.clear();
+        self.sx_cs_off.clear();
+        self.sx_cs_len.clear();
         for _l in 0..n {
             self.sx_call_fwd.push(false);
-            self.sx_call_str.push(String::new());
+            self.sx_cs_off.push(0);
+            self.sx_cs_len.push(0);
         }
         let mut bare = self.uget();
         let mut deref = self.uget();
@@ -2796,7 +2859,7 @@ extend CEmit {
     // Locals, labels, blocks and the closing brace, shared by plain functions and closures.
     // Declares an OPEN array local ([T] with no length), recovering its extent from the literal
     // or repeat that fills it. Caller guarantees the resolved type is a zero-length TYPE_ARRAY.
-    fn emit_open_array_decl(self: &mut Self, b: &ir::CoreBody, l0: u32) bool {
+    fn emit_open_array_decl(self: &mut Self, o: &mut String, b: &ir::CoreBody, l0: u32) bool {
         let l = l0 as usize;
         let mut rmL = b.module;
         let mut rtL = b.locals.at(l).ty;
@@ -2865,9 +2928,9 @@ extend CEmit {
         let mut ts2 = String::new();
         let ok3 = self.ty_c(rmL, yl.as_data.arr.elem, nm2.as_str(), &mut ts2);
         if ok3 {
-            self.out.push_str("  ");
-            self.out.push_string(&ts2);
-            self.out.push_str(";\n");
+            o.push_str("  ");
+            o.push_string(&ts2);
+            o.push_str(";\n");
         }
 
         if !ok3 {
@@ -2881,22 +2944,37 @@ extend CEmit {
             return self.emit_body_core_cf(b, unsafe &*self.cf_ext);
         }
         let mut cf = self.cfget();
+        let dm = self.pr.start();
         cf.build_into(b);
+        self.pr.stop(prb::P_DECL, dm);
         let ok9 = self.emit_body_core_cf(b, &cf);
         self.cfput(cf);
         return ok9;
     }
 
     fn emit_body_core_cf(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+        // The body renders into the TU buffer taken out of `self`, so every renderer writes to it
+        // while `self` stays borrowed; nothing else may touch `self.out` meanwhile.
+        let mut o = replace(&mut self.out, String::new());
+        let ok = self.emit_body_core_o(&mut o, b, cf);
+        assert(self.out.len() == 0);
+        self.out = o;
+        return ok;
+    }
+
+    fn emit_body_core_o(self: &mut Self, o: &mut String, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+        assert(self.sx_nest == 0);
+        let dm = self.pr.start();
         self.compute_loop_inline(b, cf);
         self.compute_fusion(b, cf);
         self.compute_call_fwd(b, cf);
         let ret_dead = !self.ret_slot_live(b, cf);
+        self.pr.stop(prb::P_DECL, dm);
         // Preemption tick, function-local so the C compiler can keep it in a register: the TLS
         // countdown cost a load+store on every loop back-edge. A loop reaching 2048 back-edges
         // still hits the hook; the cross-call accumulation the TLS tick had was incidental.
         if body_has_safepoint(b) && self.safepoints_on(b.module) {
-            self.out.push_str("  int32_t __sc_spc = 2048;\n");
+            o.push_str("  int32_t __sc_spc = 2048;\n");
         }
         // Every non-argument local declares up front, explicitly typed; unit locals carry no C.
         for l in 0..b.locals.len() {
@@ -2933,11 +3011,11 @@ extend CEmit {
                 // call destination); scalars fall back to int64_t.
                 let mut retsym = String::new();
                 if self.untyped_ret_struct(b, l as u32, &mut retsym) {
-                    self.out.push_str("  ");
-                    self.out.push_string(&retsym);
-                    self.out.push_str("_ret _");
-                    self.out.push_u64(l as u64);
-                    self.out.push_str(";\n");
+                    o.push_str("  ");
+                    o.push_string(&retsym);
+                    o.push_str("_ret _");
+                    o.push_u64(l as u64);
+                    o.push_str(";\n");
                     continue;
                 }
 
@@ -2945,22 +3023,18 @@ extend CEmit {
                 if rt0 != TYPE_NONE {
                     let mut nm3 = String::from_str("_");
                     nm3.push_u64(l as u64);
-                    let mut ts3 = String::new();
-                    let ok3 = self.ty_c(b.module, rt0, nm3.as_str(), &mut ts3);
-                    if ok3 {
-                        self.out.push_str("  ");
-                        self.out.push_string(&ts3);
-                        self.out.push_str(";\n");
-                    }
+                    o.push_str("  ");
+                    let ok3 = self.ty_c(b.module, rt0, nm3.as_str(), o);
+                    o.push_str(";\n");
 
                     if !ok3 {
                         return false;
                     }
                     continue;
                 }
-                self.out.push_str("  int64_t _");
-                self.out.push_u64(l as u64);
-                self.out.push_str(";\n");
+                o.push_str("  int64_t _");
+                o.push_u64(l as u64);
+                o.push_str(";\n");
                 continue;
             }
             if self.mg.subs.len() != 0 {
@@ -2974,7 +3048,7 @@ extend CEmit {
                     continue;
                 }
                 if yl.kind == TypeKind::TYPE_ARRAY && yl.as_data.arr.len == 0 {
-                    if !self.emit_open_array_decl(b, l as u32) {
+                    if !self.emit_open_array_decl(o, b, l as u32) {
                         return false;
                     }
                     continue;
@@ -2982,9 +3056,9 @@ extend CEmit {
                 if yl.kind == TypeKind::TYPE_NEVER {
                     // Never-typed temps only appear on dead paths; a scalar placeholder keeps
                     // their (unreachable) reads compilable.
-                    self.out.push_str("  int64_t _");
-                    self.out.push_u64(l as u64);
-                    self.out.push_str(";\n");
+                    o.push_str("  int64_t _");
+                    o.push_u64(l as u64);
+                    o.push_str(";\n");
                     continue;
                 }
                 if self.erased(b, b.locals.at(l).ty) {
@@ -2999,9 +3073,9 @@ extend CEmit {
                 let mut ts = self.sget();
                 let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
                 if ok {
-                    self.out.push_str("  ");
-                    self.out.push_string(&ts);
-                    self.out.push_str(";\n");
+                    o.push_str("  ");
+                    o.push_string(&ts);
+                    o.push_str(";\n");
                 }
                 self.sput(ts);
                 self.sput(nm);
@@ -3066,13 +3140,13 @@ extend CEmit {
             if md == 4 {
                 // Never-typed temps only appear on dead paths; a scalar placeholder keeps
                 // their (unreachable) reads compilable.
-                self.out.push_str("  int64_t _");
-                self.out.push_u64(l as u64);
-                self.out.push_str(";\n");
+                o.push_str("  int64_t _");
+                o.push_u64(l as u64);
+                o.push_str(";\n");
                 continue;
             }
             if md == 5 {
-                if !self.emit_open_array_decl(b, l as u32) {
+                if !self.emit_open_array_decl(o, b, l as u32) {
                     return false;
                 }
                 continue;
@@ -3085,20 +3159,20 @@ extend CEmit {
             self.lspell(l as u32, &mut nm);
             let mut ok = true;
             if md != 2 {
-                self.out.push_str("  ");
-                self.out.push_string(self.decl_txt.at(slot as usize));
+                o.push_str("  ");
+                o.push_string(self.decl_txt.at(slot as usize));
                 if md == 0 {
-                    self.out.push_str(" ");
+                    o.push_str(" ");
                 }
-                self.out.push_string(&nm);
-                self.out.push_str(";\n");
+                o.push_string(&nm);
+                o.push_str(";\n");
             } else {
                 let mut ts = self.sget();
                 ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
                 if ok {
-                    self.out.push_str("  ");
-                    self.out.push_string(&ts);
-                    self.out.push_str(";\n");
+                    o.push_str("  ");
+                    o.push_string(&ts);
+                    o.push_str(";\n");
                 }
                 self.sput(ts);
             }
@@ -3108,18 +3182,18 @@ extend CEmit {
             }
         }
         let mut ok2 = false;
-        if cf.reducible && self.plan_structured(b, cf) {
-            ok2 = self.emit_structured(b, cf);
+        if cf.reducible && self.plan_structured(o, b, cf) {
+            ok2 = self.emit_structured(o, b, cf);
         } else {
-            ok2 = self.emit_layout(b, cf);
+            ok2 = self.emit_layout(o, b, cf);
         }
         if !ok2 {
             return false;
         }
-        if b.returns == 1 && self.erased(b, b.locals.at(0).ty) && self.out.as_str().ends_with("  return;\n") {
-            self.out.truncate(self.out.len() - 10);
+        if b.returns == 1 && self.erased(b, b.locals.at(0).ty) && o.as_str().ends_with("  return;\n") {
+            o.truncate(o.len() - 10);
         }
-        self.out.push_str("}\n");
+        o.push_str("}\n");
         return self.err.len() == 0;
     }
 
@@ -3127,13 +3201,13 @@ extend CEmit {
     // when the sole successor is the next block, one goto otherwise. Unreachable blocks, the dead
     // fall-off sentinels, and jump-to-next chains never appear. Structured `if`/`switch`/loops are
     // layered on this by emit_body_core's structural pass; this is the goto-correct fallback.
-    fn emit_layout(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+    fn emit_layout(self: &mut Self, o: &mut String, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
         let m = cf.order.len();
-        let mut need = Vector::<bool>::new();
-        let mut skip = Vector::<bool>::new();
-        let mut chain_default = Vector::<u32>::new();
-        let mut chain_target = Vector::<u32>::new();
-        let mut chain_kind = Vector::<u8>::new();
+        let mut need = self.bget();
+        let mut skip = self.bget();
+        let mut chain_default = self.uget();
+        let mut chain_target = self.uget();
+        let mut chain_kind = self.uget();
         for _i in 0..b.blocks.len() {
             need.push(false);
             skip.push(false);
@@ -3255,12 +3329,12 @@ extend CEmit {
                 cfl::NONE;
             };
             if *need.at(x as usize) {
-                self.out.push_str("bb_");
-                self.out.push_u64(x);
-                self.out.push_str(": ;\n");
+                o.push_str("bb_");
+                o.push_u64(x);
+                o.push_str(": ;\n");
             }
             let blk = *b.blocks.at(x as usize);
-            if !self.emit_block_content(b, &blk) {
+            if !self.emit_block_content(o, b, &blk) {
                 ok = false;
                 break;
             }
@@ -3268,20 +3342,20 @@ extend CEmit {
                 let mut cs = cfl::NONE;
                 if self.const_switch_succ(b, cf, x, &mut cs) {
                     if cs != next {
-                        self.out.push_str("  goto bb_");
-                        self.out.push_u64(cs);
-                        self.out.push_str(";\n");
+                        o.push_str("  goto bb_");
+                        o.push_u64(cs);
+                        o.push_str(";\n");
                     }
                 } else {
                     let cd = *chain_default.at(x as usize);
                     if cd != cfl::NONE {
                         if *chain_kind.at(x as usize) == 1 {
-                            ok = self.emit_switch_or_chain(b, cf, x, *chain_target.at(x as usize), cd);
+                            ok = self.emit_switch_or_chain(o, b, cf, x, *chain_target.at(x as usize), cd);
                         } else {
-                            ok = self.emit_switch_and_pair(b, cf, x, *chain_target.at(x as usize), cd);
+                            ok = self.emit_switch_and_pair(o, b, cf, x, *chain_target.at(x as usize), cd);
                         }
                     } else {
-                        ok = self.emit_switch_gotos(b, cf, x);
+                        ok = self.emit_switch_gotos(o, b, cf, x);
                     }
                     if !ok {
                         ok = false;
@@ -3293,21 +3367,25 @@ extend CEmit {
                         cf.succ(b, x, blk.term.sw_len);
                     };
                     if ot != next {
-                        self.out.push_str("  goto bb_");
-                        self.out.push_u64(ot);
-                        self.out.push_str(";\n");
+                        o.push_str("  goto bb_");
+                        o.push_u64(ot);
+                        o.push_str(";\n");
                     }
                 }
             } else if blk.term.kind != ir::TM_RETURN && blk.term.kind != ir::TM_UNREACHABLE {
                 let s = cf.succ(b, x, 0);
                 if s != next {
-                    self.out.push_str("  goto bb_");
-                    self.out.push_u64(s);
-                    self.out.push_str(";\n");
+                    o.push_str("  goto bb_");
+                    o.push_u64(s);
+                    o.push_str(";\n");
                 }
             }
         }
-
+        self.bput(need);
+        self.bput(skip);
+        self.uput(chain_default);
+        self.uput(chain_target);
+        self.uput(chain_kind);
         return ok;
     }
 
@@ -3321,19 +3399,30 @@ extend CEmit {
         return true;
     }
 
-    fn emit_switch_or_chain(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32, target: u32, end: u32) bool {
+    fn emit_switch_or_chain(
+        self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        x: u32,
+        target: u32,
+        end: u32,
+    ) bool {
         let mut cur = x;
-        self.out.push_str("  if (");
+        o.push_str("  if (");
+        let mut d = self.sget();
         loop {
             let t = b.blocks.at(cur as usize).term;
-            let mut d = String::new();
+            d.clear();
             if !self.emit_operand(b, t.a, &mut d) {
+                self.sput(d);
                 return false;
             }
             if cur != x {
-                self.out.push_str(" || ");
+                o.push_str(" || ");
             }
             self.push_case_test(
+                o,
                 false,
                 self.is_bool(b, b.operands.at(t.a as usize).ty),
                 &d,
@@ -3345,25 +3434,37 @@ extend CEmit {
             }
             cur = next;
         }
-        self.out.push_str(") goto bb_");
-        self.out.push_u64(target);
-        self.out.push_str(";\n");
+        self.sput(d);
+        o.push_str(") goto bb_");
+        o.push_u64(target);
+        o.push_str(";\n");
         return true;
     }
 
-    fn emit_switch_and_pair(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32, target: u32, end: u32) bool {
+    fn emit_switch_and_pair(
+        self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        x: u32,
+        target: u32,
+        end: u32,
+    ) bool {
         let mut cur = x;
-        self.out.push_str("  if (");
+        o.push_str("  if (");
+        let mut d = self.sget();
         for i in 0..2 {
             let t = b.blocks.at(cur as usize).term;
-            let mut d = String::new();
+            d.clear();
             if !self.emit_operand(b, t.a, &mut d) {
+                self.sput(d);
                 return false;
             }
             if i != 0 {
-                self.out.push_str(" && ");
+                o.push_str(" && ");
             }
             self.push_case_test(
+                o,
                 false,
                 self.is_bool(b, b.operands.at(t.a as usize).ty),
                 &d,
@@ -3373,9 +3474,10 @@ extend CEmit {
                 cur = cf.succ(b, cur, 0);
             }
         }
-        self.out.push_str(") goto bb_");
-        self.out.push_u64(target);
-        self.out.push_str(";\n");
+        self.sput(d);
+        o.push_str(") goto bb_");
+        o.push_u64(target);
+        o.push_str(";\n");
         return cf.succ(b, cur, 1) == end;
     }
 
@@ -3403,30 +3505,32 @@ extend CEmit {
     }
 
     // The per-arm equality tests of a switch terminator: `if ((disc) == value) goto bb_target;`.
-    fn emit_switch_gotos(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32) bool {
+    fn emit_switch_gotos(self: &mut Self, o: &mut String, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32) bool {
         let t = b.blocks.at(x as usize).term;
-        let mut d = String::new();
+        let mut d = self.sget();
         if !self.emit_operand(b, t.a, &mut d) {
+            self.sput(d);
             return false;
         }
         let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
         let mut k: u32 = 0;
         while k < t.sw_len {
             let pair = b.switch_pool[(t.sw_start + k) as usize];
-            self.out.push_str("  if (");
-            self.push_case_test(false, isb, &d, pair >> 32);
+            o.push_str("  if (");
+            self.push_case_test(o, false, isb, &d, pair >> 32);
             let target = cf.succ(b, x, k);
             let mut j = k + 1;
             while j < t.sw_len && cf.succ(b, x, j) == target {
-                self.out.push_str(" || ");
-                self.push_case_test(false, isb, &d, b.switch_pool[(t.sw_start + j) as usize] >> 32);
+                o.push_str(" || ");
+                self.push_case_test(o, false, isb, &d, b.switch_pool[(t.sw_start + j) as usize] >> 32);
                 j += 1;
             }
-            self.out.push_str(") goto bb_");
-            self.out.push_u64(target);
-            self.out.push_str(";\n");
+            o.push_str(") goto bb_");
+            o.push_u64(target);
+            o.push_str(";\n");
             k = j;
         }
+        self.sput(d);
         return true;
     }
 
@@ -3522,28 +3626,26 @@ extend CEmit {
 
     // Emit a block's statements and terminator effect, applying return-slot forwarding. Shared by the
     // structured driver and the goto layout so both spell the same body.
-    fn emit_block_content(self: &mut Self, b: &ir::CoreBody, blk: &ir::BasicBlock) bool {
+    fn emit_block_content(self: &mut Self, o: &mut String, b: &ir::CoreBody, blk: &ir::BasicBlock) bool {
         let skip = self.ret_fwd_idx(b, blk);
         for si in 0..blk.stmt_len {
             if si == skip {
                 continue;
             }
             let s = *b.statements.at((blk.stmt_start + si) as usize);
-            if !self.emit_stmt(b, &s) {
+            if !self.emit_stmt(o, b, &s) {
                 return false;
             }
         }
         if skip != ir::IR_NONE {
-            let mut ov = String::new();
-            if !self.emit_rvalue(b, b.statements.at((blk.stmt_start + skip) as usize).rvalue, &mut ov) {
+            o.push_str("  return ");
+            if !self.emit_rvalue(b, b.statements.at((blk.stmt_start + skip) as usize).rvalue, o) {
                 return false;
             }
-            self.out.push_str("  return ");
-            self.out.push_string(&ov);
-            self.out.push_str(";\n");
+            o.push_str(";\n");
             return true;
         }
-        return self.emit_term_effect(b, &blk.term);
+        return self.emit_term_effect(o, b, &blk.term);
     }
 
     // Reconstruct structured C over a reducible, simple-loop CFG: straight-line runs, `if`/`else`,
@@ -3554,7 +3656,7 @@ extend CEmit {
     // Label-planning pass: walk the region tree with no output or statement side effects. Returns
     // true when the body structures with no goto (so the real pass is safe), leaving self.sx_lbl
     // marking any block that still needs a label. A false result sends the body to the goto layout.
-    fn plan_structured(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+    fn plan_structured(self: &mut Self, o: &mut String, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
         self.sx_emitted.clear();
         self.sx_lbl.clear();
         for _i in 0..b.blocks.len() {
@@ -3562,7 +3664,7 @@ extend CEmit {
             self.sx_lbl.push(false);
         }
         self.sx_goto = false;
-        let _ = self.emit_region(b, cf, cf.entry, cfl::NONE, cfl::NONE, cfl::NONE, true);
+        let _ = self.emit_region(o, b, cf, cf.entry, cfl::NONE, cfl::NONE, cfl::NONE, true);
         if self.sx_goto {
             return false;
         }
@@ -3575,28 +3677,28 @@ extend CEmit {
     }
 
     // The structured pass proper; runs only after plan_structured returned true (no goto needed).
-    fn emit_structured(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+    fn emit_structured(self: &mut Self, o: &mut String, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
         for i in 0..b.blocks.len() {
             self.sx_emitted.set(i, false);
         }
-        return self.emit_region(b, cf, cf.entry, cfl::NONE, cfl::NONE, cfl::NONE, false);
+        return self.emit_region(o, b, cf, cf.entry, cfl::NONE, cfl::NONE, cfl::NONE, false);
     }
 
-    const fn w(self: &mut Self, dry: bool, s: str) {
+    const fn w(self: &mut Self, o: &mut String, dry: bool, s: str) {
         if !dry {
-            self.out.push_str(s);
+            o.push_str(s);
         }
     }
 
-    const fn wu(self: &mut Self, dry: bool, x: u64) {
+    const fn wu(self: &mut Self, o: &mut String, dry: bool, x: u64) {
         if !dry {
-            self.out.push_u64(x);
+            o.push_u64(x);
         }
     }
 
-    const fn ws(self: &mut Self, dry: bool, s: &String) {
+    const fn ws(self: &mut Self, o: &mut String, dry: bool, s: &String) {
         if !dry {
-            self.out.push_string(s);
+            o.push_string(s);
         }
     }
 
@@ -3650,21 +3752,19 @@ extend CEmit {
     // Append one switch-case test on the already-spelled discriminant `d`: a boolean discriminant
     // reads as `d` (value 1) or `!d` (value 0); any other discriminant as `(d) == value`. `d` for a
     // true case drops one redundant paren layer so an inlined comparison does not double up.
-    fn push_case_test(self: &mut Self, dry: bool, is_bool: bool, d: &String, value: u64) {
+    fn push_case_test(self: &mut Self, o: &mut String, dry: bool, is_bool: bool, d: &String, value: u64) {
         if is_bool && value == 1 {
             if !dry {
-                let mut u = String::new();
-                CEmit::unwrap_parens(d, &mut u);
-                self.out.push_string(&u);
+                CEmit::unwrap_parens(d, o);
             }
         } else if is_bool && value == 0 {
-            self.w(dry, "!");
-            self.ws(dry, d);
+            self.w(o, dry, "!");
+            self.ws(o, dry, d);
         } else {
-            self.w(dry, "(");
-            self.ws(dry, d);
-            self.w(dry, ") == ");
-            self.wu(dry, value);
+            self.w(o, dry, "(");
+            self.ws(o, dry, d);
+            self.w(o, dry, ") == ");
+            self.wu(o, dry, value);
         }
     }
 
@@ -3693,6 +3793,27 @@ extend CEmit {
     // identical control decisions but writes no C and runs no statement side effects.
     fn emit_region(
         self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        entry: u32,
+        stop: u32,
+        brk: u32,
+        cont: u32,
+        dry: bool,
+    ) bool {
+        if self.sx_nest == RENDER_NEST_MAX {
+            return self.fail("nesting");
+        }
+        self.sx_nest += 1;
+        let ok = self.emit_region_i(o, b, cf, entry, stop, brk, cont, dry);
+        self.sx_nest -= 1;
+        return ok;
+    }
+
+    fn emit_region_i(
+        self: &mut Self,
+        o: &mut String,
         b: &ir::CoreBody,
         cf: &cfl::CFlow,
         entry: u32,
@@ -3708,34 +3829,34 @@ extend CEmit {
                 return true;
             }
             if node == cont {
-                self.w(dry, "  continue;\n");
+                self.w(o, dry, "  continue;\n");
                 self.sx_fell = false;
                 return true;
             }
             if node == brk {
-                self.w(dry, "  break;\n");
+                self.w(o, dry, "  break;\n");
                 self.sx_fell = false;
                 return true;
             }
             if self.outer_break_target(cf, cont, node) {
-                self.w(dry, "  goto bb_");
-                self.wu(dry, node);
-                self.w(dry, ";\n");
+                self.w(o, dry, "  goto bb_");
+                self.wu(o, dry, node);
+                self.w(o, dry, ";\n");
                 self.sx_lbl.set(node as usize, true);
                 self.sx_fell = false;
                 return true;
             }
             if *self.sx_emitted.at(node as usize) || !cf.dominates(entry, node) {
                 self.sx_goto = true;
-                self.w(dry, "  goto bb_");
-                self.wu(dry, node);
-                self.w(dry, ";\n");
+                self.w(o, dry, "  goto bb_");
+                self.wu(o, dry, node);
+                self.w(o, dry, ";\n");
                 self.sx_lbl.set(node as usize, true);
                 self.sx_fell = false;
                 return true;
             }
             if *cf.is_header.at(node as usize) {
-                if !self.emit_loop(b, cf, node, dry) {
+                if !self.emit_loop(o, b, cf, node, dry) {
                     return false;
                 }
                 let lf = *cf.loop_follow.at(node as usize);
@@ -3748,13 +3869,13 @@ extend CEmit {
             }
             self.sx_emitted.set(node as usize, true);
             if *self.sx_lbl.at(node as usize) {
-                self.w(dry, "bb_");
-                self.wu(dry, node);
-                self.w(dry, ": ;\n");
+                self.w(o, dry, "bb_");
+                self.wu(o, dry, node);
+                self.w(o, dry, ": ;\n");
             }
             let blk = *b.blocks.at(node as usize);
             if !dry {
-                if !self.emit_block_content(b, &blk) {
+                if !self.emit_block_content(o, b, &blk) {
                     return false;
                 }
             }
@@ -3769,7 +3890,7 @@ extend CEmit {
                     continue;
                 }
                 let f = *cf.follow.at(node as usize);
-                if !self.emit_branch(b, cf, node, f, stop, brk, cont, dry) {
+                if !self.emit_branch(o, b, cf, node, f, stop, brk, cont, dry) {
                     return false;
                 }
                 if f == cfl::NONE {
@@ -3787,6 +3908,7 @@ extend CEmit {
     // stop at the branch join `f`, or at the region stop when the arms do not rejoin.
     fn emit_branch(
         self: &mut Self,
+        o: &mut String,
         b: &ir::CoreBody,
         cf: &cfl::CFlow,
         x: u32,
@@ -3796,103 +3918,121 @@ extend CEmit {
         cont: u32,
         dry: bool,
     ) bool {
+        let mut d = self.sget();
+        let ok = self.emit_branch_i(o, b, cf, x, f, rstop, brk, cont, dry, &mut d);
+        self.sput(d);
+        return ok;
+    }
+
+    fn emit_branch_i(
+        self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        cf: &cfl::CFlow,
+        x: u32,
+        f: u32,
+        rstop: u32,
+        brk: u32,
+        cont: u32,
+        dry: bool,
+        d: &mut String,
+    ) bool {
         let arm_stop = if f != cfl::NONE {
             f;
         } else {
             rstop;
         };
         let t = b.blocks.at(x as usize).term;
-        let mut d = String::new();
-        if !dry && !self.emit_operand(b, t.a, &mut d) {
+        if !dry && !self.emit_operand(b, t.a, d) {
             return false;
         }
         if t.sw_len >= 2 && brk == cfl::NONE && cont == cfl::NONE {
-            self.w(dry, "  switch (");
-            self.ws(dry, &d);
-            self.w(dry, ") {\n");
+            self.w(o, dry, "  switch (");
+            self.ws(o, dry, d);
+            self.w(o, dry, ") {\n");
             let mut fell = false;
             for k in 0..t.sw_len {
-                self.w(dry, "  case ");
-                self.wu(dry, b.switch_pool[(t.sw_start + k) as usize] >> 32);
-                self.w(dry, ": {\n");
-                if !self.emit_region(b, cf, cf.succ(b, x, k), arm_stop, brk, cont, dry) {
+                self.w(o, dry, "  case ");
+                self.wu(o, dry, b.switch_pool[(t.sw_start + k) as usize] >> 32);
+                self.w(o, dry, ": {\n");
+                if !self.emit_region(o, b, cf, cf.succ(b, x, k), arm_stop, brk, cont, dry) {
                     return false;
                 }
                 if self.sx_fell {
-                    self.w(dry, "  break;\n");
+                    self.w(o, dry, "  break;\n");
                     fell = true;
                 }
-                self.w(dry, "  }\n");
+                self.w(o, dry, "  }\n");
             }
-            self.w(dry, "  default: {\n");
-            if !self.emit_region(b, cf, cf.succ(b, x, t.sw_len), arm_stop, brk, cont, dry) {
+            self.w(o, dry, "  default: {\n");
+            if !self.emit_region(o, b, cf, cf.succ(b, x, t.sw_len), arm_stop, brk, cont, dry) {
                 return false;
             }
             if self.sx_fell {
-                self.w(dry, "  break;\n");
+                self.w(o, dry, "  break;\n");
                 fell = true;
             }
-            self.w(dry, "  }\n  }\n");
+            self.w(o, dry, "  }\n  }\n");
             self.sx_fell = fell;
             return true;
         }
         let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
         if !dry && t.sw_len == 1 {
-            let mark = self.out.len();
-            self.out.push_str("  if (");
-            self.push_case_test(false, isb, &d, b.switch_pool[t.sw_start as usize] >> 32);
-            self.out.push_str(") {\n");
-            let body_mark = self.out.len();
-            if !self.emit_region(b, cf, cf.succ(b, x, 0), arm_stop, brk, cont, false) {
+            let mark = o.len();
+            o.push_str("  if (");
+            self.push_case_test(o, false, isb, d, b.switch_pool[t.sw_start as usize] >> 32);
+            o.push_str(") {\n");
+            let body_mark = o.len();
+            if !self.emit_region(o, b, cf, cf.succ(b, x, 0), arm_stop, brk, cont, false) {
                 return false;
             }
             let true_fell = self.sx_fell;
             let ot = cf.succ(b, x, 1);
-            if true_fell && self.out.len() == body_mark {
-                self.out.truncate(mark);
+            if true_fell && o.len() == body_mark {
+                o.truncate(mark);
                 if ot == arm_stop {
                     self.sx_fell = true;
                     return true;
                 }
-                self.out.push_str("  if (");
-                if !self.push_case_test_negated(b, &t, isb, &d, b.switch_pool[t.sw_start as usize] >> 32) {
+                o.push_str("  if (");
+                if !self.push_case_test_negated(o, b, &t, isb, d, b.switch_pool[t.sw_start as usize] >> 32) {
                     return false;
                 }
-                self.out.push_str(") {\n");
-                if !self.emit_region(b, cf, ot, arm_stop, brk, cont, false) {
+                o.push_str(") {\n");
+                if !self.emit_region(o, b, cf, ot, arm_stop, brk, cont, false) {
                     return false;
                 }
-                self.out.push_str("  }\n");
+                o.push_str("  }\n");
                 self.sx_fell = true;
                 return true;
             }
-            self.out.push_str("  }");
+            o.push_str("  }");
             let mut fell = true_fell;
             if ot != arm_stop {
                 if !true_fell {
-                    self.out.push_str("\n");
-                    if !self.emit_region(b, cf, ot, arm_stop, brk, cont, false) {
+                    o.push_str("\n");
+                    if !self.emit_region(o, b, cf, ot, arm_stop, brk, cont, false) {
                         return false;
                     }
                     return true;
                 }
-                let else_mark = self.out.len();
-                self.out.push_str(" else {\n");
-                let else_body = self.out.len();
-                if !self.emit_region(b, cf, ot, arm_stop, brk, cont, false) {
+                let else_mark = o.len();
+                o.push_str(" else {\n");
+                let else_body = o.len();
+                if !self.emit_region(o, b, cf, ot, arm_stop, brk, cont, false) {
                     return false;
                 }
                 if self.sx_fell {
                     fell = true;
                 }
-                if self.sx_fell && self.out.len() == else_body {
-                    self.out.truncate(else_mark);
-                    self.out.push_str("\n");
+                if self.sx_fell && o.len() == else_body {
+                    o.truncate(else_mark);
+                    o.push_str("\n");
                 } else {
-                    self.out.push_str("  }\n");
+                    o.push_str("  }\n");
                 }
             } else {
-                self.out.push_str("\n");
+                o.push_str("\n");
                 fell = true;
             }
             self.sx_fell = fell;
@@ -3901,39 +4041,39 @@ extend CEmit {
         let mut fell = false;
         for k in 0..t.sw_len {
             if k == 0 {
-                self.w(dry, "  if (");
+                self.w(o, dry, "  if (");
             } else {
-                self.w(dry, " else if (");
+                self.w(o, dry, " else if (");
             }
-            self.push_case_test(dry, isb, &d, b.switch_pool[(t.sw_start + k) as usize] >> 32);
-            self.w(dry, ") {\n");
-            if !self.emit_region(b, cf, cf.succ(b, x, k), arm_stop, brk, cont, dry) {
+            self.push_case_test(o, dry, isb, d, b.switch_pool[(t.sw_start + k) as usize] >> 32);
+            self.w(o, dry, ") {\n");
+            if !self.emit_region(o, b, cf, cf.succ(b, x, k), arm_stop, brk, cont, dry) {
                 return false;
             }
             if self.sx_fell {
                 fell = true;
             }
-            self.w(dry, "  }");
+            self.w(o, dry, "  }");
         }
         let ot = cf.succ(b, x, t.sw_len);
         if ot != arm_stop {
-            let else_mark = self.out.len();
-            self.w(dry, " else {\n");
-            let else_body = self.out.len();
-            if !self.emit_region(b, cf, ot, arm_stop, brk, cont, dry) {
+            let else_mark = o.len();
+            self.w(o, dry, " else {\n");
+            let else_body = o.len();
+            if !self.emit_region(o, b, cf, ot, arm_stop, brk, cont, dry) {
                 return false;
             }
             if self.sx_fell {
                 fell = true;
             }
-            if !dry && self.sx_fell && self.out.len() == else_body {
-                self.out.truncate(else_mark);
-                self.out.push_str("\n");
+            if !dry && self.sx_fell && o.len() == else_body {
+                o.truncate(else_mark);
+                o.push_str("\n");
             } else {
-                self.w(dry, "  }\n");
+                self.w(o, dry, "  }\n");
             }
         } else {
-            self.w(dry, "\n");
+            self.w(o, dry, "\n");
             fell = true;
         }
         self.sx_fell = fell;
@@ -3942,6 +4082,7 @@ extend CEmit {
 
     fn push_case_test_negated(
         self: &mut Self,
+        o: &mut String,
         b: &ir::CoreBody,
         t: &ir::Terminator,
         is_bool: bool,
@@ -3949,20 +4090,16 @@ extend CEmit {
         value: u64,
     ) bool {
         if is_bool && value == 1 {
-            let mut n = String::new();
-            if !self.emit_cond_negated(b, t.a, &mut n) {
+            if !self.emit_cond_negated(b, t.a, o) {
                 return false;
             }
-            self.out.push_string(&n);
         } else if is_bool && value == 0 {
-            let mut u = String::new();
-            CEmit::unwrap_parens(d, &mut u);
-            self.out.push_string(&u);
+            CEmit::unwrap_parens(d, o);
         } else {
-            self.out.push_str("(");
-            self.out.push_string(d);
-            self.out.push_str(") != ");
-            self.out.push_u64(value);
+            o.push_str("(");
+            o.push_string(d);
+            o.push_str(") != ");
+            o.push_u64(value);
         }
         return true;
     }
@@ -4084,7 +4221,7 @@ extend CEmit {
     }
 
     // Move an immediately preceding fused zero-initializer into a counted `for` header.
-    fn take_loop_init(self: &mut Self, b: &ir::CoreBody, index: u32, init: &mut String) bool {
+    fn take_loop_init(self: &mut Self, o: &mut String, b: &ir::CoreBody, index: u32, init: &mut String) bool {
         let local = *b.locals.at(index as usize);
         if local.decl != NODE_NONE && self.p().module_ast_const(b.module).at_const(local.decl).kind == NodeKind::NODE_LET {
             return false;
@@ -4117,31 +4254,28 @@ extend CEmit {
         if rid == ir::IR_NONE {
             return false;
         }
-        let mut name = String::new();
+        let mut name = self.sget();
         self.lspell(index, &mut name);
-        let mut decl = String::new();
-        let mut rhs = String::new();
-        if !self.ty_c(b.module, local.ty, name.as_str(), &mut decl) || !self.emit_rvalue(b, rid, &mut rhs) {
+        let okd = self.ty_c(b.module, local.ty, name.as_str(), init);
+        self.sput(name);
+        if !okd {
             return false;
         }
-        let mut line = String::from_str("  ");
-        line.push_string(&decl);
-        line.push_str(" = ");
-        line.push_string(&rhs);
-        line.push_str(";\n");
-        if self.out.len() < line.len() {
-            return false;
-        }
-        let start = self.out.len() - line.len();
-        for i in 0..line.len() {
-            if self.out.as_str().byte_at(start + i) != line.as_str().byte_at(i) {
-                return false;
-            }
-        }
-        self.out.truncate(start);
-        init.push_string(&decl);
         init.push_str(" = ");
-        init.push_string(&rhs);
+        if !self.emit_rvalue(b, rid, init) {
+            return false;
+        }
+        // The declaration line already spelled is `  <init>;\n`, the tail of the body so far.
+        let n = init.len() + 4;
+        if o.len() < n {
+            return false;
+        }
+        let start = o.len() - n;
+        let tail = o.as_str().slice(start, o.len());
+        if tail.slice(0, 2) != "  " || tail.slice(2, n - 2) != init.as_str() || tail.slice(n - 2, n) != ";\n" {
+            return false;
+        }
+        o.truncate(start);
         return true;
     }
 
@@ -4178,12 +4312,12 @@ extend CEmit {
     // `while (1) { <header>; if (cond) { body } else break; }`: the body's stop is the header, so a
     // natural back-edge falls through to the closing brace (re-iterates) and only a real
     // `break`/`continue` spells one. An unconditional header is an infinite `while (1)`.
-    fn emit_loop(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow, h: u32, dry: bool) bool {
+    fn emit_loop(self: &mut Self, o: &mut String, b: &ir::CoreBody, cf: &cfl::CFlow, h: u32, dry: bool) bool {
         self.sx_emitted.set(h as usize, true);
         if *self.sx_lbl.at(h as usize) {
-            self.w(dry, "bb_");
-            self.wu(dry, h);
-            self.w(dry, ": ;\n");
+            self.w(o, dry, "bb_");
+            self.wu(o, dry, h);
+            self.w(o, dry, ": ;\n");
         }
         let lf = *cf.loop_follow.at(h as usize);
         let blk = *b.blocks.at(h as usize);
@@ -4191,28 +4325,34 @@ extend CEmit {
         let mut latch = cfl::NONE;
         if self.do_loop_latch(b, cf, h, &mut latch) {
             self.sx_emitted.set(latch as usize, true);
-            self.w(dry, "  do {\n");
-            if !dry && !self.emit_block_content(b, &blk) {
+            self.w(o, dry, "  do {\n");
+            if !dry && !self.emit_block_content(o, b, &blk) {
                 return false;
             }
-            if !self.emit_region(b, cf, cf.succ(b, h, 0), latch, lf, latch, dry) {
+            if !self.emit_region(o, b, cf, cf.succ(b, h, 0), latch, lf, latch, dry) {
                 return false;
             }
             let lt = b.blocks.at(latch as usize).term;
-            let mut d = String::new();
+            let mut d = self.sget();
             if !dry && !self.emit_operand(b, lt.a, &mut d) {
+                self.sput(d);
                 return false;
             }
-            self.w(dry, "  } while (");
+            self.w(o, dry, "  } while (");
             let raw_case = (b.switch_pool[lt.sw_start as usize] & 0xFFFFFFFFu64) as u32;
             let case_t = *cf.thread.at(raw_case as usize);
             let isb = self.is_bool(b, b.operands.at(lt.a as usize).ty);
+            let mut ok = true;
             if case_t == h {
-                self.push_case_test(dry, isb, &d, b.switch_pool[lt.sw_start as usize] >> 32);
-            } else if !dry && !self.push_case_test_negated(b, &lt, isb, &d, b.switch_pool[lt.sw_start as usize] >> 32) {
+                self.push_case_test(o, dry, isb, &d, b.switch_pool[lt.sw_start as usize] >> 32);
+            } else if !dry {
+                ok = self.push_case_test_negated(o, b, &lt, isb, &d, b.switch_pool[lt.sw_start as usize] >> 32);
+            }
+            self.sput(d);
+            if !ok {
                 return false;
             }
-            self.w(dry, ");\n");
+            self.w(o, dry, ");\n");
             return true;
         }
         // A single-test header whose false edge leaves the loop and whose body carries no code before
@@ -4222,15 +4362,16 @@ extend CEmit {
             let body = cf.succ(b, h, 0);
             let exit_tgt = cf.succ(b, h, 1);
             if exit_tgt == lf && body != lf {
-                let mut d = String::new();
+                let mut d = self.sget();
                 if !dry && !self.emit_operand(b, t.a, &mut d) {
+                    self.sput(d);
                     return false;
                 }
                 let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
                 let mut loop_index = ir::IR_NONE;
                 let mut skip_place = ir::IR_NONE;
                 let mut skip_rvalue = ir::IR_NONE;
-                let mut step = String::new();
+                let mut step = self.sget();
                 let counted = self.counted_loop_step(
                     b,
                     cf,
@@ -4240,84 +4381,89 @@ extend CEmit {
                     &mut skip_rvalue,
                     &mut step,
                 );
-                let mut init = String::new();
-                let took_init = counted && !dry && self.take_loop_init(b, loop_index, &mut init);
+                let mut init = self.sget();
+                let took_init = counted && !dry && self.take_loop_init(o, b, loop_index, &mut init);
                 if counted {
-                    self.w(dry, "  for (");
+                    self.w(o, dry, "  for (");
                     if took_init {
-                        self.ws(dry, &init);
+                        self.ws(o, dry, &init);
                     }
-                    self.w(dry, "; ");
+                    self.w(o, dry, "; ");
                 } else {
-                    self.w(dry, "  while (");
+                    self.w(o, dry, "  while (");
                 }
-                self.push_case_test(dry, isb, &d, b.switch_pool[t.sw_start as usize] >> 32);
+                self.push_case_test(o, dry, isb, &d, b.switch_pool[t.sw_start as usize] >> 32);
                 if counted {
-                    self.w(dry, "; ");
-                    self.ws(dry, &step);
+                    self.w(o, dry, "; ");
+                    self.ws(o, dry, &step);
                 }
-                self.w(dry, ") {\n");
+                self.w(o, dry, ") {\n");
+                self.sput(d);
+                self.sput(step);
+                self.sput(init);
                 let old_place = self.sx_skip_place;
                 let old_rvalue = self.sx_skip_rvalue;
                 if counted {
                     self.sx_skip_place = skip_place;
                     self.sx_skip_rvalue = skip_rvalue;
                 }
-                let body_ok = self.emit_region(b, cf, body, h, lf, h, dry);
+                let body_ok = self.emit_region(o, b, cf, body, h, lf, h, dry);
                 self.sx_skip_place = old_place;
                 self.sx_skip_rvalue = old_rvalue;
                 if !body_ok {
                     return false;
                 }
-                self.w(dry, "  }\n");
+                self.w(o, dry, "  }\n");
                 return true;
             }
         }
-        self.w(dry, "  while (1) {\n");
+        self.w(o, dry, "  while (1) {\n");
         if !dry {
             for si in 0..blk.stmt_len {
                 let s = *b.statements.at((blk.stmt_start + si) as usize);
-                if !self.emit_stmt(b, &s) {
+                if !self.emit_stmt(o, b, &s) {
                     return false;
                 }
             }
-            if !self.emit_term_effect(b, &t) {
+            if !self.emit_term_effect(o, b, &t) {
                 return false;
             }
         }
         if t.kind == ir::TM_SWITCH && t.sw_len == 1 {
-            let mut d = String::new();
+            let mut d = self.sget();
             if !dry && !self.emit_operand(b, t.a, &mut d) {
+                self.sput(d);
                 return false;
             }
             let isb = self.is_bool(b, b.operands.at(t.a as usize).ty);
-            self.w(dry, "  if (");
-            self.push_case_test(dry, isb, &d, b.switch_pool[t.sw_start as usize] >> 32);
-            self.w(dry, ") {\n");
-            if !self.emit_region(b, cf, cf.succ(b, h, 0), h, lf, h, dry) {
+            self.w(o, dry, "  if (");
+            self.push_case_test(o, dry, isb, &d, b.switch_pool[t.sw_start as usize] >> 32);
+            self.sput(d);
+            self.w(o, dry, ") {\n");
+            if !self.emit_region(o, b, cf, cf.succ(b, h, 0), h, lf, h, dry) {
                 return false;
             }
-            self.w(dry, "  }");
+            self.w(o, dry, "  }");
             let exit_tgt = cf.succ(b, h, 1);
             if exit_tgt == lf {
-                self.w(dry, " else {\n  break;\n  }\n");
+                self.w(o, dry, " else {\n  break;\n  }\n");
             } else {
-                self.w(dry, " else {\n");
-                if !self.emit_region(b, cf, exit_tgt, h, lf, h, dry) {
+                self.w(o, dry, " else {\n");
+                if !self.emit_region(o, b, cf, exit_tgt, h, lf, h, dry) {
                     return false;
                 }
-                self.w(dry, "  }\n");
+                self.w(o, dry, "  }\n");
             }
         } else if t.kind == ir::TM_SWITCH {
-            if !self.emit_branch(b, cf, h, cfl::NONE, h, lf, h, dry) {
+            if !self.emit_branch(o, b, cf, h, cfl::NONE, h, lf, h, dry) {
                 return false;
             }
         } else if t.kind != ir::TM_RETURN && t.kind != ir::TM_UNREACHABLE {
-            if !self.emit_region(b, cf, cf.succ(b, h, 0), h, lf, h, dry) {
+            if !self.emit_region(o, b, cf, cf.succ(b, h, 0), h, lf, h, dry) {
                 return false;
             }
         }
-        self.w(dry, "  }\n");
+        self.w(o, dry, "  }\n");
         return true;
     }
 
@@ -4329,16 +4475,21 @@ extend CEmit {
         self.err = "";
         self.arr_ret = false;
         let mark = self.out.len();
-        if !self.emit_closure_inner(b, cm, cnode, sym, env_out) {
-            self.out.truncate(mark);
-            self.cap_base = 0;
-            self.cap_on = false;
-            self.cap_names.truncate(0);
-            return false;
-        }
+        let pm = self.pr.start();
+        let d0 = self.pr.ns[prb::P_DECL];
+        let a0 = self.pr.an[prb::P_DECL];
+        let b0 = self.pr.ab[prb::P_DECL];
+        let ok = self.emit_closure_inner(b, cm, cnode, sym, env_out);
+        self.pr.stop_less(prb::P_RENDER, pm, prb::P_DECL, d0, a0, b0);
         self.cap_base = 0;
         self.cap_on = false;
         self.cap_names.truncate(0);
+        if !ok {
+            self.out.truncate(mark);
+            return false;
+        }
+        self.pr.count(prb::C_BODIES, 1);
+        self.pr.count(prb::C_OUT_BYTES, (self.out.len() - mark) as u64);
         return true;
     }
 
@@ -4365,7 +4516,9 @@ extend CEmit {
         }
         self.cap_base = b.returns + np;
         self.cap_on = ncaps != 0;
+        let dm = self.pr.start();
         self.setup_locals(b);
+        self.pr.stop(prb::P_DECL, dm);
         for k in 0..ncaps {
             let decl = unsafe ca.list(cd.captures)[k as usize];
             let csp = self.mg.decl_name_span(cm, decl);
@@ -4472,14 +4625,10 @@ extend CEmit {
                 self.out.push_str(", ");
             }
             np9 += 1;
-            let mut nm = String::new();
+            let mut nm = self.sget();
             self.lspell(l as u32, &mut nm);
-            let mut ts = String::new();
-            let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut ts);
-            if ok {
-                self.out.push_string(&ts);
-            }
-
+            let ok = self.ty_c(b.module, b.locals.at(l).ty, nm.as_str(), &mut self.out);
+            self.sput(nm);
             if !ok {
                 return false;
             }
@@ -4665,7 +4814,7 @@ extend CEmit {
     }
 
     // `lhs = (T){ ..., .arr = {0}, ... }; memcpy(&lhs.arr, &src, sizeof(lhs.arr)); ...`.
-    fn emit_struct_store_arrays(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+    fn emit_struct_store_arrays(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
         let sdecl = self.agg_decl(b, rv.target);
         if sdecl == NODE_NONE {
             return self.fail("agg-struct");
@@ -4677,19 +4826,18 @@ extend CEmit {
         if ms.len != rv.b {
             return self.fail("agg-arity");
         }
-        let mut lhs = String::new();
+        let mut lhs = self.sget();
         let mut ok = self.emit_place(b, s.place, &mut lhs);
-        let mut cast = String::new();
+        let mut post = self.sget();
+        let mut fnm = self.sget();
         if ok {
-            ok = self.ty_c(b.module, rv.target, "", &mut cast);
+            o.push_str("  ");
+            o.push_string(&lhs);
+            o.push_str(" = (");
+            ok = self.ty_c(b.module, rv.target, "", o);
         }
-        let mut post = String::new();
         if ok {
-            self.out.push_str("  ");
-            self.out.push_string(&lhs);
-            self.out.push_str(" = (");
-            self.out.push_string(&cast);
-            self.out.push_str("){ ");
+            o.push_str("){ ");
             let mut emitted: u32 = 0;
             for i in 0..rv.b {
                 if !ok {
@@ -4707,7 +4855,7 @@ extend CEmit {
                     }
                 }
                 let fid = unsafe sa.list(ms)[i as usize];
-                let mut fnm = String::new();
+                fnm.clear();
                 if is_tuple {
                     fnm.push_str("_");
                     fnm.push_u64(i);
@@ -4726,7 +4874,7 @@ extend CEmit {
                     // aggregates would trip -Werror=missing-braces on stricter cc lanes.
                     // sized by the SOURCE: a designated literal's temp carries only the spelled
                     // elements, and the compound literal already zero-inits the field's tail.
-                    let mut srcA = String::new();
+                    let mut srcA = self.sget();
                     ok = self.emit_place(b, op.data, &mut srcA);
                     post.push_str("  memcpy(&");
                     post.push_string(&lhs);
@@ -4737,31 +4885,33 @@ extend CEmit {
                     post.push_str(", sizeof(");
                     post.push_string(&srcA);
                     post.push_str("));\n");
+                    self.sput(srcA);
                     continue;
                 }
                 if emitted != 0 {
-                    self.out.push_str(", ");
+                    o.push_str(", ");
                 }
-                self.out.push_str(".");
-                self.out.push_string(&fnm);
-                self.out.push_str(" = ");
-                let mut av = String::new();
-                ok = self.emit_operand(b, opid, &mut av);
-                self.out.push_string(&av);
+                o.push_str(".");
+                o.push_string(&fnm);
+                o.push_str(" = ");
+                ok = self.emit_operand(b, opid, o);
                 emitted += 1;
             }
             if emitted == 0 {
-                self.out.push_str("0");
+                o.push_str("0");
             }
-            self.out.push_str(" };\n");
-            self.out.push_string(&post);
+            o.push_str(" };\n");
+            o.push_string(&post);
         }
+        self.sput(lhs);
+        self.sput(post);
+        self.sput(fnm);
         return ok;
     }
 
     // A fixed-array literal whose temporary was coalesced with its final local can initialize that
     // local directly. C array assignment is illegal, so this must run at the declaration point.
-    fn emit_array_init(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+    fn emit_array_init(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
         let pl = *b.places.at(s.place as usize);
         if pl.proj_len != 0 {
             return false;
@@ -4770,16 +4920,16 @@ extend CEmit {
         if !*self.sx_fuse.at(root as usize) || *self.sx_declared.at(root as usize) {
             return false;
         }
-        let mut name = String::new();
+        let mut name = self.sget();
         self.lspell(root, &mut name);
-        let mut decl = String::new();
-        if !self.ty_c(b.module, b.locals.at(root as usize).ty, name.as_str(), &mut decl) {
+        o.push_str("  ");
+        let okd = self.ty_c(b.module, b.locals.at(root as usize).ty, name.as_str(), o);
+        self.sput(name);
+        if !okd {
             return false;
         }
         self.sx_declared.set(root as usize, true);
-        self.out.push_str("  ");
-        self.out.push_string(&decl);
-        self.out.push_str(" = { ");
+        o.push_str(" = { ");
         let mut ok = true;
         let mut sparse = false;
         for i in 0..rv.b {
@@ -4795,29 +4945,27 @@ extend CEmit {
                 continue;
             }
             if emitted != 0 {
-                self.out.push_str(", ");
+                o.push_str(", ");
             }
             if sparse {
-                self.out.push_str("[");
-                self.out.push_u64(i);
-                self.out.push_str("] = ");
+                o.push_str("[");
+                o.push_u64(i);
+                o.push_str("] = ");
             }
-            let mut value = String::new();
-            ok = self.emit_operand(b, op, &mut value);
-            self.out.push_string(&value);
+            ok = self.emit_operand(b, op, o);
             if !ok {
                 break;
             }
             emitted += 1;
         }
         if emitted == 0 {
-            self.out.push_str("0");
+            o.push_str("0");
         }
-        self.out.push_str(" };\n");
+        o.push_str(" };\n");
         return ok;
     }
 
-    fn emit_stmt(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement) bool {
+    fn emit_stmt(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement) bool {
         if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
             // Markers carry no C.
             return true;
@@ -4843,30 +4991,31 @@ extend CEmit {
         {
             let rv0 = *b.rvalues.at(s.rvalue as usize);
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_ASM as u32 {
-                return self.emit_asm_stmt(b, &rv0);
+                return self.emit_asm_stmt(o, b, &rv0);
             }
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_SAFEPOINT as u32 {
                 if self.safepoints_on(b.module) {
-                    self.out.push_str("  if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();\n");
+                    o.push_str("  if (--__sc_spc == 0) __sc_spc = __sc_preempt_check();\n");
                 }
                 return true;
             }
             if rv0.kind == ir::RV_INTRINSIC && rv0.c as u32 == ir::IN_SAFEPOINT_C as u32 {
                 // Combined form: identical hot tick; the cold half also asks the runtime's cancel
                 // hook, and the switch on the result enters the frame's cancellation ladder.
-                let mut cp = String::new();
-                if !self.emit_place(b, s.place, &mut cp) {
-                    return false;
+                let mut cp = self.sget();
+                let okc = self.emit_place(b, s.place, &mut cp);
+                if okc {
+                    o.push_str("  ");
+                    o.push_string(&cp);
+                    o.push_str(" = 0;\n");
+                    if self.safepoints_on(b.module) {
+                        o.push_str("  if (--__sc_spc == 0) { __sc_spc = __sc_preempt_check(); ");
+                        o.push_string(&cp);
+                        o.push_str(" = __sc_cancel_tick(); }\n");
+                    }
                 }
-                self.out.push_str("  ");
-                self.out.push_string(&cp);
-                self.out.push_str(" = 0;\n");
-                if self.safepoints_on(b.module) {
-                    self.out.push_str("  if (--__sc_spc == 0) { __sc_spc = __sc_preempt_check(); ");
-                    self.out.push_string(&cp);
-                    self.out.push_str(" = __sc_cancel_tick(); }\n");
-                }
-                return true;
+                self.sput(cp);
+                return okc;
             }
             if rv0.kind == ir::RV_INTRINSIC && (rv0.c as u32 == ir::IN_VA_START as u32 || rv0.c as u32 == ir::IN_VA_END as u32) {
                 // The assignment's place IS the va_list lvalue the macro mutates.
@@ -4881,7 +5030,7 @@ extend CEmit {
                     }
                 }
                 mac.push_str(");\n");
-                self.out.push_string(&mac);
+                o.push_string(&mac);
                 return true;
             }
         }
@@ -4913,7 +5062,7 @@ extend CEmit {
                 if root_array && pl9.proj_len == 0 && *self.sx_fuse.at(root9 as usize) && !*self.sx_declared.at(
                     root9 as usize,
                 ) {
-                    return self.emit_array_init(b, s, &rv0);
+                    return self.emit_array_init(o, b, s, &rv0);
                 }
                 // An array literal COERCED to a slice view: `(Slice__T){ (T[N]){..}, N }`; the
                 // compound literal lives to the end of the enclosing block.
@@ -4930,9 +5079,9 @@ extend CEmit {
                         nsp9.end as usize,
                     );
                     if (nm9 == "Slice" || nm9 == "SliceMut") && itS.n >= 1 {
-                        let mut lhs9 = String::new();
-                        let mut cast9 = String::new();
-                        let mut et9 = String::new();
+                        let mut lhs9 = self.sget();
+                        let mut cast9 = self.sget();
+                        let mut et9 = self.sget();
                         let mut ok9 = self.emit_place(b, s.place, &mut lhs9) && self.ty_c(
                             b.module,
                             b.places.at(s.place as usize).ty,
@@ -4940,27 +5089,25 @@ extend CEmit {
                             &mut cast9,
                         ) && self.mg.ctype(rmS, itS.args[0], "", &mut et9);
                         if ok9 {
-                            self.out.push_str("  ");
+                            o.push_str("  ");
                             let fuse9 = pl9.proj_len == 0 && *self.sx_fuse.at(root9 as usize) && !*self.sx_declared.at(
                                 root9 as usize,
                             );
                             if fuse9 {
-                                let mut decl9 = String::new();
-                                ok9 = self.ty_c(b.module, b.locals.at(root9 as usize).ty, lhs9.as_str(), &mut decl9);
+                                ok9 = self.ty_c(b.module, b.locals.at(root9 as usize).ty, lhs9.as_str(), o);
                                 if ok9 {
                                     self.sx_declared.set(root9 as usize, true);
-                                    self.out.push_string(&decl9);
                                 }
                             } else {
-                                self.out.push_string(&lhs9);
+                                o.push_string(&lhs9);
                             }
-                            self.out.push_str(" = (");
-                            self.out.push_string(&cast9);
-                            self.out.push_str("){ .ptr = (");
-                            self.out.push_string(&et9);
-                            self.out.push_str("[");
-                            self.out.push_u64(rv0.b);
-                            self.out.push_str("]){ ");
+                            o.push_str(" = (");
+                            o.push_string(&cast9);
+                            o.push_str("){ .ptr = (");
+                            o.push_string(&et9);
+                            o.push_str("[");
+                            o.push_u64(rv0.b);
+                            o.push_str("]){ ");
                             let mut sparse9 = false;
                             for i9 in 0..rv0.b {
                                 if b.oper_pool[(rv0.a + i9) as usize] == ir::IR_NONE {
@@ -4978,38 +5125,39 @@ extend CEmit {
                                     continue;
                                 }
                                 if emitted9 != 0 {
-                                    self.out.push_str(", ");
+                                    o.push_str(", ");
                                 }
                                 if sparse9 {
-                                    self.out.push_str("[");
-                                    self.out.push_u64(i9);
-                                    self.out.push_str("] = ");
+                                    o.push_str("[");
+                                    o.push_u64(i9);
+                                    o.push_str("] = ");
                                 }
-                                let mut ev9 = String::new();
-                                ok9 = self.emit_operand(b, op9, &mut ev9);
-                                self.out.push_string(&ev9);
+                                ok9 = self.emit_operand(b, op9, o);
                                 emitted9 += 1;
                             }
                             if emitted9 == 0 {
-                                self.out.push_str("0");
+                                o.push_str("0");
                             }
-                            self.out.push_str(" }, .len = ");
-                            self.out.push_u64(rv0.b);
-                            self.out.push_str(" };\n");
+                            o.push_str(" }, .len = ");
+                            o.push_u64(rv0.b);
+                            o.push_str(" };\n");
                         }
+                        self.sput(lhs9);
+                        self.sput(cast9);
+                        self.sput(et9);
                         return ok9;
                     }
                 }
-                return self.emit_array_stores(b, s, &rv0);
+                return self.emit_array_stores(o, b, s, &rv0);
             }
             if rv0.kind == ir::RV_REPEAT {
-                return self.emit_repeat_stores(b, s, &rv0);
+                return self.emit_repeat_stores(o, b, s, &rv0);
             }
             if rv0.kind == ir::RV_AGGREGATE && (rv0.c == ir::AGG_STRUCT || rv0.c == ir::AGG_TUPLE) && self.agg_has_array_field(
                 b,
                 &rv0,
             ) {
-                return self.emit_struct_store_arrays(b, s, &rv0);
+                return self.emit_struct_store_arrays(o, b, s, &rv0);
             }
         }
         // `new T { .. }`: allocate, then store the initializer through the fresh pointer.
@@ -5023,49 +5171,64 @@ extend CEmit {
                 if yN.kind != TypeKind::TYPE_POINTER && yN.kind != TypeKind::TYPE_REFERENCE {
                     return self.fail("new-target");
                 }
-                let mut es = String::new();
-                if !self.ty_c(rmN, yN.as_data.elem, "", &mut es) {
-                    return false;
+                let mut es = self.sget();
+                let mut lhs = self.sget();
+                let mut iv = self.sget();
+                let mut okn = self.ty_c(rmN, yN.as_data.elem, "", &mut es) && self.emit_place(b, s.place, &mut lhs);
+                if okn && rv0.b != 0 {
+                    okn = self.emit_operand(b, b.oper_pool[rv0.a as usize], &mut iv);
                 }
-                let mut lhs = String::new();
-                if !self.emit_place(b, s.place, &mut lhs) {
-                    return false;
+                if okn {
+                    okn = self.emit_new_store(o, b, s, &es, &lhs, &iv);
                 }
-                let mut iv = String::new();
-                if rv0.b != 0 {
-                    if !self.emit_operand(b, b.oper_pool[rv0.a as usize], &mut iv) {
-                        return false;
-                    }
-                }
-                self.out.push_str("  ");
-                let plN = *b.places.at(s.place as usize);
-                let rootN = *self.sx_coal.at(plN.base as usize);
-                let fuseN = plN.proj_len == 0 && *self.sx_fuse.at(rootN as usize) && !*self.sx_declared.at(
-                    rootN as usize,
-                );
-                if fuseN {
-                    self.sx_declared.set(rootN as usize, true);
-                    let mut declN = String::new();
-                    if !self.ty_c(b.module, b.locals.at(rootN as usize).ty, lhs.as_str(), &mut declN) {
-                        return false;
-                    }
-                    self.out.push_string(&declN);
-                } else {
-                    self.out.push_string(&lhs);
-                }
-                self.out.push_str(" = malloc(sizeof(");
-                self.out.push_string(&es);
-                self.out.push_str("));\n");
-                if iv.len() != 0 {
-                    self.out.push_str("  *");
-                    self.out.push_string(&lhs);
-                    self.out.push_str(" = ");
-                    self.out.push_string(&iv);
-                    self.out.push_str(";\n");
-                }
-                return true;
+                self.sput(es);
+                self.sput(lhs);
+                self.sput(iv);
+                return okn;
             }
         }
+        return self.emit_stmt_tail(o, b, s);
+    }
+
+    // `Box`-style allocation: `[T ]lhs = malloc(sizeof(es)); *lhs = iv;` with the pieces spelled by
+    // the caller (`iv` empty = no initializer).
+    fn emit_new_store(
+        self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        s: &ir::Statement,
+        es: &String,
+        lhs: &String,
+        iv: &String,
+    ) bool {
+        o.push_str("  ");
+        let plN = *b.places.at(s.place as usize);
+        let rootN = *self.sx_coal.at(plN.base as usize);
+        let fuseN = plN.proj_len == 0 && *self.sx_fuse.at(rootN as usize) && !*self.sx_declared.at(rootN as usize);
+        if fuseN {
+            self.sx_declared.set(rootN as usize, true);
+            if !self.ty_c(b.module, b.locals.at(rootN as usize).ty, lhs.as_str(), o) {
+                return false;
+            }
+        } else {
+            o.push_string(lhs);
+        }
+        o.push_str(" = malloc(sizeof(");
+        o.push_string(es);
+        o.push_str("));\n");
+        if iv.len() != 0 {
+            o.push_str("  *");
+            o.push_string(lhs);
+            o.push_str(" = ");
+            o.push_string(iv);
+            o.push_str(";\n");
+        }
+        return true;
+    }
+
+    // The store forms after the intrinsic ones: erased dyn envs, dead never-typed copies, whole
+    // array copies, compound assignment, then the plain `place = rvalue`.
+    fn emit_stmt_tail(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement) bool {
         // a capturing closure erased to `dyn fn` boxes its env first: statement-level emission.
         {
             let rv0 = *b.rvalues.at(s.rvalue as usize);
@@ -5074,7 +5237,7 @@ extend CEmit {
                 let mut otD = b.operands.at(rv0.a as usize).ty;
                 self.rty(b, b.operands.at(rv0.a as usize).ty, &mut omD, &mut otD);
                 if self.p().module_ast_const(omD).type_at(otD).kind == TypeKind::TYPE_FUNCTION {
-                    return self.emit_dyn_env_store(b, s, &rv0, omD, otD);
+                    return self.emit_dyn_env_store(o, b, s, &rv0, omD, otD);
                 }
             }
         }
@@ -5116,23 +5279,24 @@ extend CEmit {
                     let c0 = *b.constants.at(op0.data as usize);
                     if c0.kind == ir::CK_INT && c0.val == 0 {
                         // Zeroing a whole array is a byte fill.
-                        let mut zl = String::new();
+                        let mut zl = self.sget();
                         let okz = self.emit_place(b, s.place, &mut zl);
                         if okz {
-                            self.out.push_str("  memset(&");
-                            self.out.push_string(&zl);
-                            self.out.push_str(", 0, sizeof(");
-                            self.out.push_string(&zl);
-                            self.out.push_str("));\n");
+                            o.push_str("  memset(&");
+                            o.push_string(&zl);
+                            o.push_str(", 0, sizeof(");
+                            o.push_string(&zl);
+                            o.push_str("));\n");
                         }
+                        self.sput(zl);
                         return okz;
                     }
                 }
                 if op0.kind != ir::OP_COPY && op0.kind != ir::OP_MOVE {
                     return self.fail("array-store");
                 }
-                let mut lhs2 = String::new();
-                let mut rhs2 = String::new();
+                let mut lhs2 = self.sget();
+                let mut rhs2 = self.sget();
                 let ok2 = self.emit_place(b, s.place, &mut lhs2) && self.emit_place(b, op0.data, &mut rhs2);
                 if ok2 {
                     // A designated literal may carry FEWER elements than the destination (its
@@ -5148,28 +5312,30 @@ extend CEmit {
                         }
                     }
                     if short_src {
-                        self.out.push_str("  memset(&");
-                        self.out.push_string(&lhs2);
-                        self.out.push_str(", 0, sizeof(");
-                        self.out.push_string(&lhs2);
-                        self.out.push_str("));\n");
+                        o.push_str("  memset(&");
+                        o.push_string(&lhs2);
+                        o.push_str(", 0, sizeof(");
+                        o.push_string(&lhs2);
+                        o.push_str("));\n");
                     }
-                    self.out.push_str("  memcpy(&");
-                    self.out.push_string(&lhs2);
-                    self.out.push_str(", &");
-                    self.out.push_string(&rhs2);
-                    self.out.push_str(", sizeof(");
+                    o.push_str("  memcpy(&");
+                    o.push_string(&lhs2);
+                    o.push_str(", &");
+                    o.push_string(&rhs2);
+                    o.push_str(", sizeof(");
                     if short_src {
-                        self.out.push_string(&rhs2);
+                        o.push_string(&rhs2);
                     } else {
-                        self.out.push_string(&lhs2);
+                        o.push_string(&lhs2);
                     }
-                    self.out.push_str("));\n");
+                    o.push_str("));\n");
                 }
+                self.sput(lhs2);
+                self.sput(rhs2);
                 return ok2;
             }
         }
-        if self.try_compound_assign(b, s) {
+        if self.try_compound_assign(o, b, s) {
             return self.err.len() == 0;
         }
         let pl0 = *b.places.at(s.place as usize);
@@ -5178,34 +5344,32 @@ extend CEmit {
         if !fuse_decl {
             // The pieces appear in output order, so they spell straight into the output buffer
             // (a failed statement leaves partial text; every failure path discards the body).
-            let mut o = replace(&mut self.out, String::new());
             o.push_str("  ");
-            let mut ok = self.emit_place(b, s.place, &mut o);
+            let mut ok = self.emit_place(b, s.place, o);
             if ok {
                 o.push_str(" = ");
-                ok = self.emit_rvalue(b, s.rvalue, &mut o);
+                ok = self.emit_rvalue(b, s.rvalue, o);
             }
             if ok {
                 o.push_str(";\n");
             }
-            self.out = o;
             return ok;
         }
         let mut lhs = self.sget();
         let mut rhs = self.sget();
         let ok = self.emit_place(b, s.place, &mut lhs) && self.emit_rvalue(b, s.rvalue, &mut rhs);
         if ok {
-            self.out.push_str("  ");
+            o.push_str("  ");
             self.sx_declared.set(root0 as usize, true);
             let mut decl = self.sget();
             if !self.ty_c(b.module, b.locals.at(root0 as usize).ty, lhs.as_str(), &mut decl) {
                 return false;
             }
-            self.out.push_string(&decl);
+            o.push_string(&decl);
             self.sput(decl);
-            self.out.push_str(" = ");
-            self.out.push_string(&rhs);
-            self.out.push_str(";\n");
+            o.push_str(" = ");
+            o.push_string(&rhs);
+            o.push_str(";\n");
         }
         self.sput(lhs);
         self.sput(rhs);
@@ -5216,6 +5380,7 @@ extend CEmit {
     // value. The pair's `__free` only deallocates the env, so owning captures refuse.
     fn emit_dyn_env_store(
         self: &mut Self,
+        o: &mut String,
         b: &ir::CoreBody,
         s: &ir::Statement,
         rv: &ir::Rvalue,
@@ -5259,29 +5424,29 @@ extend CEmit {
             ok = self.dyn_pair(dm, dt, om, ot, true, &mut pair);
         }
         if ok {
-            self.out.push_str("  { ");
-            self.out.push_string(&envc);
-            self.out.push_str(" *__dp = (");
-            self.out.push_string(&envc);
-            self.out.push_str(" *)Global__alloc((Global *)&");
+            o.push_str("  { ");
+            o.push_string(&envc);
+            o.push_str(" *__dp = (");
+            o.push_string(&envc);
+            o.push_str(" *)Global__alloc((Global *)&");
             {
                 let mut sn9 = String::new();
                 self.sentinel(1, &mut sn9);
-                self.out.push_string(&sn9);
+                o.push_string(&sn9);
             }
-            self.out.push_str(", sizeof(");
-            self.out.push_string(&envc);
-            self.out.push_str("), _Alignof(");
-            self.out.push_string(&envc);
-            self.out.push_str(")); *__dp = ");
-            self.out.push_string(&opv);
-            self.out.push_str("; ");
-            self.out.push_string(&lhs);
-            self.out.push_str(" = ((");
-            self.out.push_string(&tc);
-            self.out.push_str("){ .data = __dp, .vt = &");
-            self.out.push_string(&pair);
-            self.out.push_str("__vtbl }); }\n");
+            o.push_str(", sizeof(");
+            o.push_string(&envc);
+            o.push_str("), _Alignof(");
+            o.push_string(&envc);
+            o.push_str(")); *__dp = ");
+            o.push_string(&opv);
+            o.push_str("; ");
+            o.push_string(&lhs);
+            o.push_str(" = ((");
+            o.push_string(&tc);
+            o.push_str("){ .data = __dp, .vt = &");
+            o.push_string(&pair);
+            o.push_str("__vtbl }); }\n");
         }
         return ok;
     }
@@ -5289,77 +5454,73 @@ extend CEmit {
     // C forbids array assignment: an array literal stores element-wise into the place.
     // `__asm__ volatile ("tpl" : "=r"(out).. : "r"(in).. : "clobber"..);`, strings verbatim from
     // the NODE_ASM the rvalue's item names; outputs render the place a copy operand carries.
-    fn emit_asm_stmt(self: &mut Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+    fn emit_asm_stmt(self: &mut Self, o: &mut String, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
         let a = self.p().module_ast_const(rv.item.module);
         let src = self.p().modules.at(rv.item.module as usize).source.as_str();
         let d = a.at_const(rv.item.node).as_data.asm_stmt;
-        self.out.push_str("  __asm__ volatile (");
+        o.push_str("  __asm__ volatile (");
         if d.template == NODE_NONE {
-            self.out.push_str("\"\"");
+            o.push_str("\"\"");
         } else {
             let ts = a.at_const(d.template).as_data.literal.raw;
-            self.out.push_str(src.slice(ts.start as usize, ts.end as usize));
+            o.push_str(src.slice(ts.start as usize, ts.end as usize));
         }
         let nout = d.outputs.len / 2;
         let want = d.outputs.len != 0 || d.inputs.len != 0 || d.clobbers.len != 0;
         let mut ok = true;
         if want {
-            self.out.push_str(" : ");
+            o.push_str(" : ");
             let mut i: u32 = 0;
             while i + 1 < d.outputs.len && ok {
                 if i != 0 {
-                    self.out.push_str(", ");
+                    o.push_str(", ");
                 }
                 let cs = a.at_const(unsafe a.list(d.outputs)[i as usize]).as_data.literal.raw;
-                self.out.push_str(src.slice(cs.start as usize, cs.end as usize));
-                self.out.push_str("(");
+                o.push_str(src.slice(cs.start as usize, cs.end as usize));
+                o.push_str("(");
                 let opid = b.oper_pool[(rv.a + i / 2) as usize];
                 let op = *b.operands.at(opid as usize);
                 if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                    let mut pv = String::new();
-                    ok = self.emit_place(b, op.data, &mut pv);
-                    self.out.push_string(&pv);
+                    ok = self.emit_place(b, op.data, o);
                 } else {
                     ok = self.fail("asm-out");
                 }
-                self.out.push_str(")");
+                o.push_str(")");
                 i += 2;
             }
         }
         if (d.inputs.len != 0 || d.clobbers.len != 0) && ok {
-            self.out.push_str(" : ");
+            o.push_str(" : ");
             let mut i: u32 = 0;
             while i + 1 < d.inputs.len && ok {
                 if i != 0 {
-                    self.out.push_str(", ");
+                    o.push_str(", ");
                 }
                 let cs = a.at_const(unsafe a.list(d.inputs)[i as usize]).as_data.literal.raw;
-                self.out.push_str(src.slice(cs.start as usize, cs.end as usize));
-                self.out.push_str("(");
+                o.push_str(src.slice(cs.start as usize, cs.end as usize));
+                o.push_str("(");
                 let opid = b.oper_pool[(rv.a + nout + i / 2) as usize];
-                let mut ev = String::new();
-                ok = self.emit_operand(b, opid, &mut ev);
-                self.out.push_string(&ev);
-                self.out.push_str(")");
+                ok = self.emit_operand(b, opid, o);
+                o.push_str(")");
                 i += 2;
             }
         }
         if d.clobbers.len != 0 && ok {
-            self.out.push_str(" : ");
+            o.push_str(" : ");
             for k in 0..d.clobbers.len {
                 if k != 0 {
-                    self.out.push_str(", ");
+                    o.push_str(", ");
                 }
                 let cs = a.at_const(unsafe a.list(d.clobbers)[k as usize]).as_data.literal.raw;
-                self.out.push_str(src.slice(cs.start as usize, cs.end as usize));
+                o.push_str(src.slice(cs.start as usize, cs.end as usize));
             }
         }
-        self.out.push_str(");\n");
+        o.push_str(");\n");
         return ok;
     }
 
-    fn emit_array_stores(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
-        let mut base = String::new();
+    fn emit_array_stores(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+        let mut base = self.sget();
         let mut ok = self.emit_place(b, s.place, &mut base);
         {
             // Designated-init holes zero-fill: blank the storage before the written slots land.
@@ -5371,11 +5532,11 @@ extend CEmit {
                 }
             }
             if ok && holes {
-                self.out.push_str("  memset(&");
-                self.out.push_string(&base);
-                self.out.push_str(", 0, sizeof(");
-                self.out.push_string(&base);
-                self.out.push_str("));\n");
+                o.push_str("  memset(&");
+                o.push_string(&base);
+                o.push_str(", 0, sizeof(");
+                o.push_string(&base);
+                o.push_str("));\n");
             }
         }
         for i in 0..rv.b {
@@ -5386,24 +5547,21 @@ extend CEmit {
             if opid == ir::IR_NONE {
                 continue;
             }
-            let mut el = String::new();
-            ok = self.emit_operand(b, opid, &mut el);
-            if ok {
-                self.out.push_str("  ");
-                self.out.push_string(&base);
-                self.out.push_str("[");
-                self.out.push_u64(i);
-                self.out.push_str("] = ");
-                self.out.push_string(&el);
-                self.out.push_str(";\n");
-            }
+            o.push_str("  ");
+            o.push_string(&base);
+            o.push_str("[");
+            o.push_u64(i);
+            o.push_str("] = ");
+            ok = self.emit_operand(b, opid, o);
+            o.push_str(";\n");
         }
+        self.sput(base);
         return ok;
     }
 
     // `[v; N]` with a small constant count unrolls to element stores (the count operand id rides
     // rv.b); larger repeats stay unfrozen.
-    fn emit_repeat_stores(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
+    fn emit_repeat_stores(self: &mut Self, o: &mut String, b: &ir::CoreBody, s: &ir::Statement, rv: &ir::Rvalue) bool {
         let cnt = *b.operands.at(rv.b as usize);
         let mut cv: i64 = 0 - 1;
         if cnt.kind == ir::OP_CONST {
@@ -5435,28 +5593,30 @@ extend CEmit {
             targ_start: 0,
             targ_len: 0,
         };
-        let mut base = String::new();
-        let mut el = String::new();
+        let mut base = self.sget();
+        let mut el = self.sget();
         let ok = self.emit_place(b, s.place, &mut base) && self.emit_operand(b, rv.a, &mut el);
         if ok && c.val <= 16 {
             for i in 0..c.val {
-                self.out.push_str("  ");
-                self.out.push_string(&base);
-                self.out.push_str("[");
-                self.out.push_u64(i as u64);
-                self.out.push_str("] = ");
-                self.out.push_string(&el);
-                self.out.push_str(";\n");
+                o.push_str("  ");
+                o.push_string(&base);
+                o.push_str("[");
+                o.push_u64(i as u64);
+                o.push_str("] = ");
+                o.push_string(&el);
+                o.push_str(";\n");
             }
         } else if ok {
-            self.out.push_str("  for (size_t __ri = 0; __ri < ");
-            self.out.push_i64(c.val);
-            self.out.push_str("; __ri++) { ");
-            self.out.push_string(&base);
-            self.out.push_str("[__ri] = ");
-            self.out.push_string(&el);
-            self.out.push_str("; }\n");
+            o.push_str("  for (size_t __ri = 0; __ri < ");
+            o.push_i64(c.val);
+            o.push_str("; __ri++) { ");
+            o.push_string(&base);
+            o.push_str("[__ri] = ");
+            o.push_string(&el);
+            o.push_str("; }\n");
         }
+        self.sput(base);
+        self.sput(el);
         return ok;
     }
 
@@ -5466,7 +5626,7 @@ extend CEmit {
     // Returns true when at least one level was peeled, so the caller spells the final access with `->`
     // (which folds in that last dereference); the outer levels wrap as `(*..)`. False -> a direct
     // value member spelled with `.`.
-    fn place_field_arrow(self: &Self, b: &ir::CoreBody, pre: &mut TypeId, cur: &mut String) bool {
+    fn place_field_arrow(self: &Self, b: &ir::CoreBody, pre: &mut TypeId, dst: &mut String, mk: usize) bool {
         let mut levels = 0;
         let mut g = 0;
         while g < 4 {
@@ -5485,11 +5645,8 @@ extend CEmit {
             return false;
         }
         for _k in 0..levels - 1 {
-            let mut w = String::from_str("(*");
-            w.push_string(cur);
-            w.push_str(")");
-            cur.truncate(0);
-            cur.push_string(&w);
+            dst.insert_str(mk, "(*");
+            dst.push_str(")");
         }
         return true;
     }
@@ -5502,12 +5659,19 @@ extend CEmit {
     // dereferenced place with its trailing deref dropped (lim = proj_len - 1), which the address-of
     // rvalue then spells without the `&`.
     // The base spelling of local `base` straight into `dst`: forwarded-call parens, static/const
+    // Local `l`'s forwarded call text (see sx_call_fwd).
+    fn call_str_spell(self: &Self, l: u32, dst: &mut String) {
+        let off = self.sx_cs_off[l as usize] as usize;
+        let ln = self.sx_cs_len[l as usize] as usize;
+        dst.push_str(self.sx_cs_pool.as_str().slice(off, off + ln));
+    }
+
     // symbols (with the demand-time stub record), captured-env members, or the local's C name.
     fn emit_place_base(self: &mut Self, b: &ir::CoreBody, base: u32, dst: &mut String) bool {
         let d0 = dst.len();
         if *self.sx_call_fwd.at(base as usize) {
             dst.push_str("(");
-            dst.push_string(self.sx_call_str.at(base as usize));
+            self.call_str_spell(base, dst);
             dst.push_str(")");
         } else if b.locals.at(base as usize).storage == ir::LS_STATIC_REF {
             let item = b.locals.at(base as usize).item;
@@ -5609,9 +5773,10 @@ extend CEmit {
             // No projections, no wraps: the base spells straight into the destination.
             return self.emit_place_base(b, pl.base, dst);
         }
-        let mut cur = self.sget();
-        if !self.emit_place_base(b, pl.base, &mut cur) {
-            self.sput(cur);
+        // Wraps (`(*..)`, `(&..)`) insert their opener at `mk`: the place text so far is the tail
+        // of the destination, short enough to shift.
+        let mk = dst.len();
+        if !self.emit_place_base(b, pl.base, dst) {
             return false;
         }
         let mut pre = b.locals.at(pl.base as usize).ty;
@@ -5642,19 +5807,16 @@ extend CEmit {
                 if nxt == ir::PJ_FIELD || nxt == ir::PJ_DOWNCAST {
                     pend_arrow = true;
                 } else {
-                    let mut w = self.sget();
-                    w.push_str("(*");
-                    w.push_string(&cur);
-                    w.push_str(")");
-                    self.sput(replace(&mut cur, w));
+                    dst.insert_str(mk, "(*");
+                    dst.push_str(")");
                 }
             } else if pj.kind == ir::PJ_FIELD {
                 let mut arrow = pend_arrow;
                 pend_arrow = false;
                 if !arrow && !prev_dc {
-                    arrow = self.place_field_arrow(b, &mut pre, &mut cur);
+                    arrow = self.place_field_arrow(b, &mut pre, dst, mk);
                 }
-                cur.push_str(
+                dst.push_str(
                     if arrow {
                         "->";
                     } else {
@@ -5663,12 +5825,12 @@ extend CEmit {
                 );
                 if pj.sub == NODE_NONE {
                     // Positional payload/tuple member: the emitted C names it `_<index>`.
-                    cur.push_str("_");
-                    cur.push_u64(pj.data);
+                    dst.push_str("_");
+                    dst.push_u64(pj.data);
                 } else {
                     let am = self.agg_module(b, pre);
                     let fa = self.p().module_ast_const(am);
-                    self.mg.ident(am, fa.at_const(fa.at_const(pj.sub).as_data.field.name).as_data.name.text, &mut cur);
+                    self.mg.ident(am, fa.at_const(fa.at_const(pj.sub).as_data.field.name).as_data.name.text, dst);
                 }
             } else if pj.kind == ir::PJ_INDEX_CONST || pj.kind == ir::PJ_INDEX_OP {
                 // Container instances index through their storage member: Array wraps a C array
@@ -5707,11 +5869,8 @@ extend CEmit {
                         // Raw pointer arithmetic subscripts the pointer itself.
                         break;
                     }
-                    let mut w2 = self.sget();
-                    w2.push_str("(*");
-                    w2.push_string(&cur);
-                    w2.push_str(")");
-                    self.sput(replace(&mut cur, w2));
+                    dst.insert_str(mk, "(*");
+                    dst.push_str(")");
                     rm2 = nm2;
                     rt2 = nt2;
                     g2 += 1;
@@ -5725,27 +5884,27 @@ extend CEmit {
                     let nsrc2 = self.p().modules.at(it2.module as usize).source.as_str();
                     let nmv = nsrc2.slice(nsp2.start as usize, nsp2.end as usize);
                     if nmv == "Array" {
-                        cur.push_str(".data");
+                        dst.push_str(".data");
                     } else {
-                        cur.push_str(".ptr");
+                        dst.push_str(".ptr");
                     }
                 } else if self.is_str_ty(rm2, rt2) {
-                    cur.push_str(".ptr");
+                    dst.push_str(".ptr");
                 }
-                cur.push_str("[");
+                dst.push_str("[");
                 if pj.kind == ir::PJ_INDEX_CONST {
-                    cur.push_u64(pj.data);
+                    dst.push_u64(pj.data);
                 } else {
-                    ok = self.emit_operand(b, pj.data, &mut cur);
+                    ok = self.emit_operand(b, pj.data, dst);
                 }
-                cur.push_str("]");
+                dst.push_str("]");
             } else if pj.kind == ir::PJ_DOWNCAST {
                 let mut arrow = pend_arrow;
                 pend_arrow = false;
                 if !arrow {
-                    arrow = self.place_field_arrow(b, &mut pre, &mut cur);
+                    arrow = self.place_field_arrow(b, &mut pre, dst, mk);
                 }
-                cur.push_str(
+                dst.push_str(
                     if arrow {
                         "->payload.";
                     } else {
@@ -5754,7 +5913,7 @@ extend CEmit {
                 );
                 let am = self.agg_module(b, pre);
                 let fa = self.p().module_ast_const(am);
-                self.mg.ident(am, fa.at_const(fa.at_const(pj.sub).as_data.variant.name).as_data.name.text, &mut cur);
+                self.mg.ident(am, fa.at_const(fa.at_const(pj.sub).as_data.variant.name).as_data.name.text, dst);
             } else {
                 ok = self.fail("projection");
             }
@@ -5821,22 +5980,25 @@ extend CEmit {
                     stored_ref = k9 == TypeKind::TYPE_REFERENCE || k9 == TypeKind::TYPE_POINTER;
                 }
                 if !stored_ref {
-                    let mut w = self.sget();
-                    w.push_str("(&");
-                    w.push_string(&cur);
-                    w.push_str(")");
-                    self.sput(replace(&mut cur, w));
+                    dst.insert_str(mk, "(&");
+                    dst.push_str(")");
                 }
             }
         }
-        if ok {
-            dst.push_string(&cur);
-        }
-        self.sput(cur);
         return ok;
     }
 
     fn emit_operand(self: &mut Self, b: &ir::CoreBody, opid: ir::OperandId, dst: &mut String) bool {
+        if self.sx_nest == RENDER_NEST_MAX {
+            return self.fail("nesting");
+        }
+        self.sx_nest += 1;
+        let ok = self.emit_operand_i(b, opid, dst);
+        self.sx_nest -= 1;
+        return ok;
+    }
+
+    fn emit_operand_i(self: &mut Self, b: &ir::CoreBody, opid: ir::OperandId, dst: &mut String) bool {
         let op = *b.operands.at(opid as usize);
         if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
             let pl = *b.places.at(op.data as usize);
@@ -5844,7 +6006,7 @@ extend CEmit {
                 return self.emit_rvalue(b, *self.sx_inline.at(pl.base as usize), dst);
             }
             if pl.proj_len == 0 && *self.sx_call_fwd.at(pl.base as usize) {
-                dst.push_string(self.sx_call_str.at(pl.base as usize));
+                self.call_str_spell(pl.base, dst);
                 return true;
             }
             return self.emit_place(b, op.data, dst);
@@ -5897,17 +6059,13 @@ extend CEmit {
                 let kz = self.p().module_ast_const(rmZ).type_at(rtZ).kind;
                 if kz == TypeKind::TYPE_STRUCT || kz == TypeKind::TYPE_INSTANCE {
                     // An integer constant carrying an aggregate type is the zeroed value.
-                    let mut ts = String::new();
                     if self.erased(b, c.ty) {
                         // Erased destinations suppress the store.
                         return self.fail("zst-zero");
                     }
-                    let okz = self.ty_c(b.module, c.ty, "", &mut ts);
-                    if okz {
-                        dst.push_str("(");
-                        dst.push_string(&ts);
-                        dst.push_str("){0}");
-                    }
+                    dst.push_str("(");
+                    let okz = self.ty_c(b.module, c.ty, "", dst);
+                    dst.push_str("){0}");
                     return okz;
                 }
             }
@@ -5934,6 +6092,59 @@ extend CEmit {
             return true;
         }
         if c.kind == ir::CK_STR {
+            let mut esc = self.sget();
+            let ok = self.emit_str_const(b, &c, src, &mut esc, dst);
+            self.sput(esc);
+            return ok;
+        }
+        if c.kind == ir::CK_ITEM {
+            return self.callee_sym(b, c.item, c.targ_start, c.targ_len, TYPE_NONE, TYPE_NONE, dst);
+        }
+        if c.kind == ir::CK_WIDE {
+            // the frozen wide-int shape: `((T){ .bits = { .limbs = { 0x..ULL, ... } } })`.
+            let a0 = self.p().module_ast_const(b.module);
+            let w = *unsafe a0.wide_lits.at(c.val as usize);
+            // The CONTEXTUAL type wins (`let mx: i128 = <lit>` spells Int__128, not the default),
+            // but only when it resolves to a big-int instance (operand-position literals type
+            // as the SCALAR the checker later widens).
+            let mut ct = w.ty;
+            if c.ty != TYPE_NONE {
+                let mut cm9 = b.module;
+                let mut ct9 = c.ty;
+                self.rty(b, c.ty, &mut cm9, &mut ct9);
+                if self.p().module_ast_const(cm9).type_at(ct9).kind == TypeKind::TYPE_INSTANCE {
+                    ct = c.ty;
+                }
+            }
+            dst.push_str("((");
+            if !self.ty_c(b.module, ct, "", dst) {
+                return false;
+            }
+            dst.push_str("){ .bits = { .limbs = { ");
+            let mut last: usize = 0;
+            for i in 0..16 {
+                if unsafe w.limbs[i as usize] != 0 {
+                    last = i as usize;
+                }
+            }
+            for i in 0..last + 1 {
+                if i != 0 {
+                    dst.push_str(", ");
+                }
+                dst.push_str("0x");
+                dst.push_hex(unsafe w.limbs[i], false);
+                dst.push_str("ULL");
+            }
+            dst.push_str(" } } })");
+            return true;
+        }
+        return self.fail("constant");
+    }
+
+    // A string constant: the escaped body `esc` (pooled scratch: it spells twice, as the literal
+    // and inside `sizeof`) wrapped for its typed context.
+    fn emit_str_const(self: &mut Self, b: &ir::CoreBody, c: &ir::Constant, src: str, esc: &mut String, dst: &mut String) bool {
+        {
             // Quoted spellings carry C-valid escapes and copy verbatim; matchertext/raw segments
             // are raw BYTES and re-escape byte-wise (the lowerer records the token kind in val's
             // low byte; bit 8 = a FORMAT SEGMENT, whose `{{`/`}}` collapse to one brace).
@@ -5965,7 +6176,7 @@ extend CEmit {
                     raw0 = raw0.slice(3, raw0.len() - 2);
                 }
             }
-            let mut braced = String::new();
+            let mut braced = self.sget();
             if seg9 && (tk9 == tt::TokenType::StringLiteral as i64 || tk9 == tt::TokenType::RawStringLiteral as i64) {
                 let mut i9: usize = 0;
                 while i9 < raw0.len() {
@@ -5979,14 +6190,14 @@ extend CEmit {
                 }
                 raw0 = braced.as_str();
             }
-            let mut esc = String::new();
             if plain {
                 // Quoted/byte-string bodies carry Super-C escapes: decode to bytes, then re-escape
                 // for C (a verbatim copy mis-spells `\xNN`, greedy in C, and the C-invalid `\u{...}`).
-                push_sc_str_c(raw0, &mut esc);
+                push_sc_str_c(raw0, esc);
             } else {
-                push_c_escaped(raw0, &mut esc);
+                push_c_escaped(raw0, esc);
             }
+            self.sput(braced);
             let txt = esc.as_str();
             let a = self.p().module_ast_const(b.module);
             {
@@ -5996,12 +6207,10 @@ extend CEmit {
                     self.rty(b, c.ty, &mut rmS, &mut rtS);
                     if self.p().module_ast_const(rmS).type_at(rtS).kind == TypeKind::TYPE_POINTER {
                         // A C-string context: the bare (escaped) string, cast to the target pointer type.
-                        let mut cp = String::new();
-                        if !self.ty_c(b.module, c.ty, "", &mut cp) {
+                        dst.push_str("(");
+                        if !self.ty_c(b.module, c.ty, "", dst) {
                             return false;
                         }
-                        dst.push_str("(");
-                        dst.push_string(&cp);
                         dst.push_str(")\"");
                         dst.push_str(txt);
                         dst.push_str("\"");
@@ -6010,15 +6219,13 @@ extend CEmit {
                 }
             }
             let is_slice = c.ty != TYPE_NONE && a.type_at(c.ty).kind == TypeKind::TYPE_INSTANCE;
-            let mut cast = String::new();
+            dst.push_str("(");
             if c.ty == TYPE_NONE {
                 // Untyped string tests (switch patterns) are `str` views.
-                cast.push_str("str");
-            } else if !self.ty_c(b.module, c.ty, "", &mut cast) {
+                dst.push_str("str");
+            } else if !self.ty_c(b.module, c.ty, "", dst) {
                 return false;
             }
-            dst.push_str("(");
-            dst.push_string(&cast);
             if is_slice {
                 dst.push_str("){ .ptr = (const uint8_t *)\"");
                 dst.push_str(txt);
@@ -6034,50 +6241,6 @@ extend CEmit {
             }
             return true;
         }
-        if c.kind == ir::CK_ITEM {
-            return self.callee_sym(b, c.item, c.targ_start, c.targ_len, TYPE_NONE, TYPE_NONE, dst);
-        }
-        if c.kind == ir::CK_WIDE {
-            // the frozen wide-int shape: `((T){ .bits = { .limbs = { 0x..ULL, ... } } })`.
-            let a0 = self.p().module_ast_const(b.module);
-            let w = *unsafe a0.wide_lits.at(c.val as usize);
-            // The CONTEXTUAL type wins (`let mx: i128 = <lit>` spells Int__128, not the default),
-            // but only when it resolves to a big-int instance (operand-position literals type
-            // as the SCALAR the checker later widens).
-            let mut ct = w.ty;
-            if c.ty != TYPE_NONE {
-                let mut cm9 = b.module;
-                let mut ct9 = c.ty;
-                self.rty(b, c.ty, &mut cm9, &mut ct9);
-                if self.p().module_ast_const(cm9).type_at(ct9).kind == TypeKind::TYPE_INSTANCE {
-                    ct = c.ty;
-                }
-            }
-            let mut tn = String::new();
-            if !self.ty_c(b.module, ct, "", &mut tn) {
-                return false;
-            }
-            dst.push_str("((");
-            dst.push_string(&tn);
-            dst.push_str("){ .bits = { .limbs = { ");
-            let mut last: usize = 0;
-            for i in 0..16 {
-                if unsafe w.limbs[i as usize] != 0 {
-                    last = i as usize;
-                }
-            }
-            for i in 0..last + 1 {
-                if i != 0 {
-                    dst.push_str(", ");
-                }
-                dst.push_str("0x");
-                dst.push_hex(unsafe w.limbs[i], false);
-                dst.push_str("ULL");
-            }
-            dst.push_str(" } } })");
-            return true;
-        }
-        return self.fail("constant");
     }
 
     fn emit_int(self: &mut Self, b: &ir::CoreBody, c: &ir::Constant, dst: &mut String) bool {
@@ -6085,7 +6248,6 @@ extend CEmit {
         // fast path covers synthesized constants. A bool renders from `val`: its span is never
         // read, so an inlined bool (whose span indexes the callee's source) cannot pick up digits.
         let sp = c.raw;
-        let mut digits = Vector::<u8>::new();
         let mut spelled = false;
         if c.kind == ir::CK_INT {
             // An inlined constant spans a FOREIGN module's source (item marks it).
@@ -6109,7 +6271,7 @@ extend CEmit {
                             break;
                         }
                         if ch != 95 {
-                            digits.push(ch);
+                            dst.push_byte(ch);
                         }
                         i += 1;
                     }
@@ -6118,9 +6280,6 @@ extend CEmit {
             }
         }
         if spelled {
-            for k in 0..digits.len() {
-                dst.push_byte(digits[k]);
-            }
             if c.kind == ir::CK_INT {
                 dst.push_str(if_s(self.int_is_unsigned(b, c.ty), "ULL", "LL"));
             }
@@ -6386,6 +6545,28 @@ extend CEmit {
             return;
         }
         let rit = *self.p().module_ast_const(rm6).instance(y8.as_data.inst);
+        if !self.mg.rec_on {
+            // An identical (impl, receiver instance, env) demand builds the same record: the drain
+            // would drop it on the symbol, so it never queues (journal mode records every attempt).
+            let mut dk0 = 1469598103934665603u64;
+            dk0 = (dk0 ^ (idef.module as u64 << 32 | idef.node as u64)) * 1099511628211u64;
+            dk0 = (dk0 ^ (rm6 as u64 << 32 | rit.module as u64)) * 1099511628211u64;
+            dk0 = (dk0 ^ (rit.decl as u64 << 32 | rit.n as u64)) * 1099511628211u64;
+            for k9 in 0..rit.n {
+                dk0 = (dk0 ^ (unsafe rit.args[k9 as usize]) as u64) * 1099511628211u64;
+            }
+            for k9 in 0..self.mg.subs.len() {
+                let sb9 = *self.mg.subs.at(k9);
+                dk0 = (dk0 ^ (sb9.pm as u64 << 32 | sb9.pnode as u64)) * 1099511628211u64;
+                dk0 = (dk0 ^ (sb9.am as u64 << 32 | sb9.at as u64)) * 1099511628211u64;
+                dk0 = (dk0 ^ sb9.lim as u64) * 1099511628211u64;
+            }
+            let k0 = skey_mix(2, dk0);
+            if self.demand_seen.contains(&k0) {
+                return;
+            }
+            self.demand_seen.insert(k0);
+        }
         let mut snap = Vector::<mbe::MSub>::new();
         for i in 0..self.mg.subs.len() {
             snap.push(*self.mg.subs.at(i));
@@ -6499,16 +6680,29 @@ extend CEmit {
     }
 
     fn iface_target_sym(self: &mut Self, rm6: ModuleId, rt6: TypeId, callee: DefId, dst: &mut String) bool {
-        let mut sym = String::new();
+        let mut sym = self.sget();
+        let ok = self.iface_target_sym_i(rm6, rt6, callee, &mut sym, dst);
+        self.sput(sym);
+        return ok;
+    }
+
+    fn iface_target_sym_i(
+        self: &mut Self,
+        rm6: ModuleId,
+        rt6: TypeId,
+        callee: DefId,
+        sym: &mut String,
+        dst: &mut String,
+    ) bool {
         {
             let ca8 = self.p().module_ast_const(callee.module);
             let msp8 = ca8.at_const(ca8.at_const(callee.node).as_data.function.name).as_data.name.text;
             let msrc8 = self.p().modules.at(callee.module as usize).source.as_str();
             let mname8 = msrc8.slice(msp8.start as usize, msp8.end as usize);
-            let mut impl_sym = String::new();
-            if self.mg.method_by_name(rm6, rt6, mname8, &mut impl_sym) {
-                self.demand_impl(rm6, rt6, &impl_sym);
-                dst.push_string(&impl_sym);
+            // `sym` doubles as the impl spelling here; the default-body symbol below starts fresh.
+            if self.mg.method_by_name(rm6, rt6, mname8, sym) {
+                self.demand_impl(rm6, rt6, sym);
+                dst.push_string(sym);
                 return true;
             }
             if mname8 == "free" {
@@ -6517,32 +6711,32 @@ extend CEmit {
                 let interface_name = ca8.at_const(interface_decl).as_data.interface_def.name;
                 let interface_span = ca8.at_const(interface_name).as_data.name.text;
                 if msrc8.slice(interface_span.start as usize, interface_span.end as usize) == "Free" {
-                    if !self.free_expr(rm6, rt6, &mut impl_sym) {
+                    if !self.free_expr(rm6, rt6, sym) {
                         return false;
                     }
-                    dst.push_string(&impl_sym);
+                    dst.push_string(sym);
                     return true;
                 }
             }
         }
         let y7 = *self.p().module_ast_const(rm6).type_at(rt6);
         if y7.kind == TypeKind::TYPE_BUILTIN {
-            self.mg.modpfx(callee.module, &mut sym);
-            if !self.mg.type_m(rm6, rt6, &mut sym) {
+            self.mg.modpfx(callee.module, sym);
+            if !self.mg.type_m(rm6, rt6, sym) {
                 return self.fail("iface-default-recv");
             }
         } else if y7.kind == TypeKind::TYPE_INSTANCE {
             let it7 = *self.p().module_ast_const(rm6).instance(y7.as_data.inst);
-            if !self.mg.inst_name(rm6, &it7, &mut sym) {
+            if !self.mg.inst_name(rm6, &it7, sym) {
                 return self.fail("iface-default-inst");
             }
         } else {
-            self.mg.modpfx(callee.module, &mut sym);
+            self.mg.modpfx(callee.module, sym);
             let da7 = self.p().module_ast_const(y7.module);
             self.mg.ident(
                 y7.module,
                 da7.at_const(da7.at_const(y7.as_data.decl).as_data.aggregate.name).as_data.name.text,
-                &mut sym,
+                sym,
             );
         }
         sym.push_str("__");
@@ -6550,7 +6744,7 @@ extend CEmit {
         self.mg.ident(
             callee.module,
             ca7.at_const(ca7.at_const(callee.node).as_data.function.name).as_data.name.text,
-            &mut sym,
+            sym,
         );
         // Demand the default BODY under `Self -> receiver` (the interface DECL NODE is Self's
         // binding key: the extend-frame convention).
@@ -6569,7 +6763,7 @@ extend CEmit {
                 self.demand.push(d9);
             }
         }
-        dst.push_string(&sym);
+        dst.push_string(sym);
         return true;
     }
 
@@ -7647,7 +7841,14 @@ extend CEmit {
         }
     }
 
-    fn emit_forwarded_assert(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, line: u64, handled: &mut bool) bool {
+    fn emit_forwarded_assert(
+        self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        t: &ir::Terminator,
+        line: u64,
+        handled: &mut bool,
+    ) bool {
         *handled = false;
         if t.args_len != 4 {
             return true;
@@ -7675,14 +7876,9 @@ extend CEmit {
         if !forwarded || kind == 0 || self.assert_helper_kind(b, ro) != kind {
             return true;
         }
-        let mut lv = String::new();
-        let mut rv = String::new();
-        if !self.emit_operand(b, lo, &mut lv) || !self.emit_operand(b, ro, &mut rv) {
-            return false;
-        }
         self.ensure_assert_helper(kind);
-        self.out.push_str("  __sc_assert_");
-        self.out.push_str(
+        o.push_str("  __sc_assert_");
+        o.push_str(
             if kind == 1 {
                 "i64";
             } else if kind == 2 {
@@ -7693,24 +7889,28 @@ extend CEmit {
                 "bool";
             },
         );
-        self.out.push_str("(");
-        self.out.push_string(&lv);
-        self.out.push_str(", ");
-        self.out.push_string(&rv);
-        self.out.push_str(", ");
-        self.out.push_str(if_s(t.sw_len == 2, "true", "false"));
-        self.out.push_str(", \"");
+        o.push_str("(");
+        if !self.emit_operand(b, lo, o) {
+            return false;
+        }
+        o.push_str(", ");
+        if !self.emit_operand(b, ro, o) {
+            return false;
+        }
+        o.push_str(", ");
+        o.push_str(if_s(t.sw_len == 2, "true", "false"));
+        o.push_str(", \"");
         let src = self.p().modules.at(b.module as usize).source.as_str();
         let lsp = *b.constants.at(b.operands.at(b.oper_pool[(t.args_start + 2) as usize] as usize).data as usize);
         let rsp = *b.constants.at(b.operands.at(b.oper_pool[(t.args_start + 3) as usize] as usize).data as usize);
-        push_c_escaped(src.slice(lsp.raw.start as usize, lsp.raw.end as usize), &mut self.out);
-        self.out.push_str(if_s(t.sw_len == 2, " == ", " != "));
-        push_c_escaped(src.slice(rsp.raw.start as usize, rsp.raw.end as usize), &mut self.out);
-        self.out.push_str("\", \"");
-        push_c_escaped(self.p().modules.at(b.module as usize).file.as_str(), &mut self.out);
-        self.out.push_str("\", ");
-        self.out.push_u64(line);
-        self.out.push_str(");\n");
+        push_c_escaped(src.slice(lsp.raw.start as usize, lsp.raw.end as usize), o);
+        o.push_str(if_s(t.sw_len == 2, " == ", " != "));
+        push_c_escaped(src.slice(rsp.raw.start as usize, rsp.raw.end as usize), o);
+        o.push_str("\", \"");
+        push_c_escaped(self.p().modules.at(b.module as usize).file.as_str(), o);
+        o.push_str("\", ");
+        o.push_u64(line);
+        o.push_str(");\n");
         *handled = true;
         return true;
     }
@@ -7776,11 +7976,24 @@ extend CEmit {
         return ok;
     }
 
-    fn assert_value_line(self: &mut Self, b: &ir::CoreBody, label: str, opid: ir::OperandId) bool {
-        let mut ev = String::new();
-        if !self.emit_operand(b, opid, &mut ev) {
-            return false;
+    fn assert_value_line(self: &mut Self, o: &mut String, b: &ir::CoreBody, label: str, opid: ir::OperandId) bool {
+        let mut ev = self.sget();
+        let ok = self.emit_operand(b, opid, &mut ev);
+        if ok {
+            self.assert_value_line_i(o, b, label, opid, &ev);
         }
+        self.sput(ev);
+        return ok;
+    }
+
+    fn assert_value_line_i(
+        self: &mut Self,
+        o: &mut String,
+        b: &ir::CoreBody,
+        label: str,
+        opid: ir::OperandId,
+        ev: &String,
+    ) {
         let mut rm = b.module;
         let mut rt = b.operands.at(opid as usize).ty;
         self.rty(b, b.operands.at(opid as usize).ty, &mut rm, &mut rt);
@@ -7788,55 +8001,54 @@ extend CEmit {
         if y.kind == TypeKind::TYPE_BUILTIN {
             let bt = y.as_data.builtin;
             if bt == BuiltinType::BT_BOOL {
-                self.out.push_str("fprintf(stderr, \"  ");
-                self.out.push_str(label);
-                self.out.push_str(" %s\\n\", (");
-                self.out.push_string(&ev);
-                self.out.push_str(") ? \"true\" : \"false\"); ");
-                return true;
+                o.push_str("fprintf(stderr, \"  ");
+                o.push_str(label);
+                o.push_str(" %s\\n\", (");
+                o.push_string(ev);
+                o.push_str(") ? \"true\" : \"false\"); ");
+                return;
             }
             if bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64 {
-                self.out.push_str("fprintf(stderr, \"  ");
-                self.out.push_str(label);
-                self.out.push_str(" %g\\n\", (double)(");
-                self.out.push_string(&ev);
-                self.out.push_str(")); ");
-                return true;
+                o.push_str("fprintf(stderr, \"  ");
+                o.push_str(label);
+                o.push_str(" %g\\n\", (double)(");
+                o.push_string(ev);
+                o.push_str(")); ");
+                return;
             }
             if bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_U16 || bt == BuiltinType::BT_U32 || bt == BuiltinType::BT_U64 || bt == BuiltinType::BT_USIZE {
-                self.out.push_str("fprintf(stderr, \"  ");
-                self.out.push_str(label);
-                self.out.push_str(" %llu\\n\", (unsigned long long)(");
-                self.out.push_string(&ev);
-                self.out.push_str(")); ");
-                return true;
+                o.push_str("fprintf(stderr, \"  ");
+                o.push_str(label);
+                o.push_str(" %llu\\n\", (unsigned long long)(");
+                o.push_string(ev);
+                o.push_str(")); ");
+                return;
             }
             if bt == BuiltinType::BT_CHAR || bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_I32 || bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_ISIZE {
-                self.out.push_str("fprintf(stderr, \"  ");
-                self.out.push_str(label);
-                self.out.push_str(" %lld\\n\", (long long)(");
-                self.out.push_string(&ev);
-                self.out.push_str(")); ");
-                return true;
+                o.push_str("fprintf(stderr, \"  ");
+                o.push_str(label);
+                o.push_str(" %lld\\n\", (long long)(");
+                o.push_string(ev);
+                o.push_str(")); ");
+                return;
             }
-            return true;
+            return;
         }
         if y.kind == TypeKind::TYPE_STRUCT {
             let da = self.p().module_ast_const(y.module);
             let ns = da.at_const(da.at_const(y.as_data.decl).as_data.aggregate.name).as_data.name.text;
             let nm = self.p().modules.at(y.module as usize).source.as_str().slice(ns.start as usize, ns.end as usize);
             if nm == "str" {
-                self.out.push_str("fprintf(stderr, \"  ");
-                self.out.push_str(label);
-                self.out.push_str(" \\\"%.*s\\\"\\n\", (int)(");
-                self.out.push_string(&ev);
-                self.out.push_str(").len, (const char *)(");
-                self.out.push_string(&ev);
-                self.out.push_str(").ptr); ");
-                return true;
+                o.push_str("fprintf(stderr, \"  ");
+                o.push_str(label);
+                o.push_str(" \\\"%.*s\\\"\\n\", (int)(");
+                o.push_string(ev);
+                o.push_str(").len, (const char *)(");
+                o.push_string(ev);
+                o.push_str(").ptr); ");
+                return;
             }
         }
-        return true;
     }
 
     // Preemption safepoints print only when the package uses the coroutine runtime, and never
@@ -8001,6 +8213,29 @@ extend CEmit {
         return true;
     }
 
+    // The memo holds one emission context's plain symbols (the cross-TU edge is per context).
+    fn sym_memo_ctx_check(self: &mut Self) {
+        if self.sym_memo_ctx != self.mg.mark_ctx {
+            self.sym_memo.clear();
+            self.sym_pool.clear();
+            self.sym_off.clear();
+            self.sym_len.clear();
+            self.sym_hash.clear();
+            self.sym_memo_ctx = self.mg.mark_ctx;
+        }
+    }
+
+    // The reserved-identifier hash of a plain concrete call's memoized symbol, or 0 when the memo
+    // holds none for `callee` (a spelling is then needed).
+    fn sym_memo_hash(self: &mut Self, callee: DefId) u64 {
+        self.sym_memo_ctx_check();
+        let mk = skey_mix(0, callee.module as u64 << 32 | callee.node as u64);
+        return switch self.sym_memo.get(&mk) {
+            Some(s) => self.sym_hash[(*s) as usize],
+            None => 0u64,
+        };
+    }
+
     fn callee_sym(
         self: &mut Self,
         b: &ir::CoreBody,
@@ -8011,7 +8246,47 @@ extend CEmit {
         dest_ty: TypeId,
         dst: &mut String,
     ) bool {
-        let mut sym = String::new();
+        let sm = self.pr.start();
+        let mut sym = self.sget();
+        let r = self.callee_sym_i(b, callee, targs_start, targs_len, recv_ty, dest_ty, &mut sym, dst);
+        self.sput(sym);
+        self.pr.stop(prb::P_SYM, sm);
+        return r;
+    }
+
+    // Intern `sym` under `mk` for the current mark_ctx (see sym_memo_ctx_check).
+    fn sym_memo_put(self: &mut Self, mk: u64, sym: &String) {
+        self.sym_memo.insert(mk, self.sym_off.len() as u64);
+        self.sym_off.push(self.sym_pool.len() as u32);
+        self.sym_len.push(sym.len() as u32);
+        self.sym_hash.push(ident_hash(sym.as_str()));
+        self.sym_pool.push_string(sym);
+    }
+
+    // The memoized spelling under `mk`, appended to `dst`; false when none is interned.
+    fn sym_memo_get(self: &Self, mk: u64, dst: &mut String) bool {
+        return switch self.sym_memo.get(&mk) {
+            Some(s) => {
+                let off = self.sym_off[(*s) as usize] as usize;
+                let ln = self.sym_len[(*s) as usize] as usize;
+                dst.push_str(self.sym_pool.as_str().slice(off, off + ln));
+                true;
+            },
+            None => false,
+        };
+    }
+
+    fn callee_sym_i(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        callee: DefId,
+        targs_start: u32,
+        targs_len: u32,
+        recv_ty: TypeId,
+        dest_ty: TypeId,
+        sym: &mut String,
+        dst: &mut String,
+    ) bool {
         let mut ok = true;
         // freshness: `last_method_def` must reflect THIS call's resolution (arg emission reads it).
         self.mg.last_method_def = DefId { module: 0, node: NODE_NONE };
@@ -8157,7 +8432,59 @@ extend CEmit {
             if rit.decl == NODE_NONE {
                 return self.fail("method-inst");
             }
-            if !self.mg.inst_name(rpm, &rit, &mut sym) {
+        } else if targs_len == 0 {
+            // Plain concrete call: no targ suffix, no demand record; the symbol depends
+            // only on the declaration (and mark_ctx, for the cross-TU edge), so memoize.
+            self.sym_memo_ctx_check();
+            let mk = skey_mix(0, callee.module as u64 << 32 | callee.node as u64);
+            if self.sym_memo_get(mk, dst) {
+                return true;
+            }
+            let tgt0 = self.mg.method_target(callee.module, callee.node);
+            if !self.mg.fn_sym(callee.module, callee.node, tgt0, true, sym) {
+                return self.fail("callee-sym");
+            }
+            self.sym_memo_put(mk, sym);
+            dst.push_string(sym);
+            return true;
+        }
+        // A generic call's symbol is a pure function of the callee, the receiver instance, the
+        // bound targs and the active env: the same fingerprint the demand dedup keys on, minus
+        // the spelling itself, interns it (a first spelling records its demand and cross-TU
+        // edges; the journal mode replays every attempt, so it spells each time).
+        let mut mk1: u64 = 0;
+        let memo9 = !self.mg.rec_on && self.collect_demand;
+        if memo9 {
+            let mut dk0 = 1469598103934665603u64;
+            dk0 = (dk0 ^ (callee.module as u64 << 32 | callee.node as u64)) * 1099511628211u64;
+            for k9 in 0..self.mg.subs.len() {
+                let sb9 = *self.mg.subs.at(k9);
+                dk0 = (dk0 ^ (sb9.pm as u64 << 32 | sb9.pnode as u64)) * 1099511628211u64;
+                dk0 = (dk0 ^ (sb9.am as u64 << 32 | sb9.at as u64)) * 1099511628211u64;
+                dk0 = (dk0 ^ sb9.lim as u64) * 1099511628211u64;
+            }
+            if is_minst {
+                dk0 = (dk0 ^ (rpm as u64 << 32 | rit.module as u64)) * 1099511628211u64;
+                dk0 = (dk0 ^ (rit.decl as u64 << 32 | rit.n as u64)) * 1099511628211u64;
+                for k9 in 0..rit.n {
+                    dk0 = (dk0 ^ (unsafe rit.args[k9 as usize]) as u64) * 1099511628211u64;
+                }
+            }
+            dk0 = (dk0 ^ (b.module as u64 << 32 | targs_len as u64)) * 1099511628211u64;
+            for k9 in 0..targs_len {
+                dk0 = (dk0 ^ b.targ_pool[(targs_start + k9) as usize] as u64) * 1099511628211u64;
+            }
+            if recv_targs {
+                dk0 = (dk0 ^ 1) * 1099511628211u64;
+            }
+            mk1 = skey_mix(1, dk0);
+            self.sym_memo_ctx_check();
+            if self.sym_memo_get(mk1, dst) {
+                return true;
+            }
+        }
+        if is_minst {
+            if !self.mg.inst_name(rpm, &rit, sym) {
                 ok = self.fail("callee-inst");
             }
             if ok {
@@ -8166,38 +8493,12 @@ extend CEmit {
                 self.mg.ident(
                     callee.module,
                     ca.at_const(ca.at_const(callee.node).as_data.function.name).as_data.name.text,
-                    &mut sym,
+                    sym,
                 );
             }
         } else {
-            if targs_len == 0 {
-                // Plain concrete call: no targ suffix, no demand record; the symbol depends
-                // only on the declaration (and mark_ctx, for the cross-TU edge), so memoize.
-                if self.sym_memo_ctx != self.mg.mark_ctx {
-                    self.sym_memo.clear();
-                    self.sym_memo_ctx = self.mg.mark_ctx;
-                }
-                let mk = skey_mix(0, callee.module as u64 << 32 | callee.node as u64);
-                let hit9 = switch self.sym_memo.get(&mk) {
-                    Some(s) => {
-                        dst.push_str(s.as_str());
-                        true;
-                    },
-                    None => false,
-                };
-                if hit9 {
-                    return true;
-                }
-                let tgt0 = self.mg.method_target(callee.module, callee.node);
-                if !self.mg.fn_sym(callee.module, callee.node, tgt0, true, &mut sym) {
-                    return self.fail("callee-sym");
-                }
-                self.sym_memo.insert(mk, sym.clone());
-                dst.push_string(&sym);
-                return true;
-            }
             let tgt = self.mg.method_target(callee.module, callee.node);
-            if !self.mg.fn_sym(callee.module, callee.node, tgt, true, &mut sym) {
+            if !self.mg.fn_sym(callee.module, callee.node, tgt, true, sym) {
                 ok = self.fail("callee-sym");
             }
         }
@@ -8207,10 +8508,13 @@ extend CEmit {
                     break;
                 }
                 sym.push_str("__");
-                if !self.mg.type_m(b.module, b.targ_pool[(targs_start + k) as usize], &mut sym) {
+                if !self.mg.type_m(b.module, b.targ_pool[(targs_start + k) as usize], sym) {
                     ok = self.fail("callee-targ");
                 }
             }
+        }
+        if ok && memo9 {
+            self.sym_memo_put(mk1, sym);
         }
         if ok && self.collect_demand && (is_minst || targs_len != 0) {
             let ca = self.p().module_ast_const(callee.module);
@@ -8248,7 +8552,7 @@ extend CEmit {
                 let fresh9 = !self.demand_seen.contains(&dk9);
                 if !fresh9 && !self.mg.rec_on {
                     if ok {
-                        dst.push_string(&sym);
+                        dst.push_string(sym);
                     }
                     return ok;
                 }
@@ -8333,7 +8637,7 @@ extend CEmit {
             }
         }
         if ok {
-            dst.push_string(&sym);
+            dst.push_string(sym);
         }
         return ok;
     }
@@ -8362,12 +8666,12 @@ extend CEmit {
         if nmi != "Slice" && nmi != "SliceMut" {
             return false;
         }
-        let mut cs = String::new();
-        if !self.mg.ctype(rm, rt, "", &mut cs) {
+        let mk = dst.len();
+        dst.push_str("(");
+        if !self.mg.ctype(rm, rt, "", dst) {
+            dst.truncate(mk);
             return false;
         }
-        dst.push_str("(");
-        dst.push_string(&cs);
         dst.push_str("){ .ptr = ");
         let ok = self.emit_operand(b, opid, dst);
         dst.push_str(", .len = ");
@@ -8424,16 +8728,11 @@ extend CEmit {
             // Cast to the recorded result type: u8 buffers reborrowed as char pointers (and
             // const-ness adjustments) are checker-approved.
             if rv.kind == ir::RV_ADDR || self.ref_cast_needed(b, rv.target, rv.a) {
-                let mut ts = String::new();
-                let ok0 = self.ty_c(b.module, rv.target, "", &mut ts);
-                if ok0 {
-                    dst.push_str("(");
-                    dst.push_string(&ts);
-                    dst.push_str(")");
-                }
-                if !ok0 {
+                dst.push_str("(");
+                if !self.ty_c(b.module, rv.target, "", dst) {
                     return false;
                 }
+                dst.push_str(")");
             }
             // `&*p` is `p`: a place ending in a dereference cancels the address-of, so emit the place
             // with its trailing deref dropped and no `&`.
@@ -8467,13 +8766,9 @@ extend CEmit {
             if rv.b != ir::CAST_NUMERIC {
                 return self.fail("cast");
             }
-            let mut ts = String::new();
-            let mut ok = self.ty_c(b.module, rv.target, "", &mut ts);
-            if ok {
-                dst.push_str("(");
-                dst.push_string(&ts);
-                dst.push_str(")");
-            }
+            dst.push_str("(");
+            let mut ok = self.ty_c(b.module, rv.target, "", dst);
+            dst.push_str(")");
             if ok {
                 ok = self.emit_operand(b, rv.a, dst);
             }
@@ -8548,16 +8843,18 @@ extend CEmit {
                 }
                 if self.op_dispatch_agg(rm4, rt4) {
                     // Aggregate equality dispatches through the type's `eq` (checker-approved).
-                    let mut es = String::new();
+                    let mut es = self.sget();
                     if self.mg.method_by_name(rm4, rt4, "eq", &mut es) {
                         self.demand_impl(rm4, rt4, &es);
                     } else if !self.conf_default_sym(rm4, rt4, "eq", &mut es) {
+                        self.sput(es);
                         return self.fail("struct-eq");
                     }
                     if t == tt::TokenType::BangEqual {
                         dst.push_str("!");
                     }
                     dst.push_string(&es);
+                    self.sput(es);
                     dst.push_str("(");
                     if !aref {
                         dst.push_str("&");
@@ -8577,14 +8874,16 @@ extend CEmit {
             if t == tt::TokenType::LessThan || t == tt::TokenType::LessThanEqual || t == tt::TokenType::GreaterThan || t == tt::TokenType::GreaterThanEqual {
                 if self.op_dispatch_agg(rm4, rt4) {
                     // Aggregate ordering dispatches through the type's `cmp` (checker-approved).
-                    let mut cs = String::new();
+                    let mut cs = self.sget();
                     if self.mg.method_by_name(rm4, rt4, "cmp", &mut cs) {
                         self.demand_impl(rm4, rt4, &cs);
                     } else if !self.conf_default_sym(rm4, rt4, "cmp", &mut cs) {
+                        self.sput(cs);
                         return self.fail("struct-cmp");
                     }
                     dst.push_str("(");
                     dst.push_string(&cs);
+                    self.sput(cs);
                     dst.push_str("(");
                     if !aref {
                         dst.push_str("&");
@@ -8642,13 +8941,15 @@ extend CEmit {
                 };
                 if mn.len() != 0 {
                     if self.op_dispatch_agg(rm4, rt4) {
-                        let mut ms5 = String::new();
+                        let mut ms5 = self.sget();
                         if self.mg.method_by_name(rm4, rt4, mn, &mut ms5) {
                             self.demand_impl(rm4, rt4, &ms5);
                         } else if !self.conf_default_sym(rm4, rt4, mn, &mut ms5) {
+                            self.sput(ms5);
                             return self.fail("struct-op");
                         }
                         dst.push_string(&ms5);
+                        self.sput(ms5);
                         dst.push_str("(");
                         if !aref {
                             dst.push_str("&");
@@ -8767,13 +9068,14 @@ extend CEmit {
                     return ok;
                 }
                 if nm == "Array" {
-                    let mut pv = String::new();
+                    let mut pv = self.sget();
                     let ok = self.emit_place(b, rv.a, &mut pv);
                     dst.push_str("(sizeof((");
                     dst.push_string(&pv);
                     dst.push_str(").data) / sizeof((");
                     dst.push_string(&pv);
                     dst.push_str(").data[0]))");
+                    self.sput(pv);
                     return ok;
                 }
             }
@@ -8856,25 +9158,17 @@ extend CEmit {
                     }
                     let yz = *self.p().module_ast_const(rmZ).type_at(rtZ);
                     if yz.kind == TypeKind::TYPE_ARRAY {
-                        let mut es = String::new();
-                        let okz = self.mg.ctype(rmZ, yz.as_data.elem, "", &mut es);
-                        if okz {
-                            dst.push_str(if_s(k == ir::IN_SIZEOF as u32, "sizeof(", "_Alignof("));
-                            dst.push_string(&es);
-                            dst.push_str("[");
-                            dst.push_u64(yz.as_data.arr.len);
-                            dst.push_str("])");
-                        }
+                        dst.push_str(if_s(k == ir::IN_SIZEOF as u32, "sizeof(", "_Alignof("));
+                        let okz = self.mg.ctype(rmZ, yz.as_data.elem, "", dst);
+                        dst.push_str("[");
+                        dst.push_u64(yz.as_data.arr.len);
+                        dst.push_str("])");
                         return okz;
                     }
                 }
-                let mut ts = String::new();
-                let ok = self.ty_c(b.module, rv.b, "", &mut ts);
-                if ok {
-                    dst.push_str(if_s(k == ir::IN_SIZEOF as u32, "sizeof(", "_Alignof("));
-                    dst.push_string(&ts);
-                    dst.push_str(")");
-                }
+                dst.push_str(if_s(k == ir::IN_SIZEOF as u32, "sizeof(", "_Alignof("));
+                let ok = self.ty_c(b.module, rv.b, "", dst);
+                dst.push_str(")");
                 return ok;
             }
             if k == ir::IN_TYPE_INFO as u32 {
@@ -8884,12 +9178,12 @@ extend CEmit {
                 let mut rm = b.module;
                 let mut rt = rv.b;
                 self.rty(b, rv.b, &mut rm, &mut rt);
-                let mut mg9 = String::new();
-                if !self.mg.type_m(rm, rt, &mut mg9) {
+                let mut sym = self.sget();
+                sym.push_str("__sc_ti__");
+                if !self.mg.type_m(rm, rt, &mut sym) {
+                    self.sput(sym);
                     return self.fail("type-info");
                 }
-                let mut sym = String::from_str("__sc_ti__");
-                sym.push_string(&mg9);
                 let mut h = 1469598103934665603u64;
                 {
                     let ss = sym.as_str();
@@ -8918,6 +9212,7 @@ extend CEmit {
                     }
                 }
                 dst.push_string(&sym);
+                self.sput(sym);
                 return true;
             }
             if k == ir::IN_DANGLING as u32 {
@@ -8934,28 +9229,24 @@ extend CEmit {
                     // Erased destinations suppress the whole store.
                     return self.fail("zst-zeroed");
                 }
-                let mut ts = String::new();
-                let ok = self.ty_c(b.module, rv.target, "", &mut ts);
-                if ok {
-                    dst.push_str("(");
-                    dst.push_string(&ts);
-                    dst.push_str("){0}");
-                }
+                dst.push_str("(");
+                let ok = self.ty_c(b.module, rv.target, "", dst);
+                dst.push_str("){0}");
                 return ok;
             }
             if k == ir::IN_VA_ARG as u32 {
-                let mut ts = String::new();
+                let mut ts = self.sget();
                 if !self.ty_c(b.module, rv.target, "", &mut ts) {
+                    self.sput(ts);
                     return self.fail("va-arg");
                 }
                 dst.push_str("va_arg(");
-                if !self.emit_operand(b, b.oper_pool[rv.a as usize], dst) {
-                    return false;
-                }
+                let ok = self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
                 dst.push_str(", ");
                 dst.push_string(&ts);
                 dst.push_str(")");
-                return true;
+                self.sput(ts);
+                return ok;
             }
             if k == ir::IN_DYN_TID as u32 {
                 // Vtable identity test: the tid slot holds the concrete source type's mangled
@@ -8967,26 +9258,24 @@ extend CEmit {
                 if yT.kind != TypeKind::TYPE_REFERENCE {
                     return self.fail("dyn-tid");
                 }
-                let mut spell = String::new();
+                let mut spell = self.sget();
                 if !self.mg.type_m(rmT, yT.as_data.elem, &mut spell) {
+                    self.sput(spell);
                     return self.fail("dyn-tid");
                 }
                 dst.push_str("(strcmp((");
-                if !self.emit_operand(b, b.oper_pool[rv.a as usize], dst) {
-                    return false;
-                }
+                let ok = self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
                 dst.push_str(").vt->tid, \"");
                 dst.push_string(&spell);
                 dst.push_str("\") == 0)");
-                return true;
+                self.sput(spell);
+                return ok;
             }
             if k == ir::IN_DYN_DATA as u32 {
-                let mut ts = String::new();
-                if !self.ty_c(b.module, rv.target, "", &mut ts) {
+                dst.push_str("((");
+                if !self.ty_c(b.module, rv.target, "", dst) {
                     return self.fail("dyn-data");
                 }
-                dst.push_str("((");
-                dst.push_string(&ts);
                 dst.push_str(")(");
                 if !self.emit_operand(b, b.oper_pool[rv.a as usize], dst) {
                     return false;
@@ -9066,9 +9355,7 @@ extend CEmit {
                 return self.fail("closure-caps");
             }
             dst.push_str("(");
-            let mut nm = String::new();
-            self.mg.closure_sym(cm, cn, &mut nm);
-            dst.push_string(&nm);
+            self.mg.closure_sym(cm, cn, dst);
             dst.push_str("_env){ ");
             let mut ok = true;
             let mut ne9: u32 = 0;
@@ -9115,8 +9402,8 @@ extend CEmit {
             let mut dm = b.module;
             let mut dt = rv.target;
             self.rty(b, rv.target, &mut dm, &mut dt);
-            let mut tc = String::new();
-            let mut pair = String::new();
+            let mut tc = self.sget();
+            let mut pair = self.sget();
             let mut ok = self.ty_c(b.module, rv.target, "", &mut tc);
             if ok && (oy.kind == TypeKind::TYPE_REFERENCE || oy.kind == TypeKind::TYPE_POINTER) {
                 let mut em = om;
@@ -9170,6 +9457,8 @@ extend CEmit {
                     ok = self.fail("dyn-owned");
                 }
             }
+            self.sput(tc);
+            self.sput(pair);
             return ok;
         }
         return self.fail("rvalue");
@@ -9187,9 +9476,9 @@ extend CEmit {
         if !is_arr && by.kind != TypeKind::TYPE_INSTANCE && !self.is_str_ty(rm, rt) {
             return self.fail("slice-base");
         }
-        let mut bv = String::new();
-        let mut sv = String::new();
-        let mut ev = String::new();
+        let mut bv = self.sget();
+        let mut sv = self.sget();
+        let mut ev = self.sget();
         let mut ok = self.emit_place(b, rv.a, &mut bv);
         if ok && rv.b != ir::IR_NONE {
             ok = self.emit_operand(b, rv.b, &mut sv);
@@ -9197,7 +9486,7 @@ extend CEmit {
         if ok && rv.item.node != ir::IR_NONE {
             ok = self.emit_operand(b, rv.item.node, &mut ev);
         }
-        let mut cast = String::new();
+        let mut cast = self.sget();
         if ok {
             ok = self.ty_c(b.module, rv.target, "", &mut cast);
         }
@@ -9250,6 +9539,10 @@ extend CEmit {
             }
             dst.push_str(" }");
         }
+        self.sput(bv);
+        self.sput(sv);
+        self.sput(ev);
+        self.sput(cast);
         return ok;
     }
 
@@ -9260,17 +9553,15 @@ extend CEmit {
                 return self.fail("agg-enum");
             }
             let am = self.agg_module(b, rv.target);
-            let mut tag = String::new();
-            self.mg.enum_tag(am, edecl, rv.item.node, &mut tag);
             if !self.enum_has_payload(am, edecl) {
-                dst.push_string(&tag);
+                self.mg.enum_tag(am, edecl, rv.item.node, dst);
                 return true;
             }
-            let mut cast = String::new();
-            let mut ok = self.ty_c(b.module, rv.target, "", &mut cast);
+            let mut tag = self.sget();
+            self.mg.enum_tag(am, edecl, rv.item.node, &mut tag);
+            dst.push_str("(");
+            let mut ok = self.ty_c(b.module, rv.target, "", dst);
             if ok {
-                dst.push_str("(");
-                dst.push_string(&cast);
                 dst.push_str("){ .tag = ");
                 dst.push_string(&tag);
                 let mut vmat9: u32 = 0;
@@ -9313,16 +9604,15 @@ extend CEmit {
                 }
                 dst.push_str(" }");
             }
+            self.sput(tag);
             return ok;
         }
         if rv.c == ir::AGG_STRUCT || rv.c == ir::AGG_TUPLE {
-            let mut cast = String::new();
-            let mut ok = self.ty_c(b.module, rv.target, "", &mut cast);
+            dst.push_str("(");
+            let mut ok = self.ty_c(b.module, rv.target, "", dst);
             if !ok {
                 return false;
             }
-            dst.push_str("(");
-            dst.push_string(&cast);
             dst.push_str(")");
             if rv.b == 0 {
                 let mut rmE = b.module;
@@ -9407,7 +9697,7 @@ extend CEmit {
     }
 
     // `{ <callee>_ret __mr = f(args); d0 = __mr._0; ... }`: multi-return unpacking.
-    fn emit_multi_call(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
+    fn emit_multi_call(self: &mut Self, o: &mut String, b: &ir::CoreBody, t: &ir::Terminator) bool {
         if t.callee.node == NODE_NONE {
             return self.fail("fn-value-call");
         }
@@ -9415,7 +9705,7 @@ extend CEmit {
         if t.args_len > 0 {
             rty2 = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
         }
-        let mut csym = String::new();
+        let mut csym = self.sget();
         let mut ok = self.callee_sym(b, t.callee, t.targs_start, t.targs_len, rty2, TYPE_NONE, &mut csym);
         if ok {
             // Zero-sized dests take no unpack (and no carrier member); an all-erased pack has no
@@ -9427,13 +9717,13 @@ extend CEmit {
                     dmat9 += 1;
                 }
             }
-            self.out.push_str("  { ");
+            o.push_str("  { ");
             if dmat9 != 0 {
-                self.out.push_string(&csym);
-                self.out.push_str("_ret __mr = ");
+                o.push_string(&csym);
+                o.push_str("_ret __mr = ");
             }
-            self.out.push_string(&csym);
-            self.out.push_str("(");
+            o.push_string(&csym);
+            o.push_str("(");
             let mut na9: u32 = 0;
             for i in 0..t.args_len {
                 if !ok {
@@ -9444,14 +9734,12 @@ extend CEmit {
                     continue;
                 }
                 if na9 != 0 {
-                    self.out.push_str(", ");
+                    o.push_str(", ");
                 }
                 na9 += 1;
-                let mut av = String::new();
-                ok = self.emit_call_arg(b, t.callee, i, opid2, &mut av);
-                self.out.push_string(&av);
+                ok = self.emit_call_arg(b, t.callee, i, opid2, o);
             }
-            self.out.push_str("); ");
+            o.push_str("); ");
             for d in 0..t.dests_len {
                 if !ok {
                     break;
@@ -9460,17 +9748,16 @@ extend CEmit {
                 if dty9 != TYPE_NONE && self.erased(b, dty9) {
                     continue;
                 }
-                let mut dv = String::new();
-                ok = self.emit_place(b, b.dest_pool[(t.dests_start + d) as usize], &mut dv);
-                self.out.push_string(&dv);
-                self.out.push_str(" = __mr._");
-                self.out.push_u64(d);
-                self.out.push_str("; ");
+                ok = self.emit_place(b, b.dest_pool[(t.dests_start + d) as usize], o);
+                o.push_str(" = __mr._");
+                o.push_u64(d);
+                o.push_str("; ");
             }
-            self.out.push_str("}\n  goto bb_");
-            self.out.push_u64(t.t0);
-            self.out.push_str(";\n");
+            o.push_str("}\n  goto bb_");
+            o.push_u64(t.t0);
+            o.push_str(";\n");
         }
+        self.sput(csym);
         return ok;
     }
 
@@ -9808,8 +10095,9 @@ extend CEmit {
             return false;
         }
         {
-            let mut ms = String::new();
+            let mut ms = self.sget();
             let has = self.mg.method_by_name(rm, rt, "free", &mut ms);
+            self.sput(ms);
             if has {
                 return true;
             }
@@ -9879,6 +10167,7 @@ extend CEmit {
     /// Append the C expression that frees resolved type `(rm, rt)` (a callable symbol) and record
     /// the demand/glue the call needs; false when the type is not destructible.
     pub fn free_expr(self: &mut Self, rm: ModuleId, rt: TypeId, out: &mut String) bool {
+        let mk = out.len(); // `out` may already hold text: only the symbol appended here is noted
         let yd = *self.p().module_ast_const(rm).type_at(rt);
         if yd.kind == TypeKind::TYPE_DYN {
             // Owned dyn destroys through the stem's guarded inline helper.
@@ -9894,7 +10183,7 @@ extend CEmit {
         if !self.mg.free_target(rm, rt, out) {
             return false;
         }
-        self.note_free(rm, rt, out.as_str());
+        self.note_free(rm, rt, out.as_str().slice(mk, out.len()));
         return true;
     }
 
@@ -10159,7 +10448,7 @@ extend CEmit {
         return ok;
     }
 
-    fn emit_term_effect(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
+    fn emit_term_effect(self: &mut Self, o: &mut String, b: &ir::CoreBody, t: &ir::Terminator) bool {
         if t.kind == ir::TM_GOTO {
             return true;
         }
@@ -10175,19 +10464,19 @@ extend CEmit {
                 let mut pv = self.sget();
                 let ok = self.emit_place(b, t.a, &mut pv);
                 if ok {
-                    self.out.push_str("  ");
+                    o.push_str("  ");
                     if t.args_len == 1 {
                         // Guarded: the rewrite's move flag rides args_start.
-                        self.out.push_str("if (_");
-                        self.out.push_u64(t.args_start);
-                        self.out.push_str(") { ");
+                        o.push_str("if (_");
+                        o.push_u64(t.args_start);
+                        o.push_str(") { ");
                     }
-                    self.out.push_string(&pv);
-                    self.out.push_str(".vt->__free(");
-                    self.out.push_string(&pv);
-                    self.out.push_str(".data);");
-                    self.out.push_str(if_s(t.args_len == 1, " }", ""));
-                    self.out.push_str("\n");
+                    o.push_string(&pv);
+                    o.push_str(".vt->__free(");
+                    o.push_string(&pv);
+                    o.push_str(".data);");
+                    o.push_str(if_s(t.args_len == 1, " }", ""));
+                    o.push_str("\n");
                 }
                 self.sput(pv);
                 return ok;
@@ -10198,26 +10487,20 @@ extend CEmit {
                 let mut em9 = rm;
                 let mut et9 = y.as_data.elem;
                 if self.mg.resolve(rm, y.as_data.elem, &mut em9, &mut et9) && self.is_destructible(em9, et9, 0) {
-                    let mut fs9 = String::new();
-                    if !self.free_expr(em9, et9, &mut fs9) {
+                    o.push_str("  ");
+                    if t.args_len == 1 {
+                        o.push_str("if (_");
+                        o.push_u64(t.args_start);
+                        o.push_str(") { ");
+                    }
+                    if !self.free_expr(em9, et9, o) {
                         return self.fail("drop-ptr");
                     }
-                    let mut pv9 = String::new();
-                    let ok9 = self.emit_place(b, t.a, &mut pv9);
-                    if ok9 {
-                        self.out.push_str("  ");
-                        if t.args_len == 1 {
-                            self.out.push_str("if (_");
-                            self.out.push_u64(t.args_start);
-                            self.out.push_str(") { ");
-                        }
-                        self.out.push_string(&fs9);
-                        self.out.push_str("(");
-                        self.out.push_string(&pv9);
-                        self.out.push_str(");");
-                        self.out.push_str(if_s(t.args_len == 1, " }", ""));
-                        self.out.push_str("\n");
-                    }
+                    o.push_str("(");
+                    let ok9 = self.emit_place(b, t.a, o);
+                    o.push_str(");");
+                    o.push_str(if_s(t.args_len == 1, " }", ""));
+                    o.push_str("\n");
                     return ok9;
                 }
             }
@@ -10245,18 +10528,18 @@ extend CEmit {
                     self.emit_place(b, t.a, &mut pv);
                 };
                 if ok {
-                    self.out.push_str("  ");
+                    o.push_str("  ");
                     if t.args_len == 1 {
-                        self.out.push_str("if (_");
-                        self.out.push_u64(t.args_start);
-                        self.out.push_str(") { ");
+                        o.push_str("if (_");
+                        o.push_u64(t.args_start);
+                        o.push_str(") { ");
                     }
-                    self.out.push_string(&fs);
-                    self.out.push_str(if_s(zdrop, "(", "(&"));
-                    self.out.push_string(&pv);
-                    self.out.push_str(");");
-                    self.out.push_str(if_s(t.args_len == 1, " }", ""));
-                    self.out.push_str("\n");
+                    o.push_string(&fs);
+                    o.push_str(if_s(zdrop, "(", "(&"));
+                    o.push_string(&pv);
+                    o.push_str(");");
+                    o.push_str(if_s(t.args_len == 1, " }", ""));
+                    o.push_str("\n");
                 }
                 self.sput(fs);
                 self.sput(pv);
@@ -10271,19 +10554,17 @@ extend CEmit {
                 // return type rather than the (never-assigned) return slot.
                 if self.noret {
                     // A noreturn frame has nothing to unwind to.
-                    self.out.push_str("  abort();\n");
+                    o.push_str("  abort();\n");
                 } else if b.returns == 1 && self.arr_ret {
-                    self.out.push_str("  return (");
-                    self.out.push_string(&self.cur_name);
-                    self.out.push_str("_ret){0};\n");
+                    o.push_str("  return (");
+                    o.push_string(&self.cur_name);
+                    o.push_str("_ret){0};\n");
                 } else if b.returns == 1 && !self.erased(b, b.locals.at(0).ty) {
-                    let mut zt = String::new();
-                    if !self.ty_c(b.module, b.locals.at(0).ty, "", &mut zt) {
+                    o.push_str("  return (");
+                    if !self.ty_c(b.module, b.locals.at(0).ty, "", o) {
                         return false;
                     }
-                    self.out.push_str("  return (");
-                    self.out.push_string(&zt);
-                    self.out.push_str("){0};\n");
+                    o.push_str("){0};\n");
                 } else if b.returns > 1 {
                     let mut rz9: u32 = 0;
                     for r in 0..b.returns {
@@ -10292,27 +10573,27 @@ extend CEmit {
                         }
                     }
                     if rz9 == 0 {
-                        self.out.push_str("  return;\n");
+                        o.push_str("  return;\n");
                     } else {
-                        self.out.push_str("  return (");
-                        self.out.push_string(&self.cur_name);
-                        self.out.push_str("_ret){0};\n");
+                        o.push_str("  return (");
+                        o.push_string(&self.cur_name);
+                        o.push_str("_ret){0};\n");
                     }
                 } else {
-                    self.out.push_str("  return;\n");
+                    o.push_str("  return;\n");
                 }
                 return true;
             }
             if b.returns == 1 && self.arr_ret {
-                self.out.push_str("  { ");
-                self.out.push_string(&self.cur_name);
-                self.out.push_str("_ret __ar; memcpy(__ar._a, _0, sizeof(__ar._a)); return __ar; }\n");
+                o.push_str("  { ");
+                o.push_string(&self.cur_name);
+                o.push_str("_ret __ar; memcpy(__ar._a, _0, sizeof(__ar._a)); return __ar; }\n");
             } else if b.returns == 1 {
                 // A declared `void` return counts as one UNIT slot: no value to spell.
                 if self.erased(b, b.locals.at(0).ty) {
-                    self.out.push_str("  return;\n");
+                    o.push_str("  return;\n");
                 } else {
-                    self.out.push_str("  return _0;\n");
+                    o.push_str("  return _0;\n");
                 }
             } else if b.returns > 1 {
                 // Zero-sized results have no carrier member (an all-erased pack returned void).
@@ -10323,46 +10604,44 @@ extend CEmit {
                     }
                 }
                 if rmat9 == 0 {
-                    self.out.push_str("  return;\n");
+                    o.push_str("  return;\n");
                     return true;
                 }
-                self.out.push_str("  return (");
-                self.out.push_string(&self.cur_name);
-                self.out.push_str("_ret){ ");
+                o.push_str("  return (");
+                o.push_string(&self.cur_name);
+                o.push_str("_ret){ ");
                 let mut re9: u32 = 0;
                 for r in 0..b.returns {
                     if self.erased(b, b.locals.at(r as usize).ty) {
                         continue;
                     }
                     if re9 != 0 {
-                        self.out.push_str(", ");
+                        o.push_str(", ");
                     }
                     re9 += 1;
-                    self.out.push_str("._");
-                    self.out.push_u64(r);
-                    self.out.push_str(" = ");
+                    o.push_str("._");
+                    o.push_u64(r);
+                    o.push_str(" = ");
                     if *self.sx_inline.at(r as usize) != ir::IR_NONE {
-                        let mut ev = String::new();
-                        if !self.emit_rvalue(b, *self.sx_inline.at(r as usize), &mut ev) {
+                        if !self.emit_rvalue(b, *self.sx_inline.at(r as usize), o) {
                             return false;
                         }
-                        self.out.push_string(&ev);
                     } else {
-                        self.out.push_str("_");
-                        self.out.push_u64(r);
+                        o.push_str("_");
+                        o.push_u64(r);
                     }
                 }
-                self.out.push_str(" };\n");
+                o.push_str(" };\n");
             } else if self.noret {
                 // A noreturn fn's fall-off edge must not return.
-                self.out.push_str("  abort();\n");
+                o.push_str("  abort();\n");
             } else {
-                self.out.push_str("  return;\n");
+                o.push_str("  return;\n");
             }
             return true;
         }
         if t.kind == ir::TM_UNREACHABLE {
-            self.out.push_str("  abort();\n");
+            o.push_str("  abort();\n");
             return true;
         }
         if t.kind == ir::TM_ASSERT {
@@ -10373,20 +10652,18 @@ extend CEmit {
             let file = self.p().modules.at(b.module as usize).file.as_str();
             let line = self.src_line(b.module, t.span.start);
             let mut handled = false;
-            if !self.emit_forwarded_assert(b, t, line, &mut handled) {
+            if !self.emit_forwarded_assert(o, b, t, line, &mut handled) {
                 return false;
             }
             if handled {
                 return true;
             }
-            let mut cond = String::new();
-            let mut ok = self.emit_cond_negated(b, t.a, &mut cond);
+            o.push_str("  if (");
+            let mut ok = self.emit_cond_negated(b, t.a, o);
             if !ok {
                 return false;
             }
-            self.out.push_str("  if (");
-            self.out.push_string(&cond);
-            self.out.push_str(") { ");
+            o.push_str(") { ");
             if t.args_len == 4 {
                 // The assert_eq/ne expression spellings ride as CK_STR constants [2] and [3].
                 let lsp = *b.constants.at(
@@ -10395,16 +10672,17 @@ extend CEmit {
                 let rsp = *b.constants.at(
                     b.operands.at(b.oper_pool[(t.args_start + 3) as usize] as usize).data as usize,
                 );
-                self.out.push_str("fprintf(stderr, \"assertion failed: `");
-                push_fmt_escaped(src.slice(lsp.raw.start as usize, lsp.raw.end as usize), &mut self.out);
+                o.push_str("fprintf(stderr, \"assertion failed: `");
+                push_fmt_escaped(src.slice(lsp.raw.start as usize, lsp.raw.end as usize), o);
                 if t.sw_len == 2 {
-                    self.out.push_str(" == ");
+                    o.push_str(" == ");
                 } else {
-                    self.out.push_str(" != ");
+                    o.push_str(" != ");
                 }
-                push_fmt_escaped(src.slice(rsp.raw.start as usize, rsp.raw.end as usize), &mut self.out);
-                self.out.push_str("`\\n\"); ");
-                ok = self.assert_value_line(b, "left: ", b.oper_pool[t.args_start as usize]) && self.assert_value_line(
+                push_fmt_escaped(src.slice(rsp.raw.start as usize, rsp.raw.end as usize), o);
+                o.push_str("`\\n\"); ");
+                ok = self.assert_value_line(o, b, "left: ", b.oper_pool[t.args_start as usize]) && self.assert_value_line(
+                    o,
                     b,
                     "right:",
                     b.oper_pool[(t.args_start + 1) as usize],
@@ -10413,25 +10691,23 @@ extend CEmit {
                     return false;
                 }
             } else if t.args_len == 1 {
-                let mut mv = String::new();
-                if !self.emit_operand(b, b.oper_pool[t.args_start as usize], &mut mv) {
+                o.push_str("const str __scm = ");
+                if !self.emit_operand(b, b.oper_pool[t.args_start as usize], o) {
                     return false;
                 }
-                self.out.push_str("const str __scm = ");
-                self.out.push_string(&mv);
-                self.out.push_str("; fprintf(stderr, \"assertion failed: `");
-                push_fmt_escaped(src.slice(t.span.start as usize, t.span.end as usize), &mut self.out);
-                self.out.push_str("`: %.*s\\n\", (int)__scm.len, (const char *)__scm.ptr); ");
+                o.push_str("; fprintf(stderr, \"assertion failed: `");
+                push_fmt_escaped(src.slice(t.span.start as usize, t.span.end as usize), o);
+                o.push_str("`: %.*s\\n\", (int)__scm.len, (const char *)__scm.ptr); ");
             } else {
-                self.out.push_str("fprintf(stderr, \"assertion failed: `");
-                push_fmt_escaped(src.slice(t.span.start as usize, t.span.end as usize), &mut self.out);
-                self.out.push_str("`\\n\"); ");
+                o.push_str("fprintf(stderr, \"assertion failed: `");
+                push_fmt_escaped(src.slice(t.span.start as usize, t.span.end as usize), o);
+                o.push_str("`\\n\"); ");
             }
-            self.out.push_str("fprintf(stderr, \"  at ");
-            push_fmt_escaped(file, &mut self.out);
-            self.out.push_str(":");
-            self.out.push_u64(line);
-            self.out.push_str("\\n\"); fflush(stderr); abort(); }\n");
+            o.push_str("fprintf(stderr, \"  at ");
+            push_fmt_escaped(file, o);
+            o.push_str(":");
+            o.push_u64(line);
+            o.push_str("\\n\"); fflush(stderr); abort(); }\n");
             return true;
         }
         if t.kind == ir::TM_SWITCH {
@@ -10439,7 +10715,7 @@ extend CEmit {
         }
         if t.kind == ir::TM_CALL {
             if t.dests_len > 1 {
-                return self.emit_multi_call(b, t);
+                return self.emit_multi_call(o, b, t);
             }
             // An interface-member call whose receiver is a dyn value dispatches through the
             // vtable: no symbol, no call-site prototype. A receiver operand may carry the pair
@@ -10518,14 +10794,13 @@ extend CEmit {
                 }
             }
             let plain = fwd_r == ir::IR_NONE && !arrdst && !fuse_sub;
-            let mut o = replace(&mut self.out, String::new());
             let mut line = self.sget();
             let mut dplace = self.sget();
             let mut ok = true;
             let mut cs_len: usize = 0;
             {
-                let sink = if plain {
-                    &mut o;
+                let sink: &mut String = if plain {
+                    &mut *o;
                 } else {
                     &mut line;
                 };
@@ -10654,13 +10929,15 @@ extend CEmit {
                 // `line` is `f(args` (no destination, no closing paren): close it and stash it for the
                 // single read to spell. The call itself emits nothing here.
                 line.push_str(")");
-                let mut stored = String::new();
-                stored.push_string(&line);
+                let off = self.sx_cs_pool.len() as u32;
+                self.sx_cs_pool.push_string(&line);
                 let root = *self.sx_coal.at(fwd_r as usize);
                 if root != fwd_r {
-                    self.sx_call_str.set(root as usize, stored.clone());
+                    self.sx_cs_off.set(root as usize, off);
+                    self.sx_cs_len.set(root as usize, line.len() as u32);
                 }
-                self.sx_call_str.set(fwd_r as usize, stored);
+                self.sx_cs_off.set(fwd_r as usize, off);
+                self.sx_cs_len.set(fwd_r as usize, line.len() as u32);
             } else if ok && arrdst {
                 o.push_str("  { ");
                 o.push_str(line.as_str().slice(0, cs_len));
@@ -10678,42 +10955,35 @@ extend CEmit {
             }
             self.sput(line);
             self.sput(dplace);
-            self.out = o;
             return ok;
         }
         if t.kind == ir::TM_ASSERT {
-            let mut cnd = String::new();
-            let mut msgv = String::new();
-            let mut ok = self.emit_cond_negated(b, t.a, &mut cnd);
+            o.push_str("  if (");
+            let mut ok = self.emit_cond_negated(b, t.a, o);
+            o.push_str(") { ");
             if ok && t.args_len != 0 {
-                ok = self.emit_operand(b, b.oper_pool[t.args_start as usize], &mut msgv);
+                o.push_str("const str __scm = ");
+                ok = self.emit_operand(b, b.oper_pool[t.args_start as usize], o);
+                o.push_str("; ");
             }
             if ok {
                 let msrc = self.p().modules.at(b.module as usize).source.as_str();
-                self.out.push_str("  if (");
-                self.out.push_string(&cnd);
-                self.out.push_str(") { ");
+                o.push_str("fprintf(stderr, \"assertion failed: `");
+                push_pct_c_escaped(msrc.slice(t.span.start as usize, t.span.end as usize), o);
+                o.push_str("`");
                 if t.args_len != 0 {
-                    self.out.push_str("const str __scm = ");
-                    self.out.push_string(&msgv);
-                    self.out.push_str("; ");
+                    o.push_str(": %.*s");
                 }
-                self.out.push_str("fprintf(stderr, \"assertion failed: `");
-                push_pct_c_escaped(msrc.slice(t.span.start as usize, t.span.end as usize), &mut self.out);
-                self.out.push_str("`");
-                if t.args_len != 0 {
-                    self.out.push_str(": %.*s");
-                }
-                self.out.push_str("\\n  at ");
-                push_pct_c_escaped(self.p().modules.at(b.module as usize).file.as_str(), &mut self.out);
-                self.out.push_str(":");
+                o.push_str("\\n  at ");
+                push_pct_c_escaped(self.p().modules.at(b.module as usize).file.as_str(), o);
+                o.push_str(":");
                 let ln = self.src_line(b.module, t.span.start);
-                self.out.push_u64(ln);
-                self.out.push_str("\\n\"");
+                o.push_u64(ln);
+                o.push_str("\\n\"");
                 if t.args_len != 0 {
-                    self.out.push_str(", (int)__scm.len, (const char *)__scm.ptr");
+                    o.push_str(", (int)__scm.len, (const char *)__scm.ptr");
                 }
-                self.out.push_str("); fflush(stderr); abort(); }\n");
+                o.push_str("); fflush(stderr); abort(); }\n");
             }
             return ok;
         }

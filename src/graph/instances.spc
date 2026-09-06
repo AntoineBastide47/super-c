@@ -1167,6 +1167,7 @@ extend InstGraph {
                 None => (-1) as i64,
             };
             if ki >= 0 {
+                assert(kp.viewers == 0);
                 let klw = replace(&mut kp.kept[ki as usize], irl::Lowerer::new(self.pkg, m, node));
                 let slot = self.kept.len() as i64;
                 self.kept.push(klw);

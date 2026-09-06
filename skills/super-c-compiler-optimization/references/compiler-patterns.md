@@ -33,6 +33,16 @@ When filtering items during emission, skip in-place rather than copying survivor
 new container. This preserves interning/emit order, which is required for byte-identical
 output.
 
+### Spell in place without reorder
+
+Rendering order is observable: demands, sentinels, static stubs and cross-TU edges
+record in the order text is spelled. Replacing `let mut t = String::new(); render(&mut t);
+dst.push_string(&t)` with `render(dst)` is byte-safe only when nothing side-effecting
+sits between where `t` was rendered and where it was pushed (literal pushes are fine).
+A spelling needed twice, or needed after later text, stays in its render position and
+rides in the scratch pool (`sget`/`sput`); a wrapper around text already spelled
+inserts its opener at a mark (`String::insert_str`) and appends the closer.
+
 ## Memo Grain and Memo Soundness
 
 A memoization cache is only worth adding when the memo probe cost is less than the
@@ -88,7 +98,9 @@ A pass context carries mutable scratch fields cleared per unit of work instead o
 reallocated. Real instances, all in-tree:
 
 - `CEmit.out` (`src/emit/cemit.spc`) — "the reusable output buffer (caller-owned
-  lifecycle, cleared per TU)".
+  lifecycle, cleared per TU)". A body render takes it out of the emitter and threads it
+  as `o: &mut String` so every renderer can write to it while `self` is borrowed; the
+  wrapper asserts `self.out` stayed empty before putting it back.
 - The C emitter's `scratch: Vector<String>` — per-function string buffers popped,
   cleared, and pushed back, plus `sx_*` per-body analysis arrays cleared with the
   comment "frees each String, keeps the Vector's capacity across functions".

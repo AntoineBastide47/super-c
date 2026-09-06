@@ -307,6 +307,7 @@ void sc_lk_report_now(void);
 int sc_lk_stats_enable(void);
 void sc_lk_epoch_set(uint32_t __e);
 void sc_lk_stats(uint64_t *__out);
+void sc_lk_counts(uint64_t *__out);
 typedef struct {
   void *ptr;
   void *site;
@@ -561,6 +562,18 @@ int sc_lk_stats_enable(void) {
   return 1;
 }
 void sc_lk_epoch_set(uint32_t __e) { __atomic_store_n(&sc_lk_epoch, __e, __ATOMIC_RELAXED); }
+/* out[0] allocation calls, out[1] bytes requested: the cumulative counters only (no table walk). */
+void sc_lk_counts(uint64_t *__out) {
+  __out[0] = 0;
+  __out[1] = 0;
+  for (size_t h = 0; h < SC_LK_SHARDS; h++) {
+    sc_lk_shard *s = &sc_lk_shards[h];
+    sc_lk_acquire(s);
+    __out[0] += s->alloc_n;
+    __out[1] += s->alloc_bytes;
+    sc_lk_release(s);
+  }
+}
 /* out[0] allocation calls, out[1] bytes requested, out[2 + 2e] / out[3 + 2e] live count / bytes of epoch e
    (epochs past SC_LK_EPOCHS - 1 fold into the last slot). All zero while tracking is off. */
 void sc_lk_stats(uint64_t *__out) {

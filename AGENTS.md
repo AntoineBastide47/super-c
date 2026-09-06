@@ -44,6 +44,7 @@ Follow these rules for all tasks unless the current user message gives a more sp
 ## Code Changes
 
 - Change only the files and code that are necessary for the task.
+- Follow YAGNI principles, and prefer one-liner solutions.
 - Prefer existing abstractions when they are suitable.
 - Add an abstraction only when it makes the domain clearer or removes real duplication.
 - Do not add abstractions for hypothetical future use.

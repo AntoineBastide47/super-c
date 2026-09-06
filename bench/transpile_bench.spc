@@ -256,8 +256,17 @@ fn transpile_once() Timing {
         unsafe stdio::fwrite(o.types_h.as_ptr(), 1, o.types_h.len(), f);
         unsafe stdio::fwrite(o.protos_h.as_ptr(), 1, o.protos_h.len(), f);
         for m in 0..n {
+            for x in 0..o.tu_heads.at(m).len() {
+                let h = o.tu_heads.at(m).at(x);
+                unsafe stdio::fwrite(h.as_ptr(), 1, h.len(), f);
+            }
             let tu = o.tus.at(m);
             unsafe stdio::fwrite(tu.as_ptr(), 1, tu.len(), f);
+            unsafe stdio::fwrite(o.tu_tail.at(m).as_ptr(), 1, o.tu_tail.at(m).len(), f);
+        }
+        for x in 0..o.inst_heads.len() {
+            let h = o.inst_heads.at(x);
+            unsafe stdio::fwrite(h.as_ptr(), 1, h.len(), f);
         }
         unsafe stdio::fwrite(o.inst_c.as_ptr(), 1, o.inst_c.len(), f);
     }

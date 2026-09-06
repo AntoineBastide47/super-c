@@ -164,6 +164,9 @@ pub struct Owner {
     pub kinds_pool: Vector<u8>,
     pub tok_memo: Map<u64, u64>, // (mod << 32 | type node) -> start << 16 | len into tok_pool
     pub tok_pool: Vector<u64>,
+    // Gen scratch (capacity survives across bodies).
+    sc_assign_sites: Vector<KillSite>,
+    sc_seen: Vector<u64>,
 }
 
 // Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
@@ -1850,6 +1853,8 @@ extend Owner {
             kinds_pool: Vector::<u8>::new(),
             tok_memo: Map::<u64, u64>::new(),
             tok_pool: Vector::<u64>::new(),
+            sc_assign_sites: Vector::<KillSite>::new(),
+            sc_seen: Vector::<u64>::new(),
         };
     }
 
@@ -2371,24 +2376,30 @@ extend Owner {
     /// generator owns a BodyFacts by value, so `dst`'s reset storage is moved in, filled, and moved back.
     pub fn generate_into(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest, dst: &mut BodyFacts) {
         dst.reset();
+        let mut sites = replace(&mut self.sc_assign_sites, Vector::<KillSite>::new());
+        sites.truncate(0);
+        let mut seen = replace(&mut self.sc_seen, Vector::<u64>::new());
+        seen.truncate(0);
         let mut g = Gen {
             ow: self,
             b: b,
             mf: mf,
             f: replace(dst, BodyFacts::empty()),
-            assign_sites: Vector::<KillSite>::new(),
+            assign_sites: sites,
             cur_block: 0,
             in_caps: false,
             plain_copy: false,
             calling: false,
-            seen: Vector::<u64>::new(),
+            seen: seen,
         };
         g.number_points();
         g.build_origins();
         g.walk();
         g.finish();
-        // Hand the filled facts back to `dst`; the throwaway empty returns to `g.f`, freed when `g` drops
-        // (a partial move would leave the generator's scratch fields assign_sites/seen unfreed).
+        // Hand the filled facts back to `dst` and the scratch back to the owner; the throwaway
+        // empties return to `g`, freed when it drops.
         replace(dst, replace(&mut g.f, BodyFacts::empty()));
+        self.sc_assign_sites = replace(&mut g.assign_sites, Vector::<KillSite>::new());
+        self.sc_seen = replace(&mut g.seen, Vector::<u64>::new());
     }
 }

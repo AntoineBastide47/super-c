@@ -24,6 +24,9 @@ pub struct Layout {
     pub ok: bool,
     pub size: u64,
     pub align: u64,
+    /// A failure because a generic parameter had no binding in the env: the query was asked
+    /// under an incomplete substitution, as opposed to a type no env can lay out.
+    pub unbound: bool,
 }
 
 /// One substitution frame for generic-parameter layout: parameter decls of `pmod` bound to argument
@@ -42,10 +45,12 @@ struct LayoutAcc {
     pub align: u64,
     pub packed: bool,
     pub is_union: bool,
+    pub unbound: bool, // set by acc_field on a failing field (see Layout.unbound)
 }
 
 /// A payload-carrying enum's C shape: `{ u32 tag; union payload; }`.
 pub struct EnumLayout {
+    pub unbound: bool, // see Layout.unbound
     pub ok: bool,
     pub payload_off: u64, // tag sits at 0
     pub size: u64,
@@ -60,6 +65,8 @@ const fn round_up(v: u64, a: u64) u64 {
     }
     return (v + a - 1) / a * a;
 }
+
+// Debug: the lowerer's zero-size fold sets this around its layout query.
 
 pub struct Svc {
     pub pkg: *const loader::Package,
@@ -188,7 +195,7 @@ extend Svc {
         if y.kind == TypeKind::TYPE_ARRAY {
             let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
             if !el.ok {
-                return Layout { ok: false };
+                return Layout { ok: false, unbound: el.unbound };
             }
             let n = y.as_data.arr.len as u64;
             if n == 0 {
@@ -216,7 +223,7 @@ extend Svc {
                 }
                 e = unsafe e.parent;
             }
-            return Layout { ok: false };
+            return Layout { ok: false, unbound: true };
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             return self.aggregate_layout(y.module, y.as_data.decl, null, depth + 1);
@@ -244,6 +251,7 @@ extend Svc {
     fn acc_field(self: &mut Self, acc: *mut LayoutAcc, m: ModuleId, ft: TypeId, env: *const LayoutEnv, depth: i32) bool {
         let fl = self.layout_of(m, ft, env, depth);
         if !fl.ok {
+            unsafe acc.unbound = fl.unbound;
             return false;
         }
         let mut fa = fl.align;
@@ -282,7 +290,7 @@ extend Svc {
         let dkind = ast.at_const(dn).kind;
         if dkind == NodeKind::NODE_ENUM {
             let e = self.enum_shape(dm, dn, env, depth);
-            return Layout { ok: e.ok, size: e.size, align: e.align };
+            return Layout { ok: e.ok, size: e.size, align: e.align, unbound: e.unbound };
         }
         if dkind != NodeKind::NODE_STRUCT {
             return Layout { ok: false };
@@ -307,7 +315,7 @@ extend Svc {
                 return Layout { ok: false };
             }
             if !self.acc_field(&mut acc, dm, ft, env, depth) {
-                return Layout { ok: false };
+                return Layout { ok: false, unbound: acc.unbound };
             }
         }
         let al = self.attr(dm, dn, AttrKind::ATTR_ALIGN);
@@ -353,7 +361,7 @@ extend Svc {
                     tn = ast.at_const(pid).as_data.field.ty;
                 }
                 if !self.acc_field(&mut vs, dm, self.mtype(dm, tn), env, depth) {
-                    return EnumLayout { ok: false };
+                    return EnumLayout { ok: false, unbound: vs.unbound };
                 }
             }
             vs.size = round_up(vs.size, vs.align);

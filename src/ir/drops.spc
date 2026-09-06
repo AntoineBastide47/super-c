@@ -82,6 +82,16 @@ pub struct ElabCtx {
     pub mm: Vector<u64>,
     pub scratch: Vector<u32>,
     pub sub: Vector<u32>,
+    // insert_drops scratch (see there).
+    pub ins_cond_l: Vector<u32>,
+    pub ins_cond_f: Vector<u32>,
+    pub ins_clr_at: Vector<u32>,
+    pub ins_clr_fl: Vector<u32>,
+    pub ins_clr_blk: Vector<u32>,
+    pub ins_clr_blk_fl: Vector<u32>,
+    pub ins_off: Vector<u32>,
+    pub ins_idx: Vector<u32>,
+    pub ins_fill: Vector<u32>,
 }
 
 extend ElabCtx {
@@ -93,6 +103,15 @@ extend ElabCtx {
             mm: Vector::<u64>::new(),
             scratch: Vector::<u32>::new(),
             sub: Vector::<u32>::new(),
+            ins_cond_l: Vector::<u32>::new(),
+            ins_cond_f: Vector::<u32>::new(),
+            ins_clr_at: Vector::<u32>::new(),
+            ins_clr_fl: Vector::<u32>::new(),
+            ins_clr_blk: Vector::<u32>::new(),
+            ins_clr_blk_fl: Vector::<u32>::new(),
+            ins_off: Vector::<u32>::new(),
+            ins_idx: Vector::<u32>::new(),
+            ins_fill: Vector::<u32>::new(),
         };
     }
 }
@@ -413,13 +432,28 @@ fn flag_stmt(b: &mut ir::CoreBody, fl: u32, v: i64, sp: tok::Span) {
     );
 }
 
-pub fn insert_drops(b: &mut ir::CoreBody, sched: &Schedule, forest: &mp::MoveForest) {
+pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveForest) {
     let nb = b.blocks.len();
+    // Scratch rides in the context (capacity survives across bodies); every vector is taken here
+    // and handed back at the end, the one exit.
+    let mut cond_l = replace(&mut cx.ins_cond_l, Vector::<u32>::new());
+    let mut cond_f = replace(&mut cx.ins_cond_f, Vector::<u32>::new());
+    let mut clr_at = replace(&mut cx.ins_clr_at, Vector::<u32>::new());
+    let mut clr_fl = replace(&mut cx.ins_clr_fl, Vector::<u32>::new());
+    let mut clr_blk = replace(&mut cx.ins_clr_blk, Vector::<u32>::new());
+    let mut clr_blk_fl = replace(&mut cx.ins_clr_blk_fl, Vector::<u32>::new());
+    let mut ins_off = replace(&mut cx.ins_off, Vector::<u32>::new());
+    let mut ins_idx = replace(&mut cx.ins_idx, Vector::<u32>::new());
+    cond_l.truncate(0);
+    cond_f.truncate(0);
+    clr_at.truncate(0);
+    clr_fl.truncate(0);
+    clr_blk.truncate(0);
+    clr_blk_fl.truncate(0);
+    let sched = &cx.sched;
     // Conditional drops test a REAL move flag: one bool temp per guarded local, true at entry and
     // at every storage-live, false after every whole-value move; the guarded Drop carries the flag
     // local in `args_start` (args_len 1 is the marker).
-    let mut cond_l = Vector::<u32>::new();
-    let mut cond_f = Vector::<u32>::new();
     for d in 0..sched.drops.len() {
         let da = *sched.drops.at(d);
         if da.kind != DK_COND && da.kind != DK_OVERC {
@@ -450,10 +484,6 @@ pub fn insert_drops(b: &mut ir::CoreBody, sched: &Schedule, forest: &mp::MoveFor
     }
     // Flag clears keyed by ORIGINAL statement index (terminator moves attribute to the block's
     // last statement -- the consume happens after it and before the terminator).
-    let mut clr_at = Vector::<u32>::new();
-    let mut clr_fl = Vector::<u32>::new();
-    let mut clr_blk = Vector::<u32>::new(); // empty-block terminator moves: prepend to this block
-    let mut clr_blk_fl = Vector::<u32>::new();
     if cond_l.len() != 0 {
         for mvi in 0..sched.moves.len() {
             let mv = *sched.moves.at(mvi);
@@ -482,35 +512,58 @@ pub fn insert_drops(b: &mut ir::CoreBody, sched: &Schedule, forest: &mp::MoveFor
             }
         }
     }
-    for bi in 0..nb {
-        // Scheduled whole-value drops in this block, in statement order.
-        let mut cuts = Vector::<u32>::new();
-        let mut kinds = Vector::<u8>::new();
-        let mut locs = Vector::<u32>::new();
-        let mut pths = Vector::<u32>::new();
-        let mut fdls = Vector::<NodeId>::new();
-        for d in 0..sched.drops.len() {
-            let da = *sched.drops.at(d);
-            if da.block == bi as u32 {
-                if da.kind == DK_FIELD && da.fdecl == NODE_NONE {
-                    continue; // no reconstructible place: better a leak than a wrong member
-                }
-                cuts.push(da.stmt);
-                kinds.push(da.kind);
-                locs.push(da.local);
-                pths.push(da.path);
-                fdls.push(da.fdecl);
-            }
+    // The scheduled whole-value drops per block in schedule order (statement order within a block),
+    // as one bucketed index list: `ins_idx[ins_off[bi] .. ins_off[bi + 1]]`. A field drop with no
+    // reconstructible place is left out (better a leak than a wrong member).
+    ins_off.truncate(0);
+    for _i in 0..nb + 1 {
+        ins_off.push(0);
+    }
+    for d in 0..sched.drops.len() {
+        let da = sched.drops.at(d);
+        if da.kind == DK_FIELD && da.fdecl == NODE_NONE {
+            continue;
         }
-        if cuts.len() == 0 {
+        ins_off.set(da.block as usize + 1, ins_off[da.block as usize + 1] + 1);
+    }
+    for bi in 0..nb {
+        ins_off.set(bi + 1, ins_off[bi] + ins_off[bi + 1]);
+    }
+    ins_idx.truncate(0);
+    for _i in 0..ins_off[nb] {
+        ins_idx.push(0);
+    }
+    {
+        let mut fill = replace(&mut cx.ins_fill, Vector::<u32>::new());
+        fill.truncate(0);
+        for bi in 0..nb {
+            fill.push(ins_off[bi]);
+        }
+        for d in 0..sched.drops.len() {
+            let da = sched.drops.at(d);
+            if da.kind == DK_FIELD && da.fdecl == NODE_NONE {
+                continue;
+            }
+            let k = fill[da.block as usize];
+            ins_idx.set(k as usize, d as u32);
+            fill.set(da.block as usize, k + 1);
+        }
+        cx.ins_fill = fill;
+    }
+    for bi in 0..nb {
+        let c0 = ins_off[bi] as usize;
+        let c1 = ins_off[bi + 1] as usize;
+        if c0 == c1 {
             continue;
         }
         let blk = *b.blocks.at(bi);
         let mut run_start = blk.stmt_start;
         let mut cur = bi as u32;
-        for c in 0..cuts.len() {
-            let cut = cuts[c];
-            let over = kinds[c] == DK_OVER || kinds[c] == DK_OVERC;
+        for c in c0..c1 {
+            let da = *sched.drops.at(ins_idx[c] as usize);
+            let cut = da.stmt;
+            let kind = da.kind;
+            let over = kind == DK_OVER || kind == DK_OVERC;
             // The current part keeps [run_start, cut] (the marker stays; the drop follows it);
             // an OVERWRITE drop splits BEFORE its assignment instead.
             let keep = if over {
@@ -518,15 +571,15 @@ pub fn insert_drops(b: &mut ir::CoreBody, sched: &Schedule, forest: &mp::MoveFor
             } else {
                 cut + 1 - run_start;
             };
-            let l = locs[c];
+            let l = da.local;
             let mut ty = b.locals.at(l as usize).ty;
             if over {
-                ty = b.places.at(pths[c] as usize).ty;
-            } else if kinds[c] == DK_FIELD {
+                ty = b.places.at(da.path as usize).ty;
+            } else if kind == DK_FIELD {
                 // the still-owned field: one PJ_FIELD projection reconstructed from the move-path
                 // key -- bits 32..55 are the original `data` (a tuple member's positional index),
                 // the low 32 the original `sub` (a named field's decl, or NODE_NONE for a tuple)
-                let mp0 = *forest.paths.at(pths[c] as usize);
+                let mp0 = *forest.paths.at(da.path as usize);
                 ty = mp0.ty;
                 b.projections.push(
                     ir::Projection {
@@ -541,7 +594,7 @@ pub fn insert_drops(b: &mut ir::CoreBody, sched: &Schedule, forest: &mp::MoveFor
                 b.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: ty });
             }
             let pl = if over {
-                pths[c];
+                da.path;
             } else {
                 b.places.len() as u32 - 1;
             };
@@ -563,7 +616,7 @@ pub fn insert_drops(b: &mut ir::CoreBody, sched: &Schedule, forest: &mp::MoveFor
                 is_variadic: false,
                 span: sp,
             };
-            if kinds[c] == DK_COND || kinds[c] == DK_OVERC {
+            if kind == DK_COND || kind == DK_OVERC {
                 t.args_len = 1;
                 for i in 0..cond_l.len() {
                     if cond_l[i] == l {
@@ -638,4 +691,12 @@ pub fn insert_drops(b: &mut ir::CoreBody, sched: &Schedule, forest: &mp::MoveFor
             b.blocks[bi].stmt_len = b.statements.len() as u32 - ns;
         }
     }
+    cx.ins_cond_l = cond_l;
+    cx.ins_cond_f = cond_f;
+    cx.ins_clr_at = clr_at;
+    cx.ins_clr_fl = clr_fl;
+    cx.ins_clr_blk = clr_blk;
+    cx.ins_clr_blk_fl = clr_blk_fl;
+    cx.ins_off = ins_off;
+    cx.ins_idx = ins_idx;
 }

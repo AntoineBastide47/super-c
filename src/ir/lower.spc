@@ -139,16 +139,37 @@ pub struct Lowerer {
 pub struct Keep {
     pub ix: Map<u64, u64>,
     pub kept: Vector<Lowerer>,
+    /// Read-only views outstanding (the interpreter's post-borrow-check window): while nonzero
+    /// no body may be added, moved, or taken, since a viewer holds pointers into `kept`.
+    pub viewers: u32,
 }
 
 extend Keep {
     pub fn new() Keep {
-        return Keep { ix: Map::<u64, u64>::new(), kept: Vector::<Lowerer>::new() };
+        return Keep { ix: Map::<u64, u64>::new(), kept: Vector::<Lowerer>::new(), viewers: 0 };
+    }
+
+    /// The `kept` slot of the non-generic body `(module, node)`, or -1. Never a generic body: a
+    /// caller without a substitution env cannot execute one.
+    pub fn view(self: &Self, module: ModuleId, node: NodeId) i64 {
+        let key = skey_mix(0, module as u64 << 32 | node as u64);
+        switch self.ix.get(&key) {
+            Some(v) => {
+                if self.kept.at((*v) as usize).body.is_generic {
+                    return -1;
+                }
+                return (*v) as i64;
+            },
+            None => {
+                return -1;
+            },
+        };
     }
 
     /// Move every body of `other` in (first key wins, matching `put`); `other` is left empty.
     /// Slot order in `kept` is not load-bearing -- consumers index through `ix` by owner key.
     pub fn absorb(self: &mut Self, other: &mut Keep) {
+        assert(self.viewers == 0);
         for i in 0..other.kept.len() {
             let d = other.kept.at(i).body.owner;
             let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
@@ -163,6 +184,7 @@ extend Keep {
     }
 
     pub fn put(self: &mut Self, src: &Lowerer) {
+        assert(self.viewers == 0);
         let d = src.body.owner;
         let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
         if self.ix.contains_key(&key) {
@@ -2434,16 +2456,22 @@ extend Lowerer {
         let mut svc = lay::Svc::new(self.pkg);
         let lo = svc.layout_of(self.module, measured, head, 0);
         svc.free();
-        if !lo.ok {
-            self.body.has_zst_cond = true; // symbolic here; instances re-lower and fold
+        if !lo.ok && lo.unbound {
+            self.body.has_zst_cond = true; // symbolic here: an instance with a fuller env re-lowers
             return -1;
         }
+        // A bound type no env can lay out (a const-generic array, an opaque field) is MATERIAL
+        // by the same convention storage elision applies (Mangler::is_zst): the fold must be a pure
+        // function of the zero-size signature, never of which instantiation lowered the shared
+        // variant first.
         let mk = self.f.node(mn).kind;
-        let mv = if mk == NodeKind::NODE_SIZEOF {
-            lo.size;
+        let mv = if !lo.ok {
+            1i64;
+        } else if mk == NodeKind::NODE_SIZEOF {
+            lo.size as i64;
         } else {
-            lo.align;
-        } as i64;
+            lo.align as i64;
+        };
         let r = self.binder_cond_cmp(cond, mv, ln, lm);
         if r < 0 {
             self.body.has_zst_cond = true;

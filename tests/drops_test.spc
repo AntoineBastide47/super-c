@@ -116,7 +116,7 @@ fn schedule(p: &loader::Package, name: str) DropCounts {
             c.fields += 1;
         }
     }
-    ird::insert_drops(&mut lw.body, sched, &forest);
+    ird::insert_drops(&mut lw.body, &mut ecx, &forest);
     let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
     assert(irv::verify(&lw.body, tp, p).len() == 0, "rewritten body verifies");
     // Explicit drop terminators exist for every whole-value entry.

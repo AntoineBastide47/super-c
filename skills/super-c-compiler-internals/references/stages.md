@@ -113,9 +113,13 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
   prelude modules seed nothing), expanding generics under substitution frames
   (package-stable keys: decl DefId + per-argument skey). Bodies flagged `has_reflect` or
   `has_zst_cond` re-lower per instance instead of sharing.
-- `TuEmit` (`emit/tu.spc`) renders each module's TU into `CemitOut` buffers (`tus`,
-  `tu_extra` split parts, the shared `inst_c` instance TU) — a parallel frontier under
-  `--jobs`, gated by `SC_BUILD_MEM_BUDGET`.
+- `TuEmit` (`emit/tu.spc`) renders each module's TU into `CemitOut` buffers (one
+  geometrically grown `tus[t]` per module with `tu_heads`/`tu_tail`/`tu_parts` for the
+  `__p<k>` split parts, the shared `inst_c` instance TU with `inst_heads`/`inst_parts`) —
+  a parallel frontier under `--jobs`, gated by `SC_BUILD_MEM_BUDGET`. A body renders
+  straight into its TU buffer (`emit_body_core_cf` threads it through the statement
+  renderers; expression renderers spell into their `dst`), and the driver writes each
+  part with four `fwrite`s, never a file image.
 - **Drop elaboration runs here, per body** (`DropCtx::apply_drops`): move-path forest,
   ownership facts, CFG and move dataflow, then `ird::elaborate_into` +
   `ird::insert_drops` rewrite the body with explicit `TM_DROP` terminators before

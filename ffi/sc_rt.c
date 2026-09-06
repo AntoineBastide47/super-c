@@ -116,12 +116,20 @@ void __sc_set_cancel_hook(int32_t (*f)(void)) { __sc_cancel_hook = f; }
 /* ---- allocation statistics fallbacks ------------------------------------------------------------------
    The leak tracker in the generated super_rt.c owns the allocation table and defines these for real. A
    compiler built by a release whose runtime predates them still has to link: its wrapper TU carries no
-   SC_RT_LK_STATS, so these stand-ins (reporting no tracker) are compiled instead. Plain definitions, not
-   weak ones: PE linkers do not resolve a reference against a weak definition in another object. */
+   SC_RT_LK_STATS (or a lower level), so these stand-ins (reporting no tracker) are compiled instead. Plain
+   definitions, not weak ones: PE linkers do not resolve a reference against a weak definition in another
+   object. Every new entry point raises the level the wrapper writes (extc.spc) and guards its stand-in
+   with the level that introduced it, so a compiler from the previous level still links the new source. */
 #ifndef SC_RT_LK_STATS
+#define SC_RT_LK_STATS 0
+#endif
+#if SC_RT_LK_STATS < 1
 int sc_lk_stats_enable(void) { return 0; }
 void sc_lk_epoch_set(uint32_t e) { (void)e; }
 void sc_lk_stats(uint64_t *out) { memset(out, 0, 18 * sizeof *out); }
+#endif
+#if SC_RT_LK_STATS < 2
+void sc_lk_counts(uint64_t *out) { memset(out, 0, 2 * sizeof *out); }
 #endif
 
 /* ---- lock-order tracking (SC_LOCK_ORDER=1, or =fatal to abort) --------------------------------------

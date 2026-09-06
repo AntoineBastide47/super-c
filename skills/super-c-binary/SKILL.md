@@ -248,7 +248,7 @@ sanitizer frames dominate the samples.
 | `SC_FACTS_CHECK` | Snapshot semantic tables after typecheck; report mutations |
 | `SC_CORE_IR` | Re-verify inlined bodies and re-prove bounds-check eliminations |
 | `SC_LAYOUT` | Validate pool types against C layout invariants |
-| `SC_CEMIT_STATS` | Per-phase wall times and const/reflect statistics |
+| `SC_CEMIT_STATS` | Per-phase wall times, the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes) and the emission probe table (`src/emit/probe.spc`: ms and calls per region; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
 | `SC_INLINE_STATS` | Per-body inliner decision counters |
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters |
 

@@ -119,6 +119,16 @@ pub struct InlineCtx {
     pub xm_ix: Map<u64, u64>, // shape hash -> xms index
     pub xm_key: Vector<Vector<u64>>, // exact shape per entry: slot, cm, then (pm<<32|pnode, at) pairs
     pub xms: Vector<Map<u64, u64>>,
+    pub st_vet_lower: u64, // callees vetted from a fresh lowering (emission probe tally)
+    pub st_vet_offer: u64, // callees vetted from the body offered at its own emission
+    // `run` scratch (capacity survives across bodies).
+    pub sc_blk_origin: Vector<u32>,
+    pub sc_origins: Vector<Origin>,
+    pub sc_binds: Vector<GBind>,
+    pub sc_tymap: Map<u64, u64>,
+    pub sc_wire: Vector<u8>,
+    pub sc_probe: Vector<TypeId>,
+    pub sc_shape: Vector<u64>,
 }
 
 fn bind_add(binds: &mut Vector<GBind>, pm: ModuleId, pnode: NodeId, at: TypeId) {
@@ -303,6 +313,15 @@ extend InlineCtx {
             xm_ix: Map::<u64, u64>::new(),
             xm_key: Vector::<Vector<u64>>::new(),
             xms: Vector::<Map<u64, u64>>::new(),
+            st_vet_lower: 0,
+            st_vet_offer: 0,
+            sc_blk_origin: Vector::<u32>::new(),
+            sc_origins: Vector::<Origin>::new(),
+            sc_binds: Vector::<GBind>::new(),
+            sc_tymap: Map::<u64, u64>::new(),
+            sc_wire: Vector::<u8>::new(),
+            sc_probe: Vector::<TypeId>::new(),
+            sc_shape: Vector::<u64>::new(),
         };
     }
 
@@ -331,7 +350,41 @@ extend InlineCtx {
         return r;
     }
 
+    /// Vet the body the emitter is about to elaborate, so that a later call-site lookup finds its
+    /// verdict without lowering the callee again. Only an env-free lowering of a function is the
+    /// product a lookup would build (kept bodies and on-demand lowerings are the same product);
+    /// closures and per-instance re-lowerings never qualify. No-op once the callee is known.
+    pub fn offer(self: &mut Self, pkg: *const loader::Package, lw: &irl::Lowerer) {
+        if self.off || lw.env.len() != 0 {
+            return;
+        }
+        let d = lw.body.owner;
+        let key = callee_key(d);
+        if self.keep_ix.contains_key(&key) {
+            return;
+        }
+        let mut r = self.vet_decl(pkg, d);
+        if r == 0 {
+            self.st_vet_offer += 1;
+            r = self.vet_body(pkg, d, &lw.body, lw.closures.len());
+        }
+        self.keep_ix.insert(key, r);
+    }
+
     fn callee_slot_i(self: &mut Self, pkg: *const loader::Package, d: DefId, lw: &mut irl::Lowerer) u64 {
+        let pre = self.vet_decl(pkg, d);
+        if pre != 0 {
+            return pre;
+        }
+        self.st_vet_lower += 1;
+        if !lw.lower_fn(d.node) {
+            return REJ_BASE | IJ_LOWER_FAIL as u64;
+        }
+        return self.vet_body(pkg, d, &lw.body, lw.closures.len());
+    }
+
+    // The declaration-level checks: 0 = a candidate worth lowering, else the rejection.
+    fn vet_decl(self: &Self, pkg: *const loader::Package, d: DefId) u64 {
         let p = unsafe &*pkg;
         if d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
             return REJ_BASE | IJ_NOT_FN as u64;
@@ -368,18 +421,25 @@ extend InlineCtx {
                 }
             }
         }
-        if !lw.lower_fn(d.node) {
-            return REJ_BASE | IJ_LOWER_FAIL as u64;
-        }
+        return 0;
+    }
+
+    // The body-level checks on a lowering of `d` with `nclosures` hoisted closures: the kept slot,
+    // or the rejection.
+    fn vet_body(self: &mut Self, pkg: *const loader::Package, d: DefId, body: &ir::CoreBody, nclosures: usize) u64 {
+        let p = unsafe &*pkg;
+        let a = unsafe &*p.module_ast_const(d.module);
+        let f = a.at_const(d.node).as_data.function;
+        let ext = extend_of(a, d.node);
         let mut rej: u64 = 0;
-        if lw.body.has_reflect || lw.body.has_zst_cond || lw.closures.len() != 0 {
+        if body.has_reflect || body.has_zst_cond || nclosures != 0 {
             rej = REJ_BASE | IJ_SHAPE as u64;
-        } else if lw.body.statements.len() > MAX_CALLEE_STMTS || lw.body.blocks.len() > MAX_CALLEE_BLOCKS || lw.body.locals.len() > MAX_CALLEE_LOCALS {
+        } else if body.statements.len() > MAX_CALLEE_STMTS || body.blocks.len() > MAX_CALLEE_BLOCKS || body.locals.len() > MAX_CALLEE_LOCALS {
             rej = REJ_BASE | IJ_TOO_BIG as u64;
         }
         if rej == 0 {
-            for i in 0..lw.body.blocks.len() {
-                let tk = &lw.body.blocks.at(i).term;
+            for i in 0..body.blocks.len() {
+                let tk = &body.blocks.at(i).term;
                 if tk.kind == ir::TM_ASSERT {
                     rej = REJ_BASE | IJ_SHAPE as u64; // the assert message renders from the callee module's source
                     break;
@@ -398,16 +458,16 @@ extend InlineCtx {
             }
         }
         if rej == 0 {
-            for i in 0..lw.body.locals.len() {
-                if lw.body.locals.at(i).storage == ir::LS_STATIC_REF {
+            for i in 0..body.locals.len() {
+                if body.locals.at(i).storage == ir::LS_STATIC_REF {
                     rej = REJ_BASE | IJ_SHAPE as u64; // item symbol/linkage is the owner TU's business
                     break;
                 }
             }
         }
         if rej == 0 {
-            for i in 0..lw.body.blocks.len() {
-                let t9 = lw.body.blocks.at(i).term;
+            for i in 0..body.blocks.len() {
+                let t9 = body.blocks.at(i).term;
                 if t9.kind == ir::TM_RETURN && t9.args_len == ir::RET_CANCEL {
                     // A cancellation-edge return unwinds the CALLER too; rewiring it as a goto
                     // would read the poison value and resume normal flow.
@@ -417,8 +477,8 @@ extend InlineCtx {
             }
         }
         if rej == 0 {
-            for i in 0..lw.body.rvalues.len() {
-                let rv = lw.body.rvalues.at(i);
+            for i in 0..body.rvalues.len() {
+                let rv = body.rvalues.at(i);
                 let mut bad = rv.kind == ir::RV_CLOSURE;
                 if rv.kind == ir::RV_CAST && rv.b == ir::CAST_COERCE_FROM as u32 {
                     bad = true;
@@ -426,7 +486,7 @@ extend InlineCtx {
                 if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_VA_START || rv.c == ir::IN_VA_ARG || rv.c == ir::IN_VA_END || rv.c == ir::IN_ASM || rv.c == ir::IN_REFLECT) {
                     bad = true;
                 }
-                if rv.kind == ir::RV_REPEAT && lw.body.is_generic {
+                if rv.kind == ir::RV_REPEAT && body.is_generic {
                     bad = true; // a symbolic repeat count must re-lower per instance
                 }
                 if bad {
@@ -436,8 +496,8 @@ extend InlineCtx {
             }
         }
         if rej == 0 {
-            for i in 0..lw.body.constants.len() {
-                let c9 = lw.body.constants.at(i);
+            for i in 0..body.constants.len() {
+                let c9 = body.constants.at(i);
                 if c9.kind == ir::CK_WIDE {
                     rej = REJ_BASE | IJ_SHAPE as u64; // wide-literal records index the callee module's Ast
                     break;
@@ -451,8 +511,8 @@ extend InlineCtx {
         if rej != 0 {
             return rej;
         }
-        let mut kb = ir::CoreBody::compact_from(&lw.body);
-        kb.has_uninit_decl = lw.body.has_uninit_decl;
+        let mut kb = ir::CoreBody::compact_from(body);
+        kb.has_uninit_decl = body.has_uninit_decl;
         let mut gp = Vector::<NodeId>::new();
         if ext != NODE_NONE {
             let xg = a.at_const(ext).as_data.extend_def.generics;
@@ -544,18 +604,21 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     let pkg = lw.pkg;
     let owner_key = callee_key(lw.body.owner);
     // splice provenance: per block, an origin-record index (IR_NONE = original block)
-    let mut blk_origin = Vector::<u32>::new();
+    let mut blk_origin = replace(&mut cx.sc_blk_origin, Vector::<u32>::new());
+    blk_origin.truncate(0);
     blk_origin.resize_default(lw.body.blocks.len());
     for i in 0..lw.body.blocks.len() {
         blk_origin.set(i, ir::IR_NONE);
     }
-    let mut origins = Vector::<Origin>::new();
+    let mut origins = replace(&mut cx.sc_origins, Vector::<Origin>::new());
+    origins.truncate(0);
     let mut added: usize = 0;
-    let mut binds = Vector::<GBind>::new();
-    let mut tymap = Map::<u64, u64>::new();
-    let mut wire = Vector::<u8>::new();
-    let mut probe = Vector::<TypeId>::new();
-    let mut shape = Vector::<u64>::new();
+    let mut binds = replace(&mut cx.sc_binds, Vector::<GBind>::new());
+    let mut tymap = replace(&mut cx.sc_tymap, Map::<u64, u64>::new());
+    tymap.clear();
+    let mut wire = replace(&mut cx.sc_wire, Vector::<u8>::new());
+    let mut probe = replace(&mut cx.sc_probe, Vector::<TypeId>::new());
+    let mut shape = replace(&mut cx.sc_shape, Vector::<u64>::new());
     let mut bi: usize = 0;
     while bi < lw.body.blocks.len() {
         let t = lw.body.blocks.at(bi).term;
@@ -797,6 +860,13 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         added += k.statements.len() + k.args as usize + k.returns as usize;
         st.inlined += 1;
     }
+    cx.sc_blk_origin = blk_origin;
+    cx.sc_origins = origins;
+    cx.sc_binds = binds;
+    cx.sc_tymap = tymap;
+    cx.sc_wire = wire;
+    cx.sc_probe = probe;
+    cx.sc_shape = shape;
 }
 
 /// The C-authoritative type of a place: the base local's declared type for a bare place, else the

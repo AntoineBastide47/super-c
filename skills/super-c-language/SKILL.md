@@ -112,7 +112,10 @@ Assignment frees the old value first: `s.name = fresh;` never leaks.
 
 `&T` (shared) and `&mut T` (exclusive) are borrow-checked statically. Non-lexical
 lifetimes: a borrow ends at its last use. Field-precise overlap: `p.a` and `p.b` do not
-conflict.
+conflict, and a method call may pass `&mut self.field` next to its `&mut self` receiver
+(`self.mg.ctype(m, t, decl, &mut self.out)`); the callee must then not reach that field
+through the receiver. Borrowing one value twice in one call (`s.push_str(s.as_str())`)
+is rejected.
 
 ```superc
 fn longer<'a>(a: &'a String, b: &'a String) &'a String {

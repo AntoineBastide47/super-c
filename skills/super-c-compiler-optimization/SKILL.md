@@ -103,6 +103,12 @@ Two macOS gotchas, both verified:
 (`samply record --pid <PID>` attaches to a running process; run `samply setup` once
 first on macOS to self-sign the samply binary.)
 
+Before sampling, read the emitter's own region table: `SC_CEMIT_STATS=1 SC_BUILD_STATS=-
+SC_BUILD_MEM=1 build/<release-compiler> build --jobs=1` prints per-region wall time,
+calls, allocation calls and bytes for C generation (graph, acquire, relower, inline,
+drops, sym, decl, render, assemble, publish, sync) plus the repeated-work tallies. It
+names the region to profile and records allocation counts a sampler cannot.
+
 What to capture from each profile:
 - Top functions by inclusive and exclusive sample counts
 - Call chains into hot functions (who calls them, how often)
@@ -125,6 +131,13 @@ With profiled hotspots in hand, attack the highest-impact targets first.
 
 - **Out-parameters over return allocations.** Pass a `&mut` to an existing buffer instead
   of returning a new allocation. The borrow checker validates this pattern is safe.
+
+- **Spell into the destination.** A renderer that builds a temporary string and copies
+  it into its destination allocates once the text passes the 23-byte inline capacity.
+  Write the pieces into the destination in order; keep a temporary only when the text is
+  needed twice or after later text, and take it from the pass's scratch pool. The
+  render order must not move (see "Spell in place without reorder" in
+  [references/compiler-patterns.md](references/compiler-patterns.md)).
 
 - **Arena/pool reuse.** When a phase processes many items (bodies, types, nodes), allocate
   a single arena or scratch pool at phase start and reset it per item. Do not
@@ -301,10 +314,18 @@ super-c build
 5. Run `super-c bench` 3 times, record Mcyc and Kalloc for each.
 6. Interleave: run before, after, before, after, before, after — on a quiet machine.
 
+Between steps, check byte identity on a fixed reference tree before the full gate: copy
+the compiler beside `std`/`ffi`, build the reference sources with `--jobs=1` and again
+with every core into separate `--out-dir`s (`SC_NO_CACHE=1 SC_NO_TU_CACHE=1`), and
+`diff -rq` the `gen` trees against the baseline compiler's tree. Only `.tu_cache` and
+path-dependent build records may differ. This takes seconds and localizes a
+reordering to the change that caused it; `ci/gate.sh` confirms at the end.
+
 ### What to report
 
 - Mcyc change (cycles, not wall-clock), with the run's median and p95
-- Kalloc change (allocation count)
+- Kalloc change (allocation count), and for emitter work the probe table's per-region
+  allocation calls (`SC_CEMIT_STATS=1 SC_BUILD_STATS=- SC_BUILD_MEM=1`)
 - Heap delta (peak RSS if available)
 - Whether the fixpoint holds (gen-1 vs gen-2 diff)
 - Whether tests pass

@@ -237,7 +237,7 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `compile_ast(src, stop)` | Parse + resolve up to the stop stage, return AST |
 | `parse_ast(src)` | Parse only, return AST |
 | `parse_ast_for_fmt(src)` | Parse with trivia for formatter tests |
-| `compile_c(src)` | Compile to C, return generated output |
+| `compile_c(src)` | Compile to C through the production backend; the returned text is every TU's part heads, buffer and tail plus the shared headers and instance TU, so a needle search sees every byte |
 | `compile_and_run(src)` | Compile, link, execute, return exit code |
 | `compile_and_run_env(src, env)` | Same, with environment variables set |
 

@@ -34,6 +34,7 @@ import ir::interp as iri;
 import ir::layout as lay;
 import emit::cemit as cbe;
 import emit::cflow as cfl;
+import emit::probe as prb;
 import emit::mangle as mbe;
 import emit::tu as tbe;
 import graph::instances as ig;
@@ -902,16 +903,77 @@ fn layout_pass(p: &mut loader::Package) {
 // aggregate plus every anchored instance from a fresh graph, forward typedefs then dependency-first
 // definitions), gated by a strict-C11 syntax-only compile of the emitted scratch TU.
 
+/// Rendered bodies, one buffer per translation unit (slot `n` is the shared instance TU), plus the
+/// chunk table in emission order: `chunk_mod[i]` is chunk i's TU (65534 = the instance TU) and
+/// `chunk_off[i] .. chunk_end[i]` its bytes inside that TU's buffer. A TU's chunks are contiguous
+/// and in table order, so its parts are offset ranges of its own buffer: nothing is copied between
+/// rendering and the file write.
+pub struct TuBufs {
+    pub bufs: Vector<String>,
+    pub chunk_mod: Vector<u64>,
+    pub chunk_off: Vector<u64>,
+    pub chunk_end: Vector<u64>,
+    pub n: usize,
+}
+
+extend TuBufs {
+    pub fn new(n: usize) TuBufs {
+        let mut t = TuBufs {
+            bufs: Vector::<String>::with_capacity(n + 1),
+            chunk_mod: Vector::<u64>::new(),
+            chunk_off: Vector::<u64>::new(),
+            chunk_end: Vector::<u64>::new(),
+            n: n,
+        };
+        for _i in 0..n + 1 {
+            t.bufs.push(String::new());
+        }
+        return t;
+    }
+
+    pub const fn slot(self: &Self, m: u64) usize {
+        if m == 65534 {
+            return self.n;
+        }
+        return m as usize;
+    }
+
+    /// Append one chunk to TU `m`'s buffer and record it.
+    pub fn add(self: &mut Self, m: u64, text: &String) {
+        let sl = self.slot(m);
+        let off = self.bufs.at(sl).len() as u64;
+        self.bufs.index_mut(sl).push_string(text);
+        self.chunk_mod.push(m);
+        self.chunk_off.push(off);
+        self.chunk_end.push(self.bufs.at(sl).len() as u64);
+    }
+
+    pub const fn last_off(self: &Self) u64 {
+        return self.chunk_off[self.chunk_off.len() - 1];
+    }
+
+    pub const fn last_end(self: &Self) u64 {
+        return self.chunk_end[self.chunk_end.len() - 1];
+    }
+}
+
 /// One assembled new-backend emission. TU texts carry NO include lines; the writer prepends the
 /// layout-relative includes of the two shared headers. `skips` MUST be zero for the output to be
 /// complete (every count is an emission the backend refused).
 pub struct CemitOut {
     pub types_h: String,
     pub protos_h: String,
+    /// Per module: the TU's body buffer, its part ranges (`tu_parts[m][k] .. [k + 1]` is part k;
+    /// empty when the module emits no TU), one head per part (static closures; part 0 also
+    /// carries the static asserts), and the tail of the last part (the C `main` wrapper).
     pub tus: Vector<String>,
-    pub tu_extra: Vector<Vector<String>>, // parts 1.. of an oversized TU (part 0 stays in tus)
+    pub tu_parts: Vector<Vector<u64>>,
+    pub tu_heads: Vector<Vector<String>>,
+    pub tu_tail: Vector<String>,
+    /// The shared instance TU, shaped the same way (its part 0 head carries the definitions).
     pub inst_c: String,
-    pub inst_extra: Vector<String>,
+    pub inst_parts: Vector<u64>,
+    pub inst_heads: Vector<String>,
     pub have_main: bool,
     pub main_mod: u64,
     pub main_argv: bool,
@@ -921,6 +983,8 @@ pub struct CemitOut {
     /// fully successful emission, so a failed build never publishes sections it did not finish.
     pub tuc_img: String,
     pub tuc_path: String,
+    /// Merged emission counters (SC_CEMIT_STATS); the write stage adds publication and reports.
+    pub pr: prb::Probe,
 }
 
 extend CemitOut {
@@ -930,9 +994,12 @@ extend CemitOut {
             types_h: String::new(),
             protos_h: String::new(),
             tus: Vector::<String>::new(),
-            tu_extra: Vector::<Vector<String>>::new(),
+            tu_parts: Vector::<Vector<u64>>::new(),
+            tu_heads: Vector::<Vector<String>>::new(),
+            tu_tail: Vector::<String>::new(),
             inst_c: String::new(),
-            inst_extra: Vector::<String>::new(),
+            inst_parts: Vector::<u64>::new(),
+            inst_heads: Vector::<String>::new(),
             have_main: false,
             main_mod: 0,
             main_argv: false,
@@ -940,10 +1007,13 @@ extend CemitOut {
             edges: Vector::<u64>::new(),
             tuc_img: String::new(),
             tuc_path: String::new(),
+            pr: prb::Probe::new(false, false),
         };
         for _i in 0..n {
             o.tus.push(String::new());
-            o.tu_extra.push(Vector::<String>::new());
+            o.tu_parts.push(Vector::<u64>::new());
+            o.tu_heads.push(Vector::<String>::new());
+            o.tu_tail.push(String::new());
         }
         return o;
     }
@@ -1368,7 +1438,9 @@ fn cemit_take_body(
     m: ModuleId,
     nid: NodeId,
     lw_out: &mut irl::Lowerer,
+    pr: &mut prb::Probe,
 ) bool {
+    let am = pr.start();
     let key = skey_mix(0, m as u64 << 32 | nid as u64);
     let ki = switch g.kept_ix.get(&key) {
         Some(v) => (*v) as i64,
@@ -1377,9 +1449,14 @@ fn cemit_take_body(
     if ki >= 0 {
         *lw_out = replace(&mut g.kept[ki as usize], irl::Lowerer::new(p, m, nid));
         let _ = g.kept_ix.remove(&key);
+        pr.count(prb::C_TAKEN, 1);
+        pr.stop(prb::P_ACQUIRE, am);
         return true;
     }
-    return lw_out.lower_fn(nid);
+    let ok = lw_out.lower_fn(nid);
+    pr.count(prb::C_LOWERED, 1);
+    pr.stop(prb::P_ACQUIRE, am);
+    return ok;
 }
 
 fn cemit_take_closure(
@@ -1388,7 +1465,9 @@ fn cemit_take_closure(
     m: ModuleId,
     cn: NodeId,
     lw_out: &mut irl::Lowerer,
+    pr: &mut prb::Probe,
 ) bool {
+    let am = pr.start();
     let key = skey_mix(0, m as u64 << 32 | cn as u64);
     let ki = switch g.kept_ix.get(&key) {
         Some(v) => (*v) as i64,
@@ -1397,9 +1476,14 @@ fn cemit_take_closure(
     if ki >= 0 {
         *lw_out = replace(&mut g.kept[ki as usize], irl::Lowerer::new(p, m, cn));
         let _ = g.kept_ix.remove(&key);
+        pr.count(prb::C_TAKEN, 1);
+        pr.stop(prb::P_ACQUIRE, am);
         return true;
     }
-    return lw_out.lower_closure_body(cn);
+    let ok = lw_out.lower_closure_body(cn);
+    pr.count(prb::C_LOWERED, 1);
+    pr.stop(prb::P_ACQUIRE, am);
+    return ok;
 }
 
 // Replay one cached module: pool interns first (verified id by id), then the journaled events
@@ -1410,10 +1494,8 @@ fn cemit_tuc_replay(
     cem: &mut cbe::CEmit,
     m: usize,
     t: &tuc::Tuc,
-    bodies_all: &mut String,
+    ch: &mut TuBufs,
     protos: &mut String,
-    chunk_mod: &mut Vector<u64>,
-    chunk_off: &mut Vector<u64>,
     env_names: &mut Vector<u64>,
     env_bodies: &mut Vector<String>,
     have_main: &mut bool,
@@ -1435,10 +1517,8 @@ fn cemit_tuc_replay(
         }
         tuc::ev_patch(p, &tab, &mut idc, &mut ev);
         if ev.kind == mbe::RK_CHUNK {
-            chunk_mod.push(m as u64);
-            chunk_off.push(bodies_all.len() as u64);
             proto_of(&ev.s1, protos);
-            bodies_all.push_string(&ev.s1);
+            ch.add(m as u64, &ev.s1);
         } else if ev.kind == mbe::RK_ENV {
             env_names.push(ev.h);
             env_bodies.push(ev.s1.clone());
@@ -1473,14 +1553,15 @@ fn cemit_seed_take(
     lw: &mut irl::Lowerer,
     kl: *const psync::Semaphore,
     closure: bool,
+    pr: &mut prb::Probe,
 ) bool {
     if kl != null {
         (unsafe &*kl).acquire_masked();
     }
     let r = if closure {
-        cemit_take_closure(&mut *g, p, m, nid, lw);
+        cemit_take_closure(&mut *g, p, m, nid, lw, pr);
     } else {
-        cemit_take_body(&mut *g, p, m, nid, lw);
+        cemit_take_body(&mut *g, p, m, nid, lw, pr);
     };
     if kl != null {
         (unsafe &*kl).release();
@@ -1503,10 +1584,8 @@ fn cemit_seed_module(
     testing: bool,
     verbose: bool,
     kl: *const psync::Semaphore,
-    bodies_all: &mut String,
+    ch: &mut TuBufs,
     protos: &mut String,
-    chunk_mod: &mut Vector<u64>,
-    chunk_off: &mut Vector<u64>,
     env_names: &mut Vector<u64>,
     env_bodies: &mut Vector<String>,
     have_main: &mut bool,
@@ -1550,7 +1629,7 @@ fn cemit_seed_module(
             continue;
         }
         let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
-        if !cemit_seed_take(g, p, m as ModuleId, nid, &mut lw, kl, false) {
+        if !cemit_seed_take(g, p, m as ModuleId, nid, &mut lw, kl, false, &mut dow.pr) {
             continue;
         }
         if lw.body.is_generic {
@@ -1558,8 +1637,11 @@ fn cemit_seed_module(
         }
         dow.apply_drops(&mut lw);
         let mut sym = String::new();
+        let sm9 = cem.pr.start();
         let tgt = cem.mg.method_target(m as ModuleId, nid);
-        if !cem.mg.fn_sym(m as ModuleId, nid, tgt, true, &mut sym) {
+        let sym_ok9 = cem.mg.fn_sym(m as ModuleId, nid, tgt, true, &mut sym);
+        cem.pr.stop(prb::P_SYM, sm9);
+        if !sym_ok9 {
             continue;
         }
         if sym.as_str() == "assert" || sym.as_str() == "assert_eq" || sym.as_str() == "assert_ne" {
@@ -1599,14 +1681,12 @@ fn cemit_seed_module(
                 }
             }
             {
-                chunk_mod.push(m as u64);
-                chunk_off.push(bodies_all.len() as u64);
                 proto_of(&cem.out, protos);
-                bodies_all.push_string(&cem.out);
+                ch.add(m as u64, &cem.out);
                 if cem.mg.rec_on {
                     let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
-                    ev9.a = chunk_off[chunk_off.len() - 1] as u32;
-                    ev9.b = bodies_all.len() as u32;
+                    ev9.a = ch.last_off() as u32;
+                    ev9.b = ch.last_end() as u32;
                     cem.mg.rec.push(ev9);
                 }
             }
@@ -1665,14 +1745,12 @@ fn cemit_seed_module(
                 }
                 wr.push_str("}\n");
                 if wok {
-                    chunk_mod.push(m as u64);
-                    chunk_off.push(bodies_all.len() as u64);
                     proto_of(&wr, protos);
-                    bodies_all.push_string(&wr);
+                    ch.add(m as u64, &wr);
                     if cem.mg.rec_on {
                         let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
-                        ev9.a = chunk_off[chunk_off.len() - 1] as u32;
-                        ev9.b = bodies_all.len() as u32;
+                        ev9.a = ch.last_off() as u32;
+                        ev9.b = ch.last_end() as u32;
                         cem.mg.rec.push(ev9);
                     }
                 }
@@ -1691,7 +1769,7 @@ fn cemit_seed_module(
                     None => {
                         let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
                         let mut slot = 0xFFFFFFFFFFFFFFFFu64;
-                        if cemit_seed_take(g, p, m as ModuleId, cn, &mut cl, kl, true) {
+                        if cemit_seed_take(g, p, m as ModuleId, cn, &mut cl, kl, true, &mut dow.pr) {
                             dow.apply_drops(&mut cl);
                             slot = clws.len() as u64;
                             clws.push(cl);
@@ -1734,14 +1812,12 @@ fn cemit_seed_module(
                             }
                         }
                     }
-                    chunk_mod.push(m as u64);
-                    chunk_off.push(bodies_all.len() as u64);
                     proto_of(&cem.out, protos);
-                    bodies_all.push_string(&cem.out);
+                    ch.add(m as u64, &cem.out);
                     if cem.mg.rec_on {
                         let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
-                        ev9.a = chunk_off[chunk_off.len() - 1] as u32;
-                        ev9.b = bodies_all.len() as u32;
+                        ev9.a = ch.last_off() as u32;
+                        ev9.b = ch.last_end() as u32;
                         cem.mg.rec.push(ev9);
                     }
                 } else {
@@ -1759,10 +1835,13 @@ fn cemit_seed_module(
 
 struct SeedShard {
     pub cem: cbe::CEmit,
+    pub ch: TuBufs, // seed shards: module m's chunks, in m's own buffer
+    // Drain shards: this slice's instance-TU chunks, one contiguous buffer.
     pub bodies: String,
     pub protos: String,
     pub chunk_mod: Vector<u64>,
     pub chunk_off: Vector<u64>,
+    pub chunk_end: Vector<u64>,
     pub env_names: Vector<u64>,
     pub env_bodies: Vector<String>,
     pub have_main: bool,
@@ -1901,10 +1980,8 @@ fn cemit_seed_task(t: SeedTask) {
         t.testing,
         t.verbose,
         t.kl,
-        &mut o.bodies,
+        &mut o.ch,
         &mut o.protos,
-        &mut o.chunk_mod,
-        &mut o.chunk_off,
         &mut o.env_names,
         &mut o.env_bodies,
         &mut o.have_main,
@@ -1941,10 +2018,8 @@ fn cemit_drain_demand(
     ia_built: &mut Vector<bool>,
     di: usize,
     verbose: bool,
-    bodies_all: &mut String,
+    ch: &mut TuBufs,
     protos: &mut String,
-    chunk_mod: &mut Vector<u64>,
-    chunk_off: &mut Vector<u64>,
     env_names: &mut Vector<u64>,
     env_bodies: &mut Vector<String>,
     inst_ok: &mut u64,
@@ -1979,7 +2054,7 @@ fn cemit_drain_demand(
         Some(v) => *v,
         None => {
             let mut lw = irl::Lowerer::new(p, d_def.module, d_def.node);
-            let okl = cemit_take_body(&mut *g, p, d_def.module, d_def.node, &mut lw);
+            let okl = cemit_take_body(&mut *g, p, d_def.module, d_def.node, &mut lw, &mut dow.pr);
             let mut slot = 0xFFFFFFFFFFFFFFFFu64;
             if okl {
                 dow.apply_drops(&mut lw);
@@ -2011,7 +2086,11 @@ fn cemit_drain_demand(
             let sb2 = *d_subs.at(i2);
             lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
         }
-        if lw2.lower_fn(d_def.node) {
+        let rm9 = dow.pr.start();
+        let okr9 = lw2.lower_fn(d_def.node);
+        dow.pr.stop(prb::P_RELOWER, rm9);
+        dow.pr.count(prb::C_RELOWER_REFLECT, 1);
+        if okr9 {
             dow.apply_drops(&mut lw2);
             lws.push(lw2);
             li2 = lws.len() as u64 - 1;
@@ -2042,7 +2121,11 @@ fn cemit_drain_demand(
                     lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
                 }
                 let mut slot2 = 0xFFFFFFFFFFFFFFFFu64;
-                if lw2.lower_fn(d_def.node) {
+                let rm9 = dow.pr.start();
+                let okr9 = lw2.lower_fn(d_def.node);
+                dow.pr.stop(prb::P_RELOWER, rm9);
+                dow.pr.count(prb::C_RELOWER_ZST, 1);
+                if okr9 {
                     dow.apply_drops(&mut lw2);
                     slot2 = lws.len() as u64;
                     lws.push(lw2);
@@ -2093,10 +2176,9 @@ fn cemit_drain_demand(
     if em_ok9 {
         done.insert(dk, 1);
         *inst_ok += 1;
-        chunk_mod.push(65534);
-        chunk_off.push(bodies_all.len() as u64);
+        cem.pr.count(prb::C_INSTANCES, 1);
         proto_of(&cem.out, protos);
-        bodies_all.push_string(&cem.out);
+        ch.add(65534, &cem.out);
         let mut clsq = Vector::<NodeId>::new();
         for c2 in 0..lws.at(li2 as usize).closures.len() {
             clsq.push(lws.at(li2 as usize).closures[c2]);
@@ -2111,7 +2193,7 @@ fn cemit_drain_demand(
                 None => {
                     let mut cl = irl::Lowerer::new(p, d_def.module, cn);
                     let mut slot = 0xFFFFFFFFFFFFFFFFu64;
-                    if cemit_take_closure(&mut *g, p, d_def.module, cn, &mut cl) {
+                    if cemit_take_closure(&mut *g, p, d_def.module, cn, &mut cl, &mut dow.pr) {
                         dow.apply_drops(&mut cl);
                         slot = clws.len() as u64;
                         clws.push(cl);
@@ -2148,10 +2230,8 @@ fn cemit_drain_demand(
                         env_bodies.push(envs.clone());
                     }
                 }
-                chunk_mod.push(65534);
-                chunk_off.push(bodies_all.len() as u64);
                 proto_of(&cem.out, protos);
-                bodies_all.push_string(&cem.out);
+                ch.add(65534, &cem.out);
             } else {
                 *clos_skip += 1;
             }
@@ -2261,7 +2341,11 @@ fn cemit_drain_slice_one(
             let sb2 = *d_subs.at(i2);
             lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
         }
-        if lw2.lower_fn(d_def.node) {
+        let rm9 = dow2.pr.start();
+        let okr9 = lw2.lower_fn(d_def.node);
+        dow2.pr.stop(prb::P_RELOWER, rm9);
+        dow2.pr.count(prb::C_RELOWER_REFLECT, 1);
+        if okr9 {
             dow2.apply_drops(&mut lw2);
             var_on = true;
             var_lw = lw2;
@@ -2318,7 +2402,11 @@ fn cemit_drain_slice_one(
                     let sb2 = *d_subs.at(i2);
                     lw2.env.push(irl::LSub { pm: sb2.pm, pnode: sb2.pnode, am: sb2.am, at: sb2.at });
                 }
-                if lw2.lower_fn(d_def.node) {
+                let rm9 = dow2.pr.start();
+                let okr9 = lw2.lower_fn(d_def.node);
+                dow2.pr.stop(prb::P_RELOWER, rm9);
+                dow2.pr.count(prb::C_RELOWER_ZST, 1);
+                if okr9 {
                     dow2.apply_drops(&mut lw2);
                     var_on = true;
                     var_zkey = zkey;
@@ -2404,6 +2492,7 @@ fn cemit_drain_slice_one(
     o.chunk_off.push(o.bodies.len() as u64);
     proto_of(&sh.out, &mut o.protos);
     o.bodies.push_string(&sh.out);
+    o.chunk_end.push(o.bodies.len() as u64);
     let mut clsq = Vector::<NodeId>::new();
     {
         let cls = if var_on {
@@ -2439,7 +2528,16 @@ fn cemit_drain_slice_one(
             }
             if !known {
                 let mut cl = irl::Lowerer::new(p, d_def.module, cn);
-                if cemit_seed_take(unsafe &mut *(gv as *mut ig::InstGraph), p, d_def.module, cn, &mut cl, kl, true) {
+                if cemit_seed_take(
+                    unsafe &mut *(gv as *mut ig::InstGraph),
+                    p,
+                    d_def.module,
+                    cn,
+                    &mut cl,
+                    kl,
+                    true,
+                    &mut dow2.pr,
+                ) {
                     dow2.apply_drops(&mut cl);
                     own_ci = o.dclo.len() as u64;
                     o.dclo_keys.push(ckey);
@@ -2490,6 +2588,7 @@ fn cemit_drain_slice_one(
             o.chunk_off.push(o.bodies.len() as u64);
             proto_of(&sh.out, &mut o.protos);
             o.bodies.push_string(&sh.out);
+            o.chunk_end.push(o.bodies.len() as u64);
         } else {
             o.clos_skip += 1;
         }
@@ -2524,7 +2623,7 @@ fn cemit_low_task(t: LowTask) {
         let m = (dv >> 32) as ModuleId;
         let n = (dv & 0xFFFFFFFFu64) as NodeId;
         let mut lw = irl::Lowerer::new(p, m, n);
-        let ok = cemit_seed_take(unsafe &mut *(t.g as *mut ig::InstGraph), p, m, n, &mut lw, t.kl, false);
+        let ok = cemit_seed_take(unsafe &mut *(t.g as *mut ig::InstGraph), p, m, n, &mut lw, t.kl, false, &mut dow2.pr);
         if ok {
             dow2.apply_drops(&mut lw);
             let mut cf = cfl::CFlow::new_empty();
@@ -2882,10 +2981,13 @@ pub fn cemit_package(
     let verbose = stdlib::getenv("SC_CEMIT_STATS") != null;
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tt0 = unsafe shim::sc_ticks_ms();
+    let mut prd = prb::Probe::new(tstat, stdlib::getenv("SC_BUILD_MEM") != null);
     // The planner's signature-level propagation reads the package metadata.
     p.ensure_sigs();
+    let gm9 = prd.start();
     let mut g = ig::InstGraph::new(p, irkeep, live);
     g.collect();
+    prd.stop(prb::P_GRAPH, gm9);
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage collect: {} ms\n", t9 - tt0);
@@ -2960,18 +3062,24 @@ pub fn cemit_package(
     let mut seed_skip: u64 = 0;
     let mut clos_ok: u64 = 0;
     let mut clos_skip: u64 = 0;
-    let mut bodies_all = String::new();
+    let mut ch = TuBufs::new(p.modules.len());
     let mut protos = String::new();
-    // Pre-size the two whole-package accumulators from the corpus (emitted C runs ~10 bytes per
-    // AST node): one sized request instead of a doubling-growth chain over multi-MB buffers.
+    // Pre-size every buffer from the corpus: a module's C runs about a byte per source byte, the
+    // instance TU about a quarter of the whole, prototypes a byte per AST node. Growth past an
+    // estimate stays geometric.
     {
         let mut est_nodes: usize = 0;
+        let mut src_total: usize = 0;
         for m in 0..p.modules.len() {
             if p.modules[m].has_ast {
                 est_nodes += p.modules[m].ast.nodes.len();
+                if live == null || !p.modules[m].prelude || unsafe live[m] {
+                    ch.bufs.index_mut(m).reserve(p.modules[m].source.len());
+                    src_total += p.modules[m].source.len();
+                }
             }
         }
-        bodies_all.reserve(est_nodes * 10);
+        ch.bufs.index_mut(p.modules.len()).reserve(src_total / 4);
         protos.reserve(est_nodes);
     }
     let mut envs_all = String::new();
@@ -2980,10 +3088,7 @@ pub fn cemit_package(
     let mut have_main = false;
     let mut main_argv = false;
     let mut main_mod: u64 = 0;
-    // Chunk provenance: proto_of precedes every body push, so prototype line k pairs with chunk k;
-    // chunk_mod is the owning TU (65534 = the shared instance TU), chunk_off the bodies_all offset.
-    let mut chunk_mod = Vector::<u64>::new();
-    let mut chunk_off = Vector::<u64>::new();
+    // Chunk provenance: proto_of precedes every chunk append, so prototype line k pairs with chunk k.
     // Per-TU cache: fingerprint every module up front; a hit replays the module's journaled side
     // effects instead of lowering it, a miss emits live under journaling. Test builds opt out (the
     // wrapper set would join the fingerprint for little gain).
@@ -3019,10 +3124,12 @@ pub fn cemit_package(
         for m in 0..p.modules.len() {
             let mut sh = SeedShard {
                 cem: cbe::CEmit::new(p),
+                ch: TuBufs::new(p.modules.len()),
                 bodies: String::new(),
                 protos: String::new(),
                 chunk_mod: Vector::<u64>::new(),
                 chunk_off: Vector::<u64>::new(),
+                chunk_end: Vector::<u64>::new(),
                 env_names: Vector::<u64>::new(),
                 env_bodies: Vector::<String>::new(),
                 have_main: false,
@@ -3122,10 +3229,8 @@ pub fn cemit_package(
                     &mut cem,
                     m,
                     &tuc,
-                    &mut bodies_all,
+                    &mut ch,
                     &mut protos,
-                    &mut chunk_mod,
-                    &mut chunk_off,
                     &mut env_names,
                     &mut env_bodies,
                     &mut have_main,
@@ -3165,10 +3270,8 @@ pub fn cemit_package(
                     testing,
                     verbose,
                     null,
-                    &mut bodies_all,
+                    &mut ch,
                     &mut protos,
-                    &mut chunk_mod,
-                    &mut chunk_off,
                     &mut env_names,
                     &mut env_bodies,
                     &mut have_main,
@@ -3206,7 +3309,7 @@ pub fn cemit_package(
                         cem.mg.rec.push(ev9);
                     }
                     tuc_pay.truncate(0);
-                    tuc::ser_evs(p, &mut tuc_pay, &cem.mg.rec, seg9, bodies_all.as_str());
+                    tuc::ser_evs(p, &mut tuc_pay, &cem.mg.rec, seg9, ch.bufs.at(m).as_str());
                     tuc.sec_add(m, &tuc_pay);
                     cem.mg.rec.truncate(seg9);
                 }
@@ -3244,15 +3347,18 @@ pub fn cemit_package(
                     o.cem.mg.rec.push(ev9);
                 }
                 tuc_pay.truncate(0);
-                tuc::ser_evs(p, &mut tuc_pay, &o.cem.mg.rec, 0, o.bodies.as_str());
+                tuc::ser_evs(p, &mut tuc_pay, &o.cem.mg.rec, 0, o.ch.bufs.at(m).as_str());
                 tuc.sec_add(m, &tuc_pay);
             }
-            let base9 = bodies_all.len() as u64;
-            for k2 in 0..o.chunk_mod.len() {
-                chunk_mod.push(o.chunk_mod[k2]);
-                chunk_off.push(o.chunk_off[k2] + base9);
+            // The shard's buffer for module m becomes the master's (its offsets are already
+            // module-relative); a module is either replayed or shard-emitted, never both.
+            assert(ch.bufs.at(m).len() == 0);
+            for k2 in 0..o.ch.chunk_mod.len() {
+                ch.chunk_mod.push(o.ch.chunk_mod[k2]);
+                ch.chunk_off.push(o.ch.chunk_off[k2]);
+                ch.chunk_end.push(o.ch.chunk_end[k2]);
             }
-            bodies_all.push_string(&o.bodies);
+            ch.bufs.set(m, replace(o.ch.bufs.index_mut(m), String::new()));
             protos.push_string(&o.protos);
             for k2 in 0..o.env_names.len() {
                 env_names.push(o.env_names[k2]);
@@ -3267,6 +3373,7 @@ pub fn cemit_package(
             seed_skip += o.seed_skip;
             clos_ok += o.clos_ok;
             clos_skip += o.clos_skip;
+            cem.pr.merge(&o.cem.pr);
             cemit_seed_merge(&mut cem, o, m as u64);
         }
         for i2 in 0..p.modules.len() {
@@ -3295,10 +3402,8 @@ pub fn cemit_package(
                         &mut cem,
                         m,
                         &tuc,
-                        &mut bodies_all,
+                        &mut ch,
                         &mut protos,
-                        &mut chunk_mod,
-                        &mut chunk_off,
                         &mut env_names,
                         &mut env_bodies,
                         &mut have_main,
@@ -3342,10 +3447,8 @@ pub fn cemit_package(
                 testing,
                 verbose,
                 null,
-                &mut bodies_all,
+                &mut ch,
                 &mut protos,
-                &mut chunk_mod,
-                &mut chunk_off,
                 &mut env_names,
                 &mut env_bodies,
                 &mut have_main,
@@ -3385,7 +3488,7 @@ pub fn cemit_package(
                     cem.mg.rec.push(ev9);
                 }
                 tuc_pay.truncate(0);
-                tuc::ser_evs(p, &mut tuc_pay, &cem.mg.rec, tuc_seg0, bodies_all.as_str());
+                tuc::ser_evs(p, &mut tuc_pay, &cem.mg.rec, tuc_seg0, ch.bufs.at(m).as_str());
                 tuc.sec_add(m, &tuc_pay);
                 cem.mg.rec.truncate(tuc_seg0);
             }
@@ -3417,10 +3520,8 @@ pub fn cemit_package(
             cem.out.clear();
             if cem.emit_test_wrapper(tc.mod, tc.func, tc.wants, fxi, fxf, tplan.genv_mod, tplan.genv_init) {
                 tw_ok += 1;
-                chunk_mod.push(tc.mod);
-                chunk_off.push(bodies_all.len() as u64);
                 proto_of(&cem.out, &mut protos);
-                bodies_all.push_string(&cem.out);
+                ch.add(tc.mod, &cem.out);
             } else {
                 tw_skip += 1;
                 eprint("cemit-test-miss: {}\n", cem.err);
@@ -3430,10 +3531,8 @@ pub fn cemit_package(
             cem.out.clear();
             if cem.emit_test_genv(tplan.genv_mod, tplan.genv_init, tplan.genv_free) {
                 tw_ok += 1;
-                chunk_mod.push(tplan.genv_mod);
-                chunk_off.push(bodies_all.len() as u64);
                 proto_of(&cem.out, &mut protos);
-                bodies_all.push_string(&cem.out);
+                ch.add(tplan.genv_mod, &cem.out);
             } else {
                 tw_skip += 1;
                 eprint("cemit-test-miss: {}\n", cem.err);
@@ -3483,10 +3582,8 @@ pub fn cemit_package(
             cem.out.clear();
             if cem.emit_glue(gi9) {
                 glue_ok += 1;
-                chunk_mod.push(65534);
-                chunk_off.push(bodies_all.len() as u64);
                 proto_of(&cem.out, &mut protos);
-                bodies_all.push_string(&cem.out);
+                ch.add(65534, &cem.out);
             } else {
                 if verbose {
                     eprint("glue-emit-fail: `{}` {}\n", cem.glue.at(gi9).sym.as_str(), cem.err);
@@ -3518,10 +3615,8 @@ pub fn cemit_package(
                 &mut ia_built,
                 di0,
                 verbose,
-                &mut bodies_all,
+                &mut ch,
                 &mut protos,
-                &mut chunk_mod,
-                &mut chunk_off,
                 &mut env_names,
                 &mut env_bodies,
                 &mut inst_ok,
@@ -3661,10 +3756,12 @@ pub fn cemit_package(
         for _i in 0..nsl9 {
             let mut sh = SeedShard {
                 cem: cbe::CEmit::new(p),
+                ch: TuBufs::new(p.modules.len()),
                 bodies: String::new(),
                 protos: String::new(),
                 chunk_mod: Vector::<u64>::new(),
                 chunk_off: Vector::<u64>::new(),
+                chunk_end: Vector::<u64>::new(),
                 env_names: Vector::<u64>::new(),
                 env_bodies: Vector::<String>::new(),
                 have_main: false,
@@ -3727,10 +3824,8 @@ pub fn cemit_package(
                 cem.out.clear();
                 if cem.emit_glue(gi9) {
                     glue_ok += 1;
-                    chunk_mod.push(65534);
-                    chunk_off.push(bodies_all.len() as u64);
                     proto_of(&cem.out, &mut protos);
-                    bodies_all.push_string(&cem.out);
+                    ch.add(65534, &cem.out);
                 } else {
                     if verbose {
                         eprint("glue-emit-fail: `{}` {}\n", cem.glue.at(gi9).sym.as_str(), cem.err);
@@ -3758,10 +3853,8 @@ pub fn cemit_package(
                     &mut ia_built,
                     j,
                     verbose,
-                    &mut bodies_all,
+                    &mut ch,
                     &mut protos,
-                    &mut chunk_mod,
-                    &mut chunk_off,
                     &mut env_names,
                     &mut env_bodies,
                     &mut inst_ok,
@@ -3840,12 +3933,13 @@ pub fn cemit_package(
                             }
                         }
                     }
-                    let base9 = bodies_all.len() as u64;
+                    let base9 = ch.bufs.at(ch.n).len() as u64;
                     for k2 in ma.chunks as usize..mb.chunks as usize {
-                        chunk_mod.push(o.chunk_mod[k2]);
-                        chunk_off.push(o.chunk_off[k2] - ma.bodies + base9);
+                        ch.chunk_mod.push(o.chunk_mod[k2]);
+                        ch.chunk_off.push(o.chunk_off[k2] - ma.bodies + base9);
+                        ch.chunk_end.push(o.chunk_end[k2] - ma.bodies + base9);
                     }
-                    bodies_all.push_str(o.bodies.as_str().slice(ma.bodies as usize, mb.bodies as usize));
+                    ch.bufs.index_mut(ch.n).push_str(o.bodies.as_str().slice(ma.bodies as usize, mb.bodies as usize));
                     protos.push_str(o.protos.as_str().slice(ma.protos as usize, mb.protos as usize));
                     for k2 in ma.envn as usize..mb.envn as usize {
                         env_names.push(o.env_names[k2]);
@@ -3877,6 +3971,7 @@ pub fn cemit_package(
                 let o = dsh.index_mut(scur);
                 clos_ok += o.clos_ok;
                 clos_skip += o.clos_skip;
+                cem.pr.merge(&o.cem.pr);
                 cemit_seed_merge_um(&mut cem, o);
                 slo = wcur;
                 scur += 1;
@@ -4469,13 +4564,13 @@ pub fn cemit_package(
     // Assembly: shared headers carry every aggregate/ret-struct/env typedef and all cross-TU
     // prototypes; each module TU holds its own bodies plus its static closures; the instance TU
     // holds every demanded instance, glue body, const/static definition and dyn table.
+    let asm9 = prd.start();
     {
         let ps = protos.as_str();
-        let bs = bodies_all.as_str();
         let mut poff = Vector::<u64>::new();
         {
             let mut c0: usize = 0;
-            for _i in 0..chunk_mod.len() {
+            for _i in 0..ch.chunk_mod.len() {
                 poff.push(c0 as u64);
                 while c0 < ps.len() && ps.byte_at(c0) != 10 {
                     c0 += 1;
@@ -4550,7 +4645,7 @@ pub fn cemit_package(
         phh.push_string(&cem.stat_decls);
         phh.push_string(&cem.dyn_decls);
         phh.push_string(&cem.sent_decls);
-        for i in 0..chunk_mod.len() {
+        for i in 0..ch.chunk_mod.len() {
             let pl = ps.slice(poff[i] as usize, poff[i + 1] as usize);
             if !(pl.len() >= 7 && pl.slice(0, 7) == "static ") {
                 phh.push_str(pl);
@@ -4561,68 +4656,57 @@ pub fn cemit_package(
         o.protos_h = phh;
         let mut sdefs = Set::<u64>::new();
         struct_def_names(o.types_h.as_str(), &mut sdefs);
-        // Chunk indexes per TU (the instance TU last), one pass over the chunk list: the per-TU
-        // assembly below then touches only its own chunks and reserves its buffers exactly.
+        // Chunk indexes per TU (the instance TU last), one pass over the chunk table: a TU's parts
+        // are then offset ranges of its own buffer.
         let mut tu_chunks = Vector::<Vector<u32>>::new();
         for _i in 0..p.modules.len() + 1 {
             tu_chunks.push(Vector::<u32>::new());
         }
-        for i in 0..chunk_mod.len() {
-            let w = if chunk_mod[i] == 65534 {
-                p.modules.len();
-            } else {
-                chunk_mod[i] as usize;
-            };
-            tu_chunks[w].push(i as u32);
+        for i in 0..ch.chunk_mod.len() {
+            tu_chunks[ch.slot(ch.chunk_mod[i])].push(i as u32);
         }
         let mut lps = Vector::<String>::new();
-        let mut lbs = Vector::<String>::new();
         for _k in 0..8 {
             lps.push(String::new());
-            lbs.push(String::new());
         }
         for t in 0..p.modules.len() + 1 {
             let is_inst = t == p.modules.len();
             let mut bb: usize = 0;
             for k in 0..tu_chunks[t].len() {
                 let i = tu_chunks[t][k] as usize;
-                let b1 = if i + 1 < chunk_off.len() {
-                    chunk_off[i + 1] as usize;
-                } else {
-                    bs.len();
-                };
-                bb += b1 - chunk_off[i] as usize;
+                bb += (ch.chunk_end[i] - ch.chunk_off[i]) as usize;
             }
             // Partition an oversized TU into deterministic units so the C compiler parallelizes
             // its critical path. The part count is a pure function of the body bytes, and a part
             // boundary sits only BEFORE a non-static chunk: a `static` chunk is a closure that
-            // must share a unit with the body it belongs to.
+            // must share a unit with the body it belongs to. `parts[k] .. parts[k + 1]` is part
+            // k's range of the TU buffer (a part never reached is empty).
             let mut nparts = 1 + bb / 262144;
             if nparts > 8 {
                 nparts = 8;
             }
             for k in 0..nparts {
                 lps.index_mut(k).truncate(0);
-                lbs.index_mut(k).truncate(0);
             }
             let target = bb / nparts + 1;
             let mut cur: usize = 0;
+            let mut parts = Vector::<u64>::with_capacity(nparts + 1);
+            parts.push(0);
             for k in 0..tu_chunks[t].len() {
                 let i = tu_chunks[t][k] as usize;
                 let pl = ps.slice(poff[i] as usize, poff[i + 1] as usize);
                 let is_static = pl.len() >= 7 && pl.slice(0, 7) == "static ";
-                if !is_static && cur + 1 < nparts && lbs.at(cur).len() >= target {
+                if !is_static && cur + 1 < nparts && (ch.chunk_off[i] - parts[cur]) as usize >= target {
                     cur += 1;
+                    parts.push(ch.chunk_off[i]);
                 }
                 if is_static {
                     lps.index_mut(cur).push_str(pl);
                 }
-                let b1 = if i + 1 < chunk_off.len() {
-                    chunk_off[i + 1] as usize;
-                } else {
-                    bs.len();
-                };
-                lbs.index_mut(cur).push_str(bs.slice(chunk_off[i] as usize, b1));
+            }
+            let tu_end = ch.bufs.at(t).len() as u64;
+            while parts.len() < nparts + 1 {
+                parts.push(tu_end);
             }
             // Under --test the fork-per-test runner owns the C `main`; the user main stays a
             // plain (unreferenced) `__sc_user_main`.
@@ -4630,15 +4714,9 @@ pub fn cemit_package(
             if bb == 0 && !is_inst && !has_wrap {
                 continue;
             }
-            let mut tu2 = String::new();
-            {
-                let mut cap2 = lps.at(0).len() + lbs.at(0).len() + 2048;
-                if is_inst {
-                    cap2 += cem.blk_defs.len() + const_defs.len() + static_defs.len() + cem.dyn_tabs.len();
-                }
-                tu2.reserve(cap2);
-            }
-            tu2.push_string(lps.at(0));
+            let mut heads = Vector::<String>::with_capacity(nparts);
+            let mut head0 = String::new();
+            head0.push_string(lps.at(0));
             if !is_inst && p.modules[t].has_ast {
                 // Folded module-level static_asserts leave their record in the C (parity with
                 // the checker: a false one already failed the build).
@@ -4650,52 +4728,45 @@ pub fn cemit_package(
                         continue;
                     }
                     let bd9 = a9.at_const(nid9).as_data.binary;
-                    tu2.push_str("_Static_assert(true, ");
+                    head0.push_str("_Static_assert(true, ");
                     if bd9.right != NODE_NONE {
                         let rsp9 = a9.at_const(bd9.right).as_data.literal.raw;
-                        tu2.push_str(p.modules[t].source.as_str().slice(rsp9.start as usize, rsp9.end as usize));
+                        head0.push_str(p.modules[t].source.as_str().slice(rsp9.start as usize, rsp9.end as usize));
                     } else {
-                        tu2.push_str("\"static assertion failed\"");
+                        head0.push_str("\"static assertion failed\"");
                     }
-                    tu2.push_str(");\n");
+                    head0.push_str(");\n");
                 }
-                cemit_layout_asserts(p, &mut cem, t as ModuleId, &sdefs, &mut tu2);
+                cemit_layout_asserts(p, &mut cem, t as ModuleId, &sdefs, &mut head0);
             }
             if is_inst {
-                tu2.push_string(&cem.blk_defs);
-                tu2.push_string(&const_defs);
-                tu2.push_string(&static_defs);
-                tu2.push_string(&cem.dyn_tabs);
-                tu2.push_string(&cem.sent_defs);
+                head0.push_string(&cem.blk_defs);
+                head0.push_string(&const_defs);
+                head0.push_string(&static_defs);
+                head0.push_string(&cem.dyn_tabs);
+                head0.push_string(&cem.sent_defs);
             }
-            tu2.push_string(lbs.at(0));
-            if has_wrap && nparts == 1 {
-                cemit_main_wrapper(&mut tu2, main_argv);
-            }
-            if is_inst {
-                o.inst_c = tu2;
-            } else {
-                o.tus.set(t, tu2);
-            }
+            heads.push(head0);
             for k in 1..nparts {
-                let mut px = String::new();
-                px.reserve(lps.at(k).len() + lbs.at(k).len() + 256);
-                px.push_string(lps.at(k));
-                px.push_string(lbs.at(k));
-                if has_wrap && k == nparts - 1 {
-                    cemit_main_wrapper(&mut px, main_argv);
-                }
-                if px.len() == 0 {
-                    continue;
-                }
-                if is_inst {
-                    o.inst_extra.push(px);
-                } else {
-                    o.tu_extra.index_mut(t).push(px);
-                }
+                heads.push(replace(lps.index_mut(k), String::new()));
+            }
+            let mut tail = String::new();
+            if has_wrap {
+                cemit_main_wrapper(&mut tail, main_argv);
+            }
+            if is_inst {
+                o.inst_c = replace(ch.bufs.index_mut(t), String::new());
+                o.inst_parts = parts;
+                o.inst_heads = heads;
+            } else {
+                o.tus.set(t, replace(ch.bufs.index_mut(t), String::new()));
+                o.tu_parts.set(t, parts);
+                o.tu_heads.set(t, heads);
+                o.tu_tail.set(t, tail);
             }
         }
     }
+    prd.stop(prb::P_ASSEMBLE, asm9);
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage assembly: {} ms\n", t9 - tt0);
@@ -4724,7 +4795,11 @@ pub fn cemit_package(
         o.tuc_path = tuc.path.clone();
     }
     let _ = fwd_end;
-    dctx_drop();
+    dow.fold_probe();
+    prd.merge(&dow.pr);
+    prd.merge(&cem.pr);
+    dctx_drop(&mut prd);
+    o.pr = prd;
     bst::mark(bst::B_RENDER);
 }
 
@@ -5368,11 +5443,16 @@ fn dctx_put(d: DropCtx) {
 
 // End-of-phase teardown: the pooled contexts and the pool holder itself are released, so a compile
 // exits with no live pool allocation (the leak gate audits every process).
-fn dctx_drop() {
+fn dctx_drop(acc: &mut prb::Probe) {
     unsafe sc_runtime::sc_rt_spin_lock(&mut G_DPOOL_LOCK);
     if unsafe G_DPOOL != null {
         let pv = unsafe G_DPOOL;
         unsafe G_DPOOL = null;
+        for i in 0..(unsafe &*pv).len() {
+            let d9 = (unsafe &mut *pv).index_mut(i);
+            d9.fold_probe();
+            acc.merge(&d9.pr);
+        }
         pv.free();
         let mut g9 = Global {};
         unsafe g9.dealloc(pv, sizeof(Vector<DropCtx>), alignof(Vector<DropCtx>));
@@ -5391,6 +5471,8 @@ struct DropCtx {
     pub bce: bce::Bce,
     pub core_ir: bool, // SC_CORE_IR development re-verification
     pub bce_stats: bool, // SC_BCE_STATS per-owner report lines
+    /// Emission counters (SC_CEMIT_STATS): acquisition, re-lowering, inlining, drop preparation.
+    pub pr: prb::Probe,
 }
 
 extend DropCtx {
@@ -5406,7 +5488,16 @@ extend DropCtx {
             bce: bce::Bce::new(p),
             core_ir: stdlib::getenv("SC_CORE_IR") != null,
             bce_stats: stdlib::getenv("SC_BCE_STATS") != null,
+            pr: prb::Probe::new(stdlib::getenv("SC_CEMIT_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null),
         };
+    }
+
+    // Fold the inliner's tallies into the probe (once: the tallies reset).
+    fn fold_probe(self: &mut Self) {
+        self.pr.count(prb::C_VET_LOWERED, self.inl.st_vet_lower);
+        self.pr.count(prb::C_VET_OFFERED, self.inl.st_vet_offer);
+        self.inl.st_vet_lower = 0;
+        self.inl.st_vet_offer = 0;
     }
 
     fn apply_drops(self: &mut Self, lw: &mut irl::Lowerer) {
@@ -5414,9 +5505,21 @@ extend DropCtx {
     }
 
     fn apply_drops_of(self: &mut Self, lw: &mut irl::Lowerer, allow_inline: bool) {
+        let dm = self.pr.start();
+        let i0 = self.pr.ns[prb::P_INLINE];
+        let ia0 = self.pr.an[prb::P_INLINE];
+        let ib0 = self.pr.ab[prb::P_INLINE];
+        self.apply_drops_i(lw, allow_inline);
+        self.pr.stop_less(prb::P_DROPS, dm, prb::P_INLINE, i0, ia0, ib0);
+    }
+
+    fn apply_drops_i(self: &mut Self, lw: &mut irl::Lowerer, allow_inline: bool) {
         // The inliner runs FIRST so drop elaboration and BCE see the merged body; the callee's
         // own storage markers make the merged elaboration reproduce the callee's drops in place.
         if allow_inline && !self.inl.off {
+            let im = self.pr.start();
+            // This body is a callee of later bodies: its verdict comes from this lowering.
+            self.inl.offer(lw.pkg, lw);
             let mut ist = inl::InlineStats::new();
             inl::run(lw, &mut self.inl, &mut ist);
             if self.inl.stats_on && ist.considered != 0 {
@@ -5431,13 +5534,14 @@ extend DropCtx {
                     eprintln("SC_CORE_IR: inline verify: {}", iv9);
                 }
             }
+            self.pr.stop(prb::P_INLINE, im);
         }
         self.forest.build_into(&lw.body);
         self.ow.generate_into(&lw.body, &self.forest, &mut self.facts);
         self.cfg.build_into(&lw.body);
         self.mv.build_into(&lw.body, &self.forest, &self.facts, &self.cfg);
         ird::elaborate_into(&mut self.ow, &lw.body, &self.forest, &self.facts, &self.mv, &mut self.el);
-        ird::insert_drops(&mut lw.body, &self.el.sched, &self.forest);
+        ird::insert_drops(&mut lw.body, &mut self.el, &self.forest);
         // Bounds-check elimination runs HERE, on the final elaborated body, so every emission
         // path (seed, instance, closure, wrapper) proves against the exact statements it emits.
         let mut bst = bce::BceStats::new();
@@ -5578,6 +5682,20 @@ fn cemit_write(path: str, s: &String) bool {
     }
     let b = s.as_str();
     let _ = unsafe stdio::fwrite(b.ptr(), 1, b.len(), f);
+    unsafe stdio::fclose(f);
+    return true;
+}
+
+// Overwrite `path` with the four pieces in order; false when the file cannot be opened.
+fn cemit_write4(path: str, a: str, b: str, c: str, d: str) bool {
+    let f = open_out(path);
+    if f == null {
+        return false;
+    }
+    let _ = unsafe stdio::fwrite(a.ptr(), 1, a.len(), f);
+    let _ = unsafe stdio::fwrite(b.ptr(), 1, b.len(), f);
+    let _ = unsafe stdio::fwrite(c.ptr(), 1, c.len(), f);
+    let _ = unsafe stdio::fwrite(d.ptr(), 1, d.len(), f);
     unsafe stdio::fclose(f);
     return true;
 }
@@ -6894,10 +7012,13 @@ fn ap_run_one(t: ApTask) {
         cev.all_typed = true;
         cev.max_steps = unsafe (&*master).max_steps;
         cev.max_slots = unsafe (&*master).max_slots;
+        cev.keep_view = unsafe (&*master).keep_view;
     }
     let p = unsafe &mut *t.p;
     let i = t.m as usize;
     ap_check_module_on(p, i, unsafe &mut *(t.outs + i), &mut cev);
+    let master = p.cir as *mut iri::Interp;
+    master.st_absorb(&cev);
 }
 
 fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
@@ -7027,7 +7148,9 @@ fn lint_package_i(
     }
     let mut wms = Vector::<facts::FactsWatermark>::new();
     facts_snapshot(p, &mut wms);
-    p.ok = borrowck_all(p, null) && p.ok;
+    // Kept so the report-only passes execute the checked bodies instead of lowering their own.
+    let mut lkeep = irl::Keep::new();
+    p.ok = borrowck_all(p, &mut lkeep) && p.ok;
     if p.jobs != 1 {
         prt::shutdown();
     }
@@ -7038,6 +7161,10 @@ fn lint_package_i(
         return 1;
     }
     layout_pass(p);
+    let cirk = p.cir as *mut iri::Interp;
+    if cirk != null {
+        cirk.keep_view_set(&mut lkeep);
+    }
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
     // duplicates). The const suggestion is the exception: opt-in (`--const`, warning every
     // eligible function at once would swamp default lints), and under `--fix` it contributes its
@@ -7056,6 +7183,9 @@ fn lint_package_i(
     if suggest_const {
         lint_const_suggest(p, lint_mod as i32, fixes);
     }
+    if cirk != null {
+        cirk.keep_view_clear();
+    }
     if !p.ok || p.lint_warnings != 0 {
         return 1;
     }
@@ -7071,10 +7201,12 @@ pub struct EmitSink {
     pub notify: fn(*mut void, str, i32) void,
 }
 
-fn sink_notify(sink: *mut EmitSink, path: str, kind: i32) {
+fn sink_notify(sink: *mut EmitSink, pr: &mut prb::Probe, path: str, kind: i32) {
     if sink != null {
+        let m9 = pr.start();
         let f = unsafe sink.notify;
         f(unsafe sink.ctx, path, kind);
+        pr.stop(prb::P_SYNC, m9);
     }
 }
 
@@ -7116,6 +7248,7 @@ fn run_package_i(
     let mut tp0 = unsafe shim::sc_ticks_ms();
     platform_filter(p, target);
     let n = p.modules.len();
+    let mut co = CemitOut::new(n);
     if p.jobs != 1 && n > 1 {
         resolve_all_par(p, lint);
     } else {
@@ -7185,6 +7318,14 @@ fn run_package_i(
     if facts_verify(p, &wms, "borrowck") != 0 {
         return 1;
     }
+    // Every ordinary body now sits in irkeep: the evaluator executes those in place until the
+    // emitter starts taking them.
+    {
+        let cirk = p.cir as *mut iri::Interp;
+        if cirk != null {
+            cirk.keep_view_set(&mut irkeep);
+        }
+    }
     layout_pass(p);
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
@@ -7205,10 +7346,25 @@ fn run_package_i(
         if tstat {
             let t9 = unsafe shim::sc_ticks_ms();
             eprint("phase panics: {} ms\n", t9 - tp0);
+            eprint(
+                "interp bodies: {} lookups, {} kept hits, {} fresh lowerings ({} generic instances, {} not kept), {} boxes retained by the master engine\n",
+                unsafe cirf.st_lookups,
+                unsafe cirf.st_kept_hits,
+                unsafe cirf.st_fresh,
+                unsafe cirf.st_fresh_generic,
+                unsafe cirf.st_fresh_miss,
+                unsafe cirf.bodies.len(),
+            );
             tp0 = t9;
         }
         cirf.flush_asserts(flush_assert_err, pv);
         cirf.flush_consts(flush_const_err, pv);
+    }
+    {
+        let cirk = p.cir as *mut iri::Interp;
+        if cirk != null {
+            cirk.keep_view_clear();
+        }
     }
     if !p.ok {
         return 1;
@@ -7238,9 +7394,9 @@ fn run_package_i(
     let mut keep = Vector::<String>::new();
     keep.push(build_out_path(root, "super_rt", ".h"));
     keep.push(build_out_path(root, "super_rt", ".c"));
-    sink_notify(sink, keep.at(0).as_str(), 0);
+    sink_notify(sink, &mut co.pr, keep.at(0).as_str(), 0);
     // Self-contained: carries its own includes.
-    sink_notify(sink, keep.at(1).as_str(), 1);
+    sink_notify(sink, &mut co.pr, keep.at(1).as_str(), 1);
     let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
     let pre_ext = keep.len();
@@ -7249,6 +7405,7 @@ fn run_package_i(
         let s = keep.at(i).as_str();
         sink_notify(
             sink,
+            &mut co.pr,
             s,
             if s.ends_with(".c") {
                 1;
@@ -7274,7 +7431,6 @@ fn run_package_i(
     // The whole-package Core-IR emission runs BEFORE the live-module list: it seeds every module
     // unconditionally, so any module with a non-empty TU must be written even when the reference
     // scan finds no direct use (prelude bodies the instance TU calls into).
-    let mut co = CemitOut::new(n);
     {
         let cirg = p.cir as *mut iri::Interp;
         if cirg != null {
@@ -7318,7 +7474,7 @@ fn run_package_i(
             let src9 = (ed9 >> 32) as usize;
             let dst9 = (ed9 & 0xFFFFFFFFu64) as usize;
             let on9 = src9 == 65534 || src9 < n && *keep_mod.at(src9);
-            if on9 && dst9 < n && !*keep_mod.at(dst9) && co.tus.at(dst9).len() != 0 {
+            if on9 && dst9 < n && !*keep_mod.at(dst9) && co.tu_parts.at(dst9).len() != 0 {
                 keep_mod.set(dst9, true);
                 changed9 = true;
             }
@@ -7327,8 +7483,7 @@ fn run_package_i(
     let mut lm = Vector::<ModuleId>::new();
     for oi in 0..n {
         let mi = order[oi];
-        let has_wrap = co.have_main && !testing && mi as u64 == co.main_mod;
-        if co.tus.at(mi as usize).len() == 0 && !has_wrap {
+        if co.tu_parts.at(mi as usize).len() == 0 {
             continue;
         }
         if !live[mi as usize] && !*keep_mod.at(mi as usize) {
@@ -7347,6 +7502,7 @@ fn run_package_i(
         keep.push(build_out_path(root, p.modules[lm[k] as usize].path.as_str(), ".c"));
     }
     let tw0 = unsafe shim::sc_ticks_ms();
+    let pub9 = co.pr.start();
     {
         // Shared headers land before any module file, then per-module header shims + sources in
         // emit order, then the shared instance TU.
@@ -7355,8 +7511,8 @@ fn run_package_i(
         if !cemit_write(thp.as_str(), &co.types_h) || !cemit_write(php.as_str(), &co.protos_h) {
             err = true;
         }
-        sink_notify(sink, thp.as_str(), 0);
-        sink_notify(sink, php.as_str(), 0);
+        sink_notify(sink, &mut co.pr, thp.as_str(), 0);
+        sink_notify(sink, &mut co.pr, php.as_str(), 0);
         keep.push(thp);
         keep.push(php);
         for k in 0..lm.len() {
@@ -7365,57 +7521,80 @@ fn run_package_i(
             if !cemit_write(keep.at(base_h + k).as_str(), &sh) {
                 err = true;
             }
-            sink_notify(sink, keep.at(base_h + k).as_str(), 0);
+            sink_notify(sink, &mut co.pr, keep.at(base_h + k).as_str(), 0);
         }
+        // Each part goes out as four writes (shared includes, head, body range, tail): no file
+        // image is assembled in memory.
         for k in 0..lm.len() {
-            let mut sc9 = String::new();
-            cemit_shared_incs(p.modules[lm[k] as usize].path.as_str(), &mut sc9);
-            sc9.push_string(co.tus.at(lm[k] as usize));
-            if !cemit_write(keep.at(base_c + k).as_str(), &sc9) {
-                err = true;
-            }
-            sink_notify(sink, keep.at(base_c + k).as_str(), 1);
-            let ex = co.tu_extra.at(lm[k] as usize);
-            for x in 0..ex.len() {
-                let mut stem = String::from_str(p.modules[lm[k] as usize].path.as_str());
-                stem.push_str("__p");
-                stem.push_u64(x as u64 + 1);
-                let xp = build_out_path(root, stem.as_str(), ".c");
-                let mut sx = String::new();
-                cemit_shared_incs(p.modules[lm[k] as usize].path.as_str(), &mut sx);
-                sx.push_string(ex.at(x));
-                if !cemit_write(xp.as_str(), &sx) {
-                    err = true;
+            let t = lm[k] as usize;
+            let mpath = p.modules[t].path.as_str();
+            let mut sh9 = String::new();
+            cemit_shared_incs(mpath, &mut sh9);
+            let parts = co.tu_parts.at(t);
+            let np = parts.len() - 1;
+            for x in 0..np {
+                let a = parts[x] as usize;
+                let e = parts[x + 1] as usize;
+                let head = co.tu_heads.at(t).at(x).as_str();
+                let tail = if x + 1 == np {
+                    co.tu_tail.at(t).as_str();
+                } else {
+                    "";
+                };
+                if x != 0 && head.len() + (e - a) + tail.len() == 0 {
+                    continue;
                 }
-                sink_notify(sink, xp.as_str(), 1);
-                keep.push(xp);
+                let body = co.tus.at(t).as_str().slice(a, e);
+                if x == 0 {
+                    if !cemit_write4(keep.at(base_c + k).as_str(), sh9.as_str(), head, body, tail) {
+                        err = true;
+                    }
+                    sink_notify(sink, &mut co.pr, keep.at(base_c + k).as_str(), 1);
+                } else {
+                    let mut stem = String::from_str(mpath);
+                    stem.push_str("__p");
+                    stem.push_u64(x as u64);
+                    let xp = build_out_path(root, stem.as_str(), ".c");
+                    if !cemit_write4(xp.as_str(), sh9.as_str(), head, body, tail) {
+                        err = true;
+                    }
+                    sink_notify(sink, &mut co.pr, xp.as_str(), 1);
+                    keep.push(xp);
+                }
             }
         }
-        if co.inst_c.len() != 0 {
-            let ip = build_out_path(root, "__sc_inst", ".c");
-            let mut ic = String::from_str("#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n");
-            ic.push_string(&co.inst_c);
-            if !cemit_write(ip.as_str(), &ic) {
-                err = true;
-            }
-            sink_notify(sink, ip.as_str(), 1);
-            keep.push(ip);
-            for x in 0..co.inst_extra.len() {
-                let mut stem = String::from_str("__sc_inst__p");
-                stem.push_u64(x as u64 + 1);
-                let xp = build_out_path(root, stem.as_str(), ".c");
-                let mut ix = String::from_str("#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n");
-                ix.push_string(co.inst_extra.at(x));
-                if !cemit_write(xp.as_str(), &ix) {
+        if co.inst_parts.len() != 0 {
+            let incs = "#include \"__sc_types.h\"\n#include \"__sc_protos.h\"\n";
+            let np = co.inst_parts.len() - 1;
+            for x in 0..np {
+                let a = co.inst_parts[x] as usize;
+                let e = co.inst_parts[x + 1] as usize;
+                let head = co.inst_heads.at(x).as_str();
+                if head.len() + (e - a) == 0 {
+                    continue;
+                }
+                let body = co.inst_c.as_str().slice(a, e);
+                let xp = if x == 0 {
+                    build_out_path(root, "__sc_inst", ".c");
+                } else {
+                    let mut stem = String::from_str("__sc_inst__p");
+                    stem.push_u64(x as u64);
+                    build_out_path(root, stem.as_str(), ".c");
+                };
+                if !cemit_write4(xp.as_str(), incs, head, body, "") {
                     err = true;
                 }
-                sink_notify(sink, xp.as_str(), 1);
+                sink_notify(sink, &mut co.pr, xp.as_str(), 1);
                 keep.push(xp);
             }
         }
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
         eprint("cemit-stage write: {} ms\n", unsafe shim::sc_ticks_ms() - tw0);
+        co.pr.stop(prb::P_PUBLISH, pub9);
+        let mut rep9 = String::new();
+        co.pr.report(&mut rep9);
+        rep9.eprint();
     }
     // Publish the per-TU cache only after a fully successful emission; keep[] shields it from pruning.
     if !err && co.skips == 0 && co.tuc_path.len() != 0 {
@@ -7454,7 +7633,7 @@ fn run_package_i(
         } else {
             switch write_test_main(p, &plan) {
                 Some(runner) => {
-                    sink_notify(sink, runner.as_str(), 1);
+                    sink_notify(sink, &mut co.pr, runner.as_str(), 1);
                     keep.push(runner);
                     if sink == null {
                         rc = test_build_and_run(p, topts, &keep, "", cflags, target);

@@ -63,6 +63,10 @@ pub const FX_MAYBE: u8 = 2;
 pub const FX_NO: u8 = 3;
 pub const FX_ONSTACK: u8 = 4;
 
+// body_slot tag: the slot names a kept body of the view, not a box of `bodies`.
+const BODY_KEPT: u64 = 1u64 << 63;
+const BODY_MASK: u64 = BODY_KEPT - 1;
+
 pub const fn fx_meet(a: u8, b: u8) u8 {
     if a == FX_NO || b == FX_NO {
         return FX_NO;
@@ -484,7 +488,22 @@ pub struct Interp {
     pub lsvc: lay::Svc,
     pub bodies: Vector<Box<irl::Lowerer>>, // lowered callee cache (boxed: nested calls grow it)
     pub body_keys: Vector<u64>, // module << 32 | fn node
-    pub body_ix: Map<u64, u64>, // bkey -> bodies slot (the linear key scan was O(n^2) over a sweep)
+    pub body_ix: Map<u64, u64>, // bkey -> body_ptr slot (the linear key scan was O(n^2) over a sweep)
+    /// Per body_keys slot, where the lowering lives: `BODY_KEPT | k` = slot k of the keep view,
+    /// otherwise an index into `bodies`.
+    pub body_slot: Vector<u64>,
+    /// The borrow checker's kept lowerings, readable between borrow checking and emission (null
+    /// otherwise): a non-generic body found there executes in place, with no lowering and no box.
+    /// A per-task engine copies the pointer without counting as a viewer (the master counts).
+    pub keep_view: *const irl::Keep,
+    // Body-lookup counters (SC_CEMIT_STATS reports them): every body_of miss of the slot index,
+    // how many the keep view served, how many lowered fresh (and so retained a box), and of those
+    // how many were generic instances (a substitution env) or bodies the keep never held.
+    pub st_lookups: u64,
+    pub st_kept_hits: u64,
+    pub st_fresh: u64,
+    pub st_fresh_generic: u64,
+    pub st_fresh_miss: u64,
     pub cont_memo: Map<u64, u64>, // (m << 32 | fn) -> kind << 32 | container: called per interpreted call
     pub method_memo: Map<MKey, u64>, // find_method results (module << 32 | node) once every module is typed
     pub call_memo: Map<u64, IVal>, // scalar results keyed over every semantic input (callee + args)
@@ -549,6 +568,13 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         bodies: Vector::<Box<irl::Lowerer>>::new(),
         body_keys: Vector::<u64>::new(),
         body_ix: Map::<u64, u64>::new(),
+        body_slot: Vector::<u64>::new(),
+        keep_view: null,
+        st_lookups: 0,
+        st_kept_hits: 0,
+        st_fresh: 0,
+        st_fresh_generic: 0,
+        st_fresh_miss: 0,
         cont_memo: Map::<u64, u64>::new(),
         method_memo: Map::<MKey, u64>::new(),
         call_memo: Map::<u64, IVal>::new(),
@@ -1419,6 +1445,19 @@ extend Interp {
             },
             None => {},
         };
+        self.st_lookups += 1;
+        if binds.len() == 0 && self.keep_view != null {
+            // A checked, borrow-checked body the backend will emit as is: execute it in place.
+            // Closures are kept under their own node, lowered exactly as lower_closure_body would.
+            let ki = (unsafe &*self.keep_view).view(m, fnode);
+            if ki >= 0 {
+                self.st_kept_hits += 1;
+                self.body_slot.push(BODY_KEPT | ki as u64);
+                self.body_keys.push(bkey);
+                self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
+                return self.body_keys.len() as i64 - 1;
+            }
+        }
         {
             // an UNCHECKED body must not run: lowering would degrade its widths to i64 and
             // compute wrong values (the AST evaluator's per-node gate refused these silently).
@@ -1467,10 +1506,68 @@ extend Interp {
         if !ok {
             return -1;
         }
+        self.st_fresh += 1;
+        if binds.len() != 0 {
+            self.st_fresh_generic += 1;
+        } else if self.keep_view != null {
+            self.st_fresh_miss += 1;
+        }
         self.bodies.push(Box::new(lw));
+        self.body_slot.push(self.bodies.len() as u64 - 1);
         self.body_keys.push(bkey);
         self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
         return self.body_keys.len() as i64 - 1;
+    }
+
+    // The lowering a body_of slot names.
+    fn body_at(self: &Self, bidx: i64) *const irl::Lowerer {
+        let sl = self.body_slot[bidx as usize];
+        if (sl & BODY_KEPT) != 0 {
+            assert(self.keep_view != null);
+            return (unsafe &*self.keep_view).kept.at((sl & BODY_MASK) as usize);
+        }
+        return self.bodies.at(sl as usize).get();
+    }
+
+    /// Open the read-only view of `keep` (see `keep_view`). The keep must not add, move, or take a
+    /// body until `keep_view_clear`; `Keep.viewers` enforces it.
+    pub fn keep_view_set(self: &mut Self, keep: *mut irl::Keep) {
+        assert(self.keep_view == null);
+        self.eng_enter();
+        unsafe keep.viewers += 1;
+        self.keep_view = keep;
+        self.eng_leave();
+    }
+
+    /// Fold a finished per-task engine's lookup counters into this (master) engine.
+    pub fn st_absorb(self: &mut Self, other: &Interp) {
+        self.eng_enter();
+        self.st_lookups += other.st_lookups;
+        self.st_kept_hits += other.st_kept_hits;
+        self.st_fresh += other.st_fresh;
+        self.st_fresh_generic += other.st_fresh_generic;
+        self.st_fresh_miss += other.st_fresh_miss;
+        self.eng_leave();
+    }
+
+    /// Close the view: every slot that pointed into the keep leaves the index, so a later lookup
+    /// lowers its own copy (the keep's bodies are about to move into the emitter).
+    pub fn keep_view_clear(self: &mut Self) {
+        if self.keep_view == null {
+            return;
+        }
+        self.eng_enter();
+        for i in 0..self.body_slot.len() {
+            if (self.body_slot[i] & BODY_KEPT) != 0 {
+                let _ = self.body_ix.remove(&self.body_keys[i]);
+                self.body_slot.set(i, 0);
+            }
+        }
+        let kp = self.keep_view as *mut irl::Keep;
+        assert(unsafe kp.viewers > 0);
+        unsafe kp.viewers -= 1;
+        self.keep_view = null;
+        self.eng_leave();
     }
 
     fn call(self: &mut Self, b: &ir::CoreBody, env: u32, t: &ir::Terminator) bool {
@@ -1777,7 +1874,7 @@ extend Interp {
             self.it_trap(IT_TRAP_BUDGET_DEPTH, "const-eval call depth exceeded");
             return false;
         }
-        let bp: *const irl::Lowerer = self.bodies.at(bidx as usize).get();
+        let bp: *const irl::Lowerer = self.body_at(bidx);
         let bb = (unsafe &(&*bp).body) as *const ir::CoreBody;
         // the callee frame's substitution window
         let sb0 = self.subst.len();
@@ -4984,7 +5081,7 @@ extend Interp {
             return zero;
         }
         self.lint_on = true;
-        let bp: *const irl::Lowerer = self.bodies.at(bidx as usize).get();
+        let bp: *const irl::Lowerer = self.body_at(bidx);
         let args = Vector::<IVal>::new();
         let _ = self.run(unsafe &(&*bp).body, &args);
         self.lint_on = false;

@@ -84,7 +84,7 @@ fn ext_c_wrap(
     }
     unsafe stdio::fprintf(
         f,
-        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 1\n#include \"%s\"\n".ptr() as *const char,
+        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 2\n#include \"%s\"\n".ptr() as *const char,
         rsl,
     );
     unsafe stdio::fclose(f);

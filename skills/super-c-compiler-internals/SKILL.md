@@ -37,7 +37,8 @@ borrowck_all              -- lowers every body to Core IR (kept in irl::Keep), r
   |                          var is set
 lint + panics + flush     -- lint_unused_items, check_always_panics (an error, every build),
   |                          then cir.flush_asserts / flush_consts (deferred static_asserts
-  |                          and consts undecidable in module order)
+  |                          and consts undecidable in module order); the interpreter reads
+  |                          kept bodies through a read-only Keep view here (see Core IR)
 runtime + external C      -- write super_rt.h/.c; ext_c_collect (@c.source wrappers, __ldflags)
   |
 emission planning         -- compute_emit_live scan; Package::emit_order (Kahn, owner-first)
@@ -47,7 +48,9 @@ cemit_package             -- InstGraph.collect() over the kept Core IR bodies of
   |                          TU emission (emit/tu.spc); drop elaboration runs per body here
   |                          (DropCtx::apply_drops); parallel frontier under --jobs
 serial write-out          -- __sc_types.h, __sc_protos.h, per-module .h/.c, __p<k> parts,
-  |                          __sc_inst.c; then prune_orphans drops stale outputs
+  |                          __sc_inst.c (each part is four writes: shared includes, part
+  |                          head, a range of the TU buffer, tail); then prune_orphans
+  |                          drops stale outputs
 cc + link                 -- external C compiler (parallel window under --jobs)
 ```
 
@@ -153,6 +156,19 @@ terminator / rvalue kind tables, and the replay-tape events are in
 `Lowerer`s keyed by body. Borrowck's lowerings are recycled into it, and emission's
 `InstGraph` walks those kept bodies instead of re-lowering. Bodies with `has_reflect` or
 `has_zst_cond` are the exception: instances must re-lower those under their demand env.
+A zero-size fold is symbolic (`has_zst_cond`) only when a generic parameter is unbound
+(`Layout.unbound`); a bound type no env can lay out folds as material, the
+`Mangler::is_zst` convention, so the fold never depends on which instantiation lowered a
+shared variant first.
+
+**Read-only Keep view:** between borrowck and `cemit_package` the interpreter holds
+`Interp.keep_view` (`Keep.view(m, node)` resolves non-generic functions and closures);
+`body_of` executes a kept `CoreBody` in place (`BODY_KEPT`-tagged slot) instead of
+lowering a fresh boxed body. `Keep.viewers` counts live views; `absorb`/`put` and the
+instance graph's take assert it is zero, and the driver clears the view before emission.
+Per-task always-panics engines copy the view pointer and fold their counters back with
+`st_absorb`. The scanner (`fx`) has no verdict that proves a body cannot reach a checked
+operation, so the always-panics pass runs every candidate body.
 
 ## HIR Layer (the desugar stage)
 
@@ -228,8 +244,11 @@ the move/init dataflow. Five classifications:
 
 Production consumer: emission's `DropCtx::apply_drops` (`src/driver/emit.spc`) builds
 the move-path forest, ownership facts, CFG and move dataflow, then `elaborate_into` +
-`insert_drops` rewrites the body with explicit `TM_DROP` terminators before the C
-emitter renders it.
+`insert_drops(body, &mut ElabCtx, forest)` rewrites the body with explicit `TM_DROP`
+terminators before the C emitter renders it; the pass scratch rides in the `ElabCtx` and
+survives across bodies. It runs once per concrete instance. `apply_drops` first offers the
+body being emitted to the inliner (`InlineCtx::offer`), so a callee that is itself emitted
+in this package is vetted from that body instead of a fresh lowering.
 
 ## CTFE (Compile-Time Function Evaluation)
 
@@ -260,6 +279,39 @@ Full monomorphization is the only generic backend.
   pool.
 - **Emit order:** `Package::emit_order` — if module `a` re-homes a concrete instance of
   a generic owned by `b`, then `b` emits first. Kahn topo-sort, lowest-id tiebreak.
+
+## Emission Buffers and Probes
+
+`CemitOut` holds one geometrically grown buffer per TU (`TuBufs`: `tus[t]` plus
+`tu_heads[t][k]`, `tu_tail[t]` and the `tu_parts[t]` part boundaries; `inst_c` with
+`inst_heads`/`inst_parts` for the shared instance TU). A consumer that inspects the
+emitted C (the test harness, the bench sink) must concatenate heads, buffer and tail;
+the driver writes each part with four `fwrite`s and never assembles a file image.
+Symbols, type spellings and call strings render once and intern into pools
+(`sym_memo`, `sx_nm_pool`, `sx_cs_pool`); a generic call's symbol interns under the
+fingerprint of (callee, receiver instance, targs, env), the same key the demand dedup
+uses, so only the first spelling per TU context constructs it. The recursive renderers
+(`emit_operand` through inlined temporaries, `emit_region` through structured control
+flow) share a nesting counter bounded by `RENDER_NEST_MAX` (256, clang's bracket depth);
+past it the body fails with `nesting`.
+
+A body renders straight into the TU buffer: `emit_body_core_cf` takes `self.out` out of
+the emitter and threads it as `o: &mut String` through every statement, control-flow
+and terminator renderer (the expression renderers already take `dst`), then asserts
+`self.out` stayed empty before putting the buffer back. Wrappers such as `(*..)` insert
+their opener at a mark (`String::insert_str`) instead of copying the text so far; a
+spelling needed twice or after later text rides in the `sget`/`sput` scratch pool, never
+in a fresh `String`. Rendering order is part of the contract: demands, sentinels and
+static stubs record in spelling order, so a sub-expression must still spell where it
+did before, only without the intermediate copy.
+
+`src/emit/probe.spc` is the emission probe: per region (graph, acquire, relower, inline,
+drops, sym, decl, render, assemble, publish, sync) wall time, calls and, with the
+allocation tracker on, allocation calls and requested bytes, plus repeated-work tallies
+(bodies taken/lowered, re-lowerings by cause, inliner vets by source, rendered bytes).
+Every context that does the work (`CEmit`, `DropCtx`, the driver) carries one; shard
+probes merge into the master's, and `SC_CEMIT_STATS` prints the table. Off, each
+operation is one branch.
 
 ## Output Tree
 
