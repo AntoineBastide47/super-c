@@ -80,7 +80,12 @@ printf 'matrix: release-profile compiler of this checkout\n'
 ./super-c build --profile=release -o "$m/super-c" >/dev/null || fail "cannot build the release compiler"
 sc="$m/super-c"
 commit=$(git rev-parse --short=12 HEAD)
-printf 'matrix: build %s, %s cores, %s reps per case\n' "$commit" "$ncpu" "$reps"
+if [ -r /proc/loadavg ]; then
+    load=$(awk '{print $1}' /proc/loadavg)
+else
+    load=$(sysctl -n vm.loadavg | awk '{print $2}')
+fi
+printf 'matrix: build %s, %s cores, %s reps per case, load %s\n' "$commit" "$ncpu" "$reps" "$load"
 
 # The global object cache and ccache stay off for every run: a warm case measures the project's own
 # stamp and fingerprints, and a repeated edit must compile its unit again rather than fetch rep 1's object.
@@ -131,14 +136,14 @@ apply_edit body
 build "$m/body_j${ncpu}_mem.jsonl" "$ncpu" dev $warm SC_BUILD_MEM=1
 restore
 
-python3 - "$m" "$commit" "$ncpu" "$reps" <<'EOF'
+python3 - "$m" "$commit" "$ncpu" "$reps" "$load" <<'EOF'
 import json, glob, os, statistics, sys
-m, commit, ncpu, reps = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+m, commit, ncpu, reps, load = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 transpile = ("stamp", "load", "resolve", "typecheck", "borrowck", "checks", "prepare", "plan", "render", "publish")
 def med_p95(v):
     v = sorted(v)
     return statistics.median(v), v[(len(v) * 95 + 99) // 100 - 1]
-lines = ["# Build matrix report", "", "build %s, %s cores, %s reps per case, dev profile unless noted; global object cache and ccache off throughout." % (commit, ncpu, reps), "",
+lines = ["# Build matrix report", "", "build %s, %s cores, %s reps per case, 1-minute load %s at start, dev profile unless noted; global object cache and ccache off throughout." % (commit, ncpu, reps, load), "",
          "| case | workers | runs | transpile ms med / p95 | compile ms med / p95 | link ms med / p95 | total ms med / p95 | units stale | cc span ms | cc overlap ms |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
 consts = []
 for path in sorted(glob.glob(os.path.join(m, "*.jsonl"))):
@@ -176,7 +181,7 @@ for path in sorted(glob.glob(os.path.join(m, "*_mem.jsonl"))):
         consts.append(("MATRIX_%s_PEAK_RSS_MIB" % name.upper(), r["mem"]["boundaries"][4]["rss_mib"]))
 open(os.path.join(m, "report.md"), "w").write("\n".join(lines) + "\n")
 with open(os.path.join(m, "constants.env"), "w") as f:
-    f.write("# Whole-build constants from ci/bench_matrix.sh (build %s, %s cores, %s reps): medians and p95 in ms.\n" % (commit, ncpu, reps))
+    f.write("# Whole-build constants from ci/bench_matrix.sh (build %s, %s cores, %s reps, load %s at start): medians and p95 in ms.\n" % (commit, ncpu, reps, load))
     for k, v in consts:
         f.write("%s=%.3f\n" % (k, v))
 print("\n".join(lines))

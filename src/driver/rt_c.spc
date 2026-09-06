@@ -304,7 +304,7 @@ void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
 void sc_lk_fork_child_reset(void);
 void sc_lk_report_now(void);
-void sc_lk_stats_enable(void);
+int sc_lk_stats_enable(void);
 void sc_lk_epoch_set(uint32_t __e);
 void sc_lk_stats(uint64_t *__out);
 typedef struct {
@@ -553,10 +553,12 @@ void sc_lk_fork_child_reset(void) {
 void sc_lk_report_now(void) {
   if (sc_lk_on()) sc_lk_report();
 }
-/* Track from here on without an exit report (SC_LEAK_CHECK, when set, keeps its own state). */
-void sc_lk_stats_enable(void) {
+/* Track from here on without an exit report (SC_LEAK_CHECK, when set, keeps its own state). Returns 1:
+   the tracker counts (a runtime without one reports 0 through the driver's stand-in). */
+int sc_lk_stats_enable(void) {
   sc_lk_on();
   if (sc_lk_state == 1) sc_lk_state = 2;
+  return 1;
 }
 void sc_lk_epoch_set(uint32_t __e) { __atomic_store_n(&sc_lk_epoch, __e, __ATOMIC_RELAXED); }
 /* out[0] allocation calls, out[1] bytes requested, out[2 + 2e] / out[3 + 2e] live count / bytes of epoch e

@@ -12,7 +12,7 @@ import std::parallel::platform as platform;
 
 // Allocation statistics of the generated runtime (super_rt.c, see driver::rt_c).
 extern "C" {
-    fn sc_lk_stats_enable() void;
+    fn sc_lk_stats_enable() i32;
     fn sc_lk_epoch_set(e: u32) void;
     fn sc_lk_stats(out: *mut u64) void;
 }
@@ -100,7 +100,9 @@ pub fn begin() {
     if stdlib::getenv("SC_BUILD_STATS") == null && !unsafe G_ARMED {
         return;
     }
-    let mem = stdlib::getenv("SC_BUILD_MEM") != null;
+    // `mem.on` is false when the runtime this compiler links predates the tracker's counters (a
+    // bootstrap build): the record then carries no allocation columns rather than zeros.
+    let mem = stdlib::getenv("SC_BUILD_MEM") != null && unsafe sc_lk_stats_enable() != 0;
     let mut ga = Global {};
     let g = (unsafe ga.alloc(sizeof(BuildStats), alignof(BuildStats))) as *mut BuildStats;
     unsafe g[0] = BuildStats {
@@ -127,7 +129,6 @@ pub fn begin() {
     };
     unsafe G_STATS = g;
     if mem {
-        unsafe sc_lk_stats_enable();
         unsafe sc_lk_epoch_set(0);
     }
 }

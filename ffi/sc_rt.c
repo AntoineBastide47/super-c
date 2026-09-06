@@ -115,11 +115,14 @@ void __sc_set_cancel_hook(int32_t (*f)(void)) { __sc_cancel_hook = f; }
 
 /* ---- allocation statistics fallbacks ------------------------------------------------------------------
    The leak tracker in the generated super_rt.c owns the allocation table and defines these for real. A
-   compiler built by a release whose runtime predates them still has to link: these weak definitions stand
-   in (and report nothing) until the runtime's own definitions are present, which then take precedence. */
-__attribute__((weak)) void sc_lk_stats_enable(void) {}
-__attribute__((weak)) void sc_lk_epoch_set(uint32_t e) { (void)e; }
-__attribute__((weak)) void sc_lk_stats(uint64_t *out) { memset(out, 0, 18 * sizeof *out); }
+   compiler built by a release whose runtime predates them still has to link: its wrapper TU carries no
+   SC_RT_LK_STATS, so these stand-ins (reporting no tracker) are compiled instead. Plain definitions, not
+   weak ones: PE linkers do not resolve a reference against a weak definition in another object. */
+#ifndef SC_RT_LK_STATS
+int sc_lk_stats_enable(void) { return 0; }
+void sc_lk_epoch_set(uint32_t e) { (void)e; }
+void sc_lk_stats(uint64_t *out) { memset(out, 0, 18 * sizeof *out); }
+#endif
 
 /* ---- lock-order tracking (SC_LOCK_ORDER=1, or =fatal to abort) --------------------------------------
    A deadlock is reported the first time two locks are taken in OPPOSITE orders, not the first time the

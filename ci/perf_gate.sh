@@ -52,10 +52,10 @@ rm -f "$record"
 SC_BENCH_OUT="$record" build/bench-bin --filter=self_transpile | tee "$out/self_transpile.txt" || fail "the benchmark reported a failure"
 [ -f "$record" ] || fail "no record written to $record"
 
-python3 - "$record" "$build_id" "$tol" "${SC_PERF_RECORD:-0}" "$cpu" "$ccver" "$ncpu" <<'EOF'
+python3 - "$record" "$build_id" "$tol" "${SC_PERF_RECORD:-0}" "$cpu" "$ccver" "$ncpu" "$load" <<'EOF'
 import json, sys
 rec = json.load(open(sys.argv[1]))
-build_id, tol, record_mode, cpu, ccver, ncpu = sys.argv[2], float(sys.argv[3]), sys.argv[4] == "1", sys.argv[5], sys.argv[6], sys.argv[7]
+build_id, tol, record_mode, cpu, ccver, ncpu, load = sys.argv[2], float(sys.argv[3]), sys.argv[4] == "1", sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
 if not rec.get("ok"):
     sys.exit("perf: FAILED: the record reports failure")
 if rec["build_id"] != build_id:
@@ -96,7 +96,7 @@ if record_mode:
         f.write("# Accepted performance baseline: written by `SC_PERF_RECORD=1 ci/perf_gate.sh`, compared by ci/perf_gate.sh.\n")
         f.write("# In-process constants: 100 serial self-transpile rounds (CPU ms, on-core Mcyc, Kalloc = allocator calls in\n")
         f.write("# thousands); BUILD constants: one cold dev build of the compiler through the engine with every core.\n")
-        f.write("BASE_COMMIT=%s\nBASE_CPU=\"%s\"\nBASE_CC=\"%s\"\nBASE_CORES=%s\nBASE_ROUNDS=%d\n" % (build_id, cpu, ccver, ncpu, rec["rounds"]))
+        f.write("BASE_COMMIT=%s\nBASE_CPU=\"%s\"\nBASE_CC=\"%s\"\nBASE_CORES=%s\nBASE_ROUNDS=%d\nBASE_LOAD_1MIN=%s\n" % (build_id, cpu, ccver, ncpu, rec["rounds"], load))
         for name, value, _ in consts:
             f.write("%s=%.3f\n" % (name, value))
     print("perf: recorded ci/baseline.env from build %s" % build_id)
@@ -110,7 +110,7 @@ try:
             base[k] = v.strip('"')
 except FileNotFoundError:
     sys.exit("perf: FAILED: no ci/baseline.env (record one with SC_PERF_RECORD=1)")
-print("perf: baseline %s on %s" % (base.get("BASE_COMMIT"), base.get("BASE_CPU")))
+print("perf: baseline %s on %s (recorded at load %s, this run at %s)" % (base.get("BASE_COMMIT"), base.get("BASE_CPU"), base.get("BASE_LOAD_1MIN", "?"), load))
 if base.get("BASE_CPU") != cpu:
     print("perf: WARNING: the baseline was recorded on %s, this box is %s: wall and cycle constants do not transfer" % (base.get("BASE_CPU"), cpu))
 print("%-42s %12s %12s %8s" % ("constant", "baseline", "now", "delta"))

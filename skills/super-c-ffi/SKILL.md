@@ -75,8 +75,11 @@ extern "C" "engine.h" {
 ```
 
 Each backing source becomes a wrapper translation unit in `build/` (`__ext<N>_<stem>.c`)
-with one absolute `#include`. Relative includes in the backing source continue to resolve
-correctly.
+with one absolute `#include`, preceded by `#define SC_RT_LK_STATS 1`: the runtime API
+level of the compiler that wrote the wrapper, which `ffi/sc_rt.c` tests to compile
+stand-ins for runtime entry points an older bootstrap runtime lacks (plain definitions;
+weak symbols do not resolve across objects on PE). Relative includes in the backing source
+continue to resolve correctly.
 
 ### Link flags
 

@@ -64,6 +64,11 @@ fn build_mem_records_allocation_counters() {
     // The child environment is a space-separated NAME=VALUE list, so the value carries the second switch.
     let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_BUILD_MEM=1", "build");
     assert(r.ok(), "the build succeeds");
+    if r.out_shows("\"mem\":{\"on\":false") {
+        // A compiler built by a bootstrap whose runtime predates the tracker's counters has no
+        // allocation columns to record (CI tests that binary before it rebuilds itself).
+        return;
+    }
     assert(r.out_shows("\"mem\":{\"on\":true"), "memory tracking is on");
     assert(r.out_has("{\"at\":\"frontend\",\"rss_mib\":"), "the frontend boundary is sampled");
     assert(r.out_has("{\"at\":\"build\",\"rss_mib\":"), "and the build-complete boundary");

@@ -234,7 +234,7 @@ sanitizer frames dominate the samples.
 |----------|--------|
 | `SC_TIMINGS` | Print a one-line per-phase timing summary |
 | `SC_BUILD_STATS` | Append one JSON record per engine build to the named file (`-` = stderr): every phase of the partition in ms, the streamed C compile span apart from it, cache switches, peak RSS at five boundaries (`src/driver/stats.spc`) |
-| `SC_BUILD_MEM` | With `SC_BUILD_STATS`: turn the runtime allocation tracker on for the build, so the record carries allocation calls, requested bytes, live bytes and per-phase survivors (slower; never for timing runs) |
+| `SC_BUILD_MEM` | With `SC_BUILD_STATS`: turn the runtime allocation tracker on for the build, so the record carries allocation calls, requested bytes, live bytes and per-phase survivors (slower; never for timing runs). `"mem":{"on":false` = the runtime this compiler links predates the counters (a bootstrap build) |
 | `SC_CACHE_DIR` | Override build-record cache directory |
 | `SC_NO_CACHE` | Disable the build-record cache |
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |

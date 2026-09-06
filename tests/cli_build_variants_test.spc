@@ -53,7 +53,9 @@ fn failed_c_compile_reports_status_and_keeps_the_log() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/bad.h", "int bad_value(void);\n");
-    p.mkfile("src/bad.c", "#include \"bad.h\"\nint bad_value(void) { return ; }\n");
+    // A missing semicolon: every C compiler rejects it (a bare `return` in a non-void function is
+    // only a warning under gcc).
+    p.mkfile("src/bad.c", "#include \"bad.h\"\nint bad_value(void) { return 0 }\n");
     p.mkfile(
         "src/main.spc",
         "extern \"C\" \"bad.h\" {\n    fn bad_value() i32;\n}\nfn main() i32 {\n    return unsafe bad_value();\n}\n",
