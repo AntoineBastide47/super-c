@@ -14,6 +14,7 @@ import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
 import borrowck::dataflow as bdf;
 import borrowck::loans as bln;
+import borrowck::flow_ir as bfi;
 
 fn t_resolve(p: &mut loader::Package, i: usize) bool {
     let pkg = p as *const loader::Package;
@@ -144,6 +145,17 @@ fn analyze(p: &loader::Package, name: str) BorrowOut {
     return out;
 }
 
+// The typed-IR feature bits of `name` (the loan-skip predicate's only input besides the signature).
+fn features_of(p: &loader::Package, name: str) u32 {
+    let node = find_fn(p, name);
+    assert(node != NODE_NONE, "function found");
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(p, u, node);
+    assert(lw.lower_fn(node), "body lowers");
+    let mut ow = bfx::Owner::new(p);
+    return bfi::body_features(&mut ow, &lw.body);
+}
+
 const fn clean(o: &BorrowOut) bool {
     return o.moves == 0 && o.conflicts == 0 && o.escapes == 0;
 }
@@ -181,6 +193,17 @@ fn use_after_move_rejected() {
     );
     let o = analyze(&p, "main");
     assert(o.moves != 0, "use after move reported");
+}
+
+@test
+fn raw_pointer_free_reads_pointer() {
+    // `.free()` through a raw pointer destroys the pointee, not the pointer: releasing the
+    // pointer's memory afterwards is legal. The owned local forces the full move analysis.
+    let p = typed_package(
+        "struct S { pub v: Vector<u8> }\nfn release(g: *mut S) { let s = String::new(); g.free(); let mut ga = Global {}; unsafe ga.dealloc(g, sizeof(S), alignof(S)); let n = s.len(); }\nfn main() i32 { return 0; }",
+    );
+    let o = analyze(&p, "release");
+    assert(clean(&o), "freeing through a raw pointer does not consume it");
 }
 
 @test
@@ -379,4 +402,90 @@ fn reference_solver_agrees() {
         "fn g() i32 { let mut v = Vector::<usize>::new(); v.push(v.len()); let mut x = 5; let r = &mut x; let r2 = &mut *r; *r2 = 6; return x; }\nfn main() i32 { return g(); }",
     );
     assert(ref_agrees(&q, "g"), "reborrow and two-phase shapes agree");
+}
+
+@test
+fn features_plain_body_skips_every_stage() {
+    // No carrier, no borrow op, no owned local, no split init: every stage may skip.
+    let p = typed_package(
+        "fn f(a: i32, b: i32) i32 { let c = a + b; return c * 2; }\nfn main() i32 { return f(1, 2); }",
+    );
+    let ft = features_of(&p, "f");
+    assert(ft == 0, "no feature bit set");
+    assert(bfi::loan_skip(ft), "loan skip allowed");
+    assert(bfi::stage_skip(ft), "stage skip allowed");
+}
+
+@test
+fn features_borrowed_param_holds_loans() {
+    // A reference parameter sets both the carrier and the borrowed-input bit; only the loan skip is withheld.
+    let p = typed_package("fn f(r: &i32) i32 { return *r + 1; }\nfn main() i32 { let x = 1; return f(&x); }");
+    let ft = features_of(&p, "f");
+    assert((ft & bfi::FT_BORROWED_PARAM) != 0, "borrowed param bit");
+    assert((ft & bfi::FT_CARRIER) != 0, "carrier bit");
+    assert((ft & bfi::FT_BORROW_OP) == 0, "no borrow op in the body");
+    assert(!bfi::loan_skip(ft), "loan skip withheld");
+}
+
+@test
+fn features_reference_rvalue_holds_loans() {
+    // `&x` is a borrow operation whatever the local types say.
+    let p = typed_package("fn f() i32 { let x = 1; let r = &x; return *r; }\nfn main() i32 { return f(); }");
+    let ft = features_of(&p, "f");
+    assert((ft & bfi::FT_BORROW_OP) != 0, "borrow op bit");
+    assert(!bfi::loan_skip(ft), "loan skip withheld");
+}
+
+@test
+fn features_call_result_carrier_holds_loans() {
+    // A reference obtained from a call has no borrow op in this body: the carrier bit alone holds the skip.
+    let p = typed_package(
+        "fn pick(v: &Vector<i32>) &i32 { return v.at(0); }\nfn f(v: Vector<i32>) i32 { let r = pick(&v); return *r; }\nfn g(v: &Vector<i32>) i32 { let r = pick(v); return *r; }\nfn main() i32 { return 0; }",
+    );
+    let ft = features_of(&p, "g");
+    assert((ft & bfi::FT_CARRIER) != 0, "carrier bit");
+    assert(!bfi::loan_skip(ft & ~bfi::FT_BORROWED_PARAM), "carrier alone withholds the loan skip");
+}
+
+@test
+fn features_generic_local_is_a_possible_reference() {
+    // An unresolved type parameter withholds the loan skip even with no other bit set.
+    let p = typed_package("fn f<T>(x: T) T { let y = x; return y; }\nfn main() i32 { return f::<i32>(1); }");
+    let ft = features_of(&p, "f");
+    assert((ft & bfi::FT_GENERIC) != 0, "generic bit");
+    assert(!bfi::loan_skip(ft), "loan skip withheld");
+    assert(bfi::loan_skip(ft & ~bfi::FT_GENERIC), "the generic bit is the only holder");
+}
+
+@test
+fn features_owned_local_keeps_move_tracking() {
+    // No reference anywhere, but an owning local: loans may skip, the move stages may not.
+    let p = typed_package(
+        "fn f() usize { let s = String::new(); let n = s.len(); return n; }\nfn main() i32 { return f() as i32; }",
+    );
+    let ft = features_of(&p, "f");
+    assert((ft & bfi::FT_OWNED) != 0, "owned bit");
+    assert(bfi::loan_skip(ft), "loan skip allowed");
+    assert(!bfi::stage_skip(ft), "stage skip withheld");
+}
+
+@test
+fn features_split_init_keeps_init_tracking() {
+    // A declaration initialized later needs the init dataflow even with plain types.
+    let p = typed_package(
+        "fn f(c: bool) i32 { let x: i32; if c { x = 1; } else { x = 2; } return x; }\nfn main() i32 { return f(true); }",
+    );
+    let ft = features_of(&p, "f");
+    assert((ft & bfi::FT_UNINIT) != 0, "uninit bit");
+    assert(bfi::loan_skip(ft), "loan skip allowed");
+    assert(!bfi::stage_skip(ft), "stage skip withheld");
+}
+
+@test
+fn features_closure_is_a_borrow_op() {
+    // A closure value can hold captured borrows: it withholds the loan skip.
+    let p = typed_package("fn f() i32 { let x = 1; let c = || x + 1; return c(); }\nfn main() i32 { return f(); }");
+    let ft = features_of(&p, "f");
+    assert((ft & bfi::FT_BORROW_OP) != 0, "borrow op bit");
+    assert(!bfi::loan_skip(ft), "loan skip withheld");
 }

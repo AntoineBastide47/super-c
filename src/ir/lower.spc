@@ -149,6 +149,25 @@ extend Keep {
         return Keep { ix: Map::<u64, u64>::new(), kept: Vector::<Lowerer>::new(), viewers: 0 };
     }
 
+    /// Size `kept` for every function and closure body of `p` at once. A Lowerer is large, so the
+    /// doubling chain would otherwise churn multi-megabyte blocks through the allocator each build.
+    pub fn reserve_bodies(self: &mut Self, p: &loader::Package) {
+        let mut n: usize = 0;
+        for m in 0..p.modules.len() {
+            if !p.modules.at(m).has_ast {
+                continue;
+            }
+            let a = unsafe &*p.module_ast_const(m as ModuleId);
+            for i in 0..a.nodes.len() {
+                let k = a.at_const(i as NodeId).kind;
+                if k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_CLOSURE {
+                    n += 1;
+                }
+            }
+        }
+        self.kept.reserve(n);
+    }
+
     /// The `kept` slot of the non-generic body `(module, node)`, or -1. Never a generic body: a
     /// caller without a substitution env cannot execute one.
     pub fn view(self: &Self, module: ModuleId, node: NodeId) i64 {
@@ -170,6 +189,7 @@ extend Keep {
     /// Slot order in `kept` is not load-bearing -- consumers index through `ix` by owner key.
     pub fn absorb(self: &mut Self, other: &mut Keep) {
         assert(self.viewers == 0);
+        self.kept.reserve(other.kept.len());
         for i in 0..other.kept.len() {
             let d = other.kept.at(i).body.owner;
             let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);

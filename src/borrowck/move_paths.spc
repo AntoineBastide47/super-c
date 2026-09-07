@@ -169,6 +169,11 @@ extend MoveForest {
         return MP_NONE;
     }
 
+    /// Heap bytes the forest keeps across bodies.
+    pub const fn scratch_bytes(self: &Self) u64 {
+        return (self.paths.capacity() * sizeof(MovePath) + (self.local_root.capacity() + self.place_path.capacity() + self.place_cut.capacity() + self.parent.capacity()) * 4 + self.leaf.capacity() * 8) as u64;
+    }
+
     /// True when `p` tracks no sub-places (its subtree is itself); a dense-bit read, replay-hot.
     pub const fn is_leaf(self: &Self, p: u32) bool {
         return (*self.leaf.at((p / 64) as usize) >> (p & 63) as u64 & 1u64) != 0;

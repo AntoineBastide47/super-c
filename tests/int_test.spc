@@ -5,6 +5,17 @@
 
 // These read like the built-in integers: a prelude module, so the aliases need no import, and an integer
 // literal or a `u64`/`i64` value converts through the `From` conformances wherever one is expected.
+const SUFFIXED: [u64; 4] = [1u64, 0x1Fu64, 1_000u64, 0b101u64];
+
+@test
+fn const_array_literals_keep_width_suffixes() {
+    // Element spellings reach C without the Super-C width suffix or digit separators.
+    assert(SUFFIXED[0] == 1);
+    assert(SUFFIXED[1] == 31);
+    assert(SUFFIXED[2] == 1000);
+    assert(SUFFIXED[3] == 5);
+}
+
 @test
 fn reads_like_a_builtin_integer() {
     let a: u128 = 42;

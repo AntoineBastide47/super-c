@@ -220,10 +220,26 @@ than defining a new context. Two layers:
    - `bc_replay` replays that tape — the same helper calls the old AST walk made
      (`bc_let_post`, `bc_assign_pre`, `bc_scope_close`, ...), without traversing the
      expression tree. The AST walk itself was deleted.
-   - `bc_ir_analyze` runs the loan analysis over the lowered bodies
-     (`src/borrowck/facts.spc` generates dense points/origins/loans/subset edges in Core
-     IR order; `loans.spc`/`dataflow.spc` solve them); `bc_ir_emit` reports.
+   - `bc_ir_analyze` runs the analyses over the lowered bodies through one reusable
+     `BorrowCtx` (`flow_ir.spc`): `body_features` reads the typed IR into feature bits
+     (`FT_CARRIER`, `FT_BORROWED_PARAM`, `FT_BORROW_OP`, `FT_GENERIC`, `FT_OWNED`,
+     `FT_UNINIT`, `FT_UNKNOWN`; locals' types through the ownership oracle, rvalue
+     kinds, never syntax), and the two pure predicates `loan_skip` / `stage_skip` are
+     the only skip decisions. A loan-skipped body gets a moves-only fact walk
+     (`Owner::generate_into(.., loans=false)`: events and block ranges, no origins,
+     loans, accesses, subsets, kills or liveness rows); otherwise `facts.spc` generates
+     dense points/origins/loans/subset edges in Core IR order and
+     `loans.spc`/`dataflow.spc` solve them. Every new loan source in `facts.spc` must
+     be covered by a feature bit: `SC_BC_VALIDATE=1` runs every skipped stage anyway
+     and asserts it found nothing (the gate's fixpoint and worker-identity builds run
+     under it). `bc_ir_emit` reports.
+   - Scratch is bounded: `BorrowCtx::trim_scratch` releases the six analyses' capacity
+     after a body that pushed it past `BC_SCRATCH_BUDGET`. Published results never point
+     into it (diagnostics are copied `FlowErr`s; kept bodies are `compact_from` copies).
    - Spent Lowerers are recycled into `ctx.lower_pool` and the shared `irl::Keep`.
+   - Parallel builds (`borrowck_all_par`) lease an `Owner` + `BorrowCtx` slot per task
+     from a mutex-guarded pool (`bc_slot_take`/`bc_slot_give`: never hold the guard
+     across the task), so at most one slot per concurrently running task ever exists.
 
 Callee resolution is never re-derived: the typechecker's `call_info` side table is the
 bridge (`bc_call_info`).
@@ -242,7 +258,10 @@ the move/init dataflow. Five classifications:
 | `DK_OVER` | Assignment overwrites an initialized value: free it first |
 | `DK_OVERC` | Overwrite of a maybe-moved value: the local's flag guards the free |
 
-Production consumer: emission's `DropCtx::apply_drops` (`src/driver/emit.spc`) builds
+Production consumer: emission's `DropCtx::apply_drops` (`src/driver/emit.spc`) first
+asks `ird::may_schedule` (an owning local, or a store whose destination place owns);
+a body that cannot schedule any drop skips the forest, facts, CFG, move dataflow and
+elaboration entirely. The rest generate moves-only facts (no loan discovery) and
 the move-path forest, ownership facts, CFG and move dataflow, then `elaborate_into` +
 `insert_drops(body, &mut ElabCtx, forest)` rewrites the body with explicit `TM_DROP`
 terminators before the C emitter renders it; the pass scratch rides in the `ElabCtx` and

@@ -4821,7 +4821,12 @@ fn render_const_elem(a: &Ast, src: str, eid: NodeId, out: &mut String) bool {
             out.push_str("\") - 1 }");
             return true;
         }
-        out.push_str(src.slice(a2, b2));
+        let txt = src.slice(a2, b2);
+        if txt.len() != 0 && txt.byte_at(0) >= 48 && txt.byte_at(0) <= 57 {
+            cbe::push_c_number(txt, out);
+        } else {
+            out.push_str(txt);
+        }
         return true;
     }
     if n.kind == NodeKind::NODE_STRUCT_INITIALIZER {
@@ -5536,12 +5541,16 @@ extend DropCtx {
             }
             self.pr.stop(prb::P_INLINE, im);
         }
-        self.forest.build_into(&lw.body);
-        self.ow.generate_into(&lw.body, &self.forest, &mut self.facts);
-        self.cfg.build_into(&lw.body);
-        self.mv.build_into(&lw.body, &self.forest, &self.facts, &self.cfg);
-        ird::elaborate_into(&mut self.ow, &lw.body, &self.forest, &self.facts, &self.mv, &mut self.el);
-        ird::insert_drops(&mut lw.body, &mut self.el, &self.forest);
+        // A body that can schedule no drop skips the move facts and the elaboration outright.
+        if ird::may_schedule(&mut self.ow, &lw.body) {
+            self.forest.build_into(&lw.body);
+            // Drop elaboration reads the move facts only: no loan discovery here.
+            self.ow.generate_into(&lw.body, &self.forest, &mut self.facts, false);
+            self.cfg.build_into(&lw.body);
+            self.mv.build_into(&lw.body, &self.forest, &self.facts, &self.cfg);
+            ird::elaborate_into(&mut self.ow, &lw.body, &self.forest, &self.facts, &self.mv, &mut self.el);
+            ird::insert_drops(&mut lw.body, &mut self.el, &self.forest);
+        }
         // Bounds-check elimination runs HERE, on the final elaborated body, so every emission
         // path (seed, instance, closure, wrapper) proves against the exact statements it emits.
         let mut bst = bce::BceStats::new();
@@ -5769,7 +5778,9 @@ fn borrowck_module(p: &mut loader::Package, i: usize, ow: &mut bfx::Owner, ctx: 
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
+    let ts = ctx.st.pr.start();
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    ctx.st.pr.stop(bfi::BP_SETUP, ts);
     t.borrowck(ow, ctx);
     let had = t.has_errors();
     p.lint_errs = p.lint_errs + t.errors.errors.len() as u32;
@@ -5788,6 +5799,7 @@ struct BcOut {
     pub lint: u32,
     pub errors: diag::Errors,
     pub keep: irl::Keep,
+    pub st: bfi::BcStats,
 }
 
 struct BcTask {
@@ -5795,29 +5807,63 @@ struct BcTask {
     pub i: usize,
     pub out: *mut BcOut,
     pub want_keep: bool,
+    pub pool: *mut psync::Mutex<Vector<BcSlot>>,
+}
+
+/// One analysis slot: an ownership oracle and a borrow pipeline. A task leases one from the pool
+/// for its whole run and returns it, so at most as many exist as tasks ever ran at once, and each
+/// keeps its memo tables and scratch capacity across the modules it served (the serial path's
+/// single slot, per worker). Memo answers depend only on (module, type), so which slot serves a
+/// module never changes an outcome.
+struct BcSlot {
+    pub ow: bfx::Owner,
+    pub ctx: bfi::BorrowCtx,
 }
 
 // The task closure crosses to a worker; the package and slots it points at are partitioned by
-// module and outlive the WaitGroup join.
+// module and outlive the WaitGroup join. A slot moves with the task that leased it.
 unsafe extend BcTask as Send {}
+
+unsafe extend BcSlot as Send {}
 
 fn bc_run_one(t: BcTask) {
     let pkg = t.p;
     let p = unsafe &mut *t.p;
-    let mut ow = bfx::Owner::new(p);
-    let mut ctx = bfi::BorrowCtx::new();
+    let mut slot = bc_slot_take(unsafe &*t.pool, p);
     if t.want_keep {
-        ctx.keep = &mut (unsafe &mut *t.out).keep;
+        slot.ctx.keep = &mut (unsafe &mut *t.out).keep;
     }
+    slot.ctx.st = bc_stats_new();
+    slot.ctx.validate = stdlib::getenv("SC_BC_VALIDATE") != null;
     let m = &mut p.modules[t.i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut tck = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    tck.borrowck(&mut ow, &mut ctx);
+    tck.borrowck(&mut slot.ow, &mut slot.ctx);
     let o = unsafe &mut *t.out;
     o.ok = !tck.has_errors();
     o.lint = tck.errors.errors.len() as u32;
     o.errors = replace(&mut tck.errors, diag::Errors::new());
+    o.st = replace(&mut slot.ctx.st, bfi::BcStats::new(false, false));
+    slot.ctx.keep = null;
+    bc_slot_give(unsafe &*t.pool, slot);
+}
+
+// The guard lives exactly as long as these bodies: a task never holds the pool lock while it runs.
+fn bc_slot_take(pool: &psync::Mutex<Vector<BcSlot>>, p: *const loader::Package) BcSlot {
+    let mut g = pool.lock();
+    switch g.pop() {
+        Some(s) => {
+            return s;
+        },
+        _ => {},
+    };
+    return BcSlot { ow: bfx::Owner::new(p), ctx: bfi::BorrowCtx::new() };
+}
+
+fn bc_slot_give(pool: &psync::Mutex<Vector<BcSlot>>, slot: BcSlot) {
+    let mut g = pool.lock();
+    g.push(slot);
 }
 
 /// Borrow-check every module through ONE ownership oracle and ONE borrow pipeline when serial
@@ -5833,13 +5879,31 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     let mut ow = bfx::Owner::new(p);
     let mut ctx = bfi::BorrowCtx::new();
     ctx.keep = keep;
+    if keep != null {
+        unsafe (&mut *keep).reserve_bodies(p);
+    }
+    ctx.st = bc_stats_new();
+    ctx.validate = stdlib::getenv("SC_BC_VALIDATE") != null;
     let mut ok = true;
     for i in 0..n {
         if !borrowck_module(p, i, &mut ow, &mut ctx) {
             ok = false;
         }
     }
+    bc_stats_print(&ctx.st, &ctx);
     return ok;
+}
+
+fn bc_stats_new() bfi::BcStats {
+    return bfi::BcStats::new(stdlib::getenv("SC_BORROW_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null);
+}
+
+fn bc_stats_print(st: &bfi::BcStats, ctx: &bfi::BorrowCtx) {
+    if st.pr.on {
+        let mut rep = String::new();
+        st.report(ctx, &mut rep);
+        rep.eprint();
+    }
 }
 
 fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
@@ -5860,7 +5924,15 @@ fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     }
     let mut outs = Vector::<BcOut>::with_capacity(n);
     for _ in 0..n {
-        outs.push(BcOut { ok: true, lint: 0, errors: diag::Errors::new(), keep: irl::Keep::new() });
+        outs.push(
+            BcOut {
+                ok: true,
+                lint: 0,
+                errors: diag::Errors::new(),
+                keep: irl::Keep::new(),
+                st: bfi::BcStats::new(false, false),
+            },
+        );
     }
     if p.jobs >= 2 {
         prt::set_worker_count(p.jobs as usize);
@@ -5870,8 +5942,10 @@ fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     wg.add(n as i64);
     let pp = p as *mut loader::Package;
     let want = keep != null;
+    let pool = psync::Mutex::<Vector<BcSlot>>::new(Vector::<BcSlot>::new());
+    let poolp = ((&pool) as *const psync::Mutex<Vector<BcSlot>>) as *mut psync::Mutex<Vector<BcSlot>>;
     for i in 0..n {
-        let t = BcTask { p: pp, i: i, out: outs.index_mut(i), want_keep: want };
+        let t = BcTask { p: pp, i: i, out: outs.index_mut(i), want_keep: want, pool: poolp };
         let wgc = wg.clone();
         launch || {
             bc_run_one(t);
@@ -5892,6 +5966,15 @@ fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
         if keep != null {
             unsafe (&mut *keep).absorb(&mut o.keep);
         }
+    }
+    {
+        // Task probes fold into one report; the retained-capacity line reads an empty context.
+        let mut st = bc_stats_new();
+        for i in 0..n {
+            st.merge(&outs.at(i).st);
+        }
+        let ctx9 = bfi::BorrowCtx::new();
+        bc_stats_print(&st, &ctx9);
     }
     for i in 0..n {
         p.modules[i].ast.ilock_on = false;

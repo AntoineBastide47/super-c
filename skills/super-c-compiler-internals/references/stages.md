@@ -66,11 +66,15 @@ Per function (`bc_fn`, extending `TypeChecker`):
    at the walk's AST sites.
 2. `bc_replay`: replay the tape — the same helper calls the deleted AST walk made,
    without traversing the expression tree.
-3. `bc_ir_analyze`: the loan analysis over the lowered bodies (facts generated in Core
-   IR order by `borrowck/facts.spc`; solved by `loans.spc`/`dataflow.spc`);
-   `bc_ir_emit` reports.
+3. `bc_ir_analyze`: per body, `flow_ir::body_features` reads the typed IR into feature
+   bits and `loan_skip` / `stage_skip` decide what runs: nothing, a moves-only fact walk
+   plus the move/init dataflow, or the full pipeline (facts generated in Core IR order by
+   `borrowck/facts.spc`; solved by `loans.spc`/`dataflow.spc`) inside one reusable,
+   budget-bounded `BorrowCtx`; `bc_ir_emit` reports. `SC_BC_VALIDATE=1` runs every
+   skipped stage and asserts it found nothing.
 4. Spent Lowerers are recycled into the shared `irl::Keep` cache — one lowering per
-   body, reused by emission.
+   body, reused by emission. Parallel builds lease an oracle + context slot per task
+   from a bounded pool.
 
 Declaration-level lifetime analyses (return-type elision, aggregate lifetime naming, the
 modular return-lifetime check) run alongside.
@@ -120,10 +124,12 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
   straight into its TU buffer (`emit_body_core_cf` threads it through the statement
   renderers; expression renderers spell into their `dst`), and the driver writes each
   part with four `fwrite`s, never a file image.
-- **Drop elaboration runs here, per body** (`DropCtx::apply_drops`): move-path forest,
-  ownership facts, CFG and move dataflow, then `ird::elaborate_into` +
-  `ird::insert_drops` rewrite the body with explicit `TM_DROP` terminators before
-  rendering. Free-glue wrapping (`<sym>__fb`) covers user `free` bodies that skip owning
+- **Drop elaboration runs here, per body** (`DropCtx::apply_drops`): when
+  `ird::may_schedule` says a drop is possible (an owning local or an owning store
+  destination), move-path forest, moves-only ownership facts, CFG and move dataflow,
+  then `ird::elaborate_into` + `ird::insert_drops` rewrite the body with explicit
+  `TM_DROP` terminators before rendering; other bodies skip straight to bounds-check
+  elimination. Free-glue wrapping (`<sym>__fb`) covers user `free` bodies that skip owning
   fields.
 - Symbol naming through `emit/mangle.spc` (the frozen authority): prefixing only with
   more than one non-prelude module; single-segment prefix when unique; prelude, `main`,

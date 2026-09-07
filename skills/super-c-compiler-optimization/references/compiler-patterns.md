@@ -156,3 +156,17 @@ the single largest waste in the pre-Phase-14 compiler.
   A parallel version of a slow algorithm is still slow.
 - **Speculative prefetch.** Modern CPUs have hardware prefetchers that handle sequential
   and strided access. Manual prefetch is almost never a win in compiler workloads.
+
+## Pre-size vectors of large records (no doubling chains through the large allocator)
+
+`Vector<Lowerer>` stores about 1.8 KiB per body: the borrow-check `Keep` and the instance
+graph's `kept` both reach 7 MiB for the compiler's own sources. Growing them by doubling
+frees a 3.5 MiB block into a 7 MiB one on every build; macOS malloc kept those freed
+large regions mapped and resident (`vmmap --summary`: `MALLOC_LARGE (empty)`), and the
+100-round serial benchmark climbed from 288 to 445 MiB peak RSS once the surrounding
+allocation sequence changed. `Keep::reserve_bodies` (one node-kind count over the
+package) and `InstGraph::collect` (the keep's length) size them once; peak RSS returned
+to 285 MiB. Sample a growing process with `vmmap` and `malloc_history` under
+`MallocStackLogging=1` before bisecting source changes: the empty region sizes name the
+vector.
+

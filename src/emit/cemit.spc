@@ -6260,21 +6260,7 @@ extend CEmit {
                 let txt = s0.slice(sp.start as usize, sp.end as usize);
                 let b0 = txt.byte_at(0);
                 if b0 >= 48 && b0 <= 57 {
-                    // Strip a width suffix C cannot parse; keep the digits exactly.
-                    let n = txt.len();
-                    let mut i: usize = 0;
-                    let hex = n > 2 && txt.byte_at(1) == 120;
-                    while i < n {
-                        let ch = txt.byte_at(i);
-                        let is_digit = ch >= 48 && ch <= 57 || ch == 95 || i < 2 && (ch == 120 || ch == 98 || ch == 111) || hex && (ch >= 97 && ch <= 102 || ch >= 65 && ch <= 70);
-                        if !is_digit {
-                            break;
-                        }
-                        if ch != 95 {
-                            dst.push_byte(ch);
-                        }
-                        i += 1;
-                    }
+                    push_c_number(txt, dst);
                     spelled = true;
                 }
             }
@@ -11045,6 +11031,25 @@ fn collect_ident_hashes(s: str, out: &mut Vector<u64>) {
         } else {
             i += 1;
         }
+    }
+}
+
+/// A numeric literal's C spelling: its prefix, digits, point and exponent exactly, minus the
+/// digit separators and the width suffix C cannot parse (`0x1Fu8` -> `0x1F`, `1_000` -> `1000`).
+pub fn push_c_number(txt: str, dst: &mut String) {
+    let n = txt.len();
+    let hex = n > 2 && txt.byte_at(0) == 48 && (txt.byte_at(1) == 120 || txt.byte_at(1) == 88);
+    let mut i: usize = 0;
+    while i < n {
+        let ch = txt.byte_at(i);
+        let body = ch >= 48 && ch <= 57 || ch == 95 || ch == 46 || i < 2 && (ch == 120 || ch == 98 || ch == 111) || hex && (ch >= 97 && ch <= 102 || ch >= 65 && ch <= 70) || !hex && (ch == 101 || ch == 69 || ch == 43 || ch == 45);
+        if !body {
+            break;
+        }
+        if ch != 95 {
+            dst.push_byte(ch);
+        }
+        i += 1;
     }
 }
 

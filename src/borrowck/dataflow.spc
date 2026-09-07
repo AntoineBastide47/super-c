@@ -53,6 +53,11 @@ extend Cfg {
             s_stack: Vector::<u64>::new(),
         };
     }
+
+    /// Heap bytes kept across bodies (capacity, not length).
+    pub const fn scratch_bytes(self: &Self) u64 {
+        return (self.succ.capacity() * sizeof(u32) + self.succ_start.capacity() * sizeof(u32) + self.pred.capacity() * sizeof(u32) + self.pred_start.capacity() * sizeof(u32) + self.rpo.capacity() * sizeof(u32) + self.rpo_pos.capacity() * sizeof(u32) + self.s_cnt.capacity() * sizeof(u32) + self.s_color.capacity() * sizeof(u8) + self.s_stack.capacity() * sizeof(u64)) as u64;
+    }
 }
 
 /// The control-flow graph of `b`, freshly allocated, with predecessors built.
@@ -193,6 +198,11 @@ extend Liveness {
             s_queue: Vector::<u32>::new(),
             s_queued: Vector::<bool>::new(),
         };
+    }
+
+    /// Heap bytes kept across bodies (capacity, not length).
+    pub const fn scratch_bytes(self: &Self) u64 {
+        return (self.live_in.capacity() * sizeof(u64) + self.live_out.capacity() * sizeof(u64) + self.s_queue.capacity() * sizeof(u32) + self.s_queued.capacity() * sizeof(bool)) as u64;
     }
 }
 
@@ -491,6 +501,11 @@ extend MoveFlow {
             s_scratch: Vector::<u32>::new(),
             s_sub: Vector::<u32>::new(),
         };
+    }
+
+    /// Heap bytes kept across bodies (capacity, not length).
+    pub const fn scratch_bytes(self: &Self) u64 {
+        return (self.mi.capacity() * sizeof(u64) + self.di.capacity() * sizeof(u64) + self.mm.capacity() * sizeof(u64) + self.errs.capacity() * sizeof(MoveErr) + self.s_reached.capacity() * sizeof(bool) + self.s_queue.capacity() * sizeof(u32) + self.s_queued.capacity() * sizeof(bool) + self.s_scratch.capacity() * sizeof(u32) + self.s_sub.capacity() * sizeof(u32) + (self.s_ctx.mi.capacity() + self.s_ctx.di.capacity() + self.s_ctx.mm.capacity()) * 8) as u64;
     }
 }
 

@@ -23,7 +23,7 @@ pub const P_RENDER: usize = 7; // statement and expression rendering (less plann
 pub const P_ASSEMBLE: usize = 8; // header and TU assembly
 pub const P_PUBLISH: usize = 9; // file publication (less the build engine sink)
 pub const P_SYNC: usize = 10; // build engine sink: raw to gen sync and compile planning
-pub const P_COUNT: usize = 11;
+pub const P_COUNT: usize = 12;
 
 /// Repeated-work tallies.
 pub const C_TAKEN: usize = 0; // bodies taken from the keep
@@ -50,7 +50,7 @@ const REGION_NAMES: [str<'static>; 11] = [
     "publish",
     "sync",
 ];
-static_assert(P_COUNT == 11, "one name per region");
+static_assert(P_COUNT >= 11, "one slot per emission region");
 
 pub struct Probe {
     pub on: bool,
@@ -159,18 +159,23 @@ extend Probe {
         }
     }
 
-    /// The report: one row per region, then the repeated-work tallies.
-    pub fn report(self: &Self, out: &mut String) {
-        out.push_str("emit-probe            ms      calls");
+    /// The region table under `title`: one row per named region (a region past `names` is not
+    /// shown), then the total.
+    pub fn report_regions(self: &Self, out: &mut String, title: str, names: []str) {
+        out.push_str(title);
+        for _i in title.len()..22 {
+            out.push_byte(b' ');
+        }
+        out.push_str("ms      calls");
         if self.mem {
             out.push_str("     allocs      MiB");
         }
         out.push_str("\n");
         let mut total: u64 = 0;
-        for k in 0..P_COUNT {
+        for k in 0..names.len() {
             total += self.ns[k];
             out.push_str("  ");
-            let nm = unsafe REGION_NAMES[k];
+            let nm = names[k];
             out.push_str(nm);
             for _i in nm.len()..12 {
                 out.push_byte(b' ');
@@ -187,6 +192,12 @@ extend Probe {
         out.push_str("  total       ");
         push_ms(out, total);
         out.push_str("\n");
+    }
+
+    /// The emission report: the region table, then the repeated-work tallies.
+    pub fn report(self: &Self, out: &mut String) {
+        let names: []str = REGION_NAMES;
+        self.report_regions(out, "emit-probe", names);
         out.push_str("  bodies taken ");
         out.push_u64(self.c[C_TAKEN]);
         out.push_str(", lowered ");

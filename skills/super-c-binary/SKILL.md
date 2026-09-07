@@ -248,6 +248,8 @@ sanitizer frames dominate the samples.
 | `SC_FACTS_CHECK` | Snapshot semantic tables after typecheck; report mutations |
 | `SC_CORE_IR` | Re-verify inlined bodies and re-prove bounds-check eliminations |
 | `SC_LAYOUT` | Validate pool types against C layout invariants |
+| `SC_BORROW_STATS` | Borrow-check probe table (`src/borrowck/flow_ir.spc`): ms, calls and (with `SC_BUILD_STATS` + `SC_BUILD_MEM`) allocations per region (lower, replay, forest, facts, cfg, liveness, moves, solver, rules, emit, setup, decl), skip tallies, sizes, the slowest bodies and the retained scratch. Needs `SC_BUILD_STATS`; parallel allocation columns are global counters and mean nothing |
+| `SC_BC_VALIDATE` | Validation build: every borrow-check stage the feature predicate skipped runs anyway and must find nothing (zero loans, zero move events, no diagnostic); aborts otherwise. Output is unchanged. The gate runs its fixpoint and worker-identity builds under it |
 | `SC_CEMIT_STATS` | Per-phase wall times, the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes) and the emission probe table (`src/emit/probe.spc`: ms and calls per region; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
 | `SC_INLINE_STATS` | Per-body inliner decision counters |
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters |

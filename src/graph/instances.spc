@@ -1294,6 +1294,13 @@ extend InstGraph {
     pub fn collect(self: &mut Self) {
         let p = unsafe &*self.pkg;
         let empty = Vector::<Subst>::new();
+        if self.keep != null {
+            // Every kept body moves in here: size the vectors once instead of doubling them
+            // through a chain of multi-megabyte reallocations (a Lowerer is large).
+            let nk = (unsafe &*self.keep).kept.len();
+            self.kept.reserve(nk);
+            self.wcache.reserve(nk);
+        }
         for m in 0..p.modules.len() {
             if !p.modules.at(m).has_ast {
                 continue;

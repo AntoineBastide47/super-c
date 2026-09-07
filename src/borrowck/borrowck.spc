@@ -61,6 +61,7 @@ extend tc::TypeChecker {
     /// `ow`/`ctx` are the package-level ownership oracle and borrow pipeline: one of each per
     /// build, so their memo tables and vector capacities survive across modules.
     pub fn borrowck(self: &mut Self, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
+        let tp = ctx.st.pr.start();
         if self.package != null && unsafe (&*self.package).co_state == 0 {
             // Single-threaded phase: the const package pointer is the one place mutated (cir precedent).
             unsafe (&mut *self.package).co_compute();
@@ -68,6 +69,7 @@ extend tc::TypeChecker {
         if self.package != null && unsafe (&*self.package).cancel_state == 0 {
             unsafe (&mut *self.package).cancel_compute();
         }
+        ctx.st.pr.stop(bfi::BP_SETUP, tp);
         let a = self.cur_ast();
         let items = unsafe a.at_const(a.root).as_data.program.items;
         for i in 0..items.len {
@@ -78,7 +80,9 @@ extend tc::TypeChecker {
         if self.package != null && self.cur_module() as usize < self.pkg_count() {
             file = unsafe self.package.modules[self.cur_module() as usize].file.as_str();
         }
+        let ts = ctx.st.pr.start();
         self.errors.finalize(self.source, file);
+        ctx.st.pr.stop(bfi::BP_SETUP, ts);
     }
 
     /// Borrow-check one top-level item: functions get the body walk, aggregates their field-lifetime
@@ -89,11 +93,15 @@ extend tc::TypeChecker {
         let nk = a.at_const(id).kind;
         switch nk {
             NODE_FUNCTION => {
+                let td = ctx.st.pr.start();
                 self.tc_check_elision(id);
+                ctx.st.pr.stop(bfi::BP_DECL, td);
                 self.bc_fn(id, ow, ctx);
             },
             NODE_STRUCT | NODE_ENUM => {
+                let td = ctx.st.pr.start();
                 self.tc_check_field_lifetimes(id, a.at_const(id).as_data.aggregate.members);
+                ctx.st.pr.stop(bfi::BP_DECL, td);
             },
             NODE_EXTEND => {
                 let ms = a.at_const(id).as_data.extend_def.items;
@@ -2674,25 +2682,33 @@ extend tc::TypeChecker {
         // fails to lower was reported as an error by bc_ir_lower: nothing further to check.
         self.bc_unsafe_spans.truncate(0);
         let mut irbodies = Vector::<irl::Lowerer>::new();
+        let tl = ctx.st.pr.start();
         let quiet = self.bc_ir_lower(id, ctx, &mut irbodies);
+        ctx.st.pr.stop(bfi::BP_LOWER, tl);
         for b in 0..irbodies.len() {
             let bw = irbodies.at(b);
             for u in 0..bw.unsafe_spans.len() {
                 self.bc_unsafe_spans.push(bw.unsafe_spans[u]);
             }
         }
+        let td = ctx.st.pr.start();
         self.region_reset(id);
         for pi in 0..fnd.params.len {
             let pid = unsafe a.list(fnd.params)[pi as usize];
             self.region_alloc_for(pid, a.type_of(pid));
         }
+        ctx.st.pr.stop(bfi::BP_DECL, td);
         if quiet && irbodies.len() != 0 {
             ctx.rep.reset();
             let tn = irbodies.at(0).tape.len();
+            let tr = ctx.st.pr.start();
             self.bc_replay(&irbodies, 0, 0, tn, &mut ctx.rep);
+            ctx.st.pr.stop(bfi::BP_REPLAY, tr);
             let mut irres = Vector::<bfi::FlowErr>::new();
             self.bc_ir_analyze(ow, &irbodies, ctx, &mut irres);
+            let te = ctx.st.pr.start();
             self.bc_ir_emit(&mut irres);
+            ctx.st.pr.stop(bfi::BP_EMIT, te);
         }
         // Recycle the spent Lowerers (and their CoreBody pools) instead of freeing them.
         loop {

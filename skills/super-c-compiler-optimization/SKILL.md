@@ -342,6 +342,21 @@ phase (slower: only for memory questions). `sh ci/bench_matrix.sh` runs the clea
 unchanged / body-edit / signature-edit / layout-edit / release-relink matrix with
 those records and writes `build/matrix/report.md`.
 
+### Borrow-check probe and budget
+
+`SC_BORROW_STATS=1 SC_BUILD_STATS=- super-c build --jobs=1 --out-dir=<fresh>` prints the
+borrow probe (regions, skip tallies, sizes, slowest bodies, retained scratch); add
+`--cc=true` for a 1.2 s frontend-plus-emission run (the link fails after the tables).
+Always a fresh out-dir: the emit stamp otherwise reports `borrowck: 0`. Measured split
+on the reference sources (serial release, 4100 bodies, 2026-09): lowering 18 ms and
+replay 13 ms are required work; the analyses (forest, facts, cfg, liveness, moves,
+solver, rules) sum to about 64 ms and 15k allocations, down from 76 ms and 129k.
+Budget for the analyses, gate the row before accepting a change: analysis time <= 70 ms,
+analysis allocations <= 20k, retained scratch <= `BC_SCRATCH_BUDGET` after any body,
+the emission `drops` region <= 55 ms serial, and `SC_BC_VALIDATE=1` builds (serial and
+every core) clean. The parallel path adds slot pooling, so its allocation count sits
+near the serial one plus one stack per worker.
+
 ### Bench gate policy
 
 Keep changes that:

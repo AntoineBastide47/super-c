@@ -11,6 +11,176 @@ import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
 import borrowck::dataflow as bdf;
 import borrowck::loans as bln;
+import emit::probe as prb;
+
+/// Borrow-pass probe regions (SC_BORROW_STATS): lowering, the tape replay, the six analysis
+/// stages, the Free-move rules with the wording, and diagnostic emission.
+pub const BP_LOWER: usize = 0;
+pub const BP_REPLAY: usize = 1;
+pub const BP_FOREST: usize = 2;
+pub const BP_FACTS: usize = 3;
+pub const BP_CFG: usize = 4;
+pub const BP_LIVE: usize = 5;
+pub const BP_MOVES: usize = 6;
+pub const BP_SOLVER: usize = 7;
+pub const BP_RULES: usize = 8;
+pub const BP_EMIT: usize = 9;
+pub const BP_SETUP: usize = 10; // per-module checker construction and diagnostic finalization
+pub const BP_DECL: usize = 11; // declaration-level lifetime checks and the per-function preludes
+const BP_NAMES: [str<'static>; 12] = [
+    "lower",
+    "replay",
+    "forest",
+    "facts",
+    "cfg",
+    "liveness",
+    "moves",
+    "solver",
+    "rules",
+    "emit",
+    "setup",
+    "decl",
+];
+static_assert(BP_DECL + 1 == 12, "one name per borrow region");
+static_assert(BP_DECL < prb::P_COUNT, "the borrow regions fit the probe");
+
+/// Per-body tallies.
+pub const BT_BODIES: usize = 0; // bodies analyzed (closures included)
+pub const BT_BORING: usize = 1; // every stage skipped (stage_skip)
+pub const BT_MV_SKIP: usize = 2; // move/init dataflow skipped
+pub const BT_LV_SKIP: usize = 3; // liveness skipped (no loan)
+pub const BT_CFG_SKIP: usize = 4; // CFG never built
+pub const BT_LOANS: usize = 5;
+pub const BT_PATHS: usize = 6;
+pub const BT_POINTS: usize = 7;
+pub const BT_BLOCKS: usize = 8;
+pub const BT_LOCALS: usize = 9;
+pub const BT_PLACES: usize = 10;
+pub const BT_PROJS: usize = 11;
+pub const BT_STMTS: usize = 12;
+pub const BT_LOAN_SKIP: usize = 13; // loan discovery and dataflow skipped, move facts still generated
+pub const BT_GENERIC_HELD: usize = 14; // the loan skip withheld only because a type is unresolved
+pub const BT_TRIMS: usize = 15; // scratch releases past BC_SCRATCH_BUDGET
+pub const BT_COUNT: usize = 16;
+const TOP_N: usize = 8;
+
+/// The probe and its tallies, one per context; task copies fold into the driver's.
+pub struct BcStats {
+    pub pr: prb::Probe,
+    pub t: Array<u64, BT_COUNT>,
+    pub top_ns: Array<u64, TOP_N>, // the slowest bodies' analysis time, descending
+    pub top_id: Array<u64, TOP_N>, // module << 32 | owner node
+    pub top_sz: Array<u64, TOP_N>, // blocks << 32 | points
+}
+
+extend BcStats {
+    pub fn new(on: bool, mem: bool) BcStats {
+        return BcStats {
+            pr: prb::Probe::new(on, mem),
+            t: Array::<u64, BT_COUNT>::new(),
+            top_ns: Array::<u64, TOP_N>::new(),
+            top_id: Array::<u64, TOP_N>::new(),
+            top_sz: Array::<u64, TOP_N>::new(),
+        };
+    }
+
+    /// Record body `id` (module << 32 | node) that took `ns` when it ranks among the slowest.
+    fn top_insert(self: &mut Self, ns: u64, id: u64, sz: u64) {
+        if ns <= self.top_ns[TOP_N - 1] {
+            return;
+        }
+        let mut k = TOP_N - 1;
+        while k > 0 && self.top_ns[k - 1] < ns {
+            self.top_ns[k] = self.top_ns[k - 1];
+            self.top_id[k] = self.top_id[k - 1];
+            self.top_sz[k] = self.top_sz[k - 1];
+            k -= 1;
+        }
+        self.top_ns[k] = ns;
+        self.top_id[k] = id;
+        self.top_sz[k] = sz;
+    }
+
+    /// Fold a task's stats into this one.
+    pub fn merge(self: &mut Self, o: &BcStats) {
+        self.pr.merge(&o.pr);
+        for k in 0..BT_COUNT {
+            self.t[k] += o.t[k];
+        }
+        for k in 0..TOP_N {
+            self.top_insert(o.top_ns[k], o.top_id[k], o.top_sz[k]);
+        }
+    }
+
+    /// The report: regions, tallies, the slowest bodies, and the retained scratch capacity.
+    pub fn report(self: &Self, ctx: &BorrowCtx, out: &mut String) {
+        let names: []str = BP_NAMES;
+        self.pr.report_regions(out, "borrow-probe", names);
+        out.push_str("  bodies ");
+        out.push_u64(self.t[BT_BODIES]);
+        out.push_str(": every stage skipped ");
+        out.push_u64(self.t[BT_BORING]);
+        out.push_str(", loans skipped ");
+        out.push_u64(self.t[BT_LOAN_SKIP]);
+        out.push_str(", held by generics ");
+        out.push_u64(self.t[BT_GENERIC_HELD]);
+        out.push_str(", scratch trims ");
+        out.push_u64(self.t[BT_TRIMS]);
+        out.push_str(", moves skipped ");
+        out.push_u64(self.t[BT_MV_SKIP]);
+        out.push_str(", liveness skipped ");
+        out.push_u64(self.t[BT_LV_SKIP]);
+        out.push_str(", cfg skipped ");
+        out.push_u64(self.t[BT_CFG_SKIP]);
+        out.push_str("\n  sizes: blocks ");
+        out.push_u64(self.t[BT_BLOCKS]);
+        out.push_str(", statements ");
+        out.push_u64(self.t[BT_STMTS]);
+        out.push_str(", locals ");
+        out.push_u64(self.t[BT_LOCALS]);
+        out.push_str(", places ");
+        out.push_u64(self.t[BT_PLACES]);
+        out.push_str(", projections ");
+        out.push_u64(self.t[BT_PROJS]);
+        out.push_str(", points ");
+        out.push_u64(self.t[BT_POINTS]);
+        out.push_str(", move paths ");
+        out.push_u64(self.t[BT_PATHS]);
+        out.push_str(", loans ");
+        out.push_u64(self.t[BT_LOANS]);
+        out.push_str("\n  slowest bodies (module:node ms blocks/points):");
+        for k in 0..TOP_N {
+            if self.top_ns[k] == 0 {
+                break;
+            }
+            out.push_str(" ");
+            out.push_u64(self.top_id[k] >> 32);
+            out.push_str(":");
+            out.push_u64(self.top_id[k] & 0xFFFFFFFFu64);
+            out.push_str(" ");
+            out.push_f64_prec(self.top_ns[k] as f64 / 1000000.0, 2);
+            out.push_str(" ");
+            out.push_u64(self.top_sz[k] >> 32);
+            out.push_str("/");
+            out.push_u64(self.top_sz[k] & 0xFFFFFFFFu64);
+        }
+        out.push_str("\n  retained scratch: forest ");
+        out.push_u64(ctx.forest.scratch_bytes() >> 10);
+        out.push_str(" KiB, facts ");
+        out.push_u64(ctx.facts.scratch_bytes() >> 10);
+        out.push_str(" KiB, cfg ");
+        out.push_u64(ctx.cfg.scratch_bytes() >> 10);
+        out.push_str(" KiB, liveness ");
+        out.push_u64(ctx.liveness.scratch_bytes() >> 10);
+        out.push_str(" KiB, moves ");
+        out.push_u64(ctx.moves.scratch_bytes() >> 10);
+        out.push_str(" KiB, solver ");
+        out.push_u64(ctx.solver.scratch_bytes() >> 10);
+        out.push_str(" KiB, lowerer pool ");
+        out.push_u64(ctx.lower_pool.len() as u64);
+        out.push_str(" entries\n");
+    }
+}
 
 /// One move/init/borrow diagnostic in source-span form, before wording and dedup.
 pub struct FlowErr {
@@ -75,9 +245,37 @@ pub struct BorrowCtx {
     /// Package store the driver hands in (null = discard lowerings): every body that lowers is
     /// adopted here so the backend never lowers it again.
     pub keep: *mut irl::Keep,
+    pub st: BcStats,
+    /// Validation build (SC_BC_VALIDATE): every skipped stage runs and its emptiness is asserted.
+    pub validate: bool,
 }
 
+/// Heap the six analyses may keep across bodies. One outsized body grows the scratch past it; the
+/// release after that body keeps every later body's retained capacity bounded by its own needs.
+pub const BC_SCRATCH_BUDGET: u64 = 8u64 << 20;
+
 extend BorrowCtx {
+    /// Heap bytes the six analyses keep across bodies (capacity, not length).
+    pub const fn scratch_bytes(self: &Self) u64 {
+        return self.forest.scratch_bytes() + self.facts.scratch_bytes() + self.cfg.scratch_bytes() + self.liveness.scratch_bytes() + self.moves.scratch_bytes() + self.solver.scratch_bytes();
+    }
+
+    /// Release the analysis scratch when it outgrew the budget; the next body reallocates to its own size.
+    fn trim_scratch(self: &mut Self) {
+        if self.scratch_bytes() <= BC_SCRATCH_BUDGET {
+            return;
+        }
+        self.forest = bmp::MoveForest::empty();
+        self.facts = bfx::BodyFacts::empty();
+        self.cfg = bdf::Cfg::empty();
+        self.liveness = bdf::Liveness::empty();
+        self.moves = bdf::MoveFlow::empty();
+        self.solver = bln::Solver::empty();
+        if self.st.pr.on {
+            self.st.t[BT_TRIMS] += 1;
+        }
+    }
+
     /// A context with every analysis empty; the first body allocates.
     pub fn new() BorrowCtx {
         return BorrowCtx {
@@ -92,6 +290,8 @@ extend BorrowCtx {
             escaping: Vector::<u32>::new(),
             lower_pool: Vector::<irl::Lowerer>::new(),
             keep: null,
+            st: BcStats::new(false, false),
+            validate: false,
         };
     }
 }
@@ -110,50 +310,116 @@ fn bc_lw_take(ctx: &mut BorrowCtx, pkg: *const loader::Package, m: ModuleId, own
     return irl::Lowerer::new(pkg, m, owner);
 }
 
+/// Typed-IR feature summary of one lowered body. Every bit over-approximates a fact-generation
+/// trigger, read from the locals' types through the ownership oracle and from the operation kinds,
+/// never from source syntax.
+pub const FT_CARRIER: u32 = 1; // a local's type carries a borrow (reference, dyn, capturing closure, a container of one), or is an untyped multi-return temp
+pub const FT_BORROWED_PARAM: u32 = 2; // an argument local carries: the signature takes a borrowed input
+pub const FT_BORROW_OP: u32 = 4; // a reference, address, slice, erasure or closure rvalue
+pub const FT_GENERIC: u32 = 8; // a local's type mentions an unresolved type parameter: a possible reference
+pub const FT_OWNED: u32 = 16; // a local's type owns (Free): move and drop tracking
+pub const FT_UNINIT: u32 = 32; // a split-init declaration: init tracking
+pub const FT_UNKNOWN: u32 = 64; // an rvalue kind outside the classified set
+
+/// The feature bits of `body`.
+pub fn body_features(ow: &mut bfx::Owner, body: &ir::CoreBody) u32 {
+    let m = body.module;
+    let mut ft: u32 = 0;
+    if body.has_uninit_decl {
+        ft = ft | FT_UNINIT;
+    }
+    let nargs_end = body.returns + body.args;
+    for l in 0..body.locals.len() {
+        let ld = *body.locals.at(l);
+        if ld.ty == TYPE_NONE {
+            if ld.storage == ir::LS_TEMP {
+                ft = ft | FT_CARRIER;
+            }
+            continue;
+        }
+        if !ow.ast_of(m).type_concrete(ld.ty) {
+            ft = ft | FT_GENERIC;
+        }
+        if ow.carries(m, ld.ty) {
+            ft = ft | FT_CARRIER;
+            if ld.storage == ir::LS_ARG && l as u32 >= body.returns && l as u32 < nargs_end {
+                ft = ft | FT_BORROWED_PARAM;
+            }
+        }
+        if ow.owns(m, ld.ty) {
+            ft = ft | FT_OWNED;
+        }
+    }
+    for r in 0..body.rvalues.len() {
+        let k = body.rvalues.at(r).kind;
+        if k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_SLICE || k == ir::RV_DYN || k == ir::RV_CLOSURE {
+            ft = ft | FT_BORROW_OP;
+        } else if k > ir::RV_SLICE {
+            ft = ft | FT_UNKNOWN;
+        }
+    }
+    return ft;
+}
+
+/// May loan discovery and loan dataflow skip? Only when no bit that can produce a loan is set:
+/// every loan the generator records needs a borrow rvalue, a carrying destination, or a closure,
+/// and a borrowed input or an unresolved type could hide one behind a substitution.
+pub const fn loan_skip(ft: u32) bool {
+    return (ft & (FT_CARRIER | FT_BORROWED_PARAM | FT_BORROW_OP | FT_GENERIC | FT_UNKNOWN)) == 0;
+}
+
+/// May every analysis stage skip? The loan skip, plus no owned local (no move or free event can
+/// exist) and no split-init declaration (no uninit read can exist): every stage is a no-op.
+pub const fn stage_skip(ft: u32) bool {
+    return loan_skip(ft) && (ft & (FT_OWNED | FT_UNINIT)) == 0;
+}
+
 /// Run the six analysis stages for `body` into `ctx` (reset-and-refill keeps vector capacity
 /// across bodies). Returns true when any move or borrow error was recorded: the wording pass
 /// (or the module's serial replay) then has something to say. Pure over the frozen `body`, the
 /// package's read-only ASTs, and the two private accumulators, so workers may run it concurrently.
+/// Under `ctx.validate` the skipped work runs anyway and its emptiness is asserted.
 pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBody) bool {
-    // Conservative pre-classification, each check over-approximating a fact-generation trigger.
-    // `slim` (no carrier-typed local, field-transitive, and no ref/addr/slice/dyn/closure/asm)
-    // proves no loan, origin, universal, or access can exist: fact generation records only the
-    // move/init events. `boring` additionally proves no owned local (no move or free event) and
-    // no split-init declaration (no uninit): every stage is a no-op and all of them skip.
-    let m = body.module;
-    let mut carrier = false;
-    let mut owned = false;
-    for l in 0..body.locals.len() {
-        let ty = body.locals.at(l).ty;
-        if !carrier && ow.carries(m, ty) {
-            carrier = true;
+    let ft = body_features(ow, body);
+    let lskip = loan_skip(ft);
+    let sskip = stage_skip(ft);
+    let on9 = ctx.st.pr.on;
+    if on9 {
+        ctx.st.t[BT_BODIES] += 1;
+        ctx.st.t[BT_BLOCKS] += body.blocks.len() as u64;
+        ctx.st.t[BT_STMTS] += body.statements.len() as u64;
+        ctx.st.t[BT_LOCALS] += body.locals.len() as u64;
+        ctx.st.t[BT_PLACES] += body.places.len() as u64;
+        ctx.st.t[BT_PROJS] += body.projections.len() as u64;
+        if sskip {
+            ctx.st.t[BT_BORING] += 1;
+        } else if lskip {
+            ctx.st.t[BT_LOAN_SKIP] += 1;
         }
-        if !owned && ow.owns(m, ty) {
-            owned = true;
-        }
-        if carrier && owned {
-            break;
-        }
-    }
-    // The syntax sweeps only matter when the locals scan left slim possible.
-    let mut synt = carrier;
-    if !synt {
-        for r in 0..body.rvalues.len() {
-            let k = body.rvalues.at(r).kind;
-            if k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_SLICE || k == ir::RV_DYN || k == ir::RV_CLOSURE {
-                synt = true;
-                break;
-            }
+        if (ft & FT_GENERIC) != 0 && loan_skip(ft & ~FT_GENERIC) {
+            ctx.st.t[BT_GENERIC_HELD] += 1;
         }
     }
-    let slim = !carrier && !synt;
-    if slim && !owned && !body.has_uninit_decl {
+    if sskip && !ctx.validate {
         ctx.moves.errs.truncate(0);
         ctx.solver.errs.truncate(0);
         return false;
     }
+    let t0 = ctx.st.pr.start();
     ctx.forest.build_into(body);
-    ow.generate_into(body, &ctx.forest, &mut ctx.facts);
+    let t1 = ctx.st.pr.start();
+    ctx.st.pr.stop(BP_FOREST, t0);
+    ow.generate_into(body, &ctx.forest, &mut ctx.facts, !lskip || ctx.validate);
+    ctx.st.pr.stop(BP_FACTS, t1);
+    if ctx.validate {
+        assert(ctx.facts.block_base.len() == body.blocks.len());
+        if lskip {
+            assert(ctx.facts.loans.len() == 0);
+        }
+        if sskip {
+            assert(ctx.facts.nmoves == 0);
+        }
+    }
     // Boundary liveness only feeds the loan solver's origin-liveness stage, which runs for
     // loan-bearing bodies (the solver's zero-loan gate, mirrored); leave the stale rows unread
     // otherwise.
@@ -164,20 +430,61 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     // The CFG feeds only those two; a body needing neither never walks it (the solver's early
     // return only stores the stale pointer).
     if lv_need || mv_need {
+        let t2 = ctx.st.pr.start();
         ctx.cfg.build_into(body);
+        ctx.st.pr.stop(BP_CFG, t2);
     }
     if lv_need {
         // Liveness is the only predecessor consumer.
+        let t3 = ctx.st.pr.start();
         ctx.cfg.build_preds();
         ctx.liveness.build_into(&ctx.facts, &ctx.cfg);
+        ctx.st.pr.stop(BP_LIVE, t3);
     }
     if mv_need {
+        let t4 = ctx.st.pr.start();
         ctx.moves.build_into(body, &ctx.forest, &ctx.facts, &ctx.cfg);
+        ctx.st.pr.stop(BP_MOVES, t4);
     } else {
         ctx.moves.errs.truncate(0);
     }
+    let t5 = ctx.st.pr.start();
     ctx.solver.build_into(body, &ctx.facts, &ctx.cfg, &ctx.liveness);
+    ctx.st.pr.stop(BP_SOLVER, t5);
+    if ctx.validate {
+        if lv_need || mv_need {
+            assert(ctx.cfg.nblocks as usize == body.blocks.len());
+        }
+        if sskip {
+            assert(ctx.moves.errs.len() == 0);
+            assert(ctx.solver.errs.len() == 0);
+        }
+    }
+    if on9 {
+        ctx.st.t[BT_LOANS] += ctx.facts.loans.len() as u64;
+        ctx.st.t[BT_PATHS] += ctx.forest.paths.len() as u64;
+        ctx.st.t[BT_POINTS] += ctx.facts.npoints;
+        if !mv_need {
+            ctx.st.t[BT_MV_SKIP] += 1;
+        }
+        if !lv_need {
+            ctx.st.t[BT_LV_SKIP] += 1;
+        }
+        if !lv_need && !mv_need {
+            ctx.st.t[BT_CFG_SKIP] += 1;
+        }
+        let dt = platform_ns() - t0.ns;
+        ctx.st.top_insert(
+            dt,
+            body.module as u64 << 32 | body.owner.node as u64,
+            body.blocks.len() as u64 << 32 | ctx.facts.npoints as u64,
+        );
+    }
     return ctx.moves.errs.len() != 0 || ctx.solver.errs.len() != 0;
+}
+
+fn platform_ns() u64 {
+    return std::parallel::platform::now_ns();
 }
 
 // Walk-parity wording. The categories keep loop replays and defer duplication deduplicated.
@@ -560,6 +867,7 @@ extend tc::TypeChecker {
         out: &mut Vector<FlowErr>,
     ) {
         let _ = bc_run_stages(ow, ctx, body);
+        let tr = ctx.st.pr.start();
         self.bc_ir_free_rules(ow, body, seen, out);
         // Capture sites: a move-of-moved AT a closure creation is worded as a capture. Only the
         // move-error wording below reads them, so scan the body only when an error exists at all.
@@ -641,6 +949,8 @@ extend tc::TypeChecker {
                 self.bc_ir_escape(body, &ctx.facts, &mut ctx.solver, &er, seen, out);
             }
         }
+        ctx.st.pr.stop(BP_RULES, tr);
+        ctx.trim_scratch();
     }
 
     fn bc_ir_conflict(

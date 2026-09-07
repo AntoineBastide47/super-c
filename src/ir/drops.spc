@@ -34,7 +34,6 @@ pub struct Schedule {
     /// Whole-root MOVE events (kind unused; stmt 0xFFFFFFFF = at the block's terminator): the
     /// rewrite turns them into flag clears so guarded drops test real state.
     pub moves: Vector<DropAt>,
-    pub concrete: bool, // every local type concrete: comparable against the emitter's decisions
 }
 
 // Overwrite classification of an assignment target: 2 = fully tracked (dataflow decides),
@@ -97,7 +96,7 @@ pub struct ElabCtx {
 extend ElabCtx {
     pub fn empty() ElabCtx {
         return ElabCtx {
-            sched: Schedule { drops: Vector::<DropAt>::new(), moves: Vector::<DropAt>::new(), concrete: true },
+            sched: Schedule { drops: Vector::<DropAt>::new(), moves: Vector::<DropAt>::new() },
             mi: Vector::<u64>::new(),
             di: Vector::<u64>::new(),
             mm: Vector::<u64>::new(),
@@ -116,6 +115,28 @@ extend ElabCtx {
     }
 }
 
+/// Can elaboration schedule any drop for `b`? Every drop frees either a declared owning local at
+/// its storage death or the old value of a store whose destination place owns (through a reference
+/// too), so a body with neither needs no move facts and no elaboration at all.
+pub fn may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
+    for l in 0..b.locals.len() {
+        let ty = b.locals.at(l).ty;
+        if ty != TYPE_NONE && ow.owns(b.module, ty) {
+            return true;
+        }
+    }
+    for si in 0..b.statements.len() {
+        let s = b.statements.at(si);
+        if s.kind == ir::ST_ASSIGN {
+            let ty = b.places.at(s.place as usize).ty;
+            if ty != TYPE_NONE && ow.owns(b.module, ty) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 pub fn elaborate_into(
     ow: &mut bf::Owner,
     b: &ir::CoreBody,
@@ -126,16 +147,7 @@ pub fn elaborate_into(
 ) {
     cx.sched.drops.truncate(0);
     cx.sched.moves.truncate(0);
-    cx.sched.concrete = true;
     let sched = &mut cx.sched;
-    {
-        let a = unsafe &*(&*ow.pkg).module_ast_const(b.module);
-        for l in 0..b.locals.len() {
-            if !a.type_concrete(b.locals.at(l).ty) {
-                sched.concrete = false;
-            }
-        }
-    }
     let w = fl.words as usize;
     let mi = &mut cx.mi;
     let di = &mut cx.di;

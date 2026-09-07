@@ -70,6 +70,7 @@ pub struct Solver {
     s_lo_flat: Vector<u32>,
     s_lb_start: Vector<u32>, // conflicts: per-local CSR into s_lb_flat of loans by place base
     s_lb_flat: Vector<u32>,
+    s_omask: Vector<u64>, // origin_live_points: per local word, the locals owning an inference origin
 }
 
 // Index of the single set bit `b` (de Bruijn multiply; the standard BitScanForward table).
@@ -187,7 +188,13 @@ extend Solver {
             s_lo_flat: Vector::<u32>::new(),
             s_lb_start: Vector::<u32>::new(),
             s_lb_flat: Vector::<u32>::new(),
+            s_omask: Vector::<u64>::new(),
         };
+    }
+
+    /// Heap bytes kept across bodies (capacity, not length).
+    pub const fn scratch_bytes(self: &Self) u64 {
+        return (self.errs.capacity() * sizeof(BorrowErr) + self.point_block.capacity() * sizeof(u32) + self.sub_by_point.capacity() * sizeof(u32) + self.sub_pt_start.capacity() * sizeof(u32) + self.live_pts.capacity() * sizeof(u64) + self.oreach.capacity() * sizeof(u64) + self.req_cache.capacity() * sizeof(u64) + self.req_have.capacity() * sizeof(bool) + self.issues_blk.capacity() * sizeof(u32) + self.issue_start.capacity() * sizeof(u32) + self.kills_blk.capacity() * sizeof(u64) + self.kill_start.capacity() * sizeof(u32) + self.visit.capacity() * sizeof(u64) + self.visit_dirty.capacity() * sizeof(u32) + self.work.capacity() * sizeof(u64) + self.succs.capacity() * sizeof(u32) + self.s_cur32.capacity() * sizeof(u32) + self.s_ic.capacity() * sizeof(u32) + self.s_kc.capacity() * sizeof(u32) + self.s_uses.capacity() * sizeof(u64) + self.s_cur64.capacity() * sizeof(u64) + self.s_dset.capacity() * sizeof(u64) + self.s_uset.capacity() * sizeof(u64) + self.s_flow.capacity() * sizeof(u64) + self.s_flow_queued.capacity() * sizeof(bool) + self.s_flow_queue.capacity() * sizeof(u32) + self.s_lo_start.capacity() * sizeof(u32) + self.s_lo_flat.capacity() * sizeof(u32) + self.s_lb_start.capacity() * sizeof(u32) + self.s_lb_flat.capacity() * sizeof(u32) + self.s_omask.capacity() * sizeof(u64) + self.scope.pool.capacity() * 8) as u64;
     }
 
     /// Truncate every vector (keeping heap capacity) and clear scalars and scope, for reuse.
@@ -379,40 +386,6 @@ extend Solver {
                 *(zl + i) = 0u64;
             }
         }
-        // Per-point use/def of locals, derived from accesses (a full write defines, all else uses).
-        // The four scratch vectors swap out of their reused Solver slots and back at the end.
-        let mut uses = replace(&mut self.s_uses, Vector::<u64>::new()); // point << 32 | local, sorted by point
-        uses.truncate(0);
-        for a in 0..f.accesses.len() {
-            let ac = *f.accesses.at(a);
-            if ac.place == bf::BF_NONE {
-                // Destruction of an owned carrier OBSERVES its stored borrows: a point-level use.
-                if ac.local != bf::BF_NONE && f.observed[ac.local as usize] {
-                    uses.push(ac.point as u64 << 32 | ac.local as u64);
-                }
-                continue;
-            }
-            let pl = *self.body().places.at(ac.place as usize);
-            let mut is_def = false;
-            if ac.kind == bf::ACC_WRITE && pl.proj_len == 0 {
-                is_def = true;
-            }
-            let mut enc = ac.point as u64 << 32 | pl.base as u64;
-            if is_def {
-                enc = enc | 1u64 << 63;
-            }
-            uses.push(enc);
-        }
-        // Insertion sort by point (accesses are nearly point-ordered already).
-        for i in 1..uses.len() {
-            let v = uses[i];
-            let mut j = i;
-            while j > 0 && (uses[j - 1] & 0x7FFFFFFF00000000u64) > (v & 0x7FFFFFFF00000000u64) {
-                uses.set(j, uses[j - 1]);
-                j -= 1;
-            }
-            uses.set(j, v);
-        }
         let lw = f.lwords as usize;
         // Invert origin_local into a per-local CSR: each statement pair then touches only the
         // origins whose local is live there (found by scanning the live-word bits), instead of
@@ -445,6 +418,54 @@ extend Solver {
                 self.s_lo_flat.set(self.s_cur32[l] as usize, o);
                 self.s_cur32.set(l, self.s_cur32[l] + 1);
             }
+        }
+        self.s_omask.truncate(0);
+        for _i in 0..lw {
+            self.s_omask.push(0u64);
+        }
+        for l in 0..nl {
+            if self.s_lo_start[l] != self.s_lo_start[l + 1] {
+                self.s_omask.set(l / 64, self.s_omask[l / 64] | 1u64 << (l & 63) as u64);
+            }
+        }
+        // Per-point use/def of locals, derived from accesses (a full write defines, all else uses).
+        // The four scratch vectors swap out of their reused Solver slots and back at the end.
+        // Only locals that own an inference origin matter here (the fill below reads their CSR
+        // range), so the record list and the live rows are cut to those locals up front.
+        let mut uses = replace(&mut self.s_uses, Vector::<u64>::new()); // point << 32 | local, sorted by point
+        uses.truncate(0);
+        for a in 0..f.accesses.len() {
+            let ac = *f.accesses.at(a);
+            if ac.place == bf::BF_NONE {
+                // Destruction of an owned carrier OBSERVES its stored borrows: a point-level use.
+                if ac.local != bf::BF_NONE && f.observed[ac.local as usize] && (self.s_omask[(ac.local / 64) as usize] >> (ac.local & 63) as u64 & 1u64) != 0 {
+                    uses.push(ac.point as u64 << 32 | ac.local as u64);
+                }
+                continue;
+            }
+            let pl = *self.body().places.at(ac.place as usize);
+            if (self.s_omask[(pl.base / 64) as usize] >> (pl.base & 63) as u64 & 1u64) == 0 {
+                continue;
+            }
+            let mut is_def = false;
+            if ac.kind == bf::ACC_WRITE && pl.proj_len == 0 {
+                is_def = true;
+            }
+            let mut enc = ac.point as u64 << 32 | pl.base as u64;
+            if is_def {
+                enc = enc | 1u64 << 63;
+            }
+            uses.push(enc);
+        }
+        // Insertion sort by point (accesses are nearly point-ordered already).
+        for i in 1..uses.len() {
+            let v = uses[i];
+            let mut j = i;
+            while j > 0 && (uses[j - 1] & 0x7FFFFFFF00000000u64) > (v & 0x7FFFFFFF00000000u64) {
+                uses.set(j, uses[j - 1]);
+                j -= 1;
+            }
+            uses.set(j, v);
         }
         // Statement pairs backward (entry, exit). A definition is LIVE at both points of its own
         // statement (loans and subsets injected there must flow onward) and dead before it.
@@ -519,7 +540,7 @@ extend Solver {
                 wpos = wlo;
                 // Record at both points: live-after plus this statement's uses and definitions.
                 for k in 0..lw {
-                    let mut m = cur[k] | uset[k] | dset[k];
+                    let mut m = (cur[k] | uset[k] | dset[k]) & self.s_omask[k];
                     while m != 0 {
                         let l = k * 64 + tz64(m & 0u64 - m);
                         m = m & m - 1u64;

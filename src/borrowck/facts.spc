@@ -167,6 +167,15 @@ pub struct Owner {
     // Gen scratch (capacity survives across bodies).
     sc_assign_sites: Vector<KillSite>,
     sc_seen: Vector<u64>,
+    // Per-call and per-body scratch of the fact walk (taken and handed back, capacity kept).
+    pub sc_kinds: Vector<u8>,
+    pub sc_ptyn: Vector<NodeId>,
+    pub sc_tys: Vector<TypeId>,
+    pub sc_lb_start: Vector<u32>,
+    pub sc_lb_flat: Vector<u32>,
+    pub sc_curp: Vector<u32>,
+    pub sc_tok_a: Vector<u64>, // lifetime-token scratch: the outer (parameter/return) side
+    pub sc_tok_b: Vector<u64>, // the inner (argument) side
 }
 
 // Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
@@ -211,6 +220,7 @@ pub struct Gen {
     pub in_caps: bool, // reading closure-capture operands: owned moves record ACC_CAP
     pub calling: bool, // reading a callee-position operand: calling borrows the env, never moves it
     pub plain_copy: bool, // reading an RV_USE operand: a `&mut` place copy consumes the binding
+    pub loans: bool, // record origins, loans, accesses, subsets, kills and liveness rows (else moves only)
     pub seen: Vector<u64>, // per-block first-touch words for luse/ldef construction
 }
 
@@ -255,6 +265,11 @@ extend BodyFacts {
             luse: Vector::<u64>::new(),
             ldef: Vector::<u64>::new(),
         };
+    }
+
+    /// Heap bytes kept across bodies (capacity, not length).
+    pub const fn scratch_bytes(self: &Self) u64 {
+        return (self.block_base.capacity() * sizeof(u32) + self.local_origin.capacity() * sizeof(u32) + self.origin_local.capacity() * sizeof(u32) + self.uni_name.capacity() * sizeof(tok::Span) + self.arg_universal.capacity() * sizeof(u32) + self.ret_origin.capacity() * sizeof(u32) + self.uni_flows.capacity() * sizeof(u64) + self.loans.capacity() * sizeof(Loan) + self.subsets.capacity() * sizeof(SubsetAt) + self.accesses.capacity() * sizeof(Access) + self.kills.capacity() * sizeof(KillAt) + self.events.capacity() * sizeof(Event) + self.ev_start.capacity() * sizeof(u32) + self.mev.capacity() * sizeof(Event) + self.mev_start.capacity() * sizeof(u32) + self.rep_blk.capacity() * sizeof(bool) + self.easy_blk.capacity() * sizeof(bool) + self.easy_use.capacity() * sizeof(u64) + self.freed.capacity() * sizeof(u32) + self.observed.capacity() * sizeof(bool) + self.moved_whole.capacity() * sizeof(bool) + self.cuts.capacity() * sizeof(u64) + self.luse.capacity() * sizeof(u64) + self.ldef.capacity() * sizeof(u64)) as u64;
     }
 
     /// Truncate every vector (keeping heap capacity) and clear scalars, for reuse across bodies.
@@ -374,6 +389,9 @@ extend Gen {
     }
 
     fn build_origins(self: &mut Self) {
+        if !self.loans {
+            return;
+        }
         // origin 0 = 'static.
         self.f.norigins = 1;
         self.f.nuniversal = 1;
@@ -470,6 +488,9 @@ extend Gen {
     }
 
     const fn origin_of_place(self: &Self, p: ir::PlaceId) u32 {
+        if !self.loans {
+            return BF_NONE;
+        }
         return self.f.local_origin[self.place_of(p).base as usize];
     }
 
@@ -515,6 +536,9 @@ extend Gen {
     }
 
     fn live_use(self: &mut Self, l: ir::LocalId) {
+        if !self.loans {
+            return;
+        }
         let w = (l / 64) as usize;
         let bit = 1u64 << (l & 63);
         let base = self.cur_block as usize * self.f.lwords as usize;
@@ -524,11 +548,21 @@ extend Gen {
     }
 
     fn live_def(self: &mut Self, l: ir::LocalId) {
+        if !self.loans {
+            return;
+        }
         let w = (l / 64) as usize;
         let bit = 1u64 << (l & 63);
         let base = self.cur_block as usize * self.f.lwords as usize;
         self.f.ldef.set(base + w, self.f.ldef[base + w] | bit);
         self.seen.set(w, self.seen[w] | bit);
+    }
+
+    @c.always_inline
+    fn access(self: &mut Self, place: ir::PlaceId, local: u32, kind: u8, point: u32, sp: tok::Span) {
+        if self.loans {
+            self.f.accesses.push(Access { place: place, local: local, kind: kind, point: point, span: sp });
+        }
     }
 
     fn subset(self: &mut Self, from: u32, to: u32, point: u32) {
@@ -573,7 +607,7 @@ extend Gen {
                     EV_MOVE_CUT;
                 };
                 self.push_ev(ek, mpath, point, sp);
-                self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ak, point: point, span: sp });
+                self.access(op.data, BF_NONE, ak, point, sp);
                 return;
             }
         }
@@ -583,7 +617,7 @@ extend Gen {
             let y = *self.owner().ast_of(self.body().module).type_at(pl.ty);
             if y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
                 self.push_ev(EV_MOVE, path, point, sp);
-                self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ACC_MOVE, point: point, span: sp });
+                self.access(op.data, BF_NONE, ACC_MOVE, point, sp);
                 return;
             }
         }
@@ -594,7 +628,7 @@ extend Gen {
         if upath != mp::MP_NONE {
             self.push_ev(EV_USE, upath, point, sp);
         }
-        self.f.accesses.push(Access { place: op.data, local: BF_NONE, kind: ACC_READ, point: point, span: sp });
+        self.access(op.data, BF_NONE, ACC_READ, point, sp);
     }
 
     // A write of a place: liveness def, init event, write access, and a kill site. A whole-local
@@ -604,7 +638,7 @@ extend Gen {
         let pl = self.place_of(pid);
         if pl.proj_len == 0 {
             self.live_def(pl.base);
-            let org = self.f.local_origin[pl.base as usize];
+            let org = self.origin_of_place(pid);
             if org != BF_NONE && point > 0 {
                 self.f.cuts.push(org as u64 << 32 | (point - 1) as u64);
             }
@@ -622,8 +656,10 @@ extend Gen {
                 self.push_ev(EV_USE, upath, point - 1, sp);
             }
         }
-        self.f.accesses.push(Access { place: pid, local: BF_NONE, kind: ACC_WRITE, point: point, span: sp });
-        self.assign_sites.push(KillSite { place: pid, local: BF_NONE, point: point });
+        self.access(pid, BF_NONE, ACC_WRITE, point, sp);
+        if self.loans {
+            self.assign_sites.push(KillSite { place: pid, local: BF_NONE, point: point });
+        }
     }
 
     // Parameter passing modes for a direct call: 0 = by value, 1 = &, 2 = &mut, 3 = raw pointer.
@@ -659,11 +695,13 @@ extend Gen {
             }
             return;
         }
-        let mut tys = Vector::<TypeId>::new();
+        let mut tys = replace(&mut self.owner().sc_tys, Vector::<TypeId>::new());
+        tys.truncate(0);
         {
             let a = self.owner().ast_of(callee.module);
             let nd = a.at_const(callee.node);
             if nd.kind != NodeKind::NODE_FUNCTION {
+                self.owner().sc_tys = tys;
                 return;
             }
             let ps = nd.as_data.function.params;
@@ -694,6 +732,7 @@ extend Gen {
             }
         }
         self.owner().kinds_memo.insert(kkey, kst2 as u64 << 16 | tys.len() as u64);
+        self.owner().sc_tys = tys;
     }
 
     // Can values of `ty` STORE borrows by type: declared lifetime params, or borrow-carrying
@@ -897,7 +936,7 @@ extend Gen {
         if k == 2 {
             ak = ACC_WRITE;
         }
-        self.f.accesses.push(Access { place: pid, local: BF_NONE, kind: ak, point: entry, span: sp });
+        self.access(pid, BF_NONE, ak, entry, sp);
         if dorigin != BF_NONE && !self.base_is_raw(pid) {
             // The pin a carrying RESULT holds is SHARED whatever the parameter's mutability: the
             // exclusive claim lives in the access above and ends with the call. A receiver that
@@ -932,9 +971,13 @@ extend Gen {
         }
         self.f.lwords = lw;
         for _i in 0..nb as u32 * lw {
-            self.f.luse.push(0u64);
-            self.f.ldef.push(0u64);
             self.f.easy_use.push(0u64);
+        }
+        if self.loans {
+            for _i in 0..nb as u32 * lw {
+                self.f.luse.push(0u64);
+                self.f.ldef.push(0u64);
+            }
         }
         for bi in 0..nb {
             self.cur_block = bi as u32;
@@ -943,13 +986,15 @@ extend Gen {
             self.f.mev_start.push(self.f.mev.len() as u32);
             self.f.rep_blk.push(false);
             self.f.easy_blk.push(true);
-            while self.seen.len() < lw as usize {
-                self.seen.push(0u64);
-            }
-            unsafe {
-                let zs = self.seen.as_ptr() as *mut u64;
-                for i in 0..lw as usize {
-                    *(zs + i) = 0u64;
+            if self.loans {
+                while self.seen.len() < lw as usize {
+                    self.seen.push(0u64);
+                }
+                unsafe {
+                    let zs = self.seen.as_ptr() as *mut u64;
+                    for i in 0..lw as usize {
+                        *(zs + i) = 0u64;
+                    }
                 }
             }
             let blk = *self.body().blocks.at(bi);
@@ -962,16 +1007,16 @@ extend Gen {
                 } else if s.kind == ir::ST_STORAGE_LIVE || s.kind == ir::ST_STORAGE_DEAD {
                     let root = self.forest().local_root[s.a as usize];
                     self.push_ev(EV_DEAD, root, exit, s.span);
-                    self.assign_sites.push(KillSite { place: BF_NONE, local: s.a, point: exit });
-                    if s.kind == ir::ST_STORAGE_DEAD {
-                        // An owned carrier's destruction observes what it stores (`Free` runs), so
-                        // the local counts as USED here: stored borrows must survive to this point.
-                        if self.f.observed[s.a as usize] {
-                            self.live_use(s.a);
+                    if self.loans {
+                        self.assign_sites.push(KillSite { place: BF_NONE, local: s.a, point: exit });
+                        if s.kind == ir::ST_STORAGE_DEAD {
+                            // An owned carrier's destruction observes what it stores (`Free` runs),
+                            // so the local counts as USED here: stored borrows must survive to it.
+                            if self.f.observed[s.a as usize] {
+                                self.live_use(s.a);
+                            }
+                            self.access(BF_NONE, s.a, ACC_WRITE, exit, s.span);
                         }
-                        self.f.accesses.push(
-                            Access { place: BF_NONE, local: s.a, kind: ACC_WRITE, point: exit, span: s.span },
-                        );
                     }
                 }
             }
@@ -1019,7 +1064,7 @@ extend Gen {
                         dor0 = self.origin_of_place(dp);
                     }
                 }
-                let mut kinds = Vector::<u8>::new();
+                let mut kinds = replace(&mut self.owner().sc_kinds, Vector::<u8>::new());
                 self.arg_kinds(t.callee, t.args_len, &mut kinds);
                 // Explicit `.free()` consumes its receiver even though the parameter is `&mut`.
                 let frees = t.args_len == 1 && self.is_free_callee(t.callee);
@@ -1039,9 +1084,7 @@ extend Gen {
                         let path = self.forest().place_path[op.data as usize];
                         self.live_use(self.place_of(op.data).base);
                         self.push_ev(EV_MOVE, path, entry, t.span);
-                        self.f.accesses.push(
-                            Access { place: op.data, local: BF_NONE, kind: ACC_FREE, point: entry, span: t.span },
-                        );
+                        self.access(op.data, BF_NONE, ACC_FREE, entry, t.span);
                         self.f.freed.push(path);
                     } else if implicit {
                         self.implicit_borrow(op.data, kinds[i as usize], entry, dor0, t.span);
@@ -1049,7 +1092,7 @@ extend Gen {
                         self.op_read(opid, entry, t.span);
                         // ref -> pointer at an argument erases the borrow: the reference leaves the
                         // checked world here, exactly like the walk's erase rule.
-                        if kinds[i as usize] == 3 && (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) {
+                        if self.loans && kinds[i as usize] == 3 && (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) {
                             let oty = self.place_of(op.data).ty;
                             if oty != TYPE_NONE && self.owner().ast_of(self.body().module).type_at(oty).kind == TypeKind::TYPE_REFERENCE {
                                 let aor = self.origin_of_place(op.data);
@@ -1066,8 +1109,9 @@ extend Gen {
                 // through it (`put<'a>(s: &mut Slot<'a>, x: &'a i32)`, `push_into<T>(v: &mut
                 // Vector<T>, x: T)`): flow them into that argument's origin, whose rebind backlink
                 // carries them to the pointee's holder.
-                if t.callee.node != NODE_NONE {
-                    let mut ptyn = Vector::<NodeId>::new();
+                if self.loans && t.callee.node != NODE_NONE {
+                    let mut ptyn = replace(&mut self.owner().sc_ptyn, Vector::<NodeId>::new());
+                    ptyn.truncate(0);
                     {
                         let a = self.owner().ast_of(t.callee.module);
                         let nd = a.at_const(t.callee.node);
@@ -1087,7 +1131,8 @@ extend Gen {
                         if kinds[j] != 2 {
                             continue;
                         }
-                        let mut jtok = Vector::<u64>::new();
+                        let mut jtok = replace(&mut self.owner().sc_tok_a, Vector::<u64>::new());
+                        jtok.truncate(0);
                         self.lt_tokens(t.callee.module, ptyn[j], &mut jtok, 0);
                         if jtok.len() != 0 {
                             let oj = *self.body().operands.at(
@@ -1122,7 +1167,8 @@ extend Gen {
                                 // named lifetime; its pointee's tokens matter only when the
                                 // pointee value itself carries borrows (`swap<T>(&mut T, &mut T)`
                                 // with T = &i32). By-value sources use all their tokens.
-                                let mut itok = Vector::<u64>::new();
+                                let mut itok = replace(&mut self.owner().sc_tok_b, Vector::<u64>::new());
+                                itok.truncate(0);
                                 let oty = self.place_of(oi.data).ty;
                                 let mut pointee_carries = false;
                                 if oty != TYPE_NONE {
@@ -1158,14 +1204,17 @@ extend Gen {
                                         self.subset(aor, tor, entry);
                                     }
                                 }
+                                self.owner().sc_tok_b = itok;
                             }
                         }
+                        self.owner().sc_tok_a = jtok;
                     }
+                    self.owner().sc_ptyn = ptyn;
                 }
                 // A `&mut self` receiver whose pointee holds borrows is a STORE TARGET: argument
                 // borrows can land in the container (`v.push(&x)`), so they flow into the
                 // receiver's origin. Other cross-argument stores are the signature checks' job.
-                if t.args_len != 0 && kinds[0] == 2 && self.is_self_callee(t.callee) {
+                if self.loans && t.args_len != 0 && kinds[0] == 2 && self.is_self_callee(t.callee) {
                     let op0 = *self.body().operands.at(self.body().oper_pool[t.args_start as usize] as usize);
                     if op0.kind == ir::OP_COPY || op0.kind == ir::OP_MOVE {
                         // Only a container the FRAME owns (no deref on the way, non-reference base)
@@ -1195,7 +1244,8 @@ extend Gen {
                         if tor != BF_NONE {
                             // Same signature gate as the `&mut`-parameter ties: an argument lands
                             // in the container only when the receiver's type tokens admit it.
-                            let mut jtok0 = Vector::<u64>::new();
+                            let mut jtok0 = replace(&mut self.owner().sc_tok_a, Vector::<u64>::new());
+                            jtok0.truncate(0);
                             {
                                 let a5 = self.owner().ast_of(t.callee.module);
                                 let nd5 = a5.at_const(t.callee.node);
@@ -1216,7 +1266,8 @@ extend Gen {
                                 if aor == BF_NONE {
                                     continue;
                                 }
-                                let mut itok3 = Vector::<u64>::new();
+                                let mut itok3 = replace(&mut self.owner().sc_tok_b, Vector::<u64>::new());
+                                itok3.truncate(0);
                                 let ojty = self.place_of(oj.data).ty;
                                 let mut pc3 = false;
                                 if ojty != TYPE_NONE {
@@ -1253,7 +1304,9 @@ extend Gen {
                                 if tie3 {
                                     self.subset(aor, tor, entry);
                                 }
+                                self.owner().sc_tok_b = itok3;
                             }
+                            self.owner().sc_tok_a = jtok0;
                         }
                     }
                 }
@@ -1264,84 +1317,91 @@ extend Gen {
                 // A borrow-carrying result derives from its RECEIVER (the walk's result-pin hook)
                 // and from the arguments the SIGNATURE ties to the return: shared lifetime/generic
                 // tokens, or the elision rule (one borrowing input feeds an elided return).
-                let recv = t.args_len != 0 && self.is_self_callee(t.callee);
-                let mut rtok = Vector::<u64>::new();
-                let mut relide = false;
-                let mut nborrowing: u32 = 0;
-                let mut bidx: u32 = 0;
-                if t.callee.node != NODE_NONE {
-                    let mut rets = NodeList { start: 0, len: 0 };
-                    {
-                        let a3 = self.owner().ast_of(t.callee.module);
-                        let nd3 = a3.at_const(t.callee.node);
-                        if nd3.kind == NodeKind::NODE_FUNCTION {
-                            rets = nd3.as_data.function.returns;
+                if self.loans {
+                    let recv = t.args_len != 0 && self.is_self_callee(t.callee);
+                    let mut rtok = replace(&mut self.owner().sc_tok_a, Vector::<u64>::new());
+                    rtok.truncate(0);
+                    let mut relide = false;
+                    let mut nborrowing: u32 = 0;
+                    let mut bidx: u32 = 0;
+                    if t.callee.node != NODE_NONE {
+                        let mut rets = NodeList { start: 0, len: 0 };
+                        {
+                            let a3 = self.owner().ast_of(t.callee.module);
+                            let nd3 = a3.at_const(t.callee.node);
+                            if nd3.kind == NodeKind::NODE_FUNCTION {
+                                rets = nd3.as_data.function.returns;
+                            }
+                        }
+                        for r3 in 0..rets.len {
+                            let mut rn = unsafe self.owner().ast_of(t.callee.module).list(rets)[r3 as usize];
+                            if self.owner().ast_of(t.callee.module).at_const(rn).kind == NodeKind::NODE_PARAMETER {
+                                rn = self.owner().ast_of(t.callee.module).at_const(rn).as_data.parameter.ty;
+                            }
+                            self.lt_tokens(t.callee.module, rn, &mut rtok, 0);
+                        }
+                        // No named token on the return: any borrow-carrying result elides; its
+                        // borrows come from the single borrowing input (rule 2/3; receiver ties are
+                        // separate). The dest-origin guard below keeps this to carrying results.
+                        relide = rtok.len() == 0;
+                        for i3 in 0..t.args_len {
+                            if kinds[i3 as usize] == 1 || kinds[i3 as usize] == 2 {
+                                nborrowing += 1;
+                                bidx = i3;
+                            }
                         }
                     }
-                    for r3 in 0..rets.len {
-                        let mut rn = unsafe self.owner().ast_of(t.callee.module).list(rets)[r3 as usize];
-                        if self.owner().ast_of(t.callee.module).at_const(rn).kind == NodeKind::NODE_PARAMETER {
-                            rn = self.owner().ast_of(t.callee.module).at_const(rn).as_data.parameter.ty;
-                        }
-                        self.lt_tokens(t.callee.module, rn, &mut rtok, 0);
-                    }
-                    // No named token on the return: any borrow-carrying result elides; its
-                    // borrows come from the single borrowing input (rule 2/3; receiver ties are
-                    // separate). The dest-origin guard below keeps this to carrying results.
-                    relide = rtok.len() == 0;
-                    for i3 in 0..t.args_len {
-                        if kinds[i3 as usize] == 1 || kinds[i3 as usize] == 2 {
-                            nborrowing += 1;
-                            bidx = i3;
-                        }
-                    }
-                }
-                for d in 0..t.dests_len {
-                    let dp = self.body().dest_pool[(t.dests_start + d) as usize];
-                    let dor = self.origin_of_place(dp);
-                    if dor == BF_NONE {
-                        continue;
-                    }
-                    let dty = self.place_of(dp).ty;
-                    if dty != TYPE_NONE && self.owner().ast_of(self.body().module).type_at(dty).kind == TypeKind::TYPE_POINTER {
-                        continue;
-                    }
-                    for i in 0..t.args_len {
-                        let opid = self.body().oper_pool[(t.args_start + i) as usize];
-                        let op = *self.body().operands.at(opid as usize);
-                        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+                    for d in 0..t.dests_len {
+                        let dp = self.body().dest_pool[(t.dests_start + d) as usize];
+                        let dor = self.origin_of_place(dp);
+                        if dor == BF_NONE {
                             continue;
                         }
-                        let mut tie = i == 0 && recv;
-                        if !tie && relide && nborrowing == 1 && i == bidx {
-                            // Elision: the single borrowing input feeds the return.
-                            tie = true;
+                        let dty = self.place_of(dp).ty;
+                        if dty != TYPE_NONE && self.owner().ast_of(self.body().module).type_at(dty).kind == TypeKind::TYPE_POINTER {
+                            continue;
                         }
-                        if !tie && rtok.len() != 0 && t.callee.node != NODE_NONE {
-                            let mut itok2 = Vector::<u64>::new();
-                            let a4 = self.owner().ast_of(t.callee.module);
-                            let nd4 = a4.at_const(t.callee.node);
-                            if nd4.kind == NodeKind::NODE_FUNCTION && i < nd4.as_data.function.params.len {
-                                let pid4 = unsafe a4.list(nd4.as_data.function.params)[i as usize];
-                                let ptyn4 = a4.at_const(pid4).as_data.parameter.ty;
-                                self.lt_tokens(t.callee.module, ptyn4, &mut itok2, 0);
+                        for i in 0..t.args_len {
+                            let opid = self.body().oper_pool[(t.args_start + i) as usize];
+                            let op = *self.body().operands.at(opid as usize);
+                            if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+                                continue;
                             }
-                            for x in 0..itok2.len() {
-                                for y in 0..rtok.len() {
-                                    if itok2[x] == rtok[y] {
-                                        tie = true;
+                            let mut tie = i == 0 && recv;
+                            if !tie && relide && nborrowing == 1 && i == bidx {
+                                // Elision: the single borrowing input feeds the return.
+                                tie = true;
+                            }
+                            if !tie && rtok.len() != 0 && t.callee.node != NODE_NONE {
+                                let mut itok2 = replace(&mut self.owner().sc_tok_b, Vector::<u64>::new());
+                                itok2.truncate(0);
+                                let a4 = self.owner().ast_of(t.callee.module);
+                                let nd4 = a4.at_const(t.callee.node);
+                                if nd4.kind == NodeKind::NODE_FUNCTION && i < nd4.as_data.function.params.len {
+                                    let pid4 = unsafe a4.list(nd4.as_data.function.params)[i as usize];
+                                    let ptyn4 = a4.at_const(pid4).as_data.parameter.ty;
+                                    self.lt_tokens(t.callee.module, ptyn4, &mut itok2, 0);
+                                }
+                                for x in 0..itok2.len() {
+                                    for y in 0..rtok.len() {
+                                        if itok2[x] == rtok[y] {
+                                            tie = true;
+                                        }
                                     }
+                                }
+                                self.owner().sc_tok_b = itok2;
+                            }
+                            if tie {
+                                let aor = self.origin_of_place(op.data);
+                                if aor != BF_NONE {
+                                    self.subset(aor, dor, entry);
                                 }
                             }
                         }
-                        if tie {
-                            let aor = self.origin_of_place(op.data);
-                            if aor != BF_NONE {
-                                self.subset(aor, dor, entry);
-                            }
-                        }
                     }
+                    self.owner().sc_tok_a = rtok;
                 }
+                self.owner().sc_kinds = kinds;
             } else if t.kind == ir::TM_RETURN {
                 let nrets = self.body().returns;
                 for r in 0..nrets {
@@ -1357,15 +1417,22 @@ extend Gen {
             } else if t.kind == ir::TM_DROP {
                 if t.a != ir::IR_NONE {
                     // At analysis time only USER-written destruction exists (`d.free()` on a dyn);
-                    // elaboration inserts its drops afterwards. It consumes the place.
+                    // elaboration inserts its drops afterwards. It consumes the place, unless the
+                    // place is a raw pointer: `p.free()` destroys the POINTEE, unsafe-world storage
+                    // the checker never tracks, and only reads the pointer.
                     self.live_use(self.place_of(t.a).base);
                     let path = self.forest().place_path[t.a as usize];
-                    if path != mp::MP_NONE {
-                        self.push_ev(EV_MOVE, path, entry, t.span);
+                    if self.base_is_raw(t.a) {
+                        if path != mp::MP_NONE {
+                            self.push_ev(EV_USE, path, entry, t.span);
+                        }
+                        self.access(t.a, BF_NONE, ACC_READ, entry, t.span);
+                    } else {
+                        if path != mp::MP_NONE {
+                            self.push_ev(EV_MOVE, path, entry, t.span);
+                        }
+                        self.access(t.a, BF_NONE, ACC_FREE, entry, t.span);
                     }
-                    self.f.accesses.push(
-                        Access { place: t.a, local: BF_NONE, kind: ACC_FREE, point: entry, span: t.span },
-                    );
                 }
             }
         }
@@ -1423,7 +1490,7 @@ extend Gen {
             if rv.b == 1 && self.body().locals.at(self.place_of(s.place).base as usize).storage != ir::LS_TEMP {
                 ak = ACC_WRITE;
             }
-            self.f.accesses.push(Access { place: src, local: BF_NONE, kind: ak, point: entry, span: s.span });
+            self.access(src, BF_NONE, ak, entry, s.span);
             // Init requirement: borrowing an uninitialized path is legal only for &mut (out-params);
             // record a use event for shared borrows of tracked paths.
             let path = self.forest().place_path[src as usize];
@@ -1439,41 +1506,43 @@ extend Gen {
                 // `&mut x` passed onward may initialize x through the callee.
                 self.push_ev(EV_ASSIGN, path, exit, s.span);
             }
-            let mut kind = LK_SHARED;
-            if rv.b == 1 {
-                kind = LK_MUT;
-                if self.body().locals.at(self.place_of(s.place).base as usize).storage == ir::LS_TEMP {
-                    kind = LK_RESERVED;
+            if self.loans {
+                let mut kind = LK_SHARED;
+                if rv.b == 1 {
+                    kind = LK_MUT;
+                    if self.body().locals.at(self.place_of(s.place).base as usize).storage == ir::LS_TEMP {
+                        kind = LK_RESERVED;
+                    }
                 }
-            }
-            let mut org = dor;
-            if org == BF_NONE {
-                org = 0;
-            }
-            if !self.base_is_raw(src) && !(rv.b == 1 && self.shared_deref(src)) {
-                let vw = self.owner().carries(self.body().module, self.place_of(src).ty);
-                self.f.loans.push(
-                    Loan {
-                        view: vw,
-                        pin: false,
-                        place: src,
-                        kind: kind,
-                        origin: org,
-                        issued_at: exit,
-                        activated_at: BF_NONE,
-                        span: s.span,
-                    },
-                );
-            }
-            // A reborrow's validity chains to the reference it went through; a borrow of a slot
-            // that itself HOLDS borrows links the slot's origin: both ways when mutable, because
-            // stores through the reference land in the slot (invariance).
-            let src_carries = self.owner().carries(self.body().module, self.place_of(src).ty);
-            if self.through_deref(src) || src_carries {
-                self.subset(self.f.local_origin[spl.base as usize], org, entry);
-            }
-            if rv.b == 1 && src_carries {
-                self.subset(org, self.f.local_origin[spl.base as usize], entry);
+                let mut org = dor;
+                if org == BF_NONE {
+                    org = 0;
+                }
+                if !self.base_is_raw(src) && !(rv.b == 1 && self.shared_deref(src)) {
+                    let vw = self.owner().carries(self.body().module, self.place_of(src).ty);
+                    self.f.loans.push(
+                        Loan {
+                            view: vw,
+                            pin: false,
+                            place: src,
+                            kind: kind,
+                            origin: org,
+                            issued_at: exit,
+                            activated_at: BF_NONE,
+                            span: s.span,
+                        },
+                    );
+                }
+                // A reborrow's validity chains to the reference it went through; a borrow of a slot
+                // that itself HOLDS borrows links the slot's origin: both ways when mutable, because
+                // stores through the reference land in the slot (invariance).
+                let src_carries = self.owner().carries(self.body().module, self.place_of(src).ty);
+                if self.through_deref(src) || src_carries {
+                    self.subset(self.f.local_origin[spl.base as usize], org, entry);
+                }
+                if rv.b == 1 && src_carries {
+                    self.subset(org, self.f.local_origin[spl.base as usize], entry);
+                }
             }
             self.write_place(s.place, exit, s.span);
             return;
@@ -1506,10 +1575,8 @@ extend Gen {
                     // A mutable capture is a mutable borrow held by the closure value.
                     let pl = self.place_of(op.data);
                     self.live_use(pl.base);
-                    self.f.accesses.push(
-                        Access { place: op.data, local: BF_NONE, kind: ACC_WRITE, point: entry, span: s.span },
-                    );
-                    if !self.base_is_raw(op.data) {
+                    self.access(op.data, BF_NONE, ACC_WRITE, entry, s.span);
+                    if self.loans && !self.base_is_raw(op.data) {
                         self.f.loans.push(
                             Loan {
                                 view: false,
@@ -1584,7 +1651,7 @@ extend Gen {
             // as the projected-copy path above).
             let bpl = self.place_of(rv.a);
             self.live_use(bpl.base);
-            self.f.accesses.push(Access { place: rv.a, local: BF_NONE, kind: ACC_READ, point: entry, span: s.span });
+            self.access(rv.a, BF_NONE, ACC_READ, entry, s.span);
             if rv.b != ir::IR_NONE {
                 self.op_read(rv.b, entry, s.span);
             }
@@ -1637,7 +1704,7 @@ extend Gen {
         } else if rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT {
             let pl = self.place_of(rv.a);
             self.live_use(pl.base);
-            self.f.accesses.push(Access { place: rv.a, local: BF_NONE, kind: ACC_READ, point: entry, span: s.span });
+            self.access(rv.a, BF_NONE, ACC_READ, entry, s.span);
         }
         self.write_place(s.place, exit, s.span);
     }
@@ -1645,6 +1712,9 @@ extend Gen {
     // Kills: an assignment that overwrites a loan's borrowed storage (its path is a must-equal
     // prefix of the loan's) ends the loan. Storage markers kill every loan based on their local.
     fn finish(self: &mut Self) {
+        if !self.loans {
+            return;
+        }
         let nlocals2 = self.body().locals.len();
         for _l in 0..nlocals2 {
             self.f.moved_whole.push(false);
@@ -1665,9 +1735,12 @@ extend Gen {
             // base (kill_covers demands equal bases), so the na*nl sweep shrinks to the matches.
             // Bucket order is ascending loan id: exactly the subsequence the sweep pushed.
             let nlc = self.body().locals.len();
-            let mut lb_start = Vector::<u32>::new();
-            let mut lb_flat = Vector::<u32>::new();
-            let mut curp = Vector::<u32>::new();
+            let mut lb_start = replace(&mut self.owner().sc_lb_start, Vector::<u32>::new());
+            let mut lb_flat = replace(&mut self.owner().sc_lb_flat, Vector::<u32>::new());
+            let mut curp = replace(&mut self.owner().sc_curp, Vector::<u32>::new());
+            lb_start.truncate(0);
+            lb_flat.truncate(0);
+            curp.truncate(0);
             for _i in 0..nlc + 1 {
                 lb_start.push(0);
             }
@@ -1701,6 +1774,9 @@ extend Gen {
                     }
                 }
             }
+            self.owner().sc_lb_start = lb_start;
+            self.owner().sc_lb_flat = lb_flat;
+            self.owner().sc_curp = curp;
         } else {
             for a in 0..na {
                 let site = *self.assign_sites.at(a);
@@ -1768,7 +1844,7 @@ extend Gen {
                 // Activation asserts the mutable claim against every OTHER required loan.
                 let lpl = self.f.loans.at(l).place;
                 let lsp = self.f.loans.at(l).span;
-                self.f.accesses.push(Access { place: lpl, local: BF_NONE, kind: ACC_ACT, point: act, span: lsp });
+                self.access(lpl, BF_NONE, ACC_ACT, act, lsp);
             }
         }
     }
@@ -1855,6 +1931,14 @@ extend Owner {
             tok_pool: Vector::<u64>::new(),
             sc_assign_sites: Vector::<KillSite>::new(),
             sc_seen: Vector::<u64>::new(),
+            sc_kinds: Vector::<u8>::new(),
+            sc_ptyn: Vector::<NodeId>::new(),
+            sc_tys: Vector::<TypeId>::new(),
+            sc_lb_start: Vector::<u32>::new(),
+            sc_lb_flat: Vector::<u32>::new(),
+            sc_curp: Vector::<u32>::new(),
+            sc_tok_a: Vector::<u64>::new(),
+            sc_tok_b: Vector::<u64>::new(),
         };
     }
 
@@ -1862,7 +1946,8 @@ extend Owner {
         return unsafe &*self.pkg;
     }
 
-    const fn ast_of(self: &Self, m: ModuleId) &Ast {
+    /// Module `m`'s frozen AST (types are read through it).
+    pub const fn ast_of(self: &Self, m: ModuleId) &Ast {
         return unsafe &*self.p().module_ast_const(m);
     }
 
@@ -2368,13 +2453,16 @@ extend Owner {
     /// The facts of body `b` over move forest `mf`, freshly allocated.
     pub fn generate(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts {
         let mut f = BodyFacts::empty();
-        self.generate_into(b, mf, &mut f);
+        self.generate_into(b, mf, &mut f, true);
         return f;
     }
 
     /// Fill `dst` in place, reusing its vector capacity across bodies (the reusable-context path). The
     /// generator owns a BodyFacts by value, so `dst`'s reset storage is moved in, filled, and moved back.
-    pub fn generate_into(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest, dst: &mut BodyFacts) {
+    /// With `loans` false only the move/init facts are produced (events, their block ranges and the
+    /// easy-block masks): origins, loans, accesses, subsets, kills and the liveness rows stay empty.
+    /// That is all drop elaboration reads, and all a body the loan-skip predicate cleared needs.
+    pub fn generate_into(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest, dst: &mut BodyFacts, loans: bool) {
         dst.reset();
         let mut sites = replace(&mut self.sc_assign_sites, Vector::<KillSite>::new());
         sites.truncate(0);
@@ -2390,6 +2478,7 @@ extend Owner {
             in_caps: false,
             plain_copy: false,
             calling: false,
+            loans: loans,
             seen: seen,
         };
         g.number_points();

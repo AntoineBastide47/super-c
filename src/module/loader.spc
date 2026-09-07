@@ -1165,6 +1165,9 @@ extend Package {
     /// Compute co_spans: seed with the closure/function arguments of `std::parallel::runtime::submit`
     /// (what `launch` desugars to), then close over direct calls made inside marked spans. A callee
     /// that cannot be pinned to a declaration (a fn value, a dyn method) widens to everywhere.
+    /// One pass over the nodes builds a decl table (every function and closure, per module in span
+    /// order) and attaches each pinned call to its innermost decl; the closure is then a worklist
+    /// over decls, never a rescan of the node arrays.
     pub fn co_compute(self: &mut Self) {
         self.co_state = 1;
         self.co_spans.truncate(0);
@@ -1180,9 +1183,68 @@ extend Package {
         if sub.node == NODE_NONE {
             return;
         }
-        // Seeds.
-        for m in 0..self.modules.len() {
+        let nm = self.modules.len();
+        // Decls sorted by span start within each module: the decls inside decl `d` are the run that
+        // follows it while their starts stay below its end, and a site's innermost decl is the
+        // last start at or before it whose end covers it (else that decl's ancestor).
+        let mut d_start = Vector::<u32>::new(); // per module (+ sentinel): first decl
+        let mut d_span = Vector::<u64>::new(); // start << 32 | end
+        let mut d_parent = Vector::<u32>::new(); // innermost enclosing decl, or NONE
+        let mut d_lim = Vector::<u32>::new(); // per decl: one past its module's last decl
+        let mut d_of = Map::<u64, u32>::new(); // (module << 32 | node) -> decl
+        let mut dm_span = Vector::<u64>::new(); // per-module collection scratch
+        let mut dm_node = Vector::<u32>::new();
+        let none: u32 = 0xFFFFFFFFu32;
+        for m in 0..nm {
+            d_start.push(d_span.len() as u32);
             let a = unsafe &*self.module_ast_const(m as ModuleId);
+            dm_span.truncate(0);
+            dm_node.truncate(0);
+            for ni in 0..a.nodes.len() {
+                let n = a.at_const(ni as NodeId);
+                if n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_CLOSURE {
+                    dm_span.push(n.span.start as u64 << 32 | n.span.end as u64);
+                    dm_node.push(ni as u32);
+                }
+            }
+            // Insertion sort by start: decl order is nearly source order already.
+            for x in 1..dm_span.len() {
+                let mut y = x;
+                while y > 0 && dm_span[y - 1] > dm_span[y] {
+                    let ts = dm_span[y - 1];
+                    dm_span.set(y - 1, dm_span[y]);
+                    dm_span.set(y, ts);
+                    let tn = dm_node[y - 1];
+                    dm_node.set(y - 1, dm_node[y]);
+                    dm_node.set(y, tn);
+                    y -= 1;
+                }
+            }
+            let base = d_span.len() as u32;
+            let mut open = none; // the innermost decl whose span is still open
+            for x in 0..dm_span.len() {
+                let sp = dm_span[x];
+                let st = (sp >> 32) as u32;
+                while open != none && (d_span[open as usize] & 0xFFFFFFFFu64) as u32 <= st {
+                    open = d_parent[open as usize];
+                }
+                d_span.push(sp);
+                d_parent.push(open);
+                d_lim.push(base + dm_span.len() as u32);
+                d_of.insert(m as u64 << 32 | dm_node[x] as u64, base + x as u32);
+                open = base + x as u32;
+            }
+        }
+        d_start.push(d_span.len() as u32);
+        // Call records attached to their innermost decl: a pinned target outside std (a decl to
+        // mark), or NONE for a callee the tracker cannot pin (fires: everything widens).
+        let mut r_decl = Vector::<u32>::new();
+        let mut r_tgt = Vector::<u32>::new();
+        let mut seeds = Vector::<u32>::new();
+        for m in 0..nm {
+            let a = unsafe &*self.module_ast_const(m as ModuleId);
+            let lo = d_start[m] as usize;
+            let hi = d_start[m + 1] as usize;
             for ni in 0..a.nodes.len() {
                 let n = a.at_const(ni as NodeId);
                 if n.kind != NodeKind::NODE_CALL {
@@ -1190,90 +1252,192 @@ extend Package {
                 }
                 let cd = n.as_data.call;
                 let cr = a.resolution_def(cd.callee);
-                if cr.module != sub.mid || cr.node != sub.node {
-                    continue;
-                }
-                if cd.args.len < 1 {
-                    continue;
-                }
-                let a0 = unsafe a.list(cd.args)[0];
-                let ak = a.at_const(a0).kind;
-                if ak == NodeKind::NODE_CLOSURE {
-                    self.co_mark(m as ModuleId, a.at_const(a0).span);
-                } else {
-                    let fr = a.resolution_def(a0);
-                    if fr.node != NODE_NONE && unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).kind == NodeKind::NODE_FUNCTION {
-                        let fsp = unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).span;
-                        self.co_mark(fr.module, fsp);
+                if cr.module == sub.mid && cr.node == sub.node {
+                    if cd.args.len < 1 {
+                        continue;
+                    }
+                    let a0 = unsafe a.list(cd.args)[0];
+                    let mut sk: u64 = 0;
+                    if a.at_const(a0).kind == NodeKind::NODE_CLOSURE {
+                        sk = m as u64 << 32 | a0 as u64;
                     } else {
-                        // A coroutine entry the tracker cannot pin.
-                        self.co_state = 2;
-                        return;
+                        let fr = a.resolution_def(a0);
+                        if fr.node != NODE_NONE && unsafe (&*self.module_ast_const(fr.module)).at_const(fr.node).kind == NodeKind::NODE_FUNCTION {
+                            sk = fr.module as u64 << 32 | fr.node as u64;
+                        } else {
+                            // A coroutine entry the tracker cannot pin.
+                            self.co_state = 2;
+                            return;
+                        }
                     }
-                }
-            }
-        }
-        // Transitive closure over direct calls made inside marked spans.
-        let mut changed = true;
-        while changed && self.co_state == 1 {
-            changed = false;
-            for m in 0..self.modules.len() {
-                if self.co_spans.at(m).len() == 0 {
-                    continue;
-                }
-                let a = unsafe &*self.module_ast_const(m as ModuleId);
-                for ni in 0..a.nodes.len() {
-                    let n = a.at_const(ni as NodeId);
-                    if n.kind != NodeKind::NODE_CALL {
-                        continue;
-                    }
-                    if !self.co_on(m as ModuleId, n.span) {
-                        continue;
-                    }
-                    let cd = n.as_data.call;
-                    let mut t = DefId { module: 0, node: NODE_NONE };
-                    let ni32 = ni as u32;
-                    switch a.call_info.get(&ni32) {
-                        Some(v) => {
-                            t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
+                    switch d_of.get(&sk) {
+                        Some(d) => {
+                            seeds.push(*d);
                         },
                         _ => {},
                     };
-                    if t.node == NODE_NONE {
-                        t = a.resolution_def(cd.callee);
-                    }
-                    if t.node == NODE_NONE {
-                        let ck = a.at_const(cd.callee).kind;
-                        if ck == NodeKind::NODE_MEMBER {
-                            t = a.resolution_def(a.at_const(cd.callee).as_data.member.member);
+                    continue;
+                }
+                // The innermost decl around the site; a site outside every decl (a const
+                // initializer) never runs inside a coroutine.
+                let mut d = none;
+                {
+                    let mut l = lo;
+                    let mut h = hi;
+                    while l < h {
+                        let mid = (l + h) / 2;
+                        if (d_span[mid] >> 32) as u32 <= n.span.start {
+                            l = mid + 1;
+                        } else {
+                            h = mid;
                         }
                     }
-                    if t.node == NODE_NONE {
-                        if a.is_free_call(ni as NodeId, self.modules.at(m).source.as_str()) {
-                            // An explicit drop: no callee body to run.
-                            continue;
-                        }
-                        // Fn value or dyn dispatch: cannot pin the callee.
-                        self.co_state = 2;
-                        return;
+                    if l > lo {
+                        d = (l - 1) as u32;
                     }
-                    let ta = unsafe &*self.module_ast_const(t.module);
-                    if ta.at_const(t.node).kind != NodeKind::NODE_FUNCTION {
-                        // Ctor/variant/type call: no body to run.
+                    while d != none && (d_span[d as usize] & 0xFFFFFFFFu64) as u32 < n.span.end {
+                        d = d_parent[d as usize];
+                    }
+                }
+                if d == none {
+                    continue;
+                }
+                let mut t = DefId { module: 0, node: NODE_NONE };
+                let ni32 = ni as u32;
+                switch a.call_info.get(&ni32) {
+                    Some(v) => {
+                        t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
+                    },
+                    _ => {},
+                };
+                if t.node == NODE_NONE {
+                    t = a.resolution_def(cd.callee);
+                }
+                if t.node == NODE_NONE {
+                    let ck = a.at_const(cd.callee).kind;
+                    if ck == NodeKind::NODE_MEMBER {
+                        t = a.resolution_def(a.at_const(cd.callee).as_data.member.member);
+                    }
+                }
+                if t.node == NODE_NONE {
+                    if a.is_free_call(ni as NodeId, self.modules.at(m).source.as_str()) {
+                        // An explicit drop: no callee body to run.
                         continue;
                     }
-                    // The scan stops at the std boundary: std loops are bounded by their inputs
-                    // (containers, strings), so they always return to a marked frame, and a closure
-                    // built in coroutine code is covered lexically by its enclosing marked span.
-                    // std::parallel additionally never emits safepoints at all.
-                    let tp9 = self.modules.at(t.module as usize).path.as_str();
-                    if tp9.starts_with("std") || tp9.starts_with("__std") {
-                        continue;
+                    // Fn value or dyn dispatch: cannot pin the callee.
+                    r_decl.push(d);
+                    r_tgt.push(none);
+                    continue;
+                }
+                let ta = unsafe &*self.module_ast_const(t.module);
+                if ta.at_const(t.node).kind != NodeKind::NODE_FUNCTION {
+                    // Ctor/variant/type call: no body to run.
+                    continue;
+                }
+                // The scan stops at the std boundary: std loops are bounded by their inputs
+                // (containers, strings), so they always return to a marked frame, and a closure
+                // built in coroutine code is covered lexically by its enclosing marked span.
+                // std::parallel additionally never emits safepoints at all.
+                let tp9 = self.modules.at(t.module as usize).path.as_str();
+                if tp9.starts_with("std") || tp9.starts_with("__std") {
+                    continue;
+                }
+                switch d_of.get(&(t.module as u64 << 32 | t.node as u64)) {
+                    Some(td) => {
+                        r_decl.push(d);
+                        r_tgt.push(*td);
+                    },
+                    _ => {},
+                };
+            }
+        }
+        // Records by decl (counting sort).
+        let nd = d_span.len();
+        let mut r_start = Vector::<u32>::new();
+        for _i in 0..nd + 1 {
+            r_start.push(0);
+        }
+        for i in 0..r_decl.len() {
+            let d = r_decl[i] as usize;
+            r_start.set(d + 1, r_start[d + 1] + 1);
+        }
+        for d in 0..nd {
+            r_start.set(d + 1, r_start[d + 1] + r_start[d]);
+        }
+        let mut r_flat = Vector::<u32>::new();
+        for _i in 0..r_decl.len() {
+            r_flat.push(0);
+        }
+        let mut cur = Vector::<u32>::new();
+        for d in 0..nd {
+            cur.push(r_start[d]);
+        }
+        for i in 0..r_decl.len() {
+            let d = r_decl[i] as usize;
+            r_flat.set(cur[d] as usize, r_tgt[i]);
+            cur.set(d, cur[d] + 1);
+        }
+        // The closure: a marked decl (a span) turns itself and every decl inside it on; an on decl
+        // fires its records once, marking each target. Every decl turns on at most once.
+        let mut on = Vector::<u8>::new();
+        let mut marked = Vector::<u8>::new();
+        for _i in 0..nd {
+            on.push(0);
+            marked.push(0);
+        }
+        let mut queue = Vector::<u32>::new();
+        let mut m_of = 0 as usize; // the module of the decl being marked, found by d_start
+        for si in 0..seeds.len() {
+            let d = seeds[si] as usize;
+            if marked[d] == 0 {
+                marked.set(d, 1);
+                while d_start[m_of + 1] as usize <= d {
+                    m_of += 1;
+                }
+                while d_start[m_of] as usize > d {
+                    m_of -= 1;
+                }
+                self.co_spans.index_mut(m_of).push(d_span[d]);
+                if on[d] == 0 {
+                    on.set(d, 1);
+                    queue.push(d as u32);
+                }
+            }
+        }
+        let mut qi: usize = 0;
+        while qi < queue.len() {
+            let d = queue[qi] as usize;
+            qi += 1;
+            // Everything declared inside `d` runs inside its span: the run of the module's
+            // decls after `d` whose starts fall below its end (spans nest).
+            let dend = (d_span[d] & 0xFFFFFFFFu64) as u32;
+            let mut k = d + 1;
+            while k < d_lim[d] as usize && (d_span[k] >> 32) as u32 < dend {
+                if on[k] == 0 {
+                    on.set(k, 1);
+                    queue.push(k as u32);
+                }
+                k += 1;
+            }
+            for ri in r_start[d]..r_start[d + 1] {
+                let t = r_flat[ri as usize];
+                if t == none {
+                    // Fn value or dyn dispatch inside coroutine code: cannot pin the callee.
+                    self.co_state = 2;
+                    return;
+                }
+                if marked[t as usize] == 0 {
+                    marked.set(t as usize, 1);
+                    while d_start[m_of + 1] as usize <= t as usize {
+                        m_of += 1;
                     }
-                    let fsp = ta.at_const(t.node).span;
-                    if !self.co_on(t.module, fsp) {
-                        self.co_mark(t.module, fsp);
-                        changed = true;
+                    while d_start[m_of] as usize > t as usize {
+                        m_of -= 1;
+                    }
+                    self.co_spans.index_mut(m_of).push(d_span[t as usize]);
+                    if on[t as usize] == 0 {
+                        on.set(t as usize, 1);
+                        queue.push(t);
                     }
                 }
             }
@@ -1418,10 +1582,6 @@ extend Package {
                 }
             }
         }
-    }
-
-    fn co_mark(self: &mut Self, m: ModuleId, sp: tok::Span) {
-        self.co_spans.index_mut(m as usize).push(sp.start as u64 << 32 | sp.end as u64);
     }
 
     /// Read-only view of module `mid`'s Ast for consumers outside the package (the Core IR lowerer).

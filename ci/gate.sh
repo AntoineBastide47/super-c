@@ -63,16 +63,16 @@ step "fixpoint: gen1 ($CONTRACT_FIXPOINT_GEN1) vs gen2 ($CONTRACT_FIXPOINT_GEN2)
 cp -R "$tree/build/raw" "$tmp/gen1-raw"
 cp "$tree/build/dev/super-c" "$tree/gen1-super-c"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal ./gen1-super-c build >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 ./gen1-super-c build >/dev/null )
 same_tree "$tmp/gen1-raw" "$tree/build/raw" || fail "gen1 and gen2 emitted different C (above)"
 echo "gate: byte-identical"
 
 step "worker identity: --jobs=$CONTRACT_WORKERS_MIN vs --jobs=$ncpu"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal ./gen1-super-c build --jobs=$CONTRACT_WORKERS_MIN >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 ./gen1-super-c build --jobs=$CONTRACT_WORKERS_MIN >/dev/null )
 cp -R "$tree/build/raw" "$tmp/j1-raw"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal ./gen1-super-c build --jobs=$ncpu >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 ./gen1-super-c build --jobs=$ncpu >/dev/null )
 same_tree "$tmp/j1-raw" "$tree/build/raw" || fail "one worker and $ncpu workers emitted different C (above)"
 echo "gate: byte-identical"
 
