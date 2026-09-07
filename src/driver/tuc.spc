@@ -20,7 +20,7 @@ import driver::util as *;
 import stdlib;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 3;
+const TUC_VER: u32 = 4;
 
 const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
@@ -603,7 +603,7 @@ fn ev_tr(
 ) {
     *b_out = ev.b;
     *d_out = ev.d;
-    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT {
+    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT || ev.kind == mbe::RK_HEDGE {
         *d_out = tt_ref(p, r, ev.a as ModuleId, ev.d);
     } else if ev.kind == mbe::RK_DYNREQ || ev.kind == mbe::RK_TI || ev.kind == mbe::RK_MDYN {
         *b_out = tt_ref(p, r, ev.a as ModuleId, ev.b);
@@ -633,7 +633,7 @@ fn ev_tr(
 
 /// Rewrite a decoded event's table refs back to live TypeIds interned into the consuming pools.
 pub fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, ev: &mut mbe::RecEv) {
-    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT {
+    if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT || ev.kind == mbe::RK_HEDGE {
         ev.d = tt_id(p, tab, cache, ev.d, ev.a as ModuleId);
     } else if ev.kind == mbe::RK_DYNREQ || ev.kind == mbe::RK_TI || ev.kind == mbe::RK_MDYN {
         ev.b = tt_id(p, tab, cache, ev.b, ev.a as ModuleId);

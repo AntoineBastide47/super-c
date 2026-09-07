@@ -234,11 +234,18 @@ pub struct Mangler {
     /// `@emit_macro` template mode: an UNRESOLVED generic param spells as its own name in C types
     /// and as `<paste>_SCM_<name>` in mangles (byte 1 marks a `##` for the template rewriter).
     pub macro_on: bool,
-    // TU-liveness floor: modules whose symbols were spelled outside their own TU (mark_ctx)
-    /// Dense (spelling TU -> owner module) edge matrix, (n+1)*n bytes, row n = the shared
-    /// instance TU (mark_ctx -1): modpfx marks an edge per cross-TU spelling, far too hot for a
-    /// hashed set. Sized lazily on the first edge.
-    pub used_mods: Vector<u8>,
+    /// Cross-TU spelling edges as two bit matrices (modpfx marks one per spelling, far too hot
+    /// for a hashed set): one row per context (modules, the package-level row, then one per
+    /// owner module's instance shard), one bit per owner module. `used_types` when the context
+    /// spelled a type name of the owner (it needs the owner's complete types), `used_syms` for
+    /// any other symbol (it needs the owner's prototypes); `um_hit` is their union. Sized
+    /// lazily on the first edge.
+    pub used_types: Vector<u64>,
+    pub used_syms: Vector<u64>,
+    /// Nesting of the C type spellers: a module prefix spelled inside one names a type.
+    pub type_depth: u32,
+    /// The spelling context: a module id (its TU), `CTX_INST | owner` (owner's instance shard)
+    /// or -1 (package-level text with no TU of its own).
     pub mark_ctx: i64,
     /// The impl fn `method_by_name` last resolved (node NONE when none): callers that must
     /// demand the instance body read it back (the return carries only the spelling).
@@ -256,9 +263,9 @@ pub struct Mangler {
     own_built: Vector<bool>,
     own_idx: Map<u64, u64>, // (module << 32 | fnode) -> (extend << 32 | interface)
     ovl_memo: Map<u64, u64>, // overload_count keyed by (cur, tmod, tdecl, name) hash
-    last_edge: u64, // the used_mods edge recorded last: spellings cluster, so most repeat it
+    last_edge: u64, // the spelling edge recorded last: spellings cluster, so most repeat it
     /// Spelling capture for memoized renders: while on, modpfx logs every module it spells so a
-    /// cache hit can replay the used_mods edges exactly (under the hit's own mark_ctx).
+    /// cache hit can replay the spelling edges exactly (under the hit's own mark_ctx).
     pub edge_log_on: bool,
     pub edge_log: Vector<ModuleId>,
     /// Per-TU emission journal (driver/tuc): while on, every cross-TU-gated attempt the emitter
@@ -294,9 +301,12 @@ pub const RK_TI: u8 = 12; // a = rm, b = rt (type_info descriptor request)
 pub const RK_BLK: u8 = 13; // a/b = blocking callee DefId (blk_wrapper call)
 pub const RK_AGG: u8 = 14; // h = gate, a = pm, b/c/d+xs = TyInstance, subs = spelling env
 pub const RK_MDYN: u8 = 15; // a = pm, b = t (mangler dyn_reqs entry)
-pub const RK_EDGE: u8 = 16; // xs = used_mods row of this module (driver-recorded)
+pub const RK_EDGE: u8 = 16; // xs = spelling row of this module, bit 15 = type edge (driver-recorded)
 pub const RK_MAIN: u8 = 17; // a = main_argv (driver-recorded, module holds `main`)
 pub const RK_ZST: u8 = 18; // a = alignment (ZST sentinel demand)
+pub const RK_HEDGE: u8 = 19; // a = owner module, d = embedded type (a's pool), c = env kind (header edge)
+/// `mark_ctx` of owner module `o`'s instance shard: `CTX_INST | o`.
+pub const CTX_INST: i64 = 0x10000;
 
 /// One journaled emission side effect. Fields are kind-specific (see RK_*); unused ones stay zero.
 pub struct RecEv {
@@ -376,7 +386,9 @@ extend Mangler {
             clos_ids: Vector::<NodeId>::new(),
             dyn_reqs: Vector::<DynReq>::new(),
             macro_on: false,
-            used_mods: Vector::<u8>::new(),
+            used_types: Vector::<u64>::new(),
+            used_syms: Vector::<u64>::new(),
+            type_depth: 0,
             mark_ctx: -1,
             last_method_def: DefId { module: 0, node: NODE_NONE },
             agg_on: false,
@@ -710,37 +722,61 @@ extend Mangler {
         return ok;
     }
 
-    /// Record the cross-TU edge for module `m` exactly as spelling it would (replay path for
-    /// memoized renders).
-    pub fn mark_used(self: &mut Self, m: ModuleId) {
+    /// Record the cross-TU edge for module `enc` (a module id, bit 15 set when the spelling
+    /// was a type name) exactly as spelling it would (replay path for memoized renders and the
+    /// per-TU cache).
+    pub fn mark_used(self: &mut Self, enc: ModuleId) {
+        let m = enc & 0x7FFF;
+        let ty = (enc & 0x8000) != 0;
         if m as i64 != self.mark_ctx {
             let src = if self.mark_ctx < 0 {
                 65534u64;
             } else {
                 self.mark_ctx as u64;
             };
-            let edge = src << 32 | m as u64;
+            let edge = src << 32 | enc as u64;
             if edge != self.last_edge {
                 self.last_edge = edge;
-                self.um_set(src, m);
+                self.um_set(src, m, ty);
             }
         }
     }
 
-    fn um_set(self: &mut Self, src: u64, dst: ModuleId) {
+    /// The matrix row of spelling context `src`: modules, then the package-level row (65534),
+    /// then one row per owner module's instance shard.
+    const fn um_row(self: &Self, src: u64) usize {
+        let n = self.p().modules.len();
+        if src == 65534u64 {
+            return n;
+        }
+        if src >= CTX_INST as u64 {
+            return n + 1 + (src - CTX_INST as u64) as usize;
+        }
+        return src as usize;
+    }
+
+    // Words per matrix row.
+    const fn um_w(self: &Self) usize {
+        return (self.p().modules.len() + 63) / 64;
+    }
+
+    fn um_set(self: &mut Self, src: u64, dst: ModuleId, ty: bool) {
         let n = self.p().modules.len();
         if n == 0 {
             return;
         }
-        if self.used_mods.len() == 0 {
-            self.used_mods.resize_default((n + 1) * n);
+        let w = self.um_w();
+        if self.used_types.len() == 0 {
+            self.used_types.resize_default((2 * n + 1) * w);
+            self.used_syms.resize_default((2 * n + 1) * w);
         }
-        let row = if src == 65534u64 {
-            n;
+        let i = self.um_row(src) * w + dst as usize / 64;
+        let bit = 1u64 << (dst as u64 & 63);
+        if ty {
+            self.used_types.set(i, self.used_types[i] | bit);
         } else {
-            src as usize;
-        };
-        self.used_mods.set(row * n + dst as usize, 1);
+            self.used_syms.set(i, self.used_syms[i] | bit);
+        }
     }
 
     /// Frontier merge: absorb shard `o`'s cross-TU row for TU `m` and its instance-aggregate
@@ -749,10 +785,71 @@ extend Mangler {
     pub fn sh_merge_um(self: &mut Self, o: &mut Mangler, m: u64) {
         let nmods = self.p().modules.len();
         for dst in 0..nmods {
-            if o.um_hit(m, dst) {
-                self.um_set(m, dst as ModuleId);
+            if o.um_hit_kind(m, dst, true) {
+                self.um_set(m, dst as ModuleId, true);
+            }
+            if o.um_hit_kind(m, dst, false) {
+                self.um_set(m, dst as ModuleId, false);
             }
         }
+    }
+
+    /// Frontier merge: absorb every package-level and instance-shard row of shard `o`.
+    pub fn sh_merge_inst(self: &mut Self, o: &Mangler) {
+        if o.used_types.len() == 0 {
+            return;
+        }
+        let n = self.p().modules.len();
+        let w = self.um_w();
+        if self.used_types.len() == 0 {
+            self.used_types.resize_default((2 * n + 1) * w);
+            self.used_syms.resize_default((2 * n + 1) * w);
+        }
+        for i in n * w..(2 * n + 1) * w {
+            self.used_types.set(i, self.used_types[i] | o.used_types[i]);
+            self.used_syms.set(i, self.used_syms[i] | o.used_syms[i]);
+        }
+    }
+
+    /// True when context `src` spelled a type name (`ty`) or another symbol owned by module `dst`.
+    pub const fn um_hit_kind(self: &Self, src: u64, dst: usize, ty: bool) bool {
+        if self.used_types.len() == 0 {
+            return false;
+        }
+        let i = self.um_row(src) * self.um_w() + dst / 64;
+        let bit = 1u64 << (dst as u64 & 63);
+        if ty {
+            return (self.used_types[i] & bit) != 0;
+        }
+        return (self.used_syms[i] & bit) != 0;
+    }
+
+    /// The module whose complete type definitions a by-value use of `t` needs: an aggregate's
+    /// declaring module, a generic instance's declaring module, an array's element owner, a
+    /// capturing closure's module (its env struct is the value); -1 for everything else.
+    pub fn owner_dep(self: &mut Self, pm: ModuleId, t: TypeId) i32 {
+        let mut rm = pm;
+        let mut rt = t;
+        if !self.resolve(pm, t, &mut rm, &mut rt) {
+            return -1;
+        }
+        let y = *self.p().module_ast_const(rm).type_at(rt);
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            return y.module;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            return self.p().module_ast_const(rm).instance(y.as_data.inst).module;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.owner_dep(rm, y.as_data.arr.elem);
+        }
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            let fd = self.p().module_ast_const(y.module).at_const(y.as_data.decl);
+            if fd.kind == NodeKind::NODE_CLOSURE && fd.as_data.closure.captures.len != 0 {
+                return y.module;
+            }
+        }
+        return -1;
     }
 
     /// Merge a parallel shard's aggregate requests `[a0, a1)` and dyn requests `[d0, d1)` from `o`
@@ -781,36 +878,34 @@ extend Mangler {
 
     /// True when TU `src` (65534 = the shared instance TU) spells a symbol owned by module `dst`.
     pub const fn um_hit(self: &Self, src: u64, dst: usize) bool {
-        if self.used_mods.len() == 0 {
-            return false;
-        }
-        let n = self.p().modules.len();
-        let row = if src == 65534u64 {
-            n;
-        } else {
-            src as usize;
-        };
-        return *self.used_mods.at(row * n + dst) != 0;
+        return self.um_hit_kind(src, dst, true) || self.um_hit_kind(src, dst, false);
     }
 
     /// Append module `m`'s symbol prefix (empty for a single-module build) and record the cross-TU
     /// use edge when a mark context is active.
     pub fn modpfx(self: &mut Self, m: ModuleId, out: &mut String) {
+        let ty = self.type_depth != 0;
+        let enc = if ty {
+            m | 0x8000;
+        } else {
+            m;
+        };
         if self.edge_log_on {
-            self.edge_log.push(m);
+            self.edge_log.push(enc);
         }
         if m as i64 != self.mark_ctx {
             // A cross-TU symbol spelling: record the (spelling TU -> owner module) edge so the
-            // writer can prune TUs no KEPT TU references (65534 = the shared instance TU).
+            // writer can prune TUs no KEPT TU references (65534 = the shared instance TU) and
+            // give the TU the owner's type or prototype header.
             let src = if self.mark_ctx < 0 {
                 65534u64;
             } else {
                 self.mark_ctx as u64;
             };
-            let edge = src << 32 | m as u64;
+            let edge = src << 32 | enc as u64;
             if edge != self.last_edge {
                 self.last_edge = edge;
-                self.um_set(src, m);
+                self.um_set(src, m, ty);
             }
         }
         if !self.mangle || self.p().modules.at(m as usize).prelude {
@@ -871,6 +966,13 @@ extend Mangler {
     /// subset (symbolic, or a form not yet frozen); `out` may then hold a partial spelling the
     /// caller must discard.
     pub fn type_m(self: &mut Self, pm: ModuleId, t: TypeId, out: &mut String) bool {
+        self.type_depth += 1;
+        let r = self.type_m_i(pm, t, out);
+        self.type_depth -= 1;
+        return r;
+    }
+
+    fn type_m_i(self: &mut Self, pm: ModuleId, t: TypeId, out: &mut String) bool {
         let a = self.p().module_ast_const(pm);
         let y = *a.type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
@@ -1508,6 +1610,8 @@ extend Mangler {
                             }
                             out.push_str("__");
                             out.push_str(mname);
+                            // The instance body's prototype lives in the method's module.
+                            self.mark_used(em2);
                             return true;
                         }
                         return self.fn_sym(em2, mid, DefId { module: dm, node: dd }, true, out);
@@ -1534,6 +1638,7 @@ extend Mangler {
                 return false;
             }
             out.push_str("__free__d");
+            self.mark_used(y.module);
             return true;
         }
         let mut dm = y.module;
@@ -1577,6 +1682,7 @@ extend Mangler {
                             return false;
                         }
                         out.push_str("__free");
+                        self.mark_used(dm);
                         return true;
                     }
                     return self.fn_sym(dm, mid, DefId { module: dm, node: dd }, true, out);
@@ -1587,6 +1693,7 @@ extend Mangler {
             return false;
         }
         out.push_str("__free__d");
+        self.mark_used(dm);
         return true;
     }
 
@@ -1620,6 +1727,13 @@ extend Mangler {
     /// The full C declarator `<type> <decl>` of pool type `(pm, t)`, including east-const on pointer-to-pointer and array/function spirals. False when
     /// `t` needs an unfrozen family (dyn value types, non-capturing fn pointers).
     pub fn ctype(self: &mut Self, pm: ModuleId, t: TypeId, decl: str, out: &mut String) bool {
+        self.type_depth += 1;
+        let r = self.ctype_i(pm, t, decl, out);
+        self.type_depth -= 1;
+        return r;
+    }
+
+    fn ctype_i(self: &mut Self, pm: ModuleId, t: TypeId, decl: str, out: &mut String) bool {
         let a = self.p().module_ast_const(pm);
         let y = *a.type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
@@ -1796,6 +1910,13 @@ extend Mangler {
     /// `<Qualified>[__<arg>...]` with trailing prelude-Global (default allocator) args elided:
     /// `String<Global>` -> `String`, `Vector<T, Global>` -> `Vector__T`.
     pub fn inst_name(self: &mut Self, pm: ModuleId, it: &TyInstance, out: &mut String) bool {
+        self.type_depth += 1;
+        let r = self.inst_name_i(pm, it, out);
+        self.type_depth -= 1;
+        return r;
+    }
+
+    fn inst_name_i(self: &mut Self, pm: ModuleId, it: &TyInstance, out: &mut String) bool {
         let base9 = out.len();
         let nm = self.p().module_ast_const(it.module).at_const(it.decl).as_data.aggregate.name;
         self.qualified(it.module, nm, out);

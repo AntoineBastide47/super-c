@@ -371,8 +371,11 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
     }
     let mut code = String::new();
     if !user_only {
-        code.push_string(&o.types_h);
-        code.push_string(&o.protos_h);
+        code.push_string(&o.fwd_h);
+        for t in 0..n {
+            code.push_string(o.types_h.at(t));
+            code.push_string(o.protos_h.at(t));
+        }
     }
     // A TU is its part heads, the shared body buffer, then the tail; the file writer interleaves
     // them per part, the needle search only needs every byte present.
@@ -387,10 +390,13 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
         code.push_string(o.tu_tail.at(t));
     }
     if !user_only {
-        for x in 0..o.inst_heads.len() {
-            code.push_string(o.inst_heads.at(x));
+        for q in 0..n {
+            for x in 0..o.inst_heads.at(q).len() {
+                code.push_string(o.inst_heads.at(q).at(x));
+            }
         }
         code.push_string(&o.inst_c);
+        code.push_string(&o.registry_c);
     }
     let buf = (unsafe stdlib::malloc(code.len() + 1)) as *mut char;
     if buf == null {

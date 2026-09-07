@@ -32,6 +32,20 @@ pub struct TuEmit {
     /// emitter must not define them again.
     pub env_defined: Vector<u64>,
     pub emitted: u64,
+    /// Every definition chunk of `out` in order: its start offset, its owner module (the
+    /// declaring module; a generic instance's is the generic's) and whether it is a payload-less
+    /// enum, which prototypes need complete and so lives in the shared forward header.
+    pub chunk_off: Vector<u32>,
+    pub chunk_own: Vector<ModuleId>,
+    pub chunk_enum: Vector<bool>,
+    /// Module-level by-value graph, n*n bytes: `dep_mat[a*n+b]` when an aggregate owned by `a`
+    /// embeds one owned by `b`; module `a`'s type header then includes `b`'s.
+    pub dep_mat: Vector<u8>,
+    cur_own: i64, // the owner whose body is being built (-1 outside a body)
+    cur_deps: Vector<ModuleId>, // owners noted for the bodies being built (a DFS stack of ranges)
+    last_chunk: Vector<u32>, // per module: the index of the latest chunk it owns (0xFFFFFFFF none)
+    owners: Map<u64, u64>, // emitted aggregate (name FNV) -> its owner module
+    last_owner: i64, // the owner of the aggregate the last emit_agg defined or found (-1 none)
     // Emission state keyed by the FNV of the mangled type name: 0 absent / 1 in progress / 2 done.
     state: Map<u64, u64>,
     fwds: Map<u64, u64>, // forward-typedef'd names (deps discovered mid-DFS need one too)
@@ -55,10 +69,52 @@ extend TuEmit {
             fwd2: String::new(),
             skipped: 0,
             emitted: 0,
+            chunk_off: Vector::<u32>::new(),
+            chunk_own: Vector::<ModuleId>::new(),
+            chunk_enum: Vector::<bool>::new(),
+            dep_mat: Vector::<u8>::new(),
+            cur_own: -1,
+            cur_deps: Vector::<ModuleId>::new(),
+            last_chunk: Vector::<u32>::new(),
+            owners: Map::<u64, u64>::new(),
+            last_owner: -1,
             env_defined: Vector::<u64>::new(),
             state: Map::<u64, u64>::new(),
             fwds: Map::<u64, u64>::new(),
         };
+    }
+
+    /// Note that the body being built embeds a definition owned by `dep` (`finish_chunk` turns
+    /// the notes into module edges under the chunk's chosen owner).
+    fn dep_note(self: &mut Self, dep: ModuleId) {
+        if self.cur_own >= 0 {
+            self.cur_deps.push(dep);
+        }
+    }
+
+    /// True when module `a`'s type definitions embed module `b`'s.
+    pub const fn dep_hit(self: &Self, a: usize, b: usize) bool {
+        if self.dep_mat.len() == 0 {
+            return false;
+        }
+        return *self.dep_mat.at(a * self.p().modules.len() + b) != 0;
+    }
+
+    // Append one finished definition body as a chunk of `out` owned by `own`.
+    fn push_chunk(self: &mut Self, body: &String, own: ModuleId, is_enum: bool) {
+        if body.len() == 0 {
+            return;
+        }
+        if self.last_chunk.len() == 0 {
+            for _i in 0..self.p().modules.len() {
+                self.last_chunk.push(0xFFFFFFFF);
+            }
+        }
+        self.last_chunk.set(own as usize, self.chunk_off.len() as u32);
+        self.chunk_off.push(self.out.len() as u32);
+        self.chunk_own.push(own);
+        self.chunk_enum.push(is_enum);
+        self.out.push_string(body);
     }
 
     const fn p(self: &Self) &loader::Package {
@@ -115,37 +171,148 @@ extend TuEmit {
         };
         if st != 0 {
             // 1 = in progress: a by-value cycle would be an upstream bug.
+            self.last_owner = (switch self.owners.get(&key) {
+                Some(v) => (*v) as i64,
+                None => -1,
+            });
             return st != 1;
         }
         self.state.insert(key, 1);
         self.emit_fwd(it);
-        self.emit_agg_body(it, nm.as_str());
+        let own = self.emit_agg_body(it, nm.as_str());
+        if own >= 0 {
+            self.owners.insert(key, own as u64);
+        }
+        self.last_owner = own;
         self.state.insert(key, 2);
         return true;
     }
 
-    fn emit_agg_body(self: &mut Self, it: &AggItem, nm: str) {
+    // The owner module of the aggregate named by the emitted chunk of `it` (-1 when skipped):
+    // its declaring module, or for a generic instance the owner of its by-value argument
+    // defined latest, so the instance lives beside the types it embeds.
+    fn emit_agg_body(self: &mut Self, it: &AggItem, nm: str) i64 {
         let da = self.p().module_ast_const(it.m);
         let n = da.at_const(it.decl);
         let is_enum = n.kind == NodeKind::NODE_ENUM;
         let nb = self.bind_item(it);
         if nb < 0 {
             self.skipped += 1;
-            return;
+            return -1;
         }
         let mut body = String::new();
+        let saved = self.cur_own;
+        let d0 = self.cur_deps.len();
+        self.cur_own = it.m;
         let ok = if is_enum {
             self.enum_body(it, nm, &mut body);
         } else {
             self.struct_body(it, nm, &mut body);
         };
+        self.cur_own = saved;
         self.mg.pop_subs(nb as usize);
-        if ok {
-            self.out.push_string(&body);
-            self.emitted += 1;
-        } else {
+        if !ok {
+            self.cur_deps.truncate(d0);
             self.skipped += 1;
+            return -1;
         }
+        let mut own = it.m;
+        if it.aty != TYPE_NONE {
+            let aa = self.p().module_ast_const(it.amod);
+            let inst = *aa.instance(aa.type_at(it.aty).as_data.inst);
+            own = self.pick_owner(it.m, it.amod, &inst, d0);
+        }
+        self.finish_chunk(&body, own, is_enum && !enum_has_payload(unsafe &*da, it.decl), d0);
+        return own;
+    }
+
+    // Close a body: re-home its noted dependencies under the chosen owner, define the chunk.
+    fn finish_chunk(self: &mut Self, body: &String, own: ModuleId, is_enum: bool, d0: usize) {
+        for i in d0..self.cur_deps.len() {
+            let dep = self.cur_deps[i];
+            if dep != own {
+                let n = self.p().modules.len();
+                if self.dep_mat.len() == 0 {
+                    self.dep_mat.resize_default(n * n);
+                }
+                self.dep_mat.set(own as usize * n + dep as usize, 1);
+            }
+        }
+        self.cur_deps.truncate(d0);
+        self.push_chunk(body, own, is_enum);
+        self.emitted += 1;
+    }
+
+    // The owner of instance `inst` (args in `pm`) of generic module `gm`: among its arguments'
+    // owners that the body embeds by value (noted from `d0` on), the one defined latest; `gm`
+    // when none. Every TU that spells the instance name spells its argument owners too, so
+    // the owner's type header is always included where the instance is used.
+    fn pick_owner(self: &mut Self, gm: ModuleId, pm: ModuleId, inst: &TyInstance, d0: usize) ModuleId {
+        let mut own = gm;
+        let mut best: i64 = -1;
+        for i in 0..inst.n {
+            let c = self.type_owner(pm, unsafe inst.args[i as usize]);
+            if c < 0 {
+                continue;
+            }
+            let mut noted = false;
+            for k in d0..self.cur_deps.len() {
+                if self.cur_deps[k] as i64 == c {
+                    noted = true;
+                    break;
+                }
+            }
+            if !noted {
+                continue;
+            }
+            let lc = self.last_chunk[c as usize];
+            if lc != 0xFFFFFFFF && lc as i64 > best {
+                best = lc;
+                own = c as ModuleId;
+            }
+        }
+        return own;
+    }
+
+    /// Define `(pm, t)` and everything it embeds, as a by-value field would: descriptor data
+    /// names aggregates (`FieldInfo`, `MetaInfo`, ...) that no live body reaches.
+    pub fn ensure_by_value(self: &mut Self, pm: ModuleId, t: TypeId) bool {
+        return self.field_dep(pm, t);
+    }
+
+    /// The module whose type header defines `(pm, t)` when it is used by value: an aggregate's
+    /// declaring module, an emitted instance's chosen owner, an array's element owner, a
+    /// capturing closure's module; -1 for everything else.
+    pub fn type_owner(self: &mut Self, pm: ModuleId, t: TypeId) i64 {
+        let mut rm = pm;
+        let mut rt = t;
+        if !self.mg.resolve(pm, t, &mut rm, &mut rt) {
+            return -1;
+        }
+        let y = *self.p().module_ast_const(rm).type_at(rt);
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            return y.module;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let mut nm = String::new();
+            if !self.mg.type_m(rm, rt, &mut nm) {
+                return -1;
+            }
+            return switch self.owners.get(&fnv(nm.as_str())) {
+                Some(v) => (*v) as i64,
+                None => self.p().module_ast_const(rm).instance(y.as_data.inst).module,
+            };
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.type_owner(rm, y.as_data.arr.elem);
+        }
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            let fd = self.p().module_ast_const(y.module).at_const(y.as_data.decl);
+            if fd.kind == NodeKind::NODE_CLOSURE && fd.as_data.closure.captures.len != 0 {
+                return y.module;
+            }
+        }
+        return -1;
     }
 
     // Emit dependencies of a by-value field type, then spell it. Pointers/references need only the
@@ -160,15 +327,38 @@ extend TuEmit {
         let y = *a.type_at(rt);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             let dep = AggItem { m: y.module, decl: y.as_data.decl, amod: rm, aty: TYPE_NONE };
-            return self.emit_agg(&dep);
+            let r = self.emit_agg(&dep);
+            self.dep_note(y.module);
+            return r;
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let inst = *a.instance(y.as_data.inst);
             let dep = AggItem { m: inst.module, decl: inst.decl, amod: rm, aty: rt };
-            return self.emit_agg(&dep);
+            let r = self.emit_agg(&dep);
+            if self.last_owner >= 0 {
+                self.dep_note(self.last_owner as ModuleId);
+            }
+            return r;
         }
         if y.kind == TypeKind::TYPE_ARRAY {
             return self.field_dep(rm, y.as_data.arr.elem);
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
+            // A pointer field needs only the pointee's forward typedef, which exists once the
+            // pointee is defined anywhere; a pointee nothing defines (descriptor data pointing at
+            // never-instantiated metadata) still gets its typedef.
+            let mut em2 = rm;
+            let mut et2 = y.as_data.elem;
+            if self.mg.resolve(rm, y.as_data.elem, &mut em2, &mut et2) {
+                let e = *self.p().module_ast_const(em2).type_at(et2);
+                if e.kind == TypeKind::TYPE_STRUCT || e.kind == TypeKind::TYPE_ENUM {
+                    self.emit_fwd(&AggItem { m: e.module, decl: e.as_data.decl, amod: em2, aty: TYPE_NONE });
+                } else if e.kind == TypeKind::TYPE_INSTANCE {
+                    let inst = *self.p().module_ast_const(em2).instance(e.as_data.inst);
+                    self.emit_fwd(&AggItem { m: inst.module, decl: inst.decl, amod: em2, aty: et2 });
+                }
+            }
+            return true;
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
             // A stored CLOSURE VALUE embeds its env struct: define it here (captures first), and
@@ -189,6 +379,10 @@ extend TuEmit {
                 }
                 self.state.insert(key, 1);
                 self.env_defined.push(key);
+                self.dep_note(y.module);
+                let saved = self.cur_own;
+                let d0 = self.cur_deps.len();
+                self.cur_own = y.module;
                 self.fwd2.push_str("typedef struct ");
                 self.fwd2.push_str(nm.as_str());
                 self.fwd2.push_str(" ");
@@ -232,10 +426,11 @@ extend TuEmit {
                     body.push_str("unsigned char _sc_zenv; ");
                 }
                 body.push_str("};\n");
+                self.cur_own = saved;
                 if ok {
-                    self.out.push_string(&body);
-                    self.emitted += 1;
+                    self.finish_chunk(&body, y.module, false, d0);
                 } else {
+                    self.cur_deps.truncate(d0);
                     self.skipped += 1;
                 }
                 self.state.insert(key, 2);
@@ -922,21 +1117,45 @@ extend TuEmit {
         }
         let it = AggItem { m: inst.module, decl: inst.decl, amod: pm, aty: TYPE_NONE };
         let mut body = String::new();
+        let saved = self.cur_own;
+        let d0 = self.cur_deps.len();
+        self.cur_own = inst.module;
         let ok = if n.kind == NodeKind::NODE_ENUM {
             self.enum_body(&it, nm.as_str(), &mut body);
         } else {
             self.struct_body(&it, nm.as_str(), &mut body);
         };
+        self.cur_own = saved;
         self.mg.pop_subs(nb);
         if ok {
-            self.out.push_string(&body);
-            self.emitted += 1;
+            let own = self.pick_owner(inst.module, pm, inst, d0);
+            self.owners.insert(key, own);
+            self.finish_chunk(
+                &body,
+                own,
+                n.kind == NodeKind::NODE_ENUM && !enum_has_payload(unsafe &*da, inst.decl),
+                d0,
+            );
         } else {
+            self.cur_deps.truncate(d0);
             self.skipped += 1;
         }
         self.state.insert(key, 2);
         return true;
     }
+}
+
+/// True when enum `decl` of `da` has a variant with a payload (it emits as a tagged struct).
+fn enum_has_payload(da: &Ast, decl: NodeId) bool {
+    let n = da.at_const(decl);
+    let ms = n.as_data.aggregate.members;
+    for i in 0..ms.len {
+        let vid = unsafe da.list(ms)[i as usize];
+        if da.at_const(vid).kind == NodeKind::NODE_VARIANT && da.at_const(vid).as_data.variant.payload.len != 0 {
+            return true;
+        }
+    }
+    return false;
 }
 
 const fn if_str2(c: bool, a: str<'static>, b: str<'static>) str<'static> {

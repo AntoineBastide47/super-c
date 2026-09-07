@@ -39,7 +39,7 @@ unless the contract itself is intentionally changed.
 ## Absolute Paths in the Generated Tree
 
 Three generated files embed absolute `#include` paths to the repo's `ffi/` and
-`driver_shim` headers: `__ext0_sc_rt.c`, `__ext1_driver_shim.c`, and `__sc_types.h`.
+`driver_shim` headers: `__ext0_sc_rt.c`, `__ext1_driver_shim.c`, and `__sc_fwd.h`.
 
 - **Gen-1 vs gen-2 in the same tree** (the protocol above): both generations embed the
   same paths, so no exclusion is needed — diff everything.
@@ -48,7 +48,7 @@ Three generated files embed absolute `#include` paths to the repo's `ffi/` and
 
 ```sh
 diff -r --exclude='__ext0_sc_rt.c' --exclude='__ext1_driver_shim.c' \
-        --exclude='__sc_types.h' /tmp/a/gen /tmp/b/gen
+        --exclude='__sc_fwd.h' /tmp/a/gen /tmp/b/gen
 # then compare the three excluded files with the path prefix normalized out
 ```
 

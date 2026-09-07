@@ -86,7 +86,7 @@ fn toml_err(label: str, src: str, want: str) {
 }
 
 fn manifest_err(label: str, src: str, want: str) {
-    let (m, errs) = manifest::parse_check(src, "");
+    let (m, errs) = manifest::parse_check(src, "", false);
     assert(m.is_none(), label);
     assert(errs.errors.len() >= 1, label);
     assert_eq(errs.errors.at(0).msg.as_str(), want);
@@ -185,4 +185,20 @@ fn manifest_validation_messages() {
     );
     manifest_err("unknown section", "bin = \"a\"\nroot = \"m.spc\"\n[foo]\nx = 1\n", "unknown section 'foo'");
     manifest_err("unknown key", "bin = \"a\"\nroot = \"m.spc\"\nvendor-dir = \"v\"\n", "unknown key 'vendor-dir'");
+}
+
+// A --bootstrap-tags build reads a manifest written for a newer compiler: sections and keys outside
+// the schema are skipped, everything else is still validated.
+@test
+fn manifest_bootstrap_skips_unknown() {
+    let (m, errs) = manifest::parse_check(
+        "bin = \"a\"\nroot = \"m.spc\"\nvendor-dir = \"v\"\n[foo]\nx = 1\n[profile.dev]\nnew-key = 1\n",
+        "",
+        true,
+    );
+    assert(!m.is_none());
+    assert_eq(errs.errors.len(), 0);
+    let (m2, errs2) = manifest::parse_check("bin = 1\nroot = \"m.spc\"\n", "", true);
+    assert(m2.is_none());
+    assert_eq(errs2.errors.at(0).msg.as_str(), "'bin' expects a string");
 }

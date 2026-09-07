@@ -71,6 +71,11 @@ bootstrap** is required:
 3. Build Gen-B: Gen-A builds the source that uses the new feature.
 4. Wrong order = "unknown attribute namespace" at parse time.
 
+The same rule binds build.toml: the bootstrap release reads the manifest, so a new section or
+key lands in the source only after a release whose `--bootstrap-tags` build skips what it
+does not know (sections and keys, not new TOML syntax). Until then keep the addition
+commented out, as the `[shards]` policy is.
+
 ## Single Compilation Path
 
 Only the multi-file `build/` tree emitter exists. The single-TU emitter and REPL were

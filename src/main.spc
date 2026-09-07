@@ -260,7 +260,7 @@ fn project_paths() Vector<String> {
     let mut skip = String::from_str("build");
     for i in 0..names.len() {
         if names.at(i).as_str() == "build.toml" {
-            let mo = bman::load("build.toml");
+            let mo = bman::load("build.toml", false);
             if !mo.is_none() {
                 let man = mo.unwrap();
                 skip.clear();
@@ -1338,7 +1338,7 @@ OPTIONS:
             }
             // Whole-workspace lint of a lib-less manifest: unreachable pub functions are findings.
             let mut lpub = false;
-            let mo = bman::load("build.toml");
+            let mo = bman::load("build.toml", false);
             if !mo.is_none() {
                 let man = mo.unwrap();
                 lpub = man.lib_name.len() == 0;
@@ -1383,7 +1383,7 @@ OPTIONS:
         return rc;
     }
     if manifest_mode {
-        let mo = bman::load("build.toml");
+        let mo = bman::load("build.toml", bootstrap_tags);
         let mut rc = 1;
         if !mo.is_none() {
             let mut man = mo.unwrap();

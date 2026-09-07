@@ -529,9 +529,9 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_inst.c", "touch__i32("), "the tagged copies call their callee");
-    assert(!p.gen_has("__sc_inst.c", "touch__i64("), "the untagged copy's call is never emitted");
-    assert(p.gen_has("__sc_inst.c", "sc_typeinfo_Player"), "the tagged type exports its descriptor");
+    assert(p.gen_has("main__inst.c", "touch__i32("), "the tagged copies call their callee");
+    assert(!p.gen_has("main__inst.c", "touch__i64("), "the untagged copy's call is never emitted");
+    assert(p.gen_has("main__inst.c", "sc_typeinfo_Player"), "the tagged type exports its descriptor");
     let cc = p.cc_build("");
     assert(cc.ok());
     let rr = p.run_bin_env("");
@@ -807,8 +807,8 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_inst.c", "width__i64"), "the projection fanned out to each field type");
-    assert(p.gen_has("__sc_inst.c", "width__bool"), "including the last field");
+    assert(p.gen_has("main__inst.c", "width__i64"), "the projection fanned out to each field type");
+    assert(p.gen_has("main__inst.c", "width__bool"), "including the last field");
     let cc = p.cc_build("");
     assert(cc.ok());
     let rr = p.run_bin_env("");
@@ -860,7 +860,7 @@ enum Shape { Dot, Line(i32, i32), }
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_inst.c", "TypeInfo TI"), "the const descriptor materialized as static data");
+    assert(p.gen_has("main__inst.c", "TypeInfo TI"), "the const descriptor materialized as static data");
     assert(p.gen_has("main.c", "__sc_ti"), "a runtime call site emitted its block-scope descriptor");
     let cc = p.cc_build("");
     assert(cc.ok());
@@ -1261,8 +1261,8 @@ fn local_const_lifecycle() {
     );
     let g = p.compile("g.spc");
     assert(g.ok());
-    assert(p.gen_has("__sc_inst.c", "static const uint32_t V__ct0[8]"), "the buffer is static data");
-    assert(p.gen_has("__sc_inst.c", ".ptr = (void *)V__ct0"), "the const points at it");
+    assert(p.gen_has("g__inst.c", "static const uint32_t V__ct0[8]"), "the buffer is static data");
+    assert(p.gen_has("g__inst.c", ".ptr = (void *)V__ct0"), "the const points at it");
     assert(!p.gen_has("g.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
     let gr = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(gr.ok());
@@ -1287,7 +1287,7 @@ fn dyn_fn_box_roundtrip() {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("main.c", "#include \"__sc_types.h\""), "owned dyn compiles against the package types header");
+    assert(p.gen_has("main.c", "#include \"__sc_fwd.h\""), "owned dyn compiles against the package forward header");
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -1367,6 +1367,36 @@ fn leak_tracker() {
     assert(dblf.exit != 0, "fatal mode aborts on double free");
 }
 
+// The reflection registry TU: `@reflect` roots that no body names still get their descriptor
+// aggregates defined, land in `__sc_registry.c` sorted by symbol, register through one entry
+// point, and a removed root leaves the table (runtime lookup counts the survivors).
+@test
+fn reflect_registry_add_remove() {
+    let p = cli::proj_new();
+    let two = "@reflect(entity)\nstruct Zeta { pub a: i32 }\n@reflect(entity)\nstruct Alpha { pub b: i32 }\nextern \"C\" {\n    fn __sc_reflect_types(n: *mut usize) *const *const void;\n}\nfn main() i32 {\n    let mut n: usize = 0;\n    let _ = unsafe __sc_reflect_types(&mut n);\n    let z = Zeta { a: 1 };\n    let al = Alpha { b: 2 };\n    return n as i32 + z.a + al.b - 5;\n}\n";
+    p.mkfile("main.spc", two);
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(
+        p.gen_has("__sc_registry.c", "{ &sc_typeinfo_Alpha, &sc_typeinfo_Zeta }"),
+        "the registry table lists the roots sorted by symbol",
+    );
+    assert(p.gen_has("main__inst.c", "sc_typeinfo_Zeta"), "a root is defined in its owner's instance shard");
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 0);
+    p.mkfile(
+        "main.spc",
+        "struct Zeta { pub a: i32 }\n@reflect(entity)\nstruct Alpha { pub b: i32 }\nextern \"C\" {\n    fn __sc_reflect_types(n: *mut usize) *const *const void;\n}\nfn main() i32 {\n    let mut n: usize = 0;\n    let _ = unsafe __sc_reflect_types(&mut n);\n    let z = Zeta { a: 1 };\n    let al = Alpha { b: 2 };\n    return n as i32 + z.a + al.b - 4;\n}\n",
+    );
+    let r2 = p.compile("main.spc");
+    assert(r2.ok());
+    assert(p.gen_has("__sc_registry.c", "{ &sc_typeinfo_Alpha }"), "a removed root leaves the table");
+    let cc2 = p.cc_build("");
+    assert(cc2.ok());
+    assert_eq(p.run_bin(), 0);
+}
+
 // Auto-derived Free: structs and enums whose members own memory get a SYNTHESIZED per-TU free
 // (`<T>__free__d`): fields, nested aggregates, enum payloads and container elements all free
 // without an impl being written; partial moves out of derived values are rejected exactly like
@@ -1380,9 +1410,9 @@ fn auto_derive_free() {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_inst.c", "void Plain__free__d(Plain *const self)"), "struct free synthesized");
-    assert(p.gen_has("__sc_inst.c", "Plain__free__d(&self->p);"), "nested derive composes");
-    assert(p.gen_has("__sc_inst.c", "String__free(&self->payload.Named._0);"), "enum payload freed per variant");
+    assert(p.gen_has("main__inst.c", "void Plain__free__d(Plain *const self)"), "struct free synthesized");
+    assert(p.gen_has("main__inst.c", "Plain__free__d(&self->p);"), "nested derive composes");
+    assert(p.gen_has("main__inst.c", "String__free(&self->payload.Named._0);"), "enum payload freed per variant");
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -1646,8 +1676,8 @@ fn main() i32 {
     let r = p.compile("genbv.spc");
     assert(r.ok());
     assert(
-        p.gen_has("__sc_types.h", "struct opt__Opt__genbv__Bar {"),
-        "instance full-monomorphized in the user module's header",
+        p.gen_has("genbv__types.h", "struct opt__Opt__genbv__Bar {"),
+        "instance full-monomorphized in the header of the module owning its by-value argument",
     );
     let cc = p.cc_build("");
     assert(cc.ok());
@@ -1703,8 +1733,8 @@ fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p
     );
     let r = p.compile("emac.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_types.h", "PAIR_DECLARE("), "@emit_macro emits DECLARE template");
-    assert(p.gen_has("__sc_types.h", "PAIR_DEFINE("), "@emit_macro emits DEFINE template");
+    assert(p.gen_has("__sc_fwd.h", "PAIR_DECLARE("), "@emit_macro emits DECLARE template");
+    assert(p.gen_has("__sc_fwd.h", "PAIR_DEFINE("), "@emit_macro emits DEFINE template");
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 7);
@@ -4751,8 +4781,8 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_types.h", "#include <unistd.h>"), "the unistd block pulls in its header");
-    assert(p.gen_has("__sc_types.h", "#include <dirent.h>"), "the filesystem blocks pull in theirs");
+    assert(p.gen_has("__sc_fwd.h", "#include <unistd.h>"), "the unistd block pulls in its header");
+    assert(p.gen_has("__sc_fwd.h", "#include <dirent.h>"), "the filesystem blocks pull in theirs");
     let cc = p.cc_build("");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -5321,8 +5351,8 @@ fn main() i32 {
     );
     let r = p.compile("mat.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_inst.c", "__ct0"), "auxiliary statics are emitted");
-    assert(p.gen_has("__sc_inst.c", ".next = (void *)"), "pointer relocations are emitted");
+    assert(p.gen_has("mat__inst.c", "__ct0"), "auxiliary statics are emitted");
+    assert(p.gen_has("mat__inst.c", ".next = (void *)"), "pointer relocations are emitted");
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
@@ -5348,8 +5378,8 @@ fn main() i32 {
     );
     let r2 = p2.compile("own.spc");
     assert(r2.ok());
-    assert(p2.gen_has("__sc_inst.c", "static const uint32_t V__ct0[8]"), "the Vector's buffer is static data");
-    assert(!p2.gen_has("__sc_inst.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
+    assert(p2.gen_has("own__inst.c", "static const uint32_t V__ct0[8]"), "the Vector's buffer is static data");
+    assert(!p2.gen_has("own__inst.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
     let cc2 = p2.cc_build("");
     assert(cc2.ok());
     // Bind it: run_bin_env hands the captured output to the caller, and dropping it leaks the buffer.
@@ -6239,8 +6269,8 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_inst.c", "touch__i32("), "the taken guard calls its callee");
-    assert(!p.gen_has("__sc_inst.c", "touch__i64("), "an untaken meta_str guard's call is never emitted");
+    assert(p.gen_has("main__inst.c", "touch__i32("), "the taken guard calls its callee");
+    assert(!p.gen_has("main__inst.c", "touch__i64("), "an untaken meta_str guard's call is never emitted");
     let cc = p.cc_build("");
     assert(cc.ok());
     let rr = p.run_bin_env("");
@@ -6302,10 +6332,15 @@ fn build_paths_with_spaces() {
 fn build_staleness_gates() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile("src/main.spc", "import util;\n\nfn main() i32 {\n    return util::v();\n}\n");
+    p.mkfile(
+        "src/main.spc",
+        "import util;\n\nfn main(argv: Vector<str>) i32 {\n    return util::v(argv.len() as i32 - 1);\n}\n",
+    );
+    // `v` stays a real call (a runtime argument, not inlined), so main.c includes util's
+    // prototype header and nothing of its types.
     p.mkfile(
         "src/util.spc",
-        "pub struct S {\n    pub a: i32,\n}\n\npub fn v() i32 {\n    let s = S { a: 0 };\n    return s.a;\n}\n",
+        "pub struct S {\n    pub a: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { a: x };\n    return s.a;\n}\n",
     );
     let root = str::from_cstr(p.rootp());
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
@@ -6325,13 +6360,23 @@ fn build_staleness_gates() {
     assert(p13_mtime(objo.as_str()) == o1, "a no-change build does not rewrite objects");
     assert(p13_mtime(bin.as_str()) == b1, "a no-change build does not relink");
     p13_tick();
-    // Rename the struct field: __sc_types.h changes, main.c's own text does not.
+    // Rename the struct field: util's type header changes, but main.c neither includes it (it
+    // spells no util type) nor changes its own text, so main.o stays.
     p.mkfile(
         "src/util.spc",
-        "pub struct S {\n    pub b: i32,\n}\n\npub fn v() i32 {\n    let s = S { b: 0 };\n    return s.b;\n}\n",
+        "pub struct S {\n    pub b: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n",
+    );
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "layout-change build");
+    assert(p13_mtime(genc.as_str()) == g1, "main.c is byte-identical, so the sync keeps its mtime");
+    assert(p13_mtime(objo.as_str()) == o1, "a layout edit main.c never embeds rebuilds no dependent object");
+    p13_tick();
+    // Add a public function: util.h (which main.c includes) changes, main.c's own text does not.
+    p.mkfile(
+        "src/util.spc",
+        "pub struct S {\n    pub b: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n\npub fn w() i32 {\n    return 1;\n}\n",
     );
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "header-change build");
-    assert(p13_mtime(genc.as_str()) == g1, "main.c is byte-identical, so the sync keeps its mtime");
+    assert(p13_mtime(genc.as_str()) == g1, "main.c is still byte-identical");
     let o2 = p13_mtime(objo.as_str());
     assert(o2 > o1, "a changed included header rebuilds every dependent object");
     p13_tick();

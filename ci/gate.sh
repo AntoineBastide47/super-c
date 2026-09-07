@@ -89,7 +89,7 @@ fi
 for n in $CONTRACT_READABLE_SHARED; do [ -f "$raw/$n" ] || fail "readability: missing shared file $n"; done
 for c in $(find "$raw" -name '*.c' | sort); do
     case "$(basename "$c")" in
-    __ext*|__sc_inst*|super_rt.c|*__p[0-9]*.c) continue ;;
+    __ext*|__sc_registry.c|super_rt.c|*__p[0-9]*.c|*__inst.c) continue ;;
     esac
     h="${c%.c}.h"
     [ -f "$h" ] || fail "readability: $c has no header beside it"

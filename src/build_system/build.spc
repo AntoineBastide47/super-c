@@ -220,80 +220,141 @@ fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
     *h2 = b;
 }
 
-// Hash a file and, recursively, every file its `#include "..."` lines name (resolved the way the C
-// compiler resolves them: relative to the INCLUDING file). False = something was unreadable, and the
-// unit is not cacheable: a header outside the key would mean stale objects served as fresh.
-fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, visited: &mut Vector<String>) bool {
+// `p` with every `seg/../` pair removed (`a/b/../c` -> `a/c`); a leading `..` stays.
+fn norm_path(p: str, out: &mut String) {
+    let mut segs = Vector::<str>::new();
+    let mut i: usize = 0;
+    let n = p.len();
+    while i <= n {
+        let mut e = i;
+        while e < n && p[e] != b'/' {
+            e = e + 1;
+        }
+        let seg = p.slice(i, e);
+        if seg == ".." && segs.len() != 0 && segs[segs.len() - 1] != ".." {
+            let _ = segs.pop();
+        } else if seg != "." || segs.len() == 0 {
+            segs.push(seg);
+        }
+        i = e + 1;
+    }
+    for k in 0..segs.len() {
+        if k != 0 {
+            out.push_byte(b'/');
+        }
+        out.push_str(segs[k]);
+    }
+}
+
+// The transitive content hash of one file: its bytes, then the hash of every file its
+// `#include "..."` lines name (resolved the way the C compiler resolves them: relative to the
+// INCLUDING file). Memoized per build in `memo` (path FNV -> two words), so a header shared by
+// many units is read and hashed once; a file on the current include path counts once. False =
+// something was unreadable, and the unit is not cacheable: a header outside the key would mean
+// stale objects served as fresh.
+fn ch_hash_file(path: str, h1: &mut u64, h2: &mut u64, depth: i32, memo: &mut Map<u64, u64>, pool: &mut Vector<u64>) bool {
     if depth > 64 {
         return false;
     }
-    for i in 0..visited.len() {
-        if visited.at(i).as_str() == path {
-            return true;
-        }
+    let mut pk = 1469598103934665603u64;
+    for i in 0..path.len() {
+        pk = (pk ^ path[i] as u64) * 1099511628211u64;
     }
-    visited.push(String::from_str(path));
+    let hit = switch memo.get(&pk) {
+        Some(v) => *v,
+        None => 0xFFFFFFFFFFFFFFFFu64,
+    };
+    if hit != 0xFFFFFFFFFFFFFFFFu64 {
+        // 0 = in progress on this include path (counted where it was entered), else 1 + pool
+        // index of its two words; an unreadable file is pool index with a zero pair.
+        if hit != 0 {
+            let a = pool[(hit - 1) as usize];
+            let b = pool[hit as usize];
+            if a == 0 && b == 0 {
+                return false;
+            }
+            *h1 = ch_mix(*h1, a);
+            *h2 = ch_mix(*h2, b);
+        }
+        return true;
+    }
+    memo.insert(pk, 0);
     let body = loader::read_file(path);
-    if body.is_none() {
-        return false;
-    }
-    let b = body.unwrap();
-    let s = b.as_str();
-    ch_mix_bytes(h1, h2, s.ptr(), s.len());
-    let mut base = path.len();
-    while base > 0 && path[base - 1] != b'/' && path[base - 1] != b'\\' {
-        base = base - 1;
-    }
-    let mut i: usize = 0;
-    let n = s.len();
-    while i < n {
-        // start of line: `#` [ws] `include` [ws] `"..."`.
-        let ls = i;
-        while i < n && s[i] != b'\n' {
-            i = i + 1;
+    let mut ok = !body.is_none();
+    let mut a: u64 = 0xcbf29ce484222325;
+    let mut b: u64 = 0x9e3779b97f4a7c15;
+    if ok {
+        let bd = body.unwrap();
+        let s = bd.as_str();
+        ch_mix_bytes(&mut a, &mut b, s.ptr(), s.len());
+        let mut base = path.len();
+        while base > 0 && path[base - 1] != b'/' && path[base - 1] != b'\\' {
+            base = base - 1;
         }
-        let mut j = ls;
-        while j < i && (s[j] == b' ' || s[j] == b'\t') {
-            j = j + 1;
-        }
-        if j < i && s[j] == b'#' {
-            j = j + 1;
+        let mut i: usize = 0;
+        let n = s.len();
+        while i < n && ok {
+            // start of line: `#` [ws] `include` [ws] `"..."`.
+            let ls = i;
+            while i < n && s[i] != b'\n' {
+                i = i + 1;
+            }
+            let mut j = ls;
             while j < i && (s[j] == b' ' || s[j] == b'\t') {
                 j = j + 1;
             }
-            if j + 7 <= i && s.slice(j, j + 7) == "include" {
-                j = j + 7;
+            if j < i && s[j] == b'#' {
+                j = j + 1;
                 while j < i && (s[j] == b' ' || s[j] == b'\t') {
                     j = j + 1;
                 }
-                if j < i && s[j] == b'"' {
-                    j = j + 1;
-                    let hs = j;
-                    while j < i && s[j] != b'"' {
+                if j + 7 <= i && s.slice(j, j + 7) == "include" {
+                    j = j + 7;
+                    while j < i && (s[j] == b' ' || s[j] == b'\t') {
                         j = j + 1;
                     }
-                    if j < i {
-                        let name = s.slice(hs, j);
-                        let abs = name.len() > 0 && name[0] == b'/' || name.len() > 2 && name[1] == b':';
-                        let cut = if base > 0 {
-                            base - 1;
-                        } else {
-                            0 as usize;
-                        };
-                        let inc = if abs {
-                            String::from_str(name);
-                        } else {
-                            join2(path.slice(0, cut), name);
-                        };
-                        if !ch_hash_file(inc.as_str(), h1, h2, depth + 1, visited) {
-                            return false;
+                    if j < i && s[j] == b'"' {
+                        j = j + 1;
+                        let hs = j;
+                        while j < i && s[j] != b'"' {
+                            j = j + 1;
+                        }
+                        if j < i {
+                            let name = s.slice(hs, j);
+                            let abs = name.len() > 0 && name[0] == b'/' || name.len() > 2 && name[1] == b':';
+                            let cut = if base > 0 {
+                                base - 1;
+                            } else {
+                                0 as usize;
+                            };
+                            let mut inc = String::new();
+                            if abs {
+                                inc.push_str(name);
+                            } else {
+                                // One memo entry per file: `dir/../x.h` from every including
+                                // directory collapses to `x.h` (the generated tree has no links).
+                                norm_path(join2(path.slice(0, cut), name).as_str(), &mut inc);
+                            }
+                            ok = ch_hash_file(inc.as_str(), &mut a, &mut b, depth + 1, memo, pool);
                         }
                     }
                 }
             }
+            i = i + 1;
         }
-        i = i + 1;
     }
+    if !ok {
+        a = 0;
+        b = 0;
+    }
+    pool.push(a);
+    pool.push(b);
+    memo.insert(pk, (pool.len() - 1) as u64);
+    if !ok {
+        return false;
+    }
+    *h1 = ch_mix(*h1, a);
+    *h2 = ch_mix(*h2, b);
     return true;
 }
 
@@ -866,6 +927,10 @@ struct CcStream {
     pub cache: String, // the global object cache directory; empty = disabled
     pub rewritten: Vector<String>, // gen-relative files whose content changed in this build's sync
     pub ccdb: Vector<String>, // compile_commands.json rows, one per planned unit (stale or not)
+    /// Object-cache hashing memo: file path FNV -> 1 + index of its two words in `hpool`
+    /// (0 while the file is on the include path being hashed); see `ch_hash_file`.
+    pub hmemo: Map<u64, u64>,
+    pub hpool: Vector<u64>,
     pub ccdb_dir: String, // absolute working directory the compile argv is relative to
 }
 
@@ -1038,10 +1103,9 @@ extend CcStream {
             if self.cache.len() != 0 {
                 let mut h1: u64 = 0xcbf29ce484222325;
                 let mut h2: u64 = 0x9e3779b97f4a7c15;
-                let mut visited = Vector::<String>::new();
                 ch_mix_bytes(&mut h1, &mut h2, self.ccver.as_str().ptr(), self.ccver.len());
                 ch_mix_bytes(&mut h1, &mut h2, self.cc_tail.as_str().ptr(), self.cc_tail.len());
-                if ch_hash_file(cpath.as_str(), &mut h1, &mut h2, 0, &mut visited) {
+                if ch_hash_file(cpath.as_str(), &mut h1, &mut h2, 0, &mut self.hmemo, &mut self.hpool) {
                     let mut keyname = String::new();
                     hex64(h1, &mut keyname);
                     hex64(h2, &mut keyname);
@@ -1391,7 +1455,9 @@ fn stamp_write(
     }
     out.push_str("\n");
     {
-        let mut man = join2(root_dir, "build.toml");
+        // The manifest is loaded from the working directory (main.spc): its shard policy and
+        // flags shape the emitted tree.
+        let mut man = String::from_str("build.toml");
         if unsafe shim::sc_mtime(man.cstr()) != 0 {
             if !stamp_push_input(&mut out, man.as_str()) {
                 return;
@@ -1697,6 +1763,8 @@ fn engine_build_i(
         cache: object_cache_dir(),
         rewritten: Vector::<String>::new(),
         ccdb: Vector::<String>::new(),
+        hmemo: Map::<u64, u64>::new(),
+        hpool: Vector::<u64>::new(),
         ccdb_dir: ccdb_dir,
     };
     let mut sink = EmitSink { ctx: &mut stream, notify: stream_notify };
@@ -1739,6 +1807,15 @@ fn engine_build_i(
             return 1;
         }
         p.gen_root = srcgen.clone();
+        for i in 0..m.shards.len() {
+            p.shard_rules.push(
+                loader::ShardRule {
+                    module: m.shards.at(i).module.clone(),
+                    tus: m.shards.at(i).tus,
+                    insts: m.shards.at(i).insts,
+                },
+            );
+        }
         p.jobs = p.analysis_jobs(jobs);
         if p.jobs == 1 && jobs != 1 {
             prt::shutdown(); // parallel loading may have started the pool

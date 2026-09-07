@@ -1205,6 +1205,19 @@ extend TypeChecker {
         return (unsafe &*self.mod_ast(fm)).type_of(n);
     }
 
+    /// Does a non-`mut` capture of a binding of type `cty` move an owning value into the env? A
+    /// reference or pointer binding never owns what it points at, whatever that is.
+    pub fn tc_capture_owns(self: &mut Self, cty: TypeId) bool {
+        if cty == TYPE_NONE {
+            return false;
+        }
+        let k = self.type_at(cty).kind;
+        if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE {
+            return false;
+        }
+        return self.tc_type_is_free(cty);
+    }
+
     fn fn_owns(self: &mut Self, fid: TypeId) bool {
         let fy = *self.type_at(fid);
         if fy.kind != TypeKind::TYPE_FUNCTION {
@@ -1222,7 +1235,7 @@ extend TypeChecker {
             if (mut_caps >> i as u64 & 1u64) == 0 {
                 let ct0 = self.tc_foreign_type_of(fy.module, cid);
                 let rt = self.cur_ast().reintern(unsafe &*fa, ct0);
-                if self.tc_type_is_free(rt) {
+                if self.tc_capture_owns(rt) {
                     return true;
                 }
             }
@@ -12595,7 +12608,7 @@ extend TypeChecker {
                 );
                 continue;
             }
-            if cty == TYPE_NONE || is_mut || !self.tc_type_is_free(cty) {
+            if is_mut || !self.tc_capture_owns(cty) {
                 continue;
             }
             if self.nmoved < 1024 {

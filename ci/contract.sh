@@ -46,19 +46,20 @@ CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror"
 
 # ---- readability of the emitted C tree (build/raw) ------------------------------------------------------
 # Checked by the gate on the gen1 tree:
-#   one <module>.h and <module>.c per emitted module (split TUs add <module>__p<k>.c),
-#   the shared __sc_types.h and __sc_protos.h and the runtime super_rt.h/super_rt.c beside them,
+#   one <module>.h and <module>.c per emitted module (sharded modules add <module>__p<k>.c, a
+#   module owning generic instances <module>__inst.c, an SCC of by-value types <module>__types.h),
+#   the shared __sc_fwd.h, the registry TU, the manifest and the runtime super_rt.h/super_rt.c,
 #   every include relative (the tree compiles with no -I flag),
 #   no #line directives, and symbols mangled by module path (lexer__Lexer__scan_tokens).
 CONTRACT_READABLE_FORBIDDEN='^#line '
-CONTRACT_READABLE_SHARED="super_rt.h super_rt.c __sc_types.h __sc_protos.h __sc_inst.c __ldflags"
+CONTRACT_READABLE_SHARED="super_rt.h super_rt.c __sc_fwd.h __sc_registry.c __sc_manifest __ldflags"
 
 # ---- accepted nondeterminism ---------------------------------------------------------------------------
 # Excluded from every byte comparison: the per-TU cache embeds the compiler executable's path and mtime.
 CONTRACT_NONDET_FILES=".tu_cache"
 # Identical between generations in ONE checkout, different between checkouts (absolute #include paths to
 # ffi/ and src/): excluded only when two checkouts are compared.
-CONTRACT_PATH_FILES="__sc_types.h __ext0_sc_rt.c __ext1_driver_shim.c"
+CONTRACT_PATH_FILES="__sc_fwd.h __ext0_sc_rt.c __ext1_driver_shim.c"
 
 # ---- language fixtures and expected diagnostics --------------------------------------------------------
 # The test corpus, one file per entry, sorted; every expected diagnostic is asserted inside the file that

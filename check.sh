@@ -63,7 +63,7 @@ fi
 tar xzf "$tmp/super-c-macos-arm64.tar.gz" -C "$tmp" super-c-macos-arm64/super-c
 mv "$tmp/super-c-macos-arm64/super-c" ./super-c
 chmod +x ./super-c
-if ! ./super-c build --bootstrap-tags -o stage0-super-c src/main.spc; then
+if ! ./super-c build --bootstrap-tags -o stage0-super-c; then
     printf 'check: FAILED -- the release binary cannot build the current source\n' >&2
     exit 1
 fi

@@ -47,10 +47,11 @@ cemit_package             -- InstGraph.collect() over the kept Core IR bodies of
   |                          emits (dead prelude modules seed nothing), then per-module
   |                          TU emission (emit/tu.spc); drop elaboration runs per body here
   |                          (DropCtx::apply_drops); parallel frontier under --jobs
-serial write-out          -- __sc_types.h, __sc_protos.h, per-module .h/.c, __p<k> parts,
-  |                          __sc_inst.c (each part is four writes: shared includes, part
-  |                          head, a range of the TU buffer, tail); then prune_orphans
-  |                          drops stale outputs
+serial write-out          -- __sc_fwd.h, per-SCC <module>__types.h, per-module .h, then the
+  |                          module TU shards (<module>.c, __p<k>), per-owner instance shards
+  |                          (<module>__inst.c), __sc_registry.c and __sc_manifest (a shard
+  |                          streams out as includes, head, its chunks, tail); then
+  |                          prune_orphans drops stale outputs
 cc + link                 -- external C compiler (parallel window under --jobs)
 ```
 
@@ -302,10 +303,14 @@ Full monomorphization is the only generic backend.
 ## Emission Buffers and Probes
 
 `CemitOut` holds one geometrically grown buffer per TU (`TuBufs`: `tus[t]` plus
-`tu_heads[t][k]`, `tu_tail[t]` and the `tu_parts[t]` part boundaries; `inst_c` with
-`inst_heads`/`inst_parts` for the shared instance TU). A consumer that inspects the
-emitted C (the test harness, the bench sink) must concatenate heads, buffer and tail;
-the driver writes each part with four `fwrite`s and never assembles a file image.
+`tu_incs[t]`, `tu_heads[t][k]` per shard, `tu_tail[t]` and the chunk table
+`ck_off`/`ck_end`/`ck_shard` indexed by `tu_chunks[t]`; `inst_c` with
+`inst_incs`/`inst_heads`/`inst_chunks` per owner module; `fwd_h`, `types_h[m]`,
+`protos_h[m]`, `registry_c`). A consumer that inspects the emitted C (the test harness,
+the bench sink) must concatenate the headers, every shard head, the buffers and the
+tail; the driver writes each shard piecewise (`OutFile`) and never assembles a file
+image. The layout, ownership and shard rules are in
+[output-layout.md](references/output-layout.md).
 Symbols, type spellings and call strings render once and intern into pools
 (`sym_memo`, `sx_nm_pool`, `sx_cs_pool`); a generic call's symbol interns under the
 fingerprint of (callee, receiver instance, targs, env), the same key the demand dedup
@@ -340,13 +345,16 @@ out-dir. Module paths map to nested directories (`::` → `/`):
 ```
 <gen_root>/
   super_rt.h super_rt.c    # shared runtime (allocation interposition, leak tracker)
-  __sc_types.h             # ALL shared type definitions, written before any module file
-  __sc_protos.h            # shared prototypes
-  app.h  app.c             # per module: .h is an include shim, .c the TU body
-  app__p1.c                # oversized-TU split parts (__p<k>, k from 1)
+  __sc_fwd.h               # forward typedefs, enums, dyn/extern/const declarations, shared by every TU
+  app__types.h             # complete by-value types owned by app (one header per type SCC)
+  app.h  app.c             # per module: .h holds its prototypes and `_ret` typedefs, .c the TU body
+  app__p1.c                # module shards under the build.toml [shards] policy (__p<k>, k from 1)
+  app__inst.c              # generic instances, glue, constants and dyn tables app owns
+                           # (+ app__inst__p<k>.c under [instance-shards])
   __std/string.h  __std/string.c  # prelude: loaded under the reserved __std:: namespace
                            # so output never collides with a user std/ directory
-  __sc_inst.c              # the shared cross-module instance TU (+ __sc_inst__p<k>.c)
+  __sc_registry.c          # ZST sentinels and the reflection registry
+  __sc_manifest            # paths, content hashes, header dependencies, owners, shard policy
   __ext0_impl.c            # @c.source wrapper TUs (__ext<N>_<stem>.c)
   __ldflags                # one @c.link flag per line
   __test_main.c            # fork-per-test runner (--test only)

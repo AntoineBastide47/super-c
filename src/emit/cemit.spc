@@ -57,6 +57,7 @@ pub struct CEmit {
     pub fn_attrs: String,
     pub blk_defs: String,
     pub blk_seen: Map<u64, u64>,
+    blk_proto: bool, // `__sc_blocking_run` declared in extern_protos
     pub uses_tasks: u8,
     stat_seen: Map<u64, u64>,
     /// The referenced items themselves (the definition pass folds each into `<T> <sym> = <v>;`).
@@ -145,7 +146,7 @@ pub struct CEmit {
     line_pool: Vector<u32>,
     line_off: Vector<u64>,
     // Plain concrete-call symbols per (fm, fnode), valid for one mark_ctx (cleared on change so
-    // cross-TU used_mods edges still record once per spelling TU). Every body re-spells the same
+    // cross-TU spelling edges still record once per spelling TU). Every body re-spells the same
     // callees; the mangle walk must not repeat per call site.
     // The memo maps the callee key to a slot: `sym_pool[sym_off[slot] .. +sym_len[slot]]` is the
     // symbol, `sym_hash[slot]` its reserved-identifier hash (setup_locals reserves it without a
@@ -183,7 +184,7 @@ pub struct CEmit {
     // (sym, chain, sfx) demand, and a duplicate can never emit anything the first did not.
     demand_seen: Set<u64>,
     // Per (module, TypeId): the reserved-set ident hashes of the type's C spelling plus the
-    // modules the spelling records used_mods edges for (CSR pools; empty-env spellings only).
+    // modules the spelling records cross-TU edges for (CSR pools; empty-env spellings only).
     // setup_locals spells every local's type per body; this makes revisits two pool scans.
     ti_memo2: Map<u64, u64>,
     /// Frontier shard capture: when `sh_on`, every first-claimant emission records (key, buffer
@@ -193,7 +194,6 @@ pub struct CEmit {
     pub sh_env_k: Vector<u64>,
     pub sh_env_e: Vector<u32>,
     pub sh_stat_k: Vector<u64>,
-    pub sh_stat_e: Vector<u32>,
     pub sh_stat_v: Vector<u32>,
     pub sh_glue_k: Vector<u64>,
     pub sh_glue_v: Vector<u32>,
@@ -214,6 +214,19 @@ pub struct CEmit {
     pub sh_ti_v: Vector<u32>,
     pub sh_aux_k: Vector<u64>,
     pub sh_aux_e: Vector<u32>,
+    /// Owner module of every `aux` entry (0xFFFF = shared helper, forward header), parallel to
+    /// `sh_aux_k`; and of every `stat_decls` entry (the constant's declaring module), with the
+    /// entry's end offset. Both are kept on every emitter, not only shards.
+    pub aux_own: Vector<ModuleId>,
+    pub stat_end: Vector<u32>,
+    /// Owner module of every dyn table (`sh_dyt_k` row): the receiver type's module, else the
+    /// interface's. Block wrappers are keyed by their callee's DefId (`sh_blk_k >> 32`).
+    pub dyt_own: Vector<ModuleId>,
+    /// Header dependencies bodies added: `hdr_k` = owner module | env << 16 (a closure env, in
+    /// the owner's type header; else a `_ret` struct, in its prototype header) embeds the type
+    /// `hdr_t` of the owner's pool; the assembly resolves the type to the header defining it.
+    pub hdr_k: Vector<u32>,
+    pub hdr_t: Vector<TypeId>,
     tid_start: Vector<u32>,
     tmod_start: Vector<u32>,
     tid_pool: Vector<u64>,
@@ -291,6 +304,7 @@ extend CEmit {
             fn_attrs: String::new(),
             blk_defs: String::new(),
             blk_seen: Map::<u64, u64>::new(),
+            blk_proto: false,
             uses_tasks: 0,
             stat_seen: Map::<u64, u64>::new(),
             stat_items: Vector::<StatRef>::new(),
@@ -353,7 +367,6 @@ extend CEmit {
             sh_env_k: Vector::<u64>::new(),
             sh_env_e: Vector::<u32>::new(),
             sh_stat_k: Vector::<u64>::new(),
-            sh_stat_e: Vector::<u32>::new(),
             sh_stat_v: Vector::<u32>::new(),
             sh_glue_k: Vector::<u64>::new(),
             sh_glue_v: Vector::<u32>::new(),
@@ -374,6 +387,11 @@ extend CEmit {
             sh_ti_v: Vector::<u32>::new(),
             sh_aux_k: Vector::<u64>::new(),
             sh_aux_e: Vector::<u32>::new(),
+            aux_own: Vector::<ModuleId>::new(),
+            stat_end: Vector::<u32>::new(),
+            dyt_own: Vector::<ModuleId>::new(),
+            hdr_k: Vector::<u32>::new(),
+            hdr_t: Vector::<TypeId>::new(),
             tid_start: Vector::<u32>::new(),
             tmod_start: Vector::<u32>::new(),
             tid_pool: Vector::<u64>::new(),
@@ -1115,14 +1133,12 @@ extend CEmit {
                         return false;
                     }
                     self.aux.push_str("; ");
+                    self.hdr_dep(b.module, b.locals.at(r as usize).ty, false);
                 }
                 self.aux.push_str("} ");
                 self.aux.push_str(name);
                 self.aux.push_str("_ret;\n");
-                if self.sh_on {
-                    self.sh_aux_k.push(0);
-                    self.sh_aux_e.push(self.aux.len() as u32);
-                }
+                self.aux_mark(0, b.module);
                 self.out.push_str(name);
                 self.out.push_str("_ret ");
                 self.out.push_str(name);
@@ -1150,10 +1166,8 @@ extend CEmit {
                 self.aux.push_str("; } ");
                 self.aux.push_str(name);
                 self.aux.push_str("_ret;\n");
-                if self.sh_on {
-                    self.sh_aux_k.push(0);
-                    self.sh_aux_e.push(self.aux.len() as u32);
-                }
+                self.hdr_dep(b.module, rty, false);
+                self.aux_mark(0, b.module);
                 self.out.push_str(name);
                 self.out.push_str("_ret ");
                 self.out.push_str(name);
@@ -1601,7 +1615,7 @@ extend CEmit {
         self.sx_reserved.clear();
         {
             // Bodies repeat a handful of local types; one replay per distinct type is enough
-            // (reserve_local_ty only inserts into sx_reserved and re-marks used_mods edges,
+            // (reserve_local_ty only inserts into sx_reserved and re-marks cross-TU edges,
             // both idempotent).
             let mut seen_ty = self.uget();
             for l in 0..n {
@@ -4575,6 +4589,7 @@ extend CEmit {
                     return self.fail("closure-cap-ty");
                 }
                 env_out.push_str("; ");
+                self.hdr_dep(b.module, b.locals.at(l).ty, true);
             }
             if cmat9 == 0 {
                 // C forbids an empty struct (see tu.spc).
@@ -5429,6 +5444,7 @@ extend CEmit {
             o.push_str(" *__dp = (");
             o.push_string(&envc);
             o.push_str(" *)Global__alloc((Global *)&");
+            self.global_used();
             {
                 let mut sn9 = String::new();
                 self.sentinel(1, &mut sn9);
@@ -5739,6 +5755,7 @@ extend CEmit {
                             if self.ty_c(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
                                 sd.push_str(";\n");
                                 self.stat_decls.push_string(&sd);
+                                self.stat_end.push(self.stat_decls.len() as u32);
                                 self.stat_items.push(
                                     StatRef {
                                         em: b.module,
@@ -5752,7 +5769,6 @@ extend CEmit {
                         }
                         if self.sh_on {
                             self.sh_stat_k.push(h);
-                            self.sh_stat_e.push(self.stat_decls.len() as u32);
                             self.sh_stat_v.push(self.stat_items.len() as u32);
                         }
                     }
@@ -6434,6 +6450,7 @@ extend CEmit {
             if self.ty_c(ev.a as ModuleId, ev.d, ev.s1.as_str(), &mut sd) {
                 sd.push_str(";\n");
                 self.stat_decls.push_string(&sd);
+                self.stat_end.push(self.stat_decls.len() as u32);
                 self.stat_items.push(StatRef { em: ev.a as ModuleId, def: item, sym: ev.s1.clone(), ty: ev.d });
             }
             return;
@@ -6732,6 +6749,8 @@ extend CEmit {
             ca7.at_const(ca7.at_const(callee.node).as_data.function.name).as_data.name.text,
             sym,
         );
+        // The default body's prototype lives in the interface's module.
+        self.mg.mark_used(callee.module);
         // Demand the default BODY under `Self -> receiver` (the interface DECL NODE is Self's
         // binding key: the extend-frame convention).
         if self.collect_demand {
@@ -6971,6 +6990,34 @@ extend CEmit {
             return true;
         }
         self.dyn_tab_seen.insert(h, 1);
+        // The table lands in the receiver type's instance shard (the interface's when the
+        // receiver has no owner module): spell its thunks under that context.
+        let od9 = self.mg.owner_dep(srm, srt);
+        let own9 = if od9 >= 0 {
+            od9 as ModuleId;
+        } else {
+            self.p().module_ast_const(pm).instance(y.as_data.inst).module;
+        };
+        let ctx0 = self.mg.mark_ctx;
+        self.mg.mark_ctx = mbe::CTX_INST | own9 as i64;
+        let ok9 = self.dyn_pair_tabs(pm, &y, srm, srt, own, pair, &stem, &src, h, own9);
+        self.mg.mark_ctx = ctx0;
+        return ok9;
+    }
+
+    fn dyn_pair_tabs(
+        self: &mut Self,
+        pm: ModuleId,
+        y: &Ty,
+        srm: ModuleId,
+        srt: TypeId,
+        own: bool,
+        pair: &mut String,
+        stem: &String,
+        src: &String,
+        h: u64,
+        own9: ModuleId,
+    ) bool {
         let sy = *self.p().module_ast_const(srm).type_at(srt);
         let is_clos = sy.kind == TypeKind::TYPE_FUNCTION;
         let mut srcc = String::new();
@@ -7012,7 +7059,7 @@ extend CEmit {
             }
         } else if ok {
             slots.push_str(", \"");
-            slots.push_string(&src);
+            slots.push_string(src);
             slots.push_str("\"");
             let gs = dn.as_data.interface_def.generics;
             let mut nb: usize = 0;
@@ -7077,6 +7124,7 @@ extend CEmit {
                 }
             }
             tabs.push_str("    Global__dealloc((Global *)&");
+            self.global_used();
             {
                 let mut sn9 = String::new();
                 self.sentinel(1, &mut sn9);
@@ -7090,7 +7138,7 @@ extend CEmit {
         }
         if ok {
             tabs.push_str("const ");
-            tabs.push_string(&stem);
+            tabs.push_string(stem);
             tabs.push_str("__vt ");
             tabs.push_string(pair);
             tabs.push_str("__vtbl = { ");
@@ -7099,15 +7147,14 @@ extend CEmit {
             tabs.push_str(" };\n");
             self.dyn_tabs.push_string(&tabs);
             self.dyn_decls.push_str("extern const ");
-            self.dyn_decls.push_string(&stem);
+            self.dyn_decls.push_string(stem);
             self.dyn_decls.push_str("__vt ");
             self.dyn_decls.push_string(pair);
             self.dyn_decls.push_str("__vtbl;\n");
-            if self.sh_on {
-                self.sh_dyt_k.push(h);
-                self.sh_dyt_e.push(self.dyn_tabs.len() as u32);
-                self.sh_dyt_e2.push(self.dyn_decls.len() as u32);
-            }
+            self.sh_dyt_k.push(h);
+            self.sh_dyt_e.push(self.dyn_tabs.len() as u32);
+            self.sh_dyt_e2.push(self.dyn_decls.len() as u32);
+            self.dyt_own.push(own9);
         }
         return ok;
     }
@@ -7821,10 +7868,41 @@ extend CEmit {
                 "static inline void __sc_assert_bool(bool l, bool r, bool eq, const char *e, const char *f, unsigned long long n) { if ((l == r) != eq) { fprintf(stderr, \"assertion failed: `%s`\\n  left:  %s\\n  right: %s\\n  at %s:%llu\\n\", e, l ? \"true\" : \"false\", r ? \"true\" : \"false\", f, n); fflush(stderr); abort(); } }\n",
             );
         }
-        if self.sh_on {
-            self.sh_aux_k.push(1u64 | bit as u64 << 1);
-            self.sh_aux_e.push(self.aux.len() as u32);
+        self.aux_mark(1u64 | bit as u64 << 1, 0xFFFF);
+    }
+
+    // A fixed-text `Global__alloc` / `Global__dealloc` call: the context needs Global's prototypes.
+    fn global_used(self: &mut Self) {
+        let g = self.p().prelude_lookup("Global", true);
+        self.mg.mark_used(g.mid);
+    }
+
+    // Close one `aux` entry: its shard key, end offset and owner (0xFFFF = shared helper).
+    fn aux_mark(self: &mut Self, key: u64, own: ModuleId) {
+        self.sh_aux_k.push(key);
+        self.sh_aux_e.push(self.aux.len() as u32);
+        self.aux_own.push(own);
+    }
+
+    /// Record that module `own`'s header embeds `t` (of its pool) by value (see `hdr_k`).
+    pub fn hdr_dep(self: &mut Self, own: ModuleId, t: TypeId, env: bool) {
+        let bit = if env {
+            1u32 << 16;
+        } else {
+            0u32;
+        };
+        self.hdr_k.push(own as u32 | bit);
+        self.hdr_t.push(t);
+    }
+
+    /// Replay one cached `aux` entry (see `aux_mark`): a `_ret` typedef lands as is, a shared
+    /// assert helper only when this emitter has not defined it yet.
+    pub fn aux_replay(self: &mut Self, key: u64, own: ModuleId, text: str) {
+        if key != 0 && !self.assert_helpers_claim((key >> 1) as u8) {
+            return;
         }
+        self.aux.push_str(text);
+        self.aux_mark(key, own);
     }
 
     fn emit_forwarded_assert(
@@ -8087,10 +8165,20 @@ extend CEmit {
             return true;
         }
         self.blk_seen.insert(key, 1);
-        if self.blk_defs.len() == 0 {
+        if !self.blk_proto {
             // The pool's C-callable entry point (std::parallel::blocking, symbol pinned @c.export).
-            self.blk_defs.push_str("void __sc_blocking_run(void (*__r)(void *), void *__e);\n");
+            self.blk_proto = true;
+            self.extern_protos.push_str("void __sc_blocking_run(void (*__r)(void *), void *__e);\n");
         }
+        // The wrapper lands in the callee module's instance shard: spell it under that context.
+        let ctx0 = self.mg.mark_ctx;
+        self.mg.mark_ctx = mbe::CTX_INST | d.module as i64;
+        let ok = self.blk_wrapper_defs(d, key);
+        self.mg.mark_ctx = ctx0;
+        return ok;
+    }
+
+    fn blk_wrapper_defs(self: &mut Self, d: DefId, key: u64) bool {
         let a = self.p().module_ast_const(d.module);
         let f = a.at_const(d.node).as_data.function;
         let mut nm = String::new();
@@ -8191,31 +8279,37 @@ extend CEmit {
         self.extern_protos.push_str("(");
         self.extern_protos.push_string(&wrap_params);
         self.extern_protos.push_str(");\n");
-        if self.sh_on {
-            self.sh_blk_k.push(key);
-            self.sh_blk_e.push(self.blk_defs.len() as u32);
-            self.sh_blk_e2.push(self.extern_protos.len() as u32);
-        }
+        self.sh_blk_k.push(key);
+        self.sh_blk_e.push(self.blk_defs.len() as u32);
+        self.sh_blk_e2.push(self.extern_protos.len() as u32);
         return true;
     }
 
-    // The memo holds one emission context's plain symbols (the cross-TU edge is per context).
+    // The memo keys carry the emission context (the cross-TU edge is per context), so entries
+    // of every instance-shard context coexist through the drain; a module context starts empty.
     fn sym_memo_ctx_check(self: &mut Self) {
         if self.sym_memo_ctx != self.mg.mark_ctx {
-            self.sym_memo.clear();
-            self.sym_pool.clear();
-            self.sym_off.clear();
-            self.sym_len.clear();
-            self.sym_hash.clear();
+            if self.sym_memo_ctx < mbe::CTX_INST || self.mg.mark_ctx < mbe::CTX_INST {
+                self.sym_memo.clear();
+                self.sym_pool.clear();
+                self.sym_off.clear();
+                self.sym_len.clear();
+                self.sym_hash.clear();
+            }
             self.sym_memo_ctx = self.mg.mark_ctx;
         }
+    }
+
+    // The memo key of `k` under the current context.
+    const fn sym_mk(self: &Self, k: u64) u64 {
+        return k ^ (self.mg.mark_ctx as u64 + 2) * 0x9E3779B97F4A7C15u64;
     }
 
     // The reserved-identifier hash of a plain concrete call's memoized symbol, or 0 when the memo
     // holds none for `callee` (a spelling is then needed).
     fn sym_memo_hash(self: &mut Self, callee: DefId) u64 {
         self.sym_memo_ctx_check();
-        let mk = skey_mix(0, callee.module as u64 << 32 | callee.node as u64);
+        let mk = self.sym_mk(skey_mix(0, callee.module as u64 << 32 | callee.node as u64));
         return switch self.sym_memo.get(&mk) {
             Some(s) => self.sym_hash[(*s) as usize],
             None => 0u64,
@@ -8422,7 +8516,7 @@ extend CEmit {
             // Plain concrete call: no targ suffix, no demand record; the symbol depends
             // only on the declaration (and mark_ctx, for the cross-TU edge), so memoize.
             self.sym_memo_ctx_check();
-            let mk = skey_mix(0, callee.module as u64 << 32 | callee.node as u64);
+            let mk = self.sym_mk(skey_mix(0, callee.module as u64 << 32 | callee.node as u64));
             if self.sym_memo_get(mk, dst) {
                 return true;
             }
@@ -8463,8 +8557,8 @@ extend CEmit {
             if recv_targs {
                 dk0 = (dk0 ^ 1) * 1099511628211u64;
             }
-            mk1 = skey_mix(1, dk0);
             self.sym_memo_ctx_check();
+            mk1 = self.sym_mk(skey_mix(1, dk0));
             if self.sym_memo_get(mk1, dst) {
                 return true;
             }
@@ -8473,6 +8567,8 @@ extend CEmit {
             if !self.mg.inst_name(rpm, &rit, sym) {
                 ok = self.fail("callee-inst");
             }
+            // The instance body's prototype lives in the method's declaring module.
+            self.mg.mark_used(callee.module);
             if ok {
                 sym.push_str("__");
                 let ca = self.p().module_ast_const(callee.module);
@@ -9170,6 +9266,15 @@ extend CEmit {
                     self.sput(sym);
                     return self.fail("type-info");
                 }
+                // The descriptor is declared by the type's owner module (`core` for builtins).
+                let od9 = self.mg.owner_dep(rm, rt);
+                self.mg.mark_used(
+                    if od9 >= 0 {
+                        od9 as ModuleId;
+                    } else {
+                        self.p().core_module;
+                    },
+                );
                 let mut h = 1469598103934665603u64;
                 {
                     let ss = sym.as_str();

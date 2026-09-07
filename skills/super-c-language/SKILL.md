@@ -151,7 +151,8 @@ let p = Pair::<i32, bool> { a: id(41), b: true };
 Three capture flavors:
 - **Read** — copy at creation (default)
 - **Mutated** (`FnMut`) — implicit `&mut` capture, writes land on outer variable
-- **Owned** (`FnOnce`) — moves value into env, closure becomes `Free`
+- **Owned** (`FnOnce`) — moves value into env, closure becomes `Free`; a captured reference
+  or pointer never owns what it points at, so `let kp = &v;` keeps a closure a plain `fn(..)`
 
 ```superc
 let g = |x: i32| x * 2;                       // compact closure

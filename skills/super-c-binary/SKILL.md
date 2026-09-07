@@ -189,7 +189,18 @@ run = [
     "./super-c bench --no-run",
     "samply record --rate 1000 build/bench-bin",
 ]
+
+[shards]                     # output shard policy: module TU count per module (default 1)
+"driver::emit" = 3           # a chunk lands in shard (stable symbol hash mod count)
+
+[instance-shards]            # instance shard count per owner module (default 1)
+"__std::vector" = 2
 ```
+
+A shard count is an output schema: changing it rewrites every shard of that module
+(the build names the migration); an ordinary source edit never moves a chunk between
+shards. Pick counts from the emitted size (about one shard per 256 KiB of C, see
+`ci/fanout_report.py`) so the C compile's critical path stays short.
 
 ### Built-in profiles
 
@@ -220,7 +231,7 @@ sanitizer frames dominate the samples.
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target |
 | `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` |
 | `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` |
-| `--bootstrap-tags` | Enable `@platform` bootstrap tag gating |
+| `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |
 | `--const-eval-memory=SIZE` | Cap compile-time evaluation memory (~96 MiB default) |
@@ -292,12 +303,13 @@ build/
   raw/
     super_rt.h        # shared runtime (includes + allocation interposition)
     super_rt.c        # leak/double-free tracker (inert unless SC_LEAK_CHECK set)
-    __sc_types.h      # shared type definitions for every TU
-    __sc_protos.h     # shared extern prototypes
-    __sc_inst.c       # shared globals/instances TU
+    __sc_fwd.h        # forward typedefs, enums and declarations shared by every TU
+    __sc_registry.c   # ZST sentinels and the reflection registry
+    __sc_manifest     # output paths, content hashes, header dependencies, shard policy
     __ldflags         # linker flags collected from @c.link (one per line)
     .tu_cache         # per-TU journal/replay cache
-    app.h  app.c      # one .h/.c per module
+    app.h  app.c      # one .h/.c per module (.h: prototypes; app__types.h: its by-value types)
+    app__inst.c       # generic instances, glue and constants owned by app
     __std/            # demanded prelude modules only
       core.h core.c
       interfaces.h interfaces.c

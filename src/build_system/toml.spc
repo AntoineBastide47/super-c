@@ -111,6 +111,12 @@ extend Parser {
     }
 
     fn parse_key(self: &mut Self) String {
+        if self.peek() == b'"' {
+            return switch self.parse_string() {
+                Some(k) => k,
+                None => String::new(),
+            };
+        }
         let start = self.i;
         while !self.at_end() && is_key_byte(self.peek()) {
             self.i = self.i + 1;

@@ -43,7 +43,7 @@ unless the contract itself is intentionally changed.
 
 ## Absolute Paths in the Emitted Tree
 
-External-C wrappers and `__sc_types.h` embed absolute include paths. A bootstrap binary
+External-C wrappers and `__sc_fwd.h` embed absolute include paths. A bootstrap binary
 outside the temporary tree can select a different `std/` and `ffi/` even when the source
 and output paths match. Correct the library selection and repeat from clean output
 trees; do not normalize or exclude these files.

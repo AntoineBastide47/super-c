@@ -137,8 +137,13 @@ pub fn mkdir_p(path: str) {
     let _ = unsafe shim::sc_mkdir(base);
 }
 
-/// Open `path` for writing, creating any missing parent directories first.
+/// Open `path` for writing, creating any missing parent directories when the first attempt
+/// fails (the directories exist for all but the first file written into each).
 pub fn open_out(path: str) *mut stdio::FILE {
+    let f = stdio::fopen(path, "wb");
+    if f != null {
+        return f;
+    }
     let p = path.ptr();
     let n = path.len();
     let mut slash: usize = n;
@@ -147,9 +152,10 @@ pub fn open_out(path: str) *mut stdio::FILE {
             slash = i;
         }
     }
-    if slash < n {
-        mkdir_p(str::from_raw(p, slash));
+    if slash == n {
+        return null;
     }
+    mkdir_p(str::from_raw(p, slash));
     return stdio::fopen(path, "wb");
 }
 

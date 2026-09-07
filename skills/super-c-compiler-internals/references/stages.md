@@ -118,12 +118,14 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
   (package-stable keys: decl DefId + per-argument skey). Bodies flagged `has_reflect` or
   `has_zst_cond` re-lower per instance instead of sharing.
 - `TuEmit` (`emit/tu.spc`) renders each module's TU into `CemitOut` buffers (one
-  geometrically grown `tus[t]` per module with `tu_heads`/`tu_tail`/`tu_parts` for the
-  `__p<k>` split parts, the shared `inst_c` instance TU with `inst_heads`/`inst_parts`) —
-  a parallel frontier under `--jobs`, gated by `SC_BUILD_MEM_BUDGET`. A body renders
-  straight into its TU buffer (`emit_body_core_cf` threads it through the statement
-  renderers; expression renderers spell into their `dst`), and the driver writes each
-  part with four `fwrite`s, never a file image.
+  geometrically grown `tus[t]` per module, a chunk table with the shard each chunk landed
+  in, `inst_c` for every owner module's instance shards) — a parallel frontier under
+  `--jobs`, gated by `SC_BUILD_MEM_BUDGET`. A body renders straight into its TU buffer
+  (`emit_body_core_cf` threads it through the statement renderers; expression renderers
+  spell into their `dst`), and the driver writes each shard piecewise, never a file
+  image. Every module-prefix spelling records a (context -> owner module) edge, typed as
+  a type name or another symbol; those rows select each shard's include list
+  ([output-layout.md](output-layout.md)).
 - **Drop elaboration runs here, per body** (`DropCtx::apply_drops`): when
   `ird::may_schedule` says a drop is possible (an owning local or an owning store
   destination), move-path forest, moves-only ownership facts, CFG and move dataflow,
@@ -140,14 +142,18 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 Transitive TU pruning first: keep scan-live modules plus everything a kept TU spells
 symbols from. Then, in emit order:
 
-1. `__sc_types.h` (all shared type definitions) and `__sc_protos.h` (shared prototypes)
-   — before any module file.
-2. Per-module `.h` (an include shim) and `.c` (shim + TU body); oversized TUs split into
-   `<module>__p<k>.c` parts. Module paths map to directories (`::` → `/`); the prelude
-   loads under the reserved `__std::` namespace, so it lands in `__std/` and never
-   collides with a user `std/` directory.
-3. `__sc_inst.c` (+ `__sc_inst__p<k>.c`): the shared cross-module instance TU.
-4. The per-TU cache image is published only after a fully successful emission.
+1. `__sc_fwd.h`, every `<module>__types.h` (one per SCC of the by-value module graph)
+   and every `<module>.h` (prototypes, `_ret` typedefs, constant and descriptor
+   declarations) — before any source file.
+2. Per-module `.c` shards (`<module>.c`, then `<module>__p<k>.c` under the build.toml
+   `[shards]` count: a chunk's shard is its stable symbol hash modulo the count). Module
+   paths map to directories (`::` → `/`); the prelude loads under the reserved `__std::`
+   namespace, so it lands in `__std/` and never collides with a user `std/` directory.
+3. Per-owner instance shards `<module>__inst.c` (+ `__inst__p<k>.c` under
+   `[instance-shards]`): generic instances, glue, constants, descriptors and dyn tables
+   the module owns; then `__sc_registry.c` (ZST sentinels, reflection registry).
+4. The per-TU cache image is published only after a fully successful emission, then
+   `__sc_manifest` (atomically: temporary + rename).
 5. `prune_orphans`: outputs from a previous build that this one no longer emits are
    deleted.
 

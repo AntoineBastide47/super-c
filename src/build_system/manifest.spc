@@ -67,6 +67,7 @@ pub struct Manifest<'a> {
     pub lib_root: String, // [lib] root (default src/lib.spc)
     pub lib_static: bool, // [lib] type contains "static" (the default when [lib] is present)
     pub lib_shared: bool, // [lib] type contains "shared"
+    pub shards: Vector<loader::ShardRule>, // [shards] and [instance-shards]: per-module counts
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -90,6 +91,7 @@ extend Manifest as Free {
         self.bins.free();
         self.lib_name.free();
         self.lib_root.free();
+        self.shards.free();
     }
 }
 
@@ -163,6 +165,13 @@ const fn is_builtin_command(name: str) bool {
     return name == "build" || name == "release" || name == "fmt" || name == "lint" || name == "run" || name == "command" || name == "clean" || name == "test" || name == "bench" || name == "lsp" || name == "new" || name == "init";
 }
 
+// A section or key outside this compiler's schema: an error, except under bootstrap (see `load`).
+fn unknown(errs: &mut diag::Errors, bootstrap: bool, at: u32, len: u32, msg: String) {
+    if !bootstrap {
+        errs.emit(at, len, msg);
+    }
+}
+
 fn set_str(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut String) {
     if it.val.kind != toml::TV_STR {
         errs.emit(it.at, it.key.len() as u32, format("'{}' expects a string", it.key.as_str()));
@@ -180,22 +189,25 @@ fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
 }
 
 /// Load and validate <path>, applying defaults (out-dir "build", cstd c11+POSIX, default-profile
-/// "dev", built-in profiles). Prints its own diagnostics; None on any error.
-pub fn load(path: str) Option<Manifest> {
+/// "dev", built-in profiles). Prints its own diagnostics; None on any error. `bootstrap` (the
+/// --bootstrap-tags build) skips sections and keys this compiler does not know, so a previous release
+/// can build a source tree whose manifest already uses additions it predates; the compiler it produces
+/// reads the same manifest strictly.
+pub fn load(path: str, bootstrap: bool) Option<Manifest> {
     let src_opt = loader::read_file(path);
     if src_opt.is_none() {
         eprintln("build: cannot read '{}'", path);
         return Option::<Manifest>::None;
     }
     let src = src_opt.unwrap();
-    let (m, errs) = parse_check(src.as_str(), path);
+    let (m, errs) = parse_check(src.as_str(), path, bootstrap);
     return m;
 }
 
 /// Parse and VALIDATE a manifest, returning the diagnostics alongside it. A non-empty `file` renders and
 /// logs them (what the build wants); an empty one leaves them raw with their spans, for a caller that
 /// formats its own (the language server). The manifest is None when the file is unusable.
-pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors) {
+pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a>>, diag::Errors) {
     let mut errs = diag::Errors::new();
     let items_opt = toml::parse_into(src, &mut errs);
     if items_opt.is_none() {
@@ -269,7 +281,7 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
             } else if key == "default-profile" {
                 set_str(it, &mut errs, &mut m.default_profile);
             } else {
-                errs.emit(it.at, key.len() as u32, format("unknown key '{}'", key));
+                unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown key '{}'", key));
             }
         } else if sec.starts_with("profile.") && sec.len() > 8 {
             let name = sec.slice(8, sec.len());
@@ -286,7 +298,7 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
             } else if key == "strip" {
                 set_bool(it, &mut errs, &mut p.strip);
             } else {
-                errs.emit(it.at, key.len() as u32, format("unknown profile key '{}'", key));
+                unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown profile key '{}'", key));
             }
         } else if sec.starts_with("command.") && sec.len() > 8 {
             let name = sec.slice(8, sec.len());
@@ -340,7 +352,26 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
                     }
                 }
             } else {
-                errs.emit(it.at, key.len() as u32, format("unknown command key '{}'", key));
+                unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown command key '{}'", key));
+            }
+        } else if sec == "shards" || sec == "instance-shards" {
+            if it.val.kind != toml::TV_INT || it.val.i < 1 || it.val.i > 255 {
+                errs.emit(it.at, key.len() as u32, format("'[{}]' expects a count from 1 to 255", sec));
+            } else {
+                let mut ri = m.shards.len();
+                for i in 0..m.shards.len() {
+                    if m.shards.at(i).module.as_str() == key {
+                        ri = i;
+                    }
+                }
+                if ri == m.shards.len() {
+                    m.shards.push(loader::ShardRule { module: String::from_str(key), tus: 1, insts: 1 });
+                }
+                if sec == "shards" {
+                    m.shards.index_mut(ri).tus = it.val.i as u32;
+                } else {
+                    m.shards.index_mut(ri).insts = it.val.i as u32;
+                }
             }
         } else if sec == "lib" {
             saw_lib = true;
@@ -362,7 +393,7 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
                     }
                 }
             } else {
-                errs.emit(it.at, key.len() as u32, format("unknown [lib] key '{}'", key));
+                unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown [lib] key '{}'", key));
             }
         } else if sec.starts_with("bin.") && sec.len() > 4 {
             let name = sec.slice(4, sec.len());
@@ -379,10 +410,10 @@ pub fn parse_check<'a>(src: str, file: str) (Option<Manifest<'a>>, diag::Errors)
             if key == "root" {
                 set_str(it, &mut errs, &mut m.bins[bi as usize].root);
             } else {
-                errs.emit(it.at, key.len() as u32, format("unknown [bin.{}] key '{}'", name, key));
+                unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown [bin.{}] key '{}'", name, key));
             }
         } else {
-            errs.emit(it.at, key.len() as u32, format("unknown section '{}'", sec));
+            unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown section '{}'", sec));
         }
     }
     // The name views above point into the items' section Strings: the Manifest takes ownership.
@@ -480,6 +511,7 @@ extend Manifest {
             lib_root: String::new(),
             lib_static: false,
             lib_shared: false,
+            shards: Vector::<loader::ShardRule>::new(),
         };
     }
 

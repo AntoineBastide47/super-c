@@ -3694,7 +3694,7 @@ extend tc::TypeChecker {
             let cid = unsafe a.list(caps)[i as usize];
             let cty = a.type_of(cid);
             let is_mut = (mut_caps >> i as u64 & 1u64) != 0;
-            if cty == TYPE_NONE || is_mut || !self.tc_type_is_free(cty) {
+            if is_mut || !self.tc_capture_owns(cty) {
                 continue;
             }
             // Capture-of-moved is IR-owned (CAT_C_CAP).

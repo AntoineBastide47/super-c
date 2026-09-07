@@ -2801,6 +2801,23 @@ fn split_init_reference_to_free() {
     );
 }
 
+// A closure that captures a REFERENCE to an owning value borrows through it: the capture owns
+// nothing, so the closure satisfies a plain `fn(..)` bound (a by-value capture of the owning
+// value would move it into the env and need `fn move`).
+@test
+fn closure_reference_capture_is_not_owning() {
+    h::expect_exit(
+        "a closure over a reference to a Vector sorts through a plain fn bound",
+        "fn main() i32 {\n    let mut keys = Vector::<u32>::new();\n    keys.push(3);\n    keys.push(1);\n    keys.push(2);\n    let mut idx = Vector::<u32>::new();\n    idx.push(0);\n    idx.push(1);\n    idx.push(2);\n    let kp = &keys;\n    idx.sort_by(|a: &u32, b: &u32| *kp.at(*a as usize) as i32 - *kp.at(*b as usize) as i32);\n    return idx[0] as i32 - 1 + keys.len() as i32 - 3;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a by-value capture of an owning value still needs a move bound",
+        "fn main() i32 {\n    let mut keys = Vector::<u32>::new();\n    keys.push(3);\n    keys.push(1);\n    let mut idx = Vector::<u32>::new();\n    idx.push(0);\n    idx.push(1);\n    idx.sort_by(|a: &u32, b: &u32| *keys.at(*a as usize) as i32 - *keys.at(*b as usize) as i32);\n    return idx[0] as i32 - 1;\n}\n",
+        "does not satisfy bound",
+    );
+}
+
 // A constant of an OWNING type is materialized into the binary: its heap blocks become static data
 // with relocations, and is then read or borrowed only. Nothing can obtain a copy to free, because
 // moving out of a constant is rejected, and nothing can mutate it in place.

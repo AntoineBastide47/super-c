@@ -1203,7 +1203,7 @@ extend Server {
     // Returns true when a manifest was found. No process chdir: every path stays absolute.
     fn add_manifest_root(self: &mut Self, folder: str, at: i32) bool {
         let mp = Server::abs_under(folder, "build.toml");
-        let mano = bman::load(mp.as_str());
+        let mano = bman::load(mp.as_str(), false);
         if mano.is_none() {
             return false;
         }
@@ -2906,7 +2906,7 @@ extend Server {
     fn reload_manifest_for(self: &mut Self, manifest_path: str) {
         let folder = dir_of(manifest_path);
         let mp = Server::abs_under(folder.as_str(), "build.toml");
-        let mano = bman::load(mp.as_str());
+        let mano = bman::load(mp.as_str(), false);
         if mano.is_none() {
             // Invalid: keep the last valid model.
             return;

@@ -17,7 +17,7 @@ pub struct TomlDiag {
 /// with `super-c build` about what is wrong.
 pub fn diagnostics(src: str) Vector<TomlDiag> {
     let mut out = Vector::<TomlDiag>::new();
-    let (m, errs) = bsys::parse_check(src, "");
+    let (m, errs) = bsys::parse_check(src, "", false);
     for i in 0..errs.errors.len() {
         let d = errs.errors.at(i);
         out.push(TomlDiag { start: d.start, len: d.len, msg: d.msg.clone() });

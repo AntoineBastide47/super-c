@@ -32,6 +32,14 @@ pub struct Module {
 
 /// The whole compilation: the root module plus every module reachable through `import`. Modules are kept as
 /// separate Asts; cross-module references are DefId{module, node} into this array.
+/// One shard-policy entry: module `module` (its `::` path) emits `tus` module TUs and `insts`
+/// instance shards; a count is a schema, changed only by editing the policy.
+pub struct ShardRule {
+    pub module: String,
+    pub tus: u32,
+    pub insts: u32,
+}
+
 pub struct Package {
     pub modules: Vector<Module>,
     /// Instruction set `@arch` items are gated against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown.
@@ -114,6 +122,9 @@ pub struct Package {
     /// task until tc_mod_done[m] is set.
     pub tc_wait: fn(*mut void, ModuleId) void,
     pub tc_wait_ctx: *mut void,
+    /// The output shard policy (build.toml `[shards]` / `[instance-shards]`): modules absent
+    /// from it emit one TU and one instance shard.
+    pub shard_rules: Vector<ShardRule>,
     /// True only while the parallel typecheck frontier is running.
     pub tc_frontier: bool,
     /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
@@ -1123,6 +1134,7 @@ extend Package {
             tc_mod_done: Vector::<u8>::new(),
             tc_wait: loader_no_wait,
             tc_wait_ctx: null,
+            shard_rules: Vector::<ShardRule>::new(),
             tc_frontier: false,
             mod_refs: Vector::<u64>::new(),
             mod_refs_w: 0,

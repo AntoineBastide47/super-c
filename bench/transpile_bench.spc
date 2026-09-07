@@ -253,8 +253,11 @@ fn transpile_once() Timing {
         let mut o = demit::CemitOut::new(n);
         demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut irkeep);
         // Write the whole package to the sink FILE exactly as a build does, so out_bytes is real.
-        unsafe stdio::fwrite(o.types_h.as_ptr(), 1, o.types_h.len(), f);
-        unsafe stdio::fwrite(o.protos_h.as_ptr(), 1, o.protos_h.len(), f);
+        unsafe stdio::fwrite(o.fwd_h.as_ptr(), 1, o.fwd_h.len(), f);
+        for m in 0..n {
+            unsafe stdio::fwrite(o.types_h.at(m).as_ptr(), 1, o.types_h.at(m).len(), f);
+            unsafe stdio::fwrite(o.protos_h.at(m).as_ptr(), 1, o.protos_h.at(m).len(), f);
+        }
         for m in 0..n {
             for x in 0..o.tu_heads.at(m).len() {
                 let h = o.tu_heads.at(m).at(x);
@@ -264,11 +267,14 @@ fn transpile_once() Timing {
             unsafe stdio::fwrite(tu.as_ptr(), 1, tu.len(), f);
             unsafe stdio::fwrite(o.tu_tail.at(m).as_ptr(), 1, o.tu_tail.at(m).len(), f);
         }
-        for x in 0..o.inst_heads.len() {
-            let h = o.inst_heads.at(x);
-            unsafe stdio::fwrite(h.as_ptr(), 1, h.len(), f);
+        for q in 0..n {
+            for x in 0..o.inst_heads.at(q).len() {
+                let h = o.inst_heads.at(q).at(x);
+                unsafe stdio::fwrite(h.as_ptr(), 1, h.len(), f);
+            }
         }
         unsafe stdio::fwrite(o.inst_c.as_ptr(), 1, o.inst_c.len(), f);
+        unsafe stdio::fwrite(o.registry_c.as_ptr(), 1, o.registry_c.len(), f);
     }
     r.out_bytes = sink_close(f);
     let a4 = time::cpu_seconds();
@@ -467,7 +473,7 @@ fn real_build(js: &mut String) bool {
     let mut dir = String::from_str(str::from_cstr(unsafe dshim::sc_tmpdir()));
     dir.push_str("/sc_bench_build");
     let _ = unsafe dshim::sc_rm_rf(dir.cstr());
-    let m0 = mf::load("build.toml");
+    let m0 = mf::load("build.toml", false);
     if m0.is_none() {
         eprintln("bench: cannot load build.toml (run from the repo root)");
         return false;
