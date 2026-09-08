@@ -136,6 +136,21 @@ fn manifest_validation_messages() {
         "'strip' expects true or false",
     );
     manifest_err(
+        "opt-level",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\nopt-level = 4\n",
+        "'opt-level' expects 0, 1, 2, 3, \"s\" or \"z\"",
+    );
+    manifest_err(
+        "link-args array",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\nlink-args = \"-S\"\n",
+        "'link-args' expects an array of strings",
+    );
+    manifest_err(
+        "lto mode",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.dev]\nlto = \"fat\"\n",
+        "'lto' expects \"none\", \"full\", \"auto\" or \"thin\"",
+    );
+    manifest_err(
         "absolute test-dir",
         "bin = \"a\"\nroot = \"m.spc\"\ntest-dir = \"/abs\"\n",
         "'test-dir' must be a plain workspace-relative directory, got '/abs'",
@@ -185,6 +200,66 @@ fn manifest_validation_messages() {
     );
     manifest_err("unknown section", "bin = \"a\"\nroot = \"m.spc\"\n[foo]\nx = 1\n", "unknown section 'foo'");
     manifest_err("unknown key", "bin = \"a\"\nroot = \"m.spc\"\nvendor-dir = \"v\"\n", "unknown key 'vendor-dir'");
+}
+
+// `lto` names the link-time optimization mode of a profile; a built-in profile keeps its own default
+// (automatic LTO for `release`), and a profile without the key leaves the flag arrays in charge.
+@test
+fn manifest_profile_lto_mode() {
+    let (m, errs) = manifest::parse_check(
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.fast]\ncflags = [\"-O2\"]\nlto = \"full\"\n[profile.plain]\ncflags = [\"-O1\"]\n",
+        "",
+        false,
+    );
+    assert_eq(errs.errors.len(), 0);
+    let mm = m.unwrap();
+    assert_eq(mm.profiles.at(mm.profile_index("fast") as usize).lto, manifest::LTO_FULL);
+    assert_eq(mm.profiles.at(mm.profile_index("plain") as usize).lto, manifest::LTO_FLAGS);
+    assert_eq(mm.profiles.at(mm.profile_index("release") as usize).lto, manifest::LTO_AUTO);
+    assert_eq(mm.profiles.at(mm.profile_index("dev") as usize).lto, manifest::LTO_FLAGS);
+    assert_eq(manifest::lto_parse("thin"), manifest::LTO_THIN);
+    // A section naming a built-in overrides only the keys it sets: `release` keeps its flags and strip.
+    let (m2, errs2) = manifest::parse_check(
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\nlto = \"thin\"\n[profile.dev]\ncflags = [\"-O1\"]\n",
+        "",
+        false,
+    );
+    assert_eq(errs2.errors.len(), 0);
+    let mm2 = m2.unwrap();
+    let rel = mm2.profiles.at(mm2.profile_index("release") as usize);
+    assert_eq(rel.lto, manifest::LTO_THIN);
+    assert(rel.strip && rel.cflags.len() > 1 && rel.link_args.len() == 1, "release keeps its built-in flags and strip");
+    let dev = mm2.profiles.at(mm2.profile_index("dev") as usize);
+    assert(dev.cflags.len() == 1 && dev.ldflags.len() == 2, "dev's cflags are replaced, its ldflags kept");
+    assert_eq(manifest::lto_parse("x"), -1);
+    assert_eq(manifest::lto_flag(manifest::LTO_AUTO), "-flto=auto");
+    assert_eq(manifest::lto_flag(manifest::LTO_NONE), "");
+}
+
+// `opt-level` takes Cargo's values and `link-args` the linker's own arguments; the built-in profiles
+// carry their levels in the key, so a section can change just the level.
+@test
+fn manifest_profile_opt_level_and_link_args() {
+    let (m, errs) = manifest::parse_check(
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\nopt-level = 2\nlink-args = [\"-dead_strip\", \"-S\"]\n[profile.small]\nopt-level = \"z\"\n[profile.two]\nopt-level = \"2\"\n",
+        "",
+        false,
+    );
+    assert_eq(errs.errors.len(), 0);
+    let mm = m.unwrap();
+    let rel = mm.profiles.at(mm.profile_index("release") as usize);
+    assert_eq(rel.opt, 2);
+    assert(
+        rel.link_args.len() == 2 && rel.link_args.at(0).as_str() == "-dead_strip",
+        "link-args replace the built-in list",
+    );
+    assert(rel.strip && rel.cflags.len() > 1, "the rest of release stays");
+    assert_eq(mm.profiles.at(mm.profile_index("small") as usize).opt, manifest::OPT_Z);
+    assert_eq(mm.profiles.at(mm.profile_index("two") as usize).opt, 2);
+    assert_eq(mm.profiles.at(mm.profile_index("dev") as usize).opt, 1);
+    assert_eq(mm.profiles.at(mm.profile_index("debug") as usize).opt, 0);
+    assert_eq(manifest::opt_flag(manifest::OPT_S), "-Os");
+    assert_eq(manifest::opt_flag(manifest::OPT_FLAGS), "");
 }
 
 // A --bootstrap-tags build reads a manifest written for a newer compiler: sections and keys outside

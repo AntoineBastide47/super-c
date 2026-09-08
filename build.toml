@@ -4,20 +4,18 @@ root = "src/main.spc"
 # Output shard policy (schema: changing a count rewrites every shard of that module).
 # A module absent here emits one TU and one instance shard; counts come from the measured
 # emitted size (about one shard per 256 KiB of C) so the C compile's critical path stays short.
-# Commented out until a release ships a compiler that reads these sections: the release that
-# bootstraps the build rejects them at the TOML level. Restore once that release exists.
-# [shards]
-# "typechecker::typechecker" = 6
-# "emit::cemit" = 4
-# "driver::emit" = 3
-# "ast::parser" = 3
-# "ir::interp" = 2
-# "ir::lower" = 2
-# "lsp::server" = 2
-# "borrowck::borrowck" = 2
-#
-# [instance-shards]
-# "__std::vector" = 2
+[shards]
+"typechecker::typechecker" = 6
+"emit::cemit" = 4
+"driver::emit" = 3
+"ast::parser" = 3
+"ir::interp" = 2
+"ir::lower" = 2
+"lsp::server" = 2
+"borrowck::borrowck" = 2
+
+[instance-shards]
+"__std::vector" = 2
 
 [command.bootstrap]
 run = [

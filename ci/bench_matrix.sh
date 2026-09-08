@@ -11,7 +11,9 @@
 #   body            1, all   warm    a private function body edit: body invalidation, TU impact
 #   signature       1, all   warm    a public signature edit: dependent interface invalidation
 #   layout          1, all   warm    a by-value type layout edit: header and type fanout
-#   release_relink  1, all   warm    the body edit under the release profile: LTO relink cost
+#   release_relink  1, all   warm    the body edit under the release profile (full LTO, the default): relink cost
+#   release_thin    1, all   warm    the same edit under ThinLTO with the linker cache (SC_LTO=thin)
+#   release_nocache 1, all   warm    the same edit under ThinLTO with the linker cache off (SC_NO_LTO_CACHE)
 #   tucache_on/off  all      warm    the body edit with the per-TU emit cache on and off, interleaved
 #
 # The three edits are fixed, reversible text substitutions (below); the exact source bytes are restored
@@ -89,7 +91,10 @@ printf 'matrix: build %s, %s cores, %s reps per case, load %s\n' "$commit" "$ncp
 
 # The global object cache and ccache stay off for every run: a warm case measures the project's own
 # stamp and fingerprints, and a repeated edit must compile its unit again rather than fetch rep 1's object.
-warm="SC_NO_CACHE=1 CCACHE_DISABLE=1"
+# The linker's ThinLTO cache stays on under its own root, emptied here once: the release_thin reps
+# after the first find the edited state cached (the reuse benefit), the first is the cold cost.
+warm="SC_NO_CACHE=1 CCACHE_DISABLE=1 SC_CACHE_DIR=$PWD/$m/cache"
+rm -rf "$m/cache"
 i=0
 while [ "$i" -lt "$reps" ]; do
     i=$((i + 1))
@@ -109,10 +114,19 @@ while [ "$i" -lt "$reps" ]; do
         apply_edit layout
         build "$m/layout_j$jobs.jsonl" "$jobs" dev $warm
         restore
-        # Release relink: a warm release tree, then the body edit under the release profile.
+        # Release relink: a warm release tree, then the body edit under the release profile: the
+        # default (full LTO), ThinLTO with the linker cache, and ThinLTO without it.
         build "$m/scratch.jsonl" "$jobs" release $warm
         apply_edit body
         build "$m/release_relink_j$jobs.jsonl" "$jobs" release $warm
+        restore
+        build "$m/scratch.jsonl" "$jobs" release $warm SC_LTO=thin
+        apply_edit body
+        build "$m/release_thin_j$jobs.jsonl" "$jobs" release $warm SC_LTO=thin
+        restore
+        build "$m/scratch.jsonl" "$jobs" release $warm SC_LTO=thin SC_NO_LTO_CACHE=1
+        apply_edit body
+        build "$m/release_nocache_j$jobs.jsonl" "$jobs" release $warm SC_LTO=thin SC_NO_LTO_CACHE=1
         restore
     done
     # The per-TU emit cache, interleaved on/off on the body edit with every core.
@@ -144,7 +158,7 @@ def med_p95(v):
     v = sorted(v)
     return statistics.median(v), v[(len(v) * 95 + 99) // 100 - 1]
 lines = ["# Build matrix report", "", "build %s, %s cores, %s reps per case, 1-minute load %s at start, dev profile unless noted; global object cache and ccache off throughout." % (commit, ncpu, reps, load), "",
-         "| case | workers | runs | transpile ms med / p95 | compile ms med / p95 | link ms med / p95 | total ms med / p95 | units stale | cc span ms | cc overlap ms |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+         "| case | workers | runs | transpile ms med / p95 | compile ms med / p95 | link ms med / p95 | total ms med / p95 | units stale | cc span ms | cc overlap ms | lto |", "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
 consts = []
 for path in sorted(glob.glob(os.path.join(m, "*.jsonl"))):
     name = os.path.basename(path)[:-6]
@@ -164,8 +178,8 @@ for path in sorted(glob.glob(os.path.join(m, "*.jsonl"))):
     ov = [r["cc"]["overlap_ms"] for r in recs]
     case, jobs = name.rsplit("_j", 1)
     tm, tp = med_p95(t); cm, cp = med_p95(c); lm, lp = med_p95(l); om, op = med_p95(tot)
-    lines.append("| %s | %s | %d | %.1f / %.1f | %.1f / %.1f | %.1f / %.1f | %.1f / %.1f | %s/%s | %.1f | %.1f |" % (
-        case, jobs, len(recs), tm, tp, cm, cp, lm, lp, om, op, recs[-1]["stale"], recs[-1]["units"], statistics.median(span), statistics.median(ov)))
+    lines.append("| %s | %s | %d | %.1f / %.1f | %.1f / %.1f | %.1f / %.1f | %.1f / %.1f | %s/%s | %.1f | %.1f | %s |" % (
+        case, jobs, len(recs), tm, tp, cm, cp, lm, lp, om, op, recs[-1]["stale"], recs[-1]["units"], statistics.median(span), statistics.median(ov), recs[-1].get("lto", "-")))
     tag = "%s_J%s" % (case.upper(), "ALL" if jobs == ncpu else jobs)
     consts.append(("MATRIX_%s_TRANSPILE_MS_MEDIAN" % tag, tm))
     consts.append(("MATRIX_%s_TRANSPILE_MS_P95" % tag, tp))

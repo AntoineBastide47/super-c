@@ -27,8 +27,10 @@ Before any optimization work, understand these non-negotiable constraints:
    [fixpoint.md](references/fixpoint.md) for the verification protocol.
 
 2. **LTO gate.** Gate LTO first. Do not keep a micro-optimization that LTO already
-   performs — at `-O3 -flto`, Clang inlines same-TU hot calls, CSEs `strlen` of literals,
-   and lowers fixed-size `memcmp` to branchless compares. Check the LTO profile
+   performs — at `-O3` with LTO (the `release` and `bench` profiles use ThinLTO, see the
+   binary skill), Clang inlines same-TU hot calls, CSEs `strlen` of literals, and lowers
+   fixed-size `memcmp` to branchless compares; cross-module inlining under ThinLTO is
+   import-based, so a hot cross-module call is not always inlined. Check the LTO profile
    checkpoint before implementing. If a target shows ~0 samples under LTO, the
    optimization will not produce a corpus-level win.
 

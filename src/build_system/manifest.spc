@@ -8,12 +8,97 @@ import module::loader as loader;
 import utils::errors as diag;
 
 /// One [profile.NAME]: per-profile cflags/ldflags appended after the manifest-level ones; `strip`
-/// runs strip on the freshly linked binary.
+/// runs strip on the freshly linked binary; `opt` is the `opt-level` (OPT_FLAGS: the flag arrays say
+/// it all) and `lto` the link-time optimization mode, both added by the engine to the compile and
+/// the link lines ahead of the profile's flags; `link_args` reach the linker through the driver
+/// (`-Wl,<arg>` each), after the profile's ldflags.
 pub struct Profile<'a> {
     pub name: str<'a>,
     pub cflags: Vector<String>,
     pub ldflags: Vector<String>,
+    pub link_args: Vector<String>,
     pub strip: bool,
+    pub opt: i32,
+    pub lto: i32,
+}
+
+/// `opt-level` values: OPT_FLAGS adds nothing; 0 to 3 are `-O0` to `-O3`; OPT_S and OPT_Z are
+/// `-Os` and `-Oz`.
+pub const OPT_FLAGS: i32 = -1;
+pub const OPT_S: i32 = 4;
+pub const OPT_Z: i32 = 5;
+
+/// The compiler flag of `opt`; empty for OPT_FLAGS.
+pub const fn opt_flag(opt: i32) str<'static> {
+    return if opt == 0 {
+        "-O0";
+    } else if opt == 1 {
+        "-O1";
+    } else if opt == 2 {
+        "-O2";
+    } else if opt == 3 {
+        "-O3";
+    } else if opt == OPT_S {
+        "-Os";
+    } else if opt == OPT_Z {
+        "-Oz";
+    } else {
+        "";
+    };
+}
+
+/// `lto` modes. LTO_FLAGS adds nothing (a `-flto*` in the flag arrays passes through verbatim); the
+/// others add their `-flto` form to every compile and to the link. LTO_THIN is a request: the build
+/// engine probes the toolchain once per profile directory and falls back to LTO_AUTO with the
+/// measured reason when the compiler or the linker rejects ThinLTO (`build::CcStream::lto_resolve`).
+/// The built-in optimized profiles use LTO_AUTO (see `add_builtin_profiles`).
+pub const LTO_FLAGS: i32 = 0;
+pub const LTO_NONE: i32 = 1;
+pub const LTO_FULL: i32 = 2;
+pub const LTO_AUTO: i32 = 3;
+pub const LTO_THIN: i32 = 4;
+
+/// The mode named `s`, or -1.
+pub fn lto_parse(s: str) i32 {
+    return if s == "none" {
+        LTO_NONE;
+    } else if s == "full" {
+        LTO_FULL;
+    } else if s == "auto" {
+        LTO_AUTO;
+    } else if s == "thin" {
+        LTO_THIN;
+    } else {
+        -1;
+    };
+}
+
+/// The compiler flag of `mode`; empty for LTO_FLAGS and LTO_NONE.
+pub const fn lto_flag(mode: i32) str<'static> {
+    return if mode == LTO_FULL {
+        "-flto";
+    } else if mode == LTO_AUTO {
+        "-flto=auto";
+    } else if mode == LTO_THIN {
+        "-flto=thin";
+    } else {
+        "";
+    };
+}
+
+/// The name of `mode`, the inverse of `lto_parse` ("flags" for LTO_FLAGS).
+pub const fn lto_name(mode: i32) str<'static> {
+    return if mode == LTO_NONE {
+        "none";
+    } else if mode == LTO_FULL {
+        "full";
+    } else if mode == LTO_AUTO {
+        "auto";
+    } else if mode == LTO_THIN {
+        "thin";
+    } else {
+        "flags";
+    };
 }
 
 /// One extra binary target: `[bin.NAME] root = "..."` (the top-level `bin`/`root` pair is the
@@ -97,7 +182,15 @@ extend Manifest as Free {
 
 extend Profile {
     fn new(name: str) Self {
-        return Profile { name: name, cflags: Vector::<String>::new(), ldflags: Vector::<String>::new(), strip: false };
+        return Profile {
+            name: name,
+            cflags: Vector::<String>::new(),
+            ldflags: Vector::<String>::new(),
+            link_args: Vector::<String>::new(),
+            strip: false,
+            opt: OPT_FLAGS,
+            lto: LTO_FLAGS,
+        };
     }
 }
 
@@ -128,11 +221,13 @@ pub fn builtins_only<'a>() Manifest<'a> {
     return m;
 }
 
+// The array replaces `dst` (a built-in profile's flags when the section names one).
 fn take_arr(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut Vector<String>) {
     if it.val.kind != toml::TV_ARR {
         errs.emit(it.at, it.key.len() as u32, format("'{}' expects an array of strings", it.key.as_str()));
         return;
     }
+    dst.clear();
     for i in 0..it.val.arr.len() {
         dst.push(it.val.arr.at(i).clone());
     }
@@ -219,6 +314,8 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
     }
 
     let mut m = Manifest::new();
+    // Built-ins first, so a [profile.NAME] section naming one overrides only the keys it sets.
+    m.add_builtin_profiles();
     let items = items_opt.unwrap();
     let mut rejected = Vector::<String>::new(); // [command.<builtin>] sections already reported
     let mut saw_lib = false;
@@ -295,8 +392,41 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 take_arr(it, &mut errs, &mut p.cflags);
             } else if key == "ldflags" {
                 take_arr(it, &mut errs, &mut p.ldflags);
+            } else if key == "link-args" {
+                take_arr(it, &mut errs, &mut p.link_args);
+            } else if key == "opt-level" {
+                // Cargo's spelling: an integer 0 to 3, or "s" / "z" (the digits quoted are taken too).
+                let mut lvl: i32 = -1;
+                if it.val.kind == toml::TV_INT && it.val.i >= 0 && it.val.i <= 3 {
+                    lvl = it.val.i as i32;
+                } else if it.val.kind == toml::TV_STR {
+                    let v = it.val.s.as_str();
+                    if v.len() == 1 && v[0] >= b'0' && v[0] <= b'3' {
+                        lvl = v[0] - b'0';
+                    } else if v == "s" {
+                        lvl = OPT_S;
+                    } else if v == "z" {
+                        lvl = OPT_Z;
+                    }
+                }
+                if lvl < 0 {
+                    errs.emit(it.at, key.len() as u32, format("'opt-level' expects 0, 1, 2, 3, \"s\" or \"z\""));
+                } else {
+                    p.opt = lvl;
+                }
             } else if key == "strip" {
                 set_bool(it, &mut errs, &mut p.strip);
+            } else if key == "lto" {
+                let mode = if it.val.kind == toml::TV_STR {
+                    lto_parse(it.val.s.as_str());
+                } else {
+                    -1;
+                };
+                if mode < 0 {
+                    errs.emit(it.at, key.len() as u32, format("'lto' expects \"none\", \"full\", \"auto\" or \"thin\""));
+                } else {
+                    p.lto = mode;
+                }
             } else {
                 unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown profile key '{}'", key));
             }
@@ -436,7 +566,6 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
     if m.default_profile.len() == 0 {
         m.default_profile.push_str("dev");
     }
-    m.add_builtin_profiles();
     // [lib] defaults: root src/lib.spc, name after the primary binary, static unless told otherwise.
     if saw_lib {
         if m.lib_root.len() == 0 {
@@ -535,42 +664,51 @@ extend Manifest {
         return -1;
     }
 
-    // The Makefile's profiles, available out of the box; a [profile.NAME] section with the same name
-    // starts from empty flags instead (full override, no merging surprises).
+    // The profiles available out of the box. A [profile.NAME] section with the same name starts from
+    // these values: a key it sets replaces the built-in's (`cflags` the whole array), the rest stay.
     fn add_builtin_profiles(self: &mut Self) {
-        if self.profile_index("debug") < 0 {
+        {
             let mut p = Profile::new("debug");
             push_flags(
                 &mut p.cflags,
-                "-g -O0  -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
+                "-g -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
             );
             push_flags(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
+            p.opt = 0;
             self.profiles.push(p);
         }
-        if self.profile_index("dev") < 0 {
+        {
             let mut p = Profile::new("dev");
             push_flags(
                 &mut p.cflags,
-                "-g -O1 -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
+                "-g -fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer",
             );
             push_flags(&mut p.ldflags, "-fsanitize=address -fsanitize=undefined");
+            p.opt = 1;
             self.profiles.push(p);
         }
-        if self.profile_index("release") < 0 {
+        {
             let mut p = Profile::new("release");
             push_flags(
                 &mut p.cflags,
-                "-O3 -DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -flto=auto -fPIE",
+                "-DNDEBUG -finline-functions -fomit-frame-pointer -ffunction-sections -fdata-sections -fPIE",
             );
-            push_flags(&mut p.ldflags, "-flto=auto -Wl,-O2");
+            push_flags(&mut p.link_args, "-O2");
             p.strip = true;
+            p.opt = 3;
+            // Full LTO: ThinLTO relinks in 1.3 s instead of 19 s here, but costs the compiler 3 to 5%
+            // runtime and 6.6% size, past the gates set for a default (binary skill, "Link-time
+            // optimization"); `lto = "thin"` or SC_LTO=thin opts a build in.
+            p.lto = LTO_AUTO;
             self.profiles.push(p);
         }
-        if self.profile_index("bench") < 0 {
+        {
             let mut p = Profile::new("bench");
             // Optimization parity with `release` (-O3 -DNDEBUG): the bench should measure the compiler
             // users run. -g and frame pointers stay so samply profiles remain readable.
-            push_flags(&mut p.cflags, "-O3 -DNDEBUG -g -fno-omit-frame-pointer -flto=auto");
+            push_flags(&mut p.cflags, "-DNDEBUG -g -fno-omit-frame-pointer");
+            p.opt = 3;
+            p.lto = LTO_AUTO;
             // Profile-guided optimization when local training data exists (build with --profile=pgogen,
             // run a self-transpile under LLVM_PROFILE_FILE, merge with llvm-profdata). Clang hard-errors
             // on a missing profile file, so the flag only appears when the file is present.
@@ -582,24 +720,25 @@ extend Manifest {
                     "-fprofile-use=build/pgo.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin",
                 );
             }
-            push_flags(&mut p.ldflags, "-flto=auto");
             self.profiles.push(p);
         }
-        if self.profile_index("test") < 0 {
+        {
             // The `super-c test` runner. The harness drives thousands of in-process compiles, and -O1 runs
             // them two to four times cheaper than an unoptimized build with every assert kept. No
             // sanitizers here: the compiler under test carries the selected profile's.
             let mut p = Profile::new("test");
-            push_flags(&mut p.cflags, "-O1");
+            p.opt = 1;
             self.profiles.push(p);
         }
         // PGO training build: instrument, run a representative workload (a self-transpile) under
         // LLVM_PROFILE_FILE, merge the raw profiles with llvm-profdata into build/pgo.profdata, and the
         // bench profile above picks it up on its next build.
-        if self.profile_index("pgogen") < 0 {
+        {
             let mut p = Profile::new("pgogen");
-            push_flags(&mut p.cflags, "-O2 -fprofile-generate -flto=auto");
-            push_flags(&mut p.ldflags, "-fprofile-generate -flto=auto");
+            push_flags(&mut p.cflags, "-fprofile-generate");
+            push_flags(&mut p.ldflags, "-fprofile-generate");
+            p.opt = 2;
+            p.lto = LTO_AUTO;
             self.profiles.push(p);
         }
         // ThreadSanitizer. Its own profile and NEVER part of `release`: TSan costs 5-15x runtime and several
@@ -613,10 +752,11 @@ extend Manifest {
         // disappears with it is attribution, not a race: the allocation it blames is inlined into `worker_main`
         // from a callee, and the write it blames is inlined into a wrapper from the closure body. Losing the
         // inlining is the price of a report worth acting on.
-        if self.profile_index("race") < 0 {
+        {
             let mut p = Profile::new("race");
-            push_flags(&mut p.cflags, "-O1 -fno-inline -g -fsanitize=thread -fno-omit-frame-pointer -DSC_LOCKDEP");
+            push_flags(&mut p.cflags, "-fno-inline -g -fsanitize=thread -fno-omit-frame-pointer -DSC_LOCKDEP");
             push_flags(&mut p.ldflags, "-fsanitize=thread");
+            p.opt = 1;
             self.profiles.push(p);
         }
     }

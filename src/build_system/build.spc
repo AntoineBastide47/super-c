@@ -160,13 +160,19 @@ pub fn rm_rf(path: str) {
 // invalidation story: different content is a different key. System headers (<...>) are outside the
 // key; the compiler-version fingerprint stands in for them, the same bet ccache's direct mode makes.
 
-/// The cache directory: $SC_CACHE_DIR, else <home>/.super-c/cache; empty = caching disabled
-/// (SC_NO_CACHE set, or no resolvable home).
+/// The object cache directory (the cache root itself); empty = caching disabled (SC_NO_CACHE set,
+/// or no resolvable home).
 pub fn object_cache_dir() String {
     let off = stdlib::getenv("SC_NO_CACHE");
     if off != null && unsafe *off != 0 as char {
         return String::new();
     }
+    return cache_root();
+}
+
+/// The build cache root: $SC_CACHE_DIR, else <home>/.super-c/cache; empty when no home resolves.
+/// Objects live directly below it, the linker's ThinLTO caches under `lto/<namespace>`.
+pub fn cache_root() String {
     let dir = stdlib::getenv("SC_CACHE_DIR");
     if dir != null && unsafe *dir != 0 as char {
         return String::from_cstr(dir);
@@ -633,6 +639,23 @@ fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32, sdk: i32)
     }
 }
 
+// The profile's `opt-level` flag, then its flag array (`push_profile`), so an explicit `-O` in the
+// array still wins; `wl` renders each `link-args` entry through the driver.
+fn push_profile_side(cmd: &mut String, prof: &mf::Profile, flags: &Vector<String>, wl: bool, target: i32, sdk: i32) {
+    let of = mf::opt_flag(prof.opt);
+    if of.len() != 0 {
+        cmd.push_byte(b' ');
+        cmd.push_str(of);
+    }
+    push_profile(cmd, flags, target, sdk);
+    if wl {
+        for i in 0..prof.link_args.len() {
+            cmd.push_str(" -Wl,");
+            cmd.push_string(prof.link_args.at(i));
+        }
+    }
+}
+
 /// The built-in flags for profile `name`, as one command-line fragment (cflags then ldflags), for a build
 /// with no manifest to read them from: `super-c release foo.spc`, which compiles and links in one command.
 /// Empty for an unknown name, so an unrecognised `--profile=` degrades to the plain build rather than
@@ -646,8 +669,21 @@ pub fn profile_flags(name: str, target: i32, sdk: i32) String {
     let pi = m.profile_index(name);
     if pi >= 0 {
         let prof = m.profiles.at(pi as usize);
-        push_profile(&mut out, &prof.cflags, target, sdk);
-        push_profile(&mut out, &prof.ldflags, target, sdk);
+        push_profile_side(&mut out, prof, &prof.cflags, false, target, sdk);
+        push_profile_side(&mut out, prof, &prof.ldflags, true, target, sdk);
+        // One command compiles and links: nothing to relink, so a ThinLTO request has no probe here
+        // and keeps the automatic mode.
+        let lf = mf::lto_flag(
+            if prof.lto == mf::LTO_THIN {
+                mf::LTO_AUTO;
+            } else {
+                prof.lto;
+            },
+        );
+        if lf.len() != 0 {
+            out.push_byte(b' ');
+            out.push_str(lf);
+        }
     }
     return out;
 }
@@ -680,6 +716,166 @@ fn cc_version_argv(args: &mut Vector<String>, dir: str) String {
         out.push_str(s.slice(0, e));
     }
     return out;
+}
+
+/// The linker cache namespace and probe record schema: bump when the emitted C changes shape in a
+/// way that must not share a namespace with, or reuse the verdict of, an older compiler.
+const LTO_SCHEMA: u32 = 1;
+
+/// The `idx`-th line of `s` (empty when absent).
+fn line_of(s: str, idx: usize) str {
+    let mut a: usize = 0;
+    let mut k: usize = 0;
+    for i in 0..s.len() {
+        if s[i] == b'\n' {
+            if k == idx {
+                return s.slice(a, i);
+            }
+            k += 1;
+            a = i + 1;
+        }
+    }
+    if k == idx {
+        return s.slice(a, s.len());
+    }
+    return s.slice(0, 0);
+}
+
+/// The executable the first word of `cmd` names: as given when it has a directory part, else the
+/// first PATH entry holding it (`.exe` too on a Windows host). Returns its mtime; 0 when unresolved
+/// (`out` then holds the bare word).
+fn which_path(cmd: str, out: &mut String) i64 {
+    let mut e: usize = 0;
+    while e < cmd.len() && cmd[e] != b' ' {
+        e += 1;
+    }
+    let name = cmd.slice(0, e);
+    let win = unsafe shim::sc_host_platform() == 0;
+    let mut cand = String::new();
+    let mut has_dir = false;
+    for i in 0..name.len() {
+        if name[i] == b'/' || name[i] == b'\\' {
+            has_dir = true;
+        }
+    }
+    if !has_dir {
+        let pe = stdlib::getenv("PATH");
+        if pe != null {
+            let path = str::from_cstr(pe);
+            let sep = if win {
+                b';';
+            } else {
+                b':';
+            };
+            let mut a: usize = 0;
+            for i in 0..path.len() + 1 {
+                if i == path.len() || path[i] == sep {
+                    if i > a {
+                        for x in 0..2 {
+                            cand.clear();
+                            cand.push_str(path.slice(a, i));
+                            cand.push_byte(b'/');
+                            cand.push_str(name);
+                            if x == 1 {
+                                cand.push_str(".exe");
+                            }
+                            let mt = unsafe shim::sc_mtime(cand.cstr());
+                            if mt != 0 {
+                                out.push_string(&cand);
+                                return mt;
+                            }
+                            if !win {
+                                break;
+                            }
+                        }
+                    }
+                    a = i + 1;
+                }
+            }
+        }
+    }
+    out.push_str(name);
+    cand.clear();
+    cand.push_str(name);
+    return unsafe shim::sc_mtime(cand.cstr());
+}
+
+/// The linker a `-v` link log names: the last child command line (a leading space, then the
+/// program, quoted by clang and bare by gcc) whose program exists. Writes `ld\t<path>\t<mtime>`.
+fn linker_of_log(path: str, out: &mut String) {
+    let body = loader::read_file(path);
+    if body.is_none() {
+        return;
+    }
+    let b = body.unwrap();
+    let s = b.as_str();
+    let mut a: usize = 0;
+    for i in 0..s.len() + 1 {
+        if i == s.len() || s[i] == b'\n' {
+            if i > a + 1 && s[a] == b' ' {
+                let mut x = a + 1;
+                let q = s[x] == b'"';
+                if q {
+                    x += 1;
+                }
+                let mut y = x;
+                while y < i && s[y] != b'\n' && s[y] != b'\r' && if q {
+                    s[y] != b'"';
+                } else {
+                    s[y] != b' ';
+                } {
+                    y += 1;
+                }
+                let mut prog = String::from_str(s.slice(x, y));
+                let mt = unsafe shim::sc_mtime(prog.cstr());
+                if mt != 0 {
+                    out.clear();
+                    out.push_str("ld\t");
+                    out.push_string(&prog);
+                    out.push_byte(b'\t');
+                    out.push_i64(mt);
+                }
+            }
+            a = i + 1;
+        }
+    }
+}
+
+/// A ThinLTO cache entry (`llvmcache-<hash>`) exists directly under `dir`.
+fn cache_has_entry(dir: str) bool {
+    let mut files = Vector::<String>::new();
+    walk_files(dir, dir.len(), &mut files);
+    for i in 0..files.len() {
+        if files.at(i).as_str().starts_with("llvmcache-") {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The linker cache options of `form` (1 Apple ld, 2 lld, 3 the LLVM gold plugin under gold or
+/// bfd) for cache directory `dir`, through the compiler driver. Every form bounds the cache itself:
+/// entries unused for a week go, the cache stays under a tenth of the disk, checked at most hourly.
+/// The directory is one verbatim argument (never split).
+fn lto_cache_args(form: i32, dir: str, out: &mut Vector<String>) {
+    if form == 1 {
+        let mut a = String::from_str("-Wl,-cache_path_lto,");
+        a.push_str(dir);
+        out.push(a);
+        push_arg(out, "-Wl,-prune_interval_lto,3600");
+        push_arg(out, "-Wl,-prune_after_lto,604800");
+        push_arg(out, "-Wl,-max_relative_cache_size_lto,10");
+    } else if form == 2 {
+        let mut a = String::from_str("-Wl,--thinlto-cache-dir=");
+        a.push_str(dir);
+        out.push(a);
+        push_arg(out, "-Wl,--thinlto-cache-policy=prune_interval=1h:prune_after=168h:cache_size=10%");
+    } else {
+        let mut a = String::from_str("-Wl,-plugin-opt,cache-dir=");
+        a.push_str(dir);
+        out.push(a);
+        push_arg(out, "-Wl,-plugin-opt,cache-policy=prune_interval=1h:prune_after=168h:cache_size=10%");
+    }
 }
 
 // A stale translation unit waiting for a worker slot.
@@ -908,7 +1104,14 @@ struct CcStream {
     pub obj: String,
     pub pdir: String,
     pub cc_raw: String, // compiler without the ccache decision (see ensure_cc)
-    pub cc_tail: String, // " <cstd> <cflags> <profile cflags> -MMD -c" (also the object-cache key text)
+    pub cc_tail: String, // " <cstd> <cflags> <profile cflags> -MMD -c [-flto=..]" (also the object-cache key text)
+    pub ldbase: String, // " <sdk flags and libs> <ldflags> <profile ldflags>": the fixed part of the link line
+    pub target: i32,
+    pub lto_req: i32, // the profile's `lto` mode (SC_LTO overrides it)
+    pub lto: i32, // the mode in use once ensure_cc ran: lto_req, or LTO_AUTO for a rejected ThinLTO request
+    pub lto_cache: bool, // the link line names a ThinLTO cache directory
+    pub lto_reason: String, // why ThinLTO or its cache was rejected; empty when both are in use
+    pub lto_ld: Vector<String>, // the mode's link arguments: `-flto=..` and the linker cache options
     pub probe_cc_pid: i64, // background `ccache -V` probe; -1 = resolve synchronously on demand
     pub probe_ver_pid: i64, // background `<cc> --version` probe; -1 = resolve synchronously
     pub ccver_path: String, // <pdir>/.ccver, the version probe's output file
@@ -985,11 +1188,184 @@ extend CcStream {
             push_arg(&mut va, "--version");
             self.ccver = cc_version_argv(&mut va, self.pdir.as_str());
         }
+        self.lto_resolve();
+        let lf = mf::lto_flag(self.lto);
+        if lf.len() != 0 {
+            self.cc_tail.push_byte(b' ');
+            self.cc_tail.push_str(lf);
+            push_arg(&mut self.lto_ld, lf);
+        }
         self.prefix_args = clone_args(&self.cc_args);
         split_args(&mut self.prefix_args, self.cc_tail.as_str());
         if self.cache.len() != 0 {
             mkdir_p(self.cache.as_str());
         }
+    }
+
+    /// Settle the LTO mode. A ThinLTO request needs the toolchain's answer: the record `<pdir>/.lto`
+    /// (the key line: schema, compiler version, path and mtime, target, compile tail and link flags;
+    /// the linker's path and mtime; the verdict) gives it without a process when every input still
+    /// matches, else `lto_probe` measures it. A rejected request keeps `-flto=auto`, the mode the
+    /// profiles used before ThinLTO, and `lto_reason` names why. The linker cache directory is
+    /// `<cache root>/lto/<hash of the record's key and linker lines>`: one namespace per compiler,
+    /// linker, target, flag set and schema, pruned by the linker itself (`lto_cache_args`).
+    fn lto_resolve(self: &mut Self) {
+        self.lto = self.lto_req;
+        if self.lto_req != mf::LTO_THIN {
+            return;
+        }
+        let mut key = String::from_str("sc-lto ");
+        key.push_u64(LTO_SCHEMA);
+        key.push_byte(b'\t');
+        key.push_string(&self.ccver);
+        key.push_byte(b'\t');
+        let mut ccpath = String::new();
+        let ccmt = which_path(self.cc_raw.as_str(), &mut ccpath);
+        key.push_string(&ccpath);
+        key.push_byte(b'\t');
+        key.push_i64(ccmt);
+        key.push_byte(b'\t');
+        key.push_i64(self.target);
+        key.push_byte(b'\t');
+        key.push_string(&self.cc_tail);
+        key.push_byte(b'\t');
+        key.push_string(&self.ldbase);
+        let recp = join2(self.pdir.as_str(), ".lto");
+        let mut form: i32 = -2; // -2 no valid record, -1 rejected, 0 no cache, else a `lto_cache_args` form
+        let mut ld = String::new();
+        let old = loader::read_file(recp.as_str());
+        if !old.is_none() {
+            let ob = old.unwrap();
+            let s = ob.as_str();
+            let l1 = line_of(s, 1);
+            let mut ldp = String::from_str(stamp_field(l1, 1));
+            let ldmt = stamp_field(l1, 2).parse_i64();
+            let same_ld = ldp.as_str() == "-" || !ldmt.is_none() && unsafe shim::sc_mtime(ldp.cstr()) == ldmt.unwrap();
+            if line_of(s, 0) == key.as_str() && same_ld {
+                let l2 = line_of(s, 2);
+                if stamp_field(l2, 0) == "thin" {
+                    let f = stamp_field(l2, 1).parse_i64();
+                    if !f.is_none() && f.unwrap() >= 0 && f.unwrap() <= 3 {
+                        form = f.unwrap() as i32;
+                        ld.push_str(l1);
+                    }
+                } else if stamp_field(l2, 0) == "auto" {
+                    form = -1;
+                    self.lto_reason.push_str(stamp_field(l2, 1));
+                }
+            }
+        }
+        if form == -2 {
+            form = self.lto_probe(&key, recp.as_str(), &mut ld);
+        }
+        if form < 0 {
+            self.lto = mf::LTO_AUTO;
+            return;
+        }
+        if form == 0 || stdlib::getenv("SC_NO_LTO_CACHE") != null {
+            return;
+        }
+        let root = cache_root();
+        if root.len() == 0 {
+            return;
+        }
+        let mut h: u64 = 0xcbf29ce484222325;
+        let ks = key.as_str();
+        for i in 0..ks.len() {
+            h = (h ^ ks[i] as u64) * 1099511628211u64;
+        }
+        let ls = ld.as_str();
+        for i in 0..ls.len() {
+            h = (h ^ ls[i] as u64) * 1099511628211u64;
+        }
+        let mut dir = join2(root.as_str(), "lto/");
+        hex64(h, &mut dir);
+        mkdir_p(dir.as_str());
+        lto_cache_args(form, dir.as_str(), &mut self.lto_ld);
+        self.lto_cache = true;
+    }
+
+    /// Measure ThinLTO support with a one-function program under `<pdir>/.ltoprobe`, in the argv
+    /// form a real build uses: the compile with the profile's compile tail and `-flto=thin`, the link
+    /// with the fixed link flags (its `-v` log names the linker, recorded in `ld`), then the link
+    /// again with each linker cache form until one produces a cache entry. Exit codes and output
+    /// files decide, never version text. Writes the record and returns the cache form (0 none, 1
+    /// Apple ld, 2 lld, 3 the gold plugin), or -1 when ThinLTO is rejected, with `lto_reason` set.
+    fn lto_probe(self: &mut Self, key: &String, recp: str, ld: &mut String) i32 {
+        let dir = join2(self.pdir.as_str(), ".ltoprobe");
+        rm_rf(dir.as_str());
+        mkdir_p(dir.as_str());
+        let src = join2(dir.as_str(), "p.c");
+        let mut obj = join2(dir.as_str(), "p.o");
+        let mut exe = join2(dir.as_str(), "p.out");
+        let mut log = join2(dir.as_str(), "log");
+        let mut form: i32 = -1;
+        ld.push_str("ld\t-\t0");
+        if !write_file(src.as_str(), "int main(void) {\n    return 0;\n}\n") {
+            self.lto_reason.push_str("cannot write the probe source");
+        } else {
+            let mut ca = clone_args(&self.cc_args);
+            split_args(&mut ca, self.cc_tail.as_str());
+            push_arg(&mut ca, "-flto=thin");
+            ca.push(src.clone());
+            push_arg(&mut ca, "-o");
+            ca.push(obj.clone());
+            if exec_args(&mut ca, log.cstr()) != 0 || unsafe shim::sc_mtime(obj.cstr()) == 0 {
+                self.lto_reason.push_str("the compiler rejects -flto=thin");
+            } else {
+                let mut lb = clone_args(&self.cc_args);
+                push_arg(&mut lb, "-o");
+                lb.push(exe.clone());
+                lb.push(obj.clone());
+                split_args(&mut lb, self.ldbase.as_str());
+                push_arg(&mut lb, "-flto=thin");
+                let mut lv = clone_args(&lb);
+                push_arg(&mut lv, "-v");
+                if exec_args(&mut lv, log.cstr()) != 0 || unsafe shim::sc_mtime(exe.cstr()) == 0 {
+                    self.lto_reason.push_str("the linker rejects -flto=thin");
+                } else {
+                    form = 0;
+                    linker_of_log(log.as_str(), ld);
+                    let cache = join2(dir.as_str(), "cache");
+                    // Apple ld first on Darwin; elsewhere lld, then the gold and bfd plugin.
+                    for k in 0..3 {
+                        let f: i32 = if is_darwin(self.target) {
+                            k + 1;
+                        } else {
+                            (k + 1) % 3 + 1;
+                        };
+                        unsafe shim::sc_unlink(exe.cstr());
+                        rm_rf(cache.as_str());
+                        let mut fa = clone_args(&lb);
+                        lto_cache_args(f, cache.as_str(), &mut fa);
+                        if exec_args(&mut fa, log.cstr()) == 0 && unsafe shim::sc_mtime(exe.cstr()) != 0 && cache_has_entry(
+                            cache.as_str(),
+                        ) {
+                            form = f;
+                            break;
+                        }
+                    }
+                    if form == 0 {
+                        self.lto_reason.push_str("the linker rejects a ThinLTO cache directory with a pruning policy");
+                    }
+                }
+            }
+        }
+        rm_rf(dir.as_str());
+        let mut rec = key.clone();
+        rec.push_byte(b'\n');
+        rec.push_string(ld);
+        rec.push_byte(b'\n');
+        if form < 0 {
+            rec.push_str("auto\t");
+            rec.push_string(&self.lto_reason);
+        } else {
+            rec.push_str("thin\t");
+            rec.push_i64(form);
+        }
+        rec.push_byte(b'\n');
+        let _ = write_file_atomic(recp, rec.as_str());
+        return form;
     }
 
     /// Sync one finished file raw -> gen (byte-compare keeps the mtime anchor); a source also gets
@@ -1716,8 +2092,23 @@ fn engine_build_i(
     // The cross triple comes first; manifest flags can override.
     push_sdk_flags(&mut tail, m.sdk, m.arch);
     push_all(&mut tail, &m.cflags);
-    push_profile(&mut tail, &prof.cflags, target, m.sdk);
+    push_profile_side(&mut tail, prof, &prof.cflags, false, target, m.sdk);
     tail.push_str(" -MMD -c");
+    // The fixed part of the link line, once: the link, the ThinLTO probe and its record key share it.
+    let mut ldbase = String::new();
+    push_sdk_flags(&mut ldbase, m.sdk, m.arch);
+    push_sdk_libs(&mut ldbase, m.sdk);
+    push_all(&mut ldbase, &m.ldflags);
+    push_profile_side(&mut ldbase, prof, &prof.ldflags, true, target, m.sdk);
+    let mut lto_req = prof.lto;
+    let lenv = stdlib::getenv("SC_LTO");
+    if lenv != null {
+        lto_req = mf::lto_parse(str::from_cstr(lenv));
+        if lto_req < 0 {
+            eprintln("build: SC_LTO must be none, full, auto or thin");
+            return 1;
+        }
+    }
     // The ccache probe and `cc --version` cost ~50ms of process round-trips; two background argv
     // children (no shell, on every platform) resolve both while the transpile runs: ensure_cc
     // collects the exit code and the captured version line at first use.
@@ -1745,6 +2136,13 @@ fn engine_build_i(
         pdir: pdir.clone(),
         cc_raw: cc_raw,
         cc_tail: tail,
+        ldbase: ldbase,
+        target: target,
+        lto_req: lto_req,
+        lto: lto_req,
+        lto_cache: false,
+        lto_reason: String::new(),
+        lto_ld: Vector::<String>::new(),
         probe_cc_pid: probe_cc_pid,
         probe_ver_pid: probe_ver_pid,
         ccver_path: ccver_path,
@@ -1913,6 +2311,11 @@ fn engine_build_i(
             g.ccache = stream.cc_args.len() != 0 && stream.cc_args.at(0).as_str() == "ccache";
             g.total_c = total_c;
             g.stale_n = stale_n;
+            g.lto.push_str(mf::lto_name(stream.lto));
+            if stream.lto_cache {
+                g.lto.push_str("+cache");
+            }
+            g.lto_reason.push_string(&stream.lto_reason);
         }
 
         // 4) link when anything changed: a fresh object, a missing/out-of-date binary, or a link
@@ -1945,13 +2348,11 @@ fn engine_build_i(
                     largs.push(objs.at(i).clone());
                 }
                 // Flag STRINGS keep the historic whitespace-splitting contract; only the paths the
-                // engine controls (above) are single verbatim arguments.
-                let mut fl = String::new();
-                push_sdk_flags(&mut fl, m.sdk, m.arch);
-                push_sdk_libs(&mut fl, m.sdk);
-                push_all(&mut fl, &m.ldflags);
-                push_profile(&mut fl, &prof.ldflags, target, m.sdk);
-                split_args(&mut largs, fl.as_str());
+                // engine controls (above, and the linker cache directory) are single verbatim arguments.
+                split_args(&mut largs, stream.ldbase.as_str());
+                for i in 0..stream.lto_ld.len() {
+                    largs.push(stream.lto_ld.at(i).clone());
+                }
                 // @c.link flags recorded by the emitter.
                 let lfp = join2(gen.as_str(), "__ldflags");
                 let lf = loader::read_file(lfp.as_str());
@@ -2037,7 +2438,7 @@ fn engine_build_i(
     }
     if stdlib::getenv("SC_TIMINGS") != null {
         eprintln(
-            "timings[{}->{}]: transpile {}ms | sync {}ms | compile {}ms ({}/{} stale, jobs={}) | link {}ms ({}) | total {}ms",
+            "timings[{}->{}]: transpile {}ms | sync {}ms | compile {}ms ({}/{} stale, jobs={}) | link {}ms ({}, lto {}) | total {}ms",
             prof_name,
             bin,
             t_transpile - t0,
@@ -2052,6 +2453,7 @@ fn engine_build_i(
             } else {
                 "cached";
             },
+            mf::lto_name(stream.lto),
             t_link - t0,
         );
     }

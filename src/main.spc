@@ -1193,7 +1193,7 @@ USAGE:
 
 COMMANDS:
     build   [<dir/file>]   emit C and link a binary (uses build.toml if no file)
-    release [<dir/file>]   like build, with the release profile (-O3 -flto)
+    release [<dir/file>]   like build, with the release profile (-O3, link-time optimization)
     run                    build the project and run its binary
     test                   build and run the test suite (tests/ by convention)
     bench                  build and run the benchmarks (bench/ by convention)

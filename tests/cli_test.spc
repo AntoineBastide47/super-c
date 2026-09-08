@@ -6387,6 +6387,159 @@ fn build_staleness_gates() {
     assert(p13_mtime(objo.as_str()) > o2, "a changed C flag invalidates the object cache entries");
 }
 
+// The profile's `lto` mode reaches both the compile and the link lines and their fingerprints. A
+// ThinLTO request is settled by the toolchain probe once per profile directory (`.lto`: key, linker,
+// verdict) and reused without a process; the linker cache lives under the cache root when the
+// linker accepts one. SC_LTO overrides the mode and is a fingerprint input: changing it relinks.
+@test
+fn build_lto_modes() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "build.toml",
+        "bin = \"app\"\nroot = \"src/main.spc\"\n[profile.rel]\ncflags = [\"-O1\"]\nlto = \"thin\"\n",
+    );
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    let mut env = String::from_str("1 SC_CACHE_DIR=");
+    env.push_str(root);
+    env.push_str("/cache");
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel").ok(), "thin build");
+    let mut recp = String::new();
+    recp.format_into("{}/build/rel/.lto", root);
+    let rec = loader::read_file(recp.as_str());
+    assert(!rec.is_none(), "the probe record exists beside the profile's trees");
+    let rb = rec.unwrap();
+    let rs = rb.as_str();
+    assert(rs.starts_with("sc-lto 1\t"), "the record opens with its schema");
+    let verdict = lto_line(rs, 2);
+    let thin = verdict.starts_with("thin\t");
+    assert(thin || verdict.starts_with("auto\t"), "the verdict is thin or auto with a reason");
+    // The record is named after the linked path, extension included (`app.exe` on Windows).
+    let mut cmdp = String::new();
+    cmdp.format_into("{}/build/__link-build_rel_app{}.cmd", root, str::from_cstr(cli::binext()));
+    let l1 = loader::read_file(cmdp.as_str()).unwrap();
+    let want = if thin {
+        "-flto=thin";
+    } else {
+        "-flto=auto";
+    };
+    assert(l1.as_str().find(want) >= 0, "the link fingerprint carries the settled mode");
+    let mut ocmd = String::new();
+    ocmd.format_into("{}/build/rel/obj/main.cmd", root);
+    let o1 = loader::read_file(ocmd.as_str()).unwrap();
+    assert(o1.as_str().find(want) >= 0, "the object fingerprint carries the settled mode");
+    if verdict.starts_with("thin\t") && verdict != "thin\t0" {
+        let mut cdir = String::new();
+        cdir.format_into("{}/cache/lto/", root);
+        let at = l1.as_str().find(cdir.as_str());
+        assert(at >= 0, "the link names a cache namespace under the cache root");
+        let ns = l1.as_str().slice(at as usize, at as usize + cdir.len() + 16);
+        assert(cli::dir_count_suffix(ns, ".timestamp") == 1, "the linker populated its cache in the namespace");
+    }
+    let mut bin = String::new();
+    bin.format_into("{}/build/rel/app{}", root, str::from_cstr(cli::binext()));
+    let b1 = p13_mtime(bin.as_str());
+    let r1 = p13_mtime(recp.as_str());
+    p13_tick();
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel").ok(), "unchanged build");
+    assert(p13_mtime(bin.as_str()) == b1, "an unchanged build does not relink");
+    assert(p13_mtime(recp.as_str()) == r1, "an unchanged build reuses the record without probing");
+    p13_tick();
+    env.push_str(" SC_LTO=none");
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", env.as_str(), "build --profile=rel").ok(), "SC_LTO=none build");
+    assert(p13_mtime(bin.as_str()) > b1, "a changed LTO mode relinks through the fingerprint");
+    let l2 = loader::read_file(cmdp.as_str()).unwrap();
+    assert(l2.as_str().find("-flto") < 0, "no LTO flag under SC_LTO=none");
+    let bad = cli::superc_env_in(root, "SC_LTO", "fat", "build --profile=rel");
+    assert(!bad.ok() && bad.out_has("SC_LTO must be none, full, auto or thin"), "an unknown SC_LTO value is an error");
+}
+
+fn lto_line(s: str, idx: usize) str {
+    let mut a: usize = 0;
+    let mut k: usize = 0;
+    for i in 0..s.len() {
+        if s[i] == b'\n' {
+            if k == idx {
+                return s.slice(a, i);
+            }
+            k += 1;
+            a = i + 1;
+        }
+    }
+    return s.slice(a, s.len());
+}
+
+// A toolchain that rejects `-flto=thin` (a wrapper around cc that fails on the flag stands in) keeps
+// the automatic mode, with the measured reason in the record and the build statistics.
+@test
+fn build_lto_probe_fallback() {
+    if cli::on_windows() {
+        return; // a shebang wrapper needs a POSIX host
+    }
+    let p = cli::proj_new();
+    let root = str::from_cstr(p.rootp());
+    p.mkfile(
+        "cc.sh",
+        "#!/bin/sh\nfor a in \"$@\"; do\n    [ \"$a\" = \"-flto=thin\" ] && exit 1\ndone\nexec cc \"$@\"\n",
+    );
+    let mut wrap = String::new();
+    wrap.format_into("{}/cc.sh", root);
+    let _ = unsafe shim::sc_chmod_exec(wrap.cstr());
+    let mut toml = String::new();
+    toml.format_into(
+        "bin = \"app\"\nroot = \"src/main.spc\"\ncc = \"{}\"\n[profile.rel]\ncflags = [\"-O1\"]\nlto = \"thin\"\n",
+        wrap.as_str(),
+    );
+    p.mkfile("build.toml", toml.as_str());
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_NO_CACHE=1", "build --profile=rel");
+    assert(r.ok(), "the build falls back instead of failing");
+    assert(
+        r.out_has("\"lto\":\"auto\",\"lto_reason\":\"the compiler rejects -flto=thin\""),
+        "the record names the fallback and its reason",
+    );
+    let mut recp = String::new();
+    recp.format_into("{}/build/rel/.lto", root);
+    let rec = loader::read_file(recp.as_str()).unwrap();
+    assert(lto_line(rec.as_str(), 2) == "auto\tthe compiler rejects -flto=thin", "the probe record stores the reason");
+    let mut cmdp = String::new();
+    cmdp.format_into("{}/build/__link-build_rel_app{}.cmd", root, str::from_cstr(cli::binext()));
+    let l = loader::read_file(cmdp.as_str()).unwrap();
+    assert(l.as_str().find("-flto=auto") >= 0, "the link keeps the automatic mode");
+    let mut probe = String::new();
+    probe.format_into("{}/build/rel/.ltoprobe", root);
+    assert(p13_mtime(probe.as_str()) == 0, "the probe's temporary directory is removed");
+}
+
+// A failed link publishes nothing: the previous binary and its link record stay, and the next
+// successful build relinks.
+@test
+fn build_link_failure_keeps_artifact() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    let mut bin = String::new();
+    bin.format_into("{}/build/dev/app{}", root, str::from_cstr(cli::binext()));
+    let mut cmdp = String::new();
+    cmdp.format_into("{}/build/__link-build_dev_app{}.cmd", root, str::from_cstr(cli::binext()));
+    let b1 = p13_mtime(bin.as_str());
+    let l1 = loader::read_file(cmdp.as_str()).unwrap();
+    p13_tick();
+    // A source edit recompiles its object, then the link fails: nothing is published.
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nldflags = [\"-lsc_no_such_library_p15\"]\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    let x = 1;\n    return x - 1;\n}\n");
+    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    assert(!r.ok() && r.out_has("link failed"), "the link fails");
+    assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
+    let l2 = loader::read_file(cmdp.as_str()).unwrap();
+    assert(l2.as_str() == l1.as_str(), "the previous link record stays");
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "the next build succeeds");
+    assert(p13_mtime(bin.as_str()) > b1, "and links the newer object over the stale binary");
+}
+
 // compile_commands.json: one entry per generated translation unit with a full `arguments` argv, so C
 // tooling (clangd and friends) attaches to the generated tree.
 @test

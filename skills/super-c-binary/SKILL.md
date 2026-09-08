@@ -190,6 +190,18 @@ run = [
     "samply record --rate 1000 build/bench-bin",
 ]
 
+[profile.fast]               # a profile: optimization level, flags, linker arguments, strip, LTO mode
+opt-level = 2                # 0 | 1 | 2 | 3 | "s" | "z": -O<level> on every compile and the link
+cflags = ["-DNDEBUG"]        # after the manifest-level cflags and the -O flag
+ldflags = ["-static"]        # after the manifest-level ldflags and the -O flag
+link-args = ["-dead_strip"]  # each entry reaches the linker as -Wl,<entry>, after ldflags
+strip = true
+lto = "thin"                 # none | full | auto | thin (see Link-time optimization below)
+
+[profile.release]            # a section naming a built-in profile starts from its values and
+opt-level = 2                # overrides only the keys it sets (an array replaces the whole array)
+lto = "thin"
+
 [shards]                     # output shard policy: module TU count per module (default 1)
 "driver::emit" = 3           # a chunk lands in shard (stable symbol hash mod count)
 
@@ -206,17 +218,81 @@ shards. Pick counts from the emitted size (about one shard per 256 KiB of C, see
 
 | Profile | Character | Use |
 |---------|-----------|-----|
-| `dev` | `-g -O1` + full ASan/UBSan set, frame pointers | Development (**default**) |
-| `debug` | `-g -O0` + sanitizers | Unoptimized debugging |
-| `release` | `-O3 -DNDEBUG -flto=auto -fPIE` + section GC, strip | Shipping |
-| `bench` | `-O3 -DNDEBUG -g -flto=auto -fno-omit-frame-pointer` (+ PGO ingest when present) | Benchmarking/profiling |
-| `pgogen` | `-O2 -fprofile-generate -flto=auto` | PGO profile generation |
-| `race` | `-O1 -g -fsanitize=thread -DSC_LOCKDEP` | TSan + lock-order checking |
-| `test` | `-O1`, no sanitizers | The `super-c test` runner binary only (the compiler under test keeps the selected profile) |
+| `dev` | `opt-level = 1`, `-g` + full ASan/UBSan set, frame pointers | Development (**default**) |
+| `debug` | `opt-level = 0`, `-g` + sanitizers | Unoptimized debugging |
+| `release` | `opt-level = 3`, `-DNDEBUG -fPIE` + section GC, `link-args = ["-O2"]`, strip, `lto = "auto"` | Shipping |
+| `bench` | `opt-level = 3`, `-DNDEBUG -g -fno-omit-frame-pointer`, `lto = "auto"` (+ PGO ingest when present) | Benchmarking/profiling |
+| `pgogen` | `opt-level = 2`, `-fprofile-generate`, `lto = "auto"` | PGO profile generation |
+| `race` | `opt-level = 1`, `-g -fsanitize=thread -DSC_LOCKDEP` | TSan + lock-order checking |
+| `test` | `opt-level = 1`, no sanitizers | The `super-c test` runner binary only (the compiler under test keeps the selected profile) |
 
 The exact cc flag strings live in `src/build_system/manifest.spc`; the table shows the
 character of each profile, not the verbatim flags. **Never profile the `dev` build** —
 sanitizer frames dominate the samples.
+
+### Link-time optimization
+
+A profile's `lto` key selects the mode the engine adds to every compile and to the link:
+`none`, `full` (`-flto`), `auto` (`-flto=auto`, what the built-in optimized profiles
+use) or `thin` (`-flto=thin`). A profile without the key adds nothing: a `-flto*` in its
+flag arrays passes through verbatim. `[profile.release]` with `lto = "thin"` keeps the
+built-in flags and switches the mode; `SC_LTO=<mode>` overrides the profile for one
+build: `SC_LTO=thin ./super-c build --profile=release` is the incremental release loop.
+The mode and the linker cache options are part of every object and link fingerprint, so
+changing either relinks; the transpiler never sees them, so the emitted C is identical
+under every mode.
+
+`thin` is a request. The engine settles it once per profile directory with a toolchain
+probe (`<out-dir>/<profile>/.lto`): the record's key line holds the compiler version,
+path and mtime, the target, the compile tail and the link flags; its second line the
+linker the `-v` link log named and that executable's mtime; its third the verdict. A
+build whose record matches every input runs no probe, so only the first build under a
+toolchain and flag set pays for it (about 0.2 s here). The probe compiles and links a one-function program in the argv
+form real builds use (`.ltoprobe`, removed afterwards): `-flto=thin` must compile and
+link (exit code and output file, never version text), then the link is retried with each
+linker cache form (Apple ld's cache path with its prune options, lld's ThinLTO cache
+directory with its cache policy, the LLVM gold plugin's cache directory under gold or
+bfd; `lto_cache_args` in `src/build_system/build.spc`) until one writes a cache entry.
+A rejected request keeps `-flto=auto`, the mode the profiles used before, and the
+record and the build statistics (`"lto":"auto","lto_reason":...`) name the reason. GCC
+rejects `-flto=thin` at the compile step and so keeps `auto`; a linker that accepts
+ThinLTO but no cache directory with a pruning policy links with `-flto=thin` and no
+cache (`"lto":"thin"`).
+
+The linker cache lives under the build cache root (`$SC_CACHE_DIR`, else
+`~/.super-c/cache`) at `lto/<namespace>`, one namespace per hash of the record's key and
+linker lines (compiler, linker, target, flags, schema); `SC_NO_LTO_CACHE=1` links
+without it. The linker owns the entries and prunes them itself (entries unused for a
+week, the cache under a tenth of the disk, checked at most hourly); the engine only
+creates the directory. A namespace a toolchain upgrade leaves behind keeps its last
+entries until removed by hand, the same policy as the object cache beside it.
+
+Gates set before the implementation for enabling ThinLTO by default: a body-edit relink
+under a quarter of the full-LTO relink, a clean build under 1.1x, the compiler's own
+runtime (`super-c bench`, self-transpile) within 3%, link memory no higher, the stripped
+binary within 5%. Measured on the compiler's own release build (Apple clang 21, 14
+cores, 151 units; `ci/bench_matrix.sh` protocol, object cache and ccache off):
+
+| Case | full LTO (`-flto=auto`) | ThinLTO, no cache | ThinLTO, cache |
+|------|------------------------:|------------------:|---------------:|
+| clean build, wall / CPU | 22.2 s / 34.7 s | | 5.9 s / 49.7 s (cold cache) |
+| link of one private body edit | 18.5 to 19.0 s | 2.9 s | 1.3 s (new state; 100 edits: median 1.31 s, p95 1.37 s), 0.14 s (state linked before) |
+| linker peak RSS | 993 MiB | 420 MiB | 79 MiB (warm) |
+| link CPU | 18.5 s | 33.6 s | 0.2 s (warm) |
+| public signature edit (40 units), total | | | 2.0 s |
+| by-value layout edit (92 units), total | | | 5.0 s (cold), 2.4 s |
+| stripped binary | 3,163,592 B | | 3,371,912 B (+6.6%) |
+
+| compiler runtime (Mcyc: parse / typecheck / borrowck / codegen) | 118 / 191 / 423 / 892 | | 124 / 192 / 446 / 923 (+4.7 / +0.5 / +5.4 / +3.5%); end to end −3.1% |
+
+Relink, clean build and memory pass by a wide margin; runtime and size do not (a higher
+ThinLTO import limit, `-import-instr-limit=300` and `1000`, changes neither by more
+than 0.5%), so the built-in profiles keep `auto` and ThinLTO is the validated opt-in:
+`SC_LTO=thin` for a session, or `lto = "thin"` under `[profile.release]` in a project
+whose binary is not the shipped compiler. The `bench` profile follows `release` so the benchmark measures
+the compiler users run, and `ci/perf_gate.sh` holds its runtime within 3%. Script mode
+(`super-c release foo.spc`) compiles and links in one command with nothing to relink, so
+a `thin` profile keeps `auto` there.
 
 ### Common flags
 
@@ -246,8 +322,10 @@ sanitizer frames dominate the samples.
 | `SC_TIMINGS` | Print a one-line per-phase timing summary |
 | `SC_BUILD_STATS` | Append one JSON record per engine build to the named file (`-` = stderr): every phase of the partition in ms, the streamed C compile span apart from it, cache switches, peak RSS at five boundaries (`src/driver/stats.spc`) |
 | `SC_BUILD_MEM` | With `SC_BUILD_STATS`: turn the runtime allocation tracker on for the build, so the record carries allocation calls, requested bytes, live bytes and per-phase survivors (slower; never for timing runs). `"mem":{"on":false` = the runtime this compiler links predates the counters (a bootstrap build) |
-| `SC_CACHE_DIR` | Override build-record cache directory |
-| `SC_NO_CACHE` | Disable the build-record cache |
+| `SC_CACHE_DIR` | Override the build cache root (objects, and the linker's ThinLTO caches under `lto/`) |
+| `SC_NO_CACHE` | Disable the object cache (the linker cache keeps its root) |
+| `SC_LTO` | Override the profile's `lto` mode: `none`, `full`, `auto`, `thin` |
+| `SC_NO_LTO_CACHE` | Link ThinLTO without the linker cache |
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
 | `SC_NO_TU_CACHE` | Disable per-TU journal/replay cache |
 | `SC_BUILD_MEM_BUDGET` | Cap parallel emission bytes in flight (`64M`, `2G`) |
@@ -320,7 +398,8 @@ build/
 A manifest build (`super-c build` with `build.toml`) adds per-profile directories next
 to `raw/`: emitted C is content-synced into `<out-dir>/<profile>/gen` (unchanged files
 keep their mtime), objects compile into `<out-dir>/<profile>/obj` with `-MMD` dep
-tracking, and `compile_commands.json` lands beside them. `super-c test` runs the same
+tracking, and `compile_commands.json` lands beside them, with the ThinLTO probe record
+`.lto` for a profile that requests `lto = "thin"`. `super-c test` runs the same
 engine on the generated test root under the `test` profile: emitted C in `raw-test/`,
 objects and the runner in `<out-dir>/test/` (`build/test/__tests`), with the emit stamp
 and object cache making an unchanged suite a link check.

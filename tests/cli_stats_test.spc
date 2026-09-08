@@ -51,6 +51,7 @@ fn build_stats_prints_one_json_record() {
     assert(r.out_has("\"cc\":{\"jobs\":"), "the streamed C compile is reported apart from the partition");
     assert(r.out_has("\"mem\":{\"on\":false"), "memory tracking is off without SC_BUILD_MEM");
     assert(r.out_has("\"emit_cache\":true"), "the cache switches are recorded");
+    assert(r.out_has("\"lto\":\"flags\",\"lto_reason\":\"\""), "the dev profile leaves LTO to its flag arrays");
 }
 
 // SC_BUILD_MEM turns the runtime allocation tracker on for the build: the record then carries the
