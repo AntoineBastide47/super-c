@@ -87,9 +87,16 @@ name resolves.
 
 ### TypeId (`u32`)
 
-An index into a module's type pool. Types carry `Ty.module` (a `ModuleId`), so
-`(module, TypeId)` is a global identity. `Ast::intern_type` interns: structurally equal
-types share a TypeId within a module.
+An index into the package type table (`Package.tt`, a `TypePool`): structurally equal
+types share one id across every module. A type interned before its publication
+checkpoint gets a provisional id (bit `TYPE_PROV`) in the module's own `Ast.pool`;
+`publish_types` renumbers every provisional record into the package table in a
+canonical order at the start of borrow checking and again at the start of emission, and
+remaps every retained table. Final ids are identical for one worker and every worker
+count. The instance graph interns straight into the package table. An `Ast` without a
+package (`gt == null`, unit tests) keeps module-local ids. The model, the ordering, the
+validation switches and the measurements are in
+[type-identity.md](references/type-identity.md).
 
 ### ModuleId (`u16`)
 
@@ -200,8 +207,10 @@ At type-check completion every semantic **decision** table is final — nodes, c
 resolutions, per-node types, coercions, instance demands, method_refs, dyn/deref
 selections, wide literals, attributes, lifetime declarations, `call_info`, `op_method`.
 Every later stage reads this data frozen. The ONE sanctioned mutation is **interning**:
-`type_pool`, `instances`, and `const_lins` grow append-only when a later stage interns a
-substituted type; an entry is never removed or renumbered.
+the module `pool` (provisional records) and the package table grow append-only when a
+later stage interns a substituted type; a publication checkpoint renumbers provisional
+ids into final ids and remaps every retained table in the same step, and a final id is
+never removed or renumbered.
 
 Enforcement is report-only and env-gated: under `SC_FACTS_CHECK` the driver snapshots
 per-module watermarks after typecheck and verifies them **twice** — after borrowck and
@@ -294,9 +303,8 @@ Full monomorphization is the only generic backend.
   instantiation by walking lowered Core IR bodies from concrete roots, expanding generic
   bodies under substitution frames. Roots are the concrete bodies of every module that
   emits: a prelude module `compute_emit_live` marks dead seeds nothing, and the shared
-  type header lists aggregates from live modules only. Keys are package-stable (decl DefId + skey per
-  argument), so records from different module pools compare equal without touching any
-  pool.
+  type header lists aggregates from live modules only. Keys are package ids (decl DefId +
+  the final TypeId of every argument), so records from different modules compare by id.
 - **Emit order:** `Package::emit_order` — if module `a` re-homes a concrete instance of
   a generic owned by `b`, then `b` emits first. Kahn topo-sort, lowest-id tiebreak.
 

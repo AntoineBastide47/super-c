@@ -306,6 +306,42 @@ pub struct CoreBody {
 }
 
 extend CoreBody {
+    /// Rewrite every type this body holds through a publication map (`Package::map_type` for the
+    /// body's module): locals, places, projections, operands, constants, generic arguments, rvalue
+    /// result types and the type payloads of dyn construction and the measuring intrinsics.
+    pub fn remap_types(self: &mut Self, map: &Vector<TypeId>) {
+        for i in 0..self.locals.len() {
+            let l = self.locals.index_mut(i);
+            l.ty = pub_map1(map, l.ty);
+        }
+        for i in 0..self.places.len() {
+            let pl = self.places.index_mut(i);
+            pl.ty = pub_map1(map, pl.ty);
+        }
+        for i in 0..self.projections.len() {
+            let pj = self.projections.index_mut(i);
+            pj.ty = pub_map1(map, pj.ty);
+        }
+        for i in 0..self.operands.len() {
+            let o = self.operands.index_mut(i);
+            o.ty = pub_map1(map, o.ty);
+        }
+        for i in 0..self.constants.len() {
+            let c = self.constants.index_mut(i);
+            c.ty = pub_map1(map, c.ty);
+        }
+        for i in 0..self.targ_pool.len() {
+            self.targ_pool[i] = pub_map1(map, self.targ_pool[i]);
+        }
+        for i in 0..self.rvalues.len() {
+            let rv = self.rvalues.index_mut(i);
+            rv.target = pub_map1(map, rv.target);
+            if rv.kind == RV_DYN || rv.kind == RV_INTRINSIC && (rv.c == IN_SIZEOF || rv.c == IN_ALIGNOF || rv.c == IN_TYPE_INFO || rv.c == IN_DANGLING) {
+                rv.b = pub_map1(map, rv.b);
+            }
+        }
+    }
+
     pub fn new(owner: DefId, module: ModuleId) CoreBody {
         return CoreBody {
             owner: owner,

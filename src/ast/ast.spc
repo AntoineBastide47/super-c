@@ -826,6 +826,109 @@ pub fn lin_subst(
     return true;
 }
 
+/// Type identity counters (SC_TYPE_STATS=1): calls, hits, probe steps and root-call nanoseconds of
+/// the interning, structural-key, cross-pool translation, instance-key and layout paths, reported by
+/// the driver at the end of emission. Off, every instrumented path pays one load and one predictable
+/// branch; on, the timed paths add one clock read per outermost call.
+pub static mut TS_ON: bool = false;
+/// SC_TYPE_COLLIDE=1: every type and instance hashes to one bucket, so the tables run on full
+/// equality alone (the validation configuration for the collision path). Off, one predictable branch.
+pub static mut TS_COLLIDE: bool = false;
+pub static mut TS: [u64; TS_COUNT] = [[0] = 0u64];
+pub static mut TS_LAST: [u64; TS_COUNT] = [[0] = 0u64];
+pub static mut TS_DEPTH: u32 = 0; // reentry depth shared by the timed translation paths
+pub const TS_INTERN: usize = 0; // intern_type calls
+pub const TS_INTERN_HIT: usize = 1;
+pub const TS_INTERN_PROBE: usize = 2; // extra probe steps (hash collisions)
+pub const TS_INTERN_REBUILD: usize = 3;
+pub const TS_INST: usize = 4; // intern_instance calls
+pub const TS_INST_HIT: usize = 5;
+pub const TS_INST_PROBE: usize = 6;
+pub const TS_REINTERN: usize = 14; // reintern calls (every level)
+pub const TS_REINTERN_NS: usize = 15;
+pub const TS_XTY: usize = 16; // inliner xty calls (every level)
+pub const TS_XTY_NS: usize = 17;
+pub const TS_XTY_HIT: usize = 18; // inliner translation-map hits
+pub const TS_LOWER: usize = 19; // foreign lower_type_in calls (every level)
+pub const TS_LOWER_HIT: usize = 20; // lower_memo hits
+pub const TS_LOWER_NS: usize = 21;
+pub const TS_LOWER_MEMO_N: usize = 22; // lower_memo entries summed over modules
+pub const TS_IGADD: usize = 23; // instance graph record interns
+pub const TS_IGADD_HIT: usize = 24;
+pub const TS_IGADD_NS: usize = 25;
+pub const TS_IG_BYTES: usize = 26; // instance graph keys, records and index bytes
+pub const TS_LAY: usize = 27; // cacheable layout queries
+pub const TS_LAY_HIT: usize = 28;
+pub const TS_LAY_SVC: usize = 29; // layout services (caches) created
+pub const TS_XM_BYTES: usize = 30; // inliner translation-map bytes
+pub const TS_FNSIG: usize = 31; // typechecker fn_sig calls (call-site signature lowering)
+pub const TS_LAY_RAW: usize = 32; // layouts computed (cache misses and uncacheable queries)
+pub const TS_LAY_NS: usize = 33;
+pub const TS_DECLIN: usize = 34; // foreign decl_type_in calls (field, parameter and const types of other modules)
+pub const TS_REBUILD_N: usize = 35; // pool entries re-hashed by index rebuilds
+pub const TS_LOWER_SIG: usize = 36; // foreign lowerings made at item level (signature work, no enclosing body)
+pub const TS_LAY_INS: usize = 37; // layout cache entries inserted (bytes: entries times the map slot)
+pub const TS_COUNT: usize = 40;
+
+/// Read SC_TYPE_STATS (idempotent).
+pub fn ts_init() {
+    unsafe TS_ON = stdlib::getenv("SC_TYPE_STATS") != null;
+    unsafe TS_COLLIDE = stdlib::getenv("SC_TYPE_COLLIDE") != null;
+}
+
+pub fn ts_add(i: usize, v: u64) {
+    unsafe TS[i] += v;
+}
+
+pub fn ts_get(i: usize) u64 {
+    return unsafe TS[i];
+}
+
+pub fn ts_now() u64 {
+    return unsafe sc_runtime::sc_rt_now_ns();
+}
+
+/// Print the counters' change since the previous phase line (SC_TYPE_STATS): the identity work each
+/// pipeline phase did.
+pub fn ts_phase(label: str) {
+    if !unsafe TS_ON {
+        return;
+    }
+    eprintln(
+        "type-stats[{}]: intern {} inst {} | reintern {} ({} us) xty {} ({} us) lower {} ({} us) | ig-add {} ({} us) layout {}",
+        label,
+        ts_delta(TS_INTERN),
+        ts_delta(TS_INST),
+        ts_delta(TS_REINTERN),
+        ts_delta(TS_REINTERN_NS) / 1000,
+        ts_delta(TS_XTY),
+        ts_delta(TS_XTY_NS) / 1000,
+        ts_delta(TS_LOWER),
+        ts_delta(TS_LOWER_NS) / 1000,
+        ts_delta(TS_IGADD),
+        ts_delta(TS_IGADD_NS) / 1000,
+        ts_delta(TS_LAY),
+    );
+    eprintln(
+        "type-stats[{}]: fn_sig {} foreign decl types {} foreign lowerings in signatures {} | layouts computed {} ({} us) cached {} | index rebuild entries {}",
+        label,
+        ts_delta(TS_FNSIG),
+        ts_delta(TS_DECLIN),
+        ts_delta(TS_LOWER_SIG),
+        ts_delta(TS_LAY_RAW),
+        ts_delta(TS_LAY_NS) / 1000,
+        ts_delta(TS_LAY_INS),
+        ts_delta(TS_REBUILD_N),
+    );
+    for i in 0..TS_COUNT {
+        unsafe TS_LAST[i] = unsafe TS[i];
+    }
+}
+
+fn ts_delta(i: usize) u64 {
+    return unsafe TS[i] - unsafe TS_LAST[i];
+}
+
 /// One mixing round, the mixer behind type_skey and inst_method_key. A plain FNV-1a round is NOT
 /// enough here: its output has no avalanche, so the small structured inputs these keys are built from
 /// (node ids, const widths) land clustered, and two live (method, instance) pairs have collided in
@@ -898,6 +1001,9 @@ extend Ty as Hash {
     // The hash only selects a probe bucket: `eq` stays a full memcmp and intern_type numbers TypeIds in
     // insertion order, so the hash function never affects interned identity or emitted output.
     pub fn hash(self: &Self) u64 {
+        if unsafe TS_COLLIDE {
+            return 7;
+        }
         let p = (self as *const Ty) as *const u64;
         let mut h: u64 = 1469598103934665603u64;
         for i in 0..sizeof(Ty) / 8 {
@@ -989,6 +1095,9 @@ pub struct MethodInst {
 // index numbering byte-identical.
 extend TyInstance as Hash {
     pub fn hash(self: &Self) u64 {
+        if unsafe TS_COLLIDE {
+            return 7;
+        }
         let mut h: u64 = 1469598103934665603u64;
         h = (h ^ self.module as u64) * 1099511628211u64;
         h = (h ^ self.decl as u64) * 1099511628211u64;
@@ -1258,6 +1367,370 @@ extend<T> SplitVec<T> {
     }
 }
 
+/// `t` after a publication with `map` (final ids and TYPE_NONE pass through).
+pub const fn pub_map1(map: &Vector<TypeId>, t: TypeId) TypeId {
+    if (t & TYPE_PROV) == 0 {
+        return t;
+    }
+    return map[(t & TYPE_PROV_MASK) as usize];
+}
+
+/// Provisional ids: a type interned into a module's pool while the package table is closed carries
+/// this bit over its pool index until a publication maps it to a final package id. Final ids stay
+/// below TYPE_MAX; the publication aborts the compile past it. Bit 29: the inference solver packs a
+/// TypeId into a 30-bit term payload under two tag bits (`infer::it_pub`).
+pub const TYPE_PROV: TypeId = 0x20000000;
+pub const TYPE_PROV_MASK: TypeId = 0x1FFFFFFF;
+
+/// A dense array index for any id: final ids take the even slots, provisional ids the odd ones, so
+/// a memo indexed by type id stays proportional to the ids in use and never grows to `TYPE_PROV`.
+pub const fn ty_dense(t: TypeId) usize {
+    return (t & TYPE_PROV_MASK) as usize << 1 | (t >> 29 & 1) as usize;
+}
+
+/// A memo of three-state answers (unknown, false, true) packed two bits per slot: the slot index
+/// is a dense type index, so a per-checker memo over the package id range costs a few kilobytes.
+pub const fn memo2_get(v: &Vector<u64>, i: usize) i32 {
+    let w = i >> 5;
+    if w >= v.len() {
+        return -1;
+    }
+    return (v[w] >> (i & 31) as u64 * 2 & 3) as i32 - 1;
+}
+
+pub fn memo2_set(v: &mut Vector<u64>, i: usize, r: bool) {
+    let w = i >> 5;
+    while v.len() <= w {
+        v.push(0);
+    }
+    let sh = (i & 31) as u64 * 2;
+    let mut val: u64 = 1;
+    if r {
+        val = 2;
+    }
+    v[w] = v[w] & ~(3u64 << sh) | val << sh;
+}
+pub const TYPE_MAX: TypeId = 0x1FFFFFF0;
+
+/// A type pool: the Ty records, the instance and const-expression side tables, and the
+/// open-addressing indexes over them (0xFFFFFFFF = empty slot; the pool entry is the key, so nothing
+/// is stored twice, and every hit verifies the entry). Ids are dense insertion-order indices, so
+/// identity never depends on the hash. One per module holds provisional types; the package's
+/// (`Package.tt`) holds the published ones, `open` while a serial phase may append to it directly.
+pub struct TypePool {
+    pub tys: ChunkPool<Ty>,
+    tix: Vector<u32>,
+    tix_used: u32,
+    pub insts: ChunkPool<TyInstance>,
+    iix: Vector<u32>,
+    iix_used: u32,
+    pub clins: Vector<ConstLin>,
+    pub open: bool,
+}
+
+extend TypePool {
+    pub fn new() TypePool {
+        return TypePool {
+            tys: ChunkPool::<Ty>::new(),
+            tix: Vector::<u32>::new(),
+            tix_used: 0,
+            insts: ChunkPool::<TyInstance>::new(),
+            iix: Vector::<u32>::new(),
+            iix_used: 0,
+            clins: Vector::<ConstLin>::new(),
+            open: false,
+        };
+    }
+
+    pub fn free(self: &mut Self) {
+        self.tys.free();
+        self.tix.free();
+        self.insts.free();
+        self.iix.free();
+        self.clins.free();
+    }
+
+    pub fn clear(self: &mut Self) {
+        self.tys.clear();
+        self.tix.clear();
+        self.tix_used = 0;
+        self.insts.clear();
+        self.iix.clear();
+        self.iix_used = 0;
+        self.clins.clear();
+    }
+
+    /// The fixed prefix: slot 0 is TYPE_ERROR, then one TYPE_BUILTIN per builtin (`Ast::builtin`).
+    /// Seeds pass through ty_canon like every interned entry, or their union tail bytes would be
+    /// whatever the C compiler left there and byte-identity dedup would miss them.
+    pub fn seed(self: &mut Self) {
+        let _ = self.insert_ty(Ast::ty_canon(&Ty { kind: TypeKind::TYPE_ERROR, concrete: true }));
+        for b in 0..BuiltinType::BT_COUNT as u8 {
+            let _ = self.insert_ty(
+                Ast::ty_canon(
+                    &Ty { kind: TypeKind::TYPE_BUILTIN, concrete: true, as_data: TyAs { builtin: b as BuiltinType } },
+                ),
+            );
+        }
+    }
+
+    pub const fn len(self: &Self) usize {
+        return self.tys.len();
+    }
+
+    pub const fn at(self: &Self, i: usize) &Ty {
+        return self.tys.at(i);
+    }
+
+    pub const fn ninst(self: &Self) usize {
+        return self.insts.len();
+    }
+
+    pub const fn instance(self: &Self, i: usize) &TyInstance {
+        return self.insts.at(i);
+    }
+
+    pub const fn nclin(self: &Self) usize {
+        return self.clins.len();
+    }
+
+    pub const fn const_lin_at(self: &Self, i: usize) &ConstLin {
+        return self.clins.at(i);
+    }
+
+    pub const fn retained(self: &Self) usize {
+        return self.tys.retained() + self.tix.capacity() * 4 + self.insts.retained() + self.iix.capacity() * 4 + self.clins.capacity() * sizeof(ConstLin);
+    }
+
+    // Rebuild an index table over `pool_len` live pool ids (wipes stale slots). `used` resets to the
+    // live count; sizing keeps the load after the rebuild strictly under the 0.75 trigger, so the next
+    // call cannot rebuild again (an equal load rebuilt on every intern, hits included, until the pool
+    // grew past the boundary: about 2,000 rebuilds per transpile of the compiler).
+    fn ix_rebuild(ix: &mut Vector<u32>, pool_len: usize) usize {
+        let mut cap: usize = 16;
+        while cap * 3 <= (pool_len + 1) * 4 {
+            cap = cap * 2;
+        }
+        ix.clear();
+        ix.reserve(cap);
+        for _ in 0..cap {
+            ix.push(0xFFFFFFFFu32);
+        }
+        return pool_len;
+    }
+
+    fn tix_ready(self: &mut Self) {
+        if self.tix.len() == 0 || (self.tix_used as usize + 1) * 4 >= self.tix.len() * 3 {
+            if unsafe TS_ON {
+                ts_add(TS_INTERN_REBUILD, 1);
+                ts_add(TS_REBUILD_N, self.tys.len() as u64);
+            }
+            self.tix_used = TypePool::ix_rebuild(&mut self.tix, self.tys.len()) as u32;
+            for id in 0..self.tys.len() {
+                let mask = self.tix.len() - 1;
+                let mut i = self.tys.at(id).hash() as usize & mask;
+                while self.tix[i] != 0xFFFFFFFFu32 {
+                    i = i + 1 & mask;
+                }
+                self.tix.set(i, id as u32);
+            }
+        }
+    }
+
+    /// The id of canonical `nt` (`concrete` set), or -1. Read-only: safe on a frozen table.
+    pub const fn find_ty(self: &Self, nt: &Ty) i64 {
+        if self.tix.len() == 0 {
+            return -1;
+        }
+        let mask = self.tix.len() - 1;
+        let ixp = self.tix.as_ptr();
+        let pn = self.tys.len();
+        let mut i = nt.hash() as usize & mask;
+        loop {
+            let idx = unsafe ixp[i];
+            if idx == 0xFFFFFFFFu32 {
+                return -1;
+            }
+            if idx as usize < pn && *self.tys.at(idx as usize) == *nt {
+                return idx;
+            }
+            i = i + 1 & mask;
+        }
+    }
+
+    /// Find or append canonical `nt`.
+    pub fn insert_ty(self: &mut Self, nt: Ty) TypeId {
+        self.tix_ready();
+        let ts = unsafe TS_ON;
+        let mask = self.tix.len() - 1;
+        let ixp = self.tix.as_ptr();
+        let pn = self.tys.len();
+        let mut i = nt.hash() as usize & mask;
+        loop {
+            let idx = unsafe ixp[i];
+            if idx == 0xFFFFFFFFu32 {
+                let id = self.tys.len() as TypeId;
+                self.tys.push(nt);
+                self.tix.set(i, id);
+                self.tix_used = self.tix_used + 1;
+                return id;
+            }
+            if idx as usize < pn && *self.tys.at(idx as usize) == nt {
+                if ts {
+                    ts_add(TS_INTERN_HIT, 1);
+                }
+                return idx;
+            }
+            if ts {
+                ts_add(TS_INTERN_PROBE, 1);
+            }
+            i = i + 1 & mask;
+        }
+    }
+
+    fn iix_ready(self: &mut Self) {
+        if self.iix.len() == 0 || (self.iix_used as usize + 1) * 4 >= self.iix.len() * 3 {
+            self.iix_used = TypePool::ix_rebuild(&mut self.iix, self.insts.len()) as u32;
+            for id in 0..self.insts.len() {
+                let mask = self.iix.len() - 1;
+                let mut i = self.insts.at(id).hash() as usize & mask;
+                while self.iix[i] != 0xFFFFFFFFu32 {
+                    i = i + 1 & mask;
+                }
+                self.iix.set(i, id as u32);
+            }
+        }
+    }
+
+    /// The index of instance record `it`, or -1. Read-only.
+    pub const fn find_inst(self: &Self, it: &TyInstance) i64 {
+        if self.iix.len() == 0 {
+            return -1;
+        }
+        let mask = self.iix.len() - 1;
+        let ixp = self.iix.as_ptr();
+        let pn = self.insts.len();
+        let mut i = it.hash() as usize & mask;
+        loop {
+            let cur = unsafe ixp[i];
+            if cur == 0xFFFFFFFFu32 {
+                return -1;
+            }
+            if cur as usize < pn && *self.insts.at(cur as usize) == *it {
+                return cur;
+            }
+            i = i + 1 & mask;
+        }
+    }
+
+    /// Find or append instance record `it`; its index.
+    pub fn insert_inst(self: &mut Self, it: &TyInstance) u32 {
+        self.iix_ready();
+        let ts = unsafe TS_ON;
+        let mask = self.iix.len() - 1;
+        let ixp = self.iix.as_ptr();
+        let pn = self.insts.len();
+        let mut i = it.hash() as usize & mask;
+        loop {
+            let cur = unsafe ixp[i];
+            if cur == 0xFFFFFFFFu32 {
+                let idx = self.insts.len() as u32;
+                self.insts.push(*it);
+                self.iix.set(i, idx);
+                self.iix_used = self.iix_used + 1;
+                return idx;
+            }
+            if cur as usize < pn && *self.insts.at(cur as usize) == *it {
+                if ts {
+                    ts_add(TS_INST_HIT, 1);
+                }
+                return cur;
+            }
+            if ts {
+                ts_add(TS_INST_PROBE, 1);
+            }
+            i = i + 1 & mask;
+        }
+    }
+
+    /// The index of const-expression form `l`, or -1 (linear: these are rare).
+    pub const fn find_clin(self: &Self, l: &ConstLin) i64 {
+        for i in 0..self.clins.len() {
+            if const_lin_eq(self.clins.at(i), l) {
+                return i as i64;
+            }
+        }
+        return -1;
+    }
+
+    pub fn insert_clin(self: &mut Self, l: &ConstLin) u32 {
+        let hit = self.find_clin(l);
+        if hit >= 0 {
+            return hit as u32;
+        }
+        self.clins.push(*l);
+        return self.clins.len() as u32 - 1;
+    }
+
+    // Concreteness of a record whose children are this table's ids (one level, reading the
+    // children's recorded answer).
+    const fn decide_g(self: &Self, ty: &Ty) bool {
+        return switch ty.kind {
+            TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION => false,
+            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => self.at(ty.as_data.elem as usize).concrete,
+            TYPE_INSTANCE => {
+                let it = self.instance(ty.as_data.inst as usize);
+                let mut ok = true;
+                for i in 0..it.n {
+                    if !self.at((unsafe it.args[i as usize]) as usize).concrete {
+                        ok = false;
+                    }
+                }
+                ok;
+            },
+            _ => true,
+        };
+    }
+
+    /// Intern `t` directly into this table (every child of `t` must already be one of its ids):
+    /// the serial stages append final ids this way. Returns the final id.
+    pub fn intern_g(self: &mut Self, t: Ty) TypeId {
+        let mut nt = Ast::ty_canon(&t);
+        nt.concrete = self.decide_g(&t);
+        return self.insert_ty(nt);
+    }
+
+    pub fn intern_instance_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
+        let mut m = n;
+        if m > 8 {
+            m = 8;
+        }
+        let mut it = TyInstance { module: module, decl: decl, n: m };
+        for j in 0..m {
+            unsafe it.args[j] = unsafe args[j];
+        }
+        let idx = self.insert_inst(&it);
+        return self.intern_g(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
+    }
+
+    pub fn intern_dyn_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
+        let ii = self.intern_instance_g(module, decl, args, n);
+        let idx = self.at(ii as usize).as_data.inst;
+        return self.intern_g(
+            Ty { kind: TypeKind::TYPE_DYN, qualifier: qual, module: module, as_data: TyAs { inst: idx } },
+        );
+    }
+
+    pub fn const_value_g(self: &mut Self, v: i64) TypeId {
+        return self.intern_g(Ty { kind: TypeKind::TYPE_CONST, module: 0, as_data: TyAs { value: v } });
+    }
+
+    pub fn intern_clin_g(self: &mut Self, l: &ConstLin) TypeId {
+        let ci = self.insert_clin(l);
+        return self.intern_g(Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: ci } });
+    }
+}
+
 pub struct Ast {
     pub nodes: SplitVec<Node>,
     pub children: SplitVec<u32>,
@@ -1273,14 +1746,17 @@ pub struct Ast {
     // resolution_def is the compiler's hottest lookup and the second cache line cost ~8 Mcyc of
     // typecheck for a 0.78 MiB saving. Access goes through the accessors below regardless.
     pub resolutions: SplitVec<DefId>,
-    pub type_pool: ChunkPool<Ty>,
-    // Open-addressing INDEX tables over the pools (0xFFFFFFFF = empty slot): the pool entry itself is
-    // the key, so nothing is stored twice. Every hit VERIFIES the pool entry against the live pool
-    // (defensive: an out-of-range or stale id just probes on, self-healing). Pools are append-only
-    // after type checking -- interning never removes or renumbers an entry (the freeze contract in
-    // ast::facts). `*_ix_used` counts occupied slots so the load-factor rebuild is never starved.
-    pub type_index: Vector<u32>,
-    pub type_ix_used: u32,
+    /// The module's type pool: every type under module-local identity (`gt` null: the LSP and
+    /// standalone checks), or only the provisional types not yet published to the package table.
+    pub pool: TypePool,
+    /// The package type table (`Package.tt`), null under module-local identity. See `intern_type_i`.
+    pub gt: *mut TypePool,
+    /// Package identity: every distinct type this module touched, in first-touch order, final ids
+    /// once published (provisional TYPE_PROV ids until then); the instance records among them; and
+    /// the membership bits of the final ids. What the pool enumeration meant before.
+    pub used: Vector<TypeId>,
+    pub used_inst: Vector<u32>,
+    pub used_bits: Vector<u64>,
     pub types: Vector<u32>,
     pub mono: Vector<MonoUse>,
     // Deferred field-projection bound proofs recorded while this module's bodies were checked
@@ -1288,17 +1764,13 @@ pub struct Ast {
     // driver's post-typecheck obligation pass.
     pub proj_obs: Vector<ProjOb>,
     pub mono_at: Vector<u32>,
-    pub instances: ChunkPool<TyInstance>,
     pub method_refs: Vector<MethodRef>,
     pub wide_lits: Vector<WideLit>,
     pub coerces: Vector<CoerceUse>,
     pub coerce_at: Map<u32, u32>,
     /// Canonical forms of const-generic expressions (`{BITS * 2}`), interned by VALUE so two spellings of
     /// the same width are one id -- which is what makes `{(N * 2) * 2}` and `{N * 4}` the same type.
-    pub const_lins: Vector<ConstLin>,
     pub method_insts: Vector<MethodInst>,
-    pub instance_index: Vector<u32>,
-    pub inst_ix_used: u32,
     pub method_inst_index: Vector<u32>,
     pub dyn_uses: Vector<DynUse>,
     pub dyn_at: Vector<u32>,
@@ -1329,20 +1801,19 @@ extend Ast as Free {
         self.scratch.free();
         self.ilock_sem.free();
         self.resolutions.free();
-        self.type_pool.free();
-        self.type_index.free();
+        self.pool.free();
+        self.used.free();
+        self.used_inst.free();
+        self.used_bits.free();
         self.types.free();
         self.mono.free();
         self.proj_obs.free();
         self.mono_at.free();
-        self.instances.free();
         self.method_refs.free();
         self.wide_lits.free();
         self.coerces.free();
         self.coerce_at.free();
-        self.const_lins.free();
         self.method_insts.free();
-        self.instance_index.free();
         self.method_inst_index.free();
         self.dyn_uses.free();
         self.dyn_at.free();
@@ -1367,22 +1838,20 @@ extend Ast {
             ilock_owner: 0,
             ilock_depth: 0,
             resolutions: SplitVec::<DefId>::new(),
-            type_pool: ChunkPool::<Ty>::new(),
-            type_index: Vector::<u32>::new(),
-            type_ix_used: 0,
+            pool: TypePool::new(),
+            gt: null,
+            used: Vector::<TypeId>::new(),
+            used_inst: Vector::<u32>::new(),
+            used_bits: Vector::<u64>::new(),
             types: Vector::<u32>::new(),
             mono: Vector::<MonoUse>::new(),
             proj_obs: Vector::<ProjOb>::new(),
             mono_at: Vector::<u32>::new(),
-            instances: ChunkPool::<TyInstance>::new(),
             method_refs: Vector::<MethodRef>::new(),
             wide_lits: Vector::<WideLit>::new(),
             coerces: Vector::<CoerceUse>::new(),
             coerce_at: Map::<u32, u32>::new(),
-            const_lins: Vector::<ConstLin>::new(),
             method_insts: Vector::<MethodInst>::new(),
-            instance_index: Vector::<u32>::new(),
-            inst_ix_used: 0,
             method_inst_index: Vector::<u32>::new(),
             dyn_uses: Vector::<DynUse>::new(),
             dyn_at: Vector::<u32>::new(),
@@ -1463,44 +1932,19 @@ extend Ast {
         for _ in 0..self.nodes.len() {
             self.types.push(TYPE_NONE);
         }
-        self.type_pool.clear();
-        self.type_index.clear();
-        self.type_ix_used = 0;
-        // seeds go to the pool only: the first intern_type rebuild indexes the whole pool -- and
-        // they pass through ty_canon like every interned entry, or their union tail bytes would be
-        // whatever the C compiler left there and byte-identity dedup would miss them.
-        self.type_pool.push(Ast::ty_canon(&Ty { kind: TypeKind::TYPE_ERROR, concrete: true }));
-        for b in 0..BuiltinType::BT_COUNT as u8 {
-            self.type_pool.push(
-                Ast::ty_canon(
-                    &Ty { kind: TypeKind::TYPE_BUILTIN, concrete: true, as_data: TyAs { builtin: b as BuiltinType } },
-                ),
-            );
+        self.pool.clear();
+        self.used.clear();
+        self.used_inst.clear();
+        self.used_bits.clear();
+        if self.gt == null {
+            // Module-local identity: seeds go to the pool (the package table carries them otherwise).
+            self.pool.seed();
         }
     }
 
-    // Rebuild an index table over `pool_len` live pool ids (wipes stale slots). `used` resets to the
-    // live count; sizing keeps the post-insert load under 0.75.
-    fn ix_rebuild(ix: &mut Vector<u32>, pool_len: usize) usize {
-        let mut cap: usize = 16;
-        while cap * 3 < (pool_len + 1) * 4 {
-            cap = cap * 2;
-        }
-        ix.clear();
-        ix.reserve(cap);
-        for _ in 0..cap {
-            ix.push(0xFFFFFFFFu32);
-        }
-        return pool_len;
-    }
-
-    /// Interns `t`, returning the existing TypeId on a hit. Ids are dense insertion-order indices
-    /// into `type_pool`; the hash index only picks probe buckets, so identity never depends on it.
-    // Byte identity (the memcmp eq / word-wise hash above) is only sound over CANONICAL bytes: a
-    // construction site initializes one union arm and leaves the rest of TyAs to the C compiler,
-    // which owes us nothing there. Rewrite the value through a zeroed union with only the kind's
-    // live arm copied, so equal types are equal BYTES no matter how they were built.
-    const fn ty_canon(t: &Ty) Ty {
+    // Rewrite a Ty through a zeroed union with only the kind's live arm copied, so equal types are
+    // equal BYTES no matter how they were built (the memcmp equality and word-wise hash need it).
+    pub const fn ty_canon(t: &Ty) Ty {
         let mut c = Ty {
             kind: t.kind,
             qualifier: t.qualifier,
@@ -1583,42 +2027,64 @@ extend Ast {
         return r;
     }
 
-    fn intern_type_i(self: &mut Self, t: Ty) TypeId {
-        let mut nt = Ast::ty_canon(&t);
-        nt.concrete = self.tc_decide(t);
-        if self.type_index.len() == 0 || (self.type_ix_used as usize + 1) * 4 >= self.type_index.len() * 3 {
-            self.type_ix_used = Ast::ix_rebuild(&mut self.type_index, self.type_pool.len()) as u32;
-            for id in 0..self.type_pool.len() {
-                let mask = self.type_index.len() - 1;
-                let mut i = self.type_pool.at(id).hash() as usize & mask;
-                while self.type_index[i] != 0xFFFFFFFFu32 {
-                    i = i + 1 & mask;
-                }
-                self.type_index.set(i, id as u32);
-            }
+    /// Record a package-table id this module touched (first touch appends to `used`).
+    fn mark_used(self: &mut Self, id: TypeId) {
+        let w = (id >> 6) as usize;
+        while w >= self.used_bits.len() {
+            self.used_bits.push(0);
         }
-        let mask = self.type_index.len() - 1;
-        let ixp = self.type_index.as_ptr();
-        let pn = self.type_pool.len();
-        let mut i = nt.hash() as usize & mask;
-        loop {
-            let idx = unsafe ixp[i];
-            if idx == 0xFFFFFFFFu32 {
-                let id = self.type_pool.len() as TypeId;
-                self.type_pool.push(nt);
-                self.type_index.set(i, id);
-                self.type_ix_used = self.type_ix_used + 1;
-                return id;
-            }
-            if idx as usize < pn && *self.type_pool.at(idx as usize) == nt {
-                return idx;
-            }
-            i = i + 1 & mask;
+        let bit = 1u64 << (id & 63) as u64;
+        if (self.used_bits[w] & bit) != 0 {
+            return;
+        }
+        self.used_bits[w] = self.used_bits[w] | bit;
+        self.used.push(id);
+        let y = unsafe (&*self.gt).at(id as usize);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            self.used_inst.push(y.as_data.inst);
         }
     }
 
-    /// Interns a (module, decl, args) instantiation and returns its TYPE_INSTANCE TypeId. `n` is
-    /// clamped to 8 (the fixed args capacity). Safety: `args` must point at `n` readable TypeIds.
+    /// Interns `t`, returning the existing TypeId on a hit. Module-local identity: ids are dense
+    /// insertion-order indices into the pool. Package identity (`gt` set): a type the package table
+    /// holds answers with its final id; a new type joins the package table while it is open (the
+    /// serial phases), else this module's provisional pool under a TYPE_PROV-tagged id that the
+    /// next publication maps to a final one. Either way the module notes the type in `used`.
+    // Byte identity (the memcmp eq / word-wise hash) is only sound over CANONICAL bytes: a
+    // construction site initializes one union arm and leaves the rest of TyAs to the C compiler,
+    // which owes us nothing there. ty_canon rewrites the value through a zeroed union with only the
+    // kind's live arm copied, so equal types are equal BYTES no matter how they were built.
+    fn intern_type_i(self: &mut Self, t: Ty) TypeId {
+        let mut nt = Ast::ty_canon(&t);
+        nt.concrete = self.tc_decide(t);
+        if unsafe TS_ON {
+            ts_add(TS_INTERN, 1);
+        }
+        if self.gt == null {
+            return self.pool.insert_ty(nt);
+        }
+        let g = unsafe &mut *self.gt;
+        let hit = g.find_ty(&nt);
+        if hit >= 0 {
+            self.mark_used(hit as TypeId);
+            return hit as TypeId;
+        }
+        if g.open {
+            let id = g.insert_ty(nt);
+            self.mark_used(id);
+            return id;
+        }
+        let before = self.pool.len();
+        let id = self.pool.insert_ty(nt) | TYPE_PROV;
+        if self.pool.len() != before {
+            self.used.push(id);
+            if nt.kind == TypeKind::TYPE_INSTANCE {
+                self.used_inst.push(nt.as_data.inst);
+            }
+        }
+        return id;
+    }
+
     /// Intern a const-expression form, returning the TYPE that stands for it -- a plain TYPE_CONST once
     /// nothing symbolic is left, so a fully substituted width is an ordinary value again.
     fn intern_const_lin_i(self: &mut Self, l: &ConstLin) TypeId {
@@ -1631,21 +2097,28 @@ extend Ast {
         if nz == 0 {
             return self.const_value(l.value());
         }
-        for i in 0..self.const_lins.len() {
-            if const_lin_eq(self.const_lins.at(i), l) {
-                return self.intern_type(
-                    Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: i as u32 } },
-                );
+        let mut ci: u32 = 0;
+        if self.gt == null {
+            ci = self.pool.insert_clin(l);
+        } else {
+            let g = unsafe &mut *self.gt;
+            let hit = g.find_clin(l);
+            if hit >= 0 {
+                ci = hit as u32;
+            } else if g.open {
+                ci = g.insert_clin(l);
+            } else {
+                ci = self.pool.insert_clin(l) | TYPE_PROV;
             }
         }
-        self.const_lins.push(*l);
-        return self.intern_type(
-            Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: self.const_lins.len() as u32 - 1 } },
-        );
+        return self.intern_type(Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: ci } });
     }
 
     pub const fn const_lin_at(self: &Self, i: u32) &ConstLin {
-        return self.const_lins.at(i as usize);
+        if self.gt != null && (i & TYPE_PROV) == 0 {
+            return unsafe (&*self.gt).const_lin_at(i as usize);
+        }
+        return self.pool.const_lin_at((i & TYPE_PROV_MASK) as usize);
     }
 
     /// Index of the wide-literal record for `id`, -1 when it has none. Linear: wide literals are rare.
@@ -1658,46 +2131,6 @@ extend Ast {
         return 0 - 1;
     }
 
-    /// A key for a type that does not depend on which Ast interned it: only package-wide identities
-    /// (a module id, a node id in that module, a literal value) enter the mix, never a TypeId. The
-    /// same type reached through two modules therefore keys the same package-level table entry.
-    pub const fn type_skey(self: &Self, t: TypeId, depth: i32) u64 {
-        if t == TYPE_NONE || depth > 8 {
-            return 0;
-        }
-        let y = *self.type_at(t);
-        let h = skey_mix(skey_mix(14695981039346656037u64, y.kind as u64), y.qualifier);
-        return switch y.kind {
-            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => skey_mix(h, self.type_skey(y.as_data.elem, depth + 1)),
-            TYPE_ARRAY => skey_mix(skey_mix(h, self.type_skey(y.as_data.arr.elem, depth + 1)), y.as_data.arr.len),
-            TYPE_BUILTIN => skey_mix(h, y.as_data.builtin as u64),
-            TYPE_CONST => skey_mix(h, y.as_data.value as u64),
-            TYPE_CONST_EXPR => {
-                let l = self.const_lin_at(y.as_data.inst);
-                let mut k = skey_mix(skey_mix(h, l.k as u64), l.div_of() as u64);
-                for i in 0..l.n {
-                    if unsafe l.c[i as usize] == 0 {
-                        continue;
-                    }
-                    k = skey_mix(
-                        skey_mix(skey_mix(k, unsafe l.p[i as usize].module), unsafe l.p[i as usize].node),
-                        (unsafe l.c[i as usize]) as u64,
-                    );
-                }
-                k;
-            },
-            TYPE_INSTANCE | TYPE_DYN => {
-                let it = self.instance(y.as_data.inst);
-                let mut k = skey_mix(skey_mix(h, it.module), it.decl);
-                for i in 0..it.n {
-                    k = skey_mix(k, self.type_skey(unsafe it.args[i], depth + 1));
-                }
-                k;
-            },
-            _ => skey_mix(skey_mix(h, y.module), y.as_data.decl),
-        };
-    }
-
     fn intern_instance_i(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut m = n;
         if m > 8 {
@@ -1707,36 +2140,22 @@ extend Ast {
         for j in 0..m {
             unsafe it.args[j] = unsafe args[j];
         }
-        if self.instance_index.len() == 0 || (self.inst_ix_used as usize + 1) * 4 >= self.instance_index.len() * 3 {
-            self.inst_ix_used = Ast::ix_rebuild(&mut self.instance_index, self.instances.len()) as u32;
-            for id in 0..self.instances.len() {
-                let mask = self.instance_index.len() - 1;
-                let mut i = self.instances.at(id).hash() as usize & mask;
-                while self.instance_index[i] != 0xFFFFFFFFu32 {
-                    i = i + 1 & mask;
-                }
-                self.instance_index.set(i, id as u32);
-            }
+        if unsafe TS_ON {
+            ts_add(TS_INST, 1);
         }
-        let mask = self.instance_index.len() - 1;
-        let ixp = self.instance_index.as_ptr();
-        let pn = self.instances.len();
-        let mut i = it.hash() as usize & mask;
-        let mut idx = 0xFFFFFFFFu32;
-        loop {
-            let cur = unsafe ixp[i];
-            if cur == 0xFFFFFFFFu32 {
-                idx = self.instances.len() as u32;
-                self.instances.push(it);
-                self.instance_index.set(i, idx);
-                self.inst_ix_used = self.inst_ix_used + 1;
-                break;
+        let mut idx: u32 = 0;
+        if self.gt == null {
+            idx = self.pool.insert_inst(&it);
+        } else {
+            let g = unsafe &mut *self.gt;
+            let hit = g.find_inst(&it);
+            if hit >= 0 {
+                idx = hit as u32;
+            } else if g.open {
+                idx = g.insert_inst(&it);
+            } else {
+                idx = self.pool.insert_inst(&it) | TYPE_PROV;
             }
-            if cur as usize < pn && *self.instances.at(cur as usize) == it {
-                idx = cur;
-                break;
-            }
-            i = i + 1 & mask;
         }
         return self.intern_type(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
     }
@@ -1758,7 +2177,191 @@ extend Ast {
     }
 
     pub const fn instance(self: &Self, index: u32) &TyInstance {
-        return self.instances.at(index as usize);
+        if self.gt != null && (index & TYPE_PROV) == 0 {
+            return unsafe (&*self.gt).instance(index as usize);
+        }
+        return self.pool.instance((index & TYPE_PROV_MASK) as usize);
+    }
+
+    /// Apply a publication: every provisional id this module's tables hold becomes its final id
+    /// (`map` by pool index, `imap` for instance records, `cmap` for const-expression forms), the
+    /// `used` list is rewritten and its membership bits rebuilt, and the pool is cleared.
+    pub fn publish_remap(self: &mut Self, map: &Vector<TypeId>, imap: &Vector<u32>, cmap: &Vector<u32>) {
+        for i in 0..self.types.len() {
+            self.types[i] = pub_map1(map, self.types[i]);
+        }
+        for i in 0..self.mono.len() {
+            let u = self.mono.index_mut(i);
+            for k in 0..u.n {
+                unsafe u.args[k as usize] = pub_map1(map, unsafe u.args[k as usize]);
+            }
+        }
+        for i in 0..self.method_refs.len() {
+            let r = self.method_refs.index_mut(i);
+            r.recv = pub_map1(map, r.recv);
+        }
+        for i in 0..self.wide_lits.len() {
+            let w = self.wide_lits.index_mut(i);
+            w.ty = pub_map1(map, w.ty);
+        }
+        for i in 0..self.coerces.len() {
+            let c = self.coerces.index_mut(i);
+            c.target = pub_map1(map, c.target);
+        }
+        for i in 0..self.proj_obs.len() {
+            let o = self.proj_obs.index_mut(i);
+            o.owner = pub_map1(map, o.owner);
+        }
+        for i in 0..self.method_insts.len() {
+            let mi = self.method_insts.index_mut(i);
+            mi.instance = pub_map1(map, mi.instance);
+            for k in 0..mi.n {
+                unsafe mi.targs[k as usize] = pub_map1(map, unsafe mi.targs[k as usize]);
+            }
+        }
+        for i in 0..self.dyn_uses.len() {
+            let d = self.dyn_uses.index_mut(i);
+            d.src = pub_map1(map, d.src);
+            d.dyn_ty = pub_map1(map, d.dyn_ty);
+            d.alloc = pub_map1(map, d.alloc);
+        }
+        for i in 0..self.deref_uses.len() {
+            let d = self.deref_uses.index_mut(i);
+            d.target = pub_map1(map, d.target);
+            for k in 0..d.n {
+                unsafe d.recv[k as usize] = pub_map1(map, unsafe d.recv[k as usize]);
+            }
+        }
+        for i in 0..self.used.len() {
+            self.used[i] = pub_map1(map, self.used[i]);
+        }
+        for i in 0..self.used_inst.len() {
+            let ii = self.used_inst[i];
+            if (ii & TYPE_PROV) != 0 {
+                self.used_inst[i] = imap[(ii & TYPE_PROV_MASK) as usize];
+            }
+        }
+        let _ = cmap;
+        self.used_bits.clear();
+        for i in 0..self.used.len() {
+            let id = self.used[i];
+            let w = (id >> 6) as usize;
+            while w >= self.used_bits.len() {
+                self.used_bits.push(0);
+            }
+            self.used_bits[w] = self.used_bits[w] | 1u64 << (id & 63) as u64;
+        }
+        self.method_inst_index.clear();
+        // Every provisional record is published: release the pool's chunks (a module that interns
+        // again after the checkpoint allocates one fresh chunk).
+        self.pool.free();
+        self.pool = TypePool::new();
+    }
+
+    /// Does any table of this module still hold a provisional id? (Validation after a publication.)
+    pub const fn has_provisional(self: &Self) bool {
+        for i in 0..self.types.len() {
+            if (self.types[i] & TYPE_PROV) != 0 {
+                return true;
+            }
+        }
+        for i in 0..self.used.len() {
+            if (self.used[i] & TYPE_PROV) != 0 {
+                return true;
+            }
+        }
+        for i in 0..self.mono.len() {
+            let u = self.mono.at(i);
+            for k in 0..u.n {
+                if (unsafe u.args[k as usize] & TYPE_PROV) != 0 {
+                    return true;
+                }
+            }
+        }
+        for i in 0..self.method_insts.len() {
+            if (self.method_insts.at(i).instance & TYPE_PROV) != 0 {
+                return true;
+            }
+        }
+        for i in 0..self.method_refs.len() {
+            if (self.method_refs.at(i).recv & TYPE_PROV) != 0 {
+                return true;
+            }
+        }
+        for i in 0..self.dyn_uses.len() {
+            if (self.dyn_uses.at(i).dyn_ty & TYPE_PROV) != 0 {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The number of types this module can enumerate: its pool (module-local identity) or its
+    /// `used` list (package identity); `used_type(i)` names the i-th.
+    pub const fn ntypes(self: &Self) usize {
+        if self.gt == null {
+            return self.pool.len();
+        }
+        return self.used.len();
+    }
+
+    pub const fn used_type(self: &Self, i: usize) TypeId {
+        if self.gt == null {
+            return i as TypeId;
+        }
+        return self.used[i];
+    }
+
+    /// The instance records this module can enumerate (same rule), by `used_instance(i)`.
+    pub const fn ninstances(self: &Self) usize {
+        if self.gt == null {
+            return self.pool.ninst();
+        }
+        return self.used_inst.len();
+    }
+
+    pub const fn used_instance(self: &Self, i: usize) &TyInstance {
+        if self.gt == null {
+            return self.pool.instance(i);
+        }
+        return self.instance(self.used_inst[i]);
+    }
+
+    pub const fn nconst_lins(self: &Self) usize {
+        if self.gt == null {
+            return self.pool.nclin();
+        }
+        return unsafe (&*self.gt).nclin() + self.pool.nclin();
+    }
+
+    /// Is `t` an id this module can resolve (a foreign pool's id is not, under module-local identity)?
+    pub const fn type_valid(self: &Self, t: TypeId) bool {
+        if self.gt == null {
+            return t as usize < self.pool.len();
+        }
+        if (t & TYPE_PROV) != 0 {
+            return (t & TYPE_PROV_MASK) as usize < self.pool.len();
+        }
+        return t as usize < unsafe (&*self.gt).len();
+    }
+
+    /// The exclusive id bound the Core IR verifier checks against: the pool length under module-local
+    /// identity; unbounded under package identity, where provisional ids carry the tag bit.
+    pub const fn type_bound(self: &Self) usize {
+        if self.gt == null {
+            return self.pool.len();
+        }
+        return 0xFFFFFFFF;
+    }
+
+    pub const fn instance_valid(self: &Self, i: u32) bool {
+        if self.gt == null {
+            return i as usize < self.pool.ninst();
+        }
+        if (i & TYPE_PROV) != 0 {
+            return (i & TYPE_PROV_MASK) as usize < self.pool.ninst();
+        }
+        return i as usize < unsafe (&*self.gt).ninst();
     }
 
     /// A const-generic argument value, interned as a module-independent TYPE_CONST.
@@ -1815,13 +2418,22 @@ extend Ast {
     }
 
     /// Re-interns `src`'s type `t` into THIS Ast, rebuilding element and instance payloads
-    /// recursively -- TypeIds are per-Ast and never transfer directly.
+    /// recursively. A final (published) id names one package-wide record and passes through;
+    /// only a provisional id of another module needs the rebuild.
     pub fn reintern(self: &mut Self, src: &Ast, t: TypeId) TypeId {
-        if t == TYPE_NONE {
-            return t;
+        if t == TYPE_NONE || self.gt != null && (t & TYPE_PROV) == 0 {
+            return t; // a published id is the same id in every module
+        }
+        let mut t0: u64 = 0;
+        if unsafe TS_ON {
+            ts_add(TS_REINTERN, 1);
+            if unsafe TS_DEPTH == 0 {
+                t0 = ts_now();
+            }
+            unsafe TS_DEPTH += 1;
         }
         let ty = *src.type_at(t);
-        return switch ty.kind {
+        let r = switch ty.kind {
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY => {
                 let mut nt = ty;
                 nt.as_data.elem = self.reintern(src, ty.as_data.elem);
@@ -1855,6 +2467,13 @@ extend Ast {
             },
             _ => self.intern_type(ty),
         };
+        if unsafe TS_ON {
+            unsafe TS_DEPTH -= 1;
+            if t0 != 0 {
+                ts_add(TS_REINTERN_NS, ts_now() - t0);
+            }
+        }
+        return r;
     }
 
     /// Records the concrete type args a use site instantiates with. `n` is clamped to 8. Safety:
@@ -2019,13 +2638,16 @@ extend Ast {
         return self.types[n as usize];
     }
     pub const fn type_at(self: &Self, t: TypeId) &Ty {
-        return self.type_pool.at(t as usize);
+        if self.gt != null && (t & TYPE_PROV) == 0 {
+            return unsafe (&*self.gt).at(t as usize);
+        }
+        return self.pool.at((t & TYPE_PROV_MASK) as usize);
     }
 
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.type_pool.retained() + self.type_index.capacity() * 4 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.instances.retained() + self.method_insts.capacity() * sizeof(MethodInst) + self.instance_index.capacity() * 4 + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.const_lins.capacity() * sizeof(ConstLin) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl);
+        return self.nodes.retained() + self.children.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.method_insts.capacity() * sizeof(MethodInst) + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl);
     }
 }
 

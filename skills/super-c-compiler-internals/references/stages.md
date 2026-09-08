@@ -52,8 +52,9 @@ Then `discharge_obligations`: cross-module reflection-bound obligations, once ev
 module is typed.
 
 **Freeze point:** at type-check completion every semantic decision table is final; only
-append-only interning (`type_pool`, `instances`, `const_lins`) may grow later
-(`src/ast/facts.spc`). Under `SC_FACTS_CHECK` the driver snapshots watermarks here.
+append-only interning (the module `pool` and the package type table) may grow later
+(`src/ast/facts.spc`), and the publication checkpoints renumber provisional ids in place.
+Under `SC_FACTS_CHECK` the driver snapshots watermarks here.
 
 ## 5. Borrow Check (`borrowck_all`, `src/borrowck/`)
 

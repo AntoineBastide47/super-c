@@ -51,7 +51,9 @@ fn rep_flow_push(t: &mut tc::TypeChecker, st: &mut bfi::RepSt) {
 extend tc::TypeChecker {
     /// Entry point: run the declaration-level checks and the flow walk over every item of the
     /// current module, then finalize its diagnostics.
-    /// Single-module entry (tests, harness): private oracle and pipeline, discarded after.
+    /// Single-module entry (tests, harness): private oracle and pipeline, discarded after. The
+    /// package's types must be published first (`publish_checkpoint`), as before every borrow
+    /// frontier of the driver.
     pub fn borrowck_solo(self: &mut Self) {
         let mut ow = bfx::Owner::new(self.package);
         let mut ctx = bfi::BorrowCtx::new();
@@ -2066,11 +2068,8 @@ extend tc::TypeChecker {
     /// For a `&mut T` parameter type node, the pointee type when writes through it can smuggle a
 
     /// shorter borrow (T mentions a callee type variable or is invariant); TYPE_NONE otherwise.
-    pub fn tc_mut_ref_invariant_elem(self: &mut Self, fmod: ModuleId, ptyn: NodeId) TypeId {
-        if ptyn == NODE_NONE {
-            return TYPE_NONE;
-        }
-        let lt = self.lower_type_in(fmod, ptyn);
+    pub fn tc_mut_ref_invariant_elem(self: &mut Self, fmod: ModuleId, pn: NodeId) TypeId {
+        let lt = self.decl_type_in(fmod, pn);
         if lt == TYPE_NONE || self.type_at(lt).kind != TypeKind::TYPE_REFERENCE || self.type_at(lt).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
             return TYPE_NONE;
         }
@@ -2180,10 +2179,7 @@ extend tc::TypeChecker {
             if ai >= args.len {
                 continue;
             }
-            let ei = self.tc_mut_ref_invariant_elem(
-                fmod,
-                fa.at_const(unsafe fa.list(params)[i as usize]).as_data.parameter.ty,
-            );
+            let ei = self.tc_mut_ref_invariant_elem(fmod, unsafe fa.list(params)[i as usize]);
             if ei == TYPE_NONE {
                 continue;
             }
@@ -2195,10 +2191,7 @@ extend tc::TypeChecker {
                 if aj >= args.len {
                     continue;
                 }
-                let ej = self.tc_mut_ref_invariant_elem(
-                    fmod,
-                    fa.at_const(unsafe fa.list(params)[j as usize]).as_data.parameter.ty,
-                );
+                let ej = self.tc_mut_ref_invariant_elem(fmod, unsafe fa.list(params)[j as usize]);
                 if ej != ei {
                     continue;
                 }
@@ -2246,11 +2239,7 @@ extend tc::TypeChecker {
                 if ai >= args.len {
                     continue;
                 }
-                let ptyn = fa.at_const(unsafe fa.list(params)[pi as usize]).as_data.parameter.ty;
-                if ptyn == NODE_NONE {
-                    continue;
-                }
-                let pt = self.lower_type_in(fmod, ptyn);
+                let pt = self.decl_type_in(fmod, unsafe fa.list(params)[pi as usize]);
                 if pt == TYPE_NONE || self.type_at(pt).kind != TypeKind::TYPE_GENERIC || self.type_at(pt).as_data.decl != g {
                     continue;
                 }
@@ -2332,7 +2321,7 @@ extend tc::TypeChecker {
         // The DECLARED param type must be a bare type variable (`value: T`), not `&T` or a concrete
         // type: that is what shares its region with the container's elements. `x: &T` (as in
         // `contains`) reads through a fresh reference and is excluded here.
-        let pt = self.lower_type_in(md.module, ptyn);
+        let pt = self.decl_type_in(md.module, pdecl);
         if pt == TYPE_NONE || self.type_at(pt).kind != TypeKind::TYPE_GENERIC {
             return false;
         }
@@ -2405,22 +2394,15 @@ extend tc::TypeChecker {
         if ty == TYPE_NONE || depth > 4 {
             return false;
         }
-        let slot = ty as usize * 5 + depth as usize;
-        while self.carries_borrow_memo.len() <= slot {
-            self.carries_borrow_memo.push((0 - 1) as i8);
-        }
-        let c = *self.carries_borrow_memo.at(slot);
+        let slot = ty_dense(ty) * 5 + depth as usize;
+        let c = memo2_get(&self.carries_borrow_memo, slot);
         if c >= 0 {
             return c != 0;
         }
         let mut p2 = true;
         let r = self.tc_carries_borrow_impl(ty, depth, &mut p2);
         if p2 {
-            let mut cv: i8 = 0;
-            if r {
-                cv = 1;
-            }
-            self.carries_borrow_memo.set(slot, cv);
+            memo2_set(&mut self.carries_borrow_memo, slot, r);
         } else {
             *pure = false;
         }
@@ -2505,7 +2487,7 @@ extend tc::TypeChecker {
             if ma.at_const(fnode).kind == NodeKind::NODE_REFERENCE_TYPE {
                 return true;
             }
-            if self.tc_carries_borrow_rec(self.lower_type_in(om, fnode), depth + 1, pure) {
+            if self.tc_carries_borrow_rec(self.node_type_in(om, fnode), depth + 1, pure) {
                 return true;
             }
         }
@@ -3541,7 +3523,7 @@ extend tc::TypeChecker {
                 if ps_ty == NODE_NONE {
                     continue;
                 }
-                let lt = self.lower_type_in(md.module, ps_ty);
+                let lt = self.decl_type_in(md.module, unsafe fa.list(params)[cur as usize]);
                 if lt == TYPE_NONE || self.type_at(lt).kind != TypeKind::TYPE_REFERENCE || self.type_at(lt).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
                     continue;
                 }
@@ -3666,7 +3648,7 @@ extend tc::TypeChecker {
         if pv_ty == NODE_NONE {
             return false;
         }
-        let vt = self.lower_type_in(md.module, pv_ty);
+        let vt = self.decl_type_in(md.module, unsafe fa.list(params)[c as usize]);
         if vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_GENERIC {
             if self.tc_ref_covers_generic(ps_elem, self.type_at(vt).as_data.decl, self.type_at(vt).module) {
                 return true;

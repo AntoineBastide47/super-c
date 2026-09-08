@@ -17,8 +17,8 @@
 // context the splice no longer has -- and a generic callee whose body defers a static_assert per
 // instantiation stays a call so its demand still fires the guard. Generic callees inline when
 // every generic parameter binds through the call (signature unification plus the recorded type
-// arguments) and every body type translates into the caller's pool; const-generic types do not
-// translate and reject the site. Never into a body holding IN_REFLECT binder placeholders.
+// arguments) and every body type substitutes into a package type; const-generic types do not
+// substitute and reject the site. Never into a body holding IN_REFLECT binder placeholders.
 //
 // Spliced constants keep their raw spans and mark the callee module in `item` (the emitter's
 // foreign-source convention for CK_STR, extended to CK_FLOAT and CK_INT); IR_NONE sentinels are
@@ -78,7 +78,7 @@ struct CalleeInfo {
     pub fg: u32, // trailing entries of `gp` that are the function's own parameters
 }
 
-/// One generic-parameter binding: `(pm, pnode)` resolves to caller-pool type `at`.
+/// One generic-parameter binding: `(pm, pnode)` resolves to the caller's type `at`.
 struct GBind {
     pub pm: ModuleId,
     pub pnode: NodeId,
@@ -140,7 +140,7 @@ fn bind_add(binds: &mut Vector<GBind>, pm: ModuleId, pnode: NodeId, at: TypeId) 
     binds.push(GBind { pm: pm, pnode: pnode, at: at });
 }
 
-/// Structural unification of a callee-pool type against the caller-pool type the checker matched
+/// Structural unification of a callee type against the caller type the checker matched
 /// it with: every callee generic parameter met in a matching position binds to the caller type.
 /// Mismatched shapes (coercions) contribute nothing; the final translation decides viability.
 fn unify(
@@ -187,13 +187,32 @@ fn unify(
     }
 }
 
-/// Translate callee-pool type `kt` into the caller module's pool, substituting bound generic
-/// parameters. TYPE_NONE on failure (unbound parameter, const-generic expression, or a function
-/// type under an active substitution).
+/// Callee type `kt` with the bound generic parameters substituted, interned for the caller
+/// module. TYPE_NONE on failure (unbound parameter, const-generic expression, or a function type
+/// under an active substitution).
 fn xty(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, binds: &Vector<GBind>, depth: u32) TypeId {
     if kt == TYPE_NONE || depth > 24 {
         return TYPE_NONE;
     }
+    let mut t0: u64 = 0;
+    if unsafe TS_ON {
+        ts_add(TS_XTY, 1);
+        if unsafe TS_DEPTH == 0 {
+            t0 = ts_now();
+        }
+        unsafe TS_DEPTH += 1;
+    }
+    let r = xty_i(pkg, km, kt, cm, binds, depth);
+    if unsafe TS_ON {
+        unsafe TS_DEPTH -= 1;
+        if t0 != 0 {
+            ts_add(TS_XTY_NS, ts_now() - t0);
+        }
+    }
+    return r;
+}
+
+fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, binds: &Vector<GBind>, depth: u32) TypeId {
     let p = unsafe &*pkg;
     let ka = unsafe &*p.module_ast_const(km);
     let ca = unsafe &mut *(p.module_ast_const(cm) as *mut Ast);
@@ -211,11 +230,11 @@ fn xty(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bind
         },
         TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION | TYPE_ERROR => TYPE_NONE,
         TYPE_FUNCTION => {
-            // the signature payload is module-relative and opaque here: only a substitution-free
-            // copy is sound
+            // nominal (module, declaration): the package id itself, sound only without a
+            // substitution to apply
             let mut r = TYPE_NONE;
             if binds.len() == 0 {
-                r = ca.reintern(ka, kt);
+                r = kt;
             }
             r;
         },
@@ -298,6 +317,15 @@ fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
 }
 
 extend InlineCtx {
+    /// Bytes the translation maps hold (SC_TYPE_STATS): each map's slots at its load, plus the shape keys.
+    pub fn xm_bytes(self: &Self) u64 {
+        let mut b: u64 = 0;
+        for i in 0..self.xms.len() {
+            b += (self.xms.at(i).len() * 17 * 2 + self.xm_key.at(i).len() * 8) as u64;
+        }
+        return b + (self.xm_ix.len() * 17 * 2) as u64;
+    }
+
     pub fn new() InlineCtx {
         let e = stdlib::getenv("SC_INLINE");
         let mut off = false;
@@ -725,6 +753,9 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
                 }
                 if same {
                     cix = (*v) as i64;
+                    if unsafe TS_ON {
+                        ts_add(TS_XTY_HIT, 1);
+                    }
                 } else {
                     collide = true;
                 }

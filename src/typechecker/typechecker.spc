@@ -324,10 +324,10 @@ pub struct TypeChecker<'a> {
     pub free_ext_memo: Map<u64, u64>,
     // Per-interned-type `tc_type_is_free` result: -1 unknown, 0 no, 1 yes. Free-ness is a stable fact of
     // a concrete type (extends are parse-time facts), so the full result caches by TypeId.
-    pub type_free_memo: Vector<i8>,
+    pub type_free_memo: Vector<u64>,
     // Per (TypeId, depth 0..4) `tc_carries_borrow_rec` result, same encoding; only computations
     // that never touched a TYPE_FUNCTION are cached (closure answers move under the walk).
-    pub carries_borrow_memo: Vector<i8>,
+    pub carries_borrow_memo: Vector<u64>,
     // (module<<32|method) -> enclosing extend/interface item (NODE_NONE misses included).
     pub encl_ext_memo: Map<u64, NodeId>,
     pub encl_trait_memo: Map<u64, NodeId>,
@@ -357,6 +357,12 @@ pub struct TypeChecker<'a> {
     // entries are inserted only when the lowering emitted no new errors and the result is not
     // TYPE_ERROR, so error-carrying programs re-emit their diagnostics exactly as before.
     pub lower_memo: Map<u64, TypeId>,
+    /// Foreign declaration types (`decl_type_in` for another module's fields, parameters, consts and
+    /// generic parameters), keyed `module << 32 | decl`: a foreign declaration has no type slot in
+    /// this checker's pool, and every member access or call re-lowered its type syntax (126k times
+    /// per transpile of the compiler). Entries are recorded only when the lowering raised no
+    /// diagnostic, the `lower_memo` rule.
+    pub fdecl_memo: Map<u64, TypeId>,
     // Memoized "does a value of this type carry a borrow": a pure function of the interned type, so
     // caching per (module, TypeId) makes the DEEP structural check O(1) after first use (it runs on
     // every method call and every binding/return). 1 = carries, 0 = does not.
@@ -620,8 +626,8 @@ extend TypeChecker {
             last_use_built: false,
             moved_bits: Vector::<u64>::new(),
             free_ext_memo: Map::<u64, u64>::new(),
-            type_free_memo: Vector::<i8>::new(),
-            carries_borrow_memo: Vector::<i8>::new(),
+            type_free_memo: Vector::<u64>::new(),
+            carries_borrow_memo: Vector::<u64>::new(),
             encl_ext_memo: Map::<u64, NodeId>::new(),
             encl_trait_memo: Map::<u64, NodeId>::new(),
             dynfn_list: Vector::<TypeId>::new(),
@@ -633,6 +639,7 @@ extend TypeChecker {
             mark_recv: TYPE_NONE,
             peel_memo: Map::<u64, u64>::new(),
             lower_memo: Map::<u64, TypeId>::new(),
+            fdecl_memo: Map::<u64, TypeId>::new(),
             carries_memo: Map::<u64, u8>::new(),
             ph_str: ph_lookup(pkg, "str"),
             ph_slice: ph_lookup(pkg, "Slice"),
@@ -1073,6 +1080,9 @@ extend TypeChecker {
     }
 
     fn fn_sig(self: &mut Self, fid: TypeId, params: *mut TypeId, cap: i32, ret: *mut TypeId) i32 {
+        if unsafe TS_ON {
+            ts_add(TS_FNSIG, 1);
+        }
         let fty = *self.type_at(fid);
         let m = fty.module;
         let fa = self.mod_ast(m);
@@ -1097,8 +1107,7 @@ extend TypeChecker {
                 let pty = fa.type_of(pid);
                 unsafe params[i as usize] = pty;
             } else {
-                let tn = if_node(p.kind == NodeKind::NODE_PARAMETER, p.as_data.parameter.ty, pid);
-                unsafe params[i as usize] = self.lower_type_in(m, tn);
+                unsafe params[i as usize] = self.node_type_in(m, pid);
             }
             i = i + 1;
         }
@@ -1107,9 +1116,7 @@ extend TypeChecker {
             unsafe *ret = rty;
         } else if rs.len == 1 {
             let r0 = unsafe fa.list(rs)[0];
-            let rn = fa.at_const(r0);
-            let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
-            unsafe *ret = self.lower_type_in(m, tn);
+            unsafe *ret = self.node_type_in(m, r0);
         } else if rs.len == 0 {
             // An omitted return type IS void: TYPE_NONE here would make call sites lenient.
             unsafe *ret = Ast::builtin(BuiltinType::BT_VOID);
@@ -1348,9 +1355,7 @@ extend TypeChecker {
         }
         if rets.len == 1 {
             let r0 = unsafe fa.list(rets)[0];
-            let rn = self.mod_ast(d.module).at_const(r0);
-            let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
-            self.tc_infer_ev(self.lower_type_in(d.module, tn), er, node, false);
+            self.tc_infer_ev(self.node_type_in(d.module, r0), er, node, false);
         }
         let mut all9 = true;
         for i in 0..g {
@@ -1375,9 +1380,7 @@ extend TypeChecker {
         let mut ar = Ast::builtin(BuiltinType::BT_VOID);
         if rets.len == 1 {
             let r0 = unsafe fa.list(rets)[0];
-            let rn = self.mod_ast(d.module).at_const(r0);
-            let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
-            ar = self.subst_type(self.lower_type_in(d.module, tn), &gp[0], &ga[0], g);
+            ar = self.subst_type(self.node_type_in(d.module, r0), &gp[0], &ga[0], g);
         }
         if !self.ret_eq(er, ar) {
             return false;
@@ -2511,17 +2514,41 @@ extend TypeChecker {
         return true;
     }
 
-    fn decl_type_in(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
+    /// The type of declaration `decl` of module `m`: a parameter, field, constant, binding,
+    /// function, generic parameter or aggregate. The owning checker records it on the node; a
+    /// foreign reader takes that record once its id is final (the package identity), and lowers
+    /// the declared syntax itself before that. Only declaration nodes carry their type in the node
+    /// slot: a type node's slot holds other facts, so `lower_type_in` never reads it.
+    pub fn decl_type_in(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
         if decl == NODE_NONE {
             return TYPE_NONE;
         }
         let local = self.package == null || m == self.cur_module();
+        let fkey = m as u64 << 32 | decl as u64;
         if local {
             let cached = self.cur_ast().type_of(decl);
             if cached != TYPE_NONE {
                 return cached;
             }
+        } else {
+            if unsafe TS_ON {
+                ts_add(TS_DECLIN, 1);
+            }
+            let known = self.mod_ast(m).type_of(decl);
+            if known != TYPE_NONE && (known & TYPE_PROV) == 0 && unsafe self.mod_ast(m).gt != null {
+                let dk0 = self.mod_ast(m).at_const(decl).kind;
+                if dk0 == NodeKind::NODE_PARAMETER || dk0 == NodeKind::NODE_FIELD || dk0 == NodeKind::NODE_CONST {
+                    return known;
+                }
+            }
+            switch self.fdecl_memo.get(&fkey) {
+                Some(t) => {
+                    return *t;
+                },
+                None => {},
+            };
         }
+        let ne = self.errors.errors.len();
         let a = self.mod_ast(m);
         let dk = a.at_const(decl).kind;
         let mut result = TYPE_NONE;
@@ -2554,11 +2581,26 @@ extend TypeChecker {
         }
         if local {
             self.cur_ast().set_type(decl, result);
+        } else if result != TYPE_ERROR && self.errors.errors.len() == ne {
+            self.fdecl_memo.insert(fkey, result);
         }
         return result;
     }
     fn decl_type(self: &mut Self, decl: NodeId) TypeId {
         return self.decl_type_in(self.cur_module(), decl);
+    }
+
+    /// The type a parameter, field, constant or bare type node stands for: a declaration goes
+    /// through its recorded declaration type, a type node is lowered.
+    pub fn node_type_in(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
+        if id == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let k = self.mod_ast(m).at_const(id).kind;
+        if k == NodeKind::NODE_PARAMETER || k == NodeKind::NODE_FIELD || k == NodeKind::NODE_CONST {
+            return self.decl_type_in(m, id);
+        }
+        return self.lower_type_in(m, id);
     }
 
     fn type_of_type_node(self: &mut Self, id: NodeId) TypeId {
@@ -2824,6 +2866,28 @@ extend TypeChecker {
         if id == NODE_NONE {
             return TYPE_NONE;
         }
+        let mut t0: u64 = 0;
+        if unsafe TS_ON {
+            ts_add(TS_LOWER, 1);
+            if self.icx.current_fn == NODE_NONE {
+                ts_add(TS_LOWER_SIG, 1);
+            }
+            if unsafe TS_DEPTH == 0 {
+                t0 = ts_now();
+            }
+            unsafe TS_DEPTH += 1;
+        }
+        let r = self.lower_type_in_f(m, id);
+        if unsafe TS_ON {
+            unsafe TS_DEPTH -= 1;
+            if t0 != 0 {
+                ts_add(TS_LOWER_NS, ts_now() - t0);
+            }
+        }
+        return r;
+    }
+
+    fn lower_type_in_f(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
         // Memoized foreign lowering with the diagnostics gate. Only generic-instance
         // paths take the memo: they re-lower every argument and probe the instance maps, so a
         // hash probe wins; plain paths/builtins are CHEAPER than the probe itself (measured:
@@ -2835,6 +2899,9 @@ extend TypeChecker {
         let lk = m as u64 << 32 | id as u64;
         switch self.lower_memo.get(&lk) {
             Some(t) => {
+                if unsafe TS_ON {
+                    ts_add(TS_LOWER_HIT, 1);
+                }
                 return *t;
             },
             None => {},
@@ -3215,10 +3282,11 @@ extend TypeChecker {
         // candidate sequence is exactly the old in-order scan's.
         let mut idx: usize = 0;
         loop {
-            while self.dynfn_scan as usize < unsafe self.cur_ast().type_pool.len() {
-                let e = *self.type_at(self.dynfn_scan);
+            while self.dynfn_scan as usize < self.cur_ast().ntypes() {
+                let dt = self.cur_ast().used_type(self.dynfn_scan as usize);
+                let e = *self.type_at(dt);
                 if e.kind == TypeKind::TYPE_DYN && self.mod_ast(e.module).at_const(self.cur_ast().dyn_decl_of(&e)).kind == NodeKind::NODE_FUNCTION_TYPE {
-                    self.dynfn_list.push(self.dynfn_scan);
+                    self.dynfn_list.push(dt);
                 }
                 self.dynfn_scan = self.dynfn_scan + 1;
             }
@@ -5100,9 +5168,9 @@ extend TypeChecker {
                     let mut seen3 = Vector::<TypeId>::new();
                     for j in 0..self.pkg_count() {
                         let oa = self.mod_ast(j as ModuleId);
-                        let ninst = (unsafe oa.instances).len();
+                        let ninst = oa.ninstances();
                         for q in 0..ninst {
-                            let it2 = *(unsafe oa.instances).at(q);
+                            let it2 = *oa.used_instance(q);
                             if it2.decl != tgt.node || it2.module != tgt.module {
                                 continue;
                             }
@@ -5502,8 +5570,8 @@ extend TypeChecker {
         );
         self.errors.note(format("implement Free for '{}' and free the ACTIVE member there", nm));
     }
-    fn tc_member_owns(self: &mut Self, om: ModuleId, tnode: NodeId, gp: *const DefId, ga: *const TypeId, gn: i32) bool {
-        let mut ft = self.lower_type_in(om, tnode);
+    fn tc_member_owns(self: &mut Self, om: ModuleId, member: NodeId, gp: *const DefId, ga: *const TypeId, gn: i32) bool {
+        let mut ft = self.node_type_in(om, member);
         // Substitute only fully-concrete instantiations: generic args would intern novel
         // partially-generic instances into the pool (they emit as undefined C type names);
         // generic members fall to the TYPE_GENERIC bound-based verdict instead.
@@ -5559,17 +5627,14 @@ extend TypeChecker {
             let mn = *a.at_const(mid);
             // Tuple members are bare type nodes; named members carry their type in field.ty.
             if !is_enum && (mn.kind == NodeKind::NODE_FIELD || is_tuple) {
-                let tn = if_node(mn.kind == NodeKind::NODE_FIELD, mn.as_data.field.ty, mid);
-                if self.tc_member_owns(om, tn, gp, ga, gn) {
+                if self.tc_member_owns(om, mid, gp, ga, gn) {
                     owns = true;
                 }
             } else if is_enum && mn.kind == NodeKind::NODE_VARIANT {
                 let pids = a.list(mn.as_data.variant.payload);
                 for k in 0..mn.as_data.variant.payload.len {
                     let pid = unsafe pids[k as usize];
-                    let pe = *a.at_const(pid);
-                    let tn = if_node(pe.kind == NodeKind::NODE_FIELD, pe.as_data.field.ty, pid);
-                    if self.tc_member_owns(om, tn, gp, ga, gn) {
+                    if self.tc_member_owns(om, pid, gp, ga, gn) {
                         owns = true;
                     }
                 }
@@ -5720,19 +5785,13 @@ extend TypeChecker {
         if ty == TYPE_NONE {
             return false;
         }
-        while self.type_free_memo.len() <= ty as usize {
-            self.type_free_memo.push((0 - 1) as i8);
-        }
-        let c = *self.type_free_memo.at(ty as usize);
+        let d = ty_dense(ty);
+        let c = memo2_get(&self.type_free_memo, d);
         if c >= 0 {
             return c != 0;
         }
         let r = self.tc_type_is_free_impl(ty);
-        let mut cv: i8 = 0;
-        if r {
-            cv = 1;
-        }
-        self.type_free_memo.set(ty as usize, cv);
+        memo2_set(&mut self.type_free_memo, d, r);
         return r;
     }
 
@@ -8027,11 +8086,7 @@ extend TypeChecker {
         let mut rsuba = Tys8 {};
         let nrsub = self.method_recv_subst(recv, md, &mut rsubp[0], &mut rsuba[0]);
         let r0 = unsafe fa.list(fnn.as_data.function.returns)[0];
-        let rn = fa.at_const(r0);
-        let ret = self.lower_type_in(
-            md.module,
-            if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0),
-        );
+        let ret = self.node_type_in(md.module, r0);
         return self.subst_type(ret, &rsubp[0], &rsuba[0], nrsub);
     }
     /// Method `md`'s parameter `idx` type on receiver `recv`, with the same substitution as tc_method_ret.
@@ -8045,8 +8100,7 @@ extend TypeChecker {
         let mut rsuba = Tys8 {};
         let nrsub = self.method_recv_subst(recv, md, &mut rsubp[0], &mut rsuba[0]);
         let p = unsafe fa.list(fnn.as_data.function.params)[idx as usize];
-        let pn = fa.at_const(p);
-        let pt = self.lower_type_in(md.module, if_node(pn.kind == NodeKind::NODE_PARAMETER, pn.as_data.parameter.ty, p));
+        let pt = self.node_type_in(md.module, p);
         return self.subst_type(pt, &rsubp[0], &rsuba[0], nrsub);
     }
     fn method_self_kind(self: &mut Self, md: DefId) i32 {
@@ -8909,8 +8963,7 @@ extend TypeChecker {
         } else {
             for k in 0..args.len {
                 let pid = unsafe va.list(payload)[k as usize];
-                let pe = va.at_const(pid);
-                let raw = self.lower_type_in(vmod, if_node(pe.kind == NodeKind::NODE_FIELD, pe.as_data.field.ty, pid));
+                let raw = self.node_type_in(vmod, pid);
                 let mut pt = raw;
                 if inst {
                     pt = self.subst_type(raw, &gp[0], &ga[0], gn);
@@ -8961,7 +9014,7 @@ extend TypeChecker {
                     let pn = unsafe self.mod_ast(cd.module).list(fd.params)[argi as usize];
                     let ptn = self.mod_ast(cd.module).at_const(pn).as_data.parameter.ty;
                     if ptn != NODE_NONE {
-                        let pt0 = self.lower_type_in(cd.module, ptn);
+                        let pt0 = self.decl_type_in(cd.module, pn);
                         if pt0 != TYPE_NONE && self.cur_ast().type_concrete(pt0) {
                             return pt0;
                         }
@@ -9065,11 +9118,7 @@ extend TypeChecker {
             return TYPE_NONE;
         }
         let r0 = unsafe na.list(rets)[0];
-        let rn = na.at_const(r0);
-        let mut ret = self.lower_type_in(
-            nx.module,
-            if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0),
-        );
+        let mut ret = self.node_type_in(nx.module, r0);
         let extnode = self.enclosing_extend(nx.module, nx.node);
         if extnode != NODE_NONE && gn > 0 {
             let ig = na.at_const(extnode).as_data.extend_def.generics;
@@ -10451,7 +10500,7 @@ extend TypeChecker {
                         return TYPE_NONE;
                     }
                     for k in 0..args.len {
-                        let mt = self.lower_type_in(tmod, unsafe self.mod_ast(tmod).list(members)[k as usize]);
+                        let mt = self.node_type_in(tmod, unsafe self.mod_ast(tmod).list(members)[k as usize]);
                         let et = self.subst_type(mt, &tgp[0], &tga[0], tgn);
                         let aid = unsafe a.list(args)[k as usize];
                         if !self.compatible(et, aid) {
@@ -10898,9 +10947,7 @@ extend TypeChecker {
                     }
                     if unresolved {
                         let r0 = unsafe fa.list(returns)[0];
-                        let rn = *fa.at_const(r0);
-                        let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
-                        let rty = self.subst_type(self.lower_type_in(fmod, tn), &rsubp[0], &rsuba[0], nrsub);
+                        let rty = self.subst_type(self.node_type_in(fmod, r0), &rsubp[0], &rsuba[0], nrsub);
                         self.tc_infer_ev(rty, self.strip(want), id, true);
                         self.tc_infer_worklist(
                             id,
@@ -11083,9 +11130,7 @@ extend TypeChecker {
                         }
                         if ounresolved {
                             let r0 = unsafe fa.list(returns)[0];
-                            let rn = *fa.at_const(r0);
-                            let tn = if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0);
-                            self.tc_infer_ev(self.lower_type_in(fmod, tn), self.strip(want), id, true);
+                            self.tc_infer_ev(self.node_type_in(fmod, r0), self.strip(want), id, true);
                             for k in 0..og {
                                 if obound[k as usize] == TYPE_NONE {
                                     obound[k as usize] = self.icx.sv.s_resolve(k as u32, it_conv_join);
@@ -11132,7 +11177,7 @@ extend TypeChecker {
         // to codegen unconverted.
         if conv_target != TYPE_NONE && skip == 1 && params.len == 1 {
             let pid0 = unsafe fa.list(params)[0];
-            let raw0 = if_ty(named, self.decl_type_in(fmod, pid0), self.lower_type_in(fmod, pid0));
+            let raw0 = self.node_type_in(fmod, pid0);
             // Receiver frame FIRST: an inferred method binding may mention the very parameters the
             // receiver frame rebinds ({1*BITS} under BITS := {2*BITS}); the old order substituted twice.
             let pt0 = self.subst_type(self.subst_type(raw0, &rsubp[0], &rsuba[0], nrsub), &gparams[0], &gargs[0], gn);
@@ -11170,7 +11215,7 @@ extend TypeChecker {
         } else {
             for i in 0..expected {
                 let pid = unsafe fa.list(params)[(i + skip) as usize];
-                let raw = if_ty(named, self.decl_type_in(fmod, pid), self.lower_type_in(fmod, pid));
+                let raw = self.node_type_in(fmod, pid);
                 let pt = self.subst_type(self.subst_type(raw, &rsubp[0], &rsuba[0], nrsub), &gparams[0], &gargs[0], gn);
                 let aid = unsafe a.list(args)[i as usize];
                 // A closure postponed on a path that skipped call inference is checked here, once,
@@ -11276,11 +11321,7 @@ extend TypeChecker {
                 self.icx.mret_total = returns.len;
                 for i in 0..self.icx.mret_n {
                     let mrid = unsafe fa.list(returns)[i as usize];
-                    let mrn = fa.at_const(mrid);
-                    let mrt = self.lower_type_in(
-                        fmod,
-                        if_node(mrn.kind == NodeKind::NODE_PARAMETER, mrn.as_data.parameter.ty, mrid),
-                    );
+                    let mrt = self.node_type_in(fmod, mrid);
                     unsafe self.icx.mret_types[i as usize] = self.subst_type(
                         self.subst_type(mrt, &gparams[0], &gargs[0], gn),
                         &rsubp[0],
@@ -11295,8 +11336,7 @@ extend TypeChecker {
             return Ast::builtin(BuiltinType::BT_VOID);
         }
         let r0 = unsafe fa.list(returns)[0];
-        let rn = fa.at_const(r0);
-        let ret = self.lower_type_in(fmod, if_node(rn.kind == NodeKind::NODE_PARAMETER, rn.as_data.parameter.ty, r0));
+        let ret = self.node_type_in(fmod, r0);
         return self.subst_type(self.subst_type(ret, &rsubp[0], &rsuba[0], nrsub), &gparams[0], &gargs[0], gn);
     }
 
@@ -11717,7 +11757,7 @@ extend TypeChecker {
                     }
                     let tnode = unsafe self.mod_ast(bmod).list(bd0.as_data.aggregate.members)[idx as usize];
                     self.cur_ast().set_resolution_def(mname, DefId { module: bmod, node: tnode });
-                    return self.subst_type(self.lower_type_in(bmod, tnode), &gp[0], &ga[0], gn);
+                    return self.subst_type(self.node_type_in(bmod, tnode), &gp[0], &ga[0], gn);
                 }
                 let mut fld = Buf96 {};
                 unsafe stdio::snprintf(
@@ -12222,12 +12262,7 @@ extend TypeChecker {
                     );
                 } else {
                     self.cur_ast().set_resolution_def(fnn, DefId { module: vmod, node: field });
-                    let ft = self.subst_type(
-                        self.lower_type_in(vmod, self.mod_ast(vmod).at_const(field).as_data.field.ty),
-                        &gp[0],
-                        &ga[0],
-                        gn,
-                    );
+                    let ft = self.subst_type(self.decl_type_in(vmod, field), &gp[0], &ga[0], gn);
                     if !self.compatible(ft, fval) {
                         self.err_mismatch(fval, ft);
                     }
@@ -14934,7 +14969,7 @@ extend TypeChecker {
                             va.at_const(pf.as_data.field.name).as_data.name.text,
                         ) {
                             matchId = pfid;
-                            ft = self.subst_type(self.lower_type_in(bmod, pf.as_data.field.ty), &gp[0], &ga[0], gn);
+                            ft = self.subst_type(self.decl_type_in(bmod, pfid), &gp[0], &ga[0], gn);
                             break;
                         }
                     }
@@ -15491,8 +15526,8 @@ extend TypeChecker {
 
     fn close_instances(self: &mut Self) {
         let mut ii: usize = 0;
-        while ii < unsafe self.cur_ast().instances.len() {
-            let it = *self.cur_ast().instance(ii as u32);
+        while ii < self.cur_ast().ninstances() {
+            let it = *self.cur_ast().used_instance(ii);
             let mut concrete = true;
             for k in 0..it.n {
                 if !unsafe self.cur_ast().type_concrete(it.args[k as usize]) {
@@ -15781,6 +15816,9 @@ extend TypeChecker {
             file = unsafe self.package.modules[self.cur_module() as usize].file.as_str();
         }
         self.errors.finalize(self.source, file);
+        if unsafe TS_ON {
+            ts_add(TS_LOWER_MEMO_N, self.lower_memo.len() as u64);
+        }
     }
 
     /// True once any type error is recorded.

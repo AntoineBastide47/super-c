@@ -35,7 +35,8 @@ CONTRACT_CMD_BENCH="./super-c bench --bench-filter=self_transpile"
 # and the two emitted build/raw trees must be byte-identical except CONTRACT_NONDET_FILES.
 CONTRACT_FIXPOINT_GEN1="./super-c build"
 CONTRACT_FIXPOINT_GEN2="./gen1-super-c build"
-# The worker-count identity: the same gen1 binary, `--jobs=1` against `--jobs=<max>`, same comparison.
+# The worker-count identity: the same gen1 binary, `--jobs=1` against `--jobs=<max>` under SC_TASK_DELAY=1,
+# same comparison, plus a byte comparison of the SC_TYPE_TABLE dumps.
 CONTRACT_WORKERS_MIN=1
 
 # ---- C compilation --------------------------------------------------------------------------------------

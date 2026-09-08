@@ -138,13 +138,13 @@ fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
             let _ = mark_live(row, n, d.module);
         }
     }
-    let nt = unsafe a.type_pool.len();
+    let nt = a.ntypes();
     for ti in 0..nt {
-        let _ = mark_type_modules(p, m as ModuleId, ti as TypeId, row);
+        let _ = mark_type_modules(p, m as ModuleId, a.used_type(ti), row);
     }
-    let ni = unsafe a.instances.len();
+    let ni = a.ninstances();
     for ii in 0..ni {
-        let it = *a.instance(ii as u32);
+        let it = *a.used_instance(ii);
         if it.module as usize < n {
             let _ = mark_live(row, n, it.module);
         }
@@ -466,6 +466,7 @@ fn tc_run_one(t: TcTask) {
     let pkg = t.p;
     for k in 0..t.nmods {
         let i = (unsafe t.mods[k]) as usize;
+        task_delay(i);
         let p = unsafe &mut *t.p;
         let out = unsafe (t.outs + i);
         let want = t.lint && !p.modules[i].prelude;
@@ -827,8 +828,8 @@ fn layout_pass(p: &mut loader::Package) {
             continue;
         }
         let a = unsafe &*p.module_ast_const(m as ModuleId);
-        for t in 0..a.type_pool.len() {
-            let ty = t as TypeId;
+        for t in 0..a.ntypes() {
+            let ty = a.used_type(t);
             if !a.type_concrete(ty) {
                 continue;
             }
@@ -1422,9 +1423,9 @@ fn cemit_layout_asserts(
         any = true;
     }
     {
-        let ninst = unsafe (&*p.module_ast_const(m)).instances.len();
+        let ninst = unsafe (&*p.module_ast_const(m)).ninstances();
         for ii in 0..ninst {
-            let it = *unsafe (&*p.module_ast_const(m)).instance(ii as u32);
+            let it = *unsafe (&*p.module_ast_const(m)).used_instance(ii);
             if it.module != m {
                 continue;
             }
@@ -3083,12 +3084,16 @@ pub fn cemit_package(
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tt0 = unsafe shim::sc_ticks_ms();
     let mut prd = prb::Probe::new(tstat, stdlib::getenv("SC_BUILD_MEM") != null);
+    publish_checkpoint(p, irkeep);
     // The planner's signature-level propagation reads the package metadata.
     p.ensure_sigs();
     let gm9 = prd.start();
     let mut g = ig::InstGraph::new(p, irkeep, live);
     g.collect();
     prd.stop(prb::P_GRAPH, gm9);
+    if unsafe TS_ON {
+        ts_add(TS_IG_BYTES, g.retained_bytes());
+    }
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage collect: {} ms\n", t9 - tt0);
@@ -3129,6 +3134,7 @@ pub fn cemit_package(
         let _ = em.emit_agg(&it);
     }
     bst::mark(bst::B_PLAN);
+    ts_phase("graph");
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage collect+aggs: {} ms\n", t9 - tt0);
@@ -4741,7 +4747,142 @@ pub fn cemit_package(
     prd.merge(&cem.pr);
     dctx_drop(&mut prd);
     o.pr = prd;
+    if unsafe TS_ON {
+        ty_stats_report(p);
+    }
+    let dumpp = stdlib::getenv("SC_TYPE_TABLE");
+    if dumpp != null {
+        let mut txt = String::new();
+        p.type_table_dump(&mut txt);
+        let path = String::from_cstr(dumpp);
+        let f = stdio::fopen(path.as_str(), "wb");
+        if f != null {
+            unsafe stdio::fwrite(txt.as_ptr(), 1, txt.len(), f);
+            unsafe stdio::fclose(f);
+        }
+    }
     bst::mark(bst::B_RENDER);
+    ts_phase("render");
+}
+
+/// A type publication checkpoint: the whole-package typecheck frontier (before borrow checking)
+/// and the borrow-check frontier (before emission) each end with every provisional type
+/// published under a final package id and every retained store remapped: the module tables, the
+/// constant engine, and the kept lowerings.
+pub fn publish_checkpoint(p: &mut loader::Package, keep: *mut irl::Keep) {
+    if p.tt.deref().len() == 0 {
+        return; // module-local identity (no bind_types): nothing to publish
+    }
+    p.publish_types();
+    if p.cir != null {
+        let ci = unsafe &mut *(p.cir as *mut iri::Interp);
+        ci.remap_types(p);
+    }
+    if keep != null {
+        unsafe (&mut *keep).remap_types(p);
+    }
+    if stdlib::getenv("SC_TYPE_VALIDATE") != null && !p.check_published() {
+        unsafe stdlib::exit(1);
+    }
+}
+
+/// SC_TASK_DELAY=1: a deterministic per-module delay at the start of every parallel task, so the
+/// worker-identity gates run under a scheduling the machine would not produce by itself.
+fn task_delay(m: usize) {
+    if stdlib::getenv("SC_TASK_DELAY") != null {
+        prt::sleep_ns(((m % 4) as i64 + 1) * 500000);
+    }
+}
+
+/// The SC_TYPE_STATS report: the identity-path counters, the bytes the per-module type pools and
+/// their indexes retain, and the structural census (how many pool entries stand for one type).
+fn ty_stats_report(p: &loader::Package) {
+    let mut types: u64 = 0;
+    let mut insts: u64 = 0;
+    let mut pool_bytes: u64 = 0;
+    let mut index_bytes: u64 = 0;
+    let mut nominal: u64 = 0;
+    let g = p.tt.deref();
+    for t in 1..g.len() {
+        let k = g.at(t).kind;
+        if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM || k == TypeKind::TYPE_OPAQUE || k == TypeKind::TYPE_FUNCTION || k == TypeKind::TYPE_GENERIC {
+            nominal += 1;
+        }
+    }
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        types += a.ntypes() as u64;
+        insts += a.ninstances() as u64;
+        pool_bytes += a.pool.retained() as u64;
+        index_bytes += ((a.used.len() + a.used_inst.len()) * 4 + a.used_bits.len() * 8) as u64;
+    }
+    eprintln(
+        "type-stats: sizeof Ty {} TyInstance {} InstRec {} ArgKey {}",
+        sizeof(Ty),
+        sizeof(TyInstance),
+        sizeof(ig::InstRec),
+        sizeof(ig::ArgKey),
+    );
+    eprintln(
+        "type-stats: intern calls {} hits {} probe-steps {} rebuilds {} | instance calls {} hits {} probe-steps {}",
+        ts_get(TS_INTERN),
+        ts_get(TS_INTERN_HIT),
+        ts_get(TS_INTERN_PROBE),
+        ts_get(TS_INTERN_REBUILD),
+        ts_get(TS_INST),
+        ts_get(TS_INST_HIT),
+        ts_get(TS_INST_PROBE),
+    );
+    eprintln(
+        "type-stats: reintern calls {} ({} us) | xty calls {} map-hits {} ({} us) | foreign lower calls {} memo-hits {} ({} us) memo entries {}",
+        ts_get(TS_REINTERN),
+        ts_get(TS_REINTERN_NS) / 1000,
+        ts_get(TS_XTY),
+        ts_get(TS_XTY_HIT),
+        ts_get(TS_XTY_NS) / 1000,
+        ts_get(TS_LOWER),
+        ts_get(TS_LOWER_HIT),
+        ts_get(TS_LOWER_NS) / 1000,
+        ts_get(TS_LOWER_MEMO_N),
+    );
+    eprintln(
+        "type-stats: instance-graph adds {} hits {} ({} us) retained {} B | layout services {} queries {} hits {} computed {} ({} us) | fn_sig calls {}",
+        ts_get(TS_IGADD),
+        ts_get(TS_IGADD_HIT),
+        ts_get(TS_IGADD_NS) / 1000,
+        ts_get(TS_IG_BYTES),
+        ts_get(TS_LAY_SVC),
+        ts_get(TS_LAY),
+        ts_get(TS_LAY_HIT),
+        ts_get(TS_LAY_RAW),
+        ts_get(TS_LAY_NS) / 1000,
+        ts_get(TS_FNSIG),
+    );
+    eprintln(
+        "type-stats: layout cache entries {} (~{} B) | foreign lowerings in signatures {} of {}",
+        ts_get(TS_LAY_INS),
+        ts_get(TS_LAY_INS) * 34,
+        ts_get(TS_LOWER_SIG),
+        ts_get(TS_LOWER),
+    );
+    eprintln(
+        "type-stats: package table: {} types ({} nominal), {} instance records, {} const forms, {} B retained; module use lists: {} type uses, {} instance uses, {} B, provisional pools {} B; translation maps: lower-memo {} entries (~{} B), inliner {} B",
+        g.len(),
+        nominal,
+        g.ninst(),
+        g.nclin(),
+        g.retained(),
+        types,
+        insts,
+        index_bytes,
+        pool_bytes,
+        ts_get(TS_LOWER_MEMO_N),
+        ts_get(TS_LOWER_MEMO_N) * 24,
+        ts_get(TS_XM_BYTES),
+    );
 }
 
 // A literal const-initializer element as C: string literals become str views, integers copy
@@ -5423,6 +5564,9 @@ fn dctx_drop(acc: &mut prb::Probe) {
             let d9 = (unsafe &mut *pv).index_mut(i);
             d9.fold_probe();
             acc.merge(&d9.pr);
+            if unsafe TS_ON {
+                ts_add(TS_XM_BYTES, d9.inl.xm_bytes());
+            }
         }
         pv.free();
         let mut g9 = Global {};
@@ -5499,7 +5643,7 @@ extend DropCtx {
                 eprint("{} owner {}:{}\n", iline.as_str(), lw.body.module, lw.body.owner.node);
             }
             if ist.inlined != 0 && self.core_ir {
-                let tp9 = unsafe (&*(&*lw.pkg).module_ast_const(lw.body.module)).type_pool.len();
+                let tp9 = unsafe (&*(&*lw.pkg).module_ast_const(lw.body.module)).type_bound();
                 let iv9 = irv::verify(&lw.body, tp9, lw.pkg);
                 if iv9.len() != 0 {
                     eprintln("SC_CORE_IR: inline verify: {}", iv9);
@@ -6706,6 +6850,7 @@ unsafe extend BcSlot as Send {}
 
 fn bc_run_one(t: BcTask) {
     let pkg = t.p;
+    task_delay(t.i);
     let p = unsafe &mut *t.p;
     let mut slot = bc_slot_take(unsafe &*t.pool, p);
     if t.want_keep {
@@ -6750,6 +6895,7 @@ fn bc_slot_give(pool: &psync::Mutex<Vector<BcSlot>>, slot: BcSlot) {
 /// identically. `keep` (null = discard) collects every lowered body for the backend. False when
 /// any module reported an error.
 pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
+    publish_checkpoint(p, keep);
     let n = p.modules.len();
     if p.jobs != 1 && n > 1 {
         return borrowck_all_par(p, keep);
@@ -8242,6 +8388,7 @@ fn run_package_i(
         return 1;
     }
     bst::mark(bst::B_TYPECHECK);
+    ts_phase("typecheck");
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase typecheck: {} ms\n", t9 - tp0);
@@ -8271,6 +8418,7 @@ fn run_package_i(
         return 1;
     }
     bst::mark(bst::B_BORROWCK);
+    ts_phase("borrowck");
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase borrowck: {} ms\n", t9 - tp0);
@@ -8331,6 +8479,7 @@ fn run_package_i(
         return 1;
     }
     bst::mark(bst::B_CHECKS);
+    ts_phase("checks");
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase lint+panics: {} ms\n", t9 - tp0);
@@ -8389,6 +8538,7 @@ fn run_package_i(
     let mut order = Vector::<ModuleId>::new();
     p.emit_order(&mut order);
     bst::mark(bst::B_PREPARE);
+    ts_phase("prepare");
     // The whole-package Core-IR emission runs BEFORE the live-module list: it seeds every module
     // unconditionally, so any module with a non-empty TU must be written even when the reference
     // scan finds no direct use (prelude bodies the instance TU calls into).

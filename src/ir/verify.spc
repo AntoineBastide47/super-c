@@ -96,7 +96,7 @@ fn is_sliceable(da: &Ast, sv: &SafeViews, ty0: TypeId) bool {
 }
 
 /// First violated rule as a static string, or "" when the body verifies.
-pub fn verify(b: &ir::CoreBody, type_pool_len: usize, pkg: *const loader::Package) str<'static> {
+pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) str<'static> {
     if b.blocks.len() == 0 {
         return "no-blocks";
     }
@@ -104,7 +104,7 @@ pub fn verify(b: &ir::CoreBody, type_pool_len: usize, pkg: *const loader::Packag
         return "entry-out-of-range";
     }
     for i in 0..b.locals.len() {
-        if b.locals.at(i).ty as usize >= type_pool_len {
+        if b.locals.at(i).ty as usize >= type_bound {
             return "local-type-out-of-range";
         }
     }
@@ -122,7 +122,7 @@ pub fn verify(b: &ir::CoreBody, type_pool_len: usize, pkg: *const loader::Packag
         if pj.kind == ir::PJ_INDEX_OP && pj.data as usize >= b.operands.len() {
             return "proj-index-operand";
         }
-        if pj.ty as usize >= type_pool_len {
+        if pj.ty as usize >= type_bound {
             return "proj-type-out-of-range";
         }
     }
@@ -165,7 +165,7 @@ pub fn verify(b: &ir::CoreBody, type_pool_len: usize, pkg: *const loader::Packag
             }
         } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_SIZEOF || r.c == ir::IN_ALIGNOF || r.c == ir::IN_TYPE_INFO || r.c == ir::IN_DANGLING) {
             // `b` carries the measured/described TypeId, not an operand count
-            if r.b as usize >= type_pool_len {
+            if r.b as usize >= type_bound {
                 return "intrinsic-type-out-of-range";
             }
         } else if r.kind == ir::RV_SLICE {
@@ -183,7 +183,7 @@ pub fn verify(b: &ir::CoreBody, type_pool_len: usize, pkg: *const loader::Packag
                 return "rvalue-range-out-of-range";
             }
         }
-        if r.target as usize >= type_pool_len {
+        if r.target as usize >= type_bound {
             return "rvalue-type-out-of-range";
         }
     }

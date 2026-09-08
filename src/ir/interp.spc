@@ -170,6 +170,62 @@ pub struct StaticObj {
     pub rels: Vector<SRel>,
 }
 
+// Remap one (module, type) pair through the package's last publication.
+const fn rm_ty(p: &loader::Package, m: ModuleId, t: TypeId) TypeId {
+    return p.map_type(m, t);
+}
+
+extend Interp {
+    /// Rewrite every type the engine retains (values, objects, statics, bindings, the lowered
+    /// callee cache) through the package's last publication. Every memo whose keys or values
+    /// name a type id is dropped: a module's provisional ids restart after the checkpoint, so a
+    /// stale entry could match a different type, not only miss.
+    pub fn remap_types(self: &mut Self, p: &loader::Package) {
+        for i in 0..self.objs.len() {
+            let o = self.objs.index_mut(i);
+            for s in 0..o.slots.len() {
+                let v = o.slots.index_mut(s);
+                v.ty = rm_ty(p, v.tm, v.ty);
+            }
+            for k in 0..4 {
+                unsafe o.at[k] = rm_ty(p, unsafe o.am[k], unsafe o.at[k]);
+            }
+            o.et = rm_ty(p, o.em, o.et);
+        }
+        for i in 0..self.statics.len() {
+            let so = self.statics.index_mut(i);
+            for k in 0..4 {
+                unsafe so.at[k] = rm_ty(p, unsafe so.am[k], unsafe so.at[k]);
+            }
+            so.ety = rm_ty(p, so.etm, so.ety);
+            for s in 0..so.slots.len() {
+                let sl = so.slots.index_mut(s);
+                sl.ty = rm_ty(p, sl.tm, sl.ty);
+            }
+        }
+        for i in 0..self.subst.len() {
+            let sb = self.subst.index_mut(i);
+            sb.at = rm_ty(p, sb.am, sb.at);
+        }
+        for i in 0..self.rets.len() {
+            let v = self.rets.index_mut(i);
+            v.ty = rm_ty(p, v.tm, v.ty);
+        }
+        for i in 0..self.bodies.len() {
+            let lw = self.bodies.index_mut(i).deref_mut();
+            let m = lw.body.module as usize;
+            if m < p.pub_map.len() && p.pub_map.at(m).len() != 0 {
+                lw.body.remap_types(p.pub_map.at(m));
+            }
+        }
+        self.call_memo.clear();
+        self.item_memo.clear();
+        self.ememo.clear();
+        self.body_ix.clear();
+        self.lsvc.reset();
+    }
+}
+
 pub struct StaticRes {
     pub ok: bool,
     pub root: u32,
@@ -940,7 +996,7 @@ extend Interp {
                 return true;
             }
             let a = unsafe &*self.p().module_ast_const(m);
-            if t as usize >= a.type_pool.len() {
+            if !a.type_valid(t) {
                 return false; // a foreign-pool id: unanswerable in this pool
             }
             let y = *a.type_at(t);
@@ -2421,7 +2477,7 @@ extend Interp {
                 let sb2 = *self.subst.at(i2);
                 if sb2.pmod == m && sb2.pnode == cnode {
                     let ya = unsafe &*self.p().module_ast_const(sb2.am);
-                    if sb2.at as usize < ya.type_pool.len() {
+                    if ya.type_valid(sb2.at) {
                         let yv = *ya.type_at(sb2.at);
                         if yv.kind == TypeKind::TYPE_CONST {
                             return iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), yv.as_data.value);
@@ -3789,7 +3845,7 @@ extend Interp {
             return none();
         }
         let da = unsafe &*self.p().module_ast_const(fm);
-        if ft as usize < da.type_pool.len() {
+        if da.type_valid(ft) {
             let y = *da.type_at(ft);
             if y.kind == TypeKind::TYPE_ARRAY && y.as_data.arr.len == 0 {
                 // recover the symbolic length: find the field's type node and evaluate its
@@ -3834,7 +3890,7 @@ extend Interp {
                         if unsafe a0.list(gens)[gi as usize] == ld.node {
                             let ya = unsafe &*self.p().module_ast_const(unsafe am[gi as usize]);
                             let yat = unsafe at[gi as usize];
-                            if yat as usize < ya.type_pool.len() && ya.type_at(yat).kind == TypeKind::TYPE_CONST {
+                            if ya.type_valid(yat) && ya.type_at(yat).kind == TypeKind::TYPE_CONST {
                                 nlen = ya.type_at(yat).as_data.value;
                             }
                             break;

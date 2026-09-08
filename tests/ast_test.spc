@@ -69,3 +69,54 @@ fn interner() {
     assert(a1 != b1, "differing qualifier interns distinctly");
     assert(a.type_concrete(a1) && !a.type_concrete(g) && !a.type_concrete(pg), "concreteness is cached recursively");
 }
+
+// The intern index grows geometrically: a rebuild leaves the load strictly under the trigger, so a
+// run of hits at the boundary never rebuilds again (it did: about 2,000 rebuilds per transpile).
+@test
+fn interner_index_rebuilds_geometrically() {
+    ts_init();
+    let was = unsafe TS_ON;
+    unsafe TS_ON = true;
+    let before = ts_get(TS_INTERN_REBUILD);
+    let mut a = Ast::new(8);
+    let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
+    a.init_types();
+    let mut last = Ast::builtin(BuiltinType::BT_I32);
+    for _ in 0..3000 {
+        last = a.intern_type(Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: last } });
+        // A hit right after every insert: the boundary case that used to thrash.
+        let again = a.intern_type(
+            Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: a.type_at(last).as_data.elem } },
+        );
+        assert(again == last, "a repeated Ty is a hit");
+    }
+    let rebuilds = ts_get(TS_INTERN_REBUILD) - before;
+    unsafe TS_ON = was;
+    assert(rebuilds <= 12, "3000 distinct types take at most log2 rebuilds");
+}
+
+// SC_TYPE_COLLIDE puts every type in one bucket: identity then rests on the full comparison alone,
+// and every hit and miss answers as before.
+@test
+fn interner_survives_full_collisions() {
+    let was = unsafe TS_COLLIDE;
+    unsafe TS_COLLIDE = true;
+    let mut a = Ast::new(8);
+    let _ = a.add(Node { kind: NodeKind::NODE_IDENTIFIER });
+    a.init_types();
+    let seeds = a.pool.len();
+    let n: usize = 200;
+    let mut ids = Vector::<TypeId>::new();
+    let mut last = Ast::builtin(BuiltinType::BT_I32);
+    for _ in 0..n {
+        last = a.intern_type(Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: last } });
+        ids.push(last);
+    }
+    let mut again = Ast::builtin(BuiltinType::BT_I32);
+    for i in 0..n {
+        again = a.intern_type(Ty { kind: TypeKind::TYPE_POINTER, as_data: TyAs { elem: again } });
+        assert(again == ids[i], "a repeated Ty is a hit under full collisions");
+    }
+    unsafe TS_COLLIDE = was;
+    assert_eq(a.pool.len(), seeds + n);
+}

@@ -347,7 +347,7 @@ fn verifier_rejects_unchecked_projection() {
     let u = (p.modules.len() - 1) as ModuleId;
     let mut lw = irl::Lowerer::new(&p, u, node);
     assert(lw.lower_fn(node), "body lowers");
-    let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
+    let tp = unsafe (&*p.module_ast_const(u)).type_bound();
     assert_eq(irv::verify(&lw.body, tp, &p), "");
     // corrupt: route the projection operand through the raw `i` parameter, not the check result.
     let mut hit = false;
@@ -376,7 +376,7 @@ fn verifier_rejects_unvalidated_slice_end() {
     let u = (p.modules.len() - 1) as ModuleId;
     let mut lw = irl::Lowerer::new(&p, u, node);
     assert(lw.lower_fn(node), "body lowers");
-    let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
+    let tp = unsafe (&*p.module_ast_const(u)).type_bound();
     assert_eq(irv::verify(&lw.body, tp, &p), "");
     // corrupt: hand RV_SLICE the raw `b2` parameter instead of the validated exclusive end.
     let mut hit = false;

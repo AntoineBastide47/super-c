@@ -6564,3 +6564,131 @@ fn build_compile_commands_json() {
         },
     };
 }
+
+const TT_SHAPES: str = M"(pub struct Pair<T> {
+    pub a: T,
+    pub b: T,
+}
+pub enum Shape {
+    Dot,
+    Line(i32, i32),
+}
+pub interface Area {
+    fn area(self: &Self) i64;
+}
+pub struct Sq {
+    pub s: i64,
+}
+extend Sq as Area {
+    pub fn area(self: &Self) i64 {
+        return self.s * self.s;
+    }
+}
+pub fn swap(p: &mut Pair<i32>) {
+    let t = p.a;
+    p.a = p.b;
+    p.b = t;
+}
+pub fn total(v: &Vector<Sq>, d: &dyn Area) i64 {
+    let mut n: i64 = d.area();
+    for i in 0..v.len() {
+        n = n + v[i].area();
+    }
+    return n;
+}
+pub fn last(xs: [u16; 4]) u16 {
+    return xs[3];
+}
+)";
+
+const TT_MAIN: str = M"(import shapes;
+extern "C" { fn exit(code: i32) void; }
+fn count(s: shapes::Shape) i32 {
+    return switch s {
+        Dot => 1,
+        Line(a, b) => a + b,
+    };
+}
+fn main() i32 {
+    let mut p = shapes::Pair::<i32> { a: 1, b: 2 };
+    shapes::swap(&mut p);
+    let mut v = Vector::<shapes::Sq>::new();
+    v.push(shapes::Sq { s: 2 });
+    let q = shapes::Sq { s: 3 };
+    let w: [u16; 4] = [1, 2, 3, 4];
+    let f = fn(x: i32) i32 { return x + p.a; };
+    unsafe exit(count(shapes::Shape::Line(p.a, p.b)) + shapes::total(&v, &q) as i32 + shapes::last(w) as i32 + f(0));
+}
+)";
+
+// One `super-c build` with the type table written to `<root>/tt<tag>.txt`; the table text.
+fn tt_build(root: str, tag: str, env: str, flags: str) String {
+    let mut path = String::new();
+    path.format_into("{}/tt{}.txt", root, tag);
+    let mut val = String::new();
+    val.format_into("{} SC_NO_EMIT_CACHE=1 {}", path.as_str(), env);
+    let mut args = String::new();
+    args.format_into("build {} --out-dir={}/o{} -o {}/o{}/app", flags, root, tag, root, tag);
+    let r = cli::superc_env_in(root, "SC_TYPE_TABLE", val.as_str(), args.as_str());
+    assert(r.ok(), "the build succeeds");
+    let t = cli::read_text(path.as_str());
+    assert(t.len() > 0, "the type table was written");
+    return t;
+}
+
+// The lines of `t` whose class column reads `cls` (`id class kind ...`).
+fn tt_class(t: &String, cls: str) String {
+    let mut out = String::new();
+    for line in t.as_str().lines() {
+        let sp = line.find_byte(b' ');
+        assert(sp > 0, "a table line starts with the id");
+        let rest = line.slice((sp + 1) as usize, line.len());
+        let sp2 = rest.find_byte(b' ');
+        assert(sp2 > 0, "then the class");
+        if rest.slice(0, sp2 as usize) == cls {
+            out.push_str(line);
+            out.push_str("\n");
+        }
+    }
+    return out;
+}
+
+// The package type table is one deterministic identity per structural type: one worker, every
+// worker under a skewed task schedule, and a fully colliding hash publish the same table; no two
+// records read the same; and a body-only edit at the end of a module keeps every signature-class
+// id and record (only body-class and instance-graph ids move).
+@test
+fn type_table_is_deterministic() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/shapes.spc", TT_SHAPES);
+    p.mkfile("src/main.spc", TT_MAIN);
+    let root = str::from_cstr(p.rootp());
+    let t1 = tt_build(root, "1", "SC_TYPE_VALIDATE=1", "--jobs=1");
+    let t2 = tt_build(root, "2", "SC_TYPE_VALIDATE=1 SC_TASK_DELAY=1", "--jobs=4");
+    assert(t1.equals(&t2), "one worker and four delayed workers publish the same table");
+    let t3 = tt_build(root, "3", "SC_TYPE_VALIDATE=1 SC_TYPE_COLLIDE=1", "--jobs=4");
+    assert(t1.equals(&t3), "a colliding hash publishes the same table");
+    let mut seen = Set::<String>::new();
+    let mut n: usize = 0;
+    for line in t1.as_str().lines() {
+        let sp = line.find_byte(b' ');
+        let rec = String::from_str(line.slice((sp + 1) as usize, line.len()));
+        assert(!seen.contains(&rec), "no two records read the same");
+        seen.insert(rec);
+        n = n + 1;
+    }
+    assert(n > 100, "the table holds the prelude and the program");
+    let sig1 = tt_class(&t1, "0");
+    assert(sig1.len() > 0, "signature-class records exist");
+    assert(tt_class(&t1, "1").len() > 0, "body-class records exist");
+    let mut edited = String::from_str(TT_SHAPES);
+    edited.push_str(
+        "pub fn tail(xs: [u16; 4]) u16 {\n    let deeper: *const *const *const *const u8 = null;\n    let _ = deeper;\n    return xs[3];\n}\n",
+    );
+    p.mkfile("src/shapes.spc", edited.as_str());
+    let t4 = tt_build(root, "4", "SC_TYPE_VALIDATE=1", "--jobs=1");
+    assert(!t1.equals(&t4), "the edit adds body records");
+    let sig4 = tt_class(&t4, "0");
+    assert(sig1.equals(&sig4), "every signature-class id and record survives a body edit");
+}

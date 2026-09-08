@@ -155,8 +155,8 @@ pub struct Owner {
     // Owns/carries are pure functions of (mid, ty) on concrete types, and type ids are dense per
     // module, so a `[mid][ty]` byte array replaces the u64-keyed hashmap on these very hot recursive
     // queries (the single biggest borrowck cost was the Map probe). -1 = unknown, 0 = no, 1 = yes.
-    owns_arr: Vector<Vector<i8>>,
-    carry_arr: Vector<Vector<i8>>,
+    owns_arr: Vector<Vector<u64>>,
+    carry_arr: Vector<Vector<u64>>,
     busy: Vector<u64>,
     // Per-callee and per-type-node caches: call boundaries re-read the same signatures constantly.
     pub callee_flags: Map<u64, u64>, // (mod << 32 | node) -> 4 | self << 0 | free << 1
@@ -180,31 +180,19 @@ pub struct Owner {
 
 // Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
 @c.always_inline
-fn cache_get(arr: &mut Vector<Vector<i8>>, mid: ModuleId, ty: TypeId) i8 {
-    while arr.len() <= mid as usize {
-        arr.push(Vector::<i8>::new());
+fn cache_get(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId) i32 {
+    if arr.len() <= mid as usize {
+        return -1;
     }
-    let row = arr.index_mut(mid as usize);
-    while row.len() <= ty as usize {
-        row.push((0 - 1) as i8);
-    }
-    return *row.at(ty as usize);
+    return memo2_get(arr.at(mid as usize), ty_dense(ty));
 }
 
 @c.always_inline
-fn cache_set(arr: &mut Vector<Vector<i8>>, mid: ModuleId, ty: TypeId, r: bool) {
+fn cache_set(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId, r: bool) {
     while arr.len() <= mid as usize {
-        arr.push(Vector::<i8>::new());
+        arr.push(Vector::<u64>::new());
     }
-    let row = arr.index_mut(mid as usize);
-    while row.len() <= ty as usize {
-        row.push((0 - 1) as i8);
-    }
-    let mut cv: i8 = 0;
-    if r {
-        cv = 1;
-    }
-    row.set(ty as usize, cv);
+    memo2_set(arr.index_mut(mid as usize), ty_dense(ty), r);
 }
 
 /// One statement-order walk of a verified body. Reads happen at a statement's entry point, writes,
@@ -1921,8 +1909,8 @@ extend Owner {
             pkg: pkg,
             free_ext: Map::<u64, u64>::new(),
             ext_built: false,
-            owns_arr: Vector::<Vector<i8>>::new(),
-            carry_arr: Vector::<Vector<i8>>::new(),
+            owns_arr: Vector::<Vector<u64>>::new(),
+            carry_arr: Vector::<Vector<u64>>::new(),
             busy: Vector::<u64>::new(),
             callee_flags: Map::<u64, u64>::new(),
             kinds_memo: Map::<u64, u64>::new(),
@@ -2143,7 +2131,7 @@ extend Owner {
         if y.kind != TypeKind::TYPE_INSTANCE {
             return false;
         }
-        if y.as_data.inst as usize >= self.ast_of(mid).instances.len() {
+        if !self.ast_of(mid).instance_valid(y.as_data.inst) {
             return false;
         }
         let it = *self.ast_of(mid).instance(y.as_data.inst);
@@ -2386,7 +2374,7 @@ extend Owner {
             om = y.module;
             od = y.as_data.decl;
         } else if y.kind == TypeKind::TYPE_INSTANCE {
-            if y.as_data.inst as usize >= self.ast_of(mid).instances.len() {
+            if !self.ast_of(mid).instance_valid(y.as_data.inst) {
                 return false;
             }
             let it = *self.ast_of(mid).instance(y.as_data.inst);

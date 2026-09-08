@@ -1,7 +1,8 @@
 // The instance and reachability graph: discovers every concrete generic instantiation by walking
 // lowered Core IR bodies from concrete roots, expanding generic bodies under substitution frames.
-// Keys are package-stable: a declaration DefId plus the skey of every concrete argument, so records
-// from different module pools compare equal without touching any pool.
+// Keys are package-stable: a declaration DefId plus the final package id of every concrete
+// argument (the substituted type, interned into the package table), so records from different
+// modules compare by integer.
 import ast::ast as *;
 import module::loader as loader;
 import ir::core as ir;
@@ -16,10 +17,10 @@ pub const IG_METHOD: u8 = 2; // method demanded on a generic-aggregate instance
 /// The absent record index.
 pub const IG_NONE: u32 = 0xFFFFFFFF;
 
-/// One instance argument: its package-stable skey plus, for const-generic values, the folded
-/// integer (what lets compound const-exprs like `{BITS*2}` evaluate under a frame).
+/// One instance argument: the final id of its (substituted) type plus, for const-generic values,
+/// the folded integer (what lets compound const-exprs like `{BITS*2}` evaluate under a frame).
 pub struct ArgKey {
-    pub skey: u64,
+    pub ty: TypeId,
     pub val: i64,
     pub has_val: bool,
 }
@@ -79,9 +80,9 @@ pub struct InstGraph {
     // so owner lookups must not rescan the extend/item lists.
     ext_of: Map<u64, u64>, // (module << 32 | fnode) -> owning extend node (rows of `exts` only)
     iface_of: Map<u64, u64>, // (module << 32 | fnode) -> owning interface node
-    // Per-module TypeIds already fully walked by note_type under an EMPTY frame: bodies name the
-    // same interned types over and over, and a completed depth-0 walk covers every revisit.
-    noted: Vector<Vector<bool>>,
+    // Final ids already fully walked by note_type under an EMPTY frame: bodies name the same
+    // interned types over and over, and a completed depth-0 walk covers every revisit.
+    noted: Vector<bool>,
     /// One lowering per declaration, shared by every frame that walks it (lowering ignores the
     /// frame; only walking applies it). The emitter takes these bodies instead of re-lowering.
     /// `kept_ix` maps (module << 32 | node) to a `kept` index; 0xFFFFFFFFFFFFFFFF = lowering failed.
@@ -107,34 +108,6 @@ pub struct InstGraph {
     budget: u32,
 }
 
-/// type_skey with shared-reference spellings unified: a REFERENCE's CONST qualifier (written
-/// `&'a T`) keys as NONE (the checker-inserted form), so the two spellings of one shared borrow
-/// cannot split a record. Both sides of every instance comparison key through this.
-pub fn skey_norm(a: &Ast, t: TypeId, depth: i32) u64 {
-    if t == TYPE_NONE || depth > 8 {
-        return 0;
-    }
-    let y = *a.type_at(t);
-    let mut q = y.qualifier;
-    if y.kind == TypeKind::TYPE_REFERENCE && q == TypeQualifier::TYPE_QUAL_CONST as u8 {
-        q = TypeQualifier::TYPE_QUAL_NONE as u8;
-    }
-    let h = skey_mix(skey_mix(14695981039346656037u64, y.kind as u64), q);
-    return switch y.kind {
-        TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => skey_mix(h, skey_norm(a, y.as_data.elem, depth + 1)),
-        TYPE_ARRAY => skey_mix(skey_mix(h, skey_norm(a, y.as_data.arr.elem, depth + 1)), y.as_data.arr.len),
-        TYPE_INSTANCE | TYPE_DYN => {
-            let it = a.instance(y.as_data.inst);
-            let mut k = skey_mix(skey_mix(h, it.module), it.decl);
-            for i in 0..it.n {
-                k = skey_mix(k, skey_norm(a, unsafe it.args[i], depth + 1));
-            }
-            k;
-        },
-        _ => a.type_skey(t, depth),
-    };
-}
-
 extend InstGraph {
     /// An empty graph over `pkg`; `keep` (null = lower on demand) supplies kept lowerings and `live`
     /// (per module) selects the roots. Both must outlive the graph.
@@ -151,7 +124,7 @@ extend InstGraph {
             exts: Vector::<ExtRow>::new(),
             ext_of: Map::<u64, u64>::new(),
             iface_of: Map::<u64, u64>::new(),
-            noted: Vector::<Vector<bool>>::new(),
+            noted: Vector::<bool>::new(),
             kept: Vector::<irl::Lowerer>::new(),
             kept_ix: Map::<u64, u64>::new(),
             argbuf: Vector::<ArgKey>::new(),
@@ -162,6 +135,11 @@ extend InstGraph {
             overflow: false,
             budget: 64000000,
         };
+    }
+
+    /// Bytes the argument keys, records and index hold (SC_TYPE_STATS).
+    pub fn retained_bytes(self: &Self) u64 {
+        return (self.keys.len() * sizeof(ArgKey) + self.recs.len() * sizeof(InstRec) + self.index.len() * 4) as u64;
     }
 
     const fn spend(self: &mut Self, n: u32) bool {
@@ -175,13 +153,19 @@ extend InstGraph {
     }
 
     /// Intern the record whose argument keys sit in `argbuf`; returns its id and whether it was
-    /// new. Hash + equality use skeys only (the value is derived data riding along for frame
-    /// evaluation).
+    /// new. Hash + equality use the argument ids only (the value is derived data riding along for
+    /// frame evaluation).
     pub fn add(self: &mut Self, kind: u8, def: DefId, fresh: &mut bool) u32 {
+        let ts = unsafe TS_ON;
+        let mut t0: u64 = 0;
+        if ts {
+            ts_add(TS_IGADD, 1);
+            t0 = ts_now();
+        }
         let mut h = skey_mix(skey_mix(1469598103934665603u64, kind), def.module);
         h = skey_mix(h, def.node);
         for i in 0..self.argbuf.len() {
-            h = skey_mix(h, self.argbuf.at(i).skey);
+            h = skey_mix(h, self.argbuf.at(i).ty);
         }
         if self.index.len() == 0 || (self.ix_used as usize + 1) * 4 >= self.index.len() * 3 {
             let mut cap: usize = 64;
@@ -230,19 +214,26 @@ extend InstGraph {
                 self.index.set(i, id);
                 self.ix_used += 1;
                 *fresh = true;
+                if ts {
+                    ts_add(TS_IGADD_NS, ts_now() - t0);
+                }
                 return id;
             }
             let r = self.recs.at(cur as usize);
             if r.hash == h && r.kind == kind && r.def.module == def.module && r.def.node == def.node && r.args_len as usize == self.argbuf.len() {
                 let mut eq = true;
                 for k in 0..r.args_len {
-                    if self.keys.at((r.args_start + k) as usize).skey != self.argbuf.at(k as usize).skey {
+                    if self.keys.at((r.args_start + k) as usize).ty != self.argbuf.at(k as usize).ty {
                         eq = false;
                         break;
                     }
                 }
                 if eq {
                     *fresh = false;
+                    if ts {
+                        ts_add(TS_IGADD_HIT, 1);
+                        ts_add(TS_IGADD_NS, ts_now() - t0);
+                    }
                     return cur;
                 }
             }
@@ -250,56 +241,85 @@ extend InstGraph {
         }
     }
 
-    // type_skey with a substitution frame: a generic parameter keys as its bound argument, so the
-    // key of `Vector<T>` under {T -> i32} equals the key of `Vector<i32>` in any pool.
-    fn skey_subst(self: &Self, a: &Ast, t: TypeId, frame: &Vector<Subst>, depth: i32) u64 {
+    // The final id of `t` under `frame`: a generic parameter reads its bound argument, a const
+    // expression its folded value, and every compound is rebuilt with substituted children and
+    // interned into the package table (the graph runs serially, so the ids it appends are
+    // deterministic). A shared reference's CONST qualifier (written `&'a T`) normalizes to NONE,
+    // the checker-inserted form, so the two spellings of one borrow cannot split a record.
+    fn subst_intern(self: &Self, a: &Ast, t: TypeId, frame: &Vector<Subst>, depth: i32) TypeId {
         if t == TYPE_NONE || depth > 8 {
-            return 0;
+            return TYPE_NONE;
         }
         let y = *a.type_at(t);
+        let g = self.g();
         if y.kind == TypeKind::TYPE_GENERIC {
             for i in 0..frame.len() {
                 if frame.at(i).pmod == y.module && frame.at(i).pdecl == y.as_data.decl {
-                    return frame.at(i).key.skey;
+                    return frame.at(i).key.ty;
                 }
             }
-            return skey_norm(a, t, depth);
+            return g.intern_g(y);
         }
         if y.kind == TypeKind::TYPE_CONST_EXPR {
             let bound = self.const_expr_bound(a, &y, frame);
-            if bound.skey != 0 {
-                return bound.skey;
+            if bound.ty != TYPE_NONE {
+                return bound.ty;
             }
+            return g.intern_clin_g(a.const_lin_at(y.as_data.inst));
         }
-        let h = skey_mix(skey_mix(14695981039346656037u64, y.kind as u64), y.qualifier);
         return switch y.kind {
-            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => skey_mix(
-                h,
-                self.skey_subst(a, y.as_data.elem, frame, depth + 1),
-            ),
-            TYPE_ARRAY => skey_mix(
-                skey_mix(h, self.skey_subst(a, y.as_data.arr.elem, frame, depth + 1)),
-                y.as_data.arr.len,
-            ),
-            TYPE_BUILTIN => skey_mix(h, y.as_data.builtin as u64),
-            TYPE_CONST => skey_mix(h, y.as_data.value as u64),
-            TYPE_INSTANCE | TYPE_DYN => {
-                let it = a.instance(y.as_data.inst);
-                let mut k = skey_mix(skey_mix(h, it.module), it.decl);
-                for i in 0..it.n {
-                    k = skey_mix(k, self.skey_subst(a, unsafe it.args[i], frame, depth + 1));
+            TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => {
+                let mut nt = y;
+                nt.as_data.elem = self.subst_intern(a, y.as_data.elem, frame, depth + 1);
+                if y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
+                    nt.qualifier = TypeQualifier::TYPE_QUAL_NONE as u8;
                 }
-                k;
+                g.intern_g(nt);
             },
-            _ => a.type_skey(t, depth),
+            TYPE_ARRAY => {
+                let mut nt = y;
+                nt.as_data.arr.elem = self.subst_intern(a, y.as_data.arr.elem, frame, depth + 1);
+                g.intern_g(nt);
+            },
+            TYPE_FIELD_PROJECTION => {
+                let mut nt = y;
+                nt.as_data.proj.owner = self.subst_intern(a, y.as_data.proj.owner, frame, depth + 1);
+                g.intern_g(nt);
+            },
+            TYPE_INSTANCE | TYPE_DYN => {
+                let it = *a.instance(y.as_data.inst);
+                let mut na: [TypeId; 8] = [[0] = TYPE_NONE];
+                for i in 0..it.n {
+                    unsafe na[i as usize] = self.subst_intern(a, unsafe it.args[i as usize], frame, depth + 1);
+                }
+                let r9 = if y.kind == TypeKind::TYPE_DYN {
+                    g.intern_dyn_g(it.module, it.decl, &na[0], it.n, y.qualifier);
+                } else {
+                    g.intern_instance_g(it.module, it.decl, &na[0], it.n);
+                };
+                r9;
+            },
+            _ => {
+                let r9 = if (t & TYPE_PROV) == 0 {
+                    t;
+                } else {
+                    g.intern_g(y);
+                };
+                r9;
+            },
         };
+    }
+
+    // The package type table (the graph is the serial stage that may append to it).
+    const fn g(self: &Self) &mut TypePool {
+        return unsafe &mut *((&*self.pkg).tt.as_ptr() as *mut TypePool);
     }
 
     // The key a const-expr resolves to under `frame`: identity forms (`{N}`) inherit the bound
     // key verbatim; compound forms (`{BITS*2}`, `{(BITS+7)/8}`) EVALUATE when every param has a
-    // bound value, keying exactly as the emitter's folded TYPE_CONST does. skey 0 = unbound.
+    // bound value, keying exactly as the emitter's folded TYPE_CONST does. ty TYPE_NONE = unbound.
     fn const_expr_bound(self: &Self, a: &Ast, y: &Ty, frame: &Vector<Subst>) ArgKey {
-        let none = ArgKey { skey: 0, val: 0, has_val: false };
+        let none = ArgKey { ty: TYPE_NONE, val: 0, has_val: false };
         let l = a.const_lin_at(y.as_data.inst);
         // Identity: one coefficient-1 param, no constant, no divisor.
         let mut nact: u32 = 0;
@@ -347,21 +367,19 @@ extend InstGraph {
         if d > 1 {
             v = v / d;
         }
-        // Key exactly as type_skey keys the folded TYPE_CONST (qualifier 0).
-        let h = skey_mix(skey_mix(14695981039346656037u64, TypeKind::TYPE_CONST as u64), 0);
-        return ArgKey { skey: skey_mix(h, v as u64), val: v, has_val: true };
+        return ArgKey { ty: self.g().const_value_g(v), val: v, has_val: true };
     }
 
-    // The full ArgKey of `t` under `frame`: the substituted skey plus the folded value when the
-    // argument is a const (TYPE_CONST directly, or a const-expr the frame can evaluate).
+    // The full ArgKey of `t` under `frame`: the substituted type's final id plus the folded value
+    // when the argument is a const (TYPE_CONST directly, or a const-expr the frame can evaluate).
     fn argkey_subst(self: &Self, a: &Ast, t: TypeId, frame: &Vector<Subst>) ArgKey {
         let y = *a.type_at(t);
         if y.kind == TypeKind::TYPE_CONST {
-            return ArgKey { skey: self.skey_subst(a, t, frame, 0), val: y.as_data.value, has_val: true };
+            return ArgKey { ty: self.subst_intern(a, t, frame, 0), val: y.as_data.value, has_val: true };
         }
         if y.kind == TypeKind::TYPE_CONST_EXPR {
             let b = self.const_expr_bound(a, &y, frame);
-            if b.skey != 0 {
+            if b.ty != TYPE_NONE {
                 return b;
             }
         }
@@ -372,7 +390,7 @@ extend InstGraph {
                 }
             }
         }
-        return ArgKey { skey: self.skey_subst(a, t, frame, 0), val: 0, has_val: false };
+        return ArgKey { ty: self.subst_intern(a, t, frame, 0), val: 0, has_val: false };
     }
 
     // Is `t` concrete once the frame applies? (Every symbolic leaf must be bound.)
@@ -392,7 +410,7 @@ extend InstGraph {
         return switch y.kind {
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => self.concrete_subst(a, y.as_data.elem, frame, depth + 1),
             TYPE_ARRAY => self.concrete_subst(a, y.as_data.arr.elem, frame, depth + 1),
-            TYPE_CONST_EXPR => self.const_expr_bound(a, &y, frame).skey != 0,
+            TYPE_CONST_EXPR => self.const_expr_bound(a, &y, frame).ty != TYPE_NONE,
             TYPE_FIELD_PROJECTION => false,
             TYPE_INSTANCE | TYPE_DYN => {
                 let it = a.instance(y.as_data.inst);
@@ -415,24 +433,17 @@ extend InstGraph {
         if t == TYPE_NONE || depth > 8 {
             return;
         }
-        let memo = frame.len() == 0;
-        if memo {
-            if self.noted.len() == 0 {
-                for _i in 0..(unsafe &*self.pkg).modules.len() {
-                    self.noted.push(Vector::<bool>::new());
-                }
-            }
-            let seen = self.noted.at(a.module as usize);
-            if t as usize < seen.len() && *seen.at(t as usize) {
-                return;
-            }
+        // Only final ids memoize: a provisional id belongs to one module's transient pool.
+        let memo = frame.len() == 0 && (t & TYPE_PROV) == 0;
+        if memo && t as usize < self.noted.len() && self.noted[t as usize] {
+            return;
         }
         self.note_type_walk(a, t, frame, depth);
         if memo && depth == 0 {
-            while self.noted[a.module as usize].len() <= t as usize {
-                self.noted[a.module as usize].push(false);
+            while self.noted.len() <= t as usize {
+                self.noted.push(false);
             }
-            self.noted[a.module as usize].set(t as usize, true);
+            self.noted.set(t as usize, true);
         }
     }
 

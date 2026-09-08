@@ -122,6 +122,7 @@ pub fn compile(src: str, stop: i32) Compiled {
         h_typecheck(&mut p, i, uidx, &mut r);
     }
     if r.errors == 0 {
+        demit::publish_checkpoint(&mut p, null);
         for i in 0..n {
             h_borrowck(&mut p, i, uidx, &mut r);
         }
@@ -201,21 +202,13 @@ pub struct CompiledAst {
     pub errors: usize,
     pub stage: i32,
     pub ast: Ast,
-}
-
-extend CompiledAst as Free {
-    pub fn free(self: &mut CompiledAst) {
-        self.ast.free();
-    }
+    pub pkg: loader::Package, // `ast` reads its types through the package table: the package outlives it
 }
 
 pub fn compile_ast(src: str, stop: i32) CompiledAst {
-    let mut out = CompiledAst { errors: 0, stage: stop, ast: Ast::new(0) };
     let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     if !p.ok {
-        out.errors = 1;
-        out.stage = STAGE_PARSE;
-        return out;
+        return CompiledAst { errors: 1, stage: STAGE_PARSE, ast: Ast::new(0), pkg: p };
     }
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
@@ -231,10 +224,10 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
             h_typecheck(&mut p, i, uidx, &mut rr);
         }
     }
-    out.errors = rr.errors;
-    // Detach the user module's AST so package_free leaves it alone; the caller frees it.
-    out.ast = replace(&mut p.modules[uidx].ast, Ast::new(0));
-    return out;
+    // Detach the user module's AST for inspection beside the package that holds its types.
+    p.cir = null;
+    let ast = replace(&mut p.modules[uidx].ast, Ast::new(0));
+    return CompiledAst { errors: rr.errors, stage: stop, ast: ast, pkg: p };
 }
 
 // Inspection helpers over a returned AST (mirror tests/test_harness.h's th_* / ast_resolution).
@@ -353,6 +346,7 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
         out.errors = rr.errors;
         return out;
     }
+    demit::publish_checkpoint(&mut p, null);
     for i in 0..n {
         h_borrowck(&mut p, i, uidx, &mut rr);
     }

@@ -76,7 +76,16 @@ pub struct Svc {
 
 extend Svc {
     pub fn new(pkg: *const loader::Package) Svc {
+        if unsafe TS_ON {
+            ts_add(TS_LAY_SVC, 1);
+        }
         return Svc { pkg: pkg, cache: Map::<u64, u64>::new(), active: Vector::<u64>::new() };
+    }
+
+    /// Drop every cached answer: the keys name type ids of one publication, so a checkpoint that
+    /// renumbers them (and restarts every module's provisional ids) invalidates the whole cache.
+    pub fn reset(self: &mut Self) {
+        self.cache.clear();
     }
 
     const fn p(self: &Self) &loader::Package {
@@ -142,6 +151,12 @@ extend Svc {
                 },
                 None => {},
             };
+            if unsafe TS_ON {
+                ts_add(TS_LAY, 1);
+                if have {
+                    ts_add(TS_LAY_HIT, 1);
+                }
+            }
             if have {
                 if enc == 0 {
                     return Layout { ok: false };
@@ -149,13 +164,24 @@ extend Svc {
                 return Layout { ok: true, size: enc >> 8, align: enc & 0xFF };
             }
         }
+        let mut t0: u64 = 0;
+        if unsafe TS_ON && depth == 0 {
+            ts_add(TS_LAY_RAW, 1);
+            t0 = ts_now();
+        }
         let r = self.layout_raw(m, t, env, depth);
+        if t0 != 0 {
+            ts_add(TS_LAY_NS, ts_now() - t0);
+        }
         if cacheable {
             let mut enc: u64 = 0;
             if r.ok {
                 enc = r.size << 8 | r.align;
             }
             self.cache.insert(key, enc);
+            if unsafe TS_ON {
+                ts_add(TS_LAY_INS, 1);
+            }
         }
         return r;
     }

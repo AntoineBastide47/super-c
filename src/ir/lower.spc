@@ -187,6 +187,17 @@ extend Keep {
 
     /// Move every body of `other` in (first key wins, matching `put`); `other` is left empty.
     /// Slot order in `kept` is not load-bearing -- consumers index through `ix` by owner key.
+    /// Rewrite every kept body's types through the package's last publication.
+    pub fn remap_types(self: &mut Self, p: &loader::Package) {
+        for i in 0..self.kept.len() {
+            let lw = self.kept.index_mut(i);
+            let m = lw.body.module as usize;
+            if m < p.pub_map.len() && p.pub_map.at(m).len() != 0 {
+                lw.body.remap_types(p.pub_map.at(m));
+            }
+        }
+    }
+
     pub fn absorb(self: &mut Self, other: &mut Keep) {
         assert(self.viewers == 0);
         self.kept.reserve(other.kept.len());

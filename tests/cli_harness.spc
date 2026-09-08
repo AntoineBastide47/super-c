@@ -65,6 +65,18 @@ extend CliResult as Free {
     }
 }
 
+/// The whole file at `path` as text (empty when it cannot be opened).
+pub fn read_text(path: str) String {
+    let mut p = String::from_str(path);
+    let buf = slurp(p.cstr());
+    if buf == null {
+        return String::new();
+    }
+    let text = String::from_cstr(buf);
+    unsafe stdlib::free(buf);
+    return text;
+}
+
 // Copy `needle` to provide the NUL terminator required by strstr.
 pub fn contains_str(hay: *const char, needle: str) bool {
     if hay == null {

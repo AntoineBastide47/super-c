@@ -3,6 +3,7 @@
 // reviewed precision difference) a primary error line must coincide. One acceptance case pins
 // behavior the checker permits, so the analysis cannot drift stricter there.
 import driver_shim as shim;
+import driver::emit as demit;
 import module::loader as loader;
 import ast::ast as *;
 import resolver::resolver as res;
@@ -83,6 +84,7 @@ fn typed_both(src: str, old_errs: &mut Vector<u32>) loader::Package {
         ok = t_check(&mut p, i) && ok;
     }
     assert(ok, "snippet typechecks");
+    demit::publish_checkpoint(&mut p, null);
     for i in 0..n {
         ok = t_prod(&mut p, i, i == n - 1, old_errs) && ok;
     }
@@ -234,6 +236,7 @@ fn diff_out_param_store() {
     let mut p = typed_both(src, &mut old_errs);
     assert(old_errs.len() != 0, "the established walk rejects");
     let mut new_errs = Vector::<u32>::new();
+    demit::publish_checkpoint(&mut p, null);
     prod_verdict(&mut p, &mut new_errs);
     assert(new_errs.len() != 0, "the production Core IR mode rejects");
     let usrc = p.modules.at(p.modules.len() - 1).source.as_str();

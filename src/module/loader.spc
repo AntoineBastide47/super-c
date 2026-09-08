@@ -127,6 +127,20 @@ pub struct Package {
     pub shard_rules: Vector<ShardRule>,
     /// True only while the parallel typecheck frontier is running.
     pub tc_frontier: bool,
+    /// The package type table: every published type, one final id each (`Ast::intern_type_i`).
+    /// Boxed so the module Asts can hold its address while the package moves. `bind_types` puts
+    /// the modules under it; until then (the LSP, standalone checks) they keep module-local pools.
+    pub tt: Box<TypePool>,
+    /// The maps of the last `publish_types`: per module, provisional pool index to final type id,
+    /// instance record index, and const-expression index. Read through `map_type`.
+    pub pub_map: Vector<Vector<TypeId>>,
+    pub pub_imap: Vector<Vector<u32>>,
+    pub pub_cmap: Vector<Vector<u32>>,
+    pub publications: u32, // batches published so far
+    /// Per final id: the publication class that numbered it (0 signature-reachable, 1 body-only of
+    /// the first batch, 2 a later batch, 3 interned by the instance graph between checkpoints); the
+    /// seeds carry 0.
+    pub tt_class: Vector<u8>,
     /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
     /// has any resolution into module `to`. Built once (resolve-final) at the start of instance propagation;
     /// makes module_imports an O(1) query instead of a linear resolutions scan. `mod_refs_ready` gates it
@@ -899,6 +913,13 @@ pub fn package_load(root_file: str, std_dir: str, bootstrap_tags: bool, target: 
 /// Like package_load, but imports resolve against an explicit package root instead of the root
 /// file's own directory (`super-c lint <dir>` lints nested package files in their true package).
 pub fn package_load_rooted(root_file: str, root_dir: str, alt_dir: str, std_dir: str, bootstrap_tags: bool, target: i32) Package {
+    ts_init();
+    let mut p = package_load_rooted_i(root_file, root_dir, alt_dir, std_dir, bootstrap_tags, target);
+    p.bind_types();
+    return p;
+}
+
+fn package_load_rooted_i(root_file: str, root_dir: str, alt_dir: str, std_dir: str, bootstrap_tags: bool, target: i32) Package {
     return package_load_overlaid(
         root_file,
         root_dir,
@@ -938,6 +959,7 @@ pub fn package_load_overlaid(
     p.load_module(rp.as_str(), rf.as_str(), bootstrap_tags, target);
     p.load_prelude(std_dir, target);
     p.seed_core();
+    p.bind_types();
     return p;
 }
 
@@ -963,6 +985,7 @@ pub fn package_load_prelude(
     }
     p.load_prelude(std_dir, target);
     p.seed_core();
+    p.bind_types();
     return p;
 }
 
@@ -1046,6 +1069,7 @@ pub fn package_from_source(src: str, std_dir: str, target: i32) Package {
         p.ok = false;
     }
     p.seed_core();
+    p.bind_types();
     return p;
 }
 
@@ -1084,6 +1108,162 @@ const fn name_cmp(a: &String, b: &String) i32 {
     return la as i32 - lb as i32;
 }
 
+/// One sortable image of a batch record with its children as final ids: kind, qualifier, module
+/// and the payload words, compared lexicographically (`pub_key_cmp`). Two distinct records never
+/// compare equal: the words hold every field the record's identity has.
+struct PubKey {
+    pub w: [u64; 11],
+    pub idx: u32,
+    pub rec: Ty, // the record with every child final, inserted in key order
+}
+
+const fn pub_key_cmp(a: &PubKey, b: &PubKey) i32 {
+    for i in 0..11 {
+        let x = unsafe a.w[i];
+        let y = unsafe b.w[i];
+        if x != y {
+            return if x < y {
+                -1;
+            } else {
+                1;
+            };
+        }
+    }
+    return 0;
+}
+
+// The depth of batch record `b`: 1 + the deepest batch child, 0 for a record whose children are all
+// final (`depth` holds the answers for the smaller batch ids).
+fn pub_depth(batch: &TypePool, depth: &Vector<u32>, b: usize) u32 {
+    let y = batch.at(b);
+    let k = y.kind;
+    let mut d: u32 = 0;
+    if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+        d = pub_child_depth(depth, y.as_data.elem);
+    } else if k == TypeKind::TYPE_ARRAY {
+        d = pub_child_depth(depth, y.as_data.arr.elem);
+    } else if k == TypeKind::TYPE_FIELD_PROJECTION {
+        d = pub_child_depth(depth, y.as_data.proj.owner);
+    } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
+        if (y.as_data.inst & TYPE_PROV) != 0 {
+            let it = batch.instance((y.as_data.inst & TYPE_PROV_MASK) as usize);
+            for q in 0..it.n {
+                let cd = pub_child_depth(depth, unsafe it.args[q as usize]);
+                if cd > d {
+                    d = cd;
+                }
+            }
+        }
+    }
+    return d;
+}
+
+const fn pub_child_depth(depth: &Vector<u32>, t: TypeId) u32 {
+    if (t & TYPE_PROV) == 0 {
+        return 0;
+    }
+    return depth[(t & TYPE_PROV_MASK) as usize] + 1;
+}
+
+// Push the batch children of batch record `b`.
+fn pub_children(batch: &TypePool, b: usize, out: &mut Vector<u32>) {
+    let y = batch.at(b);
+    let k = y.kind;
+    if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+        pub_push_child(y.as_data.elem, out);
+    } else if k == TypeKind::TYPE_ARRAY {
+        pub_push_child(y.as_data.arr.elem, out);
+    } else if k == TypeKind::TYPE_FIELD_PROJECTION {
+        pub_push_child(y.as_data.proj.owner, out);
+    } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
+        if (y.as_data.inst & TYPE_PROV) != 0 {
+            let it = batch.instance((y.as_data.inst & TYPE_PROV_MASK) as usize);
+            for q in 0..it.n {
+                pub_push_child(unsafe it.args[q as usize], out);
+            }
+        }
+    }
+}
+
+const fn pub_push_child(t: TypeId, out: &mut Vector<u32>) {
+    if (t & TYPE_PROV) != 0 {
+        out.push(t & TYPE_PROV_MASK);
+    }
+}
+
+// A batch child as its final id (numbered already: lower depth).
+const fn pub_fin(fin: &Vector<TypeId>, t: TypeId) TypeId {
+    if (t & TYPE_PROV) == 0 {
+        return t;
+    }
+    return fin[(t & TYPE_PROV_MASK) as usize];
+}
+
+// Batch record `b` with every child final; a batch instance record is moved into the package table
+// on first use (`ifin`).
+fn pub_final_rec(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>, g: &mut TypePool, b: usize) Ty {
+    let mut y = *batch.at(b);
+    let k = y.kind;
+    if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+        y.as_data.elem = pub_fin(fin, y.as_data.elem);
+    } else if k == TypeKind::TYPE_ARRAY {
+        y.as_data.arr.elem = pub_fin(fin, y.as_data.arr.elem);
+    } else if k == TypeKind::TYPE_FIELD_PROJECTION {
+        y.as_data.proj.owner = pub_fin(fin, y.as_data.proj.owner);
+    } else if (k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN) && (y.as_data.inst & TYPE_PROV) != 0 {
+        let bi = (y.as_data.inst & TYPE_PROV_MASK) as usize;
+        if ifin[bi] == 0xFFFFFFFFu32 {
+            let mut it = *batch.instance(bi);
+            for q in 0..it.n {
+                unsafe it.args[q as usize] = pub_fin(fin, unsafe it.args[q as usize]);
+            }
+            ifin[bi] = g.insert_inst(&it);
+        }
+        y.as_data.inst = ifin[bi];
+    }
+    return y;
+}
+
+fn pub_key(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>, g: &mut TypePool, b: usize) PubKey {
+    let y = pub_final_rec(batch, fin, ifin, g, b);
+    let mut k = PubKey { w: [[0] = 0u64], idx: b as u32, rec: y };
+    k.w[0] = y.kind as u64 << 56 | y.qualifier as u64 << 48 | y.module as u64 << 32;
+    let kd = y.kind;
+    if kd == TypeKind::TYPE_POINTER || kd == TypeKind::TYPE_REFERENCE || kd == TypeKind::TYPE_SLICE {
+        k.w[1] = y.as_data.elem;
+    } else if kd == TypeKind::TYPE_ARRAY {
+        k.w[1] = y.as_data.arr.elem;
+        k.w[2] = y.as_data.arr.len;
+    } else if kd == TypeKind::TYPE_FIELD_PROJECTION {
+        k.w[1] = y.as_data.proj.owner;
+        k.w[2] = y.as_data.proj.binder;
+    } else if kd == TypeKind::TYPE_INSTANCE || kd == TypeKind::TYPE_DYN {
+        let it = g.instance(y.as_data.inst as usize);
+        k.w[1] = it.module as u64 << 40 | it.decl as u64 << 8 | it.n as u64;
+        for q in 0..it.n {
+            unsafe k.w[2 + q as usize] = unsafe it.args[q as usize];
+        }
+    } else if kd == TypeKind::TYPE_CONST {
+        k.w[1] = y.as_data.value as u64;
+    } else {
+        k.w[1] = y.as_data.decl; // decl, builtin, or the const-expression form index
+    }
+    return k;
+}
+
+// A provisional child of the record at pool index `i`: it must precede it in the same pool.
+fn pub_child(map: &Vector<TypeId>, t: TypeId, i: usize) TypeId {
+    if (t & TYPE_PROV) == 0 {
+        return t;
+    }
+    let pi = (t & TYPE_PROV_MASK) as usize;
+    if pi >= i || pi >= map.len() {
+        eprintln("fatal: provisional type {} references a later or foreign provisional type {}", i, pi);
+        unsafe stdlib::exit(1);
+    }
+    return map[pi];
+}
+
 extend Package {
     /// The analysis worker count for this loaded package: `jobs` when the user source is large enough
     /// for the parallel frontiers to pay for themselves, else 1 (see PAR_MIN_USER_BYTES).
@@ -1103,12 +1283,317 @@ extend Package {
         return jobs;
     }
 
+    /// Put every module under the package type table (package identity): each module's pool then
+    /// holds only its provisional types, published in batches by `publish_types`.
+    pub fn bind_types(self: &mut Self) {
+        if self.tt.deref().len() == 0 {
+            self.tt.deref_mut().seed();
+            for _ in 0..self.tt.deref().len() {
+                self.tt_class.push(0);
+            }
+        }
+        let gp = self.tt.deref_mut() as *mut TypePool;
+        for i in 0..self.modules.len() {
+            if self.modules[i].has_ast {
+                self.modules[i].ast.gt = gp;
+            }
+        }
+    }
+
+    /// The final id of `t` as module `m` knew it before the last publication (final ids pass through).
+    pub const fn map_type(self: &Self, m: ModuleId, t: TypeId) TypeId {
+        if (t & TYPE_PROV) == 0 || m as usize >= self.pub_map.len() {
+            return t;
+        }
+        return self.pub_map.at(m as usize)[(t & TYPE_PROV_MASK) as usize];
+    }
+
+    /// Publish every provisional type of every module as one batch. The batch's distinct records
+    /// (a record two modules both hold is one) get final ids appended after the ids of earlier
+    /// batches, in a canonical order that depends on nothing but the set of records: first the
+    /// records reachable from function signatures, then the rest, each class by structural depth
+    /// (children before parents) and within a depth by the record's structural key. So the ids
+    /// are the same under any worker count, and a body-only edit leaves every signature id in
+    /// place. Then every module's tables are remapped (`Ast::publish_remap`) and its pool cleared;
+    /// the maps stay in `pub_map` for the driver to remap the stores it owns (the constant engine,
+    /// the kept lowerings).
+    pub fn publish_types(self: &mut Self) {
+        let n = self.modules.len();
+        self.ensure_index();
+        self.pub_map.clear();
+        self.pub_imap.clear();
+        self.pub_cmap.clear();
+        // Pass 1: the batch table, records translated so a provisional child is a batch id (tagged).
+        let mut batch = TypePool::new();
+        let mut bmaps = Vector::<Vector<TypeId>>::new();
+        let mut bimaps = Vector::<Vector<u32>>::new();
+        let mut cmaps = Vector::<Vector<u32>>::new();
+        {
+            let g = self.tt.deref_mut();
+            for m in 0..n {
+                let mut map = Vector::<TypeId>::new();
+                let mut imap = Vector::<u32>::new();
+                let mut cmap = Vector::<u32>::new();
+                if self.modules[m].has_ast && self.modules[m].ast.gt != null {
+                    let a = &mut self.modules[m].ast;
+                    let np = a.pool.len();
+                    map.reserve(np);
+                    for _ in 0..a.pool.ninst() {
+                        imap.push(0xFFFFFFFFu32);
+                    }
+                    for _ in 0..a.pool.nclin() {
+                        cmap.push(0xFFFFFFFFu32);
+                    }
+                    for i in 0..np {
+                        let mut y = *a.pool.at(i);
+                        let k = y.kind;
+                        if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+                            y.as_data.elem = pub_child(&map, y.as_data.elem, i);
+                        } else if k == TypeKind::TYPE_ARRAY {
+                            y.as_data.arr.elem = pub_child(&map, y.as_data.arr.elem, i);
+                        } else if k == TypeKind::TYPE_FIELD_PROJECTION {
+                            y.as_data.proj.owner = pub_child(&map, y.as_data.proj.owner, i);
+                        } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
+                            let ii = y.as_data.inst;
+                            if (ii & TYPE_PROV) != 0 {
+                                let pi = (ii & TYPE_PROV_MASK) as usize;
+                                if imap[pi] == 0xFFFFFFFFu32 {
+                                    let mut it = *a.pool.instance(pi);
+                                    for q in 0..it.n {
+                                        unsafe it.args[q as usize] = pub_child(&map, unsafe it.args[q as usize], i);
+                                    }
+                                    imap[pi] = batch.insert_inst(&it) | TYPE_PROV;
+                                }
+                                y.as_data.inst = imap[pi];
+                            }
+                        } else if k == TypeKind::TYPE_CONST_EXPR {
+                            let ci = y.as_data.inst;
+                            if (ci & TYPE_PROV) != 0 {
+                                let pi = (ci & TYPE_PROV_MASK) as usize;
+                                if cmap[pi] == 0xFFFFFFFFu32 {
+                                    cmap[pi] = g.insert_clin(a.pool.const_lin_at(pi));
+                                }
+                                y.as_data.inst = cmap[pi];
+                            }
+                        }
+                        map.push(batch.insert_ty(y) | TYPE_PROV);
+                    }
+                }
+                bmaps.push(map);
+                bimaps.push(imap);
+                cmaps.push(cmap);
+            }
+        }
+        let nb = batch.len();
+        // Depth: children precede parents in every pool, so batch ids of children are smaller and
+        // one ascending pass settles it. Class: reachable from a function signature.
+        let mut depth = Vector::<u32>::new();
+        let mut sig = Vector::<bool>::new();
+        for b in 0..nb {
+            depth.push(pub_depth(&batch, &depth, b));
+            sig.push(false);
+        }
+        {
+            let mut stack = Vector::<u32>::new();
+            for k in 0..self.idx.items.len() {
+                let it = *self.idx.items.at(k);
+                if it.kind != ItemKind::IK_FUNCTION as u8 && it.kind != ItemKind::IK_METHOD as u8 {
+                    continue;
+                }
+                let a = unsafe &*self.module_ast_const(it.module);
+                if it.node as usize >= a.types.len() || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION || a.gt == null {
+                    continue;
+                }
+                let fd = a.at_const(it.node).as_data.function;
+                for pi in 0..fd.params.len + fd.returns.len {
+                    let nd = if pi < fd.params.len {
+                        unsafe a.list(fd.params)[pi as usize];
+                    } else {
+                        unsafe a.list(fd.returns)[(pi - fd.params.len) as usize];
+                    };
+                    let t = a.type_of(nd);
+                    if (t & TYPE_PROV) != 0 {
+                        stack.push(bmaps.at(it.module as usize)[(t & TYPE_PROV_MASK) as usize] & TYPE_PROV_MASK);
+                    }
+                }
+                while stack.len() > 0 {
+                    let b = stack[stack.len() - 1] as usize;
+                    let _ = stack.pop();
+                    if sig[b] {
+                        continue;
+                    }
+                    sig.set(b, true);
+                    pub_children(&batch, b, &mut stack);
+                }
+            }
+        }
+        // Final ids: class, then depth, then the structural key; the key holds children as final
+        // ids, so each (class, depth) group sorts after the groups it depends on are numbered.
+        let mut fin = Vector::<TypeId>::new();
+        for _ in 0..nb {
+            fin.push(TYPE_NONE);
+        }
+        let mut ifin = Vector::<u32>::new();
+        for _ in 0..batch.ninst() {
+            ifin.push(0xFFFFFFFFu32);
+        }
+        let mut maxd: u32 = 0;
+        for b in 0..nb {
+            if depth[b] > maxd {
+                maxd = depth[b];
+            }
+        }
+        // Bucket by (class, depth) in one pass; each bucket is numbered in structural-key order.
+        let ngroups = 2 * (maxd as usize + 1);
+        let mut groups = Vector::<Vector<u32>>::new();
+        for _ in 0..ngroups {
+            groups.push(Vector::<u32>::new());
+        }
+        for b in 0..nb {
+            let cls: usize = if sig[b] {
+                0;
+            } else {
+                1;
+            };
+            groups.index_mut(cls * (maxd as usize + 1) + depth[b] as usize).push(b as u32);
+        }
+        let mut keys = Vector::<PubKey>::new();
+        {
+            let g = self.tt.deref_mut();
+            for gi in 0..ngroups {
+                let cls = gi / (maxd as usize + 1);
+                let grp = groups.at(gi);
+                keys.clear();
+                for q in 0..grp.len() {
+                    keys.push(pub_key(&batch, &fin, &mut ifin, g, grp[q] as usize));
+                }
+                keys.sort_by(pub_key_cmp);
+                {
+                    for q in 0..keys.len() {
+                        let b = keys.at(q).idx as usize;
+                        let y = keys.at(q).rec;
+                        let id = g.insert_ty(y);
+                        fin.set(b, id);
+                        while self.tt_class.len() <= id as usize {
+                            self.tt_class.push(3);
+                        }
+                        self.tt_class[id as usize] = if self.publications == 0 {
+                            cls as u8;
+                        } else {
+                            2;
+                        };
+                    }
+                }
+            }
+            if g.len() as u64 > TYPE_MAX as u64 {
+                eprintln("fatal: the package holds more than {} types", TYPE_MAX);
+                unsafe stdlib::exit(1);
+            }
+        }
+        // Per-module maps to final ids, then the tables.
+        for m in 0..n {
+            let mut map = Vector::<TypeId>::new();
+            let mut imap = Vector::<u32>::new();
+            let bm = bmaps.at(m);
+            for i in 0..bm.len() {
+                map.push(fin[(bm[i] & TYPE_PROV_MASK) as usize]);
+            }
+            let bim = bimaps.at(m);
+            for i in 0..bim.len() {
+                let bi = bim[i];
+                if bi == 0xFFFFFFFFu32 {
+                    imap.push(bi);
+                } else {
+                    imap.push(ifin[(bi & TYPE_PROV_MASK) as usize]);
+                }
+            }
+            if map.len() != 0 {
+                self.modules[m].ast.publish_remap(&map, &imap, cmaps.at(m));
+            }
+            self.pub_map.push(map);
+            self.pub_imap.push(imap);
+        }
+        self.pub_cmap = cmaps;
+        self.publications += 1;
+    }
+
+    /// The package type table as text, one line per record (`class kind qualifier module payload`,
+    /// children as final ids; `I module decl n args` for an instance record): the identity every
+    /// module shares, compared across worker counts and edits by the validation gates.
+    pub fn type_table_dump(self: &Self, out: &mut String) {
+        let g = self.tt.deref();
+        for t in 0..g.len() {
+            let y = g.at(t);
+            let cls: u8 = if t < self.tt_class.len() {
+                self.tt_class[t];
+            } else {
+                3;
+            };
+            out.push_u64(t as u64);
+            out.push_byte(b' ');
+            out.push_u64(cls);
+            out.push_byte(b' ');
+            out.push_u64(y.kind as u64);
+            out.push_byte(b' ');
+            out.push_u64(y.qualifier);
+            out.push_byte(b' ');
+            out.push_u64(y.module);
+            out.push_byte(b' ');
+            let k = y.kind;
+            if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+                out.push_u64(y.as_data.elem);
+            } else if k == TypeKind::TYPE_ARRAY {
+                out.push_u64(y.as_data.arr.elem);
+                out.push_byte(b' ');
+                out.push_u64(y.as_data.arr.len);
+            } else if k == TypeKind::TYPE_FIELD_PROJECTION {
+                out.push_u64(y.as_data.proj.owner);
+                out.push_byte(b' ');
+                out.push_u64(y.as_data.proj.binder);
+            } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
+                let it = g.instance(y.as_data.inst as usize);
+                out.push_str("I ");
+                out.push_u64(it.module);
+                out.push_byte(b' ');
+                out.push_u64(it.decl);
+                out.push_byte(b' ');
+                out.push_u64(it.n);
+                for q in 0..it.n {
+                    out.push_byte(b' ');
+                    out.push_u64(unsafe it.args[q as usize]);
+                }
+            } else if k == TypeKind::TYPE_CONST {
+                out.push_i64(y.as_data.value);
+            } else {
+                out.push_u64(y.as_data.decl);
+            }
+            out.push_byte(b'\n');
+        }
+    }
+
+    /// Validation after a publication: no module table may still name a provisional id.
+    pub fn check_published(self: &Self) bool {
+        for m in 0..self.modules.len() {
+            if self.modules.at(m).has_ast && self.modules.at(m).ast.has_provisional() {
+                eprintln("type-validate: module {} still holds a provisional type id after publication", m);
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// An empty package for the host architecture; `load_module` fills it.
     pub fn new() Package {
         return Package {
             arch: unsafe shim::sc_host_arch(),
             bootstrap: false,
             modules: Vector::<Module>::new(),
+            tt: Box::<TypePool>::new(TypePool::new()),
+            pub_map: Vector::<Vector<TypeId>>::new(),
+            pub_imap: Vector::<Vector<u32>>::new(),
+            pub_cmap: Vector::<Vector<u32>>::new(),
+            publications: 0,
+            tt_class: Vector::<u8>::new(),
             root_dir: String::new(),
             gen_root: String::new(),
             std_root: String::new(),
@@ -1626,6 +2111,11 @@ extend Package {
     fn add_module(self: &mut Self, path: String, file: String, source: String, ast: Ast, has_ast: bool) i32 {
         let id = self.modules.len() as i32;
         self.modules.push(Module { path: path, file: file, source: source, ast: ast, has_ast: has_ast, prelude: false });
+        // A module loaded after `bind_types` (an import resolved on demand) joins the package
+        // identity at once: every module of a bound package interns into the one table.
+        if has_ast && self.tt.deref().len() != 0 {
+            self.modules[id as usize].ast.gt = self.tt.deref_mut();
+        }
         return id;
     }
 
@@ -2745,8 +3235,8 @@ extend Package {
             }
             let aa = self.module_ast_const(a as ModuleId);
             let mut i: usize = 0;
-            while i < unsafe aa.instances.len() {
-                let it = *aa.instance(i as u32);
+            while i < aa.ninstances() {
+                let it = *aa.used_instance(i);
                 let bi = it.module as usize;
                 if bi >= n || bi == a || dep[a * n + bi] {
                     i = i + 1;

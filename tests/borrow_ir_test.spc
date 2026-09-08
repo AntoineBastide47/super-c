@@ -97,7 +97,7 @@ fn analyze(p: &loader::Package, name: str) BorrowOut {
     let u = (p.modules.len() - 1) as ModuleId;
     let mut lw = irl::Lowerer::new(p, u, node);
     assert(lw.lower_fn(node), "body lowers");
-    let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
+    let tp = unsafe (&*p.module_ast_const(u)).type_bound();
     assert(irv::verify(&lw.body, tp, p).len() == 0, "body verifies");
     let mut ow = bfx::Owner::new(p);
     let forest = bmp::MoveForest::build(&lw.body);

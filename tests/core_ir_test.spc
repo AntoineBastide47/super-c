@@ -2,6 +2,7 @@
 // deterministic print form is asserted structurally, plus direct coverage of the typed-facts
 // boundary accessors. These are compiler-structure tests, not generated-program substitutes.
 import driver_shim as shim;
+import driver::emit as demit;
 import module::loader as loader;
 import ast::ast as *;
 import ast::facts as facts;
@@ -74,6 +75,7 @@ fn typed_package(src: str) loader::Package {
         ok = t_typecheck(&mut p, i) && ok;
     }
     assert(ok, "snippet typechecks");
+    demit::publish_checkpoint(&mut p, null);
     for i in 0..n {
         ok = t_borrowck(&mut p, i) && ok;
     }
@@ -109,7 +111,7 @@ fn lowered(p: &loader::Package, name: str) String {
     let mut lw = irl::Lowerer::new(p, u, node);
     let ok = lw.lower_fn(node);
     assert(ok, "body lowers");
-    let tp = unsafe (&*p.module_ast_const(u)).type_pool.len();
+    let tp = unsafe (&*p.module_ast_const(u)).type_bound();
     assert(irv::verify(&lw.body, tp, p).len() == 0, "body verifies");
     return irp::print_body(&lw.body);
 }

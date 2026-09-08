@@ -5,7 +5,8 @@
 #   1. check.sh: canonical formatting, lint per target, the test corpus, the sanitizer lanes, and the
 #      two-stage rebuild from the latest release (the compiler builds its own sources);
 #   2. the two-generation fixpoint: gen1 and gen2 emit byte-identical C;
-#   3. the worker-count identity: one worker and every core emit byte-identical C;
+#   3. the worker-count identity: one worker and every core emit byte-identical C and publish the
+#      same package type table;
 #   4. every emitted translation unit compiles under the strict warning set, and the tree meets the
 #      readability rules;
 #   5. every supported target transpiles the compiler and every built-in profile builds it;
@@ -63,17 +64,18 @@ step "fixpoint: gen1 ($CONTRACT_FIXPOINT_GEN1) vs gen2 ($CONTRACT_FIXPOINT_GEN2)
 cp -R "$tree/build/raw" "$tmp/gen1-raw"
 cp "$tree/build/dev/super-c" "$tree/gen1-super-c"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 ./gen1-super-c build >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 ./gen1-super-c build >/dev/null )
 same_tree "$tmp/gen1-raw" "$tree/build/raw" || fail "gen1 and gen2 emitted different C (above)"
 echo "gate: byte-identical"
 
 step "worker identity: --jobs=$CONTRACT_WORKERS_MIN vs --jobs=$ncpu"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 ./gen1-super-c build --jobs=$CONTRACT_WORKERS_MIN >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_TYPE_TABLE="$tmp/j1-types" ./gen1-super-c build --jobs=$CONTRACT_WORKERS_MIN >/dev/null )
 cp -R "$tree/build/raw" "$tmp/j1-raw"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 ./gen1-super-c build --jobs=$ncpu >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_TASK_DELAY=1 SC_TYPE_TABLE="$tmp/jn-types" ./gen1-super-c build --jobs=$ncpu >/dev/null )
 same_tree "$tmp/j1-raw" "$tree/build/raw" || fail "one worker and $ncpu workers emitted different C (above)"
+cmp "$tmp/j1-types" "$tmp/jn-types" || fail "one worker and $ncpu workers published different type tables"
 echo "gate: byte-identical"
 
 step "strict C warnings ($CONTRACT_CSTD $CONTRACT_STRICT_CFLAGS) and readability"
