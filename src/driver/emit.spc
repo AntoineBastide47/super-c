@@ -5798,6 +5798,10 @@ fn cemit_assemble(
     o: &mut CemitOut,
 ) {
     let n = p.modules.len();
+    // The previous build's shard counts: the size policy keeps them while they fit.
+    let mut prev_tus = Vector::<u32>::new();
+    let mut prev_insts = Vector::<u32>::new();
+    shard_meta_read(p.gen_root.as_str(), p, &mut prev_tus, &mut prev_insts);
     let ps = protos.as_str();
     let mut poff = Vector::<u64>::new();
     {
@@ -6154,7 +6158,22 @@ fn cemit_assemble(
                     inc_line(d, p.modules[x].path.as_str(), ".h", &mut inc);
                 }
             }
-            let nsh = shard_count(p, t, is_inst) as usize;
+            let mut nsh = shard_rule(p, t, is_inst) as usize;
+            if nsh == 0 {
+                // The module's rendered C: its chunks (bounds in the chunk table) plus the
+                // prototype lines walked below (the static ones become the shard heads).
+                let mut bytes: usize = 0;
+                for k in 0..cks.len() {
+                    let i = cks[k] as usize;
+                    bytes += (o.ck_end[i] - o.ck_off[i]) as usize + (poff[i + 1] - poff[i]) as usize;
+                }
+                let prev = if is_inst {
+                    prev_insts[t];
+                } else {
+                    prev_tus[t];
+                };
+                nsh = shard_policy(bytes, prev) as usize;
+            }
             let mut heads = Vector::<String>::with_capacity(nsh);
             for _k in 0..nsh {
                 heads.push(String::new());
@@ -6474,7 +6493,9 @@ const fn item_hash(pl: str) u64 {
 }
 
 // Module `m`'s shard count under the policy: its TU shards, or its instance shards (`inst`).
-fn shard_count(p: &loader::Package, m: usize, inst: bool) u32 {
+// The manifest's `[shards]` / `[instance-shards]` count for module `m`, or 0 when the manifest
+// names none: the compiler then decides from the rendered size (`shard_policy`).
+fn shard_rule(p: &loader::Package, m: usize, inst: bool) u32 {
     for i in 0..p.shard_rules.len() {
         if p.shard_rules.at(i).module.as_str() == p.modules[m].path.as_str() {
             return if inst {
@@ -6484,7 +6505,117 @@ fn shard_count(p: &loader::Package, m: usize, inst: bool) u32 {
             };
         }
     }
-    return 1;
+    return 0;
+}
+
+/// Bytes of C per shard the policy aims at, and the most shards one module may have (a chunk's
+/// shard is a `u8`).
+const SHARD_TARGET: usize = 262144;
+const SHARD_MAX: u32 = 64;
+
+/// The shard count for a module that rendered `bytes` of C: one shard per target size. A count
+/// is an output schema (changing it rewrites every shard of the module), so when the previous
+/// build's count `prev` is known (0 = unknown) it stays while it keeps every shard within half
+/// and one and a half times the target.
+const fn shard_policy(bytes: usize, prev: u32) u32 {
+    if prev != 0 {
+        let per = bytes / prev as usize;
+        if per < SHARD_TARGET + SHARD_TARGET / 2 && (prev == 1 || per >= SHARD_TARGET / 2) {
+            return prev;
+        }
+    }
+    let want = ((bytes + SHARD_TARGET - 1) / SHARD_TARGET) as u32;
+    if want < 1 {
+        return 1;
+    }
+    if want > SHARD_MAX {
+        return SHARD_MAX;
+    }
+    return want;
+}
+
+/// The previous build's shard counts from `<root>/__sc_shards` (one line per module that had
+/// more than one shard of either kind: `module<TAB>tus<TAB>insts`), by module index: 1 for a
+/// module the file omits, 0 everywhere when there is no file (a fresh tree).
+fn shard_meta_read(root: str, p: &loader::Package, tus: &mut Vector<u32>, insts: &mut Vector<u32>) {
+    for _ in 0..p.modules.len() {
+        tus.push(0);
+        insts.push(0);
+    }
+    if root.len() == 0 {
+        return;
+    }
+    let mp = build_out_path(root, "__sc_shards", "");
+    let textv = loader::read_file(mp.as_str());
+    if textv.is_none() {
+        return;
+    }
+    let text = textv.unwrap();
+    for m in 0..p.modules.len() {
+        tus.set(m, 1);
+        insts.set(m, 1);
+    }
+    let s = text.as_str();
+    let mut i: usize = 0;
+    while i < s.len() {
+        let mut e = i;
+        while e < s.len() && s.byte_at(e) != 10 {
+            e += 1;
+        }
+        let line = s.slice(i, e);
+        i = e + 1;
+        let t1 = line.find_byte(b'\t');
+        if t1 <= 0 {
+            continue;
+        }
+        let rest = line.slice((t1 + 1) as usize, line.len());
+        let t2 = rest.find_byte(b'\t');
+        if t2 <= 0 {
+            continue;
+        }
+        let a = rest.slice(0, t2 as usize).parse_u64_radix(10);
+        let b = rest.slice((t2 + 1) as usize, rest.len()).parse_u64_radix(10);
+        if a.is_none() || b.is_none() {
+            continue;
+        }
+        let name = line.slice(0, t1 as usize);
+        for m in 0..p.modules.len() {
+            if p.modules[m].path.as_str() == name {
+                let av: u64 = a.unwrap();
+                let bv: u64 = b.unwrap();
+                tus.set(m, av as u32);
+                insts.set(m, bv as u32);
+            }
+        }
+    }
+}
+
+/// The effective shard counts of this build as `__sc_shards` text (the manifest's `shards` lines
+/// carry the same counts): a module TU with `k` heads was written in `k` shards.
+fn shard_meta_text(p: &loader::Package, co: &CemitOut) String {
+    let mut out = String::from_str("super-c-shards\t1\n");
+    for m in 0..p.modules.len() {
+        let tus = if co.tu_heads.at(m).len() > 1 {
+            co.tu_heads.at(m).len();
+        } else {
+            1usize;
+        };
+        let insts = if co.inst_heads.at(m).len() > 1 {
+            co.inst_heads.at(m).len();
+        } else {
+            1usize;
+        };
+        if tus == 1 && insts == 1 {
+            continue;
+        }
+        out.push_str(p.modules[m].path.as_str());
+        out.push_byte(b'\t');
+        out.push_u64(tus as u64);
+        out.push_byte(b'\t');
+        out.push_u64(insts as u64);
+        out.push_byte(b'\n');
+    }
+    return out;
 }
 
 // The module whose prototype header declares and whose instance shard defines the descriptor
@@ -8630,14 +8761,24 @@ fn run_package_i(
     // streams out piecewise and is hashed on the way for the manifest.
     let mut man = String::new();
     man.push_str("super-c-manifest\t1\nshard-policy\t1\n");
-    for i in 0..p.shard_rules.len() {
-        man.push_str("shards\t");
-        man.push_string(&p.shard_rules.at(i).module);
-        man.push_str("\t");
-        man.push_u64(p.shard_rules.at(i).tus);
-        man.push_str("\t");
-        man.push_u64(p.shard_rules.at(i).insts);
-        man.push_str("\n");
+    let shard_meta = shard_meta_text(p, &co);
+    {
+        // One `shards` line per module with more than one shard: the effective counts, whether the
+        // manifest named them or the size policy chose them.
+        let sm = shard_meta.as_str();
+        let mut i: usize = 0;
+        while i < sm.len() {
+            let mut e = i;
+            while e < sm.len() && sm.byte_at(e) != 10 {
+                e += 1;
+            }
+            if i != 0 {
+                man.push_str("shards\t");
+                man.push_str(sm.slice(i, e));
+                man.push_str("\n");
+            }
+            i = e + 1;
+        }
     }
     man.push_str("cc\t");
     man.push_i64(target);
@@ -8749,6 +8890,10 @@ fn run_package_i(
     }
     if !err {
         manifest_publish(root, &man, &mut keep);
+        let smp = build_out_path(root, "__sc_shards", "");
+        if cemit_write(smp.as_str(), &shard_meta) {
+            keep.push(smp);
+        }
     }
     // Drop outputs of an earlier build that this program does not emit, so the tree matches the current
     // sources. Skip on a keep-list OOM: never risk deleting a live output.

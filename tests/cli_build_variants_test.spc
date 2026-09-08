@@ -91,3 +91,46 @@ fn same_second_edit_recompiles() {
     let second = cli::superc_env_in(root, E, "1", "run");
     assert_eq(second.exit, 4);
 }
+
+// The compiler decides a module's shard count from its emitted size (about one shard per 256 KiB
+// of C), records the counts in `__sc_shards` beside the manifest, keeps them across rebuilds,
+// and lets a `[shards]` entry in build.toml override them.
+@test
+fn shard_counts_follow_emitted_size() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    // 1,500 small functions render to several hundred KiB of C: more than one shard.
+    let mut src = String::new();
+    for i in 0..1500 {
+        src.push_str("fn f");
+        src.push_u64(i as u64);
+        src.push_str("(a: i32) i32 {\n    let mut s = a;\n");
+        for k in 0..6 {
+            src.push_str("    s = s * 3 + ");
+            src.push_u64((i * 7 + k) as u64);
+            src.push_str(";\n    if s > 1000000 {\n        s = s - 1000000;\n    }\n");
+        }
+        src.push_str("    return s;\n}\n");
+    }
+    src.push_str("fn main() i32 {\n    return f0(1) + f1499(2) - f0(1) - f1499(2);\n}\n");
+    p.mkfile("src/main.spc", src.as_str());
+    let root = str::from_cstr(p.rootp());
+    let r = cli::superc_env_in(root, E, "1", "build");
+    assert(r.ok(), "the build succeeds");
+    let mut sp = String::from_str(root);
+    sp.push_str("/build/dev/gen/__sc_shards");
+    let meta = cli::read_text(sp.as_str());
+    assert(meta.as_str().starts_with("super-c-shards\t1\n"), "the shard file carries its version");
+    assert(meta.as_str().contains("\nmain\t"), "the large module has more than one shard");
+    let mut p1 = String::from_str(root);
+    p1.push_str("/build/dev/gen/main__p1.c");
+    assert(cli::read_text(p1.as_str()).len() > 0, "the second shard was written");
+    let again = cli::superc_env_in(root, E, "1", "build");
+    assert(again.ok(), "the rebuild succeeds");
+    assert(cli::read_text(sp.as_str()).equals(&meta), "a rebuild keeps the counts");
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n[shards]\n\"main\" = 1\n");
+    let over = cli::superc_env_in(root, E, "1", "build");
+    assert(over.ok(), "the override builds");
+    assert(!cli::read_text(sp.as_str()).as_str().contains("\nmain\t"), "the manifest's count wins");
+    assert(cli::read_text(p1.as_str()).len() == 0, "and the second shard is gone");
+}

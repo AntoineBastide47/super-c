@@ -356,13 +356,14 @@ out-dir. Module paths map to nested directories (`::` → `/`):
   __sc_fwd.h               # forward typedefs, enums, dyn/extern/const declarations, shared by every TU
   app__types.h             # complete by-value types owned by app (one header per type SCC)
   app.h  app.c             # per module: .h holds its prototypes and `_ret` typedefs, .c the TU body
-  app__p1.c                # module shards under the build.toml [shards] policy (__p<k>, k from 1)
+  app__p1.c                # module shards (__p<k>, k from 1): the size policy's count, or the build.toml [shards] override
   app__inst.c              # generic instances, glue, constants and dyn tables app owns
-                           # (+ app__inst__p<k>.c under [instance-shards])
+                           # (+ app__inst__p<k>.c when the owner's instances need more than one shard)
   __std/string.h  __std/string.c  # prelude: loaded under the reserved __std:: namespace
                            # so output never collides with a user std/ directory
   __sc_registry.c          # ZST sentinels and the reflection registry
-  __sc_manifest            # paths, content hashes, header dependencies, owners, shard policy
+  __sc_manifest            # paths, content hashes, header dependencies, owners, shard counts
+  __sc_shards              # the shard counts this build used; the next build starts from them
   __ext0_impl.c            # @c.source wrapper TUs (__ext<N>_<stem>.c)
   __ldflags                # one @c.link flag per line
   __test_main.c            # fork-per-test runner (--test only)

@@ -779,7 +779,7 @@ extend Parser {
             return NodeList { start: 0, len: 0 };
         }
         let mark = self.ast.mark();
-        while true {
+        loop {
             let start = self.raw_peek().start();
             // `where 'a: 'b` -- a lifetime on the LHS; bounds are then lifetimes only.
             let lhs_is_lifetime = self.check(TokenType::Label);
@@ -2568,7 +2568,7 @@ extend Parser {
         ];
         let mut n: u32 = 0;
         let mut cur = chain;
-        while true {
+        loop {
             let cn = self.ast.at_const(cur);
             if n < 16 {
                 unsafe segs[n] = cn.as_data.member.member;
@@ -2600,7 +2600,7 @@ extend Parser {
     }
 
     fn parse_postfix_after_mode(self: &mut Self, mut expr: NodeId, grammar: ExpressionGrammar) NodeId {
-        while true {
+        loop {
             let start = self.node_span(expr).start;
             if self.match(TokenType::LeftParen) {
                 let args = self.parse_arguments();
@@ -2801,7 +2801,7 @@ extend Parser {
         let mut relation_left = NODE_NONE;
         let mut relation_op = TokenType::Eof;
         let mut chain: u32 = 0;
-        while true {
+        loop {
             let mut op = self.peek_type();
             let mut shift = op == TokenType::LeftShift;
             if op != TokenType::GreaterThan && !shift && op != TokenType::LessThan && op != TokenType::LessThanEqual {
@@ -3383,7 +3383,7 @@ extend Parser {
                 self.advance();
                 let mark = self.ast.mark();
                 if !self.check(TokenType::Semicolon) {
-                    while true {
+                    loop {
                         self.ast.push(self.parse_expression());
                         if !self.match(TokenType::Comma) {
                             break;

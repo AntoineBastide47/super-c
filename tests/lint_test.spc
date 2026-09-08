@@ -324,3 +324,111 @@ fn const_suggestion_scans_a_switch() {
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint --const solo.spc");
     assert(r.out_has("can be declared 'const fn'"), "the const-suggestion sweep ran and flagged an eligible function");
 }
+
+// A closed `if`/`while` condition the engine folds is always true or false: the warning names
+// it, the dead branch or loop body is reported unreachable, and `--fix` folds the statement (an
+// `if` becomes its live branch, `while false` disappears, `while true` becomes `loop`).
+@test
+fn constant_condition_lint_and_fix() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(const K: bool = 1 < 2;
+fn f(x: i32) i32 {
+    if K {
+        return x + 1;
+    } else {
+        return x - 1;
+    }
+}
+fn g() i32 {
+    let mut n = 0;
+    while false {
+        n = n + 1;
+    }
+    while true {
+        n = n + 1;
+        if n > 3 {
+            break;
+        }
+    }
+    return n;
+}
+fn main() i32 {
+    return f(1) + g() - 6;
+}
+)",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::from_str("lint \"");
+    args.push_str(root);
+    args.push_str("/main.spc\"");
+    let r = p.run_raw(args.as_str());
+    assert(r.out_has("condition is always true"), "the const condition and `while true` fold to true");
+    assert(r.out_has("condition is always false"), "`while false` folds to false");
+    assert(r.out_has("unreachable branch"), "the else branch of the true condition never runs");
+    assert(r.out_has("unreachable loop body"), "the body of `while false` never runs");
+    let mut fargs = String::from_str("lint --fix \"");
+    fargs.push_str(root);
+    fargs.push_str("/main.spc\"");
+    let fr = p.run_raw(fargs.as_str());
+    assert(fr.ok(), "the folded program lints clean");
+    let mut mp = String::from_str(root);
+    mp.push_str("/main.spc");
+    let fixed = loader::read_file(mp.as_str()).unwrap();
+    let t = fixed.as_str();
+    assert(t.contains("return x + 1;"), "the live branch stays");
+    assert(!t.contains("return x - 1;"), "the dead branch is folded away");
+    assert(!t.contains("if K"), "the folded `if` is gone");
+    assert(!t.contains("while false"), "the never-running loop is gone");
+    assert(t.contains("loop {"), "`while true` reads as `loop`");
+    assert(!t.contains("while true"), "and the old spelling is gone");
+    let run = p.compile("main.spc");
+    assert(run.ok(), "the folded program compiles");
+}
+
+// Code after a statement that never completes is unreachable: a `return`, an `if` whose two
+// branches both return, and a `loop` no `break` leaves; a `loop` with a `break` is not.
+@test
+fn unreachable_code_lint() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(fn a(x: i32) i32 {
+    if x > 0 {
+        return 1;
+    } else {
+        return 2;
+    }
+    return 3;
+}
+fn b() i32 {
+    loop {
+        a(1);
+    }
+    return 4;
+}
+fn c() i32 {
+    let mut n = 0;
+    loop {
+        n = n + 1;
+        if n > 2 {
+            break;
+        }
+    }
+    return n;
+}
+fn main() i32 {
+    return a(1) + b() + c();
+}
+)",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::from_str("lint \"");
+    args.push_str(root);
+    args.push_str("/main.spc\"");
+    let r = p.run_raw(args.as_str());
+    assert(r.out_has("main.spc:7:5"), "the statement after the diverging `if` is reported");
+    assert(r.out_has("main.spc:13:5"), "the statement after the endless `loop` is reported");
+    assert(!r.out_has("main.spc:23:5"), "the statement after a loop with a `break` is not");
+}

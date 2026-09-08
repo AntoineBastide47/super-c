@@ -123,8 +123,12 @@ super-c lint --fix --const   # make those functions const, save compile time
 ```
 
 Lints: unused imports/members/labels, unnecessary `mut`/`unsafe`/cast, unreachable
-statements/arms, dead stores, discarded pure results, redundant casts, owning unions
-without `Free`.
+statements/arms/branches (after a `return`, an `if` whose two branches both leave, a
+`loop` no `break` leaves; the dead branch of a constant condition), constant conditions
+(a closed `if`/`while` condition the engine folds: `--fix` folds an `if` statement into
+its live branch, drops `while false`, spells `while true` as `loop`; `do { } while
+false` is the run-once idiom and is left alone), dead stores, discarded pure results,
+redundant casts, owning unions without `Free`.
 
 ### Language server
 
@@ -202,17 +206,21 @@ lto = "thin"                 # none | full | auto | thin (see Link-time optimiza
 opt-level = 2                # overrides only the keys it sets (an array replaces the whole array)
 lto = "thin"
 
-[shards]                     # output shard policy: module TU count per module (default 1)
+[shards]                     # output shard override: module TU count for a module
 "driver::emit" = 3           # a chunk lands in shard (stable symbol hash mod count)
 
-[instance-shards]            # instance shard count per owner module (default 1)
+[instance-shards]            # instance shard count override per owner module
 "__std::vector" = 2
 ```
 
-A shard count is an output schema: changing it rewrites every shard of that module
-(the build names the migration); an ordinary source edit never moves a chunk between
-shards. Pick counts from the emitted size (about one shard per 256 KiB of C, see
-`ci/fanout_report.py`) so the C compile's critical path stays short.
+The compiler decides shard counts itself from the emitted size, about one shard per
+256 KiB of C, and records them in `<gen>/__sc_shards` (`module<TAB>tus<TAB>insts`, one
+line per module with more than one shard); the next build reads that file and keeps a
+count while every shard stays between half and one and a half times the target, so a
+module near a boundary does not flip (a fresh tree splits at the target). A `[shards]` or `[instance-shards]` entry
+overrides the count for that module. A shard count is an output schema: changing it
+rewrites every shard of that module (the build names the migration); an ordinary source
+edit never moves a chunk between shards.
 
 ### Built-in profiles
 
@@ -388,7 +396,8 @@ build/
     super_rt.c        # leak/double-free tracker (inert unless SC_LEAK_CHECK set)
     __sc_fwd.h        # forward typedefs, enums and declarations shared by every TU
     __sc_registry.c   # ZST sentinels and the reflection registry
-    __sc_manifest     # output paths, content hashes, header dependencies, shard policy
+    __sc_manifest     # output paths, content hashes, header dependencies, shard counts
+    __sc_shards       # the shard counts this build used (read back by the next build)
     __ldflags         # linker flags collected from @c.link (one per line)
     .tu_cache         # per-TU journal/replay cache
     app.h  app.c      # one .h/.c per module (.h: prototypes; app__types.h: its by-value types)

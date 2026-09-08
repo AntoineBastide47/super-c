@@ -74,7 +74,7 @@ bootstrap** is required:
 The same rule binds build.toml: the bootstrap release reads the manifest, so a new section or
 key lands in the source only after a release whose `--bootstrap-tags` build skips what it
 does not know (sections and keys, not new TOML syntax). Until then keep the addition
-commented out, as the `[shards]` policy is.
+commented out.
 
 ## Single Compilation Path
 

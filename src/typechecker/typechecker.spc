@@ -979,6 +979,158 @@ extend TypeChecker {
 
     // Const-fold `nid` to an integer via the always-on interpreter. False when it isn't a
     // compile-time constant (locals, calls the fx summary rejects, ...): never an error.
+    /// Fold `nid` to a boolean constant through the engine, only when the expression is closed
+    /// (`tc_expr_closed`): then the answer holds on every execution, which is what the
+    /// constant-condition lint claims.
+    fn tc_fold_bool(self: &mut Self, nid: NodeId, out: &mut bool) bool {
+        if !self.tc_expr_closed(nid, 0) {
+            return false;
+        }
+        let ceptr = self.cir();
+        if ceptr == null {
+            return false;
+        }
+        let v = ceptr.eval(self.cur_module(), nid);
+        if v.kind != iri::IV_BOOL {
+            return false;
+        }
+        *out = v.i != 0;
+        return true;
+    }
+
+    // A closed expression reads no runtime value: literals, constants (never `static mut` or
+    // extern), enum variants, `sizeof`/`alignof`, combined by operators, casts and member paths.
+    // A call is not closed: a `const fn` gate (`on_wasm()`) is a deliberate switch, not a slip.
+    fn tc_expr_closed(self: &Self, nid: NodeId, depth: u32) bool {
+        if nid == NODE_NONE || depth > 24 {
+            return false;
+        }
+        let a = self.cur_ast();
+        let n = a.at_const(nid);
+        return switch n.kind {
+            NODE_LITERAL | NODE_SIZEOF | NODE_ALIGNOF => true,
+            NODE_IDENTIFIER => self.tc_def_closed(a.resolution_def(nid)),
+            NODE_MEMBER => n.as_data.member.path && self.tc_def_closed(a.resolution_def(nid)),
+            NODE_UNARY => self.tc_expr_closed(n.as_data.unary.operand, depth + 1),
+            NODE_BINARY => self.tc_expr_closed(n.as_data.binary.left, depth + 1) && self.tc_expr_closed(
+                n.as_data.binary.right,
+                depth + 1,
+            ),
+            NODE_CAST => self.tc_expr_closed(n.as_data.cast.expression, depth + 1),
+            _ => false,
+        };
+    }
+
+    fn tc_def_closed(self: &Self, d: DefId) bool {
+        if d.node == NODE_NONE || d.module as usize >= self.pkg_count() && self.package != null {
+            return false;
+        }
+        let dn = self.mod_ast(d.module).at_const(d.node);
+        if dn.kind == NodeKind::NODE_CONST {
+            return !dn.as_data.const_def.is_static_mut && !dn.as_data.const_def.is_extern;
+        }
+        return dn.kind == NodeKind::NODE_VARIANT;
+    }
+
+    /// The constant-condition lint: a closed `if` or `while` condition the engine folds is
+    /// always true or always false. The warning carries the fold as a `--fix`: an `if` statement
+    /// becomes its live branch (or nothing), `while false` disappears, `while true` becomes
+    /// `loop`; an `if` value gets no fix (its branch is not an expression on its own). The dead
+    /// branch or loop body gets its own "unreachable" warning.
+    fn lint_const_cond(self: &mut Self, id: NodeId, cond: NodeId, is_while: bool, is_stmt: bool) {
+        if !self.lint || cond == NODE_NONE {
+            return;
+        }
+        if is_while && self.cur_ast().at_const(id).as_data.while_stmt.is_do {
+            return; // `do { } while false` is the run-once block idiom
+        }
+        let mut val = false;
+        if !self.tc_fold_bool(cond, &mut val) {
+            return;
+        }
+        let a = self.cur_ast();
+        let csp = a.at_const(cond).span;
+        let nsp = a.at_const(id).span;
+        if val {
+            self.errors.warn(csp.start, csp.end - csp.start, format("condition is always true"));
+        } else {
+            self.errors.warn(csp.start, csp.end - csp.start, format("condition is always false"));
+        }
+        if is_while {
+            let w = a.at_const(id).as_data.while_stmt;
+            if w.label.end <= w.label.start {
+                if val {
+                    self.errors.fix_replace(nsp.start, csp.end, String::from_str("loop"));
+                } else {
+                    self.errors.fix(nsp.start, nsp.end, 0);
+                }
+            }
+            if !val {
+                let bsp = a.at_const(w.body).span;
+                self.errors.warn(bsp.start, bsp.end - bsp.start, format("unreachable loop body"));
+            }
+            return;
+        }
+        let ifd = a.at_const(id).as_data.if_stmt;
+        let dead = if_node(val, ifd.else_branch, ifd.then_branch);
+        let live = if_node(val, ifd.then_branch, ifd.else_branch);
+        if is_stmt {
+            if live == NODE_NONE {
+                self.errors.fix(nsp.start, nsp.end, 0);
+            } else {
+                let lsp = a.at_const(live).span;
+                self.errors.fix_replace(
+                    nsp.start,
+                    nsp.end,
+                    String::from_str(self.source.slice(lsp.start as usize, lsp.end as usize)),
+                );
+            }
+        }
+        if dead != NODE_NONE {
+            let dsp = a.at_const(dead).span;
+            self.errors.warn(dsp.start, dsp.end - dsp.start, format("unreachable branch"));
+        }
+    }
+
+    /// Whether statement `id` never completes normally: a `return`, `break` or `continue`, an
+    /// expression of type `!`, a `loop` no `break` leaves, a block holding such a statement, or
+    /// an `if` whose two branches both do. The statement after one is unreachable.
+    fn stmt_diverges(self: &Self, id: NodeId, depth: u32) bool {
+        if id == NODE_NONE || depth > 64 {
+            return false;
+        }
+        let a = self.cur_ast();
+        let n = a.at_const(id);
+        if n.kind == NodeKind::NODE_RETURN || n.kind == NodeKind::NODE_BREAK || n.kind == NodeKind::NODE_CONTINUE {
+            return true;
+        }
+        if n.kind == NodeKind::NODE_EXPRESSION_STATEMENT {
+            let vt = a.type_of(n.as_data.single.value);
+            return vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_NEVER;
+        }
+        if n.kind == NodeKind::NODE_WHILE {
+            let vt = a.type_of(id);
+            return vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_NEVER;
+        }
+        if n.kind == NodeKind::NODE_BLOCK {
+            let stmts = n.as_data.block.statements;
+            for i in 0..stmts.len {
+                if self.stmt_diverges(unsafe a.list(stmts)[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind == NodeKind::NODE_IF {
+            let ifd = n.as_data.if_stmt;
+            return ifd.else_branch != NODE_NONE && self.stmt_diverges(ifd.then_branch, depth + 1) && self.stmt_diverges(
+                ifd.else_branch,
+                depth + 1,
+            );
+        }
+        return false;
+    }
+
     fn tc_fold_int(self: &mut Self, nid: NodeId, out: &mut i64) bool {
         let ceptr = self.cir();
         if ceptr == null {
@@ -6241,6 +6393,14 @@ extend TypeChecker {
         if ot == expected {
             // Same-type casts belong to the existing unnecessary-cast lint.
             return;
+        }
+        if ot == TYPE_NONE {
+            // Only the `null` literal is untyped by design; any other operand without a recorded
+            // type (an inference term still open) proves nothing, and the probe would accept it.
+            let on = a.at_const(opn);
+            if on.kind != NodeKind::NODE_LITERAL || on.as_data.literal.token_type != TokenType::Null {
+                return;
+            }
         }
         if !self.compatible_in(expected, opn, true) {
             return;
@@ -12311,6 +12471,7 @@ extend TypeChecker {
                 format("if condition must be 'bool', found '{}'", diag::cstr(&ty[0])),
             );
         }
+        self.lint_const_cond(id, ifd.condition, false, true);
         self.check_stmt(ifd.then_branch);
         self.check_stmt(ifd.else_branch);
     }
@@ -13993,6 +14154,7 @@ extend TypeChecker {
                 format("if condition must be 'bool', found '{}'", diag::cstr(&ty[0])),
             );
         }
+        self.lint_const_cond(id, ifd.condition, false, false);
         let then_ty = self.check_expr_w(ifd.then_branch, expected);
         if ifd.else_branch == NODE_NONE {
             let sp = a.at_const(id).span;
@@ -14466,13 +14628,17 @@ extend TypeChecker {
                 format("while condition must be 'bool', found '{}'", diag::cstr(&ty[0])),
             );
         }
+        self.lint_const_cond(id, a.at_const(id).as_data.while_stmt.condition, true, true);
         let body = a.at_const(id).as_data.while_stmt.body;
-        if a.at_const(id).as_data.while_stmt.is_do || a.at_const(id).as_data.while_stmt.condition == NODE_NONE {
-            self.check_loop_body(body);
-        } else {
-            self.check_loop_body(body);
-        }
+        self.check_loop_body(body);
         if le >= 0 {
+            // A `loop` no `break` leaves is a statement of type `!`: the statement after it is
+            // unreachable (`stmt_diverges`).
+            let e = unsafe self.loop_stack[le as usize];
+            if self.lint && a.at_const(id).as_data.while_stmt.condition == NODE_NONE && !e.saw_bare && !e.saw_value {
+                let never = self.cur_ast().intern_type(Ty { kind: TypeKind::TYPE_NEVER });
+                self.cur_ast().set_type(id, never);
+            }
             self.tc_loop_pop(le, self.cur_ast().at_const(id).span);
         }
         self.loop_depth = self.loop_depth - 1;
@@ -14711,13 +14877,7 @@ extend TypeChecker {
                     }
                     self.check_stmt(sid);
                     if self.lint && !diverged {
-                        if sk == NodeKind::NODE_RETURN || sk == NodeKind::NODE_BREAK || sk == NodeKind::NODE_CONTINUE {
-                            diverged = true;
-                        } else if sk == NodeKind::NODE_EXPRESSION_STATEMENT {
-                            let v = a.at_const(sid).as_data.single.value;
-                            let vt = a.type_of(v);
-                            diverged = vt != TYPE_NONE && self.type_at(vt).kind == TypeKind::TYPE_NEVER;
-                        }
+                        diverged = self.stmt_diverges(sid, 0);
                     }
                 }
                 while self.ndefers != 0 && unsafe self.defer_depth[(self.ndefers - 1) as usize] == self.scope_depth {
