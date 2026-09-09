@@ -6,6 +6,7 @@
 import stdio;
 import stdlib;
 import driver_shim as shim;
+import graph::items as gitems;
 import driver::stats as bst;
 import lexer::token as tok;
 import lexer::lexer as lex;
@@ -347,6 +348,7 @@ struct RsOut {
     pub warns: u32,
     pub errs: u32,
     pub errors: diag::Errors,
+    pub edges: Vector<u64>, // the module's item dependency edges (graph::items)
 }
 
 struct RsTask {
@@ -354,6 +356,7 @@ struct RsTask {
     pub outs: *mut RsOut,
     pub m: u64,
     pub lint: bool,
+    pub spans: *const Vector<gitems::Spans>, // every module's declaration spans, read-only
 }
 
 unsafe extend RsTask as Send {}
@@ -375,6 +378,7 @@ fn rs_run_one(t: RsTask) {
     out.errs = r.errors.errors.len() as u32;
     out.errors = replace(&mut r.errors, diag::Errors::new());
     hirl::lower_module(p, i);
+    gitems::module_edges(unsafe &*t.p, i, unsafe &*t.spans, &mut (&mut *out).edges);
 }
 
 // Resolution has no cross-module ordering: a module reads only parse-level foreign state through
@@ -394,15 +398,17 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
     }
     let mut outs = Vector::<RsOut>::with_capacity(n);
     for _ in 0..n {
-        outs.push(RsOut { ok: true, warns: 0, errs: 0, errors: diag::Errors::new() });
+        outs.push(RsOut { ok: true, warns: 0, errs: 0, errors: diag::Errors::new(), edges: Vector::<u64>::new() });
     }
     prt::set_stack_size(8usize << 20); // the resolver's expression recursion outgrows the default task stack
+    gitems::open(p);
+    let spans = gitems::spans_all(p);
     let pp = p as *mut loader::Package;
     let ob = outs.index_mut(0) as *mut RsOut;
     let wg = psync::WaitGroup::new();
     for i in 0..n {
         wg.add(1);
-        let t = RsTask { p: pp, outs: ob, m: i as u64, lint: lint };
+        let t = RsTask { p: pp, outs: ob, m: i as u64, lint: lint, spans: &spans };
         let wgc = wg.clone();
         launch || {
             rs_run_one(t);
@@ -414,6 +420,7 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
         p.modules[i].ast.nodes.thaw();
         p.modules[i].ast.children.thaw();
     }
+    let mut edges = Vector::<u64>::new();
     for i in 0..n {
         let o = outs.index_mut(i);
         if !o.ok || o.errors.has_warnings() {
@@ -422,7 +429,11 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
         p.lint_warnings = p.lint_warnings + o.warns;
         p.lint_errs = p.lint_errs + o.errs;
         p.ok = o.ok && p.ok;
+        for k in 0..o.edges.len() {
+            edges.push(o.edges[k]);
+        }
     }
+    gitems::build(p, &edges);
 }
 
 struct TcOut {
@@ -494,7 +505,7 @@ fn tc_run_one(t: TcTask) {
 }
 
 // Type-check every module in parallel while preserving serial module-order OBSERVABILITY: the
-// engine's index-aware gate + retry-wait give each module the exact tc_done visibility the serial
+// engine's index-aware gate + retry-wait give each module the exact item-readiness visibility the serial
 // sweep gave it, diagnostics buffer per task and print in module order, and the package-global
 // method marks replay through the real functions in module order.
 // One module's cross-module duplicate-conformance sweep, run as a parallel level after every
@@ -529,10 +540,8 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
     for i in 0..n {
         let _ = p.import_closure(i as ModuleId);
     }
-    p.tc_done.clear();
     p.tc_mod_done.clear();
     for _ in 0..n {
-        p.tc_done.push(Set::<u64>::new());
         p.tc_mod_done.push(0);
     }
     let cirp = p.cir as *mut iri::Interp;
@@ -3545,6 +3554,11 @@ pub fn cemit_package(
                 tuc_eh0 = cem.env_hashes.len();
                 tuc_hedge0 = cem.hdr_k.len();
             }
+            let ts0 = if p.icost_on {
+                std::parallel::platform::now_ns();
+            } else {
+                0u64;
+            };
             cemit_seed_module(
                 p,
                 &mut cem,
@@ -3569,6 +3583,9 @@ pub fn cemit_package(
                 &mut clos_ok,
                 &mut clos_skip,
             );
+            if p.icost_on {
+                gitems::mod_cost(p, m, 0, std::parallel::platform::now_ns() - ts0);
+            }
             if tuc_rec {
                 cem.mg.rec_on = false;
                 // Trailing delta events: their accumulators are consumed whole at assembly, so only
@@ -7083,14 +7100,20 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
         unsafe (&mut *keep).reserve_bodies(p);
     }
     ctx.st = bc_stats_new();
+    ctx.st.all = p.icost_on;
     ctx.validate = stdlib::getenv("SC_BC_VALIDATE") != null;
     let mut ok = true;
     for i in 0..n {
         if !borrowck_module(p, i, &mut ow, &mut ctx) {
             ok = false;
         }
+        p.set_module_states(i, loader::IS_IR_READY);
     }
     bc_stats_print(&ctx.st, &ctx);
+    if p.icost_on {
+        p.icost_bc = replace(&mut ctx.st.body_ns, Vector::<u64>::new());
+        p.icost_lw = replace(&mut ctx.st.lower_ns, Vector::<u64>::new());
+    }
     return ok;
 }
 
@@ -7155,6 +7178,7 @@ fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     wg.wait_masked();
     let mut ok = true;
     for i in 0..n {
+        p.set_module_states(i, loader::IS_IR_READY);
         let o = outs.index_mut(i);
         if !o.ok {
             ok = false;
@@ -8369,7 +8393,15 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
             continue;
         }
         let mut errs = diag::Errors::new();
+        let tp9 = if p.icost_on {
+            std::parallel::platform::now_ns();
+        } else {
+            0u64;
+        };
         check_always_panics_module(p, m, &mut errs);
+        if p.icost_on {
+            gitems::mod_cost(p, m, 1, std::parallel::platform::now_ns() - tp9);
+        }
         if errs.errors.len() != 0 {
             p.ok = false;
             errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
@@ -8539,6 +8571,10 @@ fn run_package_i(
     platform_filter(p, target);
     let n = p.modules.len();
     let mut co = CemitOut::new(n);
+    // The per-item cost records are serial-only (the frontiers' tasks would race on them); the
+    // report and its final graph print for any worker count (the digest gate reads them).
+    let istats = stdlib::getenv("SC_ITEM_STATS") != null;
+    p.icost_on = istats && p.jobs == 1;
     if p.jobs != 1 && n > 1 {
         resolve_all_par(p, lint);
     } else {
@@ -8546,6 +8582,7 @@ fn run_package_i(
             let ok = resolve_module(p, i, lint && !p.modules[i].prelude, null);
             p.ok = ok && p.ok;
         }
+        gitems::build_serial(p);
     }
     if !p.ok {
         return 1;
@@ -8574,6 +8611,14 @@ fn run_package_i(
     bst::mark(bst::B_TYPECHECK);
     syntax_stats_report(p, "typecheck");
     ts_phase("typecheck");
+    if p.icost_on && p.cir != null {
+        let ce9 = p.cir as *mut iri::Interp;
+        eprint(
+            "item-stats evaluation: {} bodies lowered from syntax during typecheck, {} refusals\n",
+            unsafe ce9.st_fresh,
+            unsafe ce9.body_miss_n,
+        );
+    }
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase typecheck: {} ms\n", t9 - tp0);
@@ -8751,6 +8796,9 @@ fn run_package_i(
     }
     // Every body is lowered and kept, every deferred constant is flushed, and the live set and the
     // emit order have read their last reference: the releasable body syntax has no reader left.
+    if istats {
+        gitems::finalize(p); // the measurement's final graph reads body syntax
+    }
     p.release_bodies();
     syntax_stats_report(p, "release");
     bst::mark(bst::B_PREPARE);
@@ -9024,8 +9072,15 @@ fn run_package_i(
             };
         }
     }
+    if istats {
+        gitems::report(p, ITEM_TASK_NS);
+    }
     // Report-only: emission must have read the semantic tables frozen (intern-pool growth is the one
     // sanctioned mutation; see ast::facts).
     let _ = facts_verify(p, &wms, "codegen");
     return rc;
 }
+
+/// The measured cost of one runtime task (launch, run, join; 0.7 to 1.0 us over 20k empty tasks
+/// on the reference machine), charged per scheduled job by the item-schedule prediction.
+const ITEM_TASK_NS: u64 = 1000;

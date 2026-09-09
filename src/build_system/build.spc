@@ -2221,6 +2221,7 @@ fn engine_build_i(
         let pkg = (&mut p) as *mut loader::Package;
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
+        cirv.dyn_rec = true; // the master engine records the index's dynamic item edges
         if ce_steps != 0 {
             cirv.max_steps = ce_steps;
         }

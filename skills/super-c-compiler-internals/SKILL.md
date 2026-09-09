@@ -86,6 +86,17 @@ round and parses it back on demand (`BodyArena.released`, `Interp.body_missing`)
 the release contract and the owned records the emitter reads instead are in
 [syntax-ownership.md](references/syntax-ownership.md).
 
+### ItemId
+
+An index into the package index's item table (`PkgIndex.items`: every top-level and associated
+declaration), dense for one compilation. `Package.sched` (`ItemSched`) holds one record per
+item: a stable key (module path and ordinals: no node id), a post-typecheck signature hash,
+precheck and final dependency ranges, the precheck component, and the monotone readiness state
+(Resolved, Checking, Checked, IrReady) the constant engine queries before it interprets a
+body (`Package::item_state`, the rule the per-module completion sets kept before). Built by
+`graph::items` after resolution (inside the resolve frontier's tasks), measured and gated in
+[item-index.md](references/item-index.md).
+
 ### DefId
 
 Cross-module identity (`src/ast/ast.spc:22`):

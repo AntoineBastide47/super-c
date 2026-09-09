@@ -71,6 +71,9 @@ pub struct BcStats {
     pub top_ns: Array<u64, TOP_N>, // the slowest bodies' analysis time, descending
     pub top_id: Array<u64, TOP_N>, // module << 32 | owner node
     pub top_sz: Array<u64, TOP_N>, // blocks << 32 | points
+    pub all: bool, // record every body (SC_ITEM_STATS): (id, ns) pairs in `body_ns` and `lower_ns`
+    pub body_ns: Vector<u64>,
+    pub lower_ns: Vector<u64>, // Core IR lowering per body
 }
 
 extend BcStats {
@@ -81,6 +84,9 @@ extend BcStats {
             top_ns: Array::<u64, TOP_N>::new(),
             top_id: Array::<u64, TOP_N>::new(),
             top_sz: Array::<u64, TOP_N>::new(),
+            all: false,
+            body_ns: Vector::<u64>::new(),
+            lower_ns: Vector::<u64>::new(),
         };
     }
 
@@ -109,6 +115,12 @@ extend BcStats {
         }
         for k in 0..TOP_N {
             self.top_insert(o.top_ns[k], o.top_id[k], o.top_sz[k]);
+        }
+        for k in 0..o.body_ns.len() {
+            self.body_ns.push(o.body_ns[k]);
+        }
+        for k in 0..o.lower_ns.len() {
+            self.lower_ns.push(o.lower_ns[k]);
         }
     }
 
@@ -384,6 +396,11 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     let lskip = loan_skip(ft);
     let sskip = stage_skip(ft);
     let on9 = ctx.st.pr.on;
+    let tb = if ctx.st.all {
+        platform_ns();
+    } else {
+        0u64;
+    };
     if on9 {
         ctx.st.t[BT_BODIES] += 1;
         ctx.st.t[BT_BLOCKS] += body.blocks.len() as u64;
@@ -480,6 +497,10 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
             body.blocks.len() as u64 << 32 | ctx.facts.npoints as u64,
         );
     }
+    if ctx.st.all {
+        ctx.st.body_ns.push(body.module as u64 << 32 | body.owner.node as u64);
+        ctx.st.body_ns.push(platform_ns() - tb);
+    }
     return ctx.moves.errs.len() != 0 || ctx.solver.errs.len() != 0;
 }
 
@@ -532,7 +553,17 @@ extend tc::TypeChecker {
         let pkg = self.package as *const loader::Package;
         let m = self.cur_module();
         let mut lw = bc_lw_take(ctx, pkg, m, fnid);
-        if !lw.lower_fn(fnid) {
+        let tl0 = if ctx.st.all {
+            platform_ns();
+        } else {
+            0u64;
+        };
+        let lowered = lw.lower_fn(fnid);
+        if tl0 != 0 {
+            ctx.st.lower_ns.push(m as u64 << 32 | fnid as u64);
+            ctx.st.lower_ns.push(platform_ns() - tl0);
+        }
+        if !lowered {
             self.bc_lower_err(&lw, fnid);
             ctx.lower_pool.push(lw);
             return false;

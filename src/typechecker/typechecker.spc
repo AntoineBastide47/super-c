@@ -9,6 +9,7 @@ import stdio;
 import lexer::token as tok;
 import lexer::token_type as *;
 import ast::ast as *;
+import graph::items as gitems;
 import module::loader as loader;
 import pattern::pattern as pat;
 import ir::interp as iri;
@@ -16063,22 +16064,40 @@ extend TypeChecker {
     /// methods' signature types), runs whole-module lints, and finalizes diagnostics. The typed Ast
     /// stays in its module slot; the borrowck pass re-walks it from there.
     pub fn check(self: &mut Self) {
+        if self.package != null && !unsafe self.package.sched.built {
+            // A pipeline without the driver's resolve frontier (lint, the harness) opens the
+            // item index here: the engine's readiness query needs the item records.
+            gitems::open(unsafe &mut *self.package);
+        }
         self.cur_ast().init_types();
         let items = self.cur_ast().at_const(unsafe self.cur_ast().root).as_data.program.items;
         for i in 0..items.len {
             let it9 = unsafe self.cur_ast().list(items)[i as usize];
-            self.check_item(it9);
-            // Completion record: the constant engine interprets a function body only once its
-            // item is typed (an unchecked body would evaluate with degraded widths).
+            // Readiness: Checking while the item's facts are written, Checked once they are
+            // published (the constant engine interprets a function body only from Checked: an
+            // unchecked body would evaluate with degraded widths).
+            let mut rec9 = loader::ITEM_NONE;
+            let mut t0: u64 = 0;
             if self.package != null {
-                {
-                    // Lazily sized on the serial path; the parallel frontier pre-sizes it.
-                    let cm9 = self.cur_module() as usize;
-                    while unsafe self.package.tc_done.len() <= cm9 {
-                        unsafe self.package.tc_done.push(Set::<u64>::new());
-                    }
-                    unsafe self.package.tc_done.index_mut(cm9).insert(self.cur_module() as u64 << 32 | it9 as u64);
+                unsafe self.package.cur_item = self.cur_module() as u64 << 32 | it9 as u64;
+                rec9 = self.package.item_of(self.cur_module(), it9);
+                if rec9 != loader::ITEM_NONE {
+                    self.package.set_item_state_deep(rec9, loader::IS_CHECKING);
                 }
+                if unsafe self.package.icost_on {
+                    t0 = std::parallel::platform::now_ns();
+                }
+            }
+            self.check_item(it9);
+            if t0 != 0 {
+                unsafe self.package.icost_tc.push(self.cur_module() as u64 << 32 | it9 as u64);
+                unsafe self.package.icost_tc.push(std::parallel::platform::now_ns() - t0);
+            }
+            if self.package != null {
+                if rec9 != loader::ITEM_NONE {
+                    self.package.set_item_state_deep(rec9, loader::IS_CHECKED);
+                }
+                unsafe self.package.cur_item = 0;
             }
         }
         self.close_instances();

@@ -5,6 +5,7 @@
 // (owner-emits, to a fixpoint) and computes the dependency-first module emit order for codegen.
 import string as cstring;
 import stdio;
+import atomic;
 import driver_shim as shim;
 import lexer::token as tok;
 import lexer::lexer as lexer;
@@ -38,6 +39,77 @@ pub struct ShardRule {
     pub module: String,
     pub tus: u32,
     pub insts: u32,
+}
+
+/// Item readiness states (`ItemSched.state`), monotone per item: a transition only moves up,
+/// and every semantic write an item publishes lands before its state does (release store),
+/// so a reader that observes a state (acquire load) sees those writes. The two signature
+/// states are reserved for a signature-first scheduler; today an item goes Resolved ->
+/// Checking -> Checked -> IrReady. Failed marks an item whose analysis did not complete.
+pub const IS_PARSED: u8 = 0;
+pub const IS_RESOLVED: u8 = 1;
+pub const IS_SIG_CHECKING: u8 = 2;
+pub const IS_SIG_READY: u8 = 3;
+pub const IS_CHECKING: u8 = 4;
+pub const IS_CHECKED: u8 = 5;
+pub const IS_IR_READY: u8 = 6;
+pub const IS_FAILED: u8 = 7;
+
+/// The item schedule index (`graph::items`): one record per `PkgIndex.items` entry, stored as
+/// parallel arrays indexed by ItemId. `key` is the stable item key (module path, top-level
+/// ordinal, member ordinal: independent of node ids, so a body edit renumbers nothing);
+/// `sig_hash` the post-typecheck signature hash; `pre_off`/`pre_edges` the precheck dependency
+/// ranges (CSR by owner, targets ascending) read from the resolution tables after resolution;
+/// `fin_off`/`fin_edges` the final ranges refined after the checks (typecheck resolutions and
+/// the engine's dynamic body edges); `comp` the precheck strongly connected component of each
+/// item in dependency-first order; `state` the readiness state; `by_node` the items of each
+/// module (the `mod_items` ranges) ordered by declaration node for the (module, node) lookup.
+/// The diagnostic owner of an item is its module (`ItemMeta.module`).
+pub struct ItemSched {
+    pub key: Vector<u64>,
+    pub sig_hash: Vector<u64>,
+    pub pre_off: Vector<u32>,
+    pub pre_edges: Vector<u32>,
+    pub fin_off: Vector<u32>,
+    pub fin_edges: Vector<u32>,
+    pub comp: Vector<u32>,
+    pub ncomp: u32,
+    pub state: Vector<u8>,
+    pub dyn_edges: Set<u64>, // caller item << 32 | callee item, recorded by the master engine
+    pub by_node: Vector<u32>,
+    pub built: bool,
+    pub finalized: bool, // `finalize` ran: final ranges and signature hashes are current
+    pub build_ns: u64, // time of the last `build` (the frontier's per-task edges apart)
+    pub final_ns: u64, // time of `finalize`'s final-edge scan
+    pub hash_ns: u64, // time of `finalize`'s signature hashes
+}
+
+extend ItemSched {
+    pub fn new() ItemSched {
+        return ItemSched {
+            key: Vector::<u64>::new(),
+            sig_hash: Vector::<u64>::new(),
+            pre_off: Vector::<u32>::new(),
+            pre_edges: Vector::<u32>::new(),
+            fin_off: Vector::<u32>::new(),
+            fin_edges: Vector::<u32>::new(),
+            comp: Vector::<u32>::new(),
+            ncomp: 0,
+            state: Vector::<u8>::new(),
+            dyn_edges: Set::<u64>::new(),
+            by_node: Vector::<u32>::new(),
+            built: false,
+            finalized: false,
+            build_ns: 0,
+            final_ns: 0,
+            hash_ns: 0,
+        };
+    }
+
+    /// Approximate owned bytes.
+    pub const fn retained(self: &Self) usize {
+        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity()) * 4 + self.state.capacity() + self.dyn_edges.len() * 16;
+    }
 }
 
 pub struct Package {
@@ -111,11 +183,13 @@ pub struct Package {
     /// Compiler-stage parallelism: worker count for the parallel frontiers (0/1 = serial). Set by
     /// the driver from --jobs before run_package; the parallel cc window reads its own copy.
     pub jobs: u32,
-    /// Top-level items the type checker has COMPLETED (per-module sets, indexed by module; the
-    /// key keeps its module << 32 | item form): the constant engine only interprets function
-    /// bodies whose item is recorded here (an unchecked body would evaluate with degraded
-    /// widths). Per module so parallel checkers write disjoint sets.
-    pub tc_done: Vector<Set<u64>>,
+    /// The item schedule index; `item_state` answers the constant engine's readiness query (a
+    /// function body is interpreted only once its item is Checked: an unchecked body would
+    /// evaluate with degraded widths). Parallel checkers write disjoint items.
+    pub sched: ItemSched,
+    /// The item the type checker is checking right now (module << 32 | item node, 0 = none):
+    /// the engine's dynamic body edges start here.
+    pub cur_item: u64,
     /// Parallel frontend: tc_mod_done[m] flips when module m's check() completed; the engine's
     /// index-aware gate treats a LOWER-indexed module's items as checked only once its flag is
     /// set (waiting through `tc_wait`), and a HIGHER-indexed module's as unchecked regardless:
@@ -190,6 +264,19 @@ pub struct Package {
     /// disk yet. Empty outside the LSP.
     pub overlay_files: Vector<String>,
     pub overlay_texts: Vector<String>,
+    /// SC_ITEM_STATS (`graph::items`): per-item costs and dynamic evaluation edges recorded by
+    /// the serial pipeline for the item-schedule measurement. `icost_on` gates every record;
+    /// `icost_tc` holds one (module << 32 | item node, ns) pair per checked item, `icost_bc` one
+    /// per borrow-checked body (owner node), `icost_mod` two per module (seed ns, panics ns),
+    /// `ctfe_edges` (caller key, callee key) pairs for every body the engine lowered from
+    /// syntax while `cur_item` was checking.
+    pub icost_on: bool,
+    pub icost_tc: Vector<u64>,
+    pub icost_rs: Vector<u64>, // per resolved item (module << 32 | item node, ns)
+    pub icost_bc: Vector<u64>,
+    pub icost_lw: Vector<u64>, // per body lowered to Core IR (owner key, ns)
+    pub icost_mod: Vector<u64>,
+    pub ctfe_edges: Vector<u64>,
     /// LSP: modules whose body syntax the constant engine read in some analysis round (a fold's
     /// or a `const fn` scan's callee); their bodies stay live when their documents are closed, so
     /// the next round needs no parse-back. Indexed by module; shorter than the module table means
@@ -1624,7 +1711,8 @@ extend Package {
             cir: null,
             inl_store: null,
             jobs: 1, // serial unless a driver opts in: a bare Package must never launch tasks
-            tc_done: Vector::<Set<u64>>::new(),
+            sched: ItemSched::new(),
+            cur_item: 0,
             tc_mod_done: Vector::<u8>::new(),
             tc_wait: loader_no_wait,
             tc_wait_ctx: null,
@@ -1644,6 +1732,13 @@ extend Package {
             overlay_files: Vector::<String>::new(),
             overlay_texts: Vector::<String>::new(),
             body_hold: Vector::<bool>::new(),
+            icost_on: false,
+            icost_tc: Vector::<u64>::new(),
+            icost_rs: Vector::<u64>::new(),
+            icost_bc: Vector::<u64>::new(),
+            icost_lw: Vector::<u64>::new(),
+            icost_mod: Vector::<u64>::new(),
+            ctfe_edges: Vector::<u64>::new(),
         };
     }
 
@@ -2114,6 +2209,88 @@ extend Package {
             b += m.source.capacity() + m.ast.retained_bytes();
         }
         return b;
+    }
+
+    /// The index record of declaration node `node` in module `m`, or ITEM_NONE when the node is
+    /// not a top-level or associated declaration (`by_node` binary search over the module).
+    pub const fn item_of(self: &Self, m: ModuleId, node: NodeId) ItemId {
+        if !self.sched.built || m as usize + 1 >= self.idx.mod_items.len() {
+            return ITEM_NONE;
+        }
+        let mut lo = self.idx.mod_items[m as usize] as usize;
+        let mut hi = self.idx.mod_items[m as usize + 1] as usize;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let it = self.sched.by_node[mid];
+            let n = self.idx.items.at(it as usize).node;
+            if n < node {
+                lo = mid + 1;
+            } else if n > node {
+                hi = mid;
+            } else {
+                return it;
+            }
+        }
+        return ITEM_NONE;
+    }
+
+    /// The readiness state of item `it` (acquire: the item's published writes are visible).
+    pub fn item_state_at(self: &Self, it: ItemId) u8 {
+        return atomic::load_u8(unsafe (self.sched.state.as_ptr() + it as usize), 1);
+    }
+
+    /// The readiness state of declaration `node` of module `m`; IS_PARSED for a node with no
+    /// record (an unindexed declaration is never checked as an item).
+    pub fn item_state(self: &Self, m: ModuleId, node: NodeId) u8 {
+        let it = self.item_of(m, node);
+        if it == ITEM_NONE {
+            return IS_PARSED;
+        }
+        return self.item_state_at(it);
+    }
+
+    /// Move item `it` to state `st` (release: every write before the call is published with the
+    /// state). Monotone: a lower state is a programmer error.
+    pub fn set_item_state(self: &mut Self, it: ItemId, st: u8) {
+        let cur = self.item_state_at(it);
+        assert(st >= cur, "item readiness states only move up");
+        atomic::store_u8(unsafe (self.sched.state.as_ptr() as *mut u8 + it as usize), st, 2);
+    }
+
+    /// Move item `it` and, for an extend, its member records (the records following it that name
+    /// it as owner: a member is checked with its extend) to state `st`.
+    pub fn set_item_state_deep(self: &mut Self, it: ItemId, st: u8) {
+        self.set_item_state(it, st);
+        let n = self.idx.items.len();
+        for k in it as usize + 1..n {
+            if self.idx.items.at(k).owner != it {
+                break;
+            }
+            self.set_item_state(k as ItemId, st);
+        }
+    }
+
+    /// Move every item of module `m` to `st` when it is below (a module-wide transition).
+    pub fn set_module_states(self: &mut Self, m: usize, st: u8) {
+        if !self.sched.built {
+            return;
+        }
+        for it in self.idx.mod_items[m] as usize..self.idx.mod_items[m + 1] as usize {
+            if self.item_state_at(it as ItemId) < st {
+                self.set_item_state(it as ItemId, st);
+            }
+        }
+    }
+
+    /// The coordinator's re-analysis reset (the language server checks a module again): every
+    /// item of module `m` returns to Resolved. Not a monotone transition; no reader runs meanwhile.
+    pub fn reset_module_states(self: &mut Self, m: usize) {
+        if !self.sched.built {
+            return;
+        }
+        for it in self.idx.mod_items[m] as usize..self.idx.mod_items[m + 1] as usize {
+            self.sched.state.set(it, IS_RESOLVED);
+        }
     }
 
     /// Free every module's body arena: the checked release point of releasable body syntax, once

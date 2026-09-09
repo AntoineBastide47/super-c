@@ -148,9 +148,9 @@ tables). The round parses back:
 The constant engine reads foreign bodies for folds and `const fn` scans (`Interp::body_of`,
 `fx_scan_fn`). `Interp::body_avail` refuses a body-arena node whose arena is released or not
 sized by a check yet, and records the module in `Interp.body_missing` (a refusal for an item
-not yet in `tc_done` records too). `typecheck_set` checks the members of a set in import
+not yet Checked in the item index records too). `typecheck_set` checks the members of a set in import
 order (`dep_order`: closure members first, cycles in index order) with a fresh engine per
-pass and fresh `tc_done` records for the members; after the pass it parses every demanded
+pass and the members' readiness reset to Resolved; after the pass it parses every demanded
 released module back, marks it in `Package.body_hold` (held modules never release again in
 that package: the next round needs no parse-back), adds it to the set, and runs the next pass
 over the demanders (the members whose check or always-panics probe met a refusal) plus the

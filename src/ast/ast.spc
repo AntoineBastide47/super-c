@@ -1343,6 +1343,15 @@ extend<T> SplitVec<T> {
         }
     }
 
+    /// The contiguous prefix: entries below `base_len` sit at `base_ptr() + i` (the rest, a frozen
+    /// array's spill, through `ptr_at`). A scan reads the prefix without the per-entry split test.
+    pub const fn base_len(self: &Self) usize {
+        return self.base.len();
+    }
+    pub const fn base_ptr(self: &Self) *const T {
+        return self.base.as_ptr();
+    }
+
     /// Raw pointer to entry `i`: valid for the base region for the array's life while frozen, and
     /// within one overflow chunk otherwise. UNCHECKED like the flat array it replaces: an empty
     /// list's start sits one past the end and is never dereferenced.

@@ -645,6 +645,9 @@ pub struct Interp {
     pub body_read: Vector<bool>,
     pub body_missing: Vector<bool>,
     pub body_miss_n: u64,
+    /// The master engine records dynamic item edges into the package index (`note_dyn_edge`);
+    /// a per-task engine leaves it off.
+    pub dyn_rec: bool,
 }
 
 pub fn interp_new(pkg: *const loader::Package) Interp {
@@ -715,6 +718,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         body_read: Vector::<bool>::new(),
         body_missing: Vector::<bool>::new(),
         body_miss_n: 0,
+        dyn_rec: false,
     };
 }
 
@@ -1602,13 +1606,15 @@ extend Interp {
                             return -1;
                         }
                     }
-                } else if m as usize < self.p().tc_done.len() {
-                    done9 = self.p().tc_done.at(m as usize).contains(&(m as u64 << 32 | item9 as u64));
+                } else {
+                    done9 = self.p().item_state(m, item9) >= loader::IS_CHECKED;
                 }
                 if !done9 {
                     self.note_body(m, false);
+                    self.note_dyn_edge(m, item9);
                     return -1;
                 }
+                self.note_dyn_edge(m, item9);
             }
         }
         {
@@ -1620,6 +1626,12 @@ extend Interp {
             if !self.body_avail(m, bn) {
                 return -1;
             }
+        }
+        if self.p().icost_on && self.p().cur_item != 0 {
+            // Item-schedule measurement: a dynamic evaluation edge from the checking item.
+            let pm = self.pkg as *mut loader::Package;
+            unsafe pm.ctfe_edges.push(self.p().cur_item);
+            unsafe pm.ctfe_edges.push(m as u64 << 32 | fnode as u64);
         }
         let mut lw = irl::Lowerer::new(self.pkg, m, fnode);
         for i in 0..binds.len() {
@@ -1652,6 +1664,26 @@ extend Interp {
         );
         self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
         return self.body_keys.len() as i64 - 1;
+    }
+
+    // The dynamic item edge from the item the checker is on to the item of the body this engine
+    // needs (`NeedsItem`): one record per pair, in the package's bounded set. Only the master
+    // engine records (task engines share the package without a lock), and only while a check
+    // names its item.
+    fn note_dyn_edge(self: &mut Self, m: ModuleId, item9: NodeId) {
+        if !self.dyn_rec || self.p().cur_item == 0 {
+            return;
+        }
+        let caller = self.p().item_of(
+            (self.p().cur_item >> 32) as ModuleId,
+            (self.p().cur_item & 0xFFFFFFFFu64) as NodeId,
+        );
+        let callee = self.p().item_of(m, item9);
+        if caller == loader::ITEM_NONE || callee == loader::ITEM_NONE || caller == callee {
+            return;
+        }
+        let pm = self.pkg as *mut loader::Package;
+        unsafe pm.sched.dyn_edges.insert(caller as u64 << 32 | callee as u64);
     }
 
     // Record that module `m`'s body syntax was read (`ok`) or refused.

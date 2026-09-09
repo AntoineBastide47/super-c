@@ -65,6 +65,7 @@ fn run_file(
         }
         let mut cirv = iri::interp_new((&mut p) as *mut loader::Package);
         p.cir = &mut cirv;
+        cirv.dyn_rec = true; // the master engine records the index's dynamic item edges
         if ce_steps != 0 {
             cirv.max_steps = ce_steps;
         }
@@ -414,6 +415,7 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
         let pkg = (&mut p) as *mut loader::Package;
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
+        cirv.dyn_rec = true; // the master engine records the index's dynamic item edges
         if ce_steps != 0 {
             cirv.max_steps = ce_steps;
         }
@@ -553,6 +555,7 @@ fn lint_batch(
         let pkg = (&mut p) as *mut loader::Package;
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
+        cirv.dyn_rec = true; // the master engine records the index's dynamic item edges
         if ce_steps != 0 {
             cirv.max_steps = ce_steps;
         }

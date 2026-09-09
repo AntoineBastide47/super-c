@@ -358,6 +358,7 @@ a `thin` profile keeps `auto` there.
 | `SC_CEMIT_STATS` | Per-phase wall times, the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes) and the emission probe table (`src/emit/probe.spc`: ms and calls per region, bodies taken from the keep or lowered, instance re-lowerings, rendered bodies and bytes; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
 | `SC_INLINE_STATS` | Per-body inliner decision counters |
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters |
+| `SC_ITEM_STATS` | The item schedule index measurement (`src/graph/items.spc`): per-item typecheck costs, the graph and its components, the predicted item-schedule makespans against the module levels, per-body borrow and per-module panics and emission costs, the index digest (serial builds; `--jobs=1` for the costs) |
 
 ### LSP
 

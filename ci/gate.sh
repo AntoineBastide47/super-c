@@ -70,12 +70,15 @@ echo "gate: byte-identical"
 
 step "worker identity: --jobs=$CONTRACT_WORKERS_MIN vs --jobs=$ncpu"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_TYPE_TABLE="$tmp/j1-types" ./gen1-super-c build --jobs=$CONTRACT_WORKERS_MIN >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TYPE_TABLE="$tmp/j1-types" ./gen1-super-c build --jobs=$CONTRACT_WORKERS_MIN >/dev/null 2>"$tmp/j1-items" )
 cp -R "$tree/build/raw" "$tmp/j1-raw"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_TASK_DELAY=1 SC_TYPE_TABLE="$tmp/jn-types" ./gen1-super-c build --jobs=$ncpu >/dev/null )
+( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TASK_DELAY=1 SC_TYPE_TABLE="$tmp/jn-types" ./gen1-super-c build --jobs=$ncpu >/dev/null 2>"$tmp/jn-items" )
 same_tree "$tmp/j1-raw" "$tree/build/raw" || fail "one worker and $ncpu workers emitted different C (above)"
 cmp "$tmp/j1-types" "$tmp/jn-types" || fail "one worker and $ncpu workers published different type tables"
+# The item schedule index (keys, hashes, edges, components, states) is the same under both.
+d1=$(grep -o 'digest [0-9]*' "$tmp/j1-items") ; dn=$(grep -o 'digest [0-9]*' "$tmp/jn-items")
+[ -n "$d1" ] && [ "$d1" = "$dn" ] || fail "one worker and $ncpu workers built different item indexes ($d1 vs $dn)"
 echo "gate: byte-identical"
 
 step "strict C warnings ($CONTRACT_CSTD $CONTRACT_STRICT_CFLAGS) and readability"

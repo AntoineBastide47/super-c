@@ -1651,7 +1651,18 @@ extend Resolver {
         self.collect_items(items);
         for i in 0..items.len {
             let cid = self.child(items, i);
+            let t0 = if self.package != null && unsafe (&*self.package).icost_on {
+                std::parallel::platform::now_ns();
+            } else {
+                0u64;
+            };
             self.resolve_item(cid);
+            if t0 != 0 {
+                // Item-schedule measurement: the resolve cost of this item.
+                let pm = self.package as *mut loader::Package;
+                unsafe pm.icost_rs.push(self.ast.module as u64 << 32 | cid as u64);
+                unsafe pm.icost_rs.push(std::parallel::platform::now_ns() - t0);
+            }
         }
         self.scope_exit();
         if self.lint {

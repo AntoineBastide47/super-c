@@ -16,6 +16,7 @@ import ir::interp as iri;
 import utils::errors as diag;
 import driver::emit as emit;
 import driver::util as dutil;
+import graph::items as gitems;
 import stdlib;
 
 /// One harvested diagnostic: the cross-pass record the server publishes and codeAction later reads
@@ -646,6 +647,15 @@ pub fn recompile(
         }
         st.analyzed += 1;
     }
+    // The index follows the package index: the affected set's node ids changed. Every module
+    // outside the set keeps its analysis, so its items are Checked (the baseline guard above
+    // proved every module typed); the passes reset the set's own.
+    gitems::open(p);
+    for m in 0..n {
+        if !aff[m] {
+            p.set_module_states(m, loader::IS_CHECKED);
+        }
+    }
     typecheck_set(p, &mut aff, true, true, root_file, lint_dir, &mut nd, st);
     // 6) merge: keep unaffected modules' records, replace the affected ones' (the set now holds
     // every module the passes analyzed).
@@ -747,6 +757,9 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
         res_ok.push(ok);
         all_ok = ok && all_ok;
     }
+    // The readiness states and the (module, node) lookup only: the server has no consumer of the
+    // dependency ranges, so it does not pay for their scan.
+    gitems::open(p);
     // Per-module gate, not one package-wide Boolean: module `i` typechecks when its own import
     // closure resolved cleanly, so one broken file does not suppress every other file's semantic
     // diagnostics. The cross-module always-panics phase still needs the whole package typed.
@@ -801,14 +814,10 @@ fn typecheck_set(
     let pkg = p as *mut loader::Package;
     let mut order = dep_order(p, set);
     for pass in 0..n + 1 {
-        // Fresh completion records for the pass: the engine interprets a member's bodies only
-        // once this pass has checked them (a parsed-back arena has no types before that).
+        // Fresh readiness for the pass: the engine interprets a member's bodies only once this
+        // pass has checked them (a parsed-back arena has no types before that).
         for k in 0..order.len() {
-            let i = order[k];
-            if i < p.tc_done.len() {
-                let old = replace(&mut p.tc_done[i], Set::<u64>::new());
-                old.free();
-            }
+            p.reset_module_states(order[k]);
         }
         let mut cirv = iri::interp_new(pkg);
         p.cir = &mut cirv;
