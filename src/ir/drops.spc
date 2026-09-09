@@ -490,6 +490,10 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
                 span: b.locals.at(da.local as usize).span,
                 decl: NODE_NONE,
                 item: DefId { module: 0, node: NODE_NONE },
+                name_off: 0,
+                name_len: 0,
+                dkind: ir::LK_NONE,
+                zero_len: false,
             },
         );
         cond_f.push(b.locals.len() as u32 - 1);

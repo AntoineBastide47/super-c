@@ -72,6 +72,9 @@ pub struct Parser<'a> {
     // `@reflect(key = value, ..)` entries pending on the next declaration; flushed with the owner
     // by add_attrs_to (struct/enum/field/variant only -- anything else is an error).
     pub pending_metas: Vector<MetaAttr>,
+    /// Bodies parsed while set stay in the module arena: interface members and the members of a
+    /// generic `extend` (see `Ast.b`).
+    pub pin_scope: bool,
 }
 
 extend Parser {
@@ -91,6 +94,7 @@ extend Parser {
             derive_start: 0,
             derive_end: 0,
             expand_derive: true,
+            pin_scope: false,
             pending_metas: Vector::<MetaAttr>::new(),
         };
     }
@@ -850,7 +854,7 @@ extend Parser {
             self.expect(TokenType::Colon, "':'");
             let ty = self.parse_type();
             for i in 0..names.len {
-                let name = *self.ast.children.at((names.start + i) as usize);
+                let name = unsafe self.ast.list(names)[i as usize];
                 let span_start = self.node_span(name).start;
                 let span_end = self.node_span(ty).end;
                 let is_mutable = self.ast.at_const(name).as_data.name.is_mutable;
@@ -914,7 +918,9 @@ extend Parser {
         return returns;
     }
 
-    pub fn parse_function(self: &mut Self, require_body: bool) NodeId {
+    /// `pinned`: the body must stay in the module arena (`const fn`); a generic function, an
+    /// interface member and a generic extend's member are pinned here as well.
+    pub fn parse_function(self: &mut Self, require_body: bool, pinned: bool) NodeId {
         let start = self.raw_peek().start();
         self.expect(TokenType::Fn, "'fn'");
         let name = self.callable_name();
@@ -943,6 +949,8 @@ extend Parser {
             }
         }
         let mut body = NODE_NONE;
+        let outer_sink = self.ast.sink_body;
+        self.ast.sink_body = !(pinned || self.pin_scope || generics.len != 0);
         if self.check(TokenType::LeftBrace) {
             body = self.parse_block();
         } else if require_body {
@@ -951,6 +959,7 @@ extend Parser {
         if self.nrets.len() != 0 && body != NODE_NONE {
             self.bind_named_returns(body);
         }
+        self.ast.sink_body = outer_sink;
         self.nrets = outer_nrets;
         let __decl = self.ast.add(
             Node {
@@ -1005,6 +1014,8 @@ extend Parser {
             }
         }
         let mut body = NODE_NONE;
+        let outer_sink = self.ast.sink_body;
+        self.ast.sink_body = Ast::in_body(self.ast.at_const(fnid).as_data.function.body);
         if self.check(TokenType::LeftBrace) {
             body = self.parse_block();
         } else {
@@ -1013,6 +1024,7 @@ extend Parser {
         if self.nrets.len() != 0 && body != NODE_NONE {
             self.bind_named_returns(body);
         }
+        self.ast.sink_body = outer_sink;
         self.nrets = outer_nrets;
         return body;
     }
@@ -1302,7 +1314,7 @@ extend Parser {
             self.error_here("expected 'fn', 'const fn' or 'extend' after 'unsafe' at item scope");
             return NODE_NONE;
         }
-        let f = self.parse_function(true);
+        let f = self.parse_function(true, is_const);
         self.ast.at(f).as_data.function.is_unsafe = true;
         if is_const {
             self.ast.at(f).as_data.function.is_const = true;
@@ -1317,7 +1329,7 @@ extend Parser {
         let start = self.raw_peek().start();
         self.advance();
         if self.check(TokenType::Fn) {
-            let f = self.parse_function(true);
+            let f = self.parse_function(true, true);
             self.ast.at(f).as_data.function.is_const = true;
             self.ast.at(f).span.start = start;
             return f;
@@ -1328,7 +1340,7 @@ extend Parser {
                 self.error_here("expected 'fn' after 'const unsafe'");
                 return NODE_NONE;
             }
-            let f = self.parse_function(true);
+            let f = self.parse_function(true, true);
             self.ast.at(f).as_data.function.is_const = true;
             self.ast.at(f).as_data.function.is_unsafe = true;
             self.ast.at(f).span.start = start;
@@ -1429,9 +1441,11 @@ extend Parser {
         };
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
+        let outer_pin = self.pin_scope;
+        self.pin_scope = true;
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             if self.check(TokenType::Fn) {
-                let f = self.parse_function(false);
+                let f = self.parse_function(false, true);
                 if self.ast.at_const(f).as_data.function.body == NODE_NONE {
                     self.expect(TokenType::Semicolon, "';'");
                 }
@@ -1447,7 +1461,7 @@ extend Parser {
                 if !self.check(TokenType::Fn) {
                     self.error_here("expected 'fn' or 'const fn' after 'unsafe' in an interface");
                 } else {
-                    let f = self.parse_function(false);
+                    let f = self.parse_function(false, true);
                     self.ast.at(f).as_data.function.is_unsafe = true;
                     if uconst {
                         self.ast.at(f).as_data.function.is_const = true;
@@ -1464,7 +1478,7 @@ extend Parser {
                 if !self.check(TokenType::Fn) {
                     self.error_here("expected 'fn' after 'const' in an interface");
                 } else {
-                    let f = self.parse_function(false);
+                    let f = self.parse_function(false, true);
                     self.ast.at(f).as_data.function.is_const = true;
                     self.ast.at(f).span.start = cstart;
                     if self.ast.at_const(f).as_data.function.body == NODE_NONE {
@@ -1480,6 +1494,7 @@ extend Parser {
                 self.advance();
             }
         }
+        self.pin_scope = outer_pin;
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
         let __decl = self.ast.add(
@@ -1514,12 +1529,14 @@ extend Parser {
         };
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
+        let outer_pin = self.pin_scope;
+        self.pin_scope = generics.len != 0;
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             let mut attrs = self.parse_attributes(16);
             self.reject_derive_here();
             let is_public = self.match(TokenType::Pub);
             if self.check(TokenType::Fn) {
-                let f = self.parse_function(true);
+                let f = self.parse_function(true, false);
                 self.ast.at(f).as_data.function.is_public = is_public;
                 self.add_attrs_to(&mut attrs, f);
                 self.ast.push(f);
@@ -1555,6 +1572,7 @@ extend Parser {
                 self.advance();
             }
         }
+        self.pin_scope = outer_pin;
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
         let __decl = self.ast.add(
@@ -1599,7 +1617,7 @@ extend Parser {
             self.reject_derive_here();
             let is_public = self.match(TokenType::Pub);
             if self.check(TokenType::Fn) {
-                let f = self.parse_function(false);
+                let f = self.parse_function(false, true);
                 if self.ast.at_const(f).as_data.function.body != NODE_NONE {
                     let sp = self.node_span(f);
                     self.errors.emit(
@@ -1776,7 +1794,7 @@ extend Parser {
         let mut id = NODE_NONE;
         switch self.peek_type() {
             Fn => {
-                id = self.parse_function(true);
+                id = self.parse_function(true, false);
                 self.ast.at(id).as_data.function.is_public = is_public;
             },
             Unsafe => {
@@ -3377,7 +3395,12 @@ extend Parser {
                 result = self.parse_let();
             },
             Const => {
+                // A local constant is an item with an initializer: module syntax, whatever body
+                // holds it (its value may enter a type, and the emitter materializes it).
+                let outer_sink = self.ast.sink_body;
+                self.ast.sink_body = false;
                 result = self.parse_const();
+                self.ast.sink_body = outer_sink;
             },
             Return => {
                 self.advance();

@@ -55,13 +55,14 @@ fn errors() {
 // Collect all NODE_IDENTIFIER value-uses named `name` that the resolver bound, in creation order.
 fn value_uses(a: &Ast, src: *const char, name: *const char, out: *mut NodeId, cap: usize) usize {
     let mut n: usize = 0;
-    let mut id: NodeId = 1;
-    while id as usize < a.nodes.len() {
+    let mut k: usize = 1;
+    while k < a.nnodes() {
+        let id = a.nth_id(k);
         if h::ident_is(a, src, id, name) && a.resolution(id) != NODE_NONE && n < cap {
             unsafe out[n] = id;
             n = n + 1;
         }
-        id = id + 1;
+        k = k + 1;
     }
     return n;
 }
@@ -97,12 +98,13 @@ fn namespace_separation() {
     assert(c.ast.resolution(uses[0]) == const_decl, "value Foo binds to the const, not the struct");
     // The type use is the `: Foo` annotation, resolved on the NODE_TYPE_PATH.
     let mut type_path: NodeId = NODE_NONE;
-    let mut id: NodeId = 1;
-    while id as usize < c.ast.nodes.len() {
+    let mut k: usize = 1;
+    while k < c.ast.nnodes() {
+        let id = c.ast.nth_id(k);
         if c.ast.at_const(id).kind == NodeKind::NODE_TYPE_PATH && c.ast.resolution(id) != NODE_NONE {
             type_path = id;
         }
-        id = id + 1;
+        k = k + 1;
     }
     assert(type_path != NODE_NONE && c.ast.resolution(type_path) == struct_decl, "type Foo binds to the struct");
 }
@@ -111,13 +113,14 @@ fn namespace_separation() {
 fn closure_captures(src: str, out: *mut u32, cap: usize) usize {
     let c = h::compile_ast(src, h::STAGE_RESOLVE);
     let mut n: usize = 0;
-    let mut id: NodeId = 1;
-    while id as usize < c.ast.nodes.len() {
+    let mut k: usize = 1;
+    while k < c.ast.nnodes() {
+        let id = c.ast.nth_id(k);
         if c.ast.at_const(id).kind == NodeKind::NODE_CLOSURE && n < cap {
             unsafe out[n] = c.ast.at_const(id).as_data.closure.captures.len;
             n = n + 1;
         }
-        id = id + 1;
+        k = k + 1;
     }
     return n;
 }

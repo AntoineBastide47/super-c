@@ -131,9 +131,10 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
 fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
     let n = p.modules.len();
     let a = p.module_ast_const(m as ModuleId);
-    let nr = a.resolutions_len();
+    let nb9 = unsafe a.nodes.len();
+    let nr = a.nnodes();
     for r in 0..nr {
-        let d = a.resolution_def(r as NodeId);
+        let d = a.resolution_def(Ast::nth_id_n(nb9, r));
         if d.node != NODE_NONE && d.module as usize < n && d.module as usize != m && p.builtin_of_decl(d.module, d.node) < 0 {
             let _ = mark_live(row, n, d.module);
         }
@@ -389,8 +390,7 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
         let _ = p.module_closure(i as ModuleId);
     }
     for i in 0..n {
-        p.modules[i].ast.nodes.freeze();
-        p.modules[i].ast.children.freeze();
+        p.modules[i].ast.freeze_nodes();
     }
     let mut outs = Vector::<RsOut>::with_capacity(n);
     for _ in 0..n {
@@ -544,9 +544,8 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
     for i in 0..n {
         p.modules[i].ast.ilock_on = true;
         // Pin the syntax arrays: tc synthesizes nodes while other tasks read pre-existing ones.
-        p.modules[i].ast.nodes.freeze();
-        p.modules[i].ast.children.freeze();
-        p.modules[i].ast.resolutions.freeze();
+        p.modules[i].ast.freeze_nodes();
+        p.modules[i].ast.freeze_resolutions();
     }
     let mut wc = TcWaitSt { mu: psync::Mutex::<i32>::new(0), cv: psync::Condvar::new(), p: p };
     p.tc_wait = tc_wait_impl;
@@ -693,9 +692,8 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
     }
     for i in 0..n {
         p.modules[i].ast.ilock_on = false;
-        p.modules[i].ast.nodes.thaw();
-        p.modules[i].ast.children.thaw();
-        p.modules[i].ast.resolutions.thaw();
+        p.modules[i].ast.thaw_nodes();
+        p.modules[i].ast.thaw_resolutions();
     }
     let mut ok = true;
     for i in 0..n {
@@ -1218,9 +1216,10 @@ fn cemit_inst_asserts(
     if !*ia_built.at(dm) {
         ia_built.set(dm, true);
         let lst = ia.index_mut(dm);
-        for nid0 in 0..a.nodes.len() {
-            if a.at_const(nid0 as NodeId).kind == NodeKind::NODE_STATIC_ASSERT {
-                lst.push(nid0 as NodeId);
+        for k0 in 0..a.nnodes() {
+            let nid0 = a.nth_id(k0);
+            if a.at_const(nid0).kind == NodeKind::NODE_STATIC_ASSERT {
+                lst.push(nid0);
             }
         }
     }
@@ -3088,6 +3087,22 @@ pub fn cemit_package(
     // The planner's signature-level propagation reads the package metadata.
     p.ensure_sigs();
     let gm9 = prd.start();
+    // The inline candidates come from the kept lowerings, before the graph takes them.
+    let mut inls = inl::InlineStore::new();
+    if irkeep != null {
+        inls.build(p, unsafe &*irkeep);
+    }
+    p.inl_store = &inls;
+    if tstat {
+        let t9 = unsafe shim::sc_ticks_ms();
+        eprint(
+            "cemit-stage inline-store: {} ms, {} callees kept of {} vetted\n",
+            t9 - tt0,
+            inls.kept.len(),
+            inls.keep_ix.len(),
+        );
+        tt0 = t9;
+    }
     let mut g = ig::InstGraph::new(p, irkeep, live);
     g.collect();
     prd.stop(prb::P_GRAPH, gm9);
@@ -3179,7 +3194,7 @@ pub fn cemit_package(
         let mut src_total: usize = 0;
         for m in 0..p.modules.len() {
             if p.modules[m].has_ast {
-                est_nodes += p.modules[m].ast.nodes.len();
+                est_nodes += p.modules[m].ast.nnodes();
                 if live == null || !p.modules[m].prelude || unsafe live[m] {
                     ch.bufs.index_mut(m).reserve(p.modules[m].source.len());
                     src_total += p.modules[m].source.len();
@@ -4301,6 +4316,7 @@ pub fn cemit_package(
     // interpreter serves the whole pass (its lowered-callee cache, call memo, and captured static
     // groups persist), and the descriptor sections below render from the same store.
     let mut cdit = iri::interp_new(p);
+    cdit.parent = p.cir as *const iri::Interp;
     let mut cdefs = Segs::new();
     let mut cd_own9: ModuleId = 0;
     {
@@ -4746,6 +4762,7 @@ pub fn cemit_package(
     prd.merge(&dow.pr);
     prd.merge(&cem.pr);
     dctx_drop(&mut prd);
+    p.inl_store = null;
     o.pr = prd;
     if unsafe TS_ON {
         ty_stats_report(p);
@@ -4796,6 +4813,59 @@ fn task_delay(m: usize) {
 
 /// The SC_TYPE_STATS report: the identity-path counters, the bytes the per-module type pools and
 /// their indexes retain, and the structural census (how many pool entries stand for one type).
+/// One line of syntax accounting for the package at phase `label` (SC_SYNTAX_STATS): node and
+/// child counts with the share inside bodies, the retained bytes of every syntax and side-table
+/// container, the source text, and the module that retains the most.
+fn syntax_stats_report(p: &loader::Package, label: str) {
+    if stdlib::getenv("SC_SYNTAX_STATS") == null {
+        return;
+    }
+    let mut st = SyntaxStats::new();
+    let mut src: usize = 0;
+    let mut modules: usize = 0;
+    let mut big: usize = 0;
+    let mut big_m: usize = 0;
+    for i in 0..p.modules.len() {
+        let m = p.modules.at(i);
+        if !m.has_ast {
+            continue;
+        }
+        modules += 1;
+        src += m.source.capacity();
+        m.ast.syntax_stats(&mut st);
+        let r = m.ast.retained_bytes() + m.source.capacity();
+        if r > big {
+            big = r;
+            big_m = i;
+        }
+    }
+    eprintln(
+        "syntax-stats[{}]: peak rss {} MiB | modules {} node {} B | nodes {} ({} KiB) bodies {} body-nodes {} | children {} body-children {} ({} KiB) | resolutions {} KiB types {} KiB pool {} KiB tables {} KiB source {} KiB | largest {} {} KiB (module {}/{} body {}/{} nodes/capacity)",
+        label,
+        unsafe shim::sc_peak_rss() / 1048576,
+        modules,
+        sizeof(Node),
+        st.nodes,
+        st.nodes_cap / 1024,
+        st.bodies,
+        st.body_nodes,
+        st.children,
+        st.body_children,
+        st.children_cap / 1024,
+        st.resolutions / 1024,
+        st.types / 1024,
+        st.pool / 1024,
+        st.tables / 1024,
+        src / 1024,
+        p.modules.at(big_m).path.as_str(),
+        big / 1024,
+        p.modules.at(big_m).ast.nodes.len(),
+        p.modules.at(big_m).ast.nodes.retained() / sizeof(Node),
+        p.modules.at(big_m).ast.b.nodes.len(),
+        p.modules.at(big_m).ast.b.nodes.retained() / sizeof(Node),
+    );
+}
+
 fn ty_stats_report(p: &loader::Package) {
     let mut types: u64 = 0;
     let mut insts: u64 = 0;
@@ -5520,9 +5590,9 @@ const fn if_s2(c: bool, a: str<'static>, b: str<'static>) str<'static> {
 // The drop-elaboration analyses, pooled: one instance rebuilds in place per body (capacity kept),
 // mirroring flow_ir's FlowCtx; fresh builds per body dominated the elaboration's allocator cost.
 // Emission-phase pool of DropCtx instances: a task checks one out and returns it, so the
-// inliner's vetted-callee cache (whose misses lower and copy whole callees) warms once per pooled
-// slot (about the worker count) instead of once per task. Valid within one emission phase:
-// every cached decision is a pure function of the frozen package. `cemit_package` resets it.
+// inliner's type-translation caches warm once per pooled slot (about the worker count) instead of
+// once per task. Valid within one emission phase: every cached decision is a pure function of the
+// frozen package and its inline store. `cemit_package` resets it.
 static mut G_DPOOL: *mut Vector<DropCtx> = null;
 static mut G_DPOOL_LOCK: i32 = 0;
 
@@ -5599,7 +5669,7 @@ extend DropCtx {
             cfg: bdf::Cfg::empty(),
             mv: bdf::MoveFlow::empty(),
             el: ird::ElabCtx::empty(),
-            inl: inl::InlineCtx::new(),
+            inl: inl::InlineCtx::new((unsafe (&*p).inl_store) as *const inl::InlineStore),
             bce: bce::Bce::new(p),
             core_ir: stdlib::getenv("SC_CORE_IR") != null,
             bce_stats: stdlib::getenv("SC_BCE_STATS") != null,
@@ -5608,12 +5678,7 @@ extend DropCtx {
     }
 
     // Fold the inliner's tallies into the probe (once: the tallies reset).
-    fn fold_probe(self: &mut Self) {
-        self.pr.count(prb::C_VET_LOWERED, self.inl.st_vet_lower);
-        self.pr.count(prb::C_VET_OFFERED, self.inl.st_vet_offer);
-        self.inl.st_vet_lower = 0;
-        self.inl.st_vet_offer = 0;
-    }
+    fn fold_probe(self: &mut Self) {}
 
     fn apply_drops(self: &mut Self, lw: &mut irl::Lowerer) {
         self.apply_drops_of(lw, true);
@@ -5633,8 +5698,6 @@ extend DropCtx {
         // own storage markers make the merged elaboration reproduce the callee's drops in place.
         if allow_inline && !self.inl.off {
             let im = self.pr.start();
-            // This body is a callee of later bodies: its verdict comes from this lowering.
-            self.inl.offer(lw.pkg, lw);
             let mut ist = inl::InlineStats::new();
             inl::run(lw, &mut self.inl, &mut ist);
             if self.inl.stats_on && ist.considered != 0 {
@@ -5710,19 +5773,8 @@ fn cemit_free_glue_fields(
     if tn.kind != NodeKind::NODE_STRUCT || tn.as_data.aggregate.is_union || tn.as_data.aggregate.generics.len != 0 {
         return false;
     }
-    let bsp = a.at_const(f.body).span;
     let is_tuple = tn.as_data.aggregate.is_tuple;
     let ms = tn.as_data.aggregate.members;
-    let mut touched = Vector::<NodeId>::new();
-    for r in 0..a.resolutions_len() {
-        let ksp = a.at_const(r as NodeId).span;
-        if ksp.start >= bsp.start && ksp.end <= bsp.end {
-            let d = a.resolution_def(r as NodeId);
-            if d.module == m {
-                touched.push(d.node);
-            }
-        }
-    }
     for i in 0..ms.len {
         let fid = unsafe a.list(ms)[i as usize];
         let fnode = a.at_const(fid);
@@ -5747,14 +5799,7 @@ fn cemit_free_glue_fields(
         if !cem.is_destructible(m, ft, 0) {
             continue;
         }
-        let mut field_touched = false;
-        for r in 0..touched.len() {
-            if touched[r] == fid {
-                field_touched = true;
-                break;
-            }
-        }
-        if !field_touched {
+        if !a.free_touches(fnid, fid) {
             let mut fname = String::new();
             if is_tuple {
                 fname.push_str("_");
@@ -7164,6 +7209,7 @@ fn report_fold_errs(p: &mut loader::Package) {
     // record more than once across passes, so duplicates collapse).
     let mut ms = Vector::<ModuleId>::new();
     let mut ids = Vector::<NodeId>::new();
+    let mut spans = Vector::<tok::Span>::new();
     let mut kinds = Vector::<u8>::new();
     let mut details = Vector::<String>::new();
     let cirp = p.cir as *mut iri::Interp;
@@ -7182,6 +7228,7 @@ fn report_fold_errs(p: &mut loader::Package) {
             }
             ms.push(m2);
             ids.push(id2);
+            spans.push(unsafe cirp.fold_errs.at(i).span);
             kinds.push(unsafe cirp.fold_errs.at(i).kind);
             let mut d = String::new();
             d.push_string(unsafe &cirp.fold_errs.at(i).detail);
@@ -7194,8 +7241,8 @@ fn report_fold_errs(p: &mut loader::Package) {
     for a3 in 1..nerr {
         let mut b3 = a3;
         while b3 > 0 {
-            let spb = p.modules[ms[b3] as usize].ast.at_const(ids[b3]).span.start;
-            let spa = p.modules[ms[b3 - 1] as usize].ast.at_const(ids[b3 - 1]).span.start;
+            let spb = spans[b3].start;
+            let spa = spans[b3 - 1].start;
             if ms[b3] < ms[b3 - 1] || ms[b3] == ms[b3 - 1] && spb < spa {
                 let tm = ms[b3];
                 ms.set(b3, ms[b3 - 1]);
@@ -7203,6 +7250,9 @@ fn report_fold_errs(p: &mut loader::Package) {
                 let ti = ids[b3];
                 ids.set(b3, ids[b3 - 1]);
                 ids.set(b3 - 1, ti);
+                let ts = spans[b3];
+                spans.set(b3, spans[b3 - 1]);
+                spans.set(b3 - 1, ts);
                 let tk = kinds[b3];
                 kinds.set(b3, kinds[b3 - 1]);
                 kinds.set(b3 - 1, tk);
@@ -7217,14 +7267,13 @@ fn report_fold_errs(p: &mut loader::Package) {
     }
     for i in 0..nerr {
         let m = ms[i];
-        let rid = ids[i];
-        let sp = p.modules[m as usize].ast.at_const(rid).span;
+        let sp = spans[i];
         let mut inner = false;
         for j in 0..nerr {
             if j == i || ms[j] != m {
                 continue;
             }
-            let sp2 = p.modules[m as usize].ast.at_const(ids[j]).span;
+            let sp2 = spans[j];
             if sp2.start <= sp.start && sp.end <= sp2.end && (sp2.start < sp.start || sp.end < sp2.end) {
                 inner = true;
                 break;
@@ -7294,7 +7343,7 @@ pub fn platform_filter_module(p: &mut loader::Package, mi: usize, target: i32) {
     let items = m.ast.at_const(root).as_data.program.items;
     let mut w: u32 = 0;
     for j in 0..items.len {
-        let id = *m.ast.children.at((items.start + j) as usize);
+        let id = unsafe m.ast.list(items)[j as usize];
         let mut keep = true;
         {
             for k in 0..m.ast.attrs.len() {
@@ -7578,7 +7627,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
     for m in 0..nm {
         starts.push(total);
         if p.modules[m].has_ast {
-            total = total + p.modules[m].ast.nodes.len();
+            total = total + p.modules[m].ast.nnodes();
         }
     }
     let mut used = Vector::<bool>::new();
@@ -7625,8 +7674,9 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
             continue;
         }
         let a = p.module_ast_const(m as ModuleId);
-        for i in 0..a.resolutions_len() {
-            let d = a.resolution_def(i as NodeId);
+        for k in 0..a.nnodes() {
+            let i = a.nth_id(k);
+            let d = a.resolution_def(i);
             if d.node == NODE_NONE || d.module as usize >= nm {
                 continue;
             }
@@ -7634,7 +7684,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
             if ents[dm].len() == 0 {
                 continue;
             }
-            let si = lint_owner(ents.at(m), a.at_const(i as NodeId).span.start);
+            let si = lint_owner(ents.at(m), a.at_const(i).span.start);
             if si < 0 {
                 continue;
             }
@@ -7936,8 +7986,8 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
         for k in 0..nm {
             usedm.push(false);
         }
-        for i in 0..a.resolutions_len() {
-            let d = a.resolution_def(i as NodeId);
+        for i in 0..a.nnodes() {
+            let d = a.resolution_def(a.nth_id(i));
             if d.node != NODE_NONE && d.module as usize < nm && d.module as usize != m {
                 usedm.set(d.module as usize, true);
             }
@@ -8071,9 +8121,9 @@ fn lint_discarded_results(p: &mut loader::Package, only_mod: i32) {
         }
         let a = p.module_ast_const(m as ModuleId);
         let mut errs = diag::Errors::new();
-        let n = unsafe a.nodes.len();
-        let mut i: u32 = 1;
-        while i as usize < n {
+        let n = a.nnodes();
+        for k in 1..n {
+            let i = a.nth_id(k);
             if a.at_const(i).kind == NodeKind::NODE_BLOCK {
                 let stmts = a.at_const(i).as_data.block.statements;
                 if stmts.len > 1 {
@@ -8082,7 +8132,6 @@ fn lint_discarded_results(p: &mut loader::Package, only_mod: i32) {
                     }
                 }
             }
-            i = i + 1;
         }
         if errs.has_warnings() {
             p.lint_warnings = p.lint_warnings + errs.warns.len() as u32;
@@ -8102,7 +8151,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
     for m in 0..nm {
         starts.push(total);
         if p.modules[m].has_ast {
-            total = total + p.modules[m].ast.nodes.len();
+            total = total + p.modules[m].ast.nnodes();
         }
     }
     let mut used = Vector::<bool>::new();
@@ -8122,28 +8171,30 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
         let a = p.module_ast_const(m as ModuleId);
         // Struct-literal initializer names resolve to the field decl but only WRITE it: exclude
         // them from the read set (fields warn on never-READ, Rust semantics).
-        let an = unsafe a.nodes.len();
+        let an = a.nnodes();
         let mut init_src = Vector::<bool>::new();
         init_src.reserve(an);
         for i in 0..an {
             init_src.push(false);
         }
-        let mut k: u32 = 1;
-        while k as usize < an {
-            if a.at_const(k).kind == NodeKind::NODE_FIELD_INITIALIZER {
-                let fnn = a.at_const(k).as_data.field_initializer.name;
-                if fnn as usize < an {
-                    init_src.set(fnn as usize, true);
+        for k in 1..an {
+            let kid = a.nth_id(k);
+            if a.at_const(kid).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                let fnn = a.at_const(kid).as_data.field_initializer.name;
+                if a.valid(fnn) {
+                    init_src.set(a.dense(fnn), true);
                 }
             }
-            k = k + 1;
         }
-        for i in 0..a.resolutions_len() {
-            let d = a.resolution_def(i as NodeId);
-            if d.node != NODE_NONE && d.module as usize < nm && p.modules[d.module as usize].has_ast && d.node as usize < p.modules[d.module as usize].ast.nodes.len() {
-                used.set(starts[d.module as usize] + d.node as usize, true);
-                if i >= an || !init_src[i] {
-                    read.set(starts[d.module as usize] + d.node as usize, true);
+        for k in 0..an {
+            let d = a.resolution_def(a.nth_id(k));
+            if d.node != NODE_NONE && d.module as usize < nm && p.modules[d.module as usize].has_ast && p.modules[d.module as usize].ast.valid(
+                d.node,
+            ) {
+                let slot = starts[d.module as usize] + p.modules[d.module as usize].ast.dense(d.node);
+                used.set(slot, true);
+                if !init_src[k] {
+                    read.set(slot, true);
                 }
             }
         }
@@ -8484,6 +8535,7 @@ fn run_package_i(
 ) i32 {
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tp0 = unsafe shim::sc_ticks_ms();
+    syntax_stats_report(p, "parse");
     platform_filter(p, target);
     let n = p.modules.len();
     let mut co = CemitOut::new(n);
@@ -8499,6 +8551,7 @@ fn run_package_i(
         return 1;
     }
     bst::mark(bst::B_RESOLVE);
+    syntax_stats_report(p, "resolve");
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase resolve: {} ms\n", t9 - tp0);
@@ -8519,6 +8572,7 @@ fn run_package_i(
         return 1;
     }
     bst::mark(bst::B_TYPECHECK);
+    syntax_stats_report(p, "typecheck");
     ts_phase("typecheck");
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
@@ -8549,6 +8603,7 @@ fn run_package_i(
         return 1;
     }
     bst::mark(bst::B_BORROWCK);
+    syntax_stats_report(p, "borrowck");
     ts_phase("borrowck");
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
@@ -8668,6 +8723,36 @@ fn run_package_i(
     }
     let mut order = Vector::<ModuleId>::new();
     p.emit_order(&mut order);
+    syntax_stats_report(p, "prepare");
+    // Emission materializes value constants through the evaluator, whose callees lower from
+    // syntax on first use: evaluate every constant now, while the syntax is live, so the
+    // lowerings it needs are cached (`Interp::body_of`) before the release.
+    {
+        let cirp = p.cir as *mut iri::Interp;
+        if cirp != null {
+            // The memos would answer a scalar without running its callees; the emission engine
+            // starts without them and runs everything, so this pass must too.
+            unsafe cirp.call_memo.clear();
+            unsafe cirp.item_memo.clear();
+            unsafe cirp.ememo.clear();
+            for m in 0..n {
+                if !p.modules[m].has_ast {
+                    continue;
+                }
+                let a = unsafe &*p.module_ast_const(m as ModuleId);
+                for i in 0..a.nodes.len() {
+                    let nd = a.at_const(i as NodeId);
+                    if nd.kind == NodeKind::NODE_CONST && !nd.as_data.const_def.is_extern && nd.as_data.const_def.value != NODE_NONE {
+                        let _ = cirp.eval_const_in(m as ModuleId, i as NodeId, 1u32 << 20);
+                    }
+                }
+            }
+        }
+    }
+    // Every body is lowered and kept, every deferred constant is flushed, and the live set and the
+    // emit order have read their last reference: the releasable body syntax has no reader left.
+    p.release_bodies();
+    syntax_stats_report(p, "release");
     bst::mark(bst::B_PREPARE);
     ts_phase("prepare");
     // The whole-package Core-IR emission runs BEFORE the live-module list: it seeds every module
@@ -8910,6 +8995,7 @@ fn run_package_i(
         prune_orphans(&broot[0], &keep);
     }
     bst::mark(bst::B_PUBLISH);
+    syntax_stats_report(p, "emit");
     let mut rc: i32 = if err {
         1;
     } else {

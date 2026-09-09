@@ -177,6 +177,10 @@ fn check_body(opers: u32) ir::CoreBody {
             span: tok_span(),
             decl: NODE_NONE,
             item: DefId { module: 0, node: NODE_NONE },
+            name_off: 0,
+            name_len: 0,
+            dkind: ir::LK_NONE,
+            zero_len: false,
         },
     );
     b.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: ut });

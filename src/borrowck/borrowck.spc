@@ -924,29 +924,32 @@ extend tc::TypeChecker {
         }
     }
 
-    /// O(1) membership: moved_bits is a NodeId-indexed bitset mirroring moved[] (duplicates share one bit).
+    /// O(1) membership: moved_bits is a bitset over the dense node index mirroring moved[] (duplicates share one bit).
     pub const fn is_moved(self: &Self, decl: NodeId) bool {
-        let idx = (decl >> 6) as usize;
+        let dk = self.cur_ast().dense(decl);
+        let idx = dk >> 6;
         if idx >= self.moved_bits.len() {
             return false;
         }
-        return (self.moved_bits[idx] >> (decl & 63u32) as u64 & 1u64) != 0u64;
+        return (self.moved_bits[idx] >> (dk & 63) as u64 & 1u64) != 0u64;
     }
 
     /// Set `d`'s moved bit, growing the bitset on demand.
     pub fn ms_bit_set(self: &mut Self, d: NodeId) {
-        let idx = (d >> 6) as usize;
+        let dk = self.cur_ast().dense(d);
+        let idx = dk >> 6;
         while self.moved_bits.len() <= idx {
             self.moved_bits.push(0u64);
         }
-        self.moved_bits.set(idx, self.moved_bits[idx] | 1u64 << (d & 63u32) as u64);
+        self.moved_bits.set(idx, self.moved_bits[idx] | 1u64 << (dk & 63) as u64);
     }
 
     /// Clear `d`'s moved bit; a no-op when the bitset is shorter.
     pub const fn ms_bit_clear(self: &mut Self, d: NodeId) {
-        let idx = (d >> 6) as usize;
+        let dk = self.cur_ast().dense(d);
+        let idx = dk >> 6;
         if idx < self.moved_bits.len() {
-            self.moved_bits.set(idx, self.moved_bits[idx] & ~(1u64 << (d & 63u32) as u64));
+            self.moved_bits.set(idx, self.moved_bits[idx] & ~(1u64 << (dk & 63) as u64));
         }
     }
 

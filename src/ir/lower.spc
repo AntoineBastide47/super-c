@@ -158,8 +158,9 @@ extend Keep {
                 continue;
             }
             let a = unsafe &*p.module_ast_const(m as ModuleId);
-            for i in 0..a.nodes.len() {
-                let k = a.at_const(i as NodeId).kind;
+            let nb9 = a.nodes.len();
+            for i in 0..a.nnodes() {
+                let k = a.at_const(Ast::nth_id_n(nb9, i)).kind;
                 if k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_CLOSURE {
                     n += 1;
                 }
@@ -529,16 +530,7 @@ extend Lowerer {
     // ---- small constructors -----------------------------------------------------------------------
 
     fn temp(self: &mut Self, ty: TypeId, sp: tok::Span) ir::LocalId {
-        return self.body.add_local(
-            ir::LocalDecl {
-                ty: ty,
-                storage: ir::LS_TEMP,
-                is_mutable: true,
-                span: sp,
-                decl: NODE_NONE,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-        );
+        return self.body.add_local(self.local_decl(ty, ir::LS_TEMP, true, sp, NODE_NONE));
     }
 
     fn place_of_local(self: &mut Self, l: ir::LocalId) ir::PlaceId {
@@ -682,6 +674,60 @@ extend Lowerer {
         }
     }
 
+    /// A local slot with the declaration facts the emitter reads after the body syntax is
+    /// released: the binding's name text, its declaration kind, and whether a `let` spells a
+    /// `[T; 0]` annotation (the checker interns length 0 for the unsized sentinel too).
+    fn local_decl(self: &Self, ty: TypeId, storage: u8, is_mutable: bool, span: tok::Span, decl: NodeId) ir::LocalDecl {
+        let mut name = tok::Span::empty();
+        let mut dkind = ir::LK_NONE;
+        let mut zero_len = false;
+        if decl != NODE_NONE {
+            let n = self.f.node(decl);
+            name = unsafe (&*self.f.ast).decl_name_span(decl);
+            if n.kind == NodeKind::NODE_LET {
+                dkind = ir::LK_LET;
+                let tn = n.as_data.let_stmt.ty;
+                // Only a zero-length array type can be the unsized sentinel: the spelled length
+                // decides, evaluated for those lets alone.
+                let zero_ty = ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_ARRAY && self.f.ty(ty).as_data.arr.len == 0;
+                if zero_ty && tn != NODE_NONE && self.f.node(tn).kind == NodeKind::NODE_ARRAY_TYPE {
+                    let ln = self.f.node(tn).as_data.array_type.length;
+                    if ln != NODE_NONE && unsafe (&*self.pkg).cir != null {
+                        let cev = unsafe &mut *((&*self.pkg).cir as *mut iri::Interp);
+                        let cv = cev.eval(self.module, ln);
+                        zero_len = cv.kind == iri::IV_INT && cv.i == 0;
+                    }
+                }
+            } else if n.kind == NodeKind::NODE_PARAMETER {
+                dkind = ir::LK_PARAM;
+            } else if n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR {
+                dkind = ir::LK_FOR;
+            } else if n.kind == NodeKind::NODE_PATTERN_NAME {
+                dkind = ir::LK_PATTERN;
+            } else if n.kind == NodeKind::NODE_IDENTIFIER {
+                dkind = ir::LK_IDENT;
+            }
+        }
+        let mut off: u16 = 0;
+        let mut len: u16 = 0;
+        if name.end > name.start && name.start >= span.start && name.start - span.start < 65536 && name.end - name.start < 65536 {
+            off = (name.start - span.start) as u16;
+            len = (name.end - name.start) as u16;
+        }
+        return ir::LocalDecl {
+            ty: ty,
+            storage: storage,
+            is_mutable: is_mutable,
+            dkind: dkind,
+            zero_len: zero_len,
+            span: span,
+            decl: decl,
+            name_off: off,
+            name_len: len,
+            item: DefId { module: 0, node: NODE_NONE },
+        };
+    }
+
     fn bind(self: &mut Self, decl: NodeId, l: ir::LocalId) {
         self.binds.push(Binding { decl: decl, local: l });
     }
@@ -707,7 +753,18 @@ extend Lowerer {
             }
         }
         let l = self.body.add_local(
-            ir::LocalDecl { ty: ty, storage: ir::LS_STATIC_REF, is_mutable: true, span: sp, decl: NODE_NONE, item: d },
+            ir::LocalDecl {
+                ty: ty,
+                storage: ir::LS_STATIC_REF,
+                is_mutable: true,
+                span: sp,
+                decl: NODE_NONE,
+                item: d,
+                name_off: 0,
+                name_len: 0,
+                dkind: ir::LK_NONE,
+                zero_len: false,
+            },
         );
         self.item_locals.push(Binding { decl: d.node, local: l });
         return l;
@@ -728,16 +785,7 @@ extend Lowerer {
         for i in 0..rets.len {
             let rn = unsafe self.f.list(rets)[i as usize];
             let rt = self.nty(rn);
-            let _ = self.body.add_local(
-                ir::LocalDecl {
-                    ty: rt,
-                    storage: ir::LS_RET,
-                    is_mutable: true,
-                    span: sp,
-                    decl: NODE_NONE,
-                    item: DefId { module: 0, node: NODE_NONE },
-                },
-            );
+            let _ = self.body.add_local(self.local_decl(rt, ir::LS_RET, true, sp, NODE_NONE));
         }
         self.body.returns = rets.len;
         let params = fd.params;
@@ -745,14 +793,7 @@ extend Lowerer {
             let pn = unsafe self.f.list(params)[i as usize];
             let pd = self.f.node(pn).as_data.parameter;
             let l = self.body.add_local(
-                ir::LocalDecl {
-                    ty: self.nty(pn),
-                    storage: ir::LS_ARG,
-                    is_mutable: pd.is_mutable,
-                    span: self.f.node(pn).span,
-                    decl: pn,
-                    item: DefId { module: 0, node: NODE_NONE },
-                },
+                self.local_decl(self.nty(pn), ir::LS_ARG, pd.is_mutable, self.f.node(pn).span, pn),
             );
             self.bind(pn, l);
         }
@@ -792,16 +833,7 @@ extend Lowerer {
         let rets = cd.returns;
         for i in 0..rets.len {
             let rn = unsafe self.f.list(rets)[i as usize];
-            let _ = self.body.add_local(
-                ir::LocalDecl {
-                    ty: self.nty(rn),
-                    storage: ir::LS_RET,
-                    is_mutable: true,
-                    span: sp,
-                    decl: NODE_NONE,
-                    item: DefId { module: 0, node: NODE_NONE },
-                },
-            );
+            let _ = self.body.add_local(self.local_decl(self.nty(rn), ir::LS_RET, true, sp, NODE_NONE));
         }
         self.body.returns = rets.len;
         if rets.len == 0 && cd.expr_body {
@@ -809,48 +841,21 @@ extend Lowerer {
             // type (comparators etc); a unit body keeps zero return slots
             let bt = self.nty(cd.body);
             if bt != TYPE_NONE && !(self.f.ty(bt).kind == TypeKind::TYPE_BUILTIN && self.f.ty(bt).as_data.builtin == BuiltinType::BT_VOID) {
-                let _ = self.body.add_local(
-                    ir::LocalDecl {
-                        ty: bt,
-                        storage: ir::LS_RET,
-                        is_mutable: true,
-                        span: sp,
-                        decl: NODE_NONE,
-                        item: DefId { module: 0, node: NODE_NONE },
-                    },
-                );
+                let _ = self.body.add_local(self.local_decl(bt, ir::LS_RET, true, sp, NODE_NONE));
                 self.body.returns = 1;
             }
         }
         let params = cd.params;
         for i in 0..params.len {
             let pn = unsafe self.f.list(params)[i as usize];
-            let l = self.body.add_local(
-                ir::LocalDecl {
-                    ty: self.nty(pn),
-                    storage: ir::LS_ARG,
-                    is_mutable: false,
-                    span: self.f.node(pn).span,
-                    decl: pn,
-                    item: DefId { module: 0, node: NODE_NONE },
-                },
-            );
+            let l = self.body.add_local(self.local_decl(self.nty(pn), ir::LS_ARG, false, self.f.node(pn).span, pn));
             self.bind(pn, l);
         }
         let caps = cd.captures;
         for i in 0..caps.len {
             let c = unsafe self.f.list(caps)[i as usize];
             let decl = self.cap_decl(c);
-            let l = self.body.add_local(
-                ir::LocalDecl {
-                    ty: self.nty(c),
-                    storage: ir::LS_ARG,
-                    is_mutable: true,
-                    span: self.f.node(c).span,
-                    decl: decl,
-                    item: DefId { module: 0, node: NODE_NONE },
-                },
-            );
+            let l = self.body.add_local(self.local_decl(self.nty(c), ir::LS_ARG, true, self.f.node(c).span, decl));
             if decl != NODE_NONE {
                 self.bind(decl, l);
             }
@@ -893,16 +898,7 @@ extend Lowerer {
         let cd = self.f.node(cnode).as_data.const_def;
         let sp = self.f.node(cnode).span;
         let ty = self.nty(cnode);
-        let _ = self.body.add_local(
-            ir::LocalDecl {
-                ty: ty,
-                storage: ir::LS_RET,
-                is_mutable: true,
-                span: sp,
-                decl: NODE_NONE,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-        );
+        let _ = self.body.add_local(self.local_decl(ty, ir::LS_RET, true, sp, NODE_NONE));
         self.body.returns = 1;
         self.body.entry = self.open_block();
         self.cur = self.body.entry;
@@ -929,16 +925,7 @@ extend Lowerer {
     pub fn lower_expr_root(self: &mut Self, expr: NodeId) bool {
         let sp = self.f.node(expr).span;
         let ty = self.nty(expr);
-        let _ = self.body.add_local(
-            ir::LocalDecl {
-                ty: ty,
-                storage: ir::LS_RET,
-                is_mutable: true,
-                span: sp,
-                decl: NODE_NONE,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-        );
+        let _ = self.body.add_local(self.local_decl(ty, ir::LS_RET, true, sp, NODE_NONE));
         self.body.returns = 1;
         self.body.entry = self.open_block();
         self.cur = self.body.entry;
@@ -1057,16 +1044,7 @@ extend Lowerer {
                 let vop = self.lower_expr(cdf.value);
                 if vop != ir::IR_NONE {
                     let ty9 = self.nty(cdf.value);
-                    let l9 = self.body.add_local(
-                        ir::LocalDecl {
-                            ty: ty9,
-                            storage: ir::LS_USER,
-                            is_mutable: false,
-                            span: self.f.node(id).span,
-                            decl: id,
-                            item: DefId { module: 0, node: NODE_NONE },
-                        },
-                    );
+                    let l9 = self.body.add_local(self.local_decl(ty9, ir::LS_USER, false, self.f.node(id).span, id));
                     self.bind(id, l9);
                     self.bind(cdf.name, l9);
                     self.user_local_live(l9, self.f.node(id).span);
@@ -1085,7 +1063,7 @@ extend Lowerer {
     }
 
     // Inline assembly: outputs lower as places (copies carry the place id), inputs as values;
-    // template/constraints/clobbers stay in the AST the backend re-reads through `item`.
+    // template/constraints/clobbers are copied as source spans into the body's asm record.
     fn lower_asm(self: &mut Self, id: NodeId) {
         let d = self.f.node(id).as_data.asm_stmt;
         let sp = self.f.node(id).span;
@@ -1111,6 +1089,35 @@ extend Lowerer {
             i += 2;
         }
         let start = self.pool_ops(&argv);
+        // The statement's text, owned by the body: the emitter renders it after the syntax is gone.
+        let cons = self.body.asm_spans.len() as u32;
+        i = 0;
+        while i + 1 < d.outputs.len {
+            self.body.asm_spans.push(self.f.node(unsafe self.f.list(d.outputs)[i as usize]).as_data.literal.raw);
+            i += 2;
+        }
+        i = 0;
+        while i + 1 < d.inputs.len {
+            self.body.asm_spans.push(self.f.node(unsafe self.f.list(d.inputs)[i as usize]).as_data.literal.raw);
+            i += 2;
+        }
+        for k in 0..d.clobbers.len {
+            self.body.asm_spans.push(self.f.node(unsafe self.f.list(d.clobbers)[k as usize]).as_data.literal.raw);
+        }
+        let rec = self.body.asms.len() as NodeId;
+        self.body.asms.push(
+            ir::AsmRec {
+                template: if d.template == NODE_NONE {
+                    tok::Span::empty();
+                } else {
+                    self.f.node(d.template).as_data.literal.raw;
+                },
+                cons: cons,
+                nout: d.outputs.len / 2,
+                nin: d.inputs.len / 2,
+                nclob: d.clobbers.len,
+            },
+        );
         let ut = Ast::builtin(BuiltinType::BT_VOID);
         let t = self.temp(ut, sp);
         let pl9 = self.place_of_local(t);
@@ -1122,7 +1129,7 @@ extend Lowerer {
                 b: argv.len() as u32,
                 c: ir::IN_ASM,
                 target: ut,
-                item: DefId { module: self.module, node: id },
+                item: DefId { module: self.module, node: rec },
             },
             sp,
         );
@@ -1158,16 +1165,7 @@ extend Lowerer {
             return;
         }
         let ty = self.nty(id);
-        let l = self.body.add_local(
-            ir::LocalDecl {
-                ty: ty,
-                storage: ir::LS_USER,
-                is_mutable: ld.is_mutable,
-                span: sp,
-                decl: id,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-        );
+        let l = self.body.add_local(self.local_decl(ty, ir::LS_USER, ld.is_mutable, sp, id));
         self.bind(id, l);
         self.bind(ld.name, l);
         self.user_local_live(l, sp);
@@ -2835,16 +2833,7 @@ extend Lowerer {
                 let fresh = self.pool_ops(&argv);
                 let kept = argv.len() as u32;
                 self.avput(argv);
-                let l = self.body.add_local(
-                    ir::LocalDecl {
-                        ty: ity,
-                        storage: ir::LS_USER,
-                        is_mutable: false,
-                        span: sp,
-                        decl: id,
-                        item: DefId { module: 0, node: NODE_NONE },
-                    },
-                );
+                let l = self.body.add_local(self.local_decl(ity, ir::LS_USER, false, sp, id));
                 self.bind(id, l);
                 if d.binding != NODE_NONE {
                     self.bind(d.binding, l);
@@ -2930,16 +2919,7 @@ extend Lowerer {
                 }
                 let mut v = lo;
                 while v < hi {
-                    let l = self.body.add_local(
-                        ir::LocalDecl {
-                            ty: ity,
-                            storage: ir::LS_USER,
-                            is_mutable: false,
-                            span: sp,
-                            decl: id,
-                            item: DefId { module: 0, node: NODE_NONE },
-                        },
-                    );
+                    let l = self.body.add_local(self.local_decl(ity, ir::LS_USER, false, sp, id));
                     self.bind(id, l);
                     if d.binding != NODE_NONE {
                         self.bind(d.binding, l);
@@ -3016,16 +2996,7 @@ extend Lowerer {
             }
         }
         // induction variable = the user binding
-        let l = self.body.add_local(
-            ir::LocalDecl {
-                ty: ity,
-                storage: ir::LS_USER,
-                is_mutable: true,
-                span: sp,
-                decl: id,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-        );
+        let l = self.body.add_local(self.local_decl(ity, ir::LS_USER, true, sp, id));
         self.bind(id, l);
         if d.binding != NODE_NONE {
             self.bind(d.binding, l);
@@ -3175,16 +3146,7 @@ extend Lowerer {
             self.fail_at("range-fields", id);
             return;
         }
-        let l = self.body.add_local(
-            ir::LocalDecl {
-                ty: elem,
-                storage: ir::LS_USER,
-                is_mutable: true,
-                span: sp,
-                decl: id,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-        );
+        let l = self.body.add_local(self.local_decl(elem, ir::LS_USER, true, sp, id));
         self.bind(id, l);
         if d.binding != NODE_NONE {
             self.bind(d.binding, l);
@@ -3327,16 +3289,7 @@ extend Lowerer {
             self.fail_at("iter-carrier", id);
             return;
         }
-        let l = self.body.add_local(
-            ir::LocalDecl {
-                ty: elem,
-                storage: ir::LS_USER,
-                is_mutable: true,
-                span: sp,
-                decl: id,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-        );
+        let l = self.body.add_local(self.local_decl(elem, ir::LS_USER, true, sp, id));
         self.bind(id, l);
         if d.binding != NODE_NONE {
             self.bind(d.binding, l);
@@ -3451,16 +3404,7 @@ extend Lowerer {
         );
         let rz = self.rv_use(zero, ut);
         self.assign(idx_pl, rz, sp);
-        let el = self.body.add_local(
-            ir::LocalDecl {
-                ty: elem_ty,
-                storage: ir::LS_USER,
-                is_mutable: true,
-                span: sp,
-                decl: id,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-        );
+        let el = self.body.add_local(self.local_decl(elem_ty, ir::LS_USER, true, sp, id));
         self.bind(id, el);
         if d.binding != NODE_NONE {
             self.bind(d.binding, el);
@@ -5082,16 +5026,7 @@ extend Lowerer {
             // is removed first). Nothing outside the block can see it, so no loan the value carries
             // outlives the check.
             let rpl = self.body.operands.at(res as usize).data;
-            let sl = self.body.add_local(
-                ir::LocalDecl {
-                    ty: ty,
-                    storage: ir::LS_INL,
-                    is_mutable: false,
-                    span: sp,
-                    decl: NODE_NONE,
-                    item: DefId { module: 0, node: NODE_NONE },
-                },
-            );
+            let sl = self.body.add_local(self.local_decl(ty, ir::LS_INL, false, sp, NODE_NONE));
             self.stmt(
                 ir::Statement {
                     kind: ir::ST_STORAGE_LIVE,
@@ -7462,16 +7397,7 @@ extend Lowerer {
 
     fn bind_name(self: &mut Self, p: NodeId, v: ir::PlaceId, sp: tok::Span) {
         let ty = self.body.places.at(v as usize).ty;
-        let l = self.body.add_local(
-            ir::LocalDecl {
-                ty: ty,
-                storage: ir::LS_USER,
-                is_mutable: true,
-                span: sp,
-                decl: p,
-                item: DefId { module: 0, node: NODE_NONE },
-            },
-        );
+        let l = self.body.add_local(self.local_decl(ty, ir::LS_USER, true, sp, p));
         self.bind(p, l);
         self.user_local_live(l, sp);
         let pl = self.place_of_local(l);

@@ -12,6 +12,9 @@ import driver::emit as demit;
 import driver::test as dtest;
 import module::loader as loader;
 import ir::interp as iri;
+import ir::lower as irl;
+import borrowck::facts as bfx;
+import borrowck::flow_ir as bfi;
 import driver_shim as shim;
 import tests::cli_harness as cli;
 
@@ -124,7 +127,7 @@ pub fn compile(src: str, stop: i32) Compiled {
     if r.errors == 0 {
         demit::publish_checkpoint(&mut p, null);
         for i in 0..n {
-            h_borrowck(&mut p, i, uidx, &mut r);
+            h_borrowck(&mut p, i, uidx, &mut r, null);
         }
     }
     if r.errors != 0 {
@@ -235,15 +238,16 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
 /// The `nth` (0-based) node of `kind` in arena order, or NODE_NONE.
 pub fn nth_kind(a: &Ast, kind: NodeKind, nth: usize) NodeId {
     let mut seen: usize = 0;
-    let mut id: NodeId = 1;
-    while id as usize < a.nodes.len() {
+    let mut k: usize = 1;
+    while k < a.nnodes() {
+        let id = a.nth_id(k);
         if a.at_const(id).kind == kind {
             if seen == nth {
                 return id;
             }
             seen = seen + 1;
         }
-        id = id + 1;
+        k = k + 1;
     }
     return NODE_NONE;
 }
@@ -346,9 +350,10 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
         out.errors = rr.errors;
         return out;
     }
-    demit::publish_checkpoint(&mut p, null);
+    let mut keep = irl::Keep::new();
+    demit::publish_checkpoint(&mut p, &mut keep);
     for i in 0..n {
-        h_borrowck(&mut p, i, uidx, &mut rr);
+        h_borrowck(&mut p, i, uidx, &mut rr, &mut keep);
     }
     if rr.errors != 0 {
         out.errors = rr.errors;
@@ -358,7 +363,7 @@ fn compile_c_of(src: str, user_only: bool) CompiledC {
     // concatenated so prelude definitions (`str`, monomorphized Slice/Box, ...) are inspectable.
     let tplan = dtest::TestPlan::new(n);
     let mut o = demit::CemitOut::new(n);
-    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, null);
+    demit::cemit_package(&mut p, false, &tplan, null, -1, &mut o, &mut keep);
     if o.skips != 0 {
         out.errors = o.skips as usize;
         return out;
@@ -603,13 +608,18 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
 
 // Mirror the driver's borrowck_module: a SEPARATE stage after every module is typed (import cycles
 // mean a body's callees can live in a later module, so the checker may only run once all types exist).
-fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) {
+// `keep` (null = discard) receives the module's lowerings, as the driver's borrow frontier keeps
+// them for emission.
+fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled, keep: *mut irl::Keep) {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
     let src = m.source.as_str().ptr() as *const char;
     let len = m.source.len();
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    t.borrowck_solo();
+    let mut ow = bfx::Owner::new(pkg);
+    let mut ctx = bfi::BorrowCtx::new();
+    ctx.keep = keep;
+    t.borrowck(&mut ow, &mut ctx);
     if i == cap {
         let c = t.errors.errors.len();
         if c > 0 {

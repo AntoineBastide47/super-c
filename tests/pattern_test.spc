@@ -63,9 +63,9 @@ fn engine_over(src: str, probe_arm: i64) bool {
     let u = n - 1;
     let a = unsafe &*p.module_ast_const(u as ModuleId);
     let mut mid = NODE_NONE;
-    for k in 0..a.nodes.len() {
-        if a.at_const(k as NodeId).kind == NodeKind::NODE_MATCH && mid == NODE_NONE {
-            mid = k as NodeId;
+    for k in 0..a.nnodes() {
+        if a.at_const(a.nth_id(k)).kind == NodeKind::NODE_MATCH && mid == NODE_NONE {
+            mid = a.nth_id(k);
         }
     }
     assert(mid != NODE_NONE, "switch found");

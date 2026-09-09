@@ -26,14 +26,49 @@ pub const LS_STATIC_REF: u8 = 4; // a reference to an item (global/static); base
 /// drop elaboration schedules its storage-death drops exactly as the callee's own would have.
 pub const LS_INL: u8 = 5;
 
+/// The declaration a user local binds (`LocalDecl.dkind`): what the emitter reads of it after
+/// the body syntax is released.
+pub const LK_NONE: u8 = 0;
+pub const LK_LET: u8 = 1;
+pub const LK_PARAM: u8 = 2;
+pub const LK_FOR: u8 = 3; // `for` / `inline for` binding
+pub const LK_PATTERN: u8 = 4;
+pub const LK_IDENT: u8 = 5;
+
 /// One local slot: argument, return slot, user variable, or compiler temporary.
 pub struct LocalDecl {
     pub ty: TypeId,
     pub storage: u8,
     pub is_mutable: bool,
+    pub dkind: u8, // an LK_* kind
+    pub zero_len: bool, // a `let` spelled with a `[T; 0]` annotation
     pub span: tok::Span,
     pub decl: NodeId, // binding decl node for user locals (diagnostic compatibility); NODE_NONE else
+    // The binding's name text as (offset from `span.start`, length); 0/0 for a temporary. Packed
+    // so the record stays at 32 bytes (the analyses copy it by value).
+    pub name_off: u16,
+    pub name_len: u16,
     pub item: DefId, // LS_STATIC_REF: the item this local names; {0, NODE_NONE} else
+}
+
+extend LocalDecl {
+    /// The binding's name text span (empty for a temporary).
+    pub const fn name(self: &Self) tok::Span {
+        return tok::Span {
+            start: self.span.start + self.name_off as u32,
+            end: self.span.start + self.name_off as u32 + self.name_len as u32,
+        };
+    }
+}
+
+/// One inline-assembly statement's text (see IN_ASM): the template and, in `CoreBody.asm_spans`
+/// from `cons`, the output constraints, the input constraints, then the clobbers.
+pub struct AsmRec {
+    pub template: tok::Span, // empty = none
+    pub cons: u32,
+    pub nout: u32,
+    pub nin: u32,
+    pub nclob: u32,
 }
 
 /// Place projections (applied left to right from the base local).
@@ -163,8 +198,9 @@ pub const IN_TYPE_INFO: u8 = 5;
 pub const IN_ZEROED: u8 = 6;
 pub const IN_REFLECT: u8 = 7; // angle-3 compatibility: reflection binder/projection forms
 pub const IN_NEW: u8 = 9; // heap allocation of the initializer operand (`new T { .. }`)
-// Inline assembly: `item` names the NODE_ASM (template/constraints/clobbers read from the AST);
-// operands are the outputs' places (as copies) then the input values, in source order.
+// Inline assembly: `item.node` indexes the body's `asms` record (template, constraints and
+// clobbers as source spans); operands are the outputs' places (as copies) then the input values,
+// in source order.
 pub const IN_ASM: u8 = 10;
 pub const IN_SAFEPOINT: u8 = 11; // loop-body preemption marker; printed only for runtime-using programs
 pub const IN_DANGLING: u8 = 12; // non-null aligned no-storage pointer (`dangling::<T>()`; ZST buffers)
@@ -302,6 +338,8 @@ pub struct CoreBody {
     // Bit per operand: this OP_MOVE is a USER consumption (let/return/argument/aggregate/assign
     // positions the walk's move rules check) -- pattern binds, downcasts, and spills stay unmarked.
     pub user_moves: Vector<u64>,
+    pub asms: Vector<AsmRec>,
+    pub asm_spans: Vector<tok::Span>,
     pub entry: BlockId,
 }
 
@@ -365,6 +403,8 @@ extend CoreBody {
             switch_pool: Vector::<u64>::new(),
             targ_pool: Vector::<TypeId>::new(),
             user_moves: Vector::<u64>::new(),
+            asms: Vector::<AsmRec>::new(),
+            asm_spans: Vector::<tok::Span>::new(),
             entry: 0,
         };
     }
@@ -393,6 +433,8 @@ extend CoreBody {
         self.switch_pool.truncate(0);
         self.targ_pool.truncate(0);
         self.user_moves.truncate(0);
+        self.asms.truncate(0);
+        self.asm_spans.truncate(0);
         self.entry = 0;
     }
 
@@ -453,6 +495,14 @@ extend CoreBody {
         out.targ_pool.reserve(src.targ_pool.len());
         for i in 0..src.targ_pool.len() {
             out.targ_pool.push(*src.targ_pool.at(i));
+        }
+        out.asms.reserve(src.asms.len());
+        for i in 0..src.asms.len() {
+            out.asms.push(*src.asms.at(i));
+        }
+        out.asm_spans.reserve(src.asm_spans.len());
+        for i in 0..src.asm_spans.len() {
+            out.asm_spans.push(*src.asm_spans.at(i));
         }
         return out;
     }

@@ -844,8 +844,8 @@ extend Mangler {
             return self.owner_dep(rm, y.as_data.arr.elem);
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
-            let fd = self.p().module_ast_const(y.module).at_const(y.as_data.decl);
-            if fd.kind == NodeKind::NODE_CLOSURE && fd.as_data.closure.captures.len != 0 {
+            let cf = self.p().module_ast_const(y.module).closure_fact(y.as_data.decl);
+            if cf != null && unsafe (&*cf).ncaps != 0 {
                 return y.module;
             }
         }
@@ -946,12 +946,18 @@ extend Mangler {
         self.ident(owner, s, out);
     }
 
-    /// `<modpfx>closure_<node>`: a hoisted closure's C symbol (generic-instantiation suffixes are
-    /// appended by the caller that knows the instantiation).
+    /// `<modpfx>closure_<node>` (`closure_b<index>` for a closure of the body arena): a hoisted
+    /// closure's C symbol (generic-instantiation suffixes are appended by the caller that knows the
+    /// instantiation).
     pub fn closure_sym(self: &mut Self, m: ModuleId, id: NodeId, out: &mut String) {
         self.modpfx(m, out);
-        out.push_str("closure_");
-        out.push_u64(id);
+        if Ast::in_body(id) {
+            out.push_str("closure_b");
+            out.push_u64(id & NODE_BODY_MASK);
+        } else {
+            out.push_str("closure_");
+            out.push_u64(id);
+        }
         if self.clos_sfx.len() != 0 {
             for i in 0..self.clos_ids.len() {
                 if *self.clos_ids.at(i) == id {
@@ -1012,13 +1018,17 @@ extend Mangler {
             return self.inst_name(pm, &it, out);
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
-            let fd = self.p().module_ast_const(y.module).at_const(y.as_data.decl);
-            if fd.kind == NodeKind::NODE_FUNCTION {
-                self.qualified(y.module, fd.as_data.function.name, out);
+            let cf = self.p().module_ast_const(y.module).closure_fact(y.as_data.decl);
+            if cf != null && unsafe (&*cf).is_closure {
+                self.closure_sym(y.module, y.as_data.decl, out);
                 return true;
             }
-            if fd.kind == NodeKind::NODE_CLOSURE {
-                self.closure_sym(y.module, y.as_data.decl, out);
+            if cf == null && self.p().module_ast_const(y.module).at_const(y.as_data.decl).kind == NodeKind::NODE_FUNCTION {
+                self.qualified(
+                    y.module,
+                    self.p().module_ast_const(y.module).at_const(y.as_data.decl).as_data.function.name,
+                    out,
+                );
                 return true;
             }
             out.push_str("fnt");
@@ -1141,37 +1151,58 @@ extend Mangler {
     // declaring pool directly; pool-parametric spelling needs no reintern.
     fn fn_ptr_ctype(self: &mut Self, y: &Ty, decl: str, out: &mut String) bool {
         let fa = self.p().module_ast_const(y.module);
-        let fnn = *fa.at_const(y.as_data.decl);
-        let mut ps = NodeList { start: 0, len: 0 };
-        let mut rs = NodeList { start: 0, len: 0 };
-        let mut body = NODE_NONE;
-        if fnn.kind == NodeKind::NODE_FUNCTION {
-            ps = fnn.as_data.function.params;
-            rs = fnn.as_data.function.returns;
-        } else if fnn.kind == NodeKind::NODE_CLOSURE {
-            ps = fnn.as_data.closure.params;
-            rs = fnn.as_data.closure.returns;
-            if fnn.as_data.closure.expr_body {
-                body = fnn.as_data.closure.body;
+        // The signature: a closure's from its recorded facts (its syntax may be released), a
+        // function's or function type's from its declaration.
+        let mut ptys = Vector::<TypeId>::new();
+        let mut rtys = Vector::<TypeId>::new();
+        let cf = fa.closure_fact(y.as_data.decl);
+        if cf != null {
+            let c = unsafe &*cf;
+            let base = c.ncaps;
+            for i in 0..c.nparams {
+                ptys.push(unsafe fa.caps_of(cf)[(base + i) as usize].ty);
+            }
+            for i in 0..c.nrets {
+                rtys.push(unsafe fa.caps_of(cf)[(base + c.nparams + i) as usize].ty);
             }
         } else {
-            ps = fnn.as_data.function_type.params;
-            rs = fnn.as_data.function_type.returns;
+            let fnn = *fa.at_const(y.as_data.decl);
+            let mut ps = NodeList { start: 0, len: 0 };
+            let mut rs = NodeList { start: 0, len: 0 };
+            if fnn.kind == NodeKind::NODE_FUNCTION {
+                ps = fnn.as_data.function.params;
+                rs = fnn.as_data.function.returns;
+            } else {
+                ps = fnn.as_data.function_type.params;
+                rs = fnn.as_data.function_type.returns;
+            }
+            for i in 0..ps.len {
+                let pid = unsafe fa.list(ps)[i as usize];
+                let pn = fa.at_const(pid);
+                let mut tn = pid;
+                if pn.kind == NodeKind::NODE_PARAMETER {
+                    tn = pn.as_data.parameter.ty;
+                }
+                let mut anchor = tn;
+                if tn == NODE_NONE {
+                    anchor = pid;
+                }
+                ptys.push(fa.type_of(anchor));
+            }
+            for i in 0..rs.len {
+                let r0 = unsafe fa.list(rs)[i as usize];
+                let rn = fa.at_const(r0);
+                let mut rtn = r0;
+                if rn.kind == NodeKind::NODE_PARAMETER {
+                    rtn = rn.as_data.parameter.ty;
+                }
+                rtys.push(fa.type_of(rtn));
+            }
         }
         let mut params = String::new();
         let mut ok = true;
-        for i in 0..ps.len {
-            let pid = unsafe fa.list(ps)[i as usize];
-            let pn = fa.at_const(pid);
-            let mut tn = pid;
-            if pn.kind == NodeKind::NODE_PARAMETER {
-                tn = pn.as_data.parameter.ty;
-            }
-            let mut anchor = tn;
-            if tn == NODE_NONE {
-                anchor = pid;
-            }
-            let pty = fa.type_of(anchor);
+        for i in 0..ptys.len() {
+            let pty = ptys[i];
             if self.is_zst(y.module, pty) {
                 // Zero-sized by-value params take no slot (must match every lowered sig).
                 continue;
@@ -1196,36 +1227,20 @@ extend Mangler {
             inner.push_string(&params);
         }
         inner.push_str(")");
-
-        if rs.len == 1 {
-            let r0 = unsafe fa.list(rs)[0];
-            let rn = fa.at_const(r0);
-            let mut rtn = r0;
-            if rn.kind == NodeKind::NODE_PARAMETER {
-                rtn = rn.as_data.parameter.ty;
-            }
-            if self.is_zst(y.module, fa.type_of(rtn)) {
-                out.push_str("void ");
-                out.push_string(&inner);
-            } else {
-                ok = self.ctype(y.module, fa.type_of(rtn), inner.as_str(), out);
-            }
-        } else if rs.len == 0 {
-            let mut rty = TYPE_NONE;
-            if body != NODE_NONE {
-                rty = fa.type_of(body);
-            }
-            if rty != TYPE_NONE {
-                ok = self.ctype(y.module, rty, inner.as_str(), out);
-            } else {
-                out.push_str("void ");
-                out.push_string(&inner);
-            }
-        } else {
+        if rtys.len() > 1 {
             // Multi-return function pointers are unsupported everywhere.
-            ok = false;
+            return false;
         }
-        return ok;
+        let mut rty = TYPE_NONE;
+        if rtys.len() == 1 {
+            rty = rtys[0];
+        }
+        if rty == TYPE_NONE || self.is_zst(y.module, rty) {
+            out.push_str("void ");
+            out.push_string(&inner);
+            return true;
+        }
+        return self.ctype(y.module, rty, inner.as_str(), out);
     }
 
     /// A `@c.export`/`@c.import` symbol pin: the attribute string verbatim. False when `owner`
@@ -1487,27 +1502,6 @@ extend Mangler {
 
     /// The name span of binding decl `decl` in module `m` (let/parameter/for/pattern/identifier
     /// shapes: the capture-entry set), empty when the shape is unknown.
-    pub const fn decl_name_span(self: &mut Self, m: ModuleId, decl: NodeId) tok::Span {
-        let a = self.p().module_ast_const(m);
-        let n = a.at_const(decl);
-        if n.kind == NodeKind::NODE_LET {
-            return a.at_const(n.as_data.let_stmt.name).as_data.name.text;
-        }
-        if n.kind == NodeKind::NODE_PARAMETER {
-            return a.at_const(n.as_data.parameter.name).as_data.name.text;
-        }
-        if n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR {
-            return a.at_const(n.as_data.for_stmt.binding).as_data.name.text;
-        }
-        if n.kind == NodeKind::NODE_PATTERN_NAME {
-            return a.at_const(n.as_data.pattern.name).as_data.name.text;
-        }
-        if n.kind == NodeKind::NODE_IDENTIFIER {
-            return n.as_data.name.text;
-        }
-        return tok::Span { start: 0, end: 0 };
-    }
-
     /// The C symbol of the method named `mname` extending resolved aggregate `(rm, rt)`, when one
     /// exists: instance receivers spell `<InstName>__<m>`, concrete ones the frozen fn symbol.
     pub fn method_by_name(self: &mut Self, rm: ModuleId, rt: TypeId, mname: str, out: &mut String) bool {
@@ -1630,8 +1624,8 @@ extend Mangler {
         if y.kind == TypeKind::TYPE_FUNCTION {
             // A closure dropped without ever being called: no user `free` can extend a closure, so
             // its destructor is always the derived env glue (which frees the owning captures).
-            let fnn = self.p().module_ast_const(y.module).at_const(y.as_data.decl);
-            if fnn.kind != NodeKind::NODE_CLOSURE {
+            let cf = self.p().module_ast_const(y.module).closure_fact(y.as_data.decl);
+            if cf == null || !unsafe (&*cf).is_closure {
                 return false;
             }
             if !self.type_m(rm, rt, out) {
@@ -1863,8 +1857,8 @@ extend Mangler {
             return true;
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
-            let fnn = self.p().module_ast_const(y.module).at_const(y.as_data.decl);
-            if fnn.kind == NodeKind::NODE_CLOSURE && fnn.as_data.closure.captures.len != 0 {
+            let cf = self.p().module_ast_const(y.module).closure_fact(y.as_data.decl);
+            if cf != null && unsafe (&*cf).ncaps != 0 {
                 let mut nm = String::new();
                 self.closure_sym(y.module, y.as_data.decl, &mut nm);
                 nm.push_str("_env");

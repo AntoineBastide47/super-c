@@ -16,6 +16,7 @@ import ir::interp as iri;
 import utils::errors as diag;
 import driver::emit as emit;
 import driver::util as dutil;
+import stdlib;
 
 /// One harvested diagnostic: the cross-pass record the server publishes and codeAction later reads
 /// (the fix fields carry the machine-applicable quick fix, if any).
@@ -212,6 +213,7 @@ pub fn compile(
     lint_dir: str,
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
+    let t0 = unsafe shim::sc_ticks_ms();
     let mut p = loader::package_load_overlaid(
         root_file,
         root_dir,
@@ -222,7 +224,8 @@ pub fn compile(
         ov_files,
         ov_texts,
     );
-    run_pipeline(&mut p, target, root_file, lint_dir, diags);
+    let st = run_pipeline(&mut p, target, root_file, lint_dir, diags);
+    stats_line(&p, "compile", t0, &st);
     return p;
 }
 
@@ -240,6 +243,7 @@ pub fn compile_batch(
     ov_texts: Vector<String>,
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
+    let t0 = unsafe shim::sc_ticks_ms();
     let mut p = loader::package_load_prelude(
         root_dir,
         alt_dir,
@@ -274,7 +278,8 @@ pub fn compile_batch(
         }
     }
     p.lint_set = set;
-    run_pipeline(&mut p, target, "", "", diags);
+    let st = run_pipeline(&mut p, target, "", "", diags);
+    stats_line(&p, "batch", t0, &st);
     return p;
 }
 
@@ -286,12 +291,17 @@ pub fn compile_batch(
 // reparsed). Body granularity: an edit strictly inside one plain fn body reparses only that body into
 // the SAME arena (every old node id survives, importers stay valid), and only that module re-analyzes.
 // Anything outside the incremental domain returns false and the caller falls back to a full compile.
+// Body ownership: a module without an editor buffer keeps only its module arena between rounds
+// (`release_closed`); a round parses a released module's bodies back when its document opens,
+// when it must re-analyze, or when the constant engine demands a body of it (`typecheck_set`).
 
 /// Outcome counters for one incremental round: the exit-gate observables (what re-ran and why).
 pub struct RecompileStats {
     pub reparsed: u32, // changed modules (fully reparsed or body-spliced)
     pub analyzed: u32, // modules re-resolved + re-typechecked (the affected closure)
     pub body_only: u32, // changed modules that took the body-splice path (node ids stable)
+    pub bodies_back: u32, // modules whose released body syntax the round parsed back
+    pub passes: u32, // extra typecheck passes after the engine demanded a released body
 }
 
 // One module's import-decl surface, rendered to comparable bytes: path segment texts, alias text,
@@ -338,9 +348,21 @@ fn overlay_for(p: &loader::Package, i: usize, ov_files: &Vector<String>) Option<
 
 // Shift every source offset >= `from` by `delta` across the OLD prefix of the arena (the freshly
 // appended splice nodes already carry new-source offsets) plus the old attr/meta span tables.
-fn shift_spans(a: &mut Ast, old_nodes: usize, old_attrs: usize, old_metas: usize, from: u32, delta: i64) {
-    for i in 0..old_nodes {
-        let n = a.at(i as NodeId);
+fn shift_spans(
+    a: &mut Ast,
+    old_nodes: usize,
+    old_body: usize,
+    old_attrs: usize,
+    old_metas: usize,
+    from: u32,
+    delta: i64,
+) {
+    for k in 0..old_nodes + old_body {
+        let n = if k < old_nodes {
+            a.at(k as NodeId);
+        } else {
+            a.at((k - old_nodes) as NodeId | NODE_BODY);
+        };
         if n.span.start >= from {
             n.span.start = (n.span.start as i64 + delta) as u32;
         }
@@ -441,6 +463,7 @@ pub fn recompile(
     diags: &mut Vector<DiagRec>,
     st: &mut RecompileStats,
 ) bool {
+    let t0 = unsafe shim::sc_ticks_ms();
     let n = p.modules.len();
     // A resolve-gated baseline (run_pipeline typechecks NOTHING while any module has a resolve
     // error) holds no semantic state to extend: an empty per-node type table on a parsed module
@@ -450,20 +473,36 @@ pub fn recompile(
             return false;
         }
     }
+    // The overlay slot per module, looked up once per round (a realpath compare per document).
+    let mut ovk = Vector::<i64>::new();
+    for i in 0..n {
+        ovk.push(
+            switch overlay_for(p, i, ov_files) {
+                Some(k) => k as i64,
+                None => 0i64 - 1,
+            },
+        );
+    }
+    // Documents opened since their module's bodies were released: the bodies come back (ids
+    // stable, so importers keep their analyses) and the module re-analyzes.
+    let mut opened = Vector::<usize>::new();
+    for i in 0..n {
+        if ovk[i] >= 0 && p.modules[i].has_ast && p.modules[i].ast.b.released {
+            reparse_bodies(p, i);
+            st.bodies_back += 1;
+            opened.push(i);
+        }
+    }
     // 1) the changed set: modules whose overlay text differs from the analyzed source.
     let mut changed = Vector::<usize>::new();
     for i in 0..n {
-        switch overlay_for(p, i, ov_files) {
-            Some(k) => {
-                if ov_texts.at(k).as_str() != p.modules[i].source.as_str() {
-                    changed.push(i);
-                }
-            },
-            None => {},
-        };
+        if ovk[i] >= 0 && ov_texts.at(ovk[i] as usize).as_str() != p.modules[i].source.as_str() {
+            changed.push(i);
+        }
     }
-    if changed.len() == 0 {
+    if changed.len() == 0 && opened.len() == 0 {
         // No semantic work: the retained analysis and diagnostics stand.
+        release_closed(p, &ovk);
         return true;
     }
     let mut body_sliced = Vector::<bool>::new();
@@ -477,7 +516,7 @@ pub fn recompile(
             // Prelude reaches everything implicitly; a broken prior state has no baseline.
             return false;
         }
-        let k = overlay_for(p, i, ov_files).unwrap();
+        let k = ovk[i] as usize;
         let file = p.modules[i].file.clone();
         let mut ns = String::from_str(ov_texts.at(k).as_str());
         let mut lx = lex::Lexer::new(&mut ns, file.as_str());
@@ -563,6 +602,9 @@ pub fn recompile(
     for c in 0..changed.len() {
         aff.set(changed[c], true);
     }
+    for k in 0..opened.len() {
+        aff.set(opened[k], true);
+    }
     for m in 0..n {
         if aff[m] {
             continue;
@@ -582,10 +624,14 @@ pub fn recompile(
             aff.set(m, true);
         }
     }
-    // 5) re-run the pipeline over the affected set only, mirroring run_pipeline's phase order.
-    let pkg = p as *mut loader::Package;
-    let mut cirv = iri::interp_new(pkg);
-    p.cir = &mut cirv;
+    // 5) re-run the pipeline over the affected set only, mirroring run_pipeline's phase order. A
+    // closed importer's released bodies come back for its re-analysis (and go again below).
+    for m in 0..n {
+        if aff[m] && p.modules[m].has_ast && p.modules[m].ast.b.released {
+            reparse_bodies(p, m);
+            st.bodies_back += 1;
+        }
+    }
     let mut nd = Vector::<DiagRec>::new();
     for i in 0..n {
         if !aff[i] {
@@ -595,35 +641,14 @@ pub fn recompile(
         if !lsp_resolve_module(p, i, lw, &mut nd) {
             // A resolve failure invalidates this module's retained analyses and its importers';
             // rather than track that incrementally, hand the round to the full path.
-            p.cir = null;
             nd.free();
             return false;
         }
         st.analyzed += 1;
     }
-    for i in 0..n {
-        if !aff[i] {
-            continue;
-        }
-        let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
-        lsp_typecheck_module(p, i, lw, &mut nd);
-    }
-    cirv.all_typed = true;
-    for i in 0..n {
-        if !aff[i] {
-            continue;
-        }
-        if lsp_lint_wanted(p, i, root_file, lint_dir) {
-            let mut errs = diag::Errors::new();
-            emit::check_always_panics_module(p, i, &mut errs);
-            if errs.errors.len() != 0 {
-                errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
-                drain_errors(&errs, i as u32, &mut nd);
-            }
-        }
-    }
-    p.cir = null;
-    // 6) merge: keep unaffected modules' records, replace the affected ones'.
+    typecheck_set(p, &mut aff, true, true, root_file, lint_dir, &mut nd, st);
+    // 6) merge: keep unaffected modules' records, replace the affected ones' (the set now holds
+    // every module the passes analyzed).
     let mut merged = Vector::<DiagRec>::new();
     while diags.len() > 0 {
         let d = diags.remove(diags.len() - 1).unwrap();
@@ -641,6 +666,8 @@ pub fn recompile(
         let d = nd.remove(0).unwrap();
         diags.push(d);
     }
+    release_closed(p, &ovk);
+    stats_line(p, "round", t0, st);
     return true;
 }
 
@@ -676,6 +703,7 @@ fn try_body_splice(
         return false;
     }
     let old_nodes = p.modules[i].ast.nodes.len();
+    let old_body = p.modules[i].ast.b.nodes.len();
     let old_attrs = p.modules[i].ast.attrs.len();
     let old_metas = p.modules[i].ast.metas.len();
     let ns2 = ns;
@@ -693,24 +721,23 @@ fn try_body_splice(
         return false;
     }
     let a = &mut p.modules[i].ast;
-    shift_spans(a, old_nodes, old_attrs, old_metas, we_old, delta);
+    shift_spans(a, old_nodes, old_body, old_attrs, old_metas, we_old, delta);
     a.at(fnid).as_data.function.body = nb;
     p.modules[i].source = ns2;
     return true;
 }
 
 // The shared codegen-free pipeline over a loaded package: harvest parse failures, platform-filter,
-// resolve + typecheck every module (lints gated per module), then the always-panics phase.
-fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: str, diags: &mut Vector<DiagRec>) {
+// resolve + typecheck every module (lints gated per module), then the always-panics phase, then
+// release the bodies of every module without an editor buffer.
+fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: str, diags: &mut Vector<DiagRec>) RecompileStats {
+    let mut st = RecompileStats {};
     for i in 0..p.modules.len() {
         if !p.modules[i].has_ast {
             harvest_parse_errors(p, i, diags);
         }
     }
     emit::platform_filter(p, target);
-    let pkg = p as *mut loader::Package;
-    let mut cirv = iri::interp_new(pkg);
-    p.cir = &mut cirv;
     let n = p.modules.len();
     let mut res_ok = Vector::<bool>::new();
     let mut all_ok = true;
@@ -723,6 +750,8 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
     // Per-module gate, not one package-wide Boolean: module `i` typechecks when its own import
     // closure resolved cleanly, so one broken file does not suppress every other file's semantic
     // diagnostics. The cross-module always-panics phase still needs the whole package typed.
+    let mut set = Vector::<bool>::new();
+    set.resize_default(n);
     for i in 0..n {
         let mut gate = res_ok[i];
         if gate && !all_ok {
@@ -733,25 +762,244 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
                 }
             }
         }
-        if gate {
-            let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
-            lsp_typecheck_module(p, i, lw, diags);
-        }
+        set.set(i, gate);
     }
-    if all_ok {
-        // Driver-parity post-typecheck phase: the always-panics check (an error) interprets
-        // cross-module `const fn` bodies, so it only runs once every module is typed.
-        cirv.all_typed = true;
-        for i in 0..n {
-            if lsp_lint_wanted(p, i, root_file, lint_dir) {
-                let mut errs = diag::Errors::new();
-                emit::check_always_panics_module(p, i, &mut errs);
-                if errs.errors.len() != 0 {
-                    errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
-                    drain_errors(&errs, i as u32, diags);
+    typecheck_set(p, &mut set, all_ok, true, root_file, lint_dir, diags, &mut st);
+    let ovp = (&p.overlay_files) as *const Vector<String>;
+    let mut ovk = Vector::<i64>::new();
+    for i in 0..n {
+        ovk.push(
+            switch overlay_for(p, i, unsafe &*ovp) {
+                Some(k) => k as i64,
+                None => 0i64 - 1,
+            },
+        );
+    }
+    release_closed(p, &ovk);
+    return st;
+}
+
+// Typecheck the members of `set` (each after the members of its import closure, so a fold finds
+// its callee typed) and, when `panics` is set, run the always-panics phase over them; the
+// records go to `nd`. The constant engine refuses a body it cannot read and records the module
+// (`Interp.body_missing`): a released module is parsed back and held, and the next pass analyzes
+// it with every member whose analysis met a refusal (their records replaced). A refusal of a
+// member typed later in the same pass (an import cycle, a sibling checked later) stays a refusal,
+// as in a batch build. Each extra pass parses at least one module back, so the passes are
+// bounded by the module count; `set` grows by the modules parsed back.
+fn typecheck_set(
+    p: &mut loader::Package,
+    set: &mut Vector<bool>,
+    panics: bool,
+    lint: bool,
+    root_file: str,
+    lint_dir: str,
+    nd: &mut Vector<DiagRec>,
+    st: &mut RecompileStats,
+) {
+    let n = p.modules.len();
+    let pkg = p as *mut loader::Package;
+    let mut order = dep_order(p, set);
+    for pass in 0..n + 1 {
+        // Fresh completion records for the pass: the engine interprets a member's bodies only
+        // once this pass has checked them (a parsed-back arena has no types before that).
+        for k in 0..order.len() {
+            let i = order[k];
+            if i < p.tc_done.len() {
+                let old = replace(&mut p.tc_done[i], Set::<u64>::new());
+                old.free();
+            }
+        }
+        let mut cirv = iri::interp_new(pkg);
+        p.cir = &mut cirv;
+        let mut again = Vector::<bool>::new();
+        again.resize_default(n);
+        for k in 0..order.len() {
+            let i = order[k];
+            let lw = lint && lsp_lint_wanted(p, i, root_file, lint_dir);
+            if pass != 0 {
+                // The member runs again: its records are replaced whole, so resolve runs too.
+                drop_records(nd, i);
+                if !lsp_resolve_module(p, i, lw, nd) {
+                    continue;
+                }
+            }
+            let miss0 = cirv.body_miss_n;
+            lsp_typecheck_module(p, i, lw, nd);
+            if cirv.body_miss_n != miss0 {
+                again.set(i, true);
+            }
+        }
+        if panics {
+            // Driver-parity post-typecheck phase: the always-panics check (an error) interprets
+            // cross-module `const fn` bodies, so it only runs once every module is typed.
+            cirv.all_typed = true;
+            for k in 0..order.len() {
+                let i = order[k];
+                if lint && lsp_lint_wanted(p, i, root_file, lint_dir) {
+                    let miss0 = cirv.body_miss_n;
+                    let mut errs = diag::Errors::new();
+                    emit::check_always_panics_module(p, i, &mut errs);
+                    if errs.errors.len() != 0 {
+                        errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
+                        drain_errors(&errs, i as u32, nd);
+                    }
+                    if cirv.body_miss_n != miss0 {
+                        again.set(i, true);
+                    }
                 }
             }
         }
+        p.cir = null;
+        let mut back = false;
+        for m in 0..cirv.body_missing.len() {
+            if cirv.body_missing[m] && p.modules[m].has_ast && p.modules[m].ast.b.released {
+                reparse_bodies(p, m);
+                hold_bodies(p, m);
+                st.bodies_back += 1;
+                set.set(m, true);
+                again.set(m, true);
+                back = true;
+            }
+        }
+        if !back {
+            return;
+        }
+        st.passes += 1;
+        order = dep_order(p, &again);
     }
-    p.cir = null;
+}
+
+// Drop module `i`'s records from `nd`: a module analyzed again replaces them whole.
+fn drop_records(nd: &mut Vector<DiagRec>, i: usize) {
+    let mut k: usize = 0;
+    for _ in 0..nd.len() {
+        if k >= nd.len() {
+            break;
+        }
+        if nd.at(k).module as usize == i {
+            let d = nd.remove(k).unwrap();
+            d.free();
+        } else {
+            k += 1;
+        }
+    }
+}
+
+// The members of `set`, each after the members of its import closure (a cycle keeps index order).
+fn dep_order(p: &mut loader::Package, set: &Vector<bool>) Vector<usize> {
+    let n = p.modules.len();
+    let mut seen = Vector::<bool>::new();
+    seen.resize_default(n);
+    let mut out = Vector::<usize>::new();
+    for i in 0..n {
+        if set[i] && !seen[i] {
+            dep_visit(p, set, &mut seen, &mut out, i);
+        }
+    }
+    return out;
+}
+
+fn dep_visit(p: &mut loader::Package, set: &Vector<bool>, seen: &mut Vector<bool>, out: &mut Vector<usize>, i: usize) {
+    seen.set(i, true);
+    // The closure list is re-read per step: building another module's closure may move it.
+    for j in 0..p.modules.len() {
+        let clo = unsafe &*p.module_closure(i as ModuleId);
+        if j >= clo.len() {
+            break;
+        }
+        let c = clo[j] as usize;
+        if set[c] && !seen[c] {
+            dep_visit(p, set, seen, out, c);
+        }
+    }
+    out.push(i);
+}
+
+// Parse module `i`'s source again and take that parse's body arena. The parser is a function of
+// the source alone, so the arena is byte-identical to the one the release freed: every body id,
+// every fn node's body field and every parse-time side table entry (attributes, lifetimes) is
+// valid again. The arena's per-node analysis tables are empty until the module resolves and
+// typechecks again.
+fn reparse_bodies(p: &mut loader::Package, i: usize) {
+    let file = p.modules[i].file.clone();
+    let mut lx = lex::Lexer::new(&mut p.modules[i].source, file.as_str());
+    lx.scan_tokens();
+    assert(!lx.has_errors(), "a parsed module lexes again");
+    let toks = lx.take_tokens();
+    let mut ps = par::Parser::new(toks, p.modules[i].source.as_str(), file.as_str());
+    ps.build_ast();
+    assert(!ps.has_errors(), "a parsed module parses again");
+    let mut na = ps.take_ast();
+    let old = replace(&mut p.modules[i].ast.b, replace(&mut na.b, BodyArena::new()));
+    old.free();
+    na.free();
+}
+
+// Keep module `m`'s bodies live across rounds: the engine demanded them once.
+fn hold_bodies(p: &mut loader::Package, m: usize) {
+    while p.body_hold.len() <= m {
+        p.body_hold.push(false);
+    }
+    p.body_hold.set(m, true);
+}
+
+// Free the body syntax of every module without an editor buffer (`ovk[i] < 0`) that the engine
+// has not demanded (`Package.body_hold`): the positional features read only open documents'
+// bodies, and the cross-file features parse a closed module's back on demand (`ensure_bodies`).
+fn release_closed(p: &mut loader::Package, ovk: &Vector<i64>) {
+    for i in 0..p.modules.len() {
+        let held = i < p.body_hold.len() && p.body_hold[i];
+        if ovk[i] < 0 && p.modules[i].has_ast && !p.modules[i].ast.b.released && !held {
+            p.modules[i].ast.release_bodies();
+        }
+    }
+}
+
+/// Parse back and re-analyze module `i`'s released bodies for a feature that reads closed
+/// documents' bodies (references, call hierarchy). The next analysis round releases them again.
+pub fn ensure_bodies(p: &mut loader::Package, i: usize) {
+    if !p.modules[i].has_ast || !p.modules[i].ast.b.released {
+        return;
+    }
+    reparse_bodies(p, i);
+    // The records are discarded: the retained ones came from the same source and imports.
+    let typed = p.modules[i].ast.types.len() != 0;
+    let mut nd = Vector::<DiagRec>::new();
+    let mut st = RecompileStats {};
+    if lsp_resolve_module(p, i, false, &mut nd) && typed {
+        let mut set = Vector::<bool>::new();
+        set.resize_default(p.modules.len());
+        set.set(i, true);
+        typecheck_set(p, &mut set, false, false, "", "", &mut nd, &mut st);
+    }
+}
+
+// SC_LSP_STATS=1: one line per analysis round on stderr: the module counts by body ownership,
+// the retained bytes, the round's time and its parse-back work.
+fn stats_line(p: &loader::Package, what: str, t0: i64, st: &RecompileStats) {
+    if stdlib::getenv("SC_LSP_STATS") == null {
+        return;
+    }
+    let mut released: usize = 0;
+    let mut held: usize = 0;
+    for i in 0..p.modules.len() {
+        if p.modules[i].has_ast && p.modules[i].ast.b.released {
+            released += 1;
+        }
+        if i < p.body_hold.len() && p.body_hold[i] {
+            held += 1;
+        }
+    }
+    eprintln(
+        "lsp {}: {} modules, {} released, {} held, {} KiB retained, {} ms, {} parsed back, {} extra passes",
+        what,
+        p.modules.len(),
+        released,
+        held,
+        p.retained_bytes() / 1024,
+        unsafe shim::sc_ticks_ms() - t0,
+        st.bodies_back,
+        st.passes,
+    );
 }

@@ -12,12 +12,43 @@ import lexer::token_type as tt;
 
 pub type NodeId = u32;
 pub const NODE_NONE: NodeId = 0;
+/// Bit 30 of a NodeId (and of a NodeList start) names the module's body arena (`Ast.b`): the
+/// syntax of releasable bodies. Every other id indexes the module arena (`Ast.nodes`).
+pub const NODE_BODY: u32 = 0x40000000;
+pub const NODE_BODY_MASK: u32 = 0x3FFFFFFF;
 
 pub struct NodeList {
     pub start: u32,
     pub len: u32,
 }
 pub type ModuleId = u16;
+
+/// The emission facts of a function type's declaration node (`Ast::closure_fact`): a closure
+/// (`is_closure`) or a `fn(..)` type written in a body. From `cap_start` in `cap_facts`: its
+/// `ncaps` captures in capture order, then its `nparams` parameter types, then its `nrets` return
+/// types (one entry, possibly TYPE_NONE, for an expression-bodied closure); and the closure's
+/// mutable-capture mask.
+pub struct ClosureFact {
+    pub node: NodeId,
+    pub is_closure: bool,
+    pub nparams: u32,
+    pub nrets: u32,
+    pub ncaps: u32,
+    pub cap_start: u32,
+    pub mut_caps: u64,
+}
+
+/// One capture (the captured binding's name text and its type) or one signature type (empty name).
+pub struct CapFact {
+    pub name: tok::Span,
+    pub ty: TypeId,
+}
+
+/// One seeded resolution (`Ast::seed_resolution`).
+pub struct Seed {
+    pub at: NodeId,
+    pub def: DefId,
+}
 
 pub struct DefId {
     pub module: ModuleId,
@@ -1731,9 +1762,63 @@ extend TypePool {
     }
 }
 
+/// The syntax of a module's releasable bodies (the block of every function that is not generic,
+/// not `const fn`, not an interface member and not a member of a generic `extend`, with the nodes
+/// a desugar appends to such a body) and the per-node side tables of those nodes. Ids carry
+/// NODE_BODY. The driver frees the arena once the last consumer of body syntax has run
+/// (`Ast::release_bodies`); an access after that is a bounds abort.
+pub struct BodyArena {
+    pub nodes: SplitVec<Node>,
+    pub children: SplitVec<u32>,
+    pub types: Vector<u32>,
+    pub resolutions: SplitVec<DefId>,
+    pub mono_at: Vector<u32>,
+    pub dyn_at: Vector<u32>,
+    pub deref_at: Vector<u32>,
+    /// True once `release_bodies` freed the arena: the module's function nodes still name body
+    /// ids, which `valid` rejects; the LSP parses the bodies back from the module's source.
+    pub released: bool,
+}
+
+extend BodyArena as Free {
+    pub fn free(self: &mut Self) {
+        self.nodes.free();
+        self.children.free();
+        self.types.free();
+        self.resolutions.free();
+        self.mono_at.free();
+        self.dyn_at.free();
+        self.deref_at.free();
+    }
+}
+
+extend BodyArena {
+    pub fn new() BodyArena {
+        return BodyArena {
+            nodes: SplitVec::<Node>::new(),
+            children: SplitVec::<u32>::new(),
+            types: Vector::<u32>::new(),
+            resolutions: SplitVec::<DefId>::new(),
+            mono_at: Vector::<u32>::new(),
+            dyn_at: Vector::<u32>::new(),
+            deref_at: Vector::<u32>::new(),
+            released: false,
+        };
+    }
+
+    pub const fn retained(self: &Self) usize {
+        return self.nodes.retained() + self.children.retained() + self.types.capacity() * 4 + self.resolutions.retained() + self.mono_at.capacity() * 4 + self.dyn_at.capacity() * 4 + self.deref_at.capacity() * 4;
+    }
+}
+
 pub struct Ast {
     pub nodes: SplitVec<Node>,
     pub children: SplitVec<u32>,
+    /// The body arena (ids tagged NODE_BODY) and the sink `add`/`commit` write to: the parser
+    /// turns it on for a releasable body, and a later stage that appends nodes sets it to the
+    /// arena of the body it works in (`add_in`).
+    pub b: BodyArena,
+    pub sink_body: bool,
     pub scratch: Vector<u32>,
     // Intern serialization for parallel stages: off = single-threaded (no locking). Task-aware
     // (waiters PARK -- a raw mutex here deadlocks under safepoint preemption) and reentrant by
@@ -1785,6 +1870,19 @@ pub struct Ast {
     /// may provide one operator for different right operands, so the NAME no longer identifies it and
     /// codegen must not resolve it a second time.
     pub op_method: Map<u32, u64>,
+    /// Resolutions a later stage seeded on identifiers it synthesized (a desugar names its callee
+    /// and locals by resolution, never by text); `init_resolutions` re-applies them so a re-resolve
+    /// of the retained arena keeps them.
+    pub seeds: Vector<Seed>,
+    /// What the emitter reads of a closure after its body syntax is released: recorded by the
+    /// checker (`record_closure`), the mutable-capture mask finalized by the borrow checker.
+    pub closure_facts: Vector<ClosureFact>,
+    pub cap_facts: Vector<CapFact>,
+    pub closure_at: Map<u32, u32>,
+    /// `free` methods' touched declarations, `fn << 32 | decl` for every module declaration a
+    /// node inside the method's body resolves to (`record_free_touch`): the free-glue emission
+    /// completes a `free` that leaves an owning field untouched, after the body syntax is gone.
+    pub free_touched: Vector<u64>,
     pub root: NodeId,
     pub module: ModuleId,
     /// Number of sugar-keyword marker nodes (`launch`/`select`/`parallel for`) the parser built.
@@ -1798,6 +1896,7 @@ extend Ast as Free {
     pub fn free(self: &mut Self) {
         self.nodes.free();
         self.children.free();
+        self.b.free();
         self.scratch.free();
         self.ilock_sem.free();
         self.resolutions.free();
@@ -1824,6 +1923,11 @@ extend Ast as Free {
         self.lifetime_decls.free();
         self.call_info.free();
         self.op_method.free();
+        self.seeds.free();
+        self.closure_facts.free();
+        self.cap_facts.free();
+        self.closure_at.free();
+        self.free_touched.free();
     }
 }
 
@@ -1832,6 +1936,8 @@ extend Ast {
         let mut a = Ast {
             nodes: SplitVec::<Node>::new(),
             children: SplitVec::<u32>::new(),
+            b: BodyArena::new(),
+            sink_body: false,
             scratch: Vector::<u32>::new(),
             ilock_on: false,
             ilock_sem: psy::Semaphore::new(1),
@@ -1864,16 +1970,112 @@ extend Ast {
         };
         // nodes/tokens sits at ~0.78 across real corpora; 7/8 trims the over-reserve while keeping
         // the high-ratio outlier modules from doubling past the reserve.
-        a.nodes.reserve(token_count - token_count / 8);
-        a.children.reserve(token_count / 2);
+        // nodes/tokens sits at ~0.78 across real corpora, with bodies holding about 87% of the
+        // nodes and 65% of the list entries; the reserves keep the high-ratio outlier modules from
+        // doubling past them (a freeze pins capacity, and a full arena would double on its headroom).
+        a.nodes.reserve(token_count / 8);
+        a.b.nodes.reserve(token_count - token_count * 7 / 32);
+        a.children.reserve(token_count / 8);
+        a.b.children.reserve(token_count / 4);
         a.nodes.push(Node { kind: NodeKind::NODE_NONE_KIND });
         return a;
     }
 
     pub fn add(self: &mut Self, node: Node) NodeId {
+        if self.sink_body {
+            let id = self.b.nodes.len() as NodeId | NODE_BODY;
+            self.b.nodes.push(node);
+            return id;
+        }
         let id = self.nodes.len() as NodeId;
         self.nodes.push(node);
         return id;
+    }
+
+    /// Add `node` to the arena of `anchor` (a desugar extends the body it rewrites).
+    pub fn add_in(self: &mut Self, anchor: NodeId, node: Node) NodeId {
+        self.sink_body = (anchor & NODE_BODY) != 0;
+        return self.add(node);
+    }
+
+    /// True when `id` names the body arena.
+    @c.always_inline
+    pub const fn in_body(id: NodeId) bool {
+        return (id & NODE_BODY) != 0;
+    }
+
+    /// Node count over both arenas; `nth_id` enumerates them (module arena first).
+    @c.always_inline
+    pub const fn nnodes(self: &Self) usize {
+        return self.nodes.len() + self.b.nodes.len();
+    }
+    @c.always_inline
+    pub const fn nth_id(self: &Self, k: usize) NodeId {
+        return Ast::nth_id_n(self.nodes.len(), k);
+    }
+    /// `nth_id` over a hoisted module-arena count `nb` (a hot scan keeps it in a register).
+    @c.always_inline
+    pub const fn nth_id_n(nb: usize, k: usize) NodeId {
+        if k < nb {
+            return k as NodeId;
+        }
+        return (k - nb) as NodeId | NODE_BODY;
+    }
+    /// The dense index of `id` in the `nth_id` order, for a scan's per-node scratch table.
+    @c.always_inline
+    pub const fn dense(self: &Self, id: NodeId) usize {
+        if (id & NODE_BODY) != 0 {
+            return self.nodes.len() + (id & NODE_BODY_MASK) as usize;
+        }
+        return id as usize;
+    }
+    /// True when `id` names a node of this module (either arena).
+    @c.always_inline
+    pub const fn valid(self: &Self, id: NodeId) bool {
+        if (id & NODE_BODY) != 0 {
+            return (id & NODE_BODY_MASK) as usize < self.b.nodes.len();
+        }
+        return id as usize < self.nodes.len();
+    }
+
+    /// Pin both arenas' allocations before a parallel stage appends (see SplitVec::freeze).
+    pub fn freeze_nodes(self: &mut Self) {
+        self.nodes.freeze();
+        self.children.freeze();
+        self.b.nodes.freeze();
+        self.b.children.freeze();
+    }
+    pub fn thaw_nodes(self: &mut Self) {
+        self.nodes.thaw();
+        self.children.thaw();
+        self.b.nodes.thaw();
+        self.b.children.thaw();
+    }
+    pub fn freeze_resolutions(self: &mut Self) {
+        self.resolutions.freeze();
+        self.b.resolutions.freeze();
+    }
+    pub fn thaw_resolutions(self: &mut Self) {
+        self.resolutions.thaw();
+        self.b.resolutions.thaw();
+    }
+
+    /// Free the body arena: the checked release point of body syntax. Every later read of a
+    /// NODE_BODY id aborts on bounds. The seeds aimed at body nodes go with it: a parse-back
+    /// (`lsp::analysis`) lowers and checks those bodies again, which seeds them again.
+    pub fn release_bodies(self: &mut Self) {
+        self.b.free();
+        self.b = BodyArena::new();
+        self.b.released = true;
+        let mut w: usize = 0;
+        for i in 0..self.seeds.len() {
+            let sd = *self.seeds.at(i);
+            if !Ast::in_body(sd.at) {
+                self.seeds.set(w, sd);
+                w += 1;
+            }
+        }
+        self.seeds.truncate(w);
     }
 
     pub const fn mark(self: &Self) u32 {
@@ -1888,11 +2090,19 @@ extend Ast {
     @c.always_inline
     pub fn commit(self: &mut Self, mark: u32) NodeList {
         let need = self.scratch.len() - mark as usize;
-        let start = self.children.run_start(need, 0);
-        let list = NodeList { start: start as u32, len: need as u32 };
-        for i in mark as usize..self.scratch.len() {
-            self.children.push(self.scratch[i]);
-        }
+        let list = if self.sink_body {
+            let start = self.b.children.run_start(need, 0);
+            for i in mark as usize..self.scratch.len() {
+                self.b.children.push(self.scratch[i]);
+            }
+            NodeList { start: start as u32 | NODE_BODY, len: need as u32 };
+        } else {
+            let start = self.children.run_start(need, 0);
+            for i in mark as usize..self.scratch.len() {
+                self.children.push(self.scratch[i]);
+            }
+            NodeList { start: start as u32, len: need as u32 };
+        };
         self.scratch.truncate(mark as usize);
         return list;
     }
@@ -1902,6 +2112,15 @@ extend Ast {
         self.resolutions.reserve(self.nodes.len());
         for _ in 0..self.nodes.len() {
             self.resolutions.push(DefId { module: 0, node: NODE_NONE });
+        }
+        self.b.resolutions.clear();
+        self.b.resolutions.reserve(self.b.nodes.len());
+        for _ in 0..self.b.nodes.len() {
+            self.b.resolutions.push(DefId { module: 0, node: NODE_NONE });
+        }
+        for i in 0..self.seeds.len() {
+            let sd = *self.seeds.at(i);
+            self.set_resolution_def(sd.at, sd.def);
         }
     }
 
@@ -1915,6 +2134,9 @@ extend Ast {
         while self.resolutions.len() < self.nodes.len() {
             self.resolutions.push(DefId { module: 0, node: NODE_NONE });
         }
+        while self.b.resolutions.len() < self.b.nodes.len() {
+            self.b.resolutions.push(DefId { module: 0, node: NODE_NONE });
+        }
     }
 
     /// Like grow_resolutions, but for nodes built DURING typecheck (the `format` rewrite): the type
@@ -1924,6 +2146,9 @@ extend Ast {
         while self.types.len() < self.nodes.len() {
             self.types.push(TYPE_NONE);
         }
+        while self.b.types.len() < self.b.nodes.len() {
+            self.b.types.push(TYPE_NONE);
+        }
     }
 
     pub fn init_types(self: &mut Self) {
@@ -1932,6 +2157,15 @@ extend Ast {
         for _ in 0..self.nodes.len() {
             self.types.push(TYPE_NONE);
         }
+        self.b.types.clear();
+        self.b.types.reserve(self.b.nodes.len());
+        for _ in 0..self.b.nodes.len() {
+            self.b.types.push(TYPE_NONE);
+        }
+        self.closure_facts.clear();
+        self.cap_facts.clear();
+        self.closure_at.clear();
+        self.free_touched.clear();
         self.pool.clear();
         self.used.clear();
         self.used_inst.clear();
@@ -2190,6 +2424,13 @@ extend Ast {
         for i in 0..self.types.len() {
             self.types[i] = pub_map1(map, self.types[i]);
         }
+        for i in 0..self.b.types.len() {
+            self.b.types[i] = pub_map1(map, self.b.types[i]);
+        }
+        for i in 0..self.cap_facts.len() {
+            let c = self.cap_facts.index_mut(i);
+            c.ty = pub_map1(map, c.ty);
+        }
         for i in 0..self.mono.len() {
             let u = self.mono.index_mut(i);
             for k in 0..u.n {
@@ -2262,6 +2503,16 @@ extend Ast {
     pub const fn has_provisional(self: &Self) bool {
         for i in 0..self.types.len() {
             if (self.types[i] & TYPE_PROV) != 0 {
+                return true;
+            }
+        }
+        for i in 0..self.b.types.len() {
+            if (self.b.types[i] & TYPE_PROV) != 0 {
+                return true;
+            }
+        }
+        for i in 0..self.cap_facts.len() {
+            if (self.cap_facts.at(i).ty & TYPE_PROV) != 0 {
                 return true;
             }
         }
@@ -2488,16 +2739,25 @@ extend Ast {
             unsafe u.args[i] = unsafe args[i];
         }
         self.mono.push(u);
-        ensure_u32_len(&mut self.mono_at, self.nodes.len(), node as usize + 1);
-        self.mono_at[node as usize] = self.mono.len() as u32;
+        let v = self.mono.len() as u32;
+        if (node & NODE_BODY) != 0 {
+            let k = (node & NODE_BODY_MASK) as usize;
+            ensure_u32_len(&mut self.b.mono_at, self.b.nodes.len(), k + 1);
+            self.b.mono_at[k] = v;
+        } else {
+            ensure_u32_len(&mut self.mono_at, self.nodes.len(), node as usize + 1);
+            self.mono_at[node as usize] = v;
+        }
+    }
+
+    /// The `mono` slot recorded for `node` plus one, or 0 if none.
+    pub const fn mono_slot(self: &Self, node: NodeId) u32 {
+        return slot_of(&self.mono_at, &self.b.mono_at, node);
     }
 
     /// The type args recorded for `node`, or null if none.
     pub const fn type_args(self: &Self, node: NodeId) *const MonoUse {
-        if node as usize >= self.mono_at.len() {
-            return null;
-        }
-        let idx = self.mono_at[node as usize];
+        let idx = slot_of(&self.mono_at, &self.b.mono_at, node);
         if idx == 0 {
             return null;
         }
@@ -2526,16 +2786,20 @@ extend Ast {
     }
     pub fn add_dyn_use_alloc(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId, alloc: TypeId) {
         self.dyn_uses.push(DynUse { node: node, src: src, dyn_ty: dyn_ty, alloc: alloc });
-        ensure_u32_len(&mut self.dyn_at, self.nodes.len(), node as usize + 1);
-        self.dyn_at[node as usize] = self.dyn_uses.len() as u32;
+        let v = self.dyn_uses.len() as u32;
+        if (node & NODE_BODY) != 0 {
+            let k = (node & NODE_BODY_MASK) as usize;
+            ensure_u32_len(&mut self.b.dyn_at, self.b.nodes.len(), k + 1);
+            self.b.dyn_at[k] = v;
+        } else {
+            ensure_u32_len(&mut self.dyn_at, self.nodes.len(), node as usize + 1);
+            self.dyn_at[node as usize] = v;
+        }
     }
 
     /// The dyn-erasure recorded at `node`, or null if none.
     pub const fn dyn_use_at(self: &Self, node: NodeId) *const DynUse {
-        if node as usize >= self.dyn_at.len() {
-            return null;
-        }
-        let idx = self.dyn_at[node as usize];
+        let idx = slot_of(&self.dyn_at, &self.b.dyn_at, node);
         if idx == 0 {
             return null;
         }
@@ -2544,16 +2808,21 @@ extend Ast {
 
     pub fn add_deref_use(self: &mut Self, du: &DerefUse) {
         self.deref_uses.push(*du);
-        ensure_u32_len(&mut self.deref_at, self.nodes.len(), du.node as usize + 1);
-        self.deref_at[du.node as usize] = self.deref_uses.len() as u32;
+        let v = self.deref_uses.len() as u32;
+        let node = du.node;
+        if (node & NODE_BODY) != 0 {
+            let k = (node & NODE_BODY_MASK) as usize;
+            ensure_u32_len(&mut self.b.deref_at, self.b.nodes.len(), k + 1);
+            self.b.deref_at[k] = v;
+        } else {
+            ensure_u32_len(&mut self.deref_at, self.nodes.len(), node as usize + 1);
+            self.deref_at[node as usize] = v;
+        }
     }
 
     /// The auto-deref chain recorded at `node`, or null if none.
     pub const fn deref_use_at(self: &Self, node: NodeId) *const DerefUse {
-        if node as usize >= self.deref_at.len() {
-            return null;
-        }
-        let idx = self.deref_at[node as usize];
+        let idx = slot_of(&self.deref_at, &self.b.deref_at, node);
         if idx == 0 {
             return null;
         }
@@ -2563,44 +2832,189 @@ extend Ast {
     /// The auto-deref chain recorded at `node`, writable (a mutable place use patches method hops
     /// to `deref_mut`), or null if none.
     pub fn deref_use_mut(self: &mut Self, node: NodeId) *mut DerefUse {
-        if node as usize >= self.deref_at.len() {
-            return null;
-        }
-        let idx = self.deref_at[node as usize];
+        let idx = slot_of(&self.deref_at, &self.b.deref_at, node);
         if idx == 0 {
             return null;
         }
         return self.deref_uses.index_mut((idx - 1) as usize);
     }
 
+    // Each accessor selects the arena, then runs one indexed access: the select is a conditional
+    // move, and the access inlines once.
+    @c.always_inline
     pub const fn at(self: &mut Self, id: NodeId) &mut Node {
-        return self.nodes.index_mut(id as usize);
+        let sv = if (id & NODE_BODY) != 0 {
+            &mut self.b.nodes;
+        } else {
+            &mut self.nodes;
+        };
+        return sv.index_mut((id & NODE_BODY_MASK) as usize);
     }
+    @c.always_inline
     pub const fn at_const(self: &Self, id: NodeId) &Node {
-        return self.nodes.at(id as usize);
+        let sv = if (id & NODE_BODY) != 0 {
+            &self.b.nodes;
+        } else {
+            &self.nodes;
+        };
+        return sv.at((id & NODE_BODY_MASK) as usize);
     }
+    @c.always_inline
     pub const fn list(self: &Self, list: NodeList) *const NodeId {
-        return self.children.ptr_at(list.start as usize);
+        let sv = if (list.start & NODE_BODY) != 0 {
+            &self.b.children;
+        } else {
+            &self.children;
+        };
+        return sv.ptr_at((list.start & NODE_BODY_MASK) as usize);
     }
     /// Resolves `ref_id` to a decl in THIS module (the DefId is stamped with `self.module`); use
     /// set_resolution_def for a foreign target.
     pub const fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
-        self.resolutions.set(ref_id as usize, DefId { module: self.module, node: decl });
+        self.set_resolution_def(ref_id, DefId { module: self.module, node: decl });
     }
     /// The resolved decl node with its module DROPPED -- use resolution_def when the target may
     /// live in another module.
     pub const fn resolution(self: &Self, ref_id: NodeId) NodeId {
         return self.resolution_def(ref_id).node;
     }
+    @c.always_inline
     pub const fn resolution_def(self: &Self, ref_id: NodeId) DefId {
         // synthesized nodes (post-resolve desugars) have no slot: unresolved, not an abort
-        if ref_id as usize >= self.resolutions.len() {
+        let sv = if (ref_id & NODE_BODY) != 0 {
+            &self.b.resolutions;
+        } else {
+            &self.resolutions;
+        };
+        let k = (ref_id & NODE_BODY_MASK) as usize;
+        if k >= sv.len() {
             return DefId { module: 0, node: NODE_NONE };
         }
-        return *self.resolutions.at(ref_id as usize);
+        return *sv.at(k);
     }
+    @c.always_inline
     pub const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
-        self.resolutions.set(ref_id as usize, decl);
+        let sv = if (ref_id & NODE_BODY) != 0 {
+            &mut self.b.resolutions;
+        } else {
+            &mut self.resolutions;
+        };
+        sv.set((ref_id & NODE_BODY_MASK) as usize, decl);
+    }
+    /// Resolve the synthesized identifier `ref_id` for good: the resolver never looks its text up,
+    /// and a re-resolve restores the binding (see `seeds`).
+    pub fn seed_resolution(self: &mut Self, ref_id: NodeId, decl: DefId) {
+        self.set_resolution_def(ref_id, decl);
+        self.seeds.push(Seed { at: ref_id, def: decl });
+    }
+
+    /// Record closure `node`'s emission facts: `entries` holds the captures, then `nparams`
+    /// parameter types, then `nrets` return types. A later record replaces the earlier (a re-check).
+    pub fn record_closure(
+        self: &mut Self,
+        node: NodeId,
+        is_closure: bool,
+        nparams: u32,
+        nrets: u32,
+        mut_caps: u64,
+        entries: Vector<CapFact>,
+    ) {
+        let start = self.cap_facts.len() as u32;
+        let n = entries.len() as u32 - nparams - nrets;
+        for i in 0..entries.len() {
+            self.cap_facts.push(*entries.at(i));
+        }
+        let f = ClosureFact {
+            node: node,
+            is_closure: is_closure,
+            nparams: nparams,
+            nrets: nrets,
+            ncaps: n,
+            cap_start: start,
+            mut_caps: mut_caps,
+        };
+        switch self.closure_at.get(&node) {
+            Some(i) => {
+                let k = *i;
+                self.closure_facts.set(k as usize, f);
+            },
+            None => {
+                self.closure_at.insert(node, self.closure_facts.len() as u32);
+                self.closure_facts.push(f);
+            },
+        };
+    }
+
+    /// Record that `free` method `fnid`'s body resolves to module declaration `decl` (once).
+    pub fn record_free_touch(self: &mut Self, fnid: NodeId, decl: NodeId) {
+        let key = fnid as u64 << 32 | decl as u64;
+        let mut i = self.free_touched.len();
+        while i > 0 && self.free_touched[i - 1] >> 32 == fnid as u64 {
+            if self.free_touched[i - 1] == key {
+                return;
+            }
+            i -= 1;
+        }
+        self.free_touched.push(key);
+    }
+    /// True when `free` method `fnid`'s body resolves to `decl`.
+    pub const fn free_touches(self: &Self, fnid: NodeId, decl: NodeId) bool {
+        let key = fnid as u64 << 32 | decl as u64;
+        for i in 0..self.free_touched.len() {
+            if self.free_touched[i] == key {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The recorded facts of closure or function-type node `node`, or null.
+    pub const fn closure_fact(self: &Self, node: NodeId) *const ClosureFact {
+        switch self.closure_at.get(&node) {
+            Some(i) => {
+                return self.closure_facts.at((*i) as usize);
+            },
+            None => {
+                return null;
+            },
+        };
+    }
+    pub fn closure_fact_mut(self: &mut Self, node: NodeId) *mut ClosureFact {
+        switch self.closure_at.get(&node) {
+            Some(i) => {
+                let k = *i;
+                return self.closure_facts.index_mut(k as usize);
+            },
+            None => {
+                return null;
+            },
+        };
+    }
+    /// The capture facts of closure `f`, from its first capture.
+    pub const fn caps_of(self: &Self, f: *const ClosureFact) *const CapFact {
+        return self.cap_facts.at((unsafe (&*f).cap_start) as usize);
+    }
+
+    /// The name text of binding declaration `decl` (a let, parameter, loop binding, pattern name
+    /// or bare identifier); empty otherwise.
+    pub const fn decl_name_span(self: &Self, decl: NodeId) tok::Span {
+        let n = self.at_const(decl);
+        if n.kind == NodeKind::NODE_LET {
+            return self.at_const(n.as_data.let_stmt.name).as_data.name.text;
+        }
+        if n.kind == NodeKind::NODE_PARAMETER {
+            return self.at_const(n.as_data.parameter.name).as_data.name.text;
+        }
+        if n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR {
+            return self.at_const(n.as_data.for_stmt.binding).as_data.name.text;
+        }
+        if n.kind == NodeKind::NODE_PATTERN_NAME {
+            return self.at_const(n.as_data.pattern.name).as_data.name.text;
+        }
+        if n.kind == NodeKind::NODE_IDENTIFIER {
+            return n.as_data.name.text;
+        }
+        return tok::Span { start: 0, end: 0 };
     }
     /// Is call `id` spelled `x.free()`: a member call with no path and no arguments whose member is
     /// named `free`? When no method resolves for it, the call is an explicit drop: destruction IS
@@ -2625,17 +3039,30 @@ extend Ast {
     pub const fn builtin(b: BuiltinType) TypeId {
         return b as TypeId + 1;
     }
+    @c.always_inline
     pub const fn set_type(self: &mut Self, n: NodeId, t: TypeId) {
-        self.types[n as usize] = t;
+        let tv = if (n & NODE_BODY) != 0 {
+            &mut self.b.types;
+        } else {
+            &mut self.types;
+        };
+        tv[(n & NODE_BODY_MASK) as usize] = t;
     }
+    @c.always_inline
     pub const fn type_of(self: &Self, n: NodeId) TypeId {
         // nodes synthesized after init_types (typecheck-time desugars) have no slot yet; the
         // constant engine reads through partially-typed modules and must see "untyped", not a
         // bounds abort
-        if n as usize >= self.types.len() {
+        let tv = if (n & NODE_BODY) != 0 {
+            &self.b.types;
+        } else {
+            &self.types;
+        };
+        let k = (n & NODE_BODY_MASK) as usize;
+        if k >= tv.len() {
             return TYPE_NONE;
         }
-        return self.types[n as usize];
+        return tv[k];
     }
     pub const fn type_at(self: &Self, t: TypeId) &Ty {
         if self.gt != null && (t & TYPE_PROV) == 0 {
@@ -2647,8 +3074,101 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.method_insts.capacity() * sizeof(MethodInst) + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl);
+        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.method_insts.capacity() * sizeof(MethodInst) + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
     }
+
+    /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the
+    /// releasable body syntax; a pinned body (generic, `const fn`, interface default, generic
+    /// extend member) and every constant initializer stay in the module arena.
+    pub fn syntax_stats(self: &Self, out: &mut SyntaxStats) {
+        let nodes_cap = self.nodes.retained() + self.b.nodes.retained();
+        let children_cap = self.children.retained() + self.b.children.retained();
+        let resolutions = self.resolutions.retained() + self.b.resolutions.retained();
+        let types = (self.types.capacity() + self.b.types.capacity()) * 4;
+        out.nodes += self.nnodes();
+        out.body_nodes += self.b.nodes.len();
+        out.nodes_cap += nodes_cap;
+        out.children += self.children.len() + self.b.children.len();
+        out.body_children += self.b.children.len();
+        out.children_cap += children_cap;
+        out.resolutions += resolutions;
+        out.types += types;
+        out.pool += self.pool.retained();
+        out.tables += self.retained_bytes() - nodes_cap - children_cap - resolutions - types - self.pool.retained();
+        if self.nodes.len() == 0 {
+            return;
+        }
+        let items = self.at_const(self.root).as_data.program.items;
+        for i in 0..items.len {
+            let id = unsafe self.list(items)[i as usize];
+            let k = self.at_const(id).kind;
+            if k == NodeKind::NODE_FUNCTION {
+                if self.at_const(id).as_data.function.body != NODE_NONE {
+                    out.bodies += 1;
+                }
+            } else if k == NodeKind::NODE_EXTEND || k == NodeKind::NODE_INTERFACE {
+                let members = if k == NodeKind::NODE_EXTEND {
+                    self.at_const(id).as_data.extend_def.items;
+                } else {
+                    self.at_const(id).as_data.interface_def.items;
+                };
+                for j in 0..members.len {
+                    let m = unsafe self.list(members)[j as usize];
+                    if self.at_const(m).kind == NodeKind::NODE_FUNCTION && self.at_const(m).as_data.function.body != NODE_NONE {
+                        out.bodies += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Syntax accounting over a package (`Ast::syntax_stats`), bytes are retained capacities.
+pub struct SyntaxStats {
+    pub nodes: usize,
+    pub body_nodes: usize,
+    pub bodies: usize,
+    pub children: usize,
+    pub body_children: usize,
+    pub nodes_cap: usize,
+    pub children_cap: usize,
+    pub resolutions: usize,
+    pub types: usize,
+    pub pool: usize,
+    pub tables: usize, // every other per-module side table
+}
+
+extend SyntaxStats {
+    pub fn new() SyntaxStats {
+        return SyntaxStats {
+            nodes: 0,
+            body_nodes: 0,
+            bodies: 0,
+            children: 0,
+            body_children: 0,
+            nodes_cap: 0,
+            children_cap: 0,
+            resolutions: 0,
+            types: 0,
+            pool: 0,
+            tables: 0,
+        };
+    }
+}
+
+// The per-node index slot of `node` in the module (`v`) or body (`vb`) table, 0 when unrecorded.
+@c.always_inline
+const fn slot_of(v: &Vector<u32>, vb: &Vector<u32>, node: NodeId) u32 {
+    let tv = if (node & NODE_BODY) != 0 {
+        vb;
+    } else {
+        v;
+    };
+    let k = (node & NODE_BODY_MASK) as usize;
+    if k >= tv.len() {
+        return 0;
+    }
+    return tv[k];
 }
 
 fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) {

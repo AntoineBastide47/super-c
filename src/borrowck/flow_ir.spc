@@ -574,6 +574,9 @@ extend tc::TypeChecker {
                     if idx >= 0 {
                         let old = self.cur_ast().at(c).as_data.closure.mut_caps as u64;
                         self.cur_ast().at(c).as_data.closure.mut_caps = (old | 1u64 << idx as u64) as u32;
+                        let cf = self.cur_ast().closure_fact_mut(c);
+                        assert(cf != null, "every checked closure has recorded facts");
+                        unsafe cf.mut_caps = old | 1u64 << idx as u64;
                     }
                     let mut p = NODE_NONE;
                     for j in 0..cns.len() {

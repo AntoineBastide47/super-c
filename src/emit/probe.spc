@@ -30,12 +30,10 @@ pub const C_TAKEN: usize = 0; // bodies taken from the keep
 pub const C_LOWERED: usize = 1; // bodies lowered because the keep had none
 pub const C_RELOWER_REFLECT: usize = 2; // instance re-lowerings for a reflection binder
 pub const C_RELOWER_ZST: usize = 3; // instance re-lowerings for a zero-size condition
-pub const C_VET_LOWERED: usize = 4; // inliner callees vetted from a fresh lowering
-pub const C_VET_OFFERED: usize = 5; // inliner callees vetted from the body being emitted
-pub const C_BODIES: usize = 6; // bodies rendered (seeds and closures)
-pub const C_INSTANCES: usize = 7; // instances rendered
-pub const C_OUT_BYTES: usize = 8; // bytes rendered
-pub const C_COUNT: usize = 9;
+pub const C_BODIES: usize = 4; // bodies rendered (seeds and closures)
+pub const C_INSTANCES: usize = 5; // instances rendered
+pub const C_OUT_BYTES: usize = 6; // bytes rendered
+pub const C_COUNT: usize = 7;
 
 const REGION_NAMES: [str<'static>; 11] = [
     "graph",
@@ -206,10 +204,6 @@ extend Probe {
         out.push_u64(self.c[C_RELOWER_REFLECT]);
         out.push_str(", for zero-size conditions ");
         out.push_u64(self.c[C_RELOWER_ZST]);
-        out.push_str("; inliner callees vetted from a lowering ");
-        out.push_u64(self.c[C_VET_LOWERED]);
-        out.push_str(", from an emitted body ");
-        out.push_u64(self.c[C_VET_OFFERED]);
         out.push_str("; rendered ");
         out.push_u64(self.c[C_BODIES]);
         out.push_str(" bodies and ");

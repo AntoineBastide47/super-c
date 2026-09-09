@@ -41,7 +41,10 @@ lint + panics + flush     -- lint_unused_items, check_always_panics (an error, e
   |                          kept bodies through a read-only Keep view here (see Core IR)
 runtime + external C      -- write super_rt.h/.c; ext_c_collect (@c.source wrappers, __ldflags)
   |
-emission planning         -- compute_emit_live scan; Package::emit_order (Kahn, owner-first)
+emission planning         -- compute_emit_live scan; Package::emit_order (Kahn, owner-first);
+  |                          every constant evaluated once more so the evaluator's callee
+  |                          cache is complete, then Package::release_bodies frees every
+  |                          module's body arena (syntax-ownership.md)
   |
 cemit_package             -- InstGraph.collect() over the kept Core IR bodies of every module that
   |                          emits (dead prelude modules seed nothing), then per-module
@@ -71,8 +74,17 @@ Order facts that surprise people:
 
 ### NodeId (`u32`)
 
-An index into a module's AST arena (`Ast.nodes: SplitVec<Node>`). Module-local. Every AST
-item, expression, type annotation, and pattern is a node.
+An index into one of a module's two syntax arenas. Bit 30 (`NODE_BODY`) set: the body arena
+(`Ast.b`, the releasable bodies: every function body that is not generic, `const fn`, an
+interface member or a member of a generic `extend`); clear: the module arena (`Ast.nodes`:
+declarations, signatures, constant initializers, pinned bodies). Module-local. Every AST
+item, expression, type annotation, and pattern is a node. The accessors dispatch on the bit;
+a scan enumerates both arenas through `nnodes()` / `nth_id()`, and a per-node scratch table
+is indexed by `dense(id)`. The driver frees the body arenas after emission planning, before
+the C is planned and rendered; the language server frees a closed document's after every
+round and parses it back on demand (`BodyArena.released`, `Interp.body_missing`); the model,
+the release contract and the owned records the emitter reads instead are in
+[syntax-ownership.md](references/syntax-ownership.md).
 
 ### DefId
 
@@ -189,8 +201,10 @@ codegen never see one.
 - `lower_to_core_call` turns a marker into a real `NODE_CALL` by seeding the callee's
   resolution to a std shim (a resolved `loader::SugarItem` from the package index — no
   name lookup) and flipping the node kind. `launch` → `SI_SUBMIT`, etc.
-- `lower_select` builds nodes: every identifier it creates has its resolution seeded by
-  hand.
+- `lower_select` builds nodes: every identifier it creates has its resolution seeded through
+  `Ast::seed_resolution` (as do the typechecker's `format` and print rewrites). A seed is
+  re-applied by `init_resolutions` and never looked up by text, so the LSP's re-resolve of a
+  retained, already desugared arena keeps every synthesized binding.
 - Batch builds lower **by move**: the parse arena becomes the HIR in place.
 - Adding a sugar keyword = a lexer token, a parser marker, one lowering entry here, and
   a formatter arm.
@@ -275,9 +289,10 @@ elaboration entirely. The rest generate moves-only facts (no loan discovery) and
 the move-path forest, ownership facts, CFG and move dataflow, then `elaborate_into` +
 `insert_drops(body, &mut ElabCtx, forest)` rewrites the body with explicit `TM_DROP`
 terminators before the C emitter renders it; the pass scratch rides in the `ElabCtx` and
-survives across bodies. It runs once per concrete instance. `apply_drops` first offers the
-body being emitted to the inliner (`InlineCtx::offer`), so a callee that is itself emitted
-in this package is vetted from that body instead of a fresh lowering.
+survives across bodies. It runs once per concrete instance. The inliner's callees come from
+the package's `InlineStore` (`src/ir/inline.spc`): every kept env-free lowering is vetted
+once at the start of `cemit_package`, and the accepted ones are copied compact; no task
+lowers a callee from syntax.
 
 ## CTFE (Compile-Time Function Evaluation)
 

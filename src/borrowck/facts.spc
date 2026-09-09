@@ -1544,9 +1544,9 @@ extend Gen {
         if rv.kind == ir::RV_CLOSURE {
             let mut mut_caps: u64 = 0;
             if rv.item.node != NODE_NONE {
-                let a = self.owner().ast_of(self.body().module);
-                if a.at_const(rv.item.node).kind == NodeKind::NODE_CLOSURE {
-                    mut_caps = a.at_const(rv.item.node).as_data.closure.mut_caps;
+                let cf = self.owner().ast_of(self.body().module).closure_fact(rv.item.node);
+                if cf != null {
+                    mut_caps = unsafe (&*cf).mut_caps;
                 }
             }
             let mut org = dor;
@@ -2098,16 +2098,14 @@ extend Owner {
             let mut cap_tys = Vector::<TypeId>::new();
             {
                 let fa = self.ast_of(y.module);
-                let fnn = *fa.at_const(y.as_data.decl);
-                if fnn.kind != NodeKind::NODE_CLOSURE {
+                let cf = fa.closure_fact(y.as_data.decl);
+                if cf == null {
                     return false;
                 }
-                let caps = fnn.as_data.closure.captures;
-                let mut_caps = fnn.as_data.closure.mut_caps as u64;
-                for i in 0..caps.len {
+                let mut_caps = unsafe (&*cf).mut_caps;
+                for i in 0..unsafe (&*cf).ncaps {
                     if (mut_caps >> i as u64 & 1u64) == 0 {
-                        let cid = unsafe fa.list(caps)[i as usize];
-                        cap_tys.push(fa.type_of(cid));
+                        cap_tys.push(unsafe fa.caps_of(cf)[i as usize].ty);
                     }
                 }
             }
@@ -2345,17 +2343,15 @@ extend Owner {
             let mut cap_tys = Vector::<TypeId>::new();
             {
                 let fa = self.ast_of(y.module);
-                let fnn = *fa.at_const(y.as_data.decl);
-                if fnn.kind != NodeKind::NODE_CLOSURE {
+                let cf = fa.closure_fact(y.as_data.decl);
+                if cf == null {
                     return false;
                 }
-                if fnn.as_data.closure.mut_caps != 0 {
+                if unsafe (&*cf).mut_caps != 0 {
                     return true;
                 }
-                let caps = fnn.as_data.closure.captures;
-                for i in 0..caps.len {
-                    let cid = unsafe fa.list(caps)[i as usize];
-                    cap_tys.push(fa.type_of(cid));
+                for i in 0..unsafe (&*cf).ncaps {
+                    cap_tys.push(unsafe fa.caps_of(cf)[i as usize].ty);
                 }
             }
             let mut r = false;

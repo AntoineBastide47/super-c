@@ -307,8 +307,8 @@ extend TuEmit {
             return self.type_owner(rm, y.as_data.arr.elem);
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
-            let fd = self.p().module_ast_const(y.module).at_const(y.as_data.decl);
-            if fd.kind == NodeKind::NODE_CLOSURE && fd.as_data.closure.captures.len != 0 {
+            let cf = self.p().module_ast_const(y.module).closure_fact(y.as_data.decl);
+            if cf != null && unsafe (&*cf).ncaps != 0 {
                 return y.module;
             }
         }
@@ -364,8 +364,8 @@ extend TuEmit {
             // A stored CLOSURE VALUE embeds its env struct: define it here (captures first), and
             // record the name so the body emitter skips its own copy.
             let ca = self.p().module_ast_const(y.module);
-            let cdn = ca.at_const(y.as_data.decl);
-            if cdn.kind == NodeKind::NODE_CLOSURE && cdn.as_data.closure.captures.len != 0 {
+            let cf = ca.closure_fact(y.as_data.decl);
+            if cf != null && unsafe (&*cf).ncaps != 0 {
                 let mut nm = String::new();
                 self.mg.closure_sym(y.module, y.as_data.decl, &mut nm);
                 nm.push_str("_env");
@@ -388,15 +388,13 @@ extend TuEmit {
                 self.fwd2.push_str(" ");
                 self.fwd2.push_str(nm.as_str());
                 self.fwd2.push_str(";\n");
-                let caps = cdn.as_data.closure.captures;
                 let mut body = String::from_str("struct ");
                 body.push_str(nm.as_str());
                 body.push_str(" { ");
                 let mut ok = true;
                 let mut cmat: usize = 0;
-                for k in 0..caps.len {
-                    let cdl = unsafe ca.list(caps)[k as usize];
-                    let cty = ca.type_of(cdl);
+                for k in 0..unsafe (&*cf).ncaps {
+                    let cty = unsafe ca.caps_of(cf)[k as usize].ty;
                     if cty == TYPE_NONE {
                         ok = false;
                         break;
@@ -410,7 +408,7 @@ extend TuEmit {
                         ok = false;
                         break;
                     }
-                    let csp = self.mg.decl_name_span(y.module, cdl);
+                    let csp = unsafe ca.caps_of(cf)[k as usize].name;
                     let mut cnm = String::new();
                     self.mg.ident(y.module, csp, &mut cnm);
                     if !self.mg.ctype(y.module, cty, cnm.as_str(), &mut body) {

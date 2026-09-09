@@ -41,7 +41,11 @@ is reused across bodies.
 
 ## Locals
 
-`LocalDecl { ty, storage, is_mutable, span, decl, item }` with storage classes:
+`LocalDecl { ty, storage, is_mutable, dkind, zero_len, span, decl, name_off, name_len, item }`
+(32 bytes; the analyses copy it by value) with storage classes. `dkind` is an `LK_*`
+declaration kind, `zero_len` marks a `let` spelled `[T; 0]`, and `name()` is the binding's
+name text (an offset and length inside `span`): what the emitter reads of a user local after
+the body syntax is released.
 
 | Constant | Meaning |
 |----------|---------|
@@ -97,7 +101,7 @@ Each `Projection` carries the type **after** it applies.
 | `RV_LEN` / `RV_DISCRIMINANT` | Of a place |
 | `RV_DYN` | Dynamic-interface construction |
 | `RV_CLOSURE` | Capture operand range; `item` = closure body owner |
-| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM`, `IN_SAFEPOINT` (loop preemption tick), `IN_DANGLING`, `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc) |
+| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` (loop preemption tick), `IN_DANGLING`, `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_NEW` (heap alloc) |
 | `RV_SLICE` | Structural `base[lo..hi]` view — kept structural so end-openness survives |
 
 ## Statements

@@ -31,16 +31,29 @@ fn desugar_ast(ast: &mut Ast, package: *const loader::Package) {
     // Nodes appended below hold no markers, so the pre-loop count is the whole search space. A nested
     // `select` has a LOWER id than the one containing it (the parser adds a parent after its children), so
     // it is lowered first and the outer lowering moves the finished block.
+    // Each arena is scanned over its pre-loop count with the sink on that arena: a lowering
+    // appends to the arena of its marker.
     let n = ast.nodes.len();
+    ast.sink_body = false;
     for i in 0..n {
-        let kind = ast.at_const(i as NodeId).kind;
-        if kind == NodeKind::NODE_LAUNCH {
-            lower_to_core_call(ast, unsafe (&*package).sugar_item(loader::SugarItem::SI_SUBMIT), i as NodeId);
-        } else if kind == NodeKind::NODE_SELECT {
-            lower_select(ast, package, i as NodeId);
-        } else if kind == NodeKind::NODE_PARALLEL_FOR {
-            lower_parallel_for(ast, package, i as NodeId);
-        }
+        lower_marker(ast, package, i as NodeId);
+    }
+    let nb = ast.b.nodes.len();
+    ast.sink_body = true;
+    for i in 0..nb {
+        lower_marker(ast, package, i as NodeId | NODE_BODY);
+    }
+    ast.sink_body = false;
+}
+
+fn lower_marker(ast: &mut Ast, package: *const loader::Package, i: NodeId) {
+    let kind = ast.at_const(i).kind;
+    if kind == NodeKind::NODE_LAUNCH {
+        lower_to_core_call(ast, unsafe (&*package).sugar_item(loader::SugarItem::SI_SUBMIT), i);
+    } else if kind == NodeKind::NODE_SELECT {
+        lower_select(ast, package, i);
+    } else if kind == NodeKind::NODE_PARALLEL_FOR {
+        lower_parallel_for(ast, package, i);
     }
 }
 
@@ -54,7 +67,7 @@ fn lower_to_core_call(ast: &mut Ast, def: DefId, id: NodeId) {
     }
     let inner = ast.at_const(id).as_data.single.value;
     let callee = ast.at_const(inner).as_data.call.callee;
-    ast.set_resolution_def(callee, def);
+    ast.seed_resolution(callee, def);
     ast.at(id).kind = NodeKind::NODE_EXPRESSION_STATEMENT;
 }
 
@@ -228,7 +241,7 @@ const fn ident_node(span: tok::Span) Node {
 // `&mut select`, resolved to the synthetic local.
 fn sel_ref(ast: &mut Ast, kw: tok::Span, letsel: NodeId) NodeId {
     let use_id = add_node(ast, ident_node(kw));
-    ast.set_resolution(use_id, letsel);
+    ast.seed_resolution(use_id, DefId { module: ast.module, node: letsel });
     return ref_of(ast, use_id, true);
 }
 
@@ -257,7 +270,7 @@ fn ref_of(ast: &mut Ast, operand: NodeId, mutable: bool) NodeId {
 // is seeded here (the same trick `lower_to_core_call` uses).
 fn call_shim(ast: &mut Ast, def: DefId, span: tok::Span, a0: NodeId, a1: NodeId) NodeId {
     let callee = add_node(ast, ident_node(span));
-    ast.set_resolution_def(callee, def);
+    ast.seed_resolution(callee, def);
     let mark = ast.mark();
     if a0 != NODE_NONE {
         ast.push(a0);
@@ -313,6 +326,6 @@ fn clone_place(ast: &mut Ast, id: NodeId) NodeId {
     } else {
         add_node(ast, n);
     };
-    ast.set_resolution_def(copy, ast.resolution_def(id));
+    ast.seed_resolution(copy, ast.resolution_def(id));
     return copy;
 }

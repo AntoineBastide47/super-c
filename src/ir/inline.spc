@@ -103,24 +103,27 @@ extend InlineStats {
     }
 }
 
-/// Package-emission-lifetime state: one per DropCtx, so callee lowerings amortize across every
-/// body that context emits. Decisions depend only on body and AST content, never on cache state.
+/// The package's inline candidates: every kept env-free lowering vetted once before emission
+/// (`build`; a verdict depends only on the body's own content), the accepted ones copied compact.
+/// Read by every emission task through `Package.inl_store`; the kept bodies themselves move out to
+/// the emitter and the body syntax is released, so this copy is the callee's only source.
+pub struct InlineStore {
+    pub keep_ix: Map<u64, u64>, // callee key -> kept slot, or REJ_BASE | reason
+    pub kept: Vector<CalleeInfo>,
+}
+
+/// Per-DropCtx state: the type-translation caches over the shared store's slots, and the splice
+/// scratch. Decisions depend only on body and AST content, never on cache state.
 pub struct InlineCtx {
     pub off: bool,
     pub stats_on: bool,
-    pub keep_ix: Map<u64, u64>,
-    pub kept: Vector<CalleeInfo>,
+    pub store: *const InlineStore,
     /// Type-translation cache: one entry per distinct (callee slot, caller module, binds) call
     /// shape. Filling a map walks the whole callee type table through `xty`; the same shape
     /// repeats at every call site of a callee, so the walk runs once per shape instead.
-    /// Pooled vet Lowerer (0 or 1): `callee_slot` re-lowers one candidate per cache miss, and a
-    /// fresh Lowerer per miss dominated the analysis allocations.
-    pub vlw: Vector<irl::Lowerer>,
     pub xm_ix: Map<u64, u64>, // shape hash -> xms index
     pub xm_key: Vector<Vector<u64>>, // exact shape per entry: slot, cm, then (pm<<32|pnode, at) pairs
     pub xms: Vector<Map<u64, u64>>,
-    pub st_vet_lower: u64, // callees vetted from a fresh lowering (emission probe tally)
-    pub st_vet_offer: u64, // callees vetted from the body offered at its own emission
     // `run` scratch (capacity survives across bodies).
     pub sc_blk_origin: Vector<u32>,
     pub sc_origins: Vector<Origin>,
@@ -326,7 +329,7 @@ extend InlineCtx {
         return b + (self.xm_ix.len() * 17 * 2) as u64;
     }
 
-    pub fn new() InlineCtx {
+    pub fn new(store: *const InlineStore) InlineCtx {
         let e = stdlib::getenv("SC_INLINE");
         let mut off = false;
         if e != null && str::from_cstr(e) == "0" {
@@ -335,14 +338,10 @@ extend InlineCtx {
         return InlineCtx {
             off: off,
             stats_on: stdlib::getenv("SC_INLINE_STATS") != null,
-            keep_ix: Map::<u64, u64>::new(),
-            kept: Vector::<CalleeInfo>::new(),
-            vlw: Vector::<irl::Lowerer>::new(),
+            store: store,
             xm_ix: Map::<u64, u64>::new(),
             xm_key: Vector::<Vector<u64>>::new(),
             xms: Vector::<Map<u64, u64>>::new(),
-            st_vet_lower: 0,
-            st_vet_offer: 0,
             sc_blk_origin: Vector::<u32>::new(),
             sc_origins: Vector::<Origin>::new(),
             sc_binds: Vector::<GBind>::new(),
@@ -353,107 +352,113 @@ extend InlineCtx {
         };
     }
 
-    /// Lower and vet one callee, caching the outcome. Returns the kept slot, or REJ_BASE|reason.
-    fn callee_slot(self: &mut Self, pkg: *const loader::Package, d: DefId) u64 {
+    /// The shared store's verdict for callee `d`: the kept slot, or REJ_BASE|reason (a body the
+    /// keep never held is no candidate).
+    fn callee_slot(self: &Self, d: DefId) u64 {
         let key = callee_key(d);
-        switch self.keep_ix.get(&key) {
+        switch unsafe (&*self.store).keep_ix.get(&key) {
             Some(v) => {
                 return *v;
             },
-            None => {},
-        };
-        let mut lw = switch self.vlw.pop() {
-            Some(l0) => {
-                let mut l1 = l0;
-                l1.retarget(d.module);
-                l1;
-            },
-            _ => {
-                irl::Lowerer::new(pkg, d.module, d.node);
-            },
-        };
-        let r = self.callee_slot_i(pkg, d, &mut lw);
-        self.vlw.push(lw);
-        self.keep_ix.insert(key, r);
-        return r;
-    }
-
-    /// Vet the body the emitter is about to elaborate, so that a later call-site lookup finds its
-    /// verdict without lowering the callee again. Only an env-free lowering of a function is the
-    /// product a lookup would build (kept bodies and on-demand lowerings are the same product);
-    /// closures and per-instance re-lowerings never qualify. No-op once the callee is known.
-    pub fn offer(self: &mut Self, pkg: *const loader::Package, lw: &irl::Lowerer) {
-        if self.off || lw.env.len() != 0 {
-            return;
-        }
-        let d = lw.body.owner;
-        let key = callee_key(d);
-        if self.keep_ix.contains_key(&key) {
-            return;
-        }
-        let mut r = self.vet_decl(pkg, d);
-        if r == 0 {
-            self.st_vet_offer += 1;
-            r = self.vet_body(pkg, d, &lw.body, lw.closures.len());
-        }
-        self.keep_ix.insert(key, r);
-    }
-
-    fn callee_slot_i(self: &mut Self, pkg: *const loader::Package, d: DefId, lw: &mut irl::Lowerer) u64 {
-        let pre = self.vet_decl(pkg, d);
-        if pre != 0 {
-            return pre;
-        }
-        self.st_vet_lower += 1;
-        if !lw.lower_fn(d.node) {
-            return REJ_BASE | IJ_LOWER_FAIL as u64;
-        }
-        return self.vet_body(pkg, d, &lw.body, lw.closures.len());
-    }
-
-    // The declaration-level checks: 0 = a candidate worth lowering, else the rejection.
-    fn vet_decl(self: &Self, pkg: *const loader::Package, d: DefId) u64 {
-        let p = unsafe &*pkg;
-        if d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
-            return REJ_BASE | IJ_NOT_FN as u64;
-        }
-        let a = unsafe &*p.module_ast_const(d.module);
-        let n = a.at_const(d.node);
-        if n.kind != NodeKind::NODE_FUNCTION {
-            return REJ_BASE | IJ_NOT_FN as u64;
-        }
-        let f = n.as_data.function;
-        if f.is_extern || f.body == NODE_NONE {
-            return REJ_BASE | IJ_NOT_FN as u64;
-        }
-        for k in 0..a.attrs.len() {
-            if a.attrs.at(k).owner != d.node {
-                continue;
-            }
-            let kd = a.attrs.at(k).kind;
-            let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8;
-            if !benign {
+            None => {
                 return REJ_BASE | IJ_NOT_FN as u64;
+            },
+        };
+    }
+}
+
+// The declaration-level checks: 0 = a candidate worth keeping, else the rejection.
+fn vet_decl(pkg: *const loader::Package, d: DefId) u64 {
+    let p = unsafe &*pkg;
+    if d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
+        return REJ_BASE | IJ_NOT_FN as u64;
+    }
+    let a = unsafe &*p.module_ast_const(d.module);
+    let n = a.at_const(d.node);
+    if n.kind != NodeKind::NODE_FUNCTION {
+        return REJ_BASE | IJ_NOT_FN as u64;
+    }
+    let f = n.as_data.function;
+    if f.is_extern || f.body == NODE_NONE {
+        return REJ_BASE | IJ_NOT_FN as u64;
+    }
+    for k in 0..a.attrs.len() {
+        if a.attrs.at(k).owner != d.node {
+            continue;
+        }
+        let kd = a.attrs.at(k).kind;
+        let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8;
+        if !benign {
+            return REJ_BASE | IJ_NOT_FN as u64;
+        }
+    }
+    let ext = extend_of(a, d.node);
+    // A GENERIC body carrying a static_assert defers it per instantiation; that guard fires
+    // only when a call site DEMANDS the instance, and inlining the call erases the demand.
+    // Such callees must stay calls.
+    if f.generics.len != 0 || ext != NODE_NONE && a.at_const(ext).as_data.extend_def.generics.len != 0 {
+        let bsp = a.at_const(f.body).span;
+        for ni in 0..a.nnodes() {
+            let nd9 = a.at_const(a.nth_id(ni));
+            if nd9.kind == NodeKind::NODE_STATIC_ASSERT && nd9.span.start >= bsp.start && nd9.span.end <= bsp.end {
+                return REJ_BASE | IJ_SHAPE as u64;
             }
         }
-        let ext = extend_of(a, d.node);
-        // A GENERIC body carrying a static_assert defers it per instantiation; that guard fires
-        // only when a call site DEMANDS the instance, and inlining the call erases the demand.
-        // Such callees must stay calls.
-        if f.generics.len != 0 || ext != NODE_NONE && a.at_const(ext).as_data.extend_def.generics.len != 0 {
-            let bsp = a.at_const(f.body).span;
-            for ni in 0..a.nodes.len() {
-                let nd9 = a.at_const(ni as NodeId);
-                if nd9.kind == NodeKind::NODE_STATIC_ASSERT && nd9.span.start >= bsp.start && nd9.span.end <= bsp.end {
-                    return REJ_BASE | IJ_SHAPE as u64;
+    }
+    return 0;
+}
+
+extend InlineStore {
+    pub fn new() InlineStore {
+        return InlineStore { keep_ix: Map::<u64, u64>::new(), kept: Vector::<CalleeInfo>::new() };
+    }
+
+    /// Vet every kept env-free function lowering of `keep` (the borrow checker's product, the same
+    /// lowering an on-demand vet would build) and copy the accepted callees.
+    pub fn build(self: &mut Self, pkg: *const loader::Package, keep: &irl::Keep) {
+        // Only a body some kept body calls can be inlined: collect the call targets first, so
+        // the vetting (an attribute walk and a statement scan per body) runs for those alone.
+        let mut called = Map::<u64, u8>::new();
+        for i in 0..keep.kept.len() {
+            let b = &keep.kept.at(i).body;
+            for k in 0..b.blocks.len() {
+                let t = &b.blocks.at(k).term;
+                if t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
+                    called.insert(callee_key(t.callee), 1);
                 }
             }
         }
-        return 0;
+        for i in 0..keep.kept.len() {
+            let lw = keep.kept.at(i);
+            if lw.env.len() != 0 {
+                continue;
+            }
+            let d = lw.body.owner;
+            // A closure of a releasable body: never a named callee, and its node may be released.
+            if Ast::in_body(d.node) {
+                continue;
+            }
+            let key = callee_key(d);
+            if self.keep_ix.contains_key(&key) || !called.contains_key(&key) {
+                continue;
+            }
+            // The size gate first: it rejects most bodies at once, before the declaration checks
+            // walk the module's attributes.
+            let mut r: u64 = 0;
+            if lw.body.statements.len() > MAX_CALLEE_STMTS || lw.body.blocks.len() > MAX_CALLEE_BLOCKS || lw.body.locals.len() > MAX_CALLEE_LOCALS {
+                r = REJ_BASE | IJ_TOO_BIG as u64;
+            } else {
+                r = vet_decl(pkg, d);
+                if r == 0 {
+                    r = self.vet_body(pkg, d, &lw.body, lw.closures.len());
+                }
+            }
+            self.keep_ix.insert(key, r);
+        }
     }
 
-    // The body-level checks on a lowering of `d` with `nclosures` hoisted closures: the kept slot,
-    // or the rejection.
+    // The body-level checks on the env-free lowering of `d` with `nclosures` hoisted closures:
+    // the kept slot, or the rejection.
     fn vet_body(self: &mut Self, pkg: *const loader::Package, d: DefId, body: &ir::CoreBody, nclosures: usize) u64 {
         let p = unsafe &*pkg;
         let a = unsafe &*p.module_ast_const(d.module);
@@ -679,7 +684,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             st.reasons[IJ_DEPTH as usize] = st.reasons[IJ_DEPTH as usize] + 1;
             continue;
         }
-        let slot = cx.callee_slot(pkg, t.callee);
+        let slot = cx.callee_slot(t.callee);
         if slot >= REJ_BASE {
             let rr = (slot & 0xFFu64) as usize;
             unsafe {
@@ -687,7 +692,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             }
             continue;
         }
-        let ki = cx.kept.at(slot as usize);
+        let ki = unsafe (&*cx.store).kept.at(slot as usize);
         let k = &ki.body;
         if k.args != t.args_len || k.returns != t.dests_len {
             st.reasons[IJ_ARITY as usize] = st.reasons[IJ_ARITY as usize] + 1;

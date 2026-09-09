@@ -3407,6 +3407,30 @@ extend TypeChecker {
                 result = self.cur_ast().intern_type(
                     Ty { kind: TypeKind::TYPE_FUNCTION, module: self.cur_module(), as_data: TyAs { decl: id } },
                 );
+                // The signature as the C spelling reads it, recorded because a `fn` type written
+                // in a body loses its syntax before emission.
+                let ftd = a.at_const(id).as_data.function_type;
+                let mut sig = Vector::<CapFact>::new();
+                sig.reserve((ftd.params.len + ftd.returns.len) as usize);
+                for i in 0..ftd.params.len {
+                    let pid = unsafe a.list(ftd.params)[i as usize];
+                    let mut anchor = pid;
+                    if a.at_const(pid).kind == NodeKind::NODE_PARAMETER && a.at_const(pid).as_data.parameter.ty != NODE_NONE {
+                        anchor = a.at_const(pid).as_data.parameter.ty;
+                    }
+                    let m9 = self.cur_module();
+                    sig.push(CapFact { name: tok::Span::empty(), ty: self.lower_type_in(m9, anchor) });
+                }
+                for i in 0..ftd.returns.len {
+                    let r0 = unsafe a.list(ftd.returns)[i as usize];
+                    let mut rtn = r0;
+                    if a.at_const(r0).kind == NodeKind::NODE_PARAMETER {
+                        rtn = a.at_const(r0).as_data.parameter.ty;
+                    }
+                    let m9 = self.cur_module();
+                    sig.push(CapFact { name: tok::Span::empty(), ty: self.lower_type_in(m9, rtn) });
+                }
+                self.cur_ast().record_closure(id, false, ftd.params.len, ftd.returns.len, 0, sig);
             },
             NODE_DYN_TYPE => {
                 let q = a.at_const(id).as_data.indirect_type.qualifier;
@@ -5055,7 +5079,7 @@ extend TypeChecker {
         for i in 0..nmu {
             let mu = *(unsafe self.cur_ast().mono).at(i);
             let a = self.cur_ast();
-            if mu.node as usize >= (unsafe a.mono_at).len() || (unsafe a.mono_at)[mu.node as usize] != i as u32 + 1 {
+            if a.mono_slot(mu.node) != i as u32 + 1 {
                 // Superseded entry: a re-checked node records again.
                 continue;
             }
@@ -6386,7 +6410,7 @@ extend TypeChecker {
             return;
         }
         let opn = a.at_const(nid).as_data.cast.expression;
-        if opn as usize >= unsafe a.types.len() {
+        if !a.valid(opn) {
             return;
         }
         let ot = a.type_of(opn);
@@ -7575,25 +7599,29 @@ extend TypeChecker {
     /// its loop binding), which tc_note_resolution folds in at the set site.
     pub fn tc_build_last_use(self: &mut Self) {
         self.last_use_built = true;
-        let n = unsafe self.cur_ast().nodes.len();
+        let n = self.cur_ast().nnodes();
         self.last_use.clear();
         let mut i: usize = 0;
         while i < n {
             self.last_use.push(NODE_NONE);
             i = i + 1;
         }
-        let mut nid: NodeId = 0;
-        while nid as usize < n {
+        let nb9 = unsafe self.cur_ast().nodes.len();
+        for k in 0..n {
+            let nid = Ast::nth_id_n(nb9, k);
             let rd = self.cur_ast().resolution_def(nid);
-            if rd.node != NODE_NONE && rd.module == self.cur_module() && rd.node as usize < n {
-                self.last_use.set(rd.node as usize, nid);
+            if rd.node != NODE_NONE && rd.module == self.cur_module() && self.cur_ast().valid(rd.node) {
+                self.last_use.set(self.cur_ast().dense(rd.node), nid);
             }
-            nid = nid + 1;
         }
     }
     const fn tc_note_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
-        if self.last_use_built && decl as usize < self.last_use.len() && ref_id > self.last_use[decl as usize] {
-            self.last_use.set(decl as usize, ref_id);
+        if !self.last_use_built {
+            return;
+        }
+        let dk = self.cur_ast().dense(decl);
+        if dk < self.last_use.len() && ref_id > self.last_use[dk] {
+            self.last_use.set(dk, ref_id);
         }
     }
 
@@ -9326,7 +9354,8 @@ extend TypeChecker {
     }
     fn tc_local_use(self: &mut Self, span: tok::Span, letn: NodeId) NodeId {
         let u = self.tc_ident(span);
-        self.cur_ast().set_resolution(u, letn);
+        let m = unsafe self.cur_ast().module;
+        self.cur_ast().seed_resolution(u, DefId { module: m, node: letn });
         return u;
     }
     fn tc_ref_of(self: &mut Self, operand: NodeId, mutable: bool) NodeId {
@@ -9384,7 +9413,7 @@ extend TypeChecker {
     fn tc_shim_call(self: &mut Self, name: str, span: tok::Span, sa: *const NodeId, n: u32) NodeId {
         let h = self.package.prelude_lookup(name, false);
         let callee = self.tc_ident(span);
-        self.cur_ast().set_resolution_def(callee, DefId { module: h.mid, node: h.node });
+        self.cur_ast().seed_resolution(callee, DefId { module: h.mid, node: h.node });
         let mark = self.cur_ast().mark();
         for i in 0..n {
             self.cur_ast().push(unsafe sa[i as usize]);
@@ -12788,9 +12817,43 @@ extend TypeChecker {
         }
         self.loop_floor = saved_lf;
         self.icx.nclos = self.icx.nclos - 1;
-        // Capture validation.
+        // Capture validation, and the closure's emission facts (the mutable-capture mask is
+        // finalized by the borrow checker).
         let caps = a.at_const(id).as_data.closure.captures;
         let mut_caps = a.at_const(id).as_data.closure.mut_caps as u64;
+        let mut cfs = Vector::<CapFact>::new();
+        cfs.reserve(caps.len as usize);
+        for i in 0..caps.len {
+            let cid = unsafe a.list(caps)[i as usize];
+            cfs.push(CapFact { name: a.decl_name_span(cid), ty: self.decl_type(cid) });
+        }
+        // The signature as the C spelling reads it: each parameter's annotation type (the
+        // parameter node's own when bare), then the return type, which an expression body carries
+        // on the body node.
+        let cparams = a.at_const(id).as_data.closure.params;
+        for i in 0..cparams.len {
+            let pid = unsafe a.list(cparams)[i as usize];
+            let mut anchor = pid;
+            if a.at_const(pid).kind == NodeKind::NODE_PARAMETER && a.at_const(pid).as_data.parameter.ty != NODE_NONE {
+                anchor = a.at_const(pid).as_data.parameter.ty;
+            }
+            cfs.push(CapFact { name: tok::Span::empty(), ty: a.type_of(anchor) });
+        }
+        let crets = a.at_const(id).as_data.closure.returns;
+        let mut nrets: u32 = crets.len;
+        for i in 0..crets.len {
+            let r0 = unsafe a.list(crets)[i as usize];
+            let mut rtn = r0;
+            if a.at_const(r0).kind == NodeKind::NODE_PARAMETER {
+                rtn = a.at_const(r0).as_data.parameter.ty;
+            }
+            cfs.push(CapFact { name: tok::Span::empty(), ty: a.type_of(rtn) });
+        }
+        if crets.len == 0 && a.at_const(id).as_data.closure.expr_body {
+            nrets = 1;
+            cfs.push(CapFact { name: tok::Span::empty(), ty: a.type_of(a.at_const(id).as_data.closure.body) });
+        }
+        self.cur_ast().record_closure(id, true, cparams.len, nrets, mut_caps, cfs);
         for i in 0..caps.len {
             let cid = unsafe a.list(caps)[i as usize];
             let cty = self.decl_type(cid);
@@ -14102,7 +14165,7 @@ extend TypeChecker {
         if a.at_const(vid).kind != NodeKind::NODE_LITERAL {
             // A non-literal tail needs no adaptation, but a cast tail that now matches the context
             // type exactly is the redundant-cast lint's business (arms/tails see expected now).
-            if self.lint && lv as usize < unsafe a.types.len() && a.type_of(lv) == expected {
+            if self.lint && a.valid(lv) && a.type_of(lv) == expected {
                 self.tc_lint_redundant_coalesce(expected, lv);
             }
             return;
@@ -15474,7 +15537,16 @@ extend TypeChecker {
                     if fnd.is_unsafe {
                         self.icx.unsafe_depth = self.icx.unsafe_depth + 1;
                     }
+                    // Nodes a desugar appends belong to the arena of the body they extend.
+                    unsafe self.cur_ast().sink_body = Ast::in_body(fnd.body);
+                    let appended_from = if Ast::in_body(fnd.body) {
+                        unsafe self.cur_ast().b.nodes.len();
+                    } else {
+                        unsafe self.cur_ast().nodes.len();
+                    };
                     self.check_stmt(fnd.body);
+                    unsafe self.cur_ast().sink_body = false;
+                    self.tc_record_free_touches(id, fnd, appended_from);
                     if fnd.is_unsafe {
                         self.icx.unsafe_depth = self.icx.unsafe_depth - 1;
                     }
@@ -15895,9 +15967,49 @@ extend TypeChecker {
         }
     }
 
+    // A `free` method's body: every module declaration a node inside it resolves to, recorded
+    // for the free-glue emission (`Ast::free_touched`), which runs after the body syntax is gone.
+    // The body's nodes are the post-order run ending at its block (walked back while the span
+    // starts inside the block) plus what this check appended from `appended_from`.
+    fn tc_record_free_touches(self: &mut Self, fnid: NodeId, fnd: FunctionData, appended_from: usize) {
+        if fnd.params.len == 0 || fnd.body == NODE_NONE {
+            return;
+        }
+        let a = self.cur_ast();
+        let nsp = a.at_const(fnd.name).as_data.name.text;
+        if self.source.slice(nsp.start as usize, nsp.end as usize) != "free" {
+            return;
+        }
+        let bsp = a.at_const(fnd.body).span;
+        let m = self.cur_module();
+        let tag = fnd.body & NODE_BODY;
+        let root = (fnd.body & NODE_BODY_MASK) as usize;
+        let mut lo = root;
+        while lo > 0 && a.at_const((lo - 1) as NodeId | tag).span.start >= bsp.start {
+            lo -= 1;
+        }
+        let end = if tag != 0 {
+            unsafe a.b.nodes.len();
+        } else {
+            unsafe a.nodes.len();
+        };
+        let mut i = lo;
+        while i < end {
+            if i > root && i < appended_from {
+                i = appended_from;
+                continue;
+            }
+            let d = a.resolution_def(i as NodeId | tag);
+            if d.module == m && d.node != NODE_NONE {
+                a.record_free_touch(fnid, d.node);
+            }
+            i += 1;
+        }
+    }
+
     fn tc_lint_unneeded_mut(self: &mut Self) {
         let a = self.cur_ast();
-        let n = unsafe a.nodes.len();
+        let n = a.nnodes();
         let mut used = Vector::<bool>::new();
         let mut marked = Vector::<bool>::new();
         used.reserve(n);
@@ -15906,19 +16018,21 @@ extend TypeChecker {
             used.push(false);
             marked.push(false);
         }
-        for i in 0..a.resolutions_len() {
-            let d = a.resolution_def(i as NodeId);
-            if d.node != NODE_NONE && d.module == self.cur_module() && d.node as usize < n && i != d.node as usize {
-                used.set(d.node as usize, true);
+        for k in 0..n {
+            let i = a.nth_id(k);
+            let d = a.resolution_def(i);
+            if d.node != NODE_NONE && d.module == self.cur_module() && a.valid(d.node) && i != d.node {
+                used.set(a.dense(d.node), true);
             }
         }
         for i in 0..self.mut_used.len() {
-            if self.mut_used[i] as usize < n {
-                marked.set(self.mut_used[i] as usize, true);
+            if a.valid(self.mut_used[i]) {
+                marked.set(a.dense(self.mut_used[i]), true);
             }
         }
-        let mut i: u32 = 1;
-        while i as usize < n {
+        let mut k9: usize = 1;
+        while k9 < n {
+            let i = a.nth_id(k9);
             let nd = *a.at_const(i);
             let mut nn = NODE_NONE;
             if nd.kind == NodeKind::NODE_LET && nd.as_data.let_stmt.is_mutable && nd.as_data.let_stmt.name != NODE_NONE {
@@ -15930,7 +16044,7 @@ extend TypeChecker {
             ).as_data.name.is_mutable {
                 nn = nd.as_data.pattern.name;
             }
-            if nn != NODE_NONE && used[i as usize] && !marked[i as usize] {
+            if nn != NODE_NONE && used[k9] && !marked[k9] {
                 let sp = a.at_const(nn).as_data.name.text;
                 if sp.end > sp.start && self.source[sp.start as usize] != b'_' {
                     self.errors.warn(
@@ -15941,7 +16055,7 @@ extend TypeChecker {
                     self.tc_lint_mut_fix(sp);
                 }
             }
-            i = i + 1;
+            k9 += 1;
         }
     }
 

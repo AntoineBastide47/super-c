@@ -695,6 +695,11 @@ extend Resolver {
         if name_node == NODE_NONE {
             return;
         }
+        // A seeded resolution (a desugar's synthesized callee or local use, re-applied by
+        // init_resolutions) stands: its text is not a name.
+        if self.ast.resolution_def(refn).node != NODE_NONE {
+            return;
+        }
         let name = self.name_span(name_node);
         let look = self.sym_lookup(name, ns);
         if look.decl != NODE_NONE {
@@ -1264,7 +1269,7 @@ extend Resolver {
                 // `Pair(1, 2)`: a callee identifier that is not a value may name a TYPE (tuple-struct
                 // construction). One lookup per namespace; the hit commits directly (no re-lookup).
                 let callee_kind = self.ast.at_const(cd.callee).kind;
-                if callee_kind == NodeKind::NODE_IDENTIFIER {
+                if callee_kind == NodeKind::NODE_IDENTIFIER && self.ast.resolution_def(cd.callee).node == NODE_NONE {
                     let cname = self.name_span(cd.callee);
                     let v = self.sym_lookup(cname, Namespace::NS_VALUE);
                     if v.decl != NODE_NONE {
@@ -1688,16 +1693,17 @@ extend Resolver {
     // A decl is used when a node's resolution points at it. Only lets and parameters of
     // functions with bodies are checked; `self` and `_`-prefixed names opt out.
     fn lint_unused(self: &mut Self) {
-        let n = self.ast.nodes.len();
+        let n = self.ast.nnodes();
         let mut used = Vector::<bool>::new();
         used.reserve(n);
         for i in 0..n {
             used.push(false);
         }
-        for i in 0..self.ast.resolutions_len() {
-            let d = self.ast.resolution_def(i as NodeId);
-            if d.node != NODE_NONE && d.module == self.ast.module && d.node as usize < n && i != d.node as usize {
-                used.set(d.node as usize, true);
+        for k in 0..n {
+            let i = self.ast.nth_id(k);
+            let d = self.ast.resolution_def(i);
+            if d.node != NODE_NONE && d.module == self.ast.module && self.ast.valid(d.node) && i != d.node {
+                used.set(self.ast.dense(d.node), true);
             }
         }
         // Params of interface methods (signatures, default bodies) and of `extend X as Iface`
@@ -1723,8 +1729,8 @@ extend Resolver {
                 let ps = self.ast.at_const(mid).as_data.function.params;
                 for q in 0..ps.len {
                     let pid = unsafe self.ast.list(ps)[q as usize];
-                    if pid as usize < n {
-                        used.set(pid as usize, true);
+                    if self.ast.valid(pid) {
+                        used.set(self.ast.dense(pid), true);
                     }
                 }
             }
@@ -1737,16 +1743,18 @@ extend Resolver {
             seen.push(false);
         }
         for i in 0..self.lint_decls.len() {
-            let d = self.lint_decls[i] as usize;
-            if d < n {
-                seen.set(d, true);
+            let d = self.lint_decls[i];
+            if self.ast.valid(d) {
+                seen.set(self.ast.dense(d), true);
             }
         }
-        let mut i: u32 = 1;
-        while i as usize < n {
+        let mut k9: usize = 1;
+        while k9 < n {
+            let i = self.ast.nth_id(k9);
+            k9 += 1;
             let nd = *self.ast.at_const(i);
             if nd.kind == NodeKind::NODE_LET {
-                if seen[i as usize] && !used[i as usize] && nd.as_data.let_stmt.name != NODE_NONE {
+                if seen[k9 - 1] && !used[k9 - 1] && nd.as_data.let_stmt.name != NODE_NONE {
                     self.lint_warn_unused("variable", nd.as_data.let_stmt.name);
                 }
             } else if nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.body != NODE_NONE || nd.kind == NodeKind::NODE_CLOSURE {
@@ -1758,13 +1766,13 @@ extend Resolver {
                 for k in 0..params.len {
                     let pid = unsafe self.ast.list(params)[k as usize];
                     let pk = self.ast.at_const(pid).kind;
-                    if seen[pid as usize] && !used[pid as usize] && pk == NodeKind::NODE_PARAMETER {
+                    let pd = self.ast.dense(pid);
+                    if seen[pd] && !used[pd] && pk == NodeKind::NODE_PARAMETER {
                         let pname = self.ast.at_const(pid).as_data.parameter.name;
                         self.lint_warn_unused("parameter", pname);
                     }
                 }
             }
-            i = i + 1;
         }
     }
 
@@ -1815,14 +1823,16 @@ extend Resolver {
     }
 
     fn lint_dead_stores(self: &mut Self) {
-        let n = self.ast.nodes.len();
+        let n = self.ast.nnodes();
         let mut exempt = Vector::<bool>::new();
         exempt.reserve(n);
         for i in 0..n {
             exempt.push(false);
         }
-        let mut i: u32 = 1;
-        while i as usize < n {
+        let mut k9: usize = 1;
+        while k9 < n {
+            let i = self.ast.nth_id(k9);
+            k9 += 1;
             let nd = *self.ast.at_const(i);
             if nd.kind == NodeKind::NODE_UNARY && nd.as_data.unary.op == TokenType::Ampersand {
                 // The borrowed place's root binding can be read through the alias from anywhere.
@@ -1841,30 +1851,35 @@ extend Resolver {
                 }
                 let d = self.ds_root_decl(o);
                 if d != NODE_NONE {
-                    exempt.set(d as usize, true);
+                    exempt.set(self.ast.dense(d), true);
                 }
             } else if nd.kind == NodeKind::NODE_CLOSURE {
                 let caps = nd.as_data.closure.captures;
                 for k in 0..caps.len {
                     let e = unsafe self.ast.list(caps)[k as usize];
-                    if e as usize < n {
-                        exempt.set(e as usize, true);
+                    if self.ast.valid(e) {
+                        exempt.set(self.ast.dense(e), true);
                     }
                     let ed = self.ast.resolution_def(e);
-                    if ed.node != NODE_NONE && ed.module == self.ast.module && ed.node as usize < n {
-                        exempt.set(ed.node as usize, true);
+                    if ed.node != NODE_NONE && ed.module == self.ast.module && self.ast.valid(ed.node) {
+                        exempt.set(self.ast.dense(ed.node), true);
                     }
                 }
             }
-            i = i + 1;
         }
-        i = 1;
-        while i as usize < n {
+        k9 = 1;
+        while k9 < n {
+            let i = self.ast.nth_id(k9);
+            k9 += 1;
             if self.ast.at_const(i).kind != NodeKind::NODE_BLOCK {
-                i = i + 1;
                 continue;
             }
             let stmts = self.ast.at_const(i).as_data.block.statements;
+            // A block a desugar built after parsing lists statements younger than itself: generated
+            // code, not the user's stores.
+            if stmts.len != 0 && unsafe self.ast.list(stmts)[0] > i {
+                continue;
+            }
             for j in 1..stmts.len {
                 let s1 = unsafe self.ast.list(stmts)[(j - 1) as usize];
                 let s2 = unsafe self.ast.list(stmts)[j as usize];
@@ -1873,7 +1888,7 @@ extend Resolver {
                     continue;
                 }
                 let decl = self.ds_root_decl(self.ast.at_const(a2).as_data.binary.left);
-                if decl == NODE_NONE || exempt[decl as usize] {
+                if decl == NODE_NONE || exempt[self.ast.dense(decl)] {
                     continue;
                 }
                 // first store: `let <decl> = v;` or `<decl> = v;`.
@@ -1887,18 +1902,23 @@ extend Resolver {
                     }
                     sp1 = self.ast.at_const(s1).span;
                 }
-                // the second RHS must not read the binding (`x = f(x)` is a read).
-                let rsp = self.ast.at_const(self.ast.at_const(a2).as_data.binary.right).span;
+                // the second RHS must not read the binding (`x = f(x)` is a read). Nodes are in
+                // post-order, so the RHS subtree is the run after the place and up to the RHS root,
+                // bounded by the statement (a desugar may have re-rooted the RHS past it).
+                let bl = self.ast.at_const(a2).as_data.binary.left;
+                let mut hi = self.ast.at_const(a2).as_data.binary.right;
+                if hi > s2 {
+                    hi = s2;
+                }
                 let mut read = false;
-                for k in 0..self.ast.resolutions_len() {
-                    let d = self.ast.resolution_def(k as NodeId);
-                    if d.node == decl && d.module == self.ast.module && k != decl as usize {
-                        let ksp = self.ast.at_const(k as NodeId).span;
-                        if ksp.start >= rsp.start && ksp.end <= rsp.end {
-                            read = true;
-                            break;
-                        }
+                let mut k = bl + 1;
+                while k <= hi {
+                    let d = self.ast.resolution_def(k);
+                    if d.node == decl && d.module == self.ast.module && k != decl {
+                        read = true;
+                        break;
                     }
+                    k += 1;
                 }
                 if read {
                     continue;
@@ -1916,15 +1936,15 @@ extend Resolver {
                     ),
                 );
             }
-            i = i + 1;
         }
     }
 
     fn lint_unused_labels(self: &mut Self) {
-        let n = self.ast.nodes.len();
-        let mut i: u32 = 1;
-        while i as usize < n {
-            let nd = *self.ast.at_const(i);
+        let n = self.ast.nnodes();
+        let mut k9: usize = 1;
+        while k9 < n {
+            let nd = *self.ast.at_const(self.ast.nth_id(k9));
+            k9 += 1;
             let mut lsp = tok::Span::empty();
             if nd.kind == NodeKind::NODE_WHILE {
                 lsp = nd.as_data.while_stmt.label;
@@ -1935,8 +1955,10 @@ extend Resolver {
                 let lt = diag::span_str(self.source, lsp.start, lsp.end);
                 let body = nd.span;
                 let mut used = false;
-                let mut k: u32 = 1;
-                while k as usize < n {
+                let mut kk: usize = 1;
+                while kk < n {
+                    let k = self.ast.nth_id(kk);
+                    kk += 1;
                     let fk = self.ast.at_const(k).kind;
                     if fk == NodeKind::NODE_BREAK || fk == NodeKind::NODE_CONTINUE {
                         let fl = self.ast.at_const(k).as_data.flow.label;
@@ -1950,13 +1972,11 @@ extend Resolver {
                             break;
                         }
                     }
-                    k = k + 1;
                 }
                 if !used {
                     self.errors.warn(lsp.start, lsp.end - lsp.start, format("unused label '{}'", lt));
                 }
             }
-            i = i + 1;
         }
     }
 }

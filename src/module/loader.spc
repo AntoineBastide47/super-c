@@ -105,6 +105,9 @@ pub struct Package {
     /// The Core IR constant interpreter (a *mut ir::interp::Interp, kept opaque here to avoid a type
     /// cycle); owned by the driver, created after load, set before type-checking. Null in library use.
     pub cir: *mut void,
+    /// The emission's inline-candidate store (`ir::inline::InlineStore`), set for the emission's
+    /// lifetime by `cemit_package`; null outside it.
+    pub inl_store: *const void,
     /// Compiler-stage parallelism: worker count for the parallel frontiers (0/1 = serial). Set by
     /// the driver from --jobs before run_package; the parallel cc window reads its own copy.
     pub jobs: u32,
@@ -187,6 +190,11 @@ pub struct Package {
     /// disk yet. Empty outside the LSP.
     pub overlay_files: Vector<String>,
     pub overlay_texts: Vector<String>,
+    /// LSP: modules whose body syntax the constant engine read in some analysis round (a fold's
+    /// or a `const fn` scan's callee); their bodies stay live when their documents are closed, so
+    /// the next round needs no parse-back. Indexed by module; shorter than the module table means
+    /// "not held".
+    pub body_hold: Vector<bool>,
 }
 
 /// Parallel-table cache of directory listings for import resolution. `ok[i]` = did opendir(dirs[i]) succeed.
@@ -1401,7 +1409,7 @@ extend Package {
                     continue;
                 }
                 let a = unsafe &*self.module_ast_const(it.module);
-                if it.node as usize >= a.types.len() || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION || a.gt == null {
+                if !a.valid(it.node) || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION || a.gt == null {
                     continue;
                 }
                 let fd = a.at_const(it.node).as_data.function;
@@ -1614,6 +1622,7 @@ extend Package {
             edge_seen: Set::<u64>::new(),
             extern_privates: Set::<u64>::new(),
             cir: null,
+            inl_store: null,
             jobs: 1, // serial unless a driver opts in: a bare Package must never launch tasks
             tc_done: Vector::<Set<u64>>::new(),
             tc_mod_done: Vector::<u8>::new(),
@@ -1634,6 +1643,7 @@ extend Package {
             lint_pub: false,
             overlay_files: Vector::<String>::new(),
             overlay_texts: Vector::<String>::new(),
+            body_hold: Vector::<bool>::new(),
         };
     }
 
@@ -1697,11 +1707,14 @@ extend Package {
             let a = unsafe &*self.module_ast_const(m as ModuleId);
             dm_span.truncate(0);
             dm_node.truncate(0);
-            for ni in 0..a.nodes.len() {
-                let n = a.at_const(ni as NodeId);
+            let nb9 = a.nodes.len();
+            let nn9 = a.nnodes();
+            for k in 0..nn9 {
+                let ni = Ast::nth_id_n(nb9, k);
+                let n = a.at_const(ni);
                 if n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_CLOSURE {
                     dm_span.push(n.span.start as u64 << 32 | n.span.end as u64);
-                    dm_node.push(ni as u32);
+                    dm_node.push(ni);
                 }
             }
             // Insertion sort by start: decl order is nearly source order already.
@@ -1742,8 +1755,11 @@ extend Package {
             let a = unsafe &*self.module_ast_const(m as ModuleId);
             let lo = d_start[m] as usize;
             let hi = d_start[m + 1] as usize;
-            for ni in 0..a.nodes.len() {
-                let n = a.at_const(ni as NodeId);
+            let nb9 = a.nodes.len();
+            let nn9 = a.nnodes();
+            for k in 0..nn9 {
+                let ni = Ast::nth_id_n(nb9, k);
+                let n = a.at_const(ni);
                 if n.kind != NodeKind::NODE_CALL {
                     continue;
                 }
@@ -1800,7 +1816,7 @@ extend Package {
                     continue;
                 }
                 let mut t = DefId { module: 0, node: NODE_NONE };
-                let ni32 = ni as u32;
+                let ni32 = ni;
                 switch a.call_info.get(&ni32) {
                     Some(v) => {
                         t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
@@ -1817,7 +1833,7 @@ extend Package {
                     }
                 }
                 if t.node == NODE_NONE {
-                    if a.is_free_call(ni as NodeId, self.modules.at(m).source.as_str()) {
+                    if a.is_free_call(ni, self.modules.at(m).source.as_str()) {
                         // An explicit drop: no callee body to run.
                         continue;
                     }
@@ -1990,8 +2006,11 @@ extend Package {
         for m in 0..self.modules.len() {
             let a = unsafe &*self.module_ast_const(m as ModuleId);
             let mut row = Vector::<u64>::new();
-            for ni in 0..a.nodes.len() {
-                let n = a.at_const(ni as NodeId);
+            let nb9 = a.nodes.len();
+            let nn9 = a.nnodes();
+            for k in 0..nn9 {
+                let ni = Ast::nth_id_n(nb9, k);
+                let n = a.at_const(ni);
                 if n.kind == NodeKind::NODE_FUNCTION || n.kind == NodeKind::NODE_CLOSURE {
                     row.push(n.span.start as u64 << 32 | n.span.end as u64);
                 }
@@ -2000,7 +2019,7 @@ extend Package {
                 }
                 let cd = n.as_data.call;
                 let mut t = DefId { module: 0, node: NODE_NONE };
-                let ni32 = ni as u32;
+                let ni32 = ni;
                 switch a.call_info.get(&ni32) {
                     Some(v) => {
                         t = DefId { module: (*v >> 40) as ModuleId, node: (*v >> 8 & 0xFFFFFFFFu64) as NodeId };
@@ -2095,6 +2114,17 @@ extend Package {
             b += m.source.capacity() + m.ast.retained_bytes();
         }
         return b;
+    }
+
+    /// Free every module's body arena: the checked release point of releasable body syntax, once
+    /// the last consumer of it (the constant flush) has run. Every retained record a later stage
+    /// reads (kept Core IR, closure and asm facts) was copied out before.
+    pub fn release_bodies(self: &mut Self) {
+        for i in 0..self.modules.len() {
+            if self.modules[i].has_ast {
+                self.modules[i].ast.release_bodies();
+            }
+        }
     }
 
     /// Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
@@ -2234,9 +2264,10 @@ extend Package {
             let mut has_launch = false;
             let mut has_select = false;
             let mut has_parfor = false;
-            let nn = a.nodes.len();
+            let nb9 = a.nodes.len();
+            let nn = a.nnodes();
             for ni in 0..nn {
-                let k = a.at_const(ni as NodeId).kind;
+                let k = a.at_const(Ast::nth_id_n(nb9, ni)).kind;
                 if k == NodeKind::NODE_LAUNCH {
                     has_launch = true;
                 } else if k == NodeKind::NODE_SELECT {
@@ -2556,6 +2587,7 @@ extend Package {
         while self.method_used.len() <= m {
             self.method_used.push(Vector::<bool>::new());
         }
+        assert((d.node & NODE_BODY) == 0, "a method declaration is module syntax");
         if self.method_used[m].len() <= d.node as usize {
             // Size once to the module's node count so later marks are pure set()s.
             let mut n = unsafe self.module_ast_const(d.module).nodes.len();
@@ -2696,7 +2728,7 @@ extend Package {
             let a = unsafe &*self.module_ast_const(it.module);
             // An unchecked module (or a node past its typed range) records nothing: the query
             // then answers null exactly where the typed facts hold no signature either.
-            if it.node as usize >= a.types.len() || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION {
+            if !a.valid(it.node) || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION {
                 continue;
             }
             let fd = a.at_const(it.node).as_data.function;
@@ -3170,8 +3202,10 @@ extend Package {
             return (word & 1u64 << (to as usize % 64) as u64) != 0;
         }
         let ra = &self.modules[from as usize].ast;
-        for i in 0..ra.resolutions_len() {
-            let d = ra.resolution_def(i as NodeId);
+        let nb9 = ra.nodes.len();
+        let nn9 = ra.nnodes();
+        for i in 0..nn9 {
+            let d = ra.resolution_def(Ast::nth_id_n(nb9, i));
             if d.node != NODE_NONE && d.module == to {
                 return true;
             }

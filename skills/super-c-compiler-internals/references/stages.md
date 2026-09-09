@@ -15,8 +15,9 @@ ModuleIds are deterministic regardless of readdir order. Parallel under `--jobs`
   recovered; the scan always completes. `keep_trivia` (formatter path) also emits
   comment tokens.
 - Parser (`src/ast/parser.spc` — there is no `src/parser/`): context-free LL(1)
-  structural cover grammar, no predicates or backtracking. Output: flat AST arena
-  (`Ast.nodes: SplitVec<Node>`), append-only during parsing. Sugar keywords (`launch`,
+  structural cover grammar, no predicates or backtracking. Output: two append-only arenas
+  per module, the module arena (`Ast.nodes`) and the body arena (`Ast.b`, releasable bodies,
+  ids tagged `NODE_BODY`; see syntax-ownership.md). Sugar keywords (`launch`,
   `select`, `parallel for`, ...) parse to marker nodes; `@derive` synthesis happens here
   at parse time.
 

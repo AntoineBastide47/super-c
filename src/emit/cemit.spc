@@ -1009,6 +1009,23 @@ extend CEmit {
         }
     }
 
+    // The aggregate module behind pool type `(b.module, t)` through references and pointers.
+    fn agg_module_deref(self: &Self, b: &ir::CoreBody, t: TypeId) ModuleId {
+        let mut rm = b.module;
+        let mut rt = t;
+        self.rty(b, t, &mut rm, &mut rt);
+        let mut pg = 0;
+        while pg < 4 {
+            let y = *self.p().module_ast_const(rm).type_at(rt);
+            if y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_POINTER {
+                break;
+            }
+            rt = y.as_data.elem;
+            pg += 1;
+        }
+        return self.agg_module_res(rm, rt);
+    }
+
     const fn agg_module_res(self: &Self, rm: ModuleId, rt: TypeId) ModuleId {
         let a = self.p().module_ast_const(rm);
         let y = *a.type_at(rt);
@@ -1537,10 +1554,9 @@ extend CEmit {
                 si,
                 sp.base,
             );
-            let ddecl = b.locals.at(pl.base as usize).decl;
-            let inline_pattern_dest = dstore == ir::LS_USER && ddecl != NODE_NONE && self.p().module_ast_const(b.module).at_const(
-                ddecl,
-            ).kind == NodeKind::NODE_PATTERN_NAME && *defs.at(pl.base as usize) == 1 && *uses.at(pl.base as usize) == 1;
+            let inline_pattern_dest = dstore == ir::LS_USER && b.locals.at(pl.base as usize).dkind == ir::LK_PATTERN && *defs.at(
+                pl.base as usize,
+            ) == 1 && *uses.at(pl.base as usize) == 1;
             // A closure capture is an argument too, but it spells `__env->name`, not a plain local;
             // aliasing a local onto it would lose that env indirection.
             if self.cap_on && ss == ir::LS_ARG && sp.base >= self.cap_base {
@@ -1703,7 +1719,7 @@ extend CEmit {
                 if st != ir::LS_TEMP && st != ir::LS_STATIC_REF {
                     let decl = b.locals.at(l).decl;
                     if decl != NODE_NONE {
-                        let sp = self.mg.decl_name_span(b.module, decl);
+                        let sp = b.locals.at(l).name();
                         if sp.end > sp.start {
                             self.mg.ident(b.module, sp, &mut self.sx_nm_pool);
                             let nm0 = self.sx_nm_pool.as_str().slice(start, self.sx_nm_pool.len());
@@ -2267,8 +2283,7 @@ extend CEmit {
         }
         for l in 0..n {
             let ls = b.locals.at(l).storage;
-            let dn0 = b.locals.at(l).decl;
-            let pattern = dn0 != NODE_NONE && self.p().module_ast_const(b.module).at_const(dn0).kind == NodeKind::NODE_PATTERN_NAME;
+            let pattern = b.locals.at(l).dkind == ir::LK_PATTERN;
             if ls != ir::LS_TEMP && !(ls == ir::LS_USER && (!b.locals.at(l).is_mutable || pattern)) {
                 continue;
             }
@@ -2647,8 +2662,7 @@ extend CEmit {
             // lexical scope across a loop exit. A range-loop index is scoped to that loop and may
             // declare at its initializer even when the loop is nested.
             if *cf.loop_of.at((*init_blk.at(l)) as usize) != cfl::NONE {
-                let decl = b.locals.at(l).decl;
-                if decl == NODE_NONE || self.p().module_ast_const(b.module).at_const(decl).kind != NodeKind::NODE_FOR {
+                if b.locals.at(l).dkind != ir::LK_FOR {
                     continue;
                 }
             }
@@ -2913,17 +2927,11 @@ extend CEmit {
         if n == 0 && !zero_len {
             // A DECLARED `[T; 0]` is genuine (the checker interns len 0 for both the
             // unsized sentinel and true zero): the LET's spelled length decides.
-            let dn9 = b.locals.at(l).decl;
-            if dn9 != NODE_NONE {
-                let da9 = self.p().module_ast_const(b.module);
-                if da9.at_const(dn9).kind == NodeKind::NODE_LET {
-                    let tn9 = da9.at_const(dn9).as_data.let_stmt.ty;
-                    if tn9 != NODE_NONE && da9.at_const(tn9).kind == NodeKind::NODE_ARRAY_TYPE {
-                        let ln9 = da9.at_const(tn9).as_data.array_type.length;
-                        if ln9 != NODE_NONE && self.p().cir != null {
-                            let cev9 = unsafe &mut *(self.p().cir as *mut iri::Interp);
-                            let cv9 = cev9.eval(b.module, ln9);
-                            if cv9.kind == iri::IV_INT && cv9.i == 0 {
+            if b.locals.at(l).zero_len {
+                {
+                    {
+                        {
+                            {
                                 zero_len = true;
                             }
                         }
@@ -4237,7 +4245,7 @@ extend CEmit {
     // Move an immediately preceding fused zero-initializer into a counted `for` header.
     fn take_loop_init(self: &mut Self, o: &mut String, b: &ir::CoreBody, index: u32, init: &mut String) bool {
         let local = *b.locals.at(index as usize);
-        if local.decl != NODE_NONE && self.p().module_ast_const(b.module).at_const(local.decl).kind == NodeKind::NODE_LET {
+        if local.dkind == ir::LK_LET {
             return false;
         }
         if !*self.sx_fuse.at(index as usize) || !*self.sx_declared.at(index as usize) {
@@ -4519,12 +4527,12 @@ extend CEmit {
             return self.fail("multi-return");
         }
         let ca = self.p().module_ast_const(cm);
-        let cd = ca.at_const(cnode).as_data.closure;
-        if cd.mut_caps != 0 {
+        let cf = unsafe &*ca.closure_fact(cnode);
+        if cf.mut_caps != 0 {
             return self.fail("closure-mut");
         }
-        let np = cd.params.len;
-        let ncaps = cd.captures.len;
+        let np = cf.nparams;
+        let ncaps = cf.ncaps;
         if b.args != np + ncaps {
             return self.fail("closure-args");
         }
@@ -4534,8 +4542,7 @@ extend CEmit {
         self.setup_locals(b);
         self.pr.stop(prb::P_DECL, dm);
         for k in 0..ncaps {
-            let decl = unsafe ca.list(cd.captures)[k as usize];
-            let csp = self.mg.decl_name_span(cm, decl);
+            let csp = unsafe ca.caps_of(cf)[k as usize].name;
             if csp.end <= csp.start {
                 return self.fail("closure-cap-name");
             }
@@ -5403,16 +5410,14 @@ extend CEmit {
         ot: TypeId,
     ) bool {
         let oy = *self.p().module_ast_const(om).type_at(ot);
-        let cd = self.p().module_ast_const(oy.module).at_const(oy.as_data.decl);
-        if cd.kind != NodeKind::NODE_CLOSURE || cd.as_data.closure.captures.len == 0 {
+        let ca = self.p().module_ast_const(oy.module);
+        let cf = ca.closure_fact(oy.as_data.decl);
+        if cf == null || unsafe (&*cf).ncaps == 0 {
             return self.fail("dyn-fnval");
         }
         {
-            let ca = self.p().module_ast_const(oy.module);
-            let caps = cd.as_data.closure.captures;
-            for i in 0..caps.len {
-                let cid = unsafe ca.list(caps)[i as usize];
-                let cty = ca.type_of(cid);
+            for i in 0..unsafe (&*cf).ncaps {
+                let cty = unsafe ca.caps_of(cf)[i as usize].ty;
                 if cty != TYPE_NONE {
                     let mut crm = oy.module;
                     let mut crt = cty;
@@ -5469,32 +5474,32 @@ extend CEmit {
 
     // C forbids array assignment: an array literal stores element-wise into the place.
     // `__asm__ volatile ("tpl" : "=r"(out).. : "r"(in).. : "clobber"..);`, strings verbatim from
-    // the NODE_ASM the rvalue's item names; outputs render the place a copy operand carries.
+    // the body's asm record the rvalue's item indexes; outputs render the place a copy operand
+    // carries.
     fn emit_asm_stmt(self: &mut Self, o: &mut String, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
-        let a = self.p().module_ast_const(rv.item.module);
         let src = self.p().modules.at(rv.item.module as usize).source.as_str();
-        let d = a.at_const(rv.item.node).as_data.asm_stmt;
+        let d = *b.asms.at(rv.item.node as usize);
         o.push_str("  __asm__ volatile (");
-        if d.template == NODE_NONE {
+        if d.template.end <= d.template.start {
             o.push_str("\"\"");
         } else {
-            let ts = a.at_const(d.template).as_data.literal.raw;
-            o.push_str(src.slice(ts.start as usize, ts.end as usize));
+            o.push_str(src.slice(d.template.start as usize, d.template.end as usize));
         }
-        let nout = d.outputs.len / 2;
-        let want = d.outputs.len != 0 || d.inputs.len != 0 || d.clobbers.len != 0;
+        let want = d.nout != 0 || d.nin != 0 || d.nclob != 0;
         let mut ok = true;
         if want {
             o.push_str(" : ");
-            let mut i: u32 = 0;
-            while i + 1 < d.outputs.len && ok {
+            for i in 0..d.nout {
+                if !ok {
+                    break;
+                }
                 if i != 0 {
                     o.push_str(", ");
                 }
-                let cs = a.at_const(unsafe a.list(d.outputs)[i as usize]).as_data.literal.raw;
+                let cs = *b.asm_spans.at((d.cons + i) as usize);
                 o.push_str(src.slice(cs.start as usize, cs.end as usize));
                 o.push_str("(");
-                let opid = b.oper_pool[(rv.a + i / 2) as usize];
+                let opid = b.oper_pool[(rv.a + i) as usize];
                 let op = *b.operands.at(opid as usize);
                 if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
                     ok = self.emit_place(b, op.data, o);
@@ -5502,32 +5507,32 @@ extend CEmit {
                     ok = self.fail("asm-out");
                 }
                 o.push_str(")");
-                i += 2;
             }
         }
-        if (d.inputs.len != 0 || d.clobbers.len != 0) && ok {
+        if (d.nin != 0 || d.nclob != 0) && ok {
             o.push_str(" : ");
-            let mut i: u32 = 0;
-            while i + 1 < d.inputs.len && ok {
+            for i in 0..d.nin {
+                if !ok {
+                    break;
+                }
                 if i != 0 {
                     o.push_str(", ");
                 }
-                let cs = a.at_const(unsafe a.list(d.inputs)[i as usize]).as_data.literal.raw;
+                let cs = *b.asm_spans.at((d.cons + d.nout + i) as usize);
                 o.push_str(src.slice(cs.start as usize, cs.end as usize));
                 o.push_str("(");
-                let opid = b.oper_pool[(rv.a + nout + i / 2) as usize];
+                let opid = b.oper_pool[(rv.a + d.nout + i) as usize];
                 ok = self.emit_operand(b, opid, o);
                 o.push_str(")");
-                i += 2;
             }
         }
-        if d.clobbers.len != 0 && ok {
+        if d.nclob != 0 && ok {
             o.push_str(" : ");
-            for k in 0..d.clobbers.len {
+            for k in 0..d.nclob {
                 if k != 0 {
                     o.push_str(", ");
                 }
-                let cs = a.at_const(unsafe a.list(d.clobbers)[k as usize]).as_data.literal.raw;
+                let cs = *b.asm_spans.at((d.cons + d.nout + d.nin + k) as usize);
                 o.push_str(src.slice(cs.start as usize, cs.end as usize));
             }
         }
@@ -5935,7 +5940,8 @@ extend CEmit {
             }
             pre = pj.ty;
             if pj.kind == ir::PJ_DOWNCAST {
-                dc_m = self.agg_module(b, pre0);
+                // A downcast applies to a reference place directly: the enum is behind it.
+                dc_m = self.agg_module_deref(b, pre0);
                 dc_v = pj.sub;
                 dc_pre = pre0;
                 prev_dc = true;
@@ -7034,8 +7040,8 @@ extend CEmit {
                 ok = self.fail("dyn-fnval");
             }
             if ok {
-                let cd = self.p().module_ast_const(sy.module).at_const(sy.as_data.decl);
-                if cd.kind != NodeKind::NODE_CLOSURE || cd.as_data.closure.captures.len == 0 {
+                let cf = self.p().module_ast_const(sy.module).closure_fact(sy.as_data.decl);
+                if cf == null || unsafe (&*cf).ncaps == 0 {
                     ok = self.fail("dyn-fnval");
                 }
             }
@@ -9438,11 +9444,11 @@ extend CEmit {
                 self.mg.closure_sym(cm, cn, dst);
                 return true;
             }
-            if ca.at_const(cn).as_data.closure.mut_caps != 0 {
+            let cf = unsafe &*ca.closure_fact(cn);
+            if cf.mut_caps != 0 {
                 return self.fail("closure-mut");
             }
-            let caps = ca.at_const(cn).as_data.closure.captures;
-            if caps.len != rv.b {
+            if cf.ncaps != rv.b {
                 return self.fail("closure-caps");
             }
             dst.push_str("(");
@@ -9465,8 +9471,7 @@ extend CEmit {
                 }
                 ne9 += 1;
                 dst.push_str(".");
-                let decl = unsafe ca.list(caps)[i as usize];
-                let csp = self.mg.decl_name_span(cm, decl);
+                let csp = unsafe ca.caps_of(cf)[i as usize].name;
                 if csp.end <= csp.start {
                     ok = self.fail("closure-cap-name");
                     break;
@@ -10156,18 +10161,16 @@ extend CEmit {
             // A closure is destructible when any non-mut capture owns memory (mirrors the borrowck
             // owner's rule); a plain function pointer never is.
             let fa = self.p().module_ast_const(y.module);
-            let fnn = *fa.at_const(y.as_data.decl);
-            if fnn.kind != NodeKind::NODE_CLOSURE {
+            let cf = fa.closure_fact(y.as_data.decl);
+            if cf == null {
                 return false;
             }
-            let caps = fnn.as_data.closure.captures;
-            let mut_caps = fnn.as_data.closure.mut_caps as u64;
-            for i in 0..caps.len {
+            let mut_caps = unsafe (&*cf).mut_caps;
+            for i in 0..unsafe (&*cf).ncaps {
                 if (mut_caps >> i as u64 & 1u64) != 0 {
                     continue;
                 }
-                let cid = unsafe fa.list(caps)[i as usize];
-                let cty = fa.type_of(cid);
+                let cty = unsafe fa.caps_of(cf)[i as usize].ty;
                 if cty == TYPE_NONE {
                     continue;
                 }
@@ -10467,23 +10470,21 @@ extend CEmit {
     // env struct emission). The caller already opened `void <sym>(<env> *const self) {`.
     fn emit_closure_glue(self: &mut Self, y: &Ty) bool {
         let fa = self.p().module_ast_const(y.module);
-        let fnn = *fa.at_const(y.as_data.decl);
-        if fnn.kind != NodeKind::NODE_CLOSURE {
+        let cf = fa.closure_fact(y.as_data.decl);
+        if cf == null {
             return self.fail("closure-glue");
         }
-        let caps = fnn.as_data.closure.captures;
-        let mut_caps = fnn.as_data.closure.mut_caps as u64;
+        let mut_caps = unsafe (&*cf).mut_caps;
         let mut body = String::new();
         let mut ok = true;
-        for i in 0..caps.len {
+        for i in 0..unsafe (&*cf).ncaps {
             if !ok {
                 break;
             }
             if (mut_caps >> i as u64 & 1u64) != 0 {
                 continue;
             }
-            let cid = unsafe fa.list(caps)[i as usize];
-            let cty = fa.type_of(cid);
+            let cty = unsafe fa.caps_of(cf)[i as usize].ty;
             if cty == TYPE_NONE {
                 continue;
             }
@@ -10503,7 +10504,7 @@ extend CEmit {
                     let _ = self.zst_sentinel_ref(crm, crt, &mut body);
                     body.push_str(");\n");
                 } else {
-                    let csp = self.mg.decl_name_span(y.module, cid);
+                    let csp = unsafe fa.caps_of(cf)[i as usize].name;
                     if csp.end <= csp.start {
                         ok = self.fail("closure-glue-name");
                     } else {
@@ -10949,8 +10950,8 @@ extend CEmit {
                         sink.push_str(".vt->call");
                         dyn_val = true;
                     } else if cy.kind == TypeKind::TYPE_FUNCTION {
-                        let cd = self.p().module_ast_const(cy.module).at_const(cy.as_data.decl);
-                        if cd.kind == NodeKind::NODE_CLOSURE && cd.as_data.closure.captures.len != 0 {
+                        let cf = self.p().module_ast_const(cy.module).closure_fact(cy.as_data.decl);
+                        if cf != null && unsafe (&*cf).ncaps != 0 {
                             self.mg.closure_sym(cy.module, cy.as_data.decl, sink);
                             env_first = true;
                         }

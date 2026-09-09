@@ -233,7 +233,7 @@ extend PubSet {
 /// (hierarchical symbols, versioned document edits) are negotiated and applied per response.
 pub fn capabilities_with(pull: bool, delta: bool, resolve: bool) String {
     let mut s = String::from_str(
-        "{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":{\"openClose\":true,\"change\":2},\"hoverProvider\":true,\"definitionProvider\":true,\"typeDefinitionProvider\":true,\"implementationProvider\":true,\"referencesProvider\":true,\"documentHighlightProvider\":true,\"renameProvider\":{\"prepareProvider\":true},\"documentFormattingProvider\":true,\"callHierarchyProvider\":true,\"typeHierarchyProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\",\"@\",\"'\"]},\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"documentSymbolProvider\":true,\"workspaceSymbolProvider\":true,\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true",
+        "{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":{\"openClose\":true,\"change\":2},\"hoverProvider\":true,\"definitionProvider\":true,\"typeDefinitionProvider\":true,\"implementationProvider\":true,\"referencesProvider\":true,\"documentHighlightProvider\":true,\"renameProvider\":{\"prepareProvider\":true},\"documentFormattingProvider\":true,\"callHierarchyProvider\":true,\"typeHierarchyProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\",\"@\",\"'\",\"[\"]},\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"documentSymbolProvider\":true,\"workspaceSymbolProvider\":true,\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true",
     );
     s.push_str(",\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\",\"source.fixAll\"]");
     if resolve {
@@ -1091,12 +1091,15 @@ extend Server {
     // last round but clean now gets an explicit empty list.
     fn rebuild_all(self: &mut Self, f: *mut stdio::FILE, incr: bool) {
         self.drop_orphan_roots();
-        // Manifest roots build first: they decide which docs need per-file roots.
+        // Manifest roots build first: they decide which docs need per-file roots. Such a build is
+        // this round's build of that root: the loop below republishes it instead of compiling twice.
+        let mut seeded = Vector::<bool>::new();
         for r in 0..self.roots.len() {
-            if self.roots.at(r).origin.len() == 0 && !self.roots.at(r).sweep && !self.roots.at(r).built {
+            let seed = self.roots.at(r).origin.len() == 0 && !self.roots.at(r).sweep && !self.roots.at(r).built;
+            seeded.push(seed);
+            if seed {
                 let mut ps0 = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
                 self.build_root(r, &mut ps0, false);
-                // Publishing waits for the full round below; this build only seeds ownership.
             }
         }
         self.ensure_roots();
@@ -1104,7 +1107,10 @@ extend Server {
         for r in 0..self.roots.len() {
             // A built sweep root for a closed file republishes its cached diagnostics: rebuilding
             // every workspace file on each keystroke would be unusable.
-            if self.roots.at(r).sweep && self.roots.at(r).built && !self.doc_open(self.roots.at(r).origin.as_str()) {
+            let cached = self.roots.at(r).sweep && self.roots.at(r).built && !self.doc_open(
+                self.roots.at(r).origin.as_str(),
+            );
+            if cached || r < seeded.len() && seeded[r] {
                 self.publish_root_diags(r, &mut ps);
             } else {
                 self.build_root(r, &mut ps, incr);
@@ -1507,8 +1513,10 @@ extend Server {
     }
 
     // Map a request's (uri, position) onto (root, module, byte offset). Fails cleanly when the doc is
-    // unknown or not part of any built package (callers respond null).
-    fn locate(self: &Self, req: &json::JSON) Hit {
+    // unknown or not part of any built package (callers respond null). A request on a document
+    // the client never opened lands on a module whose bodies an analysis round released: they
+    // come back for the request.
+    fn locate(self: &mut Self, req: &json::JSON) Hit {
         let miss = Hit { ok: false, r: 0, m: 0, off: 0, end: 0 };
         let po = req.value("params");
         if po.is_none() {
@@ -1536,6 +1544,7 @@ extend Server {
         if pos.is_none() {
             return miss;
         }
+        analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
         let pv = pos.unwrap();
         let line = pv.value_i64("line", 0);
         let ch = pv.value_i64("character", 0);
@@ -1546,7 +1555,7 @@ extend Server {
     }
 
     // As `locate`, for requests carrying a `range` instead of a `position` (codeAction).
-    fn locate_range(self: &Self, req: &json::JSON) Hit {
+    fn locate_range(self: &mut Self, req: &json::JSON) Hit {
         let miss = Hit { ok: false, r: 0, m: 0, off: 0, end: 0 };
         let po = req.value("params");
         if po.is_none() {
@@ -1567,6 +1576,10 @@ extend Server {
             return miss;
         }
         let m = self.root_module(r as usize, path.as_str());
+        if m >= 0 {
+            // The bodies of a document the client never opened may be released.
+            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
+        }
         if m < 0 {
             return miss;
         }
@@ -1638,7 +1651,7 @@ extend Server {
         return di;
     }
 
-    fn on_hover(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_hover(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let mut moff: usize = 0;
         let mdi = self.manifest_hit(req, &mut moff);
@@ -1676,7 +1689,7 @@ extend Server {
         };
     }
 
-    fn on_definition(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_definition(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
@@ -1692,6 +1705,19 @@ extend Server {
                 respond(f, req.at_key("id"), &nullv);
             },
         };
+    }
+
+    // The cross-file features scan every module's bodies: parse back the ones the analysis rounds
+    // released (closed documents), in every built root.
+    fn hydrate_roots(self: &mut Self) {
+        for r in 0..self.roots.len() {
+            if !self.roots.at(r).built {
+                continue;
+            }
+            for m in 0..self.roots.at(r).pkg.modules.len() {
+                analysis::ensure_bodies(&mut self.roots[r].pkg, m);
+            }
+        }
     }
 
     // Reference sites for definition `d` (resolved in root `r0`) across EVERY built root, deduped
@@ -1750,13 +1776,14 @@ extend Server {
         }
     }
 
-    fn on_references(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_references(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
+        self.hydrate_roots();
         let mut include_decl = false;
         switch req.value("params") {
             Some(params) => switch params.value("context") {
@@ -1798,7 +1825,7 @@ extend Server {
         return self.folder_of(path).len() != 0;
     }
 
-    fn on_prepare_rename(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_prepare_rename(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
@@ -1831,13 +1858,14 @@ extend Server {
         respond(f, req.at_key("id"), &res);
     }
 
-    fn on_rename(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_rename(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
+        self.hydrate_roots();
         let mut new_name = "";
         switch req.value("params") {
             Some(params) => {
@@ -2090,6 +2118,10 @@ extend Server {
             return;
         }
         let m = self.root_module(r as usize, path.as_str());
+        if m >= 0 {
+            // The bodies of a document the client never opened may be released.
+            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
+        }
         if m < 0 {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -2144,6 +2176,10 @@ extend Server {
         let mut m: i32 = -1;
         if r >= 0 {
             m = self.root_module(r as usize, path.as_str());
+            if m >= 0 {
+                // The bodies of a document the client never opened may be released.
+                analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
+            }
         }
         if m < 0 {
             respond(f, req.at_key("id"), &nullv);
@@ -2362,7 +2398,7 @@ extend Server {
         return String::from_str(txt.slice(s, e));
     }
 
-    fn on_completion(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_completion(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let mut moff: usize = 0;
         let mdi = self.manifest_hit(req, &mut moff);
         if mdi >= 0 {
@@ -2442,6 +2478,10 @@ extend Server {
         let mut m: i32 = -1;
         if r >= 0 {
             m = self.root_module(r as usize, path);
+            if m >= 0 {
+                // The bodies of a document the client never opened may be released.
+                analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
+            }
         }
         let have_ast = m >= 0 && self.roots.at(r as usize).pkg.modules.at(m as usize).has_ast;
         if at_attr {
@@ -2621,7 +2661,7 @@ extend Server {
     // LITERAL support gets nothing (this server defines no commands). With client resolveSupport for
     // `edit`, lint-fix actions return lazily and codeAction/resolve builds the edit after
     // revalidating the revision.
-    fn on_code_action(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_code_action(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let mut arr = json::JSON::array();
         if !self.cap_action_literals {
             respond(f, req.at_key("id"), &arr);
@@ -2814,7 +2854,7 @@ extend Server {
 
     // CodeAction/resolve: build the deferred `edit` after revalidating that nothing changed since
     // the action was offered (same revision, and the diagnostic still carries the same fix).
-    fn on_code_action_resolve(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_code_action_resolve(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let po = req.value("params");
         if po.is_none() {
             send_error(f, req.at_key("id"), -32602, "missing code action");
@@ -2839,6 +2879,10 @@ extend Server {
         let mut m: i32 = -1;
         if r >= 0 {
             m = self.root_module(r as usize, path.as_str());
+            if m >= 0 {
+                // The bodies of a document the client never opened may be released.
+                analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
+            }
         }
         if m < 0 {
             send_error(f, req.at_key("id"), -32803, "the document is no longer part of a built package");
@@ -3018,7 +3062,7 @@ extend Server {
 
     // Navigation and information requests.
 
-    fn on_type_definition(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_type_definition(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
@@ -3036,7 +3080,7 @@ extend Server {
         };
     }
 
-    fn on_implementation(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_implementation(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
@@ -3051,7 +3095,7 @@ extend Server {
         respond(f, req.at_key("id"), &arr);
     }
 
-    fn on_document_highlight(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_document_highlight(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
@@ -3073,7 +3117,7 @@ extend Server {
         respond(f, req.at_key("id"), &arr);
     }
 
-    fn on_signature_help(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_signature_help(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
@@ -3107,7 +3151,7 @@ extend Server {
 
     // Hierarchical DocumentSymbol trees when the client negotiated them, flat SymbolInformation
     // otherwise.
-    fn on_document_symbol(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_document_symbol(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let mut uri = "";
         switch req.value("params") {
@@ -3130,6 +3174,10 @@ extend Server {
             return;
         }
         let m = self.root_module(r as usize, path.as_str());
+        if m >= 0 {
+            // The bodies of a document the client never opened may be released.
+            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
+        }
         if m < 0 {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -3241,7 +3289,7 @@ extend Server {
         respond(f, req.at_key("id"), &arr);
     }
 
-    fn on_folding_range(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_folding_range(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let mut uri = "";
         switch req.value("params") {
@@ -3260,6 +3308,10 @@ extend Server {
             return;
         }
         let m = self.root_module(r as usize, path.as_str());
+        if m >= 0 {
+            // The bodies of a document the client never opened may be released.
+            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
+        }
         if m < 0 {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -3284,7 +3336,7 @@ extend Server {
         respond(f, req.at_key("id"), &arr);
     }
 
-    fn on_selection_range(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_selection_range(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let mut uri = "";
         let mut positions = json::JSON::array();
@@ -3312,6 +3364,10 @@ extend Server {
             return;
         }
         let m = self.root_module(r as usize, path.as_str());
+        if m >= 0 {
+            // The bodies of a document the client never opened may be released.
+            analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
+        }
         if m < 0 {
             respond(f, req.at_key("id"), &nullv);
             return;
@@ -3347,7 +3403,7 @@ extend Server {
         respond(f, req.at_key("id"), &arr);
     }
 
-    fn on_inlay_hint(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_inlay_hint(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate_range(req);
         if !h.ok {
@@ -3474,7 +3530,7 @@ extend Server {
     }
 
     // The (root, module, offset) a hierarchy item's `data` names, re-resolved on the current state.
-    fn hier_locate(self: &Self, req: &json::JSON) Hit {
+    fn hier_locate(self: &mut Self, req: &json::JSON) Hit {
         let miss = Hit { ok: false, r: 0, m: 0, off: 0, end: 0 };
         let po = req.value("params");
         if po.is_none() {
@@ -3502,10 +3558,11 @@ extend Server {
         if m < 0 {
             return miss;
         }
+        analysis::ensure_bodies(&mut self.roots[r as usize].pkg, m as usize);
         return Hit { ok: true, r: r as usize, m: m as usize, off: off as u32, end: off as u32 };
     }
 
-    fn on_prepare_call_hierarchy(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_prepare_call_hierarchy(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
@@ -3529,13 +3586,14 @@ extend Server {
         respond(f, req.at_key("id"), &arr);
     }
 
-    fn on_incoming_calls(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_incoming_calls(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.hier_locate(req);
         if !h.ok {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
+        self.hydrate_roots();
         let pkg = &self.roots.at(h.r).pkg;
         let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
@@ -3581,19 +3639,21 @@ extend Server {
         respond(f, req.at_key("id"), &arr);
     }
 
-    fn on_outgoing_calls(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_outgoing_calls(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.hier_locate(req);
         if !h.ok {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
-        let pkg = &self.roots.at(h.r).pkg;
-        let d = feat::def_at(pkg, h.m, h.off);
+        let d = feat::def_at(&self.roots.at(h.r).pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
+        // The callee's own body may belong to a closed document.
+        analysis::ensure_bodies(&mut self.roots[h.r].pkg, d.module as usize);
+        let pkg = &self.roots.at(h.r).pkg;
         let calls = feat::calls_in(pkg, d.module as usize, d.node);
         let src = pkg.modules.at(d.module as usize).source.as_str();
         let ls = text::line_starts(src);
@@ -3624,7 +3684,7 @@ extend Server {
         respond(f, req.at_key("id"), &arr);
     }
 
-    fn on_prepare_type_hierarchy(self: &Self, req: &json::JSON, f: *mut stdio::FILE) {
+    fn on_prepare_type_hierarchy(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
         let h = self.locate(req);
         if !h.ok {
@@ -3659,7 +3719,7 @@ extend Server {
 
     // typeHierarchy/supertypes (`up` = true): the interfaces a type conforms to.
     // typeHierarchy/subtypes: an interface's conforming types.
-    fn on_type_hierarchy_related(self: &Self, req: &json::JSON, f: *mut stdio::FILE, up: bool) {
+    fn on_type_hierarchy_related(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE, up: bool) {
         let nullv = json::JSON::default();
         let h = self.hier_locate(req);
         if !h.ok {

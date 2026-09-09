@@ -185,6 +185,12 @@ pub struct FactsWatermark {
     pub children: usize,
     pub resolutions: usize,
     pub types: usize,
+    /// The body arena's counts, checked only while the arena is live (the driver releases it
+    /// after the constant flush; see `Ast::release_bodies`).
+    pub body_nodes: usize,
+    pub body_children: usize,
+    pub body_resolutions: usize,
+    pub body_types: usize,
     pub type_pool: usize,
     pub instances: usize,
     pub mono: usize,
@@ -210,6 +216,10 @@ pub const fn watermark(a: &Ast) FactsWatermark {
         children: a.children.len(),
         resolutions: a.resolutions.len(),
         types: a.types.len(),
+        body_nodes: a.b.nodes.len(),
+        body_children: a.b.children.len(),
+        body_resolutions: a.b.resolutions.len(),
+        body_types: a.b.types.len(),
         type_pool: a.ntypes(),
         instances: a.ninstances(),
         mono: a.mono.len(),
@@ -263,6 +273,20 @@ pub fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32) u32 {
     }
     if a.types.len() != w.types {
         d += wm_diff(mid, "types", w.types, a.types.len());
+    }
+    if a.b.nodes.len() != 0 {
+        if a.b.nodes.len() != w.body_nodes {
+            d += wm_diff(mid, "body nodes", w.body_nodes, a.b.nodes.len());
+        }
+        if a.b.children.len() != w.body_children {
+            d += wm_diff(mid, "body children", w.body_children, a.b.children.len());
+        }
+        if a.b.resolutions.len() != w.body_resolutions {
+            d += wm_diff(mid, "body resolutions", w.body_resolutions, a.b.resolutions.len());
+        }
+        if a.b.types.len() != w.body_types {
+            d += wm_diff(mid, "body types", w.body_types, a.b.types.len());
+        }
     }
     if a.coerces.len() != w.coerces {
         d += wm_diff(mid, "coerces", w.coerces, a.coerces.len());

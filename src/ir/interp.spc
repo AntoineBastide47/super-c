@@ -64,8 +64,27 @@ pub const FX_NO: u8 = 3;
 pub const FX_ONSTACK: u8 = 4;
 
 // body_slot tag: the slot names a kept body of the view, not a box of `bodies`.
+// The fx table row of (module, node): the module arena's row, or the body arena's.
+const fn fx_row(m: ModuleId, id: NodeId) usize {
+    let mut row = m as usize * 2;
+    if Ast::in_body(id) {
+        row += 1;
+    }
+    return row;
+}
+
 const BODY_KEPT: u64 = 1u64 << 63;
-const BODY_MASK: u64 = BODY_KEPT - 1;
+const BODY_PARENT: u64 = 1u64 << 62; // the slot indexes `parent.bodies`
+const BODY_MASK: u64 = BODY_PARENT - 1;
+const PLAIN_NONE: u64 = 0xFFFFFFFFFFFFFFFFu64;
+
+// The body_of key of a binding-free body (a bound one folds its bindings in after).
+const fn plain_key(m: ModuleId, fnode: NodeId) u64 {
+    let mut bkey: u64 = 1469598103934665603u64;
+    bkey = (bkey ^ m as u64) * 1099511628211u64;
+    bkey = (bkey ^ fnode as u64) * 1099511628211u64;
+    return bkey;
+}
 
 pub const fn fx_meet(a: u8, b: u8) u8 {
     if a == FX_NO || b == FX_NO {
@@ -221,7 +240,16 @@ extend Interp {
         self.call_memo.clear();
         self.item_memo.clear();
         self.ememo.clear();
+        // A binding-free body's key names only its declaration: those slots stay reachable (their
+        // syntax may be released before the next evaluation); a bound one hashes type ids and is
+        // re-lowered on demand.
         self.body_ix.clear();
+        for i in 0..self.body_plain.len() {
+            let pk = self.body_plain[i];
+            if pk != PLAIN_NONE {
+                self.body_ix.insert(plain_key((pk >> 32) as ModuleId, pk as NodeId), i as u64);
+            }
+        }
         self.lsvc.reset();
     }
 }
@@ -494,6 +522,7 @@ const fn libm2(name: str, x: f64, y: f64) DblRes {
 pub struct IFoldErr {
     pub m: ModuleId,
     pub id: NodeId,
+    pub span: tok::Span, // the call's span, recorded while its syntax is live
     pub kind: u8,
     pub constfn: bool, // the failure happened at or below a `const fn` frame
     pub detail: String,
@@ -543,7 +572,8 @@ pub struct Interp {
     pub trap_stack: [DefId; 48],
     pub lsvc: lay::Svc,
     pub bodies: Vector<Box<irl::Lowerer>>, // lowered callee cache (boxed: nested calls grow it)
-    pub body_keys: Vector<u64>, // module << 32 | fn node
+    pub body_keys: Vector<u64>, // the body_of key hash of each slot
+    pub body_plain: Vector<u64>, // module << 32 | fn node of a binding-free slot, else PLAIN_NONE
     pub body_ix: Map<u64, u64>, // bkey -> body_ptr slot (the linear key scan was O(n^2) over a sweep)
     /// Per body_keys slot, where the lowering lives: `BODY_KEPT | k` = slot k of the keep view,
     /// otherwise an index into `bodies`.
@@ -552,6 +582,10 @@ pub struct Interp {
     /// otherwise): a non-generic body found there executes in place, with no lowering and no box.
     /// A per-task engine copies the pointer without counting as a viewer (the master counts).
     pub keep_view: *const irl::Keep,
+    /// An engine whose binding-free lowerings this one reads on a miss (the emission's
+    /// materialization engine over the driver's, whose cache the pre-release constant pass filled
+    /// while the body syntax was live); null = none.
+    pub parent: *const Interp,
     // Body-lookup counters (SC_CEMIT_STATS reports them): every body_of miss of the slot index,
     // how many the keep view served, how many lowered fresh (and so retained a box), and of those
     // how many were generic instances (a substitution env) or bodies the keep never held.
@@ -603,6 +637,14 @@ pub struct Interp {
     pub fx_depth: u32,
     pub pending: Vector<u64>, // deferred static_assert conditions (module << 32 | node)
     pub pending_consts: Vector<u64>, // deferred call-bearing const decls
+    /// Body-syntax demand per module, for the LSP's release of closed documents' bodies: the
+    /// modules whose body-arena syntax this engine lowered or scanned (`body_read`), the modules
+    /// whose bodies it needed but refused (released, or not typed yet in the running pass:
+    /// `body_missing`), and the refusal count (`body_miss_n`) an analysis pass samples per
+    /// module to find the demanders it must run again.
+    pub body_read: Vector<bool>,
+    pub body_missing: Vector<bool>,
+    pub body_miss_n: u64,
 }
 
 pub fn interp_new(pkg: *const loader::Package) Interp {
@@ -623,9 +665,11 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         lsvc: lay::Svc::new(pkg),
         bodies: Vector::<Box<irl::Lowerer>>::new(),
         body_keys: Vector::<u64>::new(),
+        body_plain: Vector::<u64>::new(),
         body_ix: Map::<u64, u64>::new(),
         body_slot: Vector::<u64>::new(),
         keep_view: null,
+        parent: null,
         st_lookups: 0,
         st_kept_hits: 0,
         st_fresh: 0,
@@ -668,6 +712,9 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         fx_depth: 0,
         pending: Vector::<u64>::new(),
         pending_consts: Vector::<u64>::new(),
+        body_read: Vector::<bool>::new(),
+        body_missing: Vector::<bool>::new(),
+        body_miss_n: 0,
     };
 }
 
@@ -1485,9 +1532,7 @@ extend Interp {
     // reflection binders and sizeof folds expand for real), cached for the interpreter's lifetime;
     // -1 = does not lower.
     fn body_of(self: &mut Self, m: ModuleId, fnode: NodeId, binds: &Vector<ISub>, closure: bool) i64 {
-        let mut bkey: u64 = 1469598103934665603u64;
-        bkey = (bkey ^ m as u64) * 1099511628211u64;
-        bkey = (bkey ^ fnode as u64) * 1099511628211u64;
+        let mut bkey = plain_key(m, fnode);
         for i in 0..binds.len() {
             let sb = binds.at(i);
             bkey = (bkey ^ sb.pmod as u64) * 1099511628211u64;
@@ -1510,9 +1555,25 @@ extend Interp {
                 self.st_kept_hits += 1;
                 self.body_slot.push(BODY_KEPT | ki as u64);
                 self.body_keys.push(bkey);
+                self.body_plain.push(m as u64 << 32 | fnode as u64);
                 self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
                 return self.body_keys.len() as i64 - 1;
             }
+        }
+        if binds.len() == 0 && self.parent != null {
+            switch unsafe (&*self.parent).body_ix.get(&bkey) {
+                Some(v) => {
+                    let ps = unsafe (&*self.parent).body_slot[(*v) as usize];
+                    if (ps & (BODY_KEPT | BODY_PARENT)) == 0 {
+                        self.body_slot.push(BODY_PARENT | ps);
+                        self.body_keys.push(bkey);
+                        self.body_plain.push(m as u64 << 32 | fnode as u64);
+                        self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
+                        return self.body_keys.len() as i64 - 1;
+                    }
+                },
+                None => {},
+            };
         }
         {
             // an UNCHECKED body must not run: lowering would degrade its widths to i64 and
@@ -1545,8 +1606,19 @@ extend Interp {
                     done9 = self.p().tc_done.at(m as usize).contains(&(m as u64 << 32 | item9 as u64));
                 }
                 if !done9 {
+                    self.note_body(m, false);
                     return -1;
                 }
+            }
+        }
+        {
+            let bn = if closure {
+                fnode;
+            } else {
+                unsafe (&*self.p().module_ast_const(m)).at_const(fnode).as_data.function.body;
+            };
+            if !self.body_avail(m, bn) {
+                return -1;
             }
         }
         let mut lw = irl::Lowerer::new(self.pkg, m, fnode);
@@ -1571,8 +1643,44 @@ extend Interp {
         self.bodies.push(Box::new(lw));
         self.body_slot.push(self.bodies.len() as u64 - 1);
         self.body_keys.push(bkey);
+        self.body_plain.push(
+            if binds.len() == 0 {
+                m as u64 << 32 | fnode as u64;
+            } else {
+                PLAIN_NONE;
+            },
+        );
         self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
         return self.body_keys.len() as i64 - 1;
+    }
+
+    // Record that module `m`'s body syntax was read (`ok`) or refused.
+    fn note_body(self: &mut Self, m: ModuleId, ok: bool) {
+        let v = if ok {
+            &mut self.body_read;
+        } else {
+            &mut self.body_missing;
+        };
+        while v.len() <= m as usize {
+            v.push(false);
+        }
+        v.set(m as usize, true);
+        if !ok {
+            self.body_miss_n += 1;
+        }
+    }
+
+    // True when node `id` of module `m` can be lowered or scanned: a module-arena node always, a
+    // body-arena node while its arena is live with a type table covering it (a released arena,
+    // or one parsed back and not checked yet, refuses: the LSP round runs the demander again).
+    fn body_avail(self: &mut Self, m: ModuleId, id: NodeId) bool {
+        if !Ast::in_body(id) {
+            return true;
+        }
+        let a = unsafe &*self.p().module_ast_const(m);
+        let ok = !a.b.released && a.b.types.len() >= a.b.nodes.len();
+        self.note_body(m, ok);
+        return ok;
     }
 
     // The lowering a body_of slot names.
@@ -1581,6 +1689,9 @@ extend Interp {
         if (sl & BODY_KEPT) != 0 {
             assert(self.keep_view != null);
             return (unsafe &*self.keep_view).kept.at((sl & BODY_MASK) as usize);
+        }
+        if (sl & BODY_PARENT) != 0 {
+            return (unsafe &*self.parent).bodies.at((sl & BODY_MASK) as usize).get();
         }
         return self.bodies.at(sl as usize).get();
     }
@@ -1607,7 +1718,9 @@ extend Interp {
     }
 
     /// Close the view: every slot that pointed into the keep leaves the index, so a later lookup
-    /// lowers its own copy (the keep's bodies are about to move into the emitter).
+    /// lowers its own copy (the keep's bodies are about to move into the emitter). The driver's
+    /// constant pass after this point re-lowers, while the syntax is live, every body an emission
+    /// evaluation can reach.
     pub fn keep_view_clear(self: &mut Self) {
         if self.keep_view == null {
             return;
@@ -1617,6 +1730,7 @@ extend Interp {
             if (self.body_slot[i] & BODY_KEPT) != 0 {
                 let _ = self.body_ix.remove(&self.body_keys[i]);
                 self.body_slot.set(i, 0);
+                self.body_plain.set(i, PLAIN_NONE);
             }
         }
         let kp = self.keep_view as *mut irl::Keep;
@@ -5153,20 +5267,24 @@ extend Interp {
     // shallow scan covers the body's leading straight-line statements; deep mode recurses into
     // if/match/defer so FX_YES means every path is provably evaluable.
 
+    // The verdict tables hold two rows per module: the module arena's functions, then the body
+    // arena's closures (a closure's tagged id indexes the second row by its arena index).
     const fn fx_slot(self: &Self, m: ModuleId, id: NodeId, deep: bool) u8 {
         let tbl = if deep {
             &self.fxd;
         } else {
             &self.fx;
         };
-        if m as usize >= tbl.len() {
+        let row = fx_row(m, id);
+        if row >= tbl.len() {
             return FX_UNKNOWN;
         }
-        let inner = tbl.at(m as usize);
-        if id as usize >= inner.len() {
+        let inner = tbl.at(row);
+        let k = (id & NODE_BODY_MASK) as usize;
+        if k >= inner.len() {
             return FX_UNKNOWN;
         }
-        return inner[id as usize];
+        return inner[k];
     }
 
     fn fx_set(self: &mut Self, m: ModuleId, id: NodeId, v: u8, deep: bool) {
@@ -5175,14 +5293,16 @@ extend Interp {
         } else {
             &mut self.fx;
         };
-        while tbl.len() <= m as usize {
+        let row = fx_row(m, id);
+        while tbl.len() <= row {
             tbl.push(Vector::<u8>::new());
         }
-        let inner = &mut tbl[m as usize];
-        while inner.len() <= id as usize {
+        let inner = &mut tbl[row];
+        let k = (id & NODE_BODY_MASK) as usize;
+        while inner.len() <= k {
             inner.push(FX_UNKNOWN);
         }
-        inner.set(id as usize, v);
+        inner.set(k, v);
     }
 
     // Deep mode never records a reason: its NO is any-path (the site may be conditional), so it
@@ -5255,6 +5375,9 @@ extend Interp {
         let fd = a.at_const(fn_id).as_data.function;
         if fd.is_extern || fd.body == NODE_NONE {
             return FX_MAYBE; // externs are classified at their call sites; bodyless may re-dispatch
+        }
+        if !self.body_avail(m, fd.body) {
+            return FX_MAYBE;
         }
         if fd.is_variadic {
             return self.fx_disq(m, fn_id, fn_id, "is variadic", deep);
@@ -5784,7 +5907,10 @@ extend Interp {
         let detail = self.trap_detail();
         let mut d = String::new();
         d.push_str(detail);
-        self.fold_errs.push(IFoldErr { m: m, id: id, kind: self.trap_kind, constfn: self.trap_in_constfn, detail: d });
+        let sp = (unsafe &*self.p().module_ast_const(m)).at_const(id).span;
+        self.fold_errs.push(
+            IFoldErr { m: m, id: id, span: sp, kind: self.trap_kind, constfn: self.trap_in_constfn, detail: d },
+        );
     }
 
     /// Fold expression `id` of module `m` to a scalar; IV_NONE = not compile-time evaluable

@@ -118,7 +118,7 @@ extend Svc {
     // A member type node's recorded type (TYPE_NONE when the checker recorded none).
     const fn mtype(self: &Self, m: ModuleId, id: NodeId) TypeId {
         let ast = self.a(m);
-        if ast.types.len() > id as usize {
+        if ast.valid(id) {
             return ast.type_of(id);
         }
         return TYPE_NONE;

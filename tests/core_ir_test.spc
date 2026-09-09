@@ -203,8 +203,8 @@ fn typed_facts_boundary() {
     let mut saw_inst = false;
     let mut saw_recv = false;
     let mut closure = NODE_NONE;
-    for n in 0..a.nodes.len() {
-        let nid = n as NodeId;
+    for n in 0..a.nnodes() {
+        let nid = a.nth_id(n);
         let k = a.at_const(nid).kind;
         if k == NodeKind::NODE_CLOSURE {
             closure = nid;
@@ -227,8 +227,8 @@ fn typed_facts_boundary() {
     assert(f.captures(closure).len != 0, "capture list recorded");
     // Generic args recorded at the specialized use site.
     let mut saw_args = false;
-    for n in 0..a.nodes.len() {
-        if f.generic_args(n as NodeId) != null {
+    for n in 0..a.nnodes() {
+        if f.generic_args(a.nth_id(n)) != null {
             saw_args = true;
         }
     }

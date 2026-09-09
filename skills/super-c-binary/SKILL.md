@@ -141,7 +141,9 @@ hover, go-to-definition, type definition, implementation, references, document
 highlight, rename (with prepare), document formatting, code actions (quick fixes),
 completion, signature help, document and workspace symbols, folding ranges, selection
 ranges, inlay hints, and semantic tokens (full + range). The VS Code extension is in
-`editors/vscode/`.
+`editors/vscode/`. Between analysis rounds the server keeps only the open documents' function
+bodies (and the bodies the constant engine demanded); a closed module's bodies parse back on
+demand (`syntax-ownership.md` in the compiler-internals skill).
 
 ### Project scaffolding
 
@@ -338,6 +340,7 @@ a `thin` profile keeps `auto` there.
 | `SC_NO_TU_CACHE` | Disable per-TU journal/replay cache |
 | `SC_BUILD_MEM_BUDGET` | Cap parallel emission bytes in flight (`64M`, `2G`) |
 | `SC_TYPE_STATS` | Print the type identity counters per phase and at the end of emission: interning hits and probe steps, foreign lowerings, instance-graph interns, layout cache traffic, the bytes the package type table and the module pools retain, and the publication census (`type-identity.md` in the internals skill) |
+| `SC_SYNTAX_STATS` | Print one syntax accounting line per phase (parse, resolve, typecheck, borrowck, emit): node and child counts with the share inside bodies, the retained bytes of nodes, children, resolutions, types, module pools and the other side tables, the source text, and the module that retains the most (`syntax-ownership.md` in the internals skill) |
 
 ### Verification (dev gates, each runs only when set)
 
@@ -352,7 +355,7 @@ a `thin` profile keeps `auto` there.
 | `SC_TYPE_COLLIDE` | Every type and instance hashes to one bucket: the type tables run on full comparisons alone, so a hash-order dependence shows as different output |
 | `SC_TASK_DELAY` | A deterministic per-module delay at the start of every parallel typecheck and borrow-check task, so the worker-identity gates run under a schedule the machine would not produce by itself |
 | `SC_TYPE_TABLE` | Path: write the package type table at the end of emission, one line per final id (`id class kind qualifier module payload`, children as final ids); the gate compares the dumps of one worker and every core |
-| `SC_CEMIT_STATS` | Per-phase wall times, the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes) and the emission probe table (`src/emit/probe.spc`: ms and calls per region; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
+| `SC_CEMIT_STATS` | Per-phase wall times, the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes) and the emission probe table (`src/emit/probe.spc`: ms and calls per region, bodies taken from the keep or lowered, instance re-lowerings, rendered bodies and bytes; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
 | `SC_INLINE_STATS` | Per-body inliner decision counters |
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters |
 
@@ -362,6 +365,7 @@ a `thin` profile keeps `auto` there.
 |----------|--------|
 | `SC_LSP_NO_INCR` | Disable incremental per-edit recompilation (full rebuild, parity mode) |
 | `SC_LSP_BUDGET_MB` | Bound retained packages (closed-file roots evict first; open docs pinned) |
+| `SC_LSP_STATS` | One line per analysis round: modules, released, held, KiB retained, ms, bodies parsed back, extra passes |
 
 ### Runtime (read by compiled programs)
 
