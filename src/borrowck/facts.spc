@@ -180,7 +180,7 @@ pub struct Owner {
 
 // Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
 @c.always_inline
-fn cache_get(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId) i32 {
+const fn cache_get(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId) i32 {
     if arr.len() <= mid as usize {
         return -1;
     }

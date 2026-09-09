@@ -609,8 +609,16 @@ fn lint_batch(
     return lint_batch(files, root, std_dir, ce_steps, ce_mem, target, false, sc, lint_pub);
 }
 
+/// True when `path` names a directory. A `str` is a view without a terminator, so the C `stat`
+/// reads a terminated copy: a heap string whose allocation is exactly its length has no zero byte
+/// after it (a 28-byte fixture path under wasmtime read as "cannot read").
+fn path_is_dir(path: str) bool {
+    let mut p = String::from_str(path);
+    return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
+}
+
 fn run_lint(path: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
-    if unsafe shim::sc_stat_isdir(path.ptr() as *const char) == 1 {
+    if path_is_dir(path) {
         // Every file under the directory resolves imports against the directory itself.
         let droot = if lint_alt().len() != 0 {
             ".";
@@ -643,7 +651,7 @@ fn run_fmt(path: str, check: bool) i32 {
     if is_stdin {
         return fmt_one(path, true, false, check);
     }
-    if unsafe shim::sc_stat_isdir(path.ptr() as *const char) == 1 {
+    if path_is_dir(path) {
         return fmt_dir(path, !check, check);
     }
     return fmt_one(path, false, !check, check);
@@ -1331,7 +1339,7 @@ OPTIONS:
             let mut files = Vector::<String>::new();
             for k in 0..paths.len() {
                 let pa = paths.at(k).as_str();
-                if unsafe shim::sc_stat_isdir(pa.ptr() as *const char) == 1 {
+                if path_is_dir(pa) {
                     if lint_collect(pa, &mut files) != 0 {
                         rc = 1;
                     }

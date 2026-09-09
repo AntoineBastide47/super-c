@@ -2001,12 +2001,6 @@ extend Ast {
         return id;
     }
 
-    /// Add `node` to the arena of `anchor` (a desugar extends the body it rewrites).
-    pub fn add_in(self: &mut Self, anchor: NodeId, node: Node) NodeId {
-        self.sink_body = (anchor & NODE_BODY) != 0;
-        return self.add(node);
-    }
-
     /// True when `id` names the body arena.
     @c.always_inline
     pub const fn in_body(id: NodeId) bool {
@@ -2131,10 +2125,6 @@ extend Ast {
             let sd = *self.seeds.at(i);
             self.set_resolution_def(sd.at, sd.def);
         }
-    }
-
-    pub const fn resolutions_len(self: &Self) usize {
-        return self.resolutions.len();
     }
 
     /// Extend the resolution table to cover nodes added since `init_resolutions`. The HIR lowering builds
@@ -2840,7 +2830,7 @@ extend Ast {
 
     /// The auto-deref chain recorded at `node`, writable (a mutable place use patches method hops
     /// to `deref_mut`), or null if none.
-    pub fn deref_use_mut(self: &mut Self, node: NodeId) *mut DerefUse {
+    pub const fn deref_use_mut(self: &mut Self, node: NodeId) *mut DerefUse {
         let idx = slot_of(&self.deref_at, &self.b.deref_at, node);
         if idx == 0 {
             return null;
@@ -3148,7 +3138,7 @@ pub struct SyntaxStats {
 }
 
 extend SyntaxStats {
-    pub fn new() SyntaxStats {
+    pub const fn new() SyntaxStats {
         return SyntaxStats {
             nodes: 0,
             body_nodes: 0,

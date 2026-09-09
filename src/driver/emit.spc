@@ -142,12 +142,12 @@ fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
             let _ = mark_live(row, n, d.module);
         }
     }
-    assert(p.sched.built, "the item index precedes emission liveness");
+    assert(p.sched.final_edges, "the post-typecheck item edges precede emission liveness");
     let i0 = p.idx.mod_items[m] as usize;
     let i1 = p.idx.mod_items[m + 1] as usize;
     for it in i0..i1 {
-        for e in p.sched.pre_off[it] as usize..p.sched.pre_off[it + 1] as usize {
-            let tm = p.idx.items.at(p.sched.pre_edges[e] as usize);
+        for e in p.sched.fin_off[it] as usize..p.sched.fin_off[it + 1] as usize {
+            let tm = p.idx.items.at(p.sched.fin_edges[e] as usize);
             if tm.module as usize != m && p.builtin_of_decl(tm.module, tm.node) < 0 {
                 let _ = mark_live(row, n, tm.module);
             }
@@ -456,6 +456,7 @@ struct TcOut {
     pub fixable: u32,
     pub errors: diag::Errors,
     pub log: tc::TcMarkLog,
+    pub edges: Vector<u64>, // the module's post-typecheck item edges
 }
 
 struct TcTask {
@@ -465,6 +466,7 @@ struct TcTask {
     pub outs: *mut TcOut, // outs base; slot per module id
     pub lint: bool,
     pub wc: *mut TcWaitSt,
+    pub spans: *const Vector<gitems::Spans>,
 }
 
 unsafe extend TcTask as Send {}
@@ -502,6 +504,9 @@ fn tc_run_one(t: TcTask) {
         tck.mark_log = &mut (unsafe &mut *out).log;
         tck.check();
         tck.bc_record_ret_attr();
+        // The module's item edges with the resolutions the checker added (type-path calls), while
+        // its body syntax is live: the lint and the emission liveness read them.
+        gitems::module_edges(unsafe &*t.p, i, unsafe &*t.spans, &mut (unsafe &mut *out).edges);
         {
             // Publish completion: everything check() wrote happens-before a waiter's wake.
             let st = t.wc;
@@ -577,7 +582,15 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
     let mut outs = Vector::<TcOut>::with_capacity(n);
     for _ in 0..n {
         outs.push(
-            TcOut { ok: true, warns: 0, errs: 0, fixable: 0, errors: diag::Errors::new(), log: tc::TcMarkLog::new() },
+            TcOut {
+                ok: true,
+                warns: 0,
+                errs: 0,
+                fixable: 0,
+                errors: diag::Errors::new(),
+                log: tc::TcMarkLog::new(),
+                edges: Vector::<u64>::new(),
+            },
         );
     }
     prt::set_stack_size(8usize << 20); // the checker's expression recursion outgrows the default task stack
@@ -653,6 +666,7 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
         }
     }
     let ngrp = nscc + 1;
+    let spans = gitems::spans_all(p);
     let pp = p as *mut loader::Package;
     let wcp = (&mut wc) as *mut TcWaitSt;
     let want_lint = lint;
@@ -673,6 +687,7 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
                 outs: outs.index_mut(0),
                 lint: want_lint,
                 wc: wcp,
+                spans: &spans,
             };
             let wgc = wg.clone();
             launch || {
@@ -753,6 +768,15 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
             ok = false;
         }
     }
+    // The post-typecheck item edges, every task's in module order, as the final ranges.
+    let mut tedges = Vector::<u64>::new();
+    for i in 0..n {
+        let oe = &outs.at(i).edges;
+        for k in 0..oe.len() {
+            tedges.push(oe[k]);
+        }
+    }
+    gitems::build_final(p, &tedges);
     return ok;
 }
 
@@ -762,6 +786,8 @@ fn typecheck_module(
     lint: bool,
     fixes: *mut Vector<diag::LintFix>,
     ftexts: *mut Vector<String>,
+    spans: *const Vector<gitems::Spans>,
+    edges: *mut Vector<u64>,
 ) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
@@ -771,6 +797,11 @@ fn typecheck_module(
     t.lint = lint;
     t.check();
     t.bc_record_ret_attr();
+    if spans != null {
+        // The module's item edges with the resolutions the checker added (type-path calls),
+        // while its body syntax is live: the lint and the emission liveness read them.
+        gitems::module_edges(unsafe &*pkg, i, unsafe &*spans, unsafe &mut *edges);
+    }
     let had = t.has_errors();
     if had || fixes == null && t.errors.has_warnings() {
         t.log_errors();
@@ -5725,7 +5756,7 @@ extend DropCtx {
     }
 
     // Fold the inliner's tallies into the probe (once: the tallies reset).
-    fn fold_probe(self: &mut Self) {}
+    const fn fold_probe(self: &mut Self) {}
 
     fn apply_drops(self: &mut Self, lw: &mut irl::Lowerer) {
         self.apply_drops_of(lw, true);
@@ -7770,7 +7801,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
         // The item index's dependency edges stand in for the resolution scan: one edge per
         // (owner item, target item), the owner the item `lint_owner` attributes the referencing
         // node to, without the releasable body syntax.
-        assert(p.sched.built, "the item index precedes the unused-item lint");
+        assert(p.sched.final_edges, "the post-typecheck item edges precede the unused-item lint");
         let i0 = p.idx.mod_items[m] as usize;
         let i1 = p.idx.mod_items[m + 1] as usize;
         for it in i0..i1 {
@@ -7779,8 +7810,8 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
                 continue;
             }
             let ss = (starts[m] + ents[m][si as usize].node as usize) as u64;
-            for e in p.sched.pre_off[it] as usize..p.sched.pre_off[it + 1] as usize {
-                let tm = p.idx.items.at(p.sched.pre_edges[e] as usize);
+            for e in p.sched.fin_off[it] as usize..p.sched.fin_off[it + 1] as usize {
+                let tm = p.idx.items.at(p.sched.fin_edges[e] as usize);
                 let dm = tm.module as usize;
                 if dm >= nm || ents[dm].len() == 0 {
                     continue;
@@ -8528,6 +8559,8 @@ fn lint_package_i(
         return 1;
     }
     gitems::build_serial(p);
+    let spans = gitems::spans_all(p);
+    let mut tedges = Vector::<u64>::new();
     for i in 0..n {
         let sel = lint_reported(p, i, lint_mod as i32);
         let fx = if sel {
@@ -8535,9 +8568,10 @@ fn lint_package_i(
         } else {
             null;
         };
-        let ok = typecheck_module(p, i, sel, fx, ftexts);
+        let ok = typecheck_module(p, i, sel, fx, ftexts, &spans, &mut tedges);
         p.ok = ok && p.ok;
     }
+    gitems::build_final(p, &tedges);
     if !p.ok {
         return 1;
     }
@@ -8669,10 +8703,13 @@ fn run_package_i(
     if p.jobs != 1 && n > 1 {
         p.ok = typecheck_all_par(p, lint) && p.ok;
     } else {
+        let spans = gitems::spans_all(p);
+        let mut tedges = Vector::<u64>::new();
         for i in 0..n {
-            let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null);
+            let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null, &spans, &mut tedges);
             p.ok = ok && p.ok;
         }
+        gitems::build_final(p, &tedges);
     }
     if p.ok {
         discharge_obligations(p, n, p.jobs != 1 && n > 1);

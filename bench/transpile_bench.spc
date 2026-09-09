@@ -372,18 +372,18 @@ struct PhaseAvg {
     pub mib: f64,
 }
 
-fn phase_sum_new() PhaseSum {
+const fn phase_sum_new() PhaseSum {
     return PhaseSum { secs: 0.0, cyc: 0, alc: 0, byt: 0 };
 }
 
-fn phase_add(s: &mut PhaseSum, secs: f64, cyc: i64, alc: i64, byt: i64) {
+const fn phase_add(s: &mut PhaseSum, secs: f64, cyc: i64, alc: i64, byt: i64) {
     s.secs = s.secs + secs;
     s.cyc = s.cyc + cyc;
     s.alc = s.alc + alc;
     s.byt = s.byt + byt;
 }
 
-fn avg(s: &PhaseSum, rounds: f64) PhaseAvg {
+const fn avg(s: &PhaseSum, rounds: f64) PhaseAvg {
     return PhaseAvg {
         ms: s.secs / rounds * 1000.0,
         mcyc: s.cyc as f64 / rounds / 1e6,
@@ -461,7 +461,7 @@ fn set_env(name: str, value: str) {
 }
 
 // Milliseconds between two boundaries of a build record.
-fn build_ms(g: &bst::BuildStats, from: usize, to: usize) f64 {
+const fn build_ms(g: &bst::BuildStats, from: usize, to: usize) f64 {
     return (g.t[to] - g.t[from]) as f64 / 1000000.0;
 }
 

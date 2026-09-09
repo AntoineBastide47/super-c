@@ -294,7 +294,7 @@ fn push_bool(out: &mut String, v: bool) {
 }
 
 /// The part of the streamed C compile that ran while emission was still in progress.
-pub fn cc_overlap_ns(g: &BuildStats) u64 {
+pub const fn cc_overlap_ns(g: &BuildStats) u64 {
     let pub_ns = g.t[B_PUBLISH];
     if g.cc_jobs == 0 || g.cc_first_ns >= pub_ns {
         return 0;

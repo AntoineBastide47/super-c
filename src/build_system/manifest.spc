@@ -59,7 +59,7 @@ pub const LTO_AUTO: i32 = 3;
 pub const LTO_THIN: i32 = 4;
 
 /// The mode named `s`, or -1.
-pub fn lto_parse(s: str) i32 {
+pub const fn lto_parse(s: str) i32 {
     return if s == "none" {
         LTO_NONE;
     } else if s == "full" {

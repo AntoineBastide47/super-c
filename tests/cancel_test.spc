@@ -95,11 +95,11 @@ fn cancelled(b: &Base) usize {
     return rt::cancelled_tasks() - b.cancelled;
 }
 
-fn short() time::Duration {
+const fn short() time::Duration {
     return time::Duration::from_millis(20);
 }
 
-fn forever() time::Duration {
+const fn forever() time::Duration {
     return time::Duration::from_secs(30);
 }
 

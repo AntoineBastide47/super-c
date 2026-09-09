@@ -242,18 +242,22 @@ pub type Proj = Array<char, 256>;
 
 /// A fresh empty scratch project under the system temp directory, named by pid.
 pub fn proj_new() Proj {
-    // Process-local: one forked process per test, and the name carries the pid.
+    // Process-local: one forked process per test, and the name carries the pid, the sequence and
+    // the clock; a directory an aborted test left under a reused pid is cleared before use, so a
+    // fixture never reads another test's files.
     unsafe C_SEQ = unsafe C_SEQ + 1;
     let pid = unsafe shim::sc_getpid();
     let mut p = Proj {};
     unsafe stdio::snprintf(
         &mut p[0],
         256,
-        "%s/sccli_%d_%llu".ptr() as *const char,
+        "%s/sccli_%d_%llu_%llu".ptr() as *const char,
         unsafe shim::sc_tmpdir(),
         pid,
         unsafe C_SEQ,
+        (unsafe shim::sc_ticks_ms()) as u64,
     );
+    let _ = unsafe shim::sc_rm_rf(&p[0]);
     let _ = unsafe shim::sc_mkdir_p(&p[0]);
     return p;
 }

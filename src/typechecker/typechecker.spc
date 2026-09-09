@@ -518,7 +518,7 @@ const fn bt_widens(from: BuiltinType, to: BuiltinType) bool {
 // lattice, f32 -> f64, `&mut T` -> `&T`, and never -> anything. Deliberately narrower than
 // `compatible`: an unmodeled conversion makes the join fall back to the first bound, which is the
 // pre-rewrite result.
-fn it_conv_join(a: *mut Ast, from: TypeId, to: TypeId) bool {
+const fn it_conv_join(a: *mut Ast, from: TypeId, to: TypeId) bool {
     if from == to {
         return true;
     }
@@ -1016,7 +1016,7 @@ extend TypeChecker {
         };
     }
 
-    fn tc_def_closed(self: &Self, d: DefId) bool {
+    const fn tc_def_closed(self: &Self, d: DefId) bool {
         if d.node == NODE_NONE || d.module as usize >= self.pkg_count() && self.package != null {
             return false;
         }

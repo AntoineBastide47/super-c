@@ -84,6 +84,9 @@ pub struct ItemSched {
     pub dyn_edges: Set<u64>, // caller item << 32 | callee item, recorded by the master engine
     pub by_node: Vector<u32>,
     pub built: bool,
+    /// The final ranges hold the post-typecheck edges (`build_final` after the typecheck frontier,
+    /// or `finalize`): what the unused-item lint and the emission liveness read.
+    pub final_edges: bool,
     pub finalized: bool, // `finalize` ran: final ranges and signature hashes are current
     pub build_ns: u64, // time of the last `build` (the frontier's per-task edges apart)
     pub final_ns: u64, // time of `finalize`'s final-edge scan
@@ -106,6 +109,7 @@ extend ItemSched {
             dyn_edges: Set::<u64>::new(),
             by_node: Vector::<u32>::new(),
             built: false,
+            final_edges: false,
             finalized: false,
             build_ns: 0,
             final_ns: 0,
@@ -2296,7 +2300,7 @@ extend Package {
         if it == ITEM_NONE {
             return 0 - 1;
         }
-        return atomic::load_u8(unsafe (self.sched.ret_attr.as_ptr() + it as usize), 1) as i32;
+        return atomic::load_u8(unsafe (self.sched.ret_attr.as_ptr() + it as usize), 1);
     }
 
     /// Move item `it` and, for an extend, its member records (the records following it that name

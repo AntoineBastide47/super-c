@@ -780,7 +780,7 @@ struct CondQ {
 
 // Did this wake reason leave the wait in its normal (notified, timed out, or spurious) course, as opposed
 // to a cancellation the caller must unwind through?
-fn cv_normal(reason: u32) bool {
+const fn cv_normal(reason: u32) bool {
     return reason != runtime::WR_CANCEL && reason != runtime::WR_SHUTDOWN;
 }
 

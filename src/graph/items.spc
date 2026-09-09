@@ -496,6 +496,18 @@ pub fn spans_all(p: &loader::Package) Vector<Spans> {
     return sps;
 }
 
+/// Lay the post-typecheck edges (every module's `module_edges` run at the end of its type check,
+/// with the resolutions the checker added) out as the final ranges.
+pub fn build_final(p: &mut loader::Package, edges: &Vector<u64>) {
+    let n = p.idx.items.len();
+    let mut off = Vector::<u32>::new();
+    let mut tgt = Vector::<u32>::new();
+    csr(n, edges, &mut off, &mut tgt);
+    p.sched.fin_off = off;
+    p.sched.fin_edges = tgt;
+    p.sched.final_edges = true;
+}
+
 /// Refine the index after the checks: signature hashes and the final dependency ranges (the
 /// resolutions typecheck added, the engine's dynamic body edges), then publish the dynamic
 /// edge set empty. Batch builds only.
@@ -519,6 +531,7 @@ pub fn finalize(p: &mut loader::Package) {
     csr(n, &edges, &mut off, &mut tgt);
     p.sched.fin_off = off;
     p.sched.fin_edges = tgt;
+    p.sched.final_edges = true;
     p.sched.dyn_edges = Set::<u64>::new();
     let t1 = plat::now_ns();
     p.ensure_sigs();
@@ -958,7 +971,7 @@ fn heap_pop(h: &mut Vector<u64>) u64 {
     return top;
 }
 
-fn ms(ns: u64) f64 {
+const fn ms(ns: u64) f64 {
     return ns as f64 / 1000000.0;
 }
 

@@ -539,7 +539,7 @@ pub fn current_key() TaskKey {
 
 extend TaskKey {
     /// Does this key name a real registered task (as opposed to a plain thread or job)?
-    pub fn is_task(self: &TaskKey) bool {
+    pub const fn is_task(self: &TaskKey) bool {
         return self.slot != SLOT_NONE;
     }
 }
@@ -2358,13 +2358,13 @@ pub struct ShutdownResult {
 
 extend ShutdownOptions {
     /// The `shutdown()` defaults, minus the abort: default grace, report unresponsive tasks, return.
-    pub fn defaults() ShutdownOptions {
+    pub const fn defaults() ShutdownOptions {
         return ShutdownOptions { grace_ns: SHUTDOWN_GRACE_NS, report_unresponsive: true, abort_on_unresponsive: false };
     }
 }
 
 // A stable name for a wait kind, for the unresponsive-task report.
-fn wk_name(kind: i32) str<'static> {
+const fn wk_name(kind: i32) str<'static> {
     if kind == WK_MUTEX {
         return "mutex";
     }

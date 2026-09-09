@@ -138,7 +138,7 @@ extend InstGraph {
     }
 
     /// Bytes the argument keys, records and index hold (SC_TYPE_STATS).
-    pub fn retained_bytes(self: &Self) u64 {
+    pub const fn retained_bytes(self: &Self) u64 {
         return (self.keys.len() * sizeof(ArgKey) + self.recs.len() * sizeof(InstRec) + self.index.len() * 4) as u64;
     }
 
@@ -1405,7 +1405,7 @@ extend InstGraph {
     }
 
     // True for a prelude module the emitter skips (see `live`).
-    fn module_elided(self: &Self, m: usize) bool {
+    const fn module_elided(self: &Self, m: usize) bool {
         if self.live == null {
             return false;
         }

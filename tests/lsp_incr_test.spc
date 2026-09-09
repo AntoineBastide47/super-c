@@ -161,7 +161,7 @@ fn probe_res(p: &loader::Package, mid: usize, needle: str) u64 {
         if src.slice(sp.start as usize, sp.end as usize) != needle {
             continue;
         }
-        let d = a.resolution_def(i as NodeId);
+        let d = a.resolution_def(i);
         if d.node == NODE_NONE {
             continue;
         }
@@ -614,7 +614,7 @@ fn main() i32 {
     );
     assert(ok, "demand round");
     let mut rd = Vector::<an::DiagRec>::new();
-    let rp = fresh(&ws, &ovf, &ovt, &mut rd);
+    let _rp = fresh(&ws, &ovf, &ovt, &mut rd);
     assert(diags_equal(&diags, &rd), "the demand round reports the fold like a fresh analysis");
     assert(st.passes == 1, "one extra pass after the demand");
     assert(st.bodies_back == 2, "a opened and d demanded");
@@ -644,6 +644,6 @@ fn main() i32 {
     );
     assert(ok2 && st2.passes == 0 && st2.bodies_back == 0, "a held module serves the next round directly");
     let mut rd2 = Vector::<an::DiagRec>::new();
-    let rp2 = fresh(&ws, &ovf, &ovt2, &mut rd2);
+    let _rp2 = fresh(&ws, &ovf, &ovt2, &mut rd2);
     assert(diags_equal(&diags, &rd2), "steady state matches fresh");
 }

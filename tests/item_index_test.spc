@@ -109,6 +109,40 @@ extend Sq as Shape {
 pub const F5: i32 = fact(5);
 )";
 
+// A type-path call to a private associated function: the checker resolves the path, not the
+// resolver, so a batch build's precheck ranges lack the edge and the final ranges (built after the
+// type check) must carry it, which the unused-item lint and the emission liveness read.
+const A1: str = M"(import b;
+import c;
+
+pub struct S {
+    pub v: i32,
+}
+
+extend S {
+    fn helper(v: i32) i32 {
+        return v + 1;
+    }
+
+    pub fn run(self: &Self) i32 {
+        return S::helper(self.v);
+    }
+}
+
+fn main() i32 {
+    let s = S { v: 1 };
+    return s.run() + b::bee() + c::cee();
+}
+)";
+const B1: str = M"(pub fn bee() i32 {
+    return 1;
+}
+)";
+const C1: str = M"(pub fn cee() i32 {
+    return 2;
+}
+)";
+
 struct Ws {
     pub proj: cli::Proj,
     pub root: String,
@@ -251,6 +285,19 @@ fn index_edges_cover_reference_kinds() {
     for i in 0..p.sched.pre_off[p.idx.items.len()] as usize {
         assert(p.sched.pre_edges[i] as usize < p.idx.items.len(), "edge targets are items");
     }
+}
+
+@test
+fn index_final_edges_carry_type_path_calls() {
+    let ws = ws_new(A1, B1, C1);
+    let p = indexed(&ws, A1, B1, C1, true);
+    let am = mod_of(&p, "/a.spc");
+    let run = item_named(&p, am, "run");
+    let helper = item_named(&p, am, "helper");
+    assert(run != loader::ITEM_NONE && helper != loader::ITEM_NONE, "items indexed");
+    // (The analysis this harness runs builds the index after the type check, so its precheck
+    // ranges already hold the checker's resolutions; the driver's differ.)
+    assert(fin(&p, run, helper), "the checker's resolution of the type-path call is a final edge");
 }
 
 @test

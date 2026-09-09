@@ -679,7 +679,7 @@ extend Solver {
 
     /// Begin a nested candidate probe: parameters mapped after this mark stack on top of the
     /// enclosing session, and probe_end removes every trace of the probe's work.
-    pub fn probe_begin(self: &mut Self) ProbeMark {
+    pub const fn probe_begin(self: &mut Self) ProbeMark {
         return ProbeMark { snap: self.snapshot(), base: self.s_pd.len() as u32 };
     }
 

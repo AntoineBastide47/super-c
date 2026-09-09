@@ -93,9 +93,12 @@ for one invocation and frees it with the package; workers read it and write disj
    and the signature hashes. No production consumer asks yet (invalidation and instance work
    are later plans), so a build pays nothing for it; the measurement and the tests do.
 
-The precheck edges also serve the unused-item lint and the emission liveness scan in place of
-the body arena's resolution tables, which a batch build frees after each module's borrow pass;
-the lint driver builds the index for the same reason. The per-item `ret_attr` byte records the
+The final ranges are filled a second way, without the hashes: each typecheck task runs
+`module_edges` again when its module's check ends (the checker's type-path call resolutions
+are in the tables by then) and `build_final` lays every module's edges out after the frontier
+(`final_edges`). Those ranges serve the unused-item lint and the emission liveness scan in
+place of the body arena's resolution tables, which a batch build frees after each module's
+borrow pass; the lint driver builds the index for the same reason. The per-item `ret_attr` byte records the
 result-attributability verdict the borrow pass reads for every call (core-ir-publication.md).
 The language server opens the index after every resolve (its readiness states and node
 lookup serve the engine); it builds no ranges. A round keeps every module outside the affected

@@ -82,8 +82,8 @@ What read a released module's body syntax after its pass, and the record that re
 |--------|--------|
 | the borrow replay of every caller: `relate_result_precision` scanned the callee's `return` statements (`tc_result_attributable`) | `ItemSched.ret_attr`, one byte per item, recorded by `bc_record_ret_attr` right after the module's type check (the driver calls it after `check()`; 2 = unrecorded, so the harness and the language server scan live syntax as before) |
 | `emit_order`: the generic-call sites of the module's `mono` table name body nodes | `Package.emit_deps`, the module's dependency row (`emit_dep_row`) recorded before its release; `emit_order` reads the rows and computes them itself when none were recorded |
-| `lint_unused_items`: every resolution slot, attributed to its item by span | the item index's precheck edges (`ItemSched.pre_edges`, one per owner and target item), the same attribution the index made from the id ranges; the `method_refs` table stays (its owner is the function node) |
-| `compute_emit_live`: every resolution slot | the module arena's resolutions (declarations, signatures, constants, pinned bodies, import paths) plus the precheck edges' target modules; the lint driver builds the index (`build_serial`) for the same reason |
+| `lint_unused_items`: every resolution slot, attributed to its item by span | the item index's post-typecheck edges (`ItemSched.fin_edges`: each module's `module_edges` run again at the end of its type check, when the checker has added the type-path call resolutions the resolver cannot make, laid out by `build_final` after the frontier), the same attribution the index makes from the id ranges; the `method_refs` table stays (its owner is the function node) |
+| `compute_emit_live`: every resolution slot | the module arena's resolutions (declarations, signatures, constants, pinned bodies, import paths) plus the post-typecheck edges' target modules; the lint driver builds the index (`build_serial`) for the same reason |
 | the evaluator's folds during the borrow frontier, and the always-panics check and flush after it: `body_of` lowered an ordinary body from syntax when no view was open | the keep's view opens before the frontier (`reserve_bodies` pins every slot; `put`/`absorb` accept bodies into that reserve under the view); a task publishes its module's bodies into the viewed keep under the evaluator's lock before the release |
 | the evaluator's closure call (`Interp::call` read the callee node's kind) | a callable body-arena node is a closure: no read |
 | the constant pre-pass before emission (the evaluator lowered the callees of every constant from syntax after the view closed) | the pre-pass runs with the view open and `Interp.copy_kept` set: every kept hit becomes an owned compact copy (`own_kept`), then the view closes |
@@ -93,7 +93,11 @@ Equivalence: the previous compiler and this one emit byte-identical C over the c
 own sources (one worker, and fourteen under `SC_TASK_DELAY`) and over the test package;
 the corpus passes; the gate's fixpoint and worker-identity steps hold. The attribution
 differences that were possible in principle (a synthesized node without a span attributed
-by id range instead of dropped, an import-only module row) did not change a line.
+by id range instead of dropped, an import-only module row) did not change a line. The
+precheck edges alone are not enough for the lint: a private associated function called
+through a type path (`Type::helper()`) is resolved by the checker, not the resolver, and the
+first build on those edges reported 26 used functions unused; the post-typecheck edges carry
+those calls.
 
 ## Results
 
@@ -161,7 +165,7 @@ of every module; lowering reads their marks to place safepoints) and `Keep::rese
 | move, copy, consume intent | `OP_MOVE` / `OP_COPY`, `user_moves` bit per operand |
 | lexical scope and storage lifetime events | `ST_STORAGE_LIVE` / `ST_STORAGE_DEAD` (the drop points) |
 | cleanup source origins | statement and terminator spans; the tape's scope events are the AST-side duplicate the replay needs |
-| dependency record | the item index's precheck edges per item (the two scans that needed a record read them) and the per-module emission row |
+| dependency record | the item index's post-typecheck edges per item (the two scans that needed a record read them) and the per-module emission row |
 | feature summary | computed once per body by `body_features` from the locals' types and rvalue kinds |
 
 Every fact the plan names is explicit in the record; the dependency record is package-owned

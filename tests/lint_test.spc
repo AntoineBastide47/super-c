@@ -277,6 +277,26 @@ fn standalone_file_lint_clean() {
     assert(r.ok(), "a clean standalone file lints without findings");
 }
 
+// A private associated function reached only through a type path (`S::helper(..)`) is resolved by
+// the type checker, not the resolver: the unused-item lint must read the post-typecheck item edges,
+// or it reports the function unused.
+@test
+fn type_path_call_marks_a_private_associated_function_used() {
+    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
+    // dependent guest command, so it runs on native and Windows only.
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "solo.spc",
+        "struct S {\n    pub v: i32,\n}\n\nextend S {\n    fn helper(v: i32) i32 {\n        return v + 1;\n    }\n\n    pub fn run(self: &S) i32 {\n        return S::helper(self.v);\n    }\n}\n\nfn main() i32 {\n    let s = S { v: 1 };\n    return s.run() - 2;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint solo.spc");
+    assert(r.ok(), "a private associated function called through a type path is used");
+}
+
 @test
 fn standalone_file_lint_and_fix() {
     // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-

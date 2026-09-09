@@ -28,7 +28,7 @@ fn setup() Fx {
 }
 
 // The test conversion oracle: identity, plus i32 -> i64 widening.
-fn test_conv(_a: *mut Ast, from: TypeId, to: TypeId) bool {
+const fn test_conv(_a: *mut Ast, from: TypeId, to: TypeId) bool {
     if from == to {
         return true;
     }

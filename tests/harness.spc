@@ -470,12 +470,14 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
     unsafe stdio::snprintf(
         &mut dir.b[0],
         256,
-        "%s/scr_%d_%llu".ptr() as *const char,
+        "%s/scr_%d_%llu_%llu".ptr() as *const char,
         unsafe shim::sc_tmpdir(),
         pid,
         unsafe R_SEQ,
+        (unsafe shim::sc_ticks_ms()) as u64,
     );
     let dirp = (&dir.b[0]) as *const char;
+    rm_dir(dirp); // a directory an aborted test left under a reused pid
     if unsafe shim::sc_mkdir_p(dirp) != 0 {
         return r;
     }
