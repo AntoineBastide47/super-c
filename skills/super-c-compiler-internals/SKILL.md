@@ -31,8 +31,10 @@ typecheck, per module     -- type inference, obligations, instance recording (pa
   |
 discharge_obligations     -- cross-module reflection-bound obligations, once all modules typed
   |
-borrowck_all              -- lowers every body to Core IR (kept in irl::Keep), replays the
-  |                          event tape, runs the loan analysis (the one other parallel stage)
+borrowck_all              -- lowers every body to Core IR (kept in irl::Keep, viewed by the
+  |                          evaluator from here), replays the event tape, runs the loan
+  |                          analysis (the one other parallel stage); a module's body syntax
+  |                          is freed when its pass ends (syntax-ownership.md)
 [verification gates]      -- SC_FACTS_CHECK / SC_LAYOUT: each pass is a NO-OP unless its env
   |                          var is set
 lint + panics + flush     -- lint_unused_items, check_always_panics (an error, every build),
@@ -41,10 +43,10 @@ lint + panics + flush     -- lint_unused_items, check_always_panics (an error, e
   |                          kept bodies through a read-only Keep view here (see Core IR)
 runtime + external C      -- write super_rt.h/.c; ext_c_collect (@c.source wrappers, __ldflags)
   |
-emission planning         -- compute_emit_live scan; Package::emit_order (Kahn, owner-first);
-  |                          every constant evaluated once more so the evaluator's callee
-  |                          cache is complete, then Package::release_bodies frees every
-  |                          module's body arena (syntax-ownership.md)
+emission planning         -- compute_emit_live (module-arena resolutions + item index edges);
+  |                          Package::emit_order (Kahn over the recorded dependency rows);
+  |                          every constant evaluated once more with the kept bodies it
+  |                          touches copied into the evaluator, then the keep view closes
   |
 cemit_package             -- InstGraph.collect() over the kept Core IR bodies of every module that
   |                          emits (dead prelude modules seed nothing), then per-module
@@ -81,9 +83,10 @@ declarations, signatures, constant initializers, pinned bodies). Module-local. E
 item, expression, type annotation, and pattern is a node. The accessors dispatch on the bit;
 a scan enumerates both arenas through `nnodes()` / `nth_id()`, and a per-node scratch table
 is indexed by `dense(id)`. The driver frees the body arenas after emission planning, before
-the C is planned and rendered; the language server frees a closed document's after every
-round and parses it back on demand (`BodyArena.released`, `Interp.body_missing`); the model,
-the release contract and the owned records the emitter reads instead are in
+the C is planned and rendered; the driver frees each module's body arena when its borrow
+pass ends; the language server frees a closed document's after every round and parses it
+back on demand (`BodyArena.released`, `Interp.body_missing`); the model, the release contract
+and the owned records the later passes read instead are in
 [syntax-ownership.md](references/syntax-ownership.md).
 
 ### ItemId
@@ -181,7 +184,11 @@ pools; no per-node heap allocation, no pointers into other stages.
 It is consumed by the borrow-check loan analysis, drop elaboration, the CTFE
 interpreter, the instance graph, and the C emitter. Full record layout, the statement /
 terminator / rvalue kind tables, and the replay-tape events are in
-[core-ir.md](references/core-ir.md).
+[core-ir.md](references/core-ir.md). Lowering runs at the start of borrow checking, after the
+whole-package typecheck, the obligation discharge and the first type publication; the
+measurement that rejected an earlier publication point, the consumer inventory and the
+replay-tape category table are in
+[core-ir-publication.md](references/core-ir-publication.md).
 
 **One lowering per body:** `irl::Keep` (`src/ir/lower.spc`) is a cache of spent
 `Lowerer`s keyed by body. Borrowck's lowerings are recycled into it, and emission's

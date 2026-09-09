@@ -273,11 +273,6 @@ pub struct TypeChecker<'a> {
     // inference is on the stack. Consumed by the invariance check and by `relate` for subtyping.
     pub variance_of: Map<u64, u64>,
     pub variance_wip: Map<u64, bool>,
-    // Per-callee (module << 32 | node): is the result's lifetime fully attributable to bare-parameter
-    // returns, so the modular return check (tc_check_return_lifetime) has verified exactly what it
-    // borrows? Only then may a call site release the non-flowing arguments (relate_result_precision);
-    // a laundered return (`let z = y; return z;`) is not attributable, so the call stays conservative.
-    pub attributable_memo: Map<u64, bool>,
     // A declared lifetime param node -> the universal RegionVid standing for it in this function.
     pub lt_region: Map<u32, u32>,
     // Outlives constraints for the current function, packed (sup << 32 | sub) meaning "sup: sub",
@@ -606,7 +601,6 @@ extend TypeChecker {
             arity_memo: Map::<u64, u32>::new(),
             variance_of: Map::<u64, u64>::new(),
             variance_wip: Map::<u64, bool>::new(),
-            attributable_memo: Map::<u64, bool>::new(),
             lt_region: Map::<u32, u32>::new(),
             outlives: Vector::<u64>::new(),
             err_wm: 0,

@@ -23,7 +23,7 @@ pub const P_RENDER: usize = 7; // statement and expression rendering (less plann
 pub const P_ASSEMBLE: usize = 8; // header and TU assembly
 pub const P_PUBLISH: usize = 9; // file publication (less the build engine sink)
 pub const P_SYNC: usize = 10; // build engine sink: raw to gen sync and compile planning
-pub const P_COUNT: usize = 12;
+pub const P_COUNT: usize = 13;
 
 /// Repeated-work tallies.
 pub const C_TAKEN: usize = 0; // bodies taken from the keep

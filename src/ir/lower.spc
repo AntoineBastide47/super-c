@@ -139,8 +139,9 @@ pub struct Lowerer {
 pub struct Keep {
     pub ix: Map<u64, u64>,
     pub kept: Vector<Lowerer>,
-    /// Read-only views outstanding (the interpreter's post-borrow-check window): while nonzero
-    /// no body may be added, moved, or taken, since a viewer holds pointers into `kept`.
+    /// Read-only views outstanding (the interpreter's window from the borrow frontier to the
+    /// constant pre-pass): while nonzero no body may move or be taken, and a body may be added
+    /// only into reserved capacity (`reserve_bodies`), since a viewer holds pointers into `kept`.
     pub viewers: u32,
 }
 
@@ -188,20 +189,27 @@ extend Keep {
 
     /// Move every body of `other` in (first key wins, matching `put`); `other` is left empty.
     /// Slot order in `kept` is not load-bearing -- consumers index through `ix` by owner key.
-    /// Rewrite every kept body's types through the package's last publication.
-    pub fn remap_types(self: &mut Self, p: &loader::Package) {
+    /// Rewrite every kept body's types through the package's last publication; returns how many
+    /// bodies had a map to apply.
+    pub fn remap_types(self: &mut Self, p: &loader::Package) usize {
+        let mut n: usize = 0;
         for i in 0..self.kept.len() {
             let lw = self.kept.index_mut(i);
             let m = lw.body.module as usize;
             if m < p.pub_map.len() && p.pub_map.at(m).len() != 0 {
                 lw.body.remap_types(p.pub_map.at(m));
+                n += 1;
             }
         }
+        return n;
     }
 
     pub fn absorb(self: &mut Self, other: &mut Keep) {
-        assert(self.viewers == 0);
-        self.kept.reserve(other.kept.len());
+        if self.viewers == 0 {
+            self.kept.reserve(other.kept.len());
+        } else {
+            assert(self.kept.len() + other.kept.len() <= self.kept.capacity(), "a viewed keep never reallocates");
+        }
         for i in 0..other.kept.len() {
             let d = other.kept.at(i).body.owner;
             let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
@@ -216,7 +224,7 @@ extend Keep {
     }
 
     pub fn put(self: &mut Self, src: &Lowerer) {
-        assert(self.viewers == 0);
+        assert(self.viewers == 0 || self.kept.len() < self.kept.capacity(), "a viewed keep never reallocates");
         let d = src.body.owner;
         let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
         if self.ix.contains_key(&key) {

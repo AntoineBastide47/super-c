@@ -71,12 +71,15 @@ extend tc::TypeChecker {
         if self.package != null && unsafe (&*self.package).cancel_state == 0 {
             unsafe (&mut *self.package).cancel_compute();
         }
-        ctx.st.pr.stop(bfi::BP_SETUP, tp);
+        ctx.st.pr.stop(bfi::BP_REACH, tp);
         let a = self.cur_ast();
         let items = unsafe a.at_const(a.root).as_data.program.items;
+        // The lowered bodies of the function under analysis: one vector for the module, emptied
+        // after every function (a per-function vector reserves eight Lowerer slots on its first push).
+        let mut bodies = Vector::<irl::Lowerer>::new();
         for i in 0..items.len {
             let id = unsafe a.list(items)[i as usize];
-            self.bc_item(id, ow, ctx);
+            self.bc_item(id, ow, ctx, &mut bodies);
         }
         let mut file: str = "";
         if self.package != null && self.cur_module() as usize < self.pkg_count() {
@@ -90,7 +93,13 @@ extend tc::TypeChecker {
     /// Borrow-check one top-level item: functions get the body walk, aggregates their field-lifetime
 
     /// checks, extends recurse into their methods.
-    pub fn bc_item(self: &mut Self, id: NodeId, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
+    pub fn bc_item(
+        self: &mut Self,
+        id: NodeId,
+        ow: &mut bfx::Owner,
+        ctx: &mut bfi::BorrowCtx,
+        bodies: &mut Vector<irl::Lowerer>,
+    ) {
         let a = self.cur_ast();
         let nk = a.at_const(id).kind;
         switch nk {
@@ -98,7 +107,7 @@ extend tc::TypeChecker {
                 let td = ctx.st.pr.start();
                 self.tc_check_elision(id);
                 ctx.st.pr.stop(bfi::BP_DECL, td);
-                self.bc_fn(id, ow, ctx);
+                self.bc_fn(id, ow, ctx, bodies);
             },
             NODE_STRUCT | NODE_ENUM => {
                 let td = ctx.st.pr.start();
@@ -108,7 +117,7 @@ extend tc::TypeChecker {
             NODE_EXTEND => {
                 let ms = a.at_const(id).as_data.extend_def.items;
                 for j in 0..ms.len {
-                    self.bc_item(unsafe a.list(ms)[j as usize], ow, ctx);
+                    self.bc_item(unsafe a.list(ms)[j as usize], ow, ctx, bodies);
                 }
             },
             _ => {},
@@ -2641,8 +2650,15 @@ extend tc::TypeChecker {
     // borrow/move/lifetime analyses. Types and resolutions are read back from the AST; nothing here
     // types anything.
     /// Flow-check one function: reset every per-function fact (moves, uninit, freed, borrows,
-    /// scopes, regions, error watermark) and walk the body in evaluation order.
-    pub fn bc_fn(self: &mut Self, id: NodeId, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) {
+    /// scopes, regions, error watermark) and walk the body in evaluation order. `irbodies` is the
+    /// caller's empty scratch for the lowerings; it is empty again on return.
+    pub fn bc_fn(
+        self: &mut Self,
+        id: NodeId,
+        ow: &mut bfx::Owner,
+        ctx: &mut bfi::BorrowCtx,
+        irbodies: &mut Vector<irl::Lowerer>,
+    ) {
         let a = self.cur_ast();
         let fnd = a.at_const(id).as_data.function;
         if fnd.body == NODE_NONE {
@@ -2666,9 +2682,8 @@ extend tc::TypeChecker {
         // lowered bodies against the final side tables and emit the flow diagnostics. A body that
         // fails to lower was reported as an error by bc_ir_lower: nothing further to check.
         self.bc_unsafe_spans.truncate(0);
-        let mut irbodies = Vector::<irl::Lowerer>::new();
         let tl = ctx.st.pr.start();
-        let quiet = self.bc_ir_lower(id, ctx, &mut irbodies);
+        let quiet = self.bc_ir_lower(id, ctx, irbodies);
         ctx.st.pr.stop(bfi::BP_LOWER, tl);
         for b in 0..irbodies.len() {
             let bw = irbodies.at(b);
@@ -2687,10 +2702,10 @@ extend tc::TypeChecker {
             ctx.rep.reset();
             let tn = irbodies.at(0).tape.len();
             let tr = ctx.st.pr.start();
-            self.bc_replay(&irbodies, 0, 0, tn, &mut ctx.rep);
+            self.bc_replay(irbodies, 0, 0, tn, &mut ctx.rep);
             ctx.st.pr.stop(bfi::BP_REPLAY, tr);
             let mut irres = Vector::<bfi::FlowErr>::new();
-            self.bc_ir_analyze(ow, &irbodies, ctx, &mut irres);
+            self.bc_ir_analyze(ow, irbodies, ctx, &mut irres);
             let te = ctx.st.pr.start();
             self.bc_ir_emit(&mut irres);
             ctx.st.pr.stop(bfi::BP_EMIT, te);
@@ -3252,25 +3267,51 @@ extend tc::TypeChecker {
         }
     }
 
+    /// Record the result-attributability verdict of every function of the current module in the
+    /// package's item table (`ItemSched.ret_attr`), right after its type check and before any
+    /// module releases its body syntax: the borrow pass of every caller reads the table instead.
+    pub fn bc_record_ret_attr(self: &mut Self) {
+        if self.package == null || !unsafe (&*self.package).sched.built {
+            return;
+        }
+        let m = self.cur_module();
+        let a = self.cur_ast();
+        let items = unsafe a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let id = unsafe a.list(items)[i as usize];
+            let k = a.at_const(id).kind;
+            if k == NodeKind::NODE_FUNCTION {
+                let ra = self.tc_scan_returns_attributable(m, a.at_const(id).as_data.function.body, 0);
+                unsafe (&mut *self.package).set_item_ret_attr(m, id, ra);
+            } else if k == NodeKind::NODE_EXTEND {
+                let ms = a.at_const(id).as_data.extend_def.items;
+                for j in 0..ms.len {
+                    let mid = unsafe a.list(ms)[j as usize];
+                    if a.at_const(mid).kind == NodeKind::NODE_FUNCTION {
+                        let ra = self.tc_scan_returns_attributable(m, a.at_const(mid).as_data.function.body, 0);
+                        unsafe (&mut *self.package).set_item_ret_attr(m, mid, ra);
+                    }
+                }
+            }
+        }
+    }
+
     /// Is `md`'s result lifetime fully attributable to bare-parameter returns? Only then has the modular
     /// return check verified exactly which parameters the result borrows, so a caller may release the
     /// non-flowing arguments. A return of a local, a call result, or a value laundered through a local
     /// is NOT attributable: the signature may be dishonoured there, so the caller stays conservative.
     pub fn tc_result_attributable(self: &mut Self, md: DefId) bool {
-        let key = md.module as u64 << 32 | md.node as u64;
-        switch self.attributable_memo.get(&key) {
-            Some(v) => {
-                return *v;
-            },
-            None => {},
-        };
-        // Memoize a provisional TRUE first so a recursive body cannot loop.
-        self.attributable_memo.insert(key, true);
+        // The checker recorded the verdict at the end of the callee's body check (its syntax may be
+        // released by now); a call target outside the item table is scanned directly.
+        if self.package != null {
+            let v = unsafe (&*self.package).item_ret_attr(md.module, md.node);
+            if v == 0 || v == 1 {
+                return v != 0;
+            }
+        }
         let fa = self.mod_ast(md.module);
         let body = fa.at_const(md.node).as_data.function.body;
-        let ok = self.tc_scan_returns_attributable(md.module, body, 0);
-        self.attributable_memo.insert(key, ok);
-        return ok;
+        return self.tc_scan_returns_attributable(md.module, body, 0);
     }
 
     /// True when every `return` reachable in `node` returns a value whose borrows attribute to the

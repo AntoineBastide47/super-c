@@ -433,8 +433,10 @@ pub fn open(p: &mut loader::Package) {
         }
     }
     sch.state.resize_default(n);
+    sch.ret_attr.resize_default(n);
     for i in 0..n {
         sch.state.set(i, loader::IS_RESOLVED);
+        sch.ret_attr.set(i, 2); // unrecorded: the borrow pass scans the body
     }
     sch.sig_hash.resize_default(n);
     sch.fin_off.resize_default(n + 1);

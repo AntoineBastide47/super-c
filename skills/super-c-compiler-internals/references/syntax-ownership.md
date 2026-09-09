@@ -64,12 +64,21 @@ Rules for every scan and every table indexed by node id:
 
 ## Release contract
 
-`Package::release_bodies` runs in `run_package_i` after `emit_order`: every body is
-lowered and kept (`irl::Keep`), every deferred constant is flushed, the lints and the
-always-panics check have run, the live set and the emit order have read their last
-reference. A NODE_BODY read after that is a bounds abort in `Vector::at`. `super-c lint`
-and the test harness never release: their pipelines stop before emission. The LSP releases
-per document, see below.
+A batch build frees each module's body arena at the end of the module's borrow pass
+(`Package.free_bodies`, set by `run_package_i`; the driver's serial loop and `bc_run_one`):
+the module's bodies are lowered, kept (`irl::Keep`) and analyzed, and what a later pass read
+of the syntax is recorded first: the callees' return attributability (`ItemSched.ret_attr`,
+recorded after the type check), the module's emission dependency row (`Package.emit_deps`),
+and the resolution scans of the unused-item lint and the emission liveness read the item
+index's edges. The evaluator views the keep from the start of the frontier, so a fold reaches
+the bodies of a released module, and the constant pre-pass before emission copies the kept
+bodies it touches (`Interp.copy_kept`) before the view closes. A module with a deferred
+`static_assert` inside a body keeps its arena until the flush. A NODE_BODY read after the
+release is a bounds abort in `Vector::at`. `super-c lint`, the item-index measurement
+(`SC_ITEM_STATS`) and the test harness keep every arena until emission planning
+(`Package::release_bodies`, the point every batch build used before). The LSP releases per
+document, see below. The measurement and the reader inventory are in
+[core-ir-publication.md](core-ir-publication.md).
 
 What emission reads of a body after the release, and the owned record that carries it:
 

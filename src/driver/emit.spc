@@ -132,12 +132,25 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
 fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
     let n = p.modules.len();
     let a = p.module_ast_const(m as ModuleId);
-    let nb9 = unsafe a.nodes.len();
-    let nr = a.nnodes();
+    // The module arena's resolutions (declarations, signatures, constants, pinned bodies, import
+    // paths), then the item index's dependency edges for the releasable bodies, whose syntax is
+    // freed after the borrow pass.
+    let nr = unsafe a.nodes.len();
     for r in 0..nr {
-        let d = a.resolution_def(Ast::nth_id_n(nb9, r));
+        let d = a.resolution_def(r as NodeId);
         if d.node != NODE_NONE && d.module as usize < n && d.module as usize != m && p.builtin_of_decl(d.module, d.node) < 0 {
             let _ = mark_live(row, n, d.module);
+        }
+    }
+    assert(p.sched.built, "the item index precedes emission liveness");
+    let i0 = p.idx.mod_items[m] as usize;
+    let i1 = p.idx.mod_items[m + 1] as usize;
+    for it in i0..i1 {
+        for e in p.sched.pre_off[it] as usize..p.sched.pre_off[it + 1] as usize {
+            let tm = p.idx.items.at(p.sched.pre_edges[e] as usize);
+            if tm.module as usize != m && p.builtin_of_decl(tm.module, tm.node) < 0 {
+                let _ = mark_live(row, n, tm.module);
+            }
         }
     }
     let nt = a.ntypes();
@@ -488,6 +501,7 @@ fn tc_run_one(t: TcTask) {
         tck.lint = want;
         tck.mark_log = &mut (unsafe &mut *out).log;
         tck.check();
+        tck.bc_record_ret_attr();
         {
             // Publish completion: everything check() wrote happens-before a waiter's wake.
             let st = t.wc;
@@ -756,6 +770,7 @@ fn typecheck_module(
     let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     t.check();
+    t.bc_record_ret_attr();
     let had = t.has_errors();
     if had || fixes == null && t.errors.has_warnings() {
         t.log_errors();
@@ -3093,6 +3108,11 @@ pub fn cemit_package(
     let mut tt0 = unsafe shim::sc_ticks_ms();
     let mut prd = prb::Probe::new(tstat, stdlib::getenv("SC_BUILD_MEM") != null);
     publish_checkpoint(p, irkeep);
+    // The evaluator's view of the keep (opened by the borrow frontier) closes before the graph
+    // takes the bodies: the driver closes it after its constant pre-pass, any other pipeline here.
+    if p.cir != null {
+        (p.cir as *mut iri::Interp).keep_view_clear();
+    }
     // The planner's signature-level propagation reads the package metadata.
     p.ensure_sigs();
     let gm9 = prd.start();
@@ -4813,7 +4833,17 @@ pub fn publish_checkpoint(p: &mut loader::Package, keep: *mut irl::Keep) {
         ci.remap_types(p);
     }
     if keep != null {
-        unsafe (&mut *keep).remap_types(p);
+        let t0 = std::parallel::platform::now_ns();
+        let n9 = unsafe (&mut *keep).remap_types(p);
+        if stdlib::getenv("SC_TYPE_STATS") != null {
+            eprintln(
+                "type-stats: publication {} remapped {} of {} kept bodies in {} us",
+                p.publications,
+                n9,
+                unsafe (&*keep).kept.len(),
+                (std::parallel::platform::now_ns() - t0) / 1000,
+            );
+        }
     }
     if stdlib::getenv("SC_TYPE_VALIDATE") != null && !p.check_published() {
         unsafe stdlib::exit(1);
@@ -7022,6 +7052,7 @@ struct BcTask {
     pub i: usize,
     pub out: *mut BcOut,
     pub want_keep: bool,
+    pub master: *mut irl::Keep, // the viewed package keep the task's bodies publish into
     pub pool: *mut psync::Mutex<Vector<BcSlot>>,
 }
 
@@ -7062,6 +7093,27 @@ fn bc_run_one(t: BcTask) {
     o.errors = replace(&mut tck.errors, diag::Errors::new());
     o.st = replace(&mut slot.ctx.st, bfi::BcStats::new(false, false));
     slot.ctx.keep = null;
+    if t.master != null {
+        // Publish this module's bodies into the viewed keep under the evaluator's lock (its
+        // lookups read the index), then free the syntax the analyses are done with.
+        let ce = p.cir as *mut iri::Interp;
+        let mut free = p.free_bodies;
+        if ce != null {
+            ce.eng_lock();
+        }
+        unsafe (&mut *t.master).absorb(&mut o.keep);
+        if ce != null {
+            // A deferred static_assert in a body keeps this module's syntax for the flush.
+            free = free && !ce.pending_in_bodies(t.i as ModuleId);
+            ce.eng_unlock();
+        }
+        if p.free_bodies {
+            p.record_emit_deps(t.i);
+        }
+        if free {
+            p.modules[t.i].ast.release_bodies();
+        }
+    }
     bc_slot_give(unsafe &*t.pool, slot);
 }
 
@@ -7090,15 +7142,25 @@ fn bc_slot_give(pool: &psync::Mutex<Vector<BcSlot>>, slot: BcSlot) {
 pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     publish_checkpoint(p, keep);
     let n = p.modules.len();
+    // The keep holds every body from here on, and the evaluator views it while the frontier
+    // runs so a fold reaches the bodies of a module that has already released its syntax; the
+    // reserve keeps every slot in place under that view.
+    if keep != null {
+        unsafe (&mut *keep).reserve_bodies(p);
+        let cirk = p.cir as *mut iri::Interp;
+        if cirk != null {
+            cirk.keep_view_set(keep);
+        }
+    }
+    if p.free_bodies {
+        p.emit_deps_reserve();
+    }
     if p.jobs != 1 && n > 1 {
         return borrowck_all_par(p, keep);
     }
     let mut ow = bfx::Owner::new(p);
     let mut ctx = bfi::BorrowCtx::new();
     ctx.keep = keep;
-    if keep != null {
-        unsafe (&mut *keep).reserve_bodies(p);
-    }
     ctx.st = bc_stats_new();
     ctx.st.all = p.icost_on;
     ctx.validate = stdlib::getenv("SC_BC_VALIDATE") != null;
@@ -7108,6 +7170,13 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
             ok = false;
         }
         p.set_module_states(i, loader::IS_IR_READY);
+        if p.free_bodies {
+            p.record_emit_deps(i);
+            let ce = p.cir as *mut iri::Interp;
+            if ce == null || !ce.pending_in_bodies(i as ModuleId) {
+                p.modules[i].ast.release_bodies();
+            }
+        }
     }
     bc_stats_print(&ctx.st, &ctx);
     if p.icost_on {
@@ -7168,7 +7237,7 @@ fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     let pool = psync::Mutex::<Vector<BcSlot>>::new(Vector::<BcSlot>::new());
     let poolp = ((&pool) as *const psync::Mutex<Vector<BcSlot>>) as *mut psync::Mutex<Vector<BcSlot>>;
     for i in 0..n {
-        let t = BcTask { p: pp, i: i, out: outs.index_mut(i), want_keep: want, pool: poolp };
+        let t = BcTask { p: pp, i: i, out: outs.index_mut(i), want_keep: want, master: keep, pool: poolp };
         let wgc = wg.clone();
         launch || {
             bc_run_one(t);
@@ -7698,29 +7767,33 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
             continue;
         }
         let a = p.module_ast_const(m as ModuleId);
-        for k in 0..a.nnodes() {
-            let i = a.nth_id(k);
-            let d = a.resolution_def(i);
-            if d.node == NODE_NONE || d.module as usize >= nm {
-                continue;
-            }
-            let dm = d.module as usize;
-            if ents[dm].len() == 0 {
-                continue;
-            }
-            let si = lint_owner(ents.at(m), a.at_const(i).span.start);
+        // The item index's dependency edges stand in for the resolution scan: one edge per
+        // (owner item, target item), the owner the item `lint_owner` attributes the referencing
+        // node to, without the releasable body syntax.
+        assert(p.sched.built, "the item index precedes the unused-item lint");
+        let i0 = p.idx.mod_items[m] as usize;
+        let i1 = p.idx.mod_items[m + 1] as usize;
+        for it in i0..i1 {
+            let si = lint_owner(ents.at(m), a.at_const(p.idx.items.at(it).node).span.start);
             if si < 0 {
                 continue;
             }
-            let ta = p.module_ast_const(d.module);
-            let di = lint_owner(ents.at(dm), ta.at_const(d.node).span.start);
-            if di < 0 {
-                continue;
-            }
             let ss = (starts[m] + ents[m][si as usize].node as usize) as u64;
-            let ds = (starts[dm] + ents[dm][di as usize].node as usize) as u64;
-            if ss != ds {
-                edges.push(ss << 32 | ds);
+            for e in p.sched.pre_off[it] as usize..p.sched.pre_off[it + 1] as usize {
+                let tm = p.idx.items.at(p.sched.pre_edges[e] as usize);
+                let dm = tm.module as usize;
+                if dm >= nm || ents[dm].len() == 0 {
+                    continue;
+                }
+                let ta = p.module_ast_const(tm.module);
+                let di = lint_owner(ents.at(dm), ta.at_const(tm.node).span.start);
+                if di < 0 {
+                    continue;
+                }
+                let ds = (starts[dm] + ents[dm][di as usize].node as usize) as u64;
+                if ss != ds {
+                    edges.push(ss << 32 | ds);
+                }
             }
         }
         // `a * b` resolves the method by NAME, so the resolution table holds no edge to it. The method
@@ -8454,6 +8527,7 @@ fn lint_package_i(
     if !p.ok {
         return 1;
     }
+    gitems::build_serial(p);
     for i in 0..n {
         let sel = lint_reported(p, i, lint_mod as i32);
         let fx = if sel {
@@ -8483,9 +8557,7 @@ fn lint_package_i(
     }
     layout_pass(p);
     let cirk = p.cir as *mut iri::Interp;
-    if cirk != null {
-        cirk.keep_view_set(&mut lkeep);
-    }
+    if cirk != null {}
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
     // duplicates). The const suggestion is the exception: opt-in (`--const`, warning every
     // eligible function at once would swamp default lints), and under `--fix` it contributes its
@@ -8637,6 +8709,10 @@ fn run_package_i(
         }
     }
     let mut irkeep = irl::Keep::new();
+    // Each module's body syntax is freed after its borrow pass: the passes that follow read the
+    // kept bodies, the item index and the module arenas. The measurement's final graph reads the
+    // bodies, so that mode keeps them until emission planning.
+    p.free_bodies = !istats;
     p.ok = borrowck_all(p, &mut irkeep) && p.ok;
     // Release the pool as soon as the one parallel stage is done: the test runner FORKS after
     // this, and a forked child inherits the pool's state but none of its worker threads. (Also
@@ -8653,18 +8729,21 @@ fn run_package_i(
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("phase borrowck: {} ms\n", t9 - tp0);
+        let ce9 = p.cir as *mut iri::Interp;
+        if ce9 != null {
+            eprint(
+                "interp bodies after borrowck: {} lookups, {} kept hits, {} fresh lowerings ({} generic instances, {} not kept)\n",
+                unsafe ce9.st_lookups,
+                unsafe ce9.st_kept_hits,
+                unsafe ce9.st_fresh,
+                unsafe ce9.st_fresh_generic,
+                unsafe ce9.st_fresh_miss,
+            );
+        }
         tp0 = t9;
     }
     if facts_verify(p, &wms, "borrowck") != 0 {
         return 1;
-    }
-    // Every ordinary body now sits in irkeep: the evaluator executes those in place until the
-    // emitter starts taking them.
-    {
-        let cirk = p.cir as *mut iri::Interp;
-        if cirk != null {
-            cirk.keep_view_set(&mut irkeep);
-        }
     }
     layout_pass(p);
     if tstat {
@@ -8674,6 +8753,11 @@ fn run_package_i(
     }
     if lint {
         lint_unused_items(p, -1);
+        if tstat {
+            let t9 = unsafe shim::sc_ticks_ms();
+            eprint("phase lint: {} ms\n", t9 - tp0);
+            tp0 = t9;
+        }
     }
     // The static_asserts undecidable in module order re-evaluate now that every module is fully typed.
     let cirf = p.cir as *mut iri::Interp;
@@ -8699,12 +8783,6 @@ fn run_package_i(
         }
         cirf.flush_asserts(flush_assert_err, pv);
         cirf.flush_consts(flush_const_err, pv);
-    }
-    {
-        let cirk = p.cir as *mut iri::Interp;
-        if cirk != null {
-            cirk.keep_view_clear();
-        }
     }
     if !p.ok {
         return 1;
@@ -8769,9 +8847,10 @@ fn run_package_i(
     let mut order = Vector::<ModuleId>::new();
     p.emit_order(&mut order);
     syntax_stats_report(p, "prepare");
-    // Emission materializes value constants through the evaluator, whose callees lower from
-    // syntax on first use: evaluate every constant now, while the syntax is live, so the
-    // lowerings it needs are cached (`Interp::body_of`) before the release.
+    // Emission materializes value constants through the evaluator, whose callees come from the
+    // kept bodies: evaluate every constant now, with the view still open and every kept hit
+    // copied into the evaluator's own boxes (`copy_kept`), then close the view before the
+    // emitter takes the kept bodies. The released body syntax cannot lower a callee again.
     {
         let cirp = p.cir as *mut iri::Interp;
         if cirp != null {
@@ -8780,6 +8859,7 @@ fn run_package_i(
             unsafe cirp.call_memo.clear();
             unsafe cirp.item_memo.clear();
             unsafe cirp.ememo.clear();
+            unsafe cirp.copy_kept = true;
             for m in 0..n {
                 if !p.modules[m].has_ast {
                     continue;
@@ -8792,6 +8872,8 @@ fn run_package_i(
                     }
                 }
             }
+            unsafe cirp.copy_kept = false;
+            cirp.keep_view_clear();
         }
     }
     // Every body is lowered and kept, every deferred constant is flushed, and the live set and the

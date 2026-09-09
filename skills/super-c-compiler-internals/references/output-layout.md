@@ -129,8 +129,7 @@ The manifest hash mixes eight bytes per step; the emitted bytes (9.3 MiB) cost a
 `[shards]` and `[instance-shards]` in build.toml map a module path to a count. The
 count is an output schema: the manifest records it, and a build whose policy differs
 from the previous manifest's names the migration on stderr (every shard of that module
-is rewritten). A module absent from the policy is one file; a shard index never depends
-on body content, so a body edit rewrites the shard holding that body and nothing else.
+is rewritten).
 
 ## Validation
 

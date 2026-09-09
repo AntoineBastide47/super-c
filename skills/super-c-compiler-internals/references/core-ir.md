@@ -177,3 +177,9 @@ need.
 | C emitter | Renders bodies to readable C |
 | Verifier (`ir/verify.spc`) | Structural rules (sealed blocks, type agreement) |
 | Printer (`ir/print.spc`) | The IR expected-output tests |
+
+The checked inventory (every consumer, the fields it reads, what it still reads outside the
+record and under which condition that read could go), the measured decision that keeps
+lowering at the start of borrow checking instead of publishing inside the typecheck frontier,
+and the tape categories with their counts are in
+[core-ir-publication.md](core-ir-publication.md).

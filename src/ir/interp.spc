@@ -582,6 +582,9 @@ pub struct Interp {
     /// otherwise): a non-generic body found there executes in place, with no lowering and no box.
     /// A per-task engine copies the pointer without counting as a viewer (the master counts).
     pub keep_view: *const irl::Keep,
+    /// While set, a kept hit becomes an owned compact copy in `bodies` instead of a view slot: the
+    /// view closes before emission and the released syntax cannot lower the body again.
+    pub copy_kept: bool,
     /// An engine whose binding-free lowerings this one reads on a miss (the emission's
     /// materialization engine over the driver's, whose cache the pre-release constant pass filled
     /// while the body syntax was live); null = none.
@@ -672,6 +675,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         body_ix: Map::<u64, u64>::new(),
         body_slot: Vector::<u64>::new(),
         keep_view: null,
+        copy_kept: false,
         parent: null,
         st_lookups: 0,
         st_kept_hits: 0,
@@ -1546,7 +1550,12 @@ extend Interp {
         }
         switch self.body_ix.get(&bkey) {
             Some(v) => {
-                return (*v) as i64;
+                let si = (*v) as usize;
+                if self.copy_kept && (self.body_slot[si] & BODY_KEPT) != 0 {
+                    let owned = self.own_kept(self.body_slot[si] & BODY_MASK);
+                    self.body_slot.set(si, owned);
+                }
+                return si as i64;
             },
             None => {},
         };
@@ -1557,7 +1566,12 @@ extend Interp {
             let ki = (unsafe &*self.keep_view).view(m, fnode);
             if ki >= 0 {
                 self.st_kept_hits += 1;
-                self.body_slot.push(BODY_KEPT | ki as u64);
+                if self.copy_kept {
+                    let owned = self.own_kept(ki as u64);
+                    self.body_slot.push(owned);
+                } else {
+                    self.body_slot.push(BODY_KEPT | ki as u64);
+                }
                 self.body_keys.push(bkey);
                 self.body_plain.push(m as u64 << 32 | fnode as u64);
                 self.body_ix.insert(bkey, self.body_keys.len() as u64 - 1);
@@ -1715,6 +1729,15 @@ extend Interp {
         return ok;
     }
 
+    // An owned compact copy of kept slot `ki` (see `copy_kept`): its index in `bodies`.
+    fn own_kept(self: &mut Self, ki: u64) u64 {
+        let kl: *const irl::Lowerer = (unsafe &*self.keep_view).kept.at(ki as usize);
+        let mut lw = irl::Lowerer::new(self.pkg, unsafe kl.body.module, unsafe kl.body.owner.node);
+        lw.adopt(unsafe &*kl);
+        self.bodies.push(Box::new(lw));
+        return self.bodies.len() as u64 - 1;
+    }
+
     // The lowering a body_of slot names.
     fn body_at(self: &Self, bidx: i64) *const irl::Lowerer {
         let sl = self.body_slot[bidx as usize];
@@ -1819,20 +1842,26 @@ extend Interp {
         let mut binds = Vector::<ISub>::new();
         let mut is_extern = false;
         {
-            let da = unsafe &*self.p().module_ast_const(fm);
-            let k = da.at_const(fnode).kind;
-            if closure || k == NodeKind::NODE_CLOSURE {
+            if Ast::in_body(fnode) {
+                // Only a closure is callable from the body arena, whose syntax may be released
+                // by now (its kept body is looked up under its own node).
                 closure = true;
-                if da.at_const(fnode).kind != NodeKind::NODE_CLOSURE {
-                    let _ = self.bail();
-                    return false;
-                }
             } else {
-                if k != NodeKind::NODE_FUNCTION {
-                    let _ = self.bail();
-                    return false;
+                let da = unsafe &*self.p().module_ast_const(fm);
+                let k = da.at_const(fnode).kind;
+                if closure || k == NodeKind::NODE_CLOSURE {
+                    closure = true;
+                    if k != NodeKind::NODE_CLOSURE {
+                        let _ = self.bail();
+                        return false;
+                    }
+                } else {
+                    if k != NodeKind::NODE_FUNCTION {
+                        let _ = self.bail();
+                        return false;
+                    }
+                    is_extern = da.at_const(fnode).as_data.function.is_extern;
                 }
-                is_extern = da.at_const(fnode).as_data.function.is_extern;
             }
         }
         if is_extern {
@@ -6359,6 +6388,18 @@ extend Interp {
             }
         }
         self.pending.clear();
+    }
+
+    /// True when a deferred static_assert of module `m` sits in its body arena: the flush reads
+    /// that syntax, so the driver keeps the module's bodies until then.
+    pub fn pending_in_bodies(self: &Self, m: ModuleId) bool {
+        for i in 0..self.pending.len() {
+            let pk = self.pending[i];
+            if (pk >> 32) as ModuleId == m && Ast::in_body((pk & 0xFFFFFFFFu64) as NodeId) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Re-evaluate the deferred const initializers: err() fires with trap detail for a definite

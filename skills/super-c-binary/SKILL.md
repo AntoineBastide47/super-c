@@ -339,7 +339,7 @@ a `thin` profile keeps `auto` there.
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
 | `SC_NO_TU_CACHE` | Disable per-TU journal/replay cache |
 | `SC_BUILD_MEM_BUDGET` | Cap parallel emission bytes in flight (`64M`, `2G`) |
-| `SC_TYPE_STATS` | Print the type identity counters per phase and at the end of emission: interning hits and probe steps, foreign lowerings, instance-graph interns, layout cache traffic, the bytes the package type table and the module pools retain, and the publication census (`type-identity.md` in the internals skill) |
+| `SC_TYPE_STATS` | Print the type identity counters per phase and at the end of emission: interning hits and probe steps, foreign lowerings, instance-graph interns, layout cache traffic, the bytes the package type table and the module pools retain, the publication census, and per publication the kept bodies remapped and the time it took (`type-identity.md` in the internals skill) |
 | `SC_SYNTAX_STATS` | Print one syntax accounting line per phase (parse, resolve, typecheck, borrowck, emit): node and child counts with the share inside bodies, the retained bytes of nodes, children, resolutions, types, module pools and the other side tables, the source text, and the module that retains the most (`syntax-ownership.md` in the internals skill) |
 
 ### Verification (dev gates, each runs only when set)
@@ -349,16 +349,16 @@ a `thin` profile keeps `auto` there.
 | `SC_FACTS_CHECK` | Snapshot semantic tables after typecheck; report mutations |
 | `SC_CORE_IR` | Re-verify inlined bodies and re-prove bounds-check eliminations |
 | `SC_LAYOUT` | Validate pool types against C layout invariants |
-| `SC_BORROW_STATS` | Borrow-check probe table (`src/borrowck/flow_ir.spc`): ms, calls and (with `SC_BUILD_STATS` + `SC_BUILD_MEM`) allocations per region (lower, replay, forest, facts, cfg, liveness, moves, solver, rules, emit, setup, decl), skip tallies, sizes, the slowest bodies and the retained scratch. Needs `SC_BUILD_STATS`; parallel allocation columns are global counters and mean nothing |
+| `SC_BORROW_STATS` | Borrow-check probe table (`src/borrowck/flow_ir.spc`): ms, calls and (with `SC_BUILD_STATS` + `SC_BUILD_MEM`) allocations per region (lower, replay, forest, facts, cfg, liveness, moves, solver, rules, emit, setup, decl, reach), skip tallies, sizes, the lowered product (Core IR KiB, type slots, replay-tape entries per event kind), the slowest bodies and the retained scratch. Needs `SC_BUILD_STATS`; parallel allocation columns are global counters and mean nothing |
 | `SC_BC_VALIDATE` | Validation build: every borrow-check stage the feature predicate skipped runs anyway and must find nothing (zero loans, zero move events, no diagnostic); aborts otherwise. Output is unchanged. The gate runs its fixpoint and worker-identity builds under it |
 | `SC_TYPE_VALIDATE` | After every type publication checkpoint, exit 1 if any module table still names a provisional type id. The gate runs its fixpoint and worker-identity builds under it |
 | `SC_TYPE_COLLIDE` | Every type and instance hashes to one bucket: the type tables run on full comparisons alone, so a hash-order dependence shows as different output |
 | `SC_TASK_DELAY` | A deterministic per-module delay at the start of every parallel typecheck and borrow-check task, so the worker-identity gates run under a schedule the machine would not produce by itself |
 | `SC_TYPE_TABLE` | Path: write the package type table at the end of emission, one line per final id (`id class kind qualifier module payload`, children as final ids); the gate compares the dumps of one worker and every core |
-| `SC_CEMIT_STATS` | Per-phase wall times, the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes) and the emission probe table (`src/emit/probe.spc`: ms and calls per region, bodies taken from the keep or lowered, instance re-lowerings, rendered bodies and bytes; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
+| `SC_CEMIT_STATS` | Per-phase wall times (the unused-item lint as its own phase), the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes; printed after borrow checking and after the always-panics check) and the emission probe table (`src/emit/probe.spc`: ms and calls per region, bodies taken from the keep or lowered, instance re-lowerings, rendered bodies and bytes; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
 | `SC_INLINE_STATS` | Per-body inliner decision counters |
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters |
-| `SC_ITEM_STATS` | The item schedule index measurement (`src/graph/items.spc`): per-item typecheck costs, the graph and its components, the predicted item-schedule makespans against the module levels, per-body borrow and per-module panics and emission costs, the index digest (serial builds; `--jobs=1` for the costs) |
+| `SC_ITEM_STATS` | The item schedule index measurement (`src/graph/items.spc`): per-item typecheck costs, the graph and its components, the predicted item-schedule makespans against the module levels, per-body borrow and per-module panics and emission costs, the index digest (serial builds; `--jobs=1` for the costs). Keeps every body arena until emission planning (its final graph reads the bodies) |
 
 ### LSP
 

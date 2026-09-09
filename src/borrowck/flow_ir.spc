@@ -27,7 +27,8 @@ pub const BP_RULES: usize = 8;
 pub const BP_EMIT: usize = 9;
 pub const BP_SETUP: usize = 10; // per-module checker construction and diagnostic finalization
 pub const BP_DECL: usize = 11; // declaration-level lifetime checks and the per-function preludes
-const BP_NAMES: [str<'static>; 12] = [
+pub const BP_REACH: usize = 12; // the package's coroutine and cancellation reachability scans (once)
+const BP_NAMES: [str<'static>; 13] = [
     "lower",
     "replay",
     "forest",
@@ -40,9 +41,10 @@ const BP_NAMES: [str<'static>; 12] = [
     "emit",
     "setup",
     "decl",
+    "reach",
 ];
-static_assert(BP_DECL + 1 == 12, "one name per borrow region");
-static_assert(BP_DECL < prb::P_COUNT, "the borrow regions fit the probe");
+static_assert(BP_REACH + 1 == 13, "one name per borrow region");
+static_assert(BP_REACH < prb::P_COUNT, "the borrow regions fit the probe");
 
 /// Per-body tallies.
 pub const BT_BODIES: usize = 0; // bodies analyzed (closures included)
@@ -61,7 +63,11 @@ pub const BT_STMTS: usize = 12;
 pub const BT_LOAN_SKIP: usize = 13; // loan discovery and dataflow skipped, move facts still generated
 pub const BT_GENERIC_HELD: usize = 14; // the loan skip withheld only because a type is unresolved
 pub const BT_TRIMS: usize = 15; // scratch releases past BC_SCRATCH_BUDGET
-pub const BT_COUNT: usize = 16;
+pub const BT_TAPE: usize = 16; // replay tape entries (8 bytes each)
+pub const BT_IR_BYTES: usize = 17; // bytes of the lowered bodies' pools (kept exact-size)
+pub const BT_TY_SLOTS: usize = 18; // type ids a publication remap rewrites in those bodies
+pub const BT_COUNT: usize = 19;
+const TP_KINDS: usize = 32;
 const TOP_N: usize = 8;
 
 /// The probe and its tallies, one per context; task copies fold into the driver's.
@@ -71,6 +77,7 @@ pub struct BcStats {
     pub top_ns: Array<u64, TOP_N>, // the slowest bodies' analysis time, descending
     pub top_id: Array<u64, TOP_N>, // module << 32 | owner node
     pub top_sz: Array<u64, TOP_N>, // blocks << 32 | points
+    pub tape: Array<u64, TP_KINDS>, // replay tape entries per event kind
     pub all: bool, // record every body (SC_ITEM_STATS): (id, ns) pairs in `body_ns` and `lower_ns`
     pub body_ns: Vector<u64>,
     pub lower_ns: Vector<u64>, // Core IR lowering per body
@@ -84,6 +91,7 @@ extend BcStats {
             top_ns: Array::<u64, TOP_N>::new(),
             top_id: Array::<u64, TOP_N>::new(),
             top_sz: Array::<u64, TOP_N>::new(),
+            tape: Array::<u64, TP_KINDS>::new(),
             all: false,
             body_ns: Vector::<u64>::new(),
             lower_ns: Vector::<u64>::new(),
@@ -116,12 +124,27 @@ extend BcStats {
         for k in 0..TOP_N {
             self.top_insert(o.top_ns[k], o.top_id[k], o.top_sz[k]);
         }
+        for k in 0..TP_KINDS {
+            self.tape[k] += o.tape[k];
+        }
         for k in 0..o.body_ns.len() {
             self.body_ns.push(o.body_ns[k]);
         }
         for k in 0..o.lower_ns.len() {
             self.lower_ns.push(o.lower_ns[k]);
         }
+    }
+
+    /// Tally one lowering's product: its tape entries by kind, its pools' bytes and the type ids a
+    /// publication remap would rewrite (`CoreBody::remap_types`).
+    pub fn tally_ir(self: &mut Self, lw: &irl::Lowerer) {
+        let b = &lw.body;
+        for i in 0..lw.tape.len() {
+            self.tape[(lw.tape[i] >> 56) as usize % TP_KINDS] += 1;
+        }
+        self.t[BT_TAPE] += lw.tape.len() as u64;
+        self.t[BT_IR_BYTES] += (b.locals.len() * sizeof(ir::LocalDecl) + b.blocks.len() * sizeof(ir::BasicBlock) + b.statements.len() * sizeof(ir::Statement) + b.places.len() * sizeof(ir::Place) + b.projections.len() * sizeof(ir::Projection) + b.operands.len() * sizeof(ir::Operand) + b.rvalues.len() * sizeof(ir::Rvalue) + b.constants.len() * sizeof(ir::Constant) + (b.oper_pool.len() + b.dest_pool.len() + b.targ_pool.len()) * 4 + (b.switch_pool.len() + b.user_moves.len()) * 8 + b.asms.len() * sizeof(ir::AsmRec) + b.asm_spans.len() * sizeof(tok::Span)) as u64;
+        self.t[BT_TY_SLOTS] += (b.locals.len() + b.places.len() + b.projections.len() + b.operands.len() + b.constants.len() + b.targ_pool.len() + b.rvalues.len()) as u64;
     }
 
     /// The report: regions, tallies, the slowest bodies, and the retained scratch capacity.
@@ -160,6 +183,24 @@ extend BcStats {
         out.push_u64(self.t[BT_PATHS]);
         out.push_str(", loans ");
         out.push_u64(self.t[BT_LOANS]);
+        out.push_str("\n  lowered: ");
+        out.push_u64(self.t[BT_IR_BYTES] >> 10);
+        out.push_str(" KiB of Core IR, ");
+        out.push_u64(self.t[BT_TY_SLOTS]);
+        out.push_str(" type slots; tape ");
+        out.push_u64(self.t[BT_TAPE]);
+        out.push_str(" entries (");
+        out.push_u64(self.t[BT_TAPE] * 8 >> 10);
+        out.push_str(" KiB):");
+        for k in 0..TP_KINDS {
+            if self.tape[k] == 0 {
+                continue;
+            }
+            out.push_str(" ");
+            out.push_u64(k as u64);
+            out.push_str("=");
+            out.push_u64(self.tape[k]);
+        }
         out.push_str("\n  slowest bodies (module:node ms blocks/points):");
         for k in 0..TOP_N {
             if self.top_ns[k] == 0 {
@@ -636,6 +677,9 @@ extend tc::TypeChecker {
     ) {
         let mut seen = Vector::<u64>::new();
         for b in 0..bodies.len() {
+            if ctx.st.pr.on {
+                ctx.st.tally_ir(bodies.at(b));
+            }
             self.bc_ir_body(ow, &bodies.at(b).body, ctx, &mut seen, out);
         }
     }

@@ -75,6 +75,12 @@ pub struct ItemSched {
     pub comp: Vector<u32>,
     pub ncomp: u32,
     pub state: Vector<u8>,
+    /// Per item: 1 when every borrow-carrying `return` of the function is a bare parameter (the
+    /// modular lifetime check pinned the result's borrows), 0 when not, 2 while unrecorded. The
+    /// driver records a module's verdicts right after its type check (`bc_record_ret_attr`); the
+    /// borrow pass reads them at every call, so a callee's body syntax can be released before its
+    /// callers are analyzed.
+    pub ret_attr: Vector<u8>,
     pub dyn_edges: Set<u64>, // caller item << 32 | callee item, recorded by the master engine
     pub by_node: Vector<u32>,
     pub built: bool,
@@ -96,6 +102,7 @@ extend ItemSched {
             comp: Vector::<u32>::new(),
             ncomp: 0,
             state: Vector::<u8>::new(),
+            ret_attr: Vector::<u8>::new(),
             dyn_edges: Set::<u64>::new(),
             by_node: Vector::<u32>::new(),
             built: false,
@@ -108,7 +115,7 @@ extend ItemSched {
 
     /// Approximate owned bytes.
     pub const fn retained(self: &Self) usize {
-        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity()) * 4 + self.state.capacity() + self.dyn_edges.len() * 16;
+        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
     }
 }
 
@@ -154,6 +161,9 @@ pub struct Package {
     /// starve a worker, so its loops need no safepoint tick.
     pub co_state: u8,
     pub co_spans: Vector<Vector<u64>>,
+    /// Per module: the modules that emit before it (`emit_dep_row`), recorded before its body
+    /// syntax is released; empty when the rows are computed at emission planning.
+    pub emit_deps: Vector<Vector<ModuleId>>,
     /// Cancellation-edge reachability: 0 = uncomputed (no cancellation checks anywhere), 1 =
     /// computed. cancel_marks[m] holds start<<32|end DECL spans of the functions and closures whose
     /// bodies can reach `runtime::cancel_accept`; a call to one of these from a task-reachable
@@ -271,6 +281,9 @@ pub struct Package {
     /// `ctfe_edges` (caller key, callee key) pairs for every body the engine lowered from
     /// syntax while `cur_item` was checking.
     pub icost_on: bool,
+    /// Release each module's body syntax right after its borrow pass (batch builds; the lint driver
+    /// and the measurement mode keep it until emission planning).
+    pub free_bodies: bool,
     pub icost_tc: Vector<u64>,
     pub icost_rs: Vector<u64>, // per resolved item (module << 32 | item node, ns)
     pub icost_bc: Vector<u64>,
@@ -1701,6 +1714,7 @@ extend Package {
             inst_methods: Set::<u64>::new(),
             co_state: 0,
             co_spans: Vector::<Vector<u64>>::new(),
+            emit_deps: Vector::<Vector<ModuleId>>::new(),
             cancel_state: 0,
             cancel_marks: Vector::<Set<u64>>::new(),
             cancel_used: false,
@@ -1733,6 +1747,7 @@ extend Package {
             overlay_texts: Vector::<String>::new(),
             body_hold: Vector::<bool>::new(),
             icost_on: false,
+            free_bodies: false,
             icost_tc: Vector::<u64>::new(),
             icost_rs: Vector::<u64>::new(),
             icost_bc: Vector::<u64>::new(),
@@ -2255,6 +2270,33 @@ extend Package {
         let cur = self.item_state_at(it);
         assert(st >= cur, "item readiness states only move up");
         atomic::store_u8(unsafe (self.sched.state.as_ptr() as *mut u8 + it as usize), st, 2);
+    }
+
+    /// Record the result-attributability verdict of function `node` of module `m` (`ItemSched.ret_attr`).
+    pub fn set_item_ret_attr(self: &mut Self, m: ModuleId, node: NodeId, v: bool) {
+        let it = self.item_of(m, node);
+        if it == ITEM_NONE {
+            return;
+        }
+        atomic::store_u8(
+            unsafe (self.sched.ret_attr.as_ptr() as *mut u8 + it as usize),
+            if v {
+                1u8;
+            } else {
+                0u8;
+            },
+            2,
+        );
+    }
+
+    /// The recorded verdict of function `node` of module `m`: 1 or 0, 2 while unrecorded, -1 when
+    /// it is not an item.
+    pub fn item_ret_attr(self: &Self, m: ModuleId, node: NodeId) i32 {
+        let it = self.item_of(m, node);
+        if it == ITEM_NONE {
+            return 0 - 1;
+        }
+        return atomic::load_u8(unsafe (self.sched.ret_attr.as_ptr() + it as usize), 1) as i32;
     }
 
     /// Move item `it` and, for an extend, its member records (the records following it that name
@@ -3429,6 +3471,107 @@ extend Package {
     /// Dependency-first module emit order: if module `a` full-monomorphizes a generic owned by `b` (re-homing a
     /// concrete instance to `a` itself), `b` must be emitted first. Kahn topo-sort with a lowest-id tiebreak;
     /// `order` is filled with `modules.len()` entries.
+    /// The modules whose emission precedes module `a`'s: an instance `a` re-homes, a method
+    /// instance on a foreign generic, and a generic call into a foreign function. Reads `a`'s
+    /// instance, method-instance and generic-call tables and the callees' declarations; the
+    /// generic-call table names body nodes, so the row is computed while `a`'s body syntax is
+    /// live (`record_emit_deps`) when the driver releases it early.
+    pub fn emit_dep_row(self: &Self, a: usize, out: &mut Vector<ModuleId>) {
+        let n = self.modules.len();
+        out.truncate(0);
+        if !self.modules[a].has_ast {
+            return;
+        }
+        let mut dep = Vector::<bool>::new();
+        dep.resize_default(n);
+        let aa = self.module_ast_const(a as ModuleId);
+        let mut i: usize = 0;
+        while i < aa.ninstances() {
+            let it = *aa.used_instance(i);
+            let bi = it.module as usize;
+            if bi >= n || bi == a || dep[bi] {
+                i = i + 1;
+                continue;
+            }
+            let mut concrete = true;
+            for k in 0..it.n {
+                if !unsafe aa.type_concrete(it.args[k as usize]) {
+                    concrete = false;
+                }
+            }
+            if concrete && self.instance_home_in(a as ModuleId, &it) == a as ModuleId {
+                dep[bi] = true;
+                out.push(bi as ModuleId);
+            }
+            i = i + 1;
+        }
+        i = 0;
+        while i < unsafe aa.method_insts.len() {
+            let miinst = unsafe aa.method_insts[i].instance;
+            let y = *aa.type_at(miinst);
+            if y.kind != TypeKind::TYPE_INSTANCE {
+                i = i + 1;
+                continue;
+            }
+            let bi = aa.instance(y.as_data.inst).module as usize;
+            if bi >= n || bi == a || dep[bi] {
+                i = i + 1;
+                continue;
+            }
+            dep[bi] = true;
+            out.push(bi as ModuleId);
+            i = i + 1;
+        }
+        i = 0;
+        while i < unsafe aa.mono.len() {
+            let mnode = unsafe aa.mono[i].node;
+            if aa.at_const(mnode).kind != NodeKind::NODE_CALL {
+                i = i + 1;
+                continue;
+            }
+            let callee_id = aa.at_const(mnode).as_data.call.callee;
+            let ck = aa.at_const(callee_id).kind;
+            let fd = if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
+                let e = aa.at_const(callee_id).as_data.specialization.expression;
+                aa.resolution_def(e);
+            } else {
+                aa.resolution_def(callee_id);
+            };
+            let bi = fd.module as usize;
+            if fd.node == NODE_NONE || bi >= n || bi == a || dep[bi] {
+                i = i + 1;
+                continue;
+            }
+            if !self.modules[bi].has_ast {
+                i = i + 1;
+                continue;
+            }
+            let bast = self.module_ast_const(fd.module);
+            if bast.at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
+                i = i + 1;
+                continue;
+            }
+            dep[bi] = true;
+            out.push(bi as ModuleId);
+            i = i + 1;
+        }
+    }
+
+    /// Size `emit_deps` for every module (before a parallel borrow frontier records rows).
+    pub fn emit_deps_reserve(self: &mut Self) {
+        self.emit_deps.truncate(0);
+        for _ in 0..self.modules.len() {
+            self.emit_deps.push(Vector::<ModuleId>::new());
+        }
+    }
+
+    /// Record module `a`'s emission dependency row while its body syntax is live.
+    pub fn record_emit_deps(self: &mut Self, a: usize) {
+        let mut row = replace(self.emit_deps.index_mut(a), Vector::<ModuleId>::new());
+        self.emit_dep_row(a, &mut row);
+        *self.emit_deps.index_mut(a) = row;
+    }
+
     pub fn emit_order(self: &Self, order: &mut Vector<ModuleId>) {
         let n = self.modules.len();
         if n == 0 {
@@ -3440,80 +3583,21 @@ extend Package {
         dep.resize_default(n * n);
         let mut indeg = Vector::<u32>::new();
         indeg.resize_default(n);
+        let recorded = self.emit_deps.len() == n;
+        let mut row = Vector::<ModuleId>::new();
         for a in 0..n {
-            if !self.modules[a].has_ast {
-                continue;
+            if !recorded {
+                self.emit_dep_row(a, &mut row);
             }
-            let aa = self.module_ast_const(a as ModuleId);
-            let mut i: usize = 0;
-            while i < aa.ninstances() {
-                let it = *aa.used_instance(i);
-                let bi = it.module as usize;
-                if bi >= n || bi == a || dep[a * n + bi] {
-                    i = i + 1;
-                    continue;
-                }
-                let mut concrete = true;
-                for k in 0..it.n {
-                    if !unsafe aa.type_concrete(it.args[k as usize]) {
-                        concrete = false;
-                    }
-                }
-                if concrete && self.instance_home_in(a as ModuleId, &it) == a as ModuleId {
-                    dep[a * n + bi] = true;
-                    indeg[a] = indeg[a] + 1;
-                }
-                i = i + 1;
-            }
-            i = 0;
-            while i < unsafe aa.method_insts.len() {
-                let miinst = unsafe aa.method_insts[i].instance;
-                let y = *aa.type_at(miinst);
-                if y.kind != TypeKind::TYPE_INSTANCE {
-                    i = i + 1;
-                    continue;
-                }
-                let bi = aa.instance(y.as_data.inst).module as usize;
-                if bi >= n || bi == a || dep[a * n + bi] {
-                    i = i + 1;
-                    continue;
-                }
+            let r = if recorded {
+                self.emit_deps.at(a);
+            } else {
+                &row;
+            };
+            for k in 0..r.len() {
+                let bi = r[k] as usize;
                 dep[a * n + bi] = true;
                 indeg[a] = indeg[a] + 1;
-                i = i + 1;
-            }
-            i = 0;
-            while i < unsafe aa.mono.len() {
-                let mnode = unsafe aa.mono[i].node;
-                if aa.at_const(mnode).kind != NodeKind::NODE_CALL {
-                    i = i + 1;
-                    continue;
-                }
-                let callee_id = aa.at_const(mnode).as_data.call.callee;
-                let ck = aa.at_const(callee_id).kind;
-                let fd = if ck == NodeKind::NODE_GENERIC_SPECIALIZATION {
-                    let e = aa.at_const(callee_id).as_data.specialization.expression;
-                    aa.resolution_def(e);
-                } else {
-                    aa.resolution_def(callee_id);
-                };
-                let bi = fd.module as usize;
-                if fd.node == NODE_NONE || bi >= n || bi == a || dep[a * n + bi] {
-                    i = i + 1;
-                    continue;
-                }
-                if !self.modules[bi].has_ast {
-                    i = i + 1;
-                    continue;
-                }
-                let bast = self.module_ast_const(fd.module);
-                if bast.at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
-                    i = i + 1;
-                    continue;
-                }
-                dep[a * n + bi] = true;
-                indeg[a] = indeg[a] + 1;
-                i = i + 1;
             }
         }
         for kk in 0..n {
