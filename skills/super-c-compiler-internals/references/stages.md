@@ -74,8 +74,14 @@ Per function (`bc_fn`, extending `TypeChecker`):
    `borrowck/facts.spc`; solved by `loans.spc`/`dataflow.spc`) inside one reusable,
    budget-bounded `BorrowCtx`; `bc_ir_emit` reports. `SC_BC_VALIDATE=1` runs every
    skipped stage and asserts it found nothing.
-4. Spent Lowerers are recycled into the shared `irl::Keep` cache — one lowering per
-   body, reused by emission. Parallel builds lease an oracle + context slot per task
+4. `bc_elaborate`, per body, over the analyses just built: when an owning local or an
+   auto-freeing owning store exists, the move/init solution (built here if the analyses
+   skipped it) classifies every storage marker and `ir/drops.spc` rewrites the body with
+   `TM_DROP` terminators and flag temps; the inliner's size verdict is recorded first
+   (`CoreBody.inline_size_ok`). Under `SC_BC_VALIDATE=1` the structural verifier and
+   `verify_drops` check every elaborated body.
+5. Spent Lowerers are recycled into the shared `irl::Keep` cache — one elaborated lowering
+   per body, reused by emission. Parallel builds lease an oracle + context slot per task
    from a bounded pool.
 
 Declaration-level lifetime analyses (return-type elision, aggregate lifetime naming, the
@@ -88,6 +94,7 @@ modular return-lifetime check) run alongside.
 | `SC_FACTS_CHECK` | `facts_verify("borrowck")` | No decision table changed since typecheck |
 | `SC_LAYOUT` | `layout_pass` | Every concrete pool type vs the C layout invariants |
 | `SC_CORE_IR` | `apply_drops_of` (emission) | Inlined bodies re-verify; every PROVEN bounds check re-proves |
+| `SC_BC_VALIDATE` | `bc_elaborate` (borrow pass), `apply_drops_of` (emission) | Skipped analysis stages find nothing; loan sources, move-path parents, init rows and fixpoint bounds hold; every elaborated body verifies and `verify_drops` accepts it |
 
 ## 7. Lint, Panic Check, Const Flush
 
@@ -128,13 +135,13 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
   image. Every module-prefix spelling records a (context -> owner module) edge, typed as
   a type name or another symbol; those rows select each shard's include list
   ([output-layout.md](output-layout.md)).
-- **Drop elaboration runs here, per body** (`DropCtx::apply_drops`): when
-  `ird::may_schedule` says a drop is possible (an owning local or an owning store
-  destination), move-path forest, moves-only ownership facts, CFG and move dataflow,
-  then `ird::elaborate_into` + `ird::insert_drops` rewrite the body with explicit
-  `TM_DROP` terminators before rendering; other bodies skip straight to bounds-check
-  elimination. Free-glue wrapping (`<sym>__fb`) covers user `free` bodies that skip owning
-  fields.
+- **Per-body preparation** (`DropCtx::apply_drops`): a kept body arrives elaborated by
+  the borrow pass; a body emission lowered itself (a per-instance re-lowering, a macro
+  wrapper) is elaborated here first (`ird::may_schedule`, forest, moves-only facts, CFG,
+  move dataflow, `ird::elaborate_into` + `ird::insert_drops`). Then the inliner splices
+  elaborated callees (their drops, flag temps and markers come along; no ownership
+  analysis runs on the merged body), then bounds-check elimination, then rendering.
+  Free-glue wrapping (`<sym>__fb`) covers user `free` bodies that skip owning fields.
 - Symbol naming through `emit/mangle.spc` (the frozen authority): prefixing only with
   more than one non-prelude module; single-segment prefix when unique; prelude, `main`,
   and extern symbols never prefixed.

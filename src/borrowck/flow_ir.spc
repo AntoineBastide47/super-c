@@ -11,10 +11,14 @@ import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
 import borrowck::dataflow as bdf;
 import borrowck::loans as bln;
+import ir::drops as ird;
+import ir::inline as inl;
+import ir::print as irp;
+import ir::verify as irv;
 import emit::probe as prb;
 
 /// Borrow-pass probe regions (SC_BORROW_STATS): lowering, the tape replay, the six analysis
-/// stages, the Free-move rules with the wording, and diagnostic emission.
+/// stages, the Free-move rules with the wording, diagnostic emission, and drop elaboration.
 pub const BP_LOWER: usize = 0;
 pub const BP_REPLAY: usize = 1;
 pub const BP_FOREST: usize = 2;
@@ -28,7 +32,8 @@ pub const BP_EMIT: usize = 9;
 pub const BP_SETUP: usize = 10; // per-module checker construction and diagnostic finalization
 pub const BP_DECL: usize = 11; // declaration-level lifetime checks and the per-function preludes
 pub const BP_REACH: usize = 12; // the package's coroutine and cancellation reachability scans (once)
-const BP_NAMES: [str<'static>; 13] = [
+pub const BP_DROPS: usize = 13; // drop elaboration of the kept bodies (schedule and rewrite)
+const BP_NAMES: [str<'static>; 14] = [
     "lower",
     "replay",
     "forest",
@@ -42,9 +47,10 @@ const BP_NAMES: [str<'static>; 13] = [
     "setup",
     "decl",
     "reach",
+    "drops",
 ];
-static_assert(BP_REACH + 1 == 13, "one name per borrow region");
-static_assert(BP_REACH < prb::P_COUNT, "the borrow regions fit the probe");
+static_assert(BP_DROPS + 1 == 14, "one name per borrow region");
+static_assert(BP_DROPS < prb::P_COUNT, "the borrow regions fit the probe");
 
 /// Per-body tallies.
 pub const BT_BODIES: usize = 0; // bodies analyzed (closures included)
@@ -66,7 +72,9 @@ pub const BT_TRIMS: usize = 15; // scratch releases past BC_SCRATCH_BUDGET
 pub const BT_TAPE: usize = 16; // replay tape entries (8 bytes each)
 pub const BT_IR_BYTES: usize = 17; // bytes of the lowered bodies' pools (kept exact-size)
 pub const BT_TY_SLOTS: usize = 18; // type ids a publication remap rewrites in those bodies
-pub const BT_COUNT: usize = 19;
+pub const BT_ELAB: usize = 19; // bodies rewritten with drop terminators
+pub const BT_DROPS: usize = 20; // drops scheduled in them
+pub const BT_COUNT: usize = 21;
 const TP_KINDS: usize = 32;
 const TOP_N: usize = 8;
 
@@ -167,7 +175,11 @@ extend BcStats {
         out.push_u64(self.t[BT_LV_SKIP]);
         out.push_str(", cfg skipped ");
         out.push_u64(self.t[BT_CFG_SKIP]);
-        out.push_str("\n  sizes: blocks ");
+        out.push_str(", elaborated ");
+        out.push_u64(self.t[BT_ELAB]);
+        out.push_str(" (");
+        out.push_u64(self.t[BT_DROPS]);
+        out.push_str(" drops)\n  sizes: blocks ");
         out.push_u64(self.t[BT_BLOCKS]);
         out.push_str(", statements ");
         out.push_u64(self.t[BT_STMTS]);
@@ -229,6 +241,8 @@ extend BcStats {
         out.push_u64(ctx.moves.scratch_bytes() >> 10);
         out.push_str(" KiB, solver ");
         out.push_u64(ctx.solver.scratch_bytes() >> 10);
+        out.push_str(" KiB, drops ");
+        out.push_u64(ctx.el.scratch_bytes() >> 10);
         out.push_str(" KiB, lowerer pool ");
         out.push_u64(ctx.lower_pool.len() as u64);
         out.push_str(" entries\n");
@@ -289,6 +303,14 @@ pub struct BorrowCtx {
     pub liveness: bdf::Liveness,
     pub moves: bdf::MoveFlow,
     pub solver: bln::Solver,
+    pub el: ird::ElabCtx,
+    /// What `bc_run_stages` left behind for the current body, read by `bc_elaborate`: the feature
+    /// bits, and whether the forest and facts, the control-flow graph and the move/init solution
+    /// describe this body (a skipped stage leaves the previous body's rows).
+    pub ft: u32,
+    pub built: bool,
+    pub have_cfg: bool,
+    pub have_moves: bool,
     pub cap_spans: Vector<u32>,
     pub rep: RepSt,
     pub escaping: Vector<u32>,
@@ -303,14 +325,15 @@ pub struct BorrowCtx {
     pub validate: bool,
 }
 
-/// Heap the six analyses may keep across bodies. One outsized body grows the scratch past it; the
-/// release after that body keeps every later body's retained capacity bounded by its own needs.
+/// Heap the analyses and the elaboration may keep across bodies. One outsized body grows the
+/// scratch past it; the release after that body keeps every later body's retained capacity
+/// bounded by its own needs.
 pub const BC_SCRATCH_BUDGET: u64 = 8u64 << 20;
 
 extend BorrowCtx {
-    /// Heap bytes the six analyses keep across bodies (capacity, not length).
+    /// Heap bytes the analyses and the elaboration keep across bodies (capacity, not length).
     pub const fn scratch_bytes(self: &Self) u64 {
-        return self.forest.scratch_bytes() + self.facts.scratch_bytes() + self.cfg.scratch_bytes() + self.liveness.scratch_bytes() + self.moves.scratch_bytes() + self.solver.scratch_bytes();
+        return self.forest.scratch_bytes() + self.facts.scratch_bytes() + self.cfg.scratch_bytes() + self.liveness.scratch_bytes() + self.moves.scratch_bytes() + self.solver.scratch_bytes() + self.el.scratch_bytes();
     }
 
     /// Release the analysis scratch when it outgrew the budget; the next body reallocates to its own size.
@@ -324,6 +347,7 @@ extend BorrowCtx {
         self.liveness = bdf::Liveness::empty();
         self.moves = bdf::MoveFlow::empty();
         self.solver = bln::Solver::empty();
+        self.el = ird::ElabCtx::empty();
         if self.st.pr.on {
             self.st.t[BT_TRIMS] += 1;
         }
@@ -338,6 +362,11 @@ extend BorrowCtx {
             liveness: bdf::Liveness::empty(),
             moves: bdf::MoveFlow::empty(),
             solver: bln::Solver::empty(),
+            el: ird::ElabCtx::empty(),
+            ft: 0,
+            built: false,
+            have_cfg: false,
+            have_moves: false,
             cap_spans: Vector::<u32>::new(),
             rep: RepSt::new(),
             escaping: Vector::<u32>::new(),
@@ -458,6 +487,10 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
             ctx.st.t[BT_GENERIC_HELD] += 1;
         }
     }
+    ctx.ft = ft;
+    ctx.built = false;
+    ctx.have_cfg = false;
+    ctx.have_moves = false;
     if sskip && !ctx.validate {
         ctx.moves.errs.truncate(0);
         ctx.solver.errs.truncate(0);
@@ -465,6 +498,7 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     }
     let t0 = ctx.st.pr.start();
     ctx.forest.build_into(body);
+    ctx.built = true;
     let t1 = ctx.st.pr.start();
     ctx.st.pr.stop(BP_FOREST, t0);
     ow.generate_into(body, &ctx.forest, &mut ctx.facts, !lskip || ctx.validate);
@@ -490,6 +524,7 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     if lv_need || mv_need {
         let t2 = ctx.st.pr.start();
         ctx.cfg.build_into(body);
+        ctx.have_cfg = true;
         ctx.st.pr.stop(BP_CFG, t2);
     }
     if lv_need {
@@ -502,6 +537,7 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     if mv_need {
         let t4 = ctx.st.pr.start();
         ctx.moves.build_into(body, &ctx.forest, &ctx.facts, &ctx.cfg);
+        ctx.have_moves = true;
         ctx.st.pr.stop(BP_MOVES, t4);
     } else {
         ctx.moves.errs.truncate(0);
@@ -517,6 +553,7 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
             assert(ctx.moves.errs.len() == 0);
             assert(ctx.solver.errs.len() == 0);
         }
+        bc_validate_facts(ctx, body, lv_need, mv_need);
     }
     if on9 {
         ctx.st.t[BT_LOANS] += ctx.facts.loans.len() as u64;
@@ -543,6 +580,146 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
         ctx.st.body_ns.push(platform_ns() - tb);
     }
     return ctx.moves.errs.len() != 0 || ctx.solver.errs.len() != 0;
+}
+
+// The validation build's structural checks over one body's analysis products: every move path
+// has a valid parent, the init rows are sized by the path count, every loan issues at a borrow
+// operation (a reference, a carrying projected copy or view, a closure capture, or a call's
+// implicit autoref), every conflict names a loan and a place of the body, and each fixpoint queue
+// stayed within its monotone bound (every push after the seeds follows a row change, and a row
+// changes at most once per lattice bit).
+fn bc_validate_facts(ctx: &BorrowCtx, body: &ir::CoreBody, lv_need: bool, mv_need: bool) {
+    let nl = body.locals.len();
+    for p in 0..ctx.forest.paths.len() {
+        let mp = ctx.forest.paths.at(p);
+        if p < nl {
+            assert(mp.parent == bmp::MP_NONE && mp.base as usize == p, "a root path per local");
+        } else {
+            assert(mp.parent != bmp::MP_NONE && mp.parent as usize < p, "a child path follows its parent");
+            assert(ctx.forest.paths.at(mp.parent as usize).base == mp.base, "a path shares its parent's local");
+        }
+    }
+    let nb = body.blocks.len() as u32;
+    let nedges = ctx.cfg.succ.len() as u32;
+    if mv_need {
+        let np = ctx.forest.paths.len() as u32;
+        let mut w = (np + 63) / 64;
+        if w == 0 {
+            w = 1;
+        }
+        assert(ctx.moves.npaths == np && ctx.moves.words == w, "init rows sized by the path count");
+        assert(ctx.moves.mi.len() as u32 == nb * w && ctx.moves.di.len() as u32 == nb * w, "one init row per block");
+        assert(ctx.moves.pushes <= 2 * nb + 3 * nedges * np, "the move/init fixpoint stays within its bound");
+    }
+    for l in 0..ctx.facts.loans.len() {
+        let ln = ctx.facts.loans.at(l);
+        assert(ln.place as usize < body.places.len(), "a loan borrows a place of the body");
+        let mut bi: usize = 0;
+        while bi + 1 < ctx.facts.block_base.len() && ctx.facts.block_base[bi + 1] <= ln.issued_at {
+            bi += 1;
+        }
+        let blk = *body.blocks.at(bi);
+        let si = (ln.issued_at - ctx.facts.block_base[bi]) / 2;
+        if si == blk.stmt_len {
+            assert(blk.term.kind == ir::TM_CALL, "a terminator loan is a call's implicit borrow");
+        } else {
+            let st = *body.statements.at((blk.stmt_start + si) as usize);
+            assert(st.kind == ir::ST_ASSIGN, "a statement loan is issued by a store");
+            let rk = body.rvalues.at(st.rvalue as usize).kind;
+            assert(
+                rk == ir::RV_REF || rk == ir::RV_USE || rk == ir::RV_SLICE || rk == ir::RV_CLOSURE,
+                "a loan issues at a borrow operation",
+            );
+        }
+    }
+    for e in 0..ctx.solver.errs.len() {
+        let er = ctx.solver.errs.at(e);
+        assert(er.loan as usize < ctx.facts.loans.len(), "a borrow error names a loan of the body");
+        assert(er.point < ctx.facts.npoints, "a borrow error sits at a point of the body");
+    }
+    if lv_need {
+        assert(ctx.liveness.pushes <= nb + 2 * nedges * nl as u32, "the liveness fixpoint stays within its bound");
+    }
+    if ctx.facts.loans.len() != 0 {
+        assert(
+            ctx.solver.flow_pushes <= nb + nedges * ctx.facts.loans.len() as u32,
+            "the loan scope fixpoint stays within its bound",
+        );
+    }
+}
+
+/// Drop elaboration of `body` over what `bc_run_stages` left in `ctx`: the forest and facts, plus
+/// the control-flow graph and the move/init solution when the stages needed them (built here
+/// otherwise). Every kept body passes through once, so the keep holds elaborated bodies and the
+/// emission never analyzes ownership for them again; the inliner's vet reads the pre-elaboration
+/// size recorded here. A body without an owning local or an auto-freeing owning store schedules
+/// nothing and is left as it is.
+pub fn bc_elaborate(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &mut ir::CoreBody) {
+    let te = ctx.st.pr.start();
+    body.inline_size_ok = inl::callee_size_ok(body);
+    body.elaborated = true;
+    let want = (ctx.ft & FT_OWNED) != 0 || ird::assign_may_schedule(ow, body);
+    if !want && !ctx.validate {
+        ctx.st.pr.stop(BP_DROPS, te);
+        return;
+    }
+    if !ctx.built {
+        ctx.forest.build_into(body);
+        ow.generate_into(body, &ctx.forest, &mut ctx.facts, false);
+        ctx.built = true;
+    }
+    if !ctx.have_cfg {
+        let t2 = ctx.st.pr.start();
+        ctx.cfg.build_into(body);
+        ctx.have_cfg = true;
+        ctx.st.pr.stop(BP_CFG, t2);
+    }
+    if !ctx.have_moves {
+        let t4 = ctx.st.pr.start();
+        ctx.moves.build_into(body, &ctx.forest, &ctx.facts, &ctx.cfg);
+        ctx.have_moves = true;
+        ctx.st.pr.stop(BP_MOVES, t4);
+    }
+    ird::elaborate_into(ow, body, &ctx.forest, &ctx.facts, &ctx.moves, &mut ctx.el);
+    if ctx.validate && !want {
+        assert(ctx.el.sched.drops.len() == 0, "a body outside the schedule gate schedules nothing");
+    }
+    if ctx.el.sched.drops.len() != 0 {
+        ird::insert_drops(body, &mut ctx.el, &ctx.forest);
+        if ctx.st.pr.on {
+            ctx.st.t[BT_ELAB] += 1;
+            ctx.st.t[BT_DROPS] += ctx.el.sched.drops.len() as u64;
+        }
+    }
+    if ctx.validate {
+        bc_validate_elaborated(ow, body);
+    }
+    ctx.st.pr.stop(BP_DROPS, te);
+}
+
+/// The validation build's checks of one elaborated body: the structural verifier and the
+/// ownership verifier; a failure prints the body and aborts.
+pub fn bc_validate_elaborated(ow: &mut bfx::Owner, body: &ir::CoreBody) {
+    let mut v = irv::verify(body, ow.ast_of(body.module).type_bound(), ow.pkg);
+    if v.len() == 0 {
+        v = ird::verify_drops(ow, body);
+    }
+    if v.len() != 0 {
+        let file = unsafe (&*ow.pkg).modules.at(body.module as usize).file.as_str();
+        let text = irp::print_body(body);
+        eprintln(
+            "SC_BC_VALIDATE: elaborated body {}:{} ({}) fails `{}`\n{}",
+            body.module,
+            body.owner.node,
+            file,
+            v,
+            text.as_str(),
+        );
+        if ird::last_bad_local() != 0xFFFFFFFFu32 {
+            ird::dump_events(ow, body, ird::last_bad_local());
+        }
+        assert(false, "an elaborated body verifies and releases every value once");
+    }
 }
 
 fn platform_ns() u64 {
@@ -667,11 +844,12 @@ extend tc::TypeChecker {
         return ok;
     }
 
-    /// Analyze the pre-lowered bodies AFTER the walk ran (mut-capture bits are now final).
+    /// Analyze the pre-lowered bodies AFTER the walk ran (mut-capture bits are now final), then
+    /// elaborate the drops of every body the keep will hold, over the analyses just built.
     pub fn bc_ir_analyze(
         self: &mut Self,
         ow: &mut bfx::Owner,
-        bodies: &Vector<irl::Lowerer>,
+        bodies: &mut Vector<irl::Lowerer>,
         ctx: &mut BorrowCtx,
         out: &mut Vector<FlowErr>,
     ) {
@@ -681,6 +859,10 @@ extend tc::TypeChecker {
                 ctx.st.tally_ir(bodies.at(b));
             }
             self.bc_ir_body(ow, &bodies.at(b).body, ctx, &mut seen, out);
+            if ctx.keep != null {
+                bc_elaborate(ow, ctx, &mut bodies.index_mut(b).body);
+            }
+            ctx.trim_scratch();
         }
     }
 
@@ -1028,7 +1210,6 @@ extend tc::TypeChecker {
             }
         }
         ctx.st.pr.stop(BP_RULES, tr);
-        ctx.trim_scratch();
     }
 
     fn bc_ir_conflict(

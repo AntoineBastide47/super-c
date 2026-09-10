@@ -241,7 +241,13 @@ pub fn print_body(b: &ir::CoreBody) String {
                 out.push_str(" (cancel)");
             }
         } else if t.kind == ir::TM_DROP {
-            out.push_str("drop -> bb");
+            out.push_str("drop ");
+            p_place(&mut out, b, t.a);
+            if t.args_len == 1 {
+                out.push_str(" if _");
+                p_u(&mut out, t.args_start);
+            }
+            out.push_str(" -> bb");
             p_u(&mut out, t.t0);
         } else if t.kind == ir::TM_ASSERT {
             out.push_str("assert -> bb");

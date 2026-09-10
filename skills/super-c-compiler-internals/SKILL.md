@@ -33,8 +33,10 @@ discharge_obligations     -- cross-module reflection-bound obligations, once all
   |
 borrowck_all              -- lowers every body to Core IR (kept in irl::Keep, viewed by the
   |                          evaluator from here), replays the event tape, runs the loan
-  |                          analysis (the one other parallel stage); a module's body syntax
-  |                          is freed when its pass ends (syntax-ownership.md)
+  |                          analysis (the one other parallel stage), then elaborates each
+  |                          kept body's drops over the same facts (the keep holds elaborated
+  |                          bodies); a module's body syntax is freed when its pass ends
+  |                          (syntax-ownership.md)
 [verification gates]      -- SC_FACTS_CHECK / SC_LAYOUT: each pass is a NO-OP unless its env
   |                          var is set
 lint + panics + flush     -- lint_unused_items, check_always_panics (an error, every build),
@@ -50,8 +52,9 @@ emission planning         -- compute_emit_live (module-arena resolutions + item 
   |
 cemit_package             -- InstGraph.collect() over the kept Core IR bodies of every module that
   |                          emits (dead prelude modules seed nothing), then per-module
-  |                          TU emission (emit/tu.spc); drop elaboration runs per body here
-  |                          (DropCtx::apply_drops); parallel frontier under --jobs
+  |                          TU emission (emit/tu.spc); per body: drop elaboration only for
+  |                          a body emission lowered itself, the inliner, bounds-check
+  |                          elimination (DropCtx::apply_drops); parallel frontier under --jobs
 serial write-out          -- __sc_fwd.h, per-SCC <module>__types.h, per-module .h, then the
   |                          module TU shards (<module>.c, __p<k>), per-owner instance shards
   |                          (<module>__inst.c), __sc_registry.c and __sc_manifest (a shard
@@ -70,7 +73,10 @@ Order facts that surprise people:
 - Core IR lowering happens **inside borrowck** (and again on demand during emission for
   instances); `core_ir_pass`, `layout_pass`, `cemit_pass` in the driver are env-gated
   verification reruns, not production stages.
-- Drop elaboration is a **per-body step of emission**, not a pipeline stage.
+- Drop elaboration is a **per-body step of the borrow pass** (`bc_elaborate`, right after
+  the body's analyses): the keep holds elaborated bodies, the inliner splices elaborated
+  callees, and emission elaborates only the bodies it lowers itself (per-instance
+  re-lowerings, wrappers). It is not a pipeline stage.
 
 ## Identity Model
 
@@ -275,9 +281,17 @@ than defining a new context. Two layers:
      be covered by a feature bit: `SC_BC_VALIDATE=1` runs every skipped stage anyway
      and asserts it found nothing (the gate's fixpoint and worker-identity builds run
      under it). `bc_ir_emit` reports.
-   - Scratch is bounded: `BorrowCtx::trim_scratch` releases the six analyses' capacity
-     after a body that pushed it past `BC_SCRATCH_BUDGET`. Published results never point
-     into it (diagnostics are copied `FlowErr`s; kept bodies are `compact_from` copies).
+   - `bc_elaborate` then classifies the body's storage markers against the same forest,
+     facts and move/init solution (building the CFG and the solution when the analyses
+     skipped them) and rewrites the body with `TM_DROP` terminators (`ir/drops.spc`), so
+     the keep holds the elaborated body and emission never derives ownership for it
+     again. `SC_BC_VALIDATE=1` also runs the structural verifier and `verify_drops` (the
+     ownership verifier) over every elaborated body, checks every loan's source operation,
+     every move path's parent, the init rows' sizes and each fixpoint's push bound.
+   - Scratch is bounded: `BorrowCtx::trim_scratch` releases the analyses' and the
+     elaboration's capacity after a body that pushed it past `BC_SCRATCH_BUDGET`.
+     Published results never point into it (diagnostics are copied `FlowErr`s; kept
+     bodies are `compact_from` copies).
    - Spent Lowerers are recycled into `ctx.lower_pool` and the shared `irl::Keep`.
    - Parallel builds (`borrowck_all_par`) lease an `Owner` + `BorrowCtx` slot per task
      from a mutex-guarded pool (`bc_slot_take`/`bc_slot_give`: never hold the guard
@@ -300,17 +314,25 @@ the move/init dataflow. Five classifications:
 | `DK_OVER` | Assignment overwrites an initialized value: free it first |
 | `DK_OVERC` | Overwrite of a maybe-moved value: the local's flag guards the free |
 
-Production consumer: emission's `DropCtx::apply_drops` (`src/driver/emit.spc`) first
-asks `ird::may_schedule` (an owning local, or a store whose destination place owns);
-a body that cannot schedule any drop skips the forest, facts, CFG, move dataflow and
-elaboration entirely. The rest generate moves-only facts (no loan discovery) and
-the move-path forest, ownership facts, CFG and move dataflow, then `elaborate_into` +
-`insert_drops(body, &mut ElabCtx, forest)` rewrites the body with explicit `TM_DROP`
-terminators before the C emitter renders it; the pass scratch rides in the `ElabCtx` and
-survives across bodies. It runs once per concrete instance. The inliner's callees come from
-the package's `InlineStore` (`src/ir/inline.spc`): every kept env-free lowering is vetted
-once at the start of `cemit_package`, and the accepted ones are copied compact; no task
-lowers a callee from syntax.
+Production consumer: the borrow pass (`flow_ir::bc_elaborate`, `src/borrowck/flow_ir.spc`),
+once per kept body, right after that body's analyses: the feature bits (an owning local) or
+`ird::assign_may_schedule` (a store whose projected destination owns through auto-freeing
+storage) decide whether anything can be scheduled; the rest is skipped. Otherwise the
+forest, facts and move/init solution the analyses built (the CFG and the solution are
+built here when a skip left them out) feed `elaborate_into` + `insert_drops(body, &mut
+ElabCtx, forest)`, which rewrites the body with explicit `TM_DROP` terminators; the
+scratch rides in `BorrowCtx.el` and survives across bodies. The keep holds the elaborated
+body (`CoreBody.elaborated`), emission's `DropCtx::apply_drops` elaborates only a body it
+lowered itself (a per-instance re-lowering, a macro wrapper) and does so BEFORE the
+inliner, and the inliner's callees are elaborated bodies: a splice carries the callee's
+drops, flag temps (`TM_DROP.args_start` rebases with the locals) and markers, so no
+ownership analysis ever runs on a merged body. Elaboration runs once per kept lowering;
+instances share it as they share the lowering. The inliner's callees come from the
+package's `InlineStore` (`src/ir/inline.spc`): every kept env-free lowering is vetted once
+at the start of `cemit_package` (the size gate reads `CoreBody.inline_size_ok`, recorded
+before the rewrite), and the accepted ones are copied compact; no task lowers a callee
+from syntax. The record of the migration, the analysis boundary and the validation
+checks is [ownership-analysis.md](references/ownership-analysis.md).
 
 ## CTFE (Compile-Time Function Evaluation)
 

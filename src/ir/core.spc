@@ -323,6 +323,13 @@ pub struct CoreBody {
     // Some `let x: T;` declared a local without a value: only then can a use-before-init exist,
     // so bodies without it (and without moves) skip the move/init dataflow outright.
     pub has_uninit_decl: bool,
+    /// Drop elaboration ran on this body (`ir::drops`): every scheduled drop is a `TM_DROP`
+    /// terminator and the guarded ones read their flag temps. The borrow pass elaborates every
+    /// body it keeps; emission elaborates only the bodies it lowers itself.
+    pub elaborated: bool,
+    /// The pre-elaboration size passed the inliner's callee limits (`ir::inline`): the vet reads
+    /// this bit so an elaborated callee is judged by the shape the limits were tuned for.
+    pub inline_size_ok: bool,
     pub locals: Vector<LocalDecl>,
     pub blocks: Vector<BasicBlock>,
     pub statements: Vector<Statement>,
@@ -390,6 +397,8 @@ extend CoreBody {
             has_reflect: false,
             has_zst_cond: false,
             has_uninit_decl: false,
+            elaborated: false,
+            inline_size_ok: false,
             locals: Vector::<LocalDecl>::new(),
             blocks: Vector::<BasicBlock>::new(),
             statements: Vector::<Statement>::new(),
@@ -420,6 +429,8 @@ extend CoreBody {
         self.has_reflect = false;
         self.has_zst_cond = false;
         self.has_uninit_decl = false;
+        self.elaborated = false;
+        self.inline_size_ok = false;
         self.locals.truncate(0);
         self.blocks.truncate(0);
         self.statements.truncate(0);
@@ -447,6 +458,8 @@ extend CoreBody {
         out.is_generic = src.is_generic;
         out.has_reflect = src.has_reflect;
         out.has_zst_cond = src.has_zst_cond;
+        out.elaborated = src.elaborated;
+        out.inline_size_ok = src.inline_size_ok;
         out.entry = src.entry;
         out.locals.reserve(src.locals.len());
         for i in 0..src.locals.len() {

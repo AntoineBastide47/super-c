@@ -1,9 +1,9 @@
 # Core IR publication: the gate, the inventory and the release point
 
-Plan v2/9 asked for a measured decision on publishing Core IR directly after typechecking,
-a checked inventory of every Core IR consumer, inline fields for the semantic facts a later
-pass still recovers from an AST side table, and checked release points for body syntax. This
-is the record: the measurement, why the publication point inside the typecheck frontier is
+Publishing Core IR directly after typechecking needed a measured decision, a checked
+inventory of every Core IR consumer, inline fields for the semantic facts a later pass still
+recovers from an AST side table, and checked release points for body syntax. This is the
+record: the measurement, why the publication point inside the typecheck frontier is
 not reachable, the publication point that was built (the end of each module's borrow pass,
 where the module's body syntax is freed), the facts that had to become records for it, the
 inventory, the tape categories, and the results.
@@ -152,7 +152,7 @@ cancellation reachability scans (`Package::co_compute`, `cancel_compute`, 14.9 m
 of every module; lowering reads their marks to place safepoints) and `Keep::reserve_bodies`
 (one pass over every node to count functions and closures).
 
-## The facts the plan lists inline
+## The semantic facts and their fields
 
 | Fact | Where it lives in the current record |
 |------|--------------------------------------|
@@ -168,7 +168,7 @@ of every module; lowering reads their marks to place safepoints) and `Keep::rese
 | dependency record | the item index's post-typecheck edges per item (the two scans that needed a record read them) and the per-module emission row |
 | feature summary | computed once per body by `body_features` from the locals' types and rvalue kinds |
 
-Every fact the plan names is explicit in the record; the dependency record is package-owned
+Every fact is explicit in the record; the dependency record is package-owned
 (the item index and the emission rows) rather than a per-body field, since both readers work
 per item and per module and the index already held the edges. The verifier and printer are
 unchanged.

@@ -1,11 +1,11 @@
 // Core IR inliner (plans/1_bounds_check_elimination.md §8.5, §10): replaces qualifying direct
 // TM_CALLs with the callee's lowered body so the caller-local BCE pass sees the callee's checks
-// and guards. Runs on the emission path only, BEFORE drop elaboration: the callee's storage
-// markers (params and user locals get ST_STORAGE_DEAD before every return) splice in verbatim,
-// so the caller's single drop elaboration schedules the callee's drops at the same program
-// points, in the same order, as the callee's own elaboration would have. Argument operands are
-// reused in place (read order preserved); every early return becomes a jump to one join block
-// that moves the return slots into the call's destinations.
+// and guards. Runs on the emission path only, over ELABORATED bodies: the borrow pass rewrote
+// every kept body with its drop terminators (`ir::drops`), so a callee splices in with its own
+// drops, flag temps and storage markers, and no ownership analysis runs on the merged body (the
+// caller was elaborated before its splices too). Argument operands are reused in place (read
+// order preserved); every early return becomes a jump to one join block that moves the return
+// slots into the call's destinations.
 //
 // Candidate policy (conservative, tuned for the std index family): direct non-variadic calls to
 // known function bodies of at most MAX_CALLEE_STMTS statements / MAX_CALLEE_BLOCKS blocks,
@@ -22,8 +22,8 @@
 //
 // Spliced constants keep their raw spans and mark the callee module in `item` (the emitter's
 // foreign-source convention for CK_STR, extended to CK_FLOAT and CK_INT); IR_NONE sentinels are
-// preserved through every pool remap. Declared callee locals become LS_INL so the caller's drop
-// elaboration schedules their storage-death drops exactly as the callee's own would have.
+// preserved through every pool remap. Declared callee locals become LS_INL (a declared local of
+// the merged body whose decl node lives in another module's syntax).
 import ast::ast as *;
 import lexer::token as tok;
 import module::loader as loader;
@@ -62,6 +62,13 @@ pub fn emit_mode_env(i: usize) str<'static> {
 const MAX_CALLEE_STMTS: usize = 40;
 const MAX_CALLEE_BLOCKS: usize = 10;
 const MAX_CALLEE_LOCALS: usize = 32;
+
+/// The callee size gate over a body's current shape. The borrow pass records the answer for the
+/// pre-elaboration shape in `CoreBody.inline_size_ok` (the shape the limits were tuned for), and
+/// the vet reads that bit.
+pub const fn callee_size_ok(b: &ir::CoreBody) bool {
+    return b.statements.len() <= MAX_CALLEE_STMTS && b.blocks.len() <= MAX_CALLEE_BLOCKS && b.locals.len() <= MAX_CALLEE_LOCALS;
+}
 /// Per caller body: total statements added by all splices (nested ones included).
 const MAX_ADDED_STMTS: usize = 512;
 /// Nested splice depth (a spliced call inlining its own calls).
@@ -70,8 +77,8 @@ const MAX_DEPTH: usize = 3;
 // keep_ix value encoding: slot index, or REJ_BASE | reason for a cached rejection.
 const REJ_BASE: u64 = 0xFFFFFFFF00000000u64;
 
-/// One cached callee: its lowered pre-elaboration body plus the generic-parameter decl list in
-/// targ order (extend parameters first, then the function's own).
+/// One cached callee: its lowered, elaborated body plus the generic-parameter decl list in targ
+/// order (extend parameters first, then the function's own).
 struct CalleeInfo {
     pub body: ir::CoreBody,
     pub gp: Vector<NodeId>,
@@ -445,7 +452,7 @@ extend InlineStore {
             // The size gate first: it rejects most bodies at once, before the declaration checks
             // walk the module's attributes.
             let mut r: u64 = 0;
-            if lw.body.statements.len() > MAX_CALLEE_STMTS || lw.body.blocks.len() > MAX_CALLEE_BLOCKS || lw.body.locals.len() > MAX_CALLEE_LOCALS {
+            if !lw.body.inline_size_ok {
                 r = REJ_BASE | IJ_TOO_BIG as u64;
             } else {
                 r = vet_decl(pkg, d);
@@ -467,7 +474,7 @@ extend InlineStore {
         let mut rej: u64 = 0;
         if body.has_reflect || body.has_zst_cond || nclosures != 0 {
             rej = REJ_BASE | IJ_SHAPE as u64;
-        } else if body.statements.len() > MAX_CALLEE_STMTS || body.blocks.len() > MAX_CALLEE_BLOCKS || body.locals.len() > MAX_CALLEE_LOCALS {
+        } else if !body.inline_size_ok {
             rej = REJ_BASE | IJ_TOO_BIG as u64;
         }
         if rej == 0 {
@@ -544,8 +551,7 @@ extend InlineStore {
         if rej != 0 {
             return rej;
         }
-        let mut kb = ir::CoreBody::compact_from(body);
-        kb.has_uninit_decl = body.has_uninit_decl;
+        let kb = ir::CoreBody::compact_from(body);
         let mut gp = Vector::<NodeId>::new();
         if ext != NODE_NONE {
             let xg = a.at_const(ext).as_data.extend_def.generics;
@@ -960,14 +966,13 @@ fn splice(
     let prelude = b0 + nkb;
     let join = prelude + 1;
     // locals: return slots and parameters become plain temps; decl clears so no consumer indexes
-    // the callee's Ast through the caller module (drop scheduling keys on the storage markers)
+    // the callee's Ast through the caller module
     for i in 0..k.locals.len() {
         let mut d = *k.locals.at(i);
         d.ty = mty(tymap, d.ty);
-        // Declared callee locals (args and user bindings) become LS_INL so the caller's drop
-        // elaboration schedules their storage-death drops exactly as the callee's own would
-        // (the elaboration keys declaredness on `decl`, which must clear: it names a node in the
-        // CALLEE module's Ast). Return slots become plain temps: the join moves them out.
+        // Declared callee locals (args and user bindings) become LS_INL: still declared for every
+        // consumer that asks (`decl` must clear: it names a node in the CALLEE module's Ast).
+        // Return slots become plain temps: the join moves them out.
         if d.storage == ir::LS_RET {
             d.storage = ir::LS_TEMP;
         } else if d.storage == ir::LS_ARG || d.decl != NODE_NONE {
@@ -1111,6 +1116,9 @@ fn splice(
                 tm.t0 += b0;
             } else if tm.kind == ir::TM_DROP {
                 tm.a += p0;
+                if tm.args_len == 1 {
+                    tm.args_start += l0; // the guard flag is a callee local
+                }
                 tm.t0 += b0;
             } else if tm.kind == ir::TM_CALL {
                 if tm.a != ir::IR_NONE {
@@ -1226,5 +1234,4 @@ fn splice(
         blk_origin.push(orec);
     }
     b.blocks[call_blk].term = goto_term(prelude, sp);
-    b.has_uninit_decl = b.has_uninit_decl || k.has_uninit_decl;
 }

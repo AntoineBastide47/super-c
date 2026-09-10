@@ -81,6 +81,18 @@ fn matchertext() {
 }
 
 @test
+fn inlined_callee_keeps_its_guarded_drop() {
+    // `f` is small enough to inline into `main` and carries a flag-guarded drop: the splice must
+    // rebase the flag local with the callee's locals, or the guard reads a caller local. Under the
+    // leak gate a wrong guard is a leak or a double free, both nonzero exits.
+    run_exit(
+        "inlined guarded drop",
+        "pub fn take(s: String) { s.free(); }\npub fn f(c: bool) i32 { let s = String::from_str(\"abc\"); if c { take(s); return 1; } return s.len() as i32; }\nfn main() i32 { unsafe exit(f(true) + f(false)); }\n",
+        4,
+    );
+}
+
+@test
 fn arithmetic() {
     run_exit("precedence", "fn main() i32 { unsafe exit(1 + 2 * 3 - 4 / 2); }\n", 5);
     run_exit("mixed precedence", "fn main() i32 { unsafe exit(17 % 5 + 100 / 7 + 6 & 3); }\n", 2);

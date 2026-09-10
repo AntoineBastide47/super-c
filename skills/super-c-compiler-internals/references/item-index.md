@@ -1,7 +1,7 @@
 # The item schedule index
 
-`src/graph/items.spc` builds the package-owned item records the semantic scheduler reads
-(plan v2/8): one record per package-index item (`PkgIndex.items`: every top-level and
+`src/graph/items.spc` builds the package-owned item records the semantic scheduler reads:
+one record per package-index item (`PkgIndex.items`: every top-level and
 associated declaration), stored as parallel arrays on `Package.sched` (`ItemSched`,
 `src/module/loader.spc`). This is the record of the measurement that gated it, the decision,
 the records, and the contracts every reader and writer keeps.
@@ -148,13 +148,13 @@ the dynamic edge from `Package.cur_item` to the callee's item (`note_dyn_edge`, 
 record per pair; task engines record nothing). The two signature states exist for a
 signature-first scheduler and are not entered today.
 
-## Deviations from the plan, with reasons
+## Design decisions, with reasons
 
 - Closures and generated bodies are not records of their own: they are checked, lowered and
   scheduled with the item that holds them, so their key is the item's and their edges are the
-  item's (the plan's body ordinal is unused). A scheduler that splits a body would add them.
+  item's (there is no body ordinal). A scheduler that splits a body would add them.
 - An unresolved reference (a resolve error stops a batch build; the language server builds no
-  ranges) adds no conservative module edge; the plan's rule has no case to apply to.
+  ranges) adds no conservative module edge; there is no case for one.
 - The `NeedsItem` hook is the existing refusal path plus the dynamic edge record: the deferred
   fold records are the engine's pending constant and assertion lists, processed by the current
   flush in module order; no fold defers through typecheck today (0 dynamic edges), so no

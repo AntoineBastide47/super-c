@@ -5,8 +5,8 @@ instance record and const-expression form the package interns. A `TypeId` is an 
 into that table: structurally equal types share one id in every module, so cross-module
 identity is an integer compare and no stage re-lowers, translates or hashes a type to
 find out whether two modules mean the same one. This is the record of the model, the
-publication order, the validation switches and the measurements (plan v2/6, accepted
-by the user over the plan's numeric gate: the earlier measurement is kept below).
+publication order, the validation switches and the measurements (the earlier
+measurement is kept below).
 
 ## Ids
 
@@ -138,13 +138,13 @@ Before the change, one transpile of the compiler (92 modules, release compiler,
 | instance graph `add` | 104k | 84% hits |
 
 The 92 pools held 32,928 `Ty` and 6,471 `TyInstance` (814 KB, indexes 294 KB) for 8,257
-structural types and 1,046 instance keys: 75% duplicates across pools. The plan's gate
-asked for 5% of round cycles or 10% of allocations or memory; the sampled maximum was
-2.2% of the round, so the plan's own rule rejected the interner. Two paths were
+structural types and 1,046 instance keys: 75% duplicates across pools. The acceptance
+threshold was 5% of round cycles or 10% of allocations or memory; the sampled maximum was
+2.2% of the round, so the interner did not meet it. Two paths were
 optimized under that decision and stay: `Ast::ix_rebuild` sizes the index strictly
 under the 0.75 trigger (2,481 rebuilds per transpile became 432), and `fdecl_memo`
-memoizes foreign declaration types. The user then asked for the table regardless of the
-gate; the numbers of the accepted change are in the next section.
+memoizes foreign declaration types. The table was built regardless, for its identity
+guarantee; its numbers are in the next section.
 
 ## Result
 
@@ -174,8 +174,8 @@ the raw id grew to `TYPE_PROV` per checker (a 77 s, 8.4 GB dev build against 4.5
 643 MB), the module pools kept their 240 KB of chunks after publication (20.7 MB
 retained, now released), and `init_types` ran twice per module.
 
-The plan's gate (5% of cycles) is not met and was not expected to be: the user
-accepted the design for its identity guarantee. The remaining levers are the
+The 5%-of-cycles threshold is not met and was not expected to be: the design is kept
+for its identity guarantee. The remaining levers are the
 publication itself (about 3 ms per transpile), the `types` table walk of every module
 at the first checkpoint, and the 131k foreign lowerings that the parallel typecheck
 phase still performs before any publication.

@@ -355,8 +355,10 @@ replay 13 ms are required work; the analyses (forest, facts, cfg, liveness, move
 solver, rules) sum to about 64 ms and 15k allocations, down from 76 ms and 129k.
 Budget for the analyses, gate the row before accepting a change: analysis time <= 70 ms,
 analysis allocations <= 20k, retained scratch <= `BC_SCRATCH_BUDGET` after any body,
-the emission `drops` region <= 55 ms serial, and `SC_BC_VALIDATE=1` builds (serial and
-every core) clean. The parallel path adds slot pooling, so its allocation count sits
+the borrow probe's `drops` region (the elaboration of every kept body) <= 10 ms and
+<= 2k allocations, the emission `drops` region (bounds-check elimination plus the
+elaboration of the bodies emission lowers itself) <= 20 ms serial, and
+`SC_BC_VALIDATE=1` builds (serial and every core) clean. The parallel path adds slot pooling, so its allocation count sits
 near the serial one plus one stack per worker.
 
 ### Bench gate policy

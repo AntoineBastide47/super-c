@@ -270,27 +270,32 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
         let sv = safe_views(pk);
         let mut marks = Vector::<u8>::new();
         marks.resize_default(b.locals.len());
-        for i in 0..b.statements.len() {
-            let s = b.statements.at(i);
-            if s.kind != ir::ST_ASSIGN {
-                continue;
-            }
-            let p0 = *b.places.at(s.place as usize);
-            if p0.proj_len != 0 {
-                marks.set(p0.base as usize, 3);
-                continue;
-            }
-            let r = *b.rvalues.at(s.rvalue as usize);
-            let mut m: u8 = 3;
-            if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_BOUNDS || r.c == ir::IN_BOUNDS_PROVEN || r.c == ir::IN_BOUNDS_GROUP) {
-                m = 1;
-            } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_RANGE_BOUNDS || r.c == ir::IN_RANGE_BOUNDS_PROVEN) {
-                m = 2;
-            }
-            if marks[p0.base as usize] == 0 {
-                marks.set(p0.base as usize, m);
-            } else {
-                marks.set(p0.base as usize, 3);
+        // Only the blocks' live runs are the body: a rewrite that re-copies runs (drop
+        // elaboration's flag materialization) leaves dead entries behind in the pool.
+        for bi in 0..b.blocks.len() {
+            let blk = *b.blocks.at(bi);
+            for si in 0..blk.stmt_len {
+                let s = b.statements.at((blk.stmt_start + si) as usize);
+                if s.kind != ir::ST_ASSIGN {
+                    continue;
+                }
+                let p0 = *b.places.at(s.place as usize);
+                if p0.proj_len != 0 {
+                    marks.set(p0.base as usize, 3);
+                    continue;
+                }
+                let r = *b.rvalues.at(s.rvalue as usize);
+                let mut m: u8 = 3;
+                if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_BOUNDS || r.c == ir::IN_BOUNDS_PROVEN || r.c == ir::IN_BOUNDS_GROUP) {
+                    m = 1;
+                } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_RANGE_BOUNDS || r.c == ir::IN_RANGE_BOUNDS_PROVEN) {
+                    m = 2;
+                }
+                if marks[p0.base as usize] == 0 {
+                    marks.set(p0.base as usize, m);
+                } else {
+                    marks.set(p0.base as usize, 3);
+                }
             }
         }
         for i in 0..b.blocks.len() {

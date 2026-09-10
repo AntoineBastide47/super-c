@@ -142,7 +142,7 @@ Lower each function body exactly once. `irl::Keep` (`src/ir/lower.spc`) is a
 package-lifetime store of finished lowerings keyed by owner: borrowck adopts every body
 it lowers, and the instance graph starts from those instead of lowering the package a
 second time. Entries move out on first demand and never return. Redundant lowering was
-the single largest waste in the pre-Phase-14 compiler.
+the single largest waste before the keep existed.
 
 ## What to Avoid
 

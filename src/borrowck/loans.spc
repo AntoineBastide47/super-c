@@ -37,6 +37,7 @@ pub struct Solver {
     pub c: *const df::Cfg,
     pub lv: *const df::Liveness,
     pub errs: Vector<BorrowErr>,
+    pub flow_pushes: u32, // scope_flow queue pushes, seeds included (validation asserts the bound)
     pub point_block: Vector<u32>, // per point: its block
     pub sub_by_point: Vector<u32>, // subset indexes sorted by point
     pub sub_pt_start: Vector<u32>, // per point (+1): range into sub_by_point (entry seeds at 0)
@@ -156,6 +157,7 @@ extend Solver {
             c: null,
             lv: null,
             errs: Vector::<BorrowErr>::new(),
+            flow_pushes: 0,
             point_block: Vector::<u32>::new(),
             sub_by_point: Vector::<u32>::new(),
             sub_pt_start: Vector::<u32>::new(),
@@ -202,6 +204,7 @@ extend Solver {
         self.pwords = 0;
         self.owords = 0;
         self.errs.truncate(0);
+        self.flow_pushes = 0;
         self.point_block.truncate(0);
         self.sub_by_point.truncate(0);
         // sub_pt_start keeps its length across bodies: index_points re-sizes and re-zeroes it
@@ -691,6 +694,7 @@ extend Solver {
         for bi in 0..nb {
             queued.set(bi as usize, true);
         }
+        self.flow_pushes = nb;
         while queue.len() != 0 {
             let bi = queue[queue.len() - 1];
             let _ = queue.pop();
@@ -701,6 +705,7 @@ extend Solver {
                 if self.scope.or_scratch(t, &scratch) && !queued[t as usize] {
                     queued.set(t as usize, true);
                     queue.push(t);
+                    self.flow_pushes += 1;
                 }
             }
         }

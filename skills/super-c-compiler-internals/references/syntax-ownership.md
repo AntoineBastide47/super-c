@@ -7,7 +7,7 @@ function that is not generic, not `const fn`, not an interface member and not a 
 a generic `extend`, with the nodes a desugar appends to such a body. The driver frees the
 body arenas once the last reader of body syntax has run, before emission plans and
 renders the C, which is where the build's memory peaks. This is the record of the
-measurement that gated the change (plan v2/7), the design, the release contract and the
+measurement that gated the change, the design, the release contract and the
 results.
 
 ## Measurement
@@ -29,7 +29,7 @@ worker) before the split:
 
 Edit latency does not depend on syntax ownership: the recheck closure is the module because
 the checker keeps module-level tables, and 48 ms of the 67 were a quadratic dead-store lint
-(fixed separately; the round is 17 ms now). The gate the user accepted is the batch peak:
+(fixed separately; the round is 17 ms now). The measure that gated the change is the batch peak:
 release the body syntax and its per-node tables before the plan phase. `SC_SYNTAX_STATS=1`
 prints the accounting per phase (parse, resolve, typecheck, borrowck, release, emit).
 

@@ -1,7 +1,10 @@
 // Drop-elaboration cases: partial moves, early returns, loops, match arms, and
-// conditional destruction produce the right schedule against the move/init dataflow, and the
-// rewritten bodies stay verifiable Core IR with explicit drop terminators.
+// conditional destruction produce the right schedule against the move/init dataflow, the
+// rewritten bodies stay verifiable Core IR with explicit drop terminators, the borrow pass keeps
+// bodies elaborated, and the validation verifier rejects a body whose drops were tampered with.
 import driver_shim as shim;
+import driver::emit as demit;
+import borrowck::flow_ir as bfi;
 import module::loader as loader;
 import ast::ast as *;
 import resolver::resolver as res;
@@ -207,4 +210,87 @@ fn owning_param_drops() {
     );
     let c = schedule(&p, "eat");
     assert(c.uncond == 1, "an owning by-value parameter drops at the exit");
+}
+
+const F_COND: str = "fn take(s: String) { s.free(); }\nfn f(c: bool) { let s = String::new(); if c { take(s); } }\nfn main() i32 { f(true); return 0; }";
+
+// Lower and elaborate `name` of `p`; the rewritten body is returned in `lw`.
+fn elaborated(p: &loader::Package, name: str, lw: &mut irl::Lowerer) {
+    let node = find_fn(p, name);
+    assert(node != NODE_NONE, "function found");
+    assert(lw.lower_fn(node), "body lowers");
+    let mut ow = bfx::Owner::new(p);
+    let forest = bmp::MoveForest::build(&lw.body);
+    let bfacts = ow.generate(&lw.body, &forest);
+    let cfg = bdf::build_cfg(&lw.body);
+    let mv = bdf::solve_moves(&lw.body, &forest, &bfacts, &cfg);
+    let mut ecx = ird::ElabCtx::empty();
+    ird::elaborate_into(&mut ow, &lw.body, &forest, &bfacts, &mv, &mut ecx);
+    ird::insert_drops(&mut lw.body, &mut ecx, &forest);
+}
+
+@test
+fn verifier_rejects_tampered_drops() {
+    // The elaborated body passes; removing the guard of the flag-guarded drop (an unguarded drop
+    // of a value the path only maybe holds), or the drop itself, is caught at the storage marker
+    // the drop belongs to.
+    let p = typed_package(F_COND);
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut lw = irl::Lowerer::new(&p, u, NODE_NONE);
+    elaborated(&p, "f", &mut lw);
+    let mut ow = bfx::Owner::new(&p);
+    assert(ird::verify_drops(&mut ow, &lw.body).len() == 0, "the elaborated body verifies");
+    let mut gb: usize = 0xFFFFFFFF;
+    for b in 0..lw.body.blocks.len() {
+        let t = lw.body.blocks.at(b).term;
+        if t.kind == irc::TM_DROP && t.args_len == 1 {
+            gb = b;
+        }
+    }
+    assert(gb != 0xFFFFFFFF, "the maybe-moved local gets a guarded drop");
+    let keep = lw.body.blocks.at(gb).term;
+    let mut t1 = keep;
+    t1.args_len = 0;
+    lw.body.blocks[gb].term = t1;
+    assert(ird::verify_drops(&mut ow, &lw.body) == "drop-of-unowned", "a dropped guard is caught");
+    let mut t2 = keep;
+    t2.kind = irc::TM_GOTO;
+    lw.body.blocks[gb].term = t2;
+    assert(ird::verify_drops(&mut ow, &lw.body) == "dead-without-drop", "a removed drop is caught");
+    lw.body.blocks[gb].term = keep;
+    assert(ird::verify_drops(&mut ow, &lw.body).len() == 0, "restored");
+}
+
+@test
+fn borrow_pass_keeps_elaborated_bodies() {
+    // The production borrow pass (validation mode) hands the keep an elaborated body: the
+    // guarded drop is in place and the inliner's size verdict was taken before the rewrite.
+    let mut p = typed_package(F_COND);
+    let u = (p.modules.len() - 1) as ModuleId;
+    let mut keep = irl::Keep::new();
+    demit::publish_checkpoint(&mut p, &mut keep);
+    let pkg = (&mut p) as *mut loader::Package;
+    let m = &mut p.modules[u as usize];
+    let src = m.source.as_str().ptr() as *const char;
+    let len = m.source.len();
+    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
+    let mut ow = bfx::Owner::new(pkg);
+    let mut ctx = bfi::BorrowCtx::new();
+    ctx.keep = &mut keep;
+    ctx.validate = true;
+    t.borrowck(&mut ow, &mut ctx);
+    assert(!t.has_errors(), "the snippet borrow-checks");
+    let node = find_fn(unsafe &*pkg, "f");
+    let ki = keep.view(u, node);
+    assert(ki >= 0, "the body is kept");
+    let kb = &keep.kept.at(ki as usize).body;
+    assert(kb.elaborated && kb.inline_size_ok, "kept elaborated, small before the rewrite");
+    let mut guarded: u32 = 0;
+    for b in 0..kb.blocks.len() {
+        let tm = kb.blocks.at(b).term;
+        if tm.kind == irc::TM_DROP && tm.args_len == 1 {
+            guarded += 1;
+        }
+    }
+    assert(guarded == 1, "the kept body carries the flag-guarded drop");
 }

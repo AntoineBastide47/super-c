@@ -184,6 +184,7 @@ pub struct Liveness {
     pub words: u32,
     pub live_in: Vector<u64>, // per block * words
     pub live_out: Vector<u64>,
+    pub pushes: u32, // fixpoint queue pushes, seeds included (validation asserts the monotone bound)
     s_queue: Vector<u32>, // reused work queue / queued-flags for the fixpoint
     s_queued: Vector<bool>,
 }
@@ -195,6 +196,7 @@ extend Liveness {
             words: 0,
             live_in: Vector::<u64>::new(),
             live_out: Vector::<u64>::new(),
+            pushes: 0,
             s_queue: Vector::<u32>::new(),
             s_queued: Vector::<bool>::new(),
         };
@@ -259,6 +261,7 @@ extend Liveness {
         for bi in 0..c.nblocks {
             lv.s_queued.set(bi as usize, true);
         }
+        lv.pushes = c.nblocks;
         // Rows are sized once above; every `base/succ*w + k` is `< nblocks*w = row.len()`, so the
         // per-word inner loop indexes unchecked (super-c has no BCE pass, so this drops it by hand).
         let pin = lv.live_in.as_ptr() as *mut u64;
@@ -295,6 +298,7 @@ extend Liveness {
                     if !lv.s_queued[pb as usize] {
                         lv.s_queued.set(pb as usize, true);
                         lv.s_queue.push(pb);
+                        lv.pushes += 1;
                     }
                 }
             }
@@ -310,6 +314,7 @@ pub struct MoveFlow {
     pub di: Vector<u64>, // block-entry definitely-init
     pub mm: Vector<u64>, // block-entry maybe-moved
     pub errs: Vector<MoveErr>,
+    pub pushes: u32, // fixpoint visits: the RPO sweep plus every queue push (validation asserts the bound)
     s_reached: Vector<bool>, // reused per-block reached markers + work queue for the fixpoint
     s_queue: Vector<u32>,
     s_queued: Vector<bool>,
@@ -494,6 +499,7 @@ extend MoveFlow {
             di: Vector::<u64>::new(),
             mm: Vector::<u64>::new(),
             errs: Vector::<MoveErr>::new(),
+            pushes: 0,
             s_reached: Vector::<bool>::new(),
             s_queue: Vector::<u32>::new(),
             s_queued: Vector::<bool>::new(),
@@ -603,6 +609,7 @@ extend MoveFlow {
             }
         }
         let mut ri: usize = 0;
+        mf.pushes = c.rpo.len() as u32;
         // Raw row pointers: mf.mi/di/mm and ctx.mi/di/mm are sized once above and never grow inside
         // the fixpoint (errors only accumulate under `fused`/reporting replays), so these stay
         // valid. Every `base/tb + k` is `< nblocks*w = row.len()`, so the per-word loops index unchecked.
@@ -702,6 +709,7 @@ extend MoveFlow {
                     if !sweep || c.rpo_pos[t as usize] < ri as u32 {
                         mf.s_queued.set(t as usize, true);
                         mf.s_queue.push(t);
+                        mf.pushes += 1;
                     }
                 }
             }

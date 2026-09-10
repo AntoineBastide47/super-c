@@ -5662,11 +5662,10 @@ const fn if_s2(c: bool, a: str<'static>, b: str<'static>) str<'static> {
     return b;
 }
 
-// Scope-end destruction for a lane body: elaborate the drop schedule and rewrite the body with
-// drop terminators, exactly as the differential does; WITHOUT this, emitted programs leak every
-// non-moved owning local (explicit `.free()` calls are the only TM_DROPs lowering itself emits).
-// The drop-elaboration analyses, pooled: one instance rebuilds in place per body (capacity kept),
-// mirroring flow_ir's FlowCtx; fresh builds per body dominated the elaboration's allocator cost.
+// Per-body emission preparation for a lane body: drop elaboration for the bodies emission lowers
+// itself (the borrow pass elaborated every kept body already), the inliner, then bounds-check
+// elimination. The elaboration analyses, pooled: one instance rebuilds in place per body (capacity
+// kept), mirroring flow_ir's BorrowCtx; fresh builds per body dominated the allocator cost.
 // Emission-phase pool of DropCtx instances: a task checks one out and returns it, so the
 // inliner's type-translation caches warm once per pooled slot (about the worker count) instead of
 // once per task. Valid within one emission phase: every cached decision is a pure function of the
@@ -5734,6 +5733,7 @@ struct DropCtx {
     pub bce: bce::Bce,
     pub core_ir: bool, // SC_CORE_IR development re-verification
     pub bce_stats: bool, // SC_BCE_STATS per-owner report lines
+    pub validate: bool, // SC_BC_VALIDATE: every body elaborated here is verified like a kept one
     /// Emission counters (SC_CEMIT_STATS): acquisition, re-lowering, inlining, drop preparation.
     pub pr: prb::Probe,
 }
@@ -5751,6 +5751,7 @@ extend DropCtx {
             bce: bce::Bce::new(p),
             core_ir: stdlib::getenv("SC_CORE_IR") != null,
             bce_stats: stdlib::getenv("SC_BCE_STATS") != null,
+            validate: stdlib::getenv("SC_BC_VALIDATE") != null,
             pr: prb::Probe::new(stdlib::getenv("SC_CEMIT_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null),
         };
     }
@@ -5772,8 +5773,25 @@ extend DropCtx {
     }
 
     fn apply_drops_i(self: &mut Self, lw: &mut irl::Lowerer, allow_inline: bool) {
-        // The inliner runs FIRST so drop elaboration and BCE see the merged body; the callee's
-        // own storage markers make the merged elaboration reproduce the callee's drops in place.
+        // A body emission lowered itself (a per-instance re-lowering, a wrapper) elaborates its
+        // drops here, BEFORE the inliner: every callee splices in elaborated, so the merged body
+        // is never analyzed for ownership. A kept body arrives elaborated by the borrow pass.
+        if !lw.body.elaborated {
+            lw.body.elaborated = true;
+            // A body that can schedule no drop skips the move facts and the elaboration outright.
+            if ird::may_schedule(&mut self.ow, &lw.body) {
+                self.forest.build_into(&lw.body);
+                // Drop elaboration reads the move facts only: no loan discovery here.
+                self.ow.generate_into(&lw.body, &self.forest, &mut self.facts, false);
+                self.cfg.build_into(&lw.body);
+                self.mv.build_into(&lw.body, &self.forest, &self.facts, &self.cfg);
+                ird::elaborate_into(&mut self.ow, &lw.body, &self.forest, &self.facts, &self.mv, &mut self.el);
+                ird::insert_drops(&mut lw.body, &mut self.el, &self.forest);
+            }
+            if self.validate {
+                bfi::bc_validate_elaborated(&mut self.ow, &lw.body);
+            }
+        }
         if allow_inline && !self.inl.off {
             let im = self.pr.start();
             let mut ist = inl::InlineStats::new();
@@ -5791,16 +5809,6 @@ extend DropCtx {
                 }
             }
             self.pr.stop(prb::P_INLINE, im);
-        }
-        // A body that can schedule no drop skips the move facts and the elaboration outright.
-        if ird::may_schedule(&mut self.ow, &lw.body) {
-            self.forest.build_into(&lw.body);
-            // Drop elaboration reads the move facts only: no loan discovery here.
-            self.ow.generate_into(&lw.body, &self.forest, &mut self.facts, false);
-            self.cfg.build_into(&lw.body);
-            self.mv.build_into(&lw.body, &self.forest, &self.facts, &self.cfg);
-            ird::elaborate_into(&mut self.ow, &lw.body, &self.forest, &self.facts, &self.mv, &mut self.el);
-            ird::insert_drops(&mut lw.body, &mut self.el, &self.forest);
         }
         // Bounds-check elimination runs HERE, on the final elaborated body, so every emission
         // path (seed, instance, closure, wrapper) proves against the exact statements it emits.
