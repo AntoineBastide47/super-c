@@ -529,7 +529,7 @@ extend tc::TypeChecker {
         if !self.last_use_built {
             self.tc_build_last_use();
         }
-        if b.binding as usize < self.last_use.len() && self.last_use[b.binding as usize] > after {
+        if self.last_use_at(b.binding as usize) > after {
             return false;
         }
         return true;

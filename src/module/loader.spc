@@ -43,9 +43,11 @@ pub struct ShardRule {
 
 /// Item readiness states (`ItemSched.state`), monotone per item: a transition only moves up,
 /// and every semantic write an item publishes lands before its state does (release store),
-/// so a reader that observes a state (acquire load) sees those writes. The two signature
-/// states are reserved for a signature-first scheduler; today an item goes Resolved ->
-/// Checking -> Checked -> IrReady. Failed marks an item whose analysis did not complete.
+/// so a reader that observes a state (acquire load) sees those writes. The batch build's
+/// visibility is the static schedule rule (`graph::items::visible`); the states serve the
+/// language server's module-order passes, the digest and the tests. The two signature states
+/// are reserved for a signature-first scheduler; today an item goes Resolved -> Checking ->
+/// Checked -> IrReady. Failed marks an item whose analysis did not complete.
 pub const IS_PARSED: u8 = 0;
 pub const IS_RESOLVED: u8 = 1;
 pub const IS_SIG_CHECKING: u8 = 2;
@@ -83,6 +85,23 @@ pub struct ItemSched {
     pub ret_attr: Vector<u8>,
     pub dyn_edges: Set<u64>, // caller item << 32 | callee item, recorded by the master engine
     pub by_node: Vector<u32>,
+    /// Per item: the declaration node of the top-level item before it in node order (0 for a
+    /// module's first), the exclusive start of the item's own module-arena range; a member
+    /// carries its extend's. `body_hi` is a function's body block id (untagged), else 0.
+    pub top_lo: Vector<u32>,
+    pub body_hi: Vector<u32>,
+    /// The component graph (`build`): `cdep` the components each component depends on,
+    /// `csucc` the reverse, `citem` each component's items ascending. All CSR by component.
+    pub cdep_off: Vector<u32>,
+    pub cdep: Vector<u32>,
+    pub csucc_off: Vector<u32>,
+    pub csucc: Vector<u32>,
+    pub citem_off: Vector<u32>,
+    pub citem: Vector<u32>,
+    /// Per component, `reach_w` words: the bits of every component it depends on, transitively
+    /// (`build`); what a check of the component may read as checked (`graph::items::visible`).
+    pub reach: Vector<u64>,
+    pub reach_w: usize,
     pub built: bool,
     /// The final ranges hold the post-typecheck edges (`build_final` after the typecheck frontier,
     /// or `finalize`): what the unused-item lint and the emission liveness read.
@@ -108,6 +127,16 @@ extend ItemSched {
             ret_attr: Vector::<u8>::new(),
             dyn_edges: Set::<u64>::new(),
             by_node: Vector::<u32>::new(),
+            top_lo: Vector::<u32>::new(),
+            body_hi: Vector::<u32>::new(),
+            cdep_off: Vector::<u32>::new(),
+            cdep: Vector::<u32>::new(),
+            csucc_off: Vector::<u32>::new(),
+            csucc: Vector::<u32>::new(),
+            citem_off: Vector::<u32>::new(),
+            citem: Vector::<u32>::new(),
+            reach: Vector::<u64>::new(),
+            reach_w: 0,
             built: false,
             final_edges: false,
             finalized: false,
@@ -119,7 +148,7 @@ extend ItemSched {
 
     /// Approximate owned bytes.
     pub const fn retained(self: &Self) usize {
-        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
+        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.cdep_off.capacity() + self.cdep.capacity() + self.csucc_off.capacity() + self.csucc.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.reach.capacity() * 8 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
     }
 }
 
@@ -197,27 +226,13 @@ pub struct Package {
     /// Compiler-stage parallelism: worker count for the parallel frontiers (0/1 = serial). Set by
     /// the driver from --jobs before run_package; the parallel cc window reads its own copy.
     pub jobs: u32,
-    /// The item schedule index; `item_state` answers the constant engine's readiness query (a
-    /// function body is interpreted only once its item is Checked: an unchecked body would
-    /// evaluate with degraded widths). Parallel checkers write disjoint items.
+    /// The item schedule index: the readiness states, the component graph the item scheduler
+    /// runs, and the visibility rule the constant engine and the checker read (`graph::items`).
+    /// Parallel checkers write disjoint items.
     pub sched: ItemSched,
-    /// The item the type checker is checking right now (module << 32 | item node, 0 = none):
-    /// the engine's dynamic body edges start here.
-    pub cur_item: u64,
-    /// Parallel frontend: tc_mod_done[m] flips when module m's check() completed; the engine's
-    /// index-aware gate treats a LOWER-indexed module's items as checked only once its flag is
-    /// set (waiting through `tc_wait`), and a HIGHER-indexed module's as unchecked regardless:
-    /// exactly the serial module-order visibility.
-    pub tc_mod_done: Vector<u8>,
-    /// Driver-installed waiter for the parallel frontend (null when serial): blocks the calling
-    /// task until tc_mod_done[m] is set.
-    pub tc_wait: fn(*mut void, ModuleId) void,
-    pub tc_wait_ctx: *mut void,
     /// The output shard policy (build.toml `[shards]` / `[instance-shards]`): modules absent
     /// from it emit one TU and one instance shard.
     pub shard_rules: Vector<ShardRule>,
-    /// True only while the parallel typecheck frontier is running.
-    pub tc_frontier: bool,
     /// The package type table: every published type, one final id each (`Ast::intern_type_i`).
     /// Boxed so the module Asts can hold its address while the package moves. `bind_types` puts
     /// the modules under it; until then (the LSP, standalone checks) they keep module-local pools.
@@ -1007,9 +1022,6 @@ fn par_parse_one(t: PParse) {
     u.ok = true;
 }
 
-/// The `tc_wait` callback for serial builds: nothing to wait for.
-pub const fn loader_no_wait(_c: *mut void, _m: ModuleId) {}
-
 // Cross-module instance propagation + emit ordering. These thread raw `*mut Ast`/`*const Ast` pointers to
 // sidestep the by-value move rules on `&Ast`; the modules Vector is never grown during propagation, so
 // pointers into `modules[x].ast` stay valid throughout.
@@ -1429,6 +1441,37 @@ extend Package {
     /// place. Then every module's tables are remapped (`Ast::publish_remap`) and its pool cleared;
     /// the maps stay in `pub_map` for the driver to remap the stores it owns (the constant engine,
     /// the kept lowerings).
+    /// A total order over two modules' const-expression forms by content (`module << 32 | pool
+    /// index` each): the constant, the term count, the divisor, then each term's parameter and
+    /// coefficient.
+    fn clin_less(self: &Self, x: u64, y: u64) bool {
+        let a = self.modules[(x >> 32) as usize].ast.pool.const_lin_at((x & 0xFFFFFFFFu64) as usize);
+        let b = self.modules[(y >> 32) as usize].ast.pool.const_lin_at((y & 0xFFFFFFFFu64) as usize);
+        if a.k != b.k {
+            return a.k < b.k;
+        }
+        if a.n != b.n {
+            return a.n < b.n;
+        }
+        if a.div != b.div {
+            return a.div < b.div;
+        }
+        for i in 0..a.n {
+            let pa = unsafe a.p[i as usize];
+            let pb = unsafe b.p[i as usize];
+            if pa.module != pb.module {
+                return pa.module < pb.module;
+            }
+            if pa.node != pb.node {
+                return pa.node < pb.node;
+            }
+            if unsafe a.c[i as usize] != unsafe b.c[i as usize] {
+                return unsafe a.c[i as usize] < unsafe b.c[i as usize];
+            }
+        }
+        return false;
+    }
+
     pub fn publish_types(self: &mut Self) {
         let n = self.modules.len();
         self.ensure_index();
@@ -1440,21 +1483,53 @@ extend Package {
         let mut bmaps = Vector::<Vector<TypeId>>::new();
         let mut bimaps = Vector::<Vector<u32>>::new();
         let mut cmaps = Vector::<Vector<u32>>::new();
+        // The const-expression forms of every module pool take their package index in one
+        // canonical order (their content), not in the order the pools interned them: that order
+        // follows the item schedule, and the index is the form's publication key.
+        let mut cpre = Vector::<Vector<u32>>::new();
+        {
+            let mut refs = Vector::<u64>::new(); // module << 32 | pool index
+            for m in 0..n {
+                let mut cmap = Vector::<u32>::new();
+                if self.modules[m].has_ast && self.modules[m].ast.gt != null {
+                    let a = &self.modules[m].ast;
+                    for pi in 0..a.pool.nclin() {
+                        cmap.push(0xFFFFFFFFu32);
+                        refs.push(m as u64 << 32 | pi as u64);
+                    }
+                }
+                cpre.push(cmap);
+            }
+            // Insertion sort by content: the forms of a batch are few.
+            for i in 1..refs.len() {
+                let v = refs[i];
+                let mut j = i;
+                while j > 0 && self.clin_less(v, refs[j - 1]) {
+                    refs.set(j, refs[j - 1]);
+                    j -= 1;
+                }
+                refs.set(j, v);
+            }
+            let g = self.tt.deref_mut();
+            for i in 0..refs.len() {
+                let m = (refs[i] >> 32) as usize;
+                let pi = (refs[i] & 0xFFFFFFFFu64) as usize;
+                let ci = g.insert_clin(self.modules[m].ast.pool.const_lin_at(pi));
+                cpre.index_mut(m).set(pi, ci);
+            }
+        }
         {
             let g = self.tt.deref_mut();
             for m in 0..n {
                 let mut map = Vector::<TypeId>::new();
                 let mut imap = Vector::<u32>::new();
-                let mut cmap = Vector::<u32>::new();
+                let mut cmap = replace(cpre.index_mut(m), Vector::<u32>::new());
                 if self.modules[m].has_ast && self.modules[m].ast.gt != null {
                     let a = &mut self.modules[m].ast;
                     let np = a.pool.len();
                     map.reserve(np);
                     for _ in 0..a.pool.ninst() {
                         imap.push(0xFFFFFFFFu32);
-                    }
-                    for _ in 0..a.pool.nclin() {
-                        cmap.push(0xFFFFFFFFu32);
                     }
                     for i in 0..np {
                         let mut y = *a.pool.at(i);
@@ -1730,12 +1805,7 @@ extend Package {
             inl_store: null,
             jobs: 1, // serial unless a driver opts in: a bare Package must never launch tasks
             sched: ItemSched::new(),
-            cur_item: 0,
-            tc_mod_done: Vector::<u8>::new(),
-            tc_wait: loader_no_wait,
-            tc_wait_ctx: null,
             shard_rules: Vector::<ShardRule>::new(),
-            tc_frontier: false,
             mod_refs: Vector::<u64>::new(),
             mod_refs_w: 0,
             mod_refs_ready: false,

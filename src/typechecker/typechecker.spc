@@ -291,8 +291,23 @@ pub struct TypeChecker<'a> {
     pub tc_twophase_wm: u32,
     pub len_reported: Vector<u64>, // array-length nodes already diagnosed ((module<<32)|node; resolve_type revisits)
     pub lint: bool,
-    /// Parallel frontier: non-null routes the package-global method marks into a per-task log.
+    /// Non-null routes the package-global method marks into a log the driver replays in item order.
     pub mark_log: *mut TcMarkLog,
+    /// The item under check (its index record; ITEM_NONE outside `check_one`), the top-level
+    /// item's node and the exclusive start of that item's own module-arena range
+    /// (`ItemSched.top_lo`): what `decl_is_own` and the engine's reader identity read.
+    pub cur_item: loader::ItemId,
+    pub cur_top: NodeId,
+    pub cur_lo: NodeId,
+    /// The components the item under check depends on: the index's row for its component
+    /// (`reach_ptr`, `reach_n` words), or `reach` when `check_orphans` built a union of rows.
+    /// The checked state the engine and the foreign reads may see.
+    pub reach_ptr: *const u64,
+    pub reach_n: usize,
+    pub reach: Vector<u64>,
+    /// `check_orphans`: the diagnostics of each top-level node that is no item, in declaration
+    /// order, for the driver to publish at the node's place among the items.
+    pub orphan_errs: Vector<diag::Errors>,
     pub free_derive_memo: Map<u64, u64>, // (module<<32|decl) -> 1 = not owning, 2 = derives Free (non-generic only)
     pub bc_free_recv: bool, // marking a `.free()` receiver: destruction, exempt from the ref-move rejection
     pub bc_fold_ctx: bool, // replaying a folded call: the const-move check stays loud (no IR op survives)
@@ -311,6 +326,10 @@ pub struct TypeChecker<'a> {
     // in borrow_dead_after; answers are identical by construction.
     pub last_use: Vector<NodeId>,
     pub last_use_built: bool,
+    /// The module's shared table (`Ast.last_use`) when it is there: read in place of `last_use`,
+    /// never written (no resolution is added after the type check).
+    pub last_use_view: *const NodeId,
+    pub last_use_vn: usize,
     // Presence bitset mirroring moved[0..nmoved] (bit index = decl NodeId), so is_moved is
     // O(1) per identifier. Kept in sync at every moved[] mutation site.
     pub moved_bits: Vector<u64>,
@@ -608,6 +627,13 @@ extend TypeChecker {
             len_reported: Vector::<u64>::new(),
             lint: false,
             mark_log: null,
+            cur_item: loader::ITEM_NONE,
+            cur_top: NODE_NONE,
+            cur_lo: 0,
+            reach_ptr: null,
+            reach_n: 0,
+            reach: Vector::<u64>::new(),
+            orphan_errs: Vector::<diag::Errors>::new(),
             free_derive_memo: Map::<u64, u64>::new(),
             bc_free_recv: false,
             bc_fold_ctx: false,
@@ -619,6 +645,8 @@ extend TypeChecker {
             errors: diag::Errors::new(),
             last_use: Vector::<NodeId>::new(),
             last_use_built: false,
+            last_use_view: null,
+            last_use_vn: 0,
             moved_bits: Vector::<u64>::new(),
             free_ext_memo: Map::<u64, u64>::new(),
             type_free_memo: Vector::<u64>::new(),
@@ -651,6 +679,11 @@ extend TypeChecker {
             ph_int: ph_lookup(pkg, "Int"),
         };
         t.icx.sv.ast = ast;
+        if unsafe (&*ast).last_use.len() != 0 {
+            t.last_use_view = unsafe (&*ast).last_use.as_ptr();
+            t.last_use_vn = unsafe (&*ast).last_use.len();
+            t.last_use_built = true;
+        }
         return t;
     }
 
@@ -985,7 +1018,7 @@ extend TypeChecker {
         if ceptr == null {
             return false;
         }
-        let v = ceptr.eval(self.cur_module(), nid);
+        let v = self.ev(self.cur_module(), nid);
         if v.kind != iri::IV_BOOL {
             return false;
         }
@@ -1131,7 +1164,7 @@ extend TypeChecker {
         if ceptr == null {
             return false;
         }
-        let v = ceptr.eval(self.cur_module(), nid);
+        let v = self.ev(self.cur_module(), nid);
         if v.kind != iri::IV_INT {
             return false;
         }
@@ -1339,22 +1372,15 @@ extend TypeChecker {
         return -1;
     }
 
-    // A foreign node's checked type under serial module-order visibility: a LOWER-indexed
-    // module's value is final (wait for its task under the parallel frontier); a HIGHER-indexed
-    // module is unchecked at this point in serial order, so its value is TYPE_NONE regardless of
-    // live parallel progress.
+    // A foreign node's checked type under the schedule's visibility: an item the item under
+    // check depends on is complete, so its value is final; any other item's value is TYPE_NONE
+    // whatever a worker has done with it, so every worker order answers alike.
     fn tc_foreign_type_of(self: &mut Self, fm: ModuleId, n: NodeId) TypeId {
         if self.package == null || fm == self.cur_module() {
             return self.cur_ast().type_of(n);
         }
-        if unsafe self.package.tc_frontier {
-            if fm >= self.cur_module() {
-                return TYPE_NONE;
-            }
-            if fm as usize < unsafe self.package.tc_mod_done.len() && *unsafe self.package.tc_mod_done.at(fm as usize) == 0 {
-                let wf = unsafe self.package.tc_wait;
-                wf(unsafe self.package.tc_wait_ctx, fm);
-            }
+        if !self.node_visible(fm, n) {
+            return TYPE_NONE;
         }
         return (unsafe &*self.mod_ast(fm)).type_of(n);
     }
@@ -2181,9 +2207,8 @@ extend TypeChecker {
             return false;
         }
         // A leaf with no parameter in it (a literal, a named const) is the evaluator's business.
-        let ceptr = self.cir();
-        if ceptr != null {
-            let lv = ceptr.eval(m, id);
+        if self.cir() != null {
+            let lv = self.ev(m, id);
             if lv.kind == iri::IV_INT {
                 out.k = out.k + lv.i;
                 return true;
@@ -2662,20 +2687,33 @@ extend TypeChecker {
     }
 
     /// The type of declaration `decl` of module `m`: a parameter, field, constant, binding,
-    /// function, generic parameter or aggregate. The owning checker records it on the node; a
-    /// foreign reader takes that record once its id is final (the package identity), and lowers
-    /// the declared syntax itself before that. Only declaration nodes carry their type in the node
-    /// slot: a type node's slot holds other facts, so `lower_type_in` never reads it.
+    /// function, generic parameter or aggregate. The item that owns the declaration records it on
+    /// the node while it is under check (`decl_is_own`); every other reader takes that record
+    /// when it is there (a foreign one once its id is final, the package identity) and lowers
+    /// the declared syntax privately otherwise, memoized and without diagnostics: the owner
+    /// reports a bad declaration once, where it is written, and no two items write one slot.
+    /// Only declaration nodes carry their type in the node slot: a type node's slot holds other
+    /// facts, so `lower_type_in` never reads it.
     pub fn decl_type_in(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
         if decl == NODE_NONE {
             return TYPE_NONE;
         }
         let local = self.package == null || m == self.cur_module();
         let fkey = m as u64 << 32 | decl as u64;
+        let mut own = local;
         if local {
             let cached = self.cur_ast().type_of(decl);
             if cached != TYPE_NONE {
                 return cached;
+            }
+            own = self.package == null || self.decl_is_own(decl);
+            if !own {
+                switch self.fdecl_memo.get(&fkey) {
+                    Some(t) => {
+                        return *t;
+                    },
+                    None => {},
+                };
             }
         } else {
             if unsafe TS_ON {
@@ -2694,6 +2732,12 @@ extend TypeChecker {
                 },
                 None => {},
             };
+        }
+        // A private lowering of another item's declaration reports nothing: its owner does.
+        let quiet = local && !own;
+        let mut saved = diag::Errors::new();
+        if quiet {
+            saved = replace(&mut self.errors, diag::Errors::new());
         }
         let ne = self.errors.errors.len();
         let a = self.mod_ast(m);
@@ -2726,9 +2770,13 @@ extend TypeChecker {
         } else if dk == NodeKind::NODE_STRUCT || dk == NodeKind::NODE_ENUM {
             result = self.named_type_of(m, decl);
         }
-        if local {
+        let clean = self.errors.errors.len() == ne;
+        if quiet {
+            let _scratch = replace(&mut self.errors, saved);
+        }
+        if own {
             self.cur_ast().set_type(decl, result);
-        } else if result != TYPE_ERROR && self.errors.errors.len() == ne {
+        } else if result != TYPE_ERROR && clean {
             self.fdecl_memo.insert(fkey, result);
         }
         return result;
@@ -2830,7 +2878,7 @@ extend TypeChecker {
     fn tc_const_arg_i(self: &mut Self, m: ModuleId, aid: NodeId) TypeId {
         let ceptr = self.cir();
         if ceptr != null {
-            let lv = ceptr.eval(m, aid);
+            let lv = self.ev(m, aid);
             if lv.kind == iri::IV_INT {
                 return self.cur_ast().const_value(lv.i);
             }
@@ -2853,7 +2901,7 @@ extend TypeChecker {
                     let mid = unsafe ea.list(ms)[j as usize];
                     let vv = ea.at_const(mid).as_data.variant.value;
                     if vv != NODE_NONE && ceptr != null {
-                        let ev = ceptr.eval(ed.module, vv);
+                        let ev = self.ev(ed.module, vv);
                         if ev.kind == iri::IV_INT {
                             next = ev.i;
                         }
@@ -2905,7 +2953,7 @@ extend TypeChecker {
         if ceptr == null {
             return 0;
         }
-        let lv = ceptr.eval(m, lenNode);
+        let lv = self.ev(m, lenNode);
         // A length of 0 is legal (an empty carrier type); it interns as the same len-0 array a
         // `[]` literal types with, which is exactly the type the literal must match.
         if lv.kind == iri::IV_INT && lv.i >= 0 && lv.i <= 0xFFFFFFFFi64 {
@@ -7594,6 +7642,9 @@ extend TypeChecker {
     /// its loop binding), which tc_note_resolution folds in at the set site.
     pub fn tc_build_last_use(self: &mut Self) {
         self.last_use_built = true;
+        if self.last_use_view != null {
+            return;
+        }
         let n = self.cur_ast().nnodes();
         self.last_use.clear();
         let mut i: usize = 0;
@@ -7610,8 +7661,36 @@ extend TypeChecker {
             }
         }
     }
-    const fn tc_note_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
+    /// The last node resolving to declaration index `dk`, from the shared table or this
+    /// checker's own; NODE_NONE past either.
+    pub const fn last_use_at(self: &Self, dk: usize) NodeId {
+        if self.last_use_view != null {
+            if dk < self.last_use_vn {
+                return unsafe self.last_use_view[dk];
+            }
+            return NODE_NONE;
+        }
+        if dk < self.last_use.len() {
+            return self.last_use[dk];
+        }
+        return NODE_NONE;
+    }
+
+    /// Hand the module its shared last-use table (the type check's close): built here when no
+    /// item needed it yet.
+    pub fn share_last_use(self: &mut Self) {
+        if self.last_use_view != null {
+            return;
+        }
         if !self.last_use_built {
+            self.tc_build_last_use();
+        }
+        unsafe self.cur_ast().last_use = replace(&mut self.last_use, Vector::<NodeId>::new());
+        self.last_use_built = false;
+    }
+
+    const fn tc_note_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
+        if !self.last_use_built || self.last_use_view != null {
             return;
         }
         let dk = self.cur_ast().dense(decl);
@@ -13934,7 +14013,7 @@ extend TypeChecker {
                 if ceptr == null {
                     return -1;
                 }
-                let lv = ceptr.eval(self.cur_module(), el.as_data.field_initializer.name);
+                let lv = self.ev(self.cur_module(), el.as_data.field_initializer.name);
                 if lv.kind != iri::IV_INT || lv.i < 0 {
                     return -1;
                 }
@@ -14030,7 +14109,7 @@ extend TypeChecker {
                         );
                     } else {
                         let ceptr = self.cir();
-                        if ceptr != null && ceptr.eval(self.cur_module(), el.as_data.field_initializer.name).kind == iri::IV_NONE {
+                        if ceptr != null && self.ev(self.cur_module(), el.as_data.field_initializer.name).kind == iri::IV_NONE {
                             let sp = a.at_const(el.as_data.field_initializer.name).span;
                             if ceptr.trap_get().len() != 0 {
                                 self.errors.emit(
@@ -14116,7 +14195,7 @@ extend TypeChecker {
         let ceptr = self.cir();
         let mut n: i64 = -1;
         if ceptr != null {
-            let cv = ceptr.eval(self.cur_module(), nid);
+            let cv = self.ev(self.cur_module(), nid);
             if cv.kind == iri::IV_INT {
                 n = cv.i;
             }
@@ -14520,11 +14599,11 @@ extend TypeChecker {
             return;
         }
         let m = self.cur_module();
-        let v = ceptr.eval(m, value);
+        let v = self.ev(m, value);
         if v.kind != iri::IV_NONE {
             return;
         }
-        if ceptr.trap_get().len() == 0 && ceptr.eval_static(m, value).ok {
+        if ceptr.trap_get().len() == 0 && self.ev_static(m, value).ok {
             return;
         }
         if ceptr.trap_get().len() != 0 {
@@ -14631,7 +14710,7 @@ extend TypeChecker {
         if ceptr == null {
             return;
         }
-        let v = ceptr.eval(self.cur_module(), left);
+        let v = self.ev(self.cur_module(), left);
         if v.kind == iri::IV_BOOL && v.i == 0 {
             self.errors.emit(sp.start, sp.end - sp.start, format("static assertion failed"));
         } else if v.kind == iri::IV_NONE {
@@ -15551,7 +15630,7 @@ extend TypeChecker {
                 // would be blind to them (fn_recheck also overwrites any blind memoized verdict).
                 if fnd.is_const && fnd.body != NODE_NONE && !fnd.is_extern {
                     let ceptr = self.cir();
-                    if ceptr != null && ceptr.fn_recheck(self.cur_module(), id) == iri::FX_NO {
+                    if ceptr != null && self.fn_recheck_as(self.cur_module(), id) == iri::FX_NO {
                         let sp = self.name_span(fnd.name);
                         // The actionable token is the `const` keyword itself: [pub] [unsafe] const fn
                         // is the canonical order, so scan back from the name across `fn`.
@@ -15628,7 +15707,8 @@ extend TypeChecker {
                         let mid = unsafe self.cur_ast().list(members)[i as usize];
                         let mn = *self.cur_ast().at_const(mid);
                         if mn.kind == NodeKind::NODE_FIELD {
-                            self.resolve_type(mn.as_data.field.ty);
+                            // The field's own record: every reader takes it from the slot.
+                            self.decl_type(mid);
                         } else {
                             if mn.as_data.variant.value != NODE_NONE {
                                 let vt = self.check_expr(mn.as_data.variant.value);
@@ -15644,8 +15724,11 @@ extend TypeChecker {
                             let payload = mn.as_data.variant.payload;
                             for j in 0..payload.len {
                                 let plid = unsafe self.cur_ast().list(payload)[j as usize];
-                                let pe = self.cur_ast().at_const(plid);
-                                self.resolve_type(if_node(pe.kind == NodeKind::NODE_FIELD, pe.as_data.field.ty, plid));
+                                if self.cur_ast().at_const(plid).kind == NodeKind::NODE_FIELD {
+                                    self.decl_type(plid);
+                                } else {
+                                    self.resolve_type(plid);
+                                }
                             }
                         }
                     }
@@ -15679,7 +15762,8 @@ extend TypeChecker {
                 self.current_extend = saved_impl;
             },
             NODE_CONST => {
-                let declared = self.resolve_type(a.at_const(id).as_data.const_def.ty);
+                // The declaration's own record (`decl_type_in`): the lowering reads the slot.
+                let declared = self.decl_type(id);
                 let cd = self.cur_ast().at_const(id).as_data.const_def;
                 let dtk = self.type_at(declared).kind;
                 // An owning (Free) type IS representable: its object graph, heap blocks included,
@@ -15745,10 +15829,21 @@ extend TypeChecker {
         };
     }
 
+    // Members are checked in declaration order under their extend or interface; each names
+    // itself as the engine's reader, so an earlier member's body is visible to a later one.
     fn check_associated(self: &mut Self, items: NodeList) {
+        let saved = self.cur_item;
         for i in 0..items.len {
-            self.check_item(unsafe self.cur_ast().list(items)[i as usize]);
+            let mid = unsafe self.cur_ast().list(items)[i as usize];
+            if saved != loader::ITEM_NONE {
+                let rec = self.package.item_of(self.cur_module(), mid);
+                if rec != loader::ITEM_NONE {
+                    self.cur_item = rec;
+                }
+            }
+            self.check_item(mid);
         }
+        self.cur_item = saved;
     }
 
     fn close_instances(self: &mut Self) {
@@ -16054,46 +16149,70 @@ extend TypeChecker {
         }
     }
 
-    /// Entry point: types every top-level item, closes concrete generic instances (interning their
-    /// methods' signature types), runs whole-module lints, and finalizes diagnostics. The typed Ast
-    /// stays in its module slot; the borrowck pass re-walks it from there.
+    /// Entry point: types every top-level item in declaration order, closes concrete generic
+    /// instances (interning their methods' signature types), runs whole-module lints, and
+    /// finalizes diagnostics. The typed Ast stays in its module slot; the borrowck pass re-walks
+    /// it from there. The driver's item scheduler runs the same three steps per item.
     pub fn check(self: &mut Self) {
+        self.check_open();
+        let items = self.cur_ast().at_const(unsafe self.cur_ast().root).as_data.program.items;
+        let mut prev: NodeId = 0;
+        for i in 0..items.len {
+            let it9 = unsafe self.cur_ast().list(items)[i as usize];
+            self.check_one(it9, prev);
+            prev = it9;
+        }
+        self.check_close();
+    }
+
+    /// The module's first step: the item index (a pipeline without the driver's resolve
+    /// frontier, the lint and the harness, opens it here: the engine's visibility query needs
+    /// the item records) and the type side tables.
+    pub fn check_open(self: &mut Self) {
         if self.package != null && !unsafe self.package.sched.built {
-            // A pipeline without the driver's resolve frontier (lint, the harness) opens the
-            // item index here: the engine's readiness query needs the item records.
             gitems::open(unsafe &mut *self.package);
         }
         self.cur_ast().init_types();
-        let items = self.cur_ast().at_const(unsafe self.cur_ast().root).as_data.program.items;
-        for i in 0..items.len {
-            let it9 = unsafe self.cur_ast().list(items)[i as usize];
-            // Readiness: Checking while the item's facts are written, Checked once they are
-            // published (the constant engine interprets a function body only from Checked: an
-            // unchecked body would evaluate with degraded widths).
-            let mut rec9 = loader::ITEM_NONE;
-            let mut t0: u64 = 0;
-            if self.package != null {
-                unsafe self.package.cur_item = self.cur_module() as u64 << 32 | it9 as u64;
-                rec9 = self.package.item_of(self.cur_module(), it9);
-                if rec9 != loader::ITEM_NONE {
-                    self.package.set_item_state_deep(rec9, loader::IS_CHECKING);
-                }
-                if unsafe self.package.icost_on {
-                    t0 = std::parallel::platform::now_ns();
-                }
+    }
+
+    /// Check top-level item `it9`; `lo` is the node of the top-level item before it (0 for the
+    /// first): the exclusive start of its own module-arena range. Readiness: Checking while the
+    /// item's facts are written, Checked once they are published (the constant engine
+    /// interprets a function body only from Checked: an unchecked body would evaluate with
+    /// degraded widths).
+    pub fn check_one(self: &mut Self, it9: NodeId, lo: NodeId) {
+        let mut rec9 = loader::ITEM_NONE;
+        let mut t0: u64 = 0;
+        self.cur_top = it9;
+        self.cur_lo = lo;
+        if self.package != null {
+            rec9 = self.package.item_of(self.cur_module(), it9);
+            if rec9 != loader::ITEM_NONE {
+                self.package.set_item_state_deep(rec9, loader::IS_CHECKING);
             }
-            self.check_item(it9);
-            if t0 != 0 {
-                unsafe self.package.icost_tc.push(self.cur_module() as u64 << 32 | it9 as u64);
-                unsafe self.package.icost_tc.push(std::parallel::platform::now_ns() - t0);
-            }
-            if self.package != null {
-                if rec9 != loader::ITEM_NONE {
-                    self.package.set_item_state_deep(rec9, loader::IS_CHECKED);
-                }
-                unsafe self.package.cur_item = 0;
+            if unsafe self.package.icost_on {
+                t0 = std::parallel::platform::now_ns();
             }
         }
+        self.cur_item = rec9;
+        self.reach_ready();
+        self.check_item(it9);
+        if t0 != 0 {
+            unsafe self.package.icost_tc.push(self.cur_module() as u64 << 32 | it9 as u64);
+            unsafe self.package.icost_tc.push(std::parallel::platform::now_ns() - t0);
+        }
+        if rec9 != loader::ITEM_NONE {
+            self.package.set_item_state_deep(rec9, loader::IS_CHECKED);
+        }
+        self.cur_item = loader::ITEM_NONE;
+        self.reach_ready();
+        self.cur_top = NODE_NONE;
+        self.cur_lo = 0;
+    }
+
+    /// The module's last step, after every item: the instance closure, the whole-module lints,
+    /// the finalized diagnostics.
+    pub fn check_close(self: &mut Self) {
         self.close_instances();
         if self.lint {
             self.tc_lint_unneeded_mut();
@@ -16106,6 +16225,121 @@ extend TypeChecker {
         if unsafe TS_ON {
             ts_add(TS_LOWER_MEMO_N, self.lower_memo.len() as u64);
         }
+    }
+
+    /// Check the module's top-level nodes that are no item (a `static_assert`) after every item
+    /// of the module: the reader is the module's last item with every component the module's
+    /// items depend on, and the module's own, as visible (`gitems::reach_fill_module`). Each
+    /// node's diagnostics land in `orphan_errs`, in declaration order.
+    pub fn check_orphans(self: &mut Self) {
+        if self.package == null || !unsafe self.package.sched.built {
+            return;
+        }
+        let m = self.cur_module();
+        let i0 = unsafe self.package.idx.mod_items[m as usize];
+        let i1 = unsafe self.package.idx.mod_items[m as usize + 1];
+        if i1 == i0 {
+            return;
+        }
+        let items = self.cur_ast().at_const(unsafe self.cur_ast().root).as_data.program.items;
+        let mut prev: NodeId = 0;
+        let mut set = false;
+        for i in 0..items.len {
+            let it9 = unsafe self.cur_ast().list(items)[i as usize];
+            if self.package.item_of(m, it9) != loader::ITEM_NONE {
+                prev = it9;
+                continue;
+            }
+            if !set {
+                gitems::reach_fill_module(unsafe &*self.package, m as usize, &mut self.reach);
+                self.cur_item = i1 - 1;
+                self.reach_ptr = self.reach.as_ptr();
+                self.reach_n = self.reach.len();
+                set = true;
+            }
+            self.cur_top = it9;
+            self.cur_lo = prev;
+            let held = replace(&mut self.errors, diag::Errors::new());
+            self.check_item(it9);
+            let mine = replace(&mut self.errors, held);
+            self.orphan_errs.push(mine);
+            prev = it9;
+        }
+        self.cur_item = loader::ITEM_NONE;
+        self.reach_ready();
+        self.cur_top = NODE_NONE;
+        self.cur_lo = 0;
+    }
+
+    /// Is declaration `decl` of the current module inside the item under check: a body-arena
+    /// node (only the item's own bodies hold those), a module-arena node in the item's own range,
+    /// or a node appended after parsing (a desugar or a rewrite inside the body it extends)?
+    /// Outside `check_one` (the borrow pass, the obligation passes) nothing is own: those
+    /// readers lower privately and write no slot.
+    const fn decl_is_own(self: &Self, decl: NodeId) bool {
+        if self.cur_top == NODE_NONE {
+            return false;
+        }
+        return Ast::in_body(decl) || decl > self.cur_lo && decl <= self.cur_top || decl >= unsafe self.cur_ast().hir_base;
+    }
+
+    /// Is the checked state of node `n` of module `m` visible to the item under check
+    /// (`gitems::visible`)? Everything is once no item is under check.
+    fn node_visible(self: &mut Self, m: ModuleId, n: NodeId) bool {
+        if self.package == null || self.cur_item == loader::ITEM_NONE {
+            return true;
+        }
+        let t = gitems::owner_of(unsafe &*self.package, m, n);
+        if t == loader::ITEM_NONE {
+            return true;
+        }
+        return gitems::visible(unsafe &*self.package, self.cur_item, t, self.reach_ptr, self.reach_n);
+    }
+
+    /// Point `reach_ptr` at the index's row for the item under check's component.
+    fn reach_ready(self: &mut Self) {
+        let sch = unsafe &self.package.sched;
+        if sch.ncomp == 0 || self.cur_item == loader::ITEM_NONE {
+            self.reach_ptr = null;
+            self.reach_n = 0;
+            return;
+        }
+        self.reach_ptr = gitems::reach_row(unsafe &*self.package, sch.comp[self.cur_item as usize]);
+        self.reach_n = sch.reach_w;
+    }
+
+    /// Fold node `id` of module `m` through the engine as the item under check: the engine
+    /// answers with the item's visibility (a callee it may not see is a refusal, never a value).
+    fn ev(self: &mut Self, m: ModuleId, id: NodeId) iri::IVal {
+        let ce = self.cir();
+        ce.eng_lock();
+        ce.set_reader(self.cur_item, self.reach_ptr, self.reach_n);
+        let v = ce.eval(m, id);
+        ce.set_reader(loader::ITEM_NONE, null, 0);
+        ce.eng_unlock();
+        return v;
+    }
+
+    fn ev_static(self: &mut Self, m: ModuleId, id: NodeId) iri::StaticRes {
+        let ce = self.cir();
+        ce.eng_lock();
+        ce.set_reader(self.cur_item, self.reach_ptr, self.reach_n);
+        let r = ce.eval_static(m, id);
+        ce.set_reader(loader::ITEM_NONE, null, 0);
+        ce.eng_unlock();
+        return r;
+    }
+
+    /// The def-site `const fn` re-scan as the item under check (its visibility decides what the
+    /// scan reads as typed).
+    fn fn_recheck_as(self: &mut Self, m: ModuleId, id: NodeId) u8 {
+        let ce = self.cir();
+        ce.eng_lock();
+        ce.set_reader(self.cur_item, self.reach_ptr, self.reach_n);
+        let r = ce.fn_recheck(m, id);
+        ce.set_reader(loader::ITEM_NONE, null, 0);
+        ce.eng_unlock();
+        return r;
     }
 
     /// True once any type error is recorded.

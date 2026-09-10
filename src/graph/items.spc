@@ -1,13 +1,15 @@
-// The item schedule index (plan v2/8): the package-owned records the semantic scheduler reads,
-// built from the package index and the resolution side tables. `build` runs once resolution is
-// complete: stable keys, the (module, node) lookup, the precheck dependency ranges and their
-// strongly connected components, and the Resolved state. `finalize` refines it on demand once
-// the checks are done: the signature hashes from the post-typecheck signature metadata and the
-// final dependency ranges (the resolutions typecheck added, the engine's dynamic body edges);
-// its consumers (invalidation, instance work) call it, so a build that needs neither pays
-// nothing for it. The batch and the language server share the readiness states. SC_ITEM_STATS=1 prints the
-// measurement that gated the index (`report`): per-item costs, the graph, and the predicted
-// makespans of an item schedule against the module schedule the frontier runs today.
+// The item schedule index: the package-owned records the item scheduler and the visibility
+// rule read, built from the package index and the resolution side tables. `build` runs once
+// resolution is complete: stable keys, the (module, node) lookup, the schedule graph (the
+// resolved references, each extend to its members, each type's users to its extends) and its
+// strongly connected components with their dependency graph, and the Resolved state.
+// `finalize` refines it on demand once the checks are done: the signature hashes from the
+// post-typecheck signature metadata and the final dependency ranges (the resolutions typecheck
+// added, the engine's dynamic body edges); its consumers (invalidation, instance work) call it,
+// so a build that needs neither pays nothing for it. The batch and the language server share
+// the readiness states. SC_ITEM_STATS=1 prints the measurement (`report`): per-item costs, the
+// graph, and the predicted makespans of the item schedule against the module-level schedule
+// the type check ran before it.
 import ast::ast as *;
 import module::loader as loader;
 import std::parallel::platform as plat;
@@ -338,53 +340,35 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
     }
 }
 
-// Lay `edges` out as CSR ranges over `n` owners, targets ascending and deduplicated: a counting
-// sort by owner, then an insertion sort of each owner's few targets.
+// Lay `edges` out as CSR ranges over `n` owners, targets ascending and deduplicated.
 fn csr(n: usize, edges: &Vector<u64>, off: &mut Vector<u32>, tgt: &mut Vector<u32>) {
+    // One sort of the packed pairs orders them by owner then target; a linear pass lays the
+    // ranges out and drops the repeats.
+    let mut e = Vector::<u64>::with_capacity(edges.len());
+    for i in 0..edges.len() {
+        e.push(edges[i]);
+    }
+    e.sort();
     off.clear();
     off.resize_default(n + 1);
-    for i in 0..edges.len() {
-        let o = (edges[i] >> 32) as usize;
-        off.set(o + 1, off[o + 1] + 1);
-    }
-    for i in 0..n {
-        off.set(i + 1, off[i + 1] + off[i]);
-    }
-    let mut fill = Vector::<u32>::new();
-    fill.resize_default(n);
     tgt.clear();
-    tgt.resize_default(edges.len());
-    for i in 0..edges.len() {
-        let o = (edges[i] >> 32) as usize;
-        tgt.set((off[o] + fill[o]) as usize, (edges[i] & 0xFFFFFFFFu64) as u32);
-        fill.set(o, fill[o] + 1);
-    }
-    let mut w: usize = 0;
-    let mut nout = Vector::<u32>::new();
-    nout.resize_default(n + 1);
-    for o in 0..n {
-        let s = off[o] as usize;
-        let e = off[o + 1] as usize;
-        for i in s + 1..e {
-            let v = tgt[i];
-            let mut j = i;
-            while j > s && tgt[j - 1] > v {
-                tgt.set(j, tgt[j - 1]);
-                j -= 1;
-            }
-            tgt.set(j, v);
+    tgt.reserve(e.len());
+    let mut o: usize = 0;
+    for i in 0..e.len() {
+        if i != 0 && e[i] == e[i - 1] {
+            continue;
         }
-        nout.set(o, w as u32);
-        for i in s..e {
-            if i == s || tgt[i] != tgt[i - 1] {
-                tgt.set(w, tgt[i]);
-                w += 1;
-            }
+        let eo = (e[i] >> 32) as usize;
+        while o < eo {
+            o += 1;
+            off.set(o, tgt.len() as u32);
         }
+        tgt.push((e[i] & 0xFFFFFFFFu64) as u32);
     }
-    nout.set(n, w as u32);
-    tgt.truncate(w);
-    *off = nout;
+    while o < n {
+        o += 1;
+        off.set(o, tgt.len() as u32);
+    }
 }
 
 /// Open the index after the package index exists: keys and the (module, node) lookup, which
@@ -432,6 +416,41 @@ pub fn open(p: &mut loader::Package) {
             sch.by_node.set(j, v);
         }
     }
+    // Own ranges: a top-level item's module-arena nodes are (previous top-level node, its node];
+    // a member shares its extend's. `body_hi` runs over the by_node positions as the largest
+    // body block id so far (bodies follow source order), for the body-arena owner search.
+    sch.top_lo.resize_default(n);
+    sch.body_hi.resize_default(n);
+    for m in 0..nm {
+        let i0 = p.idx.mod_items[m] as usize;
+        let i1 = p.idx.mod_items[m + 1] as usize;
+        let mut prev: u32 = 0;
+        let mut bmax: u32 = 0;
+        for k in i0..i1 {
+            let it = sch.by_node[k] as usize;
+            let meta = *p.idx.items.at(it);
+            if meta.owner == loader::ITEM_NONE {
+                sch.top_lo.set(it, prev);
+                for j in it + 1..n {
+                    if p.idx.items.at(j).owner != it as u32 {
+                        break;
+                    }
+                    sch.top_lo.set(j, prev);
+                }
+                prev = meta.node;
+            }
+            if p.modules.at(m).has_ast {
+                let nd = p.modules.at(m).ast.at_const(meta.node);
+                if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body) {
+                    let b = nd.as_data.function.body & NODE_BODY_MASK;
+                    if b > bmax {
+                        bmax = b;
+                    }
+                }
+            }
+            sch.body_hi.set(k, bmax);
+        }
+    }
     sch.state.resize_default(n);
     sch.ret_attr.resize_default(n);
     for i in 0..n {
@@ -445,20 +464,208 @@ pub fn open(p: &mut loader::Package) {
 }
 
 /// Complete the index after resolution with the precheck ranges from `edges` (every module's
-/// `module_edges`, any order) and their components.
+/// `module_edges`, any order), their components, and the component graph the scheduler runs.
+///
+/// The schedule graph adds two edge kinds to the resolved references: an extend to each of its
+/// members (the members are checked with their extend, so the extend's job is theirs), and a
+/// dispatch edge from every item that names a type to every extend of that type (a method the
+/// checker resolves by name has no resolved reference, and a constant fold may call it). Both
+/// keep a callee's component before its caller's, which is what the visibility rule reads.
 pub fn build(p: &mut loader::Package, edges: &Vector<u64>) {
     let t0 = plat::now_ns();
     let n = p.idx.items.len();
+    // Extends by target type item (CSR): the extend's target resolution, or the alias it names;
+    // and per item the type its own extend targets (an extend or a member), for the exemption.
+    let mut xe = Vector::<u64>::new();
+    let mut self_t = Vector::<u32>::new();
+    self_t.resize_default(n);
+    for i in 0..n {
+        self_t.set(i, loader::ITEM_NONE);
+    }
+    for i in 0..n {
+        let it = *p.idx.items.at(i);
+        if it.kind != loader::ItemKind::IK_EXTEND as u8 || !p.modules.at(it.module as usize).has_ast {
+            continue;
+        }
+        let a = &p.modules.at(it.module as usize).ast;
+        let tn = a.at_const(it.node).as_data.extend_def.target_type;
+        if tn == NODE_NONE {
+            continue;
+        }
+        let d = a.resolution_def(tn);
+        if d.node == NODE_NONE {
+            continue;
+        }
+        let t = p.item_of(d.module, d.node);
+        if t != loader::ITEM_NONE {
+            xe.push(t as u64 << 32 | i as u64);
+            self_t.set(i, t);
+            for j in i + 1..n {
+                if p.idx.items.at(j).owner != i as u32 {
+                    break;
+                }
+                self_t.set(j, t);
+            }
+        }
+    }
+    let mut xoff = Vector::<u32>::new();
+    let mut xtgt = Vector::<u32>::new();
+    csr(n, &xe, &mut xoff, &mut xtgt);
+    let mut all = Vector::<u64>::with_capacity(edges.len() + n);
+    for i in 0..edges.len() {
+        let e = edges[i];
+        all.push(e);
+        let t = (e & 0xFFFFFFFFu64) as usize;
+        // A reference to the type an item's own extend targets adds no dispatch edge: the
+        // extends of one type would otherwise form one component with everything that names it.
+        if self_t[(e >> 32) as usize] == t as u32 {
+            continue;
+        }
+        for k in xoff[t] as usize..xoff[t + 1] as usize {
+            all.push(e & 0xFFFFFFFF00000000u64 | xtgt[k] as u64);
+        }
+    }
+    for i in 0..n {
+        let ow = p.idx.items.at(i).owner;
+        if ow != loader::ITEM_NONE {
+            all.push(ow as u64 << 32 | i as u64);
+        }
+    }
     let mut off = Vector::<u32>::new();
     let mut tgt = Vector::<u32>::new();
-    csr(n, edges, &mut off, &mut tgt);
+    csr(n, &all, &mut off, &mut tgt);
     let mut comp = Vector::<u32>::new();
     let ncomp = condense(n, &off, &tgt, &mut comp) as u32;
+    // The component graph: dependencies, dependents, and each component's items ascending.
+    let nc = ncomp as usize;
+    let mut ce = Vector::<u64>::new();
+    let mut cr = Vector::<u64>::new();
+    for i in 0..n {
+        let a = comp[i];
+        for e in off[i] as usize..off[i + 1] as usize {
+            let b = comp[tgt[e] as usize];
+            if a != b {
+                ce.push(a as u64 << 32 | b as u64);
+                cr.push(b as u64 << 32 | a as u64);
+            }
+        }
+    }
+    let mut ci = Vector::<u64>::with_capacity(n);
+    for i in 0..n {
+        ci.push(comp[i] as u64 << 32 | i as u64);
+    }
+    csr(nc, &ce, &mut p.sched.cdep_off, &mut p.sched.cdep);
+    csr(nc, &cr, &mut p.sched.csucc_off, &mut p.sched.csucc);
+    csr(nc, &ci, &mut p.sched.citem_off, &mut p.sched.citem);
+    // Transitive dependencies per component: the numbering is dependency-first, so one pass in
+    // component order folds each dependency's finished row in.
+    let w = (nc + 63) / 64;
+    p.sched.reach_w = w;
+    p.sched.reach.clear();
+    p.sched.reach.resize_default(nc * w);
+    for c in 0..nc {
+        for e in p.sched.cdep_off[c] as usize..p.sched.cdep_off[c + 1] as usize {
+            let d = p.sched.cdep[e] as usize;
+            assert(d < c, "a dependency's component precedes its dependent's");
+            for k in 0..w {
+                let v = p.sched.reach[c * w + k] | p.sched.reach[d * w + k];
+                p.sched.reach.set(c * w + k, v);
+            }
+            p.sched.reach.set(c * w + (d >> 6), p.sched.reach[c * w + (d >> 6)] | 1u64 << (d & 63) as u64);
+        }
+    }
     p.sched.pre_off = off;
     p.sched.pre_edges = tgt;
     p.sched.comp = comp;
     p.sched.ncomp = ncomp;
     p.sched.build_ns = plat::now_ns() - t0;
+}
+
+/// The reachability row of component `c` (`reach_w` words).
+pub fn reach_row(p: &loader::Package, c: u32) *const u64 {
+    return unsafe (p.sched.reach.as_ptr() + c as usize * p.sched.reach_w);
+}
+
+/// `bits` for a check after every item of module `m`: the module's own components and every
+/// component they depend on (the union of their rows).
+pub fn reach_fill_module(p: &loader::Package, m: usize, bits: &mut Vector<u64>) {
+    let s = &p.sched;
+    let w = s.reach_w;
+    bits.clear();
+    bits.resize_default(w);
+    for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+        let c = s.comp[it] as usize;
+        for k in 0..w {
+            bits.set(k, bits[k] | s.reach[c * w + k]);
+        }
+        bits.set(c >> 6, bits[c >> 6] | 1u64 << (c & 63) as u64);
+    }
+}
+
+/// Is item `target`'s checked state visible to a check of item `reader`? A static rule over the
+/// schedule graph, so every worker order answers alike: a dependency component (`bits`, the
+/// reader's row of `reach`) is complete before the reader starts; inside one component the items
+/// are checked in index order; a prelude item is complete before any non-prelude item. Without
+/// the component graph (the language server opens the index but builds no ranges) the readiness
+/// state decides, as the module-order sweep it runs would.
+pub fn visible(p: &loader::Package, reader: loader::ItemId, target: loader::ItemId, bits: *const u64, nbits: usize) bool {
+    if target == reader {
+        return true;
+    }
+    let s = &p.sched;
+    if s.ncomp == 0 {
+        return p.item_state_at(target) >= loader::IS_CHECKED;
+    }
+    let ct = s.comp[target as usize];
+    if ct == s.comp[reader as usize] {
+        return target < reader;
+    }
+    let tm = p.idx.items.at(target as usize).module as usize;
+    let rm = p.idx.items.at(reader as usize).module as usize;
+    if p.modules.at(tm).prelude && !p.modules.at(rm).prelude {
+        return true;
+    }
+    let w = (ct >> 6) as usize;
+    return w < nbits && (unsafe bits[w] & 1u64 << (ct & 63) as u64) != 0;
+}
+
+/// The item whose own ranges hold node `node` of module `m`: an item node answers itself; a
+/// module-arena node the first item at or after it in node order (members precede their
+/// extend); a body-arena node the function whose body run holds it. ITEM_NONE past every
+/// range (an appended desugar node, an import path).
+pub fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader::ItemId {
+    if !p.sched.built || m as usize + 1 >= p.idx.mod_items.len() {
+        return loader::ITEM_NONE;
+    }
+    let mut lo = p.idx.mod_items[m as usize] as usize;
+    let mut hi = p.idx.mod_items[m as usize + 1] as usize;
+    if Ast::in_body(node) {
+        let b = node & NODE_BODY_MASK;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if p.sched.body_hi[mid] < b {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo >= p.idx.mod_items[m as usize + 1] as usize {
+            return loader::ITEM_NONE;
+        }
+        return p.sched.by_node[lo];
+    }
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if p.idx.items.at(p.sched.by_node[mid] as usize).node < node {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo >= p.idx.mod_items[m as usize + 1] as usize {
+        return loader::ITEM_NONE;
+    }
+    return p.sched.by_node[lo];
 }
 
 /// The serial path: open, every module's edges in module order, build.
@@ -1076,7 +1283,7 @@ pub fn report(p: &mut loader::Package, task_ns: u64) {
         digest(p),
     );
     eprint(
-        "item-stats typecheck: serial {} ms, item critical path {} ms, module levels {} ms; prelude group {} ms, largest module {} ms ({}), largest item {} ms ({} node {})\n",
+        "item-stats typecheck: serial {} ms, item critical path {} ms, module-level schedule {} ms; prelude group {} ms, largest module {} ms ({}), largest item {} ms ({} node {})\n",
         ms(tc_sum),
         ms(crit),
         ms(mod_ns),
@@ -1205,9 +1412,9 @@ fn sort_longest_first(v: &mut Vector<u64>) {
     }
 }
 
-// The typecheck frontier's schedule over the measured module costs: import-SCC levels, the
-// prelude one sequential group at level 0, every non-prelude level after the prelude's; a level
-// takes its slowest group.
+// The module-level schedule the type check ran before the item scheduler, over the measured
+// module costs: import-SCC levels, the prelude one sequential group at level 0, every
+// non-prelude level after the prelude's; a level takes its slowest group.
 fn module_schedule_ns(p: &loader::Package, mcost: &Vector<u64>) u64 {
     let n = p.modules.len();
     let mut nscc: u32 = 0;

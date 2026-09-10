@@ -21,10 +21,9 @@ import ast::ast as *;
 /// per pass over a loaded package).
 pub struct TypedFacts {
     pub ast: *const Ast,
-    /// Serial-visibility emulation for the parallel frontend: when set, every TYPED accessor
-    /// answers as an unchecked module would (syntax accessors stay live). The serial pipeline
-    /// evaluated higher-indexed modules before their check; a parallel schedule that has already
-    /// checked them must not let those results leak.
+    /// The reader cannot see this item's checked state (`graph::items::visible`): every TYPED
+    /// accessor answers as an unchecked item would (syntax accessors stay live), whatever a
+    /// worker has done with it, so every schedule reads the same facts.
     pub unchecked_view: bool,
 }
 

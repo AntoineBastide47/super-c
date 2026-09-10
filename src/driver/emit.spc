@@ -46,6 +46,8 @@ import borrowck::loans as bln;
 import utils::errors as diag;
 import driver::tuc as tuc;
 import driver::taskctl as tctl;
+import driver::sched as sch;
+import atomic;
 import driver::util as *;
 
 import driver::extc as *;
@@ -449,84 +451,430 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
     gitems::build(p, &edges);
 }
 
+// ---- The type check stage -------------------------------------------------------------------
+// One job per component of the item schedule graph (`ItemSched.comp`), started by the
+// completion of its last dependency (`driver::sched`); every prelude component completes
+// before any non-prelude one starts (prelude items are visible to every item). A job checks
+// its component's top-level items in index order under the module's lease: one checker per
+// module, so the module's side tables have one writer at a time, and the same checker serves
+// every item of the module until its last one closes it. Diagnostics and method marks come out
+// per item and publish in item order, so no worker order enters the output.
+
+/// Per-item outputs: the item's diagnostics in emission order, and its range in the module's
+/// method-mark log (`TcStage.logs`: one log per module, its entries in check order).
 struct TcOut {
-    pub ok: bool,
-    pub warns: u32,
-    pub errs: u32,
-    pub fixable: u32,
     pub errors: diag::Errors,
-    pub log: tc::TcMarkLog,
-    pub edges: Vector<u64>, // the module's post-typecheck item edges
+    pub log_lo: u32,
+    pub log_hi: u32,
 }
 
-struct TcTask {
+struct TcStage {
     pub p: *mut loader::Package,
-    pub mods: *const u32, // this SCC's modules, ascending id order
-    pub nmods: usize,
-    pub outs: *mut TcOut, // outs base; slot per module id
-    pub lint: bool,
-    pub wc: *mut TcWaitSt,
+    pub outs: *mut TcOut, // per item
+    pub logs: *mut tc::TcMarkLog, // per module
+    pub tail: *mut diag::Errors, // per module: the close step's diagnostics (the whole-module lints)
+    pub orphans: *mut Vector<diag::Errors>, // per module: the non-item nodes' diagnostics, declaration order
+    pub chk: *mut Vector<Box<tc::TypeChecker>>, // per module: its checker while it has items left (one at most)
+    pub lease: *mut psync::Mutex<u8>, // per module: one job checks a module at a time
+    pub left: *mut u32, // per module: top-level items not yet checked (atomic)
+    pub edges: *mut Vector<u64>, // per module: the post-typecheck item edges, written at its close
     pub spans: *const Vector<gitems::Spans>,
+    pub lint: *const bool, // per module
 }
 
-unsafe extend TcTask as Send {}
-
-// The waiter state behind Package.tc_wait: done flags live on the Package; the mutex/condvar pair
-// serializes flag publication against parked waiters.
-struct TcWaitSt {
-    pub mu: psync::Mutex<i32>,
-    pub cv: psync::Condvar,
-    pub p: *mut loader::Package,
-}
-
-fn tc_wait_impl(ctx: *mut void, m: ModuleId) {
-    let st = ctx as *mut TcWaitSt;
-    let p = unsafe (&*st).p;
-    let g = (unsafe &(&*st).mu).lock();
-    while *(unsafe &*p).tc_mod_done.at(m as usize) == 0 {
-        (unsafe &(&*st).cv).wait_masked(&g);
+// One component: its top-level items in index order (members go with their extend).
+fn tc_job(ctx: *mut void, j: u32) {
+    let st = unsafe &*(ctx as *const TcStage);
+    let p = unsafe &mut *st.p;
+    if j as usize >= p.sched.ncomp as usize {
+        return; // the prelude gate
     }
-}
-
-fn tc_run_one(t: TcTask) {
-    let pkg = t.p;
-    for k in 0..t.nmods {
-        let i = (unsafe t.mods[k]) as usize;
-        task_delay(i);
-        let p = unsafe &mut *t.p;
-        let out = unsafe (t.outs + i);
-        let want = t.lint && !p.modules[i].prelude;
-        let m = &mut p.modules[i];
-        let src = m.source.as_str().ptr() as *const char;
-        let len = m.source.len();
-        let mut tck = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-        tck.lint = want;
-        tck.mark_log = &mut (unsafe &mut *out).log;
-        tck.check();
-        tck.bc_record_ret_attr();
-        // The module's item edges with the resolutions the checker added (type-path calls), while
-        // its body syntax is live: the lint and the emission liveness read them.
-        gitems::module_edges(unsafe &*t.p, i, unsafe &*t.spans, &mut (unsafe &mut *out).edges);
-        {
-            // Publish completion: everything check() wrote happens-before a waiter's wake.
-            let st = t.wc;
-            let _g = (unsafe &(&*st).mu).lock();
-            (unsafe &mut *t.p).tc_mod_done.set(i, 1);
-            (unsafe &(&*st).cv).notify_all();
+    for k in p.sched.citem_off[j as usize] as usize..p.sched.citem_off[j as usize + 1] as usize {
+        let it = p.sched.citem[k];
+        let meta = *p.idx.items.at(it as usize);
+        if meta.owner != loader::ITEM_NONE {
+            continue;
         }
-        let o = unsafe &mut *out;
-        o.ok = !tck.has_errors();
-        o.warns = tck.errors.warns.len() as u32;
-        o.errs = tck.errors.errors.len() as u32;
-        o.fixable = tck.errors.fixable_errs;
-        o.errors = replace(&mut tck.errors, diag::Errors::new());
+        if p.jobs != 1 {
+            let _g = (unsafe &*(st.lease + meta.module as usize)).lock();
+            tc_item(st, it, meta);
+        } else {
+            tc_item(st, it, meta);
+        }
     }
 }
 
-// Type-check every module in parallel while preserving serial module-order OBSERVABILITY: the
-// engine's index-aware gate + retry-wait give each module the exact item-readiness visibility the serial
-// sweep gave it, diagnostics buffer per task and print in module order, and the package-global
-// method marks replay through the real functions in module order.
+fn tc_item(st: &TcStage, it: loader::ItemId, meta: loader::ItemMeta) {
+    let p = unsafe &mut *st.p;
+    let m = meta.module as usize;
+    let chk = unsafe &mut *(st.chk + m);
+    if chk.len() == 0 {
+        let pkg = st.p;
+        let mm = &mut p.modules[m];
+        let src = mm.source.as_str().ptr() as *const char;
+        let len = mm.source.len();
+        let mut t = tc::TypeChecker::new(&mut mm.ast, str::from_raw(src as *const u8, len), pkg);
+        t.lint = unsafe st.lint[m];
+        t.check_open();
+        chk.push(Box::new(t));
+    }
+    let tck = chk.index_mut(0).deref_mut();
+    let out = unsafe &mut *(st.outs + it as usize);
+    let lg = unsafe (st.logs + m);
+    tck.mark_log = lg;
+    out.log_lo = (unsafe (&*lg).kinds.len()) as u32;
+    tck.check_one(meta.node, p.sched.top_lo[it as usize]);
+    out.log_hi = (unsafe (&*lg).kinds.len()) as u32;
+    out.errors = replace(&mut tck.errors, diag::Errors::new());
+    tck.mark_log = null;
+    if atomic::sub_u32(unsafe (st.left + m), 1, 3) != 1 {
+        return;
+    }
+    // The module's last item: close it (the instance closure, the whole-module lints), record
+    // the result-attributability verdicts and the post-typecheck item edges (the lint and the
+    // emission liveness read them) while its body syntax is live, and free its checker.
+    tck.check_orphans();
+    tck.check_close();
+    tck.share_last_use();
+    *unsafe &mut *(st.tail + m) = replace(&mut tck.errors, diag::Errors::new());
+    *unsafe &mut *(st.orphans + m) = replace(&mut tck.orphan_errs, Vector::<diag::Errors>::new());
+    tck.bc_record_ret_attr();
+    gitems::module_edges(unsafe &*st.p, m, unsafe &*st.spans, unsafe &mut *(st.edges + m));
+    chk.clear();
+}
+
+// The serial order of the components, module-major: the modules by import level (prelude
+// modules first, a module after the modules it imports, ties by id), each module's components
+// in item order with their unfinished dependencies before them (a depth-first walk, every
+// component once). A module's checker then lives from its first item to its last with as few
+// other modules open as the dependencies allow.
+fn tc_order(p: &loader::Package, order: &mut Vector<u32>) {
+    let s = &p.sched;
+    let nc = s.ncomp as usize;
+    let nm = p.modules.len();
+    // Import-SCC levels: 1 + the highest level among the imported SCCs.
+    let mut nscc: usize = 0;
+    for i in 0..nm {
+        if p.idx.scc_of[i] as usize + 1 > nscc {
+            nscc = p.idx.scc_of[i] as usize + 1;
+        }
+    }
+    let mut lvl = Vector::<u32>::new();
+    lvl.resize_default(nscc);
+    for _ in 0..nscc + 1 {
+        let mut changed = false;
+        for i in 0..nm {
+            let si = p.idx.scc_of[i] as usize;
+            for e in p.idx.mod_imports[i] as usize..p.idx.mod_imports[i + 1] as usize {
+                let sj = p.idx.scc_of[p.idx.imports[e] as usize] as usize;
+                if sj != si && lvl[sj] + 1 > lvl[si] {
+                    lvl.set(si, lvl[sj] + 1);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut mods = Vector::<u64>::with_capacity(nm);
+    for m in 0..nm {
+        mods.push(lvl[p.idx.scc_of[m] as usize] as u64 << 32 | m as u64);
+    }
+    mods.sort();
+    let mut done = Vector::<bool>::new();
+    done.resize_default(nc);
+    let mut stack = Vector::<u32>::new(); // (component, next dependency) pairs
+    for pass in 0..2 {
+        for mi in 0..nm {
+            let m = (mods[mi] & 0xFFFFFFFFu64) as usize;
+            if p.modules.at(m).prelude != (pass == 0) {
+                continue;
+            }
+            for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+                let root = s.comp[it] as usize;
+                if done[root] {
+                    continue;
+                }
+                done.set(root, true);
+                stack.push(root as u32);
+                stack.push(s.cdep_off[root]);
+                for _ in 0..2 * s.cdep.len() + 2 * nc + 2 {
+                    if stack.len() == 0 {
+                        break;
+                    }
+                    let v = stack[stack.len() - 2] as usize;
+                    let e = stack[stack.len() - 1];
+                    if e < s.cdep_off[v + 1] {
+                        stack.set(stack.len() - 1, e + 1);
+                        let d = s.cdep[e as usize] as usize;
+                        if !done[d] {
+                            done.set(d, true);
+                            stack.push(d as u32);
+                            stack.push(s.cdep_off[d]);
+                        }
+                        continue;
+                    }
+                    order.push(v as u32);
+                    stack.truncate(stack.len() - 2);
+                }
+            }
+        }
+        if pass == 0 {
+            order.push(nc as u32); // the prelude gate
+        }
+    }
+}
+
+// The job graph over the components: their dependency graph plus the prelude gate (a virtual
+// job after every prelude component and before every other one).
+fn tc_jobs(p: &loader::Package) sch::Jobs {
+    let s = &p.sched;
+    let nc = s.ncomp as usize;
+    let gate = nc as u64;
+    let mut edges = Vector::<u64>::new();
+    for c in 0..nc {
+        for e in s.cdep_off[c] as usize..s.cdep_off[c + 1] as usize {
+            edges.push(s.cdep[e] as u64 << 32 | c as u64);
+        }
+        let first = s.citem[s.citem_off[c] as usize];
+        if p.modules.at(p.idx.items.at(first as usize).module as usize).prelude {
+            edges.push(c as u64 << 32 | gate);
+        } else {
+            edges.push(gate << 32 | c as u64);
+        }
+    }
+    let mut order = Vector::<u32>::with_capacity(nc + 1);
+    tc_order(p, &mut order);
+    if p.icost_on {
+        // The measurement: how many module checkers the serial order keeps open at once (a
+        // module's checker lives from its first component to its last).
+        let nm = p.modules.len();
+        let mut first = Vector::<u32>::new();
+        first.resize_default(nm);
+        let mut last = Vector::<u32>::new();
+        last.resize_default(nm);
+        for k in 0..order.len() {
+            let c = order[k] as usize;
+            if c >= nc {
+                continue;
+            }
+            for i in s.citem_off[c] as usize..s.citem_off[c + 1] as usize {
+                let m = p.idx.items.at(s.citem[i] as usize).module as usize;
+                if first[m] == 0 {
+                    first.set(m, k as u32 + 1);
+                }
+                last.set(m, k as u32 + 1);
+            }
+        }
+        let mut live: u32 = 0;
+        let mut peak: u32 = 0;
+        for k in 1..order.len() + 1 {
+            for m in 0..nm {
+                if first[m] == k as u32 {
+                    live += 1;
+                }
+            }
+            if live > peak {
+                peak = live;
+            }
+            for m in 0..nm {
+                if last[m] == k as u32 {
+                    live -= 1;
+                }
+            }
+        }
+        eprint("item-stats typecheck serial order: {} module checkers open at once at the peak\n", peak);
+    }
+    let mut g = sch::Jobs::from_edges(nc + 1, &edges, order);
+    // The memory gate's estimate: the component's module-arena nodes.
+    for c in 0..nc {
+        let mut nodes: u64 = 0;
+        for k in s.citem_off[c] as usize..s.citem_off[c + 1] as usize {
+            let it = s.citem[k] as usize;
+            if p.idx.items.at(it).owner == loader::ITEM_NONE {
+                nodes += p.idx.items.at(it).node - s.top_lo[it];
+            }
+        }
+        g.est.set(c, nodes * 96);
+    }
+    return g;
+}
+
+/// Type-check every module as item jobs (`tc_job`), then publish in module and item order:
+/// diagnostics (logged unless `fixes` collects them), the lint counters, the package-global
+/// method marks (replayed through the real visibility checks), and the post-typecheck item
+/// edges as the final ranges. `lint[m]` selects the modules that lint. False when any module
+/// reported an error.
+fn typecheck_stage(
+    p: &mut loader::Package,
+    lint: &Vector<bool>,
+    fixes: *mut Vector<diag::LintFix>,
+    ftexts: *mut Vector<String>,
+) bool {
+    let n = p.modules.len();
+    let ni = p.idx.items.len();
+    let par = p.jobs != 1 && n > 1;
+    let cirp = p.cir as *mut iri::Interp;
+    if par {
+        if cirp != null {
+            unsafe cirp.elock_on = true;
+        }
+        for i in 0..n {
+            p.modules[i].ast.ilock_on = true;
+            // Pin the syntax arrays: a checker synthesizes nodes while other tasks read
+            // pre-existing ones.
+            p.modules[i].ast.freeze_nodes();
+            p.modules[i].ast.freeze_resolutions();
+        }
+    }
+    let mut outs = Vector::<TcOut>::with_capacity(ni);
+    for _ in 0..ni {
+        outs.push(TcOut { errors: diag::Errors::new(), log_lo: 0, log_hi: 0 });
+    }
+    let mut logs = Vector::<tc::TcMarkLog>::with_capacity(n);
+    let mut tail = Vector::<diag::Errors>::with_capacity(n);
+    let mut orphans = Vector::<Vector<diag::Errors>>::with_capacity(n);
+    let mut chk = Vector::<Vector<Box<tc::TypeChecker>>>::with_capacity(n);
+    let mut lease = Vector::<psync::Mutex<u8>>::with_capacity(n);
+    let mut left = Vector::<u32>::with_capacity(n);
+    let mut edges = Vector::<Vector<u64>>::with_capacity(n);
+    for m in 0..n {
+        logs.push(tc::TcMarkLog::new());
+        tail.push(diag::Errors::new());
+        orphans.push(Vector::<diag::Errors>::new());
+        chk.push(Vector::<Box<tc::TypeChecker>>::new());
+        lease.push(psync::Mutex::<u8>::new(0));
+        edges.push(Vector::<u64>::new());
+        let mut tops: u32 = 0;
+        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+            if p.idx.items.at(it).owner == loader::ITEM_NONE {
+                tops += 1;
+            }
+        }
+        left.push(tops);
+    }
+    let spans = gitems::spans_all(p);
+    let mut st = TcStage {
+        p: p,
+        outs: outs.index_mut(0),
+        logs: logs.index_mut(0),
+        tail: tail.index_mut(0),
+        orphans: orphans.index_mut(0),
+        chk: chk.index_mut(0),
+        lease: lease.index_mut(0),
+        left: left.index_mut(0),
+        edges: edges.index_mut(0),
+        spans: &spans,
+        lint: lint.as_ptr(),
+    };
+    let g = tc_jobs(p);
+    let ctl = tctl::Ctl::new(tctl::budget_from_env());
+    let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
+    let tj0 = unsafe shim::sc_ticks_ms();
+    sch::run_jobs(&g, p.jobs, tc_job, &mut st, &ctl);
+    if tstat {
+        eprint("typecheck-stage jobs: {} ms over {} components\n", unsafe shim::sc_ticks_ms() - tj0, g.n - 1);
+    }
+    if par {
+        for i in 0..n {
+            p.modules[i].ast.ilock_on = false;
+            p.modules[i].ast.thaw_nodes();
+            p.modules[i].ast.thaw_resolutions();
+        }
+        if cirp != null {
+            unsafe cirp.elock_on = false;
+        }
+    }
+    // Publication, in module then item order.
+    let mut ok = true;
+    let mut tedges = Vector::<u64>::new();
+    for m in 0..n {
+        // The module's top-level nodes in declaration order: an item's output, or the next
+        // non-item node's.
+        let mut errs = diag::Errors::new();
+        if p.modules[m].has_ast {
+            let a = unsafe &*p.module_ast_const(m as ModuleId);
+            let items = a.at_const(a.root).as_data.program.items;
+            let mut oi: usize = 0;
+            for i in 0..items.len {
+                let nd = unsafe a.list(items)[i as usize];
+                let it = p.item_of(m as ModuleId, nd);
+                if it != loader::ITEM_NONE {
+                    errs.append(&mut outs.index_mut(it as usize).errors);
+                } else if oi < orphans.at(m).len() {
+                    errs.append(orphans.index_mut(m).index_mut(oi));
+                    oi += 1;
+                }
+            }
+        }
+        errs.append(tail.index_mut(m));
+        errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+        let had = errs.has_errors();
+        if had {
+            ok = false;
+        }
+        if had || fixes == null && errs.has_warnings() {
+            errs.log();
+        }
+        p.lint_warnings = p.lint_warnings + errs.warns.len() as u32;
+        p.lint_errs = p.lint_errs + errs.errors.len() as u32;
+        p.lint_fixable = p.lint_fixable + errs.fixable_errs;
+        if fixes != null && lint[m] {
+            // Kind-3 fixes index into the caller's shared fix_texts pool: rebase and copy the payloads.
+            let base = if ftexts != null {
+                ftexts.len() as u32;
+            } else {
+                0u32;
+            };
+            for k in 0..errs.fixes.len() {
+                let mut f = errs.fixes[k];
+                if f.text != 0xFFFFFFFF {
+                    f.text = f.text + base;
+                }
+                f.module = m as u32;
+                fixes.push(f);
+            }
+            if ftexts != null {
+                for k in 0..errs.fix_texts.len() {
+                    ftexts.push(errs.fix_texts.at(k).clone());
+                }
+            }
+        }
+        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+            let lg = logs.at(m);
+            for k in outs.at(it).log_lo as usize..outs.at(it).log_hi as usize {
+                let dv = lg.a[k];
+                let d = DefId { module: (dv >> 32) as ModuleId, node: (dv & 0xFFFFFFFFu64) as NodeId };
+                let kd = lg.kinds[k];
+                if kd == 1 {
+                    p.always_methods.insert(dv);
+                } else if kd == 2 {
+                    p.mark_method_used(d);
+                } else if !p.method_used_get(d) {
+                    let fv = lg.b[k];
+                    p.record_method_edge(
+                        DefId { module: (fv >> 32) as ModuleId, node: (fv & 0xFFFFFFFFu64) as NodeId },
+                        d,
+                    );
+                }
+            }
+        }
+        let oe = edges.at(m);
+        for k in 0..oe.len() {
+            tedges.push(oe[k]);
+        }
+    }
+    gitems::build_final(p, &tedges);
+    // The reachability rows served the type check alone.
+    let _ = replace(&mut p.sched.reach, Vector::<u64>::new());
+    p.sched.reach_w = 0;
+    if tstat {
+        eprint("typecheck-stage publish: {} ms\n", unsafe shim::sc_ticks_ms() - tj0);
+    }
+    return ok;
+}
+
 // One module's cross-module duplicate-conformance sweep, run as a parallel level after every
 // module is typechecked (the check reads other modules' frozen syntax, so it is decidable only
 // then, and it writes nothing shared: errors buffer per module and log in module order).
@@ -553,160 +901,25 @@ fn dup_run_one(t: DupTask) {
     }
 }
 
-fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
+// The duplicate-conformance level of a parallel build: independent per module, under the same
+// freeze and lock discipline as the checking jobs. The serial path sweeps in
+// discharge_obligations instead.
+fn dup_conformances_par(p: &mut loader::Package) bool {
     let n = p.modules.len();
-    p.ensure_index();
-    for i in 0..n {
-        let _ = p.import_closure(i as ModuleId);
-    }
-    p.tc_mod_done.clear();
-    for _ in 0..n {
-        p.tc_mod_done.push(0);
-    }
     let cirp = p.cir as *mut iri::Interp;
     if cirp != null {
         unsafe cirp.elock_on = true;
-        unsafe cirp.tc_par = true;
-        unsafe cirp.retry_mod = 0 - 1;
     }
     for i in 0..n {
         p.modules[i].ast.ilock_on = true;
-        // Pin the syntax arrays: tc synthesizes nodes while other tasks read pre-existing ones.
         p.modules[i].ast.freeze_nodes();
         p.modules[i].ast.freeze_resolutions();
     }
-    let mut wc = TcWaitSt { mu: psync::Mutex::<i32>::new(0), cv: psync::Condvar::new(), p: p };
-    p.tc_wait = tc_wait_impl;
-    p.tc_wait_ctx = &mut wc;
-    p.tc_frontier = true;
-    let mut outs = Vector::<TcOut>::with_capacity(n);
-    for _ in 0..n {
-        outs.push(
-            TcOut {
-                ok: true,
-                warns: 0,
-                errs: 0,
-                fixable: 0,
-                errors: diag::Errors::new(),
-                log: tc::TcMarkLog::new(),
-                edges: Vector::<u64>::new(),
-            },
-        );
-    }
-    prt::set_stack_size(8usize << 20); // the checker's expression recursion outgrows the default task stack
-    // Conflict-free schedule: import-SCC condensation, IMPORTS-first levels. A module only ever
-    // reads modules in its import closure, and those are complete before its level starts, so
-    // no two live tasks touch each other's Asts, and the serial-order visibility rules above
-    // resolve every remaining cross-module question deterministically.
-    let mut nscc: u32 = 0;
-    {
-        let idx9 = &p.idx.scc_of;
-        for i in 0..n {
-            if *idx9.at(i) + 1 > nscc {
-                nscc = *idx9.at(i) + 1;
-            }
-        }
-    }
-    let mut lvl = Vector::<u32>::new(); // per SCC: 1 + max(level of imported SCCs), 0 at the leaves
-    for _ in 0..nscc {
-        lvl.push(0);
-    }
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for i in 0..n {
-            let si = *p.idx.scc_of.at(i);
-            let e0 = (*p.idx.mod_imports.at(i)) as usize;
-            let e1 = (*p.idx.mod_imports.at(i + 1)) as usize;
-            for e in e0..e1 {
-                let j = (*p.idx.imports.at(e)) as usize;
-                let sj = *p.idx.scc_of.at(j);
-                if sj != si && *lvl.at(sj as usize) + 1 > *lvl.at(si as usize) {
-                    lvl.set(si as usize, *lvl.at(sj as usize) + 1);
-                    changed = true;
-                }
-            }
-        }
-        // The prelude is AMBIENTLY visible (format shims, sugar hooks): every non-prelude module
-        // depends on every prelude module even without an import edge.
-        let mut plvl: u32 = 0;
-        for i in 0..n {
-            if p.modules[i].prelude && *lvl.at((*p.idx.scc_of.at(i)) as usize) + 1 > plvl {
-                plvl = *lvl.at((*p.idx.scc_of.at(i)) as usize) + 1;
-            }
-        }
-        for i in 0..n {
-            let si = (*p.idx.scc_of.at(i)) as usize;
-            if !p.modules[i].prelude && *lvl.at(si) < plvl {
-                lvl.set(si, plvl);
-                changed = true;
-            }
-        }
-    }
-    let mut maxlvl: u32 = 0;
-    for c in 0..nscc as usize {
-        if *lvl.at(c) > maxlvl {
-            maxlvl = *lvl.at(c);
-        }
-    }
-    // Per-SCC module lists, ascending id (intra-SCC checks stay serial in id order). The whole
-    // PRELUDE is one sequential group: prelude names are ambiently visible to every module
-    // (prelude modules included), so no import-edge order exists among them.
-    let mut scc_mods = Vector::<Vector<u32>>::new();
-    for _ in 0..nscc + 1 {
-        scc_mods.push(Vector::<u32>::new());
-    }
-    // The prelude pseudo-group rides at level 0.
-    lvl.push(0);
-    for i in 0..n {
-        if p.modules[i].prelude {
-            scc_mods.index_mut(nscc as usize).push(i as u32);
-        } else {
-            scc_mods.index_mut((*p.idx.scc_of.at(i)) as usize).push(i as u32);
-        }
-    }
-    let ngrp = nscc + 1;
-    let spans = gitems::spans_all(p);
-    let pp = p as *mut loader::Package;
-    let wcp = (&mut wc) as *mut TcWaitSt;
-    let want_lint = lint;
-    let mut level: u32 = 0;
-    while level <= maxlvl {
-        let wg = psync::WaitGroup::new();
-        let mut launched: i64 = 0;
-        for c in 0..ngrp as usize {
-            if *lvl.at(c) != level || scc_mods.at(c).len() == 0 {
-                continue;
-            }
-            wg.add(1);
-            launched += 1;
-            let t = TcTask {
-                p: pp,
-                mods: scc_mods.at(c).as_ptr(),
-                nmods: scc_mods.at(c).len(),
-                outs: outs.index_mut(0),
-                lint: want_lint,
-                wc: wcp,
-                spans: &spans,
-            };
-            let wgc = wg.clone();
-            launch || {
-                tc_run_one(t);
-                wgc.done();
-            };
-        }
-        if launched != 0 {
-            wg.wait_masked();
-        }
-        level += 1;
-    }
-    // Duplicate-conformance level: independent per module, under the same freeze and ilock
-    // discipline as the checking levels. Replaces the serial per-module sweep in
-    // discharge_obligations for the parallel path.
     let mut douts = Vector::<diag::Errors>::new();
     for _ in 0..n {
         douts.push(diag::Errors::new());
     }
+    let pp = p as *mut loader::Package;
     {
         let wgd = psync::WaitGroup::new();
         for i in 0..n {
@@ -720,47 +933,15 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
         }
         wgd.wait();
     }
-    p.tc_frontier = false;
-    p.tc_wait = loader::loader_no_wait;
-    p.tc_wait_ctx = null;
-    if cirp != null {
-        unsafe cirp.tc_par = false;
-        unsafe cirp.elock_on = false;
-        unsafe cirp.retry_mod = 0 - 1;
-    }
     for i in 0..n {
         p.modules[i].ast.ilock_on = false;
         p.modules[i].ast.thaw_nodes();
         p.modules[i].ast.thaw_resolutions();
     }
-    let mut ok = true;
-    for i in 0..n {
-        let o = outs.index_mut(i);
-        if !o.ok {
-            ok = false;
-        }
-        if !o.ok || o.errors.has_warnings() {
-            o.errors.log();
-        }
-        p.lint_warnings = p.lint_warnings + o.warns;
-        p.lint_errs = p.lint_errs + o.errs;
-        p.lint_fixable = p.lint_fixable + o.fixable;
-        // Module-order replay of the package-global marks, through the real visibility checks.
-        let lg = &o.log;
-        for k in 0..lg.kinds.len() {
-            let dv = lg.a[k];
-            let d = DefId { module: (dv >> 32) as ModuleId, node: (dv & 0xFFFFFFFFu64) as NodeId };
-            let kd = lg.kinds[k];
-            if kd == 1 {
-                p.always_methods.insert(dv);
-            } else if kd == 2 {
-                p.mark_method_used(d);
-            } else if !p.method_used_get(d) {
-                let fv = lg.b[k];
-                p.record_method_edge(DefId { module: (fv >> 32) as ModuleId, node: (fv & 0xFFFFFFFFu64) as NodeId }, d);
-            }
-        }
+    if cirp != null {
+        unsafe cirp.elock_on = false;
     }
+    let mut ok = true;
     for i in 0..n {
         let de = douts.index_mut(i);
         if de.errors.len() != 0 {
@@ -768,69 +949,7 @@ fn typecheck_all_par(p: &mut loader::Package, lint: bool) bool {
             ok = false;
         }
     }
-    // The post-typecheck item edges, every task's in module order, as the final ranges.
-    let mut tedges = Vector::<u64>::new();
-    for i in 0..n {
-        let oe = &outs.at(i).edges;
-        for k in 0..oe.len() {
-            tedges.push(oe[k]);
-        }
-    }
-    gitems::build_final(p, &tedges);
     return ok;
-}
-
-fn typecheck_module(
-    p: &mut loader::Package,
-    i: usize,
-    lint: bool,
-    fixes: *mut Vector<diag::LintFix>,
-    ftexts: *mut Vector<String>,
-    spans: *const Vector<gitems::Spans>,
-    edges: *mut Vector<u64>,
-) bool {
-    let pkg = p as *mut loader::Package;
-    let m = &mut p.modules[i];
-    let src = m.source.as_str().ptr() as *const char;
-    let len = m.source.len();
-    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    t.lint = lint;
-    t.check();
-    t.bc_record_ret_attr();
-    if spans != null {
-        // The module's item edges with the resolutions the checker added (type-path calls),
-        // while its body syntax is live: the lint and the emission liveness read them.
-        gitems::module_edges(unsafe &*pkg, i, unsafe &*spans, unsafe &mut *edges);
-    }
-    let had = t.has_errors();
-    if had || fixes == null && t.errors.has_warnings() {
-        t.log_errors();
-    }
-    p.lint_warnings = p.lint_warnings + t.errors.warns.len() as u32;
-    p.lint_errs = p.lint_errs + t.errors.errors.len() as u32;
-    p.lint_fixable = p.lint_fixable + t.errors.fixable_errs;
-    if fixes != null {
-        // Kind-3 fixes index into the caller's shared fix_texts pool: rebase and copy the payloads.
-        let base = if ftexts != null {
-            ftexts.len() as u32;
-        } else {
-            0u32;
-        };
-        for k in 0..t.errors.fixes.len() {
-            let mut f = t.errors.fixes[k];
-            if f.text != 0xFFFFFFFF {
-                f.text = f.text + base;
-            }
-            f.module = i as u32;
-            fixes.push(f);
-        }
-        if ftexts != null {
-            for k in 0..t.errors.fix_texts.len() {
-                ftexts.push(t.errors.fix_texts.at(k).clone());
-            }
-        }
-    }
-    return !had;
 }
 
 // Dev gate (SC_FACTS_CHECK=1): snapshot every module's semantic-table watermarks right after
@@ -1477,13 +1596,20 @@ fn cemit_layout_asserts(
         any = true;
     }
     {
+        // The module's instance records in type-id order (the package identity), not in the
+        // order its checks first touched them: that order follows the item schedule.
         let ninst = unsafe (&*p.module_ast_const(m)).ninstances();
+        let mut tids = Vector::<TypeId>::with_capacity(ninst);
         for ii in 0..ninst {
             let it = *unsafe (&*p.module_ast_const(m)).used_instance(ii);
             if it.module != m {
                 continue;
             }
-            let t = (&mut p.modules[m as usize].ast).intern_instance(it.module, it.decl, &it.args[0], it.n);
+            tids.push((&mut p.modules[m as usize].ast).intern_instance(it.module, it.decl, &it.args[0], it.n));
+        }
+        tids.sort();
+        for ii in 0..tids.len() {
+            let t = tids[ii];
             let lo = svc.layout(m, t);
             if !lo.ok {
                 continue;
@@ -5052,14 +5178,6 @@ pub fn publish_checkpoint(p: &mut loader::Package, keep: *mut irl::Keep) {
     }
 }
 
-/// SC_TASK_DELAY=1: a deterministic per-module delay at the start of every parallel task, so the
-/// worker-identity gates run under a scheduling the machine would not produce by itself.
-fn task_delay(m: usize) {
-    if stdlib::getenv("SC_TASK_DELAY") != null {
-        prt::sleep_ns(((m % 4) as i64 + 1) * 500000);
-    }
-}
-
 /// The SC_TYPE_STATS report: the identity-path counters, the bytes the per-module type pools and
 /// their indexes retain, and the structural census (how many pool entries stand for one type).
 /// One line of syntax accounting for the package at phase `label` (SC_SYNTAX_STATS): node and
@@ -7225,109 +7343,44 @@ fn proto_of(body: &String, out: &mut String) {
     out.push_str(";\n");
 }
 
-// Borrow-check module `i`, serially: the pipeline stage after typechecking. A fresh TypeChecker context
-// over the typed AST carries the recorded types and resolutions; only the borrow/move/lifetime analyses
-// run. This is the one-module primitive borrowck_all iterates.
-fn borrowck_module(p: &mut loader::Package, i: usize, ow: &mut bfx::Owner, ctx: &mut bfi::BorrowCtx) bool {
-    let pkg = p as *mut loader::Package;
-    let m = &mut p.modules[i];
-    let src = m.source.as_str().ptr() as *const char;
-    let len = m.source.len();
-    let ts = ctx.st.pr.start();
-    let mut t = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    ctx.st.pr.stop(bfi::BP_SETUP, ts);
-    t.borrowck(ow, ctx);
-    let had = t.has_errors();
-    p.lint_errs = p.lint_errs + t.errors.errors.len() as u32;
-    if had {
-        t.log_errors();
-    }
-    return !had;
+// ---- The borrow check stage -----------------------------------------------------------------
+// One independent job per module over its function, method and aggregate items in source
+// order. A body split of a module was measured and refused: the bodies of one module intern
+// into one type pool under one lock, and concurrent jobs of a module spent forty times the
+// lowering CPU waiting on it (the phase took twice as long at fourteen workers). The pass
+// writes its diagnostics (per item), its lowered bodies (a private keep per job, absorbed into
+// the package keep under the engine lock) and each closure's own capture facts. A module
+// closes (Core IR ready, emission dependencies, body syntax released) when its job ends.
+
+/// One job: the items at by_node positions `[lo, hi)` (source order) of module `m`.
+struct BcJob {
+    pub m: u32,
+    pub lo: u32,
+    pub hi: u32,
 }
 
-// One parallel borrow-check unit of work: a private oracle, pipeline, checker and diagnostics per
-// module. The finished (already finalized) diagnostics and the module's lowered bodies land in
-// `out`; nothing prints and nothing outside the module's own Ast is written; the const engine
-// serializes behind its gate, interning behind each Ast's lock.
-struct BcOut {
-    pub ok: bool,
-    pub lint: u32,
-    pub errors: diag::Errors,
-    pub keep: irl::Keep,
-    pub st: bfi::BcStats,
-}
-
-struct BcTask {
-    pub p: *mut loader::Package,
-    pub i: usize,
-    pub out: *mut BcOut,
-    pub want_keep: bool,
-    pub master: *mut irl::Keep, // the viewed package keep the task's bodies publish into
-    pub pool: *mut psync::Mutex<Vector<BcSlot>>,
-}
-
-/// One analysis slot: an ownership oracle and a borrow pipeline. A task leases one from the pool
-/// for its whole run and returns it, so at most as many exist as tasks ever ran at once, and each
-/// keeps its memo tables and scratch capacity across the modules it served (the serial path's
-/// single slot, per worker). Memo answers depend only on (module, type), so which slot serves a
-/// module never changes an outcome.
+/// One analysis slot: an ownership oracle and a borrow pipeline. A job leases one from the pool
+/// for its whole run and returns it, so at most as many exist as jobs ever ran at once, and each
+/// keeps its memo tables and scratch capacity across the bodies it served (the serial path's
+/// single slot). Memo answers depend only on (module, type), so which slot serves a body never
+/// changes an outcome.
 struct BcSlot {
     pub ow: bfx::Owner,
     pub ctx: bfi::BorrowCtx,
 }
 
-// The task closure crosses to a worker; the package and slots it points at are partitioned by
-// module and outlive the WaitGroup join. A slot moves with the task that leased it.
-unsafe extend BcTask as Send {}
-
 unsafe extend BcSlot as Send {}
 
-fn bc_run_one(t: BcTask) {
-    let pkg = t.p;
-    task_delay(t.i);
-    let p = unsafe &mut *t.p;
-    let mut slot = bc_slot_take(unsafe &*t.pool, p);
-    if t.want_keep {
-        slot.ctx.keep = &mut (unsafe &mut *t.out).keep;
-    }
-    slot.ctx.st = bc_stats_new();
-    slot.ctx.validate = stdlib::getenv("SC_BC_VALIDATE") != null;
-    let m = &mut p.modules[t.i];
-    let src = m.source.as_str().ptr() as *const char;
-    let len = m.source.len();
-    let mut tck = tc::TypeChecker::new(&mut m.ast, str::from_raw(src as *const u8, len), pkg);
-    tck.borrowck(&mut slot.ow, &mut slot.ctx);
-    let o = unsafe &mut *t.out;
-    o.ok = !tck.has_errors();
-    o.lint = tck.errors.errors.len() as u32;
-    o.errors = replace(&mut tck.errors, diag::Errors::new());
-    o.st = replace(&mut slot.ctx.st, bfi::BcStats::new(false, false));
-    slot.ctx.keep = null;
-    if t.master != null {
-        // Publish this module's bodies into the viewed keep under the evaluator's lock (its
-        // lookups read the index), then free the syntax the analyses are done with.
-        let ce = p.cir as *mut iri::Interp;
-        let mut free = p.free_bodies;
-        if ce != null {
-            ce.eng_lock();
-        }
-        unsafe (&mut *t.master).absorb(&mut o.keep);
-        if ce != null {
-            // A deferred static_assert in a body keeps this module's syntax for the flush.
-            free = free && !ce.pending_in_bodies(t.i as ModuleId);
-            ce.eng_unlock();
-        }
-        if p.free_bodies {
-            p.record_emit_deps(t.i);
-        }
-        if free {
-            p.modules[t.i].ast.release_bodies();
-        }
-    }
-    bc_slot_give(unsafe &*t.pool, slot);
+struct BcStage {
+    pub p: *mut loader::Package,
+    pub jobs: *const Vector<BcJob>,
+    pub outs: *mut diag::Errors, // per item
+    pub slots: *mut psync::Mutex<Vector<BcSlot>>,
+    pub master: *mut irl::Keep, // null = discard the lowerings
+    pub validate: bool,
 }
 
-// The guard lives exactly as long as these bodies: a task never holds the pool lock while it runs.
+// The guard lives exactly as long as these bodies: a job never holds the pool lock while it runs.
 fn bc_slot_take(pool: &psync::Mutex<Vector<BcSlot>>, p: *const loader::Package) BcSlot {
     let mut g = pool.lock();
     switch g.pop() {
@@ -7336,7 +7389,9 @@ fn bc_slot_take(pool: &psync::Mutex<Vector<BcSlot>>, p: *const loader::Package) 
         },
         _ => {},
     };
-    return BcSlot { ow: bfx::Owner::new(p), ctx: bfi::BorrowCtx::new() };
+    let mut s = BcSlot { ow: bfx::Owner::new(p), ctx: bfi::BorrowCtx::new() };
+    s.ctx.st = bc_stats_new();
+    return s;
 }
 
 fn bc_slot_give(pool: &psync::Mutex<Vector<BcSlot>>, slot: BcSlot) {
@@ -7344,16 +7399,94 @@ fn bc_slot_give(pool: &psync::Mutex<Vector<BcSlot>>, slot: BcSlot) {
     g.push(slot);
 }
 
-/// Borrow-check every module through ONE ownership oracle and ONE borrow pipeline when serial
-/// (their memo tables and capacities survive across modules), or one of each per module task when
-/// `p.jobs` asks for workers; outputs merge in module order, so both paths print and lower
-/// identically. `keep` (null = discard) collects every lowered body for the backend. False when
-/// any module reported an error.
+fn bc_job(ctx: *mut void, j: u32) {
+    let st = unsafe &*(ctx as *const BcStage);
+    let p = unsafe &mut *st.p;
+    let job = *(unsafe &*st.jobs).at(j as usize);
+    let m = job.m as usize;
+    let pkg = st.p;
+    let mm = &mut p.modules[m];
+    let src = mm.source.as_str().ptr() as *const char;
+    let len = mm.source.len();
+    let mut tck = tc::TypeChecker::new(&mut mm.ast, str::from_raw(src as *const u8, len), pkg);
+    let mut slot = bc_slot_take(unsafe &*st.slots, st.p);
+    // The serial path lowers straight into the package keep; a parallel job keeps its own and
+    // publishes it under the evaluator's lock (its lookups read the index).
+    let mut keep = irl::Keep::new();
+    if st.master != null {
+        slot.ctx.keep = if p.jobs == 1 {
+            st.master;
+        } else {
+            &mut keep;
+        };
+    }
+    slot.ctx.validate = st.validate;
+    // The lowered bodies of the function under analysis: one vector for the job, emptied after
+    // every function (a per-function vector reserves eight Lowerer slots on its first push).
+    let mut bodies = Vector::<irl::Lowerer>::new();
+    for k in job.lo as usize..job.hi as usize {
+        let it = p.sched.by_node[k] as usize;
+        let meta = *p.idx.items.at(it);
+        if meta.owner != loader::ITEM_NONE && p.idx.items.at(meta.owner as usize).kind != loader::ItemKind::IK_EXTEND as u8 {
+            continue; // an interface's members have no body of their own to analyze
+        }
+        let kd = meta.kind;
+        if kd != loader::ItemKind::IK_FUNCTION as u8 && kd != loader::ItemKind::IK_METHOD as u8 && kd != loader::ItemKind::IK_STRUCT as u8 && kd != loader::ItemKind::IK_ENUM as u8 {
+            continue;
+        }
+        tck.bc_item(meta.node, &mut slot.ow, &mut slot.ctx, &mut bodies);
+        *unsafe &mut *(st.outs + it) = replace(&mut tck.errors, diag::Errors::new());
+    }
+    slot.ctx.keep = null;
+    let ce = p.cir as *mut iri::Interp;
+    if st.master != null && p.jobs != 1 {
+        if ce != null {
+            ce.eng_lock();
+        }
+        unsafe (&mut *st.master).absorb(&mut keep);
+        if ce != null {
+            ce.eng_unlock();
+        }
+    }
+    bc_slot_give(unsafe &*st.slots, slot);
+    // The module's Core IR is ready. Record what its emission depends on and free the syntax
+    // the analyses are done with (a deferred static_assert in a body keeps it for the flush).
+    p.set_module_states(m, loader::IS_IR_READY);
+    if p.free_bodies {
+        p.record_emit_deps(m);
+        let mut free = true;
+        if ce != null {
+            ce.eng_lock();
+            free = !ce.pending_in_bodies(m as ModuleId);
+            ce.eng_unlock();
+        }
+        if free {
+            p.modules[m].ast.release_bodies();
+        }
+    }
+    // The shared last-use table served the type check and this pass.
+    let _ = replace(&mut p.modules[m].ast.last_use, Vector::<NodeId>::new());
+}
+
+/// The borrow jobs: one per module with syntax, its items in source order.
+fn bc_jobs(p: &loader::Package, out: &mut Vector<BcJob>) {
+    for m in 0..p.modules.len() {
+        if !p.modules.at(m).has_ast {
+            continue;
+        }
+        out.push(BcJob { m: m as u32, lo: p.idx.mod_items[m], hi: p.idx.mod_items[m + 1] });
+    }
+}
+
+/// Borrow-check every module as a job (`bc_job`): one ownership oracle and one borrow pipeline
+/// per slot in flight (the serial path's single slot serves every body), outputs published in
+/// module and item order, so both paths print and lower identically. `keep` (null = discard)
+/// collects every lowered body for the backend. False when any module reported an error.
 pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     publish_checkpoint(p, keep);
     let n = p.modules.len();
-    // The keep holds every body from here on, and the evaluator views it while the frontier
-    // runs so a fold reaches the bodies of a module that has already released its syntax; the
+    // The keep holds every body from here on, and the evaluator views it while the stage runs
+    // so a fold reaches the bodies of a module that has already released its syntax; the
     // reserve keeps every slot in place under that view.
     if keep != null {
         unsafe (&mut *keep).reserve_bodies(p);
@@ -7365,33 +7498,97 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     if p.free_bodies {
         p.emit_deps_reserve();
     }
-    if p.jobs != 1 && n > 1 {
-        return borrowck_all_par(p, keep);
+    // Package-wide lazy state the jobs would otherwise race to build.
+    if p.co_state == 0 {
+        p.co_compute();
     }
-    let mut ow = bfx::Owner::new(p);
-    let mut ctx = bfi::BorrowCtx::new();
-    ctx.keep = keep;
-    ctx.st = bc_stats_new();
-    ctx.st.all = p.icost_on;
-    ctx.validate = stdlib::getenv("SC_BC_VALIDATE") != null;
-    let mut ok = true;
-    for i in 0..n {
-        if !borrowck_module(p, i, &mut ow, &mut ctx) {
-            ok = false;
+    if p.cancel_state == 0 {
+        p.cancel_compute();
+    }
+    let par = p.jobs != 1 && n > 1;
+    let cirp = p.cir as *mut iri::Interp;
+    if par {
+        if cirp != null {
+            unsafe cirp.elock_on = true;
         }
-        p.set_module_states(i, loader::IS_IR_READY);
-        if p.free_bodies {
-            p.record_emit_deps(i);
-            let ce = p.cir as *mut iri::Interp;
-            if ce == null || !ce.pending_in_bodies(i as ModuleId) {
-                p.modules[i].ast.release_bodies();
+        for i in 0..n {
+            p.modules[i].ast.ilock_on = true;
+        }
+    }
+    let mut jobs = Vector::<BcJob>::new();
+    bc_jobs(p, &mut jobs);
+    let ni = p.idx.items.len();
+    let mut outs = Vector::<diag::Errors>::with_capacity(ni);
+    for _ in 0..ni {
+        outs.push(diag::Errors::new());
+    }
+    let slots = psync::Mutex::<Vector<BcSlot>>::new(Vector::<BcSlot>::new());
+    let mut st = BcStage {
+        p: p,
+        jobs: &jobs,
+        outs: outs.index_mut(0),
+        slots: ((&slots) as *const psync::Mutex<Vector<BcSlot>>) as *mut psync::Mutex<Vector<BcSlot>>,
+        master: keep,
+        validate: stdlib::getenv("SC_BC_VALIDATE") != null,
+    };
+    let mut g = sch::Jobs::independent(jobs.len());
+    for j in 0..jobs.len() {
+        // The memory gate's estimate: the module's source bytes, several times over for its IR.
+        g.est.set(j, p.modules[jobs[j].m as usize].source.len() as u64 * 8);
+    }
+    let ctl = tctl::Ctl::new(tctl::budget_from_env());
+    {
+        // The serial path's slot records the measurement (SC_ITEM_STATS) and the borrow report.
+        let mut seed = slots.lock();
+        let mut s0 = BcSlot { ow: bfx::Owner::new(p), ctx: bfi::BorrowCtx::new() };
+        s0.ctx.st = bc_stats_new();
+        s0.ctx.st.all = p.icost_on;
+        seed.push(s0);
+    }
+    sch::run_jobs(&g, p.jobs, bc_job, &mut st, &ctl);
+    if par {
+        for i in 0..n {
+            p.modules[i].ast.ilock_on = false;
+        }
+        if cirp != null {
+            unsafe cirp.elock_on = false;
+        }
+    }
+    // Modules without a job (no syntax) are ready too.
+    for m in 0..n {
+        if !p.modules[m].has_ast {
+            p.set_module_states(m, loader::IS_IR_READY);
+        }
+    }
+    let mut ok = true;
+    for m in 0..n {
+        let mut errs = diag::Errors::new();
+        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+            errs.append(outs.index_mut(it));
+        }
+        errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+        p.lint_errs = p.lint_errs + errs.errors.len() as u32;
+        if errs.has_errors() {
+            ok = false;
+            errs.log();
+        }
+    }
+    {
+        // Every slot's probe folds into one report; the retained-capacity line reads the first
+        // slot (the serial path's only one).
+        let mut all = slots.lock();
+        let mut st9 = bc_stats_new();
+        for i in 0..all.len() {
+            st9.merge(&all.at(i).ctx.st);
+        }
+        if all.len() != 0 {
+            bc_stats_print(&st9, &all.at(0).ctx);
+            if p.icost_on {
+                let c0 = all.index_mut(0);
+                p.icost_bc = replace(&mut c0.ctx.st.body_ns, Vector::<u64>::new());
+                p.icost_lw = replace(&mut c0.ctx.st.lower_ns, Vector::<u64>::new());
             }
         }
-    }
-    bc_stats_print(&ctx.st, &ctx);
-    if p.icost_on {
-        p.icost_bc = replace(&mut ctx.st.body_ns, Vector::<u64>::new());
-        p.icost_lw = replace(&mut ctx.st.lower_ns, Vector::<u64>::new());
     }
     return ok;
 }
@@ -7406,86 +7603,6 @@ fn bc_stats_print(st: &bfi::BcStats, ctx: &bfi::BorrowCtx) {
         st.report(ctx, &mut rep);
         rep.eprint();
     }
-}
-
-fn borrowck_all_par(p: &mut loader::Package, keep: *mut irl::Keep) bool {
-    let n = p.modules.len();
-    // Package-wide lazy state the tasks would otherwise race to build.
-    if p.co_state == 0 {
-        p.co_compute();
-    }
-    if p.cancel_state == 0 {
-        p.cancel_compute();
-    }
-    let cirp = p.cir as *mut iri::Interp;
-    if cirp != null {
-        unsafe cirp.elock_on = true;
-    }
-    for i in 0..n {
-        p.modules[i].ast.ilock_on = true;
-    }
-    let mut outs = Vector::<BcOut>::with_capacity(n);
-    for _ in 0..n {
-        outs.push(
-            BcOut {
-                ok: true,
-                lint: 0,
-                errors: diag::Errors::new(),
-                keep: irl::Keep::new(),
-                st: bfi::BcStats::new(false, false),
-            },
-        );
-    }
-    if p.jobs >= 2 {
-        prt::set_worker_count(p.jobs as usize);
-    }
-    prt::set_stack_size(8usize << 20); // no-op if the pool already runs (set again for direct callers)
-    let wg = psync::WaitGroup::new();
-    wg.add(n as i64);
-    let pp = p as *mut loader::Package;
-    let want = keep != null;
-    let pool = psync::Mutex::<Vector<BcSlot>>::new(Vector::<BcSlot>::new());
-    let poolp = ((&pool) as *const psync::Mutex<Vector<BcSlot>>) as *mut psync::Mutex<Vector<BcSlot>>;
-    for i in 0..n {
-        let t = BcTask { p: pp, i: i, out: outs.index_mut(i), want_keep: want, master: keep, pool: poolp };
-        let wgc = wg.clone();
-        launch || {
-            bc_run_one(t);
-            wgc.done();
-        };
-    }
-    wg.wait_masked();
-    let mut ok = true;
-    for i in 0..n {
-        p.set_module_states(i, loader::IS_IR_READY);
-        let o = outs.index_mut(i);
-        if !o.ok {
-            ok = false;
-        }
-        p.lint_errs = p.lint_errs + o.lint;
-        if !o.ok {
-            o.errors.log();
-        }
-        if keep != null {
-            unsafe (&mut *keep).absorb(&mut o.keep);
-        }
-    }
-    {
-        // Task probes fold into one report; the retained-capacity line reads an empty context.
-        let mut st = bc_stats_new();
-        for i in 0..n {
-            st.merge(&outs.at(i).st);
-        }
-        let ctx9 = bfi::BorrowCtx::new();
-        bc_stats_print(&st, &ctx9);
-    }
-    for i in 0..n {
-        p.modules[i].ast.ilock_on = false;
-    }
-    if cirp != null {
-        unsafe cirp.elock_on = false;
-    }
-    return ok;
 }
 
 // A deferred static_assert that failed once the whole package was typed: render it against the owning module.
@@ -8591,99 +8708,144 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
     }
 }
 
-struct ApTask {
+// ---- The always-panics stage ----------------------------------------------------------------
+// The borrow stage's jobs (one per linted module) over the function and method items, after
+// every item is IrReady: a scan is a query, so a parallel job runs a private engine (leased
+// from a pool, its memos kept across the jobs it serves; budgets copy from the master so traps
+// classify identically) and the serial path the master engine. Diagnostics publish per item in
+// item order.
+
+struct ApStage {
     pub p: *mut loader::Package,
-    pub outs: *mut diag::Errors,
-    pub m: u64,
+    pub jobs: *const Vector<BcJob>,
+    pub outs: *mut diag::Errors, // per item
+    pub engines: *mut Vector<Box<iri::Interp>>, // idle private engines, under `elock`
+    pub elock: *mut i32,
 }
 
-unsafe extend ApTask as Send {}
-
-fn ap_run_one(t: ApTask) {
-    // A private engine per task: the scan is a query, and the shared engine's caches must not be
-    // contended per interpreted call. Budgets copy from the master so traps classify identically.
-    let mut cev = iri::interp_new(t.p);
-    {
-        let master = (unsafe (&*t.p).cir) as *mut iri::Interp;
-        cev.all_typed = true;
-        cev.max_steps = unsafe (&*master).max_steps;
-        cev.max_slots = unsafe (&*master).max_slots;
-        cev.keep_view = unsafe (&*master).keep_view;
-    }
-    let p = unsafe &mut *t.p;
-    let i = t.m as usize;
-    ap_check_module_on(p, i, unsafe &mut *(t.outs + i), &mut cev);
-    let master = p.cir as *mut iri::Interp;
-    master.st_absorb(&cev);
+fn ap_engine_take(st: &ApStage) Box<iri::Interp> {
+    unsafe sc_runtime::sc_rt_spin_lock(st.elock);
+    switch (unsafe &mut *st.engines).pop() {
+        Some(e) => {
+            unsafe sc_runtime::sc_rt_spin_unlock(st.elock);
+            return e;
+        },
+        _ => {},
+    };
+    unsafe sc_runtime::sc_rt_spin_unlock(st.elock);
+    let mut cev = iri::interp_new(st.p);
+    let master = (unsafe (&*st.p).cir) as *mut iri::Interp;
+    cev.all_typed = true;
+    cev.max_steps = unsafe (&*master).max_steps;
+    cev.max_slots = unsafe (&*master).max_slots;
+    cev.keep_view = unsafe (&*master).keep_view;
+    return Box::new(cev);
 }
 
-fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
-    let n = p.modules.len();
-    if p.jobs != 1 && n > 1 && only_mod < 0 {
-        // Per-module tasks: fold failures recorded through the master's lowering callbacks land
-        // behind its lock and dedup canonically in report_fold_errs; diagnostics replay in module
-        // order below.
-        let cirp = p.cir as *mut iri::Interp;
-        if cirp != null {
-            unsafe cirp.elock_on = true;
-        }
-        for i in 0..n {
-            p.modules[i].ast.ilock_on = true;
-        }
-        let mut outs = Vector::<diag::Errors>::with_capacity(n);
-        for _ in 0..n {
-            outs.push(diag::Errors::new());
-        }
-        prt::set_stack_size(8usize << 20);
-        let wg = psync::WaitGroup::new();
-        let pp = p as *mut loader::Package;
-        let ob = outs.index_mut(0) as *mut diag::Errors;
-        let mut launched: i64 = 0;
-        for m in 0..n {
-            if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
-                continue;
-            }
-            wg.add(1);
-            launched += 1;
-            let t = ApTask { p: pp, outs: ob, m: m as u64 };
-            let wgc = wg.clone();
-            launch || {
-                ap_run_one(t);
-                wgc.done();
-            };
-        }
-        if launched != 0 {
-            wg.wait_masked();
-        }
-        for i in 0..n {
-            p.modules[i].ast.ilock_on = false;
-        }
-        if cirp != null {
-            unsafe cirp.elock_on = false;
-        }
-        for m in 0..n {
-            let errs = outs.index_mut(m);
-            if errs.errors.len() != 0 {
-                p.ok = false;
-                errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
-                errs.log();
-            }
-        }
-        return;
-    }
-    for m in 0..n {
-        if !p.modules[m].has_ast || !lint_reported(p, m, only_mod) {
+fn ap_engine_give(st: &ApStage, e: Box<iri::Interp>) {
+    unsafe sc_runtime::sc_rt_spin_lock(st.elock);
+    (unsafe &mut *st.engines).push(e);
+    unsafe sc_runtime::sc_rt_spin_unlock(st.elock);
+}
+
+fn ap_job(ctx: *mut void, j: u32) {
+    let st = unsafe &*(ctx as *const ApStage);
+    let p = unsafe &mut *st.p;
+    let job = *(unsafe &*st.jobs).at(j as usize);
+    let m = job.m as usize;
+    let a = p.module_ast_const(m as ModuleId);
+    let serial = p.jobs == 1;
+    let mut own = Vector::<Box<iri::Interp>>::new();
+    let cev: *mut iri::Interp = if serial {
+        p.cir as *mut iri::Interp;
+    } else {
+        own.push(ap_engine_take(st));
+        own.index_mut(0).as_ptr() as *mut iri::Interp;
+    };
+    for k in job.lo as usize..job.hi as usize {
+        let it = p.sched.by_node[k] as usize;
+        let meta = *p.idx.items.at(it);
+        if meta.kind != loader::ItemKind::IK_FUNCTION as u8 && meta.kind != loader::ItemKind::IK_METHOD as u8 {
             continue;
         }
-        let mut errs = diag::Errors::new();
         let tp9 = if p.icost_on {
             std::parallel::platform::now_ns();
         } else {
             0u64;
         };
-        check_always_panics_module(p, m, &mut errs);
+        let mut errs = diag::Errors::new();
+        ap_check_fn(&mut errs, a, m, meta.node, cev);
         if p.icost_on {
             gitems::mod_cost(p, m, 1, std::parallel::platform::now_ns() - tp9);
+        }
+        if errs.errors.len() != 0 {
+            *unsafe &mut *(st.outs + it) = errs;
+        }
+    }
+    if !serial {
+        switch own.pop() {
+            Some(e) => {
+                ap_engine_give(st, e);
+            },
+            _ => {},
+        };
+    }
+}
+
+/// Always-panics check (the `unconditional_panic` analog, an ERROR like the raw-array
+/// provable-OOB gate: the same proof one tier up). A driver stage after every item is IrReady:
+/// the scan interprets cross-module `const fn` bodies, whose bodies only exist once their
+/// items are analyzed. @test fns are exempt (panicking on purpose is a feature there), as are
+/// explicit `panic(..)` calls (only a panic reached THROUGH a `const fn` frame classifies; see
+/// Interp::lint_body). `only_mod` restricts the scan to one module (the lint of one file).
+fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
+    if p.cir == null {
+        return;
+    }
+    let n = p.modules.len();
+    let mut jobs = Vector::<BcJob>::new();
+    bc_jobs(p, &mut jobs);
+    let mut w: usize = 0;
+    for j in 0..jobs.len() {
+        if lint_reported(p, jobs[j].m as usize, only_mod) {
+            jobs.set(w, jobs[j]);
+            w += 1;
+        }
+    }
+    jobs.truncate(w);
+    let ni = p.idx.items.len();
+    let mut outs = Vector::<diag::Errors>::with_capacity(ni);
+    for _ in 0..ni {
+        outs.push(diag::Errors::new());
+    }
+    let par = p.jobs != 1 && n > 1;
+    let cirp = p.cir as *mut iri::Interp;
+    if par {
+        // Fold failures recorded through the master's lowering callbacks land behind its lock
+        // and dedup canonically in report_fold_errs.
+        unsafe cirp.elock_on = true;
+        for i in 0..n {
+            p.modules[i].ast.ilock_on = true;
+        }
+    }
+    let mut engines = Vector::<Box<iri::Interp>>::new();
+    let mut elock: i32 = 0;
+    let mut st = ApStage { p: p, jobs: &jobs, outs: outs.index_mut(0), engines: &mut engines, elock: &mut elock };
+    let g = sch::Jobs::independent(jobs.len());
+    sch::run_jobs(&g, p.jobs, ap_job, &mut st, null);
+    if par {
+        for i in 0..n {
+            p.modules[i].ast.ilock_on = false;
+        }
+        unsafe cirp.elock_on = false;
+    }
+    for i in 0..engines.len() {
+        cirp.st_absorb(engines.at(i).get());
+    }
+    for m in 0..n {
+        let mut errs = diag::Errors::new();
+        for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
+            errs.append(outs.index_mut(it));
         }
         if errs.errors.len() != 0 {
             p.ok = false;
@@ -8738,19 +8900,14 @@ fn lint_package_i(
         return 1;
     }
     gitems::build_serial(p);
-    let spans = gitems::spans_all(p);
-    let mut tedges = Vector::<u64>::new();
-    for i in 0..n {
-        let sel = lint_reported(p, i, lint_mod as i32);
-        let fx = if sel {
-            fixes;
-        } else {
-            null;
-        };
-        let ok = typecheck_module(p, i, sel, fx, ftexts, &spans, &mut tedges);
-        p.ok = ok && p.ok;
+    {
+        let mut want = Vector::<bool>::with_capacity(n);
+        for i in 0..n {
+            want.push(lint_reported(p, i, lint_mod as i32));
+        }
+        // Fixes are collected only for the selected modules: the others lint nothing.
+        p.ok = typecheck_stage(p, &want, fixes, ftexts) && p.ok;
     }
-    gitems::build_final(p, &tedges);
     if !p.ok {
         return 1;
     }
@@ -8879,19 +9036,23 @@ fn run_package_i(
         eprint("phase resolve: {} ms\n", t9 - tp0);
         tp0 = t9;
     }
-    if p.jobs != 1 && n > 1 {
-        p.ok = typecheck_all_par(p, lint) && p.ok;
-    } else {
-        let spans = gitems::spans_all(p);
-        let mut tedges = Vector::<u64>::new();
+    {
+        let mut want = Vector::<bool>::with_capacity(n);
         for i in 0..n {
-            let ok = typecheck_module(p, i, lint && !p.modules[i].prelude, null, null, &spans, &mut tedges);
-            p.ok = ok && p.ok;
+            want.push(lint && !p.modules[i].prelude);
         }
-        gitems::build_final(p, &tedges);
+        p.ok = typecheck_stage(p, &want, null, null) && p.ok;
     }
     if p.ok {
-        discharge_obligations(p, n, p.jobs != 1 && n > 1);
+        let dup_par = p.jobs != 1 && n > 1;
+        let td0 = unsafe shim::sc_ticks_ms();
+        if dup_par {
+            p.ok = dup_conformances_par(p) && p.ok;
+        }
+        discharge_obligations(p, n, dup_par);
+        if tstat {
+            eprint("typecheck-stage conformances+obligations: {} ms\n", unsafe shim::sc_ticks_ms() - td0);
+        }
     }
     if !p.ok {
         return 1;

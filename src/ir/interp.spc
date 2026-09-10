@@ -12,6 +12,7 @@ import std::parallel::sync as psy;
 import math;
 import ast::ast as *;
 import module::loader as loader;
+import graph::items as gitems;
 import ir::core as ir;
 import ir::lower as irl;
 import ir::layout as lay;
@@ -616,12 +617,13 @@ pub struct Interp {
     // a raw mutex here deadlocks under safepoint preemption) and reentrant by task token -- the
     // interpreter re-enters its own facade while lowering callee bodies.
     pub elock_on: bool,
-    // Parallel frontend: the module whose check requested the CURRENT top-level evaluation (the
-    // index-aware gate emulates serial module-order visibility), and the module a gated lowering
-    // asked to WAIT for (-1 = none; the facade releases the engine, waits, and re-runs).
-    pub tc_par: bool,
-    pub root_mod: ModuleId,
-    pub retry_mod: i64,
+    /// The reader: the item whose check requested the current evaluation (`set_reader`, under
+    /// the engine lock) and the components it depends on (`gitems::reach_fill`). A body or a
+    /// checked type of an item the reader cannot see (`gitems::visible`) is refused, whatever a
+    /// worker has done with it. ITEM_NONE (every stage after the type check) sees everything.
+    pub cur_item: loader::ItemId,
+    pub reach: *const u64,
+    pub reach_n: usize,
     pub elock_sem: psy::Semaphore,
     pub elock_owner: usize,
     pub elock_depth: u32,
@@ -698,9 +700,9 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         record_pause: 0,
         trap_in_constfn: false,
         elock_on: false,
-        tc_par: false,
-        root_mod: 0,
-        retry_mod: 0 - 1,
+        cur_item: loader::ITEM_NONE,
+        reach: null,
+        reach_n: 0,
         elock_sem: psy::Semaphore::new(1),
         elock_owner: 0,
         elock_depth: 0,
@@ -1607,23 +1609,7 @@ extend Interp {
                 } else {
                     cont;
                 };
-                let mut done9 = false;
-                if self.tc_par && m != self.root_mod {
-                    // serial module-order visibility: a LOWER-indexed module is fully checked by
-                    // the time this one runs -- wait for it if its task has not finished; a
-                    // HIGHER-indexed one is unchecked regardless of live parallel progress
-                    if m < self.root_mod {
-                        if m as usize < self.p().tc_mod_done.len() && *self.p().tc_mod_done.at(m as usize) != 0 {
-                            done9 = true;
-                        } else {
-                            self.retry_mod = m;
-                            return -1;
-                        }
-                    }
-                } else {
-                    done9 = self.p().item_state(m, item9) >= loader::IS_CHECKED;
-                }
-                if !done9 {
+                if !self.visible_node(m, fnode) {
                     self.note_body(m, false);
                     self.note_dyn_edge(m, item9);
                     return -1;
@@ -1641,10 +1627,11 @@ extend Interp {
                 return -1;
             }
         }
-        if self.p().icost_on && self.p().cur_item != 0 {
+        if self.p().icost_on && self.cur_item != loader::ITEM_NONE {
             // Item-schedule measurement: a dynamic evaluation edge from the checking item.
             let pm = self.pkg as *mut loader::Package;
-            unsafe pm.ctfe_edges.push(self.p().cur_item);
+            let ci = self.p().idx.items.at(self.cur_item as usize);
+            unsafe pm.ctfe_edges.push(ci.module as u64 << 32 | ci.node as u64);
             unsafe pm.ctfe_edges.push(m as u64 << 32 | fnode as u64);
         }
         let mut lw = irl::Lowerer::new(self.pkg, m, fnode);
@@ -1685,19 +1672,37 @@ extend Interp {
     // engine records (task engines share the package without a lock), and only while a check
     // names its item.
     fn note_dyn_edge(self: &mut Self, m: ModuleId, item9: NodeId) {
-        if !self.dyn_rec || self.p().cur_item == 0 {
+        if !self.dyn_rec || self.cur_item == loader::ITEM_NONE {
             return;
         }
-        let caller = self.p().item_of(
-            (self.p().cur_item >> 32) as ModuleId,
-            (self.p().cur_item & 0xFFFFFFFFu64) as NodeId,
-        );
+        let caller = self.cur_item;
         let callee = self.p().item_of(m, item9);
         if caller == loader::ITEM_NONE || callee == loader::ITEM_NONE || caller == callee {
             return;
         }
         let pm = self.pkg as *mut loader::Package;
         unsafe pm.sched.dyn_edges.insert(caller as u64 << 32 | callee as u64);
+    }
+
+    /// Name the reader of the evaluations that follow (under the engine lock): the item under
+    /// check and its dependency components. ITEM_NONE sees everything.
+    pub fn set_reader(self: &mut Self, item: loader::ItemId, bits: *const u64, n: usize) {
+        self.cur_item = item;
+        self.reach = bits;
+        self.reach_n = n;
+    }
+
+    /// Is the checked state of node `n` of module `m` visible to the reader (`gitems::visible`
+    /// over the node's owning item)? A node past every item range (an appended desugar) is.
+    fn visible_node(self: &Self, m: ModuleId, n: NodeId) bool {
+        if self.cur_item == loader::ITEM_NONE {
+            return true;
+        }
+        let t = gitems::owner_of(self.p(), m, n);
+        if t == loader::ITEM_NONE {
+            return true;
+        }
+        return gitems::visible(self.p(), self.cur_item, t, self.reach, self.reach_n);
     }
 
     // Record that module `m`'s body syntax was read (`ok`) or refused.
@@ -5397,7 +5402,6 @@ extend Interp {
     /// memoized verdict so later folds agree with it.
     pub fn fn_recheck(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
         self.eng_enter();
-        self.root_mod = m; // fx scans of HIGHER modules read them as serial order saw them: unchecked
         let r = self.fn_recheck_g(m, fn_id);
         self.eng_leave();
         return r;
@@ -5979,10 +5983,10 @@ extend Interp {
     /// scalar successes store, non-scalar successes store a positive fact, in-flight re-entry
     /// is a cyclic constant dependency.
 
-    // A module's per-node type under serial-order visibility: a module checked EARLY by the
-    // parallel schedule but AFTER the requester in id order answers TYPE_NONE, as it did serially.
-    const fn tof(self: &Self, m: ModuleId, a: &Ast, n: NodeId) TypeId {
-        if self.tc_par && m > self.root_mod {
+    // A node's checked type under the reader's visibility: TYPE_NONE for an item the reader
+    // cannot see, whatever a worker has done with it.
+    fn tof(self: &Self, m: ModuleId, a: &Ast, n: NodeId) TypeId {
+        if !self.visible_node(m, n) {
             return TYPE_NONE;
         }
         return a.type_of(n);
@@ -6059,27 +6063,7 @@ extend Interp {
 
     pub fn eval(self: &mut Self, m: ModuleId, id: NodeId) IVal {
         self.eng_enter();
-        let top9 = self.ev_depth == 0 && self.in_run == 0;
-        if top9 {
-            self.root_mod = m;
-        }
-        let mut r = self.eval_g(m, id);
-        // Parallel-frontend retry: a lowering was gated on a LOWER-indexed module still being
-        // checked. Serial semantics say that module IS checked by now, so wait for its task
-        // (indexes strictly decrease across waits -- acyclic) and re-run the whole evaluation.
-        while top9 && self.tc_par && self.retry_mod >= 0 {
-            let wm = self.retry_mod as ModuleId;
-            self.retry_mod = 0 - 1;
-            self.eng_leave();
-            let wf = self.p().tc_wait;
-            wf(self.p().tc_wait_ctx, wm);
-            self.eng_enter();
-            self.root_mod = m;
-            r = self.eval_g(m, id);
-        }
-        if top9 {
-            self.retry_mod = 0 - 1;
-        }
+        let r = self.eval_g(m, id);
         self.eng_leave();
         return r;
     }
@@ -6128,9 +6112,7 @@ extend Interp {
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         self.ev_depth += 1;
         let mut lw = irl::Lowerer::new(self.pkg, m, id);
-        if self.tc_par && m > self.root_mod {
-            lw.f.unchecked_view = true; // serial-order visibility: this module was unchecked then
-        }
+        lw.f.unchecked_view = !self.visible_node(m, id); // an item the reader cannot see is unchecked to it
         let mut v = none();
         // a CONST DECL as the target evaluates its initializer (the established evaluator's `ev`
         // did the same); anything else is a bare expression
@@ -6145,9 +6127,7 @@ extend Interp {
             v = self.run(&lw.body, &args);
         }
         self.ev_depth -= 1;
-        if top && self.retry_mod < 0 && self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(
-            self.trap_kind,
-        ) || self.trap_in_constfn) {
+        if top && self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
             self.record_fold_err(m, id);
         }
         // scalar success stores the value; non-scalar success stores the positive fact; failure
@@ -6210,9 +6190,7 @@ extend Interp {
         let prev_base = self.sub_base;
         self.sub_base = sb0;
         let mut lw = irl::Lowerer::new(self.pkg, m, id);
-        if self.tc_par && m > self.root_mod {
-            lw.f.unchecked_view = true;
-        }
+        lw.f.unchecked_view = !self.visible_node(m, id);
         for i in 0..n {
             let sb = *self.subst.at(sb0 + i as usize);
             lw.env.push(irl::LSub { pm: sb.pmod, pnode: sb.pnode, am: sb.am, at: sb.at });
@@ -6467,24 +6445,7 @@ extend Interp {
 
     pub fn eval_static(self: &mut Self, m: ModuleId, id: NodeId) StaticRes {
         self.eng_enter();
-        let top9 = self.ev_depth == 0 && self.in_run == 0;
-        if top9 {
-            self.root_mod = m;
-        }
-        let mut r = self.eval_static_g(m, id);
-        while top9 && self.tc_par && self.retry_mod >= 0 {
-            let wm = self.retry_mod as ModuleId;
-            self.retry_mod = 0 - 1;
-            self.eng_leave();
-            let wf = self.p().tc_wait;
-            wf(self.p().tc_wait_ctx, wm);
-            self.eng_enter();
-            self.root_mod = m;
-            r = self.eval_static_g(m, id);
-        }
-        if top9 {
-            self.retry_mod = 0 - 1;
-        }
+        let r = self.eval_static_g(m, id);
         self.eng_leave();
         return r;
     }
@@ -6525,9 +6486,7 @@ extend Interp {
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         self.ev_depth += 1;
         let mut lw = irl::Lowerer::new(self.pkg, m, id);
-        if self.tc_par && m > self.root_mod {
-            lw.f.unchecked_view = true;
-        }
+        lw.f.unchecked_view = !self.visible_node(m, id);
         let mut v = none();
         let isconst2 = (unsafe &*self.p().module_ast_const(m)).at_const(id).kind == NodeKind::NODE_CONST;
         let ok02 = if isconst2 {
@@ -6558,12 +6517,10 @@ extend Interp {
             }
         }
         if v.kind != IV_OBJ {
-            if self.retry_mod < 0 && self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(
-                self.trap_kind,
-            ) || self.trap_in_constfn) {
+            if self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
                 self.record_fold_err(m, id);
             }
-            if self.retry_mod < 0 && self.trap.len() != 0 {
+            if self.trap.len() != 0 {
                 self.sref.insert(key, 0 - 1); // definite failure; undecidable stays retryable
             }
             self.failed = false;

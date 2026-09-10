@@ -27,22 +27,26 @@ platform_filter           -- @platform/@arch gating: compact items by target mas
 resolve + HIR, per module -- resolver::resolve, then hir::lower_module immediately after
   |                          (parallel frontier under --jobs, serial below 256 KiB of user
   |                          source: Package::analysis_jobs; HIR = the sugar-keyword desugar)
-typecheck, per module     -- type inference, obligations, instance recording (parallel frontier)
-  |
+typecheck, per item       -- type inference, obligations, instance recording; item jobs over
+  |                          the schedule graph's components (driver::sched), one checker per
+  |                          module under its lease, visibility by the static component rule
+  |                          (item-index.md); the serial path runs the same jobs in order
 discharge_obligations     -- cross-module reflection-bound obligations, once all modules typed
   |
 borrowck_all              -- lowers every body to Core IR (kept in irl::Keep, viewed by the
   |                          evaluator from here), replays the event tape, runs the loan
-  |                          analysis (the one other parallel stage), then elaborates each
-  |                          kept body's drops over the same facts (the keep holds elaborated
-  |                          bodies); a module's body syntax is freed when its pass ends
-  |                          (syntax-ownership.md)
+  |                          analysis, then elaborates each kept body's drops over the same
+  |                          facts (the keep holds elaborated bodies); one independent job
+  |                          per module on the same runner (a body split contends on the
+  |                          module's type-pool lock, item-index.md); a module's body syntax
+  |                          is freed when its job ends (syntax-ownership.md)
 [verification gates]      -- SC_FACTS_CHECK / SC_LAYOUT: each pass is a NO-OP unless its env
   |                          var is set
-lint + panics + flush     -- lint_unused_items, check_always_panics (an error, every build),
-  |                          then cir.flush_asserts / flush_consts (deferred static_asserts
-  |                          and consts undecidable in module order); the interpreter reads
-  |                          kept bodies through a read-only Keep view here (see Core IR)
+lint + panics + flush     -- lint_unused_items, check_always_panics (an error, every build;
+  |                          one job per linted module, a private engine per worker), then
+  |                          cir.flush_asserts / flush_consts (deferred static_asserts and
+  |                          consts a check could not fold); the interpreter reads kept
+  |                          bodies through a read-only Keep view here (see Core IR)
 runtime + external C      -- write super_rt.h/.c; ext_c_collect (@c.source wrappers, __ldflags)
   |
 emission planning         -- compute_emit_live (module-arena resolutions + item index edges);
@@ -100,11 +104,13 @@ and the owned records the later passes read instead are in
 An index into the package index's item table (`PkgIndex.items`: every top-level and associated
 declaration), dense for one compilation. `Package.sched` (`ItemSched`) holds one record per
 item: a stable key (module path and ordinals: no node id), a post-typecheck signature hash,
-precheck and final dependency ranges, the precheck component, and the monotone readiness state
-(Resolved, Checking, Checked, IrReady) the constant engine queries before it interprets a
-body (`Package::item_state`, the rule the per-module completion sets kept before). Built by
-`graph::items` after resolution (inside the resolve frontier's tasks), measured and gated in
-[item-index.md](references/item-index.md).
+schedule and final dependency ranges, the schedule component and the component graph the
+item scheduler runs, the item's own node ranges, and the monotone readiness state (Resolved,
+Checking, Checked, IrReady). The constant engine and the checker decide what an item may read
+as checked by the static visibility rule over the components (`graph::items::visible`: a
+dependency component, an earlier item of the same component, a prelude item). Built by
+`graph::items` after resolution (inside the resolve frontier's tasks); the scheduler, the
+rule and the measurements are in [item-index.md](references/item-index.md).
 
 ### DefId
 
@@ -293,9 +299,10 @@ than defining a new context. Two layers:
      Published results never point into it (diagnostics are copied `FlowErr`s; kept
      bodies are `compact_from` copies).
    - Spent Lowerers are recycled into `ctx.lower_pool` and the shared `irl::Keep`.
-   - Parallel builds (`borrowck_all_par`) lease an `Owner` + `BorrowCtx` slot per task
-     from a mutex-guarded pool (`bc_slot_take`/`bc_slot_give`: never hold the guard
-     across the task), so at most one slot per concurrently running task ever exists.
+   - Every borrow job (one per module) leases an `Owner` + `BorrowCtx` slot from a
+     mutex-guarded pool (`bc_slot_take`/`bc_slot_give`: never hold the guard across the
+     job), so at most one slot per concurrently running job ever exists; the serial
+     path's single slot serves every body.
 
 Callee resolution is never re-derived: the typechecker's `call_info` side table is the
 bridge (`bc_call_info`).
@@ -343,8 +350,11 @@ eligibility, always-panics), and lint probes.
 
 Driver protocol: `cir.all_typed` and `record_folds` are set **before the first body
 lowers** (mandatory call-site folds must behave exactly as under the backend's own
-lowering); `flush_asserts` / `flush_consts` re-evaluate the deferred, module-order-
-undecidable ones at the end; `report_fold_errs` surfaces emission-time fold failures.
+lowering); `flush_asserts` / `flush_consts` re-evaluate the ones a check could not fold
+(a callee outside the item's visibility) at the end; `report_fold_errs` surfaces
+emission-time fold failures. During the type check the engine answers as the item under
+check (`Interp::set_reader`): a body or a checked type of an item that item cannot see
+(`graph::items::visible`) is a refusal, whatever a worker has done with it.
 
 ## Monomorphization
 

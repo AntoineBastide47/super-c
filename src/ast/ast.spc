@@ -1892,11 +1892,19 @@ pub struct Ast {
     /// node inside the method's body resolves to (`record_free_touch`): the free-glue emission
     /// completes a `free` that leaves an owning field untouched, after the body syntax is gone.
     pub free_touched: Vector<u64>,
+    /// Per declaration (`dense` index): the last node that resolves to it, built once when the
+    /// module's type check closes (`TypeChecker::tc_build_last_use`) for every later checker of
+    /// the module (the borrow jobs share it; a checker without it builds its own).
+    pub last_use: Vector<NodeId>,
     pub root: NodeId,
     pub module: ModuleId,
     /// Number of sugar-keyword marker nodes (`launch`/`select`/`parallel for`) the parser built.
     /// Zero lets the HIR lowering skip its whole-arena marker scan -- the overwhelmingly common case.
     pub sugar_marks: u32,
+    /// The module arena's length when the HIR lowering started: every node at or past it was
+    /// appended by a desugar or a checker rewrite inside the body it extends, so it belongs to
+    /// the item under check (the parse-time item ranges do not cover it).
+    pub hir_base: u32,
 }
 
 // Bootstrap constraint: the release compiler skips fields it never typed when it synthesizes a

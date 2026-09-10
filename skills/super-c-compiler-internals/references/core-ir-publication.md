@@ -10,9 +10,9 @@ inventory, the tape categories, and the results.
 
 ## Where lowering runs
 
-`run_package_i` (`src/driver/emit.spc`) types every module (the parallel frontier), discharges
+`run_package_i` (`src/driver/emit.spc`) types every item (the item jobs), discharges
 the cross-module obligations, publishes the provisional types (checkpoint 1) and then runs the
-borrow frontier. `bc_fn` (`src/borrowck/borrowck.spc`) lowers each function and its closures
+borrow jobs. `bc_fn` (`src/borrowck/borrowck.spc`) lowers each function and its closures
 first (`bc_ir_lower`), replays the tape, runs the analyses over the lowered bodies, and hands
 the lowerings to `irl::Keep`. When the module's pass ends, the driver records what later
 passes read of its body syntax and frees the body arena (`Ast::release_bodies`); the passes
@@ -84,7 +84,7 @@ What read a released module's body syntax after its pass, and the record that re
 | `emit_order`: the generic-call sites of the module's `mono` table name body nodes | `Package.emit_deps`, the module's dependency row (`emit_dep_row`) recorded before its release; `emit_order` reads the rows and computes them itself when none were recorded |
 | `lint_unused_items`: every resolution slot, attributed to its item by span | the item index's post-typecheck edges (`ItemSched.fin_edges`: each module's `module_edges` run again at the end of its type check, when the checker has added the type-path call resolutions the resolver cannot make, laid out by `build_final` after the frontier), the same attribution the index makes from the id ranges; the `method_refs` table stays (its owner is the function node) |
 | `compute_emit_live`: every resolution slot | the module arena's resolutions (declarations, signatures, constants, pinned bodies, import paths) plus the post-typecheck edges' target modules; the lint driver builds the index (`build_serial`) for the same reason |
-| the evaluator's folds during the borrow frontier, and the always-panics check and flush after it: `body_of` lowered an ordinary body from syntax when no view was open | the keep's view opens before the frontier (`reserve_bodies` pins every slot; `put`/`absorb` accept bodies into that reserve under the view); a task publishes its module's bodies into the viewed keep under the evaluator's lock before the release |
+| the evaluator's folds during the borrow frontier, and the always-panics check and flush after it: `body_of` lowered an ordinary body from syntax when no view was open | the keep's view opens before the frontier (`reserve_bodies` pins every slot; `put`/`absorb` accept bodies into that reserve under the view); a job publishes its bodies into the viewed keep under the evaluator's lock, and the module's last job releases its syntax |
 | the evaluator's closure call (`Interp::call` read the callee node's kind) | a callable body-arena node is a closure: no read |
 | the constant pre-pass before emission (the evaluator lowered the callees of every constant from syntax after the view closed) | the pre-pass runs with the view open and `Interp.copy_kept` set: every kept hit becomes an owned compact copy (`own_kept`), then the view closes |
 | the deferred `static_assert` flush: a condition inside a function body | the module keeps its bodies until the flush (`Interp::pending_in_bodies`) |

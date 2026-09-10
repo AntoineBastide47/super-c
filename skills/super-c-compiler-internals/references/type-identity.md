@@ -49,8 +49,12 @@ Each checkpoint:
 3. Numbers the batch class-major, then depth-major, then by the structural key
    `PubKey` (kind, qualifier, module, then the payload words with children already
    final: element ids, array length, projection owner and binder, `(module, decl, n,
-   args)` for an instance, the value of a const argument, the declaration node
-   otherwise). Ties cannot occur: two records with one key are one record.
+   args)` for an instance, the value of a const argument, the package index of a
+   const-expression form, the declaration node otherwise). Ties cannot occur: two
+   records with one key are one record. The const-expression forms of the batch take
+   their package index in content order (`Package::clin_less`: constant, term count,
+   divisor, then each term's parameter and coefficient) before the batch is numbered:
+   the order a module pool interned them follows the item schedule.
 4. Remaps every module table (`Ast::publish_remap`), the constant engine (`Interp::
    remap_types`: objects, statics, substitutions, returns, lowered bodies; the call and
    item memos are cleared), the kept lowerings (`Keep::remap_types` over every

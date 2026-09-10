@@ -127,6 +127,104 @@ extend Errors {
         );
     }
 
+    /// Move every record of `o` (an item's diagnostics) to the end of this container, in `o`'s
+    /// order: note chains, fixes and their payloads keep their links through rebased indexes,
+    /// and the sequences continue this container's. `o` is left empty. What a module's
+    /// per-item outputs concatenate through, in item order, before `finalize`.
+    @c.cold
+    pub fn append(self: &mut Self, o: &mut Errors) {
+        let nb = self.note_pool.len() as u32;
+        let wb = self.warns.len() as u32;
+        let tb = self.fix_texts.len() as u32;
+        for k in 0..o.note_pool.len() {
+            let n = o.note_pool.index_mut(k);
+            self.note_pool.push(
+                Note {
+                    text: replace(&mut n.text, String::new()),
+                    next: if n.next == NOTE_NONE {
+                        NOTE_NONE;
+                    } else {
+                        n.next + nb;
+                    },
+                },
+            );
+        }
+        for k in 0..o.errors.len() {
+            if self.errors.len() >= ERRORS_MAX {
+                break;
+            }
+            let d = o.errors.index_mut(k);
+            self.errors.push(
+                Diagnostic {
+                    severity: d.severity,
+                    code: d.code,
+                    start: d.start,
+                    len: d.len,
+                    msg: replace(&mut d.msg, String::new()),
+                    note_head: if d.note_head == NOTE_NONE {
+                        NOTE_NONE;
+                    } else {
+                        d.note_head + nb;
+                    },
+                    note_tail: if d.note_tail == NOTE_NONE {
+                        NOTE_NONE;
+                    } else {
+                        d.note_tail + nb;
+                    },
+                    sequence: d.sequence + self.seq,
+                },
+            );
+        }
+        for k in 0..o.warns.len() {
+            if self.warns.len() >= ERRORS_MAX {
+                break;
+            }
+            let d = o.warns.index_mut(k);
+            self.warns.push(
+                Diagnostic {
+                    severity: d.severity,
+                    code: d.code,
+                    start: d.start,
+                    len: d.len,
+                    msg: replace(&mut d.msg, String::new()),
+                    note_head: if d.note_head == NOTE_NONE {
+                        NOTE_NONE;
+                    } else {
+                        d.note_head + nb;
+                    },
+                    note_tail: if d.note_tail == NOTE_NONE {
+                        NOTE_NONE;
+                    } else {
+                        d.note_tail + nb;
+                    },
+                    sequence: d.sequence + self.seq,
+                },
+            );
+        }
+        for k in 0..o.fix_texts.len() {
+            self.fix_texts.push(replace(o.fix_texts.index_mut(k), String::new()));
+        }
+        for k in 0..o.fixes.len() {
+            let mut f = o.fixes[k];
+            if f.warn != 0xFFFFFFFF {
+                f.warn = f.warn + wb;
+            }
+            if f.text != 0xFFFFFFFF {
+                f.text = f.text + tb;
+            }
+            self.fixes.push(f);
+        }
+        self.fixable_errs = self.fixable_errs + o.fixable_errs;
+        self.seq = self.seq + o.seq;
+        o.errors.clear();
+        o.warns.clear();
+        o.note_pool.clear();
+        o.fixes.clear();
+        o.fix_texts.clear();
+        o.fixable_errs = 0;
+        o.seq = 0;
+    }
+
     /// Attach a machine-applicable fix to the warning being emitted (fix() always follows its warn();
     /// past the ERRORS_MAX cap the index degrades to the last kept warning).
     @c.cold

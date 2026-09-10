@@ -39,15 +39,24 @@ One parallel frontier; for each module, `Resolver::resolve()` runs and then
   — the parse arena becomes the HIR in place. Typecheck, borrowck, const-eval and codegen
   never see a sugar node.
 
-## 4. Typecheck, per module (`src/typechecker/`)
+## 4. Typecheck, per item (`typecheck_stage`, `src/typechecker/`)
 
-Parallel frontier over import levels. Type inference with expected-type propagation,
-interface obligations, dispatch. Records the typed facts (per-node types, resolutions,
-`call_info`, `op_method`, coercion/deref chains, captures) that `ast::facts` exposes
-read-only to everything downstream. `close_instances` records concrete generic
-instantiations into the per-module `Ast.instances` pool. Format-string, compound-assign
-and string-switch lowering happen here. Deferred `static_assert`s that cannot be decided
-in module order are queued on the interpreter.
+Item jobs over the components of the schedule graph (`driver::sched`, item-index.md): a
+job starts when its last dependency completes, every prelude component before any other,
+and checks its top-level items under the module's lease (one checker per module, so a
+module's side tables have one writer at a time). The serial path runs the same jobs in
+their stable order. Type inference with expected-type propagation, interface obligations,
+dispatch. Records the typed facts (per-node types, resolutions, `call_info`, `op_method`,
+coercion/deref chains, captures) that `ast::facts` exposes read-only to everything
+downstream; a declaration's slot is written by the item that owns it, every other reader
+lowers privately. What a check may read as checked follows the static visibility rule
+(`graph::items::visible`), so one worker and every core see the same facts. A module's last
+job checks its non-item nodes (`static_assert`), closes the module (`close_instances`
+records concrete generic instantiations into the per-module `Ast.instances` pool, the
+whole-module lints) and records its post-typecheck item edges. Format-string,
+compound-assign and string-switch lowering happen here. Deferred `static_assert`s and
+constants a check could not fold are queued on the interpreter. Diagnostics and method
+marks come out per item and publish in declaration order after the stage.
 
 Then `discharge_obligations`: cross-module reflection-bound obligations, once every
 module is typed.
@@ -59,9 +68,11 @@ Under `SC_FACTS_CHECK` the driver snapshots watermarks here.
 
 ## 5. Borrow Check (`borrowck_all`, `src/borrowck/`)
 
-The other parallel frontier. Before it starts, the driver sets `cir.all_typed` and
-`record_folds` — mandatory call-site folds must behave exactly as under the backend's
-own lowering, because **this stage produces the lowerings the backend reuses**.
+One independent job per module over its function, method and aggregate items in source
+order, on the item job runner (`bc_jobs`; a body split of a module was measured and refused:
+its bodies contend on the module's type-pool lock, item-index.md). Before it starts, the driver sets `cir.all_typed` and `record_folds` —
+mandatory call-site folds must behave exactly as under the backend's own lowering, because
+**this stage produces the lowerings the backend reuses**.
 
 Per function (`bc_fn`, extending `TypeChecker`):
 1. `bc_ir_lower`: lower the item's bodies to Core IR; the Lowerer records an event tape
@@ -81,8 +92,10 @@ Per function (`bc_fn`, extending `TypeChecker`):
    (`CoreBody.inline_size_ok`). Under `SC_BC_VALIDATE=1` the structural verifier and
    `verify_drops` check every elaborated body.
 5. Spent Lowerers are recycled into the shared `irl::Keep` cache — one elaborated lowering
-   per body, reused by emission. Parallel builds lease an oracle + context slot per task
-   from a bounded pool.
+   per body, reused by emission (a parallel job keeps its own and absorbs it under the
+   engine lock). Every job leases an oracle + context slot from a bounded pool; a module
+   closes (Core IR ready, emission dependencies, body syntax released) when its job ends.
+   Diagnostics publish per item in declaration order.
 
 Declaration-level lifetime analyses (return-type elision, aggregate lifetime naming, the
 modular return-lifetime check) run alongside.
@@ -99,7 +112,9 @@ modular return-lifetime check) run alongside.
 ## 7. Lint, Panic Check, Const Flush
 
 - `lint_unused_items` (when linting).
-- `check_always_panics` — an **error**, run on every build of user modules.
+- `check_always_panics` — an **error**, run on every build of user modules: one job per
+  linted module on the item job runner, a private engine leased per worker (the serial
+  path scans with the master engine), diagnostics published in declaration order.
 - `cir.flush_asserts` / `flush_consts`: the deferred static_asserts and consts
   re-evaluate now that every module is fully typed; failures carry the CTFE stack.
 - Test plan construction (`--test` builds).

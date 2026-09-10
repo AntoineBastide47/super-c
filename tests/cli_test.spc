@@ -6714,3 +6714,56 @@ fn type_table_is_deterministic() {
     let sig4 = tt_class(&t4, "0");
     assert(sig1.equals(&sig4), "every signature-class id and record survives a body edit");
 }
+
+// The item scheduler publishes diagnostics by declaration position, not by the order its jobs
+// finished: one worker and four delayed workers print the same text, with a module-level
+// `static_assert` reported between the items around it.
+@test
+fn item_jobs_publish_diagnostics_in_declaration_order() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::one() + lib::two() + lib::three();\n}\n");
+    p.mkfile(
+        "src/lib.spc",
+        "pub fn one() i32 {\n    let s: str = 1;\n    return 1;\n}\n\nstatic_assert(1 + 1 == 3, \"arithmetic\");\n\npub fn two() i32 {\n    let b: bool = \"no\";\n    return 2;\n}\n\npub fn three() i32 {\n    return \"three\";\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let r1 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --jobs=1");
+    assert(!r1.ok(), "the build fails");
+    let t1 = String::from_str(str::from_cstr(r1.out));
+    let r4 = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_TASK_DELAY=1", "build --jobs=4");
+    assert(!r4.ok(), "the build fails");
+    let t4 = String::from_str(str::from_cstr(r4.out));
+    assert(t1.equals(&t4), "one worker and four delayed workers print the same diagnostics");
+    let a = t1.as_str().find("expected 'str', found 'i32'");
+    let b = t1.as_str().find("static assertion failed");
+    let c = t1.as_str().find("expected 'bool', found 'str'");
+    let d = t1.as_str().find("expected 'i32', found 'str'");
+    assert(a >= 0 && b > a && c > b && d > c, "diagnostics follow the declaration order");
+}
+
+// A constant fold reaches every item its own item depends on, in either direction of an
+// import cycle: `a::N` calls `b::size` while `b` reads `a::N` back, and the array length folds.
+@test
+fn item_jobs_fold_across_an_import_cycle() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        "import a;\nimport b;\n\nfn main() i32 {\n    return a::buf_len() as i32 + b::back() as i32 - 16;\n}\n",
+    );
+    p.mkfile(
+        "src/a.spc",
+        "import b;\n\npub const N: usize = b::size();\n\npub fn buf_len() usize {\n    let x: [u8; N] = [[0] = 0u8];\n    return sizeof(x);\n}\n",
+    );
+    p.mkfile(
+        "src/b.spc",
+        "import a;\n\npub const fn size() usize {\n    return 8;\n}\n\npub fn back() usize {\n    return a::N;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let r4 = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_TASK_DELAY=1", "build --jobs=4 --out-dir=o4 -o o4/app");
+    assert(r4.ok(), "the fold across the cycle succeeds under four delayed workers");
+    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --jobs=1 -o bin");
+    assert(r.ok(), "and under one worker");
+    assert_eq(p.run_bin(), 0);
+}
