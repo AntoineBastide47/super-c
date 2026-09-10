@@ -1035,11 +1035,13 @@ extend Ty as Hash {
         if unsafe TS_COLLIDE {
             return 7;
         }
+        // Every word is mixed down into the low bits the index masks: a multiply-only chain
+        // leaves the index a function of the payload's low bits alone, and records that differ
+        // only above them (an array's length, a projection's binder) then probe in one chain.
         let p = (self as *const Ty) as *const u64;
         let mut h: u64 = 1469598103934665603u64;
         for i in 0..sizeof(Ty) / 8 {
-            h = h ^ unsafe p[i];
-            h = h * 1099511628211u64;
+            h = skey_mix(h, unsafe p[i]);
         }
         return h;
     }
@@ -1129,12 +1131,10 @@ extend TyInstance as Hash {
         if unsafe TS_COLLIDE {
             return 7;
         }
-        let mut h: u64 = 1469598103934665603u64;
-        h = (h ^ self.module as u64) * 1099511628211u64;
-        h = (h ^ self.decl as u64) * 1099511628211u64;
-        h = (h ^ self.n as u64) * 1099511628211u64;
+        let mut h = skey_mix(1469598103934665603u64, self.module as u64 << 32 | self.decl as u64);
+        h = skey_mix(h, self.n);
         for i in 0..self.n {
-            h = (h ^ (unsafe self.args[i]) as u64) * 1099511628211u64;
+            h = skey_mix(h, unsafe self.args[i]);
         }
         return h;
     }

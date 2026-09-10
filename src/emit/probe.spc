@@ -14,18 +14,21 @@ extern "C" {
 /// it contains, symbol construction is reported within rendering.
 pub const P_GRAPH: usize = 0; // instance graph construction
 pub const P_ACQUIRE: usize = 1; // body acquisition: kept takes and fallback lowerings
-pub const P_RELOWER: usize = 2; // per-instance re-lowering (reflection, zero-size conditions)
-pub const P_INLINE: usize = 3; // inliner: callee vetting and splicing
-pub const P_DROPS: usize = 4; // move/drop facts, cleanup elaboration, bounds-check elimination
-pub const P_SYM: usize = 5; // symbol and mangled-name construction (within rendering)
-pub const P_DECL: usize = 6; // declaration planning: local analysis and CFG structure
-pub const P_RENDER: usize = 7; // statement and expression rendering (less planning)
-pub const P_ASSEMBLE: usize = 8; // header and TU assembly
-pub const P_PUBLISH: usize = 9; // file publication (less the build engine sink)
-pub const P_SYNC: usize = 10; // build engine sink: raw to gen sync and compile planning
+pub const P_RELOWER_REFLECT: usize = 2; // per-instance re-lowering for an unexpanded reflection binder
+pub const P_RELOWER_ZST: usize = 3; // per-signature re-lowering for a zero-size condition
+pub const P_INLINE: usize = 4; // inliner: callee vetting and splicing
+pub const P_DROPS: usize = 5; // move/drop facts, cleanup elaboration, bounds-check elimination
+pub const P_SYM: usize = 6; // symbol and mangled-name construction (within rendering)
+pub const P_DECL: usize = 7; // declaration planning: local analysis and CFG structure
+pub const P_RENDER: usize = 8; // statement and expression rendering (less planning)
+pub const P_ASSEMBLE: usize = 9; // header and TU assembly
+pub const P_PUBLISH: usize = 10; // file publication (less the build engine sink)
+pub const P_SYNC: usize = 11; // build engine sink: raw to gen sync and compile planning
 pub const P_COUNT: usize = 14;
 
-/// Repeated-work tallies.
+/// Repeated-work tallies. The re-lowering rows come in reflection / zero-size pairs: a template
+/// is a generic body whose shared lowering carries the flag, an instance is a demand that reached
+/// that template, a re-lowering is one more lowering of the template under a demand env.
 pub const C_TAKEN: usize = 0; // bodies taken from the keep
 pub const C_LOWERED: usize = 1; // bodies lowered because the keep had none
 pub const C_RELOWER_REFLECT: usize = 2; // instance re-lowerings for a reflection binder
@@ -33,12 +36,21 @@ pub const C_RELOWER_ZST: usize = 3; // instance re-lowerings for a zero-size con
 pub const C_BODIES: usize = 4; // bodies rendered (seeds and closures)
 pub const C_INSTANCES: usize = 5; // instances rendered
 pub const C_OUT_BYTES: usize = 6; // bytes rendered
-pub const C_COUNT: usize = 7;
+pub const C_TPL_REFLECT: usize = 7; // templates marked for reflection re-lowering
+pub const C_TPL_ZST: usize = 8; // templates marked for zero-size re-lowering
+pub const C_INST_REFLECT: usize = 9; // instances demanded from reflection templates
+pub const C_INST_ZST: usize = 10; // instances demanded from zero-size templates
+pub const C_SAME_REFLECT: usize = 11; // reflection re-lowerings identical (printed IR) to an earlier one of the template
+pub const C_SAME_ZST: usize = 12; // zero-size re-lowerings identical to an earlier one of the template
+pub const C_KEEP_REFLECT: usize = 13; // bytes the retained reflection re-lowerings hold
+pub const C_KEEP_ZST: usize = 14; // bytes the retained zero-size re-lowerings hold
+pub const C_COUNT: usize = 15;
 
-const REGION_NAMES: [str<'static>; 11] = [
+const REGION_NAMES: [str<'static>; 12] = [
     "graph",
     "acquire",
-    "relower",
+    "relower-refl",
+    "relower-zst",
     "inline",
     "drops",
     "sym",
@@ -48,7 +60,7 @@ const REGION_NAMES: [str<'static>; 11] = [
     "publish",
     "sync",
 ];
-static_assert(P_COUNT >= 11, "one slot per emission region");
+static_assert(P_COUNT >= 12, "one slot per emission region");
 
 pub struct Probe {
     pub on: bool,
@@ -141,8 +153,12 @@ extend Probe {
         self.c[k] += n;
     }
 
-    /// Fold `other` (a shard's or a pooled context's probe) into this one.
+    /// Fold `other` (a shard's or a pooled context's probe) into this one. The tallies fold even
+    /// when the regions are off: the build record reports the re-lowering counts of every build.
     pub fn merge(self: &mut Self, other: &Probe) {
+        for k in 0..C_COUNT {
+            self.c[k] += other.c[k];
+        }
         if !self.on {
             return;
         }
@@ -151,9 +167,6 @@ extend Probe {
             self.calls[k] += other.calls[k];
             self.an[k] += other.an[k];
             self.ab[k] += other.ab[k];
-        }
-        for k in 0..C_COUNT {
-            self.c[k] += other.c[k];
         }
     }
 
@@ -196,14 +209,23 @@ extend Probe {
     pub fn report(self: &Self, out: &mut String) {
         let names: []str = REGION_NAMES;
         self.report_regions(out, "emit-probe", names);
+        out.push_str("  instance discovery and specialization (graph, acquire, re-lowering) ");
+        push_ms(out, self.ns[P_GRAPH] + self.ns[P_ACQUIRE] + self.ns[P_RELOWER_REFLECT] + self.ns[P_RELOWER_ZST]);
+        out.push_str(" ms\n");
+        self.report_relower(
+            out,
+            "reflection",
+            C_TPL_REFLECT,
+            C_INST_REFLECT,
+            C_RELOWER_REFLECT,
+            C_SAME_REFLECT,
+            C_KEEP_REFLECT,
+        );
+        self.report_relower(out, "zero-size", C_TPL_ZST, C_INST_ZST, C_RELOWER_ZST, C_SAME_ZST, C_KEEP_ZST);
         out.push_str("  bodies taken ");
         out.push_u64(self.c[C_TAKEN]);
         out.push_str(", lowered ");
         out.push_u64(self.c[C_LOWERED]);
-        out.push_str("; re-lowered for reflection ");
-        out.push_u64(self.c[C_RELOWER_REFLECT]);
-        out.push_str(", for zero-size conditions ");
-        out.push_u64(self.c[C_RELOWER_ZST]);
         out.push_str("; rendered ");
         out.push_u64(self.c[C_BODIES]);
         out.push_str(" bodies and ");
@@ -220,6 +242,33 @@ extend Probe {
             out.push_str(" (allocation columns need SC_BUILD_MEM=1)");
         }
         out.push_str("\n");
+    }
+
+    // One re-lowering reason: templates, the instances demanded from them, the re-lowerings those
+    // cost, how many repeated an earlier re-lowering's IR, and the bytes the retained ones hold.
+    fn report_relower(
+        self: &Self,
+        out: &mut String,
+        reason: str,
+        tpl: usize,
+        inst: usize,
+        rel: usize,
+        same: usize,
+        keep: usize,
+    ) {
+        out.push_str("  re-lowering for ");
+        out.push_str(reason);
+        out.push_str(": ");
+        out.push_u64(self.c[tpl]);
+        out.push_str(" templates, ");
+        out.push_u64(self.c[inst]);
+        out.push_str(" instances, ");
+        out.push_u64(self.c[rel]);
+        out.push_str(" re-lowerings (");
+        out.push_u64(self.c[same]);
+        out.push_str(" identical, ");
+        out.push_u64(self.c[keep] >> 10);
+        out.push_str(" KiB retained)\n");
     }
 }
 

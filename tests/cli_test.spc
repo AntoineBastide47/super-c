@@ -6511,6 +6511,28 @@ fn build_lto_probe_fallback() {
     assert(p13_mtime(probe.as_str()) == 0, "the probe's temporary directory is removed");
 }
 
+// The emission statistics report the per-instance re-lowering census (a zero-size template lowered
+// once per zero-size signature of its instances), the instance graph's collect line, and the build
+// record carries the re-lowering counts by reason.
+@test
+fn build_stats_report_relowering_census() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        "struct Z {}\n\nfn main() i32 {\n    let mut a = Vector::<u8>::new();\n    a.push(1u8);\n    let mut b = Vector::<Z>::new();\n    b.push(Z {});\n    return a.len() as i32 + b.len() as i32 - 2;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let r = cli::superc_env_in(root, "SC_CEMIT_STATS", "1 SC_BUILD_STATS=- SC_NO_CACHE=1", "build");
+    assert(r.ok(), "the build succeeds");
+    assert(r.out_has("cemit-relower __std::vector::"), "a zero-size template of the vector reports its census line");
+    assert(r.out_has("(zero-size): 2 instances, 2 re-lowerings, 0 identical, "), "two signatures lower twice");
+    assert(r.out_has("re-lowering for reflection: 0 templates, 0 instances, 0 re-lowerings"), "no reflection template");
+    assert(r.out_has("re-lowering for zero-size: ") && r.out_has(" identical, "), "the zero-size summary");
+    assert(r.out_has("bodies walked in ") && r.out_has(" rounds"), "the collect line reports the closure");
+    assert(r.out_has("\"relower\":{\"reflect\":0,\"zst\":"), "the build record carries the counts");
+}
+
 // A failed link publishes nothing: the previous binary and its link record stay, and the next
 // successful build relinks.
 @test

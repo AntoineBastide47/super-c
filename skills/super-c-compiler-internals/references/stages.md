@@ -124,8 +124,10 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
   cache; `collect()` discovers every concrete instantiation by walking the kept Core IR
   bodies from concrete roots (every concrete body of every module that emits; dead
   prelude modules seed nothing), expanding generics under substitution frames
-  (package-stable keys: decl DefId + per-argument skey). Bodies flagged `has_reflect` or
-  `has_zst_cond` re-lower per instance instead of sharing.
+  (package-stable keys: decl DefId + the final TypeId of every argument). Bodies flagged
+  `has_reflect` or `has_zst_cond` re-lower per instance instead of sharing; the census
+  and the decision that keeps it so are in
+  [instance-specialization.md](instance-specialization.md).
 - `TuEmit` (`emit/tu.spc`) renders each module's TU into `CemitOut` buffers (one
   geometrically grown `tus[t]` per module, a chunk table with the shard each chunk landed
   in, `inst_c` for every owner module's instance shards) — a parallel frontier under

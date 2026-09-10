@@ -83,6 +83,11 @@ pub struct InstGraph {
     // Final ids already fully walked by note_type under an EMPTY frame: bodies name the same
     // interned types over and over, and a completed depth-0 walk covers every revisit.
     noted: Vector<bool>,
+    // Demand cross product cursors: per demanded method declaration (and per interface default
+    // per conforming extend), how many records of its target's instance group it has paired.
+    // Groups only grow in record order, so a round pairs each declaration with the new records
+    // alone and the insertion order equals a full re-pairing's (the earlier pairs exist).
+    pair_cur: Map<u64, u64>,
     /// One lowering per declaration, shared by every frame that walks it (lowering ignores the
     /// frame; only walking applies it). The emitter takes these bodies instead of re-lowering.
     /// `kept_ix` maps (module << 32 | node) to a `kept` index; 0xFFFFFFFFFFFFFFFF = lowering failed.
@@ -104,6 +109,7 @@ pub struct InstGraph {
     /// type header with no code naming them.
     live: *const bool,
     pub bodies: u64, // walked body count (roots + expansions)
+    pub rounds: u64, // worklist drains until the demand cross product added nothing
     pub overflow: bool, // budget exhausted; the report marks itself partial
     budget: u32,
 }
@@ -125,6 +131,7 @@ extend InstGraph {
             ext_of: Map::<u64, u64>::new(),
             iface_of: Map::<u64, u64>::new(),
             noted: Vector::<bool>::new(),
+            pair_cur: Map::<u64, u64>::new(),
             kept: Vector::<irl::Lowerer>::new(),
             kept_ix: Map::<u64, u64>::new(),
             argbuf: Vector::<ArgKey>::new(),
@@ -132,6 +139,7 @@ extend InstGraph {
             wcache: Vector::<WalkCache>::new(),
             wt_seen: Map::<u64, u64>::new(),
             bodies: 0,
+            rounds: 0,
             overflow: false,
             budget: 64000000,
         };
@@ -617,6 +625,7 @@ extend InstGraph {
     /// non-generic method pairs with every instance of its extend's target.
     pub fn run(self: &mut Self) {
         loop {
+            self.rounds += 1;
             self.drain();
             let before = self.recs.len();
             self.cross_demand();
@@ -769,7 +778,9 @@ extend InstGraph {
             if gi < 0 {
                 continue;
             }
-            for k9 in 0..groups[gi as usize].len() {
+            let ck = skey_mix(1, md.module as u64 << 32 | md.node as u64);
+            let glen = groups[gi as usize].len();
+            for k9 in self.pair_start(ck)..glen {
                 let rec = *self.recs.at(groups[gi as usize][k9] as usize);
                 self.argbuf.truncate(0);
                 for k in 0..rec.args_len {
@@ -779,7 +790,16 @@ extend InstGraph {
                 let mut fresh = false;
                 let _ = self.add(IG_METHOD, md, &mut fresh);
             }
+            self.pair_cur.insert(ck, glen as u64);
         }
+    }
+
+    // The group position a cross-product cursor resumes from.
+    fn pair_start(self: &Self, ck: u64) usize {
+        return switch self.pair_cur.get(&ck) {
+            Some(v) => (*v) as usize,
+            None => 0,
+        };
     }
 
     // Interface default bodies: every extend that conforms `Target as Iface` emits one copy of each
@@ -843,7 +863,9 @@ extend InstGraph {
                 if gi < 0 {
                     continue;
                 }
-                for r9 in 0..groups[gi as usize].len() {
+                let ck = skey_mix(2, x as u64 << 32 | imid as u64);
+                let glen = groups[gi as usize].len();
+                for r9 in self.pair_start(ck)..glen {
                     let rec = *self.recs.at(groups[gi as usize][r9] as usize);
                     self.argbuf.truncate(0);
                     for k in 0..rec.args_len {
@@ -853,6 +875,7 @@ extend InstGraph {
                     let mut fresh = false;
                     let _ = self.add(IG_METHOD, DefId { module: iface.module, node: imid }, &mut fresh);
                 }
+                self.pair_cur.insert(ck, glen as u64);
             }
         }
     }

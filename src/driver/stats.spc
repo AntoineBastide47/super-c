@@ -67,6 +67,8 @@ pub struct BuildStats {
     pub rc: i32,
     pub profile: String,
     pub bin: String,
+    pub relower_reflect: u64, // instance re-lowerings for a reflection binder (emit::probe)
+    pub relower_zst: u64, // instance re-lowerings for a zero-size condition
 }
 
 static mut G_STATS: *mut BuildStats = null;
@@ -130,6 +132,8 @@ pub fn begin() {
         rc: 0,
         profile: String::new(),
         bin: String::new(),
+        relower_reflect: 0,
+        relower_zst: 0,
     };
     unsafe G_STATS = g;
     if mem {
@@ -208,6 +212,16 @@ pub fn cc_job(start_ns: u64, end_ns: u64) {
     }
     unsafe g.cc_busy_ns += end_ns - start_ns;
     unsafe g.cc_jobs += 1;
+}
+
+/// The emission's per-instance re-lowering counts, by reason (from the merged emission probe).
+pub fn relower(reflect: u64, zst: u64) {
+    let g = unsafe G_STATS;
+    if g == null {
+        return;
+    }
+    unsafe g.relower_reflect = reflect;
+    unsafe g.relower_zst = zst;
 }
 
 /// The build finished with `rc`: publish the record to the SC_BUILD_STATS sink when one is named,
@@ -360,6 +374,10 @@ pub fn json(g: &BuildStats, out: &mut String) {
     push_ms(out, g.cc_busy_ns);
     out.push_str(",\"overlap_ms\":");
     push_ms(out, cc_overlap_ns(g));
+    out.push_str("},\"relower\":{\"reflect\":");
+    out.push_u64(g.relower_reflect);
+    out.push_str(",\"zst\":");
+    out.push_u64(g.relower_zst);
     out.push_str("},\"mem\":{\"on\":");
     push_bool(out, g.mem_on);
     out.push_str(",\"boundaries\":[");

@@ -1518,6 +1518,150 @@ fn cemit_layout_asserts(
 // Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
 // walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
 // removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
+// Tally a template: a generic body whose shared lowering must re-lower per instance (an
+// unexpanded reflection binder) or per zero-size signature.
+fn count_template(b: &irc::CoreBody, pr: &mut prb::Probe) {
+    if b.has_reflect {
+        pr.count(prb::C_TPL_REFLECT, 1);
+    } else if b.has_zst_cond {
+        pr.count(prb::C_TPL_ZST, 1);
+    }
+}
+
+// The re-lowering census (SC_CEMIT_STATS), after the instance drain: per marked template, the
+// distinct instances emitted from it, the re-lowerings `lws` retains, how many of those repeat an
+// earlier re-lowering's printed IR, and the bytes they hold. A base slot is the one `lw_cache`
+// names under the declaration; every other slot with the same owner is a re-lowering of it. One
+// worker retains every re-lowering; the parallel frontier drops a slice's reflection
+// re-lowerings with the slice, so those are absent from a many-worker census.
+fn cemit_relower_census(
+    p: &loader::Package,
+    cem: &cbe::CEmit,
+    lws: &Vector<irl::Lowerer>,
+    lw_cache: &Map<u64, u64>,
+    done: &Map<u64, u64>,
+    pr: &mut prb::Probe,
+) {
+    let n = lws.len();
+    let mut base = Vector::<u64>::new(); // per slot: its template's base slot
+    let mut hashes = Vector::<u64>::new(); // per re-lowered slot: the printed body's hash
+    let mut nrel = Vector::<u64>::new(); // per base slot: re-lowerings, identical ones, bytes, instances
+    let mut nsame = Vector::<u64>::new();
+    let mut nbytes = Vector::<u64>::new();
+    let mut ninst = Vector::<u64>::new();
+    for i in 0..n {
+        let d = lws.at(i).body.owner;
+        let b = switch lw_cache.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
+            Some(v) => *v,
+            None => i as u64,
+        };
+        base.push(b);
+        hashes.push(0);
+        nrel.push(0);
+        nsame.push(0);
+        nbytes.push(0);
+        ninst.push(0);
+    }
+    for i in 0..n {
+        let b = base[i];
+        if b == i as u64 || b >= n as u64 {
+            continue;
+        }
+        let txt = irp::print_body(&lws.at(i).body);
+        let ts = txt.as_str();
+        let mut h = 1469598103934665603u64;
+        for k in 0..ts.len() {
+            h = (h ^ ts.byte_at(k) as u64) * 1099511628211u64;
+        }
+        hashes.set(i, h);
+        let mut same = false;
+        for j in 0..i {
+            if base[j] == b && base[j] != j as u64 && hashes[j] == h {
+                same = true;
+                break;
+            }
+        }
+        nrel.set(b as usize, nrel[b as usize] + 1);
+        if same {
+            nsame.set(b as usize, nsame[b as usize] + 1);
+        }
+        nbytes.set(b as usize, nbytes[b as usize] + lws.at(i).retained_bytes());
+    }
+    // Instances: the distinct symbols that emitted from each template.
+    let mut seen = Set::<u64>::new();
+    for di in 0..cem.demand.len() {
+        let ds = cem.demand.at(di).sym.as_str();
+        let mut dk = 1469598103934665603u64;
+        for k in 0..ds.len() {
+            dk = (dk ^ ds.byte_at(k) as u64) * 1099511628211u64;
+        }
+        if !done.contains_key(&dk) || seen.contains(&dk) {
+            continue;
+        }
+        seen.insert(dk);
+        let d = cem.demand.at(di).def;
+        let b = switch lw_cache.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
+            Some(v) => *v,
+            None => n as u64,
+        };
+        if b < n as u64 {
+            ninst.set(b as usize, ninst[b as usize] + 1);
+        }
+    }
+    for b in 0..n {
+        if base[b] != b as u64 {
+            continue;
+        }
+        let body = &lws.at(b).body;
+        if !body.has_reflect && !body.has_zst_cond {
+            continue;
+        }
+        let reflect = body.has_reflect;
+        pr.count(
+            if reflect {
+                prb::C_INST_REFLECT;
+            } else {
+                prb::C_INST_ZST;
+            },
+            ninst[b],
+        );
+        pr.count(
+            if reflect {
+                prb::C_SAME_REFLECT;
+            } else {
+                prb::C_SAME_ZST;
+            },
+            nsame[b],
+        );
+        pr.count(
+            if reflect {
+                prb::C_KEEP_REFLECT;
+            } else {
+                prb::C_KEEP_ZST;
+            },
+            nbytes[b],
+        );
+        let d = body.owner;
+        let a = unsafe &*p.module_ast_const(d.module);
+        let src = p.modules.at(d.module as usize).source.as_str();
+        let nsp = a.at_const(a.at_const(d.node).as_data.function.name).as_data.name.text;
+        eprint(
+            "cemit-relower {}::{} ({}): {} instances, {} re-lowerings, {} identical, {} KiB retained\n",
+            p.modules.at(d.module as usize).path.as_str(),
+            src.slice(nsp.start as usize, nsp.end as usize),
+            if reflect {
+                "reflection";
+            } else {
+                "zero-size";
+            },
+            ninst[b],
+            nrel[b],
+            nsame[b],
+            nbytes[b] >> 10,
+        );
+    }
+}
+
 fn cemit_take_body(
     g: &mut ig::InstGraph,
     p: *const loader::Package,
@@ -2157,6 +2301,7 @@ fn cemit_drain_demand(
             let okl = cemit_take_body(&mut *g, p, d_def.module, d_def.node, &mut lw, &mut dow.pr);
             let mut slot = 0xFFFFFFFFFFFFFFFFu64;
             if okl {
+                count_template(&lw.body, &mut dow.pr);
                 dow.apply_drops(&mut lw);
                 slot = lws.len() as u64;
                 lws.push(lw);
@@ -2188,7 +2333,7 @@ fn cemit_drain_demand(
         }
         let rm9 = dow.pr.start();
         let okr9 = lw2.lower_fn(d_def.node);
-        dow.pr.stop(prb::P_RELOWER, rm9);
+        dow.pr.stop(prb::P_RELOWER_REFLECT, rm9);
         dow.pr.count(prb::C_RELOWER_REFLECT, 1);
         if okr9 {
             dow.apply_drops(&mut lw2);
@@ -2223,7 +2368,7 @@ fn cemit_drain_demand(
                 let mut slot2 = 0xFFFFFFFFFFFFFFFFu64;
                 let rm9 = dow.pr.start();
                 let okr9 = lw2.lower_fn(d_def.node);
-                dow.pr.stop(prb::P_RELOWER, rm9);
+                dow.pr.stop(prb::P_RELOWER_ZST, rm9);
                 dow.pr.count(prb::C_RELOWER_ZST, 1);
                 if okr9 {
                     dow.apply_drops(&mut lw2);
@@ -2446,7 +2591,7 @@ fn cemit_drain_slice_one(
         }
         let rm9 = dow2.pr.start();
         let okr9 = lw2.lower_fn(d_def.node);
-        dow2.pr.stop(prb::P_RELOWER, rm9);
+        dow2.pr.stop(prb::P_RELOWER_REFLECT, rm9);
         dow2.pr.count(prb::C_RELOWER_REFLECT, 1);
         if okr9 {
             dow2.apply_drops(&mut lw2);
@@ -2507,7 +2652,7 @@ fn cemit_drain_slice_one(
                 }
                 let rm9 = dow2.pr.start();
                 let okr9 = lw2.lower_fn(d_def.node);
-                dow2.pr.stop(prb::P_RELOWER, rm9);
+                dow2.pr.stop(prb::P_RELOWER_ZST, rm9);
                 dow2.pr.count(prb::C_RELOWER_ZST, 1);
                 if okr9 {
                     dow2.apply_drops(&mut lw2);
@@ -3171,7 +3316,30 @@ pub fn cemit_package(
     }
     if tstat {
         let t9 = unsafe shim::sc_ticks_ms();
-        eprint("cemit-stage collect: {} ms\n", t9 - tt0);
+        let mut nagg: u64 = 0;
+        let mut nfn: u64 = 0;
+        for r in 0..g.recs.len() {
+            if g.recs.at(r).kind == ig::IG_AGG {
+                nagg += 1;
+            } else if g.recs.at(r).kind == ig::IG_FN {
+                nfn += 1;
+            }
+        }
+        eprint(
+            "cemit-stage collect: {} ms, {} records ({} aggregates, {} functions, {} methods), {} bodies walked in {} rounds{}\n",
+            t9 - tt0,
+            g.recs.len(),
+            nagg,
+            nfn,
+            g.recs.len() as u64 - nagg - nfn,
+            g.bodies,
+            g.rounds,
+            if g.overflow {
+                ", budget exhausted";
+            } else {
+                "";
+            },
+        );
         tt0 = t9;
     }
     let mut em = tbe::TuEmit::new(p);
@@ -3874,6 +4042,7 @@ pub fn cemit_package(
                         cf_ok.push(false);
                     }
                     let slot = lws.len() as u64;
+                    count_template(&res9.at(i).body, &mut prd);
                     lws.push(replace(res9.index_mut(i), irl::Lowerer::new(p, 0, NODE_NONE)));
                     cfs.push(replace(cfr9.index_mut(i), cfl::CFlow::new_empty()));
                     cf_ok.push(true);
@@ -4193,6 +4362,7 @@ pub fn cemit_package(
         if dwaves != 0 {
             eprint("cemit-frontier inst: {} waves, {} tasks, {} slices\n", dwaves, dtasks, dslices);
         }
+        cemit_relower_census(p, &cem, &lws, &lw_cache, &done, &mut prd);
     }
     if verbose {
         eprint(
@@ -4831,6 +5001,7 @@ pub fn cemit_package(
     prd.merge(&cem.pr);
     dctx_drop(&mut prd);
     p.inl_store = null;
+    bst::relower(prd.c[prb::C_RELOWER_REFLECT], prd.c[prb::C_RELOWER_ZST]);
     o.pr = prd;
     if unsafe TS_ON {
         ty_stats_report(p);

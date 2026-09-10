@@ -107,7 +107,7 @@ first on macOS to self-sign the samply binary.)
 
 Before sampling, read the emitter's own region table: `SC_CEMIT_STATS=1 SC_BUILD_STATS=-
 SC_BUILD_MEM=1 build/<release-compiler> build --jobs=1` prints per-region wall time,
-calls, allocation calls and bytes for C generation (graph, acquire, relower, inline,
+calls, allocation calls and bytes for C generation (graph, acquire, relower-refl, relower-zst, inline,
 drops, sym, decl, render, assemble, publish, sync) plus the repeated-work tallies. It
 names the region to profile and records allocation counts a sampler cannot.
 
@@ -360,6 +360,19 @@ the borrow probe's `drops` region (the elaboration of every kept body) <= 10 ms 
 elaboration of the bodies emission lowers itself) <= 20 ms serial, and
 `SC_BC_VALIDATE=1` builds (serial and every core) clean. The parallel path adds slot pooling, so its allocation count sits
 near the serial one plus one stack per worker.
+
+### Instance discovery and re-lowering budget
+
+The emission probe's `graph` region and the `cemit-stage collect` line (records by kind,
+bodies walked, rounds, a budget stop) are the instance discovery numbers; the
+`relower-refl`/`relower-zst` regions and the re-lowering census are the specialization
+numbers ([instance-specialization.md](../super-c-compiler-internals/references/instance-specialization.md)).
+Budget on the reference sources, serial release: `graph` <= 20 ms and <= 50k
+allocations, 2 rounds, no budget stop; both re-lowering regions together <= 1 ms; the
+type-stats probe steps within 2x of the intern hits. The test target of `super-c test`
+is the generic-heavy corpus: its collect line reports a budget stop today (the
+width-generic integer's closure), so a change there is judged by its record count and
+`graph` time against the record's table, never by the self-build alone.
 
 ### Bench gate policy
 

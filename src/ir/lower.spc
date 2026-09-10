@@ -308,6 +308,11 @@ extend Lowerer {
         self.u32_pool.push(v9);
     }
 
+    /// The bytes a finished lowering keeps: the body's pools and the replay tape.
+    pub const fn retained_bytes(self: &Self) u64 {
+        return self.body.retained_bytes() + (self.tape.capacity() * 8) as u64;
+    }
+
     /// Re-target a reused Lowerer at another module, keeping every pool's heap capacity: the
     /// instance graph lowers the whole package through one scratch Lowerer. Clears any staged
     /// instance `env` (scratch lowerings are always env-free).

@@ -449,6 +449,18 @@ extend CoreBody {
         self.entry = 0;
     }
 
+    /// The bytes the body's pools hold (capacity, slack included).
+    pub const fn retained_bytes(self: &Self) u64 {
+        let mut n = self.locals.capacity() * sizeof(LocalDecl) + self.blocks.capacity() * sizeof(BasicBlock);
+        n += self.statements.capacity() * sizeof(Statement) + self.places.capacity() * sizeof(Place);
+        n += self.projections.capacity() * sizeof(Projection) + self.operands.capacity() * sizeof(Operand);
+        n += self.rvalues.capacity() * sizeof(Rvalue) + self.constants.capacity() * sizeof(Constant);
+        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity()) * 4;
+        n += (self.switch_pool.capacity() + self.user_moves.capacity()) * 8;
+        n += self.asms.capacity() * sizeof(AsmRec) + self.asm_spans.capacity() * sizeof(tok::Span);
+        return n as u64;
+    }
+
     /// An exact-size deep copy: every pool reserves its final length, so a kept body carries no
     /// growth slack and costs one allocation per non-empty pool.
     pub fn compact_from(src: &CoreBody) CoreBody {

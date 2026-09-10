@@ -360,6 +360,14 @@ Full monomorphization is the only generic backend.
   emits: a prelude module `compute_emit_live` marks dead seeds nothing, and the shared
   type header lists aggregates from live modules only. Keys are package ids (decl DefId +
   the final TypeId of every argument), so records from different modules compare by id.
+  Only an aggregate record with a concrete pool anchor enters the planned type headers;
+  every other aggregate a body names is defined by the late replay of the mangler's
+  spellings, so the closure's breadth decides placement, not existence. The demand cross
+  product pairs each declaration with its target's new instances only (`pair_cur`), and
+  the collect line of `SC_CEMIT_STATS` reports records by kind, bodies walked, rounds
+  and a budget stop; the census of per-instance re-lowerings, the decision against a
+  symbolic generic IR and the measured closure blowup on width-generic code are in
+  [instance-specialization.md](references/instance-specialization.md).
 - **Emit order:** `Package::emit_order` — if module `a` re-homes a concrete instance of
   a generic owned by `b`, then `b` emits first. Kahn topo-sort, lowest-id tiebreak.
 
@@ -392,12 +400,16 @@ in a fresh `String`. Rendering order is part of the contract: demands, sentinels
 static stubs record in spelling order, so a sub-expression must still spell where it
 did before, only without the intermediate copy.
 
-`src/emit/probe.spc` is the emission probe: per region (graph, acquire, relower, inline,
-drops, sym, decl, render, assemble, publish, sync) wall time, calls and, with the
-allocation tracker on, allocation calls and requested bytes, plus repeated-work tallies
-(bodies taken/lowered, re-lowerings by cause, inliner vets by source, rendered bytes).
-Every context that does the work (`CEmit`, `DropCtx`, the driver) carries one; shard
-probes merge into the master's, and `SC_CEMIT_STATS` prints the table. Off, each
+`src/emit/probe.spc` is the emission probe: per region (graph, acquire, relower-refl,
+relower-zst, inline, drops, sym, decl, render, assemble, publish, sync) wall time, calls
+and, with the allocation tracker on, allocation calls and requested bytes, plus
+repeated-work tallies (bodies taken/lowered, per reason the re-lowering templates,
+instances, re-lowerings, identical re-lowerings and retained bytes, rendered bytes; the
+re-lowering census and the instance discovery total are in
+[instance-specialization.md](references/instance-specialization.md)). Every context that
+does the work (`CEmit`, `DropCtx`, the driver) carries one; shard probes merge into the
+master's (the tallies always, the regions when on), and `SC_CEMIT_STATS` prints the
+table. The build record (`SC_BUILD_STATS`) carries the two re-lowering counts. Off, each
 operation is one branch.
 
 ## Output Tree
