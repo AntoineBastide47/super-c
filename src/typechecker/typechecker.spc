@@ -2719,19 +2719,23 @@ extend TypeChecker {
             if unsafe TS_ON {
                 ts_add(TS_DECLIN, 1);
             }
-            let known = self.mod_ast(m).type_of(decl);
-            if known != TYPE_NONE && (known & TYPE_PROV) == 0 && unsafe self.mod_ast(m).gt != null {
-                let dk0 = self.mod_ast(m).at_const(decl).kind;
-                if dk0 == NodeKind::NODE_PARAMETER || dk0 == NodeKind::NODE_FIELD || dk0 == NodeKind::NODE_CONST {
-                    return known;
-                }
-            }
             switch self.fdecl_memo.get(&fkey) {
                 Some(t) => {
                     return *t;
                 },
                 None => {},
             };
+            // The owner's record: read only when its item is visible to the item under check (the
+            // owner's writes happen before this job), never while the owner may still be writing it.
+            if unsafe self.mod_ast(m).gt != null && self.node_visible(m, decl) {
+                let known = self.mod_ast(m).type_of(decl);
+                if known != TYPE_NONE && (known & TYPE_PROV) == 0 {
+                    let dk0 = self.mod_ast(m).at_const(decl).kind;
+                    if dk0 == NodeKind::NODE_PARAMETER || dk0 == NodeKind::NODE_FIELD || dk0 == NodeKind::NODE_CONST {
+                        return known;
+                    }
+                }
+            }
         }
         // A private lowering of another item's declaration reports nothing: its owner does.
         let quiet = local && !own;
@@ -2795,7 +2799,25 @@ extend TypeChecker {
         if k == NodeKind::NODE_PARAMETER || k == NodeKind::NODE_FIELD || k == NodeKind::NODE_CONST {
             return self.decl_type_in(m, id);
         }
-        return self.lower_type_in(m, id);
+        if self.package == null || m == self.cur_module() {
+            return self.lower_type_in(m, id);
+        }
+        // A foreign signature type node (a return type, a member's type): every call site of the
+        // callee asks for it, so the lowering is memoized whatever its shape (the body-expression
+        // rule that memoizes only generic paths does not pay here: a signature is read many times).
+        let lk = m as u64 << 32 | id as u64;
+        switch self.lower_memo.get(&lk) {
+            Some(t) => {
+                return *t;
+            },
+            None => {},
+        };
+        let ne = self.errors.errors.len();
+        let r = self.lower_type_in(m, id);
+        if r != TYPE_ERROR && self.errors.errors.len() == ne {
+            self.lower_memo.insert(lk, r);
+        }
+        return r;
     }
 
     fn type_of_type_node(self: &mut Self, id: NodeId) TypeId {
@@ -3852,7 +3874,8 @@ extend TypeChecker {
 
     /// The type-identity an extend's target dispatches on (peeling a transparent alias).
     pub fn tc_peel_target(self: &mut Self, tg: DefId) DefId {
-        if tg.node == NODE_NONE {
+        // Only an alias peels: the kind read costs less than the memo probe it saves.
+        if tg.node == NODE_NONE || self.mod_ast(tg.module).at_const(tg.node).kind != NodeKind::NODE_TYPE_ALIAS {
             return tg;
         }
         // Peel is a pure function of frozen decls; the uncached path's named_type_of

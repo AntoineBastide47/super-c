@@ -503,7 +503,7 @@ pub struct PkgIndex {
     pub scc_of: Vector<u32>, // module -> import-graph SCC id (completion order; deterministic)
     pub lang_items: Vector<LookupHit>, // LangItem -> prelude decl (node == NODE_NONE when absent)
     pub sugar_items: Vector<LookupHit>, // SugarItem -> std shim fn (node == NODE_NONE when absent)
-    pub li_map: Map<u64, u32>, // sym*2 + want_type -> LangItem, the prelude_lookup fast path
+    pub pl_map: Map<u64, u64>, // sym*2 + want_type -> node << 32 | module: every public top-level prelude name, the first prelude module wins (prelude_lookup)
     /// Function-item signatures as package metadata (see ensure_sigs): sig_of keys
     /// skey_mix(module << 32 | fn node) (MIXED: u64 maps hash by identity and structured keys
     /// cluster) to a `sigs` record whose types live in the `sig_types` CSR pool,
@@ -573,7 +573,7 @@ extend PkgIndex {
             scc_of: Vector::<u32>::new(),
             lang_items: Vector::<LookupHit>::new(),
             sugar_items: Vector::<LookupHit>::new(),
-            li_map: Map::<u64, u32>::new(),
+            pl_map: Map::<u64, u64>::new(),
             sigs: Vector::<ItemSig>::new(),
             sig_types: Vector::<TypeId>::new(),
             sig_of: Map::<u64, u32>::new(),
@@ -2955,29 +2955,41 @@ extend Package {
         idx.mod_items.push(idx.items.len() as u32);
         idx.mod_imports.push(idx.imports.len() as u32);
         scc_build(n, &idx.imports, &idx.mod_imports, &mut idx.scc_of);
-        // LangItem table: resolve each fixed prelude hook once, in prelude_lookup's own module order,
-        // and key the fast path by (symbol, namespace). An unresolved hook (no std loaded, or the
-        // name never interned) stays NODE_NONE and gets no fast-path entry, so the scan fallback
-        // answers those queries identically.
+        // The prelude name map: every public top-level name of every prelude module, keyed by
+        // (symbol, namespace), the first prelude module in module order winning (the order a walk
+        // over the modules would answer in). prelude_lookup answers from it alone.
+        for m in 0..n {
+            if !self.modules[m].prelude {
+                continue;
+            }
+            for it in idx.mod_items[m] as usize..idx.mod_items[m + 1] as usize {
+                let im = idx.items.at(it);
+                if im.owner != ITEM_NONE || !im.is_public || im.name == SYM_NONE {
+                    continue;
+                }
+                let key = im.name as u64 * 2u64 + if im.is_type {
+                    1u64;
+                } else {
+                    0u64;
+                };
+                if idx.pl_map.get(&key).is_none() {
+                    idx.pl_map.insert(key, im.node as u64 << 32 | m as u64);
+                }
+            }
+        }
+        // LangItem table: each fixed prelude hook resolved once. An unresolved hook (no std loaded,
+        // or the name never interned) stays NODE_NONE.
         for li in 0..LI_COUNT_N {
             let names: []str = LI_NAMES;
             let s = idx.syms.find(names[li]);
             let mut hit = LookupHit { node: NODE_NONE, mid: 0 };
             if s != SYM_NONE {
-                let key = s as u64 * 4u64 + 3u64; // is_type, public
-                for i in 0..n {
-                    if hit.node == NODE_NONE && self.modules[i].prelude {
-                        switch idx.name_maps[i].get(&key) {
-                            Some(it) => {
-                                hit = LookupHit { node: idx.items[(*it) as usize].node, mid: i as ModuleId };
-                            },
-                            None => {},
-                        };
-                    }
-                }
-                if hit.node != NODE_NONE {
-                    idx.li_map.insert(s as u64 * 2u64 + 1u64, li as u32);
-                }
+                switch idx.pl_map.get(&(s as u64 * 2u64 + 1u64)) {
+                    Some(v) => {
+                        hit = LookupHit { node: (*v >> 32) as NodeId, mid: (*v & 0xFFFFFFFFu64) as ModuleId };
+                    },
+                    None => {},
+                };
             }
             idx.lang_items.push(hit);
         }
@@ -3357,9 +3369,8 @@ extend Package {
         };
     }
 
-    /// Like lookup but across every prelude module; the hit's `mid` is the owning module. The fixed
-    /// compiler hooks answer O(1) from the LangItem table (resolved by the same scan at index build);
-    /// dynamic names fall back to the module walk.
+    /// Like lookup but across every prelude module (the first in module order wins); the hit's `mid`
+    /// is the owning module. One probe of the index's prelude name map.
     pub fn prelude_lookup(self: &Self, name: str, want_type: bool) LookupHit {
         let mp = (self as *const Package) as *mut Package;
         mp.ensure_index();
@@ -3372,21 +3383,10 @@ extend Package {
         } else {
             0u64;
         };
-        switch self.idx.li_map.get(&lk) {
-            Some(li) => {
-                return self.idx.lang_items[(*li) as usize];
-            },
-            None => {},
+        return switch self.idx.pl_map.get(&lk) {
+            Some(v) => LookupHit { node: (*v >> 32) as NodeId, mid: (*v & 0xFFFFFFFFu64) as ModuleId },
+            None => LookupHit { node: NODE_NONE, mid: 0 },
         };
-        for i in 0..self.modules.len() {
-            if self.modules[i].prelude {
-                let d = self.lookup(i as ModuleId, name, want_type);
-                if d != NODE_NONE {
-                    return LookupHit { node: d, mid: i as ModuleId };
-                }
-            }
-        }
-        return LookupHit { node: NODE_NONE, mid: 0 };
     }
 
     // Build (once) the cached [mid, transitive imports...] walk order for glob_lookup. Imports are

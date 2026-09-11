@@ -375,7 +375,7 @@ extend InlineCtx {
 }
 
 // The declaration-level checks: 0 = a candidate worth keeping, else the rejection.
-fn vet_decl(pkg: *const loader::Package, d: DefId) u64 {
+fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>) u64 {
     let p = unsafe &*pkg;
     if d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
         return REJ_BASE | IJ_NOT_FN as u64;
@@ -402,17 +402,29 @@ fn vet_decl(pkg: *const loader::Package, d: DefId) u64 {
     let ext = extend_of(a, d.node);
     // A GENERIC body carrying a static_assert defers it per instantiation; that guard fires
     // only when a call site DEMANDS the instance, and inlining the call erases the demand.
-    // Such callees must stay calls.
+    // Such callees must stay calls. `asserts` holds the module's static_assert spans.
     if f.generics.len != 0 || ext != NODE_NONE && a.at_const(ext).as_data.extend_def.generics.len != 0 {
         let bsp = a.at_const(f.body).span;
-        for ni in 0..a.nnodes() {
-            let nd9 = a.at_const(a.nth_id(ni));
-            if nd9.kind == NodeKind::NODE_STATIC_ASSERT && nd9.span.start >= bsp.start && nd9.span.end <= bsp.end {
+        for k in 0..asserts.len() {
+            let sp = asserts[k];
+            if (sp >> 32) as u32 >= bsp.start && (sp & 0xFFFFFFFFu64) as u32 <= bsp.end {
                 return REJ_BASE | IJ_SHAPE as u64;
             }
         }
     }
     return 0;
+}
+
+// The spans of module `a`'s static_assert nodes, packed `start << 32 | end`: one scan per module,
+// against one per vetted generic callee.
+fn assert_spans(a: &Ast, out: &mut Vector<u64>) {
+    out.clear();
+    for ni in 0..a.nnodes() {
+        let nd = a.at_const(a.nth_id(ni));
+        if nd.kind == NodeKind::NODE_STATIC_ASSERT {
+            out.push(nd.span.start as u64 << 32 | nd.span.end as u64);
+        }
+    }
 }
 
 extend InlineStore {
@@ -426,6 +438,13 @@ extend InlineStore {
         // Only a body some kept body calls can be inlined: collect the call targets first, so
         // the vetting (an attribute walk and a statement scan per body) runs for those alone.
         let mut called = Map::<u64, u8>::new();
+        let mut asserts = Vector::<Vector<u64>>::new(); // per module, filled on first use
+        let mut has_asserts = Vector::<u8>::new(); // 0 unknown, 1 filled
+        let nm = unsafe (&*pkg).modules.len();
+        for _ in 0..nm {
+            asserts.push(Vector::<u64>::new());
+            has_asserts.push(0);
+        }
         for i in 0..keep.kept.len() {
             let b = &keep.kept.at(i).body;
             for k in 0..b.blocks.len() {
@@ -455,7 +474,12 @@ extend InlineStore {
             if !lw.body.inline_size_ok {
                 r = REJ_BASE | IJ_TOO_BIG as u64;
             } else {
-                r = vet_decl(pkg, d);
+                let dm = d.module as usize;
+                if dm < nm && has_asserts[dm] == 0 && unsafe (&*pkg).modules.at(dm).has_ast {
+                    assert_spans(unsafe &*(&*pkg).module_ast_const(d.module), asserts.index_mut(dm));
+                    has_asserts.set(dm, 1);
+                }
+                r = vet_decl(pkg, d, asserts.at(dm));
                 if r == 0 {
                     r = self.vet_body(pkg, d, &lw.body, lw.closures.len());
                 }

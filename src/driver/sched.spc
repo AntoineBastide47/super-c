@@ -78,7 +78,7 @@ struct Task {
     pub ctx: *mut void,
     pub j: u32,
     pub ctl: *const tctl::Ctl,
-    pub delay: bool,
+    pub seed: u32, // SC_TASK_DELAY seed; 0 = no stagger
 }
 
 // The callback's context and the graph are shared by every task of the stage and outlive the
@@ -99,10 +99,12 @@ fn spawn(t: Task, wg: &psync::WaitGroup) {
 }
 
 fn run_task(t: Task, wg: &psync::WaitGroup) {
-    if t.delay {
-        // SC_TASK_DELAY: a deterministic per-job stagger, so the identity gates run under a
-        // schedule the machine would not produce by itself.
-        prt::sleep_ns(((t.j % 4) as i64 + 1) * 100000);
+    if t.seed != 0 {
+        // SC_TASK_DELAY=<seed>: a deterministic per-job stagger (100 to 400 us, a hash of the job
+        // and the seed), so the identity gates run under schedules the machine would not
+        // produce by itself and a different one per seed.
+        let h = t.j * 0x9E3779B1u32 ^ t.seed * 0x85EBCA6Bu32;
+        prt::sleep_ns(((h >> 24 & 3) as i64 + 1) * 100000);
     }
     let run = t.run;
     run(t.ctx, t.j);
@@ -115,7 +117,7 @@ fn run_task(t: Task, wg: &psync::WaitGroup) {
         // Release: this job's writes happen-before the successor's start (it reads them).
         let left = atomic::sub_u32(unsafe (g.pending.as_ptr() as *mut u32 + s as usize), 1, 3);
         if left == 1 {
-            spawn(Task { g: t.g, run: t.run, ctx: t.ctx, j: s, ctl: t.ctl, delay: t.delay }, wg);
+            spawn(Task { g: t.g, run: t.run, ctx: t.ctx, j: s, ctl: t.ctl, seed: t.seed }, wg);
         }
     }
 }
@@ -137,7 +139,14 @@ pub fn run_jobs(g: &Jobs, workers: u32, run: fn(*mut void, u32) void, ctx: *mut 
     prt::set_stack_size(8usize << 20); // the checker's expression recursion outgrows the default task stack
     let wg = psync::WaitGroup::new();
     wg.add(g.n as i64);
-    let delay = stdlib::getenv("SC_TASK_DELAY") != null;
+    let dv = stdlib::getenv("SC_TASK_DELAY");
+    let mut seed: u32 = 0;
+    if dv != null {
+        seed = (unsafe stdlib::atoi(dv)) as u32;
+        if seed == 0 {
+            seed = 1;
+        }
+    }
     // The initial ready set is read before any job runs: a completing job decrements live
     // counters, and a job whose count it takes to zero is its to launch.
     let mut ready = Vector::<u32>::new();
@@ -147,7 +156,7 @@ pub fn run_jobs(g: &Jobs, workers: u32, run: fn(*mut void, u32) void, ctx: *mut 
         }
     }
     for k in 0..ready.len() {
-        spawn(Task { g: g, run: run, ctx: ctx, j: ready[k], ctl: ctl, delay: delay }, &wg);
+        spawn(Task { g: g, run: run, ctx: ctx, j: ready[k], ctl: ctl, seed: seed }, &wg);
     }
     wg.wait_masked();
 }

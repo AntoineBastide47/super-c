@@ -261,6 +261,12 @@ reported as leaked under `SC_LEAK_CHECK`.
 | Panic messages | Include task id: `panic: [task 7] message` |
 | `runtime::live_tasks()` | Return count of tasks still alive |
 | Shutdown report | Account for tasks that never finished |
+| `race` profile (`--profile=race`) | ThreadSanitizer with the coroutine fiber annotations; the only build that reports a runtime race |
+
+Open runtime finding (`ci/cutover_report.md`): under the `race` profile, a task that
+launches from inside a completing coroutine (the compiler's job runner) reports a race
+between `spawn_coroutine`'s task-block store and the completing worker's `handoff` spin
+in `worker_main`; the release compiler panicked once in about twenty-four builds.
 
 ## Shutdown
 

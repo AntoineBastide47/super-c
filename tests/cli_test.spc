@@ -6562,6 +6562,36 @@ fn build_link_failure_keeps_artifact() {
     assert(p13_mtime(bin.as_str()) > b1, "and links the newer object over the stale binary");
 }
 
+// A generated file that cannot be published fails the build at the publication boundary: the previous
+// binary stays, no emit stamp records the failed emission, and the next build over the same edit
+// publishes and links it once the file is writable again.
+@test
+fn build_publication_failure_keeps_artifact() {
+    if cli::on_windows() {
+        return; // chmod
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").exit, 3);
+    let mut bin = String::new();
+    bin.format_into("{}/build/dev/app{}", root, str::from_cstr(cli::binext()));
+    let b1 = p13_mtime(bin.as_str());
+    let mut lock = String::new();
+    lock.format_into("chmod a-w {}/build/dev/gen/main.c", root);
+    assert_eq(cli::run_quiet(lock.cstr()), 0);
+    p13_tick();
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 4;\n}\n");
+    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    assert(!r.ok() && r.out_has("build: cannot write"), "the publication failure fails the build");
+    assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
+    let mut unlock = String::new();
+    unlock.format_into("chmod u+w {}/build/dev/gen/main.c", root);
+    assert_eq(cli::run_quiet(unlock.cstr()), 0);
+    assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").exit, 4);
+}
+
 // compile_commands.json: one entry per generated translation unit with a full `arguments` argv, so C
 // tooling (clangd and friends) attaches to the generated tree.
 @test

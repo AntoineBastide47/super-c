@@ -1329,6 +1329,7 @@ extend<T> SplitVec<T> {
         }
     }
 
+    @c.always_inline
     pub fn push(self: &mut Self, v: T) {
         if self.split == SV_UNFROZEN || self.base.len() < self.split {
             self.base.push(v);
@@ -2160,15 +2161,9 @@ extend Ast {
 
     pub fn init_types(self: &mut Self) {
         self.types.clear();
-        self.types.reserve(self.nodes.len());
-        for _ in 0..self.nodes.len() {
-            self.types.push(TYPE_NONE);
-        }
+        self.types.resize_default(self.nodes.len());
         self.b.types.clear();
-        self.b.types.reserve(self.b.nodes.len());
-        for _ in 0..self.b.nodes.len() {
-            self.b.types.push(TYPE_NONE);
-        }
+        self.b.types.resize_default(self.b.nodes.len());
         self.closure_facts.clear();
         self.cap_facts.clear();
         self.closure_at.clear();

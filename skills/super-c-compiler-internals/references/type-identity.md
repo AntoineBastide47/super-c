@@ -35,10 +35,13 @@ last checkpoint retains no pool at all.
 
 ## Publication
 
-`Package::publish_types` (`src/module/loader.spc`) runs at two checkpoints through
-`publish_checkpoint` (`src/driver/emit.spc`): the start of `borrowck_all` (the whole
-package is typed) and the start of `cemit_package` (the whole package is borrow-checked).
-Each checkpoint:
+`Package::publish_types` (`src/module/loader.spc`) runs at three checkpoints through
+`publish_checkpoint` (`src/driver/emit.spc`): the prelude gate of the type-check stage
+(every prelude item is typed and no other item has started, so only the prelude modules
+hold provisional records; every later checker then reads a prelude declaration's type
+from the owner's record instead of lowering its syntax), the start of `borrowck_all` (the
+whole package is typed) and the start of `cemit_package` (the whole package is
+borrow-checked). Each checkpoint:
 
 1. Collects one batch: every module's provisional records, in module order, children
    before parents (the pools are append-only, so a child's provisional index is smaller
@@ -69,7 +72,7 @@ and record (the cli test edits the last function of a module and checks the clas
 lines are unchanged; an edit that shifts declaration nodes moves the nominal records'
 payloads, as any node-id-keyed table would).
 
-The instance graph (`src/graph/instances.spc`) runs after the second checkpoint and
+The instance graph (`src/graph/instances.spc`) runs after the last checkpoint and
 interns its substituted types straight into the package table (`intern_g`,
 `intern_instance_g`, `intern_dyn_g`, `const_value_g`, `intern_clin_g`); its records are
 keyed by `ArgKey { ty, val, has_val }` with final ids, and `noted` is one bitset over
@@ -87,12 +90,16 @@ each borrow frontier. A harness that hands a module `Ast` out of a package
 package table.
 
 **Declaration types.** The owning checker records every declaration's type on its
-node (`decl_type_in`: parameters, fields, constants, bindings, functions, generic
-parameters, aggregates). After the first checkpoint those ids are final, so a foreign
-reader takes the record of a parameter, field or constant instead of lowering its
-syntax again (`decl_type_in`, and `node_type_in` for a member or return that may be a
-declaration or a bare type node); before that, and for every other node, it lowers and
-memoizes (`lower_memo`, `fdecl_memo`). This is what `TypeChecker` and the borrow checker
+node (`decl_type_in`: parameters, fields, constants, bindings, generic parameters,
+aggregates). Once the owner's item is visible to the reader (`gitems::visible`, so the
+owner's writes happen before the read) and the id is final (the prelude after the gate
+checkpoint, everything after the first package-wide one), a foreign reader takes the
+record of a parameter, field or constant instead of lowering its syntax again
+(`decl_type_in`, and `node_type_in` for a member or return that may be a declaration or
+a bare type node); otherwise it lowers and memoizes per checker (`fdecl_memo`; the
+foreign signature type nodes `node_type_in` reads, whatever their shape, and the
+generic-path nodes of `lower_type_in_f` in `lower_memo`). A slot is never read while its
+owner may still be writing it: the visibility rule is the happens-before edge. This is what `TypeChecker` and the borrow checker
 use for foreign parameters, fields and returns. Foreign lowerings of one transpile of
 the compiler fell from 299,863 to 169,429, and the borrow-check phase lowers none. Only
 declaration nodes carry their type in the node slot: a type node's slot holds other

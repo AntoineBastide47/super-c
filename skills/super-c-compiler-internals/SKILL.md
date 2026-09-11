@@ -30,7 +30,9 @@ resolve + HIR, per module -- resolver::resolve, then hir::lower_module immediate
 typecheck, per item       -- type inference, obligations, instance recording; item jobs over
   |                          the schedule graph's components (driver::sched), one checker per
   |                          module under its lease, visibility by the static component rule
-  |                          (item-index.md); the serial path runs the same jobs in order
+  |                          (item-index.md); the prelude gate job publishes the prelude's
+  |                          types (type-identity.md); the serial path runs the same jobs
+  |                          in order
 discharge_obligations     -- cross-module reflection-bound obligations, once all modules typed
   |
 borrowck_all              -- lowers every body to Core IR (kept in irl::Keep, viewed by the

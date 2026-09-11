@@ -5,6 +5,7 @@
 // run_package (build/run/test) and lint_package (report-only lints + `--fix` fix collection).
 import stdio;
 import stdlib;
+import string as cstring;
 import driver_shim as shim;
 import graph::items as gitems;
 import driver::stats as bst;
@@ -487,7 +488,16 @@ fn tc_job(ctx: *mut void, j: u32) {
     let st = unsafe &*(ctx as *const TcStage);
     let p = unsafe &mut *st.p;
     if j as usize >= p.sched.ncomp as usize {
-        return; // the prelude gate
+        // The prelude gate: every prelude item is typed and no other item has started, so the
+        // prelude's types publish here (no reader, no writer: the gate's job alone runs). Every
+        // later checker then takes a prelude declaration's type from the owner's record (a final
+        // id, the same in every module) instead of lowering its syntax again.
+        let tg0 = unsafe shim::sc_ticks_ms();
+        publish_checkpoint(p, null);
+        if stdlib::getenv("SC_CEMIT_STATS") != null {
+            eprint("typecheck-stage gate publication: {} ms\n", unsafe shim::sc_ticks_ms() - tg0);
+        }
+        return;
     }
     for k in p.sched.citem_off[j as usize] as usize..p.sched.citem_off[j as usize + 1] as usize {
         let it = p.sched.citem[k];
@@ -768,9 +778,13 @@ fn typecheck_stage(
         spans: &spans,
         lint: lint.as_ptr(),
     };
-    let g = tc_jobs(p);
-    let ctl = tctl::Ctl::new(tctl::budget_from_env());
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
+    let tg9 = unsafe shim::sc_ticks_ms();
+    let g = tc_jobs(p);
+    if tstat {
+        eprint("typecheck-stage graph: {} ms\n", unsafe shim::sc_ticks_ms() - tg9);
+    }
+    let ctl = tctl::Ctl::new(tctl::budget_from_env());
     let tj0 = unsafe shim::sc_ticks_ms();
     sch::run_jobs(&g, p.jobs, tc_job, &mut st, &ctl);
     if tstat {
@@ -3416,15 +3430,23 @@ pub fn cemit_package(
         (p.cir as *mut iri::Interp).keep_view_clear();
     }
     // The planner's signature-level propagation reads the package metadata.
+    let ts9 = unsafe shim::sc_ticks_ms();
     p.ensure_sigs();
     let gm9 = prd.start();
     // The inline candidates come from the kept lowerings, before the graph takes them.
     let mut inls = inl::InlineStore::new();
+    let ti9 = unsafe shim::sc_ticks_ms();
     if irkeep != null {
         inls.build(p, unsafe &*irkeep);
     }
     p.inl_store = &inls;
     if tstat {
+        eprint(
+            "cemit-stage publish: {} ms, sigs: {} ms, inline-store build: {} ms\n",
+            ts9 - tt0,
+            ti9 - ts9,
+            unsafe shim::sc_ticks_ms() - ti9,
+        );
         let t9 = unsafe shim::sc_ticks_ms();
         eprint(
             "cemit-stage inline-store: {} ms, {} callees kept of {} vetted\n",
@@ -7071,17 +7093,14 @@ extend OutFile {
             return;
         }
         let _ = unsafe stdio::fwrite(s.ptr(), 1, s.len(), self.f);
-        // Eight bytes per step (a piece boundary is folded like a word boundary).
+        // Eight bytes per step (a piece boundary is folded like a word boundary): one memcpy
+        // per word, so the hash costs a load and a mix per eight bytes, not eight byte loads.
         let mut h = self.h;
         let n = s.len();
         let mut i: usize = 0;
         while i + 8 <= n {
             let mut w: u64 = 0;
-            let mut k: usize = 0;
-            while k < 8 {
-                w = w | s.byte_at(i + k) as u64 << (k * 8) as u64;
-                k += 1;
-            }
+            unsafe cstring::memcpy((&mut w) as *mut u64, s.ptr() + i, 8);
             h = mix64(h, w);
             i += 8;
         }
@@ -9185,6 +9204,9 @@ fn run_package_i(
         p.gen_root = String::from_str(p.root_dir.as_str());
         p.gen_root.push_str("/build/raw");
     }
+    // A tree that did not exist before this build holds no orphan to prune afterwards.
+    let mut gr9 = String::from_str(p.gen_root.as_str());
+    let fresh_tree = unsafe shim::sc_stat_isdir(gr9.cstr()) != 1;
     write_super_rt(p.gen_root.as_str());
     let root = p.gen_root.as_str();
     let mut keep = Vector::<String>::new();
@@ -9498,7 +9520,7 @@ fn run_package_i(
         root.len() as i32,
         root.ptr() as *const char,
     );
-    if bn > 0 && bn as usize < 4096 {
+    if bn > 0 && bn as usize < 4096 && !fresh_tree {
         prune_orphans(&broot[0], &keep);
     }
     bst::mark(bst::B_PUBLISH);

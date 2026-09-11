@@ -41,8 +41,9 @@ Before any optimization work, understand these non-negotiable constraints:
    round, and a wide spread means the box was not quiet. First run after a rebuild is
    a cold outlier — ignore it. Run 3x interleaved A/B on a quiet machine. A run that
    reports a C compiler or linker failure exits nonzero and measures nothing.
-   `sh ci/perf_gate.sh` compares a run with the accepted constants in `ci/baseline.env`
-   (every later percentage gate resolves against those); run the benchmark binary
+   `sh ci/perf_gate.sh` compares a run with the limits resolved from the accepted
+   constants in `ci/baseline.env` and the accepted-work ledger `ci/ledger.tsv` (every
+   percentage gate resolves to a number there); run the benchmark binary
    directly (`build/bench-bin`), never as a child of the ASan dev compiler, whose
    injected sanitizer runtime changes the allocator and the peak RSS it reports.
 

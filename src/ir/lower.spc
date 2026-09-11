@@ -20,7 +20,6 @@ import lexer::token_type as tt;
 import ast::ast as *;
 import ast::facts as facts;
 import module::loader as loader;
-import stdlib;
 import ir::core as ir;
 import ir::layout as lay;
 import ir::interp as iri;
@@ -2577,9 +2576,6 @@ extend Lowerer {
         let d = self.f.node(id).as_data.for_stmt;
         let pt = self.nty(id);
         if pt == TYPE_NONE || self.f.ty(pt).kind != TypeKind::TYPE_FIELD_PROJECTION {
-            if stdlib::getenv("SC_PROJ_DBG") != null {
-                eprintln("proj: no-proj-type node {} pt {}", id, pt);
-            }
             return false;
         }
         let cd = self.f.node(d.iterable).as_data.call;
@@ -2594,17 +2590,11 @@ extend Lowerer {
         let mut orm = self.module;
         let mut ort = self.f.ty(pt).as_data.proj.owner;
         if !self.env_resolve(self.f.ty(pt).as_data.proj.owner, &mut orm, &mut ort) {
-            if stdlib::getenv("SC_PROJ_DBG") != null {
-                eprintln("proj: owner-unresolved node {} env {}", id, self.env.len());
-            }
             return false;
         }
         let owner = self.reintern_ty(orm, ort);
         let mut dm0: ModuleId = 0;
         if self.proj_owner_decl(owner, &mut dm0) == NODE_NONE {
-            if stdlib::getenv("SC_PROJ_DBG") != null {
-                eprintln("proj: owner-not-agg node {} kind {}", id, self.f.ty(owner).kind as u32);
-            }
             return false;
         }
         let mut sub0 = ir::IR_NONE;

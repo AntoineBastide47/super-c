@@ -40,6 +40,24 @@ The verified binary is stage-2.
 See [fixpoint-verification.md](references/fixpoint-verification.md) for the clean-room
 diff protocol.
 
+## The Bootstrap Sequence and the Rollback Boundary
+
+`sh ci/gate.sh` runs the production sequence: the latest release binary (the last
+verified bootstrap compiler) builds the current sources (`check.sh`), that result
+builds generation one, generation one emits generation two at the same path with the
+same options, the two trees are compared byte for byte, and generation two is compiled
+and run: it is the compiler that runs every later step of the gate (the one-worker and
+every-core builds under each task-delay seed, the targets, the profiles). Its
+one-worker tree must equal generation one's every-core tree, so the fixpoint holds
+across generations and worker counts at once.
+
+The rollback boundary is the latest GitHub release: its binary and its tag are the
+named verified compiler and source revision, outside every build directory that
+`super-c clean` removes. A rollback downloads that binary (`check.sh` does, for the
+bootstrap) and checks out the tag. No persistent semantic cache exists: the per-TU
+cache and the object cache are keyed by the compiler binary and the emitted bytes, so
+a rollback converts nothing.
+
 ## The Natural-Code Principle
 
 A workaround for natural Super-C code **is** a compiler bug. The correct response is:

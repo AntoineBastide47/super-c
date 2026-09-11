@@ -121,8 +121,11 @@ files of the old layout. Three costs had to be removed to get there:
   words per mangler instead of three byte matrices: about 5 KiB instead of 51 KiB per
   parallel shard for the compiler's 92 modules.
 
-The manifest hash mixes eight bytes per step; the emitted bytes (9.3 MiB) cost about
-3 ms to hash.
+The manifest hash mixes eight bytes per step, each word read with one copy. After the
+stream, the build engine's safety-net sync compares only the files the stream never
+synced (`CcStream.synced`; the orphan sweep still walks the tree), the sink creates each
+output directory once per build, and a tree that did not exist before the build skips
+the emitter's orphan pruning.
 
 ## Shard policy
 

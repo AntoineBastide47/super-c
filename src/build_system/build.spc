@@ -417,10 +417,15 @@ fn file_eq(a: str, b: &String) bool {
     return same;
 }
 
-fn sync_tree(srcdir: str, dstdir: str) i32 {
+// `synced`: the files the stream already synced this build (their bytes are equal on both sides), so
+// the safety net compares only what the stream never heard about.
+fn sync_tree(srcdir: str, dstdir: str, synced: &Set<String>) i32 {
     let mut rels = Vector::<String>::new();
     walk_files(srcdir, srcdir.len(), &mut rels);
     for i in 0..rels.len() {
+        if synced.contains(rels.at(i)) {
+            continue;
+        }
         let rel = rels.at(i).as_str();
         let sp = join2(srcdir, rel);
         let dp = join2(dstdir, rel);
@@ -1129,6 +1134,8 @@ struct CcStream {
     pub ret: i32,
     pub cache: String, // the global object cache directory; empty = disabled
     pub rewritten: Vector<String>, // gen-relative files whose content changed in this build's sync
+    pub synced: Set<String>, // every gen-relative file the stream synced (equal on both sides now)
+    pub made_dirs: Set<String>, // gen directories this build's sync created or verified
     pub ccdb: Vector<String>, // compile_commands.json rows, one per planned unit (stale or not)
     /// Object-cache hashing memo: file path FNV -> 1 + index of its two words in `hpool`
     /// (0 while the file is on the include path being hashed); see `ch_hash_file`.
@@ -1387,8 +1394,12 @@ extend CcStream {
                 k = k - 1;
             }
             if k > 0 {
+                // One mkdir walk per directory per build, not one per file.
                 let dir = String::from_str(full.slice(0, k - 1));
-                mkdir_p(dir.as_str());
+                if !self.made_dirs.contains(&dir) {
+                    mkdir_p(dir.as_str());
+                    self.made_dirs.insert(dir);
+                }
             }
             let f = stdio::fopen(dp.as_str(), "wb");
             if f == null {
@@ -1400,6 +1411,7 @@ extend CcStream {
             unsafe stdio::fclose(f);
             self.rewritten.push(String::from_str(rel));
         }
+        self.synced.insert(String::from_str(rel));
         if kind != 1 {
             return;
         }
@@ -2160,6 +2172,8 @@ fn engine_build_i(
         ret: 0,
         cache: object_cache_dir(),
         rewritten: Vector::<String>::new(),
+        synced: Set::<String>::new(),
+        made_dirs: Set::<String>::new(),
         ccdb: Vector::<String>::new(),
         hmemo: Map::<u64, u64>::new(),
         hpool: Vector::<u64>::new(),
@@ -2242,7 +2256,7 @@ fn engine_build_i(
         // (b) surfaces anything the stream never heard about: planned below off the directory walk.
         ret = stream.ret;
         if ret == 0 {
-            ret = sync_tree(srcgen.as_str(), gen.as_str());
+            ret = sync_tree(srcgen.as_str(), gen.as_str(), &stream.synced);
         }
         if ret == 0 && cache_on {
             stamp_write(stamp_path.as_str(), &p, root_dir, target, m.arch, bootstrap_tags, lint, gen.as_str());

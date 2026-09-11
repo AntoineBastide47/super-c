@@ -45,7 +45,11 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     // cap is always a power of two (grow doubles from 8), so the bucket modulo is a bit-mask:
     // same slot for every hash as `% cap`, without the 64-bit division.
     fn slot(self: &Map<K, V, A>, key: &K) usize {
-        let mut i = key.hash() as usize & self.cap - 1;
+        // The integer keys hash to themselves and a caller often packs two ids into one key, so
+        // the low bits alone cluster; fold the high half in, then spread through a multiply.
+        let mut h = key.hash();
+        h = (h ^ h >> 32) * 0x9E3779B97F4A7C15u64;
+        let mut i = (h ^ h >> 32) as usize & self.cap - 1;
         while unsafe self.used[i] != 0 {
             if unsafe self.keys[i] == *key {
                 return i;

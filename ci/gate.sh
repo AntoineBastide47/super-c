@@ -5,8 +5,9 @@
 #   1. check.sh: canonical formatting, lint per target, the test corpus, the sanitizer lanes, and the
 #      two-stage rebuild from the latest release (the compiler builds its own sources);
 #   2. the two-generation fixpoint: gen1 and gen2 emit byte-identical C;
-#   3. the worker-count identity: one worker and every core emit byte-identical C and publish the
-#      same package type table;
+#   3. the worker-count identity, run by generation two: one worker and every core under each
+#      task-delay seed emit byte-identical C, publish the same package type table and item index,
+#      and print the same diagnostics;
 #   4. every emitted translation unit compiles under the strict warning set, and the tree meets the
 #      readability rules;
 #   5. every supported target transpiles the compiler and every built-in profile builds it;
@@ -43,7 +44,8 @@ step "check.sh (format, lint, tests, sanitizer lanes, release bootstrap)"
 ./check.sh
 
 # check.sh leaves ./super-c as the two-stage rebuild of the current source; every step below uses a copy
-# of it inside a clean tree so std/ffi resolve there and no cache of this checkout takes part.
+# of it inside a clean tree so std/ffi resolve there and no cache of this checkout takes part. The object
+# cache stays on: every build after gen1 emits the same C, so it recompiles nothing.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 tree="$tmp/tree"
@@ -66,20 +68,37 @@ cp "$tree/build/dev/super-c" "$tree/gen1-super-c"
 rm -rf "$tree/build"
 ( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 ./gen1-super-c build >/dev/null )
 same_tree "$tmp/gen1-raw" "$tree/build/raw" || fail "gen1 and gen2 emitted different C (above)"
+# Generation two is compiled and run: every build below is its own.
+cp "$tree/build/dev/super-c" "$tree/gen2-super-c"
 echo "gate: byte-identical"
 
-step "worker identity: --jobs=$CONTRACT_WORKERS_MIN vs --jobs=$ncpu"
-rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TYPE_TABLE="$tmp/j1-types" ./gen1-super-c build --jobs=$CONTRACT_WORKERS_MIN >/dev/null 2>"$tmp/j1-items" )
-cp -R "$tree/build/raw" "$tmp/j1-raw"
-rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TASK_DELAY=1 SC_TYPE_TABLE="$tmp/jn-types" ./gen1-super-c build --jobs=$ncpu >/dev/null 2>"$tmp/jn-items" )
-same_tree "$tmp/j1-raw" "$tree/build/raw" || fail "one worker and $ncpu workers emitted different C (above)"
-cmp "$tmp/j1-types" "$tmp/jn-types" || fail "one worker and $ncpu workers published different type tables"
-# The item schedule index (keys, hashes, edges, components, states) is the same under both.
-d1=$(grep -o 'digest [0-9]*' "$tmp/j1-items") ; dn=$(grep -o 'digest [0-9]*' "$tmp/jn-items")
-[ -n "$d1" ] && [ "$d1" = "$dn" ] || fail "one worker and $ncpu workers built different item indexes ($d1 vs $dn)"
-echo "gate: byte-identical"
+# One build of the tree by gen2: $1 workers, $2 the SC_TASK_DELAY seed (empty = none), $3 the record
+# name under $tmp (<name>-raw, <name>-types, <name>-err).
+gen2_build() {
+    rm -rf "$tree/build"
+    ( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TYPE_TABLE="$tmp/$3-types" env ${2:+SC_TASK_DELAY=$2} ./gen2-super-c build --jobs="$1" >/dev/null 2>"$tmp/$3-err" ) || { cat "$tmp/$3-err" >&2; fail "gen2 build $3 (--jobs=$1${2:+, SC_TASK_DELAY=$2}) failed (above)"; }
+    cp -R "$tree/build/raw" "$tmp/$3-raw"
+}
+# The identity of two records: the emitted tree, the type table, the item index digest, the
+# diagnostics (stderr without the measurement lines).
+same_record() {
+    same_tree "$tmp/$1-raw" "$tmp/$2-raw" || fail "$1 and $2 emitted different C (above)"
+    cmp "$tmp/$1-types" "$tmp/$2-types" || fail "$1 and $2 published different type tables"
+    da=$(grep -o 'digest [0-9]*' "$tmp/$1-err") ; db=$(grep -o 'digest [0-9]*' "$tmp/$2-err")
+    [ -n "$da" ] && [ "$da" = "$db" ] || fail "$1 and $2 built different item indexes ($da vs $db)"
+    grep -v '^item-stats' "$tmp/$1-err" >"$tmp/$1-diag" || true
+    grep -v '^item-stats' "$tmp/$2-err" >"$tmp/$2-diag" || true
+    diff "$tmp/$1-diag" "$tmp/$2-diag" || fail "$1 and $2 printed different diagnostics (above)"
+}
+
+step "worker identity: --jobs=$CONTRACT_WORKERS_MIN vs --jobs=$ncpu under SC_TASK_DELAY seeds $CONTRACT_DELAY_SEEDS"
+gen2_build "$CONTRACT_WORKERS_MIN" "" j1
+same_tree "$tmp/gen1-raw" "$tmp/j1-raw" || fail "gen2 with one worker and gen1 emitted different C (above)"
+for seed in $CONTRACT_DELAY_SEEDS; do
+    gen2_build "$ncpu" "$seed" "jn$seed"
+    same_record j1 "jn$seed"
+    echo "gate: seed $seed byte-identical"
+done
 
 step "strict C warnings ($CONTRACT_CSTD $CONTRACT_STRICT_CFLAGS) and readability"
 raw="$tree/build/raw"
@@ -107,12 +126,12 @@ for t in $CONTRACT_TARGETS; do
     case "$host:$t" in
     Darwin:macos|Linux:linux) continue ;; # the host target is what every build above linked
     esac
-    ( cd "$tree" && SC_LEAK_CHECK=fatal ./gen1-super-c src/main.spc --target="$t" >/dev/null ) || fail "target $t"
+    ( cd "$tree" && SC_LEAK_CHECK=fatal ./gen2-super-c src/main.spc --target="$t" >/dev/null ) || fail "target $t"
     rm -rf "$tree/src/build"
     echo "gate: target $t transpiles"
 done
 for p in $CONTRACT_PROFILES; do
-    ( cd "$tree" && SC_LEAK_CHECK=fatal ./gen1-super-c build --profile="$p" --out-dir="build/gate-$p" -o "build/gate-$p/super-c" >/dev/null ) || fail "profile $p"
+    ( cd "$tree" && SC_LEAK_CHECK=fatal ./gen2-super-c build --profile="$p" --out-dir="build/gate-$p" -o "build/gate-$p/super-c" >/dev/null ) || fail "profile $p"
     echo "gate: profile $p builds"
 done
 

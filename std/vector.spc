@@ -296,9 +296,14 @@ extend<T: Default, A: Allocator> Vector<T, A> {
             return;
         }
         self.reserve(n - self.len);
-        while self.len < n {
-            self.push(T::default());
+        // Straight stores into the reserved tail, the length set once: a zero default becomes one
+        // memset instead of a length and capacity check per element.
+        let mut i = self.len;
+        while i < n {
+            unsafe self.ptr[i] = T::default();
+            i += 1;
         }
+        self.len = n;
     }
 }
 

@@ -1,8 +1,10 @@
 # Fixpoint Verification Protocol
 
 The clean-room protocol for verifying the byte-identical two-generation fixpoint.
-`sh ci/gate.sh` runs it (and the one-worker versus every-core identity check) as part
-of the correctness gate; the steps below are the manual form.
+`sh ci/gate.sh` runs it (and, with generation two, the one-worker versus every-core
+identity check under each `SC_TASK_DELAY` seed of `ci/contract.sh`: emitted tree, type
+table, item index digest and diagnostics) as part of the correctness gate; the steps
+below are the manual form.
 
 Emission hashes include paths. Both generations must use the same source, output,
 standard-library, and FFI paths. Place the bootstrap binary beside the copied `std/`

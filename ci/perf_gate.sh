@@ -1,9 +1,12 @@
 #!/bin/sh
 # The performance gate, one command: build the benchmark binary from the current checkout, run the
-# 100-round self-transpile lane (its cold real build included), and compare the record with the accepted
-# baseline constants in ci/baseline.env. Run from the repository root (or `super-c command perf`).
+# 100-round self-transpile lane (its cold real build included), and compare the record with the limits
+# resolved from the accepted baseline constants in ci/baseline.env and the accepted-work ledger in
+# ci/ledger.tsv (a limit is the baseline less the accepted improvements plus the accepted regressions;
+# the frontend cycles are also held within 105 percent of the baseline). Run from the repository root (or
+# `super-c command perf`).
 #
-#   SC_PERF_TOL       allowed regression in percent over a baseline constant (default 3)
+#   SC_PERF_TOL       allowed noise in percent over a constant's resolved limit (default 3)
 #   SC_PERF_MAX_LOAD  highest 1-minute load average the run accepts (default: a quarter of the cores)
 #   SC_PERF_OUT       directory for the record and the report (default build/perf)
 #   SC_PERF_RECORD=1  write the run as the new ci/baseline.env instead of comparing
@@ -113,19 +116,68 @@ except FileNotFoundError:
 print("perf: baseline %s on %s (recorded at load %s, this run at %s)" % (base.get("BASE_COMMIT"), base.get("BASE_CPU"), base.get("BASE_LOAD_1MIN", "?"), load))
 if base.get("BASE_CPU") != cpu:
     print("perf: WARNING: the baseline was recorded on %s, this box is %s: wall and cycle constants do not transfer" % (base.get("BASE_CPU"), cpu))
-print("%-42s %12s %12s %8s" % ("constant", "baseline", "now", "delta"))
+# The accepted-work ledger (ci/ledger.tsv, written by ci/ledger.sh): for every metric it names, the cutover
+# limit is the baseline minus the accepted improvements plus the accepted regressions, resolved under the
+# ledger's protocol and applied to the recorded constant as a ratio. A constant the ledger does not name
+# keeps its baseline as the limit.
+LEDGER = {
+    "BASE_TRANSPILE_SERIAL_CPU_MS_MEDIAN": "serial_cpu_ms",
+    "BASE_TRANSPILE_SERIAL_MCYC_MEDIAN": "serial_mcyc",
+    "BASE_TRANSPILE_SERIAL_KALLOC": "serial_kalloc",
+    "BASE_TRANSPILE_SERIAL_HEAP_MIB": "heap_mib",
+    # BASE_TRANSPILE_SERIAL_PEAK_RSS_MIB keeps its baseline: the constant was recorded with the benchmark
+    # binary as a child of the sanitizer compiler, whose allocator changes the peak, while the ledger runs
+    # the binary directly (the two peaks of one binary differ by 2x), so no ratio between them holds.
+    "BASE_PHASE_PARSE_MCYC": "phase_parse_mcyc",
+    "BASE_PHASE_RESOLVE_MCYC": "phase_resolve_mcyc",
+    "BASE_PHASE_TYPECHECK_MCYC": "phase_typecheck_mcyc",
+    "BASE_PHASE_BORROWCK_MCYC": "phase_borrowck_mcyc",
+    "BASE_PHASE_CODEGEN_MCYC": "phase_codegen_mcyc",
+    "BASE_BUILD_PARALLEL_TRANSPILE_MS": "parallel_transpile_ms",
+    "BASE_FRONTEND_MCYC": "frontend_mcyc",
+}
+ledger = {}  # metric -> [baseline value, sum of improvements, sum of regressions, changes]
+try:
+    for line in open("ci/ledger.tsv"):
+        if line.startswith("#") or not line.strip():
+            continue
+        work, commit, parent, metric, pv, v, imp, reg, owner = line.rstrip("\n").split("\t")
+        row = ledger.setdefault(metric, [None, 0.0, 0.0, 0])
+        if row[0] is None:
+            row[0] = float(pv)  # the first row of a metric is measured at the baseline commit
+        if owner == commit:  # the overlap owner counts the shared improvement once
+            row[1] += float(imp)
+        row[2] += float(reg)
+        row[3] += 1
+except FileNotFoundError:
+    sys.exit("perf: FAILED: no ci/ledger.tsv (write one with ci/ledger.sh)")
+def ratio(metric):
+    b, imp, reg, _ = ledger[metric]
+    return (b - imp + reg) / b
+# The frontend gate: parse, resolve and typecheck cycles within 105 percent of the baseline's sum.
+fe = sum(float(base[k]) for k in ("BASE_PHASE_PARSE_MCYC", "BASE_PHASE_RESOLVE_MCYC", "BASE_PHASE_TYPECHECK_MCYC"))
+base["BASE_FRONTEND_MCYC"] = "%.3f" % fe
+consts.append(("BASE_FRONTEND_MCYC", ph["parse"]["mcyc"] + ph["resolve"]["mcyc"] + ph["typecheck"]["mcyc"], True))
+print("%-42s %12s %12s %12s %8s" % ("constant", "baseline", "limit", "now", "vs limit"))
 bad = 0
 for name, value, gated in consts:
     if name not in base:
         continue
     ref = float(base[name])
-    delta = (value - ref) / ref * 100 if ref else 0.0
+    limit = ref
+    metric = LEDGER.get(name)
+    if metric in ledger:
+        limit = ref * ratio(metric)
+    if name == "BASE_FRONTEND_MCYC":
+        limit = min(limit, ref * 1.05) if metric in ledger else ref * 1.05
+    delta = (value - limit) / limit * 100 if limit else 0.0
     flag = ""
     if gated and delta > tol:
         flag = "  REGRESSION"
         bad += 1
-    print("%-42s %12.3f %12.3f %+7.2f%%%s" % (name, ref, value, delta, flag))
+    print("%-42s %12.3f %12.3f %12.3f %+7.2f%%%s" % (name, ref, limit, value, delta, flag))
+print("perf: ledger metrics: %s" % ", ".join("%s x%.4f over %d changes" % (m, ratio(m), ledger[m][3]) for m in sorted(ledger) if m in LEDGER.values()))
 if bad:
-    sys.exit("perf: FAILED: %d constant(s) regressed past %.1f%% (SC_PERF_TOL)" % (bad, tol))
-print("perf: OK within %.1f%%" % tol)
+    sys.exit("perf: FAILED: %d constant(s) past its resolved limit by more than %.1f%% (SC_PERF_TOL)" % (bad, tol))
+print("perf: OK within %.1f%% of every resolved limit" % tol)
 EOF

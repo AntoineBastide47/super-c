@@ -94,14 +94,22 @@ run and keeps the scratch tree. `SC_BENCH_OUT=<file>` writes the whole record as
 
 ```sh
 super-c command gate         # ci/gate.sh: the full correctness gate (contract ci/contract.sh)
-super-c command perf         # ci/perf_gate.sh: the 100-round performance gate against ci/baseline.env
+super-c command perf         # ci/perf_gate.sh: the 100-round performance gate against the resolved limits
 super-c command matrix       # ci/bench_matrix.sh: the whole-build benchmark matrix (tens of minutes)
+sh ci/ledger.sh <base> <c>.. # the accepted-work ledger: one protocol over a chain of commits
 ```
 
 `ci/contract.sh` is the versioned compatibility contract: every input file, option and
 command the gates use. `ci/baseline.env` holds the accepted baseline constants
-(`SC_PERF_RECORD=1 sh ci/perf_gate.sh` rewrites it; `SC_PERF_TOL` is the allowed
-regression in percent).
+(`SC_PERF_RECORD=1 sh ci/perf_gate.sh` rewrites it). `ci/ledger.tsv` is the
+accepted-work ledger: every accepted change measured against its parent under one
+protocol (`ci/ledger.sh`: the released bootstrap compiler builds each commit's benchmark
+binary, which runs the 100-round lane), one row per metric with the improvement and the
+regression the change was accepted with. The perf gate resolves each constant's limit
+from them (the baseline less the accepted improvements plus the accepted regressions,
+applied to the constant as a ratio), holds the frontend cycles within 105 percent of the
+baseline, and allows `SC_PERF_TOL` percent of noise over a limit. `ci/cutover_report.md`
+records the resolved numbers of the last cutover.
 
 ### Formatting
 
@@ -353,8 +361,8 @@ a `thin` profile keeps `auto` there.
 | `SC_BC_VALIDATE` | Validation build: every borrow-check stage the feature predicate skipped runs anyway and must find nothing (zero loans, zero move events, no diagnostic); every loan issues at a borrow operation, every move path has a valid parent, the init rows match the path count, every fixpoint queue stays within its monotone bound; every elaborated body passes the structural verifier and the ownership verifier (`ir::drops::verify_drops`: each value released once per path, guarded where paths disagree, nothing held at a return). A failure prints the body and its events, then aborts. Output is unchanged. The gate runs its fixpoint and worker-identity builds under it |
 | `SC_TYPE_VALIDATE` | After every type publication checkpoint, exit 1 if any module table still names a provisional type id. The gate runs its fixpoint and worker-identity builds under it |
 | `SC_TYPE_COLLIDE` | Every type and instance hashes to one bucket: the type tables run on full comparisons alone, so a hash-order dependence shows as different output |
-| `SC_TASK_DELAY` | A deterministic per-job delay at the start of every parallel item job (type check, borrow check, always-panics), so the worker-identity gates run under a schedule the machine would not produce by itself |
-| `SC_TYPE_TABLE` | Path: write the package type table at the end of emission, one line per final id (`id class kind qualifier module payload`, children as final ids); the gate compares the dumps of one worker and every core |
+| `SC_TASK_DELAY` | A seed: a deterministic per-job delay (100 to 400 us, a hash of the job and the seed) at the start of every parallel item job (type check, borrow check, always-panics), so the worker-identity gates run under schedules the machine would not produce by itself, a different one per seed |
+| `SC_TYPE_TABLE` | Path: write the package type table at the end of emission, one line per final id (`id class kind qualifier module payload`, children as final ids); the gate compares the dumps of one worker and every core under each delay seed |
 | `SC_CEMIT_STATS` | Per-phase wall times (the unused-item lint as its own phase), the interpreter body-reuse counters (kept hits, fresh lowerings, retained boxes; printed after borrow checking and after the always-panics check) and the instance graph's collect line (records by kind, bodies walked, rounds, a budget stop), the re-lowering census (one line per template: instances, re-lowerings, identical re-lowerings, retained KiB) and the emission probe table (`src/emit/probe.spc`: ms and calls per region, the instance discovery total, re-lowering templates and instances by reason, bodies taken from the keep or lowered, rendered bodies and bytes; with `SC_BUILD_STATS` + `SC_BUILD_MEM` also allocation calls and MiB) |
 | `SC_INLINE_STATS` | Per-body inliner decision counters |
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters |

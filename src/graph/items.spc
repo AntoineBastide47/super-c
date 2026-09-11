@@ -342,33 +342,56 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
 
 // Lay `edges` out as CSR ranges over `n` owners, targets ascending and deduplicated.
 fn csr(n: usize, edges: &Vector<u64>, off: &mut Vector<u32>, tgt: &mut Vector<u32>) {
-    // One sort of the packed pairs orders them by owner then target; a linear pass lays the
-    // ranges out and drops the repeats.
-    let mut e = Vector::<u64>::with_capacity(edges.len());
-    for i in 0..edges.len() {
-        e.push(edges[i]);
-    }
-    e.sort();
+    // A counting layout by owner (edge order within a row), then a stamp array over the targets
+    // drops the repeats of each row in place: linear in the edges, no sort.
     off.clear();
     off.resize_default(n + 1);
+    for i in 0..edges.len() {
+        let a = (edges[i] >> 32) as usize;
+        off.set(a + 1, off[a + 1] + 1);
+    }
+    for i in 0..n {
+        off.set(i + 1, off[i + 1] + off[i]);
+    }
     tgt.clear();
-    tgt.reserve(e.len());
-    let mut o: usize = 0;
-    for i in 0..e.len() {
-        if i != 0 && e[i] == e[i - 1] {
-            continue;
-        }
-        let eo = (e[i] >> 32) as usize;
-        while o < eo {
-            o += 1;
-            off.set(o, tgt.len() as u32);
-        }
-        tgt.push((e[i] & 0xFFFFFFFFu64) as u32);
+    tgt.resize_default(edges.len());
+    let mut fill = Vector::<u32>::new();
+    fill.resize_default(n);
+    for i in 0..edges.len() {
+        let a = (edges[i] >> 32) as usize;
+        tgt.set((off[a] + fill[a]) as usize, (edges[i] & 0xFFFFFFFFu64) as u32);
+        fill.set(a, fill[a] + 1);
     }
-    while o < n {
-        o += 1;
-        off.set(o, tgt.len() as u32);
+    // Dedupe: `seen[t]` holds the owner whose row last kept target `t`, plus one (0 = none).
+    let mut seen = Vector::<u32>::new();
+    seen.resize_default(n.max(tgt_max(tgt) + 1));
+    let mut w: usize = 0;
+    let mut lo: usize = 0;
+    for a in 0..n {
+        let hi = off[a + 1] as usize;
+        for k in lo..hi {
+            let t = tgt[k] as usize;
+            if seen[t] != a as u32 + 1 {
+                seen.set(t, a as u32 + 1);
+                tgt.set(w, t as u32);
+                w += 1;
+            }
+        }
+        lo = hi;
+        off.set(a + 1, w as u32);
     }
+    tgt.truncate(w);
+}
+
+// The largest target id of a CSR's edges (0 when empty): the dedupe stamps are indexed by it.
+fn tgt_max(tgt: &Vector<u32>) usize {
+    let mut m: usize = 0;
+    for i in 0..tgt.len() {
+        if tgt[i] as usize > m {
+            m = tgt[i] as usize;
+        }
+    }
+    return m;
 }
 
 /// Open the index after the package index exists: keys and the (module, node) lookup, which
