@@ -1385,6 +1385,10 @@ fn worker_main(arg: *mut void) *mut void {
     unsafe sc_runtime::sc_rt_stack_guard_install();
     unsafe sc_runtime::sc_rt_stack_note_size(G_STACK_SIZE);
     let sched_ctx = unsafe sc_runtime::sc_rt_ctx_alloc();
+    if sched_ctx == null {
+        // A worker without a context cannot resume anything: nothing it owns is reachable yet, so stop.
+        panic("scheduler: cannot allocate a worker context");
+    }
     loop {
         let co = dequeue_runnable(s, me);
         if co == null {
@@ -1498,10 +1502,39 @@ fn worker_main(arg: *mut void) *mut void {
     return null;
 }
 
+// Release a scheduler whose workers have NOT started (construction failed): every lock, condvar, deque
+// buffer and array in reverse order of construction. `built` is how many parkers hold a lock and condvar.
+fn release_unstarted(s: *mut Scheduler, built: usize) {
+    let mut g = Global {};
+    let nw = unsafe s.nw;
+    if unsafe s.deques != null {
+        for i in 0..nw {
+            let buf = unsafe (s.deques + i).buf;
+            if buf != null {
+                unsafe g.dealloc(buf, DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine));
+            }
+        }
+    }
+    for i in 0..built {
+        let pk = unsafe (s.parkers + i);
+        unsafe sc_runtime::sc_rt_cond_free(pk.cv);
+        unsafe sc_runtime::sc_rt_mutex_free(pk.mtx);
+    }
+    unsafe g.dealloc(unsafe s.idle, unsafe s.idle_words * sizeof(u64), alignof(u64));
+    unsafe g.dealloc(unsafe s.parkers, nw * sizeof(Parker), LINE);
+    unsafe g.dealloc(unsafe s.deques, nw * sizeof(Worker), LINE);
+    unsafe sc_runtime::sc_rt_mutex_free(s.lock);
+    unsafe s.workers.free();
+    unsafe g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
+}
+
 fn build_scheduler() *mut Scheduler {
     let mut g = Global {};
-    let s = (unsafe g.alloc(sizeof(Scheduler), alignof(Scheduler))) as *mut Scheduler;
     let lk = unsafe sc_runtime::sc_rt_mutex_new();
+    if lk == null {
+        panic("scheduler: cannot allocate the timer lock");
+    }
+    let s = (unsafe g.alloc(sizeof(Scheduler), alignof(Scheduler))) as *mut Scheduler;
     // Resolved here, before any worker exists, so every later read of `G_SEED` happens-after this write.
     // Replay needs ONE worker: with a second one, stealing decides who runs next and the seed cannot.
     unsafe G_SEED = resolve_seed();
@@ -1521,13 +1554,9 @@ fn build_scheduler() *mut Scheduler {
     for i in 0..words {
         unsafe idle[i] = 0;
     }
+    // Every deque buffer is null until built, so a failure below releases only what exists.
     for i in 0..nw {
-        unsafe parkers[i] = Parker {
-            mtx: unsafe sc_runtime::sc_rt_mutex_new(),
-            cv: unsafe sc_runtime::sc_rt_cond_new(),
-            notified: 0,
-            pad: Array::<u64, 13>::new(),
-        };
+        unsafe (deques + i).buf = null;
     }
     unsafe s[0] = Scheduler {
         deques: deques,
@@ -1549,6 +1578,22 @@ fn build_scheduler() *mut Scheduler {
         free_len: 0,
         free_spin: 0,
     };
+    for i in 0..nw {
+        let mtx = unsafe sc_runtime::sc_rt_mutex_new();
+        let cv = if mtx != null {
+            unsafe sc_runtime::sc_rt_cond_new();
+        } else {
+            null;
+        };
+        if cv == null {
+            if mtx != null {
+                unsafe sc_runtime::sc_rt_mutex_free(mtx);
+            }
+            release_unstarted(s, i);
+            panic("scheduler: cannot allocate a worker's parking lock");
+        }
+        unsafe parkers[i] = Parker { mtx: mtx, cv: cv, notified: 0, pad: Array::<u64, 13>::new() };
+    }
     for i in 0..nw {
         let buf = (unsafe g.alloc(DEQUE_CAP * sizeof(*mut Coroutine), alignof(*mut Coroutine))) as *mut *mut Coroutine;
         // Seed each victim-choice generator differently and never with zero, or xorshift stays at zero.
@@ -1572,10 +1617,27 @@ fn build_scheduler() *mut Scheduler {
     // Before any worker exists, so every safepoint's read of the hook happens-after this write.
     unsafe __sc_set_preempt_hook(preempt_yield);
     unsafe __sc_set_cancel_hook(cancel_safepoint_tick);
+    // Workers start last, so a failure before this point can release everything. A thread the OS refuses
+    // after others started leaves those running: the pool keeps the workers it has (an unstarted worker's
+    // deque stays empty and inert, its parker is never waited on) and says so; a pool with no worker at
+    // all could never run a task, so that is fatal after releasing the whole construction.
+    let mut started: usize = 0;
+    let mut rc: i32 = 0;
     for i in 0..nw {
         let mut h: *mut void = null;
-        let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, worker_main, unsafe (deques + i));
+        rc = unsafe sc_runtime::sc_rt_thread_create(&mut h, worker_main, unsafe (deques + i));
+        if rc != 0 {
+            break;
+        }
         unsafe s.workers.push(h);
+        started = started + 1;
+    }
+    if started == 0 {
+        release_unstarted(s, nw);
+        panic("scheduler: cannot create a worker thread");
+    }
+    if started < nw {
+        eprintln("super-c: scheduler started {} of {} workers (thread creation failed with code {})", started, nw, rc);
     }
     return s;
 }
@@ -1630,7 +1692,17 @@ pub fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
         let mut g = Global {};
         co = (unsafe g.alloc(sizeof(Coroutine), alignof(Coroutine))) as *mut Coroutine;
         stk = unsafe sc_runtime::sc_rt_stack_alloc(G_STACK_SIZE);
+        if stk == null {
+            // Nothing is published yet: release the block, then stop. The task has no executor otherwise.
+            unsafe g.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
+            panic("scheduler: cannot map a guarded task stack");
+        }
         ctx = unsafe sc_runtime::sc_rt_ctx_alloc();
+        if ctx == null {
+            unsafe sc_runtime::sc_rt_stack_free(stk, G_STACK_SIZE);
+            unsafe g.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
+            panic("scheduler: cannot allocate a task context");
+        }
     } else {
         stk = unsafe co.stack;
         ctx = unsafe co.ctx;
@@ -2295,9 +2367,13 @@ fn resolve_seed() u64 {
     };
 }
 
-/// How many worker threads the pool has (or will have): the configured count, else one per CPU. What the
-/// data-parallel API divides its work by.
+/// How many worker threads the pool has (or will have): once it runs, the threads that actually started
+/// (fewer than asked when the OS refused one); before that the configured count, else one per CPU. What
+/// the data-parallel API divides its work by.
 pub fn worker_count() usize {
+    if atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 1) == 2 {
+        return unsafe G_SCHED.workers.len();
+    }
     if unsafe G_NWORKERS > 0 {
         return unsafe G_NWORKERS;
     }
@@ -2472,7 +2548,10 @@ fn destroy_pool(sp: *mut i32, s: *mut Scheduler) {
     let nw = unsafe s.workers.len();
     for i in 0..nw {
         let h = unsafe s.workers[i];
-        let _ = unsafe sc_runtime::sc_rt_thread_join(h);
+        if unsafe sc_runtime::sc_rt_thread_join(h) != 0 {
+            // A worker that cannot be joined may still touch the scheduler: it cannot be freed.
+            panic("scheduler: cannot join a worker thread at shutdown");
+        }
     }
     unsafe s.workers.free();
     // Every recycled block, now that no worker can ask for one.

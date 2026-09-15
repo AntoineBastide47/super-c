@@ -2083,6 +2083,42 @@ fn usize_literal_range_follows_target() {
     assert(r2.out_has("out of range"), "the expected-type literal names its diagnostic");
 }
 
+// A `@platform`-gated @test exists only for the targets it names: on every other target the item is
+// filtered out, so the runner must not register it (else it calls a function the emitter never wrote).
+// Two tests gated to disjoint platform sets: exactly one exists on any host.
+@test
+fn platform_gates_tests() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(@test
+fn always() {
+    assert(1 == 1);
+}
+
+@platform(windows)
+@test
+fn only_windows() {
+    assert(1 == 1);
+}
+
+@platform(macos | linux)
+@test
+fn only_posix() {
+    assert(1 == 1);
+}
+
+fn main() i32 {
+    return 0;
+}
+)",
+    );
+    let r = p.compile_flags("--test --quiet", "main.spc");
+    assert(r.ok(), "the gated-out test is not registered");
+    assert(r.out_has("running 2 tests"), "one gated test exists on this host, the other does not");
+    assert(r.out_has("2 passed, 0 failed"), "tally");
+}
+
 @test
 fn platform_gates_ext_c() {
     let p = cli::proj_new();

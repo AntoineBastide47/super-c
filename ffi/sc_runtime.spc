@@ -74,6 +74,10 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_thread_create(out: *mut *mut void, entry: fn(*mut void) *mut void, arg: *mut void) i32;
     /// Wait for a thread from sc_rt_thread_spawn; 0 on success.
     pub fn sc_rt_thread_join(handle: *mut void) i32;
+    /// Detach: the thread runs on and the OS releases it at exit; the handle is consumed. 0 on success.
+    pub fn sc_rt_thread_detach(handle: *mut void) i32;
+    /// Failure injection for tests: the `nth` call of the operation `kind` (the `FAIL_*` constants) fails.
+    pub fn sc_rt_fail_arm(kind: i32, nth: u32) void;
 
     /// A NON-recursive mutex, released by the thread that took it. Allocated and sized in C, so Super-C
     /// never needs `sizeof(pthread_mutex_t)` (40 bytes on glibc, 64 on macOS) or of an SRWLOCK.
@@ -121,3 +125,12 @@ extern "C" "sc_rt.h" {
     /// Release a context's platform resources.
     pub fn sc_rt_ctx_free(ctx: *mut void) void;
 }
+
+/// `sc_rt_fail_arm` operations: the substrate's fallible calls, one constant each.
+pub const FAIL_THREAD_CREATE: i32 = 1;
+pub const FAIL_THREAD_JOIN: i32 = 2;
+pub const FAIL_THREAD_DETACH: i32 = 3;
+pub const FAIL_STACK_MAP: i32 = 4;
+pub const FAIL_STACK_GUARD: i32 = 5;
+pub const FAIL_ALLOC: i32 = 6;
+pub const FAIL_STACK_RELEASE: i32 = 7;

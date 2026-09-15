@@ -21,6 +21,33 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ---- fatal errors ---------------------------------------------------------------------------------------
+   The substrate's own contract for a state it cannot recover from: say what, then abort. */
+static void sc_rt_die(const char *what) {
+  fprintf(stderr, "super-c: %s\n", what);
+  fflush(stderr);
+  abort();
+}
+
+/* ---- failure injection (see sc_rt.h) --------------------------------------------------------------------- */
+static int sc_rt_fail_kind = SC_RT_FAIL_NONE;
+static unsigned sc_rt_fail_left = 0;
+void sc_rt_fail_arm(int kind, unsigned nth) {
+  __atomic_store_n(&sc_rt_fail_left, nth, __ATOMIC_RELAXED);
+  __atomic_store_n(&sc_rt_fail_kind, nth ? kind : SC_RT_FAIL_NONE, __ATOMIC_RELEASE);
+}
+static int sc_rt_fail_hit(int kind) {
+  if (__atomic_load_n(&sc_rt_fail_kind, __ATOMIC_ACQUIRE) != kind) return 0;
+  if (__atomic_sub_fetch(&sc_rt_fail_left, 1u, __ATOMIC_ACQ_REL) != 0) return 0;
+  __atomic_store_n(&sc_rt_fail_kind, SC_RT_FAIL_NONE, __ATOMIC_RELEASE);
+  return 1;
+}
+/* The substrate's own heap blocks (handles, locks, condvars, contexts), under the ALLOC hook. */
+static void *sc_rt_alloc(size_t n, int zeroed) {
+  if (sc_rt_fail_hit(SC_RT_FAIL_ALLOC)) return 0;
+  return zeroed ? calloc(1, n) : malloc(n);
+}
+
 /* ---- stack accounting (see sc_rt.h) --------------------------------------------------------------------
    One relaxed add per stack map or unmap, next to a syscall that costs microseconds; read by whoever asks. */
 static size_t sc_rt_stk_bytes = 0;
@@ -332,18 +359,21 @@ void *sc_rt_stack_alloc(size_t size) {
   SYSTEM_INFO si;
   GetSystemInfo(&si);
   size_t pg = si.dwPageSize;
+  if (size == 0 || size % pg != 0 || size > SIZE_MAX - pg) return 0; /* rejected before any reservation */
+  if (sc_rt_fail_hit(SC_RT_FAIL_STACK_MAP)) return 0;
   char *m = (char *)VirtualAlloc(0, size + pg, MEM_RESERVE, PAGE_NOACCESS);
   if (!m) return 0;
+  int guarded = !sc_rt_fail_hit(SC_RT_FAIL_STACK_GUARD);
 #if defined(__x86_64__)
   char *lim = sc_stk_initial_limit(m + pg, size, pg);
   /* the live part, plus one PAGE_GUARD page under it whose first touch asks for more */
-  if (!VirtualAlloc(lim, (size_t)(m + pg + size - lim), MEM_COMMIT, PAGE_READWRITE) ||
+  if (!guarded || !VirtualAlloc(lim, (size_t)(m + pg + size - lim), MEM_COMMIT, PAGE_READWRITE) ||
       (lim - pg >= m + pg && !VirtualAlloc(lim - pg, pg, MEM_COMMIT, PAGE_READWRITE | PAGE_GUARD))) {
     VirtualFree(m, 0, MEM_RELEASE);
     return 0;
   }
 #else
-  if (!VirtualAlloc(m + pg, size, MEM_COMMIT, PAGE_READWRITE)) { /* fibers: no growth path of ours */
+  if (!guarded || !VirtualAlloc(m + pg, size, MEM_COMMIT, PAGE_READWRITE)) { /* fibers: no growth path */
     VirtualFree(m, 0, MEM_RELEASE);
     return 0;
   }
@@ -354,8 +384,9 @@ void *sc_rt_stack_alloc(size_t size) {
 void sc_rt_stack_free(void *usable, size_t size) {
   SYSTEM_INFO si;
   GetSystemInfo(&si);
+  if (sc_rt_fail_hit(SC_RT_FAIL_STACK_RELEASE) || !VirtualFree((char *)usable - si.dwPageSize, 0, MEM_RELEASE))
+    sc_rt_die("cannot release a task stack");
   sc_rt_stack_note(size + si.dwPageSize, 0);
-  VirtualFree((char *)usable - si.dwPageSize, 0, MEM_RELEASE);
 }
 
 static size_t sc_rt_stk_size = 0;
@@ -473,11 +504,11 @@ static unsigned __stdcall sc_rt_thread_tramp(void *p) {
 }
 
 int sc_rt_thread_create(void **out, void *(*entry)(void *), void *arg) {
-  sc_rt_thr_win *t = (sc_rt_thr_win *)malloc(sizeof *t);
+  sc_rt_thr_win *t = (sc_rt_thr_win *)sc_rt_alloc(sizeof *t, 0);
   if (!t) return -1;
   t->entry = entry;
   t->arg = arg;
-  uintptr_t h = _beginthreadex(0, 0, sc_rt_thread_tramp, t, 0, 0);
+  uintptr_t h = sc_rt_fail_hit(SC_RT_FAIL_THREAD_CREATE) ? 0 : _beginthreadex(0, 0, sc_rt_thread_tramp, t, 0, 0);
   if (!h) {
     free(t);
     return -1;
@@ -488,15 +519,22 @@ int sc_rt_thread_create(void **out, void *(*entry)(void *), void *arg) {
 
 int sc_rt_thread_join(void *handle) {
   if (!handle) return -1;
-  WaitForSingleObject((HANDLE)handle, INFINITE);
+  if (sc_rt_fail_hit(SC_RT_FAIL_THREAD_JOIN)) return -1;
+  if (WaitForSingleObject((HANDLE)handle, INFINITE) != WAIT_OBJECT_0) return -1;
   CloseHandle((HANDLE)handle);
   return 0;
+}
+
+int sc_rt_thread_detach(void *handle) {
+  if (!handle) return -1;
+  if (sc_rt_fail_hit(SC_RT_FAIL_THREAD_DETACH)) return -1;
+  return CloseHandle((HANDLE)handle) ? 0 : -1; /* the thread keeps running; the OS drops it at exit */
 }
 
 /* SRWLOCK + CONDITION_VARIABLE: the pair Windows pairs natively (SleepConditionVariableSRW), both
    allocation-free to initialise and with no destroy call to make. */
 void *sc_rt_mutex_new(void) {
-  SRWLOCK *m = (SRWLOCK *)malloc(sizeof *m);
+  SRWLOCK *m = (SRWLOCK *)sc_rt_alloc(sizeof *m, 0);
   if (m) InitializeSRWLock(m);
   return m;
 }
@@ -505,7 +543,7 @@ void sc_rt_mutex_lock(void *m) { AcquireSRWLockExclusive((SRWLOCK *)m); }
 void sc_rt_mutex_unlock(void *m) { ReleaseSRWLockExclusive((SRWLOCK *)m); }
 
 void *sc_rt_cond_new(void) {
-  CONDITION_VARIABLE *c = (CONDITION_VARIABLE *)malloc(sizeof *c);
+  CONDITION_VARIABLE *c = (CONDITION_VARIABLE *)sc_rt_alloc(sizeof *c, 0);
   if (c) InitializeConditionVariable(c);
   return c;
 }
@@ -649,7 +687,7 @@ static void sc_ctx_save_fpctl(void *slot) {
 #endif
 }
 
-void *sc_rt_ctx_alloc(void) { return calloc(1, sizeof(sc_rt_ctx_asm)); }
+void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(sizeof(sc_rt_ctx_asm), 1); }
 
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
   SYSTEM_INFO si;
@@ -695,7 +733,7 @@ static void CALLBACK sc_rt_fiber_entry(void *p) {
   c->entry(c->arg);
 }
 
-void *sc_rt_ctx_alloc(void) { return calloc(1, sizeof(sc_rt_ctx_win)); }
+void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(sizeof(sc_rt_ctx_win), 1); }
 
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
   sc_rt_ctx_win *c = (sc_rt_ctx_win *)ctx;
@@ -760,11 +798,14 @@ void sc_rt_unpark_one(int32_t *word) { (void)word; }
 void sc_rt_unpark_all(int32_t *word) { (void)word; }
 
 void *sc_rt_stack_alloc(size_t size) { /* no guard page: wasm has no mprotect */
+  if (size == 0 || size % 65536 != 0) return 0;
+  if (sc_rt_fail_hit(SC_RT_FAIL_STACK_MAP) || sc_rt_fail_hit(SC_RT_FAIL_STACK_GUARD)) return 0;
   void *m = malloc(size);
   if (m) sc_rt_stack_note(size, 1);
   return m;
 }
 void sc_rt_stack_free(void *usable, size_t size) {
+  if (sc_rt_fail_hit(SC_RT_FAIL_STACK_RELEASE)) sc_rt_die("cannot release a task stack");
   sc_rt_stack_note(size, 0);
   free(usable);
 }
@@ -785,10 +826,14 @@ int sc_rt_thread_join(void *handle) {
   (void)handle;
   return -1;
 }
+int sc_rt_thread_detach(void *handle) {
+  (void)handle;
+  return -1;
+}
 
 /* A lock is never contended with one thread. The flag is kept so locking twice still traps rather than
    quietly succeeding, which is the bug that flag would otherwise hide. */
-void *sc_rt_mutex_new(void) { return calloc(1, sizeof(int32_t)); }
+void *sc_rt_mutex_new(void) { return sc_rt_alloc(sizeof(int32_t), 1); }
 void sc_rt_mutex_free(void *m) { free(m); }
 void sc_rt_mutex_lock(void *m) {
   int32_t *held = (int32_t *)m;
@@ -800,7 +845,7 @@ void sc_rt_mutex_lock(void *m) {
 }
 void sc_rt_mutex_unlock(void *m) { *(int32_t *)m = 0; }
 
-void *sc_rt_cond_new(void) { return calloc(1, 1); }
+void *sc_rt_cond_new(void) { return sc_rt_alloc(1, 1); }
 void sc_rt_cond_free(void *c) { free(c); }
 void sc_rt_cond_wait(void *c, void *m) {
   (void)c;
@@ -819,7 +864,7 @@ void sc_rt_cond_signal(void *c) { (void)c; }
 void sc_rt_cond_broadcast(void *c) { (void)c; }
 
 /* Stackful coroutines need a second stack to switch to, and wasm's call stack is not addressable. */
-void *sc_rt_ctx_alloc(void) { return calloc(1, 1); }
+void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(1, 1); }
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
   (void)ctx;
   (void)stack;
@@ -916,18 +961,26 @@ void sc_rt_unpark_one(int32_t *word) { sc_rt_wake(word, 0); }
 void sc_rt_unpark_all(int32_t *word) { sc_rt_wake(word, 1); }
 
 void *sc_rt_stack_alloc(size_t size) {
-  long pg = sysconf(_SC_PAGESIZE);
-  size_t total = size + (size_t)pg;
+  size_t pg = (size_t)sysconf(_SC_PAGESIZE);
+  if (size == 0 || size % pg != 0 || size > SIZE_MAX - pg) return 0; /* rejected before any mapping */
+  if (sc_rt_fail_hit(SC_RT_FAIL_STACK_MAP)) return 0;
+  size_t total = size + pg;
   void *m = mmap(0, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
   if (m == MAP_FAILED) return 0;
-  mprotect(m, (size_t)pg, PROT_NONE); /* guard page below the usable region */
+  /* The guard page below the usable region. A stack without one is not handed out: an overflow on it
+     would corrupt whatever the kernel mapped below instead of faulting. */
+  if (sc_rt_fail_hit(SC_RT_FAIL_STACK_GUARD) || mprotect(m, pg, PROT_NONE) != 0) {
+    if (munmap(m, total) != 0) sc_rt_die("cannot release a task stack");
+    return 0;
+  }
   sc_rt_stack_note(total, 1);
   return (char *)m + pg;
 }
 void sc_rt_stack_free(void *usable, size_t size) {
-  long pg = sysconf(_SC_PAGESIZE);
-  sc_rt_stack_note(size + (size_t)pg, 0);
-  munmap((char *)usable - pg, size + (size_t)pg);
+  size_t pg = (size_t)sysconf(_SC_PAGESIZE);
+  if (sc_rt_fail_hit(SC_RT_FAIL_STACK_RELEASE) || munmap((char *)usable - pg, size + pg) != 0)
+    sc_rt_die("cannot release a task stack");
+  sc_rt_stack_note(size + pg, 0);
 }
 
 /* ---- stack-overflow reporting ---------------------------------------------------------------------- */
@@ -1037,9 +1090,9 @@ void sc_rt_stack_guard_install(void) {
 /* Threads and their locks. The handle is a heap `pthread_t` rather than a cast: `pthread_t` is opaque and
    need not fit a pointer. Freed by the join that consumes it. */
 int sc_rt_thread_create(void **out, void *(*entry)(void *), void *arg) {
-  pthread_t *h = (pthread_t *)malloc(sizeof *h);
-  if (!h) return -1;
-  int rc = pthread_create(h, 0, entry, arg);
+  pthread_t *h = (pthread_t *)sc_rt_alloc(sizeof *h, 0);
+  if (!h) return ENOMEM;
+  int rc = sc_rt_fail_hit(SC_RT_FAIL_THREAD_CREATE) ? EAGAIN : pthread_create(h, 0, entry, arg);
   if (rc != 0) {
     free(h);
     return rc;
@@ -1048,16 +1101,25 @@ int sc_rt_thread_create(void **out, void *(*entry)(void *), void *arg) {
   return 0;
 }
 
+/* A failed join keeps the handle block: the thread may still be running, and the caller aborts. */
 int sc_rt_thread_join(void *handle) {
-  if (!handle) return -1;
+  if (!handle) return EINVAL;
+  if (sc_rt_fail_hit(SC_RT_FAIL_THREAD_JOIN)) return EINVAL;
   void *ret = 0;
   int rc = pthread_join(*(pthread_t *)handle, &ret);
-  free(handle);
+  if (rc == 0) free(handle);
+  return rc;
+}
+
+int sc_rt_thread_detach(void *handle) {
+  if (!handle) return EINVAL;
+  int rc = sc_rt_fail_hit(SC_RT_FAIL_THREAD_DETACH) ? EINVAL : pthread_detach(*(pthread_t *)handle);
+  free(handle); /* the pthread_t is consumed either way: a rejected detach names no joinable thread */
   return rc;
 }
 
 void *sc_rt_mutex_new(void) {
-  pthread_mutex_t *m = (pthread_mutex_t *)malloc(sizeof *m);
+  pthread_mutex_t *m = (pthread_mutex_t *)sc_rt_alloc(sizeof *m, 0);
   if (m) pthread_mutex_init(m, 0);
   return m;
 }
@@ -1072,7 +1134,7 @@ void sc_rt_mutex_lock(void *m) { pthread_mutex_lock((pthread_mutex_t *)m); }
 void sc_rt_mutex_unlock(void *m) { pthread_mutex_unlock((pthread_mutex_t *)m); }
 
 void *sc_rt_cond_new(void) {
-  pthread_cond_t *c = (pthread_cond_t *)malloc(sizeof *c);
+  pthread_cond_t *c = (pthread_cond_t *)sc_rt_alloc(sizeof *c, 0);
   if (c) pthread_cond_init(c, 0);
   return c;
 }
@@ -1264,7 +1326,7 @@ static void sc_ctx_save_fpctl(void *slot) {
 #endif
 }
 
-void *sc_rt_ctx_alloc(void) { return calloc(1, sizeof(sc_rt_ctx_asm)); }
+void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(sizeof(sc_rt_ctx_asm), 1); }
 
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
 #ifdef SC_TSAN
@@ -1352,7 +1414,7 @@ static void sc_rt_uc_tramp(unsigned hi, unsigned lo) {
   c->entry(c->arg);
 }
 
-void *sc_rt_ctx_alloc(void) { return calloc(1, sizeof(sc_rt_ctx_posix)); }
+void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(sizeof(sc_rt_ctx_posix), 1); }
 
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
   sc_rt_ctx_posix *c = (sc_rt_ctx_posix *)ctx;

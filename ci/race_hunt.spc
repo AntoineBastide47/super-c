@@ -354,8 +354,15 @@ fn hunt_mixed_threads() i64 {
             ),
         );
     }
-    for i in 0..hs.len() {
-        let _ = hs[i].join();
+    loop {
+        switch hs.pop() {
+            Some(h) => {
+                let _ = h.join();
+            },
+            _ => {
+                break;
+            },
+        };
     }
     wg.wait();
     let g = m.get().lock();

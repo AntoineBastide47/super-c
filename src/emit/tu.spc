@@ -490,7 +490,9 @@ extend TuEmit {
             if fty == TYPE_NONE {
                 return false;
             }
-            if self.mg.is_zst(it.m, fty) {
+            // A void-typed member (a generic instantiated at `void`) has no storage either: every read
+            // and write of it is erased, so its definition is too.
+            if self.mg.is_zst(it.m, fty) || (self.mg.zclass(it.m, fty) & 4) != 0 {
                 keep.push(0);
                 if !packed && !zalign_hi {
                     let mut rm9 = it.m;

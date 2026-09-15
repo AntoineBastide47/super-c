@@ -105,11 +105,20 @@ fn pool_main(arg: *mut void) *mut void {
 }
 
 fn build_pool() *mut Pool {
+    let lock = unsafe sc_runtime::sc_rt_mutex_new();
+    if lock == null {
+        panic("blocking pool: cannot allocate its lock");
+    }
+    let cv = unsafe sc_runtime::sc_rt_cond_new();
+    if cv == null {
+        unsafe sc_runtime::sc_rt_mutex_free(lock);
+        panic("blocking pool: cannot allocate its condition variable");
+    }
     let mut g = Global {};
     let p = (unsafe g.alloc(sizeof(Pool), alignof(Pool))) as *mut Pool;
     unsafe p[0] = Pool {
-        lock: unsafe sc_runtime::sc_rt_mutex_new(),
-        cv: unsafe sc_runtime::sc_rt_cond_new(),
+        lock: lock,
+        cv: cv,
         head: null,
         tail: null,
         idle: 0,
@@ -177,9 +186,23 @@ pub fn submit(run: fn(*mut void) void, env: *mut void) {
     unsafe sc_runtime::sc_rt_mutex_unlock(p.lock);
     if need {
         let mut h: *mut void = null;
-        let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, pool_main, p);
+        let rc = unsafe sc_runtime::sc_rt_thread_create(&mut h, pool_main, p);
         unsafe sc_runtime::sc_rt_mutex_lock(p.lock);
-        unsafe p.threads.push(h);
+        if rc == 0 {
+            unsafe p.threads.push(h);
+        } else {
+            // The thread was counted before it existed: uncount it. With no other thread the queued job
+            // could never run and its caller would park forever, so that is fatal; otherwise a live
+            // thread takes the job when it frees up, and the failure is reported, not hidden.
+            unsafe p.live = unsafe p.live - 1;
+            let none = unsafe p.live == 0;
+            unsafe sc_runtime::sc_rt_mutex_unlock(p.lock);
+            if none {
+                panic("blocking pool: cannot create a thread and none is running");
+            }
+            eprintln("super-c: blocking pool: thread creation failed with code {}; the job waits for a live thread", rc);
+            return;
+        }
         unsafe sc_runtime::sc_rt_mutex_unlock(p.lock);
     }
 }
@@ -442,7 +465,9 @@ pub fn shutdown() {
     let n = unsafe p.threads.len();
     for i in 0..n {
         let h = unsafe p.threads[i];
-        let _ = unsafe sc_runtime::sc_rt_thread_join(h);
+        if unsafe sc_runtime::sc_rt_thread_join(h) != 0 {
+            panic("blocking pool: cannot join a pool thread at shutdown");
+        }
     }
     unsafe p.threads.free();
     unsafe sc_runtime::sc_rt_mutex_free(p.lock);

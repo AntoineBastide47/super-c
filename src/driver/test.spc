@@ -176,6 +176,31 @@ fn test_param_bit(p: &mut loader::Package, m: ModuleId, pnode: NodeId, fx: DefId
     return 0;
 }
 
+// Whether `fnode` still exists for this target: `platform_filter` drops `@platform`/`@arch`-gated items from
+// the module's item list but leaves their attributes in the table, so a gated test (or one whose extend is
+// gated) would otherwise reach the plan and the runner would call a function the emitter never wrote.
+fn test_item_present(p: &loader::Package, am: ModuleId, fnode: NodeId) bool {
+    let a = p.module_ast_const(am);
+    let items = unsafe a.at_const(a.root).as_data.program.items;
+    let ids = a.list(items);
+    for i in 0..items.len {
+        let iid = unsafe ids[i as usize];
+        if iid == fnode {
+            return true;
+        }
+        if a.at_const(iid).kind == NodeKind::NODE_EXTEND {
+            let ed = a.at_const(iid).as_data.extend_def;
+            let mids = a.list(ed.items);
+            for j in 0..ed.items.len {
+                if unsafe mids[j as usize] == fnode {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 // The inherent, non-generic extend whose items contain `fnode`, or NODE_NONE. `*bad` is set when it IS a
 // method but of a conformance/generic extend (not suite-able).
 fn test_owner_extend(p: &loader::Package, am: ModuleId, fnode: NodeId, bad: &mut bool) NodeId {
@@ -212,6 +237,9 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
             let at = unsafe p.module_ast_const(m as ModuleId).attrs[ai];
             if at.kind != AttrKind::ATTR_TEST_INIT as u8 && at.kind != AttrKind::ATTR_TEST_FREE as u8 {
                 continue;
+            }
+            if !test_item_present(p, m as ModuleId, at.owner) {
+                continue; // gated out for this target
             }
             let sp = p.module_ast_const(m as ModuleId).at_const(at.owner).span;
             let mut bad_ext = false;
@@ -359,7 +387,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
         let nattr = unsafe p.module_ast_const(m as ModuleId).attrs.len();
         for ai in 0..nattr {
             let at = unsafe p.module_ast_const(m as ModuleId).attrs[ai];
-            if at.kind != AttrKind::ATTR_TEST_FREE as u8 {
+            if at.kind != AttrKind::ATTR_TEST_FREE as u8 || !test_item_present(p, m as ModuleId, at.owner) {
                 continue;
             }
             let mut be = false;
@@ -458,7 +486,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
         let nattr = unsafe p.module_ast_const(m as ModuleId).attrs.len();
         for ai in 0..nattr {
             let at = unsafe p.module_ast_const(m as ModuleId).attrs[ai];
-            if at.kind != AttrKind::ATTR_TEST as u8 {
+            if at.kind != AttrKind::ATTR_TEST as u8 || !test_item_present(p, m as ModuleId, at.owner) {
                 continue;
             }
             let sp = p.module_ast_const(m as ModuleId).at_const(at.owner).span;

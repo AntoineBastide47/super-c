@@ -8801,12 +8801,14 @@ extend CEmit {
         }
         if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
             // A reference to a zero-sized value binds to the aligned sentinel, EXCEPT `&*p`,
-            // which stays the pointer itself (cheaper, and keeps whatever provenance p carried).
+            // which stays the pointer itself (cheaper, and keeps whatever provenance p carried). A
+            // void-typed place (a generic member instantiated at `void`) has no C member or variable
+            // at all, so its address is the sentinel too.
             {
                 let pty9 = b.places.at(rv.a as usize).ty;
                 let rpl9 = *b.places.at(rv.a as usize);
                 let cancels9 = rpl9.proj_len != 0 && b.projections.at((rpl9.proj_start + rpl9.proj_len - 1) as usize).kind == ir::PJ_DEREF;
-                if !cancels9 && pty9 != TYPE_NONE && !self.is_unit(b, pty9) && self.erased(b, pty9) {
+                if !cancels9 && pty9 != TYPE_NONE && self.erased(b, pty9) {
                     let mut rm9 = b.module;
                     let mut rt9 = pty9;
                     self.rty(b, pty9, &mut rm9, &mut rt9);

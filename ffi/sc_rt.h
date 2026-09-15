@@ -63,8 +63,12 @@ void sc_rt_sleep_ns(int64_t ns);
 
 /* A guard-paged stack: an inaccessible page sits just below the returned usable low end, so an overflow
    faults instead of corrupting memory. Returns the usable low end (the stack grows down from low+size), or
-   NULL on failure. Free with the same `size`. Committed on every platform -- coroutines run on this memory
-   -- but pages are only faulted in as the stack is used, so a task that never goes deep never pays. */
+   NULL on failure: a `size` that is zero, not a whole number of pages or too large to add a guard page to
+   is rejected before anything is mapped, and a mapping whose guard cannot be installed is unmapped again,
+   so a returned stack is always guarded. Free with the same `size`; a release the OS refuses is fatal
+   (the runtime cannot account for a mapping it no longer owns). Committed on every platform -- coroutines
+   run on this memory -- but pages are only faulted in as the stack is used, so a task that never goes deep
+   never pays. */
 void *sc_rt_stack_alloc(size_t size);
 void sc_rt_stack_free(void *usable, size_t size);
 /* Bytes currently mapped for task stacks, guard pages included: what `sc_rt_stack_alloc` handed out and
@@ -92,6 +96,23 @@ void sc_rt_stack_note_size(size_t bytes);
    recursive and must be released by the thread that took it. */
 int sc_rt_thread_create(void **out, void *(*entry)(void *), void *arg);
 int sc_rt_thread_join(void *handle);
+/* Give up the right to join: the thread runs on and the OS releases it when it exits; the handle is
+   consumed either way. 0 on success; nonzero means the handle did not name a joinable thread, which is
+   a programmer error the caller must treat as fatal. */
+int sc_rt_thread_detach(void *handle);
+
+/* Failure injection for the substrate's tests: the `nth` call (1-based) of the operation `kind` names
+   fails the way the OS would (a null handle, a nonzero code), then the hook disarms itself; `nth` 0
+   disarms. One relaxed load on each operation's slow path, nothing on any switch or park path. */
+#define SC_RT_FAIL_NONE 0
+#define SC_RT_FAIL_THREAD_CREATE 1
+#define SC_RT_FAIL_THREAD_JOIN 2
+#define SC_RT_FAIL_THREAD_DETACH 3
+#define SC_RT_FAIL_STACK_MAP 4
+#define SC_RT_FAIL_STACK_GUARD 5
+#define SC_RT_FAIL_ALLOC 6 /* the substrate's own allocations: thread handles, locks, condvars, contexts */
+#define SC_RT_FAIL_STACK_RELEASE 7
+void sc_rt_fail_arm(int kind, unsigned nth);
 
 void *sc_rt_mutex_new(void);
 void sc_rt_mutex_free(void *m);

@@ -90,12 +90,23 @@ fn reactor_main(arg: *mut void) *mut void {
 }
 
 fn build_reactor() *mut Reactor {
+    let poller = unsafe sc_io::sc_io_new();
+    if poller == null {
+        panic("reactor: cannot create the I/O poller");
+    }
     let mut g = Global {};
     let r = (unsafe g.alloc(sizeof(Reactor), alignof(Reactor))) as *mut Reactor;
-    unsafe r.poller = unsafe sc_io::sc_io_new();
+    unsafe r.poller = poller;
     unsafe r.running = 1;
+    unsafe r.thread = null;
     let mut h: *mut void = null;
-    let _ = unsafe sc_runtime::sc_rt_thread_create(&mut h, reactor_main, r);
+    if unsafe sc_runtime::sc_rt_thread_create(&mut h, reactor_main, r) != 0 {
+        // Nothing has seen `r`: release the poller and the record, then stop (a reactor that never
+        // polls would park every I/O task forever).
+        unsafe sc_io::sc_io_free(poller);
+        unsafe g.dealloc(r, sizeof(Reactor), alignof(Reactor));
+        panic("reactor: cannot create the poller thread");
+    }
     unsafe r.thread = h;
     return r;
 }
@@ -262,7 +273,9 @@ pub fn shutdown() {
     let r = unsafe G_REACTOR;
     atomic::store_i32(&mut unsafe r.running, 0, 2);
     unsafe sc_io::sc_io_wake(r.poller);
-    let _ = unsafe sc_runtime::sc_rt_thread_join(r.thread);
+    if unsafe sc_runtime::sc_rt_thread_join(r.thread) != 0 {
+        panic("reactor: cannot join the poller thread at shutdown");
+    }
     unsafe sc_io::sc_io_free(r.poller);
     let mut g = Global {};
     unsafe g.dealloc(r, sizeof(Reactor), alignof(Reactor));
