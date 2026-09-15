@@ -374,12 +374,15 @@ extend TuEmit {
                     Some(v) => *v,
                     None => 0u64,
                 };
+                // Every embedder gets the edge to the env's module, the defining visit and the
+                // later ones alike: an instance owned elsewhere that embeds this env by value
+                // includes the closure module's type header through it.
+                self.dep_note(y.module);
                 if st != 0 {
                     return st != 1;
                 }
                 self.state.insert(key, 1);
                 self.env_defined.push(key);
-                self.dep_note(y.module);
                 let saved = self.cur_own;
                 let d0 = self.cur_deps.len();
                 self.cur_own = y.module;

@@ -103,6 +103,8 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_stack_alloc(size: usize) *mut void;
     /// Release a coroutine stack from sc_rt_stack_alloc (`usable` and `size` as returned).
     pub fn sc_rt_stack_free(usable: *mut void, size: usize) void;
+    /// Bytes currently mapped for task stacks, guard pages included.
+    pub fn sc_rt_stack_bytes() usize;
     /// Arm this thread to report a stack overflow instead of dying on a bare fault; `note_size` supplies
     /// the size the message quotes. No-ops on Windows.
     pub fn sc_rt_stack_guard_install() void;

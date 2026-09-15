@@ -20,7 +20,8 @@ import sc_runtime;
 import std::parallel::sync as sync;
 import std::parallel::runtime as runtime;
 
-const MAX_THREADS: usize = 64; // enough concurrent blocking calls for real programs, bounded for safety
+/// The most threads the blocking pool starts: the effective concurrency limit of `call`.
+pub const MAX_THREADS: usize = 64; // enough concurrent blocking calls for real programs, bounded for safety
 const IDLE_NS: i64 = 10000000000; // a thread with nothing to do for ten seconds goes away again
 
 // One submitted piece of work: a type-erased trampoline plus its heap payload.

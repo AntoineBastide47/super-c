@@ -21,6 +21,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ---- stack accounting (see sc_rt.h) --------------------------------------------------------------------
+   One relaxed add per stack map or unmap, next to a syscall that costs microseconds; read by whoever asks. */
+static size_t sc_rt_stk_bytes = 0;
+size_t sc_rt_stack_bytes(void) { return __atomic_load_n(&sc_rt_stk_bytes, __ATOMIC_RELAXED); }
+static void sc_rt_stack_note(size_t bytes, int mapped) {
+  if (mapped)
+    __atomic_fetch_add(&sc_rt_stk_bytes, bytes, __ATOMIC_RELAXED);
+  else
+    __atomic_fetch_sub(&sc_rt_stk_bytes, bytes, __ATOMIC_RELAXED);
+}
+
 /* ---- ThreadSanitizer fibers -------------------------------------------------------------------------
    TSan models happens-before per THREAD, and a stackful coroutine breaks that model: it parks on one worker
    and resumes on another, so every stack slot it touches looks like two threads racing on the same address.
@@ -337,12 +348,13 @@ void *sc_rt_stack_alloc(size_t size) {
     return 0;
   }
 #endif
+  sc_rt_stack_note(size + pg, 1);
   return m + pg;
 }
 void sc_rt_stack_free(void *usable, size_t size) {
   SYSTEM_INFO si;
   GetSystemInfo(&si);
-  (void)size;
+  sc_rt_stack_note(size + si.dwPageSize, 0);
   VirtualFree((char *)usable - si.dwPageSize, 0, MEM_RELEASE);
 }
 
@@ -747,9 +759,13 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
 void sc_rt_unpark_one(int32_t *word) { (void)word; }
 void sc_rt_unpark_all(int32_t *word) { (void)word; }
 
-void *sc_rt_stack_alloc(size_t size) { return malloc(size); } /* no guard page: wasm has no mprotect */
+void *sc_rt_stack_alloc(size_t size) { /* no guard page: wasm has no mprotect */
+  void *m = malloc(size);
+  if (m) sc_rt_stack_note(size, 1);
+  return m;
+}
 void sc_rt_stack_free(void *usable, size_t size) {
-  (void)size;
+  sc_rt_stack_note(size, 0);
   free(usable);
 }
 void sc_rt_stack_guard_install(void) {}
@@ -832,7 +848,13 @@ void sc_rt_ctx_free(void *ctx) { free(ctx); }
 
 uint64_t sc_rt_now_ns(void) {
   struct timespec ts;
+#if defined(__APPLE__)
+  /* CLOCK_MONOTONIC on Darwin ticks in microseconds; the raw clock keeps the nanoseconds a spawn
+     latency is measured in. */
+  clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
   clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
@@ -899,10 +921,12 @@ void *sc_rt_stack_alloc(size_t size) {
   void *m = mmap(0, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
   if (m == MAP_FAILED) return 0;
   mprotect(m, (size_t)pg, PROT_NONE); /* guard page below the usable region */
+  sc_rt_stack_note(total, 1);
   return (char *)m + pg;
 }
 void sc_rt_stack_free(void *usable, size_t size) {
   long pg = sysconf(_SC_PAGESIZE);
+  sc_rt_stack_note(size + (size_t)pg, 0);
   munmap((char *)usable - pg, size + (size_t)pg);
 }
 

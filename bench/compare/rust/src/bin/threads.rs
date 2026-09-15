@@ -1,29 +1,55 @@
-// One OS thread per task: no runtime in the middle, the kernel scheduler does all of it.
-use std::io::{Read, Write};
+// One OS thread per task: no runtime in the middle, the kernel scheduler does all of it. A counting
+// semaphore holds the effective concurrency of the blocking unit to LIMIT, as every lane does.
+#[path = "../common.rs"]
+mod common;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-fn unit(id: usize) {
-    let p = format!("/tmp/sc-compare/f{}", id);
-    if let Ok(mut f) = std::fs::File::create(&p) {
-        let _ = f.write_all(&[0u8; 4096]);
-        let _ = f.sync_all(); // F_FULLFSYNC on macOS: the real device barrier, as Go's Sync does
-    }
+struct Sem {
+    free: Mutex<usize>,
+    cv: Condvar,
 }
 
-fn env(name: &str, def: usize) -> usize {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
+impl Sem {
+    fn acquire(&self) {
+        let mut g = self.free.lock().unwrap();
+        while *g == 0 {
+            g = self.cv.wait(g).unwrap();
+        }
+        *g -= 1;
+    }
+    fn release(&self) {
+        *self.free.lock().unwrap() += 1;
+        self.cv.notify_one();
+    }
 }
 
 fn main() {
-    let (iters, tasks) = (env("ITERS", 5), env("TASKS", 1000));
-    let start = Instant::now();
+    let (iters, tasks, limit) = (common::env("ITERS", 5), common::env("TASKS", 1000), common::env("LIMIT", 64));
+    let dir = Arc::new(common::dir());
+    let sem = Arc::new(Sem { free: Mutex::new(limit), cv: Condvar::new() });
+    let ok = Arc::new(AtomicU64::new(0));
+    let mut samples = Vec::with_capacity(iters);
     for _ in 0..iters {
-        let hs: Vec<_> = (0..tasks).map(|i| std::thread::spawn(move || unit(i))).collect();
+        let t0 = Instant::now();
+        let hs: Vec<_> = (0..tasks)
+            .map(|i| {
+                let (dir, sem, ok) = (dir.clone(), sem.clone(), ok.clone());
+                std::thread::spawn(move || {
+                    sem.acquire();
+                    let r = common::unit(&dir, i);
+                    sem.release();
+                    if r {
+                        ok.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
         for h in hs {
             let _ = h.join();
         }
+        samples.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
-    let el = start.elapsed();
-    println!("{:.1} {:.0}", el.as_secs_f64() * 1000.0 / iters as f64,
-             el.as_nanos() as f64 / (iters * tasks) as f64);
+    common::report(&samples, tasks, ok.load(Ordering::Relaxed), (iters * tasks) as u64, limit);
 }

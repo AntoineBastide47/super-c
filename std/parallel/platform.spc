@@ -15,3 +15,10 @@ pub fn ncpu() usize {
 pub fn now_ns() u64 {
     return unsafe sc_runtime::sc_rt_now_ns();
 }
+
+/// Bytes currently mapped for coroutine stacks, guard pages included: every stack a live or pooled task
+/// block holds. Mapped, not resident: a page counts here from the map and in the resident set only once
+/// the task has touched it, which is why neither the allocator counters nor RSS can report this.
+pub fn stack_bytes() usize {
+    return unsafe sc_runtime::sc_rt_stack_bytes();
+}

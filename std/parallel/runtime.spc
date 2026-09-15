@@ -2213,6 +2213,26 @@ pub fn live_tasks() usize {
     return spawned_tasks() - completed_tasks();
 }
 
+/// Bytes the shared task-block pool retains for reuse: recycled blocks (a `Coroutine` and its stack) that
+/// no task holds. The per-worker stashes are owner-only and not counted; they hold at most `STASH_MAX`
+/// blocks per worker. Zero when the pool is not running. What `platform::stack_bytes` maps and this
+/// figure differ by the guard page of every block and the stacks of live tasks.
+pub fn pool_retained_bytes() usize {
+    if atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 1) != 2 {
+        return 0;
+    }
+    let n = atomic::load_i32(&mut unsafe G_SCHED.free_len, 1);
+    if n <= 0 {
+        return 0;
+    }
+    return n as usize * (unsafe G_STACK_SIZE + sizeof(Coroutine));
+}
+
+/// The upper bound on blocks the per-worker stashes may hold outside `pool_retained_bytes`.
+pub fn stash_capacity() usize {
+    return worker_count() * STASH_MAX as usize;
+}
+
 /// Set the per-coroutine stack size, in bytes, before the pool starts (a later call is ignored, like
 /// `set_worker_count`). The stack is RESERVED, not consumed (pages arrive as the task uses them) so this
 /// buys depth for deeply recursive tasks rather than costing memory for shallow ones. Rounded up to 64 KiB;

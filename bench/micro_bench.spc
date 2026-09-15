@@ -1,30 +1,34 @@
-// M7's micro-benchmarks: one primitive per lane, one number each. These are the numbers a regression shows
+// Micro-benchmarks: one primitive per lane, one distribution each. These are the numbers a regression shows
 // up in first: a macro benchmark tells you something got slower, a micro benchmark tells you what.
 //
 // Every lane reports per-operation cost via `b.each(N)`, so the figure is comparable across runs whatever
-// the round size. Where a lane needs more than one task it uses a WaitGroup rather than sleeping, so the
-// measurement is the primitive and not a timer.
+// the round size, and every lane whose work can be counted VALIDATES it (`b.tally`): a channel lane that
+// silently delivered nothing would otherwise report a wonderful number for doing no work, which is the one
+// way a benchmark can lie outright. Where a lane needs more than one task it uses a WaitGroup rather than
+// sleeping, so the measurement is the primitive and not a timer.
 //
-// Two lanes the milestone asks for are NOT here, and deliberately:
-//
-//   * steals per task / idle-worker latency. The scheduler keeps no steal counter, and adding one means an
-//     atomic increment on the steal path: paying for the metric in the thing being measured. It wants a
-//     counter compiled in only under a flag, which is its own change.
-//   * the data-parallel SCALING CURVE (speedup at 1/2/4/8/N workers). Worker count is fixed before the pool
-//     starts and the pool is per process, so a curve needs one process per point; `parallel_range` below
-//     measures the dispatch cost at the configured count only.
+// One lane the runtime cannot yet report is NOT here, and deliberately: steals per task and idle-worker
+// latency. The scheduler keeps no steal counter, and adding one means an atomic increment on the steal
+// path: paying for the metric in the thing being measured. It wants a counter compiled in only under a
+// flag, which is its own change.
 //
 // Task counts here are FIXED rather than taken from `worker_count()`: a lane whose round size depends on the
 // machine cannot be compared between two machines, or against its own history on a different box.
 
+import atomic;
+import stdlib;
+import sc_runtime;
+import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::channel as chan;
 import std::parallel::data as data;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
+import std::parallel::platform as platform;
 import std::testing::bench as bench;
 
 const SPAWNS: i64 = 2000; // tasks per round for the spawn lanes
+const LATENCY_SPAWNS: i64 = 500; // one-at-a-time spawns per round for the latency lane
 const OPS: i64 = 20000; // operations per round for the uncontended lanes
 const MSGS: i64 = 5000; // messages per round for the channel lanes
 const HAMMER: i64 = 2000; // per-task operations in the contended lanes
@@ -33,16 +37,33 @@ const FANIN_TASKS: i64 = 8; // signallers in the fan-in lane
 const FANIN_EACH: i64 = 20000; // `done` calls each, so spawn cost is a rounding error next to them
 const DISPATCHES: i64 = 200; // `parallel::range` calls per round
 const SPAN: usize = 256; // iterations per dispatch: small, so what is measured is the dispatch
+const ALLOCS: i64 = 20000; // malloc/free pairs per round in the allocator lane
+const CLEANUP_WAIT_NS: u64 = 5000000000; // how long spawn_to_completion waits for the runtime to retire its tasks
 
 // --- spawn ------------------------------------------------------------------------------------------.
 
-/// What one `launch` costs end to end: the task is created, scheduled, run and accounted for. This is the
-/// number a fan-out is made of, so it bounds every other coroutine lane.
+// Wait until the runtime has RETIRED `n` more tasks than `base`: completed, their blocks recycled. Bounded;
+// false when the wait ran out, which is a runtime defect the lane must report.
+fn wait_retired(base: usize, n: usize) bool {
+    let deadline = platform::now_ns() + CLEANUP_WAIT_NS;
+    while rt::completed_tasks() - base < n {
+        if platform::now_ns() > deadline {
+            return false;
+        }
+        unsafe sc_runtime::sc_rt_cpu_relax();
+    }
+    return true;
+}
+
+/// What one `launch` costs end to end: the task is created, scheduled, run, and RETIRED by the runtime
+/// (its block recycled and its completion counted), which is later than the WaitGroup's `done` inside it.
+/// This is the number a fan-out is made of, so it bounds every other coroutine lane.
 @bench
 pub fn spawn_to_completion(b: &mut bench::Bencher) {
     b.each(SPAWNS);
     b.unit("task");
     while b.running() {
+        let base = rt::completed_tasks();
         let wg = sync::WaitGroup::new();
         wg.add(SPAWNS);
         for _i in 0..SPAWNS {
@@ -52,40 +73,73 @@ pub fn spawn_to_completion(b: &mut bench::Bencher) {
             };
         }
         wg.wait();
-    }
-}
-
-/// Spawn-to-FIRST-RUN, isolated from the run itself: the launcher waits for one task at a time, so what is
-/// measured is the latency from `launch` to the task's first instruction rather than throughput under a
-/// backlog. Slower per task than the lane above by design: there is no pipelining to hide it.
-@bench
-pub fn spawn_latency(b: &mut bench::Bencher) {
-    let rounds: i64 = 2000;
-    b.each(rounds);
-    b.unit("task");
-    while b.running() {
-        for _i in 0..rounds {
-            let wg = sync::WaitGroup::new();
-            wg.add(1);
-            let w = wg.clone();
-            launch || {
-                w.done();
-            };
-            wg.wait();
+        let retired = wait_retired(base, SPAWNS as usize);
+        b.tally(
+            SPAWNS,
+            if retired {
+                SPAWNS;
+            } else {
+                0i64;
+            },
+        );
+        if !retired {
+            bench::fail("spawn_to_completion: the runtime did not retire every task within the wait");
         }
     }
 }
 
+// The moment the latency lane's task first ran, published by the task and read by the launcher.
+static mut G_FIRST_RUN: u64 = 0;
+
+/// Spawn-to-FIRST-RUN latency: the launcher notes the clock, launches one task, and the task's first
+/// instruction notes the clock again; the difference is what the scheduler took to get it running, with no
+/// backlog to pipeline behind. The per-spawn distribution is the note; the round time is the loop.
+@bench
+pub fn spawn_latency(b: &mut bench::Bencher) {
+    b.each(LATENCY_SPAWNS);
+    b.unit("task");
+    let mut lat = Vector::<f64>::new();
+    while b.running() {
+        for _i in 0..LATENCY_SPAWNS {
+            let wg = sync::WaitGroup::new();
+            wg.add(1);
+            let w = wg.clone();
+            let t0 = platform::now_ns();
+            launch || {
+                atomic::store_u64(&mut unsafe G_FIRST_RUN, platform::now_ns(), 2);
+                w.done();
+            };
+            wg.wait();
+            let t1 = atomic::load_u64(&mut unsafe G_FIRST_RUN, 1);
+            lat.push((t1 - t0) as f64);
+        }
+        b.tally(LATENCY_SPAWNS, LATENCY_SPAWNS);
+    }
+    let sm = bench::summarize(&mut lat);
+    let mut note = String::from_str("first run after launch: median ");
+    note.push_f64_prec(sm.median, 0);
+    note.push_str(" ns, p95 ");
+    note.push_f64_prec(sm.p95, 0);
+    note.push_str(" ns, p99 ");
+    note.push_f64_prec(sm.p99, 0);
+    note.push_str(" ns (");
+    note.push_u64(sm.n as u64);
+    note.push_str(" spawns)");
+    b.note(note.as_str());
+}
+
 // --- park / unpark ----------------------------------------------------------------------------------.
 
-/// A park/unpark ROUND TRIP: two coroutines hand a value back and forth over a pair of channels, so each
-/// message parks one task and wakes the other. This is the context-switch cost as a program pays
-/// it: the raw register swap is a fraction of it; the rest is the scheduler.
+/// A park/unpark ROUND TRIP between two COROUTINES: both ends are launched tasks, so every message parks
+/// one task and wakes the other on the scheduler (the launcher only waits for both). This is the
+/// context-switch cost as a program pays it: the raw register swap is a fraction of it; the rest is
+/// the scheduler.
 @bench
 pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
     let trips: i64 = 2000;
     b.each(trips);
     b.unit("trip");
+    let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
     while b.running() {
         let there = chan::Channel::<i64>::bounded(1);
         let back = chan::Channel::<i64>::bounded(1);
@@ -94,12 +148,13 @@ pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
         let tx = there.sender(); // before the echo task starts: see the note in `channel_lane`
         let rx2 = back.receiver();
         let n = trips;
-        // Wait for the echo task before freeing the channels it holds. Without this the round returns while
-        // that task is still parked in `recv`, and freeing the channel under it leaves a live task pointing
-        // at released memory, which showed up not here but in whichever lane ran next.
+        // Wait for both tasks before freeing the channels they hold: a task still parked in `recv` when
+        // its channel is freed points at released memory.
         let wg = sync::WaitGroup::new();
-        wg.add(1);
-        let w = wg.clone();
+        wg.add(2);
+        let w1 = wg.clone();
+        let w2 = wg.clone();
+        let c = seen.clone();
         launch || {
             for _i in 0..n {
                 switch rx.recv() {
@@ -111,14 +166,29 @@ pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
                     },
                 };
             }
-            w.done();
+            w1.done();
         };
-        for i in 0..trips {
-            let _ = tx.send(i);
-            let _ = rx2.recv();
-        }
-        tx.close();
+        launch || {
+            let mut got: i64 = 0;
+            for i in 0..n {
+                let _ = tx.send(i);
+                switch rx2.recv() {
+                    Some(v) => {
+                        if v == i {
+                            got = got + 1;
+                        }
+                    },
+                    None => {
+                        break;
+                    },
+                };
+            }
+            tx.close();
+            c.get().store(got, atomics::MemoryOrder::Release);
+            w2.done();
+        };
         wg.wait();
+        b.tally(trips, seen.get().load(atomics::MemoryOrder::Acquire));
     }
 }
 
@@ -131,12 +201,23 @@ pub fn mutex_uncontended(b: &mut bench::Bencher) {
     b.each(OPS);
     b.unit("lock");
     let m = sync::Mutex::<i64>::new(0);
+    let mut expect: i64 = 0;
     while b.running() {
         for _i in 0..OPS {
             let mut g = m.lock();
             let v = g.get_mut();
             *v = *v + 1;
         }
+        expect = expect + OPS;
+        let g = m.lock();
+        b.tally(
+            OPS,
+            if *g.get() == expect {
+                OPS;
+            } else {
+                0i64;
+            },
+        );
     }
 }
 
@@ -147,7 +228,6 @@ pub fn mutex_contended(b: &mut bench::Bencher) {
     let total = LOCKERS * HAMMER;
     b.each(total);
     b.unit("lock");
-    b.set_rounds(50);
     while b.running() {
         let shared = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
         let wg = sync::WaitGroup::new();
@@ -165,6 +245,15 @@ pub fn mutex_contended(b: &mut bench::Bencher) {
             };
         }
         wg.wait();
+        let g = shared.get().lock();
+        b.tally(
+            total,
+            if *g.get() == total {
+                total;
+            } else {
+                0i64;
+            },
+        );
     }
 }
 
@@ -175,11 +264,8 @@ pub fn mutex_contended(b: &mut bench::Bencher) {
 fn channel_lane(b: &mut bench::Bencher, cap: usize) {
     b.each(MSGS);
     b.unit("msg");
-    // The consumer records how many it took. A channel lane that silently delivers nothing would
-    // otherwise report a wonderful number for doing no work, which is the one way a benchmark can lie
-    // outright, so the count is checked and a wrong one is said out loud rather than averaged in.
+    // The consumer records how many it took; the round is validated against it.
     let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
-    let mut short: i64 = 0;
     while b.running() {
         let ch = chan::Channel::<i64>::bounded(cap);
         let rx = ch.receiver();
@@ -204,26 +290,15 @@ fn channel_lane(b: &mut bench::Bencher, cap: usize) {
                     },
                 };
             }
-            let _ = c.get().fetch_add(got, atomics::MemoryOrder::Relaxed);
+            c.get().store(got, atomics::MemoryOrder::Release);
             w.done();
         };
-        let mut sent: i64 = 0;
         for i in 0..MSGS {
-            switch tx.send(i) {
-                Sent => {
-                    sent = sent + 1;
-                },
-                _ => {},
-            };
+            let _ = tx.send(i);
         }
         tx.close();
         wg.wait();
-        if sent != MSGS {
-            short = short + 1;
-        }
-    }
-    if short != 0 {
-        b.note("SHORT: some rounds failed to send every message");
+        b.tally(MSGS, seen.get().load(atomics::MemoryOrder::Acquire));
     }
 }
 
@@ -273,7 +348,7 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
                 n = n + k as i64;
                 got.clear();
             }
-            let _ = c.get().fetch_add(n, atomics::MemoryOrder::Relaxed);
+            c.get().store(n, atomics::MemoryOrder::Release);
             w.done();
         };
         let mut out = Vector::<i64>::new();
@@ -294,6 +369,7 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
         }
         tx.close();
         wg.wait();
+        b.tally(MSGS, seen.get().load(atomics::MemoryOrder::Acquire));
     }
 }
 
@@ -310,7 +386,6 @@ pub fn waitgroup_fanin(b: &mut bench::Bencher) {
     let total = FANIN_TASKS * FANIN_EACH;
     b.each(total);
     b.unit("done");
-    b.set_rounds(50);
     while b.running() {
         let wg = sync::WaitGroup::new();
         wg.add(total);
@@ -323,25 +398,26 @@ pub fn waitgroup_fanin(b: &mut bench::Bencher) {
             };
         }
         wg.wait();
+        b.tally(total, total);
     }
 }
 
 // --- data-parallel ----------------------------------------------------------------------------------.
 
-/// What one `parallel::range` CALL costs, which is almost entirely fixed: measured at 182us per dispatch
-/// over a 256-iteration span and 217us over an 8192-iteration one, so thirty-two times the work adds under
-/// a fifth. Reporting it per iteration instead (a large span, amortised) hid that behind a 1.5ns figure and
-/// said nothing useful. The number to take from this: `parallel::range` is worth reaching for only when the
-/// serial loop it replaces would cost well over 180us.
+/// What one `parallel::range` CALL costs, which is almost entirely fixed: measured earlier at 182us per
+/// dispatch over a 256-iteration span and 217us over an 8192-iteration one, so thirty-two times the work
+/// added under a fifth. Reporting it per iteration instead (a large span, amortised) hid that behind a
+/// 1.5ns figure and said nothing useful. The number to take from this: `parallel::range` is worth reaching
+/// for only when the serial loop it replaces would cost well over the dispatch.
 @bench
 pub fn parallel_range(b: &mut bench::Bencher) {
     b.each(DISPATCHES);
     b.unit("dispatch");
-    b.set_rounds(50);
     // A SCOPED parallel call returns only once every chunk is done, so it may borrow this frame: no Arc.
     let hits = atomics::Atomic::<i64>::new(0);
     let hp = &hits;
     while b.running() {
+        let h0 = hits.load(atomics::MemoryOrder::Acquire);
         for _d in 0..DISPATCHES {
             data::range(
                 0..SPAN,
@@ -353,5 +429,29 @@ pub fn parallel_range(b: &mut bench::Bencher) {
                 },
             );
         }
+        b.tally(DISPATCHES, hits.load(atomics::MemoryOrder::Acquire) - h0);
+    }
+}
+
+// --- the allocator ----------------------------------------------------------------------------------.
+
+/// `malloc` plus `free` of a small block, back to back: the allocator's fast path, and the lane whose
+/// diagnostic rounds price the allocation accounting itself. The throughput rounds run with accounting
+/// off and the diagnostic rounds with it on; the difference between the two medians is the cost of the
+/// per-thread counters, which is what every other lane's diagnostic figure paid.
+@bench
+pub fn malloc_free(b: &mut bench::Bencher) {
+    b.each(ALLOCS);
+    b.unit("pair");
+    while b.running() {
+        let mut ok: i64 = 0;
+        for _i in 0..ALLOCS {
+            let p = unsafe stdlib::malloc(32);
+            if p != null {
+                ok = ok + 1;
+            }
+            unsafe stdlib::free(p);
+        }
+        b.tally(ALLOCS, ok);
     }
 }

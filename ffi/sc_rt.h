@@ -67,6 +67,10 @@ void sc_rt_sleep_ns(int64_t ns);
    -- but pages are only faulted in as the stack is used, so a task that never goes deep never pays. */
 void *sc_rt_stack_alloc(size_t size);
 void sc_rt_stack_free(void *usable, size_t size);
+/* Bytes currently mapped for task stacks, guard pages included: what `sc_rt_stack_alloc` handed out and
+   `sc_rt_stack_free` has not taken back. Stacks are mmap'd, so neither the allocator counters nor the
+   resident set (untouched pages) show them; this is the one place that does. */
+size_t sc_rt_stack_bytes(void);
 
 /* Turn a coroutine stack overflow into a message instead of a bare SIGSEGV/SIGBUS. `install` arms the
    calling thread: a signal stack of its own (the faulting stack is by definition exhausted, so the handler

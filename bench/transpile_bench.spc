@@ -24,7 +24,7 @@ import driver::test as dtest;
 import build_system::build as bsys;
 import build_system::manifest as mf;
 import ast::ast as *;
-import bench::bench_shim as shim;
+import std::testing::bench_sys as sys;
 import std::testing::bench as bench;
 import driver_shim as dshim;
 import stdio;
@@ -190,14 +190,14 @@ fn transpile_once() Timing {
     };
 
     let a0 = time::cpu_seconds();
-    let c0 = unsafe shim::sc_cpu_cycles();
-    let h0 = unsafe shim::sc_alloc_count();
-    let y0 = unsafe shim::sc_alloc_bytes();
+    let c0 = unsafe sys::sc_bs_cycles();
+    let h0 = unsafe sys::sc_bs_alloc_calls();
+    let y0 = unsafe sys::sc_bs_alloc_bytes();
     let mut p = loader::package_load(ROOT, STD_DIR, false, unsafe dshim::sc_host_platform());
     let a1 = time::cpu_seconds();
-    let c1 = unsafe shim::sc_cpu_cycles();
-    let h1 = unsafe shim::sc_alloc_count();
-    let y1 = unsafe shim::sc_alloc_bytes();
+    let c1 = unsafe sys::sc_bs_cycles();
+    let h1 = unsafe sys::sc_bs_alloc_calls();
+    let y1 = unsafe sys::sc_bs_alloc_bytes();
 
     let n = p.modules.len();
     r.modules = n;
@@ -224,9 +224,9 @@ fn transpile_once() Timing {
         i = i + 1;
     }
     let a2 = time::cpu_seconds();
-    let c2 = unsafe shim::sc_cpu_cycles();
-    let h2 = unsafe shim::sc_alloc_count();
-    let y2 = unsafe shim::sc_alloc_bytes();
+    let c2 = unsafe sys::sc_bs_cycles();
+    let h2 = unsafe sys::sc_bs_alloc_calls();
+    let y2 = unsafe sys::sc_bs_alloc_bytes();
 
     i = 0;
     while i < n {
@@ -236,16 +236,16 @@ fn transpile_once() Timing {
     cirv.all_typed = true;
     cirv.record_folds = true;
     let a3 = time::cpu_seconds();
-    let c3 = unsafe shim::sc_cpu_cycles();
-    let h3 = unsafe shim::sc_alloc_count();
-    let y3 = unsafe shim::sc_alloc_bytes();
+    let c3 = unsafe sys::sc_bs_cycles();
+    let h3 = unsafe sys::sc_bs_alloc_calls();
+    let y3 = unsafe sys::sc_bs_alloc_bytes();
 
     let mut irkeep = irl::Keep::new();
     let _ = demit::borrowck_all(&mut p, &mut irkeep); // the real stage, so the lane measures what ships
     let a3b = time::cpu_seconds();
-    let c3b = unsafe shim::sc_cpu_cycles();
-    let h3b = unsafe shim::sc_alloc_count();
-    let y3b = unsafe shim::sc_alloc_bytes();
+    let c3b = unsafe sys::sc_bs_cycles();
+    let h3b = unsafe sys::sc_bs_alloc_calls();
+    let y3b = unsafe sys::sc_bs_alloc_bytes();
 
     let f = sink_open();
     {
@@ -278,17 +278,17 @@ fn transpile_once() Timing {
     }
     r.out_bytes = sink_close(f);
     let a4 = time::cpu_seconds();
-    let c4 = unsafe shim::sc_cpu_cycles();
-    let h4 = unsafe shim::sc_alloc_count();
-    let y4 = unsafe shim::sc_alloc_bytes();
+    let c4 = unsafe sys::sc_bs_cycles();
+    let h4 = unsafe sys::sc_bs_alloc_calls();
+    let y4 = unsafe sys::sc_bs_alloc_bytes();
 
     // Lex-only pass LAST so it can't perturb the pipeline phase timings: re-lex every module source to isolate
     // pure lexer throughput. Lexing is folded into `parse` (package_load -> scan_tokens), so it is NOT added to
     // the total: it is the lexer's share OF parse.
     let lx0 = time::cpu_seconds();
-    let cl0 = unsafe shim::sc_cpu_cycles();
-    let hl0 = unsafe shim::sc_alloc_count();
-    let yl0 = unsafe shim::sc_alloc_bytes();
+    let cl0 = unsafe sys::sc_bs_cycles();
+    let hl0 = unsafe sys::sc_bs_alloc_calls();
+    let yl0 = unsafe sys::sc_bs_alloc_bytes();
     i = 0;
     while i < n {
         let mut lx = lexer::Lexer::new(&mut p.modules[i].source, "");
@@ -297,9 +297,9 @@ fn transpile_once() Timing {
         i = i + 1;
     }
     r.lex = time::cpu_seconds() - lx0;
-    r.cyc_lex = unsafe shim::sc_cpu_cycles() - cl0;
-    r.alc_lex = unsafe shim::sc_alloc_count() - hl0;
-    r.byt_lex = unsafe shim::sc_alloc_bytes() - yl0;
+    r.cyc_lex = unsafe sys::sc_bs_cycles() - cl0;
+    r.alc_lex = unsafe sys::sc_bs_alloc_calls() - hl0;
+    r.byt_lex = unsafe sys::sc_bs_alloc_bytes() - yl0;
 
     // Count source lines (untimed: a constant of the corpus) for a lines/sec figure.
     i = 0;
@@ -348,9 +348,14 @@ fn transpile_once() Timing {
 @bench(log_results = false)
 /// Benchmark lane: the compiler transpiles its own source, ITERS timed rounds, then one real cold build.
 pub fn self_transpile(b: &mut bench::Bencher) {
-    // The corpus probe below is the warm-up; every round the Bencher runs is a sample.
+    // The corpus probe below is the warm-up; every round the Bencher runs is a sample. This lane reads the
+    // allocation counters at every phase boundary of every round, so accounting stays on throughout and
+    // the Bencher runs no diagnostic rounds of its own: the reported figures are instrumented ones, the
+    // same protocol the accepted-work ledger measured.
     b.set_rounds(ITERS);
     b.set_warmup(0);
+    b.set_diag_rounds(0);
+    unsafe sys::sc_bs_alloc_enable(1);
     if !run_report(b) {
         bench::fail("self_transpile");
     }
@@ -423,35 +428,6 @@ fn json_phase(js: &mut String, name: str, a: &PhaseAvg) {
     js.push_str(",\"mib\":");
     js.push_f64_prec(a.mib, 3);
     js.push_byte(b'}');
-}
-
-// A distribution as JSON; `scale` converts the samples' unit to the reported one.
-fn json_dist(js: &mut String, name: str, sm: &bench::Summary, scale: f64) {
-    js.push_str(",\"");
-    js.push_str(name);
-    js.push_str("\":{\"min\":");
-    js.push_f64_prec(sm.min * scale, 3);
-    js.push_str(",\"median\":");
-    js.push_f64_prec(sm.median * scale, 3);
-    js.push_str(",\"p95\":");
-    js.push_f64_prec(sm.p95 * scale, 3);
-    js.push_str(",\"mean\":");
-    js.push_f64_prec(sm.mean * scale, 3);
-    js.push_str(",\"sd\":");
-    js.push_f64_prec(sm.sd * scale, 3);
-    js.push_byte(b'}');
-}
-
-fn json_str(js: &mut String, s: str) {
-    js.push_byte(b'"');
-    for i in 0..s.len() {
-        let c = s[i];
-        if c == b'"' || c == b'\\' {
-            js.push_byte(b'\\');
-        }
-        js.push_byte(c);
-    }
-    js.push_byte(b'"');
 }
 
 fn set_env(name: str, value: str) {
@@ -565,7 +541,7 @@ fn run_report(b: &mut bench::Bencher) bool {
         warm.out_bytes as f64 / 1024.0,
     );
     let mut cpu = Array::<char, 256>::new();
-    if unsafe shim::sc_cpu_model(&mut cpu[0], 256) != 0 {
+    if unsafe sys::sc_bs_cpu_model(&mut cpu[0], 256) != 0 {
         unsafe stdio::snprintf(&mut cpu[0], 256, "%s".ptr() as *const char, "unknown CPU".ptr() as *const char);
     }
     let mut bid = String::from_str(bench::build_id());
@@ -681,7 +657,7 @@ fn run_report(b: &mut bench::Bencher) bool {
         warm.out_bytes as f64 / a_cg.ms / 1000.0,
         srcf / sm_ms.min / 1000.0,
     );
-    let rss = unsafe dshim::sc_peak_rss();
+    let rss = unsafe sys::sc_bs_rss_peak();
     unsafe stdio::printf(
         "  heap: %.1f MiB requested per round;  peak RSS %.1f MiB\n\n".ptr() as *const char,
         heap_bytes as f64 / fi / (1024.0 * 1024.0),
@@ -690,9 +666,9 @@ fn run_report(b: &mut bench::Bencher) bool {
 
     let mut js = String::with_capacity(4096);
     js.push_str("{\"v\":1,\"build_id\":");
-    json_str(&mut js, bid.as_str());
+    bench::json_str(&mut js, bid.as_str());
     js.push_str(",\"cpu\":");
-    json_str(&mut js, str::from_cstr(&cpu[0]));
+    bench::json_str(&mut js, str::from_cstr(&cpu[0]));
     js.push_str(",\"rounds\":");
     js.push_u64(rounds as u64);
     js.push_str(",\"jobs\":1,\"corpus\":{\"modules\":");
@@ -725,9 +701,9 @@ fn run_report(b: &mut bench::Bencher) bool {
     json_phase(&mut js, "codegen", &a_cg);
     json_phase(&mut js, "total", &a_total);
     js.push_byte(b'}');
-    json_dist(&mut js, "cpu_ms", &sm_ms, 1.0);
-    json_dist(&mut js, "mcyc", &sm_cyc, 1.0);
-    json_dist(&mut js, "wall_ms", &sm_wall, 1000.0);
+    bench::json_dist(&mut js, "cpu_ms", &sm_ms, 1.0);
+    bench::json_dist(&mut js, "mcyc", &sm_cyc, 1.0);
+    bench::json_dist(&mut js, "wall_ms", &sm_wall, 1000.0);
     js.push_str(",\"heap_mib\":");
     js.push_f64_prec(heap_bytes as f64 / fi / 1048576.0, 3);
     js.push_str(",\"peak_rss_mib\":");

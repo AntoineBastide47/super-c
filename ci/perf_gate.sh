@@ -48,7 +48,7 @@ printf 'perf: contract v%s, build %s, %s, %s, %s cores, load %s\n' "$CONTRACT_VE
 
 # The benchmark binary, fresh from this checkout; the generated runner must carry the checkout's identity.
 ./super-c bench --no-run || fail "the benchmark binary does not build"
-grep -q "__bench::begin(\"$build_id\")" build/bench_root.spc || fail "build/bench_root.spc does not carry build id $build_id"
+grep -q "__bench::begin(\"$build_id\", " build/bench_root.spc || fail "build/bench_root.spc does not carry build id $build_id"
 
 record="$out/self_transpile.json"
 rm -f "$record"
