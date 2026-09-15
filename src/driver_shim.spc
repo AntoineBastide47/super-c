@@ -20,6 +20,11 @@ extern "C" "driver_shim.h" {
     pub fn sc_getpid() i32;
     /// 1 while process `pid` is alive, 0 once it is gone (parent-death detection for the LSP).
     pub fn sc_process_alive(pid: i64) i32;
+    /// Bytes of stream `f`'s descriptor into `buf` (at most `n`), past the stdio buffer: what one read
+    /// returns (a pipe hands over what has arrived), 0 at end of stream, -1 on error.
+    pub fn sc_file_read(f: *mut void, buf: *mut void, n: usize) i64;
+    /// 1 when a read on stream `f`'s descriptor returns at once (bytes waiting or end of stream), else 0.
+    pub fn sc_file_pending(f: *mut void) i32;
     /// Platform index baked in when the shim is compiled: 0 windows, 1 macos, 2 linux (the default --target).
     pub fn sc_host_platform() i32;
     /// Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other

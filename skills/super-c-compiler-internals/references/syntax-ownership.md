@@ -150,9 +150,29 @@ tables). The round parses back:
 
 - the module of a document that opened (`opened`: re-analyzed alone, importers keep their
   analyses since the ids are stable), before the body-splice probe reads its body spans;
-- every closed member of the affected closure (a signature edit's importers), before their
-  re-resolve;
+- every closed member of the affected set (below), before its re-resolve;
 - every module the engine demanded during the passes (`typecheck_set`).
+
+The affected set of a round that fully reparsed a module is item-level. `Package.def_refs`
+records, per module after each analysis of it (`record_refs`), one edge per (item, declaration
+of another item) pair its resolution tables name, keyed by the named declaration
+(`module << 32 | node`) with the naming item's declaration node and a flag for a naming node
+in the body arena; a node past every item's ranges (a desugar appended later) records a
+module-wide owner. The record stands while the module's bodies are released. When the reparse
+kept the module arena's shape (`same_shape`: the node count, the kind at every id and the
+child lists), every id names the same declaration, so the items the edit window touched
+(`touched_items`: an item owns the bytes from the end of the item before it to its own end, an
+extend the bytes before its first member and after its last) seed a walk over the records
+(`propagate_touched`): a touched item is full (everything naming it is stale); a full item
+reaches every item naming it, a plain function naming it only from its body becoming body
+(its calls mean something else, its signature stands) and anything else (a signature or type
+spelling it, a constant, a `const fn`, an enum, an interface, a struct) becoming full; a body
+item reaches only the readers of its body, the compile-time evaluators and the items naming
+it outside a releasable body. Every module holding a reached item re-analyzes; the others keep
+their analyses (`RecompileStats.kept`). Two edits fall back to the import closure: an edit of
+an extend's own bytes (the conformance it declares reaches modules that never name it) and a
+reparse that changed the shape (fresh ids); a reacher whose last analysis reported an error
+re-analyzes too (the edit may define the name it lacked).
 
 The constant engine reads foreign bodies for folds and `const fn` scans (`Interp::body_of`,
 `fx_scan_fn`). `Interp::body_avail` refuses a body-arena node whose arena is released or not
@@ -170,9 +190,9 @@ so the passes are bounded by the module count.
 A feature that reads a closed module's bodies parses them back through `ensure_bodies`
 (re-resolve and re-check with lints off, records discarded): `Server::locate`, `locate_range`
 and `hier_locate` for the request's own module (a client may query a document it never
-opened), the document-level handlers that map their document themselves, `hydrate_roots`
-(every module of every built root) before references, rename and incoming calls, and the
-callee's module before outgoing calls. `decl_signature` finds the signature's end at the
+opened), the document-level handlers that map their document themselves, `hydrate_refs`
+(the defining module and every module whose record names the definition, in each built root)
+before references, rename and incoming calls, and the callee's module before outgoing calls. `decl_signature` finds the signature's end at the
 first brace after `fn` instead of reading the body node. The next round releases those modules
 again. `SC_LSP_STATS=1` prints one line per round: modules, released, held, KiB retained, ms,
 parsed back, extra passes.
@@ -195,3 +215,16 @@ modules), one document open (`src/lsp/features.spc`), before = the server withou
 The full compile keeps every body live until its last phase, so a rebuild's high-water mark
 does not move; the retained state between rounds halves. Held modules after the session: one
 (a fold's callee), two after the references query.
+
+The reference record and the item-level affected set, measured with the release server over
+the compiler workspace (94 modules, the batch root 173), one document open
+(`src/graph/items.spc`), before = the closure rule and a parse-back of every module:
+
+| Measure | Before | After |
+|---------|-------:|------:|
+| first references query after a round | 320 ms | 64 ms (the defining module and the 2 naming modules parsed back) |
+| references after the edits below | 113 ms | 32 ms |
+| parameter rename plus a body statement in a function 2 modules call (`visible`) | 326 ms (35 parsed back, 27 held) | 66 ms (3 parsed back) |
+| its revert | 186 ms | 56 ms |
+| private body edit round | 12 ms | 12 ms |
+| peak RSS of the session | 294 MiB | 233 MiB |

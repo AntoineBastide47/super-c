@@ -21,7 +21,8 @@ fn stream_of(bytes: str) *mut stdio::FILE {
 
 fn read_from(bytes: str) Option<String> {
     let f = stream_of(bytes);
-    let r = transport::read_message(f);
+    let mut rd = transport::Reader::new(f);
+    let r = transport::read_message(&mut rd);
     unsafe stdio::fclose(f);
     return r;
 }
@@ -60,7 +61,9 @@ fn read_well_formed_message() {
 fn read_back_two_messages() {
     // read_message stops exactly at the body end, so a second call reads the next frame.
     let f = stream_of("Content-Length: 1\r\n\r\naContent-Length: 1\r\n\r\nb");
-    switch transport::read_message(f) {
+    let mut rd = transport::Reader::new(f);
+    assert(rd.pending(), "bytes wait before the first read");
+    switch transport::read_message(&mut rd) {
         Some(m) => {
             assert(m.as_str() == "a", "first body");
         },
@@ -68,7 +71,8 @@ fn read_back_two_messages() {
             assert(false, "first body");
         },
     };
-    switch transport::read_message(f) {
+    assert(rd.pending(), "the second frame waits in the buffer");
+    switch transport::read_message(&mut rd) {
         Some(m) => {
             assert(m.as_str() == "b", "second body");
         },
@@ -85,7 +89,8 @@ fn write_message_emits_the_frame() {
     assert(f != null, "tmpfile");
     transport::write_message(f, "{\"k\":1}");
     unsafe stdio::rewind(f);
-    let got = transport::read_message(f);
+    let mut rd = transport::Reader::new(f);
+    let got = transport::read_message(&mut rd);
     // What was written frames and reads back byte for byte.
     switch got {
         Some(b) => {

@@ -1,6 +1,7 @@
 #ifndef SC_DRIVER_SHIM_H
 #define SC_DRIVER_SHIM_H
 
+#include <stddef.h> /* size_t in sc_file_read */
 #include <stdint.h> /* int64_t in sc_process_alive */
 
 /* Platform glue for the self-hosted super-c driver: the handful of things that need C struct/macro
@@ -14,6 +15,10 @@ char *sc_realpath(const char *path, char *resolved); /* realpath(3) */
 int sc_exe_path(char *buf, unsigned size);           /* absolute path of the running binary; 0 on success */
 int sc_getpid(void);                                 /* getpid(); for unique temp paths */
 int sc_process_alive(int64_t pid); /* 1 while `pid` exists (kill 0 / OpenProcess); 0 once it is gone */
+/* Bytes of `f`'s descriptor into `buf` (at most `n`), past the stdio buffer: what one read returns (a pipe
+   hands over what has arrived), 0 at end of stream, -1 on error. */
+int64_t sc_file_read(void *f, void *buf, size_t n);
+int sc_file_pending(void *f); /* 1 when a read on `f`'s descriptor returns at once (bytes waiting or end of stream) */
 int sc_host_platform(void);
 /* Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other. */
 int sc_host_arch(void);                          /* build target: 0 windows, 1 macos, 2 linux */

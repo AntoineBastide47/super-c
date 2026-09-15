@@ -672,6 +672,18 @@ pub fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader::ItemId {
                 hi = mid;
             }
         }
+        // `body_hi` is the largest body block id so far: an item without a body repeats the
+        // one before it, and the items before the first body repeat 0, the first body's own
+        // block id when it is one node. The owner is the first position at or past the search
+        // that owns a body.
+        let a = &p.modules.at(m as usize).ast;
+        while lo < p.idx.mod_items[m as usize + 1] as usize {
+            let nd = a.at_const(p.idx.items.at(p.sched.by_node[lo] as usize).node);
+            if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body) {
+                break;
+            }
+            lo += 1;
+        }
         if lo >= p.idx.mod_items[m as usize + 1] as usize {
             return loader::ITEM_NONE;
         }

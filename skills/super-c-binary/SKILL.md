@@ -151,7 +151,10 @@ completion, signature help, document and workspace symbols, folding ranges, sele
 ranges, inlay hints, and semantic tokens (full + range). The VS Code extension is in
 `editors/vscode/`. Between analysis rounds the server keeps only the open documents' function
 bodies (and the bodies the constant engine demanded); a closed module's bodies parse back on
-demand (`syntax-ownership.md` in the compiler-internals skill).
+demand (`syntax-ownership.md` in the compiler-internals skill). The server handles one message
+at a time over a reader on its descriptor: a `didChange` folds every `didChange` already
+waiting into its round, so a superseded buffer is never analyzed; every `publishDiagnostics`
+for an open document carries the `version` it analyzed.
 
 ### Project scaffolding
 

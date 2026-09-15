@@ -8,6 +8,7 @@
 import stdio;
 import stdlib;
 import driver_shim as shim;
+import ast::parser as par;
 import lexer::lexer as lex;
 import lexer::token_type as ltt;
 import module::loader as loader;
@@ -67,6 +68,7 @@ pub struct Server {
     pub initialized: bool, // initialize accepted exactly once
     pub revision: u64, // bumps on every workspace input transaction (open/change/close/disk/config)
     pub canceled: Vector<String>, // dumped ids of $/cancelRequest notifications not yet consumed
+    pub pending: Option<String>, // a message read ahead of the loop while folding rapid edits
     // Negotiated client capabilities, read once at initialize.
     pub cap_hier_symbols: bool, // hierarchical documentSymbol trees
     pub cap_doc_changes: bool, // versioned documentChanges workspace edits
@@ -360,6 +362,7 @@ pub fn run(std_dir: str, target: i32) i32 {
         initialized: false,
         revision: 0,
         canceled: Vector::<String>::new(),
+        pending: Option::<String>::None,
         cap_hier_symbols: false,
         cap_doc_changes: false,
         cap_pull_diags: false,
@@ -384,8 +387,12 @@ pub fn run(std_dir: str, target: i32) i32 {
     if !stdio::set_binary(fout) {
         return 1;
     }
+    let mut rd = transport::Reader::new(fin);
     loop {
-        let msgo = transport::read_message(fin);
+        let msgo = switch replace(&mut sv.pending, Option::<String>::None) {
+            Some(s) => Option::<String>::Some(s),
+            None => transport::read_message(&mut rd),
+        };
         if msgo.is_none() {
             // EOF: the client vanished without exit.
             return 1;
@@ -524,7 +531,7 @@ pub fn run(std_dir: str, target: i32) i32 {
             sv.on_did_open(&req, fout);
         } else if method == "textDocument/didChange" {
             sv.revision += 1;
-            sv.on_did_change(&req, fout);
+            sv.on_did_change(&req, fout, &mut rd);
         } else if method == "textDocument/didSave" {
             // Overlays are already current.
         } else if method == "textDocument/didClose" {
@@ -1062,6 +1069,19 @@ extend Server {
         }
     }
 
+    // The version of the open document the round analyzed (the round is synchronous, so its
+    // current version): a client drops a publication older than its buffer. Publications name
+    // canonical paths; the document is matched on its canonical path.
+    fn tag_version(self: &Self, params: &mut json::JSON, uri: str) {
+        let path = uri_doc_path(uri);
+        for i in 0..self.docs.len() {
+            if self.docs.at(i).path.as_str() == path.as_str() {
+                params.emplace("version", json::JSON::integer(self.docs.at(i).version));
+                return;
+            }
+        }
+    }
+
     // Every OPEN build.toml gets the build's own verdict on it. An open manifest with no diagnostics
     // still registers its URI, so an earlier reported problem is cleared once fixed.
     fn publish_manifest_diags(self: &Self, ps: &mut PubSet) {
@@ -1121,6 +1141,7 @@ extend Server {
         for i in 0..ps.uris.len() {
             let mut params = json::JSON::object();
             params.emplace("uri", json::JSON::str(ps.uris.at(i).as_str()));
+            self.tag_version(&mut params, ps.uris.at(i).as_str());
             params.emplace("diagnostics", ps.arrs.at(i).clone());
             notify(f, "textDocument/publishDiagnostics", &params);
         }
@@ -1136,6 +1157,7 @@ extend Server {
             if !still {
                 let mut params = json::JSON::object();
                 params.emplace("uri", json::JSON::str(old));
+                self.tag_version(&mut params, old);
                 params.emplace("diagnostics", json::JSON::array());
                 notify(f, "textDocument/publishDiagnostics", &params);
             }
@@ -1462,13 +1484,14 @@ extend Server {
     // left by the one before it (LSP change-event semantics). A change without a range replaces the
     // whole document, so full-sync clients keep working unchanged. Any invalid range drops the whole
     // notification (the malformed-notification rule) and keeps the previous buffer and version.
-    fn on_did_change(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
+    // True when the notification changed a buffer.
+    fn apply_did_change(self: &mut Self, req: &json::JSON) bool {
         switch req.value("params") {
             Some(params) => {
                 let uri = params.at_key("textDocument").value_str("uri");
                 let di = self.find_doc(uri);
                 if di < 0 {
-                    return;
+                    return false;
                 }
                 switch params.value("contentChanges") {
                     Some(ch) => {
@@ -1483,11 +1506,11 @@ extend Server {
                             }
                             if !ok {
                                 eprintln("lsp: dropped didChange with an invalid range for {}", uri);
-                                return;
+                                return false;
                             }
                             self.docs[di as usize].txt = txt;
                             self.docs[di as usize].version = params.at_key("textDocument").value_i64("version", 0);
-                            self.rebuild_all(f, true);
+                            return true;
                         }
                     },
                     None => {},
@@ -1495,6 +1518,41 @@ extend Server {
             },
             None => {},
         };
+        return false;
+    }
+
+    // One analysis round per burst of edits: while the next message has already arrived and is
+    // another didChange, it folds into this round, so a superseded buffer is never analyzed and
+    // its diagnostics never publish. Any other waiting message goes back to the loop unread.
+    fn on_did_change(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE, rd: &mut transport::Reader) {
+        if !self.apply_did_change(req) {
+            return;
+        }
+        while rd.pending() {
+            let msgo = transport::read_message(rd);
+            if msgo.is_none() {
+                break;
+            }
+            let msg = msgo.unwrap();
+            let mut folded = false;
+            switch json::parse(msg.as_str()) {
+                Ok(v) => {
+                    if v.value_str("jsonrpc") == "2.0" && v.value_str("method") == "textDocument/didChange" && !v.contains_key(
+                        "id",
+                    ) {
+                        self.revision += 1;
+                        self.apply_did_change(&v);
+                        folded = true;
+                    }
+                },
+                Err(_) => {},
+            };
+            if !folded {
+                self.pending = Option::<String>::Some(msg);
+                break;
+            }
+        }
+        self.rebuild_all(f, true);
     }
 
     fn on_did_close(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
@@ -1707,15 +1765,15 @@ extend Server {
         };
     }
 
-    // The cross-file features scan every module's bodies: parse back the ones the analysis rounds
-    // released (closed documents), in every built root.
-    fn hydrate_roots(self: &mut Self) {
-        for r in 0..self.roots.len() {
-            if !self.roots.at(r).built {
-                continue;
-            }
-            for m in 0..self.roots.at(r).pkg.modules.len() {
-                analysis::ensure_bodies(&mut self.roots[r].pkg, m);
+    // Parse back the bodies a reference scan for `d` in root `r` reads: the defining module's
+    // and every module whose recorded references name `d` (`Package.def_refs`); the other
+    // modules' references, if any, sit in their retained module arenas.
+    fn hydrate_refs(self: &mut Self, r: usize, d: astn::DefId) {
+        let pkg = &mut self.roots[r].pkg;
+        analysis::ensure_bodies(pkg, d.module as usize);
+        for m in 0..pkg.modules.len() {
+            if m != d.module as usize && analysis::refers(pkg, m, d.module, d.node, d.node) {
+                analysis::ensure_bodies(pkg, m);
             }
         }
     }
@@ -1723,13 +1781,13 @@ extend Server {
     // Reference sites for definition `d` (resolved in root `r0`) across EVERY built root, deduped
     // by canonical file + span. The cross-package hop matches on (defining file, kind, name text)
     // the temporary symbol identity until compiler-API symbol ids exist.
-    fn collect_refs(self: &Self, r0: usize, d: astn::DefId, include_decl: bool, out: &mut Vector<RefHit>) {
-        let pkg0 = &self.roots.at(r0).pkg;
-        let locs0 = feat::references_of_def(pkg0, d, include_decl);
+    fn collect_refs(self: &mut Self, r0: usize, d: astn::DefId, include_decl: bool, out: &mut Vector<RefHit>) {
+        self.hydrate_refs(r0, d);
+        let locs0 = feat::references_of_def(&self.roots.at(r0).pkg, d, include_decl);
         for i in 0..locs0.len() {
             out.push(RefHit { r: r0 as u32, m: locs0.at(i).module, s: locs0.at(i).start, e: locs0.at(i).end });
         }
-        let keyo = feat::sym_key(pkg0, d);
+        let keyo = feat::sym_key(&self.roots.at(r0).pkg, d);
         if keyo.is_none() {
             return;
         }
@@ -1747,11 +1805,9 @@ extend Server {
             if dn == astn::NODE_NONE {
                 continue;
             }
-            let locs = feat::references_of_def(
-                &self.roots.at(r2).pkg,
-                astn::DefId { module: m2 as astn::ModuleId, node: dn },
-                include_decl,
-            );
+            let d2 = astn::DefId { module: m2 as astn::ModuleId, node: dn };
+            self.hydrate_refs(r2, d2);
+            let locs = feat::references_of_def(&self.roots.at(r2).pkg, d2, include_decl);
             for i in 0..locs.len() {
                 out.push(RefHit { r: r2 as u32, m: locs.at(i).module, s: locs.at(i).start, e: locs.at(i).end });
             }
@@ -1783,7 +1839,6 @@ extend Server {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
-        self.hydrate_roots();
         let mut include_decl = false;
         switch req.value("params") {
             Some(params) => switch params.value("context") {
@@ -1865,7 +1920,6 @@ extend Server {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
-        self.hydrate_roots();
         let mut new_name = "";
         switch req.value("params") {
             Some(params) => {
@@ -2236,21 +2290,129 @@ extend Server {
         respond(f, req.at_key("id"), &res);
     }
 
+    // The probe text: `txt` with `__lsp_c` (variant 1: `__lsp_c;`) spliced at the cursor.
+    fn probe_text(txt: str, off: u32, variant: i32) String {
+        let mut synth = String::with_capacity(txt.len() + 9);
+        synth.push_str(txt.slice(0, off as usize));
+        synth.push_str("__lsp_c");
+        if variant == 1 {
+            synth.push_byte(b';');
+        }
+        synth.push_str(txt.slice(off as usize, txt.len()));
+        return synth;
+    }
+
+    // Does `synth` lex and parse on its own? Decided before the live package takes it, so a probe
+    // that does not parse never touches the package.
+    fn probe_parses(synth: &String, file: str) bool {
+        let mut ns = synth.clone();
+        let mut lx = lex::Lexer::new(&mut ns, file);
+        lx.scan_tokens();
+        if lx.has_errors() {
+            return false;
+        }
+        let mut ps = par::Parser::new(lx.take_tokens(), ns.as_str(), file);
+        ps.build_ast();
+        return !ps.has_errors();
+    }
+
     // Completion through a probe: splice `__lsp_c` (then `__lsp_c;` if that still does not parse) at the
-    // cursor: the mid-edit buffer rarely parses; the probe usually makes it; compile a throwaway
-    // package with that overlay, and read completions from it. The probe's own type error is irrelevant:
-    // the typechecker still assigns the receiver's type. `member` picks member vs general completion.
-    fn complete_via_probe(self: &Self, path: str, txt: str, off: u32, member: bool) Vector<feat::CompItem> {
+    // cursor: the mid-edit buffer rarely parses; the probe usually makes it. The owning root's live
+    // package takes the parsing probe as one incremental round (a body edit: milliseconds), answers,
+    // and takes the real buffers back in a second round. A document without a built root, the
+    // parity mode, or a round outside the incremental domain (the root is rebuilt first) fall back
+    // to a throwaway package. The probe's own type error is irrelevant: the typechecker still
+    // assigns the receiver's type. `member` picks member vs general completion.
+    fn complete_via_probe(self: &mut Self, path: str, txt: str, off: u32, member: bool) Vector<feat::CompItem> {
+        let r = self.owning_root(path);
+        let mut slot: usize = self.docs.len();
+        for i in 0..self.docs.len() {
+            if self.docs.at(i).path.as_str() == path {
+                slot = i;
+            }
+        }
+        if r < 0 || slot == self.docs.len() || stdlib::getenv("SC_LSP_NO_INCR") != null {
+            return self.complete_via_fresh_probe(path, txt, off, member);
+        }
+        let ru = r as usize;
+        let mut variant = 0;
+        let mut synth = String::new();
+        while variant < 2 {
+            synth = Server::probe_text(txt, off, variant);
+            if Server::probe_parses(&synth, path) {
+                break;
+            }
+            variant += 1;
+        }
+        if variant == 2 {
+            return Vector::<feat::CompItem>::new();
+        }
+        let rf = self.roots.at(ru).root_file.clone();
+        let ld = if self.roots.at(ru).origin.len() == 0 && !self.roots.at(ru).sweep {
+            self.roots.at(ru).ws.clone();
+        } else {
+            String::new();
+        };
+        let mut ovf = Vector::<String>::new();
+        let mut ovt = Vector::<String>::new();
+        for i in 0..self.docs.len() {
+            ovf.push(self.docs.at(i).path.clone());
+            ovt.push(self.docs.at(i).txt.clone());
+        }
+        let real = replace(ovt.index_mut(slot), synth);
+        let mut out = Vector::<feat::CompItem>::new();
+        let mut scratch = Vector::<analysis::DiagRec>::new();
+        let mut st = analysis::RecompileStats {};
+        let mut ok = analysis::recompile(
+            &mut self.roots[ru].pkg,
+            self.target,
+            rf.as_str(),
+            ld.as_str(),
+            &ovf,
+            &ovt,
+            &mut scratch,
+            &mut st,
+        );
+        if ok {
+            let m = self.root_module(ru, path);
+            if m >= 0 && self.roots.at(ru).pkg.modules.at(m as usize).has_ast {
+                out = if member {
+                    feat::complete_member(&self.roots.at(ru).pkg, m as usize, off);
+                } else {
+                    feat::complete_general(&self.roots.at(ru).pkg, m as usize, off);
+                };
+            }
+            // The real buffers back (the round records nothing: the root's diagnostics stand).
+            *ovt.index_mut(slot) = real;
+            scratch.clear();
+            let mut st2 = analysis::RecompileStats {};
+            ok = analysis::recompile(
+                &mut self.roots[ru].pkg,
+                self.target,
+                rf.as_str(),
+                ld.as_str(),
+                &ovf,
+                &ovt,
+                &mut scratch,
+                &mut st2,
+            );
+        }
+        if !ok {
+            // Outside the incremental domain: the package may be part-updated, so the root is rebuilt
+            // from the real buffers, and the answer comes from a throwaway package.
+            let mut ps = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
+            self.build_root(ru, &mut ps, false);
+            return self.complete_via_fresh_probe(path, txt, off, member);
+        }
+        return out;
+    }
+
+    // A throwaway package with the probe overlay, its completions read and the package dropped.
+    fn complete_via_fresh_probe(self: &Self, path: str, txt: str, off: u32, member: bool) Vector<feat::CompItem> {
         let mut out = Vector::<feat::CompItem>::new();
         let mut variant = 0;
         while variant < 2 {
-            let mut synth = String::with_capacity(txt.len() + 9);
-            synth.push_str(txt.slice(0, off as usize));
-            synth.push_str("__lsp_c");
-            if variant == 1 {
-                synth.push_byte(b';');
-            }
-            synth.push_str(txt.slice(off as usize, txt.len()));
+            let synth = Server::probe_text(txt, off, variant);
             let mut ovf = Vector::<String>::new();
             let mut ovt = Vector::<String>::new();
             for i in 0..self.docs.len() {
@@ -2508,12 +2670,16 @@ extend Server {
                 let dot = ws > 0 && txt[ws - 1] == b'.' && !(ws > 1 && txt[ws - 2] == b'.');
                 let path2 = ws > 1 && txt[ws - 1] == b':' && txt[ws - 2] == b':';
                 if dot || path2 {
-                    items = self.complete_via_probe(path, txt, off, true);
+                    let path9 = String::from_str(path);
+                    let txt9 = String::from_str(txt);
+                    items = self.complete_via_probe(path9.as_str(), txt9.as_str(), off, true);
                 } else if have_ast {
                     items = feat::complete_general(&self.roots.at(r as usize).pkg, m as usize, off);
                 } else {
                     // Broken buffer: complete from a probe build; keywords alone if even that fails.
-                    items = self.complete_via_probe(path, txt, off, false);
+                    let path9 = String::from_str(path);
+                    let txt9 = String::from_str(txt);
+                    items = self.complete_via_probe(path9.as_str(), txt9.as_str(), off, false);
                     if items.len() == 0 {
                         items = feat::complete_keywords();
                     }
@@ -3593,7 +3759,6 @@ extend Server {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
-        self.hydrate_roots();
         let pkg = &self.roots.at(h.r).pkg;
         let d = feat::def_at(pkg, h.m, h.off);
         if d.node == astn::NODE_NONE {

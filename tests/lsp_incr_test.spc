@@ -10,6 +10,7 @@
 // constant engine demands one of its bodies (then re-runs the demanding module), and a feature
 // query on a closed module parses them back through ensure_bodies.
 import lsp::analysis as an;
+import lsp::features as feat;
 import module::loader as loader;
 import ast::ast as *;
 import tests::cli_harness as cli;
@@ -72,6 +73,49 @@ extend Ws as Free {
         self.root.free();
         self.dir.free();
     }
+}
+
+// A workspace over four given sources (a.spc is the root).
+fn ws_of(a: str, b: str, c: str, d: str) Ws {
+    let proj = cli::proj_new();
+    proj.mkfile("a.spc", a);
+    proj.mkfile("b.spc", b);
+    proj.mkfile("c.spc", c);
+    proj.mkfile("d.spc", d);
+    let dir = String::from_cstr(proj.rootp());
+    let mut root = String::from_str(dir.as_str());
+    root.push_str("/a.spc");
+    return Ws { proj: proj, root: root, dir: dir };
+}
+
+// One incremental round and the diagnostic oracle only (the workspaces below need no `bee`).
+fn round_diags(
+    ws: &Ws,
+    p: &mut loader::Package,
+    diags: &mut Vector<an::DiagRec>,
+    ovf: &Vector<String>,
+    ovt: &Vector<String>,
+    st: &mut an::RecompileStats,
+    label: str,
+) {
+    let ok = an::recompile(p, unsafe shim::sc_host_platform(), ws.root.as_str(), "", ovf, ovt, diags, st);
+    assert(ok, label);
+    let mut rd = Vector::<an::DiagRec>::new();
+    let rp = fresh(ws, ovf, ovt, &mut rd);
+    assert(diags_equal(diags, &rd), label);
+    let _ = rp;
+}
+
+// Errors recorded against module `<name>`.
+fn errors_in(p: &loader::Package, diags: &Vector<an::DiagRec>, name: str) usize {
+    let m = mod_of(p, name);
+    let mut n: usize = 0;
+    for i in 0..diags.len() {
+        if diags.at(i).module as usize == m && diags.at(i).severity == 1 {
+            n += 1;
+        }
+    }
+    return n;
 }
 
 fn ov(ws: &Ws, name: str, text: str, ovf: &mut Vector<String>, ovt: &mut Vector<String>) {
@@ -380,7 +424,390 @@ pub const fn k() i32 {
     let mut st = an::RecompileStats {};
     round(&ws, &mut p, &mut diags, &ovf, &ovt, &mut st, "const fn body oracle");
     assert(st.body_only == 0, "a const fn body is cross-module semantics: no splice");
-    assert(st.analyzed == 3, "the const owner and its transitive importers re-analyze");
+    // Nothing names `k`: the owner re-analyzes alone; its importers' analyses stand.
+    assert(st.analyzed == 1, "the const owner re-analyzes");
+    assert(st.kept == 2, "both modules that reach the owner through imports keep their analysis");
+}
+
+// The touched-item walk follows references across modules: a constant folded from the edited
+// `const fn`, then a constant folded from that one, re-analyze; a module that names only the
+// owner's untouched function stands.
+@test
+fn incr_const_fn_body_reaches_folders() {
+    let ws = ws_of(
+        M"(import b;
+import d;
+
+const KA: i32 = b::KB + 1;
+
+fn main() i32 {
+    return KA - d::dee();
+}
+)",
+        M"(import c;
+
+pub const KB: i32 = c::k();
+)",
+        M"(pub fn cee() i32 {
+    return 1;
+}
+
+pub const fn k() i32 {
+    return 2;
+}
+)",
+        M"(import c;
+
+pub fn dee() i32 {
+    return c::cee();
+}
+)",
+    );
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let c1: str = M"(pub fn cee() i32 {
+    return 1;
+}
+
+pub const fn k() i32 {
+    return 3;
+}
+)";
+    ov(&ws, "c.spc", c1, &mut ovf, &mut ovt);
+    let mut st = an::RecompileStats {};
+    round_diags(&ws, &mut p, &mut diags, &ovf, &ovt, &mut st, "const fold chain oracle");
+    assert(st.analyzed == 3, "the owner, the folder and the folder's folder re-analyze");
+    assert(st.kept == 1, "the module naming only the untouched function stands");
+}
+
+// A method's signature edit inside an extend touches that member alone: its callers re-analyze,
+// the callers of its siblings stand.
+@test
+fn incr_method_edit_keeps_sibling_callers() {
+    let ws = ws_of(
+        M"(import b;
+import d;
+
+fn main() i32 {
+    return b::bee() + d::dee();
+}
+)",
+        M"(import c;
+
+pub fn bee() i32 {
+    let s = c::S { x: 1 };
+    return s.m2();
+}
+
+pub fn other() i32 {
+    let s = c::S { x: 1 };
+    let v: i32 = s.m1();
+    return v;
+}
+)",
+        M"(pub struct S {
+    pub x: i32,
+}
+
+extend S {
+    pub fn m1(self: &Self) i32 {
+        return self.x;
+    }
+
+    pub fn m2(self: &Self) i32 {
+        return self.x + 1;
+    }
+}
+)",
+        M"(import c;
+
+pub fn dee() i32 {
+    let s = c::S { x: 2 };
+    return s.m2();
+}
+)",
+    );
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    assert(errors_in(&p, &diags, "/b.spc") == 0, "clean baseline");
+    // m1 now returns i64: b's typed binding errors; d (names m2 only) and a (names bee only) stand.
+    let c1: str = M"(pub struct S {
+    pub x: i32,
+}
+
+extend S {
+    pub fn m1(self: &Self) i64 {
+        return self.x;
+    }
+
+    pub fn m2(self: &Self) i32 {
+        return self.x + 1;
+    }
+}
+)";
+    ov(&ws, "c.spc", c1, &mut ovf, &mut ovt);
+    let mut st = an::RecompileStats {};
+    round_diags(&ws, &mut p, &mut diags, &ovf, &ovt, &mut st, "method signature oracle");
+    assert(st.body_only == 0, "a signature edit is not a body edit");
+    assert(st.analyzed == 2, "the owner and the caller of the edited method re-analyze");
+    assert(st.kept == 2, "the modules naming only the sibling method stand");
+    assert(errors_in(&p, &diags, "/b.spc") == 1, "the caller reports against the new signature");
+}
+
+// An alias edit reaches the users of a function whose signature spells the alias: the walk
+// follows the intra-module reference from the function to the alias, then the callers.
+@test
+fn incr_alias_edit_reaches_signature_users() {
+    let ws = ws_of(
+        M"(import b;
+import d;
+
+fn main() i32 {
+    return b::bee() + d::dee();
+}
+)",
+        M"(import c;
+
+pub fn bee() i32 {
+    let v = c::make();
+    return v.f;
+}
+)",
+        M"(pub struct S {
+    pub f: i32,
+}
+
+pub struct T {
+    pub g: i32,
+}
+
+pub type A = S;
+
+pub fn make() A {
+    return S { f: 1 };
+}
+
+pub fn other() i32 {
+    return 4;
+}
+)",
+        M"(import c;
+
+pub fn dee() i32 {
+    return c::other();
+}
+)",
+    );
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let c1: str = M"(pub struct S {
+    pub f: i32,
+}
+
+pub struct T {
+    pub g: i32,
+}
+
+pub type A = T;
+
+pub fn make() A {
+    return T { g: 1 };
+}
+
+pub fn other() i32 {
+    return 4;
+}
+)";
+    ov(&ws, "c.spc", c1, &mut ovf, &mut ovt);
+    let mut st = an::RecompileStats {};
+    round_diags(&ws, &mut p, &mut diags, &ovf, &ovt, &mut st, "alias chain oracle");
+    // The caller of the function returning the alias re-analyzes; its own signature stands, so
+    // its caller and the module naming only `other` stand.
+    assert(st.analyzed == 2, "the owner and the caller of the function returning the alias re-analyze");
+    assert(st.kept == 2, "the caller's caller and the module naming only the untouched function stand");
+    assert(errors_in(&p, &diags, "/b.spc") == 1, "the field read reports against the new target");
+}
+
+// An edit of an extend's own bytes (here the interface it conforms to) re-analyzes every module
+// that reaches the owner: a bound is satisfied without naming the extend.
+@test
+fn incr_extend_header_edit_reaches_importers() {
+    let ws = ws_of(
+        M"(import b;
+import d;
+
+fn main() i32 {
+    return b::bee() + d::dee();
+}
+)",
+        M"(import c;
+
+fn g<T: c::I>(x: &T) i32 {
+    return x.f();
+}
+
+pub fn bee() i32 {
+    let s = c::S { x: 1 };
+    return g(&s);
+}
+)",
+        M"(pub interface I {
+    fn f(self: &Self) i32;
+}
+
+pub interface J {
+    fn f(self: &Self) i32;
+}
+
+pub struct S {
+    pub x: i32,
+}
+
+extend S as I {
+    fn f(self: &Self) i32 {
+        return self.x;
+    }
+}
+)",
+        M"(import c;
+
+pub fn dee() i32 {
+    let s = c::S { x: 2 };
+    return s.x;
+}
+)",
+    );
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    assert(errors_in(&p, &diags, "/b.spc") == 0, "clean baseline");
+    let c1: str = M"(pub interface I {
+    fn f(self: &Self) i32;
+}
+
+pub interface J {
+    fn f(self: &Self) i32;
+}
+
+pub struct S {
+    pub x: i32,
+}
+
+extend S as J {
+    fn f(self: &Self) i32 {
+        return self.x;
+    }
+}
+)";
+    ov(&ws, "c.spc", c1, &mut ovf, &mut ovt);
+    let mut st = an::RecompileStats {};
+    round_diags(&ws, &mut p, &mut diags, &ovf, &ovt, &mut st, "extend header oracle");
+    assert(st.kept == 0, "an extend header edit keeps no reacher");
+    assert(st.analyzed == 4, "every module reaching the owner re-analyzes");
+    assert(errors_in(&p, &diags, "/b.spc") == 1, "the bound no longer holds");
+}
+
+// A reacher whose last analysis reported an error re-analyzes even when it names no touched
+// item: the edit may be what its error was about.
+@test
+fn incr_erring_reacher_reanalyzes() {
+    let ws = ws_of(
+        M"(import b;
+import d;
+
+fn main() i32 {
+    return b::bee() + d::dee();
+}
+)",
+        M"(import c;
+
+pub fn bee() i32 {
+    return c::cee();
+}
+)",
+        M"(pub fn cee() i32 {
+    return 1;
+}
+
+pub fn other() i32 {
+    return 2;
+}
+)",
+        M"(import c;
+
+pub fn dee() i32 {
+    let v: i32 = "text";
+    return v + c::cee();
+}
+)",
+    );
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    assert(errors_in(&p, &diags, "/d.spc") == 1, "the baseline error");
+    let c1: str = M"(pub fn cee() i32 {
+    return 1;
+}
+
+pub fn other() i64 {
+    return 2;
+}
+)";
+    ov(&ws, "c.spc", c1, &mut ovf, &mut ovt);
+    let mut st = an::RecompileStats {};
+    round_diags(&ws, &mut p, &mut diags, &ovf, &ovt, &mut st, "erring reacher oracle");
+    assert(st.analyzed == 2, "the owner and the erring reacher re-analyze");
+    assert(st.kept == 2, "the clean reachers naming only the untouched function stand");
+}
+
+// The reference record survives a body release: the module that names a definition is known
+// without its bodies, and a reference scan parses back that module alone.
+@test
+fn release_reference_record_names_referencers() {
+    let ws = ws_new();
+    let ovf = Vector::<String>::new();
+    let ovt = Vector::<String>::new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let am = mod_of(&p, "/a.spc");
+    let bm = mod_of(&p, "/b.spc");
+    let cm = mod_of(&p, "/c.spc");
+    assert(p.modules.at(bm).ast.b.released && p.modules.at(am).ast.b.released, "closed modules release");
+    let cee = probe_decl(&p, cm, "cee");
+    assert(cee != NODE_NONE, "cee declares in c");
+    assert(an::refers(&p, bm, cm as u32, cee, cee), "b names cee from its released body");
+    assert(!an::refers(&p, am, cm as u32, cee, cee), "a never names cee");
+    an::ensure_bodies(&mut p, bm);
+    let locs = feat::references_of_def(&p, DefId { module: cm as ModuleId, node: cee }, false);
+    assert(locs.len() == 1 && locs.at(0).module as usize == bm, "the one call site, in b");
+    assert(p.modules.at(am).ast.b.released, "a stays released");
+}
+
+// The declaration node named `needle` in module `mid` (a function's name node resolves to it).
+fn probe_decl(p: &loader::Package, mid: usize, needle: str) NodeId {
+    let a = &p.modules.at(mid).ast;
+    let src = p.modules.at(mid).source.as_str();
+    for i0 in 1..a.nnodes() {
+        let i = a.nth_id(i0);
+        let n = a.at_const(i);
+        if n.kind != NodeKind::NODE_FUNCTION {
+            continue;
+        }
+        let nm = n.as_data.function.name;
+        let sp = a.at_const(nm).as_data.name.text;
+        if src.slice(sp.start as usize, sp.end as usize) == needle {
+            return i;
+        }
+    }
+    return NODE_NONE;
 }
 
 @test

@@ -303,6 +303,7 @@ pub struct RecompileStats {
     pub body_only: u32, // changed modules that took the body-splice path (node ids stable)
     pub bodies_back: u32, // modules whose released body syntax the round parsed back
     pub passes: u32, // extra typecheck passes after the engine demanded a released body
+    pub kept: u32, // importers of a reparsed module whose analysis stood (no touched reference)
 }
 
 // One module's import-decl surface, rendered to comparable bytes: path segment texts, alias text,
@@ -330,6 +331,417 @@ fn import_surface(a: &Ast, src: str, out: &mut String) {
             out.push_byte(b'*');
         }
         out.push_byte(b';');
+    }
+}
+
+// True when two parses of a module have the same module-arena tree (the node count, the kind at
+// every id, the child lists): every id then names the same declaration, so an importer's
+// resolutions into the module stay valid across the reparse.
+fn same_shape(a: &Ast, b: &Ast) bool {
+    if a.nodes.len() != b.nodes.len() || a.children.len() != b.children.len() {
+        return false;
+    }
+    for i in 0..a.nodes.len() {
+        if a.nodes.at(i).kind != b.nodes.at(i).kind {
+            return false;
+        }
+    }
+    for i in 0..a.children.len() {
+        if *a.children.at(i) != *b.children.at(i) {
+            return false;
+        }
+    }
+    return true;
+}
+
+const SLOT_NONE: u32 = 0xFFFFFFFF;
+
+// True when the item at `by_node` position `k` is a function with a body in the body arena.
+fn slot_has_body(p: &loader::Package, m: usize, k: usize) bool {
+    let nd = p.modules[m].ast.at_const(slot_node(p, k as u32));
+    return nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(nd.as_data.function.body);
+}
+
+// The `by_node` position of the item whose own ranges hold `node` of module `m` (the owner
+// search of `graph::items`: a module-arena node belongs to the first item at or after it in
+// node order, a body node to the function whose body run holds it), or SLOT_NONE past every
+// range (a desugar appended later).
+fn slot_of(p: &loader::Package, m: usize, node: NodeId) u32 {
+    let mut lo = p.idx.mod_items[m] as usize;
+    let end = p.idx.mod_items[m + 1] as usize;
+    let mut hi = end;
+    if Ast::in_body(node) {
+        let b = node & NODE_BODY_MASK;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if p.sched.body_hi[mid] < b {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        // `body_hi` is the largest body block id so far: an item without a body repeats the
+        // one before it (and the first items repeat 0, the first body's own block id), so the
+        // owner is the first position at or past the search that owns a body.
+        while lo < end && !slot_has_body(p, m, lo) {
+            lo += 1;
+        }
+    } else {
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if p.idx.items.at(p.sched.by_node[mid] as usize).node < node {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+    }
+    if lo >= end {
+        return SLOT_NONE;
+    }
+    return lo as u32;
+}
+
+// The declaration node at `by_node` position `k`.
+const fn slot_node(p: &loader::Package, k: u32) NodeId {
+    return p.idx.items.at(p.sched.by_node[k as usize] as usize).node;
+}
+
+// The module-arena node range (lo, hi] of the item at position `k` of module `m`, pushed as
+// (lo + 1, hi): the nodes after the previous item's declaration up to its own.
+fn push_slot_range(p: &loader::Package, m: usize, k: u32, out: &mut Vector<u32>) {
+    let lo = if k as usize > p.idx.mod_items[m] as usize {
+        slot_node(p, k - 1) + 1;
+    } else {
+        0u32;
+    };
+    out.push(lo);
+    out.push(slot_node(p, k));
+}
+
+const fn ref_edge_cmp(a: &loader::RefEdge, b: &loader::RefEdge) i32 {
+    if a.key != b.key {
+        return if a.key < b.key {
+            0 - 1;
+        } else {
+            1;
+        };
+    }
+    if a.owner != b.owner {
+        return if a.owner < b.owner {
+            0 - 1;
+        } else {
+            1;
+        };
+    }
+    return 0;
+}
+
+// Record module `i`'s references (`Package.def_refs`) from its resolution tables once a round's
+// analysis of it is complete: one edge per (item, declaration of another item) pair, the
+// module's own items included, so the record answers for the module while its bodies are
+// released. A node past every item's ranges records a module-wide owner.
+fn record_refs(p: &mut loader::Package, i: usize) {
+    let mut v = Vector::<loader::RefEdge>::new();
+    {
+        let a = &p.modules[i].ast;
+        let nb = a.nodes.len();
+        let nn = a.nnodes();
+        // The owner of a run of nodes repeats: re-searched only past the current slot's range.
+        let mut cur: u32 = SLOT_NONE;
+        let mut cur_lo: u32 = 0;
+        let mut cur_hi: u32 = 0;
+        let mut cur_body = false;
+        let mut last_key: u64 = 0;
+        let mut last_owner: u32 = 0;
+        for k in 0..nn {
+            let n = Ast::nth_id_n(nb, k);
+            let d = a.resolution_def(n);
+            if d.node == NODE_NONE || d.module as usize == i && Ast::in_body(d.node) {
+                continue;
+            }
+            let body = Ast::in_body(n);
+            let nv = n & NODE_BODY_MASK;
+            if cur == SLOT_NONE || body != cur_body || nv <= cur_lo || nv > cur_hi {
+                cur = slot_of(p, i, n);
+                cur_body = body;
+                if cur != SLOT_NONE {
+                    let first = cur as usize == p.idx.mod_items[i] as usize;
+                    if body {
+                        cur_lo = if first {
+                            0u32;
+                        } else {
+                            p.sched.body_hi[cur as usize - 1];
+                        };
+                        cur_hi = p.sched.body_hi[cur as usize];
+                    } else {
+                        cur_lo = if first {
+                            0u32;
+                        } else {
+                            slot_node(p, cur - 1);
+                        };
+                        cur_hi = slot_node(p, cur);
+                    }
+                }
+            }
+            let mut owner = if cur == SLOT_NONE {
+                loader::REF_MODULE_WIDE;
+            } else {
+                slot_node(p, cur);
+            };
+            if body {
+                owner |= loader::REF_BODY_EDGE;
+            }
+            if d.module as usize == i && cur != SLOT_NONE && slot_of(p, i, d.node) == cur {
+                continue;
+            }
+            let key = d.module as u64 << 32 | d.node as u64;
+            if key != last_key || owner != last_owner {
+                v.push(loader::RefEdge { key: key, owner: owner });
+                last_key = key;
+                last_owner = owner;
+            }
+        }
+    }
+    v.sort_by(|x: &loader::RefEdge, y: &loader::RefEdge| ref_edge_cmp(x, y));
+    let mut w: usize = 0;
+    for k in 0..v.len() {
+        if w == 0 || v[k].key != v[w - 1].key || v[k].owner != v[w - 1].owner {
+            v.set(w, v[k]);
+            w += 1;
+        }
+    }
+    v.truncate(w);
+    while p.def_refs.len() <= i {
+        p.def_refs.push(Vector::<loader::RefEdge>::new());
+    }
+    p.def_refs.set(i, v);
+}
+
+// The first recorded edge of module `m` whose key is at least `want`.
+fn ref_lower_bound(v: &Vector<loader::RefEdge>, want: u64) usize {
+    let mut a: usize = 0;
+    let mut b: usize = v.len();
+    while a < b {
+        let mid = (a + b) / 2;
+        if v.at(mid).key < want {
+            a = mid + 1;
+        } else {
+            b = mid;
+        }
+    }
+    return a;
+}
+
+/// True when module `m`'s recorded references name a declaration of module `dm` with a node in
+/// [lo, hi] (a binary search over the sorted record; false for an unrecorded module).
+pub fn refers(p: &loader::Package, m: usize, dm: u32, lo: u32, hi: u32) bool {
+    if m >= p.def_refs.len() {
+        return false;
+    }
+    let v = p.def_refs.at(m);
+    let a = ref_lower_bound(v, dm as u64 << 32 | lo as u64);
+    return a < v.len() && v.at(a).key <= (dm as u64 << 32 | hi as u64);
+}
+
+// The owners (item declaration nodes, or REF_MODULE_WIDE) of module `m`'s recorded references
+// to declarations of module `dm` with nodes in [lo, hi], appended to `out`.
+fn ref_owners(p: &loader::Package, m: usize, dm: u32, lo: u32, hi: u32, out: &mut Vector<u32>) {
+    if m >= p.def_refs.len() {
+        return;
+    }
+    let v = p.def_refs.at(m);
+    let top = dm as u64 << 32 | hi as u64;
+    let mut a = ref_lower_bound(v, dm as u64 << 32 | lo as u64);
+    while a < v.len() && v.at(a).key <= top {
+        out.push(v.at(a).owner);
+        a += 1;
+    }
+}
+
+// The items of module `i` an edit of [ws, we] (bytes of its current source) touched, as
+// `by_node` positions: each item owns the bytes from the end of the item before it in source
+// order (attributes and comments precede a declaration) to its own end, an extend the bytes
+// before its first member and after its last, the last item the tail of the source. True when
+// the edit touched an extend's own bytes (its target, interface, generics or braces): the
+// conformance it declares reaches modules that never name it.
+fn touched_items(p: &loader::Package, i: usize, ws: u32, we: u32, out: &mut Vector<u32>) bool {
+    let a = &p.modules[i].ast;
+    let i0 = p.idx.mod_items[i] as usize;
+    let i1 = p.idx.mod_items[i + 1] as usize;
+    // Items by source start; a member follows its extend's start.
+    let mut order = Vector::<u64>::new();
+    for k in i0..i1 {
+        let it = p.idx.items.at(p.sched.by_node[k] as usize);
+        order.push(a.at_const(it.node).span.start as u64 << 32 | (k - i0) as u64);
+    }
+    order.sort();
+    let mut header = false;
+    let mut prev_end: u32 = 0;
+    let mut open_ext: u32 = SLOT_NONE; // the extend whose members are being walked
+    let mut open_end: u32 = 0;
+    for q in 0..order.len() {
+        let k = (order[q] & 0xFFFFFFFFu64) as u32 + i0 as u32;
+        let it = p.idx.items.at(p.sched.by_node[k as usize] as usize);
+        let sp = a.at_const(it.node).span;
+        if open_ext != SLOT_NONE && it.owner == loader::ITEM_NONE {
+            // Past the last member: the extend's closing bytes.
+            if ws <= open_end && we >= prev_end {
+                header = true;
+                out.push(open_ext);
+            }
+            prev_end = open_end;
+            open_ext = SLOT_NONE;
+        }
+        let last = q + 1 == order.len();
+        let mut end = sp.end;
+        if it.kind == loader::ItemKind::IK_EXTEND as u8 {
+            // The header runs to the first member's start.
+            let mut first: u32 = sp.end;
+            for j in i0..i1 {
+                let mem = p.idx.items.at(j);
+                if mem.owner == p.sched.by_node[k as usize] {
+                    let ms = a.at_const(mem.node).span.start;
+                    if ms < first {
+                        first = ms;
+                    }
+                }
+            }
+            if first < sp.end {
+                open_ext = k;
+                open_end = sp.end;
+                end = first;
+            }
+        }
+        let ext_end = if last && open_ext == SLOT_NONE {
+            0xFFFFFFFFu32;
+        } else {
+            end;
+        };
+        if ws <= ext_end && we >= prev_end {
+            out.push(k);
+            if it.kind == loader::ItemKind::IK_EXTEND as u8 {
+                header = true;
+            }
+        }
+        if end > prev_end {
+            prev_end = end;
+        }
+    }
+    if open_ext != SLOT_NONE && ws <= 0xFFFFFFFFu32 && we >= prev_end {
+        header = true;
+        out.push(open_ext);
+    }
+    return header;
+}
+
+const ST_NONE: u8 = 0;
+const ST_BODY: u8 = 1; // the item's body meaning may have changed; its signature stands
+const ST_FULL: u8 = 2; // its declaration changed: everything that names it is stale
+
+// True when the item at position `k` of module `m` is a function or method that is not
+// `const fn`: only its body reads it, so a change of its body alone reaches no caller, and
+// only a signature or a compile-time evaluation reads anything else.
+fn plain_fn(p: &loader::Package, m: usize, k: u32) bool {
+    let it = p.idx.items.at(p.sched.by_node[k as usize] as usize);
+    if it.kind != loader::ItemKind::IK_FUNCTION as u8 && it.kind != loader::ItemKind::IK_METHOD as u8 {
+        return false;
+    }
+    let nd = p.modules[m].ast.at_const(it.node);
+    return nd.kind == NodeKind::NODE_FUNCTION && !nd.as_data.function.is_const;
+}
+
+// Item-level invalidation over the recorded references. The items an edit touched start
+// `ST_FULL`. A full item reaches every item naming it: a plain function naming it from its
+// body becomes `ST_BODY` (its calls mean something else now, its signature stands); anything
+// else (a signature or type spelling it, a constant, a `const fn`, an enum, an interface, a
+// struct) becomes full. A body-state item reaches only the readers of its body: the
+// compile-time evaluators (a constant, a `const fn`) and the items naming it outside a
+// releasable body (a generic or `const fn` body), which become full or body in turn; a plain
+// function calling it stands. Every module holding a reached item is marked in `aff`. A
+// state only rises, so the walk is bounded by twice the item count.
+fn propagate_touched(p: &loader::Package, seeds: &Vector<Vector<u32>>, aff: &mut Vector<bool>) {
+    let n = p.modules.len();
+    let mut state = Vector::<u8>::new();
+    state.resize_default(p.idx.items.len());
+    // Per module: (lo, hi, state) triples not yet propagated.
+    let mut pend = Vector::<Vector<u32>>::new();
+    let mut queued = Vector::<bool>::new();
+    queued.resize_default(n);
+    let mut work = Vector::<usize>::new();
+    for m in 0..n {
+        pend.push(Vector::<u32>::new());
+        for q in 0..seeds.at(m).len() {
+            let k = seeds.at(m)[q];
+            if state[k as usize] != ST_FULL {
+                state.set(k as usize, ST_FULL);
+                push_slot_range(p, m, k, &mut pend[m]);
+                pend[m].push(ST_FULL);
+            }
+        }
+        if pend[m].len() != 0 {
+            aff.set(m, true);
+            queued.set(m, true);
+            work.push(m);
+        }
+    }
+    let mut owners = Vector::<u32>::new();
+    let mut steps: usize = 0;
+    while work.len() != 0 {
+        steps += 1;
+        assert(steps <= 2 * p.idx.items.len() + n, "every module is queued once per state rise");
+        let x = work.remove(work.len() - 1).unwrap();
+        queued.set(x, false);
+        let rg = replace(&mut pend[x], Vector::<u32>::new());
+        for m in 0..n {
+            if m >= p.def_refs.len() {
+                continue;
+            }
+            let mut q: usize = 0;
+            while q + 2 < rg.len() {
+                let xs = rg[q + 2] as u8;
+                owners.clear();
+                ref_owners(p, m, x as u32, rg[q], rg[q + 1], &mut owners);
+                q += 3;
+                for o in 0..owners.len() {
+                    let ow = owners[o];
+                    let in_body = (ow & loader::REF_BODY_EDGE) != 0;
+                    let node = ow & loader::REF_MODULE_WIDE; // the node bits
+                    let mut k0 = p.idx.mod_items[m];
+                    let mut k1 = p.idx.mod_items[m + 1];
+                    if node != loader::REF_MODULE_WIDE {
+                        k0 = slot_of(p, m, node);
+                        k1 = k0 + 1;
+                    }
+                    for k in k0..k1 {
+                        let plain = plain_fn(p, m, k);
+                        let mut ns = ST_FULL;
+                        if plain && in_body {
+                            ns = if xs == ST_FULL {
+                                ST_BODY;
+                            } else {
+                                ST_NONE;
+                            };
+                        } else if plain && xs != ST_FULL {
+                            ns = ST_BODY;
+                        }
+                        if ns <= state[k as usize] {
+                            continue;
+                        }
+                        state.set(k as usize, ns);
+                        push_slot_range(p, m, k, &mut pend[m]);
+                        pend[m].push(ns);
+                    }
+                }
+            }
+            if pend[m].len() != 0 {
+                aff.set(m, true);
+                if !queued[m] {
+                    queued.set(m, true);
+                    work.push(m);
+                }
+            }
+        }
     }
 }
 
@@ -507,8 +919,16 @@ pub fn recompile(
         return true;
     }
     let mut body_sliced = Vector::<bool>::new();
+    // A full reparse that kept the module-arena shape (`same_shape`), with its edit window in
+    // the new source's bytes.
+    let mut shaped = Vector::<bool>::new();
+    let mut win_s = Vector::<u32>::new();
+    let mut win_e = Vector::<u32>::new();
     for _ in 0..changed.len() {
         body_sliced.push(false);
+        shaped.push(false);
+        win_s.push(0);
+        win_e.push(0);
     }
     // 2) Guards + reparse each changed module.
     for c in 0..changed.len() {
@@ -585,27 +1005,60 @@ pub fn recompile(
                 return false;
             }
             let old = replace(&mut p.modules[i].ast, na);
-            old.free();
             p.modules[i].ast.module = i as ModuleId;
             p.modules[i].source = ns9;
             emit::platform_filter_module(p, i, target);
+            if same_shape(&old, &p.modules[i].ast) {
+                shaped.set(c, true);
+                win_s.set(c, ws);
+                win_e.set(c, (we as i64 + delta) as u32);
+            }
+            old.free();
         }
         st.reparsed += 1;
     }
-    // 3) decl spans (and for full reparses, decl ids) changed: rebuild the package index. The
+    // 3) decl spans (and for full reparses, decl ids) changed: rebuild the package index and the
+    // item index over it (the owner lookup the touched-item walk and the records read). The
     // import-closure caches survive: the guard above proved the edges identical.
     p.build_index();
-    // 4) the affected closure: changed modules, plus every module that can reach one through imports.
+    gitems::open(p);
+    // 4) the affected closure: the changed modules, plus the modules that reach one through
+    // imports and whose analysis it stales. A body-spliced module's interface (decl ids,
+    // signatures, const bodies) is untouched: none. A same-shape reparse keeps every id: the
+    // items the edit touched invalidate the items that name them, transitively
+    // (`propagate_touched`), and a reacher whose last analysis reported an error (an unresolved
+    // name the edit may define) re-analyzes; an edit of an extend's own bytes, or a reparse with
+    // fresh ids, stales every reacher.
+    let mut erring = Vector::<bool>::new();
+    erring.resize_default(n);
+    for k in 0..diags.len() {
+        let d = diags.at(k);
+        if d.severity == 1 && d.module as usize < n {
+            erring.set(d.module as usize, true);
+        }
+    }
     let mut aff = Vector::<bool>::new();
     for _ in 0..n {
         aff.push(false);
     }
-    for c in 0..changed.len() {
-        aff.set(changed[c], true);
-    }
     for k in 0..opened.len() {
         aff.set(opened[k], true);
     }
+    let mut seeds = Vector::<Vector<u32>>::new();
+    for _ in 0..n {
+        seeds.push(Vector::<u32>::new());
+    }
+    let mut wide = Vector::<bool>::new(); // changed modules every reacher re-analyzes for
+    for c in 0..changed.len() {
+        aff.set(changed[c], true);
+        let mut w = !body_sliced[c] && !shaped[c];
+        if shaped[c] && touched_items(p, changed[c], win_s[c], win_e[c], &mut seeds[changed[c]]) {
+            w = true;
+        }
+        wide.push(w);
+    }
+    let mut kept = Vector::<bool>::new();
+    kept.resize_default(n);
     for m in 0..n {
         if aff[m] {
             continue;
@@ -614,15 +1067,24 @@ pub fn recompile(
         let mut hit = false;
         for j in 0..clo.len() {
             for c in 0..changed.len() {
-                // A body-spliced module's interface (decl ids, signatures, const bodies) is
-                // untouched, so reaching it does not stale the reacher.
-                if !body_sliced[c] && clo[j] as usize == changed[c] {
+                if clo[j] as usize != changed[c] || body_sliced[c] {
+                    continue;
+                }
+                if wide[c] || erring[m] {
                     hit = true;
+                } else {
+                    kept.set(m, true);
                 }
             }
         }
         if hit {
             aff.set(m, true);
+        }
+    }
+    propagate_touched(p, &seeds, &mut aff);
+    for m in 0..n {
+        if kept[m] && !aff[m] {
+            st.kept += 1;
         }
     }
     // 5) re-run the pipeline over the affected set only, mirroring run_pipeline's phase order. A
@@ -647,10 +1109,8 @@ pub fn recompile(
         }
         st.analyzed += 1;
     }
-    // The index follows the package index: the affected set's node ids changed. Every module
-    // outside the set keeps its analysis, so its items are Checked (the baseline guard above
-    // proved every module typed); the passes reset the set's own.
-    gitems::open(p);
+    // Every module outside the set keeps its analysis, so its items are Checked (the baseline
+    // guard above proved every module typed); the passes reset the set's own.
     for m in 0..n {
         if !aff[m] {
             p.set_module_states(m, loader::IS_CHECKED);
@@ -776,6 +1236,9 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
             }
         }
         set.set(i, gate);
+        if !gate && p.modules[i].has_ast {
+            record_refs(p, i);
+        }
     }
     typecheck_set(p, &mut set, all_ok, true, root_file, lint_dir, diags, &mut st);
     let ovp = (&p.overlay_files) as *const Vector<String>;
@@ -835,6 +1298,7 @@ fn typecheck_set(
             }
             let miss0 = cirv.body_miss_n;
             lsp_typecheck_module(p, i, lw, nd);
+            record_refs(p, i);
             if cirv.body_miss_n != miss0 {
                 again.set(i, true);
             }

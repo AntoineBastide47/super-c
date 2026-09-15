@@ -314,7 +314,25 @@ pub struct Package {
     /// the next round needs no parse-back. Indexed by module; shorter than the module table means
     /// "not held".
     pub body_hold: Vector<bool>,
+    /// LSP: per module, the references its items made to declarations of other items when its
+    /// last analysis finished (`RefEdge`, ascending by key): what an edit's dependents and a
+    /// reference scan read about a module whose bodies are released. Indexed by module; shorter
+    /// than the module table means "unrecorded".
+    pub def_refs: Vector<Vector<RefEdge>>,
 }
+
+/// One recorded reference (`Package.def_refs`): the declaration named (`module << 32 | node`)
+/// and the declaration node of the item whose nodes name it (`REF_MODULE_WIDE` for a node no
+/// item's ranges hold: a desugar appended past them), with `REF_BODY_EDGE` set when the naming
+/// node sits in the body arena (a call or a use inside a releasable body) rather than in a
+/// signature, a type, a constant or a body the module arena holds.
+pub struct RefEdge {
+    pub key: u64,
+    pub owner: u32,
+}
+
+pub const REF_MODULE_WIDE: u32 = 0x7FFFFFFF;
+pub const REF_BODY_EDGE: u32 = 0x80000000;
 
 /// Parallel-table cache of directory listings for import resolution. `ok[i]` = did opendir(dirs[i]) succeed.
 pub struct DirCache {
@@ -1820,6 +1838,7 @@ extend Package {
             overlay_files: Vector::<String>::new(),
             overlay_texts: Vector::<String>::new(),
             body_hold: Vector::<bool>::new(),
+            def_refs: Vector::<Vector<RefEdge>>::new(),
             icost_on: false,
             free_bodies: false,
             icost_tc: Vector::<u64>::new(),
@@ -2296,6 +2315,9 @@ extend Package {
         for i in 0..self.modules.len() {
             let m = self.modules.at(i);
             b += m.source.capacity() + m.ast.retained_bytes();
+        }
+        for i in 0..self.def_refs.len() {
+            b += self.def_refs.at(i).capacity() * 16;
         }
         return b;
     }

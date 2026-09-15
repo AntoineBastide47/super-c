@@ -1088,6 +1088,91 @@ fn lsp_call_and_type_hierarchy() {
     assert(r8.contains("\"name\":\"S\""));
 }
 
+// A full-document change notification.
+fn push_change(ses: &mut String, root: str, rel: str, version: i64, src: str) {
+    let mut b = String::from_str(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"file://",
+    );
+    b.push_str(root);
+    b.push_byte(b'/');
+    b.push_str(rel);
+    b.format_into("\",\"version\":{}}},\"contentChanges\":[{{\"text\":", version);
+    json::dump_escaped(src, &mut b);
+    b.push_str("}]}}");
+    frame(ses, &b);
+}
+
+const BURST_ERR1: str = "fn main() i32 {\n    let x: i32 = \"one\";\n    return x;\n}\n";
+const BURST_ERR2: str = "fn main() i32 {\n    let x: i32 = true;\n    return x;\n}\n";
+
+// Rapid edits: didChange notifications already waiting fold into one analysis round, so the
+// superseded buffer's diagnostics never publish; every publication carries the document version
+// it analyzed; a message of another kind read ahead keeps its place (the cancel lands before the
+// hover it names).
+@test
+fn lsp_edit_burst_folds_and_tags_versions() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_OK);
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    push_init_caps(&mut ses, root, "{}", "{}");
+    push_open(&mut ses, root, "src/main.spc", BURST_ERR1);
+    push_change(&mut ses, root, "src/main.spc", 2, BURST_ERR2);
+    push_change(&mut ses, root, "src/main.spc", 3, MAIN_OK);
+    let b = String::from_str("{\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\",\"params\":{\"id\":5}}");
+    frame(&mut ses, &b);
+    push_req_at(&mut ses, root, "src/main.spc", 5, "textDocument/hover", 0, 4);
+    push_req_at(&mut ses, root, "src/main.spc", 6, "textDocument/hover", 0, 4);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    // The opened revision's error publishes with its version; the folded revision's never does;
+    // the final clean revision clears with its version.
+    assert(o.contains("expected 'i32', found 'str'"));
+    assert_eq(count(o, "expected 'i32', found 'bool'"), 0);
+    assert(o.contains("\"version\":1,\"diagnostics\":[{"));
+    assert(o.contains("\"version\":3,\"diagnostics\":[]"));
+    assert_eq(count(o, "\"version\":2"), 0);
+    let r5 = response_of(o, "\"id\":5");
+    assert(r5.contains("-32800"));
+    let r6 = response_of(o, "\"id\":6");
+    assert(r6.contains("main"));
+}
+
+const REF_UTIL: str = "pub struct Point {\n    pub x: i32,\n}\n\nextend Point {\n    pub fn norm(self: &Point) i32 {\n        return self.x;\n    }\n}\n";
+const REF_MAIN: str = "import util;\n\nfn main() i32 {\n    let p = util::Point { x: 3 };\n    return p.norm() - 3;\n}\n";
+
+// A reference scan with no document open: the referencing module's bodies are released, and
+// the reference record names it, so the call site inside its body is found.
+@test
+fn lsp_references_reach_released_bodies() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/util.spc", REF_UTIL);
+    p.mkfile("src/main.spc", REF_MAIN);
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    push_init_caps(&mut ses, root, "{}", "{}");
+    let mut b = String::from_str("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.format_into(
+        "{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/references\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/util.spc\"}},\"position\":{{\"line\":5,\"character\":12}},\"context\":{{\"includeDeclaration\":false}}}}}}",
+        root,
+    );
+    frame(&mut ses, &b);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let r3 = response_of(out.as_str(), "\"id\":3");
+    assert(r3.contains("src/main.spc"));
+    assert(r3.contains("\"line\":4"));
+}
+
 @test
 fn lsp_limits_and_eviction() {
     let p = cli::proj_new();

@@ -39,6 +39,7 @@
 #  include <windows.h>
 #  include <psapi.h>
 #elif !defined(__wasi__)
+#  include <poll.h>     /* sc_file_pending */
 #  include <signal.h>   /* kill(pid, 0) liveness probe */
 #  include <sys/resource.h> /* getrusage: peak RSS */
 #  include <sys/wait.h> /* WIFEXITED/WEXITSTATUS */
@@ -181,6 +182,43 @@ int sc_process_alive(int64_t pid) {
   return 1; /* WASI has no pids to probe */
 #else
   return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+#endif
+}
+
+int64_t sc_file_read(void *f, void *buf, size_t n) {
+#if defined(_WIN32)
+  unsigned want = n > 1u << 30 ? 1u << 30 : (unsigned)n;
+  return _read(_fileno((FILE *)f), buf, want);
+#else
+  ssize_t r;
+  do {
+    r = read(fileno((FILE *)f), buf, n);
+  } while (r < 0 && errno == EINTR);
+  return (int64_t)r;
+#endif
+}
+
+int sc_file_pending(void *f) {
+#if defined(_WIN32)
+  HANDLE h = (HANDLE)_get_osfhandle(_fileno((FILE *)f));
+  if (h == INVALID_HANDLE_VALUE)
+    return 0;
+  if (GetFileType(h) == FILE_TYPE_PIPE) {
+    DWORD avail = 0;
+    if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL))
+      return 1; /* a broken pipe: the read reports it */
+    return avail > 0;
+  }
+  return WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
+#elif defined(__wasi__)
+  (void)f;
+  return 0;
+#else
+  struct pollfd pfd;
+  pfd.fd = fileno((FILE *)f);
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+  return poll(&pfd, 1, 0) > 0; /* data, end of stream or an error: the read returns at once */
 #endif
 }
 
