@@ -8,22 +8,62 @@
 //
 // Only a `CancelSource` can request cancellation; a `CancelToken` observes it. A group owns its children:
 // its drop requests cancellation and joins them, so a group can never leak a running task. Children
-// inherit the group's token and register their generation-checked `TaskKey` with it: a raw task pointer
-// is never exposed, so a stale handle cannot touch a recycled task block.
+// inherit the group's token and register with it; a raw task pointer is never exposed, so a stale handle
+// cannot touch a recycled task block.
+//
+// Registration contract (`CancelToken::bind_current`):
+//   - Membership is per (task, source). Binding the same source twice from one task is one membership;
+//     binding several sources from one task is one membership each. A membership is a record the TASK
+//     owns (the first lives inline in the task block, every further one is a small heap record) and the
+//     SOURCE links into its member list, so a source holds exactly its live members and nothing of its
+//     history.
+//   - A membership lasts until the task completes, by return or by cancellation cleanup: the runtime
+//     unlinks every record before the task's identity can be recycled. The record holds a reference to
+//     the source's shared state, so a source (and its tokens) may all be dropped while members live.
+//   - Binding after the source cancelled delivers the request at once with the FIRST request's reason.
+//     Cancellation reads its members under the source lock and requests each by generation-checked key
+//     outside it, in bounded batches; a member that completes meanwhile is rejected by the key check.
+//   - Lock order: a source lock is taken alone. Nothing under it can reach a task's cleanup or another
+//     source, and the key-based request (which takes a registry slot lock) runs after it is released.
 
+import atomic;
+import sc_runtime;
 import std::parallel::arc as arc;
 import std::parallel::sync as sync;
 import std::parallel::atomics as atomics;
 import std::parallel::runtime as runtime;
 
-// The state one source and its tokens share. `keys` holds the registered target tasks; a key whose task
-// already finished is inert (the registry generation check rejects it), so the list needs no removal.
+// The state one source and its tokens share. `head` is the doubly linked member list, guarded by `spin`;
+// `flag` and `reason` are written once, under the same lock, and read lock-free by tokens.
 @no_const
 struct CancelShared {
     pub flag: atomics::Atomic<i32>, // 0 live, 1 cancelled
     pub reason: atomics::Atomic<i32>, // the CR_* reason of the first cancel
-    pub keys: sync::Mutex<Vector<runtime::TaskKey>>,
+    pub spin: UnsafeCell<i32>, // guards `head` and every member's list links
+    pub head: UnsafeCell<*mut Member>, // live members, oldest first; drained (not kept) by the cancel sweep
+    pub tail: UnsafeCell<*mut Member>, // where a registration appends: the sweep then requests in bind order
 }
+
+// One membership: the task's record, linked into the source's list. Storage belongs to the task (inline in
+// its block, or heap for a second source); the source only ever follows the links under its lock.
+@no_const
+struct Member {
+    pub src: arc::Arc<CancelShared>, // keeps the source state alive for as long as this record exists
+    pub key: runtime::TaskKey, // the task, for the generation-checked request
+    pub snext: *mut Member, // source list
+    pub sprev: *mut Member,
+    pub tnext: *mut Member, // the task's own list, walked at completion
+    pub linked: i32, // atomic: still on the source list; cleared under the lock, read before taking it
+}
+
+// The raw cells make the shared state structurally neither `Send` nor `Sync`; the spin lock guards every
+// access to them (`head` and the members' links), and the atomics are ordered on their own, so a source
+// or token may be sent and shared freely.
+unsafe extend CancelShared as Send {}
+
+unsafe extend CancelShared as Sync {}
+
+static_assert(sizeof(Member) <= sizeof(runtime::Membership) - 16, "the first membership must fit the task block's inline storage");
 
 /// The requesting half of a cancellation pair. Clonable; every clone cancels the same set of registered
 /// tasks. Runtime shutdown uses its own internal source, so a program source never races it for a reason.
@@ -69,10 +109,64 @@ fn new_shared() arc::Arc<CancelShared> {
         CancelShared {
             flag: atomics::Atomic::<i32>::new(0),
             reason: atomics::Atomic::<i32>::new(0),
-            keys: sync::Mutex::<Vector<runtime::TaskKey>>::new(Vector::<runtime::TaskKey>::new()),
+            spin: UnsafeCell::<i32>::new(0),
+            head: UnsafeCell::<*mut Member>::new(null),
+            tail: UnsafeCell::<*mut Member>::new(null),
         },
     );
 }
+
+// Unlink `m` from its source's list. Caller holds the source lock.
+fn unlink_locked(sh: &CancelShared, m: *mut Member) {
+    let nx = unsafe m.snext;
+    let pv = unsafe m.sprev;
+    if pv != null {
+        unsafe pv.snext = nx;
+    } else {
+        unsafe sh.head.get()[0] = nx;
+    }
+    if nx != null {
+        unsafe nx.sprev = pv;
+    } else {
+        unsafe sh.tail.get()[0] = pv;
+    }
+    atomic::store_i32(&mut unsafe m.linked, 0, 2);
+}
+
+// The completion hook the runtime calls once the task's body has returned and before its block can be
+// recycled: every record leaves its source list (under that source's lock), gives its reference back, and
+// heap records are freed. Runs on the worker, outside any task, holding no lock across records.
+fn membership_release(mb: *mut runtime::Membership) {
+    let inl = (&mut unsafe mb.inline_mem[0]) as *mut Member;
+    let mut m = (unsafe mb.head) as *mut Member;
+    unsafe mb.head = null;
+    let mut g = Global {};
+    while m != null {
+        let nx = unsafe m.tnext;
+        let sh = unsafe m.src.get();
+        // A member the cancel sweep already drained needs no lock: a thousand children unwinding at once
+        // would otherwise serialise on their source. Re-checked under the lock, since the sweep may be
+        // draining this very record.
+        if atomic::load_i32(&mut unsafe m.linked, 1) != 0 {
+            unsafe sc_runtime::sc_rt_spin_lock(sh.spin.get());
+            if atomic::load_i32(&mut unsafe m.linked, 0) != 0 {
+                unlink_locked(sh, m);
+            }
+            unsafe sc_runtime::sc_rt_spin_unlock(sh.spin.get());
+        }
+        // The record's reference to the source goes with it: destroyed in place, since the record is raw
+        // storage the task owns, not a value the drop elaboration knows.
+        let sp = (&mut unsafe m.src) as *mut arc::Arc<CancelShared>;
+        sp.free();
+        if m != inl {
+            unsafe g.dealloc(m, sizeof(Member), alignof(Member));
+        }
+        m = nx;
+    }
+}
+
+// How many keys one cancel sweep gathers per lock hold: the sweep's only temporary storage.
+const CANCEL_BATCH: usize = 64;
 
 // What a child reports through, moved as one value so the trampoline can defer it whole.
 @no_const
@@ -139,27 +233,56 @@ extend CancelSource {
     pub fn token(self: &CancelSource) CancelToken {
         return CancelToken::wrap(self.shared.clone());
     }
+    /// How many live tasks are registered right now: a diagnostic count, taken under the member lock.
+    /// Zero once the source has cancelled (a cancelled source keeps no list).
+    pub fn members(self: &CancelSource) usize {
+        let sh = self.shared.get();
+        let mut n: usize = 0;
+        unsafe sc_runtime::sc_rt_spin_lock(sh.spin.get());
+        let mut m = unsafe sh.head.get()[0];
+        while m != null {
+            n = n + 1;
+            m = unsafe m.snext;
+        }
+        unsafe sc_runtime::sc_rt_spin_unlock(sh.spin.get());
+        return n;
+    }
     /// Request cancellation of every registered task, with a `runtime::CR_*` reason. Idempotent: the
     /// first call's reason is retained, later calls change nothing. Tasks that register after this call
     /// are cancelled at registration.
     pub fn cancel(self: &CancelSource, reason: u32) {
         let sh = self.shared.get();
-        let mut first = false;
-        {
-            // Under the key lock: `bind_current` re-checks the flag under the same lock, so a task can
-            // never slip between this sweep and its registration.
-            let g = sh.keys.lock();
-            if sh.flag.load(atomics::MemoryOrder::Acquire) == 0 {
-                sh.reason.store(reason as i32, atomics::MemoryOrder::Relaxed);
-                sh.flag.store(1, atomics::MemoryOrder::Release);
-                first = true;
+        let mut keys = Array::<u64, 64>::new(); // packed keys: slot << 32 | gen
+        // The flag is raised under the member lock, so a registration sees either the flag (and cancels
+        // itself) or its record on the list (and is swept): never neither. The list is then DRAINED a
+        // batch at a time: once cancelled, a source has no further use for its members, and unlinking
+        // them here keeps the sweep's storage fixed and the lock held for at most one batch.
+        unsafe sc_runtime::sc_rt_spin_lock(sh.spin.get());
+        if sh.flag.load(atomics::MemoryOrder::Relaxed) != 0 {
+            unsafe sc_runtime::sc_rt_spin_unlock(sh.spin.get());
+            return;
+        }
+        sh.reason.store(reason as i32, atomics::MemoryOrder::Relaxed);
+        sh.flag.store(1, atomics::MemoryOrder::Release);
+        loop {
+            let mut n: usize = 0;
+            while n < CANCEL_BATCH && unsafe sh.head.get()[0] != null {
+                let m = unsafe sh.head.get()[0];
+                let k = unsafe m.key;
+                keys[n] = k.slot as u64 << 32 | k.gen as u64;
+                unlink_locked(sh, m);
+                n = n + 1;
             }
-            if first {
-                for i in 0..g.len() {
-                    let key = *g.at(i);
-                    let _ = runtime::request_cancel(key, reason);
-                }
+            unsafe sc_runtime::sc_rt_spin_unlock(sh.spin.get());
+            for i in 0..n {
+                // Key-checked: a member that completed since the batch was gathered is rejected here.
+                let key = runtime::TaskKey { slot: (keys[i] >> 32) as u32, gen: keys[i] as u32 };
+                let _ = runtime::request_cancel(key, reason);
             }
+            if n < CANCEL_BATCH {
+                return;
+            }
+            unsafe sc_runtime::sc_rt_spin_lock(sh.spin.get());
         }
     }
 }
@@ -183,20 +306,64 @@ extend CancelToken {
     pub fn clone(self: &CancelToken) CancelToken {
         return CancelToken { shared: self.shared.clone() };
     }
-    /// Register the CURRENT task as a cancellation target of this token's source. A no-op off the pool.
-    /// If the source already cancelled, the task is cancelled immediately. `pub` so a spawned task can
-    /// adopt a token it received by other means.
+    /// Register the CURRENT task as a cancellation target of this token's source, until the task
+    /// completes. A no-op off the pool, and a no-op if the task is already registered with this source.
+    /// If the source already cancelled, the task is cancelled immediately with the source's reason. `pub`
+    /// so a spawned task can adopt a token it received by other means; several sources may be adopted.
     pub fn bind_current(self: &CancelToken) {
-        let key = runtime::current_key();
-        if !key.is_task() {
+        let mb = runtime::current_membership();
+        if mb == null {
             return;
         }
         let sh = self.shared.get();
-        let mut g = sh.keys.lock();
-        g.push(key);
-        if sh.flag.load(atomics::MemoryOrder::Acquire) != 0 {
-            let reason = sh.reason.load(atomics::MemoryOrder::Relaxed) as u32;
-            let _ = runtime::request_cancel(key, reason);
+        let want = sh as *const CancelShared;
+        let inl = (&mut unsafe mb.inline_mem[0]) as *mut Member;
+        let mut m = (unsafe mb.head) as *mut Member;
+        while m != null {
+            if (unsafe m.src.get()) as *const CancelShared == want {
+                return; // already a member: one record per (task, source)
+            }
+            m = unsafe m.tnext;
+        }
+        // Records are only ever unlinked at completion, so the inline slot is free exactly when the task
+        // has no membership yet.
+        let mut g = Global {};
+        m = if unsafe mb.head == null {
+            unsafe mb.hook = membership_release;
+            inl;
+        } else {
+            (unsafe g.alloc(sizeof(Member), alignof(Member))) as *mut Member;
+        };
+        unsafe m[0] = Member {
+            src: self.shared.clone(),
+            key: runtime::current_key(),
+            snext: null,
+            sprev: null,
+            tnext: (unsafe mb.head) as *mut Member,
+            linked: 1,
+        };
+        unsafe mb.head = m;
+        unsafe sc_runtime::sc_rt_spin_lock(sh.spin.get());
+        let cancelled = sh.flag.load(atomics::MemoryOrder::Relaxed) != 0;
+        let reason = sh.reason.load(atomics::MemoryOrder::Relaxed) as u32;
+        if !cancelled {
+            // Appended, so a sweep requests members in registration order: tasks that armed timers in
+            // that order are then found at the front of the timer list, not walked to at its back.
+            let last = unsafe sh.tail.get()[0];
+            unsafe m.sprev = last;
+            if last != null {
+                unsafe last.snext = m;
+            } else {
+                unsafe sh.head.get()[0] = m;
+            }
+            unsafe sh.tail.get()[0] = m;
+        } else {
+            // A cancelled source keeps no list: the record stays with the task only.
+            atomic::store_i32(&mut unsafe m.linked, 0, 0);
+        }
+        unsafe sc_runtime::sc_rt_spin_unlock(sh.spin.get());
+        if cancelled {
+            let _ = runtime::request_cancel(unsafe m.key, reason);
         }
     }
 }

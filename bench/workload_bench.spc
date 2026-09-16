@@ -29,6 +29,9 @@ const SOCK_MSGS: i64 = 20; // messages per connection
 const SOCK_LEN: usize = 64; // bytes per message
 const CANCEL_TASKS: i64 = 1000; // children parked in a sleep when the group is cancelled
 const PARKED_TASKS: i64 = 4096; // tasks parked at once in the memory lane
+const MEMB_TASKS: i64 = 400000; // short tasks registered with one long-lived source per round
+const MEMB_LIVE: i64 = 512; // at most this many of them in flight at once
+const MEMB_PARKED: i64 = 1000; // members parked when the source is finally cancelled
 const PARK_ROUNDS: i32 = 5; // memory rounds: the figure is stable, the timing is not the point
 const BURST_TASKS: i64 = 500; // tasks per burst
 const BURSTS: i64 = 20; // bursts per round
@@ -279,6 +282,76 @@ pub fn cancellation(b: &mut bench::Bencher) {
         let cancelled = cancel_once(b);
         b.tally(CANCEL_TASKS, cancelled);
     }
+}
+
+// --- cancellation membership --------------------------------------------------------------------------.
+
+/// Benchmark lane: one long-lived source, MEMB_TASKS short tasks per round registered with it in waves of
+/// MEMB_LIVE, so the live membership never exceeds the wave while the history grows by a round each time.
+/// The per-task figure is spawn plus registration plus completion. After the rounds, MEMB_PARKED members
+/// park and the source cancels them: the note reports that cancel's time and what the source still holds,
+/// which must follow the live members, not the history.
+@bench
+pub fn cancel_membership(b: &mut bench::Bencher) {
+    b.each(MEMB_TASKS);
+    b.unit("task");
+    b.set_rounds(5);
+    let (src, tok) = task::CancelSource::new();
+    let mut history: i64 = 0;
+    while b.running() {
+        let base = rt::completed_tasks();
+        let mut left = MEMB_TASKS;
+        while left > 0 {
+            let n = if left < MEMB_LIVE {
+                left;
+            } else {
+                MEMB_LIVE;
+            };
+            let wg = sync::WaitGroup::new();
+            wg.add(n);
+            for _i in 0..n {
+                let w = wg.clone();
+                let t = tok.clone();
+                launch || {
+                    t.bind_current();
+                    w.done();
+                };
+            }
+            wg.wait();
+            left = left - n;
+        }
+        history = history + MEMB_TASKS;
+        b.tally(MEMB_TASKS, (rt::completed_tasks() - base) as i64);
+    }
+    // The cancel after the history: members parked in a sleep, then one request sweep.
+    let wg = sync::WaitGroup::new();
+    wg.add(MEMB_PARKED);
+    for _i in 0..MEMB_PARKED {
+        let w = wg.clone();
+        let t = tok.clone();
+        launch || {
+            defer w.done(); // the cancelled sleep never returns: the report must ride the unwind
+            t.bind_current();
+            time::sleep(time::Duration::from_secs(60));
+        };
+    }
+    if !wait_parked(rt::WK_SLEEP, MEMB_PARKED as usize) {
+        bench::fail("cancel_membership: the members did not all reach their sleep");
+    }
+    let live = src.members();
+    let t0 = platform::now_ns();
+    src.cancel(rt::CR_USER);
+    let t1 = platform::now_ns();
+    wg.wait();
+    let mut note = String::from_str("cancel of ");
+    note.push_i64(live as i64);
+    note.push_str(" live members after ");
+    note.push_i64(history);
+    note.push_str(" registrations: ");
+    note.push_f64_prec((t1 - t0) as f64 / 1000.0, 1);
+    note.push_str(" us; members held after: ");
+    note.push_i64(src.members() as i64);
+    b.note(note.as_str());
 }
 
 // --- parked-task memory ---------------------------------------------------------------------------------.

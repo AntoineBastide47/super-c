@@ -253,3 +253,10 @@ These are backed by `loader::package_from_source`.
   values, side effects, error messages), not on internal data structure shapes.
 - **Fixture values, not fixture effects.** `@test_init` returns a value. Side effects
   that need cleanup go in `@test_free`.
+- **A cancelled task reports through `defer`.** Code after a cancelled wait never runs,
+  so a `WaitGroup::done` or counter written after the wait is lost and the waiter hangs.
+  Put the report in a `defer` at the top of the body; `tests/cancel_test.spc` and the
+  cancellation benchmark lanes follow this rule.
+- **Force a schedule, do not hope for it.** Hold the sole worker busy to keep a task
+  queued, mask cancellation to read a request before the task unwinds, and poll
+  `runtime::task_snapshot` or a source's `members()` for the state the test needs.

@@ -268,6 +268,49 @@ launches from inside a completing coroutine (the compiler's job runner) reports 
 between `spawn_coroutine`'s task-block store and the completing worker's `handoff` spin
 in `worker_main`; the release compiler panicked once in about twenty-four builds.
 
+## Cancellation Sources and Groups
+
+`std::parallel::task` owns cooperative cancellation. Only a `CancelSource` requests it;
+a `CancelToken` observes it; a `TaskGroup` bundles a source with the children it spawns.
+
+```superc
+let (src, tok) = task::CancelSource::new();
+launch || {
+    tok.bind_current();                   // this task is now a member of `src`
+    time::sleep(long);                    // a cancellable wait unwinds on the request
+};
+src.cancel(runtime::CR_USER);            // request every member; first reason wins
+
+let mut g = task::TaskGroup::new();
+g.spawn(|| { work(); });                  // children bind the group's token themselves
+g.cancel();
+let report = g.join();                    // completed / cancelled / unresponsive counts
+```
+
+Registration contract (`CancelToken::bind_current`, documented at the top of
+`std/parallel/task.spc`):
+
+- Membership is per (task, source). Binding one source twice from a task is one
+  membership; binding several sources is one membership each.
+- The record belongs to the task: the first lives inline in the task block, further ones
+  are small heap records. The source links records into a list of its LIVE members and
+  keeps nothing of its history.
+- A membership ends when the task completes, by return or by cancellation cleanup: the
+  runtime unlinks every record before the task's identity can be recycled. The record
+  holds a reference to the shared state, so a source and all its tokens may be dropped
+  while members live.
+- Binding after `cancel` delivers the request at once with the first request's reason.
+- `cancel` raises the flag under the source lock, then drains members in registration
+  order in bounded batches and requests each by generation-checked key outside the lock,
+  so a member that completes meanwhile is rejected, never touched.
+- `CancelSource::members()` is the diagnostic live count; it is zero after `cancel`.
+
+Lock order: a source lock is taken alone and never held across a request or a task's
+cleanup. A key-based request takes only the registry slot lock.
+
+Sleepers are kept on a doubly linked, deadline-sorted timer list, so a cancelled sleep is
+disarmed in O(1) whatever order a sweep reaches its members in.
+
 ## Shutdown
 
 ```superc

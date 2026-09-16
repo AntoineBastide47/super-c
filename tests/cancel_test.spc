@@ -15,6 +15,7 @@ import std::parallel::io as io;
 import std::parallel::net as net;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
+import std::parallel::platform as platform;
 
 // Exact-destruction counter: every `free` of a Payload bumps it, so a test can prove one cleanup per value.
 static mut G_FREES: i64 = 0;
@@ -1060,4 +1061,304 @@ fn shutdown_cancels_detached_sleepers(_fx: &mut Base) {
     assert_eq(res.unresponsive, 0);
     // Runtime shutdown owns detached tasks.
     assert_eq(res.cancelled, 3);
+}
+
+// --- cancellation membership: records live exactly as long as their task ------------------------------.
+
+// A task that returns leaves its source: the member count follows the live tasks, not the history.
+@test
+fn membership_follows_live_tasks(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let (src, tok) = task::CancelSource::new();
+    for round in 0..3 {
+        let wg = sync::WaitGroup::new();
+        wg.add(50);
+        for _i in 0..50 {
+            let w = wg.clone();
+            let t = tok.clone();
+            launch || {
+                defer finish(&w);
+                t.bind_current();
+            };
+        }
+        wg.wait();
+        // Completion unlinks before the block is recycled; the count is exact once the tasks retired.
+        let deadline = platform::now_ns() + 5000000000;
+        while src.members() != 0 && platform::now_ns() < deadline {
+            time::sleep(time::Duration::from_millis(1));
+        }
+        assert_eq(src.members(), 0);
+        let _ = round;
+    }
+    rt::shutdown();
+    assert_eq(cancelled(fx), 0);
+}
+
+// Binding the same source three times from one task is one membership: one record, one cleanup, one
+// cancellation.
+@test
+fn duplicate_binding_is_one_membership(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let (src, tok) = task::CancelSource::new();
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    let t = tok.clone();
+    launch || {
+        defer finish(&w);
+        t.bind_current();
+        t.bind_current();
+        t.bind_current();
+        time::sleep(forever());
+        after_mark();
+    };
+    assert(wait_members(&src, 1), "one task registered");
+    assert_eq(src.members(), 1);
+    src.cancel(rt::CR_USER);
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "the member is cancelled");
+    assert_eq(src.members(), 0);
+    rt::shutdown();
+    assert_eq(cancelled(fx), 1);
+    assert_eq(unwounds(), 1);
+    assert_eq(afters(), 0);
+}
+
+// One task registered with two sources: either source cancels it, and the other's later cancel finds
+// nothing to do. The second membership is a heap record, freed with the task (the suite's leak gate).
+@test
+fn one_task_many_sources(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let (sa, ta) = task::CancelSource::new();
+    let (sb, tb) = task::CancelSource::new();
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    for k in 0..2i64 {
+        let w = wg.clone();
+        let a = ta.clone();
+        let b = tb.clone();
+        launch || {
+            defer finish(&w);
+            a.bind_current();
+            b.bind_current();
+            let _ = k;
+            time::sleep(forever());
+            after_mark();
+        };
+    }
+    assert(wait_members(&sa, 2), "both tasks registered with a");
+    assert(wait_members(&sb, 2), "both tasks registered with b");
+    sb.cancel(rt::CR_POLICY);
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "b cancels both");
+    assert_eq(sa.members(), 0);
+    sa.cancel(rt::CR_USER); // nothing left to request
+    rt::shutdown();
+    assert_eq(cancelled(fx), 2);
+    assert_eq(unwounds(), 2);
+    assert_eq(afters(), 0);
+}
+
+// The source and every token may be dropped while members live: the record keeps the shared state alive
+// until the task completes, and the task completes normally.
+@test
+fn source_dropped_before_its_members_complete(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    {
+        let (src, tok) = task::CancelSource::new();
+        let w = wg.clone();
+        launch || {
+            defer finish(&w);
+            tok.bind_current();
+            time::sleep(short());
+            after_mark();
+        };
+        assert(wait_members(&src, 1), "registered");
+        // `src` and the moved `tok` are the only handles outside the task: both go here.
+    }
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "the member completes on its own");
+    rt::shutdown();
+    assert_eq(cancelled(fx), 0);
+    assert_eq(afters(), 1);
+}
+
+// A late binder receives the FIRST request's reason, however many requests followed. The task binds under
+// a cancellation mask so the request can be read from the registry before the task unwinds.
+@test
+fn late_binder_gets_the_first_reason(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let (src, tok) = task::CancelSource::new();
+    src.cancel(rt::CR_POLICY);
+    src.cancel(rt::CR_USER);
+    let bound = sync::WaitGroup::new();
+    bound.add(1);
+    let go = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    let b = bound.clone();
+    let g = go.clone();
+    launch || {
+        defer finish(&w);
+        rt::cancel_mask_enter();
+        tok.bind_current(); // cancelled here, with the retained reason
+        b.done();
+        let mut spins: i64 = 0;
+        while g.get().load(atomics::MemoryOrder::Acquire) == 0 {
+            spins = spins + 1;
+        }
+        rt::cancel_mask_exit();
+        time::sleep(forever()); // the pending request lands on this cancellable wait
+        after_mark();
+        let _ = spins;
+    };
+    bound.wait();
+    let mut snap = Vector::<rt::TaskInfo>::new();
+    rt::task_snapshot(&mut snap);
+    assert_eq(snap.len(), 1);
+    assert_eq(snap.at(0).cancel_reason, rt::CR_POLICY);
+    go.get().store(1, atomics::MemoryOrder::Release);
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "the late binder is reclaimed");
+    rt::shutdown();
+    assert_eq(cancelled(fx), 1);
+    assert_eq(afters(), 0);
+}
+
+// Registrations racing the cancel sweep: every task ends cancelled, whether it was swept or cancelled
+// itself at registration. More tasks than one sweep batch, so the lock is dropped and retaken.
+@test
+fn registration_during_cancel(fx: &mut Base) {
+    rt::set_worker_count(4);
+    let (src, tok) = task::CancelSource::new();
+    let wg = sync::WaitGroup::new();
+    wg.add(300);
+    for _i in 0..200 {
+        let w = wg.clone();
+        let t = tok.clone();
+        launch || {
+            defer finish(&w);
+            t.bind_current();
+            time::sleep(forever());
+            after_mark();
+        };
+    }
+    assert(wait_members(&src, 200), "the first wave is registered");
+    let go = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    for _i in 0..100 {
+        let w = wg.clone();
+        let t = tok.clone();
+        let g = go.clone();
+        launch || {
+            defer finish(&w);
+            let mut spins: i64 = 0;
+            while g.get().load(atomics::MemoryOrder::Acquire) == 0 {
+                spins = spins + 1;
+                rt::yield_now();
+            }
+            t.bind_current(); // before, during or after the sweep
+            time::sleep(forever());
+            after_mark();
+            let _ = spins;
+        };
+    }
+    go.get().store(1, atomics::MemoryOrder::Release);
+    src.cancel(rt::CR_USER);
+    assert(wg.wait_timeout(time::Duration::from_secs(10)), "every task is reclaimed");
+    assert_eq(src.members(), 0);
+    rt::shutdown();
+    assert_eq(cancelled(fx), 300);
+    assert_eq(afters(), 0);
+}
+
+// Members completing while the sweep runs: their keys are rejected by the generation check, nothing
+// dangles, and the source ends empty. Repeated so the completions land in every phase of the sweep.
+@test
+fn completion_during_cancel(_fx: &mut Base) {
+    rt::set_worker_count(4);
+    for _round in 0..40 {
+        let (src, tok) = task::CancelSource::new();
+        let wg = sync::WaitGroup::new();
+        wg.add(100);
+        for _i in 0..100 {
+            let w = wg.clone();
+            let t = tok.clone();
+            launch || {
+                defer finish(&w);
+                t.bind_current();
+                rt::yield_now();
+            };
+        }
+        src.cancel(rt::CR_USER);
+        assert(wg.wait_timeout(time::Duration::from_secs(10)), "every task ends");
+        assert_eq(src.members(), 0);
+    }
+    rt::shutdown();
+    assert_eq(rt::live_tasks(), 0);
+}
+
+// A block reused by a new task after its member completed: the source's cancel must not reach the new
+// occupant. One worker, so the second task takes the first task's recycled block and slot.
+@test
+fn slot_reuse_is_not_a_member(fx: &mut Base) {
+    rt::set_worker_count(1);
+    let (src, tok) = task::CancelSource::new();
+    let first = sync::WaitGroup::new();
+    first.add(1);
+    let w1 = first.clone();
+    launch || {
+        defer finish(&w1);
+        tok.bind_current();
+    };
+    assert(first.wait_timeout(time::Duration::from_secs(5)), "the member completes");
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w2 = wg.clone();
+    launch || {
+        defer finish(&w2);
+        time::sleep(forever()); // never bound: no source may touch it
+        after_mark();
+    };
+    assert(wait_parked_sleeping(1), "the new occupant is parked");
+    src.cancel(rt::CR_USER);
+    time::sleep(short());
+    assert_eq(rt::live_tasks(), 1);
+    assert_eq(cancelled(fx), 0);
+    rt::shutdown(); // reclaims the sleeper
+    assert_eq(cancelled(fx), 1);
+    assert_eq(afters(), 0);
+}
+
+// Wait until `src` reports `want` members, or give up after a few seconds.
+fn wait_members(src: &task::CancelSource, want: usize) bool {
+    let deadline = platform::now_ns() + 5000000000;
+    while src.members() < want {
+        if platform::now_ns() > deadline {
+            return false;
+        }
+        time::sleep(time::Duration::from_millis(1));
+    }
+    return true;
+}
+
+// Wait until `want` tasks are parked in a sleep.
+fn wait_parked_sleeping(want: usize) bool {
+    let deadline = platform::now_ns() + 5000000000;
+    let mut snap = Vector::<rt::TaskInfo>::new();
+    loop {
+        snap.clear();
+        rt::task_snapshot(&mut snap);
+        let mut n: usize = 0;
+        for i in 0..snap.len() {
+            if snap.at(i).wait_kind == rt::WK_SLEEP {
+                n = n + 1;
+            }
+        }
+        if n >= want {
+            return true;
+        }
+        if platform::now_ns() > deadline {
+            return false;
+        }
+        time::sleep(time::Duration::from_millis(1));
+    }
 }

@@ -168,7 +168,8 @@ pub struct Coroutine {
     pub timed: i32, // currently linked into the scheduler's timer list
     pub deadline: u64, // monotonic wake time (ns) while `timed`
     pub tm_token: u32, // the token of the CURRENT park (every park stores it, timed or not)
-    pub tnext: *mut Coroutine, // timer-list link (sorted by `deadline`)
+    pub tnext: *mut Coroutine, // timer-list links (sorted by `deadline`): doubly linked, so a disarm is O(1)
+    pub tprev: *mut Coroutine,
     pub slot: u32, // registry slot, fixed for the block's life (SLOT_NONE for a job)
     pub tstate: i32, // atomic TS_* lifecycle state
     pub cancel: i32, // atomic CS_* cancellation state
@@ -183,6 +184,17 @@ pub struct Coroutine {
     pub unwound: i32, // the last checked call edge-returned: its value is poison; see cancel_probe
     pub ctx_mem: Array<u64, 2>, // the inline context (`sc_rt_ctx_inline_size` bytes, zeroed before use)
     pub env_mem: Array<u64, 6>, // the inline closure (`ENV_INLINE` bytes, 8-aligned)
+    pub memb: Membership, // cancellation-source memberships, unlinked at completion: see `Membership`
+}
+
+/// The task's cancellation-source memberships. The runtime knows nothing of sources: it keeps the list
+/// head and one inline record's storage, and at completion, before the block can be recycled, hands the
+/// list to the hook the first registration installed. Only the task itself touches `head`, `hook` and the
+/// inline storage (registration runs on the task; the hook runs on its worker after the body returned).
+pub struct Membership {
+    pub head: *mut void, // the owner's first record, or null: nothing to unlink
+    pub hook: fn(*mut Membership) void, // installed by the owner with its first record
+    pub inline_mem: Array<u64, 6>, // the first record's storage: a membership costs no allocation
 }
 
 // The inline closure storage is what `submit` sizes against, and the inline context must fit its slot.
@@ -910,6 +922,10 @@ fn arm_timer(s: *mut Scheduler, co: *mut Coroutine, dl: u64) {
         cur = unsafe cur.tnext;
     }
     unsafe co.tnext = cur;
+    unsafe co.tprev = prev;
+    if cur != null {
+        unsafe cur.tprev = co;
+    }
     if prev == null {
         unsafe s.timer_head = co;
     } else {
@@ -929,20 +945,20 @@ fn disarm_timer(s: *mut Scheduler, co: *mut Coroutine) {
     if unsafe co.timed == 0 {
         return;
     }
-    let mut prev: *mut Coroutine = null;
-    let mut cur = unsafe s.timer_head;
-    while cur != null && cur != co {
-        prev = cur;
-        cur = unsafe cur.tnext;
+    // Unlinked in place: a thousand sleepers cancelled in any order must not each walk the list under
+    // the scheduler lock.
+    let nx = unsafe co.tnext;
+    let pv = unsafe co.tprev;
+    if pv == null {
+        unsafe s.timer_head = nx;
+    } else {
+        unsafe pv.tnext = nx;
     }
-    if cur == co {
-        if prev == null {
-            unsafe s.timer_head = unsafe co.tnext;
-        } else {
-            unsafe prev.tnext = unsafe co.tnext;
-        }
+    if nx != null {
+        unsafe nx.tprev = pv;
     }
     unsafe co.tnext = null;
+    unsafe co.tprev = null;
     unsafe co.timed = 0;
     atomic::store_i32(&mut unsafe s.timer_len, unsafe s.timer_len - 1, 2);
 }
@@ -960,6 +976,9 @@ fn promote_expired(s: *mut Scheduler) bool {
     while unsafe s.timer_head != null && unsafe s.timer_head.deadline <= now {
         let co = unsafe s.timer_head;
         unsafe s.timer_head = unsafe co.tnext;
+        if unsafe s.timer_head != null {
+            unsafe s.timer_head.tprev = null;
+        }
         unsafe co.tnext = null;
         unsafe co.timed = 0;
         atomic::store_i32(&mut unsafe s.timer_len, unsafe s.timer_len - 1, 2);
@@ -1603,6 +1622,11 @@ fn worker_main(arg: *mut void) *mut void {
             while atomic::load_i32(&mut unsafe co.handoff, 1) != 0 {
                 unsafe sc_runtime::sc_rt_cpu_relax();
             }
+            // Memberships go before the identity does: a source must not reach a recycled block.
+            if unsafe co.memb.head != null {
+                let hook = unsafe co.memb.hook;
+                hook(&mut unsafe co.memb);
+            }
             // Completion accounting BEFORE the block is recycled: an accepted cancellation that reaches
             // this point was reclaimed; publish Completed last so a registry scan never reads a half-done
             // retirement.
@@ -1960,6 +1984,7 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
     unsafe co.deadline = 0;
     unsafe co.tm_token = 0;
     unsafe co.tnext = null;
+    unsafe co.tprev = null;
     unsafe co.slot = slot;
     unsafe co.tstate = TS_RUNNABLE;
     unsafe co.cancel = CS_NONE;
@@ -1972,6 +1997,7 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
     unsafe co.wait_obj = 0;
     unsafe co.handoff = 0;
     unsafe co.unwound = 0;
+    unsafe co.memb.head = null;
     if fresh {
         reg_assign(co);
     } else if reuse_slot != null {
@@ -2085,6 +2111,16 @@ pub fn current() *mut Coroutine {
         return null;
     }
     return t as *mut Coroutine;
+}
+
+/// The current task's membership list, or null off the pool (a plain thread or a job): what a
+/// cancellation source registers into. Only the running task may use it.
+pub fn current_membership() *mut Membership {
+    let co = current();
+    if co == null || unsafe co.slot == SLOT_NONE {
+        return null;
+    }
+    return &mut unsafe co.memb;
 }
 
 /// Is this thread running a data-parallel job? Such a task cannot park, so a nested parallel call has to run

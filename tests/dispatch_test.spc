@@ -498,11 +498,13 @@ fn inline_capture_cancelled_before_first_run_destroyed_once() {
         time::sleep(time::Duration::from_secs(3600)); // the compiled edge unwinds here on cancellation
         ran(100);
     };
-    // Both are registered once the snapshot shows two tasks; the one that is not the holder is queued.
+    // Both are registered once the snapshot shows two tasks and the holder has published its id; the one
+    // that is not the holder is queued. Bounded by time, not by a spin count: the worker thread that runs
+    // the holder can take longer to start than any fixed number of snapshots (seen on Windows CI).
     let mut key = rt::TaskKey { slot: 0, gen: 0 };
     let mut found = false;
-    let mut tries = 0;
-    while !found && tries < 100000 {
+    let deadline = platform::now_ns() + 10000000000;
+    while !found && platform::now_ns() < deadline {
         let mut snap = Vector::<rt::TaskInfo>::new();
         rt::task_snapshot(&mut snap);
         let hid = holder_id.get().load(atomics::MemoryOrder::Acquire);
@@ -514,7 +516,9 @@ fn inline_capture_cancelled_before_first_run_destroyed_once() {
                 }
             }
         }
-        tries = tries + 1;
+        if !found {
+            rt::sleep_ns(100000);
+        }
     }
     assert(found, "the queued task is registered");
     assert(rt::request_cancel(key, rt::CR_USER), "the request lands on the queued task");
