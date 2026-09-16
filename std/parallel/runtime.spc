@@ -145,7 +145,7 @@ pub const RK_JOB: u32 = 1;
 pub const RK_JOB_BORROWED: u32 = 2;
 
 /// A stackful coroutine: the runnable header, then the stack, context, timer and cancellation state only
-/// a coroutine has. `tnext` is the timer-list link. `pub` only so task-aware primitives can hold
+/// a coroutine has. `theap` is its place in the timer heap. `pub` only so task-aware primitives can hold
 /// `*mut Coroutine` and wake one: not a user-facing type.
 ///
 /// The context and a small closure live INSIDE the record (`ctx_mem`, `env_mem`): a spawn that reuses a
@@ -154,6 +154,7 @@ pub const RK_JOB_BORROWED: u32 = 2;
 @no_const
 pub struct Coroutine {
     pub run: Runnable, // first, so a `*mut Coroutine` is a `*mut Runnable`
+    pub base: *mut void, // the allocation this line-aligned record lives in: see `co_alloc`
     pub ctx: *mut void, // sc_rt saved context: `&ctx_mem`, or a heap block on the fallback platforms
     pub stack: *mut void, // guard-paged stack, usable low end
     pub stack_size: usize, // its usable size: every reuse and release goes by this, never by the default
@@ -165,11 +166,9 @@ pub struct Coroutine {
     pub commit_requeue: i32, // yield hand-off: re-enqueue this coroutine as runnable
     pub inited: i32, // context set up (lazily, on the first worker to run it)
     pub park_state: u32, // (park generation << 1) | claimed: see park_begin
-    pub timed: i32, // currently linked into the scheduler's timer list
-    pub deadline: u64, // monotonic wake time (ns) while `timed`
+    pub theap: i32, // index of this task's entry in the scheduler's timer heap, or TH_NONE when unarmed
+    pub deadline: u64, // monotonic wake time (ns) while armed
     pub tm_token: u32, // the token of the CURRENT park (every park stores it, timed or not)
-    pub tnext: *mut Coroutine, // timer-list links (sorted by `deadline`): doubly linked, so a disarm is O(1)
-    pub tprev: *mut Coroutine,
     pub slot: u32, // registry slot, fixed for the block's life (SLOT_NONE for a job)
     pub tstate: i32, // atomic TS_* lifecycle state
     pub cancel: i32, // atomic CS_* cancellation state
@@ -313,17 +312,76 @@ pub struct Parker {
 }
 
 /// The shared pool. Fields are `pub` only for the caller-monomorphized `launch` / task-aware primitives.
+/// One armed timed park. The deadline, the task and the park token it was armed for travel together: an
+/// entry can only ever wake the park it was made for (`claim` with this token), never a newer park of the
+/// same task or a recycled block. `seq` orders equal deadlines by arm order, so replay is deterministic
+/// and independent of addresses or OS timing.
+@no_const
+pub struct TimerEntry {
+    pub deadline: u64,
+    pub seq: u64,
+    pub co: *mut Coroutine,
+    pub token: u32,
+    pub pad: u32,
+}
+
+const TH_NONE: i32 = -1; // `Coroutine.theap`: not armed
+const TIMER_INIT_CAP: usize = 64; // first heap storage: two pages of entries
+const TIMER_MAX: usize = REG_SEG_SIZE * REG_MAX_SEGS; // one armed timer per registrable task at most
+const PROMOTE_BATCH: i32 = 1024; // due timers made runnable per lock hold (about 50 us): see `promote_expired`
+// A task record sits on its own cache lines: the fields a waker writes (park state, cancel state,
+// hand-off) and the fields the owner rewrites on every switch (context, closure) must never share a line
+// with a NEIGHBOURING record, which back-to-back allocations of a record-sized block would give them
+// (measured: +5% to +40% on spawn_to_completion depending on where the boundary fell). The allocator
+// only promises malloc alignment, so the record is placed inside an over-sized block and `base` keeps
+// what to free.
+const CO_ALIGN: usize = 128; // the largest line any supported core has (Apple M-series L2)
+fn co_bytes() usize {
+    return (sizeof(Coroutine) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN + CO_ALIGN;
+}
+
+fn co_alloc() *mut Coroutine {
+    let mut g = Global {};
+    let base = unsafe g.alloc(co_bytes(), 16);
+    let co = ((base as usize + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN) as *mut Coroutine;
+    unsafe co.base = base;
+    return co;
+}
+
+// The scheduler record too: its hot atomics (injection lock and count, spinning flag, pool count, timer
+// count) fall on fixed lines only when the record's own address is line-aligned; a malloc-placed record
+// moved them across line boundaries from build to build, with a 40% swing on the spawn lane.
+fn sched_alloc() *mut Scheduler {
+    let mut g = Global {};
+    let bytes = (sizeof(Scheduler) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN + CO_ALIGN;
+    let base = unsafe g.alloc(bytes, 16);
+    let s = ((base as usize + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN) as *mut Scheduler;
+    unsafe s.base = base;
+    return s;
+}
+
+fn sched_free(s: *mut Scheduler) {
+    let mut g = Global {};
+    let bytes = (sizeof(Scheduler) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN + CO_ALIGN;
+    unsafe g.dealloc(unsafe s.base, bytes, 16);
+}
+
+fn co_free(co: *mut Coroutine) {
+    let mut g = Global {};
+    unsafe g.dealloc(unsafe co.base, co_bytes(), 16);
+}
+
 @no_const
 pub struct Scheduler {
+    pub base: *mut void, // the allocation this line-aligned record lives in: see `sched_alloc`
     pub deques: *mut Worker, // one per worker thread
     pub nw: usize,
     pub inj_head: *mut Runnable, // injection queue: submissions from off-pool threads, and deque spill
     pub inj_tail: *mut Runnable,
     pub inj_len: i32, // atomic: injected-and-not-yet-taken, so a safepoint can ask "is anyone waiting?"
     pub inj_lock: i32, // spinlock over the three fields above: see the queue section
-    pub timer_head: *mut Coroutine, // sleeping coroutines, earliest deadline first
     pub timer_len: i32, // atomic, so a worker with no timers armed never takes `lock` to find that out
-    pub lock: *mut void, // guards the timer list and shutting_down
+    pub lock: *mut void, // guards the timer heap and shutting_down
     pub parkers: *mut Parker, // one per worker: where it sleeps, and how it is woken
     pub idle: *mut u64, // atomic bitmask, one bit per worker: set = parked and waiting to be woken
     pub idle_words: usize, // (nw + 63) / 64, so the mask is not capped at 64 workers
@@ -336,6 +394,11 @@ pub struct Scheduler {
     pub free_len: i32, // atomic: blocks on both lists, so the fast path can skip the lock
     pub free_cap: i32, // most blocks the two lists hold: the byte budget less the stashes' share
     pub free_spin: i32, // its own spinlock: recycling must not serialise against the run queue
+    // The timer heap, last so the hot fields above keep their offsets: cold except when timers are armed.
+    pub timers: *mut TimerEntry, // armed timed parks, earliest deadline at index 0
+    pub timer_cap: usize, // entries the heap storage holds; grows by doubling up to TIMER_MAX
+    pub timer_seq: u64, // arm sequence: the tie-breaker among equal deadlines (first armed, first due)
+    pub timer_waiter: i32, // atomic: the ONE idle worker whose park is timed to the earliest deadline, or -1
 }
 
 // The single global pool, guarded by a 0=uninit / 1=building / 2=ready init state machine.
@@ -740,7 +803,7 @@ fn yq_pop(w: *mut Worker) *mut Runnable {
 // fourteen workers pulling against one submitter, that mutex was over 90% of what a fan-out cost. What it
 // guards is a handful of pointer stores, so a spin is the right wait.
 //
-// `lock`/`cv` still cover the timer list and the sleep protocol, where a worker really does have to block.
+// `lock`/`cv` still cover the timer heap and the sleep protocol, where a worker really does have to block.
 // A holder of `lock` may take `qlock` (`promote_expired` does); the reverse never happens: a pusher
 // releases `qlock` before `signal_work` touches `lock`, so the two can never deadlock.
 
@@ -841,6 +904,13 @@ fn inject_chain(s: *mut Scheduler, head: *mut Runnable, tail: *mut Runnable, n: 
 // Claim one parked worker out of the idle mask, or -1 if none is parked. Claiming is what stops a burst of
 // submissions from spending a signal each on the same worker: the bit is cleared before the wake is sent, so
 // the next submitter looks past it to a worker that is still asleep.
+// Take one specific worker's idle bit: true if it was parked (and is now ours to wake).
+fn claim_worker(s: *mut Scheduler, idx: usize) bool {
+    let word = unsafe (s.idle + idx / 64);
+    let bit = 1u64 << (idx % 64) as u64;
+    return (atomic::and_u64(word, ~bit, 4) & bit) != 0;
+}
+
 fn claim_idle(s: *mut Scheduler) i64 {
     for wi in 0..unsafe s.idle_words {
         let word = unsafe (s.idle + wi);
@@ -912,78 +982,187 @@ fn enqueue_run(s: *mut Scheduler, co: *mut Runnable) {
     inject(s, co);
 }
 
-// Link `co` into the deadline-sorted timer list. Caller holds `(*s).lock` and passes the deadline it read
-// before this coroutine became visible to any waker (`co.deadline` is the coroutine's to overwrite).
-fn arm_timer(s: *mut Scheduler, co: *mut Coroutine, dl: u64) {
-    let mut prev: *mut Coroutine = null;
-    let mut cur = unsafe s.timer_head;
-    while cur != null && unsafe cur.deadline <= dl {
-        prev = cur;
-        cur = unsafe cur.tnext;
-    }
-    unsafe co.tnext = cur;
-    unsafe co.tprev = prev;
-    if cur != null {
-        unsafe cur.tprev = co;
-    }
-    if prev == null {
-        unsafe s.timer_head = co;
-    } else {
-        unsafe prev.tnext = co;
-    }
-    unsafe co.timed = 1;
-    atomic::store_i32(&mut unsafe s.timer_len, unsafe s.timer_len + 1, 2);
-    // A nearer deadline shortens the wait of whichever worker is idle, so one has to re-evaluate.
-    let idx = claim_idle(s);
-    if idx >= 0 {
-        wake_parked(s, idx as usize);
-    }
+// --- the timer heap -------------------------------------------------------------------------------------
+// A binary min-heap of `TimerEntry` in one contiguous array, ordered by (deadline, seq). Every armed
+// coroutine records its index in `theap`, so an arbitrary removal (a wait woken before its deadline) is a
+// logarithmic sift from that index, never a scan. The caller of every function here holds `(*s).lock`.
+
+// (deadline, seq) order: strictly earlier, or the same deadline armed earlier.
+fn timer_less(a: *const TimerEntry, b: *const TimerEntry) bool {
+    return unsafe a.deadline < unsafe b.deadline || unsafe a.deadline == unsafe b.deadline && unsafe a.seq < unsafe b.seq;
 }
 
-// Unlink `co` from the timer list if it is still on it. Caller holds `(*s).lock`.
-fn disarm_timer(s: *mut Scheduler, co: *mut Coroutine) {
-    if unsafe co.timed == 0 {
+// Store `e` at `i` and tell its task where it went.
+fn timer_place(s: *mut Scheduler, i: usize, e: TimerEntry) {
+    unsafe s.timers[i] = e;
+    unsafe e.co.theap = i as i32;
+}
+
+fn timer_sift_up(s: *mut Scheduler, from: usize) {
+    let mut i = from;
+    let e = unsafe s.timers[i];
+    while i > 0 {
+        let parent = (i - 1) / 2;
+        if !timer_less(&e, unsafe (s.timers + parent)) {
+            break;
+        }
+        timer_place(s, i, unsafe s.timers[parent]);
+        i = parent;
+    }
+    timer_place(s, i, e);
+}
+
+fn timer_sift_down(s: *mut Scheduler, from: usize, len: usize) {
+    let mut i = from;
+    let e = unsafe s.timers[i];
+    loop {
+        let mut child = 2 * i + 1;
+        if child >= len {
+            break;
+        }
+        if child + 1 < len && timer_less(unsafe (s.timers + child + 1), unsafe (s.timers + child)) {
+            child = child + 1;
+        }
+        if !timer_less(unsafe (s.timers + child), &e) {
+            break;
+        }
+        timer_place(s, i, unsafe s.timers[child]);
+        i = child;
+    }
+    timer_place(s, i, e);
+}
+
+// Storage for one more entry. Doubling, so a burst of N sleeps costs O(N) copying in total; capped at one
+// entry per registrable task, which is the most that can ever be armed at once. Both failures are fatal:
+// a timed wait with nowhere to record its deadline would hang.
+fn timer_reserve(s: *mut Scheduler, len: usize) {
+    if len < unsafe s.timer_cap {
         return;
     }
-    // Unlinked in place: a thousand sleepers cancelled in any order must not each walk the list under
-    // the scheduler lock.
-    let nx = unsafe co.tnext;
-    let pv = unsafe co.tprev;
-    if pv == null {
-        unsafe s.timer_head = nx;
+    if len >= TIMER_MAX {
+        panic("scheduler: the timer heap is full (one armed timer per registrable task)");
+    }
+    let mut ncap = if unsafe s.timer_cap == 0 {
+        TIMER_INIT_CAP;
     } else {
-        unsafe pv.tnext = nx;
+        unsafe s.timer_cap * 2;
+    };
+    if ncap > TIMER_MAX {
+        ncap = TIMER_MAX;
     }
-    if nx != null {
-        unsafe nx.tprev = pv;
-    }
-    unsafe co.tnext = null;
-    unsafe co.tprev = null;
-    unsafe co.timed = 0;
-    atomic::store_i32(&mut unsafe s.timer_len, unsafe s.timer_len - 1, 2);
+    timer_resize(s, ncap, len);
 }
 
-// Make every coroutine whose deadline has passed runnable, and report whether any did. Caller holds
-// `(*s).lock`. A coroutine already claimed (notified just before its deadline) is only unlinked: its waker
-// is resuming it, so it counts as promoted by somebody.
+// Storage cut back once the live count falls below a quarter of it, so what a burst grew is given back
+// as it drains; the floor keeps a steady trickle of timers from bouncing between sizes.
+fn timer_shrink(s: *mut Scheduler, len: usize) {
+    let cap = unsafe s.timer_cap;
+    if cap > TIMER_INIT_CAP && len < cap / 4 {
+        timer_resize(s, cap / 2, len);
+    }
+}
+
+fn timer_resize(s: *mut Scheduler, ncap: usize, len: usize) {
+    let mut g = Global {};
+    // `Global` aborts with a message when the allocation fails: nothing to test here.
+    let nt = (unsafe g.alloc(ncap * sizeof(TimerEntry), alignof(TimerEntry))) as *mut TimerEntry;
+    for i in 0..len {
+        unsafe nt[i] = unsafe s.timers[i];
+    }
+    if unsafe s.timers != null {
+        unsafe g.dealloc(unsafe s.timers, unsafe s.timer_cap * sizeof(TimerEntry), alignof(TimerEntry));
+    }
+    unsafe s.timers = nt;
+    unsafe s.timer_cap = ncap;
+}
+
+// The earliest armed deadline, or 0 when nothing is armed.
+fn timer_top(s: *mut Scheduler) u64 {
+    if atomic::load_i32(&mut unsafe s.timer_len, 1) == 0 {
+        return 0;
+    }
+    return unsafe s.timers[0].deadline;
+}
+
+// Arm `co` for the deadline it read before this coroutine became visible to any waker (`co.deadline` is
+// the coroutine's to overwrite), for the park `co.tm_token` names. Logarithmic.
+fn arm_timer(s: *mut Scheduler, co: *mut Coroutine, dl: u64) {
+    let len = (unsafe s.timer_len) as usize;
+    timer_reserve(s, len);
+    let seq = unsafe s.timer_seq;
+    unsafe s.timer_seq = seq + 1;
+    timer_place(s, len, TimerEntry { deadline: dl, seq: seq, co: co, token: unsafe co.tm_token, pad: 0 });
+    timer_sift_up(s, len);
+    atomic::store_i32(&mut unsafe s.timer_len, (len + 1) as i32, 2);
+    // One idle worker waits for the deadline that was earliest when it parked; the rest sleep untimed.
+    // Only a NEW earliest deadline can be sooner than that wait, so only then is a wake-up worth its
+    // syscall, and it goes to that worker (or, with none timed, to any idle one, which then takes the
+    // role): any other entry comes due after the one already watched.
+    if unsafe co.theap == 0 {
+        let tw = atomic::load_i32(&mut unsafe s.timer_waiter, 1);
+        if tw >= 0 && claim_worker(s, tw as usize) {
+            wake_parked(s, tw as usize);
+            return;
+        }
+        let idx = claim_idle(s);
+        if idx >= 0 {
+            wake_parked(s, idx as usize);
+        }
+    }
+}
+
+// Remove entry `i`: the last entry takes its place and sifts whichever way it must.
+fn timer_remove_at(s: *mut Scheduler, i: usize) {
+    let len = (unsafe s.timer_len) as usize - 1;
+    atomic::store_i32(&mut unsafe s.timer_len, len as i32, 2);
+    unsafe s.timers[i].co.theap = TH_NONE;
+    if i != len {
+        timer_place(s, i, unsafe s.timers[len]);
+        if i > 0 && timer_less(unsafe (s.timers + i), unsafe (s.timers + (i - 1) / 2)) {
+            timer_sift_up(s, i);
+        } else {
+            timer_sift_down(s, i, len);
+        }
+    }
+    timer_shrink(s, len);
+}
+
+// Disarm `co` if it is armed. Logarithmic, from the index the coroutine remembers.
+fn disarm_timer(s: *mut Scheduler, co: *mut Coroutine) {
+    let i = unsafe co.theap;
+    if i == TH_NONE {
+        return;
+    }
+    timer_remove_at(s, i as usize);
+}
+
+// Make due coroutines runnable, at most PROMOTE_BATCH per call so the lock is never held for an unbounded
+// sweep, and report whether any was due. A coroutine already claimed (notified just before its deadline)
+// is only removed: its waker is resuming it, so it counts as promoted by somebody. When a batch runs out
+// with more due, another idle worker is woken to continue: the due ones must not wait for this worker to
+// run what it just made runnable, and this worker must not sit on the lock instead of running it.
 fn promote_expired(s: *mut Scheduler) bool {
     if atomic::load_i32(&mut unsafe s.timer_len, 1) == 0 {
-        // The usual case: a program with no `sleep` in it never pays for the timer list.
+        // The usual case: a program with no `sleep` in it never pays for the timer heap.
         return false;
     }
     let mut any = false;
+    let mut n: i32 = 0;
     let now = platform::now_ns();
-    while unsafe s.timer_head != null && unsafe s.timer_head.deadline <= now {
-        let co = unsafe s.timer_head;
-        unsafe s.timer_head = unsafe co.tnext;
-        if unsafe s.timer_head != null {
-            unsafe s.timer_head.tprev = null;
+    while atomic::load_i32(&mut unsafe s.timer_len, 0) != 0 && unsafe s.timers[0].deadline <= now {
+        if n == PROMOTE_BATCH {
+            let idx = claim_idle(s);
+            if idx >= 0 {
+                wake_parked(s, idx as usize);
+            }
+            break;
         }
-        unsafe co.tnext = null;
-        unsafe co.timed = 0;
-        atomic::store_i32(&mut unsafe s.timer_len, unsafe s.timer_len - 1, 2);
+        n = n + 1;
+        let co = unsafe s.timers[0].co;
+        let token = unsafe s.timers[0].token;
+        timer_remove_at(s, 0);
         any = true;
-        if claim(co, unsafe co.tm_token, WR_TIMEOUT) {
+        if claim(co, token, WR_TIMEOUT) {
             // `lock` then `qlock` is the one nesting order the two are ever taken in.
             qlock(s);
             push_injection(s, co as *mut Runnable);
@@ -1142,9 +1321,10 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         // timer is empty, so no submitted or sleeping task is silently dropped (one still parked on a wait
         // queue is, since nothing will ever wake it).
         if unsafe s.shutting_down != 0 {
-            let drained = unsafe s.timer_head == null && atomic::load_i32(&mut unsafe s.inj_len, 1) == 0 && all_deques_empty(
-                s,
-            );
+            let drained = atomic::load_i32(&mut unsafe s.timer_len, 0) == 0 && atomic::load_i32(
+                &mut unsafe s.inj_len,
+                1,
+            ) == 0 && all_deques_empty(s);
             if drained {
                 unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
                 return null;
@@ -1153,12 +1333,8 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         if unsafe G_SEED != 0 {
             // The drain ran dry: give the admission back and go round, which waits for the next release; or
             // for the nearest armed deadline, read here because this is the one place holding the lock that
-            // guards the timer list.
-            replay_deadline = if unsafe s.timer_head != null {
-                unsafe s.timer_head.deadline;
-            } else {
-                0u64;
-            };
+            // guards the timer heap.
+            replay_deadline = timer_top(s);
             unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
             unsafe G_ACTIVE = 0;
             spins = 0;
@@ -1167,11 +1343,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         // The nearest deadline, read while we still hold the timer lock, decides whether this is a timed
         // park; then the scheduler mutex is dropped entirely. Parking happens on this worker's OWN mutex, so
         // a submitter waking us never has to queue behind the rest of the pool.
-        let dl = if unsafe s.timer_head != null {
-            unsafe s.timer_head.deadline;
-        } else {
-            0u64;
-        };
+        let dl = timer_top(s);
         unsafe sc_runtime::sc_rt_mutex_unlock(s.lock);
         // Idle: give the OS the pages of a few cached stacks before sleeping. Bounded per park, and only
         // here, so a busy pool never pays for it and an idle one trims a little on every park.
@@ -1201,8 +1373,12 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
             spins = 0;
             continue;
         }
+        // The timed wait belongs to ONE idle worker: with every idle worker timing its park to the
+        // earliest deadline, a run of closely spaced deadlines woke all of them per deadline. The
+        // others sleep untimed; work wakes them through the idle mask as always.
+        let timed = dl != 0 && atomic::cas_i32(&mut unsafe s.timer_waiter, -1, me as i32, false, 4, 0);
         while unsafe pk.notified == 0 {
-            if dl != 0 {
+            if timed {
                 let now = platform::now_ns();
                 let rel = if dl > now {
                     (dl - now) as i64;
@@ -1217,7 +1393,20 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         }
         // Whoever woke us already cleared our bit; a timeout did not, so clear it either way.
         let _ = atomic::and_u64(word, ~bit, 4);
+        let worked = unsafe pk.notified != 0;
         unsafe sc_runtime::sc_rt_mutex_unlock(pk.mtx);
+        if timed {
+            atomic::store_i32(&mut unsafe s.timer_waiter, -1, 2);
+            if worked && atomic::load_i32(&mut unsafe s.timer_len, 1) != 0 {
+                // Woken for work while holding the timed wait: hand the deadline to another idle
+                // worker, which takes the role when it parks. A timeout needs no hand-off: this
+                // worker promotes and parks again itself.
+                let idx = claim_idle(s);
+                if idx >= 0 {
+                    wake_parked(s, idx as usize);
+                }
+            }
+        }
         // Woken means work: earn the spin budget back rather than parking straight away.
         spins = 0;
     }
@@ -1243,7 +1432,7 @@ fn replay_gate_wait(s: *mut Scheduler, me: usize, nearest_deadline: u64) {
         // coroutine behind a timed wait sits on the TIMER LIST, not on any run queue, and only a worker past
         // this gate promotes it, so waiting for a release instead would strand it for as long as the program
         // had no plain thread left to block, which for a program whose remaining tasks are ALL on timed waits
-        // is forever. `nearest_deadline` is read by the caller, which holds the lock the timer list is under.
+        // is forever. `nearest_deadline` is read by the caller, which holds the lock the timer heap is under.
         if nearest_deadline != 0 && nearest_deadline <= platform::now_ns() {
             break;
         }
@@ -1306,7 +1495,7 @@ fn coroutine_start(arg: *mut void) {
 
 // The bytes one block retains: its stack mapping with the guard page, and the record.
 fn block_bytes() usize {
-    return unsafe G_STACK_SIZE + platform::page_size() + sizeof(Coroutine);
+    return unsafe G_STACK_SIZE + platform::page_size() + co_bytes();
 }
 
 // Caller holds `free_spin`: the next warm block, else the next cold one.
@@ -1408,8 +1597,7 @@ fn release_block(co: *mut Coroutine) {
     } else {
         unsafe sc_runtime::sc_rt_ctx_free(co.ctx);
     }
-    let mut g = Global {};
-    unsafe g.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
+    co_free(co);
 }
 
 // Everything the pool is holding. Called from `shutdown`, after the workers have been joined.
@@ -1721,7 +1909,7 @@ fn release_unstarted(s: *mut Scheduler, built: usize) {
     unsafe g.dealloc(unsafe s.deques, nw * sizeof(Worker), LINE);
     unsafe sc_runtime::sc_rt_mutex_free(s.lock);
     unsafe s.workers.free();
-    unsafe g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
+    sched_free(s);
 }
 
 // How many blocks the shared lists may hold under the byte budget, once every worker's stash (which the
@@ -1746,7 +1934,7 @@ fn build_scheduler() *mut Scheduler {
     if lk == null {
         panic("scheduler: cannot allocate the timer lock");
     }
-    let s = (unsafe g.alloc(sizeof(Scheduler), alignof(Scheduler))) as *mut Scheduler;
+    let s = sched_alloc();
     // Resolved here, before any worker exists, so every later read of `G_SEED` happens-after this write.
     // Replay needs ONE worker: with a second one, stealing decides who runs next and the seed cannot.
     unsafe G_SEED = resolve_seed();
@@ -1777,7 +1965,6 @@ fn build_scheduler() *mut Scheduler {
         inj_tail: null,
         inj_len: 0,
         inj_lock: 0,
-        timer_head: null,
         timer_len: 0,
         lock: lk,
         parkers: parkers,
@@ -1792,6 +1979,11 @@ fn build_scheduler() *mut Scheduler {
         free_len: 0,
         free_cap: pool_cap(nw),
         free_spin: 0,
+        timers: null,
+        timer_cap: 0,
+        timer_seq: 0,
+        timer_waiter: -1,
+        base: unsafe s.base,
     };
     for i in 0..nw {
         let mtx = unsafe sc_runtime::sc_rt_mutex_new();
@@ -1923,13 +2115,12 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
     let mut reuse_slot: *mut TaskSlot = null;
     let fresh = co == null;
     if fresh {
-        let mut g = Global {};
-        co = (unsafe g.alloc(sizeof(Coroutine), alignof(Coroutine))) as *mut Coroutine;
+        co = co_alloc();
         size = unsafe G_STACK_SIZE;
         stk = unsafe sc_runtime::sc_rt_stack_alloc(size);
         if stk == null {
             // Nothing is published yet: release the block, then stop. The task has no executor otherwise.
-            unsafe g.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
+            co_free(co);
             panic("scheduler: cannot map a guarded task stack");
         }
         // The context lives in the record where it fits: zeroed here, armed by the first worker to run
@@ -1942,7 +2133,7 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
             ctx = unsafe sc_runtime::sc_rt_ctx_alloc();
             if ctx == null {
                 unsafe sc_runtime::sc_rt_stack_free(stk, size);
-                unsafe g.dealloc(co, sizeof(Coroutine), alignof(Coroutine));
+                co_free(co);
                 panic("scheduler: cannot allocate a task context");
             }
         }
@@ -1980,11 +2171,9 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
     unsafe co.commit_requeue = 0;
     unsafe co.inited = 0;
     unsafe co.park_state = pst;
-    unsafe co.timed = 0;
+    unsafe co.theap = TH_NONE;
     unsafe co.deadline = 0;
     unsafe co.tm_token = 0;
-    unsafe co.tnext = null;
-    unsafe co.tprev = null;
     unsafe co.slot = slot;
     unsafe co.tstate = TS_RUNNABLE;
     unsafe co.cancel = CS_NONE;
@@ -2521,7 +2710,19 @@ pub fn cancelled_tasks() usize {
     return atomic::load_usize(&mut unsafe G_CANCELLED, 1);
 }
 
-/// Suspend for `ns` nanoseconds. A coroutine parks on the scheduler's timer list, so its worker keeps
+/// The deadline `ns` from now, saturated: a duration that would wrap the clock waits for ever (a wrapped
+/// value would be a deadline in the past, and the wait would return at once). Every timed wait's deadline
+/// comes through here or `time::deadline_in`, which applies the same rule.
+pub fn deadline_after(ns: u64) u64 {
+    let now = platform::now_ns();
+    let dl = now + ns;
+    if dl < now {
+        return 18446744073709551615u64;
+    }
+    return dl;
+}
+
+/// Suspend for `ns` nanoseconds. A coroutine parks on the scheduler's timer heap, so its worker keeps
 /// running other tasks; any other thread sleeps outright. `std::parallel::time::sleep` is the friendly form.
 pub fn sleep_ns(ns: i64) {
     if ns <= 0 {
@@ -2539,7 +2740,7 @@ pub fn sleep_ns(ns: i64) {
     }
     wait_note(WK_SLEEP, 0);
     let token = park_begin(co); // on no wait queue: the timer and a cancel are the only wakers
-    let _ = park_timed(token, platform::now_ns() + ns as u64, commit_nop, null, true);
+    let _ = park_timed(token, deadline_after(ns as u64), commit_nop, null, true);
     cancel_timer(co);
     wait_clear();
     park_done(co);
@@ -2879,8 +3080,11 @@ fn destroy_pool(sp: *mut i32, s: *mut Scheduler) {
     }
     unsafe g.dealloc(unsafe s.parkers, unsafe s.nw * sizeof(Parker), LINE);
     unsafe g.dealloc(unsafe s.idle, unsafe s.idle_words * sizeof(u64), alignof(u64));
+    if unsafe s.timers != null {
+        unsafe g.dealloc(unsafe s.timers, unsafe s.timer_cap * sizeof(TimerEntry), alignof(TimerEntry));
+    }
     unsafe sc_runtime::sc_rt_mutex_free(s.lock);
-    unsafe g.dealloc(s, sizeof(Scheduler), alignof(Scheduler));
+    sched_free(s);
     atomic::store_i32(&mut unsafe G_CLOSED, 0, 2);
     atomic::store_i32(sp, 0, 2);
     unsafe G_SCHED = null;

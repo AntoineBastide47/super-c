@@ -225,10 +225,11 @@ fn scheduler_without_any_worker_is_fatal() {
 }
 
 @test(should_panic)
-fn worker_context_allocation_failure_is_fatal() {
+fn worker_handle_allocation_failure_is_fatal() {
     rt::set_worker_count(1);
-    // lock, parker lock, parker cv, the worker's thread handle, then the worker's own context.
-    unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::FAIL_ALLOC, 5);
+    // The last allocation of a one-worker start-up: lock, parker lock, parker cv, then the worker's thread
+    // handle. (The worker's own context lives inline in its frame, so it is not an allocation here.)
+    unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::FAIL_ALLOC, 4);
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w = wg.clone();

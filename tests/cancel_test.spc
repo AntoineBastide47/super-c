@@ -1149,7 +1149,9 @@ fn one_task_many_sources(fx: &mut Base) {
     assert(wait_members(&sb, 2), "both tasks registered with b");
     sb.cancel(rt::CR_POLICY);
     assert(wg.wait_timeout(time::Duration::from_secs(5)), "b cancels both");
-    assert_eq(sa.members(), 0);
+    // The wait group is released from inside each body; the records leave `sa` a moment later, when the
+    // worker runs the completion hook, so the count is polled rather than read once.
+    assert(wait_members_gone(&sa), "both records leave the uncancelled source");
     sa.cancel(rt::CR_USER); // nothing left to request
     rt::shutdown();
     assert_eq(cancelled(fx), 2);
@@ -1332,6 +1334,18 @@ fn slot_reuse_is_not_a_member(fx: &mut Base) {
 fn wait_members(src: &task::CancelSource, want: usize) bool {
     let deadline = platform::now_ns() + 5000000000;
     while src.members() < want {
+        if platform::now_ns() > deadline {
+            return false;
+        }
+        time::sleep(time::Duration::from_millis(1));
+    }
+    return true;
+}
+
+// Wait until `src` reports no members, or give up after a few seconds.
+fn wait_members_gone(src: &task::CancelSource) bool {
+    let deadline = platform::now_ns() + 5000000000;
+    while src.members() != 0 {
         if platform::now_ns() > deadline {
             return false;
         }

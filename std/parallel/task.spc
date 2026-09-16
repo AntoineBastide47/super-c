@@ -348,7 +348,7 @@ extend CancelToken {
         let reason = sh.reason.load(atomics::MemoryOrder::Relaxed) as u32;
         if !cancelled {
             // Appended, so a sweep requests members in registration order: tasks that armed timers in
-            // that order are then found at the front of the timer list, not walked to at its back.
+            // that order come due in that order too (the heap breaks equal deadlines by arm order).
             let last = unsafe sh.tail.get()[0];
             unsafe m.sprev = last;
             if last != null {

@@ -24,6 +24,7 @@ import bench::sweep as sweep;
 
 const TIMER_TASKS: i64 = 1000; // sleeping tasks per round
 const TIMER_SLEEPS: i64 = 5; // sleeps per task, each 1 ms: the timer list is armed 5000 times a round
+const PATTERN_ROUNDS: i32 = 5; // rounds per (pattern, live count) point in the timer_patterns lane
 const CONNS: i64 = 64; // client connections in the socket lane
 const SOCK_MSGS: i64 = 20; // messages per connection
 const SOCK_LEN: usize = 64; // bytes per message
@@ -247,6 +248,142 @@ pub fn socket_readiness(b: &mut bench::Bencher) {
         b.tally(want, want);
     }
     io::shutdown();
+}
+
+// --- timer patterns -------------------------------------------------------------------------------------.
+
+// One point of the timer_patterns lane: `live` tasks arm one timed wait each in the given pattern, all
+// armed at once, and the round is the whole spawn, arm, expiry (or early notify) and completion. Lateness
+// is what a sleeper observes past its own deadline. Patterns: 0 increasing deadlines (each task later than
+// the previous), 1 decreasing, 2 equal, 3 pseudo-random, 4 cancelled (a wait on the task's own condvar,
+// notified before its deadline: arm plus removal, no expiry). The waits park on the timer heap alone (a
+// sleep, or a condvar nobody else waits on), so the round prices the heap and not a shared wait queue.
+fn pattern_once(pattern: i64, live: i64, late: &mut Vector<f64>) {
+    let wg = sync::WaitGroup::new();
+    wg.add(live);
+    let lat = arc::Arc::<sync::Mutex<Vector<f64>>>::new(sync::Mutex::<Vector<f64>>::new(Vector::<f64>::new()));
+    let mut cvs = Vector::<arc::Arc<sync::Condvar>>::new();
+    let mut locks = Vector::<arc::Arc<sync::Mutex<i64>>>::new();
+    let base = platform::now_ns() + 2000000; // the earliest deadline: 2 ms out, past the spawn burst
+    for i in 0..live {
+        let w = wg.clone();
+        let l = lat.clone();
+        // Deadlines spread over 8 ms in the pattern's order; equal keeps one; random scatters.
+        let off: u64 = switch pattern {
+            0 => i as u64 * 8000000 / live as u64,
+            1 => (live - 1 - i) as u64 * 8000000 / live as u64,
+            2 => 4000000u64,
+            3 => (i as u64 * 2654435761 >> 5) % 8000000,
+            _ => 200000000u64, // cancelled: far away, never reached
+        };
+        if pattern == 4 {
+            let m = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
+            let c = arc::Arc::<sync::Condvar>::new(sync::Condvar::new());
+            locks.push(m.clone());
+            cvs.push(c.clone());
+            launch || {
+                defer w.done();
+                let g = m.get().lock();
+                while *g.get() == 0 {
+                    let _ = c.get().wait_until(&g, base + off);
+                }
+            };
+        } else {
+            launch || {
+                defer w.done();
+                let dl = base + off;
+                let now = platform::now_ns();
+                if dl > now {
+                    rt::sleep_ns((dl - now) as i64);
+                }
+                let woke = platform::now_ns();
+                let mut v = l.get().lock();
+                v.get_mut().push((woke - dl) as f64 / 1000.0);
+            };
+        }
+    }
+    if pattern == 4 {
+        if !wait_parked(rt::WK_CONDVAR, live as usize) {
+            bench::fail("timer_patterns: the waiters did not all park");
+        }
+        for i in 0..cvs.len() {
+            {
+                let mut g = locks.at(i).get().lock();
+                *g.get_mut() = 1;
+            }
+            cvs.at(i).get().notify_one();
+        }
+    }
+    wg.wait();
+    let v = lat.get().lock();
+    for i in 0..v.len() {
+        late.push(*v.at(i));
+    }
+}
+
+/// Benchmark lane: one timed wait per task in five deadline patterns, at three live counts. Each row is
+/// the per-timer cost of the whole round (spawn, arm, expiry or removal, completion) and the lateness
+/// sleepers saw past their deadlines. Worker counts are swept by `timer_churn`; this lane keeps the
+/// default pool.
+@bench(log_results = false)
+pub fn timer_patterns(b: &mut bench::Bencher) {
+    b.set_rounds(1);
+    b.set_warmup(0);
+    b.set_diag_rounds(0);
+    let names: [str; 5] = ["increasing", "decreasing", "equal", "random", "cancelled"];
+    let lives: [i64; 3] = [100, 1000, 10000];
+    while b.running() {
+        unsafe stdio::printf("\n  timer_patterns: one timed wait per task\n".ptr() as *const char);
+        unsafe stdio::printf(
+            "    %-11s %7s %11s %11s %11s %10s\n".ptr() as *const char,
+            "pattern".ptr() as *const char,
+            "live".ptr() as *const char,
+            "median ms".ptr() as *const char,
+            "ns/timer".ptr() as *const char,
+            "late p99 us".ptr() as *const char,
+            "Mcyc".ptr() as *const char,
+        );
+        for pi in 0..5i64 {
+            for li in 0..3usize {
+                let live = unsafe lives[li];
+                let mut ms = Vector::<f64>::new();
+                let mut cyc = Vector::<f64>::new();
+                let mut late = Vector::<f64>::new();
+                pattern_once(pi, live, &mut late);
+                late.clear();
+                for _r in 0..PATTERN_ROUNDS {
+                    let c0 = unsafe sys::sc_bs_cycles();
+                    let t0 = platform::now_ns();
+                    pattern_once(pi, live, &mut late);
+                    let t1 = platform::now_ns();
+                    let c1 = unsafe sys::sc_bs_cycles();
+                    ms.push((t1 - t0) as f64 / 1000000.0);
+                    cyc.push((c1 - c0) as f64 / 1000000.0);
+                }
+                let sm = bench::summarize(&mut ms);
+                let sc = bench::summarize(&mut cyc);
+                let sl = if late.len() != 0 {
+                    bench::summarize(&mut late);
+                } else {
+                    bench::summarize(&mut ms); // the cancelled pattern has no expiry: the column is dashed
+                };
+                let mut p99: f64 = -1.0;
+                if late.len() != 0 {
+                    p99 = sl.p99;
+                }
+                unsafe stdio::printf(
+                    "    %-11s %7lld %11.3f %11.1f %11.1f %10.2f\n".ptr() as *const char,
+                    (unsafe names[pi as usize].ptr()) as *const char,
+                    live,
+                    sm.median,
+                    sm.median * 1000000.0 / live as f64,
+                    p99,
+                    sc.median,
+                );
+            }
+        }
+        b.tally(1, 1);
+    }
 }
 
 // --- cancellation ---------------------------------------------------------------------------------------.

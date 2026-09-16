@@ -1,7 +1,7 @@
 // Durations, deadlines and suspension. Import with `import std::parallel::time as time;`.
 //
 // `sleep` is the reason this module exists in `parallel`: inside a coroutine it parks on the scheduler's
-// timer list, so the worker thread keeps running other tasks for the duration, while on any other thread it
+// timer heap, so the worker thread keeps running other tasks for the duration, while on any other thread it
 // sleeps outright. Deadlines are monotonic `platform::now_ns()` values; the timed `sync` and `channel`
 // waits take one, and `remaining_ns` is how a wait loop asks how much of its budget is left.
 
@@ -46,7 +46,7 @@ extend Duration {
 
 /// The monotonic deadline `d` from now, in the units every timed wait takes.
 pub fn deadline_in(d: Duration) u64 {
-    return platform::now_ns() + d.ns;
+    return runtime::deadline_after(d.ns);
 }
 
 /// Nanoseconds left until `deadline`; `0` once it has passed. A wait loop stops when this reaches zero.

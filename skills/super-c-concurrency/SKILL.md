@@ -84,7 +84,7 @@ worker) instead of blocking the OS thread.
 | `Semaphore` | Counting semaphore |
 
 Timed forms: `acquire_timeout`, `wait_timeout`, `Condvar::wait_until`. `time::sleep`
-parks on the scheduler's timer list (`import std::parallel::time as time;`,
+parks on the scheduler's timer heap (`import std::parallel::time as time;`,
 `time::Duration::from_secs`/`from_millis`).
 
 Method calls auto-deref through the guard (`guard.push(42)`); deref-assignment goes
@@ -308,8 +308,13 @@ Registration contract (`CancelToken::bind_current`, documented at the top of
 Lock order: a source lock is taken alone and never held across a request or a task's
 cleanup. A key-based request takes only the registry slot lock.
 
-Sleepers are kept on a doubly linked, deadline-sorted timer list, so a cancelled sleep is
-disarmed in O(1) whatever order a sweep reaches its members in.
+Timed waits live in one indexed binary min-heap under the scheduler lock, ordered by
+(deadline, arm sequence): arming and disarming are logarithmic, the earliest deadline is
+read in constant time, equal deadlines come due in arm order, and a sweep may reach its
+members in any order. Exactly one idle worker times its park to the earliest deadline;
+the others sleep untimed, and only a new earliest deadline wakes that worker. Due timers
+are made runnable in bounded batches per lock hold. A deadline that would wrap the clock
+saturates (`runtime::deadline_after`, used by `time::deadline_in`).
 
 ## Shutdown
 

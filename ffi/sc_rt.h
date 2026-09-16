@@ -60,7 +60,7 @@ void sc_rt_lockdep_release(void *lock);
 void sc_rt_lockdep_forget(void *lock);
 
 /* Sleep the calling OS thread for `ns` nanoseconds (the off-worker path for `parallel::sleep`; a coroutine
-   parks on the scheduler's timer list instead). Negative/zero returns immediately. */
+   parks on the scheduler's timer heap instead). Negative/zero returns immediately. */
 void sc_rt_sleep_ns(int64_t ns);
 
 /* A guard-paged stack: an inaccessible page sits just below the returned usable low end, so an overflow
