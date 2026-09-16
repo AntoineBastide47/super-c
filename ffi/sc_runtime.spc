@@ -31,6 +31,8 @@ extern "C" "sc_rt.h" {
     /// Monotonic clock in nanoseconds.
     pub fn sc_rt_now_ns() u64;
     /// Online core count (at least 1).
+    /// The page size, bytes.
+    pub fn sc_rt_page_size() usize;
     pub fn sc_rt_ncpu() usize;
 
     /// Store this thread's runtime pointer.
@@ -124,6 +126,14 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_ctx_switch(from: *mut void, to: *mut void) void;
     /// Release a context's platform resources.
     pub fn sc_rt_ctx_free(ctx: *mut void) void;
+    /// Bytes an inline context needs (0: this platform keeps contexts on the heap).
+    pub fn sc_rt_ctx_inline_size() usize;
+    /// Release what an inline context holds besides its bytes; frees nothing.
+    pub fn sc_rt_ctx_drop(ctx: *mut void) void;
+    /// Return an idle cached stack's resident pages to the OS, keeping the mapping. 0 on success.
+    pub fn sc_rt_stack_reclaim(usable: *mut void, size: usize) i32;
+    /// Tell the OS a reclaimed stack's pages are in use again, where that changes their accounting.
+    pub fn sc_rt_stack_reuse(usable: *mut void, size: usize) void;
 }
 
 /// `sc_rt_fail_arm` operations: the substrate's fallible calls, one constant each.

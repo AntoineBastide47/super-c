@@ -22,3 +22,8 @@ pub fn now_ns() u64 {
 pub fn stack_bytes() usize {
     return unsafe sc_runtime::sc_rt_stack_bytes();
 }
+
+/// The page size of this machine: the granularity of every stack mapping and reclaim.
+pub fn page_size() usize {
+    return unsafe sc_runtime::sc_rt_page_size();
+}

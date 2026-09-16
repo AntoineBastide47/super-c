@@ -303,6 +303,11 @@ size_t sc_rt_ncpu(void) {
   GetSystemInfo(&si);
   return si.dwNumberOfProcessors ? (size_t)si.dwNumberOfProcessors : 1;
 }
+size_t sc_rt_page_size(void) {
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  return si.dwPageSize;
+}
 
 void sc_rt_sleep_ns(int64_t ns) {
   if (ns <= 0) return;
@@ -387,6 +392,16 @@ void sc_rt_stack_free(void *usable, size_t size) {
   if (sc_rt_fail_hit(SC_RT_FAIL_STACK_RELEASE) || !VirtualFree((char *)usable - si.dwPageSize, 0, MEM_RELEASE))
     sc_rt_die("cannot release a task stack");
   sc_rt_stack_note(size + si.dwPageSize, 0);
+}
+int sc_rt_stack_reclaim(void *usable, size_t size) {
+  /* MEM_RESET marks the pages discardable; a later touch may read stale or zero data, which a stack
+     about to be re-armed never relies on. The guard and reservation are untouched. */
+  return VirtualAlloc(usable, size, MEM_RESET, PAGE_READWRITE) ? 0 : -1;
+}
+void sc_rt_stack_reuse(void *usable, size_t size) {
+  /* A touch after MEM_RESET recommits the page; nothing to tell. */
+  (void)usable;
+  (void)size;
 }
 
 static size_t sc_rt_stk_size = 0;
@@ -688,6 +703,8 @@ static void sc_ctx_save_fpctl(void *slot) {
 }
 
 void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(sizeof(sc_rt_ctx_asm), 1); }
+size_t sc_rt_ctx_inline_size(void) { return sizeof(sc_rt_ctx_asm); }
+void sc_rt_ctx_drop(void *ctx) { (void)ctx; }
 
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
   SYSTEM_INFO si;
@@ -734,6 +751,12 @@ static void CALLBACK sc_rt_fiber_entry(void *p) {
 }
 
 void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(sizeof(sc_rt_ctx_win), 1); }
+size_t sc_rt_ctx_inline_size(void) { return 0; } /* fibers: the OS owns the stack; keep the heap block */
+void sc_rt_ctx_drop(void *ctx) {
+  sc_rt_ctx_win *c = (sc_rt_ctx_win *)ctx;
+  if (c->fiber && !c->is_root) DeleteFiber(c->fiber);
+  c->fiber = 0;
+}
 
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
   sc_rt_ctx_win *c = (sc_rt_ctx_win *)ctx;
@@ -776,6 +799,7 @@ uint64_t sc_rt_now_ns(void) {
 }
 
 size_t sc_rt_ncpu(void) { return 1; }
+size_t sc_rt_page_size(void) { return 65536; }
 
 void sc_rt_sleep_ns(int64_t ns) {
   if (ns <= 0) return;
@@ -865,6 +889,17 @@ void sc_rt_cond_broadcast(void *c) { (void)c; }
 
 /* Stackful coroutines need a second stack to switch to, and wasm's call stack is not addressable. */
 void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(1, 1); }
+size_t sc_rt_ctx_inline_size(void) { return 0; }
+void sc_rt_ctx_drop(void *ctx) { (void)ctx; }
+int sc_rt_stack_reclaim(void *usable, size_t size) {
+  (void)usable;
+  (void)size;
+  return -1;
+}
+void sc_rt_stack_reuse(void *usable, size_t size) {
+  (void)usable;
+  (void)size;
+}
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
   (void)ctx;
   (void)stack;
@@ -907,6 +942,7 @@ size_t sc_rt_ncpu(void) {
   long n = sysconf(_SC_NPROCESSORS_ONLN);
   return n > 0 ? (size_t)n : 1;
 }
+size_t sc_rt_page_size(void) { return (size_t)sysconf(_SC_PAGESIZE); }
 
 void sc_rt_sleep_ns(int64_t ns) {
   if (ns <= 0) return;
@@ -981,6 +1017,29 @@ void sc_rt_stack_free(void *usable, size_t size) {
   if (sc_rt_fail_hit(SC_RT_FAIL_STACK_RELEASE) || munmap((char *)usable - pg, size + pg) != 0)
     sc_rt_die("cannot release a task stack");
   sc_rt_stack_note(size + pg, 0);
+}
+int sc_rt_stack_reclaim(void *usable, size_t size) {
+#if defined(__APPLE__)
+  /* MADV_FREE_REUSABLE is the form that lowers the resident count at once; plain MADV_FREE only marks the
+     pages for reclaim under pressure and leaves them counted until then. */
+  return madvise(usable, size, MADV_FREE_REUSABLE);
+#elif defined(MADV_DONTNEED)
+  return madvise(usable, size, MADV_DONTNEED);
+#else
+  (void)usable;
+  (void)size;
+  return -1;
+#endif
+}
+void sc_rt_stack_reuse(void *usable, size_t size) {
+#if defined(__APPLE__)
+  /* Pairs with MADV_FREE_REUSABLE: without it the pages are used but stay out of the footprint. The
+     call cannot fail on a mapping this process owns; a failure would only skew accounting. */
+  (void)madvise(usable, size, MADV_FREE_REUSE);
+#else
+  (void)usable;
+  (void)size;
+#endif
 }
 
 /* ---- stack-overflow reporting ---------------------------------------------------------------------- */
@@ -1327,6 +1386,16 @@ static void sc_ctx_save_fpctl(void *slot) {
 }
 
 void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(sizeof(sc_rt_ctx_asm), 1); }
+size_t sc_rt_ctx_inline_size(void) { return sizeof(sc_rt_ctx_asm); }
+void sc_rt_ctx_drop(void *ctx) {
+#ifdef SC_TSAN
+  void *fb = ((sc_rt_ctx_asm *)ctx)->fiber;
+  if (fb && fb != __tsan_get_current_fiber()) __tsan_destroy_fiber(fb);
+  ((sc_rt_ctx_asm *)ctx)->fiber = 0;
+#else
+  (void)ctx;
+#endif
+}
 
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
 #ifdef SC_TSAN
@@ -1385,11 +1454,8 @@ void sc_rt_ctx_switch(void *from, void *to) {
 }
 
 void sc_rt_ctx_free(void *ctx) {
-#ifdef SC_TSAN
-  void *fb = ((sc_rt_ctx_asm *)ctx)->fiber;
   /* A worker's own context borrowed its fiber from the thread; only a created one is ours to destroy. */
-  if (fb && fb != __tsan_get_current_fiber()) __tsan_destroy_fiber(fb);
-#endif
+  sc_rt_ctx_drop(ctx);
   free(ctx);
 }
 
@@ -1415,6 +1481,8 @@ static void sc_rt_uc_tramp(unsigned hi, unsigned lo) {
 }
 
 void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(sizeof(sc_rt_ctx_posix), 1); }
+size_t sc_rt_ctx_inline_size(void) { return 0; } /* a ucontext is far too large for the record */
+void sc_rt_ctx_drop(void *ctx) { (void)ctx; }
 
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg) {
   sc_rt_ctx_posix *c = (sc_rt_ctx_posix *)ctx;

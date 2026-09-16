@@ -38,6 +38,8 @@ const FANIN_EACH: i64 = 20000; // `done` calls each, so spawn cost is a rounding
 const DISPATCHES: i64 = 200; // `parallel::range` calls per round
 const SPAN: usize = 256; // iterations per dispatch: small, so what is measured is the dispatch
 const ALLOCS: i64 = 20000; // malloc/free pairs per round in the allocator lane
+const DEEP_TASKS: i64 = 500; // tasks per round in the deep-stack lane
+const DEEP_FRAMES: u64 = 1500; // frames of at least 80 bytes each: past 100 KiB of the default stack
 const CLEANUP_WAIT_NS: u64 = 5000000000; // how long spawn_to_completion waits for the runtime to retire its tasks
 
 // --- spawn ------------------------------------------------------------------------------------------.
@@ -430,6 +432,109 @@ pub fn parallel_range(b: &mut bench::Bencher) {
             );
         }
         b.tally(DISPATCHES, hits.load(atomics::MemoryOrder::Acquire) - h0);
+    }
+}
+
+/// The same short dispatch over UNEVEN work: index `i` costs `4 * (i % 64)` multiply steps, so with the
+/// sixteen-index chunk floor one static chunk carries up to seven times another's work. Static and Dynamic
+/// run back to back on identical work; the gap between them is what dynamic claiming buys on a short
+/// range, and bounds what the chunk floor costs there.
+@bench
+pub fn parallel_range_uneven(b: &mut bench::Bencher) {
+    b.each(DISPATCHES * 2);
+    b.unit("dispatch");
+    let hits = atomics::Atomic::<i64>::new(0);
+    let hp = &hits;
+    let dynamic = data::Options { schedule: data::Schedule::Dynamic, grain_size: 8 };
+    let mut ms_static = Vector::<f64>::new();
+    let mut ms_dynamic = Vector::<f64>::new();
+    while b.running() {
+        let h0 = hits.load(atomics::MemoryOrder::Acquire);
+        let t0 = platform::now_ns();
+        for _d in 0..DISPATCHES {
+            data::range(
+                0..SPAN,
+                |i: usize| {
+                    bench::black_box(bench::burn((i % 64) as i64 * 4));
+                    if i == 0 {
+                        let _ = hp.fetch_add(1, atomics::MemoryOrder::Relaxed);
+                    }
+                },
+            );
+        }
+        let t1 = platform::now_ns();
+        for _d in 0..DISPATCHES {
+            data::range_with(
+                0..SPAN,
+                dynamic,
+                |i: usize| {
+                    bench::black_box(bench::burn((i % 64) as i64 * 4));
+                    if i == 0 {
+                        let _ = hp.fetch_add(1, atomics::MemoryOrder::Relaxed);
+                    }
+                },
+            );
+        }
+        let t2 = platform::now_ns();
+        ms_static.push((t1 - t0) as f64 / 1000000.0);
+        ms_dynamic.push((t2 - t1) as f64 / 1000000.0);
+        b.tally(DISPATCHES * 2, hits.load(atomics::MemoryOrder::Acquire) - h0);
+    }
+    let ss = bench::summarize(&mut ms_static);
+    let sd = bench::summarize(&mut ms_dynamic);
+    let mut note = String::from_str("static ");
+    note.push_f64_prec(ss.median * 1000000.0 / DISPATCHES as f64, 1);
+    note.push_str(" ns/dispatch, dynamic ");
+    note.push_f64_prec(sd.median * 1000000.0 / DISPATCHES as f64, 1);
+    note.push_str(" ns/dispatch (medians)");
+    b.note(note.as_str());
+}
+
+// --- deep stacks ------------------------------------------------------------------------------------.
+
+// The frame's address escapes: with it private the optimiser turns this tail call into a loop, and the
+// lane would measure a shallow stack.
+fn deep(n: u64, acc: u64) u64 {
+    let mut pad = Array::<u64, 8>::new();
+    pad[7] = n;
+    bench::black_box((((&mut pad[0]) as *mut u64) as usize) as u64);
+    if n == 0 {
+        return acc + pad[7];
+    }
+    return deep(n - 1, acc + pad[7]);
+}
+
+/// Tasks that each recurse past 100 KiB of their 256 KiB stack: what a task pays when it uses its stack
+/// rather than the first page of it. A recycled block whose pages were given back faults them in again
+/// here, so this is the lane that prices stack trimming and block reuse, not spawn.
+@bench
+pub fn deep_stack(b: &mut bench::Bencher) {
+    b.each(DEEP_TASKS);
+    b.unit("task");
+    while b.running() {
+        let base = rt::completed_tasks();
+        let wg = sync::WaitGroup::new();
+        wg.add(DEEP_TASKS);
+        for _i in 0..DEEP_TASKS {
+            let w = wg.clone();
+            launch || {
+                bench::black_box(deep(DEEP_FRAMES, 0));
+                w.done();
+            };
+        }
+        wg.wait();
+        let retired = wait_retired(base, DEEP_TASKS as usize);
+        b.tally(
+            DEEP_TASKS,
+            if retired {
+                DEEP_TASKS;
+            } else {
+                0i64;
+            },
+        );
+        if !retired {
+            bench::fail("deep_stack: the runtime did not retire every task within the wait");
+        }
     }
 }
 

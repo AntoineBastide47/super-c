@@ -39,6 +39,10 @@ import std::parallel::atomics as atomics;
 // Chunks per worker. More than one lets a worker that finishes early pick up another chunk, which is most of
 // what dynamic scheduling buys, at no extra cost; many more would only add per-chunk overhead.
 const CHUNKS_PER_WORKER: usize = 4;
+// The fewest units a chunk carries: a short range gets fewer chunks than the workers could take, because
+// each chunk costs an enqueue, a wake and a job run whatever it holds, and sixteen trivial iterations do
+// not pay for that. Uneven work on a short range is what the Dynamic and Guided schedules are for.
+const MIN_UNITS_PER_CHUNK: usize = 16;
 
 /// How a parallel loop divides its index space.
 pub enum Schedule {
@@ -92,6 +96,15 @@ pub struct ChunkEnv {
     pub lo: usize,
     pub hi: usize,
     pub idx: usize,
+}
+
+/// One chunk's job header and descriptor together: `dispatch` allocates the whole batch as one array in
+/// the calling frame's ownership, and the runtime touches a record only until its entry returns (the
+/// borrowed-job contract), which is before the last chunk's `finish` lets the caller release the array.
+@no_const
+pub struct ChunkJob {
+    pub run: runtime::Runnable,
+    pub env: ChunkEnv,
 }
 
 /// The next index range for this chunk, `[lo, hi)`; `false` once it has no more work. Static hands over the
@@ -183,6 +196,10 @@ pub fn chunk_count(total: usize) usize {
         return 1;
     }
     let mut n = runtime::worker_count() * CHUNKS_PER_WORKER;
+    let by_units = (total + MIN_UNITS_PER_CHUNK - 1) / MIN_UNITS_PER_CHUNK;
+    if n > by_units {
+        n = by_units;
+    }
     if n > total {
         n = total;
     }
@@ -244,9 +261,11 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
         nw: runtime::worker_count(),
     };
     let bp = (&mut b) as *mut Batch;
-    // One allocation for every chunk slot; each job holds a pointer into it, and the caller outlives them.
+    // ONE allocation for every chunk: its job header and its descriptor side by side. The records are
+    // this frame's; the runtime reads a header only until the chunk's entry runs, and the join below
+    // outlives every chunk's last touch of the descriptor (`finish` is the last thing an entry does).
     let mut g = Global {};
-    let envs = (unsafe g.alloc(nchunks * sizeof(ChunkEnv), alignof(ChunkEnv))) as *mut ChunkEnv;
+    let jobs = (unsafe g.alloc(nchunks * sizeof(ChunkJob), alignof(ChunkJob))) as *mut ChunkJob;
     let base = total / nchunks;
     let extra = total % nchunks;
     let mut at: usize = 0;
@@ -256,10 +275,12 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
             // Spread the remainder over the first chunks.
             n = n + 1;
         }
-        unsafe envs[i] = ChunkEnv { batch: bp, lo: at, hi: at + n, idx: i };
+        let j = unsafe (jobs + i);
+        unsafe j.env = ChunkEnv { batch: bp, lo: at, hi: at + n, idx: i };
+        runtime::job_init(&mut unsafe j.run, entry, &mut unsafe j.env);
         at = at + n;
-        runtime::spawn_job(entry, &mut unsafe envs[i]);
     }
+    runtime::submit_jobs(&mut unsafe jobs[0].run, sizeof(ChunkJob), nchunks);
     {
         let g2 = latch.left.lock();
         while *g2.get() > 0 {
@@ -268,7 +289,7 @@ pub fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, shared: 
             latch.cv.wait_masked(&g2);
         }
     }
-    unsafe g.dealloc(envs, nchunks * sizeof(ChunkEnv), alignof(ChunkEnv));
+    unsafe g.dealloc(jobs, nchunks * sizeof(ChunkJob), alignof(ChunkJob));
     // `latch` is auto-freed at scope exit (its mutex and condvar with it), which is safe only because no
     // chunk touches it after the count reached zero, and once `raw_mutex_unlock` publishes the release it
     // touches only memory that outlives the mutex (see `RawMutex`), so the last chunk's unlock cannot race

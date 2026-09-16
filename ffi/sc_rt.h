@@ -12,6 +12,8 @@
 uint64_t sc_rt_now_ns(void);
 /* Logical CPU count (>= 1). */
 size_t sc_rt_ncpu(void);
+/* The page size: what a stack mapping and a reclaim are measured in. */
+size_t sc_rt_page_size(void);
 
 /* Per-OS-thread slot holding the running coroutine pointer (the current-coroutine TLS the scheduler needs).
    The language has no thread-locals; this is that one slot. */
@@ -139,6 +141,21 @@ void *sc_rt_ctx_alloc(void);
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg);
 void sc_rt_ctx_switch(void *from, void *to);
 void sc_rt_ctx_free(void *ctx);
+/* A context small enough to live INSIDE the task record: `inline_size` is its byte size (8-aligned) on the
+   assembly-switch platforms and 0 where the platform fallback (ucontext, fibers) needs a heap block from
+   `sc_rt_ctx_alloc`. Inline storage must be zeroed before its first `init`; `drop` releases what an inline
+   context holds besides its bytes (a sanitizer fiber) without freeing anything. */
+size_t sc_rt_ctx_inline_size(void);
+void sc_rt_ctx_drop(void *ctx);
+
+/* Give the pages of an IDLE cached stack back to the OS without unmapping it: the mapping and its guard
+   stay, the resident pages go, and the next use faults zero pages back in. 0 on success; nonzero where the
+   platform has no such call, in which case the pages simply stay resident. Never for a live stack. */
+int sc_rt_stack_reclaim(void *usable, size_t size);
+/* The pages of a reclaimed stack are about to be used again: where the reclaim changed how the OS counts
+   them (macOS MADV_FREE_REUSABLE takes them out of the footprint until told otherwise), tell it. A no-op
+   elsewhere: a touch is all the other platforms need. */
+void sc_rt_stack_reuse(void *usable, size_t size);
 
 /* Combined-safepoint cancellation hook: the cold half of a compiled combined safepoint calls it
    through `__sc_cancel_tick` (super_rt.h); 1 means an unmasked pending cancellation was accepted.

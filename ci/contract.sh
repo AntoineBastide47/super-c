@@ -1,11 +1,11 @@
-# Super-C compatibility contract, version 5.
+# Super-C compatibility contract, version 6.
 #
 # Sourced by ci/gate.sh (correctness) and ci/perf_gate.sh / ci/bench_matrix.sh (performance). Every
 # input file, option and command a gate uses is named here, in the order the gates apply it; no gate
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=5
+CONTRACT_VERSION=6
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -92,6 +92,7 @@ tests/codegen_test.spc
 tests/core_ir_test.spc
 tests/cross_target_helpers_test.spc
 tests/ctfe_reflect_test.spc
+tests/dispatch_test.spc
 tests/doc_test.spc
 tests/drops_test.spc
 tests/errors_test.spc
