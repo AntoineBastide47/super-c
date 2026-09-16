@@ -285,6 +285,20 @@ static _Thread_local int32_t sc_rt_widx_slot = -1;
 __attribute__((noinline)) void sc_rt_widx_set(int32_t i) { sc_rt_widx_slot = i; }
 __attribute__((noinline)) int32_t sc_rt_widx_get(void) { return sc_rt_widx_slot; }
 
+uint64_t sc_rt_cycles(void) {
+#if defined(__x86_64__)
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+#elif defined(__aarch64__)
+  uint64_t v;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+  return v;
+#else
+  return sc_rt_now_ns();
+#endif
+}
+
 #ifdef _WIN32
 /* ================================ Windows ========================================================== */
 #include <windows.h>
@@ -733,6 +747,7 @@ void sc_rt_ctx_switch(void *from, void *to) {
   sc_rt_ctx_asm *f = (sc_rt_ctx_asm *)from;
   sc_ctx_swap(&f->sp, ((sc_rt_ctx_asm *)to)->sp);
 }
+void sc_rt_ctx_entered(void *ctx) { (void)ctx; }
 
 void sc_rt_ctx_free(void *ctx) { free(ctx); }
 
@@ -775,6 +790,7 @@ void sc_rt_ctx_switch(void *from, void *to) {
   }
   SwitchToFiber(t->fiber);
 }
+void sc_rt_ctx_entered(void *ctx) { (void)ctx; }
 
 void sc_rt_ctx_free(void *ctx) {
   sc_rt_ctx_win *c = (sc_rt_ctx_win *)ctx;
@@ -913,6 +929,7 @@ void sc_rt_ctx_switch(void *from, void *to) {
   fprintf(stderr, "super-c: 'launch' needs a stackful context switch, which wasm does not provide\n");
   abort();
 }
+void sc_rt_ctx_entered(void *ctx) { (void)ctx; }
 void sc_rt_ctx_free(void *ctx) { free(ctx); }
 
 #else
@@ -1453,6 +1470,18 @@ void sc_rt_ctx_switch(void *from, void *to) {
 #endif
 }
 
+void sc_rt_ctx_entered(void *ctx) {
+#ifdef SC_TSAN
+  /* The first run of a coroutine pops the forged frame into `sc_ctx_entry`, so the acquire at the end of
+     `sc_rt_ctx_switch` never runs for it: without this, everything the starting worker acquired before the
+     switch (a recycled block's hand-off, for one) is invisible to the task's first run in the sanitizer's
+     model, and every such run reports a race that the hardware, by program order, cannot have. */
+  __tsan_acquire(ctx);
+#else
+  (void)ctx;
+#endif
+}
+
 void sc_rt_ctx_free(void *ctx) {
   /* A worker's own context borrowed its fiber from the thread; only a created one is ours to destroy. */
   sc_rt_ctx_drop(ctx);
@@ -1499,6 +1528,7 @@ void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), 
 void sc_rt_ctx_switch(void *from, void *to) {
   swapcontext(&((sc_rt_ctx_posix *)from)->uc, &((sc_rt_ctx_posix *)to)->uc);
 }
+void sc_rt_ctx_entered(void *ctx) { (void)ctx; }
 
 void sc_rt_ctx_free(void *ctx) { free(ctx); }
 #endif

@@ -51,6 +51,27 @@ swaps stacks — so per-coroutine fields need no atomics.
 that use `launch`). The scheduler yields there when other work is waiting, so a
 compute-bound task cannot starve the pool.
 
+**Run queues.** Each worker owns a fixed ring (256 slots) that it appends to; the owner
+and thieves alike take from its head with a CAS, FIFO for everyone, and a thief takes half
+the ring in one claim. Every slot access is a relaxed atomic: a taker reads slots before
+its head CAS, a failed CAS discards them, and the atomic access is what keeps a delayed
+read of a refilled slot defined. Head-claim retries are bounded, after which the worker
+looks elsewhere. A full ring spills to the shared injection queue (a spinlock); yields go
+to a private per-worker queue. Every sixteenth dequeue serves the yield queue first and
+every sixty-first the injection queue, so a ring that never runs dry (a recursive producer)
+cannot starve either. One worker spins looking for work with a budget that doubles while
+spinning finds work and halves when it ends in a park (64 to 2048 iterations); the others
+give up after 512. A parked task's block carries a COUNT of park hand-off tails in flight,
+so a task that parks twice in a row (a wait, then a contended re-lock) is never recycled
+under the first tail. Completion, cancellation and spawn counts live per worker and fold
+into process-lifetime totals when a pool is destroyed. Scheduler counters (steals, failed
+probes, spills, wakes, parks, spin iterations, search cycles) compile in when `RT_STATS`
+in `std/parallel/runtime.spc` is true and read back through `runtime::sched_stats()`;
+they cost nothing otherwise. `RT_HOOKS` likewise compiles in `runtime::sched_hook_arm`,
+which delays every worker at a named point (`HOOK_STEAL_READ`: between a thief's slot
+reads and its head claim) so a race window of nanoseconds becomes reproducible under the
+`race` profile.
+
 ## Send / Sync
 
 Marker interfaces in `std/interfaces.spc`. Structural auto-conformance:

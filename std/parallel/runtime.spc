@@ -179,7 +179,7 @@ pub struct Coroutine {
     pub cmask: i32, // cancellation-mask depth; only the task's own thread touches it
     pub wait_kind: i32, // atomic WK_* while parked, for diagnostics
     pub wait_obj: usize, // atomic: address identifying the wait object, for diagnostics
-    pub handoff: i32, // atomic: the parking worker still owns the hand-off tail; see worker_main
+    pub handoff: i32, // atomic COUNT of park hand-off tails still running on this block; see worker_main
     pub unwound: i32, // the last checked call edge-returned: its value is poison; see cancel_probe
     pub ctx_mem: Array<u64, 2>, // the inline context (`sc_rt_ctx_inline_size` bytes, zeroed before use)
     pub env_mem: Array<u64, 6>, // the inline closure (`ENV_INLINE` bytes, 8-aligned)
@@ -249,6 +249,7 @@ static mut G_REG: *mut Registry = null;
 const DEQUE_CAP: usize = 256; // power of two; an overflowing push spills to the injection queue
 const BATCH_MAX: usize = 16; // injected tasks moved to a deque per lock: see `take_injection`
 const STEAL_MAX: usize = 32; // most tasks taken in one steal: see `dq_steal`
+const CLAIM_RETRY: i32 = 4; // head-claim attempts per take before the caller looks elsewhere: see `dq_pop`
 const Y_MAX: i32 = 32; // yields a worker keeps to itself before spilling: see `yq_push`
 // The recycled task blocks the pool keeps are bounded by `G_POOL_BUDGET` (bytes of mappings, stashes
 // included): it has to cover the number of tasks a program runs concurrently, or every spawn past it pays a
@@ -262,20 +263,126 @@ const SPIN_MAX: i32 = 2048; // the spinner's look-again budget before it parks: 
 // a cheap-task fan-out spent most of its time waking threads, and at 4096 the spinners stole cores from
 // tasks that had actual work to do. 512 measured best across both shapes.
 const SPIN_IDLE: i32 = 512;
+// The spinner's budget adapts between these: it doubles while spinning keeps finding work and halves
+// every time a spin ends in a park, so an empty pool burns little and a bursty one keeps a spinner awake.
+const SPIN_MIN: i32 = 64;
+const YQ_EVERY: u32 = 16; // dequeues between forced looks at the yield queue: see `find_work`
+const INJ_EVERY: u32 = 61; // dequeues between forced looks at the injection queue
+const ID_BLOCK: u64 = 64; // task ids a worker takes from the global counter at a time
+// A spinning worker sweeps every other worker's ring on one spin iteration in this many; the others look
+// at the shared queue's count alone. Profiled on an external burst, the sweep on every iteration was 279
+// ring probes per task for 0.2% successful steals, but throttling it to one in four was measured to cost
+// 45% on that same lane and to cut parallel pickup of dispatched chunks by four: the probes are cheap
+// shared-line reads while nothing changes, and the delay they save is what a fan-out needs. Kept at 1.
+const PROBE_EVERY: i32 = 1;
+// Scheduler statistics are compiled in only when this is true: every counter sits behind
+// `sched_stats_on()`, a constant the emitter folds, so an ordinary build carries no counter code at all.
+// Flip it, rebuild, and read `sched_stats()`.
+const RT_STATS: bool = false;
+// Scheduling hooks for race hunts: compiled in only when true. An armed hook delays the worker at one
+// named point (see `sched_hook_arm`), which turns a nanosecond race window into a reproducible one.
+const RT_HOOKS: bool = false;
 const LINE: usize = 128; // cache line, and so the stride between two workers: see `Worker.pad`
 
 // Gated on the instruction set, not asserted everywhere: `pad` is sized for 8-byte pointers, and on wasm32
 // the fields add up to less than a line. Nothing is lost there: wasm runs one thread, so no second worker
 // exists to share the line with, and the padding it does carry is only wasted bytes rather than a bug.
 @arch(x86_64 | aarch64)
-static_assert(sizeof(Worker) == LINE, "Worker must be exactly one cache line: adjust its padding");
+static_assert(sizeof(Worker) % LINE == 0, "Worker must be whole cache lines: adjust its padding");
 
-/// One worker's run deque (Chase-Lev): its owner pushes and pops the BOTTOM, thieves steal the TOP, and the
-/// two only contend over the last element, so the common case takes no lock at all. Fixed capacity, which
-/// is what keeps it simple: a push that would overflow spills into the shared injection queue instead of
-/// growing the buffer under the thieves' feet.
+/// Whether scheduler statistics are compiled in. A constant: the emitter folds every `if sched_stats_on()`
+/// away when it is false, so the counters cost nothing then.
+pub const fn sched_stats_on() bool {
+    return RT_STATS;
+}
+
+/// Scheduler counters, summed over the workers by `sched_stats`. All zero unless `sched_stats_on()`.
+pub struct SchedStats {
+    pub pushes: u64, // tasks appended to a worker's own ring
+    pub spills: u64, // pushes that found the ring full and went to the injection queue
+    pub pops: u64, // tasks taken from a worker's own ring
+    pub occupancy: u64, // sum of the ring's occupancy at each pop: divide by `pops` for the mean
+    pub steal_searches: u64, // `steal_any` calls
+    pub steal_probes: u64, // victims looked at
+    pub steals: u64, // probes that took something
+    pub inj_locks: u64, // injection-queue lock acquisitions by takers
+    pub inj_takes: u64, // tasks taken from the injection queue (the first of each batch)
+    pub yields: u64, // tasks put on a private yield queue
+    pub yield_spills: u64, // yields that overflowed it into the injection queue
+    pub wakes: u64, // parked workers woken (signals sent)
+    pub parks: u64, // times a worker went to sleep
+    pub spin_iters: u64, // spin iterations while searching for work
+    pub search_cycles: u64, // cycles spent between finishing one task and finding the next
+    pub stash_hits: u64, // task blocks taken from the worker's own stash (no lock)
+    pub pool_locks: u64, // task-block pool lock acquisitions (refills, overflows, trims)
+    pub block_allocs: u64, // fresh task blocks mapped (stash and pool both empty)
+}
+
+extend SchedStats {
+    pub const fn zero() SchedStats {
+        return SchedStats {
+            pushes: 0,
+            spills: 0,
+            pops: 0,
+            occupancy: 0,
+            steal_searches: 0,
+            steal_probes: 0,
+            steals: 0,
+            inj_locks: 0,
+            inj_takes: 0,
+            yields: 0,
+            yield_spills: 0,
+            wakes: 0,
+            parks: 0,
+            spin_iters: 0,
+            search_cycles: 0,
+            stash_hits: 0,
+            pool_locks: 0,
+            block_allocs: 0,
+        };
+    }
+}
+
+/// Whether the race-hunt scheduling hooks are compiled in. A constant the emitter folds.
+pub const fn sched_hooks_on() bool {
+    return RT_HOOKS;
+}
+
+/// Hook point: a thief has read its batch of ring slots and is about to claim them with the head CAS.
+pub const HOOK_STEAL_READ: i32 = 1;
+static mut G_HOOK_POINT: i32 = 0; // atomic: the armed point, or 0
+static mut G_HOOK_NS: u64 = 0; // atomic: how long to delay there
+
+/// Arm a scheduling hook: every worker reaching `point` first spins for `ns`. Only with
+/// `sched_hooks_on()`; a no-op otherwise.
+pub fn sched_hook_arm(point: i32, ns: u64) {
+    atomic::store_u64(&mut unsafe G_HOOK_NS, ns, 0);
+    atomic::store_i32(&mut unsafe G_HOOK_POINT, point, 2);
+}
+
+fn hook_delay(point: i32) {
+    if atomic::load_i32(&mut unsafe G_HOOK_POINT, 1) != point {
+        return;
+    }
+    let until = platform::now_ns() + atomic::load_u64(&mut unsafe G_HOOK_NS, 0);
+    while platform::now_ns() < until {
+        unsafe sc_runtime::sc_rt_cpu_relax();
+    }
+}
+
+// Events raised off the pool (a submitter's inject or wake from a plain thread): counted here.
+static mut G_STATS_EXT: SchedStats = SchedStats::zero();
+
+/// One worker's run queue: a fixed ring the owner appends to at `tail`, and that the owner and thieves alike
+/// take from at `head` with a CAS (FIFO for everyone: see the run-queue section for why that beats the
+/// Chase-Lev owner-side pop here). Fixed capacity, which is what keeps it simple: a push that would
+/// overflow spills into the shared injection queue instead of growing the buffer under the thieves' feet.
 @no_const
 pub struct Worker {
+    // The first line holds the ring and the owner's queue state together. Splitting `head` and `tail` onto
+    // a line of their own was measured and was 12% WORSE on spawn_to_completion: a push then touches two
+    // lines, and the thieves' reads of `tail` cost the owner nothing extra while it stays clean of the
+    // per-task counters, which is why those sit on the lines after.
     pub buf: *mut *mut Runnable, // DEQUE_CAP slots, indexed modulo the capacity
     pub head: usize, // atomic: next slot to run; CAS'd by the owner and by thieves alike
     pub tail: usize, // atomic: one past the last slot pushed (only the owner writes it)
@@ -286,15 +393,27 @@ pub struct Worker {
     pub bhead: *mut Coroutine, // this worker's private stash of recycled task blocks
     pub blen: i32, // how many (atomic stores, so an accounting read from off the worker is defined);
     // beyond STASH_MAX the stash is handed to the shared pool in one go
-    // Padding to a whole cache line. Workers live in one array, so without it two of them share a line:
-    // every push moves `bottom` and every steal moves `top`, and a store to either invalidates the
+    // Padded to whole cache lines. Workers live in one array, so without it two of them share a line:
+    // every push moves `tail` and every steal moves `head`, and a store to either invalidates the
     // neighbour's copy of both. Worth ~25% on a yield-heavy fan-out across fourteen workers, which is the
     // shape that moves these two fields hardest. 128 bytes because that is the line on Apple silicon; on a
     // 64-byte machine it is two lines per worker.
     pub yhead: *mut Runnable, // yielded here, oldest first: taken only once the ring is empty
     pub ytail: *mut Runnable,
     pub ylen: i32, // beyond Y_MAX a yield spills to the injection queue: see `yq_push`
-    pub pad: Array<u64, 4>,
+    pub pad: Array<u64, 4>, // the end of the first line
+    // Completion and spawn accounting, per worker so a task's end never touches a shared line, and on
+    // the second line so it never dirties the ring's line either: the owner adds (atomic stores, so the
+    // sums are defined), readers sum. The sums are exact once the pool is quiescent, which is when
+    // shutdown and the leak gate read them.
+    pub done: u64, // atomic: tasks completed on this worker
+    pub cancelled: u64, // atomic: completions that were accepted cancellations
+    pub spawned: u64, // atomic: tasks created on this worker
+    pub id_next: u64, // the next task id from this worker's block, valid below `id_end`
+    pub id_end: u64,
+    pub st: SchedStats, // compiled-in statistics, or an unused zero block
+    pub tail_pad: Array<u64, 12>, // to three lines (384 bytes): checked by `sizeof` in a size probe, since
+    // a static assertion over a const-generic array is not folded by the compiler today
 }
 
 /// Where one worker sleeps: its own mutex and condvar, so waking it is an UNCONTENDED lock plus one signal.
@@ -374,7 +493,8 @@ fn co_free(co: *mut Coroutine) {
 @no_const
 pub struct Scheduler {
     pub base: *mut void, // the allocation this line-aligned record lives in: see `sched_alloc`
-    pub deques: *mut Worker, // one per worker thread
+    pub deques: *mut Worker, // one per worker thread, line-aligned inside `deques_base`
+    pub deques_base: *mut void, // the allocation the workers live in
     pub nw: usize,
     pub inj_head: *mut Runnable, // injection queue: submissions from off-pool threads, and deque spill
     pub inj_tail: *mut Runnable,
@@ -386,6 +506,7 @@ pub struct Scheduler {
     pub idle: *mut u64, // atomic bitmask, one bit per worker: set = parked and waiting to be woken
     pub idle_words: usize, // (nw + 63) / 64, so the mask is not capped at 64 workers
     pub spinning: i32, // atomic: a worker is looking for work right now; see `dequeue_runnable`
+    pub spin_budget: i32, // atomic: the spinner's current look-again budget, SPIN_MIN..SPIN_MAX
     pub workers: Vector<*mut void>,
     pub shutting_down: i32, // set once under `lock`; a parking worker reads it atomically without the lock
     pub free_head: *mut Coroutine, // recycled task blocks, linked through `run.next`: see `pool_take`
@@ -405,9 +526,13 @@ pub struct Scheduler {
 static mut G_STATE: i32 = 0;
 static mut G_SCHED: *mut Scheduler = null;
 static mut G_NWORKERS: usize = 0; // 0 = one worker per CPU
-static mut G_NEXT_ID: u64 = 0; // atomic: task-id source, and so also the count of tasks ever created
-static mut G_DONE: usize = 0; // atomic: tasks that ran to completion
-static mut G_CANCELLED: usize = 0; // atomic: completions that were accepted cancellations
+static mut G_NEXT_ID: u64 = 0; // atomic: task-id source; ids are handed out in per-worker blocks
+static mut G_SPAWNED_EXT: u64 = 0; // atomic: tasks created off the pool (a plain thread's launch)
+// The counters are process-lifetime values by contract (a test reads them across a shutdown), while the
+// workers that hold them die with the pool: `destroy_pool` folds every worker's counters into these.
+static mut G_SPAWNED_BASE: u64 = 0; // atomic: spawns counted by workers of pools since destroyed
+static mut G_DONE_BASE: u64 = 0; // atomic: completions, likewise
+static mut G_CANCELLED_BASE: u64 = 0; // atomic: accepted cancellations, likewise
 static mut G_CLOSED: i32 = 0; // atomic: shutdown has stopped accepting new tasks
 
 static mut G_TRACE: i32 = 0; // 0 unknown / 1 off / 2 on
@@ -452,8 +577,28 @@ const fn commit_nop(_p: *mut void) {}
 
 // A fresh task id. Ids are handed out in order and never reused, so the counter is also the number of tasks
 // ever created: one contended increment per task rather than two for the same pair of facts.
+// A fresh task id, and the spawn counted. On a worker both come from its own block and counter, so a
+// fan-out spawning from every worker never contends on one line; off the pool, from the globals.
 fn next_task_id() u64 {
-    return atomic::add_u64(&mut unsafe G_NEXT_ID, 1, 0) + 1;
+    let s = unsafe G_SCHED;
+    let w = if s != null {
+        my_worker(s);
+    } else {
+        null;
+    };
+    if w == null {
+        let _ = atomic::add_u64(&mut unsafe G_SPAWNED_EXT, 1, 0);
+        return atomic::add_u64(&mut unsafe G_NEXT_ID, 1, 0) + 1;
+    }
+    atomic::store_u64(&mut unsafe w.spawned, unsafe w.spawned + 1, 0);
+    if unsafe w.id_next == unsafe w.id_end {
+        let base = atomic::add_u64(&mut unsafe G_NEXT_ID, ID_BLOCK, 0) + 1;
+        unsafe w.id_next = base;
+        unsafe w.id_end = base + ID_BLOCK;
+    }
+    let id = unsafe w.id_next;
+    unsafe w.id_next = id + 1;
+    return id;
 }
 
 // Claim the right to resume the park identified by `token`, recording `reason` as the winning wake:
@@ -673,6 +818,23 @@ extend TaskKey {
 //
 // The cost is that the owner now takes in FIFO order, so the freshest task does not run first. The yield
 // queue below is unaffected: it is still drained after this one.
+//
+// Memory-order argument. `head` and `tail` are monotone counters, indexed modulo DEQUE_CAP; they wrap at
+// the width, and every distance is computed as `tail - head`, which is exact under wraparound. A slot
+// `i` holds a task for the counter values `i`, `i + CAP`, ...; its contents are (re)written by the owner
+// exactly when `tail == i (mod CAP)`, and the owner only writes when `tail - head < CAP`, so every reuse
+// of a slot happens-after some take advanced `head` past its previous value. A taker reads `head` (h),
+// then `tail` (acquire: this pairs with the owner's release store that published the slots below it), then
+// the slots `[h, h + n)` with RELAXED ATOMIC loads, then CASes `head` from h. If the CAS succeeds, no take
+// moved `head` past h in between, so the owner cannot have refilled those slots, and the values read are
+// the published ones. If the CAS fails, another take advanced `head`, the owner MAY have refilled a slot
+// the reader had already read, and the failed CAS does not order that write against the read: the value
+// is discarded, but the read itself must be a defined access, which is why every slot access is atomic
+// rather than plain (a plain read there was a data race in the emitted C, and a torn read is undefined
+// even when its value is thrown away). A thief's writes into its OWN ring past its tail are atomic for
+// the same reason: a taker of the thief's ring holding a stale `head` can still be reading the slot just
+// behind the current head, which is the last slot a full batch may land on. A relaxed atomic load or
+// store compiles to a plain load or store on every supported target, so this costs nothing at run time.
 
 fn dq_head(w: *mut Worker) *mut usize {
     return &mut unsafe w.head;
@@ -682,38 +844,65 @@ fn dq_tail(w: *mut Worker) *mut usize {
     return &mut unsafe w.tail;
 }
 
+// Slot access. Atomic (relaxed) so a delayed reader and the owner's refill of a reused slot are never an
+// undefined pair: see the memory-order argument above.
+fn slot_load(w: *mut Worker, i: usize) *mut Runnable {
+    return atomic::load_ptr((unsafe (w.buf + i % DEQUE_CAP)) as *const usize, 0) as *mut Runnable;
+}
+
+fn slot_store(w: *mut Worker, i: usize, co: *mut Runnable) {
+    atomic::store_ptr((unsafe (w.buf + i % DEQUE_CAP)) as *mut usize, co as usize, 0);
+}
+
 // Owner: append. False when the ring is full (the caller spills to the injection queue).
 fn dq_push(w: *mut Worker, co: *mut Runnable) bool {
     let t = atomic::load_usize(dq_tail(w), 0); // only this worker writes it
     let h = atomic::load_usize(dq_head(w), 1);
     if t - h >= DEQUE_CAP {
+        if sched_stats_on() {
+            unsafe w.st.spills = unsafe w.st.spills + 1;
+        }
         return false;
     }
-    unsafe w.buf[t % DEQUE_CAP] = co;
+    slot_store(w, t, co);
     atomic::store_usize(dq_tail(w), t + 1, 2); // Release: publishes the slot
+    if sched_stats_on() {
+        unsafe w.st.pushes = unsafe w.st.pushes + 1;
+    }
     return true;
 }
 
-// Owner: take the oldest. Null when empty, or when a thief won the race for the slot.
+// Owner: take the oldest. Null when empty, or when thieves kept winning the slot: the claim is retried a
+// bounded number of times and then the caller moves on to its other sources rather than spin here.
 fn dq_pop(w: *mut Worker) *mut Runnable {
-    loop {
+    let mut tries: i32 = 0;
+    while tries < CLAIM_RETRY {
+        tries = tries + 1;
         let h = atomic::load_usize(dq_head(w), 1);
         let t = atomic::load_usize(dq_tail(w), 1);
         if h == t {
             return null;
         }
-        let co = unsafe w.buf[h % DEQUE_CAP];
+        let co = slot_load(w, h);
         if atomic::cas_usize(dq_head(w), h, h + 1, false, 4, 0) {
+            if sched_stats_on() {
+                unsafe w.st.pops = unsafe w.st.pops + 1;
+                unsafe w.st.occupancy = unsafe w.st.occupancy + (t - h) as u64;
+            }
             return co;
         }
     }
+    return null;
 }
 
 // Any worker: take HALF of `victim`'s queue, keeping one to run and putting the rest on the thief's own
-// ring. Reading the slots before the CAS is sound because they can only be reused after `head` advances
-// past them, and `head` advancing is exactly what makes our CAS fail.
+// ring. The slots are read before the CAS; a failed CAS discards them (see the memory-order argument).
+// Bounded: a victim whose head keeps moving under us is being drained by others, and a fresh victim
+// choice beats another round on this one.
 fn dq_steal(victim: *mut Worker, thief: *mut Worker) *mut Runnable {
-    loop {
+    let mut tries: i32 = 0;
+    while tries < CLAIM_RETRY {
+        tries = tries + 1;
         let h = atomic::load_usize(dq_head(victim), 1);
         let t = atomic::load_usize(dq_tail(victim), 1);
         if t == h {
@@ -736,11 +925,14 @@ fn dq_steal(victim: *mut Worker, thief: *mut Worker) *mut Runnable {
         if n == 0 {
             return null;
         }
-        // Copy straight into our own ring, at slots past our tail: nobody can see them until we publish
+        // Copy straight into our own ring, at slots past our tail: nobody can take them until we publish
         // that tail, so a failed CAS below leaves scribbles on memory we own and we try again.
-        let first = unsafe victim.buf[h % DEQUE_CAP];
+        let first = slot_load(victim, h);
         for i in 1..n {
-            unsafe thief.buf[(tt + i - 1) % DEQUE_CAP] = unsafe victim.buf[(h + i) % DEQUE_CAP];
+            slot_store(thief, tt + i - 1, slot_load(victim, h + i));
+        }
+        if sched_hooks_on() {
+            hook_delay(HOOK_STEAL_READ); // a race hunt widens the window between the reads and the claim
         }
         if !atomic::cas_usize(dq_head(victim), h, h + n, false, 4, 0) {
             // Somebody else moved the head; re-read and try again.
@@ -751,6 +943,7 @@ fn dq_steal(victim: *mut Worker, thief: *mut Worker) *mut Runnable {
         }
         return first;
     }
+    return null;
 }
 
 fn dq_empty(w: *mut Worker) bool {
@@ -770,7 +963,13 @@ fn dq_empty(w: *mut Worker) bool {
 
 fn yq_push(w: *mut Worker, co: *mut Runnable) bool {
     if unsafe w.ylen >= Y_MAX {
+        if sched_stats_on() {
+            unsafe w.st.yield_spills = unsafe w.st.yield_spills + 1;
+        }
         return false;
+    }
+    if sched_stats_on() {
+        unsafe w.st.yields = unsafe w.st.yields + 1;
     }
     unsafe co.next = null;
     if unsafe w.ytail == null {
@@ -851,12 +1050,21 @@ fn take_injection(s: *mut Scheduler, w: *mut Worker) *mut Runnable {
         return null;
     }
     qlock(s);
+    if sched_stats_on() {
+        unsafe w.st.inj_locks = unsafe w.st.inj_locks + 1;
+    }
     let co = pop_injection(s);
     if co == null {
         qunlock(s);
         return null;
     }
+    if sched_stats_on() {
+        unsafe w.st.inj_takes = unsafe w.st.inj_takes + 1;
+    }
     // A share, not the lot: leaving the rest shared is what lets a worker that is still busy catch up.
+    // Profiled at one lock per task when a submitter feeds one task at a time, and a floor of three per
+    // lock was tried for that: it cost 10% on spawn_to_completion, because the taker then ran the extra
+    // tasks itself while other workers had nothing, so the share stays proportional.
     let mut n = atomic::load_i32(&mut unsafe s.inj_len, 0) as usize / unsafe s.nw;
     if n > BATCH_MAX {
         n = BATCH_MAX;
@@ -938,11 +1146,24 @@ fn claim_idle(s: *mut Scheduler) i64 {
 // Wake one specific parked worker. Its mutex is its own, so this is an uncontended lock, a store and one
 // signal: no queueing behind the rest of the pool.
 fn wake_parked(s: *mut Scheduler, idx: usize) {
+    if sched_stats_on() {
+        stat_wake(s);
+    }
     let pk = unsafe (s.parkers + idx);
     unsafe sc_runtime::sc_rt_mutex_lock(pk.mtx);
     unsafe pk.notified = 1;
     unsafe sc_runtime::sc_rt_cond_signal(pk.cv);
     unsafe sc_runtime::sc_rt_mutex_unlock(pk.mtx);
+}
+
+// Count a wake on the calling worker, or off the pool.
+fn stat_wake(s: *mut Scheduler) {
+    let w = my_worker(s);
+    if w != null {
+        unsafe w.st.wakes = unsafe w.st.wakes + 1;
+    } else {
+        let _ = atomic::add_u64(&mut unsafe G_STATS_EXT.wakes, 1, 0);
+    }
 }
 
 // Wake one idle worker, if one is parked at all. Deliberately touches no lock unless it has to: the mask
@@ -1186,13 +1407,22 @@ fn steal_any(s: *mut Scheduler, me: usize) *mut Runnable {
     r = r ^ r << 17;
     unsafe w.rng = r;
     let start = (r % nw as u64) as usize;
+    if sched_stats_on() {
+        unsafe w.st.steal_searches = unsafe w.st.steal_searches + 1;
+    }
     for k in 0..nw {
         let v = (start + k) % nw;
         if v == me {
             continue;
         }
+        if sched_stats_on() {
+            unsafe w.st.steal_probes = unsafe w.st.steal_probes + 1;
+        }
         let co = dq_steal(unsafe (s.deques + v), w);
         if co != null {
+            if sched_stats_on() {
+                unsafe w.st.steals = unsafe w.st.steals + 1;
+            }
             if tracing() {
                 trace("stolen", unsafe co.id);
             }
@@ -1211,24 +1441,30 @@ fn all_deques_empty(s: *mut Scheduler) bool {
     return true;
 }
 
-// Every source of work, in order of what it costs to look: this worker's own deque (no lock, LIFO, so the
-// freshest task keeps its cache warm), then what it yielded, then the injection queue, then a steal.
+// Every source of work, in order of what it costs to look: this worker's own ring (no lock; FIFO, the
+// oldest queued task first), then what it yielded, then the injection queue, then a steal.
 //
 // `shared` is false for a worker that is only filling in time before it parks. The injection queue is the
 // one source behind a lock, and every idle worker racing for it the instant a task lands there turns a
 // single submitter into a fourteen-way collision, so only the spinner (and a worker on its first look
 // after running something) goes near it. Everyone else finds work by stealing, which needs no lock.
-fn find_work(s: *mut Scheduler, w: *mut Worker, me: usize, shared: bool) *mut Runnable {
-    if shared {
-        // Every so often, look at the shared queue FIRST: a worker that keeps spawning local work would
-        // otherwise never come back for anything submitted from off the pool.
-        let t = unsafe w.tick + 1;
-        unsafe w.tick = t;
-        if t % 61 == 0 {
-            let first = take_injection(s, w);
-            if first != null {
-                return first;
-            }
+fn find_work(s: *mut Scheduler, w: *mut Worker, me: usize, shared: bool, sweep: bool) *mut Runnable {
+    // Every so often, look at the other queues FIRST: a worker whose ring never runs dry (a recursive
+    // producer keeps it full from one level to the next) would otherwise never come back to a task that
+    // yielded, nor to anything submitted from off the pool. Bounded service, not priority: one look in
+    // YQ_EVERY dequeues for the yield queue, one in INJ_EVERY for the shared queue.
+    let t = unsafe w.tick + 1;
+    unsafe w.tick = t;
+    if t % YQ_EVERY == 0 {
+        let y = yq_pop(w);
+        if y != null {
+            return y;
+        }
+    }
+    if shared && t % INJ_EVERY == 0 {
+        let first = take_injection(s, w);
+        if first != null {
+            return first;
         }
     }
     let local = dq_pop(w);
@@ -1246,6 +1482,9 @@ fn find_work(s: *mut Scheduler, w: *mut Worker, me: usize, shared: bool) *mut Ru
             return injected;
         }
     }
+    if !sweep {
+        return null; // a spin iteration between sweeps: the shared count above was the whole look
+    }
     return steal_any(s, me);
 }
 
@@ -1261,6 +1500,10 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
     let w = unsafe (s.deques + me);
     let mut spins: i32 = 0; // a fresh budget per call: a worker that ran something expects more
     let mut spinning = false; // do we hold `s.spinning`?
+    let mut t0: u64 = 0;
+    if sched_stats_on() {
+        t0 = unsafe sc_runtime::sc_rt_cycles();
+    }
     // Replay mode: the nearest armed timer deadline as of this worker's last look, so the gate wait can end on
     // it and not only on a release. Zero means nothing is armed: always true on the first pass, because
     // nothing has run yet to arm one.
@@ -1276,14 +1519,24 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         }
         // The shared queue is worth a look on the first try of every call (this worker has just finished
         // something, so it is the natural next taker) and for as long as we are the spinner. Not otherwise.
-        let co = find_work(s, w, me, spinning || spins == 0);
+        let co = find_work(s, w, me, spinning || spins == 0, spins % PROBE_EVERY == 0);
         if co != null {
             if spinning {
                 atomic::store_i32(&mut unsafe s.spinning, 0, 2);
+                if spins > 0 {
+                    // Spinning paid: allow a longer spin next time, up to the ceiling.
+                    let b = atomic::load_i32(&mut unsafe s.spin_budget, 0);
+                    if b < SPIN_MAX {
+                        atomic::store_i32(&mut unsafe s.spin_budget, b * 2, 0);
+                    }
+                }
                 if atomic::load_i32(&mut unsafe s.inj_len, 1) > 0 {
                     // Work left over: somebody else should be awake for it.
                     signal_work(s);
                 }
+            }
+            if sched_stats_on() {
+                unsafe w.st.search_cycles = unsafe w.st.search_cycles + (unsafe sc_runtime::sc_rt_cycles() - t0);
             }
             return co;
         }
@@ -1293,12 +1546,15 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         // The spinner waits long enough to cover a wake-up it is there to avoid; anyone else gives up almost
         // at once, since a second spinner buys nothing.
         let budget = if spinning {
-            SPIN_MAX;
+            atomic::load_i32(&mut unsafe s.spin_budget, 0);
         } else {
             SPIN_IDLE;
         };
         if spins < budget {
             spins = spins + 1;
+            if sched_stats_on() {
+                unsafe w.st.spin_iters = unsafe w.st.spin_iters + 1;
+            }
             unsafe sc_runtime::sc_rt_cpu_relax();
             continue;
         }
@@ -1308,6 +1564,12 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         if spinning {
             atomic::store_i32(&mut unsafe s.spinning, 0, 2);
             spinning = false;
+            // The spin found nothing: spin less next time, down to the floor. An empty pool then costs
+            // a short spin per wake instead of the full ceiling.
+            let b = atomic::load_i32(&mut unsafe s.spin_budget, 0);
+            if b > SPIN_MIN {
+                atomic::store_i32(&mut unsafe s.spin_budget, b / 2, 0);
+            }
         }
         // A due timer is the only source of work left that needs this mutex, and we are holding it anyway.
         // Doing it here rather than round the loop is what keeps an armed-but-distant deadline from putting
@@ -1377,6 +1639,11 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         // earliest deadline, a run of closely spaced deadlines woke all of them per deadline. The
         // others sleep untimed; work wakes them through the idle mask as always.
         let timed = dl != 0 && atomic::cas_i32(&mut unsafe s.timer_waiter, -1, me as i32, false, 4, 0);
+        let mut park_t0: u64 = 0;
+        if sched_stats_on() {
+            unsafe w.st.parks = unsafe w.st.parks + 1;
+            park_t0 = unsafe sc_runtime::sc_rt_cycles();
+        }
         while unsafe pk.notified == 0 {
             if timed {
                 let now = platform::now_ns();
@@ -1395,6 +1662,10 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         let _ = atomic::and_u64(word, ~bit, 4);
         let worked = unsafe pk.notified != 0;
         unsafe sc_runtime::sc_rt_mutex_unlock(pk.mtx);
+        if sched_stats_on() {
+            // Asleep is not searching: move the search clock past the park.
+            t0 = t0 + (unsafe sc_runtime::sc_rt_cycles() - park_t0);
+        }
         if timed {
             atomic::store_i32(&mut unsafe s.timer_waiter, -1, 2);
             if worked && atomic::load_i32(&mut unsafe s.timer_len, 1) != 0 {
@@ -1464,6 +1735,10 @@ pub fn replay_release() {
 // The coroutine body trampoline: run the closure (which frees its own box), mark done, return to scheduler.
 fn coroutine_start(arg: *mut void) {
     let co = arg as *mut Coroutine;
+    // A first run arrives through the trampoline, not through a switch that returns: tell the substrate
+    // this context has been entered, so the sanitizer's model has the same edge from the worker that the
+    // hardware has by program order (see `sc_rt_ctx_switch`).
+    unsafe sc_runtime::sc_rt_ctx_entered(co.ctx);
     let e = unsafe co.run.entry;
     e(unsafe co.run.env);
     unsafe co.done = 1;
@@ -1690,9 +1965,15 @@ fn take_block(s: *mut Scheduler) *mut Coroutine {
         unsafe w.bhead = (unsafe co.run.next) as *mut Coroutine;
         atomic::store_i32(&mut unsafe w.blen, unsafe w.blen - 1, 0);
         unsafe co.run.next = null;
+        if sched_stats_on() {
+            unsafe w.st.stash_hits = unsafe w.st.stash_hits + 1;
+        }
         return co;
     }
     // Empty: refill the stash and keep the head, so the next STASH_BATCH spawns take no lock at all.
+    if sched_stats_on() {
+        unsafe w.st.pool_locks = unsafe w.st.pool_locks + 1;
+    }
     let mut got: i32 = 0;
     let chain = pool_take_chain(s, STASH_BATCH, &mut got);
     if chain == null {
@@ -1717,6 +1998,9 @@ fn free_coroutine(s: *mut Scheduler, co: *mut Coroutine) {
         let full = unsafe w.bhead;
         unsafe w.bhead = null;
         atomic::store_i32(&mut unsafe w.blen, 0, 0);
+        if sched_stats_on() {
+            unsafe w.st.pool_locks = unsafe w.st.pool_locks + 1;
+        }
         pool_put_chain(s, full);
     }
     unsafe co.run.next = (unsafe w.bhead) as *mut Runnable;
@@ -1779,7 +2063,7 @@ fn worker_main(arg: *mut void) *mut void {
                 let mut gj = Global {};
                 unsafe gj.dealloc(r, sizeof(Runnable), alignof(Runnable));
             }
-            let _ = atomic::add_usize(&mut unsafe G_DONE, 1, 0);
+            atomic::store_u64(&mut unsafe w.done, unsafe w.done + 1, 0);
             continue;
         }
         let co = r as *mut Coroutine;
@@ -1804,9 +2088,12 @@ fn worker_main(arg: *mut void) *mut void {
             if tracing() {
                 trace("complete", unsafe co.run.id);
             }
-            // The previous run slice's parking worker may still own the hand-off tail (its Parked
-            // publication and cancel check). The block must not be recycled under it; the wait is bounded
-            // by that worker's dozen remaining instructions.
+            // A parking worker may still own a hand-off tail on this block (its Parked publication and
+            // cancel check): the last park's, or an EARLIER park's if the task was resumed and parked
+            // again before that tail ended (a wait, then a contended re-lock on the way out, is the common
+            // shape). The block must not be recycled under any of them, so `handoff` counts tails in
+            // flight and this waits for every one; a flag was measured to lose the second tail to the
+            // first tail's clear. Bounded by those workers' dozen remaining instructions each.
             while atomic::load_i32(&mut unsafe co.handoff, 1) != 0 {
                 unsafe sc_runtime::sc_rt_cpu_relax();
             }
@@ -1820,14 +2107,14 @@ fn worker_main(arg: *mut void) *mut void {
             // retirement.
             if atomic::load_i32(&mut unsafe co.cancel, 1) == CS_ACCEPTED {
                 atomic::store_i32(&mut unsafe co.cancel, CS_FINISHED, 2);
-                let _ = atomic::add_usize(&mut unsafe G_CANCELLED, 1, 0);
+                atomic::store_u64(&mut unsafe w.cancelled, unsafe w.cancelled + 1, 0);
                 if tracing() {
                     trace("task reclaimed", unsafe co.run.id);
                 }
             }
             atomic::store_i32(&mut unsafe co.tstate, TS_COMPLETED, 2);
             free_coroutine(s, co);
-            let _ = atomic::add_usize(&mut unsafe G_DONE, 1, 0);
+            atomic::store_u64(&mut unsafe w.done, unsafe w.done + 1, 0);
         } else if unsafe co.commit_requeue != 0 {
             unsafe co.commit_requeue = 0;
             if !yq_push(w, r) {
@@ -1842,10 +2129,11 @@ fn worker_main(arg: *mut void) *mut void {
             let arg = unsafe co.commit_arg;
             let dl = unsafe co.deadline;
             let token = unsafe co.tm_token;
-            // Own the hand-off tail before the task becomes visible to any waker: a worker that resumes
-            // and completes this task spins on `handoff` before recycling the block, so the tail below can
-            // never touch freed memory.
-            atomic::store_i32(&mut unsafe co.handoff, 1, 2);
+            // Own a hand-off tail before the task becomes visible to any waker: a worker that resumes
+            // and completes this task waits for the count to reach zero before recycling the block, so the
+            // tail below can never touch freed memory. A count, not a flag: another park's tail may still
+            // be running (see the completion path).
+            let _ = atomic::add_i32(&mut unsafe co.handoff, 1, 2);
             // Then arm its timer (if the wait was timed) and only last release the lock that kept its waker
             // out: by now its context is fully saved, so any waker may resume it.
             if dl != 0 {
@@ -1872,7 +2160,9 @@ fn worker_main(arg: *mut void) *mut void {
                     }
                 }
             }
-            atomic::store_i32(&mut unsafe co.handoff, 0, 2); // the tail is over: the block may be recycled
+            // This tail is over. AcqRel, so the completer's acquire of the final zero synchronises with
+            // every tail's decrement through the release sequence, not only the last one's.
+            let _ = atomic::sub_i32(&mut unsafe co.handoff, 1, 3);
         }
     }
     // Before widx goes: `free_coroutine` keys off it.
@@ -1906,7 +2196,7 @@ fn release_unstarted(s: *mut Scheduler, built: usize) {
     }
     unsafe g.dealloc(unsafe s.idle, unsafe s.idle_words * sizeof(u64), alignof(u64));
     unsafe g.dealloc(unsafe s.parkers, nw * sizeof(Parker), LINE);
-    unsafe g.dealloc(unsafe s.deques, nw * sizeof(Worker), LINE);
+    unsafe g.dealloc(unsafe s.deques_base, nw * sizeof(Worker) + LINE, 16);
     unsafe sc_runtime::sc_rt_mutex_free(s.lock);
     unsafe s.workers.free();
     sched_free(s);
@@ -1947,7 +2237,10 @@ fn build_scheduler() *mut Scheduler {
     } else {
         platform::ncpu();
     };
-    let deques = (unsafe g.alloc(nw * sizeof(Worker), LINE)) as *mut Worker; // line-aligned: see Worker.pad
+    // Line-aligned for real: the allocator only promises malloc alignment, so the array sits inside an
+    // over-sized block (`deques_base` is what gets freed); see Worker.pad for why the alignment matters.
+    let deques_base = unsafe g.alloc(nw * sizeof(Worker) + LINE, 16);
+    let deques = ((deques_base as usize + LINE - 1) / LINE * LINE) as *mut Worker;
     let parkers = (unsafe g.alloc(nw * sizeof(Parker), LINE)) as *mut Parker;
     let words = (nw + 63) / 64;
     let idle = (unsafe g.alloc(words * sizeof(u64), alignof(u64))) as *mut u64;
@@ -1960,6 +2253,7 @@ fn build_scheduler() *mut Scheduler {
     }
     unsafe s[0] = Scheduler {
         deques: deques,
+        deques_base: deques_base,
         nw: nw,
         inj_head: null,
         inj_tail: null,
@@ -1971,6 +2265,7 @@ fn build_scheduler() *mut Scheduler {
         idle: idle,
         idle_words: words,
         spinning: 0,
+        spin_budget: SPIN_MAX,
         workers: Vector::<*mut void>::new(),
         shutting_down: 0,
         free_head: null,
@@ -2019,6 +2314,13 @@ fn build_scheduler() *mut Scheduler {
             ytail: null,
             ylen: 0,
             pad: Array::<u64, 4>::new(),
+            done: 0,
+            cancelled: 0,
+            spawned: 0,
+            id_next: 0,
+            id_end: 0,
+            st: SchedStats::zero(),
+            tail_pad: Array::<u64, 12>::new(),
         };
     }
     // Before any worker exists, so every safepoint's read of the hook happens-after this write.
@@ -2115,6 +2417,12 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
     let mut reuse_slot: *mut TaskSlot = null;
     let fresh = co == null;
     if fresh {
+        if sched_stats_on() {
+            let w = my_worker(unsafe G_SCHED);
+            if w != null {
+                unsafe w.st.block_allocs = unsafe w.st.block_allocs + 1;
+            }
+        }
         co = co_alloc();
         size = unsafe G_STACK_SIZE;
         stk = unsafe sc_runtime::sc_rt_stack_alloc(size);
@@ -2232,6 +2540,13 @@ pub fn submit_jobs(first: *mut Runnable, stride: usize, n: usize) {
     let base = atomic::add_u64(&mut unsafe G_NEXT_ID, n as u64, 0) + 1;
     let wi = unsafe sc_runtime::sc_rt_widx_get();
     let on_pool = wi >= 0 && wi as usize < unsafe s.nw;
+    // The batch is counted where it is created, like a coroutine spawn.
+    if on_pool {
+        let w = unsafe (s.deques + wi as usize);
+        atomic::store_u64(&mut unsafe w.spawned, unsafe w.spawned + n as u64, 0);
+    } else {
+        let _ = atomic::add_u64(&mut unsafe G_SPAWNED_EXT, n as u64, 0);
+    }
     let mut head: *mut Runnable = null;
     let mut tail: *mut Runnable = null;
     let mut chained: i32 = 0;
@@ -2707,7 +3022,14 @@ pub fn wait_clear() {
 
 /// Completions that were accepted cancellations (the task was reclaimed rather than finishing normally).
 pub fn cancelled_tasks() usize {
-    return atomic::load_usize(&mut unsafe G_CANCELLED, 1);
+    let mut n = atomic::load_u64(&mut unsafe G_CANCELLED_BASE, 1);
+    let s = unsafe G_SCHED;
+    if s != null {
+        for i in 0..unsafe s.nw {
+            n = n + atomic::load_u64(&mut unsafe (s.deques + i).cancelled, 1);
+        }
+    }
+    return n as usize;
 }
 
 /// The deadline `ns` from now, saturated: a duration that would wrap the clock waits for ever (a wrapped
@@ -2757,14 +3079,81 @@ pub fn current_id() u64 {
     return unsafe t.run.id;
 }
 
-/// Tasks created so far (coroutines and data-parallel jobs alike).
+/// Tasks created so far (coroutines and data-parallel jobs alike): the off-pool count plus every
+/// worker's own. Exact when the pool is quiescent; while tasks are being created the sum lags by the
+/// spawns that land after their worker's counter was read.
 pub fn spawned_tasks() usize {
-    return atomic::load_u64(&mut unsafe G_NEXT_ID, 1) as usize;
+    let mut n = atomic::load_u64(&mut unsafe G_SPAWNED_EXT, 1) + atomic::load_u64(&mut unsafe G_SPAWNED_BASE, 1);
+    let s = unsafe G_SCHED;
+    if s != null {
+        for i in 0..unsafe s.nw {
+            n = n + atomic::load_u64(&mut unsafe (s.deques + i).spawned, 1);
+        }
+    }
+    return n as usize;
 }
 
-/// Tasks that have run to completion.
+/// Tasks that have run to completion: the sum of the workers' counters (every completion happens on a
+/// worker). Exact when quiescent, never ahead of the truth otherwise.
 pub fn completed_tasks() usize {
-    return atomic::load_usize(&mut unsafe G_DONE, 1);
+    let mut n = atomic::load_u64(&mut unsafe G_DONE_BASE, 1);
+    let s = unsafe G_SCHED;
+    if s != null {
+        for i in 0..unsafe s.nw {
+            n = n + atomic::load_u64(&mut unsafe (s.deques + i).done, 1);
+        }
+    }
+    return n as usize;
+}
+
+/// The scheduler counters summed over every worker (and the off-pool events). All zero unless the
+/// runtime was built with `sched_stats_on()` true.
+pub fn sched_stats() SchedStats {
+    let mut t = SchedStats::zero();
+    if !sched_stats_on() {
+        return t;
+    }
+    stats_add(&mut t, &unsafe G_STATS_EXT);
+    let s = unsafe G_SCHED;
+    if s == null {
+        return t;
+    }
+    for i in 0..unsafe s.nw {
+        stats_add(&mut t, &unsafe (s.deques + i).st);
+    }
+    return t;
+}
+
+// `t += w`, field by field.
+fn stats_add(t: &mut SchedStats, w: &SchedStats) {
+    t.pushes = t.pushes + w.pushes;
+    t.spills = t.spills + w.spills;
+    t.pops = t.pops + w.pops;
+    t.occupancy = t.occupancy + w.occupancy;
+    t.steal_searches = t.steal_searches + w.steal_searches;
+    t.steal_probes = t.steal_probes + w.steal_probes;
+    t.steals = t.steals + w.steals;
+    t.inj_locks = t.inj_locks + w.inj_locks;
+    t.inj_takes = t.inj_takes + w.inj_takes;
+    t.yields = t.yields + w.yields;
+    t.yield_spills = t.yield_spills + w.yield_spills;
+    t.wakes = t.wakes + w.wakes;
+    t.parks = t.parks + w.parks;
+    t.spin_iters = t.spin_iters + w.spin_iters;
+    t.search_cycles = t.search_cycles + w.search_cycles;
+    t.stash_hits = t.stash_hits + w.stash_hits;
+    t.pool_locks = t.pool_locks + w.pool_locks;
+    t.block_allocs = t.block_allocs + w.block_allocs;
+}
+
+// A dying worker's counters go into the process-lifetime block (only ever called at pool destruction,
+// with no worker running: plain adds are enough for every field but `wakes`, which off-pool submitters
+// add to atomically, so that one is added atomically too).
+fn stats_fold(w: &mut SchedStats) {
+    let wk = w.wakes;
+    w.wakes = 0;
+    stats_add(&mut unsafe G_STATS_EXT, w);
+    let _ = atomic::add_u64(&mut unsafe G_STATS_EXT.wakes, wk, 0);
 }
 
 /// Tasks created but not finished: still runnable, running, or parked. Zero after every launched task has
@@ -3064,6 +3453,16 @@ fn destroy_pool(sp: *mut i32, s: *mut Scheduler) {
         }
     }
     unsafe s.workers.free();
+    // The workers are gone: their counters carry over into the process-lifetime totals.
+    for i in 0..unsafe s.nw {
+        let w = unsafe (s.deques + i);
+        let _ = atomic::add_u64(&mut unsafe G_SPAWNED_BASE, atomic::load_u64(&mut unsafe w.spawned, 1), 0);
+        let _ = atomic::add_u64(&mut unsafe G_DONE_BASE, atomic::load_u64(&mut unsafe w.done, 1), 0);
+        let _ = atomic::add_u64(&mut unsafe G_CANCELLED_BASE, atomic::load_u64(&mut unsafe w.cancelled, 1), 0);
+        if sched_stats_on() {
+            stats_fold(&mut unsafe w.st);
+        }
+    }
     // Every recycled block, now that no worker can ask for one.
     pool_drain(s);
     // After pool_drain: releasing a block retires its registry slot.
@@ -3072,7 +3471,7 @@ fn destroy_pool(sp: *mut i32, s: *mut Scheduler) {
     for i in 0..unsafe s.nw {
         unsafe g.dealloc(unsafe (s.deques + i).buf, DEQUE_CAP * sizeof(*mut Runnable), alignof(*mut Runnable));
     }
-    unsafe g.dealloc(unsafe s.deques, unsafe s.nw * sizeof(Worker), LINE);
+    unsafe g.dealloc(unsafe s.deques_base, unsafe s.nw * sizeof(Worker) + LINE, 16);
     for i in 0..unsafe s.nw {
         let pk = unsafe (s.parkers + i);
         unsafe sc_runtime::sc_rt_mutex_free(pk.mtx);

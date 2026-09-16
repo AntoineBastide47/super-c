@@ -10,6 +10,10 @@
 
 /* Monotonic clock, nanoseconds since an unspecified epoch. */
 uint64_t sc_rt_now_ns(void);
+/* A cheap monotone cycle-ish counter for the scheduler's compile-gated statistics: the CPU's own counter
+   on x86_64 and aarch64 (rdtsc / cntvct), the monotone clock otherwise. Not comparable across
+   cores or machines; only differences on one thread mean anything. */
+uint64_t sc_rt_cycles(void);
 /* Logical CPU count (>= 1). */
 size_t sc_rt_ncpu(void);
 /* The page size: what a stack mapping and a reclaim are measured in. */
@@ -140,6 +144,9 @@ void sc_rt_cond_broadcast(void *c);
 void *sc_rt_ctx_alloc(void);
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg);
 void sc_rt_ctx_switch(void *from, void *to);
+/* A context's body has just started through the entry trampoline, not through a returning switch: consume
+   what its switcher published (see sc_rt_ctx_switch). A no-op except under the race profile. */
+void sc_rt_ctx_entered(void *ctx);
 void sc_rt_ctx_free(void *ctx);
 /* A context small enough to live INSIDE the task record: `inline_size` is its byte size (8-aligned) on the
    assembly-switch platforms and 0 where the platform fallback (ucontext, fibers) needs a heap block from

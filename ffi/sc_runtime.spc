@@ -30,6 +30,8 @@ extern "C" "sc_rt.h" {
 
     /// Monotonic clock in nanoseconds.
     pub fn sc_rt_now_ns() u64;
+    /// A cheap per-thread cycle counter for the scheduler's compile-gated statistics.
+    pub fn sc_rt_cycles() u64;
     /// Online core count (at least 1).
     /// The page size, bytes.
     pub fn sc_rt_page_size() usize;
@@ -124,6 +126,8 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_ctx_init(ctx: *mut void, stack: *mut void, size: usize, entry: fn(*mut void) void, arg: *mut void) void;
     /// Save the current registers into `from` and resume `to`.
     pub fn sc_rt_ctx_switch(from: *mut void, to: *mut void) void;
+    /// The context's first run has started: pairs with the switcher's publication under the race profile.
+    pub fn sc_rt_ctx_entered(ctx: *mut void) void;
     /// Release a context's platform resources.
     pub fn sc_rt_ctx_free(ctx: *mut void) void;
     /// Bytes an inline context needs (0: this platform keeps contexts on the heap).
