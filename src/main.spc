@@ -34,6 +34,8 @@ fn run_file(
     lint: bool,
     cflags: str,
     jobs: u32,
+    out_dir: str,
+    cc: str,
 ) i32 {
     loader::set_load_jobs(jobs);
     let tl0 = unsafe shim::sc_ticks_ms();
@@ -43,6 +45,15 @@ fn run_file(
     }
     loader::set_load_jobs(1);
     p.arch = arch;
+    // `--out-dir` and `--cc` apply to a bare build exactly as to a manifest one: the emitted tree goes under
+    // the named directory, and the named compiler links the program.
+    if out_dir.len() != 0 {
+        p.gen_root = String::from_str(out_dir);
+        p.gen_root.push_str("/raw");
+    }
+    if cc.len() != 0 {
+        p.cc = String::from_str(cc);
+    }
     // A standalone script is a binary with no test suite to count as callers: unreachable pub
     // functions are dead weight. Project trees get this from the whole-workspace lint instead,
     // where @test roots keep test-only helpers alive.
@@ -1536,6 +1547,8 @@ OPTIONS:
         lint,
         pflags.as_str(),
         jobs,
+        out_dir,
+        bo.cc,
     );
     return rc;
 }

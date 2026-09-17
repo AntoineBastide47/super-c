@@ -135,7 +135,7 @@ extend TcpListener {
 extend TcpListener as Free {
     pub fn free(self: &mut TcpListener) {
         if self.fd >= 0 {
-            let _ = unsafe sc_io::sc_io_close(self.fd);
+            let _ = io::close(self.fd);
             self.fd = -1;
         }
     }
@@ -154,7 +154,7 @@ extend TcpStream {
         io::wait_writable(fd);
         let err = unsafe sc_io::sc_tcp_connect_result(fd);
         if err != 0 {
-            let _ = unsafe sc_io::sc_io_close(fd);
+            let _ = io::close(fd);
             let kind = if err == 61 || err == 111 || err == 10061 {
                 IoErrorKind::Refused;
             } else if err == 51 || err == 65 || err == 101 || err == 113 || err == 10051 || err == 10065 {
@@ -179,7 +179,7 @@ extend TcpStream {
     /// Close the connection early. Dropping the stream does the same.
     pub fn close(self: &mut TcpStream) {
         if self.fd >= 0 {
-            let _ = unsafe sc_io::sc_io_close(self.fd);
+            let _ = io::close(self.fd);
             self.fd = -1;
         }
     }
@@ -248,7 +248,7 @@ extend UdpSocket {
 extend UdpSocket as Free {
     pub fn free(self: &mut UdpSocket) {
         if self.fd >= 0 {
-            let _ = unsafe sc_io::sc_io_close(self.fd);
+            let _ = io::close(self.fd);
             self.fd = -1;
         }
     }

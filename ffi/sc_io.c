@@ -21,7 +21,7 @@
 
 #if defined(_WIN32)
 /* Sizes fd_set's socket array, so it must precede winsock2.h: this is the reactor's hard ceiling on
-   simultaneously parked descriptors, and sc_io_arm reports it rather than overflowing the set. */
+   simultaneously parked descriptors, and sc_io_set reports it rather than overflowing the set. */
 #define FD_SETSIZE 1024
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -152,17 +152,30 @@ long sc_io_write(int fd, const void *buf, size_t n) {
 
 /* ---- readiness poller ------------------------------------------------------------------------------ */
 
+/* The interface is one-shot and mask-based. `sc_io_set` adds the `want` bits (SC_IO_RD / SC_IO_WR) to the
+   OS interest in `fd`; a bit that fires is consumed (the backend disarms it) and reported once through
+   `sc_io_wait` as a (fd, ready, dropped) triple. `dropped` names the
+   interest bits the backend no longer holds after that event: on epoll a one-shot registration disables
+   the whole descriptor, so both bits are dropped by either; kqueue and select drop only the one that
+   fired. The reactor owns the per-descriptor state and re-arms what it still needs. No cookie crosses this
+   boundary: the descriptor number is the identity, and every table the events index lives on the
+   reactor's side.
+
+   Registration (`sc_io_set`) may come from any thread: the backends are thread-safe for it, and the
+   reactor re-registers itself whenever it has to combine directions. Only the reactor calls `sc_io_wait`;
+   `sc_io_wake` may come from any thread. Interests are never removed one by one: a one-shot that fires
+   is gone, a descriptor closed is gone, and the poller's release drops the rest. */
+
 #if defined(_WIN32)
 
-/* One registration. The table is rebuilt into fd_sets on every wait, which is select()'s cost model. */
+/* One registration: the table is rebuilt into fd_sets on every wait, which is select()'s cost model. */
 typedef struct {
   sc_sock s;
-  int write;
-  void *udata;
+  int dir;
 } sc_reg;
 
 typedef struct {
-  CRITICAL_SECTION lock;
+  CRITICAL_SECTION lock; /* workers register, the reactor rebuilds the sets */
   sc_reg *regs;
   int n, cap;
   sc_sock wake_r, wake_w; /* a loopback pair: Windows has no socketpair, and select cannot watch a pipe */
@@ -206,9 +219,18 @@ static int sc_wake_pair(sc_sock *rd, sc_sock *wr) {
   return 0;
 }
 
-static int sc_reg_find(sc_io_poller *p, sc_sock s, int write) {
+/* Whether the handle still names a socket. closesocket() may overlap a select() on the same socket (the
+   reactor blocks in one while a closer runs), which Winsock leaves unspecified: in practice select() either
+   fails with WSAENOTSOCK or returns with the dead socket flagged. Both paths probe before they report. */
+static int sc_sock_alive(sc_sock s) {
+  int type = 0;
+  sc_socklen len = (sc_socklen)sizeof type;
+  return getsockopt(s, SOL_SOCKET, SO_TYPE, SC_OPTOUT(&type), &len) == 0;
+}
+
+static int sc_reg_find(sc_io_poller *p, sc_sock s, int dir) {
   for (int i = 0; i < p->n; i++)
-    if (p->regs[i].s == s && p->regs[i].write == write) return i;
+    if (p->regs[i].s == s && p->regs[i].dir == dir) return i;
   return -1;
 }
 
@@ -234,52 +256,27 @@ void sc_io_free(void *ptr) {
   free(p);
 }
 
-int sc_io_arm(void *ptr, int fd, int write, void *udata) {
-  sc_io_poller *p = (sc_io_poller *)ptr;
-  const sc_sock s = SC_SOCK(fd);
-  int rc = 0;
-  EnterCriticalSection(&p->lock);
-  int i = sc_reg_find(p, s, write);
-  if (i < 0) {
-    /* +1 for the wake socket, which is in every read set */
-    if (p->n + 1 >= FD_SETSIZE) {
-      rc = -1;
-    } else {
-      if (p->n == p->cap) {
-        const int cap = p->cap ? p->cap * 2 : 16;
-        sc_reg *g = (sc_reg *)realloc(p->regs, (size_t)cap * sizeof *g);
-        if (!g) {
-          rc = -1;
-        } else {
-          p->regs = g;
-          p->cap = cap;
-        }
-      }
-      if (rc == 0) {
-        i = p->n++;
-        p->regs[i].s = s;
-        p->regs[i].write = write;
-      }
+static int sc_reg_add(sc_io_poller *p, sc_sock s, int dir) {
+  if (sc_reg_find(p, s, dir) >= 0) return 0;
+  /* +1 for the wake socket, which is in every read set */
+  if (p->n + 1 >= FD_SETSIZE) {
+    WSASetLastError(WSAEMFILE);
+    return -1;
+  }
+  if (p->n == p->cap) {
+    const int cap = p->cap ? p->cap * 2 : 16;
+    sc_reg *g = (sc_reg *)realloc(p->regs, (size_t)cap * sizeof *g);
+    if (!g) {
+      WSASetLastError(WSA_NOT_ENOUGH_MEMORY);
+      return -1;
     }
+    p->regs = g;
+    p->cap = cap;
   }
-  if (rc == 0) p->regs[i].udata = udata;
-  LeaveCriticalSection(&p->lock);
-  /* A select() already blocked on the old set would not see this one: make it rebuild. */
-  if (rc == 0) sc_io_wake(p);
-  return rc;
-}
-
-int sc_io_disarm(void *ptr, int fd, int write) {
-  sc_io_poller *p = (sc_io_poller *)ptr;
-  int found = 0;
-  EnterCriticalSection(&p->lock);
-  const int i = sc_reg_find(p, SC_SOCK(fd), write);
-  if (i >= 0) {
-    p->regs[i] = p->regs[--p->n];
-    found = 1;
-  }
-  LeaveCriticalSection(&p->lock);
-  return found;
+  p->regs[p->n].s = s;
+  p->regs[p->n].dir = dir;
+  p->n++;
+  return 0;
 }
 
 void sc_io_wake(void *ptr) {
@@ -291,28 +288,48 @@ void sc_io_wake(void *ptr) {
   (void)send(p->wake_w, &b, 1, 0);
 }
 
+int sc_io_set(void *ptr, int fd, int want, int known) {
+  sc_io_poller *p = (sc_io_poller *)ptr;
+  const sc_sock s = SC_SOCK(fd);
+  int rc = 0;
+  (void)known;
+  /* select() has no registration step of its own, so a closed number is refused here, as kqueue and epoll
+     refuse it: the wait settles as not ready at once instead of parking, and a dead socket dropped by
+     sc_io_wait is never registered again. */
+  if (!sc_sock_alive(s)) return -1;
+  EnterCriticalSection(&p->lock);
+  if ((want & SC_IO_RD) && sc_reg_add(p, s, SC_IO_RD) != 0) rc = -1;
+  if (rc == 0 && (want & SC_IO_WR) && sc_reg_add(p, s, SC_IO_WR) != 0) rc = -1;
+  LeaveCriticalSection(&p->lock);
+  /* A select() already blocked on the old set would not see this one: make it rebuild. */
+  if (rc == 0) sc_io_wake(p);
+  return rc;
+}
+
 /* select() fails the WHOLE call if any member of a set is not a socket, which happens when a descriptor is
    closed while someone is parked on it. Rather than let that kill the reactor thread, find the dead
-   registrations, hand their cookies back as ready, and drop them: the woken task re-tries its syscall and
-   gets the real error, which is what it would have got from a closed descriptor anyway. */
-static int sc_io_reap_dead(sc_io_poller *p, void **out, int max) {
+   registrations and drop them, reported as dropped but NOT ready: the reactor registers the direction
+   again for the waiters it still holds, that registration fails, and the waits settle as not ready, the
+   same answer a close gives on the other two backends. */
+static int sc_io_reap_dead(sc_io_poller *p, int *out, int max) {
   int k = 0;
   EnterCriticalSection(&p->lock);
   for (int i = 0; i < p->n && k < max;) {
-    int type = 0;
-    sc_socklen len = (sc_socklen)sizeof type;
-    if (getsockopt(p->regs[i].s, SOL_SOCKET, SO_TYPE, SC_OPTOUT(&type), &len) == 0) {
+    if (sc_sock_alive(p->regs[i].s)) {
       i++;
       continue;
     }
-    out[k++] = p->regs[i].udata;
+    out[3 * k] = SC_FD(p->regs[i].s);
+    out[3 * k + 1] = 0;
+    out[3 * k + 2] = p->regs[i].dir;
+    k++;
     p->regs[i] = p->regs[--p->n];
   }
   LeaveCriticalSection(&p->lock);
   return k;
 }
 
-int sc_io_wait(void *ptr, void **out, int max, int timeout_ms) {
+int sc_io_wait(void *ptr, int *out, int max, int timeout_ms) {
   sc_io_poller *p = (sc_io_poller *)ptr;
   fd_set rd, wr, ex;
   struct timeval tv;
@@ -324,7 +341,7 @@ int sc_io_wait(void *ptr, void **out, int max, int timeout_ms) {
   EnterCriticalSection(&p->lock);
   FD_SET(p->wake_r, &rd);
   for (int i = 0; i < p->n; i++) {
-    if (p->regs[i].write) {
+    if (p->regs[i].dir == SC_IO_WR) {
       FD_SET(p->regs[i].s, &wr);
       FD_SET(p->regs[i].s, &ex); /* a refused connect surfaces HERE and nowhere else */
     } else {
@@ -332,7 +349,6 @@ int sc_io_wait(void *ptr, void **out, int max, int timeout_ms) {
     }
   }
   LeaveCriticalSection(&p->lock);
-
   if (timeout_ms >= 0) {
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (long)(timeout_ms % 1000) * 1000;
@@ -344,25 +360,28 @@ int sc_io_wait(void *ptr, void **out, int max, int timeout_ms) {
     return WSAGetLastError() == WSAENOTSOCK ? sc_io_reap_dead(p, out, max) : 0;
   }
   if (r == 0) return 0;
-
-  int k = 0;
-  EnterCriticalSection(&p->lock);
   if (FD_ISSET(p->wake_r, &rd)) {
     char drain[64];
     while (recv(p->wake_r, drain, (int)sizeof drain, 0) > 0) {
     }
   }
-  /* Registrations are matched by socket, not by index: arm/disarm may have run while select() was blocked.
-     A socket armed in that window can only be missing from the sets, never wrongly present for long -- and
-     a spurious wake is safe here, since the woken task re-tries its syscall and re-parks if it must. */
+  int k = 0;
+  EnterCriticalSection(&p->lock);
+  /* Registrations are matched by socket, not by index: a worker may have registered while select() was
+     blocked. A socket armed in that window can only be missing from the sets, never wrongly present. */
   for (int i = 0; i < p->n && k < max;) {
     const sc_reg *g = &p->regs[i];
-    const int ready = g->write ? (FD_ISSET(g->s, &wr) || FD_ISSET(g->s, &ex)) : FD_ISSET(g->s, &rd);
+    const int ready = g->dir == SC_IO_WR ? (FD_ISSET(g->s, &wr) || FD_ISSET(g->s, &ex)) : FD_ISSET(g->s, &rd);
     if (!ready) {
       i++;
       continue;
     }
-    out[k++] = g->udata;
+    out[3 * k] = SC_FD(g->s);
+    /* A socket closed while select() was blocked comes back flagged: report it dropped, not ready, so the
+       reactor's next registration fails and its waits settle as not ready (see sc_io_reap_dead). */
+    out[3 * k + 1] = sc_sock_alive(g->s) ? g->dir : 0;
+    out[3 * k + 2] = g->dir;
+    k++;
     p->regs[i] = p->regs[--p->n]; /* one-shot, like the other two backends: firing consumes it */
   }
   LeaveCriticalSection(&p->lock);
@@ -407,17 +426,17 @@ void *sc_io_new(void) {
   if (pipe(p->wake) != 0) { close(p->q); free(p); return 0; }
   sc_io_set_nonblocking(p->wake[0]);
   sc_io_set_nonblocking(p->wake[1]);
-  /* The wake pipe stays registered level-triggered, with a NULL cookie the wait loop filters out. */
+  /* The wake pipe stays registered level-triggered; the wait loop recognises it by descriptor. */
 #if defined(__linux__)
   struct epoll_event ev;
   memset(&ev, 0, sizeof ev);
   ev.events = EPOLLIN;
-  ev.data.ptr = 0;
-  epoll_ctl(p->q, EPOLL_CTL_ADD, p->wake[0], &ev);
+  ev.data.fd = p->wake[0];
+  if (epoll_ctl(p->q, EPOLL_CTL_ADD, p->wake[0], &ev) != 0) { sc_io_free(p); return 0; }
 #else
   struct kevent kev;
   EV_SET(&kev, p->wake[0], EVFILT_READ, EV_ADD, 0, 0, 0);
-  kevent(p->q, &kev, 1, 0, 0, 0);
+  if (kevent(p->q, &kev, 1, 0, 0, 0) != 0) { sc_io_free(p); return 0; }
 #endif
   return p;
 }
@@ -431,35 +450,35 @@ void sc_io_free(void *ptr) {
   free(p);
 }
 
-int sc_io_arm(void *ptr, int fd, int write, void *udata) {
+int sc_io_set(void *ptr, int fd, int want, int known) {
   sc_io_poller *p = (sc_io_poller *)ptr;
 #if defined(__linux__)
+  /* One registration per descriptor carries both directions. A one-shot registration that fired is
+     disabled, not gone, so it is modified rather than added; a descriptor closed and reused under the
+     reactor has no registration any more (ENOENT), and the fresh add takes over. EPERM is a descriptor
+     epoll cannot watch (a regular file): it is always ready, which is what 1 tells the reactor. */
   struct epoll_event ev;
   memset(&ev, 0, sizeof ev);
-  ev.events = (write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT;
-  ev.data.ptr = udata;
+  ev.events = ((want & SC_IO_RD) ? EPOLLIN : 0) | ((want & SC_IO_WR) ? EPOLLOUT : 0) | EPOLLONESHOT;
+  ev.data.fd = fd;
+  if (known) {
+    if (epoll_ctl(p->q, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+    if (errno != ENOENT) return errno == EPERM ? 1 : -1;
+  }
   if (epoll_ctl(p->q, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
-  /* Already known to this epoll (a previous wait on the other direction): rearm it instead. */
-  if (errno == EEXIST) return epoll_ctl(p->q, EPOLL_CTL_MOD, fd, &ev);
-  return -1;
+  if (errno == EEXIST) return epoll_ctl(p->q, EPOLL_CTL_MOD, fd, &ev) == 0 ? 0 : -1;
+  return errno == EPERM ? 1 : -1;
 #else
-  struct kevent kev;
-  EV_SET(&kev, fd, write ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, udata);
-  return kevent(p->q, &kev, 1, 0, 0, 0);
-#endif
-}
-
-int sc_io_disarm(void *ptr, int fd, int write) {
-  sc_io_poller *p = (sc_io_poller *)ptr;
-#if defined(__linux__)
-  (void)write;
-  if (epoll_ctl(p->q, EPOLL_CTL_DEL, fd, 0) == 0) return 1;
-  return errno == ENOENT ? 0 : -1;
-#else
-  struct kevent kev;
-  EV_SET(&kev, fd, write ? EVFILT_WRITE : EVFILT_READ, EV_DELETE, 0, 0, 0);
-  if (kevent(p->q, &kev, 1, 0, 0, 0) == 0) return 1;
-  return errno == ENOENT ? 0 : -1;
+  /* Read and write are separate knotes: add what is wanted (EV_ADD on an existing knote refreshes it, so a
+     descriptor reused under the reactor is registered afresh). With no event list, a change that fails
+     makes the call fail with its errno, and nothing pending is drained. */
+  (void)known;
+  struct kevent ch[2];
+  int n = 0;
+  if (want & SC_IO_RD) EV_SET(&ch[n++], fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, 0);
+  if (want & SC_IO_WR) EV_SET(&ch[n++], fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, 0);
+  if (n == 0) return 0;
+  return kevent(p->q, ch, n, 0, 0, 0) < 0 ? -1 : 0;
 #endif
 }
 
@@ -481,15 +500,15 @@ int sc_io_wait_fd(int fd, int write, int timeout_ms) {
   return r;
 }
 
-int sc_io_wait(void *ptr, void **out, int max, int timeout_ms) {
+int sc_io_wait(void *ptr, int *out, int max, int timeout_ms) {
   sc_io_poller *p = (sc_io_poller *)ptr;
-  if (max > 64) max = 64;
+  if (max > SC_IO_EV_MAX) max = SC_IO_EV_MAX;
   int n = 0;
 #if defined(__linux__)
-  struct epoll_event evs[64];
+  struct epoll_event evs[SC_IO_EV_MAX];
   n = epoll_wait(p->q, evs, max, timeout_ms);
 #else
-  struct kevent evs[64];
+  struct kevent evs[SC_IO_EV_MAX];
   struct timespec ts;
   struct timespec *tp = 0;
   if (timeout_ms >= 0) {
@@ -503,17 +522,28 @@ int sc_io_wait(void *ptr, void **out, int max, int timeout_ms) {
   int k = 0;
   for (int i = 0; i < n; i++) {
 #if defined(__linux__)
-    void *u = evs[i].data.ptr;
+    const int fd = evs[i].data.fd;
+    int ready = 0;
+    if (evs[i].events & (EPOLLIN | EPOLLRDHUP)) ready |= SC_IO_RD;
+    if (evs[i].events & EPOLLOUT) ready |= SC_IO_WR;
+    if (evs[i].events & (EPOLLERR | EPOLLHUP)) ready |= SC_IO_RD | SC_IO_WR;
+    const int dropped = SC_IO_RD | SC_IO_WR; /* one-shot disables the whole registration */
 #else
-    void *u = evs[i].udata;
+    const int fd = (int)evs[i].ident;
+    int ready = evs[i].filter == EVFILT_WRITE ? SC_IO_WR : SC_IO_RD;
+    const int dropped = ready;
+    if (evs[i].flags & (EV_EOF | EV_ERROR)) ready |= SC_IO_RD | SC_IO_WR;
 #endif
-    if (!u) { /* the wake pipe: drain it and report nothing */
+    if (fd == p->wake[0]) { /* the wake pipe: drain it and report nothing */
       char buf[64];
       while (read(p->wake[0], buf, sizeof buf) > 0) {
       }
       continue;
     }
-    out[k++] = u;
+    out[3 * k] = fd;
+    out[3 * k + 1] = ready;
+    out[3 * k + 2] = dropped;
+    k++;
   }
   return k;
 }

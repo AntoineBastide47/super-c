@@ -250,6 +250,460 @@ pub fn socket_readiness(b: &mut bench::Bencher) {
     io::shutdown();
 }
 
+// --- socket shapes ----------------------------------------------------------------------------------------.
+// The same message pattern as the echo lane (bytes 0..SOCK_LEN, so every message sums to MSG_SUM), in the
+// shapes that move the reactor differently: readiness already present when the wait is armed, readiness
+// that always arrives after the park, traffic in both directions at once, a burst of short connections,
+// and an echo under a thousand idle descriptors. Every lane checks bytes and checksums on both ends.
+
+const MSG_SUM: i64 = 2016; // 0 + 1 + ... + 63
+const BURST_CONNS: i64 = 100; // connections per round in the burst lane, one round trip each
+const IDLE_CONNS: i64 = 1000; // descriptors parked while the idle lane echoes
+
+// Read exactly `n` bytes from `s`, summing them; false if the peer closed first.
+@platform(macos | linux)
+fn read_exact(s: &net::TcpStream, buf: &mut Vector<u8>, n: usize, sum: &mut i64) bool {
+    let mut at: usize = 0;
+    while at < n {
+        let got = s.read(buf.index_range_mut(at..n));
+        if got <= 0 {
+            return false;
+        }
+        at = at + got as usize;
+    }
+    for k in 0..n {
+        *sum = *sum + (*buf.at(k)) as i64;
+    }
+    return true;
+}
+
+// Echo SOCK_MSGS messages, with `delay_ns` of sleep before each read (0: none); the checksum of what
+// came in, or -1 on a short connection.
+@platform(macos | linux)
+fn echo_checked(s: &net::TcpStream, delay_ns: u64) i64 {
+    let mut buf = Vector::<u8>::with_capacity(SOCK_LEN);
+    buf.resize_default(SOCK_LEN);
+    let mut sum: i64 = 0;
+    for _m in 0..SOCK_MSGS {
+        if delay_ns != 0 {
+            rt::sleep_ns(delay_ns as i64);
+        }
+        if !read_exact(s, &mut buf, SOCK_LEN, &mut sum) {
+            return -1;
+        }
+        if s.write(buf.index_range(0..SOCK_LEN)) != SOCK_LEN as isize {
+            return -1;
+        }
+    }
+    return sum;
+}
+
+// A client that sends every message before reading any echo (the server's later waits find data already
+// there) when `ahead`, or one round trip at a time otherwise; the checksum of the echoes, or -1.
+@platform(macos | linux)
+fn client_checked(port: i32, ahead: bool) i64 {
+    let mut msg = Vector::<u8>::with_capacity(SOCK_LEN);
+    for k in 0..SOCK_LEN {
+        msg.push(k as u8);
+    }
+    let r = net::TcpStream::connect("127.0.0.1", port);
+    if r.is_err() {
+        return -1;
+    }
+    let s = r.unwrap();
+    let mut buf = Vector::<u8>::with_capacity(SOCK_LEN);
+    buf.resize_default(SOCK_LEN);
+    let mut sum: i64 = 0;
+    if ahead {
+        for _m in 0..SOCK_MSGS {
+            if s.write(msg.index_range(0..SOCK_LEN)) != SOCK_LEN as isize {
+                return -1;
+            }
+        }
+        for _m in 0..SOCK_MSGS {
+            if !read_exact(&s, &mut buf, SOCK_LEN, &mut sum) {
+                return -1;
+            }
+        }
+        return sum;
+    }
+    for _m in 0..SOCK_MSGS {
+        if s.write(msg.index_range(0..SOCK_LEN)) != SOCK_LEN as isize {
+            return -1;
+        }
+        if !read_exact(&s, &mut buf, SOCK_LEN, &mut sum) {
+            return -1;
+        }
+    }
+    return sum;
+}
+
+// `conns` connections through `listener`: servers echo (sleeping `delay_ns` before each read), clients
+// send `ahead` or in lockstep; both checksums must total conns * SOCK_MSGS * MSG_SUM.
+@platform(macos | linux)
+fn shape_once(name: str, listener: net::TcpListener, conns: i64, delay_ns: u64, ahead: bool) {
+    let port = listener.port();
+    let wg = sync::WaitGroup::new();
+    wg.add(conns * 2 + 1);
+    let echoed = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let received = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let wa = wg.clone();
+    let wg2 = wg.clone();
+    let e2 = echoed.clone();
+    launch || {
+        // A deadline on every accept: a client whose connect failed (ephemeral ports exhausted by an
+        // earlier run) then fails the round's check instead of parking this task for ever.
+        for _c in 0..conns {
+            switch listener.accept_until(time::deadline_in(time::Duration::from_secs(10))) {
+                Ok(stream) => {
+                    let w = wg2.clone();
+                    let e = e2.clone();
+                    launch || {
+                        let n = echo_checked(&stream, delay_ns);
+                        let _ = e.get().fetch_add(n, atomics::MemoryOrder::Relaxed);
+                        w.done();
+                    };
+                },
+                Err(_) => {
+                    wg2.done();
+                },
+            };
+        }
+        wa.done();
+    };
+    for _c in 0..conns {
+        let w = wg.clone();
+        let r = received.clone();
+        launch || {
+            let n = client_checked(port, ahead);
+            let _ = r.get().fetch_add(n, atomics::MemoryOrder::Relaxed);
+            w.done();
+        };
+    }
+    wg.wait();
+    let want = conns * SOCK_MSGS * MSG_SUM;
+    check(name, received.get().load(atomics::MemoryOrder::Acquire), want);
+    check(name, echoed.get().load(atomics::MemoryOrder::Acquire), want);
+}
+
+@platform(macos | linux)
+fn ready_now_once() {
+    let lr = net::TcpListener::bind("127.0.0.1", 0);
+    if lr.is_err() {
+        bench::fail("socket_ready_now: bind failed");
+        return;
+    }
+    let listener = lr.unwrap();
+    shape_once("socket_ready_now checksum", listener, CONNS, 0, true);
+}
+
+@platform(macos | linux)
+@bench
+/// Benchmark lane: echo where the server's waits mostly find data already present.
+pub fn socket_ready_now(b: &mut bench::Bencher) {
+    let want = CONNS * SOCK_MSGS;
+    b.each(want);
+    b.unit("msg");
+    b.set_rounds(50);
+    while b.running() {
+        ready_now_once();
+        b.tally(want, want);
+    }
+    io::shutdown();
+}
+
+@platform(macos | linux)
+fn delayed_once() {
+    let lr = net::TcpListener::bind("127.0.0.1", 0);
+    if lr.is_err() {
+        bench::fail("socket_delayed: bind failed");
+        return;
+    }
+    let listener = lr.unwrap();
+    shape_once("socket_delayed checksum", listener, CONNS, 200000, false);
+}
+
+@platform(macos | linux)
+@bench
+/// Benchmark lane: echo where readiness always arrives after the park (the server sleeps before each read).
+pub fn socket_delayed(b: &mut bench::Bencher) {
+    let want = CONNS * SOCK_MSGS;
+    b.each(want);
+    b.unit("msg");
+    b.set_rounds(20);
+    while b.running() {
+        delayed_once();
+        b.tally(want, want);
+    }
+    io::shutdown();
+}
+
+// One end of a bidirectional connection: a writer task sends SOCK_MSGS messages while a reader task reads
+// SOCK_MSGS; the checksum read is added to `sum`.
+@platform(macos | linux)
+fn bidir_end(s: &net::TcpStream, sum: &arc::Arc<atomics::Atomic<i64>>, wg: &sync::WaitGroup) {
+    let mut msg = Vector::<u8>::with_capacity(SOCK_LEN);
+    for k in 0..SOCK_LEN {
+        msg.push(k as u8);
+    }
+    for _m in 0..SOCK_MSGS {
+        if s.write(msg.index_range(0..SOCK_LEN)) != SOCK_LEN as isize {
+            break;
+        }
+    }
+    let mut buf = Vector::<u8>::with_capacity(SOCK_LEN);
+    buf.resize_default(SOCK_LEN);
+    let mut got: i64 = 0;
+    for _m in 0..SOCK_MSGS {
+        if !read_exact(s, &mut buf, SOCK_LEN, &mut got) {
+            break;
+        }
+    }
+    let _ = sum.get().fetch_add(got, atomics::MemoryOrder::Relaxed);
+    wg.done();
+}
+
+@platform(macos | linux)
+fn bidir_once() {
+    let lr = net::TcpListener::bind("127.0.0.1", 0);
+    if lr.is_err() {
+        bench::fail("socket_bidir: bind failed");
+        return;
+    }
+    let listener = lr.unwrap();
+    let port = listener.port();
+    let wg = sync::WaitGroup::new();
+    wg.add(CONNS * 2 + 1);
+    let sum = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let wa = wg.clone();
+    let wg2 = wg.clone();
+    let s2 = sum.clone();
+    launch || {
+        for _c in 0..CONNS {
+            switch listener.accept_until(time::deadline_in(time::Duration::from_secs(10))) {
+                Ok(stream) => {
+                    let w = wg2.clone();
+                    let s = s2.clone();
+                    launch || {
+                        bidir_end(&stream, &s, &w);
+                    };
+                },
+                Err(_) => {
+                    wg2.done();
+                },
+            };
+        }
+        wa.done();
+    };
+    for _c in 0..CONNS {
+        let w = wg.clone();
+        let s = sum.clone();
+        launch || {
+            switch net::TcpStream::connect("127.0.0.1", port) {
+                Ok(stream) => {
+                    bidir_end(&stream, &s, &w);
+                },
+                Err(_) => {
+                    w.done();
+                },
+            };
+        };
+    }
+    wg.wait();
+    check("socket_bidir checksum", sum.get().load(atomics::MemoryOrder::Acquire), 2 * CONNS * SOCK_MSGS * MSG_SUM);
+}
+
+@platform(macos | linux)
+@bench
+/// Benchmark lane: both ends of every connection send and receive at once.
+pub fn socket_bidir(b: &mut bench::Bencher) {
+    let want = 2 * CONNS * SOCK_MSGS;
+    b.each(want);
+    b.unit("msg");
+    b.set_rounds(50);
+    while b.running() {
+        bidir_once();
+        b.tally(want, want);
+    }
+    io::shutdown();
+}
+
+// A burst of short connections: BURST_CONNS connects, each one message and its echo, then closed.
+@platform(macos | linux)
+fn conn_burst_once() {
+    let lr = net::TcpListener::bind("127.0.0.1", 0);
+    if lr.is_err() {
+        bench::fail("socket_burst: bind failed");
+        return;
+    }
+    let listener = lr.unwrap();
+    let port = listener.port();
+    let wg = sync::WaitGroup::new();
+    wg.add(BURST_CONNS * 2 + 1);
+    let sum = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let wa = wg.clone();
+    let wg2 = wg.clone();
+    launch || {
+        for _c in 0..BURST_CONNS {
+            switch listener.accept_until(time::deadline_in(time::Duration::from_secs(10))) {
+                Ok(stream) => {
+                    let w = wg2.clone();
+                    launch || {
+                        let mut buf = Vector::<u8>::with_capacity(SOCK_LEN);
+                        buf.resize_default(SOCK_LEN);
+                        let mut got: i64 = 0;
+                        if read_exact(&stream, &mut buf, SOCK_LEN, &mut got) {
+                            let _ = stream.write(buf.index_range(0..SOCK_LEN));
+                        }
+                        w.done();
+                    };
+                },
+                Err(_) => {
+                    wg2.done();
+                },
+            };
+        }
+        wa.done();
+    };
+    for _c in 0..BURST_CONNS {
+        let w = wg.clone();
+        let s = sum.clone();
+        launch || {
+            let mut msg = Vector::<u8>::with_capacity(SOCK_LEN);
+            for k in 0..SOCK_LEN {
+                msg.push(k as u8);
+            }
+            switch net::TcpStream::connect("127.0.0.1", port) {
+                Ok(stream) => {
+                    let mut got: i64 = 0;
+                    if stream.write(msg.index_range(0..SOCK_LEN)) == SOCK_LEN as isize {
+                        let mut buf = Vector::<u8>::with_capacity(SOCK_LEN);
+                        buf.resize_default(SOCK_LEN);
+                        let _ = read_exact(&stream, &mut buf, SOCK_LEN, &mut got);
+                    }
+                    let _ = s.get().fetch_add(got, atomics::MemoryOrder::Relaxed);
+                },
+                Err(_) => {},
+            };
+            w.done();
+        };
+    }
+    wg.wait();
+    check("socket_burst checksum", sum.get().load(atomics::MemoryOrder::Acquire), BURST_CONNS * MSG_SUM);
+}
+
+@platform(macos | linux)
+@bench
+/// Benchmark lane: a burst of short connections, one round trip each, through accept and connect.
+pub fn socket_burst(b: &mut bench::Bencher) {
+    b.each(BURST_CONNS);
+    b.unit("conn");
+    b.set_rounds(20);
+    while b.running() {
+        conn_burst_once();
+        b.tally(BURST_CONNS, BURST_CONNS);
+    }
+    io::shutdown();
+}
+
+// The echo lane under IDLE_CONNS idle connections, each parked in a read until the lane ends. The idle
+// descriptors are set up once, outside the timed rounds (a thousand connections per round would exhaust
+// the ephemeral ports), and their wake at the end is timed on its own.
+@platform(macos | linux)
+struct Idle {
+    pub listener: net::TcpListener,
+    pub peers: Vector<net::TcpStream>,
+    pub parked: sync::WaitGroup,
+    pub woke: arc::Arc<atomics::Atomic<i64>>,
+}
+
+@platform(macos | linux)
+fn idle_setup() Option<Idle> {
+    let lr = net::TcpListener::bind("127.0.0.1", 0);
+    if lr.is_err() {
+        bench::fail("socket_idle_many: bind failed");
+        return Option::<Idle>::None;
+    }
+    let listener = lr.unwrap();
+    let port = listener.port();
+    let mut peers = Vector::<net::TcpStream>::new();
+    let parked = sync::WaitGroup::new();
+    parked.add(IDLE_CONNS);
+    let woke = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    for _i in 0..IDLE_CONNS {
+        switch net::TcpStream::connect("127.0.0.1", port) {
+            Ok(c) => {
+                peers.push(c);
+            },
+            Err(_) => {
+                bench::fail("socket_idle_many: connect failed");
+                return Option::<Idle>::None;
+            },
+        };
+        switch listener.accept_until(time::deadline_in(time::Duration::from_secs(10))) {
+            Ok(s) => {
+                let w = parked.clone();
+                let k = woke.clone();
+                launch || {
+                    let mut buf = Vector::<u8>::with_capacity(8);
+                    buf.resize_default(8);
+                    let cap: usize = 8;
+                    if s.read(buf.index_range_mut(0..cap)) == 1 {
+                        let _ = k.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
+                    }
+                    w.done();
+                };
+            },
+            Err(_) => {
+                bench::fail("socket_idle_many: accept failed");
+                return Option::<Idle>::None;
+            },
+        };
+    }
+    if !wait_parked(rt::WK_IO, IDLE_CONNS as usize) {
+        bench::fail("socket_idle_many: the idle readers did not all park");
+        return Option::<Idle>::None;
+    }
+    return Option::<Idle>::Some(Idle { listener: listener, peers: peers, parked: parked, woke: woke });
+}
+
+// Wake every idle reader with one byte and count them in; the batch of a thousand wakes is timed.
+@platform(macos | linux)
+fn idle_wake(idle: &Idle) {
+    let byte: [u8; 1] = [1u8];
+    for i in 0..IDLE_CONNS as usize {
+        let _ = idle.peers.at(i).write(byte);
+    }
+    idle.parked.wait();
+    check("socket_idle_many wakes", idle.woke.get().load(atomics::MemoryOrder::Acquire), IDLE_CONNS);
+}
+
+@platform(macos | linux)
+@bench
+/// Benchmark lane: the echo round trips under a thousand idle parked descriptors, then their wake.
+pub fn socket_idle_many(b: &mut bench::Bencher) {
+    let want = CONNS * SOCK_MSGS;
+    b.each(want);
+    b.unit("msg");
+    b.set_rounds(20);
+    let setup = idle_setup();
+    if setup.is_none() {
+        return;
+    }
+    let idle = setup.unwrap();
+    while b.running() {
+        let lr = net::TcpListener::bind("127.0.0.1", 0);
+        if lr.is_err() {
+            bench::fail("socket_idle_many: bind failed");
+            return;
+        }
+        shape_once("socket_idle_many checksum", lr.unwrap(), CONNS, 0, false);
+        b.tally(want, want);
+    }
+    idle_wake(&idle);
+    io::shutdown();
+}
+
 // --- timer patterns -------------------------------------------------------------------------------------.
 
 // One point of the timer_patterns lane: `live` tasks arm one timed wait each in the given pattern, all

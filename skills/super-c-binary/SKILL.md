@@ -321,8 +321,8 @@ a `thin` profile keeps `auto` there.
 |------|--------|
 | `--profile=NAME` | Select build profile |
 | `--jobs=N` | Worker count for parallel stages + cc (default: one per CPU) |
-| `--out-dir=DIR` | Override output directory |
-| `--cc=CMD` | Override C compiler |
+| `--out-dir=DIR` | Override output directory (a bare `build file.spc` emits under `DIR/raw`) |
+| `--cc=CMD` | Override C compiler (manifest and bare builds alike) |
 | `--cstd=STD` | Replace the manifest's base C flags string, passed verbatim (e.g. `gnu11`) |
 | `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not script mode) |
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target |

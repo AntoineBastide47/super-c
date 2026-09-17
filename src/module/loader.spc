@@ -162,6 +162,7 @@ pub struct Package {
     pub bootstrap: bool,
     pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
     pub gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
+    pub cc: String, // the C compiler the command line named for a bare build; empty = resolve as usual
     pub std_root: String, // second import search root (parent of std/); empty = none
     pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub ok: bool, // false if any read/parse/cycle error was reported during loading
@@ -1801,6 +1802,7 @@ extend Package {
             tt_class: Vector::<u8>::new(),
             root_dir: String::new(),
             gen_root: String::new(),
+            cc: String::new(),
             std_root: String::new(),
             alt_root: String::new(),
             ok: true,

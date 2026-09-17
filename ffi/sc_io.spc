@@ -6,19 +6,26 @@
 // On Windows the poller watches SOCKETS ONLY: a socket is not a CRT file descriptor there, so `sc_io_read`
 // and `sc_io_write` are recv/send and no file or pipe can be parked on. POSIX takes any descriptor.
 
+/// Interest and readiness bits of the poller.
+pub const RD: i32 = 1;
+pub const WR: i32 = 2;
+/// Most events one `sc_io_wait` returns; each is three `i32` values in the output buffer.
+pub const EV_MAX: i32 = 64;
+
 extern "C" "sc_io.h" {
-    /// A poller with its own wake channel, or null. `wait` fills `out` with the cookies of ready
-    /// registrations and returns how many; `arm` is ONE-SHOT, so a registration that fires is already gone.
+    /// A poller with its own wake channel, or null. Only the reactor thread may call `wait` and `free`;
+    /// `set` and `wake` may come from any thread.
     pub fn sc_io_new() *mut void;
     /// Destroy a poller from sc_io_new.
     pub fn sc_io_free(p: *mut void) void;
-    /// Watch `fd` for readability (or writability) once, reporting `udata` when ready; 0 or -1.
-    pub fn sc_io_arm(p: *mut void, fd: i32, write: i32, udata: *mut void) i32;
-    /// Stop watching `fd` for the given direction; 0 or -1.
-    pub fn sc_io_disarm(p: *mut void, fd: i32, write: i32) i32;
-    /// Block up to `timeout_ms` (-1 = forever) and collect up to `max` ready `udata` pointers into `out`;
-    /// the count, 0 on timeout, -1 on error.
-    pub fn sc_io_wait(p: *mut void, out: *mut *mut void, max: i32, timeout_ms: i32) i32;
+    /// Add the ONE-SHOT `want` bits to the interest in `fd`; `known` says the backend still holds a
+    /// registration for `fd` (epoll keeps a fired one, disabled). 0 on success, 1 when the descriptor
+    /// cannot be polled and is always ready, -1 with errno on failure. Callable from any thread.
+    pub fn sc_io_set(p: *mut void, fd: i32, want: i32, known: i32) i32;
+    /// Block up to `timeout_ms` (-1 = forever) and collect up to `max` events into `out`, three `i32`
+    /// each: the descriptor, its ready bits (an error or hang-up sets both), and the interest bits the
+    /// backend dropped by reporting it. The count, 0 on timeout, -1 on error.
+    pub fn sc_io_wait(p: *mut void, out: *mut i32, max: i32, timeout_ms: i32) i32;
     /// Interrupt a concurrent sc_io_wait.
     pub fn sc_io_wake(p: *mut void) void;
     /// One descriptor, no poller object: what a plain thread waits on. >0 ready, 0 timed out, -1 error.

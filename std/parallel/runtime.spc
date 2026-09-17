@@ -784,6 +784,32 @@ pub fn task_snapshot(out: &mut Vector<TaskInfo>) {
     unsafe sc_runtime::sc_rt_spin_unlock(&mut r.spin);
 }
 
+/// Registered live tasks whose recorded wait is of kind `kind` (`WK_*`), read under the registry locks
+/// with sequentially consistent loads: what a pool being stopped counts to learn that no task can still
+/// reach it (a task records its wait before it asks the pool for admission).
+pub fn tasks_waiting(kind: i32) usize {
+    if unsafe G_REG == null {
+        return 0;
+    }
+    let r = unsafe G_REG;
+    let mut n: usize = 0;
+    unsafe sc_runtime::sc_rt_spin_lock(&mut r.spin);
+    for idx in 0..unsafe r.len {
+        let sl = reg_slot(r, idx);
+        unsafe sc_runtime::sc_rt_spin_lock(&mut sl.spin);
+        let co = unsafe sl.co;
+        if co != null && atomic::load_i32(&mut unsafe co.tstate, 4) != TS_COMPLETED && atomic::load_i32(
+            &mut unsafe co.wait_kind,
+            4,
+        ) == kind {
+            n = n + 1;
+        }
+        unsafe sc_runtime::sc_rt_spin_unlock(&mut sl.spin);
+    }
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut r.spin);
+    return n;
+}
+
 /// The registry key of the task running on this thread. `slot` is `SLOT_NONE`-valued (`is_task` false) on
 /// a plain thread or inside a data-parallel job.
 pub fn current_key() TaskKey {
@@ -2730,6 +2756,36 @@ pub fn wake_as(co: *mut Coroutine, token: u32, reason: u32) bool {
     return true;
 }
 
+/// The claim half of `wake_as` alone: take the park `token` with `reason` and report whether this call won
+/// it, without making the task runnable. A waker that resumes many tasks at once claims each, links the
+/// winners through `run.next`, and hands the chain to `run_claimed` in one scheduler operation. A claimed
+/// task cannot run, be woken again or complete until that chain is submitted.
+pub fn claim_wake(co: *mut Coroutine, token: u32, reason: u32) bool {
+    return claim(co, token, reason);
+}
+
+/// Make a chain of `claim_wake` winners (`head` to `tail` through `run.next`, `n` long) runnable under one
+/// injection lock, then wake one worker; the rest wake as the spinner finds the queue still full. From a
+/// worker thread a single task takes that worker's own deque instead.
+pub fn run_claimed(head: *mut Coroutine, tail: *mut Coroutine, n: i32) {
+    let s = unsafe G_SCHED;
+    let mut co = head;
+    let mut left = n;
+    while left > 0 {
+        atomic::store_i32(&mut unsafe co.tstate, TS_RUNNABLE, 0);
+        if tracing() {
+            trace("wake", unsafe co.run.id);
+        }
+        co = (unsafe co.run.next) as *mut Coroutine;
+        left = left - 1;
+    }
+    if n == 1 {
+        enqueue_run(s, head as *mut Runnable);
+        return;
+    }
+    inject_chain(s, head as *mut Runnable, tail as *mut Runnable, n);
+}
+
 /// Drop `co`'s pending timer, if its wait was timed and it was woken before the deadline. Call after every
 /// `park_until` with a deadline, before the coroutine can park again: a stale timer entry would otherwise
 /// resume a running coroutine.
@@ -3495,8 +3551,10 @@ fn destroy_pool(sp: *mut i32, s: *mut Scheduler) {
 /// no task remains is the scheduler destroyed. Otherwise the runtime stays fully alive: an unresponsive
 /// task keeps its stack, and the caller may wait longer, report, or exit the process.
 ///
-/// Call from outside the pool (the main thread), after `io::shutdown()` and `blocking::shutdown()` if the
-/// program started them: the reactor and blocking pool must outlive the tasks parked on them.
+/// Call from outside the pool (the main thread). Stop the reactor (`io::shutdown()`) and the blocking pool
+/// (`blocking::shutdown()`) once the tasks parked on them have finished, in either order relative to
+/// this: a reactor stopped earlier settles its pending waits as not ready, and a task cancelled here
+/// leaves its I/O wait through the reactor, which must therefore still run or start again for it.
 pub fn try_shutdown(opts: ShutdownOptions) ShutdownResult {
     let mut res = ShutdownResult { completed: 0, cancelled: 0, unresponsive: 0 };
     let sp = (&mut unsafe G_STATE) as *mut i32;

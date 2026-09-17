@@ -1,11 +1,11 @@
 /* Readiness poller and the socket calls whose structs are platform-specific, for std/parallel/io and
-   std/parallel/net. POSIX only (kqueue on macOS/BSD, epoll on Linux); the Super-C side is @platform-gated,
-   so nothing here is compiled for a Windows target.
+   std/parallel/net. Three backends behind one interface: kqueue on macOS/BSD, epoll on Linux, select() on
+   Windows (sockets only there: a SOCKET is not a CRT descriptor).
 
-   The poller is READINESS-based: a registration is one-shot and says "tell me when this descriptor can be
-   read (or written)". That is what lets a coroutine park on a descriptor -- the reactor thread turns the
-   event back into a wake. Everything that would otherwise need `struct sockaddr`, `fd_set` or errno
-   spelling lives here, so the Super-C side never encodes a platform layout. */
+   The poller is READINESS-based and one-shot: an interest says "tell me once when this descriptor can be
+   read (or written)", and the reactor thread turns the event back into a wake. Everything that would
+   otherwise need `struct sockaddr`, `fd_set` or errno spelling lives here, so the Super-C side never
+   encodes a platform layout. */
 #ifndef SC_IO_H
 #define SC_IO_H
 
@@ -14,22 +14,30 @@
 
 /* ---- readiness poller ------------------------------------------------------------------------------ */
 
-/* A poller plus its own wake pipe. NULL on failure. */
+/* Interest and readiness bits. */
+#define SC_IO_RD 1
+#define SC_IO_WR 2
+/* Most events one sc_io_wait returns (three ints each in `out`). */
+#define SC_IO_EV_MAX 64
+
+/* A poller plus its own wake channel. NULL on failure. Only the reactor thread calls wait and free. */
 void *sc_io_new(void);
 void sc_io_free(void *p);
 
-/* Register one-shot interest in `fd` becoming readable (write == 0) or writable (write != 0). `udata` comes
-   back from sc_io_wait when it fires. 0 on success. */
-int sc_io_arm(void *p, int fd, int write, void *udata);
+/* Add the one-shot `want` bits (SC_IO_RD / SC_IO_WR) to the interest in `fd`. `known` says whether the
+   caller believes the backend still holds a registration for `fd` (epoll keeps a fired one-shot
+   registration, disabled, until the descriptor closes); a wrong guess costs one failed call, never the
+   registration. 0 on success; 1 when the descriptor cannot be polled and is therefore always ready (a
+   regular file under epoll); -1 with errno on failure. Callable from any thread. */
+int sc_io_set(void *p, int fd, int want, int known);
 
-/* Drop a registration. 1 if one was actually removed, 0 if there was none, -1 on error. */
-int sc_io_disarm(void *p, int fd, int write);
+/* Wait for readiness and fill `out` with up to `max` events of three ints each: the descriptor, its
+   ready bits (an error or hang-up sets both), and the interest bits the backend dropped by reporting it.
+   Returns the event count, or -1 on error. `timeout_ms` < 0 waits forever. Wake events are consumed here
+   and never appear in `out`. */
+int sc_io_wait(void *p, int *out, int max, int timeout_ms);
 
-/* Wait for readiness and fill `out` with up to `max` udata pointers; returns how many, or -1 on error.
-   `timeout_ms` < 0 waits forever. Wake-pipe events are consumed here and never appear in `out`. */
-int sc_io_wait(void *p, void **out, int max, int timeout_ms);
-
-/* Make a blocked sc_io_wait return promptly (shutdown). */
+/* Make a blocked sc_io_wait return promptly. Callable from any thread. */
 void sc_io_wake(void *p);
 
 /* Wait on ONE descriptor without a poller object -- what a plain thread (no coroutine to park) needs.

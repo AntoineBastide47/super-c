@@ -1307,7 +1307,9 @@ pub fn test_build_and_run(
     // gated items on `--target=`, with no diagnostic.
     let sdk = target_sdk(target);
     let mut ccs = String::new();
-    if sdk != 0 {
+    if p.cc.len() != 0 {
+        ccs.push_string(&p.cc);
+    } else if sdk != 0 {
         sdk_cc(sdk, &mut ccs);
     }
     if ccs.len() == 0 {

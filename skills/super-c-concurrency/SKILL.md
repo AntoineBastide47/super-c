@@ -251,7 +251,42 @@ its methods but not move it out — pass `&stream` to helpers.
 a hundred parked tasks and one poller thread, not a hundred threads. `UdpSocket` too,
 IPv4 or IPv6, with every failure a `Result<T, IoError>`.
 
-POSIX only.
+Every platform: kqueue on macOS, epoll on Linux, select() on Windows (sockets only there,
+at most FD_SETSIZE parked at once).
+
+**Reactor contract** (`std/parallel/io.spc`). The reactor thread alone touches the
+per-descriptor records (a table indexed by descriptor number, never freed while the
+reactor runs) and the waiter lists; tasks reach it through a lock-free command list. A
+wait is a node in the waiting task's frame, published by the park hand-off, linked and
+unlinked by the reactor, and carrying the park token the reactor claims exactly like a
+timer or a cancellation does. The one-shot operating-system registration is idempotent
+and thread-safe, so the publishing worker registers the interest itself just before it
+publishes: the readiness event is what wakes the reactor, an arm costs no wake of its
+own, and an event that finds no waiter marks the record so the next arm in that
+direction registers again. Interests are never removed one by one. A wait that ends by
+any other reason (deadline, cancel, shutdown) parks once more until the reactor
+acknowledges the node's removal, so no reference to a frame outlives it and the
+operating system never holds a pointer. Read and write waits on one descriptor are two
+lists; where a backend keeps one registration per descriptor (epoll) the reactor
+registers both directions again when the second one gains a waiter. Several waiters in
+one direction are all woken by its event and each retries. Every `net` handle closes through
+`io::close`, which first excludes the close from every registration in flight (on macOS
+a `close` overlapping a `kevent` registration of the same socket wedges both threads in
+the kernel for good; registering threads count themselves into per-slot counters and
+back off while a close is pending), then reports the close to the reactor: the record's
+generation moves on, every wait on the number settles as not ready at once, and an arm
+whose registration raced the close registers again and fails. A descriptor closed with
+a raw `close(2)` instead gets none of this: its waiters run to their deadlines, and on
+macOS the close itself may wedge. Its next file is registered afresh by the next arm.
+`wait_until` reports `false` when the deadline passed, the wait was cancelled, the
+reactor is shutting down or the descriptor cannot be watched (a closed number, the
+Windows set limit); a descriptor the poller cannot watch at all (a regular file under
+epoll) reports ready.
+`io::shutdown()` settles every pending wait as not ready, keeps acknowledging until no
+admitted wait remains, then joins the thread; a later wait starts a fresh reactor.
+`io::pending_waits()` counts admitted waits (zero when every task has left its wait);
+`io_stats()` returns arm, disarm, registration, poll, event, wake and batch counters when
+`IO_STATS` in `io.spc` is true, and zeros otherwise.
 
 ## Blocking Calls
 
@@ -283,11 +318,6 @@ reported as leaked under `SC_LEAK_CHECK`.
 | `runtime::live_tasks()` | Return count of tasks still alive |
 | Shutdown report | Account for tasks that never finished |
 | `race` profile (`--profile=race`) | ThreadSanitizer with the coroutine fiber annotations; the only build that reports a runtime race |
-
-Open runtime finding (`ci/cutover_report.md`): under the `race` profile, a task that
-launches from inside a completing coroutine (the compiler's job runner) reports a race
-between `spawn_coroutine`'s task-block store and the completing worker's `handoff` spin
-in `worker_main`; the release compiler panicked once in about twenty-four builds.
 
 ## Cancellation Sources and Groups
 
