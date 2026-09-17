@@ -25,6 +25,7 @@ import std::parallel::data as data;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;
+import std::parallel::blocking as blocking;
 import std::testing::bench as bench;
 
 const SPAWNS: i64 = 2000; // tasks per round for the spawn lanes
@@ -39,6 +40,10 @@ const DISPATCHES: i64 = 200; // `parallel::range` calls per round
 const SPAN: usize = 256; // iterations per dispatch: small, so what is measured is the dispatch
 const ALLOCS: i64 = 20000; // malloc/free pairs per round in the allocator lane
 const DEEP_TASKS: i64 = 500; // tasks per round in the deep-stack lane
+const BCALLS: i64 = 2000; // blocking calls per round in the round-trip lane
+const BFAN_TASKS: i64 = 8; // tasks calling at once in the blocking fan-out lane: FIXED, comparable across machines
+const BFAN_EACH: i64 = 250; // calls each
+const LAT_ROUNDS: usize = 110; // rounds a latency sink is sized for: the default plus warm-up and diagnostics
 const DEEP_FRAMES: u64 = 1500; // frames of at least 80 bytes each: past 100 KiB of the default stack
 const CLEANUP_WAIT_NS: u64 = 5000000000; // how long spawn_to_completion waits for the runtime to retire its tasks
 
@@ -192,6 +197,102 @@ pub fn park_unpark_roundtrip(b: &mut bench::Bencher) {
         wg.wait();
         b.tally(trips, seen.get().load(atomics::MemoryOrder::Acquire));
     }
+}
+
+// --- blocking calls ---------------------------------------------------------------------------------.
+
+// `n` blocking calls of an empty closure from one task, one after the other; how many returned their
+// value, and each call's round trip in microseconds appended to `lat`.
+fn call_chain(n: i64, lat: &mut Vector<f64>) i64 {
+    let mut got: i64 = 0;
+    for _i in 0..n {
+        let t0 = platform::now_ns();
+        got = got + blocking::call(
+            fn() i64 {
+                return 1i64;
+            },
+        );
+        lat.push((platform::now_ns() - t0) as f64 / 1000.0);
+    }
+    return got;
+}
+
+// The per-call latencies of a lane, gathered from its tasks once each so the timed loop pays no lock.
+type LatSink = arc::Arc<sync::Mutex<Vector<f64>>>;
+
+fn lat_sink(cap: usize) LatSink {
+    return arc::Arc::<sync::Mutex<Vector<f64>>>::new(sync::Mutex::<Vector<f64>>::new(Vector::<f64>::with_capacity(cap)));
+}
+
+fn lat_merge(sink: &LatSink, lat: &Vector<f64>) {
+    let mut g = sink.get().lock();
+    let v = g.get_mut();
+    for i in 0..lat.len() {
+        v.push(lat[i]);
+    }
+}
+
+fn lat_note(b: &mut bench::Bencher, sink: &LatSink) {
+    let mut g = sink.get().lock();
+    let t = bench::dist_text("call latency", "us", g.get_mut());
+    b.note_more(t.as_str());
+}
+
+/// A blocking-call ROUND TRIP: one task hands an empty closure to the blocking pool and parks until the
+/// value comes back, BCALLS times in a row. Nothing blocks, so this is the dispatch itself: the submission,
+/// the pool thread's wake, the result's return and the task's wake, with no work to hide any of it behind.
+@bench
+pub fn blocking_roundtrip(b: &mut bench::Bencher) {
+    b.each(BCALLS);
+    b.unit("call");
+    let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let sink = lat_sink(LAT_ROUNDS * BCALLS as usize);
+    while b.running() {
+        let wg = sync::WaitGroup::new();
+        wg.add(1);
+        let w = wg.clone();
+        let c = seen.clone();
+        let k = sink.clone();
+        launch || {
+            let mut lat = Vector::<f64>::with_capacity(BCALLS as usize);
+            c.get().store(call_chain(BCALLS, &mut lat), atomics::MemoryOrder::Release);
+            lat_merge(&k, &lat);
+            w.done();
+        };
+        wg.wait();
+        b.tally(BCALLS, seen.get().load(atomics::MemoryOrder::Acquire));
+    }
+    lat_note(b, &sink);
+}
+
+/// The same round trip from BFAN_TASKS tasks at once: what the pool's submission path costs when several
+/// workers hand work over at the same time, and how the pool threads share it.
+@bench
+pub fn blocking_fanout(b: &mut bench::Bencher) {
+    let calls = BFAN_TASKS * BFAN_EACH;
+    b.each(calls);
+    b.unit("call");
+    let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let sink = lat_sink(LAT_ROUNDS * calls as usize);
+    while b.running() {
+        seen.get().store(0, atomics::MemoryOrder::Release);
+        let wg = sync::WaitGroup::new();
+        wg.add(BFAN_TASKS);
+        for _t in 0..BFAN_TASKS {
+            let w = wg.clone();
+            let c = seen.clone();
+            let k = sink.clone();
+            launch || {
+                let mut lat = Vector::<f64>::with_capacity(BFAN_EACH as usize);
+                let _ = c.get().fetch_add(call_chain(BFAN_EACH, &mut lat), atomics::MemoryOrder::Relaxed);
+                lat_merge(&k, &lat);
+                w.done();
+            };
+        }
+        wg.wait();
+        b.tally(calls, seen.get().load(atomics::MemoryOrder::Acquire));
+    }
+    lat_note(b, &sink);
 }
 
 // --- mutex ------------------------------------------------------------------------------------------.

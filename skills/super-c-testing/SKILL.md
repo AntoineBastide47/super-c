@@ -260,3 +260,8 @@ These are backed by `loader::package_from_source`.
 - **Force a schedule, do not hope for it.** Hold the sole worker busy to keep a task
   queued, mask cancellation to read a request before the task unwinds, and poll
   `runtime::task_snapshot` or a source's `members()` for the state the test needs.
+- **A signal lands before the signaller's cleanup.** A `defer w.done()` fires before
+  the task's locals drop, and a blocking-pool caller is woken before the thread that
+  ran its call counts itself out. A waiter that asserts on a destruction count or on
+  pool statistics polls for that state with a bound (`wait_frees`, `wait_quiet` in
+  `tests/blocking_test.spc`) instead of asserting right after the wait.

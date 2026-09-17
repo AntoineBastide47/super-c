@@ -1378,6 +1378,10 @@ extend<T> SplitVec<T> {
 
     /// Pin the base allocation at its CURRENT capacity and route later growth to stable chunks.
     pub fn freeze(self: &mut Self) {
+        // Re-pinning a frozen array would move the split under the entries already spilled past it.
+        if self.split != SV_UNFROZEN {
+            panic("SplitVec::freeze: the array is frozen already");
+        }
         if self.base.capacity() == self.base.len() {
             self.base.reserve(self.base.len() / 8 + 64); // headroom so small growth stays flat
         }

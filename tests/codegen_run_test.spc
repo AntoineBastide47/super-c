@@ -287,6 +287,19 @@ fn array_field_coerces_to_slice() {
     );
 }
 
+// A closure nested three deep (a closure literal inside a closure literal inside a closure literal)
+// compiled to an out-of-bounds node lookup: the instance graph demanded closures two levels down and
+// no further, so the innermost never entered its keep and the emitter lowered it from scratch after the
+// body arena was released. The graph now expands closures to any depth.
+@test
+fn closures_nest_to_any_depth() {
+    run_exit(
+        "a closure three levels deep runs and captures through every level",
+        "fn apply<F: fn() i64>(f: F) i64 { return f(); }\nfn main() i32 {\n  let want: i64 = 3;\n  let got = apply(fn() i64 { return apply(fn() i64 { return apply(fn() i64 { return apply(fn() i64 { return want + 39; }); }); }); });\n  unsafe exit(got as i32);\n}\n",
+        42,
+    );
+}
+
 @test
 fn closure_captures_every_binding_kind() {
     // A closure environment must name EVERY kind of binding it can capture, not only `let`s and parameters:

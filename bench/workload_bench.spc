@@ -1083,7 +1083,9 @@ fn compute_progress_task() {
 
 // Run COMPUTE_TASKS compute tasks until `stop` is raised by the caller, and return the chunks they completed
 // per millisecond of the window.
-fn compute_window(flood: bool) f64 {
+type LatSink = arc::Arc<sync::Mutex<Vector<f64>>>;
+
+fn compute_window(flood: bool, lat: &LatSink) f64 {
     atomic::store_i32(&mut unsafe G_STOP, 0, 2);
     atomic::store_i64(&mut unsafe G_PROGRESS, 0, 2);
     let wg = sync::WaitGroup::new();
@@ -1098,7 +1100,7 @@ fn compute_window(flood: bool) f64 {
     let t0 = platform::now_ns();
     let mut ok: i64 = 0;
     if flood {
-        ok = flood_once();
+        ok = flood_once(lat);
     } else {
         rt::sleep_ns(20000000);
     }
@@ -1112,24 +1114,32 @@ fn compute_window(flood: bool) f64 {
 }
 
 // FLOOD blocking calls at once, four times the pool's thread limit, each holding its thread for
-// FLOOD_SLEEP_US; returns how many came back with their own id.
-fn flood_once() i64 {
+// FLOOD_SLEEP_US; returns how many came back with their own id, and appends each call's latency in
+// microseconds (queue wait plus the hold) to `lat`.
+fn flood_once(lat: &LatSink) i64 {
     let wg = sync::WaitGroup::new();
     wg.add(FLOOD);
     let ok = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
     for i in 0..FLOOD {
         let w = wg.clone();
         let o = ok.clone();
+        let k = lat.clone();
         let id = i;
         launch || {
+            let t0 = platform::now_ns();
             let got = blocking::call(
                 fn() i64 {
                     let _ = unsafe unistd::usleep(FLOOD_SLEEP_US);
                     return id;
                 },
             );
+            let us = (platform::now_ns() - t0) as f64 / 1000.0;
             if got == id {
                 let _ = o.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
+            }
+            {
+                let mut g = k.get().lock();
+                g.get_mut().push(us);
             }
             w.done();
         };
@@ -1146,10 +1156,13 @@ pub fn blocking_saturation(b: &mut bench::Bencher) {
     b.each(FLOOD);
     b.unit("call");
     b.set_rounds(30);
-    let unloaded = compute_window(false);
+    let lat = arc::Arc::<sync::Mutex<Vector<f64>>>::new(
+        sync::Mutex::<Vector<f64>>::new(Vector::<f64>::with_capacity(40 * FLOOD as usize)),
+    );
+    let unloaded = compute_window(false, &lat);
     let mut shares = Vector::<f64>::new();
     while b.running() {
-        let under = compute_window(true);
+        let under = compute_window(true, &lat);
         shares.push(under / unloaded * 100.0);
         b.tally(FLOOD, FLOOD);
     }
@@ -1162,8 +1175,18 @@ pub fn blocking_saturation(b: &mut bench::Bencher) {
     note.push_u64(blocking::MAX_THREADS as u64);
     note.push_str(" threads for ");
     note.push_i64(FLOOD);
-    note.push_str(" calls");
+    note.push_str(" calls; peak ");
+    let st = blocking::stats();
+    note.push_u64(st.peak_threads as u64);
+    note.push_str(" threads, peak ");
+    note.push_u64(st.peak_queued as u64);
+    note.push_str(" queued, ");
+    note.push_u64(st.admit_waits as u64);
+    note.push_str(" admission waits");
     b.note(note.as_str());
+    let mut g = lat.get().lock();
+    let t = bench::dist_text("call latency", "us", g.get_mut());
+    b.note_more(t.as_str());
 }
 
 // --- task counts on both sides of the block pool --------------------------------------------------------.

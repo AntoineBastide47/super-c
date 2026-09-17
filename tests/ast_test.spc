@@ -14,6 +14,37 @@ fn arena() {
     assert(a.at_const(n2).kind == NodeKind::NODE_LITERAL, "node payload stored");
 }
 
+// A frozen array spills past its pin; thawing folds the spill back so a later pin addresses every entry.
+// The resolve frontier once thawed only two of a module's four arrays, and the next frontier's pin moved
+// the split under the body nodes a `select` lowering had spilled: those nodes were then unreachable.
+@test
+fn split_vec_spill_thaw_and_pin_again() {
+    let mut v = SplitVec::<u32>::new();
+    for i in 0..100u32 {
+        v.push(i);
+    }
+    v.freeze();
+    for i in 100..1000u32 {
+        v.push(i); // past the pinned capacity: the spill
+    }
+    assert_eq(v.len(), 1000usize);
+    v.thaw();
+    v.freeze();
+    for i in 0..1000usize {
+        assert_eq(*v.at(i), i as u32);
+    }
+    v.thaw();
+}
+
+// Pinning a frozen array again is a programmer error: it would move the split under the spill.
+@test(should_panic)
+fn split_vec_refuses_a_second_pin() {
+    let mut v = SplitVec::<u32>::new();
+    v.push(1u32);
+    v.freeze();
+    v.freeze();
+}
+
 @test
 fn scratch_lists() {
     let mut a = Ast::new(8);

@@ -105,6 +105,33 @@ pub fn summarize(samples: &mut Vector<f64>) Summary {
     };
 }
 
+/// A per-operation distribution as note text: `name` and its `unit`, then median, p95, p99 (when the
+/// samples allow one) and the maximum over `samples`, which are sorted in place. Empty samples give "".
+pub fn dist_text(name: str, unit: str, samples: &mut Vector<f64>) String {
+    let mut t = String::new();
+    if samples.len() == 0 {
+        return t;
+    }
+    let sm = summarize(samples);
+    t.push_str(name);
+    t.push_str(": median ");
+    t.push_f64_prec(sm.median, 2);
+    t.push_str(" ");
+    t.push_str(unit);
+    t.push_str(", p95 ");
+    t.push_f64_prec(sm.p95, 2);
+    if sm.p99 != NO_P99 {
+        t.push_str(", p99 ");
+        t.push_f64_prec(sm.p99, 2);
+    }
+    t.push_str(", max ");
+    t.push_f64_prec(samples[samples.len() - 1], 2);
+    t.push_str(" (");
+    t.push_u64(sm.n as u64);
+    t.push_str(" samples)");
+    return t;
+}
+
 /// One benchmark's driver: the loop condition, the clock, the counters and the samples it collects. The
 /// runner makes one per `@bench` function; a benchmark only ever calls the methods below.
 @no_const
@@ -218,6 +245,14 @@ extend Bencher {
     /// Appended verbatim after the timings.
     pub fn note(self: &mut Self, s: str) {
         self.extra.clear();
+        self.extra.push_str(s);
+    }
+
+    /// Append to the note, after what is already there.
+    pub fn note_more(self: &mut Self, s: str) {
+        if self.extra.len() != 0 {
+            self.extra.push_str("; ");
+        }
         self.extra.push_str(s);
     }
 

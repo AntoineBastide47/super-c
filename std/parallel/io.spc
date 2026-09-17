@@ -624,6 +624,10 @@ fn reactor_main(arg: *mut void) *mut void {
             // Every task that can still reach this reactor has recorded an I/O wait: none left means
             // nothing more will be pushed (see `wait_until` for the order that makes this sound).
             if runtime::tasks_waiting(runtime::WK_IO) == 0 && atomic::load_i32(&mut unsafe G_CLOSERS, 4) == 0 {
+                // A closer counts out after its report is pushed, and one that counts in from here on finds
+                // the reactor stopping and reports nothing: what the list holds now is all it will hold.
+                drain_commands(r, &mut b);
+                batch_flush(r, &mut b);
                 break;
             }
         }

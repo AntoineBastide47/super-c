@@ -118,6 +118,10 @@ pub struct Lowerer {
     // Per-body cache of the check-eligibility test (cancel pass ran, sugar items present, owner on
     // a coroutine stack, not the runtime module): 0 uncomputed, 1 off, 2 on.
     chk_on: u8,
+    // The runtime's `cancel_after_wait`, resolved with the cache above: a call to it never carries a
+    // check (see `maybe_cancel_check`).
+    chk_caw_m: ModuleId,
+    chk_caw_n: NodeId,
     // Combined-safepoint ladder sharing: sibling loops with the same live scope state jump to one
     // ladder block instead of each emitting their own defers-then-deads sequence.
     sp_ladder_b: u32, // 0xFFFFFFFF = none cached
@@ -274,6 +278,8 @@ extend Lowerer {
             chk_root: NODE_NONE,
             chk_base: 0,
             chk_on: 0,
+            chk_caw_m: 0,
+            chk_caw_n: NODE_NONE,
             sp_ladder_b: 0xFFFFFFFFu32,
             sp_ladder_locals: Vector::<ir::LocalId>::new(),
             sp_ladder_defers: Vector::<NodeId>::new(),
@@ -4960,6 +4966,12 @@ extend Lowerer {
                     let osp = unsafe (&*pk.module_ast_const(ow.module)).at_const(ow.node).span;
                     if pk.co_on(ow.module, osp) && pk.modules.at(ow.module as usize).path.as_str() != "std::parallel::runtime" {
                         self.chk_on = 2;
+                        let rt = pk.find("std::parallel::runtime");
+                        if rt >= 0 {
+                            let caw = pk.glob_lookup(rt as ModuleId, "cancel_after_wait", false);
+                            self.chk_caw_m = caw.mid;
+                            self.chk_caw_n = caw.node;
+                        }
                     }
                 }
             }
@@ -4998,6 +5010,14 @@ extend Lowerer {
         }
         if !pk.cancel_on(target.module, ta.at_const(target.node).span) {
             return; // this callee can never accept a cancellation
+        }
+        if target.node == self.chk_caw_n && target.module == self.chk_caw_m {
+            // The acceptance call of a primitive's own wait cleanup: it reports through its result so
+            // the primitive can finish removing its registrations and hand back the value it waited
+            // with, and the edge belongs after the PRIMITIVE, at its caller's check. A check here
+            // unwound the primitive mid-cleanup: a channel's unsent payload leaked on every target
+            // whose reachability analysis marks the primitive.
+            return;
         }
         let probe = pk.sugar_item(loader::SugarItem::SI_CANCEL_PROBE);
         let lbegin = pk.sugar_item(loader::SugarItem::SI_CANCEL_LBEGIN);

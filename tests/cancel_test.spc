@@ -561,6 +561,49 @@ fn rwlock_write_c_cancel_restores_writer_count(fx: &mut Base) {
     assert_eq(afters(), 0);
 }
 
+// A primitive of the user's own, generic in its value: it waits masked, accepts the request that arrived
+// meanwhile through `cancel_after_wait`, and hands the value back. The acceptance call carries no
+// compiled edge of its own (it reports through its result), so the value reaches the caller, whose edge
+// frees it exactly once. With an edge after the acceptance the primitive unwound instead, and a generic
+// value it still held was never freed.
+fn hand_back<T>(v: T) Option<T> {
+    rt::cancel_mask_enter();
+    // Masked until the request has arrived: a fixed sleep let a slow requester find the task finished.
+    let deadline = platform::now_ns() + 5000000000;
+    while !rt::cancel_requested() && platform::now_ns() < deadline {
+        time::sleep(time::Duration::from_millis(1));
+    }
+    rt::cancel_mask_exit();
+    let _ = rt::cancel_after_wait(true);
+    return Option::<T>::Some(v);
+}
+
+@test
+fn acceptance_inside_a_primitive_hands_its_value_back(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
+    let ktx = kch.sender();
+    let krx = kch.receiver();
+    let done = sync::WaitGroup::new();
+    done.add(1);
+    let d2 = done.clone();
+    launch || {
+        defer finish(&d2);
+        let _ = ktx.send(rt::current_key());
+        let _got = hand_back::<Payload>(Payload { n: 3 });
+        after_mark();
+    };
+    let key = krx.recv().unwrap();
+    time::sleep(short());
+    assert(rt::request_cancel(key, rt::CR_USER), "the masked waiter is live");
+    assert(done.wait_timeout(time::Duration::from_secs(5)), "the cancelled task finishes");
+    assert_eq(frees(), 1);
+    assert_eq(unwounds(), 1);
+    assert_eq(afters(), 0);
+    rt::shutdown();
+    assert_eq(cancelled(fx), 1);
+}
+
 // --- blocking pool: heap-owned results and abandonment ------------------------------------------------.
 
 @test

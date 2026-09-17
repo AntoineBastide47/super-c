@@ -41,7 +41,11 @@ body arena's child array. The accessors (`at`, `at_const`, `list`, `type_of`, `s
 `resolution_def`, `set_resolution_def`, `type_args`, `dyn_use_at`, `deref_use_at`)
 dispatch on the bit; the body arena owns its own `types`, `resolutions`, `mono_at`,
 `dyn_at` and `deref_at` tables so a release frees them too. Both arenas are `SplitVec`s:
-`freeze_nodes` / `freeze_resolutions` pin both before a parallel stage appends.
+`freeze_nodes` / `freeze_resolutions` pin both before a parallel stage appends, and
+`thaw_nodes` / `thaw_resolutions` fold the spill back once the stage has joined. Every
+stage thaws exactly what it pinned, all four node arrays included: a pin of a still-frozen
+array would move its split under the entries a lowering spilled past it, so `freeze`
+refuses one.
 
 The parser routes through `Ast.sink_body`: `parse_function` turns it on for a releasable
 body (the `pinned` argument, the `pin_scope` of an interface or generic extend, and the

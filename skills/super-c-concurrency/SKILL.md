@@ -305,9 +305,51 @@ let got = blocking::call(fn() i64 {
 `@blocking` sits on the extern **function declaration** (inside the block, one per
 function) and is rejected on variadics. `blocking::call<F: fn move() T + Send, T>` runs
 the closure on a **separate blocking pool** while the calling coroutine parks. Use for C
-library calls that block their OS thread. The blocking pool has its own
-`blocking::shutdown()` — call it before `runtime::shutdown()` or its threads' state is
-reported as leaked under `SC_LEAK_CHECK`.
+library calls that block their OS thread.
+
+**Blocking-pool contract** (`std/parallel/blocking.spc`). A `call` and a `@blocking`
+call are not cancellable: their whole record (queue link, closure, result) lives in the
+caller's frame and costs no allocation, and the pool thread's wake of the caller is its
+last touch of that frame. `call_c` is a cancellation point: its record is heap-owned and
+reference-counted (recycled within `CACHE_BUDGET` bytes), a cancellation abandons the
+task's side without stopping the body, and whichever side ends with the value destroys
+it exactly once; the task unwinds from the call as from any cancelled wait. From a plain
+thread every form blocks for the value; from a pool thread (a body that calls again) the
+body runs in place, so a saturated pool never waits on itself. Bounds: at most
+`MAX_THREADS` threads exist, creation reservations included (reserve under the lock,
+create outside it, publish the handle before the thread takes work); at most
+`MAX_PENDING` accepted calls wait for a thread, past which a coroutine parks for
+admission on a node in its own frame and a plain thread blocks. Ordering across workers
+is not FIFO. Idle threads exit after `set_idle_ns` (ten seconds by default), announce
+their handle first, and are joined at the next creation or at shutdown. The queue is a
+spinlock, idle threads park on their own word, and one thread spins for the next job
+with an adaptive budget: a stream of short calls costs no thread wake. A thread counts
+itself out of a call and, with no spinner, becomes it BEFORE the caller is woken, so a
+caller that calls again at once is covered instead of reserving a creation. `stats()`
+reads the counters under the lock.
+
+**Shutdown.** `try_shutdown(grace_ns)` closes the pool (a call made while it closes,
+and every admission waiter, runs on its caller's own thread), drains accepted work and
+joins announced exits until the deadline, and reports `{queued, running, threads,
+released}`. What remains keeps its records, handles and the pool; an expired deadline
+never means a foreign call stopped; a late completion still settles its caller; a later
+attempt finishes the drain. `shutdown()` is `try_shutdown(SHUTDOWN_GRACE_NS)` and aborts
+when the pool is not released. Call it before `runtime::shutdown()`: a task parked in a
+call keeps its stack until the call returns, which the scheduler's own bounded shutdown
+reports rather than frees, and pool threads left running are reported as leaked under
+`SC_LEAK_CHECK`.
+
+**In-place execution was measured and rejected.** Moving the scheduling role off the
+calling worker's OS thread (a replacement worker per blocking call, a permit to take
+back before returning to compute) costs at least one thread wake in each direction, the
+same floor as the hand-off it would replace, plus queue ownership transfer, TLS
+restoration, sanitizer fiber state and cancellation masking per call. The hand-off's
+own cost is the thread wake, not the records: with zero allocations per call the
+round trip is bounded by the wake, and a spinning pool thread already removes that wake
+for a stream of calls. Keep the pool. The measured residue is on the scheduler side:
+pool threads' wakes reach workers through the injection queue one at a time, so under a
+mixed compute-and-call load workers take one task per injection lock instead of a
+share; that is the queue's take policy, not the pool.
 
 ## Task Diagnostics
 
@@ -358,6 +400,24 @@ Registration contract (`CancelToken::bind_current`, documented at the top of
 
 Lock order: a source lock is taken alone and never held across a request or a task's
 cleanup. A key-based request takes only the registry slot lock.
+
+**Compiled cancellation edges.** After a statement-root call whose callee can reach the
+runtime's acceptance, a task-reachable body outside `std::parallel::runtime` probes for an
+accepted cancellation and, on one, runs its cleanup ladder and returns a poison value its
+caller never reads. Two calls never carry an edge of their own: an unpinned fn-value or
+`dyn` callee (cancellation is masked across it), and `runtime::cancel_after_wait` itself.
+That function is how a primitive's wait cleanup accepts the request; it reports through
+its result so the primitive finishes removing its registrations and hands back the value
+it waited with, and the edge fires after the primitive, at its caller. A probe placed
+right after it unwound the primitive mid-cleanup and leaked a channel's unsent payload.
+Whether a body is task-reachable comes from a whole-package analysis that turns
+conservative (every body probes) when it meets a callee it cannot pin; targets differ
+here, so a probe that is absent on one target may be present on another.
+
+Known gap: in a generic body an unbounded `T` is not an owning type, so a `T` value a
+path does not consume is never dropped in an instance with an owning argument (a
+never-moved `T` parameter, `Option::unwrap_or`'s unused default). Bound it with `Free`
+where a drop is required.
 
 Timed waits live in one indexed binary min-heap under the scheduler lock, ordered by
 (deadline, arm sequence): arming and disarming are logarithmic, the earliest deadline is

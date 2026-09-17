@@ -1297,28 +1297,26 @@ extend InstGraph {
 
     fn expand_closures(self: &mut Self, cls: &Vector<NodeId>, m: ModuleId, frame: &Vector<Subst>) {
         let a = unsafe &*(&*self.pkg).module_ast_const(m);
+        // A worklist to any depth: every closure a kept body holds is walked, and the closures IT
+        // holds join the list, so a closure nested three deep is demanded here like its parents
+        // (the emitter lowers what the graph never demanded from scratch, after the body arena is
+        // gone). Bounded by the closure nodes of the body. Raw borrow: walk_body never touches
+        // `kept`, but body_idx can grow it, so the nested ids are copied out first.
+        let mut work = Vector::<NodeId>::new();
         for c in 0..cls.len() {
-            let ci = self.body_idx(m, cls[c], true);
+            work.push(cls[c]);
+        }
+        let mut i: usize = 0;
+        while i < work.len() {
+            let ci = self.body_idx(m, work[i], true);
+            i += 1;
             if ci < 0 {
                 continue;
             }
-            // Nested closures append to the cached lowering's list; one level at a time keeps
-            // this bounded. Raw borrow: walk_body never touches `kept`, but body_idx below can
-            // grow it, so the nested ids are copied out first.
             self.walk_kept(ci, a, frame);
-            let mut nested = Vector::<NodeId>::new();
-            {
-                let bp = self.kept.at(ci as usize) as *const irl::Lowerer;
-                for c2 in 0..(unsafe &*bp).closures.len() {
-                    nested.push((unsafe &*bp).closures[c2]);
-                }
-            }
-            for c2 in 0..nested.len() {
-                let ci2 = self.body_idx(m, nested[c2], true);
-                if ci2 < 0 {
-                    continue;
-                }
-                self.walk_kept(ci2, a, frame);
+            let bp = self.kept.at(ci as usize) as *const irl::Lowerer;
+            for c2 in 0..(unsafe &*bp).closures.len() {
+                work.push((unsafe &*bp).closures[c2]);
             }
         }
     }

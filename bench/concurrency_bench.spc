@@ -23,6 +23,7 @@ import std::parallel::sync as sync;
 import std::parallel::blocking as blocking;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
+import std::parallel::platform as platform;
 import std::testing::bench as bench;
 import driver_shim as dshim;
 
@@ -70,12 +71,20 @@ fn io_short_unit() i64 {
     };
 }
 
-fn io_short_task() i64 {
-    return blocking::call(
+type LatSink = arc::Arc<sync::Mutex<Vector<f64>>>;
+
+// One short call through the pool, its round trip in microseconds pushed to `lat`.
+fn io_short_task(lat: &LatSink) i64 {
+    let t0 = platform::now_ns();
+    let ok = blocking::call(
         fn() i64 {
             return io_short_unit();
         },
     );
+    let us = (platform::now_ns() - t0) as f64 / 1000.0;
+    let mut g = lat.get().lock();
+    g.get_mut().push(us);
+    return ok;
 }
 
 // Durability, matching what the compared lanes' standard libraries do. On macOS `fsync` only pushes to the
@@ -148,13 +157,14 @@ fn io_durable_unit(id: i64) i64 {
 
 // One round: spawn `tasks` tasks, `io_share` out of every 4 doing the short syscall (0 = none, 4 = all,
 // 2 = half), wait for all of them, and report how many validated their work.
-fn one_round(tasks: i64, io_share: i64, durable_lane: bool) i64 {
+fn one_round(tasks: i64, io_share: i64, durable_lane: bool, lat: &LatSink) i64 {
     let wg = sync::WaitGroup::new();
     wg.add(tasks);
     let oks = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
     for i in 0..tasks {
         let w = wg.clone();
         let o = oks.clone();
+        let k = lat.clone();
         let does_io = i % 4 < io_share;
         let id = i;
         launch || {
@@ -165,7 +175,7 @@ fn one_round(tasks: i64, io_share: i64, durable_lane: bool) i64 {
                     },
                 );
             } else if does_io {
-                io_short_task();
+                io_short_task(&k);
             } else {
                 compute_task(YIELDS);
             };
@@ -177,12 +187,41 @@ fn one_round(tasks: i64, io_share: i64, durable_lane: bool) i64 {
     return oks.get().load(atomics::MemoryOrder::Acquire);
 }
 
+fn lat_sink(cap: usize) LatSink {
+    return arc::Arc::<sync::Mutex<Vector<f64>>>::new(sync::Mutex::<Vector<f64>>::new(Vector::<f64>::with_capacity(cap)));
+}
+
+// The blocking pool's high-water marks over the lane: threads at once, calls waiting at once, admission
+// waits, and the record bytes it retains; then the lane's per-call latency distribution, if it kept one.
+fn pool_note(b: &mut bench::Bencher, lat: &LatSink) {
+    let st = blocking::stats();
+    let mut note = String::from_str("pool: peak ");
+    note.push_u64(st.peak_threads as u64);
+    note.push_str(" of ");
+    note.push_u64(blocking::MAX_THREADS as u64);
+    note.push_str(" threads, peak ");
+    note.push_u64(st.peak_queued as u64);
+    note.push_str(" queued, ");
+    note.push_u64(st.admit_waits as u64);
+    note.push_str(" admission waits, ");
+    note.push_u64(st.cache_bytes as u64);
+    note.push_str(" B of records retained");
+    b.note(note.as_str());
+    let mut g = lat.get().lock();
+    let t = bench::dist_text("call latency", "us", g.get_mut());
+    b.note_more(t.as_str());
+}
+
 fn run_lane(b: &mut bench::Bencher, io_share: i64) {
     b.each(TASKS);
     b.unit("task");
+    let lat = lat_sink(110 * TASKS as usize);
     while b.running() {
-        let ok = one_round(TASKS, io_share, false);
+        let ok = one_round(TASKS, io_share, false, &lat);
         b.tally(TASKS, ok);
+    }
+    if io_share != 0 {
+        pool_note(b, &lat);
     }
 }
 
@@ -222,9 +261,11 @@ pub fn io_durable(b: &mut bench::Bencher) {
     note.push_u64(blocking::MAX_THREADS as u64);
     note.push_str(" blocking threads");
     b.note(note.as_str());
+    let lat = lat_sink(0);
     while b.running() {
-        let ok = one_round(DURABLE_TASKS, 4, true);
+        let ok = one_round(DURABLE_TASKS, 4, true, &lat);
         b.tally(DURABLE_TASKS, ok);
     }
+    pool_note(b, &lat);
     dir_teardown();
 }

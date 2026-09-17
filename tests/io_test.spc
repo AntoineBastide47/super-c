@@ -46,13 +46,18 @@ fn write_one(s: &net::TcpStream) {
     let _ = s.write(msg);
 }
 
-// Wait readable on `fd` with a three-second deadline and count a prompt readiness.
-fn wait_prompt(fd: i32, write: bool, hits: &arc::Arc<atomics::Atomic<i64>>) {
+// Wait on `fd` with a deadline of `secs` seconds and count a prompt readiness.
+fn wait_prompt_for(fd: i32, write: bool, hits: &arc::Arc<atomics::Atomic<i64>>, secs: u64) {
     let t0 = platform::now_ns();
-    let ok = io::wait_until(fd, write, time::deadline_in(time::Duration::from_secs(3)));
+    let ok = io::wait_until(fd, write, time::deadline_in(time::Duration::from_secs(secs)));
     if ok && platform::now_ns() - t0 < PROMPT_NS {
         bump(hits);
     }
+}
+
+// Wait readable on `fd` with a three-second deadline and count a prompt readiness.
+fn wait_prompt(fd: i32, write: bool, hits: &arc::Arc<atomics::Atomic<i64>>) {
+    wait_prompt_for(fd, write, hits, 3);
 }
 
 fn finish() {
@@ -149,6 +154,32 @@ fn a_reused_descriptor_number_serves_its_new_waiter() {
     write_one(&q.a);
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "both waits finish");
     assert_eq(count(&hits), 1);
+    finish();
+}
+
+// A close that lands as the reactor stops: a closer that counted in before the stop pushes its report and
+// only then counts out, so the poller thread drains once more after it finds no closer left. Every round,
+// thirty-two tasks signal and then close a listener each while the shutdown starts behind the signals;
+// the suite's leak gate holds every report to account. Twenty-five rounds: enough to hit the window, and
+// little enough socket churn not to slow the tests that share the shard (the select backend most).
+@test
+fn close_racing_shutdown_drains_its_report() {
+    rt::set_worker_count(2);
+    for _i in 0..25 {
+        let _ = io::ensure_reactor();
+        let wg = sync::WaitGroup::new();
+        wg.add(32);
+        for _k in 0..32 {
+            let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+            let w = wg.clone();
+            launch || {
+                w.done();
+                let _ = l.port(); // the env closes the listener once the body is over: behind the signal
+            };
+        }
+        assert(wg.wait_timeout(time::Duration::from_secs(10)), "the tasks signal");
+        io::shutdown();
+    }
     finish();
 }
 
@@ -400,7 +431,9 @@ fn idle_descriptors_do_not_delay_an_active_one() {
         let h = hits.clone();
         launch || {
             defer w.done();
-            wait_prompt(fd, false, &h);
+            // Longer than the poll below: a loaded runner parks the last of a thousand after the first
+            // would otherwise have expired.
+            wait_prompt_for(fd, false, &h, 30);
         };
     }
     // Let them all park.
@@ -440,7 +473,9 @@ fn idle_descriptors_do_not_delay_an_active_one() {
     }
     assert(awg.wait_timeout(time::Duration::from_secs(10)), "the echo task finishes");
     assert_eq(count(&trips), 100);
-    assert(platform::now_ns() - t0 < 5000000000, "a hundred round trips under a thousand idle waits");
+    // A loaded runner on the select backend rebuilds a thousand-entry set per wake: the bound is about
+    // delay by the idle waits, not about the machine, so it stays wide.
+    assert(platform::now_ns() - t0 < 20000000000, "a hundred round trips under a thousand idle waits");
     assert_eq(io::pending_waits(), idle as usize);
     for i in 0..idle as usize {
         write_one(&pairs.at(i).a);

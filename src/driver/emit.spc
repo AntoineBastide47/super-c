@@ -433,8 +433,7 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
     }
     wg.wait_masked();
     for i in 0..n {
-        p.modules[i].ast.nodes.thaw();
-        p.modules[i].ast.children.thaw();
+        p.modules[i].ast.thaw_nodes(); // all four arrays: a body arena a lowering spilled into included
     }
     let mut edges = Vector::<u64>::new();
     for i in 0..n {
