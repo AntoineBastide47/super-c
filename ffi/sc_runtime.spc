@@ -62,6 +62,10 @@ extern "C" "sc_rt.h" {
     /// One 64-byte static bucket of the mutex parking lot, keyed by the lock's address. Static so a waker
     /// may touch it after the mutex itself was freed; the queue discipline lives in std/parallel/sync.spc.
     pub fn sc_rt_lot_bucket(addr: *mut void) *mut void;
+    /// Bytes the parking lot retains per thread that has parked at least once.
+    pub fn sc_rt_park_bytes_per_thread() usize;
+    /// Bytes the parking lot retains for the process, whatever the thread count.
+    pub fn sc_rt_park_bytes_fixed() usize;
     /// Record `lock` as held by this thread (lock-order checking builds only).
     pub fn sc_rt_lockdep_acquire(lock: *mut void) void;
     /// Record `lock` as released.

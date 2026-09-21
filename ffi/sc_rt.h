@@ -27,7 +27,10 @@ void *sc_rt_tls_get(void);
 /* Address-based parking on a 32-bit word, futex-style. `sc_rt_park` blocks while `*word == expected`, until
    an `sc_rt_unpark_*` on the same address or (for timeout_ns >= 0) the deadline; timeout_ns < 0 waits
    forever. Wakeups may be spurious -- re-check your own condition in a loop. The unparker must publish the
-   new state to `*word` before unparking. */
+   new state to `*word` before unparking, and an unpark reads nothing through the address: the word may be
+   in a frame the waiter has already left. An unpark wakes only threads parked on that address (one, or all
+   of them), never a thread parked on another word; on POSIX each parked thread is a record in a static
+   bucket naming a per-thread parker retained for the thread's lifetime. */
 void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns);
 void sc_rt_unpark_one(int32_t *word);
 void sc_rt_unpark_all(int32_t *word);
@@ -56,6 +59,13 @@ void sc_rt_spin_unlock(int32_t *word);
    mutex whose waiters it queues has been freed, so the queues must live somewhere that outlives every lock.
    The queue layout and discipline belong to std/parallel/sync.spc; this only hands out the slot. */
 void *sc_rt_lot_bucket(void *addr);
+
+/* What the address-based parking lot retains: bytes per thread that has parked at least once (its own
+   parker, held for the thread's life so a waker can always reach it), and the fixed bytes of the bucket
+   table. Zero on a backend whose wait needs no records of its own (Windows WaitOnAddress). Wait records
+   live in the parking thread's frame and retain nothing. */
+size_t sc_rt_park_bytes_per_thread(void);
+size_t sc_rt_park_bytes_fixed(void);
 
 /* Lock-order tracking, off unless SC_LOCK_ORDER is set (=fatal aborts on the first inversion). `acquire`
    after a lock is taken, `release` before it is given up, `forget` when it is destroyed. See sc_rt.c. */

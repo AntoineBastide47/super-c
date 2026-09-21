@@ -98,7 +98,7 @@ worker) instead of blocking the OS thread.
 |-----------|-------------|
 | `Mutex<T>` | Exclusive lock with RAII guard |
 | `RwLock<T>` | Reader-writer lock with RAII guards |
-| `Condvar` | Condition variable (coroutines park, plain threads `pthread_cond_wait`) |
+| `Condvar` | Condition variable (both kinds of waiter queue a node in their own frame) |
 | `Once` | One-time initialization |
 | `WaitGroup` | Counter-based barrier |
 | `Barrier` | Fixed-count synchronization point |
@@ -107,6 +107,25 @@ worker) instead of blocking the OS thread.
 Timed forms: `acquire_timeout`, `wait_timeout`, `Condvar::wait_until`. `time::sleep`
 parks on the scheduler's timer heap (`import std::parallel::time as time;`,
 `time::Duration::from_secs`/`from_millis`).
+
+**Waiting costs no allocation, and neither does a primitive.** A `Mutex<T>` holds its lock
+word inline and a `Condvar` holds its wait queue inline, so constructing either allocates
+nothing; a value may therefore not move while a waiter is queued against it, which nothing
+can do, since a waiter only exists once a second thread shares the value through a pointer.
+Every wait is a node in the waiter's own frame, queued under the paired mutex and unlinked
+by its owner before that frame ends. A coroutine's node carries its park token; a plain
+thread's node carries the address of a wake word in the same frame. A notify claims one
+node under the mutex and wakes it, and passes the wake to the next node when it finds a
+wait already over (a deadline or a cancellation got there first), so a wake is never
+spent on a waiter that cannot use it. `sync_stats()` returns lock, wait and wake counters
+when `SYNC_STATS` in `std/parallel/sync.spc` is true, and zeros otherwise.
+
+Parking an OS thread retains a little: on POSIX, one parker (a mutex, a condvar and a
+flag) per thread that has parked at least once, held for that thread's life so a waker
+can always reach it, plus a fixed bucket table. `sc_rt_park_bytes_per_thread()` and
+`sc_rt_park_bytes_fixed()` report both (120 B and 4 KiB on macOS arm64, against about
+16 KiB of resident stack per thread). Windows parks through `WaitOnAddress` and retains
+nothing. Wait records themselves live in the parking frame and are not retained.
 
 Method calls auto-deref through the guard (`guard.push(42)`); deref-assignment goes
 through `.get_mut()` (`*guard.get_mut() = v` — plain `*guard = v` is rejected), and any
@@ -149,6 +168,17 @@ while let Some(val) = rx.recv() {           // Option<T>: None once closed and d
   when the last handle of either side drops.
 - Import: `import std::parallel::channel as chan;` (or `as *` for unqualified names).
 
+**A channel is one allocation.** The handle count, the state lock, the ring state, both
+wait queues and the ring itself live in one block that the last handle out releases;
+handles are counted atomically like an `Arc`. An unbounded channel starts on that inline
+ring and moves to a heap ring when it outgrows it (doubling); a zero-sized payload has no
+ring at all. An operation on a live channel allocates nothing, waits included.
+
+**Batches wake what they can use.** `send_batch` and `recv_batch` take the lock once per
+run and then wake at most as many waiters as the run delivered items or freed slots,
+rather than broadcasting: each item admits one waiter, and any further wake would only
+queue again. A batch that hits a closed channel, loses its last peer or is cancelled
+leaves its remainder in the caller's vector, in the original order.
 ## select
 
 Arms are separated by newlines (no commas). An arm operation is `ch.recv()`,
@@ -177,6 +207,13 @@ select {
 parked. A `default` arm fires immediately when nothing is ready — a `select` cannot have
 both a `timeout` and a `default` arm. A closed channel makes its recv arm ready
 (yielding `None`).
+
+A wait registers one node per arm under every arm's lock (taken in address order, so two
+selectors sharing channels cannot deadlock and one channel armed twice is locked once),
+then waits ONCE: a coroutine parks under a single wake token, and a plain thread sleeps on
+a single wake word in the same frame that every one of its nodes names. Neither polls. The
+notify that wins names its arm, and that arm is retried first; the losing nodes are
+unlinked in the same lock order before the frame ends.
 
 ## Data Parallelism
 

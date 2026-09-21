@@ -3109,9 +3109,8 @@ pub fn sleep_ns(ns: i64) {
     let co = current();
     if co == null {
         // A plain thread about to stop making progress is exactly when replay mode must hand the pool the
-        // CPU. Not a nicety: `select` on a plain thread waits by POLLING through here rather than on a
-        // condvar, so without this the gate stays shut, whatever the select is waiting for never runs, and
-        // the wait times out: a program that behaves differently under replay, which defeats the point.
+        // CPU: without this the gate stays shut, whatever the sleeper waits for never runs, and a timed
+        // wait times out: a program that behaves differently under replay, which defeats the point.
         replay_release();
         unsafe sc_runtime::sc_rt_sleep_ns(ns);
         return;

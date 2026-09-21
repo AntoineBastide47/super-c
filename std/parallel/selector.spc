@@ -1,8 +1,10 @@
 // Wait on several channel operations at once. Import with `import std::parallel::selector;`.
 //
-// `recv_timeout` in a loop polls; this parks. A `Selector` registers a wait node on EVERY armed channel's
-// queue under one wake token, parks once, and the first channel to notify wins the token, so a task
-// waiting on four channels costs one park, not four, and wakes the instant any of them moves.
+// `recv_timeout` in a loop polls; this waits. A `Selector` registers a wait node on EVERY armed channel's
+// queue, all sharing one wake, and waits once: a coroutine parks under a single token, and any other
+// thread sleeps on a single word in the same frame that each of its nodes names. The first channel to
+// notify wins, so waiting on four channels costs one wait, not four, and ends the instant any of them
+// moves. Nothing here polls, and the wait nodes cost no allocation.
 //
 // It reports WHICH arm is ready, not the value: the arm indices `arm_recv`/`arm_send` hand back identify
 // the operation, and the caller performs it with `try_recv`/`try_send`. That is what lets one selector mix
@@ -22,12 +24,13 @@
 // Fairness has two halves. When several arms are ready at once there is no notion of which became ready
 // first (nothing records it, and recording it would cost an atomic on the channel send path) so one is
 // picked uniformly at random, which is what keeps a busy arm from starving a quiet one. When nothing is
-// ready the selector parks, and then the order IS observable: the notify that wins the wake token names its
+// ready the selector waits, and then the order IS observable: the notify that wins the wake names its
 // arm, and that arm is retried first.
 //
 // A selector borrows its endpoints: it holds their addresses, so it must not outlive them. Arm the ones a
 // single wait needs, wait, act, and let it go.
 
+import atomic;
 import std::parallel::sync as sync;
 import std::parallel::channel as channel;
 import std::parallel::runtime as runtime;
@@ -36,11 +39,6 @@ import std::parallel::platform as platform;
 
 /// The most operations one selector can wait on.
 pub const MAX_ARMS: usize = 16;
-
-// How long a plain (non-coroutine) thread sleeps between re-checks. It cannot park on several queues at
-// once (that needs a coroutine's single wake token) so it polls; short enough to stay responsive,
-// long enough not to spin. Coroutines never take this path.
-const POLL_SLICE_NS: i64 = 200000;
 
 /// The outcome of a wait: the arm index that is ready, or nothing; the deadline passed, or `poll` found
 /// no ready arm.
@@ -102,7 +100,7 @@ extend Selector {
             ready: no_arm,
             raw: null,
             cv: null,
-            w: sync::Waiter { co: null, token: 0, arm: 0, next: null, claim: null },
+            w: sync::Waiter { co: null, token: 0, arm: 0, next: null, claim: null, os: null },
         };
         return Selector {
             arms: [empty; MAX_ARMS],
@@ -179,7 +177,9 @@ extend Selector {
     // One pass over the arms: the arm a notify named (first-notify-wins, for a wait that parked), else a
     // uniform pick among everything ready (fair, for a wait that never had to park).
     fn ready_now(self: &mut Selector) Selected {
-        let hint = self.woken;
+        // Atomic, as the notifies that write it are (see `sync::publish_arm`); every one of them landed under
+        // an arm lock this task has since taken and released.
+        let hint = atomic::load_i32(&mut self.woken, 0);
         self.woken = -1;
         if hint >= 0 && hint < self.n as i32 && self.arm_ready(hint as usize) {
             return Selected::Ready(hint as usize);
@@ -213,28 +213,22 @@ extend Selector {
         unsafe sync::raw_mutex_unlock(raw);
         return r;
     }
-    // Park until some arm moves, returning the winning wake reason (`WR_NONE` when it never parked).
+    // Wait until some arm moves, returning the winning wake reason (`WR_NONE` when it never waited).
     // Takes every channel lock, re-checks readiness under them (a value that arrived since `ready_now`
-    // must not be missed: with no node queued yet, its notify would be lost), queues one node per arm
-    // under a single wake token, and parks; the hand-off releases the locks.
+    // must not be missed: with no node queued yet, its notify would be lost), queues one node per arm and
+    // waits once: a coroutine parks under a single wake token and the hand-off releases the locks; a plain
+    // thread releases them itself and sleeps on one wake word in this frame that every node names, so the
+    // first arm to notify ends the sleep. Either way the first notify wins and the rest find the wait over.
     fn block(self: &mut Selector, deadline: u64) u32 {
-        let co = runtime::current();
-        if co == null || self.n == 0 {
-            // A plain thread has no wake token to share across queues, so it re-checks on a timer instead.
+        if self.n == 0 {
             // With no arms at all there is nothing to be woken BY, and an unbounded wait would never end.
-            if self.n == 0 && deadline == 0 {
+            if deadline == 0 {
                 panic("select: waiting on no arms with no deadline");
             }
-            let mut ns = POLL_SLICE_NS;
-            if deadline != 0 {
-                let left = time::remaining_ns(deadline) as i64;
-                if left < ns {
-                    ns = left;
-                }
-            }
-            runtime::sleep_ns(ns);
+            runtime::sleep_ns(time::remaining_ns(deadline) as i64);
             return runtime::WR_NONE;
         }
+        let co = runtime::current();
         self.lock_all();
         for i in 0..self.n {
             let f = unsafe self.arms[i].ready;
@@ -243,22 +237,40 @@ extend Selector {
                 return runtime::WR_NONE;
             }
         }
-        runtime::wait_note(runtime::WK_SELECT, self as usize);
+        let mut token: u32 = 0;
+        if co != null {
+            runtime::wait_note(runtime::WK_SELECT, self as usize);
+            // AFTER lock_all: a contended `raw_mutex_lock` parks, and that park would take a token of its
+            // own, leaving ours stale and unwakeable.
+            token = runtime::park_begin(co);
+        }
         self.woken = -1;
         let claim = &mut self.woken;
-        // AFTER lock_all: a contended `raw_mutex_lock` parks, and that park would take a token of its own,
-        // leaving ours stale and unwakeable.
-        let token = runtime::park_begin(co);
+        let mut word: i32 = 0;
         for i in 0..self.n {
-            unsafe self.arms[i].w = sync::Waiter { co: co, token: token, arm: i as i32, next: null, claim: claim };
+            unsafe self.arms[i].w = sync::Waiter {
+                co: co,
+                token: token,
+                arm: i as i32,
+                next: null,
+                claim: claim,
+                os: &mut word,
+            };
             let cv = unsafe self.arms[i].cv;
             let wp = &mut unsafe self.arms[i].w;
             // Every arm's lock is held: see `lock_all`.
             unsafe cv.register(wp);
         }
-        let mut reason = runtime::park_timed(token, deadline, commit_unlock_all, self, true);
-        if deadline != 0 {
-            runtime::cancel_timer(co); // drop the timer if a notify got here first
+        let mut reason = runtime::WR_NONE;
+        if co != null {
+            reason = runtime::park_timed(token, deadline, commit_unlock_all, self, true);
+            if deadline != 0 {
+                runtime::cancel_timer(co); // drop the timer if a notify got here first
+            }
+        } else {
+            self.unlock_all();
+            runtime::replay_release(); // about to block: in replay mode the pool runs while we do not
+            reason = sync::os_wait(&mut word, deadline);
         }
         // Our nodes outlive the wake: a notify pops only the one it used, and a deadline or a cancel pops
         // none. Every losing arm is unregistered in the stable lock order before anything else happens.
@@ -270,6 +282,10 @@ extend Selector {
             // Unlinked before this frame dies, which is what the node's owner owes.
             unsafe cv.unregister(wp);
             unsafe sync::raw_mutex_unlock(raw);
+        }
+        if co == null {
+            // A plain thread has no task to cancel.
+            return reason;
         }
         runtime::wait_clear();
         runtime::park_done(co);

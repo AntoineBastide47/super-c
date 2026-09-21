@@ -10,9 +10,16 @@
 //
 // Every wait is task-aware, because it goes through `sync::Condvar`: a coroutine parks and its worker moves
 // on to another task, so a program may have far more blocked senders and receivers than worker threads.
+//
+// A channel is ONE allocation: the handle count, the lock, the state, both wait queues and, for a bounded
+// channel, the ring itself share a block that lives until the last handle drops, so the header and the
+// first slots share cache lines and construction costs one `malloc`. An unbounded channel starts on the
+// same inline ring and moves to a heap ring when it outgrows it. A zero-sized payload has no ring at all.
+// Every wait node lives in the waiting task's frame, so an operation allocates nothing.
 
+import atomic;
 import std::parallel::sync as sync;
-import std::parallel::arc as arc;
+import std::parallel::atomics as atomics;
 import std::parallel::time as time;
 import std::parallel::runtime as runtime;
 
@@ -22,6 +29,9 @@ pub enum SendResult<T> {
     Sent,
     Rejected(T),
 }
+
+// The slot count an unbounded channel starts with, on its inline ring.
+const UNBOUNDED_START: usize = 8;
 
 // The mutex-guarded state: a ring buffer of `cap` slots plus the live-handle counts and the closed flag.
 @no_const
@@ -34,6 +44,7 @@ struct ChannelState<T> {
     pub receivers: i64,
     pub closed: bool,
     pub unbounded: bool, // grow the ring instead of making a sender wait
+    pub heap_ring: bool, // `slots` is its own heap block (an unbounded channel that outgrew the inline ring)
 }
 
 extend<T> ChannelState<T> {
@@ -56,22 +67,46 @@ extend<T> ChannelState<T> {
                 self.slots[idx];
             };
         }
-        unsafe g.dealloc(self.slots, self.cap * sizeof(T), alignof(T));
+        if self.heap_ring {
+            unsafe g.dealloc(self.slots, self.cap * sizeof(T), alignof(T));
+        }
         self.slots = ns;
         self.head = 0;
         self.cap = ncap;
+        self.heap_ring = true;
+    }
+    /// Append `value` under the lock; the caller checked there is room (or that the ring may grow). `pub`
+    /// for linkage, like `grow`.
+    pub fn push(self: &mut ChannelState<T>, value: T) {
+        if self.count == self.cap {
+            // Unbounded only: a bounded channel waited for room instead.
+            self.grow();
+        }
+        let idx = (self.head + self.count) % self.cap;
+        unsafe self.slots[idx] = value;
+        self.count = self.count + 1;
+    }
+    /// Take the oldest item under the lock; the caller checked there is one. `pub` for linkage.
+    pub fn pop(self: &mut ChannelState<T>) T {
+        let v = unsafe {
+            self.slots[self.head];
+        };
+        self.head = (self.head + 1) % self.cap;
+        self.count = self.count - 1;
+        return v;
     }
 }
 
 extend<T> ChannelState<T> as Free {
     pub fn free(self: &mut ChannelState<T>) {
-        // Deep-free any items still buffered (no-op if T isn't Free), then release the slot array.
+        // Deep-free any items still buffered (no-op if T isn't Free), then release a heap ring. The inline
+        // ring goes with the block.
         for i in 0..self.count {
             let idx = (self.head + i) % self.cap;
             let vp = (&mut unsafe self.slots[idx]) as *mut T;
             vp.free();
         }
-        if self.slots != null && sizeof(T) != 0 {
+        if self.heap_ring {
             let mut g = Global {};
             unsafe g.dealloc(self.slots, self.cap * sizeof(T), alignof(T));
         }
@@ -79,39 +114,42 @@ extend<T> ChannelState<T> as Free {
     }
 }
 
-// The shared channel: one mutex over the state, plus a condvar for "space freed" and one for "item ready".
-// Holds no raw pointer itself, so its `Free` is auto-derived (freeing the mutex frees the state above).
+// The shared block: the handle count, one mutex over the state, a condvar for "space freed" and one for
+// "item ready", and (for a payload with a size) the inline ring right behind it. Freed by the handle that
+// drops the count to zero; freeing the mutex frees the state, and with it the buffered payloads.
 @no_const
 struct ChannelInner<T> {
+    pub strong: usize, // atomic: live handles, the `Channel` value included
     pub state: sync::Mutex<ChannelState<T>>,
     pub not_full: sync::Condvar,
     pub not_empty: sync::Condvar,
+    pub bytes: usize, // the whole block, for its release
 }
 
 /// A bounded MPMC channel. Create it with `Channel::<T>::bounded(n)`, then hand out `sender()` / `receiver()`
 /// handles. The `Channel` value is only a factory: dropping it does not close the channel (its handles do).
 @no_const
 pub struct Channel<T> {
-    pub inner: arc::Arc<ChannelInner<T>>,
+    pub inner: *mut ChannelInner<T>, // `pub` for linkage (generic methods build handles in the caller's module)
 }
 
 /// A sending endpoint. Cloneable (each clone is another producer); the channel closes for receiving once the
 /// last one is dropped.
 @no_const
 pub struct Sender<T> {
-    pub inner: arc::Arc<ChannelInner<T>>,
+    pub inner: *mut ChannelInner<T>, // `pub` for linkage
 }
 
 /// A receiving endpoint. Cloneable (each clone is another consumer); the channel closes for sending once the
 /// last one is dropped.
 @no_const
 pub struct Receiver<T> {
-    pub inner: arc::Arc<ChannelInner<T>>,
+    pub inner: *mut ChannelInner<T>, // `pub` for linkage
 }
 
 // The endpoints move a `Send` payload between threads, so they are Send + Sync when `T` is Send. Explicit
-// (unsafe) assertions: the `Arc<ChannelInner>` holds a raw slot pointer that would otherwise disqualify
-// them structurally; the mutex makes every access race-free.
+// (unsafe) assertions: the raw block pointer would otherwise disqualify them structurally; the mutex makes
+// every access race-free and the atomic count makes the sharing itself race-free.
 unsafe extend<T: Send> Channel<T> as Send {}
 
 unsafe extend<T: Send> Channel<T> as Sync {}
@@ -124,6 +162,75 @@ unsafe extend<T: Send> Receiver<T> as Send {}
 
 unsafe extend<T: Send> Receiver<T> as Sync {}
 
+// Where the inline ring starts: the header rounded up to the payload's alignment.
+const fn ring_offset<T>() usize {
+    let a = alignof(T);
+    return (sizeof(ChannelInner<T>) + a - 1) / a * a;
+}
+
+// The block's alignment: the header's or the payload's, whichever is larger.
+const fn block_align<T>() usize {
+    if alignof(T) > alignof(ChannelInner<T>) {
+        return alignof(T);
+    }
+    return alignof(ChannelInner<T>);
+}
+
+/// Allocate and initialise a block with a `cap`-slot inline ring and a count of one. `pub` for linkage.
+pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T> {
+    let mut bytes = sizeof(ChannelInner<T>);
+    if sizeof(T) != 0 {
+        bytes = ring_offset::<T>() + cap * sizeof(T);
+    }
+    let mut g = Global {};
+    let p = (unsafe g.alloc(bytes, block_align::<T>())) as *mut ChannelInner<T>;
+    let mut slots = zst_dangling::<T>();
+    if sizeof(T) != 0 {
+        slots = (unsafe (p as *mut u8 + ring_offset::<T>())) as *mut T;
+    }
+    let st = ChannelState::<T> {
+        slots: slots,
+        cap: cap,
+        head: 0,
+        count: 0,
+        senders: 0,
+        receivers: 0,
+        closed: false,
+        unbounded: unbounded,
+        heap_ring: false,
+    };
+    unsafe p[0] = ChannelInner::<T> {
+        strong: 1,
+        state: sync::Mutex::<ChannelState<T>>::new(st),
+        not_full: sync::Condvar::new(),
+        not_empty: sync::Condvar::new(),
+        bytes: bytes,
+    };
+    return p;
+}
+
+/// Another handle to the block: one relaxed increment, as for an `Arc`. `pub` for linkage.
+pub fn retain<T>(p: *mut ChannelInner<T>) *mut ChannelInner<T> {
+    let _ = unsafe atomic::add_usize(&mut p.strong, 1, atomics::MemoryOrder::Relaxed as i32);
+    return p;
+}
+
+/// Drop one handle; the one that observes the count fall to zero frees the state (buffered payloads and a
+/// heap ring included) and the block. AcqRel, as for an `Arc`: the decrement chain orders every handle's
+/// last touch before the free. `pub` for linkage.
+pub fn release<T>(p: *mut ChannelInner<T>) {
+    let prev = unsafe atomic::sub_usize(&mut p.strong, 1, atomics::MemoryOrder::AcqRel as i32);
+    if prev != 1 {
+        return;
+    }
+    let bytes = unsafe p.bytes;
+    // Through a raw pointer, like Box::free: freeing the place directly would move out of a dereference.
+    let sp = (&mut unsafe p.state) as *mut sync::Mutex<ChannelState<T>>;
+    sp.free();
+    let mut g = Global {};
+    unsafe g.dealloc(p, bytes, block_align::<T>());
+}
+
 extend<T> Channel<T> {
     /// A new channel buffering up to `capacity` items (at least one). A `send` into a full buffer waits.
     pub fn bounded(capacity: usize) Channel<T> {
@@ -132,73 +239,55 @@ extend<T> Channel<T> {
         } else {
             capacity;
         };
-        let mut slots = zst_dangling::<T>();
-        if sizeof(T) != 0 {
-            let mut g = Global {};
-            slots = (unsafe g.alloc(cap * sizeof(T), alignof(T))) as *mut T;
-        }
-        let st = ChannelState::<T> {
-            slots: slots,
-            cap: cap,
-            head: 0,
-            count: 0,
-            senders: 0,
-            receivers: 0,
-            closed: false,
-            unbounded: false,
-        };
-        let inner = ChannelInner::<T> {
-            state: sync::Mutex::<ChannelState<T>>::new(st),
-            not_full: sync::Condvar::new(),
-            not_empty: sync::Condvar::new(),
-        };
-        return Channel::<T> { inner: arc::Arc::<ChannelInner<T>>::new(inner) };
+        return Channel::<T> { inner: new_block::<T>(cap, false) };
     }
     /// A new channel with no capacity limit: the ring grows as needed, so `send` never waits. Use it only
     /// when the producers are known to outpace the consumers by a bounded amount: `bounded` is what keeps
     /// a runaway producer from exhausting memory.
     pub fn unbounded() Channel<T> {
-        let ch = Channel::<T>::bounded(8);
-        {
-            let inner = ch.inner.get();
-            let mut g = inner.state.lock();
-            let s = g.get_mut();
-            s.unbounded = true;
-        }
-        return ch;
+        return Channel::<T> { inner: new_block::<T>(UNBOUNDED_START, true) };
+    }
+    /// The shared block. `pub` for linkage; not user-facing.
+    pub fn get(self: &Channel<T>) &ChannelInner<T> {
+        return &unsafe self.inner[0];
     }
     /// A new sending handle.
     pub fn sender(self: &Channel<T>) Sender<T> {
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut g = inner.state.lock();
         let s = g.get_mut();
         s.senders = s.senders + 1;
-        return Sender::<T> { inner: self.inner.clone() };
+        return Sender::<T> { inner: retain(self.inner) };
     }
     /// A new receiving handle.
     pub fn receiver(self: &Channel<T>) Receiver<T> {
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut g = inner.state.lock();
         let s = g.get_mut();
         s.receivers = s.receivers + 1;
-        return Receiver::<T> { inner: self.inner.clone() };
+        return Receiver::<T> { inner: retain(self.inner) };
     }
 }
 
 extend<T> Channel<T> as Free {
     pub fn free(self: &mut Channel<T>) {
-        self.inner.free();
+        release(self.inner);
+        self.inner = null;
     }
 }
 
 extend<T> Sender<T> {
+    /// The shared block. `pub` for linkage; not user-facing.
+    pub fn get(self: &Sender<T>) &ChannelInner<T> {
+        return &unsafe self.inner[0];
+    }
     /// Another producer handle for the same channel.
     pub fn clone(self: &Sender<T>) Sender<T> {
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut g = inner.state.lock();
         let s = g.get_mut();
         s.senders = s.senders + 1;
-        return Sender::<T> { inner: self.inner.clone() };
+        return Sender::<T> { inner: retain(self.inner) };
     }
     /// Wait until there is room, then send `value`. Returns `Rejected(value)` if the channel is closed or has
     /// no receivers left (the value is handed back so the caller keeps ownership).
@@ -213,7 +302,7 @@ extend<T> Sender<T> {
     /// body of `send`/`send_timeout`; also `pub` because a deadline computed once and reused across several
     /// operations is the honest way to bound a whole sequence.
     pub fn send_deadline(self: &Sender<T>, value: T, deadline: u64) SendResult<T> {
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut g = inner.state.lock();
         loop {
             let mut ready = false;
@@ -241,20 +330,13 @@ extend<T> Sender<T> {
                 return SendResult::<T>::Rejected(value);
             }
         }
-        let sm = g.get_mut();
-        if sm.count == sm.cap {
-            // Unbounded only: the wait above is what a bounded channel does instead.
-            sm.grow();
-        }
-        let idx = (sm.head + sm.count) % sm.cap;
-        unsafe sm.slots[idx] = value;
-        sm.count = sm.count + 1;
+        g.get_mut().push(value);
         inner.not_empty.notify_one();
         return SendResult::<T>::Sent;
     }
     /// Send without waiting. Returns `Rejected(value)` if the buffer is full or the channel is closed.
     pub fn try_send(self: &Sender<T>, value: T) SendResult<T> {
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut g = inner.state.lock();
         {
             let s = g.get();
@@ -262,29 +344,25 @@ extend<T> Sender<T> {
                 return SendResult::<T>::Rejected(value);
             }
         }
-        let sm = g.get_mut();
-        if sm.count == sm.cap {
-            sm.grow();
-        }
-        let idx = (sm.head + sm.count) % sm.cap;
-        unsafe sm.slots[idx] = value;
-        sm.count = sm.count + 1;
+        g.get_mut().push(value);
         inner.not_empty.notify_one();
         return SendResult::<T>::Sent;
     }
     /// Send every item in `items`, in order, taking the lock once per run of free slots instead of once per
     /// item; returns how many were sent. `items` is left EMPTY when they all went; when the channel closes or
     /// loses its last receiver part-way, the ones not sent stay in it, in order, so ownership is never lost.
+    /// A cancelled wait for room likewise leaves the remainder in `items`: the run before it was delivered.
     ///
     /// A `send` costs a lock, an unlock and a wake regardless of how big the payload is, so a producer that
     /// already has several items in hand pays that three times over for nothing. Filling the ring under one
     /// acquisition is the entire point of this method; with a batch of 64 it is what a single `send` costs.
+    /// A run of `n` items wakes at most `n` receivers, never every one queued.
     pub fn send_batch(self: &Sender<T>, items: &mut Vector<T>) usize {
         // Reversed, so the next item to send is a `pop` (O(1)) rather than a front removal that shifts
         // everything after it. Reversed back before returning, so a caller left holding a partial batch finds
         // its remainder in the order it passed in.
         items.reverse();
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut sent: usize = 0;
         let mut open = true;
         let mut cancelled = false;
@@ -317,25 +395,15 @@ extend<T> Sender<T> {
                 while !items.is_empty() && (sm.count < sm.cap || sm.unbounded) {
                     switch items.pop() {
                         Some(v) => {
-                            if sm.count == sm.cap {
-                                // Unbounded only, exactly as in `send`.
-                                sm.grow();
-                            }
-                            let idx = (sm.head + sm.count) % sm.cap;
-                            unsafe sm.slots[idx] = v;
-                            sm.count = sm.count + 1;
+                            sm.push(v);
                             n = n + 1;
                         },
                         None => {},
                     };
                 }
                 sent = sent + n;
-                // One item can wake at most one receiver; a run of them can wake as many as it delivered.
-                if n == 1 {
-                    inner.not_empty.notify_one();
-                } else {
-                    inner.not_empty.notify_all();
-                }
+                // Each item delivered can admit one receiver.
+                inner.not_empty.notify_some(n);
             }
         }
         items.reverse();
@@ -343,7 +411,7 @@ extend<T> Sender<T> {
     }
     /// Close the channel: no further sends succeed; buffered items stay readable until drained.
     pub fn close(self: &Sender<T>) {
-        let inner = self.inner.get();
+        let inner = self.get();
         // Notify UNDER the lock: the dual-mode condvar's wait queue is guarded by this mutex.
         let mut g = inner.state.lock();
         let s = g.get_mut();
@@ -355,7 +423,7 @@ extend<T> Sender<T> {
 
 extend<T> Sender<T> as Free {
     pub fn free(self: &mut Sender<T>) {
-        let inner = self.inner.get();
+        let inner = self.get();
         {
             let mut g = inner.state.lock();
             let s = g.get_mut();
@@ -366,18 +434,23 @@ extend<T> Sender<T> as Free {
                 inner.not_empty.notify_all();
             }
         }
-        self.inner.free();
+        release(self.inner);
+        self.inner = null;
     }
 }
 
 extend<T> Receiver<T> {
+    /// The shared block. `pub` for linkage; not user-facing.
+    pub fn get(self: &Receiver<T>) &ChannelInner<T> {
+        return &unsafe self.inner[0];
+    }
     /// Another consumer handle for the same channel.
     pub fn clone(self: &Receiver<T>) Receiver<T> {
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut g = inner.state.lock();
         let s = g.get_mut();
         s.receivers = s.receivers + 1;
-        return Receiver::<T> { inner: self.inner.clone() };
+        return Receiver::<T> { inner: retain(self.inner) };
     }
     /// Wait for an item and take it, or return `None` once the channel is closed (or has no senders left)
     /// and the buffer is drained.
@@ -391,7 +464,7 @@ extend<T> Receiver<T> {
     /// `recv` with an explicit monotonic `deadline` (a `time::deadline_in` value; `0` waits forever). The
     /// body of `recv`/`recv_timeout`; also `pub` so one deadline can bound a whole sequence of operations.
     pub fn recv_deadline(self: &Receiver<T>, deadline: u64) Option<T> {
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut g = inner.state.lock();
         loop {
             let mut ready = false;
@@ -420,18 +493,13 @@ extend<T> Receiver<T> {
                 return Option::<T>::None;
             }
         }
-        let sm = g.get_mut();
-        let v = unsafe {
-            sm.slots[sm.head];
-        };
-        sm.head = (sm.head + 1) % sm.cap;
-        sm.count = sm.count - 1;
+        let v = g.get_mut().pop();
         inner.not_full.notify_one();
         return Option::<T>::Some(v);
     }
     /// Take an item without blocking, or `None` if the buffer is empty (also `None` if closed and empty).
     pub fn try_recv(self: &Receiver<T>) Option<T> {
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut g = inner.state.lock();
         {
             let s = g.get();
@@ -439,28 +507,24 @@ extend<T> Receiver<T> {
                 return Option::<T>::None;
             }
         }
-        let sm = g.get_mut();
-        let v = unsafe {
-            sm.slots[sm.head];
-        };
-        sm.head = (sm.head + 1) % sm.cap;
-        sm.count = sm.count - 1;
+        let v = g.get_mut().pop();
         inner.not_full.notify_one();
         return Option::<T>::Some(v);
     }
     /// Take up to `max` buffered items in ONE lock acquisition, appending them to `out` in order; returns how
     /// many were taken. Waits like `recv` until at least one is there, and returns 0 once the channel is
     /// closed and drained (so a `while recv_batch(..) > 0` loop terminates). `max` of 0 takes nothing and
-    /// never waits.
+    /// never waits. A cancelled wait takes nothing and reports 0.
     ///
     /// The consumer half of `send_batch`, and the same argument: `recv` in a loop pays a lock, an unlock and
     /// a wake for every single item, while draining a run of them pays that once. Use it wherever the
-    /// consumer can work on several items at a time; `recv` remains right for one-at-a-time hand-off.
+    /// consumer can work on several items at a time; `recv` remains right for one-at-a-time hand-off. A run
+    /// of `n` items wakes at most `n` senders, never every one queued.
     pub fn recv_batch(self: &Receiver<T>, out: &mut Vector<T>, max: usize) usize {
         if max == 0 {
             return 0;
         }
-        let inner = self.inner.get();
+        let inner = self.get();
         let mut g = inner.state.lock();
         loop {
             let mut ready = false;
@@ -495,26 +559,17 @@ extend<T> Receiver<T> {
         // One growth for the batch, while the lock is held for as few instructions as possible.
         out.reserve(n);
         for _i in 0..n {
-            let v = unsafe {
-                sm.slots[sm.head];
-            };
-            sm.head = (sm.head + 1) % sm.cap;
-            sm.count = sm.count - 1;
-            out.push(v);
+            out.push(sm.pop());
         }
-        // Every slot freed can admit one blocked sender, so a run of them wakes as many as it freed.
-        if n == 1 {
-            inner.not_full.notify_one();
-        } else {
-            inner.not_full.notify_all();
-        }
+        // Each slot freed can admit one sender.
+        inner.not_full.notify_some(n);
         return n;
     }
 }
 
 extend<T> Receiver<T> as Free {
     pub fn free(self: &mut Receiver<T>) {
-        let inner = self.inner.get();
+        let inner = self.get();
         {
             let mut g = inner.state.lock();
             let s = g.get_mut();
@@ -525,7 +580,8 @@ extend<T> Receiver<T> as Free {
                 inner.not_full.notify_all();
             }
         }
-        self.inner.free();
+        release(self.inner);
+        self.inner = null;
     }
 }
 
@@ -534,17 +590,17 @@ extend<T> Receiver<T> as Free {
 extend<T> Sender<T> as sync::Selectable {
     /// The channel's state lock.
     pub unsafe fn select_lock(self: &Sender<T>) *mut sync::RawMutex {
-        return unsafe self.inner.get().state.raw_handle();
+        return unsafe self.get().state.raw_handle();
     }
     /// The queue a blocked `send` waits on.
     pub unsafe fn select_queue(self: &Sender<T>) *const sync::Condvar {
-        return &self.inner.get().not_full;
+        return &self.get().not_full;
     }
     /// Would `try_send` do something other than wait? A closed or receiver-less channel counts as ready:
     /// `try_send` hands the value straight back rather than blocking.
     pub unsafe fn select_ready(self: &Sender<T>) bool {
         // The selector holds `select_lock` across this call: that is what makes the unlocked read sound.
-        let s = unsafe self.inner.get().state.locked_ref();
+        let s = unsafe self.get().state.locked_ref();
         return s.count < s.cap || s.unbounded || s.closed || s.receivers == 0;
     }
 }
@@ -552,17 +608,17 @@ extend<T> Sender<T> as sync::Selectable {
 extend<T> Receiver<T> as sync::Selectable {
     /// The channel's state lock.
     pub unsafe fn select_lock(self: &Receiver<T>) *mut sync::RawMutex {
-        return unsafe self.inner.get().state.raw_handle();
+        return unsafe self.get().state.raw_handle();
     }
     /// The queue a blocked `recv` waits on.
     pub unsafe fn select_queue(self: &Receiver<T>) *const sync::Condvar {
-        return &self.inner.get().not_empty;
+        return &self.get().not_empty;
     }
     /// Would `try_recv` do something other than wait? A drained channel with no senders left counts as
     /// ready: `recv` returns `None` at once rather than blocking.
     pub unsafe fn select_ready(self: &Receiver<T>) bool {
         // See `Sender::select_ready`: the selector holds the lock across this call.
-        let s = unsafe self.inner.get().state.locked_ref();
+        let s = unsafe self.get().state.locked_ref();
         return s.count > 0 || s.closed || s.senders == 0;
     }
 }

@@ -339,6 +339,9 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
 }
 void sc_rt_unpark_one(int32_t *word) { WakeByAddressSingle(word); }
 void sc_rt_unpark_all(int32_t *word) { WakeByAddressAll(word); }
+/* WaitOnAddress keeps no records of its own, so parking retains nothing here. */
+size_t sc_rt_park_bytes_per_thread(void) { return 0; }
+size_t sc_rt_park_bytes_fixed(void) { return 0; }
 
 #if defined(__x86_64__)
 /* How much of a coroutine stack is committed up front. Windows charges commit against RAM + pagefile the
@@ -836,6 +839,8 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
 }
 void sc_rt_unpark_one(int32_t *word) { (void)word; }
 void sc_rt_unpark_all(int32_t *word) { (void)word; }
+size_t sc_rt_park_bytes_per_thread(void) { return 0; }
+size_t sc_rt_park_bytes_fixed(void) { return 0; }
 
 void *sc_rt_stack_alloc(size_t size) { /* no guard page: wasm has no mprotect */
   if (size == 0 || size % 65536 != 0) return 0;
@@ -972,46 +977,170 @@ void sc_rt_sleep_ns(int64_t ns) {
 
 void sc_rt_thread_yield(void) { sched_yield(); }
 
-/* Parking lot: a fixed set of (mutex, cond) buckets keyed by address hash. Broadcasting on unpark wakes
-   every waiter in the bucket; each re-checks its own word and re-parks if it was not the target. This is
-   the portable POSIX path (no futex / no private macOS ulock syscalls). */
+/* Parking lot: every parked thread is a record in a static bucket (picked by the word's address) naming
+   the word it waits on and the thread's own RETAINED parker (a mutex and condvar in thread-local storage,
+   built once per thread and never freed), so an unpark wakes exactly the threads waiting on that word and
+   no other: the earlier version broadcast a shared per-bucket condvar, and every thread that happened to
+   share the bucket woke, re-checked and slept again. The portable POSIX path (no futex, no private macOS
+   ulock syscalls); Windows has WaitOnAddress, which is this by construction.
+
+   The record lives in the parking thread's frame. It is read only under the bucket's spinlock, and only
+   while linked, by anyone but its owner: an unparker unlinks it under that lock, takes the parker pointer
+   with it, and signals the parker after the lock is released; the owner, once it has stopped sleeping,
+   re-takes the lock to unlink the record itself, and if it finds the record already unlinked it waits for
+   the signal that must be coming, so it never leaves the call (and never frees the frame) while an unparker
+   is still about to signal it. `sc_rt_unpark_all` walks its private chain of unlinked records outside the
+   lock, reading each record before signalling its owner, which is sound for the same reason. A bounded
+   wait that ends by its deadline claims nothing: a wake sent to a word nobody waits on is dropped, as
+   the futex contract says, and the caller re-checks its own condition. */
 #define SC_RT_BUCKETS 64
-static struct {
+typedef struct sc_rt_parker {
   pthread_mutex_t m;
   pthread_cond_t cv;
-} sc_rt_lot[SC_RT_BUCKETS] = {[0 ... SC_RT_BUCKETS - 1] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER}};
+  int32_t signaled; /* under `m`: one pending wake, consumed by the sleep it ends */
+} sc_rt_parker;
+typedef struct sc_rt_pnode {
+  int32_t *addr;
+  sc_rt_parker *p;
+  struct sc_rt_pnode *next;
+  int32_t linked; /* under the bucket lock: cleared by whoever unlinks the record */
+} sc_rt_pnode;
+static struct {
+  int32_t lock;
+  int32_t pad;
+  sc_rt_pnode *head;
+  sc_rt_pnode *tail;
+  char pad2[40];
+} __attribute__((aligned(64))) sc_rt_lot[SC_RT_BUCKETS];
+static _Thread_local sc_rt_parker sc_rt_self = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0};
 
-static unsigned sc_rt_bucket(void *addr) { return (unsigned)(((uintptr_t)addr >> 4) & (SC_RT_BUCKETS - 1)); }
+static unsigned sc_rt_bucket(void *addr) {
+  return (unsigned)(((((uintptr_t)addr >> 4) * 0x9E3779B97F4A7C15ull) >> 58) & (SC_RT_BUCKETS - 1));
+}
 
-void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
-  unsigned b = sc_rt_bucket(word);
-  pthread_mutex_lock(&sc_rt_lot[b].m);
-  if (__atomic_load_n(word, __ATOMIC_ACQUIRE) == expected) {
-    if (timeout_ns < 0) {
-      pthread_cond_wait(&sc_rt_lot[b].cv, &sc_rt_lot[b].m);
+/* Unlink `n` from bucket `b`; caller holds the bucket lock and `n` is linked. `prev` is its predecessor. */
+static void sc_rt_lot_unlink(unsigned b, sc_rt_pnode *prev, sc_rt_pnode *n) {
+  if (prev)
+    prev->next = n->next;
+  else
+    sc_rt_lot[b].head = n->next;
+  if (sc_rt_lot[b].tail == n) sc_rt_lot[b].tail = prev;
+  n->linked = 0;
+}
+
+/* Sleep on the calling thread's parker until it is signalled; `ts` (absolute, realtime) bounds the sleep.
+   Reports whether a signal was consumed. */
+static int sc_rt_parker_sleep(sc_rt_parker *p, const struct timespec *ts) {
+  pthread_mutex_lock(&p->m);
+  while (!p->signaled) {
+    if (ts) {
+      if (pthread_cond_timedwait(&p->cv, &p->m, ts) == ETIMEDOUT) break;
     } else {
-      struct timespec ts;
-      clock_gettime(CLOCK_REALTIME, &ts);
-      int64_t ns = ts.tv_nsec + timeout_ns % 1000000000ll;
-      ts.tv_sec += (time_t)(timeout_ns / 1000000000ll + ns / 1000000000ll);
-      ts.tv_nsec = (long)(ns % 1000000000ll);
-      pthread_cond_timedwait(&sc_rt_lot[b].cv, &sc_rt_lot[b].m, &ts);
+      pthread_cond_wait(&p->cv, &p->m);
     }
   }
-  pthread_mutex_unlock(&sc_rt_lot[b].m);
+  int got = p->signaled;
+  p->signaled = 0;
+  pthread_mutex_unlock(&p->m);
+  return got;
 }
 
-static void sc_rt_wake(int32_t *word, int all) {
-  unsigned b = sc_rt_bucket(word);
-  pthread_mutex_lock(&sc_rt_lot[b].m);
-  if (all)
-    pthread_cond_broadcast(&sc_rt_lot[b].cv);
-  else
-    pthread_cond_broadcast(&sc_rt_lot[b].cv); /* buckets are shared, so a targeted wake still broadcasts */
-  pthread_mutex_unlock(&sc_rt_lot[b].m);
+static void sc_rt_parker_signal(sc_rt_parker *p) {
+  pthread_mutex_lock(&p->m);
+  p->signaled = 1;
+  pthread_cond_signal(&p->cv);
+  pthread_mutex_unlock(&p->m);
 }
-void sc_rt_unpark_one(int32_t *word) { sc_rt_wake(word, 0); }
-void sc_rt_unpark_all(int32_t *word) { sc_rt_wake(word, 1); }
+
+void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
+  if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != expected) return;
+  unsigned b = sc_rt_bucket(word);
+  sc_rt_pnode n = {word, &sc_rt_self, 0, 1};
+  sc_rt_spin_lock(&sc_rt_lot[b].lock);
+  /* Re-checked under the lock: an unparker publishes the new state before it takes this lock, so a change
+     that raced the first load is seen here and a change after this point finds the record queued. */
+  if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != expected) {
+    sc_rt_spin_unlock(&sc_rt_lot[b].lock);
+    return;
+  }
+  if (sc_rt_lot[b].tail)
+    sc_rt_lot[b].tail->next = &n;
+  else
+    sc_rt_lot[b].head = &n;
+  sc_rt_lot[b].tail = &n;
+  sc_rt_spin_unlock(&sc_rt_lot[b].lock);
+  struct timespec ts;
+  const struct timespec *deadline = 0;
+  if (timeout_ns >= 0) {
+    clock_gettime(CLOCK_REALTIME, &ts);
+    int64_t ns = ts.tv_nsec + timeout_ns % 1000000000ll;
+    ts.tv_sec += (time_t)(timeout_ns / 1000000000ll + ns / 1000000000ll);
+    ts.tv_nsec = (long)(ns % 1000000000ll);
+    deadline = &ts;
+  }
+  if (sc_rt_parker_sleep(n.p, deadline)) return; /* the unparker unlinked the record before signalling */
+  /* Timed out (or woke without a signal). Take the record back, unless an unparker got to it first: then
+     its signal is on the way, and this frame must stay until it lands. */
+  sc_rt_spin_lock(&sc_rt_lot[b].lock);
+  if (n.linked) {
+    sc_rt_pnode *prev = 0;
+    for (sc_rt_pnode *c = sc_rt_lot[b].head; c != &n; c = c->next) prev = c;
+    sc_rt_lot_unlink(b, prev, &n);
+    sc_rt_spin_unlock(&sc_rt_lot[b].lock);
+    return;
+  }
+  sc_rt_spin_unlock(&sc_rt_lot[b].lock);
+  (void)sc_rt_parker_sleep(n.p, 0);
+}
+
+void sc_rt_unpark_one(int32_t *word) {
+  unsigned b = sc_rt_bucket(word);
+  sc_rt_parker *p = 0;
+  sc_rt_spin_lock(&sc_rt_lot[b].lock);
+  sc_rt_pnode *prev = 0;
+  for (sc_rt_pnode *c = sc_rt_lot[b].head; c; prev = c, c = c->next) {
+    if (c->addr == word) {
+      p = c->p;
+      sc_rt_lot_unlink(b, prev, c);
+      break;
+    }
+  }
+  sc_rt_spin_unlock(&sc_rt_lot[b].lock);
+  if (p) sc_rt_parker_signal(p);
+}
+
+void sc_rt_unpark_all(int32_t *word) {
+  unsigned b = sc_rt_bucket(word);
+  sc_rt_pnode *mine = 0; /* the unlinked records, chained through their own `next` */
+  sc_rt_spin_lock(&sc_rt_lot[b].lock);
+  sc_rt_pnode *prev = 0;
+  for (sc_rt_pnode *c = sc_rt_lot[b].head; c;) {
+    sc_rt_pnode *nx = c->next;
+    if (c->addr == word) {
+      sc_rt_lot_unlink(b, prev, c);
+      c->next = mine;
+      mine = c;
+    } else {
+      prev = c;
+    }
+    c = nx;
+  }
+  sc_rt_spin_unlock(&sc_rt_lot[b].lock);
+  while (mine) {
+    /* Read before the signal: the owner leaves (and its frame with it) only once signalled. */
+    sc_rt_pnode *nx = mine->next;
+    sc_rt_parker *p = mine->p;
+    sc_rt_parker_signal(p);
+    mine = nx;
+  }
+}
+
+/* What parking retains, for a program that wants to account for it. Per thread: the parker, kept in
+   thread-local storage for the thread's life once it has parked even once, because an unparker may be
+   about to signal it. Fixed: the bucket table. The wait records themselves live in the parking frames and
+   retain nothing. */
+size_t sc_rt_park_bytes_per_thread(void) { return sizeof(sc_rt_parker); }
+size_t sc_rt_park_bytes_fixed(void) { return sizeof(sc_rt_lot); }
 
 void *sc_rt_stack_alloc(size_t size) {
   size_t pg = (size_t)sysconf(_SC_PAGESIZE);

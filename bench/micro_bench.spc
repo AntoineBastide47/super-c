@@ -26,12 +26,20 @@ import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;
 import std::parallel::blocking as blocking;
+import std::parallel::selector as selector;
+import std::parallel::thread as thread;
 import std::testing::bench as bench;
+import std::testing::bench_sys as sys;
 
 const SPAWNS: i64 = 2000; // tasks per round for the spawn lanes
 const LATENCY_SPAWNS: i64 = 500; // one-at-a-time spawns per round for the latency lane
 const OPS: i64 = 20000; // operations per round for the uncontended lanes
 const MSGS: i64 = 5000; // messages per round for the channel lanes
+const CHANNELS: i64 = 20000; // channels built and dropped per round in the construction lane
+const PRODUCERS: i64 = 4; // producers in the MPMC lane: FIXED, comparable across machines
+const CONSUMERS: i64 = 4; // consumers in the MPMC lane
+const PARK_THREADS: i64 = 128; // plain threads parked at once in the parking-lot lane: past the bucket count
+const PARK_ROUNDS: i64 = 20; // unparks of every thread per round
 const HAMMER: i64 = 2000; // per-task operations in the contended lanes
 const LOCKERS: i64 = 8; // tasks in the contended lock lane: FIXED, so the number compares across machines
 const FANIN_TASKS: i64 = 8; // signallers in the fan-in lane
@@ -232,9 +240,9 @@ fn lat_merge(sink: &LatSink, lat: &Vector<f64>) {
     }
 }
 
-fn lat_note(b: &mut bench::Bencher, sink: &LatSink) {
+fn lat_note(b: &mut bench::Bencher, sink: &LatSink, name: str) {
     let mut g = sink.get().lock();
-    let t = bench::dist_text("call latency", "us", g.get_mut());
+    let t = bench::dist_text(name, "us", g.get_mut());
     b.note_more(t.as_str());
 }
 
@@ -262,7 +270,7 @@ pub fn blocking_roundtrip(b: &mut bench::Bencher) {
         wg.wait();
         b.tally(BCALLS, seen.get().load(atomics::MemoryOrder::Acquire));
     }
-    lat_note(b, &sink);
+    lat_note(b, &sink, "call latency");
 }
 
 /// The same round trip from BFAN_TASKS tasks at once: what the pool's submission path costs when several
@@ -292,7 +300,60 @@ pub fn blocking_fanout(b: &mut bench::Bencher) {
         wg.wait();
         b.tally(calls, seen.get().load(atomics::MemoryOrder::Acquire));
     }
-    lat_note(b, &sink);
+    lat_note(b, &sink, "call latency");
+}
+
+// Scheduler parks and wakes over a lane, per work unit: what the coordination under test cost the
+// scheduler, which the per-operation time alone does not separate from the work itself. Reported only when
+// the runtime was built with its counters compiled in (`RT_STATS` in std/parallel/runtime.spc), so an
+// ordinary run says nothing and pays nothing.
+fn sched_note(b: &mut bench::Bencher, s0: &rt::SchedStats, units: i64, rounds: i64, unit: str) {
+    if !rt::sched_stats_on() || rounds <= 0 || units <= 0 {
+        return;
+    }
+    let s1 = rt::sched_stats();
+    let per = (rounds * units) as f64;
+    let mut note = String::from_str("scheduler per ");
+    note.push_str(unit);
+    note.push_str(": parks ");
+    note.push_f64_prec((s1.parks - s0.parks) as f64 / per, 3);
+    note.push_str(", wakes ");
+    note.push_f64_prec((s1.wakes - s0.wakes) as f64 / per, 3);
+    note.push_str(", steals ");
+    note.push_f64_prec((s1.steals - s0.steals) as f64 / per, 3);
+    note.push_str(", injections ");
+    note.push_f64_prec((s1.inj_takes - s0.inj_takes) as f64 / per, 3);
+    note.push_str(" (");
+    note.push_i64(rounds);
+    note.push_str(" rounds)");
+    b.note_more(note.as_str());
+}
+
+// The coordination the primitives themselves did, per work unit: how often a wait actually blocked, how
+// many notifies found a waiter, and how many found none. Reported only when the synchronisation module was
+// built with its counters compiled in (`SYNC_STATS` in std/parallel/sync.spc). A build of an older runtime
+// for comparison has no such counters, so an A/B against one drops this call.
+fn sync_note(b: &mut bench::Bencher, s0: &sync::SyncStats, units: i64, rounds: i64, unit: str) {
+    if !sync::sync_stats_on() || rounds <= 0 || units <= 0 {
+        return;
+    }
+    let s1 = sync::sync_stats();
+    let per = (rounds * units) as f64;
+    let mut note = String::from_str("coordination per ");
+    note.push_str(unit);
+    note.push_str(": task waits ");
+    note.push_f64_prec((s1.cv_waits - s0.cv_waits) as f64 / per, 3);
+    note.push_str(", thread waits ");
+    note.push_f64_prec((s1.cv_blocks - s0.cv_blocks) as f64 / per, 3);
+    note.push_str(", wakes ");
+    note.push_f64_prec((s1.wakes - s0.wakes) as f64 / per, 3);
+    note.push_str(" (stale ");
+    note.push_f64_prec((s1.wakes_stale - s0.wakes_stale) as f64 / per, 3);
+    note.push_str("), notifies with no waiter ");
+    note.push_f64_prec((s1.notifies_idle - s0.notifies_idle) as f64 / per, 3);
+    note.push_str(", contended locks ");
+    note.push_f64_prec((s1.lock_slow - s0.lock_slow) as f64 / per, 3);
+    b.note_more(note.as_str());
 }
 
 // --- mutex ------------------------------------------------------------------------------------------.
@@ -369,7 +430,11 @@ fn channel_lane(b: &mut bench::Bencher, cap: usize) {
     b.unit("msg");
     // The consumer records how many it took; the round is validated against it.
     let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let s0 = rt::sched_stats();
+    let y0 = sync::sync_stats();
+    let mut rounds: i64 = 0;
     while b.running() {
+        rounds = rounds + 1;
         let ch = chan::Channel::<i64>::bounded(cap);
         let rx = ch.receiver();
         // The sender MUST exist before the consumer starts. `recv` reports "closed and drained" when the
@@ -403,6 +468,8 @@ fn channel_lane(b: &mut bench::Bencher, cap: usize) {
         wg.wait();
         b.tally(MSGS, seen.get().load(atomics::MemoryOrder::Acquire));
     }
+    sched_note(b, &s0, MSGS, rounds, "msg");
+    sync_note(b, &y0, MSGS, rounds, "msg");
 }
 
 @bench
@@ -431,7 +498,11 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
     b.each(MSGS);
     b.unit("msg");
     let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let s0 = rt::sched_stats();
+    let y0 = sync::sync_stats();
+    let mut rounds: i64 = 0;
     while b.running() {
+        rounds = rounds + 1;
         let ch = chan::Channel::<i64>::bounded(64);
         let rx = ch.receiver();
         let tx = ch.sender(); // before the consumer starts: see the note in `channel_lane`
@@ -474,6 +545,380 @@ pub fn channel_batch64(b: &mut bench::Bencher) {
         wg.wait();
         b.tally(MSGS, seen.get().load(atomics::MemoryOrder::Acquire));
     }
+    sched_note(b, &s0, MSGS, rounds, "msg");
+    sync_note(b, &y0, MSGS, rounds, "msg");
+}
+
+/// Channel construction: build a bounded channel, one sender and one receiver, and drop them. The
+/// allocation figure is the whole cost of a channel's block(s); a program that opens a channel per
+/// request pays this per request.
+@bench
+pub fn channel_construct(b: &mut bench::Bencher) {
+    b.each(CHANNELS);
+    b.unit("channel");
+    while b.running() {
+        let mut ok: i64 = 0;
+        for _i in 0..CHANNELS {
+            let ch = chan::Channel::<i64>::bounded(64);
+            let tx = ch.sender();
+            let rx = ch.receiver();
+            switch tx.try_send(1) {
+                Sent => {},
+                Rejected(_v) => {},
+            };
+            switch rx.try_recv() {
+                Some(v) => {
+                    ok = ok + v;
+                },
+                None => {},
+            };
+        }
+        b.tally(CHANNELS, ok);
+    }
+}
+
+/// PRODUCERS producers and CONSUMERS consumers on one 64-slot channel: the lock contended from both sides,
+/// with a wake for every item a parked consumer or producer was waiting for. The MPMC shape a work queue
+/// has.
+@bench
+pub fn channel_mpmc(b: &mut bench::Bencher) {
+    let per = MSGS / PRODUCERS;
+    let total = per * PRODUCERS;
+    b.each(total);
+    b.unit("msg");
+    let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let s0 = rt::sched_stats();
+    let y0 = sync::sync_stats();
+    let mut rounds: i64 = 0;
+    while b.running() {
+        rounds = rounds + 1;
+        seen.get().store(0, atomics::MemoryOrder::Relaxed);
+        let ch = chan::Channel::<i64>::bounded(64);
+        let wg = sync::WaitGroup::new();
+        wg.add(PRODUCERS + CONSUMERS);
+        // Every sender exists before a consumer can start: see the note in `channel_lane`.
+        let mut txs = Vector::<chan::Sender<i64>>::with_capacity(PRODUCERS as usize);
+        for _p in 0..PRODUCERS {
+            txs.push(ch.sender());
+        }
+        for _c in 0..CONSUMERS {
+            let rx = ch.receiver();
+            let w = wg.clone();
+            let s = seen.clone();
+            launch || {
+                let mut got: i64 = 0;
+                loop {
+                    switch rx.recv() {
+                        Some(_v) => {
+                            got = got + 1;
+                        },
+                        None => {
+                            break;
+                        },
+                    };
+                }
+                let _ = s.get().fetch_add(got, atomics::MemoryOrder::AcqRel);
+                w.done();
+            };
+        }
+        loop {
+            switch txs.pop() {
+                Some(tx) => {
+                    let w = wg.clone();
+                    launch || {
+                        for i in 0..per {
+                            let _ = tx.send(i);
+                        }
+                        w.done();
+                    };
+                },
+                _ => {
+                    break;
+                },
+            };
+        }
+        wg.wait();
+        b.tally(total, seen.get().load(atomics::MemoryOrder::Acquire));
+    }
+    sched_note(b, &s0, total, rounds, "msg");
+    sync_note(b, &y0, total, rounds, "msg");
+}
+
+/// One producer, one consumer, 64 slots, and every message carries the time it was sent, so the note is
+/// the per-message delivery latency: what a wake costs a receiver in time, where `channel_cap64` says what
+/// the traffic costs in throughput.
+@bench
+pub fn channel_latency(b: &mut bench::Bencher) {
+    b.each(MSGS);
+    b.unit("msg");
+    let sink = lat_sink(LAT_ROUNDS * MSGS as usize);
+    let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let s0 = rt::sched_stats();
+    let y0 = sync::sync_stats();
+    let mut rounds: i64 = 0;
+    while b.running() {
+        rounds = rounds + 1;
+        let ch = chan::Channel::<u64>::bounded(64);
+        let rx = ch.receiver();
+        let tx = ch.sender(); // before the consumer starts: see the note in `channel_lane`
+        let wg = sync::WaitGroup::new();
+        wg.add(1);
+        let w = wg.clone();
+        let c = seen.clone();
+        let s = sink.clone();
+        launch || {
+            let mut lat = Vector::<f64>::with_capacity(MSGS as usize);
+            let mut got: i64 = 0;
+            loop {
+                switch rx.recv() {
+                    Some(t0) => {
+                        lat.push((platform::now_ns() - t0) as f64 / 1000.0);
+                        got = got + 1;
+                    },
+                    None => {
+                        break;
+                    },
+                };
+            }
+            lat_merge(&s, &lat);
+            c.get().store(got, atomics::MemoryOrder::Release);
+            w.done();
+        };
+        for _i in 0..MSGS {
+            let _ = tx.send(platform::now_ns());
+        }
+        tx.close();
+        wg.wait();
+        b.tally(MSGS, seen.get().load(atomics::MemoryOrder::Acquire));
+    }
+    sched_note(b, &s0, MSGS, rounds, "msg");
+    sync_note(b, &y0, MSGS, rounds, "msg");
+    lat_note(b, &sink, "delivery latency");
+}
+
+// The `select` half of a two-channel exchange: `who` receives MSGS messages that one task sends alternately
+// on two 64-slot channels, waiting on both at once, and reports how many it took. Run on a coroutine or on
+// the calling thread, which is what the two lanes below differ in.
+fn select_two_channels(b: &mut bench::Bencher, on_thread: bool) {
+    b.each(MSGS);
+    b.unit("msg");
+    let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let s0 = rt::sched_stats();
+    let y0 = sync::sync_stats();
+    let mut rounds: i64 = 0;
+    while b.running() {
+        rounds = rounds + 1;
+        let a = chan::Channel::<i64>::bounded(64);
+        let c = chan::Channel::<i64>::bounded(64);
+        let arx = a.receiver();
+        let crx = c.receiver();
+        let atx = a.sender();
+        let ctx = c.sender();
+        let wg = sync::WaitGroup::new();
+        wg.add(1);
+        let w = wg.clone();
+        launch || {
+            for i in 0..MSGS {
+                if i % 2 == 0 {
+                    let _ = atx.send(i);
+                } else {
+                    let _ = ctx.send(i);
+                }
+            }
+            atx.close();
+            ctx.close();
+            w.done();
+        };
+        if on_thread {
+            seen.get().store(select_drain(&arx, &crx), atomics::MemoryOrder::Release);
+        } else {
+            let s = seen.clone();
+            let done = sync::WaitGroup::new();
+            done.add(1);
+            let d = done.clone();
+            launch || {
+                s.get().store(select_drain(&arx, &crx), atomics::MemoryOrder::Release);
+                d.done();
+            };
+            done.wait();
+        }
+        wg.wait();
+        b.tally(MSGS, seen.get().load(atomics::MemoryOrder::Acquire));
+    }
+    sched_note(b, &s0, MSGS, rounds, "msg");
+    sync_note(b, &y0, MSGS, rounds, "msg");
+}
+
+// Take everything from both receivers through one selector until both are closed and drained. A closed
+// arm is always ready, so once one reports "closed and drained" the selector is rebuilt without it.
+fn select_drain(arx: &chan::Receiver<i64>, crx: &chan::Receiver<i64>) i64 {
+    let mut s = selector::Selector::new();
+    let mut ia = s.arm_recv(arx);
+    let mut ic = s.arm_recv(crx);
+    let mut got: i64 = 0;
+    let mut a_open = true;
+    let mut c_open = true;
+    while a_open || c_open {
+        switch s.wait() {
+            Ready(i) => {
+                let from_a = a_open && i == ia;
+                let r = if from_a {
+                    arx.try_recv();
+                } else {
+                    crx.try_recv();
+                };
+                switch r {
+                    Some(_v) => {
+                        got = got + 1;
+                    },
+                    None => {
+                        s.clear();
+                        if from_a {
+                            a_open = false;
+                            if c_open {
+                                ic = s.arm_recv(crx);
+                            }
+                        } else {
+                            c_open = false;
+                            if a_open {
+                                ia = s.arm_recv(arx);
+                            }
+                        }
+                    },
+                };
+            },
+            TimedOut => {},
+        };
+    }
+    let _ = ic;
+    return got;
+}
+
+/// `select` over two channels from a coroutine: one park under one wake token however many arms there are.
+@bench
+pub fn select_two(b: &mut bench::Bencher) {
+    select_two_channels(b, false);
+}
+
+/// `select` over two channels from a plain thread (the calling thread), which sleeps on one wake word that
+/// every arm's node names and is woken by the first arm to move.
+@bench
+pub fn select_thread(b: &mut bench::Bencher) {
+    select_two_channels(b, true);
+}
+
+/// The parking lot under collision: PARK_THREADS plain threads (more than the lot has buckets) each park
+/// on a word of their own, and the lane unparks them one at a time, round-robin, PARK_ROUNDS times each.
+/// The note counts the wakes that reached a thread whose word had NOT changed: what a bucket-wide
+/// broadcast costs every thread that merely shares a bucket, and what a targeted wake never does.
+@bench
+pub fn park_collisions(b: &mut bench::Bencher) {
+    let total = PARK_THREADS * PARK_ROUNDS;
+    b.each(total);
+    b.unit("unpark");
+    // One word per thread, 64 bytes apart: a line each, and a spread of addresses over the buckets.
+    let stride: usize = 16;
+    let mut words = Vector::<i32>::with_capacity(PARK_THREADS as usize * stride);
+    for _i in 0..PARK_THREADS as usize * stride {
+        words.push(0);
+    }
+    let base = words.as_ptr() as usize;
+    let acks = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let unrelated = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let rss0 = unsafe sys::sc_bs_rss_now();
+    let mut handles = Vector::<thread::JoinHandle<i64>>::with_capacity(PARK_THREADS as usize);
+    for t in 0..PARK_THREADS as usize {
+        let addr = base + t * stride * sizeof(i32);
+        let a = acks.clone();
+        let u = unrelated.clone();
+        handles.push(
+            thread::spawn(
+                fn() i64 {
+                    let w = addr as *mut i32;
+                    let mut stray: i64 = 0;
+                    let mut served: i64 = 0;
+                    loop {
+                        while atomic::load_i32(w, 1) == 0 {
+                            unsafe sc_runtime::sc_rt_park(w, 0, -1);
+                            if atomic::load_i32(w, 1) == 0 {
+                                stray = stray + 1;
+                            }
+                        }
+                        let v = atomic::load_i32(w, 1);
+                        atomic::store_i32(w, 0, 2);
+                        if v == 2 {
+                            break;
+                        }
+                        served = served + 1;
+                        let _ = a.get().fetch_add(1, atomics::MemoryOrder::Release);
+                    }
+                    let _ = u.get().fetch_add(stray, atomics::MemoryOrder::AcqRel);
+                    return served;
+                },
+            ),
+        );
+    }
+    // Every thread is parked by now (the first round's first unpark waits for an acknowledgement, so the
+    // reading below happens with the whole set asleep on their words).
+    rt::sleep_ns(50000000);
+    let rss1 = unsafe sys::sc_bs_rss_now();
+    let mut expected: i64 = 0;
+    while b.running() {
+        for _r in 0..PARK_ROUNDS {
+            for t in 0..PARK_THREADS as usize {
+                let w = (base + t * stride * sizeof(i32)) as *mut i32;
+                atomic::store_i32(w, 1, 2);
+                unsafe sc_runtime::sc_rt_unpark_one(w);
+                expected = expected + 1;
+                // Each unpark is acknowledged before the next: the figure is one wake's round trip.
+                while acks.get().load(atomics::MemoryOrder::Acquire) < expected {
+                    unsafe sc_runtime::sc_rt_cpu_relax();
+                }
+            }
+        }
+        b.tally(total, total);
+    }
+    let mut served: i64 = 0;
+    for t in 0..PARK_THREADS as usize {
+        let w = (base + t * stride * sizeof(i32)) as *mut i32;
+        atomic::store_i32(w, 2, 2);
+        unsafe sc_runtime::sc_rt_unpark_one(w);
+    }
+    loop {
+        switch handles.pop() {
+            Some(h) => {
+                served = served + h.join();
+            },
+            _ => {
+                break;
+            },
+        };
+    }
+    if served != expected {
+        bench::fail("park_collisions: a thread was not woken for every unpark");
+    }
+    let mut note = String::from_str("unrelated wakes per unpark: ");
+    note.push_f64_prec(unrelated.get().load(atomics::MemoryOrder::Acquire) as f64 / expected as f64, 3);
+    note.push_str(" (");
+    note.push_i64(PARK_THREADS);
+    note.push_str(" threads parked at once)");
+    b.note(note.as_str());
+    // What the lot RETAINS for those threads, which the wake count alone does not say: a targeted wake
+    // may be paid for in records that never come back. Wait records live in the parking frames and are
+    // not retained; what is kept is one parker per thread that has ever parked, plus the bucket table.
+    let per = unsafe sc_runtime::sc_rt_park_bytes_per_thread();
+    let mut held = String::from_str("parking retains ");
+    held.push_u64(per as u64);
+    held.push_str(" B per parked thread (");
+    held.push_f64_prec((per * PARK_THREADS as usize) as f64 / 1024.0, 1);
+    held.push_str(" KiB for ");
+    held.push_i64(PARK_THREADS);
+    held.push_str("), ");
+    held.push_f64_prec((unsafe sc_runtime::sc_rt_park_bytes_fixed()) as f64 / 1024.0, 1);
+    held.push_str(" KiB fixed; resident while parked ");
+    held.push_f64_prec((rss1 - rss0) as f64 / 1024.0, 1);
+    held.push_str(" KiB (thread stacks included)");
+    b.note_more(held.as_str());
 }
 
 // --- fan-in -----------------------------------------------------------------------------------------.

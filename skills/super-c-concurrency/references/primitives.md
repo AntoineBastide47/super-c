@@ -165,9 +165,10 @@ while !*guard.get() {
 }
 ```
 
-`Condvar::wait(&guard)` **borrows** the guard and returns nothing — the guard stays
-usable after the wake (no Rust-style consume-and-return). `wait_until` takes an absolute
-deadline.
+`Condvar::wait(&guard)` **borrows** the guard and returns `false` only when the wait was
+CANCELLED; the guard stays usable after the wake (no Rust-style consume-and-return).
+`wait_until` takes an absolute deadline. `notify_some(n)` wakes up to `n` waiters, which
+is what a batch that delivered `n` items owes; `notify_one` is `notify_some(1)`.
 
 ## Data Parallelism Functions
 
