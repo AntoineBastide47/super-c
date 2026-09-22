@@ -181,7 +181,12 @@ typedef struct {
   sc_sock wake_r, wake_w; /* a loopback pair: Windows has no socketpair, and select cannot watch a pipe */
 } sc_io_poller;
 
-/* The wake channel: connect a socket to a listener of our own on the loopback, keep both ends. */
+static void sc_no_delay(sc_sock s);
+
+/* The wake channel: connect a socket to a listener of our own on the loopback, keep both ends. The writer
+   sends one byte per wake and nothing ever flows back, so under Nagle a second wake within Windows' 200 ms
+   delayed-ACK window would sit in the send buffer until that ACK arrived: a reactor wake 200 ms late, on
+   every wake after the first. TCP_NODELAY sends each byte at once. */
 static int sc_wake_pair(sc_sock *rd, sc_sock *wr) {
   struct sockaddr_in a;
   sc_socklen alen = (sc_socklen)sizeof a;
@@ -214,6 +219,7 @@ static int sc_wake_pair(sc_sock *rd, sc_sock *wr) {
   }
   sc_io_set_nonblocking(SC_FD(s));
   sc_io_set_nonblocking(SC_FD(c));
+  sc_no_delay(c);
   *rd = s;
   *wr = c;
   return 0;

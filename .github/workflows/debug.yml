@@ -107,10 +107,20 @@ jobs:
           [ -f "./$bin" ] || mv "./super-c" "./$bin"
           test -x "./$bin"
 
-      - name: Run the test suite (leak-gated)
+      # The io idle-descriptor test alone and in-process first, so its own progress lines reach the job
+      # log live and a hang stops at the timeout with the last line telling where it stopped.
+      - name: Probe the io idle-descriptor test (in-process, bounded)
         run: |
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./super-c${BINEXT:-}" test --quiet --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
+          for i in 1 2 3; do
+            echo "### probe $i"
+            SC_LEAK_CHECK=fatal timeout 180 "./super-c${BINEXT:-}" test --test-no-fork --test-filter=idle_descriptors_do_not_delay ${cstd:+"$cstd"} || echo "### probe $i exit $?"
+          done
+
+      - name: Run the test suite (leak-gated, bounded)
+        run: |
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          SC_LEAK_CHECK=fatal timeout 1200 "./super-c${BINEXT:-}" test --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
 
   # Linux, verbose, with a watchdog: a compiled test program alive for over a minute is named (its
   # project's main.spc and every thread's kernel wait channel) and killed so the run finishes.
@@ -168,15 +178,21 @@ jobs:
               for p in $(pgrep -x bin); do
                 et=$(ps -o etimes= -p "$p" 2>/dev/null | tr -d ' '); [ -z "$et" ] && continue
                 if [ "$et" -gt 60 ]; then
-                  d=$(readlink "/proc/$p/cwd")
-                  echo "### STUCK bin pid=$p etime=$et cwd=$d"
-                  head -60 "$d/main.spc" 2>/dev/null
-                  echo "### threads (state, wchan):"
-                  for t in /proc/$p/task/*; do
-                    echo "$(basename "$t") $(cut -d' ' -f3 "$t/stat") $(cat "$t/wchan" 2>/dev/null)"
-                    sudo cat "$t/stack" 2>/dev/null | head -12
+                  # The program, the shell that ran it and the test process above that: state, threads
+                  # and kernel wait channels of each, so a hang in the caller shows as well as one in
+                  # the program. `readlink -f /proc/$p/exe` names the project the program came from.
+                  echo "### STUCK bin pid=$p etime=$et exe=$(readlink -f "/proc/$p/exe" 2>/dev/null)"
+                  q=$p
+                  for lvl in program shell test; do
+                    [ -d "/proc/$q" ] || break
+                    echo "### $lvl pid=$q $(grep -E '^(Name|State|PPid):' "/proc/$q/status" 2>/dev/null | tr '\n' ' ')"
+                    for t in /proc/$q/task/*; do
+                      echo "  $(basename "$t") $(cut -d' ' -f3 "$t/stat" 2>/dev/null) $(cat "$t/wchan" 2>/dev/null)"
+                      sudo cat "$t/stack" 2>/dev/null | head -8 | sed 's/^/    /'
+                    done
+                    q=$(awk '/^PPid:/ { print $2 }' "/proc/$q/status" 2>/dev/null)
                   done
-                  kill -9 "$p"
+                  kill -9 "$p" 2>/dev/null || echo "### kill -9 $p failed: $?"
                 fi
               done
               sleep 10
@@ -294,7 +310,7 @@ jobs:
           diff -r /tmp/wasm-gen1 /tmp/wwasm/src/build
 
       - name: Run the test suite against the wasm compiler
-        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }}
+        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --test-shard=${{ matrix.test_shard }}
 
       - name: Package
         if: matrix.artifact

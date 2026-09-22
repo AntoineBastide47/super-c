@@ -50,6 +50,11 @@ pub struct SyncStats {
     pub lock_slow: u64, // lock acquisitions that found the lock held (the spin-then-park path)
     pub lock_parks: u64, // lock waits that parked a coroutine
     pub lock_blocks: u64, // lock waits that blocked a plain thread
+    pub lock_spins: u64, // spin-hint iterations executed while waiting for a held lock
+    pub lock_cas_fail: u64, // acquisition attempts that lost the word to another contender
+    pub lock_barges: u64, // acquisitions taken while a waiter was already queued (overtaking)
+    pub lock_scan: u64, // queue nodes walked under a bucket lock (pop and remove together)
+    pub lock_buckets: u64, // bucket-lock acquisitions
     pub cv_waits: u64, // condvar waits that parked a coroutine
     pub cv_blocks: u64, // condvar waits that blocked a plain thread
     pub wakes: u64, // notifies that resumed a waiter
@@ -61,6 +66,11 @@ static mut G_SYNC: SyncStats = SyncStats {
     lock_slow: 0,
     lock_parks: 0,
     lock_blocks: 0,
+    lock_spins: 0,
+    lock_cas_fail: 0,
+    lock_barges: 0,
+    lock_scan: 0,
+    lock_buckets: 0,
     cv_waits: 0,
     cv_blocks: 0,
     wakes: 0,
@@ -68,8 +78,30 @@ static mut G_SYNC: SyncStats = SyncStats {
     notifies_idle: 0,
 };
 
+// The lock's interleaving hook points, for its race hunt. They share the runtime's hook machinery
+// (`runtime::sched_hook_arm`, compiled in only when `RT_HOOKS` in std/parallel/runtime.spc is true) and its
+// point space, so their values follow the scheduler's own. An armed point delays whoever reaches it, which
+// turns a window of nanoseconds into one a test can hit on purpose.
+
+/// Hook point: a contender has published the queued bit and is about to take the bucket lock, so an
+/// unlock can get in first and release before the waiter has enqueued.
+pub const HOOK_BEFORE_ENQUEUE: i32 = 2;
+
+/// Hook point: an unlock has popped a waiter and has not published the release yet, so a cancellation can
+/// claim that waiter's park before the wake reaches it.
+pub const HOOK_AFTER_POP: i32 = 3;
+
+/// Hook point: an unlock has published the release and has not woken its waiter yet, so a fresh acquirer
+/// can barge in front of the waiter that was chosen, and a caller that frees the lock here proves the
+/// unlock never touches it again.
+pub const HOOK_AFTER_RELEASE: i32 = 4;
+
 fn stat_add(p: *mut u64) {
     let _ = atomic::add_u64(p, 1, 0);
+}
+
+fn stat_addn(p: *mut u64, n: u64) {
+    let _ = atomic::add_u64(p, n, 0);
 }
 
 /// The coordination counters. All zero unless the module was built with `sync_stats_on()` true.
@@ -78,6 +110,11 @@ pub fn sync_stats() SyncStats {
         lock_slow: atomic::load_u64(&mut unsafe G_SYNC.lock_slow, 0),
         lock_parks: atomic::load_u64(&mut unsafe G_SYNC.lock_parks, 0),
         lock_blocks: atomic::load_u64(&mut unsafe G_SYNC.lock_blocks, 0),
+        lock_spins: atomic::load_u64(&mut unsafe G_SYNC.lock_spins, 0),
+        lock_cas_fail: atomic::load_u64(&mut unsafe G_SYNC.lock_cas_fail, 0),
+        lock_barges: atomic::load_u64(&mut unsafe G_SYNC.lock_barges, 0),
+        lock_scan: atomic::load_u64(&mut unsafe G_SYNC.lock_scan, 0),
+        lock_buckets: atomic::load_u64(&mut unsafe G_SYNC.lock_buckets, 0),
         cv_waits: atomic::load_u64(&mut unsafe G_SYNC.cv_waits, 0),
         cv_blocks: atomic::load_u64(&mut unsafe G_SYNC.cv_blocks, 0),
         wakes: atomic::load_u64(&mut unsafe G_SYNC.wakes, 0),
@@ -97,6 +134,34 @@ pub fn sync_stats() SyncStats {
 /// is observed (a lock that lives no longer than the work it guards, e.g. the data-parallel latch), so once
 /// an unlock has published the release it may touch only memory that outlives the mutex: the static buckets
 /// and the popped waiter's own frame, which cannot die before its wake. It never touches the lock again.
+///
+/// The word takes four values, and every write of it appears here:
+///
+/// | from | to | written by | with |
+/// |------|----|------------|------|
+/// | 0 free | 1 held | an acquirer | the acquire CAS of `lock` or `try_lock` |
+/// | 2 free, waiter queued | 3 held, waiter queued | an acquirer | the slow path's acquire CAS, which preserves bit 1 |
+/// | 1 held | 3 held, waiter queued | a contender | a relaxed CAS, immediately before it enqueues |
+/// | 1 held | 0 free | the owner | the release CAS of `unlock` |
+/// | 3 held, waiter queued | 2 or 0 | the owner | the slow path's release store: 2 if a waiter remains queued, 0 if none does (a cancelled waiter leaves the bit with nobody behind it, and this is the store that clears it) |
+///
+/// A contender that observes 1 or 3 and spins writes nothing, and a lost CAS leaves the word as it found
+/// it. 0 never becomes 2: the queued bit is only ever set on a HELD lock, by the contender that is about
+/// to queue itself on it.
+///
+/// Linearization. A successful `lock` or `try_lock` linearizes at the acquire CAS that sets bit 0; a
+/// failed `try_lock` at the relaxed load that saw bit 0 already set. An `unlock` linearizes at its release
+/// CAS, or at the slow path's release store. A cancelled acquisition linearizes at the park's cancelled
+/// return: it writes the word not at all, removes its own node under the bucket lock, and any queued bit
+/// it leaves behind is corrected by the next unlock, which pops nobody and stores 0.
+///
+/// Happens-before. An acquisition's Acquire CAS reads the value the previous release wrote, so everything
+/// the previous owner did inside its critical section happens-before everything the next owner does inside
+/// its own. Registration and waking are ordered by the bucket spinlock rather than by the word: a waiter
+/// enqueues only while the word still reads 3, revalidated under that lock, and an unlock pops under the
+/// same lock, so between the two a waiter is either popped and woken or still queued when the release is
+/// published. The queued bit is cleared only by the unlock that pops under that lock and finds no
+/// survivor, which is why it can never be cleared while a queued waiter still needs a wake.
 @no_const
 pub struct RawMutex {
     pub locked: i32,
@@ -115,6 +180,13 @@ struct LotNode {
 }
 
 // The Super-C view of one static bucket (a 64-byte slot in sc_rt.c): a spinlock over a FIFO of nodes.
+//
+// The queue needs no admission limit of its own because it cannot grow past the runtime's own capacity:
+// a node lives in the frame of the coroutine or thread that is blocked on it, so a waiter contributes at
+// most one node and only while it is waiting. The queue length is therefore bounded by the live task count
+// plus the live thread count, external OS-thread callers included, both of which the runtime already
+// bounds. `sync_stats()` reports the nodes walked per acquisition, which is what would show the bound
+// being approached in practice; it measures under one per acquisition on every workload here.
 @no_const
 struct LotBucket {
     pub lock: i32,
@@ -123,11 +195,37 @@ struct LotBucket {
     pub tail: *mut LotNode,
 }
 
-// Spins before a contender parks. The trade: spinning occupies a worker that could run other tasks, but a
-// park costs microseconds (a context switch out and back, plus a wake) against a critical section of tens
-// of nanoseconds, so a bounded spin is cheaper for the SYSTEM, not only for this task. Sized to cover a
-// typical holder's critical section a few times over, and nowhere near the cost of the park it avoids.
+// Attempts a contender makes before it parks, counting both observations of a held lock and acquisitions
+// lost to somebody else: every episode is bounded, so a contender that keeps losing races still reaches
+// the queue instead of spinning for ever. The trade: spinning occupies a worker that could run other
+// tasks, but a park costs microseconds (a context switch out and back, plus a wake) against a critical
+// section of tens of nanoseconds, so a bounded spin is cheaper for the SYSTEM, not only for this task.
+//
+// Sized by measurement, not by instruction count. One iteration is a relaxed load plus `sc_rt_cpu_relax`,
+// which on this family of targets is a real delay rather than a no-op (a pause on x86, an instruction
+// barrier on arm64 measured at 13.9 ns), so this budget is a few microseconds of waiting. A cheaper hint
+// at the same TOTAL duration was measured and rejected: it polls the contended line tens of times more
+// often within the same window, and the owner's acquisition has to fight that traffic for the line.
 const MUTEX_SPIN: i32 = 256;
+
+// Acquisitions lost to another contender before this one stops spinning and takes the queue at the first
+// opportunity. Lost attempts are bounded SEPARATELY from held-lock observations rather than sharing their
+// budget: a lost attempt already carries a full read-modify-write, and spending the spin budget on them
+// made a contended channel park far sooner than its short critical sections deserve. What the bound
+// guarantees is that an episode of losing races cannot go on for ever.
+const MUTEX_LOSSES: i32 = 64;
+
+// Attempts `try_lock` makes before it reports failure. More than one, because losing the word once to
+// another contender says nothing about whether the lock is available; bounded, because `try_lock` promises
+// not to wait and a retry loop with no ceiling is a wait.
+const TRY_ATTEMPTS: i32 = 8;
+
+// The budget once a waiter is ALREADY queued on this lock. Our turn is then at least one whole release
+// away, so the full budget mostly burns a worker that could be running the owner instead. Half the base
+// budget, by measurement rather than by taste: a quarter of it (32) took the same wins but cost a
+// contended channel about a tenth of its throughput, because a channel's critical section is a ring push
+// and spinning through one is still the cheaper answer; half takes the wins with the channel lanes flat.
+const MUTEX_SPIN_QUEUED: i32 = 128;
 
 fn lot_bucket(m: *mut RawMutex) *mut LotBucket {
     return (unsafe sc_runtime::sc_rt_lot_bucket(m)) as *mut LotBucket;
@@ -149,9 +247,14 @@ fn lot_push(b: *mut LotBucket, n: *mut LotNode) {
 fn lot_remove(b: *mut LotBucket, n: *mut LotNode) {
     let mut prev: *mut LotNode = null;
     let mut cur = unsafe b.head;
+    let mut seen: u64 = 0;
     while cur != null && cur != n {
         prev = cur;
         cur = unsafe cur.next;
+        seen = seen + 1;
+    }
+    if sync_stats_on() {
+        stat_addn(&mut unsafe G_SYNC.lock_scan, seen);
     }
     if cur != n {
         return;
@@ -174,8 +277,10 @@ fn lot_pop(b: *mut LotBucket, addr: *mut void, more: &mut bool) *mut LotNode {
     let mut prev: *mut LotNode = null;
     let mut cur = unsafe b.head;
     let mut found: *mut LotNode = null;
+    let mut seen: u64 = 0;
     while cur != null {
         let nx = unsafe cur.next;
+        seen = seen + 1;
         if unsafe cur.addr == addr {
             if found != null {
                 *more = true;
@@ -195,6 +300,9 @@ fn lot_pop(b: *mut LotBucket, addr: *mut void, more: &mut bool) *mut LotNode {
             prev = cur;
         }
         cur = nx;
+    }
+    if sync_stats_on() {
+        stat_addn(&mut unsafe G_SYNC.lock_scan, seen);
     }
     return found;
 }
@@ -248,18 +356,47 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
     }
     let w = &mut unsafe m.locked;
     let mut spins: i32 = 0;
+    let mut losses: i32 = 0;
     loop {
         let c = atomic::load_i32(w, 0);
         if (c & 1) == 0 {
             // Free: take it, PRESERVING the parked bit; waiters may remain, and clearing it would let
             // the next unlock take its fast path straight past them.
             if atomic::cas_i32(w, c, c | 1, false, 1, 0) {
+                if sync_stats_on() && (c & 2) != 0 {
+                    // Taken with a waiter already queued: this acquisition overtook it.
+                    stat_add(&mut unsafe G_SYNC.lock_barges);
+                }
                 return true;
+            }
+            // Lost the word to somebody else. Counted only up to the bound: past it the count is not
+            // read again, and an unbounded increment on a signed counter would eventually trap.
+            if losses < MUTEX_LOSSES {
+                losses = losses + 1;
+            }
+            if sync_stats_on() {
+                stat_add(&mut unsafe G_SYNC.lock_cas_fail);
             }
             continue;
         }
-        if spins < MUTEX_SPIN {
+        // Held. How long to keep looking depends on who else is waiting: nobody, and the owner is
+        // probably about to release; somebody, and our turn is at least one release away. An attempt that
+        // has lost this many races is not winning this one either, so it stops looking and takes the queue
+        // at the first opportunity. Past that bound the loop is no longer spinning: every turn of it
+        // either acquires, loses to an acquirer, or reaches the queue, so the episode ends in acquisition,
+        // in a park, or in a cancellation, never in waiting for its own sake.
+        let budget = if losses >= MUTEX_LOSSES {
+            0;
+        } else if (c & 2) != 0 {
+            MUTEX_SPIN_QUEUED;
+        } else {
+            MUTEX_SPIN;
+        };
+        if spins < budget {
             spins = spins + 1;
+            if sync_stats_on() {
+                stat_add(&mut unsafe G_SYNC.lock_spins);
+            }
             unsafe sc_runtime::sc_rt_cpu_relax();
             continue;
         }
@@ -270,7 +407,13 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
         // The word reads held-with-waiters, so the next unlock takes its slow path. Enqueue while it STILL
         // reads that, validated under the bucket lock: the unlock pops (or records a survivor) under the
         // same lock, so between the two an enqueued waiter is either woken or left counted, never lost.
+        if runtime::sched_hooks_on() {
+            runtime::hook_delay(HOOK_BEFORE_ENQUEUE);
+        }
         let b = lot_bucket(m);
+        if sync_stats_on() {
+            stat_add(&mut unsafe G_SYNC.lock_buckets);
+        }
         unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
         if atomic::load_i32(w, 0) != 3 {
             unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
@@ -295,6 +438,9 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
                 // already: then the pop consumed it and `lot_remove` finds nothing), clear the wait
                 // record, and only then accept. A stale parked bit left on the word is harmless: the next
                 // unlock takes its slow path, pops nobody, and clears it.
+                if sync_stats_on() {
+                    stat_add(&mut unsafe G_SYNC.lock_buckets);
+                }
                 unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
                 lot_remove(b, &mut n);
                 unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
@@ -302,11 +448,12 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
                 runtime::park_done(co);
                 return false;
             }
+            // Woken by an unlock: this park CONSUMED that release, so it must be spent on an acquisition
+            // attempt even when a cancellation landed after the wake claimed the park. Returning
+            // cancelled here left the waiters behind us parked for good. The pending request is taken at
+            // the next cancellation point: this loop's next park, or the caller's.
             runtime::wait_clear();
             runtime::park_done(co);
-            if cancellable && runtime::cancel_pending() {
-                return false;
-            }
         } else {
             if sync_stats_on() {
                 stat_add(&mut unsafe G_SYNC.lock_blocks);
@@ -319,15 +466,22 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
                 unsafe sc_runtime::sc_rt_park(&mut n.oswake, 0, -1);
             }
         }
-        // Woken because the lock was free a moment ago: a fresh spin is worth it again.
+        // Woken because the lock was free a moment ago: a fresh episode, and a fresh budget for it.
         spins = 0;
+        losses = 0;
     }
 }
 
-/// Acquire the lock only if it is free; reports whether it was taken. Never waits.
+/// Acquire the lock only if it is free; reports whether it was taken. Never waits, and never retries
+/// without a bound: a caller that loses the word to another contender tries again at most `TRY_ATTEMPTS`
+/// times and then reports failure. A `false` therefore means "not taken", which is what the contract has
+/// always said, rather than "was held": under contention a lock that was free for an instant can report
+/// failure, exactly as a weak compare-and-exchange may. Every caller already treats `false` as "go and do
+/// something else", and an unbounded retry here would be a wait in a call that promises not to wait.
 pub unsafe fn raw_mutex_try_lock(m: *mut RawMutex) bool {
     let w = &mut unsafe m.locked;
-    loop {
+    let mut tries: i32 = 0;
+    while tries < TRY_ATTEMPTS {
         let c = atomic::load_i32(w, 0);
         if (c & 1) != 0 {
             return false;
@@ -335,7 +489,9 @@ pub unsafe fn raw_mutex_try_lock(m: *mut RawMutex) bool {
         if atomic::cas_i32(w, c, c | 1, false, 1, 0) {
             return true;
         }
+        tries = tries + 1;
     }
+    return false;
 }
 
 /// Release the lock and wake the longest-parked waiter, if any. `pub` for linkage.
@@ -356,9 +512,15 @@ fn raw_mutex_unlock_slow(m: *mut RawMutex) {
     // cancellation: that wakeup was consumed elsewhere, so the release must go to the next waiter or the
     // bit self-corrects on the next unlock. Bounded by the number of queued waiters.
     loop {
+        if sync_stats_on() {
+            stat_add(&mut unsafe G_SYNC.lock_buckets);
+        }
         unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
         let mut more = false;
         let n = lot_pop(b, m, &mut more);
+        if runtime::sched_hooks_on() {
+            runtime::hook_delay(HOOK_AFTER_POP);
+        }
         if !released {
             // The release store, and the LAST touch of the lock (see `RawMutex`): whoever acquires from
             // here on may legitimately free it. Everything below touches only the static bucket and the
@@ -371,6 +533,11 @@ fn raw_mutex_unlock_slow(m: *mut RawMutex) {
             };
             atomic::store_i32(&mut unsafe m.locked, next_word, 2);
             released = true;
+            if runtime::sched_hooks_on() {
+                // The lock may be taken, released and even destroyed from here on; everything below
+                // touches only the static bucket and the popped waiter's frame.
+                runtime::hook_delay(HOOK_AFTER_RELEASE);
+            }
         }
         if n == null {
             unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);

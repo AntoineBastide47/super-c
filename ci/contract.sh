@@ -1,11 +1,11 @@
-# Super-C compatibility contract, version 11.
+# Super-C compatibility contract, version 13.
 #
 # Sourced by ci/gate.sh (correctness) and ci/perf_gate.sh / ci/bench_matrix.sh (performance). Every
 # input file, option and command a gate uses is named here, in the order the gates apply it; no gate
 # derives its inputs from a directory listing (a listing is only ever compared AGAINST this file).
 # Change a value here and bump CONTRACT_VERSION; a gate that finds the tree and this file disagreeing
 # fails.
-CONTRACT_VERSION=11
+CONTRACT_VERSION=13
 
 # ---- the compiler under contract --------------------------------------------------------------------
 CONTRACT_ROOT=src/main.spc
@@ -116,6 +116,7 @@ tests/lsp_text_test.spc
 tests/lsp_transport_test.spc
 tests/lsp_v2_test.spc
 tests/map_test.spc
+tests/mutex_test.spc
 tests/parser_test.spc
 tests/pattern_test.spc
 tests/raii_gen_test.spc
@@ -135,10 +136,12 @@ ci/race_hunt.spc
 ci/cancel_hunt.spc
 ci/queue_hunt.spc
 ci/io_hunt.spc
-ci/blocking_hunt.spc"
+ci/blocking_hunt.spc
+ci/mutex_hunt.spc"
 CONTRACT_BENCH_FILES="bench/concurrency_bench.spc
 bench/macro_bench.spc
 bench/micro_bench.spc
+bench/mutex_bench.spc
 bench/sweep.spc
 bench/transpile_bench.spc
 bench/workload_bench.spc"

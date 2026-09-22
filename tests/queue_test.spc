@@ -4,6 +4,7 @@
 // every task; and shutdown drains work still arriving from cancellation cleanup.
 
 import std::parallel::runtime as rt;
+import tests::parallel_harness as ph;
 import std::parallel::sync as sync;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
@@ -97,8 +98,9 @@ fn yielded_task_is_served_under_continuous_spawning() {
             rt::yield_now();
         }
     };
-    // Let the yielder take its first turn, so it is on the yield queue when the chains start.
-    time::sleep(time::Duration::from_millis(5));
+    // The yielder has taken its first turn (it counts one per turn), so it is on the yield queue when the
+    // chains start.
+    assert(ph::wait_count(&progress, 1), "the yielder takes its first turn");
     let chains: i64 = 64;
     let depth: i64 = 255;
     let total: i64 = chains * (depth + 1);
@@ -198,7 +200,7 @@ fn shutdown_drains_cleanup_in_flight() {
             },
         );
     }
-    time::sleep(time::Duration::from_millis(5));
+    assert(ph::wait_waiting(rt::WK_SLEEP, 32), "every child is parked in its sleep");
     g.cancel();
     let res = rt::try_shutdown(rt::ShutdownOptions::defaults());
     assert_eq(res.unresponsive, 0usize);

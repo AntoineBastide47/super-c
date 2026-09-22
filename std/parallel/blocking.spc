@@ -106,6 +106,7 @@ struct PThread {
     pub pool: *mut Pool,
     pub published: i32, // atomic: the handle is stored
     pub park: i32, // atomic: 1 = popped from the idle stack with work to take
+    pub wakes: i32, // atomic: wakes a submitter still owes this thread (popped idle, signal not yet sent)
     pub covering: i32, // became the spinner when it released its last call (pool lock)
 }
 
@@ -298,6 +299,12 @@ fn reap(p: *mut Pool) {
         if unsafe sc_runtime::sc_rt_thread_join(t.handle) != 0 {
             panic("blocking pool: cannot join an exited pool thread");
         }
+        // A submitter that popped this thread while it was idle may not have sent its signal yet (it was
+        // held off between releasing the pool lock and taking this one); the thread has exited, but its
+        // lock and condition must outlive that signal. Bounded by that submitter's few instructions.
+        while atomic::load_i32(&mut unsafe t.wakes, 1) != 0 {
+            unsafe sc_runtime::sc_rt_thread_yield();
+        }
         unsafe sc_runtime::sc_rt_cond_free(t.cv);
         unsafe sc_runtime::sc_rt_mutex_free(t.mtx);
         unsafe g.dealloc(t, sizeof(PThread), alignof(PThread));
@@ -323,11 +330,8 @@ fn plan(p: *mut Pool) Post {
     if unsafe p.spinner != 0 && unsafe p.head.next == null {
         return post;
     }
-    let t = unsafe p.idle_head;
+    let t = pop_idle(p);
     if t != null {
-        unsafe p.idle_head = unsafe t.inext;
-        unsafe p.idle = unsafe p.idle - 1;
-        atomic::store_i32(&mut unsafe t.park, 1, 2);
         post.wake = t;
         return post;
     }
@@ -343,12 +347,30 @@ fn plan(p: *mut Pool) Post {
     return post;
 }
 
-// Wake a thread popped from the idle stack (`park` already set): the signal lands under its own lock, so
-// a thread between its check of `park` and its wait cannot miss it.
+// Pop the most recently idle thread for a wake, or null. Caller holds the lock and owes the thread a
+// `wake_thread`. The signal may come only after the lock is released, from a worker the scheduler may
+// hold off for as long as it likes; meanwhile the thread may take work on its own timed wake, serve it,
+// and be retired and reaped. Every owed wake is counted, so the reap frees no record with one still due.
+fn pop_idle(p: *mut Pool) *mut PThread {
+    let t = unsafe p.idle_head;
+    if t == null {
+        return null;
+    }
+    unsafe p.idle_head = unsafe t.inext;
+    unsafe p.idle = unsafe p.idle - 1;
+    atomic::store_i32(&mut unsafe t.park, 1, 2);
+    let _ = atomic::add_i32(&mut unsafe t.wakes, 1, 2);
+    return t;
+}
+
+// Wake a thread popped by `pop_idle` (`park` already set): the signal lands under its own lock, so a
+// thread between its check of `park` and its wait cannot miss it. The wake owed is paid off only once the
+// lock is released: until then the record must stay allocated, whatever the thread itself has done.
 fn wake_thread(t: *mut PThread) {
     unsafe sc_runtime::sc_rt_mutex_lock(t.mtx);
     unsafe sc_runtime::sc_rt_cond_signal(t.cv);
     unsafe sc_runtime::sc_rt_mutex_unlock(t.mtx);
+    let _ = atomic::sub_i32(&mut unsafe t.wakes, 1, 3);
 }
 
 fn post_run(p: *mut Pool, post: Post) {
@@ -378,6 +400,7 @@ fn spawn_thread(p: *mut Pool) {
         pool: p,
         published: 0,
         park: 0,
+        wakes: 0,
         covering: 0,
     };
     let mut h: *mut void = null;
@@ -390,9 +413,11 @@ fn spawn_thread(p: *mut Pool) {
         unsafe sc_runtime::sc_rt_sleep_ns(delay);
     }
     lock(p);
-    unsafe p.starting = unsafe p.starting - 1;
     if rc == 0 {
+        // The joins release the lock: the reservation stays counted until the thread is on the live list,
+        // or a shutdown running meanwhile sees neither and releases the pool under this publication.
         reap(p);
+        unsafe p.starting = unsafe p.starting - 1;
         unsafe t.handle = h;
         unsafe t.next = unsafe p.live_list;
         unsafe p.live_list = t;
@@ -403,6 +428,7 @@ fn spawn_thread(p: *mut Pool) {
         unsafe sc_runtime::sc_rt_unpark_all(&mut t.published);
         return;
     }
+    unsafe p.starting = unsafe p.starting - 1;
     unsafe sc_runtime::sc_rt_cond_free(cv);
     unsafe sc_runtime::sc_rt_mutex_free(mtx);
     unsafe g.dealloc(t, sizeof(PThread), alignof(PThread));
@@ -1177,10 +1203,7 @@ pub fn try_shutdown(grace_ns: u64) ShutdownReport {
         unsafe p.shutting = 1;
         // Idle threads: woken to find the pool closed and exit.
         while unsafe p.idle_head != null {
-            let t = unsafe p.idle_head;
-            unsafe p.idle_head = unsafe t.inext;
-            unsafe p.idle = unsafe p.idle - 1;
-            atomic::store_i32(&mut unsafe t.park, 1, 2);
+            let t = pop_idle(p);
             wake_thread(t);
         }
         // Admission waiters: woken to find the pool closed and run their calls themselves.

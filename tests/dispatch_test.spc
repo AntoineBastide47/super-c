@@ -11,6 +11,7 @@ import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;
 import std::parallel::time as time;
+import tests::parallel_harness as ph;
 
 // Exact-destruction counter: every `free` of a Tracked bumps it.
 static mut G_FREES: i64 = 0;
@@ -210,7 +211,7 @@ fn cached_stacks_are_reused() {
         }
         wg.wait();
         if round == 0 {
-            rt::sleep_ns(20000000); // let the blocks settle into the pool
+            assert(ph::wait_pool_within(rt::pool_budget()), "the blocks settle into the pool");
         }
         let mapped = platform::stack_bytes();
         if round > 0 {
@@ -220,9 +221,8 @@ fn cached_stacks_are_reused() {
             );
         }
     }
-    rt::sleep_ns(20000000);
+    assert(ph::wait_pool_within(rt::pool_budget()), "within the budget");
     assert(rt::pool_retained_bytes() > 0, "the idle pool holds the recycled blocks");
-    assert(rt::pool_retained_bytes() <= rt::pool_budget(), "within the budget");
     rt::shutdown();
     assert_eq(platform::stack_bytes(), 0usize);
 }
@@ -247,8 +247,8 @@ fn small_pool_budget_is_honoured() {
     }
     let _ = gate.wait();
     wg.wait();
-    rt::sleep_ns(50000000); // workers park: stashes and the shared pool settle, idle trimming runs
-    assert(rt::pool_retained_bytes() <= budget, "the idle cache is within the budget");
+    // Workers park: stashes and the shared pool settle, and what is past the budget is released.
+    assert(ph::wait_pool_within(budget), "the idle cache is within the budget");
     let live_blocks = platform::stack_bytes() / (262144 + platform::page_size());
     assert(live_blocks <= 48usize, "released past the budget: at most the budget plus the stashes remain mapped");
     rt::shutdown();

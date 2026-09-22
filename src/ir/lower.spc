@@ -6345,9 +6345,9 @@ extend Lowerer {
         return vd_is(v.v_array, it.decl, it.module);
     }
 
-    /// The place RV_LEN reads for a check: the view itself, reached through any reference
-    /// wrappers. Only the length read derefs; the access projection keeps its original shape.
-    fn view_len_place(self: &mut Self, base: ir::PlaceId) ir::PlaceId {
+    /// `base` reached through every reference wrapper: the place of the value itself. Element
+    /// projections and the length read of a bounds check both address the view, never the reference.
+    fn deref_refs(self: &mut Self, base: ir::PlaceId) ir::PlaceId {
         let mut pl = base;
         let mut guard = 0;
         while guard < 3 {
@@ -6432,7 +6432,7 @@ extend Lowerer {
             },
             None => {},
         };
-        let base = self.lower_place(d.object);
+        let mut base = self.lower_place(d.object);
         if base == ir::IR_NONE {
             return ir::IR_NONE;
         }
@@ -6467,7 +6467,7 @@ extend Lowerer {
             let is_arr = pvt != TYPE_NONE && self.f.ty(pvt).kind == TypeKind::TYPE_ARRAY;
             if self.checked_view(pvt) || is_arr || self.array_view(pvt) {
                 let ut = Ast::builtin(BuiltinType::BT_USIZE);
-                let vbase = self.view_len_place(base);
+                let vbase = self.deref_refs(base);
                 let lpl = self.len_temp(vbase, sp);
                 if sop == ir::IR_NONE {
                     sop = self.const_op(
@@ -6554,6 +6554,11 @@ extend Lowerer {
             );
             return pl;
         }
+        // An element THROUGH a reference is the referent's storage, not the reference's: the index
+        // projection sits behind a deref, exactly as a field access does, so a loan on the element
+        // outlives the slot holding the reference (a call-result temporary dies at the end of its
+        // block; `v.get()[i].lock()` borrows the vector, not that temporary).
+        base = self.deref_refs(base);
         let iop = self.lower_expr(d.index);
         if iop == ir::IR_NONE {
             return ir::IR_NONE;
@@ -6574,7 +6579,7 @@ extend Lowerer {
                     }
                     if dec && cn.val >= 0 {
                         if self.checked_view(self.peeled_view_ty(base)) {
-                            let vb0 = self.view_len_place(base);
+                            let vb0 = self.deref_refs(base);
                             let _ = self.bounds_check(vb0, iop, sp);
                         }
                         return self.place_project(
@@ -6587,7 +6592,7 @@ extend Lowerer {
         }
         let mut iop_use = iop;
         if self.checked_view(self.peeled_view_ty(base)) {
-            let vb1 = self.view_len_place(base);
+            let vb1 = self.deref_refs(base);
             let ck1 = self.bounds_check(vb1, iop, sp);
             iop_use = self.copy_op(ck1);
         }

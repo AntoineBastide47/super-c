@@ -60,6 +60,19 @@ fn wait_prompt(fd: i32, write: bool, hits: &arc::Arc<atomics::Atomic<i64>>) {
     wait_prompt_for(fd, write, hits, 3);
 }
 
+// Wait, bounded, until the reactor holds `want` pending waits: the waiters have ARMED, so a byte written
+// now is what wakes them rather than what they find already there.
+fn wait_pending(want: usize) bool {
+    let deadline = platform::now_ns() + 5000000000;
+    while io::pending_waits() < want {
+        if platform::now_ns() > deadline {
+            return false;
+        }
+        time::sleep(time::Duration::from_millis(1));
+    }
+    return true;
+}
+
 fn finish() {
     assert_eq(io::pending_waits(), 0usize);
     io::shutdown();
@@ -84,7 +97,7 @@ fn two_readers_on_one_socket_both_wake() {
             wait_prompt(fd, false, &h);
         };
     }
-    time::sleep(time::Duration::from_millis(50));
+    assert(wait_pending(2), "both readers arm");
     write_one(&p.a);
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "both readers finish");
     assert_eq(count(&hits), 2);
@@ -100,7 +113,7 @@ fn read_and_write_waits_on_one_socket_are_independent() {
     let p = pair(&l);
     let fd = p.b.fd;
     let wg = sync::WaitGroup::new();
-    wg.add(2);
+    wg.add(1);
     let hits = counter();
     let w1 = wg.clone();
     let h1 = hits.clone();
@@ -108,17 +121,58 @@ fn read_and_write_waits_on_one_socket_are_independent() {
         defer w1.done();
         wait_prompt(fd, false, &h1);
     };
-    time::sleep(time::Duration::from_millis(20)); // the reader arms first
-    let w2 = wg.clone();
+    assert(wait_pending(1), "the reader arms first");
+    let writer = sync::WaitGroup::new();
+    writer.add(1);
+    let w2 = writer.clone();
     let h2 = hits.clone();
     launch || {
         defer w2.done();
         wait_prompt(fd, true, &h2);
     };
-    time::sleep(time::Duration::from_millis(50));
+    // The write wait is satisfied at once (the socket is writable) and never pending, so its completion
+    // is what orders it: only once it has finished is the byte written, and the still-armed reader must
+    // wake on it. (Writing while the write wait is still arming is a different case: under epoll the two
+    // directions share one registration, and that interleaving left the write wait unserved once in
+    // eight runs on a loaded Linux box, which is a reactor question, not this test's.)
+    assert(writer.wait_timeout(time::Duration::from_secs(10)), "the write wait finishes at once");
     write_one(&p.a);
-    assert(wg.wait_timeout(time::Duration::from_secs(10)), "both waits finish");
+    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the read wait finishes");
     assert_eq(count(&hits), 2);
+    finish();
+}
+
+// The same two waits, but the byte arrives WHILE the write wait is arming: the read event may be delivered
+// before the reactor has seen the write wait's arm, and the write wait must still be served promptly rather
+// than sit until something else wakes the reactor.
+@test
+fn a_write_wait_arming_under_a_read_event_is_still_served() {
+    rt::set_worker_count(2);
+    let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+    let rounds: i64 = 40;
+    let hits = counter();
+    for _r in 0..rounds {
+        let p = pair(&l);
+        let fd = p.b.fd;
+        let wg = sync::WaitGroup::new();
+        wg.add(2);
+        let w1 = wg.clone();
+        let h1 = hits.clone();
+        launch || {
+            defer w1.done();
+            wait_prompt(fd, false, &h1);
+        };
+        assert(wait_pending(1), "the reader arms first");
+        let w2 = wg.clone();
+        let h2 = hits.clone();
+        launch || {
+            defer w2.done();
+            wait_prompt(fd, true, &h2);
+        };
+        write_one(&p.a);
+        assert(wg.wait_timeout(time::Duration::from_secs(10)), "both waits finish");
+    }
+    assert_eq(count(&hits), 2 * rounds);
     finish();
 }
 
@@ -130,19 +184,23 @@ fn a_reused_descriptor_number_serves_its_new_waiter() {
     let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let mut p = pair(&l);
     let fd = p.b.fd;
-    let wg = sync::WaitGroup::new();
-    wg.add(1);
-    let w1 = wg.clone();
+    // The first wait is armed and then settled by the close; the same descriptor number then carries a
+    // new socket and a new wait, which the byte written afterwards must reach.
+    let first = sync::WaitGroup::new();
+    first.add(1);
+    let w1 = first.clone();
     launch || {
         defer w1.done();
-        let _ = io::wait_until(fd, false, time::deadline_in(time::Duration::from_millis(200)));
+        let _ = io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(2)));
     };
-    time::sleep(time::Duration::from_millis(50));
+    assert(wait_pending(1), "the first wait arms");
     p.b.close();
     p.a.close();
+    assert(first.wait_timeout(time::Duration::from_secs(10)), "the first wait settles on the close");
     let q = pair(&l); // the lowest free number is the one just closed
     let fd2 = q.b.fd;
     let hits = counter();
+    let wg = sync::WaitGroup::new();
     wg.add(1);
     let w2 = wg.clone();
     let h2 = hits.clone();
@@ -150,9 +208,9 @@ fn a_reused_descriptor_number_serves_its_new_waiter() {
         defer w2.done();
         wait_prompt(fd2, false, &h2);
     };
-    time::sleep(time::Duration::from_millis(300)); // the first wait expires meanwhile
+    assert(wait_pending(1), "the new wait arms on the reused number");
     write_one(&q.a);
-    assert(wg.wait_timeout(time::Duration::from_secs(10)), "both waits finish");
+    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the second wait finishes");
     assert_eq(count(&hits), 1);
     finish();
 }
@@ -309,7 +367,7 @@ fn close_under_a_wait_settles_it_at_once() {
             t.get().store(-1i64, atomics::MemoryOrder::Release);
         }
     };
-    time::sleep(time::Duration::from_millis(30));
+    assert(wait_pending(1), "the wait arms");
     p.b.close();
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the wait ends");
     let el = count(&took);
@@ -326,7 +384,7 @@ fn close_under_a_wait_settles_it_at_once() {
         defer w2.done();
         wait_prompt(fd2, false, &h);
     };
-    time::sleep(time::Duration::from_millis(20));
+    assert(wait_pending(1), "the new wait arms");
     write_one(&q.a);
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the new wait ends");
     assert_eq(count(&hits), 1);
@@ -389,7 +447,7 @@ fn shutdown_settles_a_pending_wait() {
             t.get().store(-1i64, atomics::MemoryOrder::Release);
         }
     };
-    time::sleep(time::Duration::from_millis(50));
+    assert(wait_pending(1), "the wait arms");
     io::shutdown();
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the settled wait ends");
     let el = count(&took);
@@ -404,7 +462,7 @@ fn shutdown_settles_a_pending_wait() {
         defer w2.done();
         wait_prompt(fd, false, &h);
     };
-    time::sleep(time::Duration::from_millis(20));
+    assert(wait_pending(1), "the new wait arms");
     write_one(&p.a);
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the new wait ends");
     assert_eq(count(&hits), 1);
@@ -442,6 +500,7 @@ fn idle_descriptors_do_not_delay_an_active_one() {
         time::sleep(time::Duration::from_millis(1));
     }
     assert_eq(io::pending_waits(), idle as usize);
+    eprintln("idle waits parked: {}", idle);
     // The active connection.
     let p = pair(&l);
     let afd = p.b.fd;
@@ -467,15 +526,31 @@ fn idle_descriptors_do_not_delay_an_active_one() {
     back.resize_default(8);
     let bcap: usize = 8;
     let t0 = platform::now_ns();
+    let mut slowest: u64 = 0;
     for _k in 0..100 {
+        let t1 = platform::now_ns();
         write_one(&p.a);
         assert(p.a.read(back.index_range_mut(0..bcap)) == 1, "the echo comes back");
+        let trip = platform::now_ns() - t1;
+        if trip > slowest {
+            slowest = trip;
+        }
     }
+    let spent = platform::now_ns() - t0;
+    eprintln("round trips done in {} ms", spent / 1000000);
     assert(awg.wait_timeout(time::Duration::from_secs(10)), "the echo task finishes");
+    eprintln("echo task finished");
     assert_eq(count(&trips), 100);
+    // Replayed only when the test fails: the numbers say whether the wake path or the machine is slow.
+    eprintln(
+        "a hundred round trips under {} idle waits: {} ms, slowest trip {} us",
+        idle,
+        spent / 1000000,
+        slowest / 1000,
+    );
     // A loaded runner on the select backend rebuilds a thousand-entry set per wake: the bound is about
     // delay by the idle waits, not about the machine, so it stays wide.
-    assert(platform::now_ns() - t0 < 20000000000, "a hundred round trips under a thousand idle waits");
+    assert(spent < 20000000000, "a hundred round trips under a thousand idle waits");
     assert_eq(io::pending_waits(), idle as usize);
     for i in 0..idle as usize {
         write_one(&pairs.at(i).a);
@@ -506,7 +581,11 @@ fn a_burst_of_waits_from_one_worker_is_all_served() {
         let h = hits.clone();
         launch || {
             defer w.done();
-            wait_prompt(fd, false, &h);
+            // The byte comes only after the yield phase below, so the read wait's own duration is the
+            // test's, not the wake's: it counts on readiness, with a deadline only a lost wake reaches.
+            if io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(30))) {
+                bump(&h);
+            }
             wait_prompt(fd, true, &h); // writable at once: a second wait on the same descriptor
         };
     }

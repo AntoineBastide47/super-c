@@ -334,8 +334,21 @@ void sc_rt_thread_yield(void) { SwitchToThread(); }
    library, so the Windows build links -lsynchronization (see ffi/sc_runtime.spc). */
 void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
   int32_t cmp = expected;
-  DWORD ms = timeout_ns < 0 ? INFINITE : (DWORD)(timeout_ns / 1000000);
-  WaitOnAddress(word, &cmp, sizeof(cmp), ms);
+  if (timeout_ns < 0) {
+    WaitOnAddress(word, &cmp, sizeof(cmp), INFINITE);
+    return;
+  }
+  /* WaitOnAddress counts its timeout in scheduler ticks (15.6 ms by default), so a timed wait can return
+     up to a tick EARLY, and it may return spuriously as well. Wait again for what remains until the word
+     changes or the deadline passes: the contract the POSIX parker keeps (woken, or the deadline reached).
+     The remainder rounds UP to whole milliseconds; rounded down it would spin through the last one. */
+  const uint64_t deadline = sc_rt_now_ns() + (uint64_t)timeout_ns;
+  for (;;) {
+    if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != expected) return;
+    const uint64_t now = sc_rt_now_ns();
+    if (now >= deadline) return;
+    WaitOnAddress(word, &cmp, sizeof(cmp), (DWORD)((deadline - now + 999999) / 1000000));
+  }
 }
 void sc_rt_unpark_one(int32_t *word) { WakeByAddressSingle(word); }
 void sc_rt_unpark_all(int32_t *word) { WakeByAddressAll(word); }

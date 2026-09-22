@@ -8,6 +8,7 @@
 import atomic;
 import sc_runtime;
 import std::parallel::runtime as rt;
+import tests::parallel_harness as ph;
 import std::parallel::sync as sync;
 import std::parallel::blocking as blocking;
 import std::parallel::channel as chan;
@@ -65,6 +66,15 @@ fn hold(ms: u64, v: i64) i64 {
     return v;
 }
 
+// A blocking body: hold a pool thread until `gate` opens and return `v`. A hold measured in time loses to
+// a loaded runner; one that ends on a signal ends exactly when the test says.
+fn hold_open(gate: &arc::Arc<atomics::Atomic<i64>>, v: i64) i64 {
+    while count(gate) == 0 {
+        time::sleep(time::Duration::from_millis(1));
+    }
+    return v;
+}
+
 // Wait, bounded, until the pool reports no call queued or running. A caller is woken before the thread
 // that ran its call has counted itself out, so the count may lag a returned call by a few instructions.
 fn wait_quiet() bool {
@@ -110,17 +120,24 @@ fn wait_threads_gone() bool {
 
 // Launch `n` calls that each hold a pool thread for `ms`, and wait until every thread is busy with one,
 // so that what is launched next queues behind them whatever order the workers run tasks in.
-fn hold_threads(wg: &sync::WaitGroup, ok: &arc::Arc<atomics::Atomic<i64>>, n: i64, ms: u64) {
+fn hold_threads(
+    wg: &sync::WaitGroup,
+    ok: &arc::Arc<atomics::Atomic<i64>>,
+    n: i64,
+    gate: &arc::Arc<atomics::Atomic<i64>>,
+) {
     wg.add(n);
     for i in 0..n {
         let w = wg.clone();
         let o = ok.clone();
+        let g = gate.clone();
         launch || {
             defer w.done();
             let want = i;
+            let gi = g.clone(); // the call's closure owns its own handle: it outlives this frame
             if blocking::call(
                 fn() i64 {
-                    return hold(ms, want);
+                    return hold_open(&gi, want);
                 },
             ) == want {
                 let _ = o.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
@@ -482,7 +499,8 @@ fn a_full_queue_parks_callers_for_admission() {
     let extra = blocking::MAX_PENDING as i64 + 40;
     let ok = counter();
     let wg = sync::WaitGroup::new();
-    hold_threads(&wg, &ok, holders, 150);
+    let gate = counter();
+    hold_threads(&wg, &ok, holders, &gate);
     wg.add(extra);
     for i in 0..extra {
         let w = wg.clone();
@@ -500,11 +518,18 @@ fn a_full_queue_parks_callers_for_admission() {
             }
         };
     }
+    // The threads stay held until a caller has actually waited for admission, so the wait is a fact
+    // rather than a race against the hold.
+    let deadline = platform::now_ns() + 5000000000;
+    while blocking::stats().admit_waits == 0 && platform::now_ns() < deadline {
+        time::sleep(time::Duration::from_millis(1));
+    }
+    assert(blocking::stats().admit_waits > 0, "callers waited for admission");
+    gate.get().store(1, atomics::MemoryOrder::Release);
     assert(wg.wait_timeout(time::Duration::from_secs(60)), "every call returns");
     assert_eq(count(&ok), holders + extra);
     let st = blocking::stats();
     assert(st.peak_queued <= blocking::MAX_PENDING, "the queue never passed its bound");
-    assert(st.admit_waits > 0, "callers waited for admission");
     finish();
 }
 
@@ -516,7 +541,8 @@ fn a_cancelled_admission_wait_returns_none() {
     let fill = blocking::MAX_PENDING as i64;
     let ok = counter();
     let wg = sync::WaitGroup::new();
-    hold_threads(&wg, &ok, holders, 200);
+    let gate = counter();
+    hold_threads(&wg, &ok, holders, &gate);
     wg.add(fill);
     for _i in 0..fill {
         let w = wg.clone();
@@ -554,10 +580,11 @@ fn a_cancelled_admission_wait_returns_none() {
         after_mark(); // unreachable: the cancelled task unwinds from the call
     };
     let key = krx.recv().unwrap();
-    time::sleep(time::Duration::from_millis(20));
+    assert(ph::wait_parked(key), "the caller parks for admission");
     assert(rt::request_cancel(key, rt::CR_USER), "the parked caller is live");
     assert(done.wait_timeout(time::Duration::from_secs(10)), "the cancelled caller returns");
     assert_eq(afters(), 0i64);
+    gate.get().store(1, atomics::MemoryOrder::Release);
     assert(wg.wait_timeout(time::Duration::from_secs(60)), "the rest return");
     finish();
     // Counted when the task completes, after its deferred signal: read once the scheduler has folded it.
@@ -573,22 +600,29 @@ fn a_cancelled_admission_wait_returns_none() {
 fn shutdown_with_an_unreturned_call_is_bounded() {
     rt::set_worker_count(2);
     let got = counter();
+    let gate = counter();
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w = wg.clone();
     let g = got.clone();
+    let ga = gate.clone();
     launch || {
         defer w.done();
+        let gi = ga.clone(); // the call's closure owns its own handle: it outlives this frame
         g.get().store(
             blocking::call(
                 fn() i64 {
-                    return hold(300, 7);
+                    return hold_open(&gi, 7);
                 },
             ),
             atomics::MemoryOrder::Release,
         );
     };
-    time::sleep(time::Duration::from_millis(30));
+    // The call is running before the shutdown is asked for, and stays out until the gate opens below.
+    let deadline = platform::now_ns() + 5000000000;
+    while blocking::stats().running < 1 && platform::now_ns() < deadline {
+        time::sleep(time::Duration::from_millis(1));
+    }
     let t0 = platform::now_ns();
     let r = blocking::try_shutdown(50000000);
     let took = platform::now_ns() - t0;
@@ -616,6 +650,7 @@ fn shutdown_with_an_unreturned_call_is_bounded() {
     };
     assert(wg2.wait_timeout(time::Duration::from_secs(10)), "the late call returns");
     assert_eq(count(&late), 11i64);
+    gate.get().store(1, atomics::MemoryOrder::Release);
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the held call returns");
     assert_eq(count(&got), 7i64);
     let r2 = blocking::try_shutdown(5000000000);
@@ -634,22 +669,27 @@ fn shutdown_with_an_abandoned_call_is_bounded() {
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
     let krx = kch.receiver();
+    let gate = counter();
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w = wg.clone();
+    let ga = gate.clone();
     launch || {
         defer w.done();
         let _ = ktx.send(rt::current_key());
+        let gi = ga.clone(); // the body owns its own handle: it outlives this frame
         let _got = blocking::call_c(
             fn() Payload {
-                time::sleep(time::Duration::from_millis(300));
+                // The body stays out until the gate opens: the cancel and the first shutdown below
+                // land while it runs, whatever the runner's pace.
+                let _ = hold_open(&gi, 0);
                 return Payload { n: 1 };
             },
         );
         after_mark(); // unreachable: the cancelled task unwinds from the call
     };
     let key = krx.recv().unwrap();
-    time::sleep(time::Duration::from_millis(30));
+    assert(ph::wait_parked(key), "the caller parks in its call");
     assert(rt::request_cancel(key, rt::CR_USER), "the parked caller is live");
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the caller leaves at once");
     assert_eq(afters(), 0i64);
@@ -657,6 +697,7 @@ fn shutdown_with_an_abandoned_call_is_bounded() {
     let r = blocking::try_shutdown(50000000);
     assert(!r.released, "the body still runs");
     assert_eq(r.running, 1usize);
+    gate.get().store(1, atomics::MemoryOrder::Release);
     let r2 = blocking::try_shutdown(5000000000);
     assert(r2.released, "released once the body returned");
     assert_eq(frees(), 1i64);
@@ -675,9 +716,15 @@ fn shutdown_with_an_unreturned_foreign_call_is_bounded() {
     let r0 = rc.clone();
     launch || {
         defer w.done();
-        r0.get().store(unsafe usleep(300000), atomics::MemoryOrder::Release);
+        // Foreign code the runtime cannot stop, and cannot signal either: long enough that the shutdown
+        // below, asked for once the call is running, cannot outlast it on a loaded runner.
+        r0.get().store(unsafe usleep(1000000), atomics::MemoryOrder::Release);
     };
-    time::sleep(time::Duration::from_millis(30));
+    // Wait until the pool reports the call running: a fixed sleep loses to a slow start under load.
+    let deadline = platform::now_ns() + 5000000000;
+    while blocking::stats().running < 1 && platform::now_ns() < deadline {
+        time::sleep(time::Duration::from_millis(1));
+    }
     let r = blocking::try_shutdown(50000000);
     assert(!r.released, "the foreign call is still running");
     assert_eq(r.running, 1usize);
@@ -699,7 +746,8 @@ fn shutdown_settles_admission_waiters() {
     let calls = holders + fill + waiters;
     let ok = counter();
     let wg = sync::WaitGroup::new();
-    hold_threads(&wg, &ok, holders, 200);
+    let gate = counter();
+    hold_threads(&wg, &ok, holders, &gate);
     wg.add(fill + waiters);
     for i in 0..fill + waiters {
         let w = wg.clone();
@@ -724,6 +772,7 @@ fn shutdown_settles_admission_waiters() {
     assert(blocking::stats().admit_waits >= waiters as usize, "the extra callers parked for admission");
     let r = blocking::try_shutdown(20000000);
     assert(!r.released, "the holders still run");
+    gate.get().store(1, atomics::MemoryOrder::Release);
     assert(wg.wait_timeout(time::Duration::from_secs(60)), "every call returns");
     assert_eq(count(&ok), calls);
     let r2 = blocking::try_shutdown(5000000000);

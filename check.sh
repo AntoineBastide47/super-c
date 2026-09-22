@@ -33,15 +33,16 @@ fi
 # in the runtime, so any output at all fails the check.
 printf 'check: thread sanitizer (race profile)\n'
 racelog=$(mktemp)
-for prog in parallel_smoke race_hunt cancel_hunt queue_hunt io_hunt blocking_hunt; do
+for prog in parallel_smoke race_hunt cancel_hunt queue_hunt io_hunt blocking_hunt mutex_hunt; do
     if ! ./super-c build "ci/$prog.spc" -o ./tsan-smoke --profile=race >/dev/null 2>&1; then
         rm -f "$racelog" ./tsan-smoke
         printf 'check: FAILED -- could not build ci/%s.spc under the race profile\n' "$prog" >&2
         exit 1
     fi
-    TSAN_OPTIONS="halt_on_error=0" ./tsan-smoke >/dev/null 2>"$racelog"
-    if grep -q 'ThreadSanitizer' "$racelog"; then
-        printf 'check: FAILED -- ThreadSanitizer reported a data race (ci/%s.spc):\n' "$prog" >&2
+    rc=0
+    TSAN_OPTIONS="halt_on_error=0" ./tsan-smoke >/dev/null 2>"$racelog" || rc=$?
+    if [ "$rc" -ne 0 ] || grep -q 'ThreadSanitizer' "$racelog"; then
+        printf 'check: FAILED -- ci/%s.spc under ThreadSanitizer (exit %s):\n' "$prog" "$rc" >&2
         cat "$racelog" >&2
         rm -f "$racelog" ./tsan-smoke
         exit 1

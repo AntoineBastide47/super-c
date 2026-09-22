@@ -158,7 +158,7 @@ pub struct Coroutine {
     pub ctx: *mut void, // sc_rt saved context: `&ctx_mem`, or a heap block on the fallback platforms
     pub stack: *mut void, // guard-paged stack, usable low end
     pub stack_size: usize, // its usable size: every reuse and release goes by this, never by the default
-    pub done: i32, // set by the coroutine when its body returns
+    pub done: i32, // atomic: set by the coroutine when its body returns, read by the shutdown report
     pub trimmed: i32, // idle in the pool with its pages given back: the next run faults them in again
     pub sched_ctx: *mut void, // the running worker's scheduler context (set on switch-in)
     pub commit_fn: fn(*mut void) void, // park hand-off: called once the context is saved
@@ -217,6 +217,8 @@ pub struct TaskInfo {
     pub wait_kind: i32, // WK_*
     pub wait_obj: usize,
     pub masked: bool, // parked non-cancellably, or running with the cancel mask held
+    pub done: bool, // the body has returned: the task is in, or waiting for, its completion
+    pub handoff: i32, // park hand-off tails still running on the block: what a completion waits for
 }
 
 // One registry slot. `gen` bumps once per task assigned to the slot and once per retirement, so a key
@@ -349,18 +351,21 @@ pub const fn sched_hooks_on() bool {
 }
 
 /// Hook point: a thief has read its batch of ring slots and is about to claim them with the head CAS.
+/// The lock's points (`sync::HOOK_*`) share this space and follow it.
 pub const HOOK_STEAL_READ: i32 = 1;
 static mut G_HOOK_POINT: i32 = 0; // atomic: the armed point, or 0
 static mut G_HOOK_NS: u64 = 0; // atomic: how long to delay there
 
-/// Arm a scheduling hook: every worker reaching `point` first spins for `ns`. Only with
-/// `sched_hooks_on()`; a no-op otherwise.
+/// Arm a scheduling hook: whoever reaches `point` first spins for `ns`. Only with `sched_hooks_on()`; a
+/// no-op otherwise.
 pub fn sched_hook_arm(point: i32, ns: u64) {
     atomic::store_u64(&mut unsafe G_HOOK_NS, ns, 0);
     atomic::store_i32(&mut unsafe G_HOOK_POINT, point, 2);
 }
 
-fn hook_delay(point: i32) {
+/// Delay here if `point` is the armed hook. Callers gate it behind `sched_hooks_on()` so an ordinary build
+/// carries no call.
+pub fn hook_delay(point: i32) {
     if atomic::load_i32(&mut unsafe G_HOOK_POINT, 1) != point {
         return;
     }
@@ -750,6 +755,8 @@ fn reg_read(sl: *mut TaskSlot, idx: usize, out: &mut TaskInfo) bool {
         wait_kind: atomic::load_i32(&mut unsafe co.wait_kind, 1),
         wait_obj: atomic::load_usize(&mut unsafe co.wait_obj, 1),
         masked: parked_masked,
+        done: atomic::load_i32(&mut unsafe co.done, 1) != 0,
+        handoff: atomic::load_i32(&mut unsafe co.handoff, 1),
     };
     unsafe sc_runtime::sc_rt_spin_unlock(&mut sl.spin);
     return true;
@@ -776,6 +783,8 @@ pub fn task_snapshot(out: &mut Vector<TaskInfo>) {
             wait_kind: 0,
             wait_obj: 0,
             masked: false,
+            done: false,
+            handoff: 0,
         };
         if reg_read(sl, idx, &mut info) {
             out.push(info);
@@ -1767,7 +1776,8 @@ fn coroutine_start(arg: *mut void) {
     unsafe sc_runtime::sc_rt_ctx_entered(co.ctx);
     let e = unsafe co.run.entry;
     e(unsafe co.run.env);
-    unsafe co.done = 1;
+    // Atomic: the shutdown report reads it from the main thread.
+    atomic::store_i32(&mut unsafe co.done, 1, 0);
     unsafe sc_runtime::sc_rt_ctx_switch(co.ctx, co.sched_ctx);
 }
 
@@ -2475,7 +2485,9 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
         stk = unsafe co.stack;
         ctx = unsafe co.ctx;
         size = unsafe co.stack_size;
-        pst = unsafe co.park_state;
+        // Atomic: a waker that lost this block's last wake claim may still be finishing its compare
+        // (a stale token, so it fails); the generation read here is the one the winner left.
+        pst = atomic::load_u32(&mut unsafe co.park_state, 0);
         slot = unsafe co.slot;
         // The previous task's context state (a sanitizer fiber) goes before the block is re-armed.
         unsafe sc_runtime::sc_rt_ctx_drop(ctx);
@@ -2504,7 +2516,7 @@ pub fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src
     unsafe co.commit_arg = null;
     unsafe co.commit_requeue = 0;
     unsafe co.inited = 0;
-    unsafe co.park_state = pst;
+    atomic::store_u32(&mut unsafe co.park_state, pst, 0); // atomic: see the reuse read above
     unsafe co.theap = TH_NONE;
     unsafe co.deadline = 0;
     unsafe co.tm_token = 0;
@@ -3476,14 +3488,21 @@ fn report_unresponsive(tasks: &mut Vector<TaskInfo>) {
         } else {
             "running";
         };
+        // State and phase say WHERE it is stuck: a body that returned (done) with hand-off tails still
+        // counted is a completion waiting on another worker's park tail; a parked phase with no wait kind
+        // is a park that lost its record; runnable is a task nobody ran.
         eprintln(
-            "  task {} (slot {} gen {}): waiting on {} ({}); {}",
+            "  task {} (slot {} gen {}): waiting on {} ({}); {}; state {} phase {} done {} handoff {}",
             t.id,
             t.key.slot,
             t.key.gen,
             wk_name(t.wait_kind),
             t.wait_obj,
             why,
+            t.state,
+            t.phase,
+            t.done,
+            t.handoff,
         );
     }
 }

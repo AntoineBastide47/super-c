@@ -95,6 +95,7 @@ struct IoWait {
     pub state: i32, // NS_*
     pub rc: i32, // the worker's registration result: 0 registered, 1 always ready, -1 failed
     pub gen: u32, // the record's generation when this node was linked: see `FdRec.gen`
+    pub seq: u64, // `Reactor.events` as the worker read it BEFORE registering: see `commit_arm`
     pub anext: usize, // command-list link while the arm command is queued (tagged, see `push_cmd`)
     pub dnext: usize, // the same for the disarm command
     pub lnext: *mut IoWait, // the record's waiter list
@@ -109,9 +110,11 @@ const CMD_MASK: usize = 1;
 // for it (epoll keeps a fired one-shot registration, disabled, until the descriptor closes), the
 // directions whose last event found no waiter (`stale`: the next arm in such a direction registers again,
 // because the one-shot the event consumed may have been that arm's own, registered by its worker before
-// the reactor saw the node), and the record's generation: bumped by every close reported through
-// `io::close`, so the number's next file starts a new generation, every waiter of the old one has been
-// settled, and a node is only ever unlinked from the generation that linked it.
+// the reactor saw the node), the event count when this descriptor's last event was delivered (`evt`: an
+// arm whose worker registered before that event may have had its one-shot consumed by it, whoever the
+// event woke, so `do_arm` registers it again), and the record's generation: bumped by every close
+// reported through `io::close`, so the number's next file starts a new generation, every waiter of the
+// old one has been settled, and a node is only ever unlinked from the generation that linked it.
 @no_const
 struct FdRec {
     pub rd: *mut IoWait,
@@ -120,6 +123,7 @@ struct FdRec {
     pub stale: i32,
     pub gen: u32,
     pub pad: u32,
+    pub evt: u64,
 }
 
 // A batch of poller events: `sc_io::EV_MAX` triples (descriptor, ready bits, dropped bits). Wrapped in a
@@ -147,7 +151,8 @@ struct Reactor {
     pub pad1: Array<u64, 15>,
     pub sleeping: i32, // atomic: the reactor is in, or about to enter, its blocking poll
     pub pad2: i32,
-    pub pad3: Array<u64, 15>,
+    pub events: u64, // atomic: readiness events delivered so far; workers read it around their registration
+    pub pad3: Array<u64, 14>,
     pub st: IoStats,
 }
 
@@ -278,7 +283,7 @@ fn rec_for(r: *mut Reactor, fd: i32) *mut FdRec {
             unsafe t[k] = unsafe old[k];
         }
         for k in n..cap {
-            unsafe t[k] = FdRec { rd: null, wr: null, known: 0, stale: 0, gen: 0, pad: 0 };
+            unsafe t[k] = FdRec { rd: null, wr: null, known: 0, stale: 0, gen: 0, pad: 0, evt: 0 };
         }
         unsafe g.dealloc(old, n * sizeof(FdRec), alignof(FdRec));
         unsafe r.recs = t;
@@ -432,6 +437,11 @@ fn do_arm(r: *mut Reactor, n: *mut IoWait, b: &mut Batch) {
         unsafe rec.stale = unsafe rec.stale & ~dir;
         again = dir;
     }
+    if unsafe rec.evt > unsafe n.seq {
+        // An event on this descriptor was delivered after the worker registered: the one-shot it consumed
+        // may have been this node's, whichever waiters that event woke, so the interest is set again.
+        again = again | dir;
+    }
     if unsafe rec.rd != null && unsafe rec.wr != null {
         again = RD | WR;
     }
@@ -550,6 +560,10 @@ fn process_events(r: *mut Reactor, evs: &mut EvBuf, n: i32, b: &mut Batch) {
             continue;
         }
         let rec = unsafe (r.recs + fd as usize);
+        // Counted BEFORE the reactor next decides to sleep, and stamped on the record: a worker whose
+        // registration predates this event learns from the count that its one-shot may be gone (see
+        // `commit_arm`), and `do_arm` learns it from the stamp.
+        unsafe rec.evt = atomic::add_u64(&mut unsafe r.events, 1, 4) + 1;
         // A direction is stale only when the backend dropped an interest there that no waiter had:
         // an end-of-file sets both ready bits, but consumes only the filter that fired.
         let unowned = dropped & ~(if unsafe rec.rd != null {
@@ -709,7 +723,7 @@ fn build_reactor() *mut Reactor {
         unsafe regs[k] = 0;
     }
     for k in 0..REC_INIT {
-        unsafe recs[k] = FdRec { rd: null, wr: null, known: 0, stale: 0, gen: 0, pad: 0 };
+        unsafe recs[k] = FdRec { rd: null, wr: null, known: 0, stale: 0, gen: 0, pad: 0, evt: 0 };
     }
     let r = ((base as usize + R_ALIGN - 1) / R_ALIGN * R_ALIGN) as *mut Reactor;
     unsafe r[0] = Reactor {
@@ -726,7 +740,8 @@ fn build_reactor() *mut Reactor {
         pad1: Array::<u64, 15>::new(),
         sleeping: 0,
         pad2: 0,
-        pad3: Array::<u64, 15>::new(),
+        events: 0,
+        pad3: Array::<u64, 14>::new(),
         st: IoStats {
             arms: 0,
             disarms: 0,
@@ -811,14 +826,26 @@ fn commit_arm(p: *mut void) {
         let _ = atomic::add_u64(&mut unsafe r.st.sets, 1, 0);
     }
     let closes = atomic::load_u64(&mut unsafe G_CLOSES, 4);
+    let seq = atomic::load_u64(&mut unsafe r.events, 4);
+    unsafe n.seq = seq;
     let rc = register(r, unsafe n.fd, unsafe n.dir, 1);
     unsafe n.rc = rc;
     // Nothing touches `n` after the push: the reactor may acknowledge it and the frame may end at once.
     push_cmd(r, n, CMD_ARM, rc != 0);
-    // A close between the two reads may have taken the registration with it (the kernel drops a closed
-    // descriptor's interests) after its report was processed, leaving this arm with no event and no wake.
-    // A close after the push is ordered behind the arm on the command list and settles it there.
-    if rc == 0 && atomic::load_u64(&mut unsafe G_CLOSES, 4) != closes && atomic::load_i32(&mut unsafe r.sleeping, 4) != 0 {
+    // The push brings no wake of its own: the event this registration raises is the wake. That event can
+    // be delivered, and consumed, BEFORE the push lands (the reactor drains commands, then events, then
+    // sleeps), and then nothing else would ever drain this arm. The event count says whether any event
+    // was delivered since the registration; if one was and the reactor sleeps, it is woken, and `do_arm`
+    // registers again where the descriptor's own stamp says the one-shot may be gone. The ordering is the
+    // sleep protocol's (both sides sequentially consistent): a reactor that read the command list after
+    // this push drains it, and one that read it before did so after counting the event, which this load
+    // then sees. Likewise a close between the two reads may have taken the registration with it (the
+    // kernel drops a closed descriptor's interests) after its report was processed, leaving this arm with
+    // no event and no wake. A close after the push is ordered behind the arm on the command list.
+    if rc == 0 && (atomic::load_u64(&mut unsafe r.events, 4) != seq || atomic::load_u64(&mut unsafe G_CLOSES, 4) != closes) && atomic::load_i32(
+        &mut unsafe r.sleeping,
+        4,
+    ) != 0 {
         unsafe sc_io::sc_io_wake(r.poller);
     }
 }
@@ -875,6 +902,7 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
         state: NS_NEW,
         rc: 0,
         gen: 0,
+        seq: 0,
         anext: 0,
         dnext: 0,
         lnext: null,
@@ -945,6 +973,7 @@ pub fn close(fd: i32) i32 {
         state: NS_NEW,
         rc: 0,
         gen: 0,
+        seq: 0,
         anext: 0,
         dnext: 0,
         lnext: null,

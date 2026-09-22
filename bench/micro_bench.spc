@@ -360,6 +360,13 @@ fn sync_note(b: &mut bench::Bencher, s0: &sync::SyncStats, units: i64, rounds: i
 
 /// An uncontended lock/unlock pair, on the thread that already owns it. The fast path, and the one that
 /// shows up in every data structure built on top of `Mutex`.
+///
+/// The protected value reaches the optimisation barrier inside the critical section, and that is
+/// load-bearing rather than decoration. Without it the compiler is free to hoist the whole increment out
+/// of the loop whenever it can prove the lock word does not alias the payload, which it can when the two
+/// live in separate allocations and cannot when they share one: the lane would then report the cost of
+/// lock and unlock alone in one layout and lock, unlock and a real read-modify-write in the other, and the
+/// two numbers would not be comparable. With the barrier the critical section is performed either way.
 @bench
 pub fn mutex_uncontended(b: &mut bench::Bencher) {
     b.each(OPS);
@@ -371,6 +378,7 @@ pub fn mutex_uncontended(b: &mut bench::Bencher) {
             let mut g = m.lock();
             let v = g.get_mut();
             *v = *v + 1;
+            bench::black_box((*v) as u64);
         }
         expect = expect + OPS;
         let g = m.lock();

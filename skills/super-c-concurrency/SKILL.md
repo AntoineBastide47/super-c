@@ -68,9 +68,10 @@ into process-lifetime totals when a pool is destroyed. Scheduler counters (steal
 probes, spills, wakes, parks, spin iterations, search cycles) compile in when `RT_STATS`
 in `std/parallel/runtime.spc` is true and read back through `runtime::sched_stats()`;
 they cost nothing otherwise. `RT_HOOKS` likewise compiles in `runtime::sched_hook_arm`,
-which delays every worker at a named point (`HOOK_STEAL_READ`: between a thief's slot
-reads and its head claim) so a race window of nanoseconds becomes reproducible under the
-`race` profile.
+which delays whoever reaches a named point so a race window of nanoseconds becomes
+reproducible under the `race` profile. The scheduler's point is `HOOK_STEAL_READ`
+(between a thief's slot reads and its head claim); the lock's are `sync::HOOK_BEFORE_ENQUEUE`,
+`sync::HOOK_AFTER_POP` and `sync::HOOK_AFTER_RELEASE`, driven by `ci/mutex_hunt.spc`.
 
 ## Send / Sync
 
@@ -96,7 +97,7 @@ worker) instead of blocking the OS thread.
 
 | Primitive | Description |
 |-----------|-------------|
-| `Mutex<T>` | Exclusive lock with RAII guard |
+| `Mutex<T>` | Exclusive lock with RAII guard; the lock word lives in the value |
 | `RwLock<T>` | Reader-writer lock with RAII guards |
 | `Condvar` | Condition variable (both kinds of waiter queue a node in their own frame) |
 | `Once` | One-time initialization |
@@ -119,6 +120,31 @@ node under the mutex and wakes it, and passes the wake to the next node when it 
 wait already over (a deadline or a cancellation got there first), so a wake is never
 spent on a waiter that cannot use it. `sync_stats()` returns lock, wait and wake counters
 when `SYNC_STATS` in `std/parallel/sync.spc` is true, and zeros otherwise.
+
+**What a lock costs.** An uncontended acquisition and release are one atomic
+read-modify-write each, and on a build with cross-module inlining (the release and bench
+profiles) that is all they are: four instructions and one `cas` per side on arm64, with
+no call, no barrier and no diagnostic left in the path. A contender spins with the
+platform's spin hint for a bounded number of attempts and then queues. Every kind of
+attempt is bounded: observations of a held lock by `MUTEX_SPIN`, the same observations
+once another waiter is already queued by the shorter `MUTEX_SPIN_QUEUED`, and
+acquisitions lost to another contender by `MUTEX_LOSSES`, after which the contender stops
+spinning and takes the queue at its first opportunity. Bounding lost attempts is what
+keeps a stream of hot re-acquirers from overtaking a waiter indefinitely: it cuts the
+waiters' wait tail by about three quarters and levels their share of the lock. Spinning
+less once someone is queued is worth another tenth to a half wherever waits reach the
+queue at all, because a spinner there is waiting out a whole release it cannot shorten.
+`try_lock` retries a bounded number of times too, so a `false` means "not taken" rather
+than "was held": under contention it may refuse a lock that was free for an instant,
+which is what lets it promise never to wait. Acquisition is otherwise
+unfair by design, in that a woken waiter re-contends rather than being handed the lock,
+because a hand-off would serialise every acquisition behind a wake. That wake is the
+unlock's one release, spent on the waiter whose park it claimed: a `lock_c` waiter woken
+that way re-contends even when a cancellation landed after the claim (the request is
+taken at its next cancellation point, this loop's next park included). Giving the wait
+up there left every waiter queued behind it parked for good; the test
+`a_cancel_after_the_wake_claim_passes_the_release_on` pins the window with one busy
+worker.
 
 Parking an OS thread retains a little: on POSIX, one parker (a mutex, a condvar and a
 flag) per thread that has parked at least once, held for that thread's life so a waker
@@ -300,7 +326,17 @@ timer or a cancellation does. The one-shot operating-system registration is idem
 and thread-safe, so the publishing worker registers the interest itself just before it
 publishes: the readiness event is what wakes the reactor, an arm costs no wake of its
 own, and an event that finds no waiter marks the record so the next arm in that
-direction registers again. Interests are never removed one by one. A wait that ends by
+direction registers again. That event can also be delivered and consumed BEFORE the
+arm's push lands (the reactor drains commands, then events, then sleeps), and the
+one-shot it consumed may have been the arm's own even when it woke other waiters: the
+reactor counts every event it delivers (`Reactor.events`, atomic) and stamps the
+descriptor's record with the count; the worker reads the count before registering and
+keeps it in the node, wakes a sleeping reactor when the count moved between its
+registration and its push (the sleep protocol's sequentially consistent order makes the
+two checks cover each other), and `do_arm` registers the direction again when the
+record's stamp is newer than the node's snapshot. Without this a lost arm sits until an
+unrelated wake: a 30 s timer in a test, never in a program with no timers, which is how
+the reactor echo programs hung on CI. Interests are never removed one by one. A wait that ends by
 any other reason (deadline, cancel, shutdown) parks once more until the reactor
 acknowledges the node's removal, so no reference to a frame outlives it and the
 operating system never holds a pointer. Read and write waits on one descriptor are two
@@ -374,7 +410,19 @@ attempt finishes the drain. `shutdown()` is `try_shutdown(SHUTDOWN_GRACE_NS)` an
 when the pool is not released. Call it before `runtime::shutdown()`: a task parked in a
 call keeps its stack until the call returns, which the scheduler's own bounded shutdown
 reports rather than frees, and pool threads left running are reported as leaked under
-`SC_LEAK_CHECK`.
+`SC_LEAK_CHECK`. Two rules keep a closing pool from releasing under a submitter still
+inside its park hand-off tail (the caller's task is then reported unresponsive at the
+scheduler's shutdown with its body already returned: `state 1 phase 0 done true handoff
+1`, fields the report prints for this reason). A creation reservation (`starting`) stays
+counted until the thread is on the live list: `spawn_thread` joins announced exits first
+and those joins release the lock, so a reservation dropped before them left a shutdown
+with nothing to wait for; it released and freed the pool, and the creator then took the
+freed lock for good, its new thread parked on a publication that never came. A thread
+popped from the idle stack is signalled only after the pool lock is released, by a worker
+the scheduler may hold off for as long as it likes, and may meanwhile take the job on its
+own timed wake, serve it, retire and be joined: `pop_idle` counts the wake owed
+(`PThread.wakes`), `wake_thread` pays it off after releasing the thread's lock, and the
+reap frees no record with a wake still owed.
 
 **In-place execution was measured and rejected.** Moving the scheduling role off the
 calling worker's OS thread (a replacement worker per blocking call, a permit to take
@@ -397,6 +445,14 @@ share; that is the queue's take policy, not the pool.
 | `runtime::live_tasks()` | Return count of tasks still alive |
 | Shutdown report | Account for tasks that never finished |
 | `race` profile (`--profile=race`) | ThreadSanitizer with the coroutine fiber annotations; the only build that reports a runtime race |
+
+The shutdown report prints each unfinished task's `state`, `phase`, `done` and `handoff`:
+`done true handoff 1` is a worker stuck in that task's park hand-off tail, and the cure is
+that worker's backtrace, not a guess. Every `Coroutine` field another thread may read or
+compare after the task's own worker last wrote it is accessed atomically, `done` (the
+report reads it) and `park_state` on block reuse (a waker that lost the last claim may
+still be finishing its compare) included: `check.sh` runs `ci/*_hunt.spc` under the race
+profile and fails on any report or nonzero exit.
 
 ## Cancellation Sources and Groups
 

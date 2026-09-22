@@ -1343,7 +1343,7 @@ fn leak_tracker() {
         "main.spc",
         "@test\nfn leaks_in_child() {\n    forget(String::from_str(\"deliberate test child leak past the inline budget\"));\n}\n\nfn main() i32 { return 0; }\n",
     );
-    let child = t.compile_flags("--test --quiet", "main.spc");
+    let child = t.compile_flags_env("--test --quiet", "main.spc", "SC_LEAK_CHECK=fatal ");
     assert_eq(child.exit, 1);
     assert(child.out_has("test main::leaks_in_child ... FAILED"), "child leak fails the test");
     assert(child.out_has("super-c leaks: 1 allocation"), "child leak report is captured");

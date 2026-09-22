@@ -329,6 +329,12 @@ extend Proj {
     // Compile <root>/mainrel with the given extra flags (compile-only mode: emits <root>/build/, no link).
     /// Run the compiler on `mainrel` with extra `flags`, capturing output.
     pub fn compile_flags(self: &Proj, flags: str, mainrel: str) CliResult {
+        return self.compile_flags_env(flags, mainrel, "");
+    }
+
+    /// `compile_flags` with `env` ("NAME=VALUE" pairs, space separated) applied to the compiler and
+    /// everything it runs, so a check never depends on the suite's own environment.
+    pub fn compile_flags_env(self: &Proj, flags: str, mainrel: str, env: str) CliResult {
         let mut base = Cmd8192 {};
         unsafe stdio::snprintf(
             &mut base[0],
@@ -343,7 +349,12 @@ extend Proj {
         );
         let mut op = Path512 {};
         unsafe stdio::snprintf(&mut op[0], 512, "%s/.out".ptr() as *const char, self.rootp());
-        return exec(&base[0], &op[0]);
+        if env.len() == 0 {
+            return exec(&base[0], &op[0]);
+        }
+        let mut envb = Path512 {};
+        unsafe stdio::snprintf(&mut envb[0], 512, "%.*s".ptr() as *const char, env.len() as i32, env.ptr());
+        return exec_env(&base[0], &op[0], &envb[0]);
     }
 
     /// Run the compiler on `mainrel`, capturing output.

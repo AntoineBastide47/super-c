@@ -215,6 +215,10 @@ construction, not by audit.
 SC_LEAK_CHECK=fatal super-c test --quiet
 ```
 
+A test's verdict never depends on that variable: a test that checks leak behaviour sets
+`SC_LEAK_CHECK` on the child it runs (`run_bin_env`, `compile_flags_env`, `compile_and_run_env`),
+so an unarmed `super-c test --quiet` gives the same result as the gate.
+
 ## Lint-Based Leak Detection
 
 ```sh
@@ -257,11 +261,37 @@ These are backed by `loader::package_from_source`.
   so a `WaitGroup::done` or counter written after the wait is lost and the waiter hangs.
   Put the report in a `defer` at the top of the body; `tests/cancel_test.spc` and the
   cancellation benchmark lanes follow this rule.
-- **Force a schedule, do not hope for it.** Hold the sole worker busy to keep a task
-  queued, mask cancellation to read a request before the task unwinds, and poll
-  `runtime::task_snapshot` or a source's `members()` for the state the test needs.
+- **A concurrency test never depends on the scheduler's order.** It asserts only what
+  holds for every legal interleaving, and it waits for the STATE it needs, never for a
+  duration that usually suffices. `time::sleep(short())` before a cancel, a fixed hold
+  while callers are meant to queue, a latency bound on a wake, or an assertion right
+  after a signal: each passed for months on an idle machine and then failed on a loaded
+  runner, where a preemption landed inside the window. A test's sleep is legitimate
+  only as a cancellation point inside a task, as a widening of the window for a DEFECT
+  to show in a negative test, or as a bounded poll interval.
+- **Wait on state through `tests/parallel_harness.spc`** (`import tests::parallel_harness
+  as ph;`): `wait_parked(key)` until a task is at its wait (the snapshot shows its wait
+  kind, so a cancellation requested next is claimed by that park), `wait_waiting(kind, n)`
+  until `n` tasks wait on a `WK_*` kind, `wait_gone(key)` and `wait_quiescent()` until a
+  task or every task has completed (a signal fires before completion, and completion
+  before the block retires), `wait_count(&counter, n)`, and `wait_pool_within(bytes)` until
+  the idle block pool has settled under a budget (workers parked, stashes drained). Every
+  wait is bounded at five seconds and returns whether the state was reached, so the
+  caller asserts on it and a hang fails with a name. The io tests wait on `io::pending_waits()` (armed waiters), the
+  blocking tests on `blocking::stats()` (running, queued, `admit_waits`).
+- **Hold with a gate, not a clock.** A pool thread or a lock holder that must stay busy
+  while other callers queue holds until a shared counter opens (`hold_open` in
+  `tests/blocking_test.spc`, `hold_until` in `tests/mutex_test.spc`), and the test
+  opens it once the queueing it wanted is a fact. A hold measured in milliseconds loses
+  to a slow launch.
 - **A signal lands before the signaller's cleanup.** A `defer w.done()` fires before
-  the task's locals drop, and a blocking-pool caller is woken before the thread that
-  ran its call counts itself out. A waiter that asserts on a destruction count or on
-  pool statistics polls for that state with a bound (`wait_frees`, `wait_quiet` in
-  `tests/blocking_test.spc`) instead of asserting right after the wait.
+  the task's locals drop, a holder that signals in its last statement still owns its
+  guard, and a blocking-pool caller is woken before the thread that ran its call counts
+  itself out. Drop the guard in an inner block before signalling, and a waiter that
+  asserts on a destruction count or on pool statistics polls for that state with a bound
+  (`wait_frees`, `wait_quiet` in `tests/blocking_test.spc`) instead of asserting right
+  after the wait.
+- **A wake's latency belongs to a benchmark.** A test asserts that a wake happened and
+  followed its cause, not that it arrived within some milliseconds: that number measures
+  the runner. The only latency bounds kept are those a real defect alone can exceed
+  (a whole second where a missed wake would take the full deadline).
