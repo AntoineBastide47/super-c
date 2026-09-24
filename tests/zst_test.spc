@@ -109,3 +109,25 @@ fn over_aligned_zst_field_pads_the_layout() {
         0,
     );
 }
+
+// An Array of a zero-sized element is itself zero-sized: its `[T; N]` member is read under the
+// instance's bindings, so no C definition over an incomplete element type is emitted.
+@test
+fn zst_element_array_elides() {
+    h::expect_exit(
+        "Array<Z, 3> of an empty struct",
+        "@derive(Default)\nstruct Z {}\nfn main() i32 {\n    let a = Array::<Z, 3>::new();\n    if a.len() != 3 { return 1; }\n    let mut n = 0;\n    for _z in a.iter() {\n        n += 1;\n    }\n    if n != 3 { return 2; }\n    if sizeof(Array<Z, 3>) != 0 { return 3; }\n    return 0;\n}\n",
+        0,
+    );
+}
+
+// A generic body names `Array<T, N>` and `[T; N]` through its own parameters; with T zero-sized
+// and over-aligned, it must classify, size and align them as the concrete caller does.
+@test
+fn zst_nested_generic_agrees_with_concrete() {
+    h::expect_exit(
+        "generic body and concrete caller agree on Array<T, N> with T zero-sized",
+        "@derive(Default)\n@c.align(16)\nstruct M {}\nstruct Hold<T, const N: usize> { pub a: Array<T, N>, pub raw: [T; N], pub b: i32 }\nfn gsize<T, const N: usize>() usize {\n    return sizeof(Hold<T, N>) * 100 + alignof(Array<T, N>);\n}\nfn pass<T, const N: usize>(h: Hold<T, N>) Hold<T, N> {\n    return h;\n}\nfn make<T: Default, const N: usize>(y: T, z: T) Hold<T, N> {\n    return Hold::<T, N> { a: Array::<T, N>::new(), raw: [y, z], b: 9 };\n}\nfn main() i32 {\n    let h = pass::<M, 2>(make::<M, 2>(M {}, M {}));\n    if h.b != 9 { return 1; }\n    if gsize::<M, 2>() != 1616 { return 2; }\n    if sizeof(Hold<M, 2>) != 16 { return 3; }\n    return 0;\n}\n",
+        0,
+    );
+}

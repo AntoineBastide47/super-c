@@ -6,9 +6,8 @@ import ir::core as ir;
 import borrowck::move_paths as mp;
 import borrowck::facts as bf;
 
-/// Move/init error kinds.
+/// Move/init error kinds (MoveErr.kind).
 pub const ME_UNINIT: u8 = 0; // read of a never-initialized-on-some-path place
-/// Move error kinds (MoveErr.kind).
 pub const ME_MOVED: u8 = 1; // read of a maybe-moved place
 pub const ME_DOUBLE_MOVE: u8 = 2; // second move of a maybe-moved place
 pub const ME_PARTIAL: u8 = 3; // whole-value read while a sub-place is moved out
@@ -632,7 +631,7 @@ extend MoveFlow {
                 break;
             } else {
                 bi = mf.s_queue[0];
-                // Pop from the front to keep propagation roughly topological; swap-with-last keeps it O(1).
+                // Take the front slot and move the last entry into it: O(1), in no topological order.
                 mf.s_queue.set(0, mf.s_queue[mf.s_queue.len() - 1]);
                 let _ = mf.s_queue.pop();
                 mf.s_queued.set(bi as usize, false);

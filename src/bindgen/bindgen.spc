@@ -22,8 +22,8 @@ import stdio;
 import stdlib;
 import driver_shim as shim;
 import module::loader as loader;
-import string as cstring;
 import driver::util as *;
+import build_system::build as bsys;
 
 const TK_EOF: i32 = 0;
 const TK_IDENT: i32 = 1;
@@ -77,7 +77,6 @@ extend Lexer<'a> {
         while i < n && (self.src.byte_at(i) == b' ' || self.src.byte_at(i) == b'\t') {
             i = i + 1;
         }
-        let mut got = false;
         if i < n && is_digit(self.src.byte_at(i)) {
             while i < n && is_digit(self.src.byte_at(i)) {
                 i = i + 1;
@@ -93,10 +92,8 @@ extend Lexer<'a> {
                 }
                 self.file.clear();
                 self.file.push_str(self.src.slice(fs, i));
-                got = true;
             }
         }
-        let _ = got;
         while self.pos < n && self.src.byte_at(self.pos) != b'\n' {
             self.pos = self.pos + 1;
         }
@@ -367,8 +364,6 @@ struct Alias {
     pub ok: bool,
 }
 
-// Everything the parse produced: the type environment (every typedef in the whole translation unit, since
-// the target header's signatures are spelled with them) and the declarations from the target header alone.
 struct Field {
     pub name: String,
     pub ty: String,
@@ -408,6 +403,8 @@ struct ConstDef {
     pub mutable: bool, // a global whose C declaration is not const: bound as `static mut`
 }
 
+// Everything the parse produced: the type environment (every typedef in the whole translation unit, since
+// the target header's signatures are spelled with them) and the declarations from the target header alone.
 struct Collected {
     pub aliases: Vector<Alias>,
     pub fns: Vector<FnDecl>,
@@ -426,6 +423,9 @@ struct Collected {
     /// Functions from the target header whose signature this tool could not model. Reported rather than
     /// swallowed: a binding file that is quietly short is worse than one that says what it left out.
     pub skipped: usize,
+    /// Object-like macros of the `-dM` dump: name -> offsets of the replacement text in the dump
+    /// (start << 32 | end). Built once, so a lookup does not rescan the dump.
+    pub macros: Map<String, u64>,
 }
 
 // Vendor noise that carries no meaning for a binding. `__attribute__`, `__declspec` and `asm` take a
@@ -449,6 +449,9 @@ fn safe_name(s: str, out: &mut String) {
         out.push_byte(b'_');
     }
 }
+
+const I64_MAX: i64 = 0x7FFFFFFFFFFFFFFF;
+const I64_MIN: i64 = -I64_MAX - 1;
 
 // An integer written in a C enumerator or an array bound: decimal, hex or a character, with the suffixes
 // and sign C allows. -1 means "not a plain integer", which is what makes the caller fall back.
@@ -483,7 +486,7 @@ fn int_literal(t: str) i64 {
         if d >= base {
             return -1;
         }
-        if v > 0x0FFFFFFFFFFFFFFF {
+        if v > (I64_MAX - d) / base {
             return -1;
         }
         v = v * base + d;
@@ -706,7 +709,7 @@ extend CExpr {
         }
         if depth < CE_DEPTH {
             let mut raw = String::new();
-            let got = macro_value(dump, name, &mut raw);
+            let got = c.macro_value(dump, name, &mut raw);
             if got && raw.len() != 0 {
                 let v = ce_eval(raw.as_str(), c, e, dump, depth + 1);
                 if v.is_some() {
@@ -718,6 +721,45 @@ extend CExpr {
         }
         self.ok = false;
         return 0;
+    }
+
+    // Signed arithmetic traps on overflow; a result outside i64 makes the expression unknown instead.
+    fn add_checked(self: &mut Self, a: i64, b: i64) i64 {
+        if b > 0 && a > I64_MAX - b || b < 0 && a < I64_MIN - b {
+            self.ok = false;
+            return 0;
+        }
+        return a + b;
+    }
+
+    fn sub_checked(self: &mut Self, a: i64, b: i64) i64 {
+        if b < 0 && a > I64_MAX + b || b > 0 && a < I64_MIN + b {
+            self.ok = false;
+            return 0;
+        }
+        return a - b;
+    }
+
+    fn mul_checked(self: &mut Self, a: i64, b: i64) i64 {
+        let mut over = false;
+        if a > 0 {
+            if b > 0 {
+                over = a > I64_MAX / b;
+            } else {
+                over = b < I64_MIN / a;
+            }
+        } else if a < 0 {
+            if b > 0 {
+                over = a < I64_MIN / b;
+            } else if b < 0 {
+                over = a < I64_MAX / b;
+            }
+        }
+        if over {
+            self.ok = false;
+            return 0;
+        }
+        return a * b;
     }
 
     fn ex_primary(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
@@ -769,7 +811,12 @@ extend CExpr {
     fn ex_unary(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
         if self.lx.at_punct(b'-') {
             self.lx.advance();
-            return 0 - self.ex_unary(c, e, dump, depth);
+            let v = self.ex_unary(c, e, dump, depth);
+            if v == I64_MIN {
+                self.ok = false;
+                return 0;
+            }
+            return 0 - v;
         }
         if self.lx.at_punct(b'+') {
             self.lx.advance();
@@ -777,8 +824,8 @@ extend CExpr {
         }
         if self.lx.at_punct(b'~') {
             self.lx.advance();
-            // ~v == -v - 1.
-            return 0 - self.ex_unary(c, e, dump, depth) - 1;
+            // ~v == -1 - v, which cannot overflow.
+            return -1 - self.ex_unary(c, e, dump, depth);
         }
         if self.lx.at_punct(b'!') {
             self.lx.advance();
@@ -795,11 +842,12 @@ extend CExpr {
         loop {
             if self.lx.at_punct(b'*') {
                 self.lx.advance();
-                v = v * self.ex_unary(c, e, dump, depth);
+                let r = self.ex_unary(c, e, dump, depth);
+                v = self.mul_checked(v, r);
             } else if self.lx.at_punct(b'/') {
                 self.lx.advance();
                 let d = self.ex_unary(c, e, dump, depth);
-                if d == 0 {
+                if d == 0 || v == I64_MIN && d == -1 {
                     self.ok = false;
                     return 0;
                 }
@@ -807,7 +855,7 @@ extend CExpr {
             } else if self.lx.at_punct(b'%') {
                 self.lx.advance();
                 let d = self.ex_unary(c, e, dump, depth);
-                if d == 0 {
+                if d == 0 || v == I64_MIN && d == -1 {
                     self.ok = false;
                     return 0;
                 }
@@ -823,10 +871,12 @@ extend CExpr {
         loop {
             if self.lx.at_punct(b'+') {
                 self.lx.advance();
-                v = v + self.ex_mul(c, e, dump, depth);
+                let r = self.ex_mul(c, e, dump, depth);
+                v = self.add_checked(v, r);
             } else if self.lx.at_punct(b'-') {
                 self.lx.advance();
-                v = v - self.ex_mul(c, e, dump, depth);
+                let r = self.ex_mul(c, e, dump, depth);
+                v = self.sub_checked(v, r);
             } else {
                 return v;
             }
@@ -845,7 +895,8 @@ extend CExpr {
                 }
                 self.lx.advance();
                 let sh = self.ex_add(c, e, dump, depth);
-                if sh < 0 || sh > 62 {
+                // A shift that drops value bits is refused, not truncated.
+                if sh < 0 || sh > 62 || v > I64_MAX >> sh || v < I64_MIN >> sh {
                     self.ok = false;
                     return 0;
                 }
@@ -961,27 +1012,6 @@ fn header_macro_names(src: str, out: &mut Vector<String>) {
     }
 }
 
-// The macro's replacement text, as `#define NAME <text>` in the `-dM` dump; empty when it has none.
-fn macro_value(dump: str, name: str, out: &mut String) bool {
-    let n = dump.len();
-    let mut i: usize = 0;
-    while i < n {
-        let mut e: usize = 0;
-        let line = line_at(dump, i, &mut e);
-        if line_defines(line, name) {
-            let v = line[8 + name.len()..];
-            let mut a: usize = 0;
-            while a < v.len() && v.byte_at(a) == b' ' {
-                a = a + 1;
-            }
-            out.push_str(v.slice(a, v.len()));
-            return true;
-        }
-        i = e + 1;
-    }
-    return false;
-}
-
 // `((-1))` -> `-1`: the parentheses C needs for hygiene carry no meaning here.
 fn strip_parens(v: str) str {
     let mut s = v;
@@ -1026,9 +1056,9 @@ fn is_float_text(v: str) bool {
     return dot;
 }
 
-// Turn one macro replacement into a typed Super-C constant. Only literals: an integer, a float or a
-// string. An expression macro (`(SIZE_MAX >> 1)`, `INT32_MAX`) is left alone: folding C expressions is
-// the C compiler's job, and a const that is subtly different from the macro is worse than no const.
+// Turn one macro replacement into a typed Super-C constant: an integer, float or string literal, or an
+// integer expression the constant evaluator (`ce_eval`) can fold. Anything outside that subset is left
+// out: a const that is subtly different from the macro is worse than no const.
 fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef) bool {
     let v = strip_parens(raw);
     if v.len() == 0 {
@@ -1064,7 +1094,7 @@ fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef
         out.value.push_str(body.slice(0, k));
         return true;
     }
-    let mut iv = int_literal(body);
+    let iv = int_literal(body);
     if iv < 0 {
         // Not a literal: `(1 << 8)`, `A | B`, or a name standing for another macro. The evaluator settles
         // whether it is a constant at all, and refuses when any part of it is outside C's integer subset.
@@ -1084,8 +1114,6 @@ fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef
         out.value.format_into("{}", ev);
         return true;
     }
-    let _ = iv;
-    iv = int_literal(body);
     // Unsigned only when C says so; the width is the smallest that holds the value, as a literal would be.
     let mut uns = false;
     for i in 0..body.len() {
@@ -1179,6 +1207,7 @@ fn run_one(
         pending_is_enum: false,
         saw_extern: false,
         skipped: 0,
+        macros: Map::<String, u64>::new(),
     };
 
     let mut mdump = String::new();
@@ -1187,7 +1216,8 @@ fn run_one(
         switch loader::read_file(mpath.as_str()) {
             Some(t) => {
                 c.widths = read_widths(t.as_str());
-                mdump.push_string(&t);
+                c.index_macros(t.as_str());
+                mdump = t;
             },
             None => {},
         };
@@ -1210,7 +1240,7 @@ fn run_one(
                 lx.parse_unit(&mut c, hdr.as_str(), froms, mdump.as_str());
                 c.collect_consts(hdr.as_str(), mdump.as_str());
                 let mut out = String::new();
-                c.emit(hdr.as_str(), spelling.as_str(), link, &mut out);
+                c.emit(spelling.as_str(), link, &mut out);
                 rc = write_out(out.as_str(), out_path, c.fns.len(), c.skipped);
             },
             None => {
@@ -1228,11 +1258,13 @@ fn run_one(
 
 fn write_out(text: str, out_path: str, nfns: usize, skipped: usize) i32 {
     if out_path.len() == 0 {
-        unsafe stdio::fwrite(text.ptr(), 1, text.len(), stdio::stdout());
+        if unsafe stdio::fwrite(text.ptr(), 1, text.len(), stdio::stdout()) != text.len() {
+            unsafe stdio::fputs("super-c: cannot write the bindings to stdout\n".ptr() as *const char, stdio::stderr());
+            return 1;
+        }
         return 0;
     }
-    let f = stdio::fopen(out_path, "wb");
-    if f == null {
+    if !bsys::write_file_atomic(out_path, text) {
         unsafe stdio::fprintf(
             stdio::stderr(),
             "super-c: cannot write '%.*s'\n".ptr() as *const char,
@@ -1241,8 +1273,6 @@ fn write_out(text: str, out_path: str, nfns: usize, skipped: usize) i32 {
         );
         return 1;
     }
-    unsafe stdio::fwrite(text.ptr(), 1, text.len(), f);
-    unsafe stdio::fclose(f);
     unsafe stdio::fprintf(
         stdio::stdout(),
         "bindgen: %d function(s) -> %.*s\n".ptr() as *const char,
@@ -1344,7 +1374,7 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
         names.push(String::from_cstr(nm));
     }
     let _ = unsafe shim::sc_closedir(dh);
-    names.sort_by(|a: &String, b: &String| name_cmp(a, b));
+    names.sort_by(|a: &String, b: &String| loader::name_cmp(a, b));
     let mut ok = true;
     for i in 0..names.len() {
         let mut child = join_path(dir, names[i].as_str());
@@ -1364,22 +1394,6 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
         }
     }
     return ok;
-}
-
-// Byte-lexicographic with a length tiebreak: the same walk order on every filesystem.
-const fn name_cmp(a: &String, b: &String) i32 {
-    let la = a.len();
-    let lb = b.len();
-    let m = if la < lb {
-        la;
-    } else {
-        lb;
-    };
-    let c = unsafe cstring::memcmp(a.as_str().ptr(), b.as_str().ptr(), m);
-    if c != 0 {
-        return c;
-    }
-    return la as i32 - lb as i32;
 }
 
 /// `super-c bindgen <header.h|dir>... [-o out]`. A directory is walked recursively for `.h` files, so a
@@ -1573,7 +1587,12 @@ extend Lexer {
             } else {
                 e.partial = true;
             }
-            next = next + 1;
+            // C gives the enumerator after I64_MAX no representable value.
+            if next == I64_MAX {
+                known = false;
+            } else {
+                next = next + 1;
+            }
             self.skip_noise();
             if !self.at_punct(b',') && !self.at_punct(b'}') {
                 e.ok = false;
@@ -1609,9 +1628,8 @@ extend Lexer {
             ok: true, // a nameless body is named by the typedef that follows; emission re-checks the tag
             mine: c.cur_mine,
         };
-        // '{'.
+        // '{'. A nested body is consumed by parse_specs, so the first '}' seen here closes this one.
         self.advance();
-        let mut depth: i32 = 1;
         loop {
             self.skip_noise();
             if self.kind == TK_EOF {
@@ -1623,11 +1641,7 @@ extend Lexer {
             let before = self.pos;
             if self.at_punct(b'}') {
                 self.advance();
-                depth = depth - 1;
-                if depth == 0 {
-                    break;
-                }
-                continue;
+                break;
             }
             if self.at_punct(b';') {
                 self.advance();
@@ -1637,7 +1651,6 @@ extend Lexer {
             let mut bc = false;
             let mut st = false;
             let base = self.parse_specs(c, &mut td, &mut bc, &mut st, dump);
-            let mut any = false;
             loop {
                 let mut nm = String::new();
                 let mut isfn = false;
@@ -1681,7 +1694,6 @@ extend Lexer {
                     safe_name(nm.as_str(), &mut fname);
                     r.fields.push(Field { name: fname, ty: rt });
                 }
-                any = true;
                 self.skip_noise();
                 if self.at_punct(b',') {
                     self.advance();
@@ -1690,7 +1702,6 @@ extend Lexer {
                 break;
             }
 
-            let _ = any;
             if self.at_punct(b';') {
                 self.advance();
             }
@@ -1983,16 +1994,21 @@ extend Lexer {
             if fnptr {
                 // Rendered here and carried as a signature: `fn(..) T` is already the pointer.
                 let mut sig = String::from_str("fn(");
+                let mut ok = ty.ok && !va;
                 for i in 0..ps.len() {
                     if i != 0 {
                         sig.push_str(", ");
                     }
                     sig.push_string(&ps[i].ty);
+                    // An unmodelled parameter poisons the pointer type like it does a function.
+                    if ps[i].ty.as_str() == "?" {
+                        ok = false;
+                    }
                 }
                 sig.push_str(") ");
                 ty.render(&mut sig);
                 let mut out = ctype_new();
-                out.ok = ty.ok && !va;
+                out.ok = ok;
                 out.fnsig.push_string(&sig);
                 return out;
             }
@@ -2219,6 +2235,50 @@ extend Collected {
         return -1;
     }
 
+    // Index the object-like macros of the `-dM` dump (`#define NAME <text>`); the first definition of
+    // a name wins. A function-like macro has `(` right after its name and is left out.
+    fn index_macros(self: &mut Collected, dump: str) {
+        let n = dump.len();
+        let mut i: usize = 0;
+        while i < n {
+            let mut e: usize = 0;
+            let line = line_at(dump, i, &mut e);
+            let off = i;
+            i = e + 1;
+            if !line.starts_with("#define ") {
+                continue;
+            }
+            let mut k: usize = 8;
+            while k < line.len() && line.byte_at(k) != b' ' && line.byte_at(k) != b'(' {
+                k = k + 1;
+            }
+            if k == 8 || k >= line.len() || line.byte_at(k) != b' ' {
+                continue;
+            }
+            let name = String::from_str(line.slice(8, k));
+            if self.macros.contains_key(&name) {
+                continue;
+            }
+            let mut a = k;
+            while a < line.len() && line.byte_at(a) == b' ' {
+                a = a + 1;
+            }
+            self.macros.insert(name, (off + a) as u64 << 32 | (off + line.len()) as u64);
+        }
+    }
+
+    // The macro's replacement text from the dump `index_macros` read; empty when it has none.
+    fn macro_value(self: &Collected, dump: str, name: str, out: &mut String) bool {
+        let key = String::from_str(name);
+        return switch self.macros.get(&key) {
+            Some(v) => {
+                out.push_str(dump.slice((*v >> 32) as usize, (*v & 0xFFFFFFFFu64) as usize));
+                true;
+            },
+            None => false,
+        };
+    }
+
     fn note_opaque(self: &mut Collected, name: str) {
         for i in 0..self.opaques.len() {
             if self.opaques[i].as_str() == name {
@@ -2271,8 +2331,9 @@ extend Collected {
         self.aliases.push(Alias { name: String::from_str(name), sub: sub, opaque: opaque, ok: ty.ok || opaque });
     }
 
-    // Only the opaque tags the emitted signatures mention: a header pulls in hundreds of struct names
-    // through its own includes, and binding all of them would bury the ones a caller needs.
+    // Only the opaque tags the emitted signatures, record fields and globals mention: a header pulls in
+    // hundreds of struct names through its own includes, and binding all of them would bury the ones a
+    // caller needs.
     fn opaque_used(self: &Self, name: str) bool {
         for i in 0..self.fns.len() {
             let f = self.fns.at(i);
@@ -2283,6 +2344,22 @@ extend Collected {
                 if type_mentions(f.params[j].ty.as_str(), name) {
                     return true;
                 }
+            }
+        }
+        for i in 0..self.records.len() {
+            let r = self.records.at(i);
+            if !r.mine || !r.ok || r.tag.len() == 0 {
+                continue;
+            }
+            for j in 0..r.fields.len() {
+                if type_mentions(r.fields[j].ty.as_str(), name) {
+                    return true;
+                }
+            }
+        }
+        for i in 0..self.globals.len() {
+            if type_mentions(self.globals[i].ty.as_str(), name) {
+                return true;
             }
         }
         return false;
@@ -2346,8 +2423,7 @@ extend Collected {
                 let mut cd = ConstDef { name: String::new(), ty: String::from_str("i32"), value: String::new() };
                 cd.name.push_str(self.enums[i].vals[j].name.as_str());
                 cd.value.format_into("{}", self.enums[i].vals[j].value);
-                let taken = self.name_taken(self.consts.len(), cd.name.as_str());
-                if taken {} else {
+                if !self.name_taken(self.consts.len(), cd.name.as_str()) {
                     self.consts.push(cd);
                 }
             }
@@ -2361,7 +2437,7 @@ extend Collected {
         };
         for i in 0..names.len() {
             let mut raw = String::new();
-            if macro_value(dump, names[i].as_str(), &mut raw) {
+            if self.macro_value(dump, names[i].as_str(), &mut raw) {
                 let mut cd = ConstDef { name: String::new(), ty: String::new(), value: String::new() };
                 let ok = macro_const(names[i].as_str(), raw.as_str(), self, dump, &mut cd) && !self.name_taken(
                     self.consts.len(),
@@ -2369,18 +2445,17 @@ extend Collected {
                 );
                 if ok {
                     self.consts.push(cd);
-                } else {}
+                }
             }
         }
     }
 
-    fn emit(self: &Self, header: str, spelling: str, link: str, out: &mut String) {
+    fn emit(self: &Self, spelling: str, link: str, out: &mut String) {
         out.format_into("// Generated by `super-c bindgen {}`; edit the generator's input, not this file.\n", spelling);
         out.push_str(
             "// Raw C bindings: every call requires `unsafe`. Structs reached only through a pointer are opaque\n",
         );
         out.push_str("// types -- their layout is C's business, not this module's.\n\n");
-        let _ = header;
         // The constants are ordinary top-level items and come first; `@c.link` has to sit on the extern block
         // itself, so it is emitted last, immediately above it.
         for i in 0..self.consts.len() {

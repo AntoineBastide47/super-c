@@ -68,6 +68,10 @@ A `Place` is a base local plus a projection **range** into `projections`
 | `PJ_INDEX_OP` | `data` = OperandId of the dynamic index |
 | `PJ_DOWNCAST` | `data` = variant index, `sub` = variant decl NodeId |
 
+Pattern lowering dereferences a place (`PJ_DEREF` through every reference and pointer
+layer) before a downcast or a value test, and types each sub-place from its member
+declaration. A by-reference binding is `RV_REF` of the matched place.
+
 Each `Projection` carries the type **after** it applies.
 
 ## Operands and Constants
@@ -82,7 +86,8 @@ Each `Projection` carries the type **after** it applies.
 | `OP_ITEM` | A function/constant item value (ConstId carrying the DefId) |
 
 `Constant` kinds: `CK_INT`, `CK_FLOAT` (raw span keeps the literal spelling), `CK_BOOL`,
-`CK_STR`, `CK_UNIT`, `CK_ITEM` (resolved DefId + bound generic args in `targ_pool`),
+`CK_STR`, `CK_UNIT`, `CK_ITEM` (resolved DefId + bound generic args in `targ_pool`; the range is packed into
+`val`, read with `targ_start()`/`targ_len()`),
 `CK_WIDE` (wide-literal record index), `CK_ERROR` (error recovery).
 
 ## Rvalues
@@ -97,7 +102,7 @@ Each `Projection` carries the type **after** it applies.
 | `RV_UNARY` / `RV_BINARY` | Operand(s) + token op |
 | `RV_CAST` | `b` = CastKind: `CAST_NUMERIC`, `CAST_POINTER`, `CAST_COERCE_FROM` (library `from`; `item` = selected method), `CAST_NEVER`, `CAST_ARRAY_SLICE` |
 | `RV_AGGREGATE` | Operand range; `c` = `AGG_STRUCT`/`AGG_TUPLE`/`AGG_ARRAY`/`AGG_VARIANT` |
-| `RV_REPEAT` | `[elem; count]` |
+| `RV_REPEAT` | `[elem; count]`: `a` = element OperandId, `b` = count OperandId |
 | `RV_LEN` / `RV_DISCRIMINANT` | Of a place |
 | `RV_DYN` | Dynamic-interface construction |
 | `RV_CLOSURE` | Capture operand range; `item` = closure body owner |
@@ -106,7 +111,7 @@ Each `Projection` carries the type **after** it applies.
 
 ## Statements
 
-`Statement { kind, place, rvalue, a, b, span }`:
+`Statement { kind, place, rvalue, a, span }`:
 
 | Kind | Meaning |
 |------|---------|
@@ -120,8 +125,7 @@ Each `Projection` carries the type **after** it applies.
 ## Terminators and Blocks
 
 `BasicBlock { stmt_start, stmt_len, term, sealed }` — a statement range plus exactly one
-terminator; the verifier rejects unsealed blocks. `Terminator` packs to 64 bytes (one
-per cache line):
+terminator; the verifier rejects unsealed blocks. `Terminator` is 60 bytes:
 
 | Kind | Meaning |
 |------|---------|
@@ -160,7 +164,7 @@ need.
   bodies run LIFO at every scope exit; multi-return destinations written in declaration
   order.
 - A body that reaches a construct the lowering cannot handle fails with a reason string.
-- **One lowering per body:** `irl::Keep` caches spent Lowerers keyed by body; borrowck
+- **One lowering per body:** `irl::Keep` caches `KeptBody` records (body plus closures) keyed by body; borrowck
   fills it, emission's InstGraph walks it. Bodies with `has_reflect` / `has_zst_cond`
   re-lower per instance.
 - Deterministic: two serial runs produce identical vectors; borrowck facts are integers

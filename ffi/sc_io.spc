@@ -5,6 +5,8 @@
 //
 // On Windows the poller watches SOCKETS ONLY: a socket is not a CRT file descriptor there, so `sc_io_read`
 // and `sc_io_write` are recv/send and no file or pipe can be parked on. POSIX takes any descriptor.
+// WASI preview 1 has no poller and no sockets: there `sc_io_new` returns null and every socket call fails
+// with ENOTSUP; `sc_io_wait_fd` and the descriptor calls work.
 
 /// Interest and readiness bits of the poller.
 pub const RD: i32 = 1;

@@ -1,5 +1,4 @@
-// Bounds-check elimination (plans/1_bounds_check_elimination.md): a local, near-linear proof pass
-// over one final elaborated CoreBody. It rewrites IN_BOUNDS / IN_RANGE_BOUNDS operations to their
+// Bounds-check elimination: a local, near-linear proof pass over one final elaborated CoreBody. It rewrites IN_BOUNDS / IN_RANGE_BOUNDS operations to their
 // PROVEN twins ONLY when the proof holds at the exact operation site; anything unknown, mutated,
 // called-past, joined-away, or over-limit keeps its check. The pass owns its (tiny) control-flow
 // facts -- it never imports the C emitter.
@@ -57,24 +56,25 @@ extend BceStats {
 }
 
 // One established or branch-derived fact. kinds: 0 = idx < len, 1 = idx <= len.
+// Fields sort by size (8, 4, then 1 byte) so the struct has no padding holes.
 struct Fact {
-    pub kind: u8,
     // index key: a constant or a (local, version) value plus an affine constant offset
-    pub iconst: bool,
     pub ic: i64,
-    pub il: u32,
-    pub iv: u32,
     pub ioff: i64,
     // length value identity (local, version, affine offset)
-    pub ln_ok: bool,
+    pub ln_off: i64,
+    pub il: u32,
+    pub iv: u32,
     pub ln_l: u32,
     pub ln_v: u32,
-    pub ln_off: i64,
     // length place identity (structural place + generations at capture)
-    pub lp_ok: bool,
     pub lp: u32,
     pub lp_hg: u32,
     pub lp_bg: u32,
+    pub kind: u8,
+    pub iconst: bool,
+    pub ln_ok: bool,
+    pub lp_ok: bool,
 }
 
 // A resolved operand key: constant, or (local, version) + affine constant offset, or opaque.
@@ -82,12 +82,12 @@ struct Fact {
 // the same definition), which stays true even when the addition wrapped -- the basis for every
 // affine match below. No ordering is ever derived from two different offsets.
 struct VKey {
-    pub is_const: bool,
     pub c: i64,
-    pub is_local: bool,
+    pub off: i64,
     pub l: u32,
     pub v: u32,
-    pub off: i64,
+    pub is_const: bool,
+    pub is_local: bool,
 }
 
 const MAX_EDGE_FACTS: usize = 96;
@@ -151,10 +151,17 @@ pub struct Bce {
     pub affof: Vector<AffBind>,
     pub refof: Vector<RefBind>,
     pub facts: Vector<Fact>, // facts of the block being processed
-    pub in_facts: Vector<Vector<Fact>>, // per block, filled by its single predecessor
+    // Facts entering each block, filled by its single predecessor: block k's facts are
+    // in_facts[in_start[k] .. in_start[k] + in_len[k]] (one pool per pass, no per-block vectors).
+    pub in_facts: Vector<Fact>,
+    pub in_start: Vector<u32>,
+    pub in_len: Vector<u32>,
     pub in_set: Vector<bool>,
     pub preds: Vector<u32>,
     pub rpo: Vector<u32>,
+    // RPO construction scratch (kept for capacity): visited marks and the DFS stack.
+    pub seen: Vector<u8>,
+    pub stack: Vector<u64>, // block << 1 | phase
     pub total_facts: usize,
     pub limited: bool,
     pub off: bool, // SC_BCE=0
@@ -219,10 +226,14 @@ extend Bce {
             affof: Vector::<AffBind>::new(),
             refof: Vector::<RefBind>::new(),
             facts: Vector::<Fact>::new(),
-            in_facts: Vector::<Vector<Fact>>::new(),
+            in_facts: Vector::<Fact>::new(),
+            in_start: Vector::<u32>::new(),
+            in_len: Vector::<u32>::new(),
             in_set: Vector::<bool>::new(),
             preds: Vector::<u32>::new(),
             rpo: Vector::<u32>::new(),
+            seen: Vector::<u8>::new(),
+            stack: Vector::<u64>::new(),
             total_facts: 0,
             limited: false,
             off: e != null && str::from_cstr(e) == "0",
@@ -286,7 +297,7 @@ extend Bce {
         return p.base;
     }
 
-    /// Resolve an operand to a value key, following at most four whole-local copies. With
+    /// Resolve an operand to a value key, following at most six whole-local copy or affine steps. With
     /// `clean`, any resolution step through a local marked in `cwritten` (reassigned inside a
     /// coalescing lookahead window, so its recorded binds describe its OLD value) is refused.
     fn vkey_w(self: &Self, b: &ir::CoreBody, opid: u32, clean: bool) VKey {
@@ -879,7 +890,7 @@ extend Bce {
         if n.kind != NodeKind::NODE_FUNCTION {
             return false;
         }
-        return !n.as_data.function.is_extern;
+        return !n.as_data.function.is_extern();
     }
 
     /// `rv` casts a reference to a raw pointer: its target leaves the borrow discipline.
@@ -1285,15 +1296,7 @@ extend Bce {
         let w = maxoff - ik.off + 1;
         let ut = b.rvalues.at(rid).target;
         b.constants.push(
-            ir::Constant {
-                kind: ir::CK_INT,
-                ty: ut,
-                val: w,
-                raw: sp,
-                item: DefId { module: 0, node: NODE_NONE },
-                targ_start: 0,
-                targ_len: 0,
-            },
+            ir::Constant { kind: ir::CK_INT, ty: ut, val: w, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
         );
         b.operands.push(ir::Operand { kind: ir::OP_CONST, data: b.constants.len() as u32 - 1, ty: ut });
         let wop = b.operands.len() as u32 - 1;
@@ -1346,12 +1349,11 @@ extend Bce {
             self.refof.push(RefBind { pl: 0, my_v: 0, ok: false });
         }
         self.facts.clear();
-        while self.in_facts.len() < nb {
-            self.in_facts.push(Vector::<Fact>::new());
-        }
-        for i in 0..nb {
-            self.in_facts[i].clear();
-        }
+        self.in_facts.clear();
+        self.in_start.clear();
+        self.in_start.resize_default(nb);
+        self.in_len.clear();
+        self.in_len.resize_default(nb);
         self.in_set.clear();
         self.in_set.resize_default(nb);
         self.preds.clear();
@@ -1387,8 +1389,9 @@ extend Bce {
         }
         self.heapgen = 0;
         self.facts.clear();
+        self.in_facts.clear();
         for i in 0..nb {
-            self.in_facts[i].clear();
+            self.in_len.set(i, 0);
             self.in_set.set(i, false);
         }
         self.total_facts = 0;
@@ -1461,20 +1464,20 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
     z.begin_body(b);
     // predecessor counts + RPO over the reachable blocks (iterative DFS, dense vectors)
     {
-        let mut seen = Vector::<u8>::new();
-        seen.resize_default(nb);
-        let mut stack = Vector::<u64>::new(); // block << 1 | phase
-        stack.push(b.entry as u64 << 1);
-        seen.set(b.entry as usize, 1);
-        while stack.len() != 0 {
-            let top = stack[stack.len() - 1];
-            let _ = stack.pop();
+        z.seen.clear();
+        z.seen.resize_default(nb);
+        z.stack.clear();
+        z.stack.push(b.entry as u64 << 1);
+        z.seen.set(b.entry as usize, 1);
+        while z.stack.len() != 0 {
+            let top = z.stack[z.stack.len() - 1];
+            let _ = z.stack.pop();
             let blk = (top >> 1) as usize;
             if (top & 1) != 0 {
                 z.rpo.push(blk as u32);
                 continue;
             }
-            stack.push(top | 1);
+            z.stack.push(top | 1);
             let t = &b.blocks.at(blk).term;
             // successors without allocation: switch targets first, then the shared t0 edge
             let mut nsw: u32 = 0;
@@ -1492,16 +1495,14 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                     continue;
                 }
                 z.preds.set(s as usize, z.preds[s as usize] + 1);
-                if seen[s as usize] == 0 {
-                    seen.set(s as usize, 1);
-                    stack.push(s as u64 << 1);
+                if z.seen[s as usize] == 0 {
+                    z.seen.set(s as usize, 1);
+                    z.stack.push(s as u64 << 1);
                 }
             }
         }
-        seen.free();
         // rpo currently holds a POST order (children pushed after the phase-1 marker); reverse it
         z.rpo.reverse();
-        stack.free();
     }
     let mut err: str<'static> = "";
     // the escape-collection pass exists only for signature transparency
@@ -1516,11 +1517,11 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
             let blk = z.rpo[bi] as usize;
             z.facts.clear();
             if z.in_set[blk] {
-                for i in 0..z.in_facts[blk].len() {
-                    let f0 = z.in_facts[blk][i];
+                let s0 = z.in_start[blk] as usize;
+                for i in s0..s0 + z.in_len[blk] as usize {
+                    let f0 = z.in_facts[i];
                     z.facts.push(f0);
                 }
-                z.in_facts[blk].clear();
             }
             let bb = *b.blocks.at(blk);
             for si in 0..bb.stmt_len {
@@ -1868,16 +1869,19 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                 }
             }
             if succ0 != ir::IR_NONE && z.preds[succ0 as usize] == 1 && !z.in_set[succ0 as usize] {
+                z.in_start.set(succ0 as usize, z.in_facts.len() as u32);
                 for i in 0..z.facts.len() {
                     let f0 = *z.facts.at(i);
-                    z.in_facts[succ0 as usize].push(f0);
+                    z.in_facts.push(f0);
                 }
+                z.in_len.set(succ0 as usize, z.facts.len() as u32);
                 z.in_set.set(succ0 as usize, true);
             }
             if succ_true != ir::IR_NONE && z.preds[succ_true as usize] == 1 && !z.in_set[succ_true as usize] && !z.no_loop {
+                let st0 = z.in_facts.len();
                 for i in 0..z.facts.len() {
                     let f0 = *z.facts.at(i);
-                    z.in_facts[succ_true as usize].push(f0);
+                    z.in_facts.push(f0);
                 }
                 let st_i = succ_true as usize;
                 // the branch condition itself, on its true edge: `a < b` (or `a <= b`)
@@ -1887,8 +1891,8 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                         let cb = *z.cmpof.at(ck.l as usize);
                         if cb.ok && cb.my_v == ck.v && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
                             let lp = cb.b_lp; // captured at the comparison, so never stale here
-                            if z.in_facts[st_i].len() < MAX_EDGE_FACTS {
-                                z.in_facts[st_i].push(
+                            if z.in_facts.len() - st0 < MAX_EDGE_FACTS {
+                                z.in_facts.push(
                                     Fact {
                                         kind: if cb.le {
                                             1;
@@ -1914,7 +1918,9 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                         }
                     }
                 }
-                z.in_set.set(succ_true as usize, true);
+                z.in_start.set(st_i, st0 as u32);
+                z.in_len.set(st_i, (z.in_facts.len() - st0) as u32);
+                z.in_set.set(st_i, true);
             }
         }
         if pass9 == 0 {

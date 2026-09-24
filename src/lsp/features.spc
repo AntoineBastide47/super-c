@@ -26,10 +26,10 @@ const fn mod_ast(p: &loader::Package, m: usize) *const Ast {
 pub fn node_at(a: *const Ast, off: u32) NodeId {
     let mut best: NodeId = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        let sp = a.at_const(i).span;
+        let i = unsafe (*a).nth_id(i0);
+        let sp = unsafe (*a).at_const(i).span;
         if sp.start <= off && off < sp.end && sp.end - sp.start <= blen {
             best = i;
             blen = sp.end - sp.start;
@@ -50,7 +50,7 @@ fn node_at_or_before(a: *const Ast, off: u32) NodeId {
 /// The declaration's NAME node (whose span is the go-to/rename target); NODE_NONE when the kind has no
 /// distinct name node (callers fall back to the decl span).
 pub const fn decl_name(a: *const Ast, id: NodeId) NodeId {
-    let n = a.at_const(id);
+    let n = unsafe (*a).at_const(id);
     if n.kind == NodeKind::NODE_FUNCTION {
         return n.as_data.function.name;
     }
@@ -92,12 +92,12 @@ pub const fn decl_name(a: *const Ast, id: NodeId) NodeId {
 fn resolved_at(p: &loader::Package, a: *const Ast, off: u32) DefId {
     let mut best = DefId { module: 0, node: NODE_NONE };
     let mut blen: u32 = 0xFFFFFFFF;
-    let nn = a.nnodes();
+    let nn = unsafe (*a).nnodes();
     for i0 in 1..nn {
-        let i = a.nth_id(i0);
-        let sp = a.at_const(i).span;
+        let i = unsafe (*a).nth_id(i0);
+        let sp = unsafe (*a).at_const(i).span;
         if sp.start <= off && off < sp.end && sp.end - sp.start <= blen {
-            let d = a.resolution_def(i);
+            let d = unsafe (*a).resolution_def(i);
             if d.node != NODE_NONE && d.module as usize < p.modules.len() {
                 best = d;
                 blen = sp.end - sp.start;
@@ -123,9 +123,9 @@ pub fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
     // Maybe the cursor is on a decl's own name: find the decl this name node belongs to.
     let id = node_at_or_before(a, off);
     if id != NODE_NONE {
-        let n = a.nnodes();
+        let n = unsafe (*a).nnodes();
         for i0 in 1..n {
-            let i = a.nth_id(i0);
+            let i = unsafe (*a).nth_id(i0);
             if decl_name(a, i) == id && i != id {
                 return DefId { module: mi as ModuleId, node: i };
             }
@@ -139,7 +139,7 @@ pub fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
 fn decl_signature(p: &loader::Package, d: DefId) String {
     let da = mod_ast(p, d.module as usize);
     let src = p.modules.at(d.module as usize).source.as_str();
-    let n = da.at_const(d.node);
+    let n = unsafe (*da).at_const(d.node);
     let s = n.span.start;
     let mut e = n.span.end;
     if n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.body != NODE_NONE {
@@ -151,21 +151,24 @@ fn decl_signature(p: &loader::Package, d: DefId) String {
         }
         e = k as u32;
     } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
-        e = da.at_const(n.as_data.aggregate.name).span.end;
+        e = unsafe (*da).at_const(n.as_data.aggregate.name).span.end;
     } else if n.kind == NodeKind::NODE_INTERFACE {
-        e = da.at_const(n.as_data.interface_def.name).span.end;
+        e = unsafe (*da).at_const(n.as_data.interface_def.name).span.end;
     } else if n.kind == NodeKind::NODE_LET {
-        e = da.at_const(n.as_data.let_stmt.name).span.end;
+        e = unsafe (*da).at_const(n.as_data.let_stmt.name).span.end;
         if n.as_data.let_stmt.ty != NODE_NONE {
-            e = da.at_const(n.as_data.let_stmt.ty).span.end;
+            e = unsafe (*da).at_const(n.as_data.let_stmt.ty).span.end;
         }
     }
     if e as usize > src.len() {
         e = src.len() as u32;
     }
     if e > s + 300 {
-        // Cap pathological heads.
+        // Cap pathological heads at a character boundary: a cut UTF-8 sequence is invalid JSON text.
         e = s + 300;
+        while e > s && (src[e as usize] & 0xC0) == 0x80 {
+            e -= 1;
+        }
     }
     if s >= e {
         return String::new();
@@ -188,7 +191,7 @@ fn line_start_of(src: str, pos: usize) usize {
 fn decl_doc(p: &loader::Package, d: DefId) String {
     let da = mod_ast(p, d.module as usize);
     let src = p.modules.at(d.module as usize).source.as_str();
-    let sp = da.at_const(d.node).span;
+    let sp = unsafe (*da).at_const(d.node).span;
     if sp.start as usize > src.len() {
         return String::new();
     }
@@ -279,8 +282,8 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
     }
     let mut out = String::new();
     let mut t: TypeId = TYPE_NONE;
-    if a.valid(id) {
-        t = a.type_of(id);
+    if unsafe (*a).valid(id) {
+        t = unsafe (*a).type_of(id);
     }
     if t != TYPE_NONE {
         let mut buf = HovBuf {};
@@ -319,10 +322,10 @@ pub fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
         return Option::<Loc>::None;
     }
     let da = mod_ast(p, d.module as usize);
-    let mut sp = da.at_const(d.node).span;
+    let mut sp = unsafe (*da).at_const(d.node).span;
     let nm = decl_name(da, d.node);
     if nm != NODE_NONE {
-        sp = da.at_const(nm).span;
+        sp = unsafe (*da).at_const(nm).span;
     }
     return Option::<Loc>::Some(Loc { module: d.module, start: sp.start, end: sp.end });
 }
@@ -330,14 +333,14 @@ pub fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
 // The span rename/references should touch for a resolved node: a path member or type path narrows to
 // its final NAME segment (replacing the whole `util::Point` span would eat the qualifier).
 const fn ref_span(a: *const Ast, i: NodeId) tok::Span {
-    let n = a.at_const(i);
+    let n = unsafe (*a).at_const(i);
     if n.kind == NodeKind::NODE_MEMBER {
-        return a.at_const(n.as_data.member.member).span;
+        return unsafe (*a).at_const(n.as_data.member.member).span;
     }
     if n.kind == NodeKind::NODE_TYPE_PATH {
         let parts = n.as_data.type_path.parts;
         if parts.len > 0 {
-            return a.at_const(unsafe a.list(parts)[(parts.len - 1) as usize]).span;
+            return unsafe (*a).at_const(unsafe (*a).list(parts)[(parts.len - 1) as usize]).span;
         }
     }
     return n.span;
@@ -356,11 +359,11 @@ pub struct Tok {
 
 // A method is a function declared inside an `extend` block. The first parameter's SOURCE SPELLING
 // being `self` is checked as an assertion of the same fact, not inferred from its length.
-// Per-request cache for method classification: one extend-membership bitset per touched module,
-// so semantic tokens pay one item scan per module instead of one per token.
+// Per-request cache for method classification: the sorted method ids of each touched module, so
+// semantic tokens pay one item scan per module instead of one per token.
 struct MethodCache {
     pub mods: Vector<u32>,
-    pub sets: Vector<Vector<bool>>,
+    pub sets: Vector<Vector<NodeId>>,
 }
 
 fn fn_is_method(p: &loader::Package, dm: usize, id: NodeId, mc: &mut MethodCache) bool {
@@ -368,44 +371,47 @@ fn fn_is_method(p: &loader::Package, dm: usize, id: NodeId, mc: &mut MethodCache
     for i in 0..mc.mods.len() {
         if *mc.mods.at(i) == dm as u32 {
             slot = i;
+            break;
         }
     }
     if slot == mc.mods.len() {
         let a = mod_ast(p, dm);
-        let mut set = Vector::<bool>::new();
-        set.resize_default(a.nnodes());
-        let items = unsafe a.at_const(a.root).as_data.program.items;
+        let mut set = Vector::<NodeId>::new();
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
+            let iid = unsafe (*a).list(items)[i as usize];
+            if unsafe (*a).at_const(iid).kind != NodeKind::NODE_EXTEND {
                 continue;
             }
-            let eis = a.at_const(iid).as_data.extend_def.items;
+            let eis = unsafe (*a).at_const(iid).as_data.extend_def.items;
             for k in 0..eis.len {
-                let eid = unsafe a.list(eis)[k as usize];
-                if a.at_const(eid).kind != NodeKind::NODE_FUNCTION {
+                let eid = unsafe (*a).list(eis)[k as usize];
+                if unsafe (*a).at_const(eid).kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
-                let ps = a.at_const(eid).as_data.function.params;
+                let ps = unsafe (*a).at_const(eid).as_data.function.params;
                 // An associated fn (constructor-shaped) still renders as a method.
                 let mut m = true;
                 if ps.len > 0 {
-                    let p0 = unsafe a.list(ps)[0];
-                    m = name_str(p, dm, a.at_const(p0).as_data.parameter.name) == "self";
+                    let p0 = unsafe (*a).list(ps)[0];
+                    m = name_str(p, dm, unsafe (*a).at_const(p0).as_data.parameter.name) == "self";
                 }
-                set[eid as usize] = m;
+                if m {
+                    set.push(eid);
+                }
             }
         }
+        set.sort();
         mc.mods.push(dm as u32);
         mc.sets.push(set);
     }
-    return *mc.sets.at(slot).at(id as usize);
+    return mc.sets.at(slot).binary_search(&id).is_ok();
 }
 
 // Legend index for a resolved declaration; -1 = unclassified (skip the token).
 fn token_type_of(p: &loader::Package, d: DefId, mc: &mut MethodCache) i32 {
     let da = mod_ast(p, d.module as usize);
-    let n = da.at_const(d.node);
+    let n = unsafe (*da).at_const(d.node);
     if n.kind == NodeKind::NODE_FUNCTION {
         if fn_is_method(p, d.module as usize, d.node, mc) {
             return 10;
@@ -474,33 +480,33 @@ const fn tok_cmp(a: &Tok, b: &Tok) i32 {
 pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
     let a = mod_ast(p, mi);
     let mut out = Vector::<Tok>::new();
-    let mut mc = MethodCache { mods: Vector::<u32>::new(), sets: Vector::<Vector<bool>>::new() };
-    let nn = a.nnodes();
+    let mut mc = MethodCache { mods: Vector::<u32>::new(), sets: Vector::<Vector<NodeId>>::new() };
+    let nn = unsafe (*a).nnodes();
     for i0 in 1..nn {
-        let i = a.nth_id(i0);
-        let d = a.resolution_def(i);
+        let i = unsafe (*a).nth_id(i0);
+        let d = unsafe (*a).resolution_def(i);
         if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
             continue;
         }
         let sp = ref_span(a, i);
         let mut mods: u32 = 0;
-        let dk = mod_ast(p, d.module as usize).at_const(d.node).kind;
+        let dk = unsafe (*mod_ast(p, d.module as usize)).at_const(d.node).kind;
         if dk == NodeKind::NODE_CONST {
             // Readonly.
             mods = 2;
         }
         tok_push(&mut out, sp.start, sp.end, token_type_of(p, d, &mut mc), mods);
     }
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
+        let i = unsafe (*a).nth_id(i0);
         let nm = decl_name(a, i);
         if nm == NODE_NONE || nm == i {
             continue;
         }
-        let sp = a.at_const(nm).span;
+        let sp = unsafe (*a).at_const(nm).span;
         let mut mods: u32 = 1; // declaration
-        if a.at_const(i).kind == NodeKind::NODE_CONST {
+        if unsafe (*a).at_const(i).kind == NodeKind::NODE_CONST {
             mods = 3;
         }
         tok_push(&mut out, sp.start, sp.end, token_type_of(p, DefId { module: mi as ModuleId, node: i }, &mut mc), mods);
@@ -529,14 +535,39 @@ pub struct CompItem {
     pub detail: String,
 }
 
+/// For each item, whether it is the first offer of its label (several sources offer the same name, for
+/// example a local that shadows a prelude item: the first offer wins).
+pub fn first_offers(items: &Vector<CompItem>) Vector<bool> {
+    let mut order = Vector::<u32>::new();
+    order.reserve(items.len());
+    for i in 0..items.len() {
+        order.push(i as u32);
+    }
+    order.sort_by(
+        fn(x: &u32, y: &u32) i32 {
+            let c = items.at((*x) as usize).label.cmp(&items.at((*y) as usize).label);
+            if c != 0 {
+                return c;
+            }
+            return x.cmp(y);
+        },
+    );
+    let mut first = Vector::<bool>::new();
+    first.resize_default(items.len());
+    for k in 0..order.len() {
+        let i = (*order.at(k)) as usize;
+        if k == 0 || items.at((*order.at(k - 1)) as usize).label.as_str() != items.at(i).label.as_str() {
+            first.set(i, true);
+        }
+    }
+    return first;
+}
+
+// Offer `label`. A label offered twice keeps its first offer: the server drops the later ones when
+// it renders the list (`first_offers`), in O(n log n) instead of a scan per push.
 fn comp_push(out: &mut Vector<CompItem>, label: str, kind: i32, detail: String) {
     if label.len() == 0 {
         return;
-    }
-    for k in 0..out.len() {
-        if out.at(k).label.as_str() == label {
-            return;
-        }
     }
     out.push(CompItem { label: String::from_str(label), kind: kind, detail: detail });
 }
@@ -549,11 +580,11 @@ const fn name_str(p: &loader::Package, m: usize, name_node: NodeId) str {
         return "";
     }
     let a = mod_ast(p, m);
-    let k = a.at_const(name_node).kind;
+    let k = unsafe (*a).at_const(name_node).kind;
     if k != NodeKind::NODE_IDENTIFIER && k != NodeKind::NODE_PATTERN_NAME {
         return "";
     }
-    let sp = a.at_const(name_node).as_data.name.text;
+    let sp = unsafe (*a).at_const(name_node).as_data.name.text;
     let src = p.modules.at(m).source.as_str();
     if sp.start > sp.end || sp.end as usize > src.len() {
         return "";
@@ -566,18 +597,18 @@ const fn name_str(p: &loader::Package, m: usize, name_node: NodeId) str {
 // from: private fields and methods are offered only inside their owning module.
 fn comp_aggregate(p: &loader::Package, dm: usize, dn: NodeId, req_mod: usize, out: &mut Vector<CompItem>) {
     let da = mod_ast(p, dm);
-    let n = da.at_const(dn);
+    let n = unsafe (*da).at_const(dn);
     if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
         let ms = n.as_data.aggregate.members;
         for i in 0..ms.len {
-            let mid = unsafe da.list(ms)[i as usize];
-            let mk = da.at_const(mid).kind;
+            let mid = unsafe (*da).list(ms)[i as usize];
+            let mk = unsafe (*da).at_const(mid).kind;
             if mk == NodeKind::NODE_FIELD {
-                if !da.at_const(mid).as_data.field.is_public && dm != req_mod {
+                if !unsafe (*da).at_const(mid).as_data.field.is_public && dm != req_mod {
                     continue;
                 }
                 let d = decl_signature(p, DefId { module: dm as ModuleId, node: mid });
-                comp_push(out, name_str(p, dm, da.at_const(mid).as_data.field.name), 5, d);
+                comp_push(out, name_str(p, dm, unsafe (*da).at_const(mid).as_data.field.name), 5, d);
             }
         }
     }
@@ -586,34 +617,56 @@ fn comp_aggregate(p: &loader::Package, dm: usize, dn: NodeId, req_mod: usize, ou
         if !p.modules.at(mm).has_ast {
             continue;
         }
-        let items = unsafe am.at_const(am.root).as_data.program.items;
+        let items = unsafe (*am).at_const((*am).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe am.list(items)[i as usize];
-            if am.at_const(iid).kind != NodeKind::NODE_EXTEND {
+            let iid = unsafe (*am).list(items)[i as usize];
+            if unsafe (*am).at_const(iid).kind != NodeKind::NODE_EXTEND {
                 continue;
             }
-            let tgt = am.at_const(iid).as_data.extend_def.target_type;
-            if tgt == NODE_NONE || !am.valid(tgt) {
+            let tgt = unsafe (*am).at_const(iid).as_data.extend_def.target_type;
+            if tgt == NODE_NONE || !unsafe (*am).valid(tgt) {
                 continue;
             }
-            let td = am.resolution_def(tgt);
+            let td = unsafe (*am).resolution_def(tgt);
             if td.module as usize != dm || td.node != dn {
                 continue;
             }
-            let eis = am.at_const(iid).as_data.extend_def.items;
+            let eis = unsafe (*am).at_const(iid).as_data.extend_def.items;
             for k in 0..eis.len {
-                let fid = unsafe am.list(eis)[k as usize];
-                if am.at_const(fid).kind != NodeKind::NODE_FUNCTION {
+                let fid = unsafe (*am).list(eis)[k as usize];
+                if unsafe (*am).at_const(fid).kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
-                if !am.at_const(fid).as_data.function.is_public && mm != req_mod {
+                if !unsafe (*am).at_const(fid).as_data.function.is_public() && mm != req_mod {
                     continue;
                 }
                 let sig = decl_signature(p, DefId { module: mm as ModuleId, node: fid });
-                comp_push(out, name_str(p, mm, am.at_const(fid).as_data.function.name), 2, sig);
+                comp_push(out, name_str(p, mm, unsafe (*am).at_const(fid).as_data.function.name), 2, sig);
             }
         }
     }
+}
+
+// The name of top-level item `iid` of module `mm` when it is one of the public declarations
+// `comp_module_publics` offers, else "".
+fn public_item_name(p: &loader::Package, mm: usize, iid: NodeId) str {
+    let n = unsafe (*mod_ast(p, mm)).at_const(iid);
+    if n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_public() {
+        return name_str(p, mm, n.as_data.function.name);
+    }
+    if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && n.as_data.aggregate.is_public {
+        return name_str(p, mm, n.as_data.aggregate.name);
+    }
+    if n.kind == NodeKind::NODE_CONST && n.as_data.const_def.is_public {
+        return name_str(p, mm, n.as_data.const_def.name);
+    }
+    if n.kind == NodeKind::NODE_TYPE_ALIAS && n.as_data.type_alias.is_public {
+        return name_str(p, mm, n.as_data.type_alias.name);
+    }
+    if n.kind == NodeKind::NODE_INTERFACE && n.as_data.interface_def.is_public {
+        return name_str(p, mm, n.as_data.interface_def.name);
+    }
+    return "";
 }
 
 // Public top-level declarations of module `mm`.
@@ -622,11 +675,11 @@ fn comp_module_publics(p: &loader::Package, mm: usize, out: &mut Vector<CompItem
     if !p.modules.at(mm).has_ast {
         return;
     }
-    let items = unsafe am.at_const(am.root).as_data.program.items;
+    let items = unsafe (*am).at_const((*am).root).as_data.program.items;
     for i in 0..items.len {
-        let iid = unsafe am.list(items)[i as usize];
-        let n = am.at_const(iid);
-        if n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_public {
+        let iid = unsafe (*am).list(items)[i as usize];
+        let n = unsafe (*am).at_const(iid);
+        if n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_public() {
             comp_push(
                 out,
                 name_str(p, mm, n.as_data.function.name),
@@ -663,17 +716,17 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
     let a = mod_ast(p, mi);
     // The enclosing member node whose NAME span contains the probe.
     let mut mem: NodeId = NODE_NONE;
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        if a.at_const(i).kind != NodeKind::NODE_MEMBER {
+        let i = unsafe (*a).nth_id(i0);
+        if unsafe (*a).at_const(i).kind != NodeKind::NODE_MEMBER {
             continue;
         }
-        let mn = a.at_const(i).as_data.member.member;
+        let mn = unsafe (*a).at_const(i).as_data.member.member;
         if mn == NODE_NONE {
             continue;
         }
-        let sp = a.at_const(mn).span;
+        let sp = unsafe (*a).at_const(mn).span;
         if sp.start <= off && off < sp.end {
             mem = i;
             break;
@@ -682,21 +735,21 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
     if mem == NODE_NONE {
         return out;
     }
-    let mo = a.at_const(mem).as_data.member.object;
+    let mo = unsafe (*a).at_const(mem).as_data.member.object;
     // A path object resolving to an enum or an import: variants / module publics.
-    if a.valid(mo) {
-        let od = a.resolution_def(mo);
+    if unsafe (*a).valid(mo) {
+        let od = unsafe (*a).resolution_def(mo);
         if od.node != NODE_NONE && od.module as usize < p.modules.len() {
             let oa = mod_ast(p, od.module as usize);
-            let ok = oa.at_const(od.node).kind;
+            let ok = unsafe (*oa).at_const(od.node).kind;
             if ok == NodeKind::NODE_ENUM {
-                let ms = oa.at_const(od.node).as_data.aggregate.members;
+                let ms = unsafe (*oa).at_const(od.node).as_data.aggregate.members;
                 for i in 0..ms.len {
-                    let vid = unsafe oa.list(ms)[i as usize];
-                    if oa.at_const(vid).kind == NodeKind::NODE_VARIANT {
+                    let vid = unsafe (*oa).list(ms)[i as usize];
+                    if unsafe (*oa).at_const(vid).kind == NodeKind::NODE_VARIANT {
                         comp_push(
                             &mut out,
-                            name_str(p, od.module as usize, oa.at_const(vid).as_data.variant.name),
+                            name_str(p, od.module as usize, unsafe (*oa).at_const(vid).as_data.variant.name),
                             20,
                             String::new(),
                         );
@@ -707,13 +760,13 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
             }
             if ok == NodeKind::NODE_IMPORT {
                 // Resolve the import to its module by the '::'-joined path.
-                let parts = oa.at_const(od.node).as_data.import_decl.path;
+                let parts = unsafe (*oa).at_const(od.node).as_data.import_decl.path;
                 let mut mp = String::new();
                 for i in 0..parts.len {
                     if i != 0 {
                         mp.push_str("::");
                     }
-                    mp.push_str(name_str(p, od.module as usize, unsafe oa.list(parts)[i as usize]));
+                    mp.push_str(name_str(p, od.module as usize, unsafe (*oa).list(parts)[i as usize]));
                 }
                 let mid = p.find(mp.as_str());
                 if mid >= 0 {
@@ -724,13 +777,13 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
         }
     }
     // A value receiver: its type, references/pointers peeled, names the aggregate.
-    if !a.valid(mo) {
+    if !unsafe (*a).valid(mo) {
         return out;
     }
-    let mut t = a.type_of(mo);
+    let mut t = unsafe (*a).type_of(mo);
     let mut guard = 0;
     while t != TYPE_NONE && guard < 8 {
-        let y = *a.type_at(t);
+        let y = *unsafe (*a).type_at(t);
         if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_POINTER {
             t = y.as_data.elem;
             guard += 1;
@@ -739,7 +792,7 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             comp_aggregate(p, y.module as usize, y.as_data.decl, mi, &mut out);
         } else if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *a.instance(y.as_data.inst);
+            let it = *unsafe (*a).instance(y.as_data.inst);
             comp_aggregate(p, it.module as usize, it.decl, mi, &mut out);
         }
         break;
@@ -773,10 +826,10 @@ pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompIte
     let mut out = complete_keywords();
     let a = mod_ast(p, mi);
     if p.modules.at(mi).has_ast {
-        let items = unsafe a.at_const(a.root).as_data.program.items;
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            let n = a.at_const(iid);
+            let iid = unsafe (*a).list(items)[i as usize];
+            let n = unsafe (*a).at_const(iid);
             if n.kind == NodeKind::NODE_FUNCTION {
                 comp_push(
                     &mut out,
@@ -801,7 +854,7 @@ pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompIte
                 let parts = n.as_data.import_decl.path;
                 let mut nm = alias;
                 if nm == NODE_NONE && parts.len > 0 {
-                    nm = unsafe a.list(parts)[(parts.len - 1) as usize];
+                    nm = unsafe (*a).list(parts)[(parts.len - 1) as usize];
                 }
                 if nm != NODE_NONE {
                     comp_push(&mut out, name_str(p, mi, nm), 9, String::new());
@@ -812,30 +865,30 @@ pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompIte
         // OWN scope contains the cursor: a `let` from its statement to its enclosing block's end,
         // a pattern name within its match arm / for loop / closure, a closure parameter within the
         // closure. Bindings from closed or sibling scopes are never offered.
-        let nn = a.nnodes();
+        let nn = unsafe (*a).nnodes();
         let mut fnode: NodeId = NODE_NONE;
         let mut flen: u32 = 0xFFFFFFFF;
         for i0 in 1..nn {
-            let i = a.nth_id(i0);
-            let nd = a.at_const(i);
+            let i = unsafe (*a).nth_id(i0);
+            let nd = unsafe (*a).at_const(i);
             if nd.kind == NodeKind::NODE_FUNCTION && nd.span.start <= off && off < nd.span.end && nd.span.end - nd.span.start < flen {
                 fnode = i;
                 flen = nd.span.end - nd.span.start;
             }
         }
         if fnode != NODE_NONE {
-            let ps = a.at_const(fnode).as_data.function.params;
+            let ps = unsafe (*a).at_const(fnode).as_data.function.params;
             for i in 0..ps.len {
-                let pid = unsafe a.list(ps)[i as usize];
-                let nm = a.at_const(pid).as_data.parameter.name;
+                let pid = unsafe (*a).list(ps)[i as usize];
+                let nm = unsafe (*a).at_const(pid).as_data.parameter.name;
                 if nm != NODE_NONE {
                     comp_push(&mut out, name_str(p, mi, nm), 6, String::new());
                 }
             }
-            let fsp = a.at_const(fnode).span;
+            let fsp = unsafe (*a).at_const(fnode).span;
             for i0 in 1..nn {
-                let i = a.nth_id(i0);
-                let nd = a.at_const(i);
+                let i = unsafe (*a).nth_id(i0);
+                let nd = unsafe (*a).at_const(i);
                 if nd.span.start < fsp.start || nd.span.end > fsp.end {
                     continue;
                 }
@@ -851,9 +904,9 @@ pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompIte
                     if nd.span.start <= off && off < nd.span.end {
                         let cps = nd.as_data.closure.params;
                         for k in 0..cps.len {
-                            let pid = unsafe a.list(cps)[k as usize];
-                            if a.at_const(pid).kind == NodeKind::NODE_PARAMETER {
-                                let nm = a.at_const(pid).as_data.parameter.name;
+                            let pid = unsafe (*a).list(cps)[k as usize];
+                            if unsafe (*a).at_const(pid).kind == NodeKind::NODE_PARAMETER {
+                                let nm = unsafe (*a).at_const(pid).as_data.parameter.name;
                                 if nm != NODE_NONE {
                                     comp_push(&mut out, name_str(p, mi, nm), 6, String::new());
                                 }
@@ -880,13 +933,13 @@ fn binder_scope_has(a: *const Ast, decl_start: u32, off: u32) bool {
     let mut best: u32 = 0xFFFFFFFF;
     let mut bs: u32 = 0;
     let mut be: u32 = 0;
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        if a.at_const(i).kind != NodeKind::NODE_BLOCK {
+        let i = unsafe (*a).nth_id(i0);
+        if unsafe (*a).at_const(i).kind != NodeKind::NODE_BLOCK {
             continue;
         }
-        let sp = a.at_const(i).span;
+        let sp = unsafe (*a).at_const(i).span;
         if sp.start <= decl_start && decl_start < sp.end && sp.end - sp.start < best {
             best = sp.end - sp.start;
             bs = sp.start;
@@ -902,25 +955,25 @@ fn binder_scope_has(a: *const Ast, decl_start: u32, off: u32) bool {
 // The scope of a pattern binder: its match arm, for loop, or closure when one encloses it (that
 // node's whole span), else the let rule against its enclosing block.
 fn pattern_scope_has(a: *const Ast, pid: NodeId, off: u32) bool {
-    let psp = a.at_const(pid).span;
+    let psp = unsafe (*a).at_const(pid).span;
     let mut best: u32 = 0xFFFFFFFF;
     let mut owner: NodeId = NODE_NONE;
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        let k = a.at_const(i).kind;
+        let i = unsafe (*a).nth_id(i0);
+        let k = unsafe (*a).at_const(i).kind;
         let scoped = k == NodeKind::NODE_MATCH_ARM || k == NodeKind::NODE_FOR || k == NodeKind::NODE_INLINE_FOR || k == NodeKind::NODE_PARALLEL_FOR || k == NodeKind::NODE_CLOSURE;
         if !scoped {
             continue;
         }
-        let sp = a.at_const(i).span;
+        let sp = unsafe (*a).at_const(i).span;
         if sp.start <= psp.start && psp.end <= sp.end && sp.end - sp.start < best {
             best = sp.end - sp.start;
             owner = i;
         }
     }
     if owner != NODE_NONE {
-        let sp = a.at_const(owner).span;
+        let sp = unsafe (*a).at_const(owner).span;
         return sp.start <= off && off < sp.end;
     }
     return psp.start < off && binder_scope_has(a, psp.start, off);
@@ -969,11 +1022,11 @@ pub fn complete_interfaces(p: &loader::Package, mi: usize) Vector<CompItem> {
         return out;
     }
     let a = mod_ast(p, mi);
-    let items = unsafe a.at_const(a.root).as_data.program.items;
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     for i in 0..items.len {
-        let iid = unsafe a.list(items)[i as usize];
-        if a.at_const(iid).kind == NodeKind::NODE_INTERFACE {
-            comp_push(&mut out, name_str(p, mi, a.at_const(iid).as_data.interface_def.name), 8, String::new());
+        let iid = unsafe (*a).list(items)[i as usize];
+        if unsafe (*a).at_const(iid).kind == NodeKind::NODE_INTERFACE {
+            comp_push(&mut out, name_str(p, mi, unsafe (*a).at_const(iid).as_data.interface_def.name), 8, String::new());
         }
     }
     let mut visible = Vector::<bool>::new();
@@ -984,14 +1037,14 @@ pub fn complete_interfaces(p: &loader::Package, mi: usize) Vector<CompItem> {
         }
     }
     for i in 0..items.len {
-        let iid = unsafe a.list(items)[i as usize];
-        if a.at_const(iid).kind != NodeKind::NODE_IMPORT {
+        let iid = unsafe (*a).list(items)[i as usize];
+        if unsafe (*a).at_const(iid).kind != NodeKind::NODE_IMPORT {
             continue;
         }
         let path = loader::join_parts(
             unsafe &*a,
             p.modules.at(mi).source.as_str(),
-            a.at_const(iid).as_data.import_decl.path,
+            unsafe (*a).at_const(iid).as_data.import_decl.path,
             "::",
         );
         let target = p.find(path.as_str());
@@ -1004,11 +1057,16 @@ pub fn complete_interfaces(p: &loader::Package, mi: usize) Vector<CompItem> {
             continue;
         }
         let am = mod_ast(p, mm);
-        let its = unsafe am.at_const(am.root).as_data.program.items;
+        let its = unsafe (*am).at_const((*am).root).as_data.program.items;
         for i in 0..its.len {
-            let iid = unsafe am.list(its)[i as usize];
-            if am.at_const(iid).kind == NodeKind::NODE_INTERFACE && am.at_const(iid).as_data.interface_def.is_public {
-                comp_push(&mut out, name_str(p, mm, am.at_const(iid).as_data.interface_def.name), 8, String::new());
+            let iid = unsafe (*am).list(its)[i as usize];
+            if unsafe (*am).at_const(iid).kind == NodeKind::NODE_INTERFACE && unsafe (*am).at_const(iid).as_data.interface_def.is_public {
+                comp_push(
+                    &mut out,
+                    name_str(p, mm, unsafe (*am).at_const(iid).as_data.interface_def.name),
+                    8,
+                    String::new(),
+                );
             }
         }
     }
@@ -1035,10 +1093,10 @@ pub fn complete_labels(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
     }
     let a = mod_ast(p, mi);
     let src = p.modules.at(mi).source.as_str();
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        let nd = a.at_const(i);
+        let i = unsafe (*a).nth_id(i0);
+        let nd = unsafe (*a).at_const(i);
         let mut lab = tok::Span::empty();
         if nd.kind == NodeKind::NODE_WHILE {
             lab = nd.as_data.while_stmt.label;
@@ -1077,18 +1135,31 @@ pub struct Sym {
     pub parent: i32,
 }
 
-fn sym_push(p: &loader::Package, mi: usize, out: &mut Vector<Sym>, id: NodeId, nm: NodeId, kind: i32, parent: i32) i32 {
+fn sym_push(
+    p: &loader::Package,
+    mi: usize,
+    detail: bool,
+    out: &mut Vector<Sym>,
+    id: NodeId,
+    nm: NodeId,
+    kind: i32,
+    parent: i32,
+) i32 {
     let a = mod_ast(p, mi);
     let name = name_str(p, mi, nm);
     if name.len() == 0 {
         return -1;
     }
-    let sp = a.at_const(id).span;
-    let nsp = a.at_const(nm).span;
+    let sp = unsafe (*a).at_const(id).span;
+    let nsp = unsafe (*a).at_const(nm).span;
     out.push(
         Sym {
             name: String::from_str(name),
-            detail: decl_signature(p, DefId { module: mi as ModuleId, node: id }),
+            detail: if detail {
+                decl_signature(p, DefId { module: mi as ModuleId, node: id });
+            } else {
+                String::new();
+            },
             kind: kind,
             start: sp.start,
             end: sp.end,
@@ -1101,46 +1172,47 @@ fn sym_push(p: &loader::Package, mi: usize, out: &mut Vector<Sym>, id: NodeId, n
 }
 
 /// The module's symbol tree in source order (functions, types with their fields/variants,
-/// interfaces with their methods, extends with their methods, consts, aliases).
-pub fn document_symbols(p: &loader::Package, mi: usize) Vector<Sym> {
+/// interfaces with their methods, extends with their methods, consts, aliases). `detail` fills each
+/// symbol's signature text; without it `detail` stays empty.
+pub fn document_symbols(p: &loader::Package, mi: usize, detail: bool) Vector<Sym> {
     let mut out = Vector::<Sym>::new();
     if !p.modules.at(mi).has_ast {
         return out;
     }
     let a = mod_ast(p, mi);
     let src = p.modules.at(mi).source.as_str();
-    let items = unsafe a.at_const(a.root).as_data.program.items;
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     for i in 0..items.len {
-        let iid = unsafe a.list(items)[i as usize];
-        let n = a.at_const(iid);
+        let iid = unsafe (*a).list(items)[i as usize];
+        let n = unsafe (*a).at_const(iid);
         if n.kind == NodeKind::NODE_FUNCTION {
-            sym_push(p, mi, &mut out, iid, n.as_data.function.name, 12, -1);
+            sym_push(p, mi, detail, &mut out, iid, n.as_data.function.name, 12, -1);
         } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
             let mut kind = 23;
             if n.kind == NodeKind::NODE_ENUM {
                 kind = 10;
             }
-            let me = sym_push(p, mi, &mut out, iid, n.as_data.aggregate.name, kind, -1);
+            let me = sym_push(p, mi, detail, &mut out, iid, n.as_data.aggregate.name, kind, -1);
             if me >= 0 {
                 let ms = n.as_data.aggregate.members;
                 for k in 0..ms.len {
-                    let mid = unsafe a.list(ms)[k as usize];
-                    let mk = a.at_const(mid).kind;
+                    let mid = unsafe (*a).list(ms)[k as usize];
+                    let mk = unsafe (*a).at_const(mid).kind;
                     if mk == NodeKind::NODE_FIELD {
-                        sym_push(p, mi, &mut out, mid, a.at_const(mid).as_data.field.name, 8, me);
+                        sym_push(p, mi, detail, &mut out, mid, unsafe (*a).at_const(mid).as_data.field.name, 8, me);
                     } else if mk == NodeKind::NODE_VARIANT {
-                        sym_push(p, mi, &mut out, mid, a.at_const(mid).as_data.variant.name, 22, me);
+                        sym_push(p, mi, detail, &mut out, mid, unsafe (*a).at_const(mid).as_data.variant.name, 22, me);
                     }
                 }
             }
         } else if n.kind == NodeKind::NODE_INTERFACE {
-            let me = sym_push(p, mi, &mut out, iid, n.as_data.interface_def.name, 11, -1);
+            let me = sym_push(p, mi, detail, &mut out, iid, n.as_data.interface_def.name, 11, -1);
             if me >= 0 {
                 let ms = n.as_data.interface_def.items;
                 for k in 0..ms.len {
-                    let mid = unsafe a.list(ms)[k as usize];
-                    if a.at_const(mid).kind == NodeKind::NODE_FUNCTION {
-                        sym_push(p, mi, &mut out, mid, a.at_const(mid).as_data.function.name, 6, me);
+                    let mid = unsafe (*a).list(ms)[k as usize];
+                    if unsafe (*a).at_const(mid).kind == NodeKind::NODE_FUNCTION {
+                        sym_push(p, mi, detail, &mut out, mid, unsafe (*a).at_const(mid).as_data.function.name, 6, me);
                     }
                 }
             }
@@ -1149,7 +1221,7 @@ pub fn document_symbols(p: &loader::Package, mi: usize) Vector<Sym> {
             let tgt = n.as_data.extend_def.target_type;
             let mut label = String::from_str("extend");
             if tgt != NODE_NONE {
-                let tsp = a.at_const(tgt).span;
+                let tsp = unsafe (*a).at_const(tgt).span;
                 if tsp.end as usize <= src.len() && tsp.start < tsp.end {
                     label.push_byte(b' ');
                     label.push_str(src.slice(tsp.start as usize, tsp.end as usize));
@@ -1170,15 +1242,15 @@ pub fn document_symbols(p: &loader::Package, mi: usize) Vector<Sym> {
             let me = out.len() as i32 - 1;
             let ms = n.as_data.extend_def.items;
             for k in 0..ms.len {
-                let mid = unsafe a.list(ms)[k as usize];
-                if a.at_const(mid).kind == NodeKind::NODE_FUNCTION {
-                    sym_push(p, mi, &mut out, mid, a.at_const(mid).as_data.function.name, 6, me);
+                let mid = unsafe (*a).list(ms)[k as usize];
+                if unsafe (*a).at_const(mid).kind == NodeKind::NODE_FUNCTION {
+                    sym_push(p, mi, detail, &mut out, mid, unsafe (*a).at_const(mid).as_data.function.name, 6, me);
                 }
             }
         } else if n.kind == NodeKind::NODE_CONST {
-            sym_push(p, mi, &mut out, iid, n.as_data.const_def.name, 14, -1);
+            sym_push(p, mi, detail, &mut out, iid, n.as_data.const_def.name, 14, -1);
         } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
-            sym_push(p, mi, &mut out, iid, n.as_data.type_alias.name, 5, -1);
+            sym_push(p, mi, detail, &mut out, iid, n.as_data.type_alias.name, 5, -1);
         }
     }
     return out;
@@ -1222,17 +1294,17 @@ fn fuzzy_has(name: str, q: str) bool {
     return false;
 }
 
-/// Top-level declarations (and extend methods) across the whole package matching `query`, bounded
-/// by `cap` results.
-pub fn workspace_symbols(p: &loader::Package, query: str, cap: usize, out: &mut Vector<WsSym>) {
+/// Top-level declarations (and extend methods) matching `query` in the modules `searched` marks,
+/// bounded by `cap` results.
+pub fn workspace_symbols(p: &loader::Package, query: str, cap: usize, searched: &Vector<bool>, out: &mut Vector<WsSym>) {
     for mm in 0..p.modules.len() {
         if out.len() >= cap {
             return;
         }
-        if !p.modules.at(mm).has_ast {
+        if !searched[mm] || !p.modules.at(mm).has_ast {
             continue;
         }
-        let syms = document_symbols(p, mm);
+        let syms = document_symbols(p, mm, false);
         for i in 0..syms.len() {
             if out.len() >= cap {
                 break;
@@ -1260,10 +1332,10 @@ pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> 
     let a = mod_ast(p, mi);
     let mut call: NodeId = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        let nd = a.at_const(i);
+        let i = unsafe (*a).nth_id(i0);
+        let nd = unsafe (*a).at_const(i);
         if nd.kind != NodeKind::NODE_CALL {
             continue;
         }
@@ -1275,25 +1347,25 @@ pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> 
     if call == NODE_NONE {
         return Option::<SigInfo>::None;
     }
-    let callee = a.at_const(call).as_data.call.callee;
-    if !a.valid(callee) {
+    let callee = unsafe (*a).at_const(call).as_data.call.callee;
+    if !unsafe (*a).valid(callee) {
         return Option::<SigInfo>::None;
     }
-    let d = a.resolution_def(callee);
+    let d = unsafe (*a).resolution_def(callee);
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
         return Option::<SigInfo>::None;
     }
     let da = mod_ast(p, d.module as usize);
-    if da.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+    if unsafe (*da).at_const(d.node).kind != NodeKind::NODE_FUNCTION {
         return Option::<SigInfo>::None;
     }
     let dsrc = p.modules.at(d.module as usize).source.as_str();
     let mut params = Vector::<String>::new();
-    let ps = da.at_const(d.node).as_data.function.params;
+    let ps = unsafe (*da).at_const(d.node).as_data.function.params;
     let mut skip_self = false;
-    if ps.len > 0 && a.at_const(callee).kind == NodeKind::NODE_MEMBER {
-        let p0 = unsafe da.list(ps)[0];
-        if name_str(p, d.module as usize, da.at_const(p0).as_data.parameter.name) == "self" {
+    if ps.len > 0 && unsafe (*a).at_const(callee).kind == NodeKind::NODE_MEMBER {
+        let p0 = unsafe (*da).list(ps)[0];
+        if name_str(p, d.module as usize, unsafe (*da).at_const(p0).as_data.parameter.name) == "self" {
             // The receiver is not an argument slot.
             skip_self = true;
         }
@@ -1302,16 +1374,16 @@ pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> 
         if i == 0 && skip_self {
             continue;
         }
-        let pid = unsafe da.list(ps)[i as usize];
-        let sp = da.at_const(pid).span;
+        let pid = unsafe (*da).list(ps)[i as usize];
+        let sp = unsafe (*da).at_const(pid).span;
         if sp.start < sp.end && sp.end as usize <= dsrc.len() {
             params.push(String::from_str(dsrc.slice(sp.start as usize, sp.end as usize)));
         }
     }
-    let args = a.at_const(call).as_data.call.args;
+    let args = unsafe (*a).at_const(call).as_data.call.args;
     let mut active: i32 = 0;
     for i in 0..args.len {
-        let asp = a.at_const(unsafe a.list(args)[i as usize]).span;
+        let asp = unsafe (*a).at_const(unsafe (*a).list(args)[i as usize]).span;
         if asp.end < off {
             active += 1;
         }
@@ -1322,14 +1394,17 @@ pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> 
     return Option::<SigInfo>::Some(SigInfo { label: decl_signature(p, d), params: params, active: active });
 }
 
-/// All same-document reference spans for the symbol under `off` (document highlights).
+/// All same-document reference spans for the symbol under `off` (document highlights): only module
+/// `mi` is scanned.
 pub fn document_highlights(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
-    let all = references_of_def(p, def_at(p, mi, off), true);
+    let d = def_at(p, mi, off);
     let mut out = Vector::<Loc>::new();
-    for i in 0..all.len() {
-        if all.at(i).module as usize == mi {
-            out.push(*all.at(i));
-        }
+    if d.node == NODE_NONE {
+        return out;
+    }
+    refs_in_module(p, d, mi, &mut out);
+    if d.module as usize == mi {
+        push_decl_name(p, d, &mut out);
     }
     return out;
 }
@@ -1338,13 +1413,13 @@ pub fn document_highlights(p: &loader::Package, mi: usize, off: u32) Vector<Loc>
 pub fn type_definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     let a = mod_ast(p, mi);
     let id = node_at_or_before(a, off);
-    if id == NODE_NONE || !a.valid(id) {
+    if id == NODE_NONE || !unsafe (*a).valid(id) {
         return Option::<Loc>::None;
     }
-    let mut t = a.type_of(id);
+    let mut t = unsafe (*a).type_of(id);
     let mut guard = 0;
     while t != TYPE_NONE && guard < 8 {
-        let y = *a.type_at(t);
+        let y = *unsafe (*a).type_at(t);
         if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_POINTER {
             t = y.as_data.elem;
             guard += 1;
@@ -1356,7 +1431,7 @@ pub fn type_definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
             dm = y.module as usize;
             dn = y.as_data.decl;
         } else if y.kind == TypeKind::TYPE_INSTANCE {
-            let it = *a.instance(y.as_data.inst);
+            let it = *unsafe (*a).instance(y.as_data.inst);
             dm = it.module as usize;
             dn = it.decl;
         }
@@ -1365,9 +1440,9 @@ pub fn type_definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
         }
         let da = mod_ast(p, dm);
         let nm = decl_name(da, dn);
-        let mut sp = da.at_const(dn).span;
+        let mut sp = unsafe (*da).at_const(dn).span;
         if nm != NODE_NONE {
-            sp = da.at_const(nm).span;
+            sp = unsafe (*da).at_const(nm).span;
         }
         return Option::<Loc>::Some(Loc { module: dm as u32, start: sp.start, end: sp.end });
     }
@@ -1377,15 +1452,15 @@ pub fn type_definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
 // The interface declaration owning method `fnid` in module `im`, or NODE_NONE.
 fn owning_interface(p: &loader::Package, im: usize, fnid: NodeId) NodeId {
     let a = mod_ast(p, im);
-    let items = unsafe a.at_const(a.root).as_data.program.items;
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     for i in 0..items.len {
-        let iid = unsafe a.list(items)[i as usize];
-        if a.at_const(iid).kind != NodeKind::NODE_INTERFACE {
+        let iid = unsafe (*a).list(items)[i as usize];
+        if unsafe (*a).at_const(iid).kind != NodeKind::NODE_INTERFACE {
             continue;
         }
-        let ms = a.at_const(iid).as_data.interface_def.items;
+        let ms = unsafe (*a).at_const(iid).as_data.interface_def.items;
         for k in 0..ms.len {
-            if unsafe a.list(ms)[k as usize] == fnid {
+            if unsafe (*a).list(ms)[k as usize] == fnid {
                 return iid;
             }
         }
@@ -1403,7 +1478,7 @@ pub fn implementations(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
     }
     let dm = d.module as usize;
     let da = mod_ast(p, dm);
-    let dk = da.at_const(d.node).kind;
+    let dk = unsafe (*da).at_const(d.node).kind;
     let mut iface = DefId { module: 0, node: NODE_NONE };
     let mut method_name = "";
     if dk == NodeKind::NODE_INTERFACE {
@@ -1414,7 +1489,7 @@ pub fn implementations(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
             return out;
         }
         iface = DefId { module: d.module, node: own };
-        method_name = name_str(p, dm, da.at_const(d.node).as_data.function.name);
+        method_name = name_str(p, dm, unsafe (*da).at_const(d.node).as_data.function.name);
     } else {
         return out;
     }
@@ -1423,37 +1498,37 @@ pub fn implementations(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
             continue;
         }
         let am = mod_ast(p, mm);
-        let items = unsafe am.at_const(am.root).as_data.program.items;
+        let items = unsafe (*am).at_const((*am).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe am.list(items)[i as usize];
-            if am.at_const(iid).kind != NodeKind::NODE_EXTEND {
+            let iid = unsafe (*am).list(items)[i as usize];
+            if unsafe (*am).at_const(iid).kind != NodeKind::NODE_EXTEND {
                 continue;
             }
-            let it = am.at_const(iid).as_data.extend_def.interface_type;
-            if it == NODE_NONE || !am.valid(it) {
+            let it = unsafe (*am).at_const(iid).as_data.extend_def.interface_type;
+            if it == NODE_NONE || !unsafe (*am).valid(it) {
                 continue;
             }
-            let idf = am.resolution_def(it);
+            let idf = unsafe (*am).resolution_def(it);
             if idf.module != iface.module || idf.node != iface.node {
                 continue;
             }
             if method_name.len() == 0 {
-                let tgt = am.at_const(iid).as_data.extend_def.target_type;
+                let tgt = unsafe (*am).at_const(iid).as_data.extend_def.target_type;
                 let sp = if tgt != NODE_NONE {
-                    am.at_const(tgt).span;
+                    unsafe (*am).at_const(tgt).span;
                 } else {
-                    am.at_const(iid).span;
+                    unsafe (*am).at_const(iid).span;
                 };
                 out.push(Loc { module: mm as u32, start: sp.start, end: sp.end });
             } else {
-                let ms = am.at_const(iid).as_data.extend_def.items;
+                let ms = unsafe (*am).at_const(iid).as_data.extend_def.items;
                 for k in 0..ms.len {
-                    let fid = unsafe am.list(ms)[k as usize];
-                    if am.at_const(fid).kind != NodeKind::NODE_FUNCTION {
+                    let fid = unsafe (*am).list(ms)[k as usize];
+                    if unsafe (*am).at_const(fid).kind != NodeKind::NODE_FUNCTION {
                         continue;
                     }
-                    if name_str(p, mm, am.at_const(fid).as_data.function.name) == method_name {
-                        let sp = am.at_const(am.at_const(fid).as_data.function.name).span;
+                    if name_str(p, mm, unsafe (*am).at_const(fid).as_data.function.name) == method_name {
+                        let sp = unsafe (*am).at_const(unsafe (*am).at_const(fid).as_data.function.name).span;
                         out.push(Loc { module: mm as u32, start: sp.start, end: sp.end });
                     }
                 }
@@ -1469,10 +1544,10 @@ pub fn folding_ranges(p: &loader::Package, mi: usize) Vector<Loc> {
     let src = p.modules.at(mi).source.as_str();
     if p.modules.at(mi).has_ast {
         let a = mod_ast(p, mi);
-        let n = a.nnodes();
+        let n = unsafe (*a).nnodes();
         for i0 in 1..n {
-            let i = a.nth_id(i0);
-            let nd = a.at_const(i);
+            let i = unsafe (*a).nth_id(i0);
+            let nd = unsafe (*a).at_const(i);
             let k = nd.kind;
             let foldable = k == NodeKind::NODE_BLOCK || k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_INTERFACE || k == NodeKind::NODE_EXTEND || k == NodeKind::NODE_MATCH;
             if !foldable {
@@ -1531,11 +1606,11 @@ pub fn selection_ranges(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
         return out;
     }
     let a = mod_ast(p, mi);
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     let mut spans = Vector::<u64>::new(); // (len << 32 | start), sorted by length
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        let sp = a.at_const(i).span;
+        let i = unsafe (*a).nth_id(i0);
+        let sp = unsafe (*a).at_const(i).span;
         if sp.start <= off && off < sp.end {
             spans.push((sp.end - sp.start) as u64 << 32 | sp.start as u64);
         }
@@ -1577,10 +1652,10 @@ pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<
         return out;
     }
     let a = mod_ast(p, mi);
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        let nd = a.at_const(i);
+        let i = unsafe (*a).nth_id(i0);
+        let nd = unsafe (*a).at_const(i);
         if nd.kind != NodeKind::NODE_LET {
             continue;
         }
@@ -1591,10 +1666,10 @@ pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<
         if nd.span.start < start || nd.span.start >= end {
             continue;
         }
-        if !a.valid(ls.value) {
+        if !unsafe (*a).valid(ls.value) {
             continue;
         }
-        let t = a.type_of(ls.value);
+        let t = unsafe (*a).type_of(ls.value);
         if t == TYPE_NONE {
             continue;
         }
@@ -1606,7 +1681,7 @@ pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<
         }
         let mut label = String::from_str(": ");
         label.push_str(rendered);
-        out.push(Hint { off: a.at_const(ls.name).span.end, label: label });
+        out.push(Hint { off: unsafe (*a).at_const(ls.name).span.end, label: label });
     }
     return out;
 }
@@ -1649,7 +1724,7 @@ pub fn sym_key(p: &loader::Package, d: DefId) Option<SymKey> {
     return Option::<SymKey>::Some(
         SymKey {
             file: p.modules.at(d.module as usize).file.clone(),
-            kind: da.at_const(d.node).kind as u8,
+            kind: (unsafe (*da).at_const(d.node).kind) as u8,
             name: String::from_str(name),
         },
     );
@@ -1659,10 +1734,10 @@ pub fn sym_key(p: &loader::Package, d: DefId) Option<SymKey> {
 /// FIRST (outermost source order) match, which is the declaration itself.
 pub fn find_decl_by_key(p: &loader::Package, mi: usize, kind: u8, name: str) NodeId {
     let a = mod_ast(p, mi);
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        if a.at_const(i).kind as u8 != kind {
+        let i = unsafe (*a).nth_id(i0);
+        if (unsafe (*a).at_const(i).kind) as u8 != kind {
             continue;
         }
         let nm = decl_name(a, i);
@@ -1676,43 +1751,72 @@ pub fn find_decl_by_key(p: &loader::Package, mi: usize, kind: u8, name: str) Nod
     return NODE_NONE;
 }
 
-/// Every reference to definition `d` across the package (the span-narrowed reference sites);
-/// `include_decl` appends the declaration's own name span.
+const fn loc_span_cmp(a: &Loc, b: &Loc) i32 {
+    if a.start != b.start {
+        return if a.start < b.start {
+            -1;
+        } else {
+            1;
+        };
+    }
+    if a.end != b.end {
+        return if a.end < b.end {
+            -1;
+        } else {
+            1;
+        };
+    }
+    return 0;
+}
+
+// Append the reference sites of `d` in module `mm` to `out`, sorted by span with duplicate spans
+// removed (sort, then one pass over neighbours).
+fn refs_in_module(p: &loader::Package, d: DefId, mm: usize, out: &mut Vector<Loc>) {
+    if !p.modules.at(mm).has_ast {
+        return;
+    }
+    let am = mod_ast(p, mm);
+    let mut hits = Vector::<Loc>::new();
+    let nn = unsafe (*am).nnodes();
+    for i0 in 1..nn {
+        let i = unsafe (*am).nth_id(i0);
+        let r = unsafe (*am).resolution_def(i);
+        if r.module == d.module && r.node == d.node {
+            let sp = ref_span(am, i);
+            hits.push(Loc { module: mm as u32, start: sp.start, end: sp.end });
+        }
+    }
+    hits.sort_by(loc_span_cmp);
+    for k in 0..hits.len() {
+        if k > 0 && loc_span_cmp(hits.at(k - 1), hits.at(k)) == 0 {
+            continue;
+        }
+        out.push(*hits.at(k));
+    }
+}
+
+// Append the name span of declaration `d`, when it has one.
+fn push_decl_name(p: &loader::Package, d: DefId, out: &mut Vector<Loc>) {
+    let da = mod_ast(p, d.module as usize);
+    let nm = decl_name(da, d.node);
+    if nm != NODE_NONE {
+        let sp = unsafe (*da).at_const(nm).span;
+        out.push(Loc { module: d.module, start: sp.start, end: sp.end });
+    }
+}
+
+/// Every reference to definition `d` across the package (the span-narrowed reference sites, per
+/// module in span order); `include_decl` appends the declaration's own name span.
 pub fn references_of_def(p: &loader::Package, d: DefId, include_decl: bool) Vector<Loc> {
     let mut out = Vector::<Loc>::new();
     if d.node == NODE_NONE {
         return out;
     }
     for mm in 0..p.modules.len() {
-        if !p.modules.at(mm).has_ast {
-            continue;
-        }
-        let am = mod_ast(p, mm);
-        let nn = am.nnodes();
-        for i0 in 1..nn {
-            let i = am.nth_id(i0);
-            let r = am.resolution_def(i);
-            if r.module == d.module && r.node == d.node {
-                let sp = ref_span(am, i);
-                let mut seen = false;
-                for k in 0..out.len() {
-                    if out.at(k).module == mm as u32 && out.at(k).start == sp.start && out.at(k).end == sp.end {
-                        seen = true;
-                    }
-                }
-                if !seen {
-                    out.push(Loc { module: mm as u32, start: sp.start, end: sp.end });
-                }
-            }
-        }
+        refs_in_module(p, d, mm, &mut out);
     }
     if include_decl {
-        let da = mod_ast(p, d.module as usize);
-        let nm = decl_name(da, d.node);
-        if nm != NODE_NONE {
-            let sp = da.at_const(nm).span;
-            out.push(Loc { module: d.module, start: sp.start, end: sp.end });
-        }
+        push_decl_name(p, d, &mut out);
     }
     return out;
 }
@@ -1727,10 +1831,10 @@ pub fn cursor_ref_span(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     // The narrowed span of the resolved node under the cursor.
     let mut best: u32 = 0xFFFFFFFF;
     let mut hit = tok::Span::empty();
-    let nn = a.nnodes();
+    let nn = unsafe (*a).nnodes();
     for i0 in 1..nn {
-        let i = a.nth_id(i0);
-        let r = a.resolution_def(i);
+        let i = unsafe (*a).nth_id(i0);
+        let r = unsafe (*a).resolution_def(i);
         if r.module != d.module || r.node != d.node {
             continue;
         }
@@ -1743,7 +1847,7 @@ pub fn cursor_ref_span(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     if best == 0xFFFFFFFF && d.module as usize == mi {
         let nm = decl_name(a, d.node);
         if nm != NODE_NONE {
-            let sp = a.at_const(nm).span;
+            let sp = unsafe (*a).at_const(nm).span;
             if sp.start <= off && off <= sp.end {
                 hit = sp;
                 best = 0;
@@ -1759,15 +1863,15 @@ pub fn cursor_ref_span(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
 // The extend block owning method `fnid` in module `im`, or NODE_NONE.
 fn owning_extend(p: &loader::Package, im: usize, fnid: NodeId) NodeId {
     let a = mod_ast(p, im);
-    let items = unsafe a.at_const(a.root).as_data.program.items;
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     for i in 0..items.len {
-        let iid = unsafe a.list(items)[i as usize];
-        if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
+        let iid = unsafe (*a).list(items)[i as usize];
+        if unsafe (*a).at_const(iid).kind != NodeKind::NODE_EXTEND {
             continue;
         }
-        let ms = a.at_const(iid).as_data.extend_def.items;
+        let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
         for k in 0..ms.len {
-            if unsafe a.list(ms)[k as usize] == fnid {
+            if unsafe (*a).list(ms)[k as usize] == fnid {
                 return iid;
             }
         }
@@ -1785,7 +1889,7 @@ pub fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
     }
     let dm = d.module as usize;
     let da = mod_ast(p, dm);
-    if da.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+    if unsafe (*da).at_const(d.node).kind != NodeKind::NODE_FUNCTION {
         return;
     }
     let mut iface = DefId { module: 0, node: NODE_NONE };
@@ -1795,9 +1899,9 @@ pub fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
     } else {
         let ext = owning_extend(p, dm, d.node);
         if ext != NODE_NONE {
-            let it = da.at_const(ext).as_data.extend_def.interface_type;
-            if it != NODE_NONE && da.valid(it) {
-                let idf = da.resolution_def(it);
+            let it = unsafe (*da).at_const(ext).as_data.extend_def.interface_type;
+            if it != NODE_NONE && unsafe (*da).valid(it) {
+                let idf = unsafe (*da).resolution_def(it);
                 if idf.node != NODE_NONE {
                     iface = idf;
                 }
@@ -1807,17 +1911,17 @@ pub fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
     if iface.node == NODE_NONE {
         return;
     }
-    let name = name_str(p, dm, da.at_const(d.node).as_data.function.name);
+    let name = name_str(p, dm, unsafe (*da).at_const(d.node).as_data.function.name);
     // The interface's own declaration of this method.
     let ia = mod_ast(p, iface.module as usize);
-    if ia.at_const(iface.node).kind == NodeKind::NODE_INTERFACE {
-        let ms = ia.at_const(iface.node).as_data.interface_def.items;
+    if unsafe (*ia).at_const(iface.node).kind == NodeKind::NODE_INTERFACE {
+        let ms = unsafe (*ia).at_const(iface.node).as_data.interface_def.items;
         for k in 0..ms.len {
-            let fid = unsafe ia.list(ms)[k as usize];
-            if ia.at_const(fid).kind == NodeKind::NODE_FUNCTION && name_str(
+            let fid = unsafe (*ia).list(ms)[k as usize];
+            if unsafe (*ia).at_const(fid).kind == NodeKind::NODE_FUNCTION && name_str(
                 p,
                 iface.module as usize,
-                ia.at_const(fid).as_data.function.name,
+                unsafe (*ia).at_const(fid).as_data.function.name,
             ) == name {
                 let cand = DefId { module: iface.module, node: fid };
                 let mut have = false;
@@ -1838,27 +1942,27 @@ pub fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
             continue;
         }
         let am = mod_ast(p, mm);
-        let items = unsafe am.at_const(am.root).as_data.program.items;
+        let items = unsafe (*am).at_const((*am).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe am.list(items)[i as usize];
-            if am.at_const(iid).kind != NodeKind::NODE_EXTEND {
+            let iid = unsafe (*am).list(items)[i as usize];
+            if unsafe (*am).at_const(iid).kind != NodeKind::NODE_EXTEND {
                 continue;
             }
-            let it = am.at_const(iid).as_data.extend_def.interface_type;
-            if it == NODE_NONE || !am.valid(it) {
+            let it = unsafe (*am).at_const(iid).as_data.extend_def.interface_type;
+            if it == NODE_NONE || !unsafe (*am).valid(it) {
                 continue;
             }
-            let idf = am.resolution_def(it);
+            let idf = unsafe (*am).resolution_def(it);
             if idf.module != iface.module || idf.node != iface.node {
                 continue;
             }
-            let ms = am.at_const(iid).as_data.extend_def.items;
+            let ms = unsafe (*am).at_const(iid).as_data.extend_def.items;
             for k in 0..ms.len {
-                let fid = unsafe am.list(ms)[k as usize];
-                if am.at_const(fid).kind != NodeKind::NODE_FUNCTION {
+                let fid = unsafe (*am).list(ms)[k as usize];
+                if unsafe (*am).at_const(fid).kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
-                if name_str(p, mm, am.at_const(fid).as_data.function.name) != name {
+                if name_str(p, mm, unsafe (*am).at_const(fid).as_data.function.name) != name {
                     continue;
                 }
                 let cand = DefId { module: mm as ModuleId, node: fid };
@@ -1878,9 +1982,9 @@ pub fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
 
 // True when `iid` is a top-level item of its module.
 fn is_top_level(a: *const Ast, iid: NodeId) bool {
-    let items = unsafe a.at_const(a.root).as_data.program.items;
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     for i in 0..items.len {
-        if unsafe a.list(items)[i as usize] == iid {
+        if unsafe (*a).list(items)[i as usize] == iid {
             return true;
         }
     }
@@ -1897,12 +2001,12 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
     }
     let dm = d.module as usize;
     let a = mod_ast(p, dm);
-    let k = a.at_const(d.node).kind;
+    let k = unsafe (*a).at_const(d.node).kind;
     // Top-level item: another item of the same module with the new name.
     if is_top_level(a, d.node) {
-        let items = unsafe a.at_const(a.root).as_data.program.items;
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
+            let iid = unsafe (*a).list(items)[i as usize];
             if iid == d.node {
                 continue;
             }
@@ -1915,17 +2019,17 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
     }
     // Field: sibling members of the owning aggregate.
     if k == NodeKind::NODE_FIELD || k == NodeKind::NODE_VARIANT {
-        let n = a.nnodes();
+        let n = unsafe (*a).nnodes();
         for i0 in 1..n {
-            let i = a.nth_id(i0);
-            let nd = a.at_const(i);
+            let i = unsafe (*a).nth_id(i0);
+            let nd = unsafe (*a).at_const(i);
             if nd.kind != NodeKind::NODE_STRUCT && nd.kind != NodeKind::NODE_ENUM {
                 continue;
             }
             let ms = nd.as_data.aggregate.members;
             let mut mine = false;
             for q in 0..ms.len {
-                if unsafe a.list(ms)[q as usize] == d.node {
+                if unsafe (*a).list(ms)[q as usize] == d.node {
                     mine = true;
                 }
             }
@@ -1933,7 +2037,7 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
                 continue;
             }
             for q in 0..ms.len {
-                let mid = unsafe a.list(ms)[q as usize];
+                let mid = unsafe (*a).list(ms)[q as usize];
                 if mid == d.node {
                     continue;
                 }
@@ -1950,39 +2054,39 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
     if k == NodeKind::NODE_FUNCTION {
         let ext = owning_extend(p, dm, d.node);
         if ext != NODE_NONE {
-            let tgt = a.at_const(ext).as_data.extend_def.target_type;
-            if tgt != NODE_NONE && a.valid(tgt) {
-                let td = a.resolution_def(tgt);
+            let tgt = unsafe (*a).at_const(ext).as_data.extend_def.target_type;
+            if tgt != NODE_NONE && unsafe (*a).valid(tgt) {
+                let td = unsafe (*a).resolution_def(tgt);
                 if td.node != NODE_NONE {
                     for mm in 0..p.modules.len() {
                         if !p.modules.at(mm).has_ast {
                             continue;
                         }
                         let am = mod_ast(p, mm);
-                        let its = unsafe am.at_const(am.root).as_data.program.items;
+                        let its = unsafe (*am).at_const((*am).root).as_data.program.items;
                         for i in 0..its.len {
-                            let iid = unsafe am.list(its)[i as usize];
-                            if am.at_const(iid).kind != NodeKind::NODE_EXTEND {
+                            let iid = unsafe (*am).list(its)[i as usize];
+                            if unsafe (*am).at_const(iid).kind != NodeKind::NODE_EXTEND {
                                 continue;
                             }
-                            let t2 = am.at_const(iid).as_data.extend_def.target_type;
-                            if t2 == NODE_NONE || !am.valid(t2) {
+                            let t2 = unsafe (*am).at_const(iid).as_data.extend_def.target_type;
+                            if t2 == NODE_NONE || !unsafe (*am).valid(t2) {
                                 continue;
                             }
-                            let td2 = am.resolution_def(t2);
+                            let td2 = unsafe (*am).resolution_def(t2);
                             if td2.module != td.module || td2.node != td.node {
                                 continue;
                             }
-                            let ms = am.at_const(iid).as_data.extend_def.items;
+                            let ms = unsafe (*am).at_const(iid).as_data.extend_def.items;
                             for q in 0..ms.len {
-                                let fid = unsafe am.list(ms)[q as usize];
+                                let fid = unsafe (*am).list(ms)[q as usize];
                                 if fid == d.node && mm == dm {
                                     continue;
                                 }
-                                if am.at_const(fid).kind == NodeKind::NODE_FUNCTION && name_str(
+                                if unsafe (*am).at_const(fid).kind == NodeKind::NODE_FUNCTION && name_str(
                                     p,
                                     mm,
-                                    am.at_const(fid).as_data.function.name,
+                                    unsafe (*am).at_const(fid).as_data.function.name,
                                 ) == new_name {
                                     return String::from_str("a method with that name already exists on this type");
                                 }
@@ -1996,26 +2100,26 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
     }
     // Local binder or parameter: any other binder of the enclosing function.
     if k == NodeKind::NODE_LET || k == NodeKind::NODE_PATTERN_NAME || k == NodeKind::NODE_PARAMETER {
-        let dsp = a.at_const(d.node).span;
-        let n = a.nnodes();
+        let dsp = unsafe (*a).at_const(d.node).span;
+        let n = unsafe (*a).nnodes();
         let mut fnode: NodeId = NODE_NONE;
         let mut flen: u32 = 0xFFFFFFFF;
         for i0 in 1..n {
-            let i = a.nth_id(i0);
-            let nd = a.at_const(i);
+            let i = unsafe (*a).nth_id(i0);
+            let nd = unsafe (*a).at_const(i);
             if nd.kind == NodeKind::NODE_FUNCTION && nd.span.start <= dsp.start && dsp.end <= nd.span.end && nd.span.end - nd.span.start < flen {
                 fnode = i;
                 flen = nd.span.end - nd.span.start;
             }
         }
         if fnode != NODE_NONE {
-            let fsp = a.at_const(fnode).span;
+            let fsp = unsafe (*a).at_const(fnode).span;
             for i0 in 1..n {
-                let i = a.nth_id(i0);
+                let i = unsafe (*a).nth_id(i0);
                 if i == d.node {
                     continue;
                 }
-                let nd = a.at_const(i);
+                let nd = unsafe (*a).at_const(i);
                 if nd.span.start < fsp.start || nd.span.end > fsp.end {
                     continue;
                 }
@@ -2039,22 +2143,46 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
 
 /// The smallest function item whose span contains `off` (NODE_NONE when none does).
 pub fn enclosing_function(p: &loader::Package, mi: usize, off: u32) NodeId {
+    let fns = body_functions(p, mi);
+    return enclosing_in(&fns, off);
+}
+
+/// A function that has a body: its node and span.
+pub struct FnSpan {
+    pub node: NodeId,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Every function of module `mi` that has a body, in node order: one scan of the module serves
+/// many `enclosing_in` lookups.
+pub fn body_functions(p: &loader::Package, mi: usize) Vector<FnSpan> {
+    let mut out = Vector::<FnSpan>::new();
     if !p.modules.at(mi).has_ast {
-        return NODE_NONE;
+        return out;
     }
     let a = mod_ast(p, mi);
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
+    for i0 in 1..n {
+        let i = unsafe (*a).nth_id(i0);
+        let nd = unsafe (*a).at_const(i);
+        if nd.kind == NodeKind::NODE_FUNCTION && nd.as_data.function.body != NODE_NONE {
+            out.push(FnSpan { node: i, start: nd.span.start, end: nd.span.end });
+        }
+    }
+    return out;
+}
+
+/// The innermost function of `fns` whose span holds `off` (the first in node order on a tie), or
+/// NODE_NONE.
+pub fn enclosing_in(fns: &Vector<FnSpan>, off: u32) NodeId {
     let mut best = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
-    for i0 in 1..n {
-        let i = a.nth_id(i0);
-        let nd = a.at_const(i);
-        if nd.kind != NodeKind::NODE_FUNCTION || nd.as_data.function.body == NODE_NONE {
-            continue;
-        }
-        if nd.span.start <= off && off < nd.span.end && nd.span.end - nd.span.start < blen {
-            best = i;
-            blen = nd.span.end - nd.span.start;
+    for k in 0..fns.len() {
+        let f = fns.at(k);
+        if f.start <= off && off < f.end && f.end - f.start < blen {
+            best = f.node;
+            blen = f.end - f.start;
         }
     }
     return best;
@@ -2071,11 +2199,11 @@ pub struct CallSite {
 pub fn calls_in(p: &loader::Package, mi: usize, fnid: NodeId) Vector<CallSite> {
     let mut out = Vector::<CallSite>::new();
     let a = mod_ast(p, mi);
-    let fsp = a.at_const(fnid).span;
-    let n = a.nnodes();
+    let fsp = unsafe (*a).at_const(fnid).span;
+    let n = unsafe (*a).nnodes();
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        let nd = a.at_const(i);
+        let i = unsafe (*a).nth_id(i0);
+        let nd = unsafe (*a).at_const(i);
         if nd.kind != NodeKind::NODE_CALL || nd.span.start < fsp.start || nd.span.end > fsp.end {
             continue;
         }
@@ -2084,21 +2212,21 @@ pub fn calls_in(p: &loader::Package, mi: usize, fnid: NodeId) Vector<CallSite> {
             continue;
         }
         // A generic specialization call resolves through its expression.
-        if a.at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
-            callee = a.at_const(callee).as_data.specialization.expression;
+        if unsafe (*a).at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            callee = unsafe (*a).at_const(callee).as_data.specialization.expression;
         }
-        if callee == NODE_NONE || !a.valid(callee) {
+        if callee == NODE_NONE || !unsafe (*a).valid(callee) {
             continue;
         }
-        let d = a.resolution_def(callee);
+        let d = unsafe (*a).resolution_def(callee);
         if d.node == NODE_NONE {
             continue;
         }
         let da = mod_ast(p, d.module as usize);
-        if da.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+        if unsafe (*da).at_const(d.node).kind != NodeKind::NODE_FUNCTION {
             continue;
         }
-        let sp = a.at_const(callee).span;
+        let sp = unsafe (*a).at_const(callee).span;
         out.push(CallSite { callee: d, start: sp.start, end: sp.end });
     }
     return out;
@@ -2115,10 +2243,10 @@ pub fn import_candidates(p: &loader::Package, mi: usize, name: str) Vector<Strin
         if p.modules.at(mm).path.len() == 0 {
             continue;
         }
-        let mut pubs = Vector::<CompItem>::new();
-        comp_module_publics(p, mm, &mut pubs);
-        for i in 0..pubs.len() {
-            if pubs.at(i).label.as_str() == name {
+        let am = mod_ast(p, mm);
+        let items = unsafe (*am).at_const((*am).root).as_data.program.items;
+        for i in 0..items.len {
+            if public_item_name(p, mm, unsafe (*am).list(items)[i as usize]) == name {
                 out.push(p.modules.at(mm).path.clone());
                 break;
             }
@@ -2172,12 +2300,12 @@ pub fn iface_stub(p: &loader::Package, mi: usize, off: u32, method_name: str) Op
         return none;
     }
     let a = mod_ast(p, mi);
-    let n = a.nnodes();
+    let n = unsafe (*a).nnodes();
     let mut ext = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
     for i0 in 1..n {
-        let i = a.nth_id(i0);
-        let nd = a.at_const(i);
+        let i = unsafe (*a).nth_id(i0);
+        let nd = unsafe (*a).at_const(i);
         if nd.kind != NodeKind::NODE_EXTEND {
             continue;
         }
@@ -2189,29 +2317,29 @@ pub fn iface_stub(p: &loader::Package, mi: usize, off: u32, method_name: str) Op
     if ext == NODE_NONE {
         return none;
     }
-    let it = a.at_const(ext).as_data.extend_def.interface_type;
-    if it == NODE_NONE || !a.valid(it) {
+    let it = unsafe (*a).at_const(ext).as_data.extend_def.interface_type;
+    if it == NODE_NONE || !unsafe (*a).valid(it) {
         return none;
     }
-    let idf = a.resolution_def(it);
+    let idf = unsafe (*a).resolution_def(it);
     if idf.node == NODE_NONE {
         return none;
     }
     let ia = mod_ast(p, idf.module as usize);
-    if ia.at_const(idf.node).kind != NodeKind::NODE_INTERFACE {
+    if unsafe (*ia).at_const(idf.node).kind != NodeKind::NODE_INTERFACE {
         return none;
     }
     let isrc = p.modules.at(idf.module as usize).source.as_str();
-    let ms = ia.at_const(idf.node).as_data.interface_def.items;
+    let ms = unsafe (*ia).at_const(idf.node).as_data.interface_def.items;
     for k in 0..ms.len {
-        let fid = unsafe ia.list(ms)[k as usize];
-        if ia.at_const(fid).kind != NodeKind::NODE_FUNCTION {
+        let fid = unsafe (*ia).list(ms)[k as usize];
+        if unsafe (*ia).at_const(fid).kind != NodeKind::NODE_FUNCTION {
             continue;
         }
-        if name_str(p, idf.module as usize, ia.at_const(fid).as_data.function.name) != method_name {
+        if name_str(p, idf.module as usize, unsafe (*ia).at_const(fid).as_data.function.name) != method_name {
             continue;
         }
-        let sp = ia.at_const(fid).span;
+        let sp = unsafe (*ia).at_const(fid).span;
         let mut sig = String::from_str(isrc.slice(sp.start as usize, sp.end as usize));
         // The interface declaration ends in ';' (no body); the stub replaces it with a panicking body.
         while sig.len() != 0 && (sig.as_str()[sig.len() - 1] == b';' || sig.as_str()[sig.len() - 1] == b' ' || sig.as_str()[sig.len() - 1] == b'\n') {
@@ -2220,7 +2348,7 @@ pub fn iface_stub(p: &loader::Package, mi: usize, off: u32, method_name: str) Op
         let mut text = String::from_str("\n    ");
         text.push_string(&sig);
         text.push_str(" {\n        panic(\"todo: implement\");\n    }\n");
-        let esp = a.at_const(ext).span;
+        let esp = unsafe (*a).at_const(ext).span;
         if esp.end == 0 {
             return none;
         }
@@ -2237,28 +2365,31 @@ pub fn type_ifaces(p: &loader::Package, d: DefId) Vector<Loc> {
             continue;
         }
         let am = mod_ast(p, mm);
-        let items = unsafe am.at_const(am.root).as_data.program.items;
+        let items = unsafe (*am).at_const((*am).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe am.list(items)[i as usize];
-            if am.at_const(iid).kind != NodeKind::NODE_EXTEND {
+            let iid = unsafe (*am).list(items)[i as usize];
+            if unsafe (*am).at_const(iid).kind != NodeKind::NODE_EXTEND {
                 continue;
             }
-            let tgt = am.at_const(iid).as_data.extend_def.target_type;
-            let it = am.at_const(iid).as_data.extend_def.interface_type;
-            if tgt == NODE_NONE || it == NODE_NONE || !am.valid(tgt) || !am.valid(it) {
+            let tgt = unsafe (*am).at_const(iid).as_data.extend_def.target_type;
+            let it = unsafe (*am).at_const(iid).as_data.extend_def.interface_type;
+            if tgt == NODE_NONE || it == NODE_NONE || !unsafe (*am).valid(tgt) || !unsafe (*am).valid(it) {
                 continue;
             }
-            let td = am.resolution_def(tgt);
+            let td = unsafe (*am).resolution_def(tgt);
             if td.module != d.module || td.node != d.node {
                 continue;
             }
-            let idf = am.resolution_def(it);
+            let idf = unsafe (*am).resolution_def(it);
             if idf.node == NODE_NONE {
                 continue;
             }
             let ia = mod_ast(p, idf.module as usize);
-            let nm = ia.at_const(idf.node).as_data.interface_def.name;
-            let sp = ia.at_const(nm).span;
+            if unsafe (*ia).at_const(idf.node).kind != NodeKind::NODE_INTERFACE {
+                continue;
+            }
+            let nm = unsafe (*ia).at_const(idf.node).as_data.interface_def.name;
+            let sp = unsafe (*ia).at_const(nm).span;
             out.push(Loc { module: idf.module, start: sp.start, end: sp.end });
         }
     }
@@ -2273,27 +2404,27 @@ pub fn iface_conformers(p: &loader::Package, d: DefId) Vector<Loc> {
             continue;
         }
         let am = mod_ast(p, mm);
-        let items = unsafe am.at_const(am.root).as_data.program.items;
+        let items = unsafe (*am).at_const((*am).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe am.list(items)[i as usize];
-            if am.at_const(iid).kind != NodeKind::NODE_EXTEND {
+            let iid = unsafe (*am).list(items)[i as usize];
+            if unsafe (*am).at_const(iid).kind != NodeKind::NODE_EXTEND {
                 continue;
             }
-            let tgt = am.at_const(iid).as_data.extend_def.target_type;
-            let it = am.at_const(iid).as_data.extend_def.interface_type;
-            if tgt == NODE_NONE || it == NODE_NONE || !am.valid(tgt) || !am.valid(it) {
+            let tgt = unsafe (*am).at_const(iid).as_data.extend_def.target_type;
+            let it = unsafe (*am).at_const(iid).as_data.extend_def.interface_type;
+            if tgt == NODE_NONE || it == NODE_NONE || !unsafe (*am).valid(tgt) || !unsafe (*am).valid(it) {
                 continue;
             }
-            let idf = am.resolution_def(it);
+            let idf = unsafe (*am).resolution_def(it);
             if idf.module != d.module || idf.node != d.node {
                 continue;
             }
-            let td = am.resolution_def(tgt);
+            let td = unsafe (*am).resolution_def(tgt);
             if td.node == NODE_NONE {
                 continue;
             }
             let ta = mod_ast(p, td.module as usize);
-            let tn = ta.at_const(td.node);
+            let tn = unsafe (*ta).at_const(td.node);
             let nm = if tn.kind == NodeKind::NODE_STRUCT || tn.kind == NodeKind::NODE_ENUM {
                 tn.as_data.aggregate.name;
             } else {
@@ -2302,7 +2433,7 @@ pub fn iface_conformers(p: &loader::Package, d: DefId) Vector<Loc> {
             if nm == NODE_NONE {
                 continue;
             }
-            let sp = ta.at_const(nm).span;
+            let sp = unsafe (*ta).at_const(nm).span;
             out.push(Loc { module: td.module, start: sp.start, end: sp.end });
         }
     }

@@ -24,12 +24,12 @@ struct Tracked {
 
 extend Tracked as Free {
     pub fn free(self: &mut Tracked) {
-        let _ = atomic::add_i64(&mut unsafe G_FREES, 1, 0);
+        let _ = unsafe atomic::add_i64(&mut unsafe G_FREES, 1, 0);
     }
 }
 
 fn frees() i64 {
-    return atomic::load_i64(&mut unsafe G_FREES, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_FREES, 1);
 }
 
 // Wait, bounded, until `frees()` reaches `want`.
@@ -128,7 +128,7 @@ fn zero_sized_result() {
         // leak check sees a finished thread rather than one still holding its payload.
         let _d = thread::spawn(
             || {
-                let _ = atomic::add_i64(&mut unsafe G_FREES, 1, 0);
+                let _ = unsafe atomic::add_i64(&mut unsafe G_FREES, 1, 0);
             },
         );
     }

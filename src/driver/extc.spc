@@ -1,25 +1,14 @@
-// External C sources/libs: turns every @c.source (and implicit extern-block backing-header .c sibling)
-// into a build/ wrapper TU on the emit keep-list, and writes the deduped @c.link flags (plus the runtime's
-// own libm on POSIX) to build/__ldflags
+// External C sources/libs: `@c.source`/`@c.link` attrs + implicit backing-header `.c` siblings. Each resolved
+// source becomes a wrapper TU `build/__ext<N>_<stem>.c` on the emit keep-list (one absolute #include; the file
+// stays in place so its own relative includes keep resolving), deduped by resolved path. `@c.link` values become
+// `-l<v>` (verbatim when starting with '-'), written with the runtime's own libm on POSIX to `build/__ldflags`
 // for the final link line.
 import stdio;
 import string as cstring;
-import lexer::token as tok;
-import lexer::lexer as lex;
 import ast::ast as *;
-import ast::parser as par;
-import fmt::builder as fbld;
 import driver_shim as shim;
 import module::loader as loader;
-import resolver::resolver as resolver;
-import typechecker::typechecker as tc;
-import utils::errors as diag;
 import driver::util as *;
-
-// External C sources/libs: `@c.source`/`@c.link` attrs + implicit backing-header `.c` siblings. Each resolved
-// source becomes a wrapper TU `build/__ext<N>_<stem>.c` (one absolute #include; the file stays in place so its
-// own relative includes keep resolving), deduped by resolved path. `@c.link` values become `-l<v>` (verbatim
-// when starting with '-'), written to `build/__ldflags`.
 
 // "<dir of file>/<v[0..vl]>" (or "<v>") into `out` (a 4096-byte buffer).
 fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) {
@@ -82,12 +71,16 @@ fn ext_c_wrap(
         *err = true;
         return;
     }
-    unsafe stdio::fprintf(
+    let wrote = unsafe stdio::fprintf(
         f,
         "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 2\n#include \"%s\"\n".ptr() as *const char,
         rsl,
-    );
-    unsafe stdio::fclose(f);
+    ) >= 0;
+    if unsafe stdio::fclose(f) != 0 || !wrote {
+        unsafe stdio::perror(path.cstr());
+        *err = true;
+        return;
+    }
     keep.push(path);
 }
 
@@ -119,11 +112,11 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
         // Live top-level items, after `platform_filter` compacted `program.items`: a `@platform`-gated-out
         // `@c.source`/`@c.link` leaves its attr in the table, so skip attrs whose owning item is gone (else
         // every OS would pull in every other OS's runtime C and `-l` flags).
-        let rootn = unsafe ap.root;
-        let live = ap.at_const(rootn).as_data.program.items;
-        let live_ids = ap.list(live);
-        for ai in 0..unsafe ap.attrs.len() {
-            let at = unsafe ap.attrs[ai];
+        let rootn = unsafe (*ap).root;
+        let live = unsafe (*ap).at_const(rootn).as_data.program.items;
+        let live_ids = unsafe (*ap).list(live);
+        for ai in 0..unsafe (*ap).attrs.len() {
+            let at = unsafe (*ap).attrs[ai];
             let is_src = at.kind == AttrKind::ATTR_C_SOURCE as u8;
             let is_link = at.kind == AttrKind::ATTR_C_LINK as u8;
             if !is_src && !is_link || at.str_span.end <= at.str_span.start {
@@ -144,21 +137,20 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
             let vl = (at.str_span.end - at.str_span.start) as i32;
             let v = unsafe (src + at.str_span.start);
             if is_link {
-                let mut flag = Buf128 {};
-                if unsafe *v == '-' as char {
-                    unsafe stdio::snprintf(&mut flag[0], 128, "%.*s".ptr() as *const char, vl, v);
-                } else {
-                    unsafe stdio::snprintf(&mut flag[0], 128, "-l%.*s".ptr() as *const char, vl, v);
+                let mut flag = String::new();
+                if unsafe *v != '-' as char {
+                    flag.push_str("-l");
                 }
+                flag.push_str(str::from_raw(v as *const u8, vl as usize));
                 let mut dup = false;
                 for k in 0..ld.len() {
-                    if ld[k].as_str() == str::from_cstr(&flag[0]) {
+                    if ld[k].as_str() == flag.as_str() {
                         dup = true;
                         break;
                     }
                 }
                 if !dup {
-                    ld.push(String::from_cstr(&flag[0]));
+                    ld.push(flag);
                 }
                 continue;
             }
@@ -182,20 +174,20 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
             ext_c_wrap(root, keep, &mut seen, &mut nsrc, &rsl[0], err);
         }
         // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
-        let items = unsafe ap.at_const(ap.root).as_data.program.items;
-        let ids = ap.list(items);
+        let items = unsafe (*ap).at_const((*ap).root).as_data.program.items;
+        let ids = unsafe (*ap).list(items);
         for i in 0..items.len {
             let nid = unsafe ids[i as usize];
-            let nk = ap.at_const(nid).kind;
+            let nk = unsafe (*ap).at_const(nid).kind;
             let hdr = if nk == NodeKind::NODE_EXTERN_BLOCK {
-                ap.at_const(nid).as_data.extern_block.header;
+                unsafe (*ap).at_const(nid).as_data.extern_block.header;
             } else {
                 NODE_NONE;
             };
             if hdr == NODE_NONE {
                 continue;
             }
-            let hs = ap.at_const(hdr).span;
+            let hs = unsafe (*ap).at_const(hdr).span;
             let hl = (hs.end - hs.start) as i32 - 2;
             if hl <= 2 {
                 continue;
@@ -230,11 +222,16 @@ pub fn ext_c_collect(p: &mut loader::Package, keep: &mut Vector<String>, err: &m
     let mut ldpath = build_out_path(root, "__ldflags", "");
     if ld.len() != 0 {
         let f = stdio::fopen(ldpath.as_str(), "wb"); // binary: no CRLF so linker flags read back clean on Windows
-        if f != null {
+        let mut ok = f != null;
+        if ok {
             for k in 0..ld.len() {
-                unsafe stdio::fprintf(f, "%s\n".ptr() as *const char, ld[k].cstr());
+                ok = unsafe stdio::fprintf(f, "%s\n".ptr() as *const char, ld[k].cstr()) >= 0 && ok;
             }
-            unsafe stdio::fclose(f);
+            ok = unsafe stdio::fclose(f) == 0 && ok;
+        }
+        if !ok {
+            unsafe stdio::perror(ldpath.cstr());
+            *err = true;
         }
     } else {
         let _ = unsafe shim::sc_unlink(ldpath.cstr());

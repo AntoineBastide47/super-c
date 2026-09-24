@@ -6,7 +6,6 @@
 import ast::ast as *;
 import emit::mangle as mbe;
 import ir::interp as iri;
-import lexer::token_type as tt;
 import graph::instances as ig;
 import module::loader as loader;
 
@@ -128,19 +127,19 @@ extend TuEmit {
             return 0;
         }
         let aa = self.p().module_ast_const(it.amod);
-        let y = *aa.type_at(it.aty);
+        let y = *unsafe (*aa).type_at(it.aty);
         if y.kind != TypeKind::TYPE_INSTANCE {
             return -1;
         }
-        let inst = *aa.instance(y.as_data.inst);
+        let inst = *unsafe (*aa).instance(y.as_data.inst);
         let da = self.p().module_ast_const(it.m);
-        let gens = da.at_const(it.decl).as_data.aggregate.generics;
+        let gens = unsafe (*da).at_const(it.decl).as_data.aggregate.generics;
         if gens.len as u8 > inst.n {
             return -1;
         }
         let mut n: i64 = 0;
         for i in 0..gens.len {
-            let gid = unsafe da.list(gens)[i as usize];
+            let gid = unsafe (*da).list(gens)[i as usize];
             self.mg.push_sub(it.m, gid, it.amod, unsafe inst.args[i as usize]);
             n += 1;
         }
@@ -150,7 +149,11 @@ extend TuEmit {
     // The mangled C type name of the item (instance names come from the anchor).
     fn item_name(self: &mut Self, it: &AggItem, out: &mut String) bool {
         if it.aty == TYPE_NONE {
-            self.mg.qualified(it.m, self.p().module_ast_const(it.m).at_const(it.decl).as_data.aggregate.name, out);
+            self.mg.qualified(
+                it.m,
+                unsafe (*self.p().module_ast_const(it.m)).at_const(it.decl).as_data.aggregate.name,
+                out,
+            );
             return true;
         }
         return self.mg.type_m(it.amod, it.aty, out);
@@ -193,7 +196,7 @@ extend TuEmit {
     // defined latest, so the instance lives beside the types it embeds.
     fn emit_agg_body(self: &mut Self, it: &AggItem, nm: str) i64 {
         let da = self.p().module_ast_const(it.m);
-        let n = da.at_const(it.decl);
+        let n = unsafe (*da).at_const(it.decl);
         let is_enum = n.kind == NodeKind::NODE_ENUM;
         let nb = self.bind_item(it);
         if nb < 0 {
@@ -219,7 +222,7 @@ extend TuEmit {
         let mut own = it.m;
         if it.aty != TYPE_NONE {
             let aa = self.p().module_ast_const(it.amod);
-            let inst = *aa.instance(aa.type_at(it.aty).as_data.inst);
+            let inst = *unsafe (*aa).instance(unsafe (*aa).type_at(it.aty).as_data.inst);
             own = self.pick_owner(it.m, it.amod, &inst, d0);
         }
         self.finish_chunk(&body, own, is_enum && !enum_has_payload(unsafe &*da, it.decl), d0);
@@ -289,7 +292,7 @@ extend TuEmit {
         if !self.mg.resolve(pm, t, &mut rm, &mut rt) {
             return -1;
         }
-        let y = *self.p().module_ast_const(rm).type_at(rt);
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             return y.module;
         }
@@ -300,14 +303,14 @@ extend TuEmit {
             }
             return switch self.owners.get(&fnv(nm.as_str())) {
                 Some(v) => (*v) as i64,
-                None => self.p().module_ast_const(rm).instance(y.as_data.inst).module,
+                None => unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst).module,
             };
         }
         if y.kind == TypeKind::TYPE_ARRAY {
             return self.type_owner(rm, y.as_data.arr.elem);
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
-            let cf = self.p().module_ast_const(y.module).closure_fact(y.as_data.decl);
+            let cf = unsafe (*self.p().module_ast_const(y.module)).closure_fact(y.as_data.decl);
             if cf != null && unsafe (&*cf).ncaps != 0 {
                 return y.module;
             }
@@ -324,7 +327,7 @@ extend TuEmit {
             return false;
         }
         let a = self.p().module_ast_const(rm);
-        let y = *a.type_at(rt);
+        let y = *unsafe (*a).type_at(rt);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             let dep = AggItem { m: y.module, decl: y.as_data.decl, amod: rm, aty: TYPE_NONE };
             let r = self.emit_agg(&dep);
@@ -332,7 +335,7 @@ extend TuEmit {
             return r;
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
-            let inst = *a.instance(y.as_data.inst);
+            let inst = *unsafe (*a).instance(y.as_data.inst);
             let dep = AggItem { m: inst.module, decl: inst.decl, amod: rm, aty: rt };
             let r = self.emit_agg(&dep);
             if self.last_owner >= 0 {
@@ -350,11 +353,11 @@ extend TuEmit {
             let mut em2 = rm;
             let mut et2 = y.as_data.elem;
             if self.mg.resolve(rm, y.as_data.elem, &mut em2, &mut et2) {
-                let e = *self.p().module_ast_const(em2).type_at(et2);
+                let e = *unsafe (*self.p().module_ast_const(em2)).type_at(et2);
                 if e.kind == TypeKind::TYPE_STRUCT || e.kind == TypeKind::TYPE_ENUM {
                     self.emit_fwd(&AggItem { m: e.module, decl: e.as_data.decl, amod: em2, aty: TYPE_NONE });
                 } else if e.kind == TypeKind::TYPE_INSTANCE {
-                    let inst = *self.p().module_ast_const(em2).instance(e.as_data.inst);
+                    let inst = *unsafe (*self.p().module_ast_const(em2)).instance(e.as_data.inst);
                     self.emit_fwd(&AggItem { m: inst.module, decl: inst.decl, amod: em2, aty: et2 });
                 }
             }
@@ -364,7 +367,7 @@ extend TuEmit {
             // A stored CLOSURE VALUE embeds its env struct: define it here (captures first), and
             // record the name so the body emitter skips its own copy.
             let ca = self.p().module_ast_const(y.module);
-            let cf = ca.closure_fact(y.as_data.decl);
+            let cf = unsafe (*ca).closure_fact(y.as_data.decl);
             if cf != null && unsafe (&*cf).ncaps != 0 {
                 let mut nm = String::new();
                 self.mg.closure_sym(y.module, y.as_data.decl, &mut nm);
@@ -397,7 +400,7 @@ extend TuEmit {
                 let mut ok = true;
                 let mut cmat: usize = 0;
                 for k in 0..unsafe (&*cf).ncaps {
-                    let cty = unsafe ca.caps_of(cf)[k as usize].ty;
+                    let cty = unsafe (*ca).caps_of(cf)[k as usize].ty;
                     if cty == TYPE_NONE {
                         ok = false;
                         break;
@@ -411,7 +414,7 @@ extend TuEmit {
                         ok = false;
                         break;
                     }
-                    let csp = unsafe ca.caps_of(cf)[k as usize].name;
+                    let csp = unsafe (*ca).caps_of(cf)[k as usize].name;
                     let mut cnm = String::new();
                     self.mg.ident(y.module, csp, &mut cnm);
                     if !self.mg.ctype(y.module, cty, cnm.as_str(), &mut body) {
@@ -443,7 +446,7 @@ extend TuEmit {
 
     fn struct_body(self: &mut Self, it: &AggItem, nm: str, body: &mut String) bool {
         let da = self.p().module_ast_const(it.m);
-        let n = da.at_const(it.decl);
+        let n = unsafe (*da).at_const(it.decl);
         if n.as_data.aggregate.is_extern {
             // Extern aggregates are defined by their backing C header.
             return true;
@@ -477,15 +480,15 @@ extend TuEmit {
         let mut mat: usize = 0;
         let mut zalign_hi = false;
         for i in 0..ms.len {
-            let fid = unsafe da.list(ms)[i as usize];
+            let fid = unsafe (*da).list(ms)[i as usize];
             // Tuple members are bare type nodes named positionally `_i`; named members are NODE_FIELD.
-            if !is_tuple && da.at_const(fid).kind != NodeKind::NODE_FIELD {
+            if !is_tuple && unsafe (*da).at_const(fid).kind != NodeKind::NODE_FIELD {
                 keep.push(2);
                 continue;
             }
-            let mut fty = da.type_of(fid);
+            let mut fty = unsafe (*da).type_of(fid);
             if fty == TYPE_NONE && !is_tuple {
-                fty = da.type_of(da.at_const(fid).as_data.field.ty);
+                fty = unsafe (*da).type_of(unsafe (*da).at_const(fid).as_data.field.ty);
             }
             if fty == TYPE_NONE {
                 return false;
@@ -495,12 +498,8 @@ extend TuEmit {
             if self.mg.is_zst(it.m, fty) || (self.mg.zclass(it.m, fty) & 4) != 0 {
                 keep.push(0);
                 if !packed && !zalign_hi {
-                    let mut rm9 = it.m;
-                    let mut rt9 = fty;
-                    if self.mg.resolve(it.m, fty, &mut rm9, &mut rt9) {
-                        let lo9 = self.mg.lay.layout(rm9, rt9);
-                        zalign_hi = lo9.ok && lo9.align > 1;
-                    }
+                    let lo9 = self.mg.layout_sub(it.m, fty);
+                    zalign_hi = lo9.ok && lo9.align > 1;
                 }
             } else {
                 keep.push(1);
@@ -536,10 +535,10 @@ extend TuEmit {
             if keep[i as usize] != 1 {
                 continue;
             }
-            let fid = unsafe da.list(ms)[i as usize];
-            let mut fty = da.type_of(fid);
+            let fid = unsafe (*da).list(ms)[i as usize];
+            let mut fty = unsafe (*da).type_of(fid);
             if fty == TYPE_NONE && !is_tuple {
-                fty = da.type_of(da.at_const(fid).as_data.field.ty);
+                fty = unsafe (*da).type_of(unsafe (*da).at_const(fid).as_data.field.ty);
             }
             if !self.field_dep(it.m, fty) {
                 return false;
@@ -556,7 +555,11 @@ extend TuEmit {
                 fnm.push_str("_");
                 fnm.push_u64(i);
             } else {
-                self.mg.ident(it.m, da.at_const(da.at_const(fid).as_data.field.name).as_data.name.text, &mut fnm);
+                self.mg.ident(
+                    it.m,
+                    unsafe (*da).at_const(unsafe (*da).at_const(fid).as_data.field.name).as_data.name.text,
+                    &mut fnm,
+                );
             }
             body.push_str("  ");
             if mi == 0 && force_align != 0 {
@@ -564,28 +567,7 @@ extend TuEmit {
                 body.push_u64(force_align);
                 body.push_str(") ");
             }
-            // A `[T; N]` field interns len-0 in the generic pool (the length is symbolic, and a
-            // len-0 array's frozen spelling is a POINTER): recover N from the annotation's length
-            // expression under the instance env before the ctype rules see the type.
-            let mut ok = false;
-            let mut done = false;
-            let fyv = *da.type_at(fty);
-            if fyv.kind == TypeKind::TYPE_ARRAY && fyv.as_data.arr.len == 0 {
-                let mut alen: u64 = 0;
-                let got9 = self.field_arr_len(it.m, fid, &mut alen);
-                if got9 && alen != 0 {
-                    let mut d2 = String::from_str(fnm.as_str());
-                    d2.push_str("[");
-                    d2.push_u64(alen);
-                    d2.push_str("]");
-                    ok = self.mg.ctype(it.m, fyv.as_data.arr.elem, d2.as_str(), body);
-                    done = true;
-                }
-            }
-            if !done {
-                ok = self.mg.ctype(it.m, fty, fnm.as_str(), body);
-            }
-            if !ok {
+            if !self.member_ctype(it.m, fid, fty, fnm.as_str(), body) {
                 return false;
             }
             body.push_str(";\n");
@@ -616,7 +598,7 @@ extend TuEmit {
         force_align: &mut u64,
     ) bool {
         let da = self.p().module_ast_const(it.m);
-        let n = da.at_const(it.decl);
+        let n = unsafe (*da).at_const(it.decl);
         let is_tuple = n.as_data.aggregate.is_tuple;
         let ms = n.as_data.aggregate.members;
         let mut soff: u64 = 0; // semantic running offset (all fields)
@@ -630,17 +612,12 @@ extend TuEmit {
             if keep[i as usize] == 2 {
                 continue;
             }
-            let fid = unsafe da.list(ms)[i as usize];
-            let mut fty = da.type_of(fid);
+            let fid = unsafe (*da).list(ms)[i as usize];
+            let mut fty = unsafe (*da).type_of(fid);
             if fty == TYPE_NONE && !is_tuple {
-                fty = da.type_of(da.at_const(fid).as_data.field.ty);
+                fty = unsafe (*da).type_of(unsafe (*da).at_const(fid).as_data.field.ty);
             }
-            let mut rm9 = it.m;
-            let mut rt9 = fty;
-            if !self.mg.resolve(it.m, fty, &mut rm9, &mut rt9) {
-                return false;
-            }
-            let lo = self.mg.lay.layout(rm9, rt9);
+            let lo = self.mg.layout_sub(it.m, fty);
             if !lo.ok {
                 return false;
             }
@@ -711,202 +688,35 @@ extend TuEmit {
         return true;
     }
 
-    // Evaluate a symbolic `[T; expr]` length under the instance env: literals, + - * / % << >>
-    // arithmetic, and params folded through the substitution stack (`(BITS + 63) / 64` = 2 at
-    // BITS=128). The checker interns these fields at len 0, so the value only exists HERE.
-    fn eval_len_expr(self: &mut Self, m: ModuleId, id: NodeId, out: &mut i64, depth: u32) bool {
-        if depth > 8 {
+    // Spell member `fid` of type `fty` as a C declarator. A `[T; N]` member interns len-0 in the
+    // generic pool (the length is symbolic, and a len-0 array's frozen spelling is a POINTER):
+    // recover N from the annotation's length expression under the instance env before the ctype
+    // rules see the type. A length that folds to 0 spells `T name[0]`, which is zero-sized as the
+    // layout service models it. False = no C shape (a len-0 array whose length does not fold).
+    fn member_ctype(self: &mut Self, m: ModuleId, fid: NodeId, fty: TypeId, fnm: str, body: &mut String) bool {
+        let fyv = *unsafe (*self.p().module_ast_const(m)).type_at(fty);
+        if fyv.kind != TypeKind::TYPE_ARRAY || fyv.as_data.arr.len != 0 {
+            return self.mg.ctype(m, fty, fnm, body);
+        }
+        let mut alen: u64 = 0;
+        if !self.mg.field_arr_len(m, fid, &mut alen) {
             return false;
         }
-        let da = self.p().module_ast_const(m);
-        let n = da.at_const(id);
-        if n.kind == NodeKind::NODE_LITERAL {
-            let sp = n.span;
-            let src = self.p().modules.at(m as usize).source.as_str();
-            if sp.end as usize > src.len() || sp.end <= sp.start {
-                return false;
-            }
-            let mut v: i64 = 0;
-            let mut i = sp.start as usize;
-            let hex = sp.end as usize - i > 2 && src.byte_at(i) == 48 && (src.byte_at(i + 1) | 32) == 120;
-            if hex {
-                i += 2;
-            }
-            let mut any = false;
-            while i < sp.end as usize {
-                let ch = src.byte_at(i);
-                if ch == 95 {
-                    i += 1;
-                    continue;
-                }
-                let mut d: i64 = 0 - 1;
-                if ch >= 48 && ch <= 57 {
-                    d = ch as i64 - 48;
-                } else if hex && (ch | 32) >= 97 && (ch | 32) <= 102 {
-                    d = (ch | 32) as i64 - 87;
-                }
-                if d < 0 {
-                    // A width suffix ends the digits.
-                    break;
-                }
-                let base: i64 = if hex {
-                    16;
-                } else {
-                    10;
-                };
-                v = v * base + d;
-                any = true;
-                i += 1;
-            }
-            if !any {
-                return false;
-            }
-            *out = v;
-            return true;
-        }
-        if n.kind == NodeKind::NODE_BINARY {
-            let mut lv: i64 = 0;
-            let mut rv: i64 = 0;
-            if !self.eval_len_expr(m, n.as_data.binary.left, &mut lv, depth + 1) || !self.eval_len_expr(
-                m,
-                n.as_data.binary.right,
-                &mut rv,
-                depth + 1,
-            ) {
-                return false;
-            }
-            let opn = n.as_data.binary.op;
-            if opn == tt::TokenType::Plus {
-                *out = lv + rv;
-            } else if opn == tt::TokenType::Minus {
-                *out = lv - rv;
-            } else if opn == tt::TokenType::Star {
-                *out = lv * rv;
-            } else if opn == tt::TokenType::Slash && rv != 0 {
-                *out = lv / rv;
-            } else if opn == tt::TokenType::Percent && rv != 0 {
-                *out = lv % rv;
-            } else if opn == tt::TokenType::LeftShift {
-                *out = lv << rv;
-            } else if opn == tt::TokenType::RightShift {
-                *out = lv >> rv;
-            } else {
-                return false;
-            }
-            return true;
-        }
-        // An identifier naming a generic param folds through the env.
-        let ld = da.resolution_def(id);
-        if ld.node == NODE_NONE || self.p().module_ast_const(ld.module).at_const(ld.node).kind != NodeKind::NODE_GENERIC_PARAM {
-            return false;
-        }
-        let mut k9 = self.mg.subs.len();
-        while k9 > 0 {
-            k9 -= 1;
-            let sb = *self.mg.subs.at(k9);
-            if sb.pm != ld.module || sb.pnode != ld.node {
-                continue;
-            }
-            let kl9 = if sb.lim as usize < k9 {
-                sb.lim as usize;
-            } else {
-                k9;
-            };
-            if self.mg.fold_cval_at(sb.am, sb.at, out, kl9) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    fn field_arr_len(self: &mut Self, m: ModuleId, fid: NodeId, len_out: &mut u64) bool {
-        let da = self.p().module_ast_const(m);
-        let tn = if da.at_const(fid).kind == NodeKind::NODE_FIELD {
-            da.at_const(fid).as_data.field.ty;
-        } else {
-            // Tuple member: the node is already the type annotation.
-            fid;
-        };
-        if tn == NODE_NONE || da.at_const(tn).kind != NodeKind::NODE_ARRAY_TYPE {
-            return false;
-        }
-        let ln = da.at_const(tn).as_data.array_type.length;
-        if ln == NODE_NONE {
-            return false;
-        }
-        // The length expression types as its const type (usize); its RESOLUTION names the
-        // param decl, which the instance env binds to a TYPE_CONST (innermost binding wins).
-        let ld = da.resolution_def(ln);
-        if ld.node != NODE_NONE {
-            let mut i9 = self.mg.subs.len();
-            while i9 > 0 {
-                i9 -= 1;
-                let sb = *self.mg.subs.at(i9);
-                if sb.pm == ld.module && sb.pnode == ld.node {
-                    let by = *self.p().module_ast_const(sb.am).type_at(sb.at);
-                    if by.kind == TypeKind::TYPE_CONST && by.as_data.value >= 0 {
-                        *len_out = by.as_data.value as u64;
-                        return true;
-                    }
-                    return false;
-                }
-            }
-        }
-        let lty = da.type_of(ln);
-        if lty == TYPE_NONE || da.type_at(lty).kind == TypeKind::TYPE_BUILTIN {
-            // An arithmetic length expression carries no const record: evaluate it under the env.
-            let mut ev: i64 = 0;
-            if self.eval_len_expr(m, ln, &mut ev, 0) && ev > 0 {
-                *len_out = ev as u64;
-                return true;
-            }
-            return false;
-        }
-        if da.type_at(lty).kind == TypeKind::TYPE_GENERIC {
-            let mut rm = m;
-            let mut rt = lty;
-            if self.mg.resolve(m, lty, &mut rm, &mut rt) {
-                let ry = *self.p().module_ast_const(rm).type_at(rt);
-                if ry.kind == TypeKind::TYPE_CONST && ry.as_data.value >= 0 {
-                    *len_out = ry.as_data.value as u64;
-                    return true;
-                }
-            }
-            return false;
-        }
-        if da.type_at(lty).kind == TypeKind::TYPE_CONST {
-            let cv = da.type_at(lty).as_data.value;
-            if cv >= 0 {
-                *len_out = cv as u64;
-                return true;
-            }
-            return false;
-        }
-        if da.type_at(lty).kind != TypeKind::TYPE_CONST_EXPR {
-            return false;
-        }
-        let mut v: i64 = 0;
-        if self.mg.fold_cexpr(m, lty, &mut v) && v >= 0 {
-            *len_out = v as u64;
-            return true;
-        }
-        return false;
+        let mut d2 = String::from_str(fnm);
+        d2.push_str("[");
+        d2.push_u64(alen);
+        d2.push_str("]");
+        return self.mg.ctype(m, fyv.as_data.arr.elem, d2.as_str(), body);
     }
 
     fn enum_body(self: &mut Self, it: &AggItem, nm: str, body: &mut String) bool {
         let da = self.p().module_ast_const(it.m);
-        let n = da.at_const(it.decl);
+        let n = unsafe (*da).at_const(it.decl);
         if n.as_data.aggregate.is_extern {
             return true;
         }
         let ms = n.as_data.aggregate.members;
-        let mut has_payload = false;
-        for i in 0..ms.len {
-            let vid = unsafe da.list(ms)[i as usize];
-            if da.at_const(vid).kind == NodeKind::NODE_VARIANT && da.at_const(vid).as_data.variant.payload.len != 0 {
-                has_payload = true;
-            }
-        }
+        let has_payload = enum_has_payload(unsafe &*da, it.decl);
         // The tag enum (or the whole payload-less enum) belongs to the GENERIC declaration and is
         // shared by every instance: guard it and spell it from the decl, not the anchor.
         let mut q = String::new();
@@ -919,8 +729,8 @@ extend TuEmit {
         body.push_str("\ntypedef enum { ");
         let mut first = true;
         for i in 0..ms.len {
-            let vid = unsafe da.list(ms)[i as usize];
-            if da.at_const(vid).kind != NodeKind::NODE_VARIANT {
+            let vid = unsafe (*da).list(ms)[i as usize];
+            if unsafe (*da).at_const(vid).kind != NodeKind::NODE_VARIANT {
                 continue;
             }
             if !first {
@@ -929,7 +739,7 @@ extend TuEmit {
             first = false;
             self.mg.enum_tag(it.m, it.decl, vid, body);
             // an explicit discriminant pins the C value (`Code_Bad = 404`): casts observe it.
-            let vv = da.at_const(vid).as_data.variant.value;
+            let vv = unsafe (*da).at_const(vid).as_data.variant.value;
             if vv != NODE_NONE && self.p().cir != null {
                 let cevE = unsafe &mut *(self.p().cir as *mut iri::Interp);
                 let cvE = cevE.eval(it.m, vv);
@@ -951,18 +761,20 @@ extend TuEmit {
         body.push_str("struct ");
         body.push_str(nm);
         body.push_str(" {\n  ");
-        let mut q2 = String::new();
-        self.mg.qualified(it.m, n.as_data.aggregate.name, &mut q2);
-        body.push_string(&q2);
-        body.push_str("Tag tag;\n");
+        if unsafe (*da).enum_tag_is_byte(it.decl) {
+            body.push_str("uint8_t tag;\n");
+        } else {
+            body.push_string(&q);
+            body.push_str("Tag tag;\n");
+        }
         // The payload union is buffered: when EVERY variant payload is zero-sized the union has no
         // members, and an empty union is not C; the enum then defines as `{ Tag tag; }` alone.
         let hold = body.len();
         body.push_str("  union {\n");
         let mut upay: usize = 0; // union members emitted (all-ZST variants take none)
         for i in 0..ms.len {
-            let vid = unsafe da.list(ms)[i as usize];
-            let vn = da.at_const(vid);
+            let vid = unsafe (*da).list(ms)[i as usize];
+            let vn = unsafe (*da).at_const(vid);
             if vn.kind != NodeKind::NODE_VARIANT || vn.as_data.variant.payload.len == 0 {
                 continue;
             }
@@ -971,10 +783,10 @@ extend TuEmit {
             // takes no union member at all (its accesses are erased with it).
             let mut vmat: usize = 0;
             for k in 0..pl.len {
-                let pid = unsafe da.list(pl)[k as usize];
-                let mut pty = da.type_of(pid);
-                if pty == TYPE_NONE && da.at_const(pid).kind == NodeKind::NODE_FIELD {
-                    pty = da.type_of(da.at_const(pid).as_data.field.ty);
+                let pid = unsafe (*da).list(pl)[k as usize];
+                let mut pty = unsafe (*da).type_of(pid);
+                if pty == TYPE_NONE && unsafe (*da).at_const(pid).kind == NodeKind::NODE_FIELD {
+                    pty = unsafe (*da).type_of(unsafe (*da).at_const(pid).as_data.field.ty);
                 }
                 if pty == TYPE_NONE {
                     return false;
@@ -989,10 +801,10 @@ extend TuEmit {
             upay += 1;
             body.push_str("    struct { ");
             for k in 0..pl.len {
-                let pid = unsafe da.list(pl)[k as usize];
-                let mut pty = da.type_of(pid);
-                if pty == TYPE_NONE && da.at_const(pid).kind == NodeKind::NODE_FIELD {
-                    pty = da.type_of(da.at_const(pid).as_data.field.ty);
+                let pid = unsafe (*da).list(pl)[k as usize];
+                let mut pty = unsafe (*da).type_of(pid);
+                if pty == TYPE_NONE && unsafe (*da).at_const(pid).kind == NodeKind::NODE_FIELD {
+                    pty = unsafe (*da).type_of(unsafe (*da).at_const(pid).as_data.field.ty);
                 }
                 if self.mg.is_zst(it.m, pty) {
                     continue;
@@ -1001,21 +813,23 @@ extend TuEmit {
                     return false;
                 }
                 let mut fnm = String::new();
-                if vn.as_data.variant.struct_payload && da.at_const(pid).kind == NodeKind::NODE_FIELD {
-                    self.mg.ident(it.m, da.at_const(da.at_const(pid).as_data.field.name).as_data.name.text, &mut fnm);
+                if vn.as_data.variant.struct_payload && unsafe (*da).at_const(pid).kind == NodeKind::NODE_FIELD {
+                    self.mg.ident(
+                        it.m,
+                        unsafe (*da).at_const(unsafe (*da).at_const(pid).as_data.field.name).as_data.name.text,
+                        &mut fnm,
+                    );
                 } else {
                     fnm.push_str("_");
                     fnm.push_u64(k);
                 }
-                let ok = self.mg.ctype(it.m, pty, fnm.as_str(), body);
-
-                if !ok {
+                if !self.member_ctype(it.m, pid, pty, fnm.as_str(), body) {
                     return false;
                 }
                 body.push_str("; ");
             }
             body.push_str("} ");
-            self.mg.ident(it.m, da.at_const(vn.as_data.variant.name).as_data.name.text, body);
+            self.mg.ident(it.m, unsafe (*da).at_const(vn.as_data.variant.name).as_data.name.text, body);
             body.push_str(";\n");
         }
         if upay == 0 {
@@ -1038,7 +852,7 @@ extend TuEmit {
 
     fn emit_fwd_named(self: &mut Self, m: ModuleId, decl: NodeId, nm: str) {
         let da = self.p().module_ast_const(m);
-        let n = da.at_const(decl);
+        let n = unsafe (*da).at_const(decl);
         if n.as_data.aggregate.is_extern {
             return;
         }
@@ -1052,15 +866,7 @@ extend TuEmit {
         self.fwds.insert(fk, 1);
         if n.kind == NodeKind::NODE_ENUM {
             // Payload-less enums typedef in their own guarded block; payload enums fwd as structs.
-            let ms = n.as_data.aggregate.members;
-            let mut has_payload = false;
-            for i in 0..ms.len {
-                let vid = unsafe da.list(ms)[i as usize];
-                if da.at_const(vid).kind == NodeKind::NODE_VARIANT && da.at_const(vid).as_data.variant.payload.len != 0 {
-                    has_payload = true;
-                }
-            }
-            if !has_payload {
+            if !enum_has_payload(unsafe &*da, decl) {
                 return;
             }
         }
@@ -1104,7 +910,7 @@ extend TuEmit {
             return st != 1;
         }
         let da = self.p().module_ast_const(inst.module);
-        let n = da.at_const(inst.decl);
+        let n = unsafe (*da).at_const(inst.decl);
         let gens = n.as_data.aggregate.generics;
         if gens.len as u8 > inst.n {
             self.skipped += 1;
@@ -1114,7 +920,7 @@ extend TuEmit {
         self.emit_fwd_named(inst.module, inst.decl, nm.as_str());
         let mut nb: usize = 0;
         for i in 0..gens.len {
-            let gid = unsafe da.list(gens)[i as usize];
+            let gid = unsafe (*da).list(gens)[i as usize];
             self.mg.push_sub(inst.module, gid, pm, unsafe inst.args[i as usize]);
             nb += 1;
         }

@@ -39,6 +39,8 @@ extend<T, A: Allocator> Box<T, A> {
 
     /// Frees the current value, then stores `value` (the box takes ownership of it).
     pub const fn set(self: &mut Box<T, A>, value: T) {
+        // A store through the raw pointer frees nothing, so the current value is freed here.
+        unsafe self.ptr[0].free();
         unsafe self.ptr[0] = value;
     }
 
@@ -55,8 +57,10 @@ extend<T, A: Allocator> Box<T, A> {
     }
 
     /// Allocate a new box (through a copy of the same allocator) holding `f` applied to this box's value.
-    pub const fn map<U, F: fn(T) U>(self: &Box<T, A>, f: F) Box<U, A> {
-        return Box::<U, A>::new_in(self.alloc, f(unsafe self.ptr[0]));
+    /// `f` BORROWS the value (`&T`): the box keeps owning it, so `f` must not consume it (a Free value
+    /// passed by value would be freed by `f` and again by the box).
+    pub const fn map<U, F: fn(&T) U>(self: &Box<T, A>, f: F) Box<U, A> {
+        return Box::<U, A>::new_in(self.alloc, f(self.get()));
     }
 }
 
@@ -87,6 +91,10 @@ extend<T, A: Allocator> Box<T, A> as DerefMut<T> {
 // value. The inner `.free()` is a no-op when `T` isn't a Free type.
 extend<T, A: Allocator> Box<T, A> as Free {
     pub fn free(self: &mut Box<T, A>) {
+        if self.ptr == null {
+            // An all-zero Box (a `zeroed` seed, or one already freed) owns nothing.
+            return;
+        }
         // Free the boxed value (no-op if T isn't Free).
         self.ptr.free();
         if sizeof(T) == 0 {

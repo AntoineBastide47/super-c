@@ -108,7 +108,7 @@ fn unsafe_extend() {
     assert(item(&c.ast, 0).kind == NodeKind::NODE_EXTEND, "expected an extend");
     assert(item(&c.ast, 0).as_data.extend_def.is_unsafe, "expected the extend to be marked unsafe");
     assert(!item(&c.ast, 1).as_data.extend_def.is_unsafe, "a plain extend stays unmarked");
-    assert(item(&c.ast, 2).as_data.function.is_unsafe, "unsafe fn still parses after the new branch");
+    assert(item(&c.ast, 2).as_data.function.is_unsafe(), "unsafe fn still parses after the new branch");
     let bad = h::parse_ast("unsafe struct S {}\n");
     assert(bad.errors > 0, "unsafe on a non-fn, non-extend item is rejected");
 }
@@ -576,10 +576,10 @@ fn pub_modifiers() {
     let methods = c.ast.list(ext_items);
     let m0 = unsafe methods[0];
     let m1 = unsafe methods[1];
-    assert(c.ast.at_const(m0).as_data.function.is_public, "pub method is public");
-    assert(!c.ast.at_const(m1).as_data.function.is_public, "non-pub method is private");
-    assert(item(&c.ast, 2).as_data.function.is_public, "pub fn is public");
-    assert(!item(&c.ast, 3).as_data.function.is_public, "non-pub fn is private");
+    assert(c.ast.at_const(m0).as_data.function.is_public(), "pub method is public");
+    assert(!c.ast.at_const(m1).as_data.function.is_public(), "non-pub method is private");
+    assert(item(&c.ast, 2).as_data.function.is_public(), "pub fn is public");
+    assert(!item(&c.ast, 3).as_data.function.is_public(), "non-pub fn is private");
     assert(
         item(&c.ast, 4).kind == NodeKind::NODE_ENUM && item(&c.ast, 4).as_data.aggregate.is_public,
         "pub enum is public",
@@ -718,6 +718,58 @@ fn bug_regressions() {
         }
         s.push_str("}");
         assert(h::parse_has_error(s.as_str()), "deeply nested blocks should diagnose, not crash");
+    }
+    // P3: an expression statement exactly at the depth cap consumed no token; the block loop must still
+    // make progress instead of spinning on the same token.
+    {
+        let mut s = String::new();
+        s.push_str("fn main() i32 {");
+        for _ in 0..255 {
+            s.push_str("{");
+        }
+        s.push_str(" x; ");
+        for _ in 0..255 {
+            s.push_str("}");
+        }
+        s.push_str(" return 0; }");
+        assert(h::parse_has_error(s.as_str()), "an expression at the depth cap should diagnose, not hang");
+    }
+    // P4: `@bench()` at end of input reads no argument past the token stream.
+    assert(h::parse_has_error("@bench()"), "empty @bench arguments rejected");
+    // P5: a struct-literal path deeper than 16 segments keeps every segment.
+    {
+        let c = h::parse_ast("fn f() { let x = a::b::c::d::e::f::g::h::i::j::k::l::m::n::o::p::q::T { }; }\n");
+        assert(c.errors == 0, "deep struct-literal path parses");
+        let mut parts: u32 = 0;
+        for n in 0..c.ast.nnodes() {
+            let nd = c.ast.at_const(c.ast.nth_id(n));
+            if nd.kind == NodeKind::NODE_TYPE_PATH && nd.as_data.type_path.parts.len > parts {
+                parts = nd.as_data.type_path.parts.len;
+            }
+        }
+        assert_eq(parts, 18);
+    }
+    // P6: attribute integers use the lexer's literal rules (a leading 0 is decimal), and every
+    // attribute after the reserve hint is kept.
+    {
+        let c = h::parse_ast(
+            "@c.align(010)\nstruct A { x: u8 }\n@c.align(0o10)\nstruct B { x: u8 }\n@c.align(0b1_0000)\nstruct D { x: u8 }\n",
+        );
+        assert(c.errors == 0, "attribute integers parse");
+        assert_eq(c.ast.attrs.len(), 3);
+        assert_eq(c.ast.attrs[0].arg, 10);
+        assert_eq(c.ast.attrs[1].arg, 8);
+        assert_eq(c.ast.attrs[2].arg, 16);
+        assert(h::parse_has_error("@c.align(0x1_0000_0000)\nstruct A { x: u8 }\n"), "u32 overflow rejected");
+    }
+    {
+        let mut s = String::new();
+        for _ in 0..20 {
+            s.push_str("@c.used\n");
+        }
+        s.push_str("fn f() {}\n");
+        let c = h::parse_ast(s.as_str());
+        assert_eq(c.ast.attrs.len(), 20);
     }
 }
 

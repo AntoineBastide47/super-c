@@ -10,12 +10,8 @@ import driver_shim as shim;
 import graph::items as gitems;
 import driver::stats as bst;
 import lexer::token as tok;
-import lexer::lexer as lex;
-import lexer::token_type as ltt;
 import ast::ast as *;
 import ast::facts as facts;
-import ast::parser as par;
-import fmt::builder as fbld;
 import module::loader as loader;
 import resolver::resolver as resolver;
 import hir::lower as hirl;
@@ -43,7 +39,6 @@ import graph::instances as ig;
 import borrowck::move_paths as bmp;
 import borrowck::facts as bfx;
 import borrowck::dataflow as bdf;
-import borrowck::loans as bln;
 import utils::errors as diag;
 import driver::tuc as tuc;
 import driver::taskctl as tctl;
@@ -53,6 +48,25 @@ import driver::util as *;
 
 import driver::extc as *;
 import driver::test as *;
+
+const FNV_BASIS: u64 = 1469598103934665603u64;
+
+// The instance drain's bound on demand-queue entries: a program over it is a runaway instantiation.
+const DEMAND_CAP: usize = 200000;
+
+// 64-bit FNV-1a of `s` continued from state `h`: hashing a then b continues over their concatenation.
+const fn fnv_cont(h: u64, s: str) u64 {
+    let mut x = h;
+    for k in 0..s.len() {
+        x = (x ^ s.byte_at(k) as u64) * 1099511628211u64;
+    }
+    return x;
+}
+
+// 64-bit FNV-1a of `s`.
+const fn fnv1a(s: str) u64 {
+    return fnv_cont(FNV_BASIS, s);
+}
 
 // Dead-module pruning of the emit set: a live module reaches its own decls + everything it references.
 const fn mark_live(live: *mut bool, n: usize, m: ModuleId) bool {
@@ -67,7 +81,7 @@ fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool 
     if t == TYPE_NONE {
         return false;
     }
-    let y = *p.module_ast_const(am).type_at(t);
+    let y = *unsafe (*p.module_ast_const(am)).type_at(t);
     if y.kind == TypeKind::TYPE_BUILTIN {
         return true;
     }
@@ -75,7 +89,7 @@ fn ast_type_mentions_builtin(p: &loader::Package, am: ModuleId, t: TypeId) bool 
         return ast_type_mentions_builtin(p, am, y.as_data.elem);
     }
     if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = *p.module_ast_const(am).instance(y.as_data.inst);
+        let it = *unsafe (*p.module_ast_const(am)).instance(y.as_data.inst);
         for i in 0..it.n {
             if ast_type_mentions_builtin(p, am, unsafe it.args[i as usize]) {
                 return true;
@@ -90,7 +104,7 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
     if t == TYPE_NONE {
         return false;
     }
-    let y = *p.module_ast_const(am).type_at(t);
+    let y = *unsafe (*p.module_ast_const(am)).type_at(t);
     let mut changed = false;
     if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_ARRAY {
         if mark_type_modules(p, am, y.as_data.elem, live) {
@@ -103,7 +117,7 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, live: *mut bo
             }
         }
     } else if y.kind == TypeKind::TYPE_INSTANCE {
-        let it = *p.module_ast_const(am).instance(y.as_data.inst);
+        let it = *unsafe (*p.module_ast_const(am)).instance(y.as_data.inst);
         let np = p.modules.len();
         if it.module as usize < np {
             if mark_live(live, np, it.module) {
@@ -138,9 +152,9 @@ fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
     // The module arena's resolutions (declarations, signatures, constants, pinned bodies, import
     // paths), then the item index's dependency edges for the releasable bodies, whose syntax is
     // freed after the borrow pass.
-    let nr = unsafe a.nodes.len();
+    let nr = unsafe (*a).nodes.len();
     for r in 0..nr {
-        let d = a.resolution_def(r as NodeId);
+        let d = unsafe (*a).resolution_def(r as NodeId);
         if d.node != NODE_NONE && d.module as usize < n && d.module as usize != m && p.builtin_of_decl(d.module, d.node) < 0 {
             let _ = mark_live(row, n, d.module);
         }
@@ -156,13 +170,13 @@ fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
             }
         }
     }
-    let nt = a.ntypes();
+    let nt = unsafe (*a).ntypes();
     for ti in 0..nt {
-        let _ = mark_type_modules(p, m as ModuleId, a.used_type(ti), row);
+        let _ = mark_type_modules(p, m as ModuleId, unsafe (*a).used_type(ti), row);
     }
-    let ni = a.ninstances();
+    let ni = unsafe (*a).ninstances();
     for ii in 0..ni {
-        let it = *a.used_instance(ii);
+        let it = *unsafe (*a).used_instance(ii);
         if it.module as usize < n {
             let _ = mark_live(row, n, it.module);
         }
@@ -177,9 +191,9 @@ fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
             }
         }
     }
-    let nmo = unsafe a.mono.len();
+    let nmo = unsafe (*a).mono.len();
     for moi in 0..nmo {
-        let mu = unsafe a.mono[moi];
+        let mu = unsafe (*a).mono[moi];
         for k in 0..mu.n {
             let _ = mark_type_modules(p, m as ModuleId, unsafe mu.args[k as usize], row);
             if p.core_seeded && ast_type_mentions_builtin(p, m as ModuleId, unsafe mu.args[k as usize]) {
@@ -187,9 +201,9 @@ fn emit_live_row(p: &loader::Package, m: usize, row: *mut bool) {
             }
         }
     }
-    let nmi = unsafe a.method_insts.len();
+    let nmi = unsafe (*a).method_insts.len();
     for xi in 0..nmi {
-        let miu = unsafe a.method_insts[xi];
+        let miu = unsafe (*a).method_insts[xi];
         let _ = mark_type_modules(p, m as ModuleId, miu.instance, row);
         for k in 0..miu.n {
             let _ = mark_type_modules(p, m as ModuleId, unsafe miu.targs[k as usize], row);
@@ -284,12 +298,11 @@ fn resolve_module(p: &mut loader::Package, i: usize, lint: bool, fixes: *mut Vec
         r.log_errors();
     }
     p.lint_warnings = p.lint_warnings + r.errors.warns.len() as u32;
-    p.lint_errs = p.lint_errs + r.errors.errors.len() as u32;
     if fixes != null {
         for k in 0..r.errors.fixes.len() {
             let mut f = r.errors.fixes[k];
             f.module = i as u32;
-            fixes.push(f);
+            unsafe (*fixes).push(f);
         }
     }
     hirl::lower_module(p, i);
@@ -321,11 +334,11 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool) {
         }
     }
     // Pass k proves what pass k-1's re-deferrals made provable; the per-module cursors keep any
-    // obligation from being run against a caller module twice. Chains are as deep as the module
-    // graph at most, and the pass cap is a runaway backstop, not a real bound.
+    // obligation from being run against a caller module twice. A pass that adds no obligation ends
+    // the loop: every other pass adds at least one, a module never holds the same one twice, and a
+    // module past tc::PROJ_OBS_MAX of them is an error, so the loop ends.
     let mut starts = Vector::<u32>::new();
     starts.resize_default(n);
-    let mut pass = 0;
     loop {
         let mut ends = Vector::<u32>::new();
         for i in 0..n {
@@ -341,9 +354,7 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool) {
             if t.discharge_foreign_obligations(starts.as_ptr()) {
                 grew = true;
             }
-            if t.discharge_conformance_obligations(starts.as_ptr(), ends.as_ptr()) {
-                grew = true;
-            }
+            t.discharge_conformance_obligations(starts.as_ptr(), ends.as_ptr());
             if t.has_errors() {
                 t.errors.finalize(str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
                 t.log_errors();
@@ -352,8 +363,7 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool) {
         }
 
         starts = ends;
-        pass = pass + 1;
-        if !grew || !p.ok || pass >= 16 {
+        if !grew || !p.ok {
             break;
         }
     }
@@ -362,7 +372,6 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool) {
 struct RsOut {
     pub ok: bool,
     pub warns: u32,
-    pub errs: u32,
     pub errors: diag::Errors,
     pub edges: Vector<u64>, // the module's item dependency edges (graph::items)
 }
@@ -391,7 +400,6 @@ fn rs_run_one(t: RsTask) {
     r.resolve();
     out.ok = !r.has_errors();
     out.warns = r.errors.warns.len() as u32;
-    out.errs = r.errors.errors.len() as u32;
     out.errors = replace(&mut r.errors, diag::Errors::new());
     hirl::lower_module(p, i);
     gitems::module_edges(unsafe &*t.p, i, unsafe &*t.spans, &mut (&mut *out).edges);
@@ -414,7 +422,7 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
     }
     let mut outs = Vector::<RsOut>::with_capacity(n);
     for _ in 0..n {
-        outs.push(RsOut { ok: true, warns: 0, errs: 0, errors: diag::Errors::new(), edges: Vector::<u64>::new() });
+        outs.push(RsOut { ok: true, warns: 0, errors: diag::Errors::new(), edges: Vector::<u64>::new() });
     }
     prt::set_stack_size(8usize << 20); // the resolver's expression recursion outgrows the default task stack
     gitems::open(p);
@@ -442,7 +450,6 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
             o.errors.log();
         }
         p.lint_warnings = p.lint_warnings + o.warns;
-        p.lint_errs = p.lint_errs + o.errs;
         p.ok = o.ok && p.ok;
         for k in 0..o.edges.len() {
             edges.push(o.edges[k]);
@@ -463,9 +470,29 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
 /// Per-item outputs: the item's diagnostics in emission order, and its range in the module's
 /// method-mark log (`TcStage.logs`: one log per module, its entries in check order).
 struct TcOut {
-    pub errors: diag::Errors,
+    pub errors: Option<Box<diag::Errors>>,
     pub log_lo: u32,
     pub log_hi: u32,
+}
+
+// One item's diagnostics as its result slot: the checker's buffer moves out only when it holds
+// something, so the many silent items keep no buffer of their own.
+fn take_errs(e: &mut diag::Errors) Option<Box<diag::Errors>> {
+    if e.errors.len() == 0 && e.warns.len() == 0 && e.fixes.len() == 0 {
+        return Option::<Box<diag::Errors>>::None;
+    }
+    return Option::<Box<diag::Errors>>::Some(Box::new(replace(e, diag::Errors::new())));
+}
+
+// Move a result slot's diagnostics, if any, into `dst`.
+fn append_errs(dst: &mut diag::Errors, slot: &mut Option<Box<diag::Errors>>) {
+    switch slot.take() {
+        Some(b) => {
+            let mut e = b;
+            dst.append(e.deref_mut());
+        },
+        None => {},
+    };
 }
 
 struct TcStage {
@@ -534,9 +561,9 @@ fn tc_item(st: &TcStage, it: loader::ItemId, meta: loader::ItemMeta) {
     out.log_lo = (unsafe (&*lg).kinds.len()) as u32;
     tck.check_one(meta.node, p.sched.top_lo[it as usize]);
     out.log_hi = (unsafe (&*lg).kinds.len()) as u32;
-    out.errors = replace(&mut tck.errors, diag::Errors::new());
+    out.errors = take_errs(&mut tck.errors);
     tck.mark_log = null;
-    if atomic::sub_u32(unsafe (st.left + m), 1, 3) != 1 {
+    if unsafe atomic::sub_u32(unsafe (st.left + m), 1, 3) != 1 {
         return;
     }
     // The module's last item: close it (the instance closure, the whole-module lints), record
@@ -727,7 +754,7 @@ fn typecheck_stage(
     let cirp = p.cir as *mut iri::Interp;
     if par {
         if cirp != null {
-            unsafe cirp.elock_on = true;
+            unsafe (*cirp).elock_on = true;
         }
         for i in 0..n {
             p.modules[i].ast.ilock_on = true;
@@ -739,7 +766,7 @@ fn typecheck_stage(
     }
     let mut outs = Vector::<TcOut>::with_capacity(ni);
     for _ in 0..ni {
-        outs.push(TcOut { errors: diag::Errors::new(), log_lo: 0, log_hi: 0 });
+        outs.push(TcOut { errors: Option::<Box<diag::Errors>>::None, log_lo: 0, log_hi: 0 });
     }
     let mut logs = Vector::<tc::TcMarkLog>::with_capacity(n);
     let mut tail = Vector::<diag::Errors>::with_capacity(n);
@@ -779,13 +806,13 @@ fn typecheck_stage(
     };
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let tg9 = unsafe shim::sc_ticks_ms();
-    let g = tc_jobs(p);
+    let mut g = tc_jobs(p);
     if tstat {
         eprint("typecheck-stage graph: {} ms\n", unsafe shim::sc_ticks_ms() - tg9);
     }
     let ctl = tctl::Ctl::new(tctl::budget_from_env());
     let tj0 = unsafe shim::sc_ticks_ms();
-    sch::run_jobs(&g, p.jobs, tc_job, &mut st, &ctl);
+    sch::run_jobs(&mut g, p.jobs, tc_job, &mut st, &ctl);
     if tstat {
         eprint("typecheck-stage jobs: {} ms over {} components\n", unsafe shim::sc_ticks_ms() - tj0, g.n - 1);
     }
@@ -796,7 +823,7 @@ fn typecheck_stage(
             p.modules[i].ast.thaw_resolutions();
         }
         if cirp != null {
-            unsafe cirp.elock_on = false;
+            unsafe (*cirp).elock_on = false;
         }
     }
     // Publication, in module then item order.
@@ -814,7 +841,7 @@ fn typecheck_stage(
                 let nd = unsafe a.list(items)[i as usize];
                 let it = p.item_of(m as ModuleId, nd);
                 if it != loader::ITEM_NONE {
-                    errs.append(&mut outs.index_mut(it as usize).errors);
+                    append_errs(&mut errs, &mut outs.index_mut(it as usize).errors);
                 } else if oi < orphans.at(m).len() {
                     errs.append(orphans.index_mut(m).index_mut(oi));
                     oi += 1;
@@ -831,12 +858,10 @@ fn typecheck_stage(
             errs.log();
         }
         p.lint_warnings = p.lint_warnings + errs.warns.len() as u32;
-        p.lint_errs = p.lint_errs + errs.errors.len() as u32;
-        p.lint_fixable = p.lint_fixable + errs.fixable_errs;
         if fixes != null && lint[m] {
-            // Kind-3 fixes index into the caller's shared fix_texts pool: rebase and copy the payloads.
+            // Replace fixes index into the caller's shared fix_texts pool: rebase and copy the payloads.
             let base = if ftexts != null {
-                ftexts.len() as u32;
+                (unsafe (*ftexts).len()) as u32;
             } else {
                 0u32;
             };
@@ -846,11 +871,11 @@ fn typecheck_stage(
                     f.text = f.text + base;
                 }
                 f.module = m as u32;
-                fixes.push(f);
+                unsafe (*fixes).push(f);
             }
             if ftexts != null {
                 for k in 0..errs.fix_texts.len() {
-                    ftexts.push(errs.fix_texts.at(k).clone());
+                    unsafe (*ftexts).push(errs.fix_texts.at(k).clone());
                 }
             }
         }
@@ -921,7 +946,7 @@ fn dup_conformances_par(p: &mut loader::Package) bool {
     let n = p.modules.len();
     let cirp = p.cir as *mut iri::Interp;
     if cirp != null {
-        unsafe cirp.elock_on = true;
+        unsafe (*cirp).elock_on = true;
     }
     for i in 0..n {
         p.modules[i].ast.ilock_on = true;
@@ -952,7 +977,7 @@ fn dup_conformances_par(p: &mut loader::Package) bool {
         p.modules[i].ast.thaw_resolutions();
     }
     if cirp != null {
-        unsafe cirp.elock_on = false;
+        unsafe (*cirp).elock_on = false;
     }
     let mut ok = true;
     for i in 0..n {
@@ -1093,7 +1118,7 @@ fn layout_pass(p: &mut loader::Package) {
 /// chunk table in emission order: `chunk_mod[i]` is chunk i's TU (65534 = the instance TU) and
 /// `chunk_off[i] .. chunk_end[i]` its bytes inside that TU's buffer. A TU's chunks are contiguous
 /// and in table order, so its parts are offset ranges of its own buffer: nothing is copied between
-/// rendering and the file write.
+/// rendering and the file write. A seed shard holds module `lo`'s buffer alone (`one`).
 pub struct TuBufs {
     pub bufs: Vector<String>,
     pub chunk_mod: Vector<u64>,
@@ -1101,6 +1126,7 @@ pub struct TuBufs {
     pub chunk_off: Vector<u64>,
     pub chunk_end: Vector<u64>,
     pub n: usize,
+    pub lo: usize, // the module of bufs[0]
 }
 
 extend TuBufs {
@@ -1112,6 +1138,7 @@ extend TuBufs {
             chunk_off: Vector::<u64>::new(),
             chunk_end: Vector::<u64>::new(),
             n: n,
+            lo: 0,
         };
         for _i in 0..n + 1 {
             t.bufs.push(String::new());
@@ -1119,11 +1146,26 @@ extend TuBufs {
         return t;
     }
 
+    /// Module `m`'s TU buffer alone: a seed shard renders into no other TU.
+    pub fn one(m: usize) TuBufs {
+        let mut t = TuBufs {
+            bufs: Vector::<String>::with_capacity(1),
+            chunk_mod: Vector::<u64>::new(),
+            chunk_own: Vector::<ModuleId>::new(),
+            chunk_off: Vector::<u64>::new(),
+            chunk_end: Vector::<u64>::new(),
+            n: 0,
+            lo: m,
+        };
+        t.bufs.push(String::new());
+        return t;
+    }
+
     pub const fn slot(self: &Self, m: u64) usize {
         if m == 65534 {
             return self.n;
         }
-        return m as usize;
+        return m as usize - self.lo;
     }
 
     /// Append one chunk owned by module `own` to TU `m`'s buffer and record it.
@@ -1181,6 +1223,8 @@ pub struct CemitOut {
     pub main_mod: u64,
     pub main_argv: bool,
     pub skips: u64,
+    /// The refused bodies behind `skips` that carry a source location.
+    pub refused: Vector<cbe::Refusal>,
     pub edges: Vector<u64>, // (spelling TU << 32 | owner module): cross-TU symbol references
     /// Next per-TU cache image + its path ("" = caching off): run_package persists it only after a
     /// fully successful emission, so a failed build never publishes sections it did not finish.
@@ -1215,6 +1259,7 @@ extend CemitOut {
             main_mod: 0,
             main_argv: false,
             skips: 0,
+            refused: Vector::<cbe::Refusal>::new(),
             edges: Vector::<u64>::new(),
             tuc_img: String::new(),
             tuc_path: String::new(),
@@ -1321,30 +1366,6 @@ fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, out: &mut Strin
     }
 }
 
-fn cemit_is_noreturn(a: &Ast, nid: NodeId) bool {
-    for k in 0..a.attrs.len() {
-        let at = a.attrs.at(k);
-        if at.owner == nid && at.kind == AttrKind::ATTR_NORETURN as u8 {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Is `nid` a test-family item (@test/@test_init/@test_free)? Skipped entirely outside --test.
-fn cemit_is_test_item(a: &Ast, nid: NodeId) bool {
-    for k in 0..a.attrs.len() {
-        let at = a.attrs.at(k);
-        if at.owner == nid && (at.kind == AttrKind::ATTR_TEST as u8 || at.kind == AttrKind::ATTR_TEST_INIT as u8 || at.kind == AttrKind::ATTR_TEST_FREE as u8) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// The whole-package new-backend emission: aggregates, bodies, instances, glue, consts, statics,
-/// reflection, macros and (under `testing`) the test wrappers, assembled into shared headers plus
-/// one TU per module and one shared instance TU.
 // A short display name for the instantiation note: decl names for aggregates, the mangled
 // spelling for builtins, "?" when unrenderable.
 fn cemit_ty_disp(p: &loader::Package, m: ModuleId, t: TypeId, out: &mut String) {
@@ -1439,7 +1460,7 @@ fn cemit_inst_asserts(
             continue;
         }
         let bd = n.as_data.binary;
-        let cv = cev.eval_typed(d_def.module, bd.left, pmod, &prm[0], &ams[0], &ats[0], np);
+        let cv = unsafe (*cev).eval_typed(d_def.module, bd.left, pmod, &prm[0], &ams[0], &ats[0], np);
         if cv.kind != iri::IV_INT && cv.kind != iri::IV_BOOL {
             decided = false;
             continue;
@@ -1488,11 +1509,7 @@ fn struct_def_names(text: str, out: &mut Set<u64>) {
                 j += 1;
             }
             if j > s0 && j + 2 <= n && text.byte_at(j) == b' ' && text.byte_at(j + 1) == b'{' {
-                let mut h = 1469598103934665603u64;
-                for k in s0..j {
-                    h = (h ^ text.byte_at(k) as u64) * 1099511628211u64;
-                }
-                out.insert(h);
+                out.insert(fnv1a(text.slice(s0, j)));
             }
             i = j;
         } else {
@@ -1502,11 +1519,7 @@ fn struct_def_names(text: str, out: &mut Set<u64>) {
 }
 
 const fn struct_def_hit(defined: &Set<u64>, nm: str) bool {
-    let mut h = 1469598103934665603u64;
-    for k in 0..nm.len() {
-        h = (h ^ nm.byte_at(k) as u64) * 1099511628211u64;
-    }
-    return defined.contains(&h);
+    return defined.contains(&fnv1a(nm));
 }
 
 // Layout-model verification asserts for module `m`: sizeof/_Alignof of every concrete aggregate
@@ -1595,17 +1608,7 @@ fn cemit_layout_asserts(
                 continue;
             }
         }
-        out.push_str("_Static_assert(sizeof(");
-        out.push_string(&nm);
-        out.push_str(") == ");
-        out.push_u64(lo.size);
-        out.push_str(" && _Alignof(");
-        out.push_string(&nm);
-        out.push_str(") == ");
-        out.push_u64(lo.align);
-        out.push_str(", \"super-c layout model mismatch: ");
-        out.push_string(&nm);
-        out.push_str("\");\n");
+        push_layout_assert(out, nm.as_str(), lo.size, lo.align);
         any = true;
     }
     {
@@ -1634,17 +1637,7 @@ fn cemit_layout_asserts(
             if !struct_def_hit(defined, nm.as_str()) {
                 continue;
             }
-            out.push_str("_Static_assert(sizeof(");
-            out.push_string(&nm);
-            out.push_str(") == ");
-            out.push_u64(lo.size);
-            out.push_str(" && _Alignof(");
-            out.push_string(&nm);
-            out.push_str(") == ");
-            out.push_u64(lo.align);
-            out.push_str(", \"super-c layout model mismatch: ");
-            out.push_string(&nm);
-            out.push_str("\");\n");
+            push_layout_assert(out, nm.as_str(), lo.size, lo.align);
             any = true;
         }
     }
@@ -1654,9 +1647,21 @@ fn cemit_layout_asserts(
     svc.free();
 }
 
-// Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
-// walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
-// removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
+// One layout-model check: C type `nm` must have the modelled size and alignment.
+fn push_layout_assert(out: &mut String, nm: str, size: u64, align: u64) {
+    out.push_str("_Static_assert(sizeof(");
+    out.push_str(nm);
+    out.push_str(") == ");
+    out.push_u64(size);
+    out.push_str(" && _Alignof(");
+    out.push_str(nm);
+    out.push_str(") == ");
+    out.push_u64(align);
+    out.push_str(", \"super-c layout model mismatch: ");
+    out.push_str(nm);
+    out.push_str("\");\n");
+}
+
 // Tally a template: a generic body whose shared lowering must re-lower per instance (an
 // unexpanded reflection binder) or per zero-size signature.
 fn count_template(b: &irc::CoreBody, pr: &mut prb::Probe) {
@@ -1708,10 +1713,7 @@ fn cemit_relower_census(
         }
         let txt = irp::print_body(&lws.at(i).body);
         let ts = txt.as_str();
-        let mut h = 1469598103934665603u64;
-        for k in 0..ts.len() {
-            h = (h ^ ts.byte_at(k) as u64) * 1099511628211u64;
-        }
+        let h = fnv1a(ts);
         hashes.set(i, h);
         let mut same = false;
         for j in 0..i {
@@ -1730,10 +1732,7 @@ fn cemit_relower_census(
     let mut seen = Set::<u64>::new();
     for di in 0..cem.demand.len() {
         let ds = cem.demand.at(di).sym.as_str();
-        let mut dk = 1469598103934665603u64;
-        for k in 0..ds.len() {
-            dk = (dk ^ ds.byte_at(k) as u64) * 1099511628211u64;
-        }
+        let dk = fnv1a(ds);
         if !done.contains_key(&dk) || seen.contains(&dk) {
             continue;
         }
@@ -1801,11 +1800,16 @@ fn cemit_relower_census(
     }
 }
 
+// Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
+// walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
+// removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
+// `closure` selects a closure body (`nid` is the closure node) over a function body.
 fn cemit_take_body(
     g: &mut ig::InstGraph,
     p: *const loader::Package,
     m: ModuleId,
     nid: NodeId,
+    closure: bool,
     lw_out: &mut irl::Lowerer,
     pr: &mut prb::Probe,
 ) bool {
@@ -1816,40 +1820,17 @@ fn cemit_take_body(
         None => (-2) as i64,
     };
     if ki >= 0 {
-        *lw_out = replace(&mut g.kept[ki as usize], irl::Lowerer::new(p, m, nid));
+        *lw_out = irl::Lowerer::take_kept(p, g.kept.index_mut(ki as usize));
         let _ = g.kept_ix.remove(&key);
         pr.count(prb::C_TAKEN, 1);
         pr.stop(prb::P_ACQUIRE, am);
         return true;
     }
-    let ok = lw_out.lower_fn(nid);
-    pr.count(prb::C_LOWERED, 1);
-    pr.stop(prb::P_ACQUIRE, am);
-    return ok;
-}
-
-fn cemit_take_closure(
-    g: &mut ig::InstGraph,
-    p: *const loader::Package,
-    m: ModuleId,
-    cn: NodeId,
-    lw_out: &mut irl::Lowerer,
-    pr: &mut prb::Probe,
-) bool {
-    let am = pr.start();
-    let key = skey_mix(0, m as u64 << 32 | cn as u64);
-    let ki = switch g.kept_ix.get(&key) {
-        Some(v) => (*v) as i64,
-        None => (-2) as i64,
+    let ok = if closure {
+        lw_out.lower_closure_body(nid);
+    } else {
+        lw_out.lower_fn(nid);
     };
-    if ki >= 0 {
-        *lw_out = replace(&mut g.kept[ki as usize], irl::Lowerer::new(p, m, cn));
-        let _ = g.kept_ix.remove(&key);
-        pr.count(prb::C_TAKEN, 1);
-        pr.stop(prb::P_ACQUIRE, am);
-        return true;
-    }
-    let ok = lw_out.lower_closure_body(cn);
     pr.count(prb::C_LOWERED, 1);
     pr.stop(prb::P_ACQUIRE, am);
     return ok;
@@ -1882,10 +1863,9 @@ fn cemit_tuc_replay(
     let nev = rd.r32() as usize; // the event count follows the type table
     let mut ev = mbe::RecEv::blank(0);
     for _i in 0..nev {
-        if !rd.read_ev(&mut ev) {
+        if !rd.read_ev(&mut ev) || !tuc::ev_patch(p, &tab, &mut idc, &mut ev) {
             return 2;
         }
-        tuc::ev_patch(p, &tab, &mut idc, &mut ev);
         if ev.kind == mbe::RK_CHUNK {
             proto_of(&ev.s1, protos);
             ch.add(m as u64, m as ModuleId, &ev.s1);
@@ -1932,11 +1912,7 @@ fn cemit_seed_take(
     if kl != null {
         (unsafe &*kl).acquire_masked();
     }
-    let r = if closure {
-        cemit_take_closure(&mut *g, p, m, nid, lw, pr);
-    } else {
-        cemit_take_body(&mut *g, p, m, nid, lw, pr);
-    };
+    let r = cemit_take_body(&mut *g, p, m, nid, closure, lw, pr);
     if kl != null {
         (unsafe &*kl).release();
     }
@@ -1992,10 +1968,10 @@ fn cemit_seed_module(
     for i in 0..cands.len() {
         let nid = cands[i];
         let n = a.at_const(nid);
-        if n.as_data.function.is_extern || n.as_data.function.body == NODE_NONE {
+        if n.as_data.function.is_extern() || n.as_data.function.body == NODE_NONE {
             continue;
         }
-        if !testing && cemit_is_test_item(a, nid) {
+        if !testing && is_test_item(a, nid) {
             // Test-family items exist only under --test.
             continue;
         }
@@ -2036,7 +2012,7 @@ fn cemit_seed_module(
         if is_glue {
             sym.push_str("__fb");
         }
-        cem.noret = cemit_is_noreturn(a, nid);
+        cem.noret = item_has_attr(a, nid, AttrKind::ATTR_NORETURN);
         cem.fn_attrs.truncate(0);
         cemit_fn_attrs(p, m as ModuleId, nid, &mut cem.fn_attrs);
         if cem.emit_fn(&lw.body, sym.as_str()) {
@@ -2130,76 +2106,26 @@ fn cemit_seed_module(
                     }
                 }
             }
-            let mut clsq = Vector::<NodeId>::new();
-            for c2 in 0..lw.closures.len() {
-                clsq.push(lw.closures[c2]);
-            }
-            let mut cqi: usize = 0;
-            while cqi < clsq.len() {
-                let cn = clsq[cqi];
-                cqi += 1;
-                let ckey = skey_mix(0, m as u64 << 32 | cn as u64);
-                let ci = switch cl_cache.get(&ckey) {
-                    Some(v) => *v,
-                    None => {
-                        let mut cl = irl::Lowerer::new(p, m as ModuleId, cn);
-                        let mut slot = 0xFFFFFFFFFFFFFFFFu64;
-                        if cemit_seed_take(g, p, m as ModuleId, cn, &mut cl, kl, true, &mut dow.pr) {
-                            dow.apply_drops(&mut cl);
-                            slot = clws.len() as u64;
-                            clws.push(cl);
-                        }
-                        cl_cache.insert(ckey, slot);
-                        slot;
-                    },
-                };
-                let mut csym = String::new();
-                cem.mg.closure_sym(m as ModuleId, cn, &mut csym);
-                let mut envs = String::new();
-                cem.out.clear();
-                let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
-                if cok {
-                    for x2 in 0..clws.at(ci as usize).closures.len() {
-                        // Closures nest: emit the inner ones too.
-                        clsq.push(clws.at(ci as usize).closures[x2]);
-                    }
-                }
-                if cok && cem.emit_closure(&clws.at(ci as usize).body, m as ModuleId, cn, csym.as_str(), &mut envs) {
-                    *clos_ok += 1;
-                    {
-                        if envs.len() != 0 {
-                            let mut eh9 = 1469598103934665603u64;
-                            {
-                                let mut en9 = String::from_str(csym.as_str());
-                                en9.push_str("_env");
-                                let es9 = en9.as_str();
-                                for k9 in 0..es9.len() {
-                                    eh9 = (eh9 ^ es9.byte_at(k9) as u64) * 1099511628211u64;
-                                }
-                            }
-                            env_names.push(eh9);
-                            env_bodies.push(envs.clone());
-                            env_own.push(m as ModuleId);
-                            if cem.mg.rec_on {
-                                let mut ev9 = mbe::RecEv::blank(mbe::RK_ENV);
-                                ev9.h = eh9;
-                                ev9.s1 = envs.clone();
-                                cem.mg.rec.push(ev9);
-                            }
-                        }
-                    }
-                    proto_of(&cem.out, protos);
-                    ch.add(m as u64, m as ModuleId, &cem.out);
-                    if cem.mg.rec_on {
-                        let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
-                        ev9.a = ch.last_off() as u32;
-                        ev9.b = ch.last_end() as u32;
-                        cem.mg.rec.push(ev9);
-                    }
-                } else {
-                    *clos_skip += 1;
-                }
-            }
+            cemit_closure_queue(
+                p,
+                cem,
+                g,
+                dow,
+                cl_cache,
+                clws,
+                kl,
+                m as ModuleId,
+                m as u64,
+                &lw.closures,
+                cem.mg.rec_on,
+                ch,
+                protos,
+                env_names,
+                env_bodies,
+                env_own,
+                clos_ok,
+                clos_skip,
+            );
         } else {
             *seed_skip += 1;
             if verbose {
@@ -2207,6 +2133,108 @@ fn cemit_seed_module(
             }
         }
     }
+}
+
+// Emit the closures `roots` of one emitted body, then the closures nested in them, in queue order.
+// Each closure is lowered once (`cl_cache` maps it to its slot in `clws`), lands in `ch` under chunk
+// key `key`, and puts its environment struct, if any, in the env vectors. `rec` journals both
+// for the per-TU cache.
+fn cemit_closure_queue(
+    p: &mut loader::Package,
+    cem: &mut cbe::CEmit,
+    g: &mut ig::InstGraph,
+    dow: &mut DropCtx,
+    cl_cache: &mut Map<u64, u64>,
+    clws: &mut Vector<irl::Lowerer>,
+    kl: *const psync::Semaphore,
+    m: ModuleId,
+    key: u64,
+    roots: &Vector<NodeId>,
+    rec: bool,
+    ch: &mut TuBufs,
+    protos: &mut String,
+    env_names: &mut Vector<u64>,
+    env_bodies: &mut Vector<String>,
+    env_own: &mut Vector<ModuleId>,
+    clos_ok: &mut u64,
+    clos_skip: &mut u64,
+) {
+    let mut clsq = roots.clone();
+    let mut cqi: usize = 0;
+    while cqi < clsq.len() {
+        let cn = clsq[cqi];
+        cqi += 1;
+        let ckey = skey_mix(0, m as u64 << 32 | cn as u64);
+        let ci = switch cl_cache.get(&ckey) {
+            Some(v) => *v,
+            None => {
+                let mut cl = irl::Lowerer::new(p, m, cn);
+                let mut slot = 0xFFFFFFFFFFFFFFFFu64;
+                if cemit_seed_take(g, p, m, cn, &mut cl, kl, true, &mut dow.pr) {
+                    dow.apply_drops(&mut cl);
+                    slot = clws.len() as u64;
+                    clws.push(cl);
+                }
+                cl_cache.insert(ckey, slot);
+                slot;
+            },
+        };
+        let clp: *const irl::Lowerer = if ci != 0xFFFFFFFFFFFFFFFFu64 {
+            clws.at(ci as usize);
+        } else {
+            null;
+        };
+        let mut csym = String::new();
+        let mut envs = String::new();
+        if !cemit_queued_closure(cem, m, cn, clp, &mut clsq, &mut csym, &mut envs) {
+            *clos_skip += 1;
+            continue;
+        }
+        *clos_ok += 1;
+        if envs.len() != 0 {
+            let eh9 = fnv_cont(fnv1a(csym.as_str()), "_env");
+            if rec {
+                let mut ev9 = mbe::RecEv::blank(mbe::RK_ENV);
+                ev9.h = eh9;
+                ev9.s1 = envs.clone();
+                cem.mg.rec.push(ev9);
+            }
+            env_names.push(eh9);
+            env_bodies.push(envs);
+            env_own.push(m);
+        }
+        proto_of(&cem.out, protos);
+        ch.add(key, m, &cem.out);
+        if rec {
+            let mut ev9 = mbe::RecEv::blank(mbe::RK_CHUNK);
+            ev9.a = ch.last_off() as u32;
+            ev9.b = ch.last_end() as u32;
+            cem.mg.rec.push(ev9);
+        }
+    }
+}
+
+// One queued closure: spell its symbol into `csym`, queue the closures nested in its lowering `clp`
+// (null: it did not lower), and emit it into `cem.out`, its environment struct into `envs`.
+fn cemit_queued_closure(
+    cem: &mut cbe::CEmit,
+    m: ModuleId,
+    cn: NodeId,
+    clp: *const irl::Lowerer,
+    clsq: &mut Vector<NodeId>,
+    csym: &mut String,
+    envs: &mut String,
+) bool {
+    cem.mg.closure_sym(m, cn, csym);
+    cem.out.clear();
+    if clp == null {
+        return false;
+    }
+    let cl = unsafe &*clp;
+    for x in 0..cl.closures.len() {
+        clsq.push(cl.closures[x]);
+    }
+    return cem.emit_closure(&cl.body, m, cn, csym.as_str(), envs);
 }
 
 struct SeedShard {
@@ -2414,10 +2442,7 @@ fn cemit_drain_demand(
 ) {
     let d_def = cem.demand.at(di).def;
     let ds = cem.demand.at(di).sym.as_str();
-    let mut dk = 1469598103934665603u64;
-    for k in 0..ds.len() {
-        dk = (dk ^ ds.byte_at(k) as u64) * 1099511628211u64;
-    }
+    let dk = fnv1a(ds);
     // Dedup on SUCCESS only: two demands for one symbol can carry different substitution
     // chains, and the first may be the incomplete one; a later, fuller chain must retry.
     let seen = switch done.get(&dk) {
@@ -2437,7 +2462,7 @@ fn cemit_drain_demand(
         Some(v) => *v,
         None => {
             let mut lw = irl::Lowerer::new(p, d_def.module, d_def.node);
-            let okl = cemit_take_body(&mut *g, p, d_def.module, d_def.node, &mut lw, &mut dow.pr);
+            let okl = cemit_take_body(&mut *g, p, d_def.module, d_def.node, false, &mut lw, &mut dow.pr);
             let mut slot = 0xFFFFFFFFFFFFFFFFu64;
             if okl {
                 count_template(&lw.body, &mut dow.pr);
@@ -2464,6 +2489,8 @@ fn cemit_drain_demand(
     // env-dependence is `sizeof(T) <op> 0` branches re-lowers once per ZST-BIT SIGNATURE of
     // its args; every material instantiation folds identically and shares one body.
     let mut li2 = li;
+    // The reflection re-lowering serves this demand only; its slot is dropped at the end.
+    let mut own_slot = false;
     if lws.at(li as usize).body.has_reflect {
         let mut lw2 = irl::Lowerer::new(p, d_def.module, d_def.node);
         for i2 in 0..d_subs.len() {
@@ -2478,6 +2505,7 @@ fn cemit_drain_demand(
             dow.apply_drops(&mut lw2);
             lws.push(lw2);
             li2 = lws.len() as u64 - 1;
+            own_slot = true;
         } else {
             if verbose {
                 eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
@@ -2495,7 +2523,7 @@ fn cemit_drain_demand(
                 0 as u64;
             };
         }
-        let zkey = skey_mix(zb, d_def.module as u64 << 32 | d_def.node as u64);
+        let zkey = skey_mix(skey_mix(0, d_def.module as u64 << 32 | d_def.node as u64), zb);
         let zi = switch lw_cache.get(&zkey) {
             Some(v) => *v,
             None => {
@@ -2565,64 +2593,26 @@ fn cemit_drain_demand(
         cem.pr.count(prb::C_INSTANCES, 1);
         proto_of(&cem.out, protos);
         ch.add(65534, d_def.module, &cem.out);
-        let mut clsq = Vector::<NodeId>::new();
-        for c2 in 0..lws.at(li2 as usize).closures.len() {
-            clsq.push(lws.at(li2 as usize).closures[c2]);
-        }
-        let mut cqi: usize = 0;
-        while cqi < clsq.len() {
-            let cn = clsq[cqi];
-            cqi += 1;
-            let ckey = skey_mix(0, d_def.module as u64 << 32 | cn as u64);
-            let ci = switch cl_cache.get(&ckey) {
-                Some(v) => *v,
-                None => {
-                    let mut cl = irl::Lowerer::new(p, d_def.module, cn);
-                    let mut slot = 0xFFFFFFFFFFFFFFFFu64;
-                    if cemit_take_closure(&mut *g, p, d_def.module, cn, &mut cl, &mut dow.pr) {
-                        dow.apply_drops(&mut cl);
-                        slot = clws.len() as u64;
-                        clws.push(cl);
-                    }
-                    cl_cache.insert(ckey, slot);
-                    slot;
-                },
-            };
-            let mut csym = String::new();
-            cem.mg.closure_sym(d_def.module, cn, &mut csym);
-            let mut envs = String::new();
-            cem.out.clear();
-            let cok = ci != 0xFFFFFFFFFFFFFFFFu64;
-            if cok {
-                for x2 in 0..clws.at(ci as usize).closures.len() {
-                    // Closures nest: emit the inner ones too.
-                    clsq.push(clws.at(ci as usize).closures[x2]);
-                }
-            }
-            if cok && cem.emit_closure(&clws.at(ci as usize).body, d_def.module, cn, csym.as_str(), &mut envs) {
-                *clos_ok += 1;
-                {
-                    if envs.len() != 0 {
-                        let mut eh9 = 1469598103934665603u64;
-                        {
-                            let mut en9 = String::from_str(csym.as_str());
-                            en9.push_str("_env");
-                            let es9 = en9.as_str();
-                            for k9 in 0..es9.len() {
-                                eh9 = (eh9 ^ es9.byte_at(k9) as u64) * 1099511628211u64;
-                            }
-                        }
-                        env_names.push(eh9);
-                        env_bodies.push(envs.clone());
-                        env_own.push(d_def.module);
-                    }
-                }
-                proto_of(&cem.out, protos);
-                ch.add(65534, d_def.module, &cem.out);
-            } else {
-                *clos_skip += 1;
-            }
-        }
+        cemit_closure_queue(
+            p,
+            cem,
+            g,
+            dow,
+            cl_cache,
+            clws,
+            null,
+            d_def.module,
+            65534,
+            &lws.at(li2 as usize).closures,
+            false,
+            ch,
+            protos,
+            env_names,
+            env_bodies,
+            env_own,
+            clos_ok,
+            clos_skip,
+        );
     } else {
         if verbose {
             eprint("inst-emit-fail: `{}` {}\n", d_sym.as_str(), cem.err);
@@ -2643,9 +2633,11 @@ fn cemit_drain_demand(
     cem.mg.subs.truncate(0);
     cem.mg.clos_sfx.truncate(0);
     cem.mg.clos_ids.truncate(0);
-    cem.mg.subs.truncate(0);
-    cem.mg.clos_sfx.truncate(0);
-    cem.mg.clos_ids.truncate(0);
+    if own_slot {
+        lws.truncate(li2 as usize);
+        cfs.truncate(li2 as usize);
+        cf_ok.truncate(li2 as usize);
+    }
 }
 
 // One demanded instance emitted into a private shard by the parallel instance frontier. Shared
@@ -2709,13 +2701,11 @@ fn cemit_drain_slice_one(
     verbose: bool,
     dow2: &mut DropCtx,
 ) {
+    // The demand vector is frozen during the wave: read the demand in place.
     let d_def = dem.at(di).def;
-    let d_sym = dem.at(di).sym.clone();
-    let mut d_subs = Vector::<mbe::MSub>::new();
-    for i2 in 0..dem.at(di).subs.len() {
-        d_subs.push(*dem.at(di).subs.at(i2));
-    }
-    let d_sfx = dem.at(di).sfx.clone();
+    let d_sym = dem.at(di).sym.as_str();
+    let d_subs = &dem.at(di).subs;
+    let d_sfx = dem.at(di).sfx.as_str();
     let mut var_on = false;
     let mut var_zkey: u64 = 0;
     let mut var_lw = irl::Lowerer::new(p, 0, NODE_NONE);
@@ -2738,7 +2728,7 @@ fn cemit_drain_slice_one(
             var_lw = lw2;
         } else {
             if verbose {
-                eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
+                eprint("inst-lower-fail: `{}` {}\n", d_sym, lw2.err);
             }
             o.douts.push(1);
             o.derrs.push("");
@@ -2756,7 +2746,7 @@ fn cemit_drain_slice_one(
                 0 as u64;
             };
         }
-        let zkey = skey_mix(zb, d_def.module as u64 << 32 | d_def.node as u64);
+        let zkey = skey_mix(skey_mix(0, d_def.module as u64 << 32 | d_def.node as u64), zb);
         let zi = switch lwc.get(&zkey) {
             Some(v) => *v,
             None => 0xFFFFFFFFFFFFFFFEu64,
@@ -2800,7 +2790,7 @@ fn cemit_drain_slice_one(
                     var_lw = lw2;
                 } else {
                     if verbose {
-                        eprint("inst-lower-fail: `{}` {}\n", d_sym.as_str(), lw2.err);
+                        eprint("inst-lower-fail: `{}` {}\n", d_sym, lw2.err);
                     }
                     o.douts.push(1);
                     o.derrs.push("");
@@ -2834,7 +2824,7 @@ fn cemit_drain_slice_one(
         sh.mg.push_msub(*d_subs.at(i2));
     }
     sh.mg.clos_sfx.truncate(0);
-    sh.mg.clos_sfx.push_string(&d_sfx);
+    sh.mg.clos_sfx.push_str(d_sfx);
     sh.mg.clos_ids.truncate(0);
     {
         let cls = if var_on {
@@ -2861,7 +2851,7 @@ fn cemit_drain_slice_one(
     } else {
         &lws.at(li2 as usize).body;
     };
-    let em_ok9 = sh.emit_fn(bodyp, d_sym.as_str());
+    let em_ok9 = sh.emit_fn(bodyp, d_sym);
     sh.cf_ext = null;
     if !em_ok9 {
         o.douts.push(2);
@@ -2939,7 +2929,6 @@ fn cemit_drain_slice_one(
             }
             shared_ci = 0xFFFFFFFFFFFFFFFFu64;
         }
-        let cok = shared_ci < 0xFFFFFFFFFFFFFFFEu64 || own_ci != 0xFFFFFFFFFFFFFFFFu64;
         let clp: *const irl::Lowerer = if shared_ci < 0xFFFFFFFFFFFFFFFEu64 {
             clws0.at(shared_ci as usize);
         } else if own_ci != 0xFFFFFFFFFFFFFFFFu64 {
@@ -2948,30 +2937,12 @@ fn cemit_drain_slice_one(
             null;
         };
         let mut csym = String::new();
-        sh.mg.closure_sym(d_def.module, cn, &mut csym);
         let mut envs = String::new();
-        sh.out.clear();
-        if cok {
-            let cls2 = unsafe &(&*clp).closures;
-            for x2 in 0..cls2.len() {
-                // Closures nest: emit the inner ones too.
-                clsq.push(cls2[x2]);
-            }
-        }
-        if cok && sh.emit_closure(unsafe &(&*clp).body, d_def.module, cn, csym.as_str(), &mut envs) {
+        if cemit_queued_closure(sh, d_def.module, cn, clp, &mut clsq, &mut csym, &mut envs) {
             o.clos_ok += 1;
             if envs.len() != 0 {
-                let mut eh9 = 1469598103934665603u64;
-                {
-                    let mut en9 = String::from_str(csym.as_str());
-                    en9.push_str("_env");
-                    let es9 = en9.as_str();
-                    for k9 in 0..es9.len() {
-                        eh9 = (eh9 ^ es9.byte_at(k9) as u64) * 1099511628211u64;
-                    }
-                }
-                o.env_names.push(eh9);
-                o.env_bodies.push(envs.clone());
+                o.env_names.push(fnv_cont(fnv1a(csym.as_str()), "_env"));
+                o.env_bodies.push(envs);
                 o.env_own.push(d_def.module);
             }
             o.chunk_mod.push(65534);
@@ -3149,9 +3120,18 @@ fn cemit_drain_launch(
 
 fn cemit_seed_merge_um(cem: &mut cbe::CEmit, o: &mut SeedShard) {
     cem.mg.sh_merge_inst(&o.cem.mg);
+    cemit_take_refused(cem, o);
+}
+
+fn cemit_take_refused(cem: &mut cbe::CEmit, o: &mut SeedShard) {
+    for i in 0..o.cem.refused.len() {
+        cem.refused.push(o.cem.refused[i]);
+    }
+    o.cem.refused.clear();
 }
 
 fn cemit_seed_merge(cem: &mut cbe::CEmit, o: &mut SeedShard, m: u64) {
+    cemit_take_refused(cem, o);
     let a = cap_zero();
     let b = o.cap_of();
     cemit_seed_merge_range(cem, o, &a, &b);
@@ -3419,14 +3399,13 @@ pub fn cemit_package(
     irkeep: *mut irl::Keep,
 ) {
     let verbose = stdlib::getenv("SC_CEMIT_STATS") != null;
-    let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tt0 = unsafe shim::sc_ticks_ms();
-    let mut prd = prb::Probe::new(tstat, stdlib::getenv("SC_BUILD_MEM") != null);
+    let mut prd = prb::Probe::new(verbose, stdlib::getenv("SC_BUILD_MEM") != null);
     publish_checkpoint(p, irkeep);
     // The evaluator's view of the keep (opened by the borrow frontier) closes before the graph
     // takes the bodies: the driver closes it after its constant pre-pass, any other pipeline here.
     if p.cir != null {
-        (p.cir as *mut iri::Interp).keep_view_clear();
+        unsafe (*(p.cir as *mut iri::Interp)).keep_view_clear();
     }
     // The planner's signature-level propagation reads the package metadata.
     let ts9 = unsafe shim::sc_ticks_ms();
@@ -3439,7 +3418,7 @@ pub fn cemit_package(
         inls.build(p, unsafe &*irkeep);
     }
     p.inl_store = &inls;
-    if tstat {
+    if verbose {
         eprint(
             "cemit-stage publish: {} ms, sigs: {} ms, inline-store build: {} ms\n",
             ts9 - tt0,
@@ -3461,7 +3440,7 @@ pub fn cemit_package(
     if unsafe TS_ON {
         ts_add(TS_IG_BYTES, g.retained_bytes());
     }
-    if tstat {
+    if verbose {
         let t9 = unsafe shim::sc_ticks_ms();
         let mut nagg: u64 = 0;
         let mut nfn: u64 = 0;
@@ -3515,17 +3494,13 @@ pub fn cemit_package(
     for i in 0..items.len() {
         em.emit_fwd(items.at(i));
     }
-    // Dyn typedef blocks splice in AFTER these forward typedefs and BEFORE the definitions:
-    // vtable signatures may name aggregates (fn-pointer params need only the typedef), and
-    // aggregates may embed fat values (which need the complete dyn struct).
-    let fwd_end = em.out.len();
     for i in 0..items.len() {
         let it = *items.at(i);
         let _ = em.emit_agg(&it);
     }
     bst::mark(bst::B_PLAN);
     ts_phase("graph");
-    if tstat {
+    if verbose {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage collect+aggs: {} ms\n", t9 - tt0);
         tt0 = t9;
@@ -3548,6 +3523,11 @@ pub fn cemit_package(
     // so call sites never synthesize conflicting protos).
     let mut ext_incs = String::new();
     cemit_extern_includes(p, &mut ext_incs, &mut cem.ext_backed);
+    // Every emitter shard starts from the same header-backed fn set.
+    let mut ext_keys = Vector::<u64>::new();
+    for k in cem.ext_backed.iter() {
+        ext_keys.push(*k);
+    }
     let mut dow = DropCtx::new(p);
     let mut lw_cache = Map::<u64, u64>::new();
     let mut lws = Vector::<irl::Lowerer>::new();
@@ -3611,7 +3591,7 @@ pub fn cemit_package(
         // table makes sections pool-position-independent, so parallel intern order is harmless).
         let cirg9 = p.cir as *mut iri::Interp;
         if cirg9 != null {
-            unsafe cirg9.elock_on = true;
+            unsafe (*cirg9).elock_on = true;
         }
         for i2 in 0..p.modules.len() {
             p.modules[i2].ast.ilock_on = true;
@@ -3621,7 +3601,7 @@ pub fn cemit_package(
         for m in 0..p.modules.len() {
             let mut sh = SeedShard {
                 cem: cbe::CEmit::new(p),
-                ch: TuBufs::new(p.modules.len()),
+                ch: TuBufs::one(m),
                 bodies: String::new(),
                 protos: String::new(),
                 chunk_mod: Vector::<u64>::new(),
@@ -3655,9 +3635,9 @@ pub fn cemit_package(
                 for ei in 0..em.env_defined.len() {
                     sh.cem.env_skip.insert(*em.env_defined.at(ei), 1);
                 }
-                let mut dumm9 = String::new();
-                cemit_extern_includes(p, &mut dumm9, &mut sh.cem.ext_backed);
-                dumm9.free();
+                for k in 0..ext_keys.len() {
+                    sh.cem.ext_backed.insert(ext_keys[k]);
+                }
                 sh.cem.sh_on = true;
                 sh.cem.mg.sh_on = true;
                 sh.cem.mg.mark_ctx = m as i64;
@@ -3707,7 +3687,7 @@ pub fn cemit_package(
         if launched9 != 0 {
             wg.wait_masked();
         }
-        if tstat {
+        if verbose {
             eprint("cemit-frontier seed: {} tasks\n", launched9);
         }
         for m in 0..p.modules.len() {
@@ -3826,7 +3806,7 @@ pub fn cemit_package(
                 }
                 rec_edges(&mut o.cem, m, p.modules.len());
                 tuc_pay.truncate(0);
-                tuc::ser_evs(p, &mut tuc_pay, &o.cem.mg.rec, 0, o.ch.bufs.at(m).as_str());
+                tuc::ser_evs(p, &mut tuc_pay, &o.cem.mg.rec, 0, o.ch.bufs.at(0).as_str());
                 tuc.sec_add(m, &tuc_pay);
             }
             // The shard's buffer for module m becomes the master's (its offsets are already
@@ -3838,7 +3818,7 @@ pub fn cemit_package(
                 ch.chunk_off.push(o.ch.chunk_off[k2]);
                 ch.chunk_end.push(o.ch.chunk_end[k2]);
             }
-            ch.bufs.set(m, replace(o.ch.bufs.index_mut(m), String::new()));
+            ch.bufs.set(m, replace(o.ch.bufs.index_mut(0), String::new()));
             protos.push_string(&o.protos);
             for k2 in 0..o.env_names.len() {
                 env_names.push(o.env_names[k2]);
@@ -3861,7 +3841,7 @@ pub fn cemit_package(
             p.modules[i2].ast.ilock_on = false;
         }
         if cirg9 != null {
-            unsafe cirg9.elock_on = false;
+            unsafe (*cirg9).elock_on = false;
         }
     } else {
         for m in 0..p.modules.len() {
@@ -3975,7 +3955,10 @@ pub fn cemit_package(
             }
         }
     }
-    if tstat {
+    // Every replay and carried section has read the previous image: release it before the rest of
+    // the emission grows the heap.
+    let _ = replace(&mut tuc.raw, String::new());
+    if verbose {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage seed: {} ms\n", t9 - tt0);
         tt0 = t9;
@@ -4047,7 +4030,7 @@ pub fn cemit_package(
     let cird = p.cir as *mut iri::Interp;
     if par9 {
         if cird != null {
-            unsafe cird.elock_on = true;
+            unsafe (*cird).elock_on = true;
         }
         for i2 in 0..p.modules.len() {
             p.modules[i2].ast.ilock_on = true;
@@ -4057,7 +4040,7 @@ pub fn cemit_package(
     let mut dwaves: u64 = 0;
     let mut dtasks: u64 = 0;
     let mut dslices: u64 = 0;
-    while (qi < cem.demand.len() || gi9 < cem.glue.len()) && qi < 200000 {
+    while (qi < cem.demand.len() || gi9 < cem.glue.len()) && qi < DEMAND_CAP {
         // Derived destructors drain alongside instances (each may enqueue the other).
         while gi9 < cem.glue.len() {
             let go9 = glue_owner(&mut cem, gi9);
@@ -4117,17 +4100,13 @@ pub fn cemit_package(
         let mut widx = Vector::<u64>::new(); // tasked demand indices, ascending
         let mut wli = Vector::<u64>::new(); // their base lowering slots (0xFF.. = pending phase L)
         let mut wdef = Vector::<u64>::new(); // their packed defs
+        let mut wkey = Vector::<u64>::new(); // their symbol hashes
         let mut wave_seen = Map::<u64, u64>::new();
         let mut newdefs = Vector::<u64>::new();
         let mut newsyms = Vector::<String>::new(); // first demanding symbol, for the failure print
         let mut newdef_seen = Map::<u64, u64>::new();
         for j in qi..len0 {
-            let js9 = cem.demand.at(j).sym.clone();
-            let js = js9.as_str();
-            let mut dkj = 1469598103934665603u64;
-            for k in 0..js.len() {
-                dkj = (dkj ^ js.byte_at(k) as u64) * 1099511628211u64;
-            }
+            let dkj = fnv1a(cem.demand.at(j).sym.as_str());
             let seenj = switch done.get(&dkj) {
                 Some(_v) => true,
                 None => false,
@@ -4168,6 +4147,7 @@ pub fn cemit_package(
             widx.push(j as u64);
             wli.push(base);
             wdef.push(jkey);
+            wkey.push(dkj);
         }
         // Phase L: lower this wave's missing base definitions in parallel slices.
         if newdefs.len() != 0 {
@@ -4204,6 +4184,7 @@ pub fn cemit_package(
         {
             let mut w2 = Vector::<u64>::new();
             let mut l2 = Vector::<u64>::new();
+            let mut k2 = Vector::<u64>::new();
             for i in 0..widx.len() {
                 let mut li9 = wli[i];
                 if li9 == 0xFFFFFFFFFFFFFFFEu64 {
@@ -4217,9 +4198,11 @@ pub fn cemit_package(
                 }
                 w2.push(widx[i]);
                 l2.push(li9);
+                k2.push(wkey[i]);
             }
             widx = w2;
             wli = l2;
+            wkey = k2;
         }
         // Phase E: contiguous demand slices, each emitting into one private shard.
         let mut envh9 = Vector::<u64>::new();
@@ -4241,7 +4224,7 @@ pub fn cemit_package(
         for _i in 0..nsl9 {
             let mut sh = SeedShard {
                 cem: cbe::CEmit::new(p),
-                ch: TuBufs::new(p.modules.len()),
+                ch: TuBufs::new(0), // drain shards render into `bodies`
                 bodies: String::new(),
                 protos: String::new(),
                 chunk_mod: Vector::<u64>::new(),
@@ -4276,9 +4259,9 @@ pub fn cemit_package(
             for ei in 0..envh9.len() {
                 sh.cem.env_skip.insert(envh9[ei], 1);
             }
-            let mut dumm9 = String::new();
-            cemit_extern_includes(p, &mut dumm9, &mut sh.cem.ext_backed);
-            dumm9.free();
+            for k in 0..ext_keys.len() {
+                sh.cem.ext_backed.insert(ext_keys[k]);
+            }
             sh.cem.sh_on = true;
             sh.cem.mg.sh_on = true;
             sh.cem.mg.mark_ctx = -1;
@@ -4357,13 +4340,8 @@ pub fn cemit_package(
                 continue;
             }
             let d_ord = wcur - slo;
+            let dkj = wkey[wcur];
             wcur += 1;
-            let js9 = cem.demand.at(j).sym.clone();
-            let js = js9.as_str();
-            let mut dkj = 1469598103934665603u64;
-            for k in 0..js.len() {
-                dkj = (dkj ^ js.byte_at(k) as u64) * 1099511628211u64;
-            }
             {
                 let jd = cem.demand.at(j).def;
                 let mut jsubs = Vector::<mbe::MSub>::new();
@@ -4442,7 +4420,7 @@ pub fn cemit_package(
                     inst_skip += 1;
                 } else {
                     if verbose {
-                        eprint("inst-emit-fail: `{}` {}\n", js, o.derrs[d_ord]);
+                        eprint("inst-emit-fail: `{}` {}\n", cem.demand.at(j).sym.as_str(), o.derrs[d_ord]);
                     }
                     let mut found = false;
                     for r2 in 0..reasons.len() {
@@ -4471,12 +4449,18 @@ pub fn cemit_package(
         }
         qi = len0;
     }
+    if qi < cem.demand.len() || gi9 < cem.glue.len() {
+        // The drain stopped at its bound: every demand and destructor left is code not emitted.
+        eprint("error: more than {} generic instance demands; the rest are not emitted\n", DEMAND_CAP);
+        inst_skip += (cem.demand.len() - qi) as u64;
+        glue_skip += (cem.glue.len() - gi9) as u64;
+    }
     if par9 {
         for i2 in 0..p.modules.len() {
             p.modules[i2].ast.ilock_on = false;
         }
         if cird != null {
-            unsafe cird.elock_on = false;
+            unsafe (*cird).elock_on = false;
         }
     }
     // True instance failures are demanded symbols that never emitted on ANY chain.
@@ -4484,10 +4468,7 @@ pub fn cemit_package(
         let mut fseen = Map::<u64, u64>::new();
         for di9 in 0..cem.demand.len() {
             let fs9 = cem.demand.at(di9).sym.as_str();
-            let mut fk9 = 1469598103934665603u64;
-            for k9 in 0..fs9.len() {
-                fk9 = (fk9 ^ fs9.byte_at(k9) as u64) * 1099511628211u64;
-            }
+            let fk9 = fnv1a(fs9);
             let emitted9 = switch done.get(&fk9) {
                 Some(_v) => true,
                 None => false,
@@ -4502,7 +4483,7 @@ pub fn cemit_package(
             }
         }
     }
-    if tstat {
+    if verbose {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage drain: {} ms\n", t9 - tt0);
         tt0 = t9;
@@ -4526,7 +4507,9 @@ pub fn cemit_package(
         );
     }
     for r2 in 0..reasons.len() {
-        eprint("cemit-tu-inst-miss: {} x{}\n", reasons[r2], rcounts[r2]);
+        if reasons[r2] != cbe::inst_depth_why() {
+            eprint("cemit-tu-inst-miss: {} x{}\n", reasons[r2], rcounts[r2]);
+        }
     }
     o.skips += seed_skip + inst_skip + clos_skip + glue_skip + tw_skip;
     if have_main && main_argv && !testing {
@@ -4677,7 +4660,7 @@ pub fn cemit_package(
         }
         o.skips += mac_skip;
     }
-    if tstat {
+    if verbose {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage macros: {} ms\n", t9 - tt0);
         tt0 = t9;
@@ -4869,7 +4852,7 @@ pub fn cemit_package(
                         },
                     );
                 } else if v.kind == iri::IV_FLOAT {
-                    line.push_f64(v.f);
+                    push_c_float(&mut line, v.f);
                 } else {
                     let csrc = p.modules[cdef.module as usize].source.as_str();
                     let mut a0 = (v.i >> 32) as usize;
@@ -4909,7 +4892,6 @@ pub fn cemit_package(
                 }
                 cd_skip += 1;
             }
-            let _ = em2;
         }
         cdefs.close(cd_own9);
         o.skips += cd_skip;
@@ -4917,7 +4899,7 @@ pub fn cemit_package(
             eprint("cemit-consts: {} defined, {} skipped\n", cd_ok, cd_skip);
         }
     }
-    if tstat {
+    if verbose {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage consts: {} ms\n", t9 - tt0);
         tt0 = t9;
@@ -5077,7 +5059,7 @@ pub fn cemit_package(
         }
         o.skips += ti_skip;
     }
-    if tstat {
+    if verbose {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage statics+ti: {} ms\n", t9 - tt0);
         tt0 = t9;
@@ -5107,7 +5089,7 @@ pub fn cemit_package(
         o,
     );
     prd.stop(prb::P_ASSEMBLE, asm9);
-    if tstat {
+    if verbose {
         let t9 = unsafe shim::sc_ticks_ms();
         eprint("cemit-stage assembly: {} ms\n", t9 - tt0);
         tt0 = t9;
@@ -5139,13 +5121,12 @@ pub fn cemit_package(
     o.main_mod = main_mod;
     o.main_argv = main_argv;
     if tuc.on {
-        o.tuc_img = tuc.out.clone();
-        o.tuc_path = tuc.path.clone();
+        o.tuc_img = replace(&mut tuc.out, String::new());
+        o.tuc_path = replace(&mut tuc.path, String::new());
     }
-    let _ = fwd_end;
-    dow.fold_probe();
     prd.merge(&dow.pr);
     prd.merge(&cem.pr);
+    o.refused = replace(&mut cem.refused, Vector::<cbe::Refusal>::new());
     dctx_drop(&mut prd);
     p.inl_store = null;
     bst::relower(prd.c[prb::C_RELOWER_REFLECT], prd.c[prb::C_RELOWER_ZST]);
@@ -5199,8 +5180,6 @@ pub fn publish_checkpoint(p: &mut loader::Package, keep: *mut irl::Keep) {
     }
 }
 
-/// The SC_TYPE_STATS report: the identity-path counters, the bytes the per-module type pools and
-/// their indexes retain, and the structural census (how many pool entries stand for one type).
 /// One line of syntax accounting for the package at phase `label` (SC_SYNTAX_STATS): node and
 /// child counts with the share inside bodies, the retained bytes of every syntax and side-table
 /// container, the source text, and the module that retains the most.
@@ -5254,6 +5233,8 @@ fn syntax_stats_report(p: &loader::Package, label: str) {
     );
 }
 
+/// The SC_TYPE_STATS report: the identity-path counters, the bytes the per-module type pools and
+/// their indexes retain, and the structural census (how many pool entries stand for one type).
 fn ty_stats_report(p: &loader::Package) {
     let mut types: u64 = 0;
     let mut insts: u64 = 0;
@@ -5387,24 +5368,20 @@ fn render_const_elem(a: &Ast, src: str, eid: NodeId, out: &mut String) bool {
     return false;
 }
 
-// Copy one captured group from the established evaluator's store into the interpreter's,
-// remapping intra-group indices; groups are self-contained (each capture evaluates from a fresh
-// object store), so a constant offset relocates every parent/owner/child/target.
-
 // Define every aggregate a descriptor group embeds by value: descriptor data names `FieldInfo`,
 // `MetaInfo`, ... whether or not a live body ever spells them.
 fn st_group_types(em: &mut tbe::TuEmit, cev: &iri::Interp, root: u32) {
-    let groupn = unsafe cev.static_at(root).groupn;
+    let groupn = unsafe (*cev.static_at(root)).groupn;
     for gi in root..root + groupn {
         let g = cev.static_at(gi);
-        let shape = unsafe g.shape;
+        let shape = unsafe (*g).shape;
         if shape == iri::SS_STRUCT || shape == iri::SS_ENUM {
-            if unsafe g.nargs == 0 {
-                let dm = unsafe g.dm;
-                let _ = em.emit_agg(&tbe::AggItem { m: dm, decl: unsafe g.dn, amod: dm, aty: TYPE_NONE });
+            if unsafe (*g).nargs == 0 {
+                let dm = unsafe (*g).dm;
+                let _ = em.emit_agg(&tbe::AggItem { m: dm, decl: unsafe (*g).dn, amod: dm, aty: TYPE_NONE });
             }
         } else {
-            let _ = em.ensure_by_value(unsafe g.etm, unsafe g.ety);
+            let _ = em.ensure_by_value(unsafe (*g).etm, unsafe (*g).ety);
         }
     }
 }
@@ -5413,9 +5390,9 @@ fn st_group_types(em: &mut tbe::TuEmit, cev: &iri::Interp, root: u32) {
 // aggregates by their (instance) names, cells by their value type.
 fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u32, decl: str, out: &mut String) bool {
     let g = cev.static_at(gi);
-    let shape = unsafe g.shape;
+    let shape = unsafe (*g).shape;
     if shape == iri::SS_HEAP || shape == iri::SS_ARRAY {
-        let mut n2 = unsafe g.n;
+        let mut n2 = unsafe (*g).n;
         if n2 == 0 {
             n2 = 1;
         }
@@ -5423,23 +5400,22 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
         d2.push_str("[");
         d2.push_u64(n2);
         d2.push_str("]");
-        let ok = mg.ctype(unsafe g.etm, unsafe g.ety, d2.as_str(), out);
+        let ok = mg.ctype(unsafe (*g).etm, unsafe (*g).ety, d2.as_str(), out);
         return ok;
     }
     if shape == iri::SS_CELL {
-        return mg.ctype(unsafe g.etm, unsafe g.ety, decl, out);
+        return mg.ctype(unsafe (*g).etm, unsafe (*g).ety, decl, out);
     }
     // SS_STRUCT / SS_ENUM: the aggregate's (instance) C name, a type spelling.
-    let dm = unsafe g.dm;
-    let dn = unsafe g.dn;
+    let dm = unsafe (*g).dm;
+    let dn = unsafe (*g).dn;
     let da = unsafe &*p.module_ast_const(dm);
     mg.type_depth += 1;
-    mg.modpfx(dm, out);
-    mg.ident(dm, da.at_const(da.at_const(dn).as_data.aggregate.name).as_data.name.text, out);
+    mg.qualified(dm, da.at_const(dn).as_data.aggregate.name, out);
     let mut ok = true;
-    if shape == iri::SS_STRUCT && unsafe g.nargs != 0 {
-        let mut last = unsafe g.nargs;
-        while last > 0 && mg.is_global(unsafe g.am[(last - 1) as usize], unsafe g.at[(last - 1) as usize]) {
+    if shape == iri::SS_STRUCT && unsafe (*g).nargs != 0 {
+        let mut last = unsafe (*g).nargs;
+        while last > 0 && mg.is_global(unsafe (*g).am[(last - 1) as usize], unsafe (*g).at[(last - 1) as usize]) {
             last -= 1;
         }
         for i in 0..last {
@@ -5447,7 +5423,7 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
                 break;
             }
             out.push_str("__");
-            ok = mg.type_m(unsafe g.am[i as usize], unsafe g.at[i as usize], out);
+            ok = mg.type_m(unsafe (*g).am[i as usize], unsafe (*g).at[i as usize], out);
         }
     }
     mg.type_depth -= 1;
@@ -5461,12 +5437,11 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
     return true;
 }
 
-// `.field` designator for member index `idx` of aggregate `(dm, dn)` (`._N` for tuples).
 // Is struct slot `idx` a zero-sized field (no C member exists for it)? Resolved under the
 // StaticObj's recorded instance args, mirroring st_field's field-ordinal indexing.
 fn st_field_zst(p: &loader::Package, mg: &mut mbe::Mangler, g: *const iri::StaticObj, idx: u32) bool {
-    let dm = unsafe g.dm;
-    let dn = unsafe g.dn;
+    let dm = unsafe (*g).dm;
+    let dn = unsafe (*g).dn;
     let a = unsafe &*p.module_ast_const(dm);
     let ms = a.at_const(dn).as_data.aggregate.members;
     let is_tuple = a.at_const(dn).as_data.aggregate.is_tuple;
@@ -5492,10 +5467,10 @@ fn st_field_zst(p: &loader::Package, mg: &mut mbe::Mangler, g: *const iri::Stati
     let gens = a.at_const(dn).as_data.aggregate.generics;
     let mut nb: usize = 0;
     for i in 0..gens.len {
-        if i as u8 >= unsafe g.nargs {
+        if i as u8 >= unsafe (*g).nargs {
             break;
         }
-        mg.push_sub(dm, unsafe a.list(gens)[i as usize], unsafe g.am[i as usize], unsafe g.at[i as usize]);
+        mg.push_sub(dm, unsafe a.list(gens)[i as usize], unsafe (*g).am[i as usize], unsafe (*g).at[i as usize]);
         nb += 1;
     }
     let z = mg.is_zst(dm, fty);
@@ -5503,6 +5478,7 @@ fn st_field_zst(p: &loader::Package, mg: &mut mbe::Mangler, g: *const iri::Stati
     return z;
 }
 
+// `.field` designator for member index `idx` of aggregate `(dm, dn)` (`._N` for tuples).
 fn st_field(p: &loader::Package, mg: &mut mbe::Mangler, dm: ModuleId, dn: NodeId, idx: u32, out: &mut String) {
     let a = unsafe &*p.module_ast_const(dm);
     if a.at_const(dn).as_data.aggregate.is_tuple {
@@ -5531,37 +5507,37 @@ fn st_field(p: &loader::Package, mg: &mut mbe::Mangler, dm: ModuleId, dn: NodeId
 // The C lvalue path of statics entry `gi`, rooted at its owner's name.
 fn st_path(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: str, gi: u32, out: &mut String) {
     let g = cev.static_at(gi);
-    if unsafe g.parent == iri::S_NO_PARENT {
+    if unsafe (*g).parent == iri::S_NO_PARENT {
         out.push_str(name);
-        if unsafe g.ord != 0 {
+        if unsafe (*g).ord != 0 {
             out.push_str("__ct");
-            out.push_u64(unsafe g.ord - 1);
+            out.push_u64(unsafe (*g).ord - 1);
         }
         return;
     }
-    let pi = unsafe g.parent;
+    let pi = unsafe (*g).parent;
     st_path(p, mg, cev, name, pi, out);
     let pg = cev.static_at(pi);
-    let pshape = unsafe pg.shape;
-    let pslot = unsafe g.pslot;
+    let pshape = unsafe (*pg).shape;
+    let pslot = unsafe (*g).pslot;
     if pshape == iri::SS_ARRAY || pshape == iri::SS_HEAP {
         out.push_str("[");
         out.push_u64(pslot);
         out.push_str("]");
     } else if pshape == iri::SS_STRUCT {
-        st_field(p, mg, unsafe pg.dm, unsafe pg.dn, pslot, out);
+        st_field(p, mg, unsafe (*pg).dm, unsafe (*pg).dn, pslot, out);
     } else if pshape == iri::SS_ENUM {
-        let a = unsafe &*p.module_ast_const(unsafe pg.dm);
-        let ms = a.at_const(unsafe pg.dn).as_data.aggregate.members;
-        let tag = (unsafe pg.slots.at(0).i) as u32;
+        let a = unsafe &*p.module_ast_const(unsafe (*pg).dm);
+        let ms = a.at_const(unsafe (*pg).dn).as_data.aggregate.members;
+        let tag = (unsafe (*pg).slots.at(0).i) as u32;
         let vid = unsafe a.list(ms)[tag as usize];
         out.push_str(".payload.");
-        mg.ident(unsafe pg.dm, a.at_const(a.at_const(vid).as_data.variant.name).as_data.name.text, out);
+        mg.ident(unsafe (*pg).dm, a.at_const(a.at_const(vid).as_data.variant.name).as_data.name.text, out);
         let vdat = a.at_const(vid).as_data.variant;
         if vdat.struct_payload {
             let pfid = unsafe a.list(vdat.payload)[(pslot - 1) as usize];
             out.push_str(".");
-            mg.ident(unsafe pg.dm, a.at_const(a.at_const(pfid).as_data.field.name).as_data.name.text, out);
+            mg.ident(unsafe (*pg).dm, a.at_const(a.at_const(pfid).as_data.field.name).as_data.name.text, out);
         } else {
             out.push_str("._");
             out.push_u64(pslot - 1);
@@ -5575,7 +5551,7 @@ fn st_rel(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: s
         let tgt = mg.method_target(r.fm, r.fnode);
         return mg.fn_sym(r.fm, r.fnode, tgt, true, out);
     }
-    let tshape = unsafe cev.static_at(r.target).shape;
+    let tshape = unsafe (*cev.static_at(r.target)).shape;
     if tshape == iri::SS_ARRAY || tshape == iri::SS_HEAP {
         if r.toff == 0 {
             out.push_str("(void *)");
@@ -5592,15 +5568,45 @@ fn st_rel(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: s
     out.push_str("(void *)&");
     st_path(p, mg, cev, name, r.target, out);
     if tshape == iri::SS_STRUCT && r.toff != 0 {
-        st_field(p, mg, unsafe cev.static_at(r.target).dm, unsafe cev.static_at(r.target).dn, r.toff, out);
+        st_field(p, mg, unsafe (*cev.static_at(r.target)).dm, unsafe (*cev.static_at(r.target)).dn, r.toff, out);
     }
     return true;
+}
+
+// A float constant as a C literal that converts back to the same double: 17 significant digits, a
+// `.0` when the digits alone would spell an integer constant, and compiler builtins for infinity and
+// NaN, which have no literal spelling. An f32 destination rounds this exact double as C does.
+fn push_c_float(out: &mut String, v: f64) {
+    if v.is_nan() {
+        out.push_str("__builtin_nan(\"\")");
+        return;
+    }
+    if v.is_infinite() {
+        out.push_str(
+            if v < 0.0 {
+                "-__builtin_inf()";
+            } else {
+                "__builtin_inf()";
+            },
+        );
+        return;
+    }
+    let mut buf = Buf64 {};
+    let n = (unsafe stdio::snprintf(&mut buf[0], 64, "%.17g".ptr() as *const char, v)) as usize;
+    out.push_bytes((&buf[0]) as *const u8, n);
+    for i in 0..n {
+        let c = buf[i] as u8;
+        if c == b'.' || c == b'e' {
+            return;
+        }
+    }
+    out.push_str(".0");
 }
 
 // One slot's initializer expression.
 fn st_slot(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: str, gi: u32, k: u32, out: &mut String) bool {
     let g = cev.static_at(gi);
-    let sl = *unsafe g.slots.at(k as usize);
+    let sl = *unsafe (*g).slots.at(k as usize);
     if sl.kind == iri::SK_ZERO {
         out.push_str("{0}");
         return true;
@@ -5610,12 +5616,12 @@ fn st_slot(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         return true;
     }
     if sl.kind == iri::SK_AGG {
-        return st_init(p, mg, cev, name, sl.child, out);
+        return st_init(p, mg, cev, name, sl.child(), out);
     }
     if sl.kind == iri::SK_REL {
-        for ri in 0..unsafe g.rels.len() {
-            if unsafe g.rels.at(ri).slot == k {
-                return st_rel(p, mg, cev, name, unsafe g.rels.at(ri), out);
+        for ri in 0..unsafe (*g).rels.len() {
+            if unsafe (*g).rels.at(ri).slot == k {
+                return st_rel(p, mg, cev, name, unsafe (*g).rels.at(ri), out);
             }
         }
         out.push_str("NULL");
@@ -5632,7 +5638,7 @@ fn st_slot(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         return true;
     }
     if sl.kind == iri::SK_FLOAT {
-        out.push_f64(sl.f);
+        push_c_float(out, sl.f());
         return true;
     }
     // SK_INT: unsigned pool types print unsigned (with the 64-bit suffix when the sign bit is set).
@@ -5658,15 +5664,15 @@ fn st_slot(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
 // The braced initializer of statics entry `gi`.
 fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: str, gi: u32, out: &mut String) bool {
     let g = cev.static_at(gi);
-    let shape = unsafe g.shape;
-    let nslots = (unsafe g.slots.len()) as u32;
+    let shape = unsafe (*g).shape;
+    let nslots = (unsafe (*g).slots.len()) as u32;
     if shape == iri::SS_CELL {
         return st_slot(p, mg, cev, name, gi, 0, out);
     }
     if shape == iri::SS_ARRAY || shape == iri::SS_HEAP {
         let mut allzero = true;
         for k in 0..nslots {
-            if unsafe g.slots.at(k as usize).kind != iri::SK_ZERO {
+            if unsafe (*g).slots.at(k as usize).kind != iri::SK_ZERO {
                 allzero = false;
                 break;
             }
@@ -5675,14 +5681,14 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
             out.push_str("{0}");
             return true;
         }
-        let ek = unsafe (&*p.module_ast_const(unsafe g.etm)).type_at(unsafe g.ety).kind;
+        let ek = unsafe (&*p.module_ast_const(unsafe (*g).etm)).type_at(unsafe (*g).ety).kind;
         let escalar = ek == TypeKind::TYPE_BUILTIN || ek == TypeKind::TYPE_POINTER || ek == TypeKind::TYPE_REFERENCE || ek == TypeKind::TYPE_FUNCTION;
         out.push_str("{ ");
         for k in 0..nslots {
             if k != 0 {
                 out.push_str(", ");
             }
-            if unsafe g.slots.at(k as usize).kind == iri::SK_ZERO && escalar {
+            if unsafe (*g).slots.at(k as usize).kind == iri::SK_ZERO && escalar {
                 out.push_str("0");
             } else if !st_slot(p, mg, cev, name, gi, k, out) {
                 return false;
@@ -5692,11 +5698,11 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         return true;
     }
     if shape == iri::SS_ENUM {
-        let dm = unsafe g.dm;
-        let dn = unsafe g.dn;
+        let dm = unsafe (*g).dm;
+        let dn = unsafe (*g).dn;
         let a = unsafe &*p.module_ast_const(dm);
         let ms = a.at_const(dn).as_data.aggregate.members;
-        let tag = (unsafe g.slots.at(0).i) as u32;
+        let tag = (unsafe (*g).slots.at(0).i) as u32;
         if tag >= ms.len {
             out.push_str("{0}");
             return true;
@@ -5706,7 +5712,7 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         mg.enum_tag(dm, dn, vid, out);
         let mut haspay = false;
         for k in 1..nslots {
-            if unsafe g.slots.at(k as usize).kind != iri::SK_ZERO {
+            if unsafe (*g).slots.at(k as usize).kind != iri::SK_ZERO {
                 haspay = true;
             }
         }
@@ -5717,7 +5723,7 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
             out.push_str(" = { ");
             let mut first = true;
             for k in 1..nslots {
-                if unsafe g.slots.at(k as usize).kind == iri::SK_ZERO {
+                if unsafe (*g).slots.at(k as usize).kind == iri::SK_ZERO {
                     continue;
                 }
                 if !first {
@@ -5749,10 +5755,10 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
         out.push_str("{0}");
         return true;
     }
-    let uact = unsafe g.uactive;
+    let uact = unsafe (*g).uactive;
     if uact >= 0 {
         out.push_str("{ ");
-        st_field(p, mg, unsafe g.dm, unsafe g.dn, uact as u32, out);
+        st_field(p, mg, unsafe (*g).dm, unsafe (*g).dn, uact as u32, out);
         out.push_str(" = ");
         if !st_slot(p, mg, cev, name, gi, uact as u32, out) {
             return false;
@@ -5771,7 +5777,7 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
             out.push_str(", ");
         }
         ne9 += 1;
-        st_field(p, mg, unsafe g.dm, unsafe g.dn, k, out);
+        st_field(p, mg, unsafe (*g).dm, unsafe (*g).dn, k, out);
         out.push_str(" = ");
         if !st_slot(p, mg, cev, name, gi, k, out) {
             return false;
@@ -5789,14 +5795,14 @@ fn st_init(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: 
 // (back-references and cycles resolve against them), then their definitions. The ROOT is the
 // caller's to define (its linkage differs per use).
 fn st_group(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name: str, root: u32, out: &mut String) bool {
-    let groupn = unsafe cev.static_at(root).groupn;
+    let groupn = unsafe (*cev.static_at(root)).groupn;
     for gi in root + 1..root + groupn {
-        if unsafe cev.static_at(gi).parent != iri::S_NO_PARENT {
+        if unsafe (*cev.static_at(gi)).parent != iri::S_NO_PARENT {
             continue;
         }
         let mut nm2 = String::from_str(name);
         nm2.push_str("__ct");
-        nm2.push_u64(unsafe cev.static_at(gi).ord - 1);
+        nm2.push_u64(unsafe (*cev.static_at(gi)).ord - 1);
         let mut dl = String::new();
         let ok = st_ctype(p, mg, cev, gi, nm2.as_str(), &mut dl);
         if ok {
@@ -5809,12 +5815,12 @@ fn st_group(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, name:
         }
     }
     for gi in root + 1..root + groupn {
-        if unsafe cev.static_at(gi).parent != iri::S_NO_PARENT {
+        if unsafe (*cev.static_at(gi)).parent != iri::S_NO_PARENT {
             continue;
         }
         let mut nm2 = String::from_str(name);
         nm2.push_str("__ct");
-        nm2.push_u64(unsafe cev.static_at(gi).ord - 1);
+        nm2.push_u64(unsafe (*cev.static_at(gi)).ord - 1);
         let mut dl = String::new();
         let mut ok = st_ctype(p, mg, cev, gi, nm2.as_str(), &mut dl);
         if ok {
@@ -6019,13 +6025,12 @@ fn dctx_drop(acc: &mut prb::Probe) {
         unsafe G_DPOOL = null;
         for i in 0..(unsafe &*pv).len() {
             let d9 = (unsafe &mut *pv).index_mut(i);
-            d9.fold_probe();
             acc.merge(&d9.pr);
             if unsafe TS_ON {
                 ts_add(TS_XM_BYTES, d9.inl.xm_bytes());
             }
         }
-        pv.free();
+        unsafe (*pv).free();
         let mut g9 = Global {};
         unsafe g9.dealloc(pv, sizeof(Vector<DropCtx>), alignof(Vector<DropCtx>));
     }
@@ -6065,9 +6070,6 @@ extend DropCtx {
             pr: prb::Probe::new(stdlib::getenv("SC_CEMIT_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null),
         };
     }
-
-    // Fold the inliner's tallies into the probe (once: the tallies reset).
-    const fn fold_probe(self: &mut Self) {}
 
     fn apply_drops(self: &mut Self, lw: &mut irl::Lowerer) {
         self.apply_drops_of(lw, true);
@@ -6192,7 +6194,7 @@ fn cemit_free_glue_fields(
             // Non-owning by rule: raw pointers are borrows.
             continue;
         }
-        if !cem.is_destructible(m, ft, 0) {
+        if !cem.is_destructible(m, ft) {
             continue;
         }
         if !a.free_touches(fnid, fid) {
@@ -6715,7 +6717,7 @@ fn cemit_assemble(
                 o.reg_inputs.push_string(&reg_names[ord[k] as usize]);
             }
             rg.push_str(
-                " };\n__attribute__((constructor)) static void __sc_reflect_init(void) { for (size_t i = 0; i < sizeof(__sc_reflect_roots) / sizeof(__sc_reflect_roots[0]); i++) { __sc_reflect_register(__sc_reflect_roots[i]); } }\n",
+                " };\n__attribute__((constructor)) static void __sc_reflect_init(void) { __sc_reflect_register(__sc_reflect_roots, sizeof(__sc_reflect_roots) / sizeof(__sc_reflect_roots[0])); }\n",
             );
         }
         o.registry_c = rg;
@@ -6926,11 +6928,7 @@ const fn item_hash(pl: str) u64 {
         }
         s -= 1;
     }
-    let mut h = 1469598103934665603u64;
-    for k in s..e {
-        h = (h ^ pl.byte_at(k) as u64) * 1099511628211u64;
-    }
-    return h;
+    return fnv1a(pl.slice(s, e));
 }
 
 // Module `m`'s shard count under the policy: its TU shards, or its instance shards (`inst`).
@@ -7084,7 +7082,7 @@ struct OutFile {
 
 extend OutFile {
     fn open(path: str) OutFile {
-        return OutFile { f: open_out(path), h: 1469598103934665603u64 };
+        return OutFile { f: open_out(path), h: FNV_BASIS };
     }
 
     fn put(self: &mut Self, s: str) {
@@ -7113,14 +7111,15 @@ extend OutFile {
         self.h = mix64(h, tail ^ n as u64 << 56);
     }
 
-    // False when the file could not be opened.
+    // False when the file could not be opened, written or closed (a full disk fails here).
     fn close(self: &mut Self) bool {
         if self.f == null {
             return false;
         }
-        unsafe stdio::fclose(self.f);
+        let werr = unsafe stdio::ferror(self.f) != 0;
+        let cerr = unsafe stdio::fclose(self.f) != 0;
         self.f = null;
-        return true;
+        return !werr && !cerr;
     }
 }
 
@@ -7288,16 +7287,16 @@ fn manifest_publish(root: str, man: &String, keep: &mut Vector<String>) {
     }
 }
 
-// Overwrite `path` with the buffer; false when the file cannot be opened.
+// Overwrite `path` with the buffer; false when the file cannot be opened, written or closed.
 fn cemit_write(path: str, s: &String) bool {
     let f = open_out(path);
     if f == null {
         return false;
     }
     let b = s.as_str();
-    let _ = unsafe stdio::fwrite(b.ptr(), 1, b.len(), f);
-    unsafe stdio::fclose(f);
-    return true;
+    let wrote = unsafe stdio::fwrite(b.ptr(), 1, b.len(), f) == b.len();
+    let closed = unsafe stdio::fclose(f) == 0;
+    return wrote && closed;
 }
 
 // The C `main`: argv marshalled into a Vector<str> when the user main takes one.
@@ -7392,7 +7391,7 @@ unsafe extend BcSlot as Send {}
 struct BcStage {
     pub p: *mut loader::Package,
     pub jobs: *const Vector<BcJob>,
-    pub outs: *mut diag::Errors, // per item
+    pub outs: *mut Option<Box<diag::Errors>>, // per item
     pub slots: *mut psync::Mutex<Vector<BcSlot>>,
     pub master: *mut irl::Keep, // null = discard the lowerings
     pub validate: bool,
@@ -7453,17 +7452,17 @@ fn bc_job(ctx: *mut void, j: u32) {
             continue;
         }
         tck.bc_item(meta.node, &mut slot.ow, &mut slot.ctx, &mut bodies);
-        *unsafe &mut *(st.outs + it) = replace(&mut tck.errors, diag::Errors::new());
+        *unsafe &mut *(st.outs + it) = take_errs(&mut tck.errors);
     }
     slot.ctx.keep = null;
     let ce = p.cir as *mut iri::Interp;
     if st.master != null && p.jobs != 1 {
         if ce != null {
-            ce.eng_lock();
+            unsafe (*ce).eng_lock();
         }
         unsafe (&mut *st.master).absorb(&mut keep);
         if ce != null {
-            ce.eng_unlock();
+            unsafe (*ce).eng_unlock();
         }
     }
     bc_slot_give(unsafe &*st.slots, slot);
@@ -7474,9 +7473,9 @@ fn bc_job(ctx: *mut void, j: u32) {
         p.record_emit_deps(m);
         let mut free = true;
         if ce != null {
-            ce.eng_lock();
-            free = !ce.pending_in_bodies(m as ModuleId);
-            ce.eng_unlock();
+            unsafe (*ce).eng_lock();
+            free = !unsafe (*ce).pending_in_bodies(m as ModuleId);
+            unsafe (*ce).eng_unlock();
         }
         if free {
             p.modules[m].ast.release_bodies();
@@ -7510,7 +7509,7 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
         unsafe (&mut *keep).reserve_bodies(p);
         let cirk = p.cir as *mut iri::Interp;
         if cirk != null {
-            cirk.keep_view_set(keep);
+            unsafe (*cirk).keep_view_set(keep);
         }
     }
     if p.free_bodies {
@@ -7527,7 +7526,7 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     let cirp = p.cir as *mut iri::Interp;
     if par {
         if cirp != null {
-            unsafe cirp.elock_on = true;
+            unsafe (*cirp).elock_on = true;
         }
         for i in 0..n {
             p.modules[i].ast.ilock_on = true;
@@ -7536,9 +7535,9 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     let mut jobs = Vector::<BcJob>::new();
     bc_jobs(p, &mut jobs);
     let ni = p.idx.items.len();
-    let mut outs = Vector::<diag::Errors>::with_capacity(ni);
+    let mut outs = Vector::<Option<Box<diag::Errors>>>::with_capacity(ni);
     for _ in 0..ni {
-        outs.push(diag::Errors::new());
+        outs.push(Option::<Box<diag::Errors>>::None);
     }
     let slots = psync::Mutex::<Vector<BcSlot>>::new(Vector::<BcSlot>::new());
     let mut st = BcStage {
@@ -7563,13 +7562,13 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
         s0.ctx.st.all = p.icost_on;
         seed.push(s0);
     }
-    sch::run_jobs(&g, p.jobs, bc_job, &mut st, &ctl);
+    sch::run_jobs(&mut g, p.jobs, bc_job, &mut st, &ctl);
     if par {
         for i in 0..n {
             p.modules[i].ast.ilock_on = false;
         }
         if cirp != null {
-            unsafe cirp.elock_on = false;
+            unsafe (*cirp).elock_on = false;
         }
     }
     // Modules without a job (no syntax) are ready too.
@@ -7582,10 +7581,9 @@ pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     for m in 0..n {
         let mut errs = diag::Errors::new();
         for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
-            errs.append(outs.index_mut(it));
+            append_errs(&mut errs, outs.index_mut(it));
         }
         errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
-        p.lint_errs = p.lint_errs + errs.errors.len() as u32;
         if errs.has_errors() {
             ok = false;
             errs.log();
@@ -7626,9 +7624,9 @@ fn bc_stats_print(st: &bfi::BcStats, ctx: &bfi::BorrowCtx) {
 // A deferred static_assert that failed once the whole package was typed: render it against the owning module.
 fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) {
     let p = ctx as *mut loader::Package;
-    let sp = unsafe p.modules[m as usize].ast.at_const(cond).span;
-    let src = unsafe p.modules[m as usize].source.as_str();
-    let file = unsafe p.modules[m as usize].file.as_str();
+    let sp = unsafe (*p).modules[m as usize].ast.at_const(cond).span;
+    let src = unsafe (*p).modules[m as usize].source.as_str();
+    let file = unsafe (*p).modules[m as usize].file.as_str();
     let mut errs = diag::Errors::new();
     if msg != null {
         errs.emit(sp.start, sp.end - sp.start, format("static assertion cannot be evaluated: {}", diag::cstr(msg)));
@@ -7637,7 +7635,7 @@ fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char)
     }
     errs.finalize(src, file);
     errs.log();
-    unsafe p.ok = false;
+    unsafe (*p).ok = false;
 }
 
 // Promoted fold failures (proven UB, failed mandatory `const fn` folds) recorded by the evaluator:
@@ -7652,9 +7650,9 @@ fn report_fold_errs(p: &mut loader::Package) {
     let mut details = Vector::<String>::new();
     let cirp = p.cir as *mut iri::Interp;
     if cirp != null {
-        for i in 0..unsafe cirp.fold_errs.len() {
-            let m2 = unsafe cirp.fold_errs.at(i).m;
-            let id2 = unsafe cirp.fold_errs.at(i).id;
+        for i in 0..unsafe (*cirp).fold_errs.len() {
+            let m2 = unsafe (*cirp).fold_errs.at(i).m;
+            let id2 = unsafe (*cirp).fold_errs.at(i).id;
             let mut dup = false;
             for j in 0..ms.len() {
                 if ms[j] == m2 && ids[j] == id2 {
@@ -7666,10 +7664,10 @@ fn report_fold_errs(p: &mut loader::Package) {
             }
             ms.push(m2);
             ids.push(id2);
-            spans.push(unsafe cirp.fold_errs.at(i).span);
-            kinds.push(unsafe cirp.fold_errs.at(i).kind);
+            spans.push(unsafe (*cirp).fold_errs.at(i).span);
+            kinds.push(unsafe (*cirp).fold_errs.at(i).kind);
             let mut d = String::new();
-            d.push_string(unsafe &cirp.fold_errs.at(i).detail);
+            d.push_string(unsafe &(*cirp).fold_errs.at(i).detail);
             details.push(d);
         }
     }
@@ -7744,65 +7742,69 @@ fn report_fold_errs(p: &mut loader::Package) {
     }
 }
 
+// One located error per refused body, in (module, source position) order: recording order is
+// scheduling order under the parallel emission, and a body refused once per instance reports once.
+// A depth refusal is left to report_depth_refusals.
+fn report_refusals(p: &loader::Package, rs: &mut Vector<cbe::Refusal>) {
+    sort_refusals(rs);
+    for i in 0..rs.len() {
+        let r = rs[i];
+        if i > 0 && rs[i - 1].m == r.m && rs[i - 1].start == r.start && rs[i - 1].why == r.why || r.why == cbe::inst_depth_why() {
+            continue;
+        }
+        let mut errs = diag::Errors::new();
+        errs.emit(r.start, r.end - r.start, format("internal: the C backend cannot emit this body ({})", r.why));
+        errs.finalize(p.modules[r.m as usize].source.as_str(), p.modules[r.m as usize].file.as_str());
+        errs.log();
+    }
+}
+
+// The bodies refused for nesting past the instantiation depth bound, one located error each (a user
+// error, so it reports whether or not the backend skipped anything else). True when any was found.
+fn report_depth_refusals(p: &loader::Package, rs: &mut Vector<cbe::Refusal>) bool {
+    sort_refusals(rs);
+    let mut any = false;
+    for i in 0..rs.len() {
+        let r = rs[i];
+        if r.why != cbe::inst_depth_why() || any && rs[i - 1].m == r.m && rs[i - 1].start == r.start && rs[i - 1].why == r.why {
+            continue;
+        }
+        any = true;
+        let mut errs = diag::Errors::new();
+        errs.emit(r.start, r.end - r.start, format("{}", r.why));
+        errs.finalize(p.modules[r.m as usize].source.as_str(), p.modules[r.m as usize].file.as_str());
+        errs.log();
+    }
+    return any;
+}
+
+// (module, source position) order: recording order is scheduling order under the parallel emission.
+fn sort_refusals(rs: &mut Vector<cbe::Refusal>) {
+    for a in 1..rs.len() {
+        let mut k = a;
+        while k > 0 && (rs[k].m < rs[k - 1].m || rs[k].m == rs[k - 1].m && rs[k].start < rs[k - 1].start) {
+            let t = rs[k];
+            rs.set(k, rs[k - 1]);
+            rs.set(k - 1, t);
+            k -= 1;
+        }
+    }
+}
+
 // A deferred call-bearing const initializer that still cannot be evaluated once the package is typed.
 fn flush_const_err(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) {
     let p = ctx as *mut loader::Package;
-    let sp = unsafe p.modules[m as usize].ast.at_const(decl).span;
-    let src = unsafe p.modules[m as usize].source.as_str();
-    let file = unsafe p.modules[m as usize].file.as_str();
+    let sp = unsafe (*p).modules[m as usize].ast.at_const(decl).span;
+    let src = unsafe (*p).modules[m as usize].source.as_str();
+    let file = unsafe (*p).modules[m as usize].file.as_str();
     let mut errs = diag::Errors::new();
     errs.emit(sp.start, sp.end - sp.start, format("constant cannot be evaluated at compile time: {}", diag::cstr(msg)));
     errs.finalize(src, file);
     errs.log();
-    unsafe p.ok = false;
+    unsafe (*p).ok = false;
 }
 
 // Global-phase compilation of a loaded package into a `<root>/build/` tree.
-
-/// Drop @platform-gated items that don't match the build target BEFORE resolution, so inactive code is
-/// parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
-/// target: 0 windows, 1 macos, 2 linux; Attr.arg is the active-set mask (windows=bit0/macos=bit1/linux=bit2).
-pub fn platform_filter(p: &mut loader::Package, target: i32) {
-    let n = p.modules.len();
-    for mi in 0..n {
-        platform_filter_module(p, mi, target);
-    }
-}
-
-/// Filter one module's item list (idempotent): the LSP's incremental rebuild re-filters only the
-/// reparsed module.
-pub fn platform_filter_module(p: &mut loader::Package, mi: usize, target: i32) {
-    let arch = p.arch; // the instruction-set axis rides on the package, so no caller has to thread it
-    let m = &mut p.modules[mi];
-    let root = m.ast.root;
-    if m.ast.at_const(root).kind != NodeKind::NODE_PROGRAM {
-        return;
-    }
-    let items = m.ast.at_const(root).as_data.program.items;
-    let mut w: u32 = 0;
-    for j in 0..items.len {
-        let id = unsafe m.ast.list(items)[j as usize];
-        let mut keep = true;
-        {
-            for k in 0..m.ast.attrs.len() {
-                let at = m.ast.attrs.at(k);
-                if at.owner == id && at.kind == AttrKind::ATTR_PLATFORM as u8 && (at.arg >> target as u32 & 1u32) == 0 {
-                    keep = false;
-                }
-                // `@arch` gates the same way on the instruction set. An unknown host arch (-1)
-                // keeps every gated item: dropping them all would silently empty the program.
-                if at.owner == id && at.kind == AttrKind::ATTR_ARCH as u8 && arch >= 0 && (at.arg >> arch as u32 & 1u32) == 0 {
-                    keep = false;
-                }
-            }
-        }
-        if keep {
-            m.ast.children.set((items.start + w) as usize, id);
-            w = w + 1;
-        }
-    }
-    m.ast.at(root).as_data.program.items.len = w;
-}
 
 // --lint: unused non-pub items (functions/structs/unions/enums/interfaces/type aliases). Reachability v2:
 // entries are top-level items + extend members (disjoint spans; extend HEADERS are deliberately not
@@ -7813,8 +7815,8 @@ pub fn platform_filter_module(p: &mut loader::Package, mi: usize, target: i32) {
 // (per-file `lint` invocations treat other modules as live; the full-build lint reports all non-prelude
 // modules, so cross-module dead cycles are caught there).
 fn item_has_attr(a: *const Ast, owner: NodeId, kind: AttrKind) bool {
-    for i in 0..unsafe a.attrs.len() {
-        let at = unsafe a.attrs.at(i);
+    for i in 0..unsafe (*a).attrs.len() {
+        let at = unsafe (*a).attrs.at(i);
         if at.owner == owner && at.kind == kind as u8 {
             return true;
         }
@@ -7894,10 +7896,10 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
     // Items of a module reported this run are candidates; everything else roots the graph.
     let reported = lint_reported(p, m, only_mod);
     let src = p.modules[m].source.as_str();
-    let items = unsafe a.at_const(a.root).as_data.program.items;
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     for i in 0..items.len {
-        let iid = unsafe a.list(items)[i as usize];
-        let it = a.at_const(iid);
+        let iid = unsafe (*a).list(items)[i as usize];
+        let it = unsafe (*a).at_const(iid);
         if it.kind == NodeKind::NODE_IMPORT {
             continue;
         }
@@ -7905,8 +7907,8 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
             let in_iface = it.as_data.extend_def.interface_type != NODE_NONE;
             let ms = it.as_data.extend_def.items;
             for j in 0..ms.len {
-                let mid = unsafe a.list(ms)[j as usize];
-                let msp = a.at_const(mid).span;
+                let mid = unsafe (*a).list(ms)[j as usize];
+                let msp = unsafe (*a).at_const(mid).span;
                 ents.push(
                     LintEnt {
                         start: msp.start,
@@ -7921,7 +7923,7 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
         let mut root = !(reported && lint_item_candidate(a, iid, false, lint_pub_applies(p, m)));
         // `main` in the root module is the program entry: never reported, always a root.
         if !root && lint_root_mod(p, m) && it.kind == NodeKind::NODE_FUNCTION {
-            let nsp = a.at_const(it.as_data.function.name).as_data.name.text;
+            let nsp = unsafe (*a).at_const(it.as_data.function.name).as_data.name.text;
             if diag::span_str(src, nsp.start, nsp.end) == "main" {
                 root = true;
             }
@@ -7953,7 +7955,7 @@ const fn lint_pub_applies(p: &loader::Package, m: usize) bool {
 }
 
 fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_too: bool) bool {
-    let it = a.at_const(iid);
+    let it = unsafe (*a).at_const(iid);
     // Everything inside a conformance is required BY the conformance: a method implements one of its
     // methods, a `type X = ..` binds one of its associated types. Neither is dead for want of a caller.
     if in_iface_extend {
@@ -7961,7 +7963,7 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
     }
     if it.kind == NodeKind::NODE_FUNCTION {
         let f = it.as_data.function;
-        if f.is_public && !pub_too || f.is_extern || f.body == NODE_NONE {
+        if f.is_public() && !pub_too || f.is_extern() || f.body == NODE_NONE {
             return false;
         }
         return !(item_has_attr(a, iid, AttrKind::ATTR_EXPORT) || item_has_attr(a, iid, AttrKind::ATTR_USED) || item_has_attr(
@@ -8006,13 +8008,13 @@ fn lint_report_item(
     iid: NodeId,
     root_mod: bool,
 ) {
-    let it = a.at_const(iid);
+    let it = unsafe (*a).at_const(iid);
     // A `@reflect`-tagged declaration is REACHED at startup: its exported descriptor registers
     // itself, and the metadata is the point even when no code names the type.
     if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
-        let nmet = (unsafe a.metas).len();
+        let nmet = (unsafe (*a).metas).len();
         for k in 0..nmet {
-            if (unsafe a.metas).at(k).owner == iid {
+            if (unsafe (*a).metas).at(k).owner == iid {
                 return;
             }
         }
@@ -8039,11 +8041,11 @@ fn lint_report_item(
         what = "type alias";
         nid = it.as_data.type_alias.name;
     }
-    let nsp = a.at_const(nid).as_data.name.text;
+    let nsp = unsafe (*a).at_const(nid).as_data.name.text;
     if root_mod && it.kind == NodeKind::NODE_FUNCTION && diag::span_str(src, nsp.start, nsp.end) == "main" {
         return;
     }
-    if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.is_public {
+    if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.is_public() {
         errs.warn(
             nsp.start,
             nsp.end - nsp.start,
@@ -8119,7 +8121,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
         let i0 = p.idx.mod_items[m] as usize;
         let i1 = p.idx.mod_items[m + 1] as usize;
         for it in i0..i1 {
-            let si = lint_owner(ents.at(m), a.at_const(p.idx.items.at(it).node).span.start);
+            let si = lint_owner(ents.at(m), unsafe (*a).at_const(p.idx.items.at(it).node).span.start);
             if si < 0 {
                 continue;
             }
@@ -8131,7 +8133,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
                     continue;
                 }
                 let ta = p.module_ast_const(tm.module);
-                let di = lint_owner(ents.at(dm), ta.at_const(tm.node).span.start);
+                let di = lint_owner(ents.at(dm), unsafe (*ta).at_const(tm.node).span.start);
                 if di < 0 {
                     continue;
                 }
@@ -8143,14 +8145,14 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
         }
         // `a * b` resolves the method by NAME, so the resolution table holds no edge to it. The method
         // references the type checker recorded do, and they carry the body each one sits in.
-        for i in 0..unsafe a.method_refs.len() {
-            let r = *unsafe a.method_refs.at(i);
+        for i in 0..unsafe (*a).method_refs.len() {
+            let r = *unsafe (*a).method_refs.at(i);
             let dm = r.callee.module as usize;
             if r.callee.node == NODE_NONE || dm >= nm || ents[dm].len() == 0 {
                 continue;
             }
             let ta = p.module_ast_const(r.callee.module);
-            let di = lint_owner(ents.at(dm), ta.at_const(r.callee.node).span.start);
+            let di = lint_owner(ents.at(dm), unsafe (*ta).at_const(r.callee.node).span.start);
             if di < 0 {
                 continue;
             }
@@ -8162,7 +8164,7 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
                 }
                 continue;
             }
-            let si2 = lint_owner(ents.at(m), a.at_const(r.owner).span.start);
+            let si2 = lint_owner(ents.at(m), unsafe (*a).at_const(r.owner).span.start);
             if si2 < 0 {
                 continue;
             }
@@ -8203,15 +8205,15 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
         }
         let a = p.module_ast_const(m as ModuleId);
         let mut errs = diag::Errors::new();
-        let items = unsafe a.at_const(a.root).as_data.program.items;
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            let it = a.at_const(iid);
+            let iid = unsafe (*a).list(items)[i as usize];
+            let it = unsafe (*a).at_const(iid);
             if it.kind == NodeKind::NODE_EXTEND {
                 let in_iface = it.as_data.extend_def.interface_type != NODE_NONE;
                 let ms = it.as_data.extend_def.items;
                 for j in 0..ms.len {
-                    let mid = unsafe a.list(ms)[j as usize];
+                    let mid = unsafe (*a).list(ms)[j as usize];
                     if lint_item_candidate(a, mid, in_iface, lint_pub_applies(p, m)) && !used[starts[m] + mid as usize] {
                         lint_report_item(p, &mut errs, a, m as ModuleId, mid, lint_root_mod(p, m));
                     }
@@ -8228,9 +8230,10 @@ fn lint_unused_items(p: &mut loader::Package, only_mod: i32) {
     }
 }
 
-fn ap_is_test_fn(a: *const Ast, fnode: NodeId) bool {
-    for i in 0..unsafe a.attrs.len() {
-        let at = unsafe a.attrs.at(i);
+// Is `fnode` a test-family item (@test/@test_init/@test_free)? Skipped entirely outside --test.
+fn is_test_item(a: *const Ast, fnode: NodeId) bool {
+    for i in 0..unsafe (*a).attrs.len() {
+        let at = unsafe (*a).attrs.at(i);
         if at.owner == fnode && (at.kind == AttrKind::ATTR_TEST as u8 || at.kind == AttrKind::ATTR_TEST_INIT as u8 || at.kind == AttrKind::ATTR_TEST_FREE as u8) {
             return true;
         }
@@ -8239,22 +8242,22 @@ fn ap_is_test_fn(a: *const Ast, fnode: NodeId) bool {
 }
 
 fn ap_check_fn(errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, cev: *mut iri::Interp) {
-    if a.at_const(fnode).kind != NodeKind::NODE_FUNCTION || ap_is_test_fn(a, fnode) {
+    if unsafe (*a).at_const(fnode).kind != NodeKind::NODE_FUNCTION || is_test_item(a, fnode) {
         return;
     }
-    let sp = cev.lint_body(m as ModuleId, fnode);
+    let sp = unsafe (*cev).lint_body(m as ModuleId, fnode);
     if sp.end > sp.start {
-        if iri::it_trap_is_ub(cev.trap_kind_get()) {
+        if iri::it_trap_is_ub(unsafe (*cev).trap_kind_get()) {
             errs.emit(
                 sp.start,
                 sp.end - sp.start,
-                format("this statement is undefined behavior when executed: {}", cev.trap_detail()),
+                format("this statement is undefined behavior when executed: {}", unsafe (*cev).trap_detail()),
             );
         } else {
             errs.emit(
                 sp.start,
                 sp.end - sp.start,
-                format("this statement always panics at runtime: {}", cev.trap_detail()),
+                format("this statement always panics at runtime: {}", unsafe (*cev).trap_detail()),
             );
         }
     }
@@ -8278,13 +8281,13 @@ fn ap_check_module_on(p: &mut loader::Package, m: usize, errs: &mut diag::Errors
         return;
     }
     let a = p.module_ast_const(m as ModuleId);
-    let items = unsafe a.at_const(a.root).as_data.program.items;
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     for i in 0..items.len {
-        let iid = unsafe a.list(items)[i as usize];
-        if a.at_const(iid).kind == NodeKind::NODE_EXTEND {
-            let ms = a.at_const(iid).as_data.extend_def.items;
+        let iid = unsafe (*a).list(items)[i as usize];
+        if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
+            let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
             for j in 0..ms.len {
-                ap_check_fn(errs, a, m, unsafe a.list(ms)[j as usize], cev);
+                ap_check_fn(errs, a, m, unsafe (*a).list(ms)[j as usize], cev);
             }
         } else {
             ap_check_fn(errs, a, m, iid, cev);
@@ -8301,20 +8304,20 @@ fn ap_check_module_on(p: &mut loader::Package, m: usize, errs: &mut diag::Errors
 // promotes failed folds to errors in every downstream program, a blast radius the per-package
 // `--fix` fixpoint cannot validate; prelude const adoption must be a deliberate manual change.
 fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, in_iface: bool) {
-    if a.at_const(fnode).kind != NodeKind::NODE_FUNCTION || in_iface || ap_is_test_fn(a, fnode) {
+    if unsafe (*a).at_const(fnode).kind != NodeKind::NODE_FUNCTION || in_iface || is_test_item(a, fnode) {
         return;
     }
-    let f = a.at_const(fnode).as_data.function;
-    if f.is_const || f.is_extern || f.body == NODE_NONE {
+    let f = unsafe (*a).at_const(fnode).as_data.function;
+    if f.is_const() || f.is_extern() || f.body == NODE_NONE {
         return;
     }
     let src = p.modules[m].source.as_str();
-    let nsp = a.at_const(f.name).as_data.name.text;
+    let nsp = unsafe (*a).at_const(f.name).as_data.name.text;
     if lint_root_mod(p, m) && diag::span_str(src, nsp.start, nsp.end) == "main" {
         return;
     }
     let cev = p.cir as *mut iri::Interp;
-    if cev.fn_const_suggest(m as ModuleId, fnode) {
+    if unsafe (*cev).fn_const_suggest(m as ModuleId, fnode) {
         errs.warn(
             nsp.start,
             nsp.end - nsp.start,
@@ -8341,14 +8344,14 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
         }
         let a = p.module_ast_const(m as ModuleId);
         let mut errs = diag::Errors::new();
-        let items = unsafe a.at_const(a.root).as_data.program.items;
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            if a.at_const(iid).kind == NodeKind::NODE_EXTEND {
-                let in_iface = a.at_const(iid).as_data.extend_def.interface_type != NODE_NONE;
-                let ms = a.at_const(iid).as_data.extend_def.items;
+            let iid = unsafe (*a).list(items)[i as usize];
+            if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
+                let in_iface = unsafe (*a).at_const(iid).as_data.extend_def.interface_type != NODE_NONE;
+                let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
                 for j in 0..ms.len {
-                    cs_check_fn(p, &mut errs, a, m, unsafe a.list(ms)[j as usize], in_iface);
+                    cs_check_fn(p, &mut errs, a, m, unsafe (*a).list(ms)[j as usize], in_iface);
                 }
             } else {
                 cs_check_fn(p, &mut errs, a, m, iid, false);
@@ -8358,7 +8361,7 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
             for k in 0..errs.fixes.len() {
                 let mut f = errs.fixes[k];
                 f.module = m as u32;
-                fixes.push(f);
+                unsafe (*fixes).push(f);
             }
         }
         if errs.has_warnings() {
@@ -8380,8 +8383,8 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
 // the dropped items' uses are invisible under the current target, so a per-target verdict would
 // contradict another target's.
 fn module_platform_gated(a: *const Ast) bool {
-    for i in 0..unsafe a.attrs.len() {
-        if unsafe a.attrs.at(i).kind == AttrKind::ATTR_PLATFORM as u8 {
+    for i in 0..unsafe (*a).attrs.len() {
+        if unsafe (*a).attrs.at(i).kind == AttrKind::ATTR_PLATFORM as u8 {
             return true;
         }
     }
@@ -8394,17 +8397,17 @@ fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
         return true;
     }
     let a = p.module_ast_const(mid);
-    for i in 0..unsafe a.attrs.len() {
-        let k = unsafe a.attrs.at(i).kind;
+    for i in 0..unsafe (*a).attrs.len() {
+        let k = unsafe (*a).attrs.at(i).kind;
         if k == AttrKind::ATTR_C_SOURCE as u8 || k == AttrKind::ATTR_C_LINK as u8 {
             return true;
         }
     }
-    let items = unsafe a.at_const(a.root).as_data.program.items;
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     for i in 0..items.len {
-        let iid = unsafe a.list(items)[i as usize];
-        if a.at_const(iid).kind == NodeKind::NODE_EXTEND {
-            let d = a.resolution_def(a.at_const(iid).as_data.extend_def.target_type);
+        let iid = unsafe (*a).list(items)[i as usize];
+        if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
+            let d = unsafe (*a).resolution_def(unsafe (*a).at_const(iid).as_data.extend_def.target_type);
             if d.node == NODE_NONE || d.module != mid {
                 // Extends a foreign (or unresolved) type.
                 return true;
@@ -8428,21 +8431,21 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
         for k in 0..nm {
             usedm.push(false);
         }
-        for i in 0..a.nnodes() {
-            let d = a.resolution_def(a.nth_id(i));
+        for i in 0..unsafe (*a).nnodes() {
+            let d = unsafe (*a).resolution_def(unsafe (*a).nth_id(i));
             if d.node != NODE_NONE && d.module as usize < nm && d.module as usize != m {
                 usedm.set(d.module as usize, true);
             }
         }
         let src = p.modules[m].source.as_str();
         let mut errs = diag::Errors::new();
-        let items = unsafe a.at_const(a.root).as_data.program.items;
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            if a.at_const(iid).kind != NodeKind::NODE_IMPORT {
+            let iid = unsafe (*a).list(items)[i as usize];
+            if unsafe (*a).at_const(iid).kind != NodeKind::NODE_IMPORT {
                 continue;
             }
-            let path = loader::join_parts(unsafe &*a, src, a.at_const(iid).as_data.import_decl.path, "::");
+            let path = loader::join_parts(unsafe &*a, src, unsafe (*a).at_const(iid).as_data.import_decl.path, "::");
             let mid = p.find(path.as_str());
             if mid < 0 || mid as usize == m {
                 continue;
@@ -8459,7 +8462,7 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
                 }
             }
             if !used {
-                let sp = a.at_const(iid).span;
+                let sp = unsafe (*a).at_const(iid).span;
                 errs.warn(sp.start, sp.end - sp.start, format("unused import '{}'", path.as_str()));
                 let mut fe = sp.end;
                 if fe as usize < src.len() && src[fe as usize] == b'\n' {
@@ -8473,7 +8476,7 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
             for k in 0..errs.fixes.len() {
                 let mut f = errs.fixes[k];
                 f.module = m as u32;
-                fixes.push(f);
+                unsafe (*fixes).push(f);
             }
         }
         if errs.has_warnings() {
@@ -8490,62 +8493,62 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
 // non-generic) whose results are dropped computes nothing observable: dead code. The trailing
 // statement of every block is exempt (it may be the block's value in expression position).
 fn dp_check_stmt(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: usize, sid: NodeId) {
-    if a.at_const(sid).kind != NodeKind::NODE_EXPRESSION_STATEMENT {
+    if unsafe (*a).at_const(sid).kind != NodeKind::NODE_EXPRESSION_STATEMENT {
         return;
     }
-    let mut v = a.at_const(sid).as_data.single.value;
-    while a.at_const(v).kind == NodeKind::NODE_UNARY && (a.at_const(v).as_data.unary.op == TokenType::Move || a.at_const(
+    let mut v = unsafe (*a).at_const(sid).as_data.single.value;
+    while unsafe (*a).at_const(v).kind == NodeKind::NODE_UNARY && (unsafe (*a).at_const(v).as_data.unary.op == TokenType::Move || unsafe (*a).at_const(
         v,
     ).as_data.unary.op == TokenType::Unsafe) {
-        v = a.at_const(v).as_data.unary.operand;
+        v = unsafe (*a).at_const(v).as_data.unary.operand;
     }
-    if a.at_const(v).kind != NodeKind::NODE_CALL {
+    if unsafe (*a).at_const(v).kind != NodeKind::NODE_CALL {
         return;
     }
-    let mut callee = a.at_const(v).as_data.call.callee;
-    if a.at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
-        callee = a.at_const(callee).as_data.specialization.expression;
+    let mut callee = unsafe (*a).at_const(v).as_data.call.callee;
+    if unsafe (*a).at_const(callee).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
+        callee = unsafe (*a).at_const(callee).as_data.specialization.expression;
     }
-    let ck = a.at_const(callee).kind;
-    if ck != NodeKind::NODE_IDENTIFIER && !(ck == NodeKind::NODE_MEMBER && a.at_const(callee).as_data.member.path) {
+    let ck = unsafe (*a).at_const(callee).kind;
+    if ck != NodeKind::NODE_IDENTIFIER && !(ck == NodeKind::NODE_MEMBER && unsafe (*a).at_const(callee).as_data.member.path) {
         return;
     }
-    let mut fd = a.resolution_def(callee);
+    let mut fd = unsafe (*a).resolution_def(callee);
     if fd.node == NODE_NONE && ck == NodeKind::NODE_MEMBER {
-        fd = a.resolution_def(a.at_const(callee).as_data.member.member);
+        fd = unsafe (*a).resolution_def(unsafe (*a).at_const(callee).as_data.member.member);
     }
     if fd.node == NODE_NONE && ck == NodeKind::NODE_IDENTIFIER {
-        fd = DefId { module: m as ModuleId, node: a.resolution(callee) };
+        fd = DefId { module: m as ModuleId, node: unsafe (*a).resolution(callee) };
     }
     if fd.node == NODE_NONE || fd.module as usize >= p.modules.len() || !p.modules[fd.module as usize].has_ast {
         return;
     }
     let fa = p.module_ast_const(fd.module);
-    if fa.at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
+    if unsafe (*fa).at_const(fd.node).kind != NodeKind::NODE_FUNCTION {
         return;
     }
-    let f = fa.at_const(fd.node).as_data.function;
-    if f.is_extern || f.body == NODE_NONE || f.returns.len == 0 || f.generics.len != 0 {
+    let f = unsafe (*fa).at_const(fd.node).as_data.function;
+    if f.is_extern() || f.body == NODE_NONE || f.returns.len == 0 || f.generics.len != 0 {
         return;
     }
     for i in 0..f.params.len {
-        let pid = unsafe fa.list(f.params)[i as usize];
-        if fa.at_const(pid).kind != NodeKind::NODE_PARAMETER {
+        let pid = unsafe (*fa).list(f.params)[i as usize];
+        if unsafe (*fa).at_const(pid).kind != NodeKind::NODE_PARAMETER {
             return;
         }
-        let tk = fa.at_const(fa.at_const(pid).as_data.parameter.ty).kind;
+        let tk = unsafe (*fa).at_const(unsafe (*fa).at_const(pid).as_data.parameter.ty).kind;
         if tk == NodeKind::NODE_POINTER_TYPE || tk == NodeKind::NODE_REFERENCE_TYPE || tk == NodeKind::NODE_SLICE_TYPE || tk == NodeKind::NODE_DYN_TYPE || tk == NodeKind::NODE_FUNCTION_TYPE {
             // A reference-carrying param could observe or mutate caller state.
             return;
         }
     }
     let cev = p.cir as *mut iri::Interp;
-    if !cev.fn_const_suggest(fd.module, fd.node) {
+    if !unsafe (*cev).fn_const_suggest(fd.module, fd.node) {
         return;
     }
-    let csp = a.at_const(callee).span;
+    let csp = unsafe (*a).at_const(callee).span;
     let src = p.modules[m].source.as_str();
-    let ssp = a.at_const(sid).span;
+    let ssp = unsafe (*a).at_const(sid).span;
     errs.warn(
         ssp.start,
         ssp.end - ssp.start,
@@ -8563,14 +8566,14 @@ fn lint_discarded_results(p: &mut loader::Package, only_mod: i32) {
         }
         let a = p.module_ast_const(m as ModuleId);
         let mut errs = diag::Errors::new();
-        let n = a.nnodes();
+        let n = unsafe (*a).nnodes();
         for k in 1..n {
-            let i = a.nth_id(k);
-            if a.at_const(i).kind == NodeKind::NODE_BLOCK {
-                let stmts = a.at_const(i).as_data.block.statements;
+            let i = unsafe (*a).nth_id(k);
+            if unsafe (*a).at_const(i).kind == NodeKind::NODE_BLOCK {
+                let stmts = unsafe (*a).at_const(i).as_data.block.statements;
                 if stmts.len > 1 {
                     for j in 0..stmts.len - 1 {
-                        dp_check_stmt(p, &mut errs, a, m, unsafe a.list(stmts)[j as usize]);
+                        dp_check_stmt(p, &mut errs, a, m, unsafe (*a).list(stmts)[j as usize]);
                     }
                 }
             }
@@ -8613,23 +8616,23 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
         let a = p.module_ast_const(m as ModuleId);
         // Struct-literal initializer names resolve to the field decl but only WRITE it: exclude
         // them from the read set (fields warn on never-READ, Rust semantics).
-        let an = a.nnodes();
+        let an = unsafe (*a).nnodes();
         let mut init_src = Vector::<bool>::new();
         init_src.reserve(an);
         for i in 0..an {
             init_src.push(false);
         }
         for k in 1..an {
-            let kid = a.nth_id(k);
-            if a.at_const(kid).kind == NodeKind::NODE_FIELD_INITIALIZER {
-                let fnn = a.at_const(kid).as_data.field_initializer.name;
-                if a.valid(fnn) {
-                    init_src.set(a.dense(fnn), true);
+            let kid = unsafe (*a).nth_id(k);
+            if unsafe (*a).at_const(kid).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                let fnn = unsafe (*a).at_const(kid).as_data.field_initializer.name;
+                if unsafe (*a).valid(fnn) {
+                    init_src.set(unsafe (*a).dense(fnn), true);
                 }
             }
         }
         for k in 0..an {
-            let d = a.resolution_def(a.nth_id(k));
+            let d = unsafe (*a).resolution_def(unsafe (*a).nth_id(k));
             if d.node != NODE_NONE && d.module as usize < nm && p.modules[d.module as usize].has_ast && p.modules[d.module as usize].ast.valid(
                 d.node,
             ) {
@@ -8651,10 +8654,10 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
         }
         let src = p.modules[m].source.as_str();
         let mut errs = diag::Errors::new();
-        let items = unsafe a.at_const(a.root).as_data.program.items;
+        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
         for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            let it = a.at_const(iid);
+            let iid = unsafe (*a).list(items)[i as usize];
+            let it = unsafe (*a).at_const(iid);
             if it.kind != NodeKind::NODE_STRUCT && it.kind != NodeKind::NODE_ENUM {
                 continue;
             }
@@ -8672,7 +8675,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
             if it.kind == NodeKind::NODE_ENUM {
                 let mut tagged = false;
                 for j in 0..ms.len {
-                    if a.at_const(unsafe a.list(ms)[j as usize]).as_data.variant.payload.len > 0 {
+                    if unsafe (*a).at_const(unsafe (*a).list(ms)[j as usize]).as_data.variant.payload.len > 0 {
                         tagged = true;
                     }
                 }
@@ -8681,19 +8684,19 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
                 }
             }
             for j in 0..ms.len {
-                let mid2 = unsafe a.list(ms)[j as usize];
-                let mn = a.at_const(mid2);
+                let mid2 = unsafe (*a).list(ms)[j as usize];
+                let mn = unsafe (*a).at_const(mid2);
                 let mut nsp = tok::Span::empty();
                 if it.kind == NodeKind::NODE_STRUCT {
                     if mn.kind != NodeKind::NODE_FIELD || mn.as_data.field.is_public {
                         continue;
                     }
-                    nsp = a.at_const(mn.as_data.field.name).as_data.name.text;
+                    nsp = unsafe (*a).at_const(mn.as_data.field.name).as_data.name.text;
                 } else {
                     if mn.kind != NodeKind::NODE_VARIANT {
                         continue;
                     }
-                    nsp = a.at_const(mn.as_data.variant.name).as_data.name.text;
+                    nsp = unsafe (*a).at_const(mn.as_data.variant.name).as_data.name.text;
                 }
                 let hit = if it.kind == NodeKind::NODE_STRUCT {
                     read[starts[m] + mid2 as usize];
@@ -8736,7 +8739,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
 struct ApStage {
     pub p: *mut loader::Package,
     pub jobs: *const Vector<BcJob>,
-    pub outs: *mut diag::Errors, // per item
+    pub outs: *mut Option<Box<diag::Errors>>, // per item
     pub engines: *mut Vector<Box<iri::Interp>>, // idle private engines, under `elock`
     pub elock: *mut i32,
 }
@@ -8757,6 +8760,7 @@ fn ap_engine_take(st: &ApStage) Box<iri::Interp> {
     cev.max_steps = unsafe (&*master).max_steps;
     cev.max_slots = unsafe (&*master).max_slots;
     cev.keep_view = unsafe (&*master).keep_view;
+    cev.record_folds = unsafe (&*master).record_folds;
     return Box::new(cev);
 }
 
@@ -8797,7 +8801,7 @@ fn ap_job(ctx: *mut void, j: u32) {
             gitems::mod_cost(p, m, 1, std::parallel::platform::now_ns() - tp9);
         }
         if errs.errors.len() != 0 {
-            *unsafe &mut *(st.outs + it) = errs;
+            *unsafe &mut *(st.outs + it) = Option::<Box<diag::Errors>>::Some(Box::new(errs));
         }
     }
     if !serial {
@@ -8832,16 +8836,16 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     }
     jobs.truncate(w);
     let ni = p.idx.items.len();
-    let mut outs = Vector::<diag::Errors>::with_capacity(ni);
+    let mut outs = Vector::<Option<Box<diag::Errors>>>::with_capacity(ni);
     for _ in 0..ni {
-        outs.push(diag::Errors::new());
+        outs.push(Option::<Box<diag::Errors>>::None);
     }
     let par = p.jobs != 1 && n > 1;
     let cirp = p.cir as *mut iri::Interp;
     if par {
         // Fold failures recorded through the master's lowering callbacks land behind its lock
         // and dedup canonically in report_fold_errs.
-        unsafe cirp.elock_on = true;
+        unsafe (*cirp).elock_on = true;
         for i in 0..n {
             p.modules[i].ast.ilock_on = true;
         }
@@ -8849,21 +8853,21 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
     let mut engines = Vector::<Box<iri::Interp>>::new();
     let mut elock: i32 = 0;
     let mut st = ApStage { p: p, jobs: &jobs, outs: outs.index_mut(0), engines: &mut engines, elock: &mut elock };
-    let g = sch::Jobs::independent(jobs.len());
-    sch::run_jobs(&g, p.jobs, ap_job, &mut st, null);
+    let mut g = sch::Jobs::independent(jobs.len());
+    sch::run_jobs(&mut g, p.jobs, ap_job, &mut st, null);
     if par {
         for i in 0..n {
             p.modules[i].ast.ilock_on = false;
         }
-        unsafe cirp.elock_on = false;
+        unsafe (*cirp).elock_on = false;
     }
     for i in 0..engines.len() {
-        cirp.st_absorb(engines.at(i).get());
+        unsafe (*cirp).st_absorb(engines.at(i).get());
     }
     for m in 0..n {
         let mut errs = diag::Errors::new();
         for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
-            errs.append(outs.index_mut(it));
+            append_errs(&mut errs, outs.index_mut(it));
         }
         if errs.errors.len() != 0 {
             p.ok = false;
@@ -8902,7 +8906,7 @@ fn lint_package_i(
     ftexts: *mut Vector<String>,
     suggest_const: bool,
 ) i32 {
-    platform_filter(p, target);
+    p.platform_filter(target);
     let n = p.modules.len();
     for i in 0..n {
         let sel = lint_reported(p, i, lint_mod as i32);
@@ -8945,7 +8949,6 @@ fn lint_package_i(
     }
     layout_pass(p);
     let cirk = p.cir as *mut iri::Interp;
-    if cirk != null {}
     // Report-only passes: skipped while `--fix` iterates (they yield no fixes and would print
     // duplicates). The const suggestion is the exception: opt-in (`--const`, warning every
     // eligible function at once would swamp default lints), and under `--fix` it contributes its
@@ -8954,7 +8957,7 @@ fn lint_package_i(
         lint_unused_items(p, lint_mod as i32);
         let cirp0 = p.cir as *mut iri::Interp;
         if cirp0 != null {
-            unsafe cirp0.all_typed = true;
+            unsafe (*cirp0).all_typed = true;
         }
         check_always_panics(p, lint_mod as i32);
         lint_discarded_results(p, lint_mod as i32);
@@ -8965,7 +8968,7 @@ fn lint_package_i(
         lint_const_suggest(p, lint_mod as i32, fixes);
     }
     if cirk != null {
-        cirk.keep_view_clear();
+        unsafe (*cirk).keep_view_clear();
     }
     if !p.ok || p.lint_warnings != 0 {
         return 1;
@@ -8973,7 +8976,6 @@ fn lint_package_i(
     return 0;
 }
 
-/// Compile a loaded package into the <gen_root> C tree: full per-module pipeline, instance propagation,
 /// Per-file completion callback for the streaming build: the engine starts compiling a finished TU
 /// while later ones are still being emitted. `kind` 0 = header, 1 = C source. Paths are full paths
 /// under the package's gen_root. Notifications for one build arrive from a single thread.
@@ -8985,13 +8987,14 @@ pub struct EmitSink {
 fn sink_notify(sink: *mut EmitSink, pr: &mut prb::Probe, path: str, kind: i32) {
     if sink != null {
         let m9 = pr.start();
-        let f = unsafe sink.notify;
-        f(unsafe sink.ctx, path, kind);
+        let f = unsafe (*sink).notify;
+        f(unsafe (*sink).ctx, path, kind);
         pr.stop(prb::P_SYNC, m9);
     }
 }
 
-/// Then codegen of the live modules (headers first, then sources across `jobs` forked workers),
+/// Compile a loaded package into the <gen_root> C tree: full per-module pipeline, instance propagation,
+/// then codegen of the live modules (headers first, then sources across `jobs` forked workers),
 /// pruning stale outputs afterwards. A non-empty `out_bin` also compiles + links the program there
 /// (`build`); `topts.enabled` synthesizes the test runner and, without a `sink`, builds and runs it
 /// too. `sink` (may be null) hears about every finished output file, which is what lets the build
@@ -9028,7 +9031,7 @@ fn run_package_i(
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tp0 = unsafe shim::sc_ticks_ms();
     syntax_stats_report(p, "parse");
-    platform_filter(p, target);
+    p.platform_filter(target);
     let n = p.modules.len();
     let mut co = CemitOut::new(n);
     // The per-item cost records are serial-only (the frontiers' tasks would race on them); the
@@ -9082,8 +9085,8 @@ fn run_package_i(
         let ce9 = p.cir as *mut iri::Interp;
         eprint(
             "item-stats evaluation: {} bodies lowered from syntax during typecheck, {} refusals\n",
-            unsafe ce9.st_fresh,
-            unsafe ce9.body_miss_n,
+            unsafe (*ce9).st_fresh,
+            unsafe (*ce9).body_miss_n,
         );
     }
     if tstat {
@@ -9099,8 +9102,8 @@ fn run_package_i(
     {
         let cirp1 = p.cir as *mut iri::Interp;
         if cirp1 != null {
-            unsafe cirp1.all_typed = true;
-            unsafe cirp1.record_folds = true;
+            unsafe (*cirp1).all_typed = true;
+            unsafe (*cirp1).record_folds = true;
         }
     }
     let mut irkeep = irl::Keep::new();
@@ -9128,11 +9131,11 @@ fn run_package_i(
         if ce9 != null {
             eprint(
                 "interp bodies after borrowck: {} lookups, {} kept hits, {} fresh lowerings ({} generic instances, {} not kept)\n",
-                unsafe ce9.st_lookups,
-                unsafe ce9.st_kept_hits,
-                unsafe ce9.st_fresh,
-                unsafe ce9.st_fresh_generic,
-                unsafe ce9.st_fresh_miss,
+                unsafe (*ce9).st_lookups,
+                unsafe (*ce9).st_kept_hits,
+                unsafe (*ce9).st_fresh,
+                unsafe (*ce9).st_fresh_generic,
+                unsafe (*ce9).st_fresh_miss,
             );
         }
         tp0 = t9;
@@ -9158,7 +9161,7 @@ fn run_package_i(
     let cirf = p.cir as *mut iri::Interp;
     if cirf != null {
         let pv = p as *mut loader::Package;
-        unsafe cirf.all_typed = true;
+        unsafe (*cirf).all_typed = true;
         // An ERROR, not a lint: it runs on every build (user modules; std is gated by check.sh's
         // explicit std lint invocations).
         check_always_panics(p, -1);
@@ -9167,17 +9170,17 @@ fn run_package_i(
             eprint("phase panics: {} ms\n", t9 - tp0);
             eprint(
                 "interp bodies: {} lookups, {} kept hits, {} fresh lowerings ({} generic instances, {} not kept), {} boxes retained by the master engine\n",
-                unsafe cirf.st_lookups,
-                unsafe cirf.st_kept_hits,
-                unsafe cirf.st_fresh,
-                unsafe cirf.st_fresh_generic,
-                unsafe cirf.st_fresh_miss,
-                unsafe cirf.bodies.len(),
+                unsafe (*cirf).st_lookups,
+                unsafe (*cirf).st_kept_hits,
+                unsafe (*cirf).st_fresh,
+                unsafe (*cirf).st_fresh_generic,
+                unsafe (*cirf).st_fresh_miss,
+                unsafe (*cirf).bodies.len(),
             );
             tp0 = t9;
         }
-        cirf.flush_asserts(flush_assert_err, pv);
-        cirf.flush_consts(flush_const_err, pv);
+        unsafe (*cirf).flush_asserts(flush_assert_err, pv);
+        unsafe (*cirf).flush_consts(flush_const_err, pv);
     }
     if !p.ok {
         return 1;
@@ -9189,7 +9192,7 @@ fn run_package_i(
         eprint("phase lint+panics: {} ms\n", t9 - tp0);
         tp0 = t9;
     }
-    let testing = topts != null && unsafe topts.enabled;
+    let testing = topts != null && unsafe (*topts).enabled;
     let mut plan = TestPlan::new(n);
     if testing {
         test_plan_build(p, &mut plan);
@@ -9206,7 +9209,7 @@ fn run_package_i(
     // A tree that did not exist before this build holds no orphan to prune afterwards.
     let mut gr9 = String::from_str(p.gen_root.as_str());
     let fresh_tree = unsafe shim::sc_stat_isdir(gr9.cstr()) != 1;
-    write_super_rt(p.gen_root.as_str());
+    let mut err = !write_super_rt(p.gen_root.as_str());
     let root = p.gen_root.as_str();
     let mut keep = Vector::<String>::new();
     keep.push(build_out_path(root, "super_rt", ".h"));
@@ -9214,7 +9217,6 @@ fn run_package_i(
     sink_notify(sink, &mut co.pr, keep.at(0).as_str(), 0);
     // Self-contained: carries its own includes.
     sink_notify(sink, &mut co.pr, keep.at(1).as_str(), 1);
-    let mut err = false;
     // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
     let pre_ext = keep.len();
     ext_c_collect(p, &mut keep, &mut err, target);
@@ -9254,10 +9256,10 @@ fn run_package_i(
         if cirp != null {
             // The memos would answer a scalar without running its callees; the emission engine
             // starts without them and runs everything, so this pass must too.
-            unsafe cirp.call_memo.clear();
-            unsafe cirp.item_memo.clear();
-            unsafe cirp.ememo.clear();
-            unsafe cirp.copy_kept = true;
+            unsafe (*cirp).call_memo.clear();
+            unsafe (*cirp).item_memo.clear();
+            unsafe (*cirp).ememo.clear();
+            unsafe (*cirp).copy_kept = true;
             for m in 0..n {
                 if !p.modules[m].has_ast {
                     continue;
@@ -9266,12 +9268,12 @@ fn run_package_i(
                 for i in 0..a.nodes.len() {
                     let nd = a.at_const(i as NodeId);
                     if nd.kind == NodeKind::NODE_CONST && !nd.as_data.const_def.is_extern && nd.as_data.const_def.value != NODE_NONE {
-                        let _ = cirp.eval_const_in(m as ModuleId, i as NodeId, 1u32 << 20);
+                        let _ = unsafe (*cirp).eval_const_in(m as ModuleId, i as NodeId, 1u32 << 20);
                     }
                 }
             }
-            unsafe cirp.copy_kept = false;
-            cirp.keep_view_clear();
+            unsafe (*cirp).copy_kept = false;
+            unsafe (*cirp).keep_view_clear();
         }
     }
     // Every body is lowered and kept, every deferred constant is flushed, and the live set and the
@@ -9290,7 +9292,7 @@ fn run_package_i(
         let cirg = p.cir as *mut iri::Interp;
         if cirg != null {
             // The seed/instance lowering attempts mandatory folds.
-            unsafe cirg.record_folds = true;
+            unsafe (*cirg).record_folds = true;
         }
     }
     if tstat {
@@ -9307,12 +9309,20 @@ fn run_package_i(
     if !p.ok {
         err = true;
     }
+    // A depth refusal leaves its instance unemitted: the located error explains the skip.
+    let deep = report_depth_refusals(p, &mut co.refused);
+    if deep {
+        err = true;
+    }
     if co.skips != 0 {
-        unsafe stdio::fprintf(
-            stdio::stderr(),
-            "error: internal: the backend refused %llu emissions\n".ptr() as *const char,
-            co.skips,
-        );
+        report_refusals(p, &mut co.refused);
+        if !deep {
+            unsafe stdio::fprintf(
+                stdio::stderr(),
+                "error: internal: the backend refused %llu emissions\n".ptr() as *const char,
+                co.skips,
+            );
+        }
         err = true;
     }
     // Transitive TU pruning: keep scan-live modules, then everything a KEPT TU (or the always-
@@ -9509,7 +9519,7 @@ fn run_package_i(
         }
     }
     // Drop outputs of an earlier build that this program does not emit, so the tree matches the current
-    // sources. Skip on a keep-list OOM: never risk deleting a live output.
+    // sources.
     let mut broot = PathBuf {};
     // Root is a str view (not nul-terminated); bound the copy with %.*s or %s runs off the buffer end.
     let bn = unsafe stdio::snprintf(

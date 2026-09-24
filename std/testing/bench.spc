@@ -546,18 +546,6 @@ extend Bencher {
     }
 }
 
-extend Bencher as Free {
-    pub fn free(self: &mut Bencher) {
-        self.name.free();
-        self.unit_name.free();
-        self.samples.free();
-        self.cycles.free();
-        self.cpu.free();
-        self.diag.free();
-        self.extra.free();
-    }
-}
-
 const fn median_of(v: &Vector<f64>) f64 {
     let n = v.len();
     if n % 2 == 0 {
@@ -806,7 +794,6 @@ fn run_one(e: &Entry) {
     if !e.quiet {
         b.report();
     }
-    b.free();
 }
 
 // Release every runtime pool a benchmark may have started. The blocking pool has threads of its own that

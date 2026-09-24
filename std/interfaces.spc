@@ -24,6 +24,15 @@ pub interface Send {}
 /// Structural and automatic on the same rules as `Send`; override with an explicit `extend T as Sync {}`.
 pub interface Sync {}
 
+/// Marker: a `Copy` value is duplicated by a plain bitwise copy, so a use of it never moves it. Conformance
+/// is STRUCTURAL and automatic: scalars, `str`, raw pointers, shared references, `fn` pointers, and arrays,
+/// slices, tuples and non-`Free` aggregates whose members are all `Copy`. An owning value (`Free`, an
+/// owning closure, `Box<dyn I>`) and a `&mut T` are never `Copy`. Inside a generic body a type parameter
+/// is `Copy` only when its bounds say so (`T: Copy`, or a bound whose superinterfaces include `Copy`);
+/// otherwise its values move and drop like any owning value. An explicit `extend T as Copy {}` is accepted
+/// only where the structural rule already holds.
+pub interface Copy {}
+
 /// Arithmetic operator overloading: `a + b` dispatches to `a.add(&b)`, and likewise `-`/`*`/`/`/`%` to
 /// sub/mul/div/rem. A type need not name these interfaces: a bare method of the right name is enough;
 /// but conforming documents the intent and is what a generic bound can require.
@@ -173,6 +182,7 @@ extern "C" {
     fn realloc(ptr: *mut void, size: usize) *mut void;
     fn free(ptr: *mut void) void;
     fn abort() void;
+    fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
 }
 
 /// The memory source a heap container allocates through. Carried as a type parameter (`Box<T, A = Global>`,
@@ -183,31 +193,65 @@ extern "C" {
 /// `size` and `align` (and `realloc` the `old_size`), which a bump/arena allocator needs and which a
 /// `malloc`-backed one may ignore. `alloc`/`realloc` return a usable, suitably-aligned block (never null:
 /// they handle OOM themselves). Allocators own nothing themselves (the memory they hand out is owned by the
-/// container), so they are not `Free` and are freely copied when a container is cloned.
+/// container), so an allocator is `Copy`: a container's clone or `map` copies its handle.
 /// Every method is `unsafe`, and the bookkeeping arguments are why. `dealloc` and `realloc` are TOLD the
 /// block's `size` and `align`, and an allocator that trusts them (a bump or arena one must) corrupts its
 /// own free list when they are wrong. Nothing checks that the numbers describe the block `ptr` came from, or
 /// that `ptr` came from this allocator at all, so the caller says so.
-pub interface Allocator {
+pub interface Allocator: Copy {
     unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void;
     unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void;
     unsafe fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) void;
 }
 
-/// The default allocator: the C heap (`malloc`/`realloc`/`free`), aborting on out-of-memory. A zero-sized
-/// tag: it stores nothing, so `Box<T>` is `{ ptr }` with no space overhead. `malloc` already returns
-/// memory aligned for any fundamental type, so `Global` ignores `align` (and the bookkeeping `size`s).
+// Over-aligned blocks: the platform call is chosen in the header, where the C compiler knows the target.
+extern "C" "alloc.h" {
+    fn sc_alloc_aligned(size: usize, align: usize) *mut void;
+    fn sc_free_aligned(ptr: *mut void) void;
+}
+
+// The alignment every `malloc` result has on the supported targets: 16 bytes on 64-bit ones. On wasm32 it
+// is 8, below wasi-libc's 16, so a 16-aligned type there takes the over-aligned path, which is also correct.
+const MALLOC_ALIGN: usize = 2 * sizeof(usize);
+
+/// The default allocator: the C heap, aborting on out-of-memory. A zero-sized tag: it stores nothing, so
+/// `Box<T>` is `{ ptr }` with no space overhead. An `align` up to what `malloc` guarantees takes
+/// `malloc`/`realloc`/`free`; a larger one takes the platform's aligned allocation (`posix_memalign`, or
+/// `_aligned_malloc` on Windows), and the same `align` must be passed back to `realloc` and `dealloc`.
+/// The bookkeeping `size`s matter only for moving an over-aligned block.
 pub struct Global {}
+
+// Restates the derived conformance: the bootstrap compiler predates the derivation and checks
+// `Allocator`'s superinterface against written conformances only.
+extend Global as Copy {}
 
 extend Global as Allocator {
     pub unsafe const fn alloc(self: &mut Global, size: usize, align: usize) *mut void {
-        let p = unsafe malloc(size);
+        let p = if align > MALLOC_ALIGN {
+            unsafe sc_alloc_aligned(size, align);
+        } else {
+            unsafe malloc(size);
+        };
         if p == null {
             unsafe abort();
         }
         return p;
     }
     pub unsafe const fn realloc(self: &mut Global, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
+        if align > MALLOC_ALIGN {
+            // `realloc` keeps only malloc's alignment, so the block moves to a fresh aligned one.
+            let p = unsafe self.alloc(new_size, align);
+            if ptr != null {
+                let n = if old_size < new_size {
+                    old_size;
+                } else {
+                    new_size;
+                };
+                unsafe memcpy(p, ptr, n);
+                unsafe sc_free_aligned(ptr);
+            }
+            return p;
+        }
         let p = unsafe realloc(ptr, new_size);
         if p == null {
             unsafe abort();
@@ -215,6 +259,10 @@ extend Global as Allocator {
         return p;
     }
     pub unsafe const fn dealloc(self: &mut Global, ptr: *mut void, size: usize, align: usize) {
+        if align > MALLOC_ALIGN {
+            unsafe sc_free_aligned(ptr);
+            return;
+        }
         unsafe free(ptr);
     }
 }

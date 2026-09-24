@@ -185,15 +185,7 @@ fn check_body(opers: u32) ir::CoreBody {
     );
     b.places.push(ir::Place { base: l, proj_start: 0, proj_len: 0, ty: ut });
     b.constants.push(
-        ir::Constant {
-            kind: ir::CK_INT,
-            ty: ut,
-            val: 0,
-            raw: tok_span(),
-            item: DefId { module: 0, node: NODE_NONE },
-            targ_start: 0,
-            targ_len: 0,
-        },
+        ir::Constant { kind: ir::CK_INT, ty: ut, val: 0, raw: tok_span(), item: DefId { module: 0, node: NODE_NONE } },
     );
     b.operands.push(ir::Operand { kind: ir::OP_CONST, data: 0, ty: ut });
     b.oper_pool.push(0);
@@ -208,7 +200,7 @@ fn check_body(opers: u32) ir::CoreBody {
             item: DefId { module: 0, node: NODE_NONE },
         },
     );
-    b.statements.push(ir::Statement { kind: ir::ST_ASSIGN, place: 0, rvalue: 0, a: 0, b: 0, span: tok_span() });
+    b.statements.push(ir::Statement { kind: ir::ST_ASSIGN, place: 0, rvalue: 0, a: 0, span: tok_span() });
     let blk = b.add_block();
     b.blocks[blk as usize].stmt_start = 0;
     b.blocks[blk as usize].stmt_len = 1;

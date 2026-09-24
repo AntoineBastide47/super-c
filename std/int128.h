@@ -13,47 +13,47 @@
 #endif
 #if defined(__SIZEOF_INT128__)
 static inline int sc_has_i128(void) { return 1; }
-static inline void sc_i128_add(uint64_t __al, uint64_t __ah, uint64_t __bl, uint64_t __bh, uint64_t *__rl, uint64_t *__rh, uint64_t *__c) {
-  unsigned __int128 __a = (unsigned __int128)__ah << 64 | __al;
-  unsigned __int128 __s = __a + ((unsigned __int128)__bh << 64 | __bl);
-  *__rl = (uint64_t)__s; *__rh = (uint64_t)(__s >> 64); *__c = __s < __a;
+static inline void sc_i128_add(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_c) {
+  unsigned __int128 sc_a = (unsigned __int128)sc_ah << 64 | sc_al;
+  unsigned __int128 sc_s = sc_a + ((unsigned __int128)sc_bh << 64 | sc_bl);
+  *sc_rl = (uint64_t)sc_s; *sc_rh = (uint64_t)(sc_s >> 64); *sc_c = sc_s < sc_a;
 }
-static inline void sc_i128_sub(uint64_t __al, uint64_t __ah, uint64_t __bl, uint64_t __bh, uint64_t *__rl, uint64_t *__rh, uint64_t *__b) {
-  unsigned __int128 __a = (unsigned __int128)__ah << 64 | __al;
-  unsigned __int128 __y = (unsigned __int128)__bh << 64 | __bl;
-  unsigned __int128 __d = __a - __y;
-  *__rl = (uint64_t)__d; *__rh = (uint64_t)(__d >> 64); *__b = __a < __y;
+static inline void sc_i128_sub(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_b) {
+  unsigned __int128 sc_a = (unsigned __int128)sc_ah << 64 | sc_al;
+  unsigned __int128 sc_y = (unsigned __int128)sc_bh << 64 | sc_bl;
+  unsigned __int128 sc_d = sc_a - sc_y;
+  *sc_rl = (uint64_t)sc_d; *sc_rh = (uint64_t)(sc_d >> 64); *sc_b = sc_a < sc_y;
 }
-static inline void sc_i128_mul(uint64_t __al, uint64_t __ah, uint64_t __bl, uint64_t __bh, uint64_t *__rl, uint64_t *__rh, uint64_t *__hl, uint64_t *__hh) {
-  /* The full 256-bit product from four 64x64 partials. __m1 cannot overflow (at most 2^128 - 2^64 - 1);
-     __m2 can, and its carry sits 128 bits up, inside __hi's headroom. */
-  unsigned __int128 __p0 = (unsigned __int128)__al * __bl;
-  unsigned __int128 __m1 = (unsigned __int128)__al * __bh + (uint64_t)(__p0 >> 64);
-  unsigned __int128 __m2 = __m1 + (unsigned __int128)__ah * __bl;
-  unsigned __int128 __hi = (unsigned __int128)__ah * __bh + (uint64_t)(__m2 >> 64) + ((unsigned __int128)(__m2 < __m1) << 64);
-  *__rl = (uint64_t)__p0; *__rh = (uint64_t)__m2;
-  *__hl = (uint64_t)__hi; *__hh = (uint64_t)(__hi >> 64);
+static inline void sc_i128_mul(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_hl, uint64_t *sc_hh) {
+  /* The full 256-bit product from four 64x64 partials. sc_m1 cannot overflow (at most 2^128 - 2^64 - 1);
+     sc_m2 can, and its carry sits 128 bits up, inside sc_hi's headroom. */
+  unsigned __int128 sc_p0 = (unsigned __int128)sc_al * sc_bl;
+  unsigned __int128 sc_m1 = (unsigned __int128)sc_al * sc_bh + (uint64_t)(sc_p0 >> 64);
+  unsigned __int128 sc_m2 = sc_m1 + (unsigned __int128)sc_ah * sc_bl;
+  unsigned __int128 sc_hi = (unsigned __int128)sc_ah * sc_bh + (uint64_t)(sc_m2 >> 64) + ((unsigned __int128)(sc_m2 < sc_m1) << 64);
+  *sc_rl = (uint64_t)sc_p0; *sc_rh = (uint64_t)sc_m2;
+  *sc_hl = (uint64_t)sc_hi; *sc_hh = (uint64_t)(sc_hi >> 64);
 }
-static inline void sc_i128_divmod(uint64_t __al, uint64_t __ah, uint64_t __bl, uint64_t __bh, uint64_t *__ql, uint64_t *__qh, uint64_t *__rl, uint64_t *__rh) {
-  unsigned __int128 __a = (unsigned __int128)__ah << 64 | __al;
-  unsigned __int128 __b = (unsigned __int128)__bh << 64 | __bl;
-  unsigned __int128 __q = __a / __b, __r = __a % __b;
-  *__ql = (uint64_t)__q; *__qh = (uint64_t)(__q >> 64);
-  *__rl = (uint64_t)__r; *__rh = (uint64_t)(__r >> 64);
+static inline void sc_i128_divmod(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_ql, uint64_t *sc_qh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  unsigned __int128 sc_a = (unsigned __int128)sc_ah << 64 | sc_al;
+  unsigned __int128 sc_b = (unsigned __int128)sc_bh << 64 | sc_bl;
+  unsigned __int128 sc_q = sc_a / sc_b, sc_r = sc_a % sc_b;
+  *sc_ql = (uint64_t)sc_q; *sc_qh = (uint64_t)(sc_q >> 64);
+  *sc_rl = (uint64_t)sc_r; *sc_rh = (uint64_t)(sc_r >> 64);
 }
 #else
 static inline int sc_has_i128(void) { return 0; }
-static inline void sc_i128_add(uint64_t __al, uint64_t __ah, uint64_t __bl, uint64_t __bh, uint64_t *__rl, uint64_t *__rh, uint64_t *__c) {
-  (void)__al; (void)__ah; (void)__bl; (void)__bh; (void)__rl; (void)__rh; (void)__c; abort();
+static inline void sc_i128_add(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_c) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; (void)sc_c; abort();
 }
-static inline void sc_i128_sub(uint64_t __al, uint64_t __ah, uint64_t __bl, uint64_t __bh, uint64_t *__rl, uint64_t *__rh, uint64_t *__b) {
-  (void)__al; (void)__ah; (void)__bl; (void)__bh; (void)__rl; (void)__rh; (void)__b; abort();
+static inline void sc_i128_sub(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_b) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; (void)sc_b; abort();
 }
-static inline void sc_i128_mul(uint64_t __al, uint64_t __ah, uint64_t __bl, uint64_t __bh, uint64_t *__rl, uint64_t *__rh, uint64_t *__hl, uint64_t *__hh) {
-  (void)__al; (void)__ah; (void)__bl; (void)__bh; (void)__rl; (void)__rh; (void)__hl; (void)__hh; abort();
+static inline void sc_i128_mul(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_hl, uint64_t *sc_hh) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; (void)sc_hl; (void)sc_hh; abort();
 }
-static inline void sc_i128_divmod(uint64_t __al, uint64_t __ah, uint64_t __bl, uint64_t __bh, uint64_t *__ql, uint64_t *__qh, uint64_t *__rl, uint64_t *__rh) {
-  (void)__al; (void)__ah; (void)__bl; (void)__bh; (void)__ql; (void)__qh; (void)__rl; (void)__rh; abort();
+static inline void sc_i128_divmod(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_ql, uint64_t *sc_qh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_ql; (void)sc_qh; (void)sc_rl; (void)sc_rh; abort();
 }
 #endif
 #if defined(__GNUC__) || defined(__clang__)

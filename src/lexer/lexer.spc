@@ -21,25 +21,16 @@ pub const SOURCE_PAD: usize = 8;
 
 /// Per-byte character-class flags, indexed by byte value (see build_char_class). Held BY VALUE in each Lexer
 /// so there is no global mutable state (the compiler lexes many sources, possibly concurrently in-process).
-pub const CC_ID_START: u8 = 1;
-pub const CC_ID_PART: u8 = 2;
-pub const CC_DIGIT: u8 = 4;
-pub const CC_HEX: u8 = 8;
-pub const CC_WS: u8 = 16;
+pub const CC_ID_PART: u8 = 1;
+pub const CC_WS: u8 = 2;
 pub type CharClass = Array<u8, 256>;
 
 const fn build_char_class() CharClass {
     let mut c = CharClass {};
     for b in 0..255u8 {
         let mut fl = 0u8;
-        if b == b'_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' {
-            fl = fl | CC_ID_START | CC_ID_PART;
-        }
-        if b >= b'0' && b <= b'9' {
-            fl = fl | CC_ID_PART | CC_DIGIT | CC_HEX;
-        }
-        if b >= b'a' && b <= b'f' || b >= b'A' && b <= b'F' {
-            fl = fl | CC_HEX;
+        if b == b'_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' || b >= b'0' && b <= b'9' {
+            fl = fl | CC_ID_PART;
         }
         if b == b' ' || b == b'\t' || b == b'\n' || b == b'\x0b' || b == b'\x0c' || b == b'\r' {
             fl = fl | CC_WS;
@@ -346,12 +337,23 @@ extend Lexer {
         };
     }
 
+    // The source byte at `i`, unchecked: `i` stays within the SOURCE_PAD NUL bytes past the logical
+    // end, because the scan loops stop at the first NUL and fixed lookahead reads at most 4 bytes past it.
+    const fn at(self: &Self, i: usize) u8 {
+        return unsafe self.bytes.ptr()[i];
+    }
+
     const fn is_eof(self: &Self) bool {
         return self.current >= self.bytes.len();
     }
 
     fn add_token(self: &mut Self, token_type: TokenType) {
-        self.tokens.push(Token::new(token_type, self.start as u32, (self.current - self.start) as u32));
+        let mut len = self.current - self.start;
+        if len > TOKEN_MAX_LEN {
+            self.error("a token must be shorter than 16 MiB");
+            len = TOKEN_MAX_LEN;
+        }
+        self.tokens.push(Token::new(token_type, self.start as u32, len as u32));
     }
 
     fn add_match(self: &mut Self, expected: u8, matched: TokenType, unmatched: TokenType) {
@@ -364,11 +366,11 @@ extend Lexer {
     }
 
     const fn peek_byte(self: &Self) u8 {
-        return self.bytes.byte_at(self.current);
+        return self.at(self.current);
     }
 
     const fn peek_next(self: &Self) u8 {
-        return self.bytes.byte_at(self.current + 1);
+        return self.at(self.current + 1);
     }
 
     const fn match_byte(self: &mut Self, expected: u8) bool {
@@ -414,7 +416,7 @@ extend Lexer {
             return 0;
         }
         for i in 1..width {
-            let continuation = self.bytes.byte_at(current + i);
+            let continuation = self.at(current + i);
             if (continuation & 0xC0u8) != 0x80u8 {
                 *size = 0;
                 return 0;
@@ -432,13 +434,13 @@ extend Lexer {
     @c.always_inline
     fn identifier(self: &mut Self) {
         let mut i = self.current;
-        while (self.class[self.bytes.byte_at(i) as usize] & CC_ID_PART) != 0u8 {
+        while (self.class[self.at(i) as usize] & CC_ID_PART) != 0u8 {
             i += 1;
         }
         self.current = i;
 
         let identifier_len = i - self.start;
-        if identifier_len == 1 && self.bytes.byte_at(self.start) == b'_' {
+        if identifier_len == 1 && self.at(self.start) == b'_' {
             self.add_token(TokenType::Underscore);
             return;
         }
@@ -457,11 +459,11 @@ extend Lexer {
             let inl = identifier_len == 6 && memeq(p, "inline");
             if inl || identifier_len == 8 && memeq(p, "parallel") {
                 let mut j = i;
-                while (self.class[self.bytes.byte_at(j) as usize] & CC_WS) != 0u8 {
+                while (self.class[self.at(j) as usize] & CC_WS) != 0u8 {
                     j += 1;
                 }
                 let p = unsafe (self.bytes.ptr() + j);
-                if memeq(p, "for") && (self.class[self.bytes.byte_at(j + 3) as usize] & CC_ID_PART) == 0u8 {
+                if memeq(p, "for") && (self.class[self.at(j + 3) as usize] & CC_ID_PART) == 0u8 {
                     kind = if inl {
                         TokenType::InlineFor;
                     } else {
@@ -477,7 +479,7 @@ extend Lexer {
     @c.cold
     fn validate_utf8_at(self: &mut Self, i: &mut usize) bool {
         let mut size: usize = 0;
-        self.decode_at_b(self.bytes.byte_at(*i), *i, &mut size);
+        self.decode_at_b(self.at(*i), *i, &mut size);
         if size == 0 {
             self.error_at(*i, 1, "source is not valid UTF-8");
             *i += 1;
@@ -489,7 +491,7 @@ extend Lexer {
 
     fn whitespace(self: &mut Self) {
         let mut i = self.current;
-        while (self.class[self.bytes.byte_at(i) as usize] & CC_WS) != 0u8 {
+        while (self.class[self.at(i) as usize] & CC_WS) != 0u8 {
             i += 1;
         }
         self.current = i;
@@ -498,7 +500,7 @@ extend Lexer {
     fn line_comment(self: &mut Self) {
         let mut i = self.current;
         loop {
-            let b = self.bytes.byte_at(i);
+            let b = self.at(i);
             if b == b'\n' || b == b'\r' {
                 break;
             }
@@ -521,11 +523,11 @@ extend Lexer {
         let mut i = self.current;
         let mut depth: usize = 1;
         loop {
-            let b = self.bytes.byte_at(i);
-            if b == b'/' && self.bytes.byte_at(i + 1) == b'*' {
+            let b = self.at(i);
+            if b == b'/' && self.at(i + 1) == b'*' {
                 depth = depth + 1;
                 i += 2;
-            } else if b == b'*' && self.bytes.byte_at(i + 1) == b'/' {
+            } else if b == b'*' && self.at(i + 1) == b'/' {
                 i += 2;
                 depth -= 1;
                 if depth == 0 {
@@ -557,7 +559,7 @@ extend Lexer {
         }
 
         let at = self.current - 1;
-        let escaped = self.bytes.byte_at(self.current);
+        let escaped = self.at(self.current);
         self.current += 1;
 
         if escaped == b'n' {
@@ -582,16 +584,14 @@ extend Lexer {
             return 0;
         }
         if escaped == b'x' {
-            if is_hex(self.bytes.byte_at(self.current)) && is_hex(self.bytes.byte_at(self.current + 1)) {
-                let value = (hex_value(self.bytes.byte_at(self.current)) << 4 | hex_value(
-                    self.bytes.byte_at(self.current + 1),
-                )) as u32;
+            if is_hex(self.at(self.current)) && is_hex(self.at(self.current + 1)) {
+                let value = (hex_value(self.at(self.current)) << 4 | hex_value(self.at(self.current + 1))) as u32;
                 self.current += 2;
                 return value;
             }
 
             self.error_at(at, self.current - at, "\\x escape requires exactly two hexadecimal digits");
-            while self.current < at + 4 && is_hex(self.bytes.byte_at(self.current)) {
+            while self.current < at + 4 && is_hex(self.at(self.current)) {
                 self.current += 1;
             }
             return UINT32_MAX;
@@ -638,7 +638,7 @@ extend Lexer {
     fn string_lit(self: &mut Self, kind: TokenType) {
         let mut i = self.current;
         loop {
-            let b = self.bytes.byte_at(i);
+            let b = self.at(i);
             i += 1;
             if b == b'"' {
                 self.current = i;
@@ -655,7 +655,7 @@ extend Lexer {
                 self.error("unterminated string literal");
                 // Resync past the next '"' (or EOF) so the rest of the line cannot cascade errors.
                 while self.current < self.bytes.len() {
-                    let recovery = self.bytes.byte_at(self.current);
+                    let recovery = self.at(self.current);
                     self.current += 1;
                     if recovery == b'"' {
                         break;
@@ -682,15 +682,15 @@ extend Lexer {
         let mut i = self.current;
         let mut b: u8 = 0;
         if i < self.bytes.len() {
-            b = self.bytes.byte_at(i);
+            b = self.at(i);
         }
         if !is_id_start(b) {
             return false;
         }
-        while i < self.bytes.len() && is_id_part_byte(self.bytes.byte_at(i)) {
+        while i < self.bytes.len() && is_id_part_byte(self.at(i)) {
             i += 1;
         }
-        return i >= self.bytes.len() || self.bytes.byte_at(i) != b'\'';
+        return i >= self.bytes.len() || self.at(i) != b'\'';
     }
 
     fn character(self: &mut Self, byte_character: bool) {
@@ -698,7 +698,7 @@ extend Lexer {
         let mut malformed = false; // an inner error was already diagnosed; suppresses the count check at the close
         let mut invalid_byte = false; // b'..' held a multi-byte scalar; diagnosed only at the closing quote
         while !self.is_eof() {
-            let b = self.bytes.byte_at(self.current);
+            let b = self.at(self.current);
             self.current += 1;
             if b == b'\'' {
                 if !malformed && count != 1 {
@@ -758,19 +758,19 @@ extend Lexer {
     fn matchertext_ahead(self: &Self) bool {
         let mut i = self.current;
         let mut dn: usize = 0;
-        while i < self.bytes.len() && is_mt_open(self.bytes.byte_at(i)) {
+        while i < self.bytes.len() && is_mt_open(self.at(i)) {
             i += 1;
             dn = dn + 1;
         }
         let mut k = dn;
         while k > 0 {
             k = k - 1;
-            if i >= self.bytes.len() || self.bytes.byte_at(i) != mt_closer(self.bytes.byte_at(self.current + k)) {
+            if i >= self.bytes.len() || self.at(i) != mt_closer(self.at(self.current + k)) {
                 return false;
             }
             i += 1;
         }
-        return i < self.bytes.len() && self.bytes.byte_at(i) == b'"';
+        return i < self.bytes.len() && self.at(i) == b'"';
     }
 
     // Does src[at..at+dn] spell the hole delimiter sequence? Openers as written for the open side;
@@ -786,13 +786,13 @@ extend Lexer {
             } else {
                 k;
             };
-            let d = self.bytes.byte_at(dpos + idx);
+            let d = self.at(dpos + idx);
             let want = if close {
                 mt_closer(d);
             } else {
                 d;
             };
-            if self.bytes.byte_at(at + k) != want {
+            if self.at(at + k) != want {
                 return false;
             }
             k = k + 1;
@@ -811,7 +811,7 @@ extend Lexer {
         let base = self.mt[fi].base as usize;
         let mut i = self.current;
         while i < self.bytes.len() {
-            let b = self.bytes.byte_at(i);
+            let b = self.at(i);
             if b == b'\0' {
                 self.error_at(i, 1, "NUL byte is not allowed in matchertext literals");
                 i += 1;
@@ -836,7 +836,7 @@ extend Lexer {
                 if self.mt_stack.len() == base + 1 {
                     if b == mt_closer(self.mt_stack[base]) {
                         self.current = i + 1;
-                        if i + 1 < self.bytes.len() && self.bytes.byte_at(i + 1) == b'"' {
+                        if i + 1 < self.bytes.len() && self.at(i + 1) == b'"' {
                             self.current = i + 2;
                         } else {
                             self.error("matchertext literal must end with '\"' right after the closing matcher");
@@ -874,41 +874,29 @@ extend Lexer {
         let _ = self.mt.pop();
     }
 
-    // `M` consumed, a matcher-run + `"` ahead: validate the delimiter chain (strictly nested pairs),
-    // require an opening matcher right after the `"`, then scan the template. Malformed heads resync
-    // as an ordinary string literal so one bad literal yields one diagnostic.
+    // `M` consumed and matchertext_ahead true: a valid delimiter chain and its `"` are ahead. Require
+    // a chain of at most 255 openers (the frame's d_len is a u8) and an opening matcher right after the
+    // `"`, then scan the template. Malformed heads resync as an ordinary string literal so one bad
+    // literal yields one diagnostic.
     fn matchertext(self: &mut Self) {
         let dpos = self.current;
-        let mut i = self.current;
         let mut dn: usize = 0;
-        while is_mt_open(self.bytes.byte_at(i)) {
-            i += 1;
+        while is_mt_open(self.at(dpos + dn)) {
             dn = dn + 1;
         }
-        let mut k = dn;
-        let mut ok = dn <= 255;
-        while ok && k > 0 {
-            k = k - 1;
-            if self.bytes.byte_at(i) != mt_closer(self.bytes.byte_at(dpos + k)) {
-                ok = false;
-            }
-            i += 1;
-        }
-        if !ok || self.bytes.byte_at(i) != b'"' {
-            while i < self.bytes.len() && self.bytes.byte_at(i) != b'"' {
-                i += 1;
-            }
+        let mut i = dpos + 2 * dn; // the `"` after the chain
+        if dn > 255 {
             self.error_at(
                 self.start,
                 i - self.start,
-                "matchertext interpolation delimiter must be strictly nested matcher pairs, like `M{}\"(...)\"` or `M([{}])\"(...)\"`",
+                "matchertext interpolation delimiter must be at most 255 matcher pairs",
             );
             self.current = i + 1;
             self.string_lit(TokenType::StringLiteral);
             return;
         }
         i += 1;
-        let o = self.bytes.byte_at(i);
+        let o = self.at(i);
         if !is_mt_open(o) {
             self.error_at(i, 1, "matchertext content must be delimited by '(', '[', or '{' inside the quotes");
             self.current = i;
@@ -945,19 +933,19 @@ extend Lexer {
         return false;
     }
 
-    // Scans a digit run allowing '_' only BETWEEN digits; the first bad separator position latches into
+    // Scans a decimal digit run allowing '_' only BETWEEN digits; the first bad separator position latches into
     // *error_at (USIZE_MAX = none yet) while scanning continues, so the run is consumed whole.
-    fn digits(self: &mut Self, component_start: usize, error_at: *mut usize, pred: fn(u8) bool) {
+    fn digits(self: &mut Self, component_start: usize, error_at: &mut usize) {
         let mut i = self.current;
         while i < self.bytes.len() {
-            let b = self.bytes.byte_at(i);
-            if pred(b) {
+            let b = self.at(i);
+            if is_dec(b) {
                 i += 1;
             } else if b == b'_' {
-                let prev = i > component_start && pred(self.bytes.byte_at(i - 1));
-                let next = i + 1 < self.bytes.len() && pred(self.bytes.byte_at(i + 1));
-                if (!prev || !next) && unsafe *error_at == USIZE_MAX {
-                    unsafe *error_at = i;
+                let prev = i > component_start && is_dec(self.at(i - 1));
+                let next = i + 1 < self.bytes.len() && is_dec(self.at(i + 1));
+                if (!prev || !next) && *error_at == USIZE_MAX {
+                    *error_at = i;
                 }
                 i += 1;
             } else {
@@ -965,6 +953,22 @@ extend Lexer {
             }
         }
         self.current = i;
+    }
+
+    // True when the bytes at `k` are a hex-digit run followed by a 'p' exponent with at least one digit.
+    const fn hex_frac_at(self: &Self, k: usize) bool {
+        let mut i = k;
+        while is_hex(self.at(i)) {
+            i += 1;
+        }
+        if i == k || (self.at(i) | 0x20u8) != b'p' {
+            return false;
+        }
+        i += 1;
+        if self.at(i) == b'+' || self.at(i) == b'-' {
+            i += 1;
+        }
+        return is_dec(self.at(i));
     }
 
     fn number(self: &mut Self) {
@@ -975,7 +979,7 @@ extend Lexer {
         let mut is_float = false;
         // Radix-prefixed scan (0x/0o/0b): the full id-part run is consumed so bad digits and suffixes
         // stay inside one token.
-        if self.bytes.byte_at(self.start) == b'0' {
+        if self.at(self.start) == b'0' {
             let mut radix: u32 = 10;
             let mut digit: fn(u8) bool = is_dec;
             let prefix = self.peek_byte();
@@ -994,14 +998,15 @@ extend Lexer {
                 self.current += 1;
                 let component_start = self.current;
                 let mut saw_digit = false;
+                let mut suffixed = false;
                 let mut i = self.current;
-                while i < self.bytes.len() && is_id_part_byte(self.bytes.byte_at(i)) {
-                    let b = self.bytes.byte_at(i);
+                while i < self.bytes.len() && is_id_part_byte(self.at(i)) {
+                    let b = self.at(i);
                     if digit(b) {
                         saw_digit = true;
                     } else if b == b'_' {
-                        let prev = i > component_start && digit(self.bytes.byte_at(i - 1));
-                        let next = i + 1 < self.bytes.len() && digit(self.bytes.byte_at(i + 1));
+                        let prev = i > component_start && digit(self.at(i - 1));
+                        let next = i + 1 < self.bytes.len() && digit(self.at(i + 1));
                         if (!prev || !next) && error_at == USIZE_MAX {
                             error_at = i;
                             error = "invalid numeric separator";
@@ -1011,11 +1016,12 @@ extend Lexer {
                             break;
                         }
                         let mut j = i;
-                        while j < self.bytes.len() && is_id_part_byte(self.bytes.byte_at(j)) {
+                        while j < self.bytes.len() && is_id_part_byte(self.at(j)) {
                             j = j + 1;
                         }
                         if saw_digit && num_suffix_kind(unsafe (self.bytes.ptr() + i), j - i) == 0 {
                             i = j;
+                            suffixed = true;
                             break;
                         }
                         if error_at == USIZE_MAX {
@@ -1036,10 +1042,13 @@ extend Lexer {
                     error_at = component_start;
                     error = "radix prefix must be followed by at least one digit";
                 }
-                // Hex float: '.' commits only when a hex digit follows; the 'p' exponent is mandatory
-                // (a fraction without one is diagnosed below).
+                // A '.' starts a fraction only when a decimal digit follows it, or, in hex, a digit run with a
+                // 'p' exponent (`0x1.ap3`). Any other '.' ends the literal: `0x0..4` is a range and
+                // `0xFF.count_ones()` a method call. A hex fraction without an exponent is diagnosed below.
+                let dot = !suffixed && self.peek_byte() == b'.';
+                let fraction = dot && (is_dec(self.peek_next()) || radix == 16 && self.hex_frac_at(self.current + 1));
                 let mut hex_float = false;
-                if radix == 16 && error_at == USIZE_MAX && self.peek_byte() == b'.' && is_hex(self.peek_next()) {
+                if radix == 16 && error_at == USIZE_MAX && fraction {
                     hex_float = true;
                     self.current += 1;
                     while is_hex(self.peek_byte()) {
@@ -1073,9 +1082,9 @@ extend Lexer {
                     error_at = self.current;
                     error = "a hexadecimal float requires a binary exponent ('p'), e.g. 0x1.8p3";
                 }
-                // A '.' after any other radix literal is an error, but the whole float-shaped run is
+                // A fraction after any other radix literal is an error, but the whole float-shaped run is
                 // still consumed so it remains a single bad token.
-                if !hex_float && self.peek_byte() == b'.' {
+                if !hex_float && fraction {
                     if error_at == USIZE_MAX {
                         error_at = self.current;
                         if radix == 16 {
@@ -1106,7 +1115,7 @@ extend Lexer {
             }
         }
         let integer_start = self.current;
-        self.digits(integer_start - 1, &mut error_at, is_dec);
+        self.digits(integer_start - 1, &mut error_at);
         if error_at != USIZE_MAX {
             error = "invalid numeric separator";
         }
@@ -1116,7 +1125,7 @@ extend Lexer {
             is_float = true;
             self.current += 1;
             let fraction_start = self.current;
-            self.digits(fraction_start, &mut error_at, is_dec);
+            self.digits(fraction_start, &mut error_at);
             if error_at != USIZE_MAX && error.len() == 0 {
                 error = "invalid numeric separator";
             }
@@ -1128,7 +1137,7 @@ extend Lexer {
                 self.current += 1;
             }
             let exponent_start = self.current;
-            self.digits(exponent_start, &mut error_at, is_dec);
+            self.digits(exponent_start, &mut error_at);
             if self.current == exponent_start && error_at == USIZE_MAX {
                 error_at = exponent_start;
                 error = "exponent requires at least one decimal digit";
@@ -1169,7 +1178,7 @@ extend Lexer {
     }
 
     fn scan_token(self: &mut Self) {
-        let c = self.bytes.byte_at(self.current);
+        let c = self.at(self.current);
         if c < 0x80u8 {
             self.current += 1;
         }
@@ -1315,7 +1324,7 @@ extend Lexer {
                     self.line_comment();
                     if self.keep_trivia {
                         // `///...` is a doc comment; `//...` a plain one. The 3rd byte decides.
-                        let doc = self.current - self.start > 2 && self.bytes.byte_at(self.start + 2) == b'/';
+                        let doc = self.current - self.start > 2 && self.at(self.start + 2) == b'/';
                         if doc {
                             self.add_token(TokenType::DocLineComment);
                         } else {
@@ -1325,7 +1334,7 @@ extend Lexer {
                 } else if self.match_byte(b'*') {
                     self.block_comment();
                     if self.keep_trivia {
-                        let doc = self.current - self.start > 4 && self.bytes.byte_at(self.start + 2) == b'*';
+                        let doc = self.current - self.start > 4 && self.at(self.start + 2) == b'*';
                         if doc {
                             self.add_token(TokenType::DocBlockComment);
                         } else {
@@ -1444,10 +1453,15 @@ extend Lexer {
     /// from every error (diagnostics accumulate in `errors`; the stream is always complete). A
     /// UTF-8 BOM is consumed only at byte 0; anywhere else it is diagnosed.
     pub fn scan_tokens(self: &mut Self) {
+        if self.bytes.len() > 0xFFFFFFFF {
+            // Token and diagnostic offsets are u32.
+            self.errors.emit(0, 0, String::from_str("a source file must be smaller than 4 GiB"));
+            self.tokens.push(Token::new(TokenType::Eof, 0, 0));
+            self.errors.finalize(self.bytes, self.file);
+            return;
+        }
         self.tokens.reserve(self.bytes.len() / 5);
-        if self.current == 0 && self.bytes.len() >= 3 && self.bytes.byte_at(0) == 0xEFu8 && self.bytes.byte_at(1) == 0xBBu8 && self.bytes.byte_at(
-            2,
-        ) == 0xBFu8 {
+        if self.current == 0 && self.bytes.len() >= 3 && self.at(0) == 0xEFu8 && self.at(1) == 0xBBu8 && self.at(2) == 0xBFu8 {
             self.current = 3;
         }
         while self.current < self.bytes.len() {

@@ -104,6 +104,8 @@ fn toml_error_messages() {
     toml_err("trailing token", "a = 1 b\n", "unexpected trailing characters");
     toml_err("bad escape", "a = \"\\q\"\n", "unknown escape in string");
     toml_err("open string", "a = \"abc\n", "unterminated string");
+    toml_err("integer overflow", "jobs = 99999999999999999999\n", "integer out of range");
+    toml_err("integer above i64", "jobs = 9223372036854775808\n", "integer out of range");
 }
 
 @test
@@ -124,6 +126,11 @@ fn manifest_validation_messages() {
         "'env' expects an inline table of strings",
     );
     manifest_err("jobs", "bin = \"a\"\nroot = \"m.spc\"\njobs = \"x\"\n", "'jobs' expects a non-negative integer");
+    manifest_err(
+        "jobs above u32",
+        "bin = \"a\"\nroot = \"m.spc\"\njobs = 4294967296\n",
+        "'jobs' expects a non-negative integer",
+    );
     manifest_err("bin string", "bin = 5\nroot = \"m.spc\"\n", "'bin' expects a string");
     manifest_err(
         "cflags array",

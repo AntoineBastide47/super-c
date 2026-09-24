@@ -45,6 +45,7 @@ pub struct Solver {
     pub pwords: u32,
     pub oreach: Vector<u64>, // prepass: per origin, origins reachable over point-stripped subsets
     pub owords: u32,
+    pub cuts: Vector<u64>, // the facts' rebind cuts (origin << 32 | point), sorted for cut_at
     pub req_cache: Vector<u64>, // per queried loan: required-point bitset (pwords), or empty
     pub req_have: Vector<bool>,
     pub scope: ls::LoanMat, // block-entry loans-in-scope
@@ -58,18 +59,19 @@ pub struct Solver {
     pub succs: Vector<u32>, // reused point-successor scratch for the flood
     // Reused per-stage scratch (truncated at each use), so a body allocates none of it after warmup.
     s_cur32: Vector<u32>, // index_points: counting-sort cursors
-    s_ic: Vector<u32>, // index_points: per-block issue counts
+    s_ic: Vector<u32>, // index_points: per-block issue counts; prepass and conflicts: CSR cursors
     s_kc: Vector<u32>, // index_points: per-block kill counts
     s_uses: Vector<u64>, // origin_live_points: point<<32|local records
     s_cur64: Vector<u64>, // origin_live_points block state / conflicts replay row
     s_dset: Vector<u64>, // origin_live_points: per-pair defs
     s_uset: Vector<u64>, // origin_live_points: per-pair uses
     s_flow: Vector<u64>, // scope_flow: transfer scratch row
-    s_flow_queued: Vector<bool>,
+    s_flow_queued: Vector<bool>, // scope_flow, and the prepass worklist
     s_flow_queue: Vector<u32>,
     s_lo_start: Vector<u32>, // origin_live_points: per-local CSR into s_lo_flat of inference origins
     s_lo_flat: Vector<u32>,
-    s_lb_start: Vector<u32>, // conflicts: per-local CSR into s_lb_flat of loans by place base
+    s_lb_start: Vector<u32>, // conflicts: per-local CSR into s_lb_flat of loans by place base;
+    // the prepass: per origin, CSR of the subset sources flowing into it
     s_lb_flat: Vector<u32>,
     s_omask: Vector<u64>, // origin_live_points: per local word, the locals owning an inference origin
 }
@@ -165,6 +167,7 @@ extend Solver {
             pwords: 0,
             oreach: Vector::<u64>::new(),
             owords: 0,
+            cuts: Vector::<u64>::new(),
             req_cache: Vector::<u64>::new(),
             req_have: Vector::<bool>::new(),
             scope: ls::LoanMat::new(0, 0),
@@ -196,7 +199,7 @@ extend Solver {
 
     /// Heap bytes kept across bodies (capacity, not length).
     pub const fn scratch_bytes(self: &Self) u64 {
-        return (self.errs.capacity() * sizeof(BorrowErr) + self.point_block.capacity() * sizeof(u32) + self.sub_by_point.capacity() * sizeof(u32) + self.sub_pt_start.capacity() * sizeof(u32) + self.live_pts.capacity() * sizeof(u64) + self.oreach.capacity() * sizeof(u64) + self.req_cache.capacity() * sizeof(u64) + self.req_have.capacity() * sizeof(bool) + self.issues_blk.capacity() * sizeof(u32) + self.issue_start.capacity() * sizeof(u32) + self.kills_blk.capacity() * sizeof(u64) + self.kill_start.capacity() * sizeof(u32) + self.visit.capacity() * sizeof(u64) + self.visit_dirty.capacity() * sizeof(u32) + self.work.capacity() * sizeof(u64) + self.succs.capacity() * sizeof(u32) + self.s_cur32.capacity() * sizeof(u32) + self.s_ic.capacity() * sizeof(u32) + self.s_kc.capacity() * sizeof(u32) + self.s_uses.capacity() * sizeof(u64) + self.s_cur64.capacity() * sizeof(u64) + self.s_dset.capacity() * sizeof(u64) + self.s_uset.capacity() * sizeof(u64) + self.s_flow.capacity() * sizeof(u64) + self.s_flow_queued.capacity() * sizeof(bool) + self.s_flow_queue.capacity() * sizeof(u32) + self.s_lo_start.capacity() * sizeof(u32) + self.s_lo_flat.capacity() * sizeof(u32) + self.s_lb_start.capacity() * sizeof(u32) + self.s_lb_flat.capacity() * sizeof(u32) + self.s_omask.capacity() * sizeof(u64) + self.scope.pool.capacity() * 8) as u64;
+        return (self.errs.capacity() * sizeof(BorrowErr) + self.point_block.capacity() * sizeof(u32) + self.sub_by_point.capacity() * sizeof(u32) + self.sub_pt_start.capacity() * sizeof(u32) + self.live_pts.capacity() * sizeof(u64) + self.oreach.capacity() * sizeof(u64) + self.cuts.capacity() * sizeof(u64) + self.req_cache.capacity() * sizeof(u64) + self.req_have.capacity() * sizeof(bool) + self.issues_blk.capacity() * sizeof(u32) + self.issue_start.capacity() * sizeof(u32) + self.kills_blk.capacity() * sizeof(u64) + self.kill_start.capacity() * sizeof(u32) + self.visit.capacity() * sizeof(u64) + self.visit_dirty.capacity() * sizeof(u32) + self.work.capacity() * sizeof(u64) + self.succs.capacity() * sizeof(u32) + self.s_cur32.capacity() * sizeof(u32) + self.s_ic.capacity() * sizeof(u32) + self.s_kc.capacity() * sizeof(u32) + self.s_uses.capacity() * sizeof(u64) + self.s_cur64.capacity() * sizeof(u64) + self.s_dset.capacity() * sizeof(u64) + self.s_uset.capacity() * sizeof(u64) + self.s_flow.capacity() * sizeof(u64) + self.s_flow_queued.capacity() * sizeof(bool) + self.s_flow_queue.capacity() * sizeof(u32) + self.s_lo_start.capacity() * sizeof(u32) + self.s_lo_flat.capacity() * sizeof(u32) + self.s_lb_start.capacity() * sizeof(u32) + self.s_lb_flat.capacity() * sizeof(u32) + self.s_omask.capacity() * sizeof(u64) + self.scope.pool.capacity() * 8) as u64;
     }
 
     /// Truncate every vector (keeping heap capacity) and clear scalars and scope, for reuse.
@@ -212,6 +215,7 @@ extend Solver {
         // live_pts keeps its length across bodies: origin_live_points re-sizes and re-zeroes it
         // through raw stores, and every reader runs after that pass.
         self.oreach.truncate(0);
+        self.cuts.truncate(0);
         self.req_cache.truncate(0);
         self.req_have.truncate(0);
         self.issues_blk.truncate(0);
@@ -315,6 +319,11 @@ extend Solver {
             self.sub_by_point.set(self.s_cur32[p] as usize, i as u32);
             self.s_cur32.set(p, self.s_cur32[p] + 1);
         }
+        // Rebind cuts sorted once: the flood asks cut_at for every node it visits.
+        for i in 0..f.cuts.len() {
+            self.cuts.push(f.cuts[i]);
+        }
+        self.cuts.sort();
 
         // Loan issues and kills bucketed per block.
         let nb = c.nblocks;
@@ -590,7 +599,9 @@ extend Solver {
         return (*self.live_pts.at(row + (p / 64) as usize) >> (p & 63) as u64 & 1u64) != 0;
     }
 
-    // Point-stripped origin reachability: the conservative candidate filter.
+    // Point-stripped origin reachability: the conservative candidate filter. A subset edge makes
+    // `from` reach everything `to` reaches, so a worklist re-joins only the sources of an origin
+    // whose row grew. Rows only gain bits, so an origin is queued at most norigins + 1 times.
     fn prepass(self: &mut Self) {
         let f = unsafe &*self.f;
         self.owords = (f.norigins + 63) / 64;
@@ -606,32 +617,55 @@ extend Solver {
                 self.oreach.push(v);
             }
         }
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for i in 0..f.subsets.len() {
-                let e = *f.subsets.at(i);
-                for w in 0..self.owords as usize {
-                    let src = self.oreach[e.to as usize * self.owords as usize + w];
-                    let d = e.from as usize * self.owords as usize + w;
-                    let v = self.oreach[d] | src;
+        // Subset sources grouped by target origin (counting sort).
+        let no = f.norigins as usize;
+        self.s_lb_start.truncate(0);
+        for _i in 0..no + 1 {
+            self.s_lb_start.push(0);
+        }
+        for i in 0..f.subsets.len() {
+            let t = f.subsets.at(i).to as usize;
+            self.s_lb_start.set(t + 1, self.s_lb_start[t + 1] + 1);
+        }
+        self.s_ic.truncate(0);
+        for o in 0..no {
+            self.s_lb_start.set(o + 1, self.s_lb_start[o + 1] + self.s_lb_start[o]);
+            self.s_ic.push(self.s_lb_start[o]);
+        }
+        self.s_lb_flat.truncate(0);
+        for _i in 0..f.subsets.len() {
+            self.s_lb_flat.push(0);
+        }
+        for i in 0..f.subsets.len() {
+            let e = *f.subsets.at(i);
+            self.s_lb_flat.set(self.s_ic[e.to as usize] as usize, e.from);
+            self.s_ic.set(e.to as usize, self.s_ic[e.to as usize] + 1);
+        }
+        let ow = self.owords as usize;
+        self.s_flow_queue.truncate(0);
+        self.s_flow_queued.truncate(0);
+        for o in 0..no {
+            self.s_flow_queue.push((no - 1 - o) as u32);
+            self.s_flow_queued.push(true);
+        }
+        while self.s_flow_queue.len() != 0 {
+            let to = self.s_flow_queue[self.s_flow_queue.len() - 1] as usize;
+            let _ = self.s_flow_queue.pop();
+            self.s_flow_queued.set(to, false);
+            for k in self.s_lb_start[to]..self.s_lb_start[to + 1] {
+                let from = self.s_lb_flat[k as usize] as usize;
+                let mut grew = false;
+                for w in 0..ow {
+                    let d = from * ow + w;
+                    let v = self.oreach[d] | self.oreach[to * ow + w];
                     if v != self.oreach[d] {
                         self.oreach.set(d, v);
-                        changed = true;
+                        grew = true;
                     }
                 }
-            }
-            for i in 0..f.uni_flows.len() {
-                let fr = (f.uni_flows[i] >> 32) as usize;
-                let to = (f.uni_flows[i] & 0xFFFFFFFFu64) as usize;
-                for w in 0..self.owords as usize {
-                    let src = self.oreach[to * self.owords as usize + w];
-                    let d = fr * self.owords as usize + w;
-                    let v = self.oreach[d] | src;
-                    if v != self.oreach[d] {
-                        self.oreach.set(d, v);
-                        changed = true;
-                    }
+                if grew && !self.s_flow_queued[from] {
+                    self.s_flow_queued.set(from, true);
+                    self.s_flow_queue.push(from as u32);
                 }
             }
         }
@@ -641,7 +675,7 @@ extend Solver {
         return (*self.oreach.at(from as usize * self.owords as usize + (to / 64) as usize) >> (to & 63) as u64 & 1u64) != 0;
     }
 
-    /// Conservative origin reachability over subsets + universal flows (the prepass relation).
+    /// Conservative origin reachability over subsets (the prepass relation).
     /// Production wording uses it to tell a returned borrow from a store-through-out-param escape.
     pub const fn origin_reaches(self: &Self, from: u32, to: u32) bool {
         return from == to || self.prereach(from, to);
@@ -650,14 +684,10 @@ extend Solver {
     /// A whole-local rebind at (origin `o`, stmt entry `p`): flows already in `o` end before the
     /// write; a subset ENTERING `o` at `p` lands past it (the incoming value survives its own store).
     pub const fn cut_at(self: &Self, o: u32, p: u32) bool {
-        let f = unsafe &*self.f;
-        let key = o as u64 << 32 | p as u64;
-        for i in 0..f.cuts.len() {
-            if f.cuts[i] == key {
-                return true;
-            }
-        }
-        return false;
+        return switch self.cuts.binary_search(&(o as u64 << 32 | p as u64)) {
+            Ok(_) => true,
+            Err(_) => false,
+        };
     }
 
     fn scope_flow(self: &mut Self) {
@@ -825,7 +855,7 @@ extend Solver {
                     self.req_cache[row + (p / 64) as usize] | 1u64 << (p & 63) as u64,
                 );
             }
-            // Subset edges at this point, plus omnipresent flows into universals.
+            // Subset edges at this point.
             for i in self.sub_pt_start[p as usize]..self.sub_pt_start[p as usize + 1] {
                 let e = *f.subsets.at(self.sub_by_point[i as usize] as usize);
                 if e.from == o && (self_org == bf::BF_NONE || e.to != self_org) {
@@ -834,11 +864,6 @@ extend Solver {
                         tp = p + 1;
                     }
                     self.work.push(e.to as u64 << 32 | tp as u64);
-                }
-            }
-            for u2 in 0..f.uni_flows.len() {
-                if (f.uni_flows[u2] >> 32) as u32 == o {
-                    self.work.push((f.uni_flows[u2] & 0xFFFFFFFFu64) << 32 | p as u64);
                 }
             }
             // Liveness edges along the CFG (universal origins always flow, rebind cuts sever).
@@ -926,16 +951,14 @@ extend Solver {
             let ac = *f.accesses.at(a);
             let mut it0: usize = 0;
             let mut it1 = nl;
+            // The in-scope row at the access depends on the access alone: replayed on first need.
+            let mut scoped = false;
             if bucketed {
                 let base = if ac.place == bf::BF_NONE {
                     ac.local as usize;
                 } else {
                     self.body().places.at(ac.place as usize).base as usize;
                 };
-                if base + 1 >= self.s_lb_start.len() {
-                    // No local -> no loan shares its base.
-                    continue;
-                }
                 it0 = self.s_lb_start[base] as usize;
                 it1 = self.s_lb_start[base + 1] as usize;
             }
@@ -991,8 +1014,10 @@ extend Solver {
                     }
                 }
                 // In scope at the access?
-                let bi = self.point_block[ac.point as usize];
-                self.transfer_block(bi, ac.point - 1, &mut scratch);
+                if !scoped {
+                    self.transfer_block(self.point_block[ac.point as usize], ac.point - 1, &mut scratch);
+                    scoped = true;
+                }
                 if !bits::bit_get(&scratch, li as u32) {
                     continue;
                 }
@@ -1172,11 +1197,6 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
                         tp = p + 1;
                     }
                     work.push(e.to as u64 << 32 | tp as u64);
-                }
-            }
-            for u2 in 0..f.uni_flows.len() {
-                if (f.uni_flows[u2] >> 32) as u32 == o {
-                    work.push((f.uni_flows[u2] & 0xFFFFFFFFu64) << 32 | p as u64);
                 }
             }
             sv.point_succs(p, &mut succs);

@@ -5,8 +5,8 @@
 // its constructor is known on a path.
 //
 // Reads go through the typed-facts boundary plus package/declaration structure only. Constructor
-// completeness is decided from the constructors themselves: enum variants against their declared
-// member count (bit sets), booleans as a pair, tuples and structs as single constructors; integers,
+// completeness is decided from the constructors themselves: the distinct enum variants seen against
+// the declared member count, booleans as a pair, tuples and structs as single constructors; integers,
 // ranges, strings, floats, and every other literal are treated as never-complete, matching the
 // established diagnostics (an integer switch needs a catch-all even when its ranges cover the
 // domain). A work budget bounds adversarial or-pattern expansion; on overflow every query answers
@@ -65,6 +65,11 @@ pub struct PatCx {
     mcells: Vector<u32>,
     mrows: Vector<u64>, // start << 32 | len
     seen: Vector<u32>, // distinct-head scratch, watermark-disciplined like the arenas
+    // Decision-tree arena: rows over parallel pattern/occurrence cell pools, watermarked like the
+    // usefulness arena.
+    trows: Vector<Row>,
+    tpats: Vector<u32>,
+    toccs: Vector<u32>, // DtPath ids, parallel to tpats
     pub budget: u32, // remaining work units; 0 = overflow, answer conservatively
     pub overflow: bool,
 }
@@ -218,6 +223,9 @@ extend PatCx {
             mcells: Vector::<u32>::new(),
             mrows: Vector::<u64>::new(),
             seen: Vector::<u32>::new(),
+            trows: Vector::<Row>::new(),
+            tpats: Vector::<u32>::new(),
+            toccs: Vector::<u32>::new(),
             budget: 65536,
             overflow: false,
         };
@@ -251,23 +259,14 @@ extend PatCx {
 
     /// The enum decl containing variant `vd`, its ordinal, and the member count; ord -1 = unknown.
     pub fn variant_ordinal(self: &Self, vd: DefId, count: &mut u32) i64 {
-        let a = unsafe &*(&*self.pkg).module_ast_const(vd.module);
-        let items = a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let nid = unsafe a.list(items)[i as usize];
-            if a.at_const(nid).kind != NodeKind::NODE_ENUM {
-                continue;
-            }
-            let ms = a.at_const(nid).as_data.aggregate.members;
-            for j in 0..ms.len {
-                if unsafe a.list(ms)[j as usize] == vd.node {
-                    *count = ms.len;
-                    return j;
-                }
-            }
-        }
+        let mut ord: i64 = 0;
+        let en = unsafe (&*self.pkg).variant_enum(vd, &mut ord);
         *count = 0;
-        return -1;
+        if en != NODE_NONE {
+            let a = unsafe &*(&*self.pkg).module_ast_const(vd.module);
+            *count = a.at_const(en).as_data.aggregate.members.len;
+        }
+        return ord;
     }
 
     // The payload arity of variant `vd`.
@@ -559,9 +558,10 @@ extend PatCx {
             out.push(self.wild(pid));
             return;
         }
-        // Normalize each child into its own alternative list first.
-        let mut slot_alts = Vector::<Vector<u32>>::new();
-        let mut slot_of = Vector::<i64>::new(); // child index -> slot ordinal
+        // Normalize each child into its alternatives first: kids[i] names child i's slot and its run
+        // in `alts`.
+        let mut alts = Vector::<u32>::new();
+        let mut kids = Vector::<ChildAlts>::new();
         for i in 0..ch.len {
             let cid = unsafe self.f.list(ch)[i as usize];
             let mut slot: i64 = i;
@@ -578,24 +578,19 @@ extend PatCx {
                     sub = NODE_NONE;
                 }
             }
-            let mut alts = Vector::<u32>::new();
+            let start = alts.len();
             if sub == NODE_NONE {
                 alts.push(self.wild(cid));
             } else {
                 self.normalize(sub, &mut alts);
             }
-            if alts.len() == 0 {
+            if alts.len() == start {
                 alts.push(self.wild(cid));
             }
-            slot_alts.push(alts);
-            slot_of.push(slot);
+            kids.push(ChildAlts { slot: slot, start: start as u32, len: (alts.len() - start) as u32, cursor: 0 });
         }
         // Cartesian expansion over children with several alternatives (nested or-patterns), bounded
         // by the budget; the common case is one alternative each = one parent.
-        let mut cursors = Vector::<u32>::new();
-        for i in 0..slot_alts.len() {
-            cursors.push(0);
-        }
         loop {
             if !self.spend(arity + 1) {
                 out.push(self.wild(pid));
@@ -603,22 +598,20 @@ extend PatCx {
             }
             let sub_start = self.subs.len() as u32;
             // Default every slot to wild, then place the children.
-            let mut slot_pat = Vector::<u32>::new();
             for s in 0..arity {
-                slot_pat.push(P_NONE);
+                self.subs.push(P_NONE);
             }
-            for i in 0..slot_alts.len() {
-                let s = slot_of[i];
-                if s >= 0 && s as u32 < arity {
-                    slot_pat.set(s as usize, slot_alts.at(i)[cursors[i] as usize]);
+            for i in 0..kids.len() {
+                let k = kids[i];
+                if k.slot >= 0 && k.slot as u32 < arity {
+                    self.subs.set((sub_start + k.slot as u32) as usize, alts[(k.start + k.cursor) as usize]);
                 }
             }
             for s in 0..arity {
-                let mut v = slot_pat[s as usize];
-                if v == P_NONE {
-                    v = self.wild(pid);
+                if self.subs[(sub_start + s) as usize] == P_NONE {
+                    let w = self.wild(pid);
+                    self.subs.set((sub_start + s) as usize, w);
                 }
-                self.subs.push(v);
             }
             self.pats.push(
                 NPat {
@@ -636,13 +629,13 @@ extend PatCx {
             // Advance the cartesian cursor.
             let mut carried = true;
             let mut i2: usize = 0;
-            while carried && i2 < cursors.len() {
-                let c = cursors[i2] + 1;
-                if c as usize < slot_alts.at(i2).len() {
-                    cursors.set(i2, c);
+            while carried && i2 < kids.len() {
+                let c = kids[i2].cursor + 1;
+                if c < kids[i2].len {
+                    kids[i2].cursor = c;
                     carried = false;
                 } else {
-                    cursors.set(i2, 0);
+                    kids[i2].cursor = 0;
                     i2 += 1;
                 }
             }
@@ -726,39 +719,11 @@ extend PatCx {
         }
         // Wildcard q0: distinct head constructors + completeness.
         let wm_s = self.seen.len();
-        let mut complete = false;
-        let mut variant_count: u32 = 0;
-        let mut vmask = Cover4x {};
-        let mut tcov = false;
-        let mut fcov = false;
-        let mut single = P_NONE;
         for r in 0..rn {
             let row = self.mrows[rs + r];
             let h = self.mcells[(row >> 32) as usize];
-            let hp = self.pats.at(h as usize);
-            if hp.kind == PC_WILD {
+            if self.pats.at(h as usize).kind == PC_WILD {
                 continue;
-            }
-            if hp.kind == PC_VARIANT {
-                if variant_count == 0 {
-                    let mut c2: u32 = 0;
-                    let _ = self.variant_ordinal(hp.decl, &mut c2);
-                    variant_count = c2;
-                }
-                if hp.val >= 0 && hp.val < 256 {
-                    let ix = (hp.val >> 6) as usize;
-                    unsafe {
-                        vmask.b[ix] = vmask.b[ix] | 1u64 << (hp.val & 63) as u64;
-                    }
-                }
-            } else if hp.kind == PC_BOOL {
-                if hp.val != 0 {
-                    tcov = true;
-                } else {
-                    fcov = true;
-                }
-            } else if hp.kind == PC_TUPLE || hp.kind == PC_STRUCT {
-                single = h;
             }
             let mut dup = false;
             for s2 in wm_s..self.seen.len() {
@@ -771,21 +736,7 @@ extend PatCx {
                 self.seen.push(h);
             }
         }
-        if single != P_NONE {
-            complete = true;
-        } else if tcov && fcov {
-            complete = true;
-        } else if variant_count != 0 && variant_count <= 256 {
-            let mut n: u32 = 0;
-            for w in 0..4 {
-                let mut bits = unsafe vmask.b[w as usize];
-                while bits != 0 {
-                    bits = bits & bits - 1;
-                    n += 1;
-                }
-            }
-            complete = n >= variant_count;
-        }
+        let complete = self.ctors_complete(&self.seen, wm_s);
         if !complete {
             // Default matrix: wild-headed rows, minus the column.
             let drs = self.mrows.len();
@@ -1026,16 +977,13 @@ extend PatCx {
     }
 }
 
-// 256-variant coverage scratch (mirrors the typechecker's cap).
-struct Cover4x {
-    pub b: [u64; 4],
-}
-
-// One in-flight decision-tree row: patterns with their occurrence paths, plus the arm it selects.
-struct RowB {
-    pub pats: Vector<u32>,
-    pub occs: Vector<u32>, // DtPath ids, parallel to pats
-    pub arm: u32,
+// One child's normalized alternatives during norm_children: its sub-slot, its run in the
+// alternative list, and the cartesian cursor over that run.
+struct ChildAlts {
+    pub slot: i64,
+    pub start: u32,
+    pub len: u32,
+    pub cursor: u32,
 }
 
 extend PatCx {
@@ -1060,18 +1008,19 @@ extend PatCx {
                 pat: NODE_NONE,
             },
         );
-        let mut rows = Vector::<RowB>::new();
         for r in 0..self.rows.len() {
             let row = *self.rows.at(r);
-            let mut pv = Vector::<u32>::new();
-            let mut ov = Vector::<u32>::new();
+            let start = self.tpats.len() as u32;
             for c in 0..row.len {
-                pv.push(self.cols[(row.start + c) as usize]);
-                ov.push(0);
+                self.tpats.push(self.cols[(row.start + c) as usize]);
+                self.toccs.push(0);
             }
-            rows.push(RowB { pats: pv, occs: ov, arm: row.arm });
+            self.trows.push(Row { start: start, len: row.len, arm: row.arm });
         }
-        t.root = self.tree_rec(&mut t, &rows);
+        t.root = self.tree_rec(&mut t, 0, self.trows.len());
+        self.trows.clear();
+        self.tpats.clear();
+        self.toccs.clear();
         if self.overflow {
             t.ok = false;
         }
@@ -1083,71 +1032,59 @@ extend PatCx {
         return t.nodes.len() as u32 - 1;
     }
 
-    fn tree_rec(self: &mut Self, t: &mut DecisionTree, rows: &Vector<RowB>) u32 {
-        if !self.spend(rows.len() as u32 + 1) {
+    // The subtree for arena rows trows[rs..rs+rn].
+    fn tree_rec(self: &mut Self, t: &mut DecisionTree, rs: usize, rn: usize) u32 {
+        if !self.spend(rn as u32 + 1) {
             return self.tree_leaf(t, DT_FAIL, 0);
         }
-        if rows.len() == 0 {
+        if rn == 0 {
             return self.tree_leaf(t, DT_FAIL, 0);
         }
         // First row all-wild: it matches; later rows are this path's dead tail.
-        let r0 = rows.at(0);
+        let r0 = *self.trows.at(rs);
         let mut col: i64 = -1;
-        for c in 0..r0.pats.len() {
-            if self.pats.at(r0.pats[c] as usize).kind != PC_WILD {
-                col = c as i64;
+        for c in 0..r0.len {
+            if self.pats.at(self.tpats[(r0.start + c) as usize] as usize).kind != PC_WILD {
+                col = c;
                 break;
             }
         }
         if col < 0 {
-            // Pick the leftmost column any row tests, else the first row wins outright.
-            for c in 0..r0.pats.len() {
-                let mut any = false;
-                for r in 1..rows.len() {
-                    if self.pats.at(rows.at(r).pats[c] as usize).kind != PC_WILD {
-                        any = true;
-                    }
-                }
-                if any {
-                    col = c as i64;
-                    break;
-                }
-            }
-            if col < 0 {
-                return self.tree_leaf(t, DT_LEAF, r0.arm);
-            }
-            // The first row is wild in the test column too, so it still wins: emitting the test
-            // first would only grow the tree; take the leaf directly (bindings re-walk the arm).
             return self.tree_leaf(t, DT_LEAF, r0.arm);
         }
-        let c = col as usize;
-        // Distinct head constructors in the column.
-        let mut seen = Vector::<u32>::new();
-        for r in 0..rows.len() {
-            let h = rows.at(r).pats[c];
+        let c = col as u32;
+        let occ = self.toccs[(r0.start + c) as usize];
+        // Distinct head constructors in the column go to `seen` behind its watermark, then the child
+        // built for each: constructors at [wm_s, wm_s + n), children at [wm_s + n, wm_s + 2n).
+        let wm_s = self.seen.len();
+        for r in 0..rn {
+            let row = *self.trows.at(rs + r);
+            let h = self.tpats[(row.start + c) as usize];
             if self.pats.at(h as usize).kind == PC_WILD {
                 continue;
             }
             let mut dup = false;
-            for s2 in 0..seen.len() {
-                if self.head_covers(seen[s2], h) && self.head_covers(h, seen[s2]) {
+            for s2 in wm_s..self.seen.len() {
+                let sv = self.seen[s2];
+                if self.head_covers(sv, h) && self.head_covers(h, sv) {
                     dup = true;
                 }
             }
             if !dup {
-                seen.push(h);
+                self.seen.push(h);
             }
         }
-        let complete = self.ctors_complete(&seen);
+        let n = self.seen.len() - wm_s;
+        let complete = self.ctors_complete(&self.seen, wm_s);
+        let wm_r = self.trows.len();
+        let wm_c = self.tpats.len();
         // Build one child per constructor.
-        let mut children = Vector::<u32>::new();
-        for s2 in 0..seen.len() {
-            let rep = seen[s2];
-            let arity = self.pats.at(rep as usize).sub_len;
+        for s2 in 0..n {
+            let rep = self.seen[wm_s + s2];
             let repp = *self.pats.at(rep as usize);
-            // Sub-occurrence paths for this constructor.
-            let occ = rows.at(0).occs[c];
-            let mut sub_paths = Vector::<u32>::new();
+            let arity = repp.sub_len;
+            // Sub-occurrence paths for this constructor: t.paths[sp0 .. sp0 + arity).
+            let sp0 = t.paths.len() as u32;
             for f in 0..arity {
                 let dc: i64 = if repp.kind == PC_VARIANT {
                     repp.val;
@@ -1164,12 +1101,10 @@ extend PatCx {
                         pat: self.slot_pat_node(&repp, f),
                     },
                 );
-                sub_paths.push(t.paths.len() as u32 - 1);
             }
-            let mut nrs = Vector::<RowB>::new();
-            for r in 0..rows.len() {
-                let row = rows.at(r);
-                let h = row.pats[c];
+            for r in 0..rn {
+                let row = *self.trows.at(rs + r);
+                let h = self.tpats[(row.start + c) as usize];
                 let hp = *self.pats.at(h as usize);
                 let cov = if hp.kind == PC_WILD {
                     true;
@@ -1179,76 +1114,73 @@ extend PatCx {
                 if !cov {
                     continue;
                 }
-                let mut pv = Vector::<u32>::new();
-                let mut ov = Vector::<u32>::new();
+                let ns = self.tpats.len();
                 if hp.kind == PC_WILD {
                     for f in 0..arity {
                         let w = self.wild(hp.node);
-                        pv.push(w);
-                        ov.push(sub_paths[f as usize]);
+                        self.tpats.push(w);
+                        self.toccs.push(sp0 + f);
                     }
                 } else {
                     for f in 0..hp.sub_len {
-                        pv.push(self.subs[(hp.sub_start + f) as usize]);
-                        ov.push(sub_paths[f as usize]);
+                        self.tpats.push(self.subs[(hp.sub_start + f) as usize]);
+                        self.toccs.push(sp0 + f);
                     }
                 }
-                for c2 in 0..row.pats.len() {
-                    if c2 != c {
-                        pv.push(row.pats[c2]);
-                        ov.push(row.occs[c2]);
-                    }
-                }
-                nrs.push(RowB { pats: pv, occs: ov, arm: row.arm });
+                self.push_other_columns(row, c);
+                self.trows.push(Row { start: ns as u32, len: (self.tpats.len() - ns) as u32, arm: row.arm });
             }
-            let child = self.tree_rec(t, &nrs);
-            children.push(child);
+            let child = self.tree_rec(t, wm_r, self.trows.len() - wm_r);
+            self.trows.truncate(wm_r);
+            self.tpats.truncate(wm_c);
+            self.toccs.truncate(wm_c);
+            self.seen.push(child);
         }
         // Default child for an incomplete constructor set.
         let mut dchild = P_NONE;
         if !complete {
-            let mut nrs = Vector::<RowB>::new();
-            for r in 0..rows.len() {
-                let row = rows.at(r);
-                if self.pats.at(row.pats[c] as usize).kind != PC_WILD {
+            for r in 0..rn {
+                let row = *self.trows.at(rs + r);
+                if self.pats.at(self.tpats[(row.start + c) as usize] as usize).kind != PC_WILD {
                     continue;
                 }
-                let mut pv = Vector::<u32>::new();
-                let mut ov = Vector::<u32>::new();
-                for c2 in 0..row.pats.len() {
-                    if c2 != c {
-                        pv.push(row.pats[c2]);
-                        ov.push(row.occs[c2]);
-                    }
-                }
-                nrs.push(RowB { pats: pv, occs: ov, arm: row.arm });
+                let ns = self.tpats.len();
+                self.push_other_columns(row, c);
+                self.trows.push(Row { start: ns as u32, len: (self.tpats.len() - ns) as u32, arm: row.arm });
             }
-            dchild = self.tree_rec(t, &nrs);
+            dchild = self.tree_rec(t, wm_r, self.trows.len() - wm_r);
+            self.trows.truncate(wm_r);
+            self.tpats.truncate(wm_c);
+            self.toccs.truncate(wm_c);
         }
         let estart = t.edges.len() as u32;
-        for s2 in 0..seen.len() {
-            t.edges.push(DtEdge { pat: seen[s2], child: children[s2] });
+        for s2 in 0..n {
+            t.edges.push(DtEdge { pat: self.seen[wm_s + s2], child: self.seen[wm_s + n + s2] });
         }
+        self.seen.truncate(wm_s);
         t.nodes.push(
-            DtNode {
-                kind: DT_TEST,
-                arm: 0,
-                place: rows.at(0).occs[c],
-                edge_start: estart,
-                edge_len: seen.len() as u32,
-                default_child: dchild,
-            },
+            DtNode { kind: DT_TEST, arm: 0, place: occ, edge_start: estart, edge_len: n as u32, default_child: dchild },
         );
         return t.nodes.len() as u32 - 1;
     }
 
-    // Is the collected head-constructor set complete for its column type?
-    fn ctors_complete(self: &Self, seen: &Vector<u32>) bool {
+    // Append every cell of arena row `row` except column `c` (patterns and occurrences).
+    fn push_other_columns(self: &mut Self, row: Row, c: u32) {
+        for c2 in 0..row.len {
+            if c2 != c {
+                self.tpats.push(self.tpats[(row.start + c2) as usize]);
+                self.toccs.push(self.toccs[(row.start + c2) as usize]);
+            }
+        }
+    }
+
+    // Is the head-constructor set seen[from..] complete for its column type?
+    fn ctors_complete(self: &Self, seen: &Vector<u32>, from: usize) bool {
         let mut tcov = false;
         let mut fcov = false;
         let mut variant_count: u32 = 0;
         let mut nvar: u32 = 0;
-        for s2 in 0..seen.len() {
+        for s2 in from..seen.len() {
             let hp = self.pats.at(seen[s2] as usize);
             if hp.kind == PC_TUPLE || hp.kind == PC_STRUCT {
                 return true;

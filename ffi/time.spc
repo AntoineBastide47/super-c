@@ -3,7 +3,8 @@
 // C's `time_t`/`clock_t` are integer typedefs, exposed here as `i64` values; the `time_t*` out-parameter
 // of `time` is taken as `*mut void` (pass `null` to ignore it). Calendar APIs use `*mut void` for
 // `struct tm*` to avoid assuming a non-standard `tm` typedef; callers that need field access should provide
-// platform-specific layout glue. `CLOCKS_PER_SEC` is the POSIX value. Calling the raw bindings requires
+// platform-specific layout glue. `CLOCKS_PER_SEC` binds to the real macro (1000000 on POSIX, 1000 on
+// Windows), so it is a runtime value, not a Super-C constant expression. Calling the raw bindings requires
 // `unsafe`; `now`/`cpu_seconds` do not.
 
 extern "C" {
@@ -23,10 +24,10 @@ extern "C" {
     /// Format calendar fields into `dst` (at most `max` bytes with NUL); the length, or 0 when it did not
     /// fit.
     pub fn strftime(dst: *mut char, max: usize, fmt: *const char, t: *const void) usize;
-}
 
-/// Ticks per second of `clock()` on every supported target.
-pub const CLOCKS_PER_SEC: i64 = 1000000;
+    /// Ticks per second of `clock()`.
+    pub const CLOCKS_PER_SEC: i64;
+}
 
 /// Current wall-clock time as seconds since the Unix epoch.
 pub fn now() i64 {

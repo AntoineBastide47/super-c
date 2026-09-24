@@ -78,6 +78,9 @@ let p = Pair::<i32, bool> { a: 1, b: true };
 let a = Array::<u8, 16>::new();
 ```
 
+An unbounded `T` owns: uses move, leftovers drop. `T: Copy` (derived structurally, see the
+ownership section of the skill) makes it copyable.
+
 ## Closures
 
 | Form | Meaning |

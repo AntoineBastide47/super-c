@@ -24,11 +24,7 @@ pub fn lower_module(p: &mut loader::Package, i: usize) {
     desugar_ast(unsafe &mut *aptr, p);
 }
 
-// A null package (or an unresolved shim) leaves the marker untouched, so a later pass reports it.
 fn desugar_ast(ast: &mut Ast, package: *const loader::Package) {
-    if package == null {
-        return;
-    }
     // Nodes appended below hold no markers, so the pre-loop count is the whole search space. A nested
     // `select` has a LOWER id than the one containing it (the parser adds a parent after its children), so
     // it is lowered first and the outer lowering moves the finished block.

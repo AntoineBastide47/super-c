@@ -29,12 +29,12 @@ struct Payload {
 
 extend Payload as Free {
     pub fn free(self: &mut Payload) {
-        let _ = atomic::add_i64(&mut unsafe G_FREES, 1, 0);
+        let _ = unsafe atomic::add_i64(&mut unsafe G_FREES, 1, 0);
     }
 }
 
 fn frees() i64 {
-    return atomic::load_i64(&mut unsafe G_FREES, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_FREES, 1);
 }
 
 struct Base {
@@ -43,7 +43,7 @@ struct Base {
 
 @test_init
 fn fresh_counters() Base {
-    atomic::store_i64(&mut unsafe G_FREES, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_FREES, 0, 0);
     return Base { cancelled: rt::cancelled_tasks() };
 }
 
@@ -242,11 +242,11 @@ fn an_idle_lock_may_move(fx: &mut Base) {
 static mut G_AFTER: i64 = 0;
 
 fn after_mark() {
-    let _ = atomic::add_i64(&mut unsafe G_AFTER, 1, 0);
+    let _ = unsafe atomic::add_i64(&mut unsafe G_AFTER, 1, 0);
 }
 
 fn afters() i64 {
-    return atomic::load_i64(&mut unsafe G_AFTER, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_AFTER, 1);
 }
 
 // Take the lock on a task and keep it until `release` says otherwise, so anything else that asks for it
@@ -277,7 +277,7 @@ fn hold_until(m: &arc::Arc<sync::Mutex<i64>>, release: &arc::Arc<atomics::Atomic
 @test
 fn a_cancelled_acquisition_holds_no_lock(fx: &mut Base) {
     rt::set_worker_count(4);
-    atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
     let krx = kch.receiver();
@@ -389,7 +389,7 @@ fn a_cancel_after_the_wake_claim_passes_the_release_on(fx: &mut Base) {
 @test
 fn a_plain_acquisition_is_not_a_cancellation_point(fx: &mut Base) {
     rt::set_worker_count(4);
-    atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
     let krx = kch.receiver();
@@ -440,7 +440,7 @@ fn a_plain_acquisition_is_not_a_cancellation_point(fx: &mut Base) {
 @test
 fn repeated_cancellation_leaves_the_lock_usable(fx: &mut Base) {
     rt::set_worker_count(4);
-    atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
     let m = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
     let release = counter();
     let holder = sync::WaitGroup::new();
@@ -573,6 +573,85 @@ fn a_condvar_releases_and_retakes_the_same_lock() {
     let g = st.get().lock();
     assert_eq(*g.get(), 1 + waiters);
     rt::shutdown();
+}
+
+// A cancellation that lands after a notify has claimed a condvar waiter's park does not drop that
+// notify: the waiter's `wait` reports a normal wake and it takes what it was woken for, and the request
+// waits for the next cancellation point. Reporting the wait cancelled lost the notify, and the waiter
+// queued behind it stayed parked with the condition true. One busy worker keeps the woken waiter from
+// running until the request is in.
+@test
+fn a_cancel_after_a_condvar_notify_keeps_the_notify(fx: &mut Base) {
+    rt::set_worker_count(1);
+    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
+    let krx = kch.receiver();
+    let st = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(0));
+    let cv = arc::Arc::<sync::Condvar>::new(sync::Condvar::new());
+    let taken = counter();
+    let gate = counter();
+    let busy = counter();
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    let mut key = rt::TaskKey { slot: 0, gen: 0 };
+    for k in 0..2 {
+        let m = st.clone();
+        let c = cv.clone();
+        let w = wg.clone();
+        let t = taken.clone();
+        let kt = kch.sender();
+        launch || {
+            defer w.done();
+            if k == 0 {
+                let _ = kt.send(rt::current_key());
+            }
+            let mut g = m.get().lock();
+            while *g.get() == 0 {
+                if !c.get().wait(&g) {
+                    return;
+                }
+            }
+            // Take the ticket.
+            let v = g.get_mut();
+            *v = *v - 1;
+            let _ = t.get().fetch_add(1, atomics::MemoryOrder::AcqRel);
+        };
+        if k == 0 {
+            key = krx.recv().unwrap();
+            assert(ph::wait_parked(key), "the first waiter is queued first");
+        }
+    }
+    assert(ph::wait_waiting(rt::WK_CONDVAR, 2), "both waiters are queued");
+    {
+        let b = busy.clone();
+        let gt = gate.clone();
+        launch || {
+            b.get().store(1, atomics::MemoryOrder::Release);
+            while gt.get().load(atomics::MemoryOrder::Acquire) == 0 {
+                unsafe sc_runtime::sc_rt_cpu_relax();
+            }
+        };
+    }
+    assert(ph::wait_count(&busy, 1), "the only worker is busy");
+    {
+        let mut g = st.get().lock();
+        let v = g.get_mut();
+        *v = 1;
+        // Pops the first waiter and claims its park; it cannot run yet.
+        cv.get().notify_one();
+    }
+    assert(rt::request_cancel(key, rt::CR_USER), "the woken waiter is live");
+    gate.get().store(1, atomics::MemoryOrder::Release);
+    assert(ph::wait_count(&taken, 1), "the notified waiter takes the ticket");
+    {
+        let mut g = st.get().lock();
+        let v = g.get_mut();
+        *v = *v + 1;
+        cv.get().notify_all();
+    }
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "both waiters finish");
+    assert_eq(count(&taken), 2);
+    rt::shutdown();
+    assert_eq(cancelled(fx), 0);
 }
 
 @test

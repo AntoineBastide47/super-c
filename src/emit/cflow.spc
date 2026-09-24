@@ -20,7 +20,7 @@ pub struct CFlow {
     pub preds: Vector<u32>, // [n] reachable in-edge count
     pub pred_start: Vector<u32>, // [n+1] CSR offsets into pred_list
     pub pred_list: Vector<u32>, // reachable predecessors, grouped by target
-    pub idom: Vector<u32>, // [n] immediate dominator, NONE for entry/unreachable
+    pub idom: Vector<u32>, // [n] immediate dominator: the entry itself for entry, NONE if unreachable
     pub tin: Vector<u32>, // [n] dominator-tree DFS entry stamp (Euler tour) -> O(1) dominance
     pub tout: Vector<u32>, // [n] dominator-tree DFS exit stamp
     pub ipdom: Vector<u32>, // [n+1] immediate post-dominator over the reverse graph (index n = exit)

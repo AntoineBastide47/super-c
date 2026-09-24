@@ -7,6 +7,10 @@ extern "C" "driver_shim.h" {
     pub fn sc_dirent_name(entry: *mut void) *const char;
     /// 1 directory, 0 other file kind, -1 when `path` cannot be stat'd.
     pub fn sc_stat_isdir(path: *const char) i32;
+    /// Like `sc_stat_isdir` without following links: 1 real directory (safe to descend), 2 a Windows directory
+    /// link or junction (rmdir it, never descend), 0 anything else (a POSIX symlink: unlink removes the link),
+    /// -1 when `path` does not exist.
+    pub fn sc_lstat_isdir(path: *const char) i32;
     /// The d_type of a `sc_readdir` entry: 1 dir, 0 non-dir, -1 unknown (caller must stat; always -1 on Windows).
     pub fn sc_dirent_isdir(entry: *mut void) i32;
     /// 1 iff both paths resolve to the same physical file, 0 if distinct, -1 if either cannot be stat'd.
@@ -25,7 +29,8 @@ extern "C" "driver_shim.h" {
     pub fn sc_file_read(f: *mut void, buf: *mut void, n: usize) i64;
     /// 1 when a read on stream `f`'s descriptor returns at once (bytes waiting or end of stream), else 0.
     pub fn sc_file_pending(f: *mut void) i32;
-    /// Platform index baked in when the shim is compiled: 0 windows, 1 macos, 2 linux (the default --target).
+    /// Platform index baked in when the shim is compiled: 0 windows, 1 macos, 2 linux, 3 wasm, 5 android (the
+    /// default --target).
     pub fn sc_host_platform() i32;
     /// Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other
     /// (the default --arch).
@@ -50,6 +55,8 @@ extern "C" "driver_shim.h" {
     pub fn sc_closedir(dir: *mut void) i32;
     /// Modification time in seconds; 0 when the file does not exist (the build engine's staleness sentinel).
     pub fn sc_mtime(path: *const char) i64;
+    /// Modification time in nanoseconds (100 ns steps on Windows); 0 when the file does not exist.
+    pub fn sc_mtime_ns(path: *const char) i64;
     /// Online core count; 4 when it cannot be determined.
     pub fn sc_ncpu() i32;
     /// Create the process-tree jobserver when none exists. Returns 1 when a shared budget is active.
@@ -67,7 +74,8 @@ extern "C" "driver_shim.h" {
     /// A non-null `out_path` truncate-redirects the child's stdout+stderr into it; null inherits.
     /// Returns a pid/handle for sc_wait_any/sc_try_wait/sc_waitpid, or -1 on spawn failure.
     pub fn sc_spawn_argv(argv: *const *const char, out_path: *const char) i64;
-    /// Spawn through sc_spawn_argv and wait: the child's exit code, or -1 on spawn/wait failure.
+    /// Spawn through sc_spawn_argv and wait: the child's exit code, or -1 on spawn/wait failure. A child a
+    /// signal ended returns 1 and is named on stderr with the signal.
     pub fn sc_exec_argv(argv: *const *const char, out_path: *const char) i32;
     /// Block until any of the `n` children exits: returns its index into `pids` and stores its exit
     /// code in `code`; -1 on wait error.
@@ -104,7 +112,7 @@ extern "C" "driver_shim.h" {
     pub fn sc_exec(cmd: *const char) i32;
     /// `mkdir -p`: create every missing component of `path`. 0 on success.
     pub fn sc_mkdir_p(path: *const char) i32;
-    /// `rm -rf`: delete `path` and anything under it. 0 once it is gone.
+    /// `rm -rf`: delete `path` and anything under it; a link is removed, never followed. 0 once it is gone.
     pub fn sc_rm_rf(path: *const char) i32;
     /// The system temp directory, without a trailing separator.
     pub fn sc_tmpdir() *const char;

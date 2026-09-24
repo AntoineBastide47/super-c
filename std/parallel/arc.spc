@@ -4,7 +4,7 @@
 //
 // Use it to share one value across threads: move an `Arc` into each thread (clone per thread), read through
 // `get`. `Arc` gives shared (`&T`) access only: for shared MUTATION put an atomic or a lock inside it
-// (`Arc<Atomic<i64>>`, later `Arc<Mutex<T>>`).
+// (`Arc<Atomic<i64>>`, `Arc<Mutex<T>>`).
 
 import atomic;
 import std::parallel::atomics as atomics;
@@ -34,16 +34,16 @@ extend<T> Arc<T> {
     /// Another owning handle to the same value (atomic increment of the strong count).
     pub fn clone(self: &Arc<T>) Arc<T> {
         // Relaxed: a new handle only requires the count be atomic, not ordered against other memory.
-        let _ = unsafe atomic::add_usize(&mut self.ptr.strong, 1, atomics::MemoryOrder::Relaxed as i32);
+        let _ = unsafe atomic::add_usize(&mut (*self.ptr).strong, 1, atomics::MemoryOrder::Relaxed as i32);
         return Arc::<T> { ptr: self.ptr };
     }
     /// Borrow the shared value. Valid while this handle is alive.
     pub fn get(self: &Arc<T>) &T {
-        return unsafe &self.ptr.value;
+        return unsafe &(*self.ptr).value;
     }
     /// The current strong count (a snapshot; other threads may change it immediately).
     pub fn strong_count(self: &Arc<T>) usize {
-        return unsafe atomic::load_usize(&self.ptr.strong, atomics::MemoryOrder::Relaxed as i32);
+        return unsafe atomic::load_usize(&(*self.ptr).strong, atomics::MemoryOrder::Relaxed as i32);
     }
 }
 
@@ -63,11 +63,11 @@ extend<T> Arc<T> as Free {
         // handle's LAST payload access before the teardown (a `WaitGroup` doner is still inside the gate
         // after publishing zero, and only this drop orders that use before a free), and a standalone fence
         // is outside TSan's memory model, so the race gate could never check the fence form.
-        let prev = unsafe atomic::sub_usize(&mut self.ptr.strong, 1, atomics::MemoryOrder::AcqRel as i32);
+        let prev = unsafe atomic::sub_usize(&mut (*self.ptr).strong, 1, atomics::MemoryOrder::AcqRel as i32);
         if prev == 1 {
             // Free the value THROUGH a raw pointer (no-op if T isn't Free), like Box::free; freeing the
             // place directly would be a conditional move out of a dereference.
-            let vp = (&mut unsafe self.ptr.value) as *mut T;
+            let vp = (&mut unsafe (*self.ptr).value) as *mut T;
             vp.free();
             let mut g = Global {};
             unsafe g.dealloc(self.ptr, sizeof(ArcInner<T>), alignof(ArcInner<T>));

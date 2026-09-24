@@ -89,7 +89,14 @@ fn area(s: Shape) i32 {
 ```
 
 `switch` is exhaustive and usable as an expression. Arms combine alternatives with `|`.
-Payload-less enums lower to C `enum`s; payload-bearing ones to tagged unions.
+A pattern matched against a reference (`&T` or `&mut T`, at the top or nested, as in
+`Option<&E>`) reads the referent: literal and range sub-patterns test the value, and
+names bound inside bind by `&` (or `&mut` through a `&mut` with no `&` above it), so
+nothing is moved out through the reference. A method name without a call (`v.m`) is an
+error; `Type::m` is a function value.
+Payload-less enums lower to C `enum`s; payload-bearing ones to tagged unions whose tag is
+one byte when the enum has at most 256 variants and no explicit discriminant, and the
+4-byte C enum otherwise.
 
 ## Ownership and RAII
 
@@ -107,6 +114,14 @@ only for resources RAII does not manage (file descriptors, C allocations). Use `
 for deliberate leaks.
 
 Assignment frees the old value first: `s.name = fresh;` never leaks.
+
+`Copy` (a marker interface) names the values a use copies instead of moving. It is derived from
+the type's shape: scalars, `str`, raw pointers, `&T`, `&dyn I`, `fn` pointers and closures that own
+nothing, arrays of Copy, and aggregates that are not `Free` whose members are all Copy. `&mut T`,
+`Box<dyn I>` and every owning value are not Copy. A written `extend X as Copy {}` is accepted only
+where the derivation holds (`extend String as Copy {}` is rejected). A type parameter is Copy
+when its bounds reach `Copy`. A method's `where T: Copy` on its extend's `T` holds in that
+method only, closures included.
 
 ## References and Borrowing
 
@@ -129,11 +144,18 @@ Lifetime annotations are Rust-style and almost always elided.
 ## Unsafe
 
 `unsafe` is **required** for:
-- Raw-pointer dereference, indexing, arithmetic, field access
+- Raw-pointer dereference, indexing, arithmetic
 - Every call to an `extern "C"` function
 - Casting `&T` to `*mut T` (except through `UnsafeCell::get`)
 
-Prefix form (`unsafe expr`) or block form (`unsafe { .. }`). Use `.at()` for safe
+There is no auto-dereference through a raw pointer (the Rust rule): for `p: *mut T`,
+`p.f` and `p.m()` are errors; write `unsafe (*p).f` and `unsafe (*p).m()`. A method whose
+`self` is the raw pointer type itself applies to `p` directly. The explicit form keeps the
+receiver a place: `(unsafe (*p)).m()` calls a `&mut self` method on the pointee, never on a
+copy. Auto-deref through references, `Box` and `Deref` is unchanged.
+
+Prefix form (`unsafe expr`) or block form (`unsafe { .. }`); the prefix covers the whole
+postfix chain after it, so `unsafe (*p).a.b()` needs one `unsafe`. Use `.at()` for safe
 bounds-checked container access.
 
 ## Generics
@@ -144,6 +166,20 @@ Monomorphized, Rust-style. Turbofish in expression position.
 fn id<T>(x: T) T { return x; }
 struct Pair<A, B> { pub a: A, pub b: B }
 let p = Pair::<i32, bool> { a: id(41), b: true };
+```
+
+An unbounded type parameter OWNS (Rust's rule): each by-value use moves it, a `T` value left at a
+scope exit, an early return, `?` or a cancellation is dropped, and `*r = v` through `r: &mut T`
+drops the old value. A second use is "use of moved value"; copying out of `&T` is rejected. A
+`T: Copy` bound (inline, in a `where` clause, or through a bound's superinterfaces, as
+`Allocator: Copy`) makes `T` copyable. A plain `F: fn(..)` bound copies, `F: fn move(..)` owns.
+The instance whose concrete type owns nothing emits no drop code (`f::<i64>` costs nothing).
+Raw-pointer reads (`unsafe *p`, `unsafe p[i]`) hand out an owned bitwise copy and raw-pointer
+writes never drop the old value, so container internals move slots explicitly.
+
+```superc
+fn twice<T: Copy>(x: T) (T, T) { return (x, x); }
+fn keep<T>(slot: &mut T, v: T) T { return replace(slot, v); }  // move out through a reference
 ```
 
 ## Closures
@@ -212,7 +248,10 @@ let a: [i32; 4] = [10, 20, 30, 40];
 ## Compile-Time Evaluation
 
 Always on. Any call with constant arguments is interpreted at compile time. `const fn`
-marks mandatory evaluation.
+marks mandatory evaluation: a chain of `const fn` calls with known arguments that cannot
+evaluate is an error. A plain function is evaluated speculatively: when it fails, the call
+runs at run time, even if a `const fn` it calls hit an evaluator limit (a panic or undefined
+behavior it proves still reports).
 
 ```superc
 const fn table_size(bits: u32) usize { return (1u32 << bits) as usize; }
@@ -231,7 +270,8 @@ fn platform_init() { /* macOS-specific */ }
 fn platform_init() { /* Windows-specific */ }
 ```
 
-No `#ifdef` in Super-C. Use `@platform(windows|macos|linux)` on items. `--target=` for
+No `#ifdef` in Super-C. Use `@platform(windows|macos|linux)` on items; several `@platform`
+attributes on one item intersect (all must hold), and `|` inside one attribute is a union. `--target=` for
 cross-compilation.
 
 ## C FFI
@@ -314,7 +354,7 @@ enforced at spawn boundaries.
 | `str` | Borrowed string view (non-NUL-terminated; print via `%.*s`, or `.to_string()` then `String::cstr()`) |
 | `Vector<T>` | Growable array |
 | `Box<T>` | Heap-allocated single value |
-| `Option<T>` | `Some(T)` or `None` |
+| `Option<T>` | `Option::Some(x)` / `Option::None` in values; bare `Some(..)`/`None` in patterns only |
 | `Result<T, E>` | `Ok(T)` or `Err(E)` |
 | `Map<K, V>` | Hash map |
 | `Set<T>` | Hash set |

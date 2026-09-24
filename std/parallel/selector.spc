@@ -30,7 +30,6 @@
 // A selector borrows its endpoints: it holds their addresses, so it must not outlive them. Arm the ones a
 // single wait needs, wait, act, and let it go.
 
-import atomic;
 import std::parallel::sync as sync;
 import std::parallel::channel as channel;
 import std::parallel::runtime as runtime;
@@ -82,14 +81,14 @@ const fn no_arm(_p: *const void) bool {
 fn iface_ready<S: sync::Selectable>(p: *const void) bool {
     let s = p as *const S;
     // `arm_ready` and `lock_all` are the only callers, and both hold this arm's lock across the call.
-    return unsafe s.select_ready();
+    return unsafe (*s).select_ready();
 }
 
 // The park hand-off: the worker runs it once the selector's context is saved, which is what stops a notify
 // from resuming a coroutine that is still switching out.
 fn commit_unlock_all(p: *mut void) {
     let s = p as *mut Selector;
-    s.unlock_all();
+    unsafe (*s).unlock_all();
 }
 
 extend Selector {
@@ -177,9 +176,9 @@ extend Selector {
     // One pass over the arms: the arm a notify named (first-notify-wins, for a wait that parked), else a
     // uniform pick among everything ready (fair, for a wait that never had to park).
     fn ready_now(self: &mut Selector) Selected {
-        // Atomic, as the notifies that write it are (see `sync::publish_arm`); every one of them landed under
-        // an arm lock this task has since taken and released.
-        let hint = atomic::load_i32(&mut self.woken, 0);
+        // A plain read: every notify that wrote it did so under an arm lock this task has since taken and
+        // released, and no node of ours is queued to be written through.
+        let hint = self.woken;
         self.woken = -1;
         if hint >= 0 && hint < self.n as i32 && self.arm_ready(hint as usize) {
             return Selected::Ready(hint as usize);
@@ -259,7 +258,7 @@ extend Selector {
             let cv = unsafe self.arms[i].cv;
             let wp = &mut unsafe self.arms[i].w;
             // Every arm's lock is held: see `lock_all`.
-            unsafe cv.register(wp);
+            unsafe (*cv).register(wp);
         }
         let mut reason = runtime::WR_NONE;
         if co != null {
@@ -280,7 +279,7 @@ extend Selector {
             unsafe sync::raw_mutex_lock(raw);
             let wp = &mut unsafe self.arms[i].w;
             // Unlinked before this frame dies, which is what the node's owner owes.
-            unsafe cv.unregister(wp);
+            unsafe (*cv).unregister(wp);
             unsafe sync::raw_mutex_unlock(raw);
         }
         if co == null {
@@ -289,7 +288,10 @@ extend Selector {
         }
         runtime::wait_clear();
         runtime::park_done(co);
-        if runtime::cancel_after_wait(true) {
+        // A notify this wait consumed is spent on the arm it names, never dropped: other waiters on that
+        // channel may be parked behind it. A request that landed after it is taken at the next cancellation
+        // point.
+        if reason != runtime::WR_NOTIFY && runtime::cancel_after_wait(true) {
             reason = runtime::WR_CANCEL;
         }
         return reason;

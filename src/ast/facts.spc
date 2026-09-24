@@ -1,7 +1,7 @@
 // The typed-facts boundary: every semantic decision the type checker
 // records for a body -- node types, resolutions, call targets, generic arguments, operator methods,
-// coercion/dereference sequences, dynamic conversions, wide literals, captures, attributes and
-// lifetime declarations -- behind ONE read-only interface. Core IR lowering and every later new
+// coercion/dereference sequences, dynamic conversions, wide literals and captures -- behind ONE
+// read-only interface. Core IR lowering and every later new
 // consumer reads these accessors, never the Ast side tables directly, so the tables can move off
 // `Ast` without touching consumers. Nothing here mutates.
 //
@@ -10,10 +10,10 @@
 // resolutions, per-node types, coercions, mono/method-instance demands, method_refs, dyn/deref
 // selections, wide literals, attributes, lifetime declarations, call_info, op_method. Every later
 // stage (borrow checking, Core IR lowering, instance planning, const-eval fold discharge, emission)
-// reads this data frozen. The ONE sanctioned mutation is interning: `type_pool`, `instances`, and
-// `const_lins` (with their index tables) grow append-only whenever a later stage interns a
-// substituted or replayed type, and an interned entry is never removed or renumbered -- growth
-// changes no existing answer.
+// reads this data frozen. The ONE sanctioned mutation is interning: the type pools (the module's
+// `pool` and the package table `gt`, with their instances, const-expression forms and index tables)
+// grow append-only whenever a later stage interns a substituted or replayed type, and an interned
+// entry is never removed or renumbered -- growth changes no existing answer.
 import ast::ast as *;
 
 /// Read-only view of one module's typed AST. Holds a raw pointer because consumers thread it through
@@ -97,14 +97,6 @@ extend TypedFacts {
         };
     }
 
-    /// The concrete generic arguments recorded at use site `n`, or null.
-    pub const fn generic_args(self: &Self, n: NodeId) *const MonoUse {
-        if self.unchecked_view {
-            return null;
-        }
-        return self.a().type_args(n);
-    }
-
     /// The conversion recorded at `n` (`target::from(expr)` or a builtin widening), or null.
     pub const fn coercion(self: &Self, n: NodeId) *const CoerceUse {
         if self.unchecked_view {
@@ -141,38 +133,10 @@ extend TypedFacts {
         return self.a().wide_lits.at(i as usize);
     }
 
-    /// The receiver type a method reference was resolved on: the checked type of the receiver
-    /// expression `recv` (method selection itself is in `call_info`/`res`).
-    pub const fn receiver_type(self: &Self, recv: NodeId) TypeId {
-        if self.unchecked_view {
-            return TYPE_NONE;
-        }
-        return self.a().type_of(recv);
-    }
-
-    /// A closure's captures: the binding list the type checker recorded on the closure node, with
-    /// `mut_caps` naming the captures taken as implicit `&mut`.
+    /// A closure's captures: the binding list the type checker recorded on the closure node (its
+    /// `mut_caps` mask names the captures taken as implicit `&mut`).
     pub const fn captures(self: &Self, closure: NodeId) NodeList {
         return self.node(closure).as_data.closure.captures;
-    }
-
-    pub const fn mut_captures(self: &Self, closure: NodeId) u32 {
-        return self.node(closure).as_data.closure.mut_caps;
-    }
-
-    /// First attribute of `kind` on declaration `n`, or null (the Attr side table is owner-keyed).
-    pub const fn attr_of(self: &Self, n: NodeId, kind: u8) *const Attr {
-        for i in 0..self.a().attrs.len() {
-            if self.a().attrs.at(i).owner == n && self.a().attrs.at(i).kind == kind {
-                return self.a().attrs.at(i);
-            }
-        }
-        return null;
-    }
-
-    /// The lifetime declarations attached to declaration `owner` (empty when none).
-    pub const fn lifetimes(self: &Self, owner: NodeId) NodeList {
-        return self.a().lifetimes_of(owner);
     }
 }
 
@@ -190,8 +154,6 @@ pub struct FactsWatermark {
     pub body_children: usize,
     pub body_resolutions: usize,
     pub body_types: usize,
-    pub type_pool: usize,
-    pub instances: usize,
     pub mono: usize,
     pub method_insts: usize,
     pub method_refs: usize,
@@ -200,7 +162,6 @@ pub struct FactsWatermark {
     pub dyn_uses: usize,
     pub deref_uses: usize,
     pub wide_lits: usize,
-    pub const_lins: usize,
     pub attrs: usize,
     pub metas: usize,
     pub lifetime_decls: usize,
@@ -219,8 +180,6 @@ pub const fn watermark(a: &Ast) FactsWatermark {
         body_children: a.b.children.len(),
         body_resolutions: a.b.resolutions.len(),
         body_types: a.b.types.len(),
-        type_pool: a.ntypes(),
-        instances: a.ninstances(),
         mono: a.mono.len(),
         method_insts: a.method_insts.len(),
         method_refs: a.method_refs.len(),
@@ -229,7 +188,6 @@ pub const fn watermark(a: &Ast) FactsWatermark {
         dyn_uses: a.dyn_uses.len(),
         deref_uses: a.deref_uses.len(),
         wide_lits: a.wide_lits.len(),
-        const_lins: a.nconst_lins(),
         attrs: a.attrs.len(),
         metas: a.metas.len(),
         lifetime_decls: a.lifetime_decls.len(),

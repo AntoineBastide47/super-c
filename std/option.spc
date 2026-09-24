@@ -72,16 +72,12 @@ extend<T> Option<T> {
 
     /// Replace the value in place (returns the previous Option). The old payload travels out in `old`.
     pub const fn replace(self: &mut Option<T>, value: T) Option<T> {
-        let old = *self;
-        *self = Option::<T>::Some(value);
-        return old;
+        return replace(self, Option::<T>::Some(value));
     }
 
     /// Take the value out in place, leaving `None` behind (returns the previous Option).
     pub const fn take(self: &mut Option<T>) Option<T> {
-        let old = *self;
-        *self = Option::<T>::None;
-        return old;
+        return replace(self, Option::<T>::None);
     }
 
     /// Map the contained value through `f`, producing `Option<U>` (`None` stays `None`). Consumes `self`.
@@ -109,14 +105,12 @@ extend<T> Option<T> {
         };
     }
 
-    /// Keep the value only when `pred` holds, else `None`. Consumes `self`; the `&self` match lets `pred`
-    /// peek the payload before `self` is moved. On rejection `self` is freed by scope-exit auto-`Free`.
-    /// NOTE: `pred` takes `T` by value, so for a Free element type this copies (and the copy is freed),
-    /// double-freeing the payload `self` still owns. A `fn(&T)` predicate is the right fix but currently
-    /// hits two compiler gaps (over-const borrow of an embedded pointer payload; no `&mut`->`&` coercion).
-    pub const fn filter<F: fn(T) bool>(self: Option<T>, pred: F) Option<T> {
+    /// Keep the value only when `pred` holds, else `None`. Consumes `self`; `pred` BORROWS the payload
+    /// (`&T`) through the `&self` match, before `self` is moved. On rejection `self` is freed by
+    /// scope-exit auto-`Free`.
+    pub const fn filter<F: fn(&T) bool>(self: Option<T>, pred: F) Option<T> {
         let keep = switch &self {
-            Some(v) => pred(*v),
+            Some(v) => pred(v),
             None => false,
         };
         if keep {

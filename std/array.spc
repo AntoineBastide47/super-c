@@ -324,29 +324,60 @@ extend<T, const N: usize> Array<T, N> {
         }
     }
 
-    /// Sort in place by a derived `Ord` key (`a.sort_by_key(|p: &P| p.age)`).
+    /// Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`): the heapsort of `sort_by`
+    /// ordered by the extracted keys, so O(n log n) and, like `sort_by`, not stable. The sift is inlined
+    /// for the same reason as `sort_by`'s.
     pub const fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Array<T, N>, key: F) {
-        if N < 2 {
+        let n = N;
+        if n < 2 {
             return;
         }
-        let mut i: usize = 1; // insertion sort through swaps: key extraction stays borrow-only
-        while i < N {
-            let mut j = i;
-            while j > 0 {
-                let prev = key(&unsafe self.data[j - 1]);
-                let cur = key(&unsafe self.data[j]);
-                if prev <= cur {
+        let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
+        let mut start = n / 2;
+        let mut end = n;
+        loop {
+            let mut r: usize = 0;
+            if phase == 0 {
+                if start == 0 {
+                    phase = 1;
+                    continue;
+                }
+                start = start - 1;
+                r = start;
+            } else {
+                if end <= 1 {
                     break;
                 }
-                self.swap(j - 1, j);
-                j = j - 1;
+                end = end - 1;
+                self.swap(0, end);
             }
-            i = i + 1;
+            let mut lim = n;
+            if phase == 1 {
+                lim = end;
+            }
+            let mut child = 2 * r + 1;
+            while child < lim {
+                if child + 1 < lim {
+                    let kc = key(&unsafe self.data[child]);
+                    let kn = key(&unsafe self.data[child + 1]);
+                    if kc < kn {
+                        child = child + 1;
+                    }
+                }
+                let kr = key(&unsafe self.data[r]);
+                let kc = key(&unsafe self.data[child]);
+                if kr >= kc {
+                    break;
+                }
+                self.swap(r, child);
+                r = child;
+                child = 2 * r + 1;
+            }
         }
     }
 }
 
-// Index conformances: `a[i]` borrows the element in place (unchecked, like `at`), and `a[lo..hi]`; any
+// Index conformances: `a[i]` borrows the element in place (bounds-checked like `at`), and `a[lo..hi]`; any
 // range form, `..=` including the end, an open end meaning `N`: is a borrowed `[]T` view of the
 // elements. Views alias the inline buffer, so they are invalidated when the Array is moved.
 extend<T, const N: usize> Array<T, N> as Index<T, []T> {

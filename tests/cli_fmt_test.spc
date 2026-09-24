@@ -132,3 +132,31 @@ fn fmt_check_a_feature_dense_file() {
     // Canonical input passes --check; the value is the formatter breadth it exercises.
     assert(p.run_raw(args.as_str()).ok(), "the feature-dense file is already canonical");
 }
+
+// A rewrite goes through a temp file and a rename; a symlinked source keeps its link, and the file it
+// names gets the formatted text.
+@test
+fn fmt_rewrites_through_a_symlink() {
+    if cli::on_wasm() || cli::on_windows() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("real/a.spc", UGLY);
+    let root = str::from_cstr(p.rootp());
+    let mut ln = String::new();
+    ln.format_into("ln -s \"{}/real/a.spc\" \"{}/link.spc\"", root, root);
+    assert_eq(cli::run_quiet(ln.cstr()), 0);
+    let mut args = String::from_str("fmt \"");
+    args.push_str(root);
+    args.push_str("/link.spc\"");
+    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    assert(read(root, "real/a.spc").as_str() == CLEAN, "the link target is formatted");
+    let mut chk = String::new();
+    chk.format_into("test -L \"{}/link.spc\"", root);
+    assert_eq(cli::run_quiet(chk.cstr()), 0);
+    // No temp file is left beside either path.
+    assert_eq(cli::dir_count_suffix(root, ".tmp"), 0);
+    let mut real = String::from_str(root);
+    real.push_str("/real");
+    assert_eq(cli::dir_count_suffix(real.as_str(), ".tmp"), 0);
+}

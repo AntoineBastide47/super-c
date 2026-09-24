@@ -32,9 +32,9 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_now_ns() u64;
     /// A cheap per-thread cycle counter for the scheduler's compile-gated statistics.
     pub fn sc_rt_cycles() u64;
-    /// Online core count (at least 1).
     /// The page size, bytes.
     pub fn sc_rt_page_size() usize;
+    /// Online core count (at least 1).
     pub fn sc_rt_ncpu() usize;
 
     /// Store this thread's runtime pointer.
@@ -62,16 +62,14 @@ extern "C" "sc_rt.h" {
     /// One 64-byte static bucket of the mutex parking lot, keyed by the lock's address. Static so a waker
     /// may touch it after the mutex itself was freed; the queue discipline lives in std/parallel/sync.spc.
     pub fn sc_rt_lot_bucket(addr: *mut void) *mut void;
-    /// Bytes the parking lot retains per thread that has parked at least once.
-    pub fn sc_rt_park_bytes_per_thread() usize;
-    /// Bytes the parking lot retains for the process, whatever the thread count.
-    pub fn sc_rt_park_bytes_fixed() usize;
-    /// Record `lock` as held by this thread (lock-order checking builds only).
-    pub fn sc_rt_lockdep_acquire(lock: *mut void) void;
-    /// Record `lock` as released.
-    pub fn sc_rt_lockdep_release(lock: *mut void) void;
-    /// Drop `lock` from the order graph before it is freed.
-    pub fn sc_rt_lockdep_forget(lock: *mut void) void;
+    /// Threads parked in the POSIX parking lot; zero on a backend that keeps no records.
+    pub fn sc_rt_parked() usize;
+    /// Record the lock whose identity word is `id` as held by this thread (lock-order checking builds only).
+    pub fn sc_rt_lockdep_acquire(id: *mut u32) void;
+    /// Record the lock as released.
+    pub fn sc_rt_lockdep_release(id: *mut u32) void;
+    /// Drop the lock from the order graph before it is freed.
+    pub fn sc_rt_lockdep_forget(id: *mut u32) void;
 
     /// Sleep the calling OS thread. Only for a non-coroutine thread: a coroutine must park on the
     /// scheduler's timer list instead, or it would take its worker down with it.
@@ -80,7 +78,7 @@ extern "C" "sc_rt.h" {
     /// OS threads and their locks, as opaque handles: pthreads on POSIX, Win32 on Windows, one call site
     /// either way. `thread_create` fills `out` and returns 0 on success; `join` consumes the handle.
     pub fn sc_rt_thread_create(out: *mut *mut void, entry: fn(*mut void) *mut void, arg: *mut void) i32;
-    /// Wait for a thread from sc_rt_thread_spawn; 0 on success.
+    /// Wait for a thread from sc_rt_thread_create; 0 on success.
     pub fn sc_rt_thread_join(handle: *mut void) i32;
     /// Detach: the thread runs on and the OS releases it at exit; the handle is consumed. 0 on success.
     pub fn sc_rt_thread_detach(handle: *mut void) i32;
@@ -108,8 +106,6 @@ extern "C" "sc_rt.h" {
     pub fn sc_rt_cond_timedwait_ns(c: *mut void, m: *mut void, rel_ns: i64) i32;
     /// Wake one waiter.
     pub fn sc_rt_cond_signal(c: *mut void) void;
-    /// Wake every waiter.
-    pub fn sc_rt_cond_broadcast(c: *mut void) void;
 
     /// A guard-paged stack: the usable low end, or null on failure. Free with the same size.
     pub fn sc_rt_stack_alloc(size: usize) *mut void;
@@ -118,7 +114,7 @@ extern "C" "sc_rt.h" {
     /// Bytes currently mapped for task stacks, guard pages included.
     pub fn sc_rt_stack_bytes() usize;
     /// Arm this thread to report a stack overflow instead of dying on a bare fault; `note_size` supplies
-    /// the size the message quotes. No-ops on Windows.
+    /// the size the message quotes. No-op on Windows builds other than x86-64 and on wasm.
     pub fn sc_rt_stack_guard_install() void;
     /// Record the usable stack size for the overflow report.
     pub fn sc_rt_stack_note_size(bytes: usize) void;

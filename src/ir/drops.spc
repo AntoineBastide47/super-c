@@ -142,7 +142,7 @@ pub fn assign_may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
             if pl.ty == TYPE_NONE || pl.proj_len == 0 && pl.ty == b.locals.at(pl.base as usize).ty {
                 continue;
             }
-            if place_over_class(a, b, &pl) != 0 && ow.owns(b.module, pl.ty) {
+            if place_over_class(a, b, &pl) != 0 && ow.owns(b.owner, b.module, pl.ty) {
                 return true;
             }
         }
@@ -156,7 +156,7 @@ pub fn assign_may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
 pub fn may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
     for l in 0..b.locals.len() {
         let ty = b.locals.at(l).ty;
-        if ty != TYPE_NONE && ow.owns(b.module, ty) {
+        if ty != TYPE_NONE && ow.owns(b.owner, b.module, ty) {
             return true;
         }
     }
@@ -222,7 +222,7 @@ pub fn elaborate_into(
                 // overwriting an initialized destructible value frees it first (language rule);
                 // stores through raw pointers are unsafe storage and never auto-free
                 let pl0 = *b.places.at(s.place as usize);
-                if pl0.ty != TYPE_NONE && ow.owns(b.module, pl0.ty) {
+                if pl0.ty != TYPE_NONE && ow.owns(b.owner, b.module, pl0.ty) {
                     let a0 = unsafe &*(&*ow.pkg).module_ast_const(b.module);
                     let cls0 = place_over_class(a0, b, &pl0);
                     if cls0 != 0 {
@@ -286,7 +286,7 @@ pub fn elaborate_into(
                 let decl = b.locals.at(l as usize).decl;
                 let lty = b.locals.at(l as usize).ty;
                 let declared = decl != NODE_NONE || b.locals.at(l as usize).storage == ir::LS_INL;
-                if declared && ow.owns(b.module, lty) {
+                if declared && ow.owns(b.owner, b.module, lty) {
                     let root = forest.local_root[l as usize];
                     forest.subtree(root, scratch, sub);
                     let mut all_di = true;
@@ -327,7 +327,7 @@ pub fn elaborate_into(
                                 if child != mp::MP_NONE {
                                     live = bits::bit_get(di, child);
                                 }
-                                if live && ow.owns(fom, ftys[fi]) {
+                                if live && ow.owns(b.owner, fom, ftys[fi]) {
                                     let mut pth = root;
                                     if child != mp::MP_NONE {
                                         pth = child;
@@ -364,6 +364,7 @@ pub fn elaborate_into(
                         let have2 = ow.agg_fields(b.module, lty, fdecls, ftys, &mut fom2);
                         for i in 0..sub.len() {
                             if sub[i] != root && bits::bit_get(di, sub[i]) && ow.owns(
+                                b.owner,
                                 b.module,
                                 forest.paths.at(sub[i] as usize).ty,
                             ) {
@@ -438,15 +439,7 @@ pub fn elaborate_into(
 fn flag_stmt(b: &mut ir::CoreBody, fl: u32, v: i64, sp: tok::Span) {
     let bt = Ast::builtin(BuiltinType::BT_BOOL);
     b.constants.push(
-        ir::Constant {
-            kind: ir::CK_BOOL,
-            ty: bt,
-            val: v,
-            raw: sp,
-            item: DefId { module: 0, node: NODE_NONE },
-            targ_start: 0,
-            targ_len: 0,
-        },
+        ir::Constant { kind: ir::CK_BOOL, ty: bt, val: v, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
     );
     b.operands.push(ir::Operand { kind: ir::OP_CONST, data: b.constants.len() as u32 - 1, ty: bt });
     b.rvalues.push(
@@ -466,7 +459,6 @@ fn flag_stmt(b: &mut ir::CoreBody, fl: u32, v: i64, sp: tok::Span) {
             place: b.places.len() as u32 - 1,
             rvalue: b.rvalues.len() as u32 - 1,
             a: 0,
-            b: 0,
             span: sp,
         },
     );
@@ -884,7 +876,9 @@ pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
         let ld = *b.locals.at(l);
         let declared = ld.decl != NODE_NONE || ld.storage == ir::LS_INL;
         let cap = l as u32 >= cap_lo && l as u32 < cap_hi;
-        tracked.push(declared && !cap && l as u32 >= b.returns && ld.ty != TYPE_NONE && ow.owns(b.module, ld.ty));
+        tracked.push(
+            declared && !cap && l as u32 >= b.returns && ld.ty != TYPE_NONE && ow.owns(b.owner, b.module, ld.ty),
+        );
     }
     let mut forest = mp::MoveForest::empty();
     forest.build_into(b);

@@ -42,13 +42,13 @@ pub struct Cell<T> {
 // Drop one reference. The last one frees the value (when the thread produced it and nobody moved it out)
 // and the cell. Release/acquire on the count orders the thread's writes before the last holder's reads.
 fn cell_drop<T>(c: *mut Cell<T>) {
-    if atomic::sub_i32(&mut unsafe c.refs, 1, 3) != 1 {
+    if unsafe atomic::sub_i32(&mut unsafe (*c).refs, 1, 3) != 1 {
         return;
     }
-    if atomic::load_i32(&mut unsafe c.done, 1) == 1 && sizeof(T) != 0 {
+    if unsafe atomic::load_i32(&mut unsafe (*c).done, 1) == 1 && sizeof(T) != 0 {
         // The unclaimed value is destroyed in place: a read through the raw pointer would be a copy the
         // drop elaboration does not own. (A zero-sized value has no storage and nothing to destroy.)
-        let vp = (&mut unsafe c.value) as *mut T;
+        let vp = (&mut unsafe (*c).value) as *mut T;
         vp.free();
     }
     let mut g = Global {};
@@ -69,15 +69,13 @@ pub struct ThreadPayload<F, T> {
 /// `sc_rt_thread_create`. `pub` for linkage.
 pub fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
     let pp = arg as *mut ThreadPayload<F, T>;
-    let payload = unsafe {
-        pp[0];
-    };
+    // Each field is read out of the block once: the body moves to `f`, and the block is released raw.
+    let f = unsafe (*pp).body;
+    let c = unsafe (*pp).cell;
     let mut g = Global {};
     unsafe g.dealloc(arg, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
-    let f = payload.body;
-    let c = payload.cell;
-    unsafe c.value = f();
-    atomic::store_i32(&mut unsafe c.done, 1, 2);
+    unsafe (*c).value = f();
+    unsafe atomic::store_i32(&mut unsafe (*c).done, 1, 2);
     cell_drop(c);
     return null;
 }
@@ -111,7 +109,7 @@ extend<T> JoinHandle<T> {
         me.handle = null;
         me.cell = null;
         let v = unsafe {
-            c.value;
+            (*c).value;
         };
         let mut g = Global {};
         unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
@@ -147,8 +145,8 @@ extend<T> JoinHandle<T> as Free {
 pub fn spawn<F: fn move() T + Send + 'static, T: Send>(f: F) JoinHandle<T> {
     let mut g = Global {};
     let c = (unsafe g.alloc(sizeof(Cell<T>), alignof(Cell<T>))) as *mut Cell<T>;
-    unsafe c.refs = 2;
-    unsafe c.done = 0;
+    unsafe (*c).refs = 2;
+    unsafe (*c).done = 0;
     let env = (unsafe g.alloc(sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>))) as *mut ThreadPayload<F, T>;
     unsafe env[0] = ThreadPayload::<F, T> { body: f, cell: c };
     let mut h: *mut void = null;

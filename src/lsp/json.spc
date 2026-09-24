@@ -5,14 +5,7 @@
 // output (the wire format must be valid JSON) and integral numbers print without a ".0" suffix (LSP
 // positions and ids are integers).
 import string as cstring;
-
-/// JSON value kinds (JSON.kind).
-pub const JT_NULL: u8 = 0;
-pub const JT_BOOL: u8 = 1;
-pub const JT_NUMBER: u8 = 2;
-pub const JT_STRING: u8 = 3;
-pub const JT_ARRAY: u8 = 4;
-pub const JT_OBJECT: u8 = 5;
+import stdlib;
 
 const MAX_NESTING_DEPTH: usize = 1024;
 
@@ -22,118 +15,131 @@ pub struct JSONPair {
     pub value: JSON,
 }
 
-/// A JSON value tagged by `kind`; only the payload matching `kind` is meaningful, the rest stay empty.
-pub struct JSON {
-    pub kind: u8,
-    pub b: bool,
-    pub num: f64,
-    pub s: String,
-    pub arr: Vector<JSON>, // JT_ARRAY elements
-    pub obj: Vector<JSONPair>, // JT_OBJECT members, insertion order
+/// A JSON value. Only the active variant holds a payload, so a value is 32 bytes.
+pub enum JSON {
+    Null,
+    Bool(bool),
+    Num(f64),
+    Str(String),
+    Arr(Vector<JSON>),
+    Obj(Vector<JSONPair>), // members in insertion order
 }
 
 extend JSON {
-    fn make(kind: u8) JSON {
-        return JSON {
-            kind: kind,
-            b: false,
-            num: 0.0,
-            s: String::new(),
-            arr: Vector::<JSON>::new(),
-            obj: Vector::<JSONPair>::new(),
-        };
-    }
-
     /// A boolean value.
     pub fn boolean(value: bool) JSON {
-        let mut j = JSON::make(JT_BOOL);
-        j.b = value;
-        return j;
+        return JSON::Bool(value);
     }
 
     /// A number value.
     pub fn number(value: f64) JSON {
-        let mut j = JSON::make(JT_NUMBER);
-        j.num = value;
-        return j;
+        return JSON::Num(value);
     }
 
     /// An integer, stored as f64 (exact below 2^53).
     pub fn integer(value: i64) JSON {
-        return JSON::number(value as f64);
+        return JSON::Num(value as f64);
     }
 
     /// A string value; `value` is copied.
     pub fn str(value: str) JSON {
-        let mut j = JSON::make(JT_STRING);
-        j.s = String::from_str(value);
-        return j;
+        return JSON::Str(String::from_str(value));
     }
 
     /// Takes ownership of `value` (no copy): the JSON(std::string&&) constructor.
     pub fn string(value: String) JSON {
-        let mut j = JSON::make(JT_STRING);
-        j.s = value;
-        return j;
+        return JSON::Str(value);
     }
 
     /// An empty array.
     pub fn array() JSON {
-        return JSON::make(JT_ARRAY);
+        return JSON::Arr(Vector::<JSON>::new());
     }
 
     /// An empty object.
     pub fn object() JSON {
-        return JSON::make(JT_OBJECT);
+        return JSON::Obj(Vector::<JSONPair>::new());
     }
 
     /// Kind test.
     pub const fn is_null(self: &Self) bool {
-        return self.kind == JT_NULL;
+        return switch self {
+            Null => true,
+            _ => false,
+        };
     }
 
     /// Kind test.
     pub const fn is_bool(self: &Self) bool {
-        return self.kind == JT_BOOL;
+        return switch self {
+            Bool(_) => true,
+            _ => false,
+        };
+    }
+
+    /// Kind test.
+    pub const fn is_number(self: &Self) bool {
+        return switch self {
+            Num(_) => true,
+            _ => false,
+        };
+    }
+
+    /// Kind test.
+    pub const fn is_string(self: &Self) bool {
+        return switch self {
+            Str(_) => true,
+            _ => false,
+        };
     }
 
     /// Kind test.
     pub const fn is_array(self: &Self) bool {
-        return self.kind == JT_ARRAY;
+        return switch self {
+            Arr(_) => true,
+            _ => false,
+        };
     }
 
     /// Kind test.
     pub const fn is_object(self: &Self) bool {
-        return self.kind == JT_OBJECT;
+        return switch self {
+            Obj(_) => true,
+            _ => false,
+        };
     }
 
     /// The boolean. Panics: not a boolean.
     pub const fn get_bool(self: &Self) bool {
-        if self.kind != JT_BOOL {
-            panic("JSON::get_bool called on a non-boolean type");
-        }
-        return self.b;
+        return switch self {
+            Bool(b) => *b,
+            _ => panic("JSON::get_bool called on a non-boolean type"),
+        };
     }
 
     /// The number. Panics: not a number.
     pub const fn get_number(self: &Self) f64 {
-        if self.kind != JT_NUMBER {
-            panic("JSON::get_number called on a non-number type");
-        }
-        return self.num;
+        return switch self {
+            Num(n) => *n,
+            _ => panic("JSON::get_number called on a non-number type"),
+        };
     }
 
-    /// The number truncated to i64. Panics: not a number.
+    /// The number truncated to i64. Panics: not a number, or outside the i64 range (NaN included).
     pub const fn get_i64(self: &Self) i64 {
-        return self.get_number() as i64;
+        let n = self.get_number();
+        if !in_i64_range(n) {
+            panic("JSON::get_i64 called on a number outside the i64 range");
+        }
+        return n as i64;
     }
 
     /// The string. Panics: not a string.
     pub const fn get_string(self: &Self) &String {
-        if self.kind != JT_STRING {
-            panic("JSON::get_string called on a non-string type");
-        }
-        return &self.s;
+        return switch self {
+            Str(s) => s,
+            _ => panic("JSON::get_string called on a non-string type"),
+        };
     }
 
     /// The string as a view. Panics: not a string.
@@ -143,10 +149,10 @@ extend JSON {
 
     /// Element at `index`; panics out of bounds or on a non-array (JSON::At(size_t)).
     pub const fn at(self: &Self, index: usize) &JSON {
-        if self.kind != JT_ARRAY {
-            panic("JSON::at on a non array-type");
-        }
-        return self.arr.at(index);
+        return switch self {
+            Arr(a) => a.at(index),
+            _ => panic("JSON::at on a non array-type"),
+        };
     }
 
     /// Member for `key`; panics when missing or on a non-object (JSON::At(string)).
@@ -159,10 +165,10 @@ extend JSON {
 
     /// Safe member lookup: None when absent or on a non-object (the JSON::Value analog, Option-shaped).
     pub fn value(self: &Self, key: str) Option<&JSON> {
-        if self.kind == JT_OBJECT {
-            for i in 0..self.obj.len() {
-                if self.obj.at(i).key.as_str() == key {
-                    return Option::<&JSON>::Some(&self.obj.at(i).value);
+        if let Obj(o) = self {
+            for i in 0..o.len() {
+                if o.at(i).key.as_str() == key {
+                    return Option::<&JSON>::Some(&o.at(i).value);
                 }
             }
         }
@@ -174,168 +180,179 @@ extend JSON {
         return self.value(key).is_some();
     }
 
-    /// Member as integer / string view with a default: the common LSP request-field reads.
+    /// Member as integer / string view with a default: the common LSP request-field reads. A number
+    /// outside the i64 range (NaN included) also yields `dflt`.
     pub fn value_i64(self: &Self, key: str, dflt: i64) i64 {
-        return switch self.value(key) {
-            Some(v) => switch v.kind == JT_NUMBER {
-                true => v.num as i64,
-                false => dflt,
-            },
-            None => dflt,
-        };
+        if let Some(v) = self.value(key) {
+            if let Num(n) = v {
+                if in_i64_range(*n) {
+                    return (*n) as i64;
+                }
+            }
+        }
+        return dflt;
     }
 
     /// Member `key` as a string view; empty when absent or not a string.
     pub fn value_str(self: &Self, key: str) str {
-        return switch self.value(key) {
-            Some(v) => switch v.kind == JT_STRING {
-                true => v.s.as_str(),
-                false => "",
-            },
-            None => "",
-        };
+        if let Some(v) = self.value(key) {
+            if let Str(s) = v {
+                return s.as_str();
+            }
+        }
+        return "";
     }
 
-    /// Element count of an array or member count of an object; 0 for scalars.
+    /// Element count of an array or member count of an object. Panics: a scalar.
     pub const fn size(self: &Self) usize {
-        if self.kind == JT_ARRAY {
-            return self.arr.len();
-        }
-        if self.kind == JT_OBJECT {
-            return self.obj.len();
-        }
-        panic("JSON::size called on non-array or non-object type");
-    }
-
-    // Become an empty value of `kind`. Assigning over a field frees what
-    // it held, so the three stores below are the release as well as the reset.
-    fn reset_to(self: &mut Self, kind: u8) {
-        self.s = String::new();
-        self.arr = Vector::<JSON>::new();
-        self.obj = Vector::<JSONPair>::new();
-        self.kind = kind;
+        return switch self {
+            Arr(a) => a.len(),
+            Obj(o) => o.len(),
+            _ => panic("JSON::size called on non-array or non-object type"),
+        };
     }
 
     /// Append to the array; a non-array converts to one first (JSON::PushBack). Owns `value`.
     pub fn push_back(self: &mut Self, value: JSON) {
-        if self.kind != JT_ARRAY {
-            self.reset_to(JT_ARRAY);
+        if !self.is_array() {
+            *self = JSON::array();
         }
-        self.arr.push(value);
+        self.items_mut().push(value);
     }
 
     /// Set `key` to `value`, overwriting an existing member; a non-object converts to one first
     /// (JSON::Emplace). Owns `value`.
     pub fn emplace(self: &mut Self, key: str, value: JSON) {
-        if self.kind != JT_OBJECT {
-            self.reset_to(JT_OBJECT);
+        if !self.is_object() {
+            *self = JSON::object();
         }
-        for i in 0..self.obj.len() {
-            if self.obj.at(i).key.as_str() == key {
-                self.obj[i].value = value;
+        let o = self.members_mut();
+        for i in 0..o.len() {
+            if o.at(i).key.as_str() == key {
+                o[i].value = value;
                 return;
             }
         }
-        self.obj.push(JSONPair { key: String::from_str(key), value: value });
+        o.push(JSONPair { key: String::from_str(key), value: value });
     }
 
     /// Deep copy
     pub fn clone(self: &Self) JSON {
-        let mut j = JSON::make(self.kind);
-        j.b = self.b;
-        j.num = self.num;
-        j.s = self.s.clone();
-        for i in 0..self.arr.len() {
-            j.arr.push(self.arr.at(i).clone());
-        }
-        for i in 0..self.obj.len() {
-            j.obj.push(JSONPair { key: self.obj.at(i).key.clone(), value: self.obj.at(i).value.clone() });
-        }
-        return j;
+        switch self {
+            Arr(a) => {
+                let mut c = Vector::<JSON>::with_capacity(a.len());
+                for i in 0..a.len() {
+                    c.push(a.at(i).clone());
+                }
+                return JSON::Arr(c);
+            },
+            Obj(o) => {
+                let mut c = Vector::<JSONPair>::with_capacity(o.len());
+                for i in 0..o.len() {
+                    c.push(JSONPair { key: o.at(i).key.clone(), value: o.at(i).value.clone() });
+                }
+                return JSON::Obj(c);
+            },
+            Str(s) => {
+                return JSON::Str(s.clone());
+            },
+            Num(n) => {
+                return JSON::Num(*n);
+            },
+            Bool(b) => {
+                return JSON::Bool(*b);
+            },
+            Null => {
+                return JSON::Null;
+            },
+        };
     }
 
-    /// Reserve capacity for `size` elements or members; a no-op for scalars.
+    /// Reserve capacity for `size` elements or members. Panics: a scalar.
     pub fn reserve(self: &mut Self, size: usize) {
-        if self.kind == JT_ARRAY {
-            self.arr.reserve(size);
-        } else if self.kind == JT_OBJECT {
-            self.obj.reserve(size);
-        } else {
-            panic("JSON::reserve called on non-array and non-object type");
-        }
+        switch self {
+            Arr(a) => a.reserve(size),
+            Obj(o) => o.reserve(size),
+            _ => panic("JSON::reserve called on non-array and non-object type"),
+        };
     }
 
-    /// Serialize; `pretty` indents by two spaces per level (JSON::Dump).
-    pub fn dump(self: &Self, pretty: bool) String {
+    // The array elements. Panics: not an array.
+    fn items_mut(self: &mut Self) &mut Vector<JSON> {
+        return switch self {
+            Arr(a) => a,
+            _ => panic("JSON::items_mut called on a non-array type"),
+        };
+    }
+
+    // The object members. Panics: not an object.
+    fn members_mut(self: &mut Self) &mut Vector<JSONPair> {
+        return switch self {
+            Obj(o) => o,
+            _ => panic("JSON::members_mut called on a non-object type"),
+        };
+    }
+
+    // Element or member count; 0 for a scalar.
+    const fn count(self: &Self) usize {
+        return switch self {
+            Arr(a) => a.len(),
+            Obj(o) => o.len(),
+            _ => 0,
+        };
+    }
+
+    /// Serialize compactly (JSON::Dump).
+    pub fn dump(self: &Self) String {
         let mut out = String::with_capacity(256);
-        self.dump_into(&mut out, pretty, 0);
+        self.dump_into(&mut out);
         return out;
     }
 
-    fn dump_into(self: &Self, out: &mut String, pretty: bool, indent: u32) {
-        if self.kind == JT_NULL {
-            out.push_str("null");
-        } else if self.kind == JT_BOOL {
-            if self.b {
-                out.push_str("true");
-            } else {
-                out.push_str("false");
-            }
-        } else if self.kind == JT_NUMBER {
-            dump_number(self.num, out);
-        } else if self.kind == JT_STRING {
-            dump_escaped(self.s.as_str(), out);
-        } else if self.kind == JT_ARRAY {
-            out.push_byte(b'[');
-            for i in 0..self.arr.len() {
-                if i > 0 {
-                    out.push_byte(b',');
+    /// Append the compact serialization to `out`.
+    pub fn dump_into(self: &Self, out: &mut String) {
+        switch self {
+            Null => out.push_str("null"),
+            Bool(true) => out.push_str("true"),
+            Bool(false) => out.push_str("false"),
+            Num(n) => dump_number(*n, out),
+            Str(s) => dump_escaped(s.as_str(), out),
+            Arr(a) => {
+                out.push_byte(b'[');
+                for i in 0..a.len() {
+                    if i > 0 {
+                        out.push_byte(b',');
+                    }
+                    a.at(i).dump_into(out);
                 }
-                if pretty {
-                    dump_indent(out, indent + 1);
+                out.push_byte(b']');
+            },
+            Obj(o) => {
+                out.push_byte(b'{');
+                for i in 0..o.len() {
+                    if i > 0 {
+                        out.push_byte(b',');
+                    }
+                    dump_escaped(o.at(i).key.as_str(), out);
+                    out.push_byte(b':');
+                    o.at(i).value.dump_into(out);
                 }
-                self.arr.at(i).dump_into(out, pretty, indent + 1);
-            }
-            if pretty && self.arr.len() != 0 {
-                dump_indent(out, indent);
-            }
-            out.push_byte(b']');
-        } else {
-            out.push_byte(b'{');
-            for i in 0..self.obj.len() {
-                if i > 0 {
-                    out.push_byte(b',');
-                }
-                if pretty {
-                    dump_indent(out, indent + 1);
-                }
-                dump_escaped(self.obj.at(i).key.as_str(), out);
-                out.push_byte(b':');
-                if pretty {
-                    out.push_byte(b' ');
-                }
-                self.obj.at(i).value.dump_into(out, pretty, indent + 1);
-            }
-            if pretty && self.obj.len() != 0 {
-                dump_indent(out, indent);
-            }
-            out.push_byte(b'}');
-        }
+                out.push_byte(b'}');
+            },
+        };
     }
 }
 
 extend JSON as Default {
     /// A JSON null
     pub fn default() JSON {
-        return JSON::make(JT_NULL);
+        return JSON::Null;
     }
 }
 
-fn dump_indent(out: &mut String, level: u32) {
-    out.push_byte(b'\n');
-    for k in 0..level * 2 {
-        out.push_byte(b' ');
-    }
+// True when `n` truncates to an i64 without overflow (false for NaN: every comparison fails).
+const fn in_i64_range(n: f64) bool {
+    return n >= -9223372036854775808.0 && n < 9223372036854775808.0;
 }
 
 fn dump_number(n: f64, out: &mut String) {
@@ -487,8 +504,8 @@ extend JSONParser {
     // usize), 0 on error. The slot stays valid while it is the open top of stack: nothing is appended to
     // this object until the child closes.
     fn set_object_value(self: &mut Self, json: JSON) usize {
-        let t = self.top() as *mut JSON;
-        if !self.comma_detected && unsafe t.obj.len() != 0 {
+        let o = unsafe (*(self.top() as *mut JSON)).members_mut();
+        if !self.comma_detected && o.len() != 0 {
             self.fail("Missing ',' between object members");
             return 0;
         }
@@ -498,22 +515,25 @@ extend JSONParser {
         }
         let k = replace(&mut self.pending_key, String::new());
         self.candidate_key.clear();
-        unsafe t.obj.push(JSONPair { key: k, value: json });
+        o.push(JSONPair { key: k, value: json });
         self.pending_key_set = false;
         self.comma_detected = false;
-        let idx = unsafe t.obj.len() - 1;
-        return ((&mut unsafe t.obj[idx].value) as *mut JSON) as usize;
+        let idx = o.len() - 1;
+        return ((&mut o[idx].value) as *mut JSON) as usize;
     }
 
-    // Append `json` to the open array; frees it on a comma error.
-    fn set_array_value(self: &mut Self, json: JSON) {
-        let t = self.top() as *mut JSON;
-        if !self.comma_detected && unsafe t.arr.len() != 0 {
+    // Append `json` to the open array and return its slot (as usize), 0 on a comma error (which frees
+    // `json`). The slot stays valid while it is the open top of stack.
+    fn set_array_value(self: &mut Self, json: JSON) usize {
+        let a = unsafe (*(self.top() as *mut JSON)).items_mut();
+        if !self.comma_detected && a.len() != 0 {
             self.fail("Missing ',' between array members");
-            return;
+            return 0;
         }
-        unsafe t.arr.push(json);
+        a.push(json);
         self.comma_detected = false;
+        let idx = a.len() - 1;
+        return ((&mut a[idx]) as *mut JSON) as usize;
     }
 
     // Decode the escaped content between src[from..to] (exclusive of the quotes): copy backslash-free
@@ -630,20 +650,18 @@ extend JSONParser {
         return code;
     }
 
-    // Parse the number in src[from..to] (JSONParser::parseNumber): integer mantissa, fractional
-    // accumulation, then a power-of-ten exponent scale.
+    // Validate the number in src[from..to] against the JSON grammar, then convert it with strtod: the
+    // value is correctly rounded, and an exponent past the f64 range saturates to infinity or zero at
+    // a cost linear in the digit count.
     fn parse_number(self: &mut Self, from: usize, to: usize) f64 {
         let mut p = from;
-        let mut neg = false;
         if self.src[p] == b'-' {
-            neg = true;
             p += 1;
         }
         if p == to {
             self.fail("Invalid number: digit expected after '-'");
             return 0.0;
         }
-        let mut int_part: u64 = 0;
         let b0 = self.src[p];
         if b0 == b'0' {
             p += 1;
@@ -653,75 +671,41 @@ extend JSONParser {
             }
         } else if b0 >= b'1' && b0 <= b'9' {
             while p < to && self.src[p] >= b'0' && self.src[p] <= b'9' {
-                int_part = int_part * 10 + (self.src[p] - b'0') as u64;
                 p += 1;
             }
         } else {
             self.fail("Invalid number: digit expected after '-'");
             return 0.0;
         }
-        let mut frac_part: f64 = 0.0;
         if p < to && self.src[p] == b'.' {
             p += 1;
             if p == to || self.src[p] < b'0' || self.src[p] > b'9' {
                 self.fail("Invalid number: digit expected after '.'");
                 return 0.0;
             }
-            let mut factor: f64 = 0.1;
             while p < to && self.src[p] >= b'0' && self.src[p] <= b'9' {
-                frac_part += (self.src[p] - b'0') as f64 * factor;
-                factor *= 0.1;
                 p += 1;
             }
         }
-        let mut value = int_part as f64 + frac_part;
         if p < to && (self.src[p] == b'e' || self.src[p] == b'E') {
             p += 1;
-            let mut exp_neg = false;
             if p < to && (self.src[p] == b'+' || self.src[p] == b'-') {
-                exp_neg = self.src[p] == b'-';
                 p += 1;
             }
             if p == to || self.src[p] < b'0' || self.src[p] > b'9' {
                 self.fail("Invalid number: digit expected after exponent");
                 return 0.0;
             }
-            // Saturate the exponent at a value past the f64 range so a pathological input like
-            // 1e999999999 costs O(digits), and scale by squaring: O(log exponent), never linear.
-            let mut exponent: i64 = 0;
             while p < to && self.src[p] >= b'0' && self.src[p] <= b'9' {
-                if exponent < 4096 {
-                    exponent = exponent * 10 + (self.src[p] - b'0') as i64;
-                }
                 p += 1;
-            }
-            if exponent > 400 {
-                exponent = 400;
-            }
-            let mut scale: f64 = 1.0;
-            let mut base: f64 = 10.0;
-            let mut e = exponent;
-            while e > 0 {
-                if (e & 1) == 1 {
-                    scale *= base;
-                }
-                base *= base;
-                e = e >> 1;
-            }
-            if exp_neg {
-                value /= scale;
-            } else {
-                value *= scale;
             }
         }
         if p != to {
             self.fail("Invalid character in number");
             return 0.0;
         }
-        if neg {
-            return 0.0 - value;
-        }
-        return value;
+        let mut text = String::from_str(self.src.slice(from, to));
+        return unsafe stdlib::strtod(text.cstr(), null);
     }
 
     // The parseBuffer main loop over the whole (in-memory) input; returns the consumed byte count.
@@ -742,36 +726,35 @@ extend JSONParser {
                     return i;
                 }
                 let t = self.top() as *mut JSON;
-                if unsafe t.kind == JT_OBJECT {
-                    let mut child = JSON::object();
-                    child.reserve(8);
+                let child = JSON::Obj(Vector::<JSONPair>::with_capacity(8));
+                if unsafe (*t).is_object() {
                     let slot = self.set_object_value(child);
                     if slot == 0 {
                         return i;
                     }
                     self.stack.push(slot);
-                } else if unsafe t.kind == JT_ARRAY {
-                    let mut child = JSON::object();
-                    child.reserve(8);
-                    self.set_array_value(child);
-                    if self.err.len() != 0 {
+                } else if unsafe (*t).is_array() {
+                    let slot = self.set_array_value(child);
+                    if slot == 0 {
                         return i;
                     }
-                    let last = unsafe t.arr.len() - 1;
-                    self.stack.push(((&mut unsafe t.arr[last]) as *mut JSON) as usize);
+                    self.stack.push(slot);
                 } else if self.stack.len() == 1 {
-                    t.reset_to(JT_OBJECT);
-                    unsafe t.obj.reserve(8);
+                    unsafe *t = child;
                 }
                 self.found_data = true;
             } else if c == b'}' {
                 let t = self.top() as *mut JSON;
-                if unsafe t.kind == JT_OBJECT {
+                if unsafe (*t).is_object() {
                     if self.pending_key_set {
                         self.fail_s(format("Missing value for key '{}' in object", self.pending_key.as_str()));
                         return i;
                     }
-                    if self.comma_detected && unsafe t.obj.len() != 0 {
+                    if self.candidate_key_set {
+                        self.fail("Missing a colon after a key");
+                        return i;
+                    }
+                    if self.comma_detected && unsafe (*t).count() != 0 {
                         self.fail("Trailing ',' before closing '}'");
                         return i;
                     }
@@ -780,7 +763,7 @@ extend JSONParser {
                     if self.stack.len() == 0 {
                         return i + 1;
                     }
-                } else if unsafe t.kind == JT_ARRAY {
+                } else if unsafe (*t).is_array() {
                     self.fail("Expected ']' but found '}'");
                     return i;
                 } else {
@@ -795,37 +778,31 @@ extend JSONParser {
                     return i;
                 }
                 let t = self.top() as *mut JSON;
-                if unsafe t.kind == JT_OBJECT {
-                    let mut child = JSON::array();
-                    child.reserve(8);
-                    let slot = self.set_object_value(child);
+                if unsafe (*t).is_object() {
+                    let slot = self.set_object_value(JSON::Arr(Vector::<JSON>::with_capacity(8)));
                     if slot == 0 {
                         return i;
                     }
                     self.stack.push(slot);
-                } else if unsafe t.kind == JT_ARRAY {
-                    let mut child = JSON::array();
-                    child.reserve(8);
-                    self.set_array_value(child);
-                    if self.err.len() != 0 {
+                } else if unsafe (*t).is_array() {
+                    let slot = self.set_array_value(JSON::Arr(Vector::<JSON>::with_capacity(8)));
+                    if slot == 0 {
                         return i;
                     }
-                    let last = unsafe t.arr.len() - 1;
-                    self.stack.push(((&mut unsafe t.arr[last]) as *mut JSON) as usize);
+                    self.stack.push(slot);
                 } else if self.stack.len() == 1 {
                     // Root arrays reserve by input size (max(16, n/512)) like the original.
                     let mut cap: usize = 16;
                     if n / 512 > cap {
                         cap = n / 512;
                     }
-                    t.reset_to(JT_ARRAY);
-                    unsafe t.arr.reserve(cap);
+                    unsafe *t = JSON::Arr(Vector::<JSON>::with_capacity(cap));
                 }
                 self.found_data = true;
             } else if c == b']' {
                 let t = self.top() as *mut JSON;
-                if unsafe t.kind == JT_ARRAY {
-                    if self.comma_detected && unsafe t.arr.len() != 0 {
+                if unsafe (*t).is_array() {
+                    if self.comma_detected && unsafe (*t).count() != 0 {
                         self.fail("Trailing ',' before closing ']'");
                         return i;
                     }
@@ -834,7 +811,7 @@ extend JSONParser {
                     if self.stack.len() == 0 {
                         return i + 1;
                     }
-                } else if unsafe t.kind == JT_OBJECT {
+                } else if unsafe (*t).is_object() {
                     self.fail("Expected '}' but found ']'");
                     return i;
                 } else {
@@ -843,8 +820,7 @@ extend JSONParser {
                 }
                 self.found_data = true;
             } else if c == b':' {
-                let t = self.top() as *mut JSON;
-                if unsafe t.kind == JT_ARRAY {
+                if unsafe (*(self.top() as *mut JSON)).is_array() {
                     self.fail("Unexpected ':' in an array, did you mean ','?");
                     return i;
                 }
@@ -857,15 +833,25 @@ extend JSONParser {
                 self.candidate_key_set = false;
                 self.found_data = true;
             } else if c == b',' {
+                // A comma is valid only right after a complete member of a non-empty container.
+                if self.pending_key_set {
+                    self.fail_s(format("Missing value for key '{}' in object", self.pending_key.as_str()));
+                    return i;
+                }
+                if self.candidate_key_set {
+                    self.fail("Missing a colon after a key");
+                    return i;
+                }
                 if self.comma_detected {
                     self.fail("Duplicate ','");
                     return i;
                 }
+                // The open container holds no member yet, or no container is open.
+                if unsafe (*(self.top() as *mut JSON)).count() == 0 {
+                    self.fail("Unexpected ','");
+                    return i;
+                }
                 self.comma_detected = true;
-                self.pending_key_set = false;
-                self.pending_key.clear();
-                self.candidate_key.clear();
-                self.candidate_key_set = false;
                 self.found_data = true;
             } else if c == b'"' {
                 let mut q = i + 1;
@@ -889,7 +875,7 @@ extend JSONParser {
                         }
                         self.found_data = true;
                         let t = self.top() as *mut JSON;
-                        if unsafe t.kind == JT_OBJECT {
+                        if unsafe (*t).is_object() {
                             if !self.pending_key_set {
                                 if !self.candidate_key_set {
                                     self.candidate_key = text;
@@ -901,7 +887,7 @@ extend JSONParser {
                             } else {
                                 self.set_object_value(JSON::string(text));
                             }
-                        } else if unsafe t.kind == JT_ARRAY {
+                        } else if unsafe (*t).is_array() {
                             self.set_array_value(JSON::string(text));
                         } else if self.stack.len() == 1 {
                             unsafe *t = JSON::string(text);
@@ -934,7 +920,7 @@ extend JSONParser {
                 }
             } else if c == b'-' || c >= b'0' && c <= b'9' {
                 let t = self.top() as *mut JSON;
-                if unsafe t.kind == JT_OBJECT && !self.pending_key_set {
+                if unsafe (*t).is_object() && !self.pending_key_set {
                     self.fail("Expected a key before adding a number");
                     return i;
                 }
@@ -947,9 +933,9 @@ extend JSONParser {
                     return i;
                 }
                 self.found_data = true;
-                if unsafe t.kind == JT_OBJECT {
+                if unsafe (*t).is_object() {
                     self.set_object_value(JSON::number(num));
-                } else if unsafe t.kind == JT_ARRAY {
+                } else if unsafe (*t).is_array() {
                     self.set_array_value(JSON::number(num));
                 } else if self.stack.len() == 1 {
                     unsafe *t = JSON::number(num);
@@ -959,7 +945,7 @@ extend JSONParser {
                 i = q - 1;
             } else if c == b't' || c == b'f' || c == b'n' {
                 let t = self.top() as *mut JSON;
-                if unsafe t.kind == JT_OBJECT && !self.pending_key_set {
+                if unsafe (*t).is_object() && !self.pending_key_set {
                     self.fail("Expected a key before adding a boolean or null value");
                     return i;
                 }
@@ -986,9 +972,9 @@ extend JSONParser {
                     val = JSON::boolean(false);
                 }
                 self.found_data = true;
-                if unsafe t.kind == JT_OBJECT {
+                if unsafe (*t).is_object() {
                     self.set_object_value(val);
-                } else if unsafe t.kind == JT_ARRAY {
+                } else if unsafe (*t).is_array() {
                     self.set_array_value(val);
                 } else if self.stack.len() == 1 {
                     unsafe *t = val;
@@ -1031,10 +1017,10 @@ pub fn parse(src: str) Result<JSON, String> {
     }
     if p.stack.len() != 0 {
         let t = p.top() as *mut JSON;
-        if unsafe t.kind == JT_OBJECT {
+        if unsafe (*t).is_object() {
             return Result::<JSON, String>::Err(String::from_str("Missing closing '}' for object"));
         }
-        if unsafe t.kind == JT_ARRAY {
+        if unsafe (*t).is_array() {
             return Result::<JSON, String>::Err(String::from_str("Missing closing ']' for array"));
         }
     }

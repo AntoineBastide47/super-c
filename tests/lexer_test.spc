@@ -128,6 +128,46 @@ fn numeric_errors() {
     expect_error("0xFG");
 }
 
+// A radix literal keeps a '.' only as a fraction (a digit, or a hex run with a 'p' exponent, follows);
+// any other '.' is a range or a member access, as after a decimal literal.
+@test
+fn radix_literal_dots() {
+    expect_tokens("0x0..0x4", [TokenType::IntegerLiteral, TokenType::Range, TokenType::IntegerLiteral, TokenType::Eof]);
+    expect_tokens(
+        "0b1..=0b10",
+        [TokenType::IntegerLiteral, TokenType::RangeInclusive, TokenType::IntegerLiteral, TokenType::Eof],
+    );
+    expect_tokens(
+        "0xFF.dbl()",
+        [
+            TokenType::IntegerLiteral,
+            TokenType::Dot,
+            TokenType::Identifier,
+            TokenType::LeftParen,
+            TokenType::RightParen,
+            TokenType::Eof,
+        ],
+    );
+    expect_tokens("0xFFu32.x", [TokenType::IntegerLiteral, TokenType::Dot, TokenType::Identifier, TokenType::Eof]);
+    expect_tokens("0o7.x", [TokenType::IntegerLiteral, TokenType::Dot, TokenType::Identifier, TokenType::Eof]);
+    expect_tokens("0x1.8p3", [TokenType::FloatLiteral, TokenType::Eof]);
+    expect_tokens("0x1.ap-2", [TokenType::FloatLiteral, TokenType::Eof]);
+    expect_error("0x1.8");
+    expect_error("0b1.1");
+}
+
+// A Token stores its length in 24 bits: a longer lexeme is diagnosed, never packed into the kind bits.
+@test
+fn token_length_limit() {
+    let mut s = String::with_capacity(TOKEN_MAX_LEN + 3);
+    s.push_str("\"");
+    for _ in 0..TOKEN_MAX_LEN {
+        s.push_str("a");
+    }
+    s.push_str("\"");
+    expect_error(s.as_str());
+}
+
 @test
 fn matchertext_literals() {
     // One token per literal; quotes, backslashes, and nested matchers stay verbatim.
@@ -206,6 +246,16 @@ fn matchertext_errors() {
     expect_error("M{}\"(hole {)} bad)\"");
     // EOF inside an interpolation hole.
     expect_error("M{}\"(open {x");
+    // A delimiter chain longer than 255 matcher pairs.
+    let mut d = String::from_str("M");
+    for _ in 0..256 {
+        d.push_str("(");
+    }
+    for _ in 0..256 {
+        d.push_str(")");
+    }
+    d.push_str("\"(x)\"");
+    expect_error(d.as_str());
 }
 
 // Every lexer diagnostic, by message: the harness stops at the lex stage and reports the first one.

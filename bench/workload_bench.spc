@@ -1073,12 +1073,12 @@ static mut G_STOP: i32 = 0;
 
 fn compute_progress_task() {
     let mut chunks: i64 = 0;
-    while atomic::load_i32(&mut unsafe G_STOP, 1) == 0 {
+    while unsafe atomic::load_i32(&mut unsafe G_STOP, 1) == 0 {
         bench::black_box(bench::burn(COMPUTE_CHUNK));
         chunks = chunks + 1;
         rt::yield_now();
     }
-    let _ = atomic::add_i64(&mut unsafe G_PROGRESS, chunks, 0);
+    let _ = unsafe atomic::add_i64(&mut unsafe G_PROGRESS, chunks, 0);
 }
 
 // Run COMPUTE_TASKS compute tasks until `stop` is raised by the caller, and return the chunks they completed
@@ -1086,8 +1086,8 @@ fn compute_progress_task() {
 type LatSink = arc::Arc<sync::Mutex<Vector<f64>>>;
 
 fn compute_window(flood: bool, lat: &LatSink) f64 {
-    atomic::store_i32(&mut unsafe G_STOP, 0, 2);
-    atomic::store_i64(&mut unsafe G_PROGRESS, 0, 2);
+    unsafe atomic::store_i32(&mut unsafe G_STOP, 0, 2);
+    unsafe atomic::store_i64(&mut unsafe G_PROGRESS, 0, 2);
     let wg = sync::WaitGroup::new();
     wg.add(COMPUTE_TASKS);
     for _i in 0..COMPUTE_TASKS {
@@ -1105,12 +1105,12 @@ fn compute_window(flood: bool, lat: &LatSink) f64 {
         rt::sleep_ns(20000000);
     }
     let dt = (platform::now_ns() - t0) as f64 / 1000000.0;
-    atomic::store_i32(&mut unsafe G_STOP, 1, 2);
+    unsafe atomic::store_i32(&mut unsafe G_STOP, 1, 2);
     wg.wait();
     if flood {
         check("blocking_saturation calls returned their id", ok, FLOOD);
     }
-    return atomic::load_i64(&mut unsafe G_PROGRESS, 1) as f64 / dt;
+    return (unsafe atomic::load_i64(&mut unsafe G_PROGRESS, 1)) as f64 / dt;
 }
 
 // FLOOD blocking calls at once, four times the pool's thread limit, each holding its thread for

@@ -223,6 +223,13 @@ fn golden_fmt_skip() {
         "@fmt.skip\nfn weird(  a:i32 )i32{ return   a; }\nfn n(a:i32)i32{return a;}",
         "@fmt.skip\nfn weird(  a:i32 )i32{ return   a; }\nfn n(a: i32) i32 {\n    return a;\n}\n",
     );
+    // Comments inside a skipped item print with its text and count as printed; a comment marker
+    // inside a string literal is not a comment.
+    let src = "// head\n@fmt.skip\nfn weird(  a:i32 )i32{\n    // inner\n    let s = \"// no\"; return   a; /* tail */ }\n";
+    expect_fmt(src, src);
+    let pa = h::parse_ast_for_fmt(src);
+    let mut out = String::new();
+    assert_eq(fbld::format_program(&pa.ast, src, 120, &mut out), 3);
 }
 
 @test
@@ -304,4 +311,14 @@ fn asm_statement_formatting() {
     // empty sections keep their colons. Canonical form is stable and covers the asm-operand formatter.
     let SRC: str = "fn add_one(x: i32) i32 {\n    let mut out: i32 = 0;\n    asm(\"addl $1, %0\" : \"=r\"(out) : \"r\"(x));\n    return out;\n}\nfn barrier() {\n    asm(\"\" :  :  : \"memory\");\n}\n";
     expect_fmt(SRC, SRC);
+}
+
+// `if let` / `while let` parse to a match (in a synthesized loop for `while let`); the formatter prints the
+// written form, including labels, else chains and the expression position, never the desugared switch.
+@test
+fn golden_if_let_while_let() {
+    expect_fmt(
+        "fn f(o:Option<i32>){'a: while   let Some(x)=g(){ // n\nh(x);}\nwhile let Some(y) = g() { h(y); }\nif let Some(y)=o{h(y);}else if let None=o{h(0);}else{h(1);}\nlet w=if let Some(q)=o{q;}else{0;};\nif c(){h(2);}else if let Some(z)=o{h(z);}\n}",
+        "fn f(o: Option<i32>) {\n    'a: while let Some(x) = g() {\n        // n\n        h(x);\n    }\n    while let Some(y) = g() {\n        h(y);\n    }\n    if let Some(y) = o {\n        h(y);\n    } else if let None = o {\n        h(0);\n    } else {\n        h(1);\n    }\n    let w = if let Some(q) = o {\n        q;\n    } else {\n        0;\n    };\n    if c() {\n        h(2);\n    } else if let Some(z) = o {\n        h(z);\n    }\n}\n",
+    );
 }

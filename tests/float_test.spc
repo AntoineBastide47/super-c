@@ -125,10 +125,13 @@ fn f16_known_encodings() {
     assert_eq(f16::min_positive().to_raw().to_u64(), 0x0001u64);
     // 65504.
     assert_eq(f16::max_finite(false).to_raw().to_u64(), 0x7BFFu64);
-    // Overflow saturates to infinity, and NaN equals nothing (itself included).
+    // Overflow saturates to infinity. Under IEEE equality NaN equals nothing (itself included); `==`
+    // (Eq) is encoding equality, the total order the built-in floats' Eq uses.
     assert((f16::max_finite(false) + f16::from_f64(32.0)).is_infinite());
     assert(f16::nan().is_nan());
-    assert(!(f16::nan() == f16::nan()));
+    let nan16 = f16::nan();
+    assert(!f16::nan().ieee_eq(&nan16));
+    assert(f16::nan() == f16::nan());
 }
 
 // The wide formats run the same generic code with multi-limb significands: identities that require
@@ -174,7 +177,10 @@ fn finite_only_family_is_e4m3fn() {
     // Division by zero: no infinity exists, so the answer is NaN.
     assert((one / f8e4m3fn::zero()).is_nan());
     assert(f8e4m3fn::nan().is_nan());
-    assert(!(f8e4m3fn::nan() == f8e4m3fn::nan()));
+    let nan8 = f8e4m3fn::nan();
+    assert(!f8e4m3fn::nan().ieee_eq(&nan8));
+    // No infinity exists: the text saturates like an overflowing literal.
+    assert(f8e4m3fn::from_str("inf").unwrap() == mx);
     // The family is part of the TYPE: same bit budget, different meaning of the top encodings
     // The IEEE sibling overflows to infinity.
     assert(f8e5m2::from_f64(1.0e9).is_infinite());
@@ -198,10 +204,12 @@ fn classification_and_comparison() {
     assert(f16::one().classify() == FpClass::FP_NORMAL);
     assert(f16::infinity(false).classify() == FpClass::FP_INFINITE);
     assert(f16::nan().classify() == FpClass::FP_NAN);
-    // The zeros are one value to ==, and neither is less than the other.
-    assert(f16::zero() == f16::neg_zero());
+    // The zeros are one value to IEEE equality, and neither is IEEE-less than the other; `==` and `<`
+    // follow the total order, which puts -0 below +0.
     let nz = f16::neg_zero();
+    assert(f16::zero().ieee_eq(&nz));
     assert(!f16::zero().ieee_lt(&nz));
+    assert(f16::zero() != f16::neg_zero() && f16::neg_zero() < f16::zero());
     // Sign and magnitude ordering, both signs.
     let a = f16::from_f64(1.5);
     let b = f16::from_f64(2.5);
@@ -472,8 +480,13 @@ fn neighbours_parts_and_scalbn() {
     let (sg, eb, fr) = v.to_parts();
     let back = Float::<11, 52>::from_parts(sg, eb, &fr);
     assert(same64(back.to_f64(), v.to_f64()));
-    // Hash follows Eq at the zeros.
-    assert_eq(Float::<11, 52>::zero().hash(), Float::<11, 52>::neg_zero().hash());
+    // Hash follows Eq: equal encodings hash alike.
+    assert_eq(Float::<11, 52>::neg_zero().hash(), Float::<11, 52>::neg_zero().hash());
+    // Past the exponent span scalbn still overflows or underflows (a wide exponent field included).
+    let wide = Float::<20, 10>::min_positive();
+    assert(wide.scalbn(1100000).is_infinite() && wide.scalbn(0 - 10).is_zero());
+    let low = Float::<20, 10>::one().scalbn(0 - 524000);
+    assert(low.scalbn(1048000) == Float::<20, 10>::one().scalbn(524000));
 }
 
 // The FINITE_ONLY family exercises the same new surface exhaustively: 256 encodings, every rem and
@@ -500,4 +513,56 @@ fn finite_only_family_new_surface() {
         assert(same64(x.floor().to_f64(), unsafe math::floor(xf)));
         assert(same64(x.ceil().to_f64(), unsafe math::ceil(xf)));
     }
+}
+
+// Decimal text is rounded once, to nearest even, as the C compiler reads the same literal: the fast
+// path (one exact IEEE operation) and the exact decimal path both, compared bit for bit with values the
+// C compiler parsed.
+@test
+fn parse_f64_is_correctly_rounded() {
+    let cases: [str; 12] = [
+        "7e-2",
+        "0.1",
+        "0.3",
+        "123.456",
+        "1e23",
+        "8.98846567431158e307",
+        "2.2250738585072011e-308",
+        "4.9406564584124654e-324",
+        "1.7976931348623157e308",
+        "9007199254740993",
+        "0.000000000000000000000000000000000000000000001234567890123456789",
+        "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497791",
+    ];
+    let want: [f64; 12] = [
+        7e-2,
+        0.1,
+        0.3,
+        123.456,
+        1e23,
+        8.98846567431158e307,
+        2.2250738585072011e-308,
+        4.9406564584124654e-324,
+        1.7976931348623157e308,
+        9007199254740993.0,
+        0.000000000000000000000000000000000000000000001234567890123456789,
+        1.7976931348623157e308,
+    ];
+    for i in 0..12 {
+        let got = (unsafe cases[i]).parse_f64().unwrap();
+        assert(same64(got, unsafe want[i]));
+    }
+    assert(same64("1e400".parse_f64().unwrap(), 1.0 / 0.0));
+    assert(same64("1e-400".parse_f64().unwrap(), 0.0));
+    let nz = "-0.0".parse_f64().unwrap();
+    assert(nz == 0.0 && 1.0 / nz < 0.0);
+    assert("1.5e".parse_f64().is_none() && ".".parse_f64().is_none() && "1.2.3".parse_f64().is_none());
+    assert("0.1".parse_f32().unwrap() == 0.1f32 && "16777217".parse_f32().unwrap() == 16777216.0f32);
+}
+
+// A zero significand stays zero at any scale; an overflowing power of ten must not turn it into NaN.
+@test
+fn from_str_zero_with_huge_exponent() {
+    assert(f16::from_str("0e5000").unwrap().is_zero());
+    assert(f16::from_str("-0e5000").unwrap().is_negative());
 }

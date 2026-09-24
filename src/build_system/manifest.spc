@@ -1,7 +1,6 @@
 // build.toml schema: maps parsed TOML items onto the Build manifest, applies defaults (built-in
 // debug/dev/release/bench profiles), and validates. Unknown sections/keys are hard errors so typos
 // never silently no-op.
-import stdio;
 import driver_shim as shim;
 import build_system::toml as toml;
 import module::loader as loader;
@@ -20,6 +19,8 @@ pub struct Profile<'a> {
     pub strip: bool,
     pub opt: i32,
     pub lto: i32,
+    /// Compile with `-fprofile-use=<out-dir>/pgo.profdata` when that file exists (the engine checks).
+    pub pgo_use: bool,
 }
 
 /// `opt-level` values: OPT_FLAGS adds nothing; 0 to 3 are `-O0` to `-O3`; OPT_S and OPT_Z are
@@ -114,7 +115,7 @@ pub struct Command<'a> {
     pub name: str<'a>,
     pub run: Vector<String>,
     pub needs_build: bool, // needs-build = true: run a manifest build before the lines
-    pub env_k: Vector<String>, // parallel with env_v: KEY='VALUE' prefixes applied to every line
+    pub env_k: Vector<String>, // parallel with env_v: set in the environment every line inherits
     pub env_v: Vector<String>,
 }
 
@@ -190,6 +191,7 @@ extend Profile {
             strip: false,
             opt: OPT_FLAGS,
             lto: LTO_FLAGS,
+            pgo_use: false,
         };
     }
 }
@@ -352,7 +354,7 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
             } else if key == "ldlibs" {
                 take_arr(it, &mut errs, &mut m.ldlibs);
             } else if key == "jobs" {
-                if it.val.kind != toml::TV_INT || it.val.i < 0 {
+                if it.val.kind != toml::TV_INT || it.val.i < 0 || it.val.i > 4294967295 {
                     errs.emit(it.at, 4, format("'jobs' expects a non-negative integer"));
                 } else {
                     m.jobs = it.val.i as u32;
@@ -710,16 +712,8 @@ extend Manifest {
             p.opt = 3;
             p.lto = LTO_AUTO;
             // Profile-guided optimization when local training data exists (build with --profile=pgogen,
-            // run a self-transpile under LLVM_PROFILE_FILE, merge with llvm-profdata). Clang hard-errors
-            // on a missing profile file, so the flag only appears when the file is present.
-            let pf = stdio::fopen("build/pgo.profdata", "rb");
-            if pf != null {
-                let _ = unsafe stdio::fclose(pf);
-                push_flags(
-                    &mut p.cflags,
-                    "-fprofile-use=build/pgo.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin",
-                );
-            }
+            // run a self-transpile under LLVM_PROFILE_FILE, merge with llvm-profdata).
+            p.pgo_use = true;
             self.profiles.push(p);
         }
         {
@@ -731,7 +725,7 @@ extend Manifest {
             self.profiles.push(p);
         }
         // PGO training build: instrument, run a representative workload (a self-transpile) under
-        // LLVM_PROFILE_FILE, merge the raw profiles with llvm-profdata into build/pgo.profdata, and the
+        // LLVM_PROFILE_FILE, merge the raw profiles with llvm-profdata into <out-dir>/pgo.profdata, and the
         // bench profile above picks it up on its next build.
         {
             let mut p = Profile::new("pgogen");

@@ -200,9 +200,12 @@ SC_LEAK_CHECK=1 ./app           # report leaks at exit with call stacks
 SC_LEAK_CHECK=fatal ./app       # report + exit 23 on leaks (CI gate)
 ```
 
-The tracker interposes `malloc`/`calloc`/`realloc`/`free` at the emitted-C level. It:
+The tracker interposes `malloc`/`calloc`/`realloc`/`free` at the emitted-C level, and
+tracks over-aligned blocks from `std/alloc.h` through `sc_lk_aligned_alloc` /
+`sc_lk_aligned_free`. It:
 - Reports every allocation that survives to exit
-- Detects **double frees** with both allocation and free stacks
+- Detects **double frees** with both allocation and free stacks (freed blocks stay allocated
+  in a bounded history, so an address in it is always a real double free, never a reused block)
 - Detects **use-after-free** on `realloc` of a freed pointer
 - Works everywhere, including Apple Silicon (where LeakSanitizer does not exist)
 
@@ -245,7 +248,8 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `compile_and_run(src)` | Compile, link, execute, return exit code |
 | `compile_and_run_env(src, env)` | Same, with environment variables set |
 
-These are backed by `loader::package_from_source`.
+These are backed by `loader::package_from_source`, which applies `@platform`/`@arch`
+filtering for the host like a real build.
 
 ## Test Design Rules
 
@@ -274,10 +278,13 @@ These are backed by `loader::package_from_source`.
   kind, so a cancellation requested next is claimed by that park), `wait_waiting(kind, n)`
   until `n` tasks wait on a `WK_*` kind, `wait_gone(key)` and `wait_quiescent()` until a
   task or every task has completed (a signal fires before completion, and completion
-  before the block retires), `wait_count(&counter, n)`, and `wait_pool_within(bytes)` until
-  the idle block pool has settled under a budget (workers parked, stashes drained). Every
+  before the block retires), `wait_count(&counter, n)`, `wait_os_parked(n)` until `n`
+  plain threads sleep in the parking lot (true at once on Windows, whose
+  `WaitOnAddress` keeps no records to count), and `wait_pool_within(bytes)` until
+  the idle block pool has settled under a budget (worker stashes are sized so the pool
+  stays within its budget at all times). Every
   wait is bounded at five seconds and returns whether the state was reached, so the
-  caller asserts on it and a hang fails with a name. The io tests wait on `io::pending_waits()` (armed waiters), the
+  caller asserts on it and a hang fails with a name. The io tests wait on `io::pending_waits()` (wait records, which precede registration), the
   blocking tests on `blocking::stats()` (running, queued, `admit_waits`).
 - **Hold with a gate, not a clock.** A pool thread or a lock holder that must stay busy
   while other callers queue holds until a shared counter opens (`hold_open` in

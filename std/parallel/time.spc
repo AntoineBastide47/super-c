@@ -18,17 +18,25 @@ extend Duration {
     pub const fn from_nanos(n: u64) Duration {
         return Duration { ns: n };
     }
-    /// A duration of `n` microseconds.
+    /// A duration of `n` microseconds, saturating at the largest duration.
     pub const fn from_micros(n: u64) Duration {
-        return Duration { ns: n * 1000 };
+        return Duration::scaled(n, 1000);
     }
-    /// A duration of `n` milliseconds.
+    /// A duration of `n` milliseconds, saturating at the largest duration.
     pub const fn from_millis(n: u64) Duration {
-        return Duration { ns: n * 1000000 };
+        return Duration::scaled(n, 1000000);
     }
-    /// A duration of `n` seconds.
+    /// A duration of `n` seconds, saturating at the largest duration.
     pub const fn from_secs(n: u64) Duration {
-        return Duration { ns: n * 1000000000 };
+        return Duration::scaled(n, 1000000000);
+    }
+    // `n` units of `unit` nanoseconds. Saturates rather than wrapping, as deadlines do
+    // (`runtime::deadline_after`): a wrapped duration would be a short one.
+    const fn scaled(n: u64, unit: u64) Duration {
+        if n > 18446744073709551615u64 / unit {
+            return Duration { ns: 18446744073709551615u64 };
+        }
+        return Duration { ns: n * unit };
     }
     /// The duration in whole nanoseconds.
     pub const fn as_nanos(self: &Duration) u64 {
@@ -61,5 +69,11 @@ pub fn remaining_ns(deadline: u64) u64 {
 /// Suspend for `d`. A coroutine parks (its worker runs other tasks meanwhile) and any other thread
 /// sleeps. Never blocks a worker thread inside a coroutine.
 pub fn sleep(d: Duration) {
-    runtime::sleep_ns(d.ns as i64);
+    // Clamped to the largest `i64`: the cast alone turns a huge duration negative, which sleeps not at all.
+    let ns = if d.ns > 9223372036854775807u64 {
+        9223372036854775807i64;
+    } else {
+        d.ns as i64;
+    };
+    runtime::sleep_ns(ns);
 }

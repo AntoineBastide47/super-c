@@ -28,16 +28,19 @@
 #else
 #include <errno.h>
 #include <fcntl.h>
+#if !defined(__wasi__)
 #include <netdb.h>
+#endif
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(__linux__)
 #include <sys/epoll.h>
-#else
+#elif !defined(__wasi__)
 #include <sys/event.h>
 #endif
 #endif
@@ -90,6 +93,59 @@ static void sc_set_err(int e) {
 #endif
 }
 
+/* WASI preview 1 has no socket(), bind(), connect() or name resolution, and no descriptor that could wake
+   a poller (no pipe, no socketpair): the socket calls and the poller object report ENOTSUP there, and only
+   the single-descriptor wait (sc_io_wait_fd, over poll) works. */
+#if !defined(__wasi__)
+/* No socket or poller descriptor leaks into a spawned child: a child that holds a listening socket keeps
+   the port bound after the parent closes it. Linux and Windows set this at creation; macOS has no creation
+   flag, so it sets it right after, which leaves a window only against a spawn on another thread. */
+#if !defined(_WIN32) && !defined(__linux__)
+static void sc_cloexec(int fd) {
+  if (fd >= 0) fcntl(fd, F_SETFD, FD_CLOEXEC);
+}
+#endif
+
+static sc_sock sc_socket(int family, int type, int proto) {
+#if defined(_WIN32)
+  /* WSA_FLAG_OVERLAPPED is what socket() sets; NO_HANDLE_INHERIT keeps the handle out of children. */
+  return WSASocketW(family, type, proto, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+#elif defined(__linux__)
+  return socket(family, type | SOCK_CLOEXEC, proto);
+#else
+  const sc_sock s = socket(family, type, proto);
+  sc_cloexec(s);
+  return s;
+#endif
+}
+
+static sc_sock sc_accept(sc_sock l) {
+#if defined(__linux__)
+  return accept4(l, 0, 0, SOCK_CLOEXEC);
+#else
+  const sc_sock s = accept(l, 0, 0);
+#if defined(_WIN32)
+  if (s != INVALID_SOCKET) SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+#else
+  sc_cloexec(s);
+#endif
+  return s;
+#endif
+}
+
+/* getaddrinfo reports through its result, not errno: a name that does not resolve fails as "host
+   unreachable", which the callers classify as Unreachable. EAI_SYSTEM already left its errno. */
+static int sc_resolve(const char *host, const char *svc, const struct addrinfo *hints, struct addrinfo **out) {
+  const int r = getaddrinfo(host, svc, hints, out);
+  if (r == 0) return 0;
+#if defined(_WIN32)
+  sc_set_err(WSAEHOSTUNREACH);
+#else
+  if (r != EAI_SYSTEM) sc_set_err(EHOSTUNREACH);
+#endif
+  return -1;
+}
+
 /* Winsock needs a process-wide startup before any socket call; POSIX needs nothing. Idempotent and safe
    from several threads, because a listener can be bound before the reactor ever starts. */
 #if defined(_WIN32)
@@ -107,6 +163,7 @@ static void sc_startup(void) {
 #else
 static void sc_startup(void) {}
 #endif
+#endif /* !__wasi__ */
 
 int sc_io_set_nonblocking(int fd) {
 #if defined(_WIN32)
@@ -190,7 +247,7 @@ static void sc_no_delay(sc_sock s);
 static int sc_wake_pair(sc_sock *rd, sc_sock *wr) {
   struct sockaddr_in a;
   sc_socklen alen = (sc_socklen)sizeof a;
-  sc_sock l = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  sc_sock l = sc_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (l == INVALID_SOCKET) return -1;
   memset(&a, 0, sizeof a);
   a.sin_family = AF_INET;
@@ -201,7 +258,7 @@ static int sc_wake_pair(sc_sock *rd, sc_sock *wr) {
     sc_closesock(l);
     return -1;
   }
-  sc_sock c = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  sc_sock c = sc_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (c == INVALID_SOCKET) {
     sc_closesock(l);
     return -1;
@@ -211,7 +268,7 @@ static int sc_wake_pair(sc_sock *rd, sc_sock *wr) {
     sc_closesock(c);
     return -1;
   }
-  sc_sock s = accept(l, 0, 0);
+  sc_sock s = sc_accept(l);
   sc_closesock(l);
   if (s == INVALID_SOCKET) {
     sc_closesock(c);
@@ -301,8 +358,9 @@ int sc_io_set(void *ptr, int fd, int want, int known) {
   (void)known;
   /* select() has no registration step of its own, so a closed number is refused here, as kqueue and epoll
      refuse it: the wait settles as not ready at once instead of parking, and a dead socket dropped by
-     sc_io_wait is never registered again. */
-  if (!sc_sock_alive(s)) return -1;
+     sc_io_wait is never registered again. A number that names the wake pair is a closed socket's, taken
+     by a poller created after the close: refused the same way. */
+  if (!sc_sock_alive(s) || s == p->wake_r || s == p->wake_w) return -1;
   EnterCriticalSection(&p->lock);
   if ((want & SC_IO_RD) && sc_reg_add(p, s, SC_IO_RD) != 0) rc = -1;
   if (rc == 0 && (want & SC_IO_WR) && sc_reg_add(p, s, SC_IO_WR) != 0) rc = -1;
@@ -413,6 +471,35 @@ int sc_io_wait_fd(int fd, int write, int timeout_ms) {
   return r == SOCKET_ERROR ? -1 : r;
 }
 
+#elif defined(__wasi__) /* ---- WASI: no poller object ----------------------------------------------- */
+
+void *sc_io_new(void) {
+  errno = ENOTSUP;
+  return 0;
+}
+
+void sc_io_free(void *ptr) { (void)ptr; }
+
+int sc_io_set(void *ptr, int fd, int want, int known) {
+  (void)ptr;
+  (void)fd;
+  (void)want;
+  (void)known;
+  errno = ENOTSUP;
+  return -1;
+}
+
+void sc_io_wake(void *ptr) { (void)ptr; }
+
+int sc_io_wait(void *ptr, int *out, int max, int timeout_ms) {
+  (void)ptr;
+  (void)out;
+  (void)max;
+  (void)timeout_ms;
+  errno = ENOTSUP;
+  return -1;
+}
+
 #else /* ---- POSIX: kqueue / epoll ------------------------------------------------------------------- */
 
 typedef struct {
@@ -424,14 +511,19 @@ void *sc_io_new(void) {
   sc_io_poller *p = (sc_io_poller *)calloc(1, sizeof *p);
   if (!p) return 0;
 #if defined(__linux__)
-  p->q = epoll_create1(0);
+  p->q = epoll_create1(EPOLL_CLOEXEC);
+  if (p->q < 0) { free(p); return 0; }
+  if (pipe2(p->wake, O_CLOEXEC | O_NONBLOCK) != 0) { close(p->q); free(p); return 0; }
 #else
   p->q = kqueue();
-#endif
   if (p->q < 0) { free(p); return 0; }
+  sc_cloexec(p->q);
   if (pipe(p->wake) != 0) { close(p->q); free(p); return 0; }
+  sc_cloexec(p->wake[0]);
+  sc_cloexec(p->wake[1]);
   sc_io_set_nonblocking(p->wake[0]);
   sc_io_set_nonblocking(p->wake[1]);
+#endif
   /* The wake pipe stays registered level-triggered; the wait loop recognises it by descriptor. */
 #if defined(__linux__)
   struct epoll_event ev;
@@ -458,6 +550,10 @@ void sc_io_free(void *ptr) {
 
 int sc_io_set(void *ptr, int fd, int want, int known) {
   sc_io_poller *p = (sc_io_poller *)ptr;
+  /* A number that names the poller's own descriptors is a closed file's, taken by a poller created after
+     the close. Registered, the wake pipe's read end would become one-shot and every later wake would be
+     lost: refused, so the wait settles as not ready, the answer a closed descriptor gets. */
+  if (fd == p->q || fd == p->wake[0] || fd == p->wake[1]) return -1;
 #if defined(__linux__)
   /* One registration per descriptor carries both directions. A one-shot registration that fired is
      disabled, not gone, so it is modified rather than added; a descriptor closed and reused under the
@@ -494,16 +590,6 @@ void sc_io_wake(void *ptr) {
   char b = 1;
   ssize_t r = write(p->wake[1], &b, 1);
   (void)r;
-}
-
-int sc_io_wait_fd(int fd, int write, int timeout_ms) {
-  struct pollfd p;
-  p.fd = fd;
-  p.events = (short)(write ? POLLOUT : POLLIN);
-  p.revents = 0;
-  int r = poll(&p, 1, timeout_ms);
-  if (r < 0 && errno == EINTR) return 0;
-  return r;
 }
 
 int sc_io_wait(void *ptr, int *out, int max, int timeout_ms) {
@@ -556,7 +642,89 @@ int sc_io_wait(void *ptr, int *out, int max, int timeout_ms) {
 
 #endif /* poller backends */
 
+#if !defined(_WIN32)
+int sc_io_wait_fd(int fd, int write, int timeout_ms) {
+  struct pollfd p;
+  p.fd = fd;
+  p.events = (short)(write ? POLLOUT : POLLIN);
+  p.revents = 0;
+  /* A signal interrupts poll: wait again for what remains, so an interruption never reads as a timeout. */
+  struct timespec t0;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  int left = timeout_ms;
+  for (;;) {
+    const int r = poll(&p, 1, left);
+    if (r >= 0 || errno != EINTR) return r;
+    if (timeout_ms > 0) {
+      struct timespec t;
+      clock_gettime(CLOCK_MONOTONIC, &t);
+      const long long ms = (long long)(t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000;
+      left = ms >= timeout_ms ? 0 : timeout_ms - (int)ms;
+    }
+  }
+}
+#endif
+
 /* ---- sockets --------------------------------------------------------------------------------------- */
+
+#if defined(__wasi__)
+
+static int sc_no_sockets(void) {
+  sc_set_err(ENOTSUP);
+  return -1;
+}
+
+int sc_tcp_listen(const char *host, int port, int backlog) {
+  (void)host;
+  (void)port;
+  (void)backlog;
+  return sc_no_sockets();
+}
+
+int sc_tcp_port(int fd) {
+  (void)fd;
+  return sc_no_sockets();
+}
+
+int sc_tcp_accept(int lfd) {
+  (void)lfd;
+  return sc_no_sockets();
+}
+
+int sc_tcp_connect(const char *host, int port) {
+  (void)host;
+  (void)port;
+  return sc_no_sockets();
+}
+
+int sc_tcp_connect_result(int fd) {
+  (void)fd;
+  return sc_no_sockets();
+}
+
+int sc_udp_bind(const char *host, int port) {
+  (void)host;
+  (void)port;
+  return sc_no_sockets();
+}
+
+long sc_udp_send_to(int fd, const void *buf, size_t n, const char *host, int port) {
+  (void)fd;
+  (void)buf;
+  (void)n;
+  (void)host;
+  (void)port;
+  return sc_no_sockets();
+}
+
+long sc_udp_recv(int fd, void *buf, size_t n) {
+  (void)fd;
+  (void)buf;
+  (void)n;
+  return sc_no_sockets();
+}
+
+#else
 
 /* Resolve host:port and hand back the first usable address. `host` NULL/empty means "any". */
 static int sc_tcp_addr(const char *host, int port, struct addrinfo **out) {
@@ -567,7 +735,7 @@ static int sc_tcp_addr(const char *host, int port, struct addrinfo **out) {
   hints.ai_socktype = SOCK_STREAM;
   if (!host || !*host) hints.ai_flags = AI_PASSIVE;
   snprintf(svc, sizeof svc, "%d", port);
-  return getaddrinfo((host && *host) ? host : 0, svc, &hints, out);
+  return sc_resolve((host && *host) ? host : 0, svc, &hints, out);
 }
 
 /* "Let me have this port if nobody is really using it." The two systems spell that differently, and using
@@ -592,8 +760,8 @@ static void sc_no_delay(sc_sock s) {
 int sc_tcp_listen(const char *host, int port, int backlog) {
   sc_startup();
   struct addrinfo *ai = 0;
-  if (sc_tcp_addr(host, port, &ai) != 0 || !ai) return -1;
-  sc_sock s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+  if (sc_tcp_addr(host, port, &ai) != 0) return -1;
+  sc_sock s = sc_socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
   if (SC_FD(s) < 0) { const int e = sc_last_err(); freeaddrinfo(ai); sc_set_err(e); return -1; }
   sc_reuse_addr(s);
   if (bind(s, ai->ai_addr, (sc_socklen)ai->ai_addrlen) != 0 || listen(s, backlog) != 0) {
@@ -618,7 +786,7 @@ int sc_tcp_port(int fd) {
 }
 
 int sc_tcp_accept(int lfd) {
-  sc_sock s = accept(SC_SOCK(lfd), 0, 0);
+  sc_sock s = sc_accept(SC_SOCK(lfd));
   if (SC_FD(s) < 0) return -1; /* nothing ran since the failure, so the error is still the caller's */
   if (sc_io_set_nonblocking(SC_FD(s)) != 0) { const int e = sc_last_err(); sc_closesock(s); sc_set_err(e); return -1; }
   sc_no_delay(s);
@@ -628,8 +796,8 @@ int sc_tcp_accept(int lfd) {
 int sc_tcp_connect(const char *host, int port) {
   sc_startup();
   struct addrinfo *ai = 0;
-  if (sc_tcp_addr(host, port, &ai) != 0 || !ai) return -1;
-  sc_sock s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+  if (sc_tcp_addr(host, port, &ai) != 0) return -1;
+  sc_sock s = sc_socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
   if (SC_FD(s) < 0) { const int e = sc_last_err(); freeaddrinfo(ai); sc_set_err(e); return -1; }
   if (sc_io_set_nonblocking(SC_FD(s)) != 0) {
     const int e = sc_last_err();
@@ -676,8 +844,8 @@ int sc_udp_bind(const char *host, int port) {
   hints.ai_socktype = SOCK_DGRAM;
   if (!host || !*host) hints.ai_flags = AI_PASSIVE;
   snprintf(svc, sizeof svc, "%d", port);
-  if (getaddrinfo((host && *host) ? host : 0, svc, &hints, &ai) != 0 || !ai) return -1;
-  sc_sock s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+  if (sc_resolve((host && *host) ? host : 0, svc, &hints, &ai) != 0) return -1;
+  sc_sock s = sc_socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
   if (SC_FD(s) < 0) { const int e = sc_last_err(); freeaddrinfo(ai); sc_set_err(e); return -1; }
   sc_reuse_addr(s);
   if (bind(s, ai->ai_addr, (sc_socklen)ai->ai_addrlen) != 0) {
@@ -701,9 +869,11 @@ long sc_udp_send_to(int fd, const void *buf, size_t n, const char *host, int por
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_DGRAM;
   snprintf(svc, sizeof svc, "%d", port);
-  if (getaddrinfo(host, svc, &hints, &ai) != 0 || !ai) return -1;
+  if (sc_resolve(host, svc, &hints, &ai) != 0) return -1;
   const long r = (long)sendto(SC_SOCK(fd), (const char *)buf, (int)n, 0, ai->ai_addr, (sc_socklen)ai->ai_addrlen);
+  const int e = sc_last_err(); /* freeaddrinfo below would reset it */
   freeaddrinfo(ai);
+  sc_set_err(e);
   return r;
 }
 
@@ -712,3 +882,5 @@ long sc_udp_send_to(int fd, const void *buf, size_t n, const char *host, int por
 long sc_udp_recv(int fd, void *buf, size_t n) {
   return (long)recvfrom(SC_SOCK(fd), (char *)buf, (int)n, 0, 0, 0);
 }
+
+#endif /* sockets */

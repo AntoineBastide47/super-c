@@ -212,6 +212,26 @@ fn closure_inference() {
         "fn map1<T, U>(f: fn(T) U, x: T) U { return f(x); }\nfn main() i32 { let r = map1(|v| (v * 2) as i64, 10); return (r - 20) as i32; }\n",
         0,
     );
+    h::expect_exit(
+        "generic call inside a postponed closure body keeps the outer session",
+        "fn apply<T, U>(x: T, f: fn(T) U) U { return f(x); }\nfn id<A>(a: A) A { return a; }\nfn main() i32 { let r = apply(5, |v| id(v) + 1); return r - 6; }\n",
+        0,
+    );
+    h::expect_exit(
+        "five-parameter closure through a generic fn type",
+        "fn ap5<T: Copy>(f: fn(T, T, T, T, T) T, x: T) T { return f(x, x, x, x, x); }\nfn main() i32 { return ap5(|a, b, c, d, e| a + b + c + d + e, 2) - 10; }\n",
+        0,
+    );
+    h::expect_exit(
+        "generic fn item coerces to a five-parameter fn type",
+        "fn s5<T>(a: T, b: T, c: T, d: T, e: T) T { return e; }\nfn main() i32 { let f: fn(i32, i32, i32, i32, i32) i32 = s5; return f(1, 2, 3, 4, 5) - 5; }\n",
+        0,
+    );
+    h::expect_exit(
+        "nine-parameter closure from an expected fn type",
+        "fn main() i32 { let f: fn(i32, i32, i32, i32, i32, i32, i32, i32, i32) i32 = |a, b, c, d, e, g, k, m, n| a + n; return f(1, 0, 0, 0, 0, 0, 0, 0, 2) - 3; }\n",
+        0,
+    );
     h::expect_err_msg(
         "a closure bound to a plain local still needs annotations",
         "fn ap<T>(f: fn(T) T, x: T) T { return f(x); }\nfn main() i32 { let f2 = |v| v * 2; return ap(f2, 10) - 20; }\n",
@@ -265,9 +285,14 @@ fn candidate_selection() {
         "interface A { fn m(self: &Self, x: i32) i32; }\ninterface B { fn m(self: &Self, x: i64) i32; }\nstruct V {}\nextend V as A { pub fn m(self: &V, x: i32) i32 { return 1; } }\nextend V as B { pub fn m(self: &V, x: i64) i32 { return 2; } }\nfn main() i32 { let v = V {}; return v.m(5) - 1; }\n",
         0,
     );
+    h::expect_exit(
+        "exactly the candidate limit is still weighed",
+        "struct V {}\ninterface C0 { fn m(self: &Self, x: i32) i32; }\ninterface C1 { fn m(self: &Self, x: i64) i32; }\ninterface C2 { fn m(self: &Self, x: u8) i32; }\ninterface C3 { fn m(self: &Self, x: u16) i32; }\ninterface C4 { fn m(self: &Self, x: u32) i32; }\ninterface C5 { fn m(self: &Self, x: u64) i32; }\ninterface C6 { fn m(self: &Self, x: i8) i32; }\ninterface C7 { fn m(self: &Self, x: i16) i32; }\nextend V as C0 { pub fn m(self: &V, x: i32) i32 { return 0; } }\nextend V as C1 { pub fn m(self: &V, x: i64) i32 { return 1; } }\nextend V as C2 { pub fn m(self: &V, x: u8) i32 { return 2; } }\nextend V as C3 { pub fn m(self: &V, x: u16) i32 { return 3; } }\nextend V as C4 { pub fn m(self: &V, x: u32) i32 { return 4; } }\nextend V as C5 { pub fn m(self: &V, x: u64) i32 { return 5; } }\nextend V as C6 { pub fn m(self: &V, x: i8) i32 { return 6; } }\nextend V as C7 { pub fn m(self: &V, x: i16) i32 { return 7; } }\nfn main() i32 { let v = V {}; let k: u16 = 3; return v.m(k) - 3; }\n",
+        0,
+    );
     h::expect_err_msg(
         "candidate budget stops adversarial overload sets",
-        "struct V {}\ninterface C0 { fn m(self: &Self, x: i32) i32; }\ninterface C1 { fn m(self: &Self, x: i64) i32; }\ninterface C2 { fn m(self: &Self, x: u8) i32; }\ninterface C3 { fn m(self: &Self, x: u16) i32; }\ninterface C4 { fn m(self: &Self, x: u32) i32; }\ninterface C5 { fn m(self: &Self, x: u64) i32; }\ninterface C6 { fn m(self: &Self, x: i8) i32; }\ninterface C7 { fn m(self: &Self, x: i16) i32; }\nextend V as C0 { pub fn m(self: &V, x: i32) i32 { return 0; } }\nextend V as C1 { pub fn m(self: &V, x: i64) i32 { return 1; } }\nextend V as C2 { pub fn m(self: &V, x: u8) i32 { return 2; } }\nextend V as C3 { pub fn m(self: &V, x: u16) i32 { return 3; } }\nextend V as C4 { pub fn m(self: &V, x: u32) i32 { return 4; } }\nextend V as C5 { pub fn m(self: &V, x: u64) i32 { return 5; } }\nextend V as C6 { pub fn m(self: &V, x: i8) i32 { return 6; } }\nextend V as C7 { pub fn m(self: &V, x: i16) i32 { return 7; } }\nfn main() i32 { let v = V {}; let k: u16 = 3; return v.m(k) - 3; }\n",
+        "struct V {}\ninterface C0 { fn m(self: &Self, x: i32) i32; }\ninterface C1 { fn m(self: &Self, x: i64) i32; }\ninterface C2 { fn m(self: &Self, x: u8) i32; }\ninterface C3 { fn m(self: &Self, x: u16) i32; }\ninterface C4 { fn m(self: &Self, x: u32) i32; }\ninterface C5 { fn m(self: &Self, x: u64) i32; }\ninterface C6 { fn m(self: &Self, x: i8) i32; }\ninterface C7 { fn m(self: &Self, x: i16) i32; }\nextend V as C0 { pub fn m(self: &V, x: i32) i32 { return 0; } }\nextend V as C1 { pub fn m(self: &V, x: i64) i32 { return 1; } }\nextend V as C2 { pub fn m(self: &V, x: u8) i32 { return 2; } }\nextend V as C3 { pub fn m(self: &V, x: u16) i32 { return 3; } }\nextend V as C4 { pub fn m(self: &V, x: u32) i32 { return 4; } }\nextend V as C5 { pub fn m(self: &V, x: u64) i32 { return 5; } }\nextend V as C6 { pub fn m(self: &V, x: i8) i32 { return 6; } }\nextend V as C7 { pub fn m(self: &V, x: i16) i32 { return 7; } }\ninterface C8 { fn m(self: &Self, x: bool) i32; }\nextend V as C8 { pub fn m(self: &V, x: bool) i32 { return 8; } }\nfn main() i32 { let v = V {}; let k: u16 = 3; return v.m(k) - 3; }\n",
         "candidate limit",
     );
 }
@@ -286,9 +311,57 @@ fn overload_and_receiver() {
         "turbofish binds explicitly",
         "fn id<T>(x: T) T { return x; }\nfn main() i32 { return id::<i32>(3) - 3; }\n",
     );
+    h::expect_exit(
+        "a bound interface's five generic arguments all substitute",
+        "interface I<A, B, C, D, E> { fn get(self: &Self, a: A, b: B, c: C, d: D) E; }\nstruct S {}\nextend S as I<i32, i32, i32, i32, i64> { pub fn get(self: &S, a: i32, b: i32, c: i32, d: i32) i64 { let r: i64 = a + b + c + d; return r; } }\nfn f<T: I<i32, i32, i32, i32, i64>>(t: &T) i64 { return t.get(1, 2, 3, 4); }\nfn main() i32 { let s = S {}; return (f(&s) - 10) as i32; }\n",
+        0,
+    );
     h::expect_err_msg(
         "turbofish conflict with argument",
         "fn id<T>(x: T) T { return x; }\nfn main() i32 { let s: str = \"hi\"; return id::<i32>(s); }\n",
         "mismatched types",
+    );
+}
+
+// A generic enum's variant written without type arguments takes its instance from the expected
+// type (a declared result, an annotation, a parameter, a comparison's other operand), else from
+// its payload arguments. Variant constructors are qualified in value position: a bare `Some` is
+// only a pattern.
+@test
+fn generic_variant_constructors() {
+    h::expect_exit(
+        "expected result instance",
+        "struct J { pub v: i32 }\nfn pick(x: &J, k: i32) Option<&J> { if k > 0 { return Option::Some(x); } return Option::None; }\nfn main() i32 { let j = J { v: 7 }; if pick(&j, 0).is_some() { return 1; } return pick(&j, 1).unwrap().v; }\n",
+        7,
+    );
+    h::expect_exit(
+        "annotation adapts a literal payload",
+        "fn main() i32 { let o: Option<u8> = Option::Some(200); return (o.unwrap() - 197) as i32; }\n",
+        3,
+    );
+    h::expect_exit(
+        "parameter and comparison operand",
+        "fn g(o: Option<i32>) i32 { return o.unwrap_or(1); }\nfn main() i32 { let a: Option<i32> = Option::Some(2); if a == Option::None || a != Option::Some(2) { return 9; } return g(Option::None) + g(Option::Some(3)); }\n",
+        4,
+    );
+    h::expect_exit(
+        "payload arguments bind the parameters",
+        "enum Opt<T> { Val(T), Nil }\nfn main() i32 { let j = 5; let o = Opt::Val(&j); return switch o { Val(r) => *r, Nil => 0, }; }\n",
+        5,
+    );
+    h::expect_err_msg(
+        "an unbound parameter is reported at the constructor",
+        "fn main() i32 { let o = Result::Ok(3); return 0; }\n",
+        "cannot infer the generic argument 'E'",
+    );
+    h::expect_err_msg(
+        "a unit variant without an expected instance names no type",
+        "fn main() i32 { let o = Option::None; return 0; }\n",
+        "cannot infer the generic argument 'T' of this variant",
+    );
+    h::expect_resolve_err_msg(
+        "a bare variant is not a value",
+        "fn main() i32 { let o = Some(3); return 0; }\n",
+        "cannot find value 'Some'",
     );
 }

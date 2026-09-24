@@ -23,20 +23,20 @@ struct Tracked {
 
 extend Tracked as Free {
     pub fn free(self: &mut Tracked) {
-        let _ = atomic::add_i64(&mut unsafe G_FREES, 1, 0);
+        let _ = unsafe atomic::add_i64(&mut unsafe G_FREES, 1, 0);
     }
 }
 
 fn frees() i64 {
-    return atomic::load_i64(&mut unsafe G_FREES, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_FREES, 1);
 }
 
 fn runs() i64 {
-    return atomic::load_i64(&mut unsafe G_RUNS, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_RUNS, 1);
 }
 
 fn ran(n: i64) {
-    let _ = atomic::add_i64(&mut unsafe G_RUNS, n, 0);
+    let _ = unsafe atomic::add_i64(&mut unsafe G_RUNS, n, 0);
 }
 
 // --- captures of every shape ------------------------------------------------------------------------------
@@ -150,7 +150,7 @@ static mut G_FRAME: usize = 0;
 fn deep(n: u64, acc: u64) u64 {
     let mut pad = Array::<u64, 8>::new();
     pad[7] = n;
-    atomic::store_usize(&mut unsafe G_FRAME, ((&mut pad[0]) as *mut u64) as usize, 0);
+    unsafe atomic::store_usize(&mut unsafe G_FRAME, ((&mut pad[0]) as *mut u64) as usize, 0);
     if n == 0 {
         return acc + pad[7];
     }
@@ -177,7 +177,7 @@ fn deep_recursion_fits_the_default_stack() {
 fn forever(n: u64) u64 {
     let mut pad = Array::<u64, 32>::new();
     pad[31] = n;
-    atomic::store_usize(&mut unsafe G_FRAME, ((&mut pad[0]) as *mut u64) as usize, 0);
+    unsafe atomic::store_usize(&mut unsafe G_FRAME, ((&mut pad[0]) as *mut u64) as usize, 0);
     return forever(n + 1) + pad[31];
 }
 
@@ -247,7 +247,7 @@ fn small_pool_budget_is_honoured() {
     }
     let _ = gate.wait();
     wg.wait();
-    // Workers park: stashes and the shared pool settle, and what is past the budget is released.
+    // Every block is back: the stashes and the shared pool hold at most the budget, the rest is released.
     assert(ph::wait_pool_within(budget), "the idle cache is within the budget");
     let live_blocks = platform::stack_bytes() / (262144 + platform::page_size());
     assert(live_blocks <= 48usize, "released past the budget: at most the budget plus the stashes remain mapped");

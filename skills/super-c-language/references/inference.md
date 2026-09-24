@@ -90,6 +90,12 @@ disagrees with a later use is a conflict error, never silently kept. Acceptance
 never depends on argument order. An unresolved parameter after defaults is a type
 error at the call, not a downstream failure.
 
+A generic enum variant constructor (`Option::Some(x)`, `Option::None`, `Result::Ok(x)`)
+infers its instance the same way: from an expected instance of the same enum (a return
+type, a declared binding, a parameter, the other side of `==`/`!=`), then from its payload
+arguments, then from declared defaults. A unit variant with nothing to infer from is an
+error; write the instance (`Option::<T>::None`).
+
 ## Const generic inference
 
 - A bare const parameter in a parameter position (`[T; N]`) binds from the
@@ -130,8 +136,9 @@ makes a candidate viable, and never selects an overload.
 ## Limits
 
 - A generic item declares at most 8 type parameters (a declaration error beyond).
-- Candidate search, solver recursion, and constraint counts have fixed compiler
-  budgets; exceeding one reports the limit and the source expression.
+- Candidate search (8 candidates) and constraint counts have fixed compiler limits;
+  exceeding one reports the limit and the source expression. The solver worklist needs no
+  budget: every round binds a new slot, so it ends after at most one round per slot.
 
 ## Current engine deviations
 

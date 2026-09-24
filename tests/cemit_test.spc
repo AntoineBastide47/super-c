@@ -264,3 +264,30 @@ fn structured_shape_isolated() {
     assert(!e4.out.contains("unused"), "the never-read local is not declared");
     assert(!e4.out.contains("9LL"), "its pure store is dropped");
 }
+
+// A single-use temporary folds into its read only within the inline look-ahead bound: the first
+// of 300 field values stays a declared temporary, the last folds into the struct literal.
+@test
+fn far_read_stays_declared() {
+    let mut src = String::from_str("pub struct W { ");
+    for i in 0u64..300 {
+        src.push_str("pub f");
+        src.push_u64(i);
+        src.push_str(": i64, ");
+    }
+    src.push_str("}\npub fn wide(y: i64) i64 { let w = W { ");
+    for i in 0u64..300 {
+        src.push_str("f");
+        src.push_u64(i);
+        src.push_str(": y + ");
+        src.push_u64(i);
+        src.push_str(", ");
+    }
+    src.push_str("}; return w.f0 + w.f299; }\nfn main() i32 { return 0; }");
+    let p = typed_package(src.as_str());
+    let mut em = cb::CEmit::new(&p);
+    let names: [str; 1] = ["wide"];
+    emit_tu(&p, &names[0], 1, &mut em);
+    assert(em.out.contains(".f0 = _"), "the far-read field value stays a declared temporary");
+    assert(em.out.contains(".f299 = (y + 299LL)"), "the near-read field value folds");
+}

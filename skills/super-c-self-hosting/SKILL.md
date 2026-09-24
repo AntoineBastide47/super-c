@@ -94,6 +94,12 @@ key lands in the source only after a release whose `--bootstrap-tags` build skip
 does not know (sections and keys, not new TOML syntax). Until then keep the addition
 commented out.
 
+A conformance the new compiler DERIVES is an ordinary interface to a release that predates the
+derivation: the release checks a bound or a superinterface against written conformances only. So
+where the compiler's own sources (and the std they use) instantiate such a bound, restate the
+conformance explicitly (`extend u32 as Copy {}`, `extend Global as Copy {}`, the AST pool element
+types); the new compiler accepts a restatement only where its derivation agrees.
+
 ## Single Compilation Path
 
 Only the multi-file `build/` tree emitter exists. The single-TU emitter and REPL were

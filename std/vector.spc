@@ -39,6 +39,9 @@ extend<T, A: Allocator> Vector<T, A> {
             return v;
         }
         if cap > 0 {
+            if cap > ~(0 as usize) / sizeof(T) {
+                panic("Vector: capacity overflow");
+            }
             v.ptr = (unsafe v.alloc.alloc(cap * sizeof(T), alignof(T))) as *mut T;
             v.cap = cap;
         }
@@ -68,11 +71,27 @@ extend<T, A: Allocator> Vector<T, A> {
             self.cap = ~(0 as usize);
             return;
         }
-        let needed = self.len + additional;
-        if needed <= self.cap {
+        // `cap - len` cannot wrap, where `len + additional` could.
+        if additional <= self.cap - self.len {
             return;
         }
-        let mut new_cap = self.cap * 2;
+        self.grow_for(additional);
+    }
+
+    // The growth path of `reserve`, out of line so the check above stays small enough to inline into
+    // every `push`.
+    @c.noinline
+    const fn grow_for(self: &mut Vector<T, A>, additional: usize) {
+        // The most elements whose byte size fits a usize.
+        let max_cap = ~(0 as usize) / sizeof(T);
+        if additional > max_cap - self.len {
+            panic("Vector: capacity overflow");
+        }
+        let needed = self.len + additional;
+        let mut new_cap = max_cap;
+        if self.cap <= max_cap / 2 {
+            new_cap = self.cap * 2;
+        }
         if new_cap == 0 {
             new_cap = 8;
         }
@@ -169,8 +188,11 @@ extend<T, A: Allocator> Vector<T, A> {
         return self.ptr;
     }
 
-    /// Insert `value` at `index`, shifting later elements right. `index` must be <= len (not checked).
+    /// Insert `value` at `index`, shifting later elements right. Panics when `index > len`.
     pub const fn insert(self: &mut Vector<T, A>, index: usize, value: T) {
+        if index > self.len {
+            panic("Vector::insert: index out of bounds");
+        }
         self.reserve(1);
         let mut i = self.len;
         while i > index {
@@ -196,8 +218,11 @@ extend<T, A: Allocator> Vector<T, A> {
         return Option::<T>::Some(removed);
     }
 
-    /// Exchange the elements at `i` and `j` (both must be in range; not checked).
+    /// Exchange the elements at `i` and `j`. Panics when either is `>= len`.
     pub const fn swap(self: &mut Vector<T, A>, i: usize, j: usize) {
+        if i >= self.len || j >= self.len {
+            panic("Vector::swap: index out of bounds");
+        }
         let tmp = unsafe self.ptr[i];
         unsafe self.ptr[i] = unsafe self.ptr[j];
         unsafe self.ptr[j] = tmp;
@@ -371,7 +396,7 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
             return;
         }
         let mut w: usize = 1;
-        for r in 0..self.len {
+        for r in 1..self.len {
             if unsafe self.ptr[r] == unsafe self.ptr[w - 1] {
                 unsafe self.ptr[r].free();
             } else {
@@ -503,25 +528,55 @@ extend<T, A: Allocator> Vector<T, A> {
         }
     }
 
-    /// Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`).
+    /// Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`): the heapsort of `sort_by`
+    /// ordered by the extracted keys, so O(n log n) and, like `sort_by`, not stable. The sift is inlined
+    /// for the same reason as `sort_by`'s.
     pub const fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Vector<T, A>, key: F) {
         let n = self.len;
         if n < 2 {
             return;
         }
-        let mut i: usize = 1; // insertion sort through swaps: key extraction stays borrow-only
-        while i < n {
-            let mut j = i;
-            while j > 0 {
-                let prev = key(&unsafe self.ptr[j - 1]);
-                let cur = key(&unsafe self.ptr[j]);
-                if prev <= cur {
+        let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
+        let mut start = n / 2;
+        let mut end = n;
+        loop {
+            let mut r: usize = 0;
+            if phase == 0 {
+                if start == 0 {
+                    phase = 1;
+                    continue;
+                }
+                start = start - 1;
+                r = start;
+            } else {
+                if end <= 1 {
                     break;
                 }
-                self.swap(j - 1, j);
-                j = j - 1;
+                end = end - 1;
+                self.swap(0, end);
             }
-            i = i + 1;
+            let mut lim = n;
+            if phase == 1 {
+                lim = end;
+            }
+            let mut child = 2 * r + 1;
+            while child < lim {
+                if child + 1 < lim {
+                    let kc = key(&unsafe self.ptr[child]);
+                    let kn = key(&unsafe self.ptr[child + 1]);
+                    if kc < kn {
+                        child = child + 1;
+                    }
+                }
+                let kr = key(&unsafe self.ptr[r]);
+                let kc = key(&unsafe self.ptr[child]);
+                if kr >= kc {
+                    break;
+                }
+                self.swap(r, child);
+                r = child;
+                child = 2 * r + 1;
+            }
         }
     }
 }
@@ -551,8 +606,8 @@ extend<T> VecIter<T> as Iterator<&T> {
     }
 }
 
-// Index conformances: `v[i]` borrows the element in place (unchecked, like `at`; the caller keeps
-// `i < len`), and `v[lo..hi]`: any range form, `..=` including the end, an open end meaning the
+// Index conformances: `v[i]` borrows the element in place (bounds-checked like `at`: it panics when
+// `i >= len`), and `v[lo..hi]`: any range form, `..=` including the end, an open end meaning the
 // vector's `len()`: is a borrowed `[]T` view of the elements. Views alias the buffer, so they are
 // invalidated by any reallocating mutation (push/reserve).
 extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
@@ -627,7 +682,6 @@ extend<T: Eq, A: Allocator> Vector<T, A> as Eq {
             let a = self.at(i);
             let b = other.at(i);
             if !a.eq(b) {
-                // ERROR: a[i] != b[i] does not work.
                 return false;
             }
         }

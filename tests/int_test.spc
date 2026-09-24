@@ -684,3 +684,46 @@ fn wide_integer_literals() {
     assert(7u100 == UInt::<100>::from_u64(7));
     assert(sa + 1i128 == 6i128);
 }
+
+// from_f64 saturates at the WIDTH, whatever the width: below 64 bits and past a limb boundary too.
+@test
+fn from_f64_saturates_at_every_width() {
+    assert(UInt::<32>::from_f64(1.0e10) == UInt::<32>::max());
+    assert(UInt::<100>::from_f64(1267650600228229401496703205376.0) == UInt::<100>::max()); // 2^100
+    let big = UInt::<100>::from_f64(1.0e20).to_string();
+    assert(big.as_str() == "100000000000000000000");
+    assert(Int::<32>::from_f64(0.0 - 1.0e10) == Int::<32>::min());
+    assert(Int::<100>::from_f64(1.0e40) == Int::<100>::max());
+}
+
+// Signed multiplication overflow, decided from the magnitudes and the sign.
+@test
+fn signed_checked_mul_edges() {
+    let mn = i256::min();
+    let neg1 = i256::from_i64(-1);
+    let two = i256::from_i64(2);
+    assert(mn.checked_mul(&neg1).is_none());
+    assert(neg1.checked_mul(&mn).is_none());
+    let one = i256::one();
+    assert(mn.checked_mul(&one).unwrap() == mn);
+    let half = mn.checked_div(&two).unwrap(); // -2^254
+    assert(half.checked_mul(&two).unwrap() == mn);
+    assert(half.wrapping_neg().checked_mul(&two).is_none()); // +2^255 overflows
+    let a = i256::from_i64(-12345);
+    let b = i256::from_i64(6789);
+    assert(a.checked_mul(&b).unwrap() == i256::from_i64(-83810205));
+    assert(Int::<70>::from_i64(3).checked_pow(44).is_none() && Int::<70>::from_i64(-3).checked_pow(43).is_some());
+}
+
+// Digits are written once into the result: every radix and the sign.
+@test
+fn to_string_every_radix() {
+    let zero = u256::zero().to_string();
+    assert(zero.as_str() == "0");
+    assert_eq(u256::max().to_string_radix(16).len(), 64 as usize);
+    assert_eq(i256::min().to_string_radix(2).len(), 257 as usize);
+    let hex = i128::from_i64(-255).to_string_radix(16);
+    assert(hex.as_str() == "-ff");
+    let mx = u128::max().to_string();
+    assert(mx.as_str() == "340282366920938463463374607431768211455");
+}

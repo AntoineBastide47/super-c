@@ -218,22 +218,6 @@ fn read_stdin() Option<String> {
     return Option::<String>::Some(s);
 }
 
-// Byte-lexicographic name order with a length tiebreak: deterministic directory walks.
-const fn fmt_name_cmp(a: &String, b: &String) i32 {
-    let la = a.len();
-    let lb = b.len();
-    let m = if la < lb {
-        la;
-    } else {
-        lb;
-    };
-    let c = unsafe cstring::memcmp(a.as_str().ptr(), b.as_str().ptr(), m);
-    if c != 0 {
-        return c;
-    }
-    return la as i32 - lb as i32;
-}
-
 // The entries of `dir` in name order, without the dot-entries (".", "..", hidden); None when the
 // directory cannot be read.
 fn dir_entries(dir: str) Option<Vector<String>> {
@@ -255,7 +239,7 @@ fn dir_entries(dir: str) Option<Vector<String>> {
         names.push(String::from_cstr(nm));
     }
     unsafe shim::sc_closedir(dh);
-    names.sort_by(fmt_name_cmp);
+    names.sort_by(loader::name_cmp);
     return Option::<Vector<String>>::Some(names);
 }
 
@@ -324,9 +308,6 @@ fn fmt_dir(dir: str, write: bool, check: bool) i32 {
     return rc;
 }
 
-// `super-c lint [<path>...]`: load each path as its own root (its import closure + prelude),
-// resolve + typecheck with lints on for that root module, and print warnings. Lints files that are not
-// part of any binary's import closure. A directory recurses over its .spc files.
 const fn lint_fix_cmp(a: &diag::LintFix, b: &diag::LintFix) i32 {
     if a.start < b.start {
         return -1;
@@ -338,8 +319,7 @@ const fn lint_fix_cmp(a: &diag::LintFix, b: &diag::LintFix) i32 {
 }
 
 // Apply machine fixes ascending: kind 0 deletes [start, end), kind 1 inserts '_' before start,
-// kind 2 inserts 'const ' before start, kind 3 inserts fix_texts[text] before start, kind 4 replaces
-// [start, end) with fix_texts[text]. An overlapping fix is skipped: the next `--fix` re-lint pass
+// kind 2 inserts 'const ' before start, kind 4 replaces [start, end) with fix_texts[text]. An overlapping fix is skipped: the next `--fix` re-lint pass
 // records it against the patched source.
 fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>, texts: &Vector<String>) String {
     fixes.sort_by(lint_fix_cmp);
@@ -357,11 +337,6 @@ fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>, texts: &Vector<
             pos = f.start as usize;
         } else if f.kind == 2 {
             out.push_str("const ");
-            pos = f.start as usize;
-        } else if f.kind == 3 {
-            if f.text as usize < texts.len() {
-                out.push_str(texts.at(f.text as usize).as_str());
-            }
             pos = f.start as usize;
         } else if f.kind == 4 {
             if f.text as usize < texts.len() {
@@ -441,18 +416,15 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
         let mut fixes = Vector::<diag::LintFix>::new();
         let mut ftexts = Vector::<String>::new();
         lint_package(&mut p, target, lint_mod, &mut fixes, &mut ftexts, sc);
-        let errors = !p.ok && !(p.lint_errs != 0 && p.lint_errs == p.lint_fixable);
+        let errors = !p.ok;
         let mut applied = false;
         let mut werr = false;
         if !errors && fixes.len() != 0 && pass < 8 {
             let out = apply_lint_fixes(p.modules[lint_mod].source.as_str(), &mut fixes, &ftexts);
-            let f = stdio::fopen(p.modules[lint_mod].file.as_str(), "wb");
-            if f == null {
+            if !write_source(p.modules[lint_mod].file.as_str(), out.as_str()) {
                 eprintln("lint: cannot write '{}'", path);
                 werr = true;
             } else {
-                unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), f);
-                unsafe stdio::fclose(f);
                 applied = true;
             }
         }
@@ -507,10 +479,15 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, ta
     let mut mids = Vector::<i32>::new();
     for k in 0..files.len() {
         let mut fc = String::from_str(files.at(k).as_str());
-        // Already present? (a prelude module, or pulled in by an earlier file's imports).
+        let base = loader::basename_of(files.at(k).as_str());
+        // Already present? (a prelude module, or pulled in by an earlier file's imports). The basename
+        // compare needs no syscall, so the file-identity check runs only on the rare collisions.
         let mut mid: i32 = -1;
         for m in 0..p.modules.len() {
-            if p.modules[m].has_ast && unsafe shim::sc_same_file(fc.cstr(), p.modules[m].file.cstr()) == 1 {
+            if p.modules[m].has_ast && loader::basename_of(p.modules[m].file.as_str()) == base && unsafe shim::sc_same_file(
+                fc.cstr(),
+                p.modules[m].file.cstr(),
+            ) == 1 {
                 mid = m as i32;
                 break;
             }
@@ -580,7 +557,7 @@ fn lint_batch(
         let mut fixes = Vector::<diag::LintFix>::new();
         let mut ftexts = Vector::<String>::new();
         lint_package(&mut p, target, 0, &mut fixes, &mut ftexts, sc);
-        let errors = !p.ok && !(p.lint_errs != 0 && p.lint_errs == p.lint_fixable);
+        let errors = !p.ok;
         let mut applied = false;
         let mut werr = false;
         if !errors && fixes.len() != 0 && pass < 8 {
@@ -595,13 +572,10 @@ fn lint_batch(
                     continue;
                 }
                 let out = apply_lint_fixes(p.modules[m].source.as_str(), &mut mf, &ftexts);
-                let f = stdio::fopen(p.modules[m].file.as_str(), "wb");
-                if f == null {
+                if !write_source(p.modules[m].file.as_str(), out.as_str()) {
                     eprintln("lint: cannot write '{}'", p.modules[m].file.as_str());
                     werr = true;
                 } else {
-                    unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), f);
-                    unsafe stdio::fclose(f);
                     // Reformat before re-linting: canonicalization can unlock paren-guarded fixes.
                     fmt_one(p.modules[m].file.as_str(), false, true, false);
                     applied = true;
@@ -628,6 +602,9 @@ fn path_is_dir(path: str) bool {
     return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
 }
 
+// `super-c lint <path>`: a file loads as its own root (its import closure + prelude) and is linted
+// there; a directory lints every .spc under it in one shared package. Lints files that are not part
+// of any binary's import closure.
 fn run_lint(path: str, std_dir: str, ce_steps: u32, ce_mem: u64, target: i32, fix: bool, sc: bool) i32 {
     if path_is_dir(path) {
         // Every file under the directory resolves imports against the directory itself.
@@ -668,6 +645,17 @@ fn run_fmt(path: str, check: bool) i32 {
     return fmt_one(path, false, !check, check);
 }
 
+// Replace a source file through a temp file and a rename, so a failed write leaves it intact. The link
+// target is replaced when `path` is a symlink, never the link itself.
+fn write_source(path: str, body: str) bool {
+    let mut p = String::from_str(path);
+    let mut abs = PathBuf {};
+    if unsafe shim::sc_realpath(p.cstr(), &mut abs[0]) != null {
+        return bsys::write_file_atomic(str::from_cstr(&abs[0]), body);
+    }
+    return bsys::write_file_atomic(path, body);
+}
+
 fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
     let src_opt = if is_stdin {
         read_stdin();
@@ -693,15 +681,9 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
             rc = 1;
         }
     } else if write {
-        if !same {
-            let f = stdio::fopen(path, "wb");
-            if f == null {
-                eprintln("fmt: cannot write '{}'", path);
-                rc = 1;
-            } else {
-                unsafe stdio::fwrite(out.as_str().ptr(), 1, out.len(), f);
-                unsafe stdio::fclose(f);
-            }
+        if !same && !write_source(path, out.as_str()) {
+            eprintln("fmt: cannot write '{}'", path);
+            rc = 1;
         }
     } else {
         // Windows opens stdout in text mode, which would rewrite the formatter's "\n" as "\r\n"; the
@@ -1304,7 +1286,16 @@ OPTIONS:
             eprintln("new: '{}' already exists", file);
             return 1;
         }
-        return bsys::scaffold_project(file, file);
+        // The project is named after the directory's last component: `new apps/demo` builds `demo`.
+        let mut e = file.len();
+        while e > 0 && file[e - 1] == b'/' {
+            e = e - 1;
+        }
+        let mut k = e;
+        while k > 0 && file[k - 1] != b'/' {
+            k = k - 1;
+        }
+        return bsys::scaffold_project(file, file.slice(k, e));
     }
     if mode == Mode::MODE_VENDOR {
         return bsys::vendor_dep(vendor_dir, file, vendor_name, vendor_ref, vendor_force);

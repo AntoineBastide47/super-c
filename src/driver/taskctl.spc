@@ -44,26 +44,46 @@ extend Ctl {
     }
 }
 
-/// The build memory budget: `SC_BUILD_MEM_BUDGET` in bytes with an optional K/M/G suffix; 0 = off.
+/// The build memory budget: `SC_BUILD_MEM_BUDGET` in bytes with an optional K/M/G suffix; unset or
+/// empty = off (0). Any other spelling, or a value past u64, is a fatal configuration error.
 pub fn budget_from_env() u64 {
     let e = stdlib::getenv("SC_BUILD_MEM_BUDGET");
-    if e == null {
+    if e == null || unsafe *e == 0 as char {
         return 0;
     }
-    let mut endp: *mut char = null;
-    let v = unsafe stdlib::strtoul(e, &mut endp, 10);
-    if endp as usize == e as usize || v == 0 {
-        return 0;
+    let s = str::from_cstr(e);
+    let mut v: u64 = 0;
+    let mut i: usize = 0;
+    let mut ok = true;
+    while i < s.len() && s.byte_at(i) >= b'0' && s.byte_at(i) <= b'9' {
+        let d = (s.byte_at(i) - b'0') as u64;
+        if v > (0xFFFFFFFFFFFFFFFFu64 - d) / 10 {
+            ok = false;
+            break;
+        }
+        v = v * 10 + d;
+        i += 1;
     }
-    let c = unsafe *endp;
-    if c == 'K' as char || c == 'k' as char {
-        return v * 1024;
+    let mut scale: u64 = 1;
+    if i == 0 {
+        ok = false;
+    } else if i + 1 == s.len() {
+        let c = s.byte_at(i);
+        if c == b'K' || c == b'k' {
+            scale = 1024;
+        } else if c == b'M' || c == b'm' {
+            scale = 1024u64 * 1024;
+        } else if c == b'G' || c == b'g' {
+            scale = 1024u64 * 1024 * 1024;
+        } else {
+            ok = false;
+        }
+    } else if i != s.len() {
+        ok = false;
     }
-    if c == 'M' as char || c == 'm' as char {
-        return v * 1024 * 1024;
+    if !ok || v > 0xFFFFFFFFFFFFFFFFu64 / scale {
+        eprintln("error: SC_BUILD_MEM_BUDGET must be a whole byte count with an optional K, M or G suffix");
+        unsafe stdlib::exit(1);
     }
-    if c == 'G' as char || c == 'g' as char {
-        return v * 1024 * 1024 * 1024;
-    }
-    return v;
+    return v * scale;
 }

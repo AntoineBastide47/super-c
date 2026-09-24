@@ -9,6 +9,10 @@
 
 const char *sc_dirent_name(void *entry);             /* ((struct dirent *)entry)->d_name */
 int sc_stat_isdir(const char *path);                 /* 1 dir, 0 not, -1 on stat failure */
+/* Like sc_stat_isdir, but a link is never followed: 1 real directory (safe to descend), 2 a Windows
+   directory link or junction (remove with rmdir, never descend), 0 anything else (a POSIX symlink is 0:
+   unlink removes the link itself), -1 when `path` does not exist. */
+int sc_lstat_isdir(const char *path);
 int sc_dirent_isdir(void *entry);                    /* readdir d_type: 1 dir, 0 not, -1 unknown */
 int sc_same_file(const char *a, const char *b);      /* 1 same file (POSIX dev+ino / Win32 file id), 0 not, -1 on failure */
 char *sc_realpath(const char *path, char *resolved); /* realpath(3) */
@@ -19,9 +23,10 @@ int sc_process_alive(int64_t pid); /* 1 while `pid` exists (kill 0 / OpenProcess
    hands over what has arrived), 0 at end of stream, -1 on error. */
 int64_t sc_file_read(void *f, void *buf, size_t n);
 int sc_file_pending(void *f); /* 1 when a read on `f`'s descriptor returns at once (bytes waiting or end of stream) */
+/* Platform baked in when the shim is compiled: 0 windows, 1 macos, 2 linux, 3 wasm, 5 android. */
 int sc_host_platform(void);
 /* Instruction set baked in when the shim is compiled: 0 x86_64, 1 aarch64, 2 wasm32, -1 other. */
-int sc_host_arch(void);                          /* build target: 0 windows, 1 macos, 2 linux */
+int sc_host_arch(void);
 
 int sc_chdir(const char *path);   /* chdir / _chdir; 0 on success */
 int sc_mkdir(const char *path);   /* mkdir(path, 0775); ignores EEXIST at the caller */
@@ -34,6 +39,7 @@ void *sc_readdir(void *dir);      /* the next struct dirent *, or NULL */
 int sc_closedir(void *dir);
 
 long long sc_mtime(const char *path); /* mtime seconds; 0 if missing */
+long long sc_mtime_ns(const char *path); /* mtime nanoseconds (100 ns steps on Windows); 0 if missing */
 int sc_ncpu(void);                    /* online core count; >= 1 */
 /* One inherited process-tree worker budget. A process owns one implicit slot and can claim free extras. */
 int sc_jobserver_init(int capacity);
@@ -42,7 +48,7 @@ void sc_jobserver_release_claim(void);
 long long sc_ticks_ms(void);          /* monotonic milliseconds (build-phase timing) */
 long long sc_peak_rss(void);          /* peak resident set size in bytes; 0 when unavailable */
 long long sc_spawn_argv(const char *const *argv, const char *out_path); /* argv spawn, NO shell; out_path (may be NULL) captures stdout+stderr */
-int sc_exec_argv(const char *const *argv, const char *out_path);        /* sc_spawn_argv + wait: exit code, or -1 */
+int sc_exec_argv(const char *const *argv, const char *out_path);        /* sc_spawn_argv + wait: exit code, or -1; a killing signal is named on stderr */
 int sc_wait_any(const int64_t *pids, int n, int *code); /* index of the first child to exit; -1 on error */
 int sc_try_wait(const int64_t *pids, int n, int *code); /* non-blocking sc_wait_any; -1 when none exited; never reaps outside `pids` */
 int sc_waitpid(long long pid, int *code); /* wait for ONE specific child; 0 on success, -1 on error */
@@ -77,7 +83,7 @@ int sc_run(const char *cmd, const char *in_path, const char *out_path, const cha
 int sc_exec(const char *cmd);
 
 int sc_mkdir_p(const char *path); /* mkdir -p: creates every missing component; 0 on success */
-int sc_rm_rf(const char *path);   /* rm -rf: recursive delete, 0 if the path is gone afterwards */
+int sc_rm_rf(const char *path);   /* rm -rf without following links: 0 if the path is gone afterwards */
 const char *sc_tmpdir(void);      /* the system temp directory, no trailing separator */
 
 #endif

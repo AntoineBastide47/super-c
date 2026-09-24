@@ -109,6 +109,7 @@ pub const IT_MAX_FRAMES: u32 = 48;
 pub const IT_MAX_OBJS: usize = 65536;
 pub const IT_DEFAULT_STEPS: u32 = 2097152; // 1 << 21
 pub const IT_DEFAULT_SLOTS: u64 = 4194304; // 1 << 22 IVal slots of abstract memory
+const IT_RETAIN_SLOTS: u64 = 262144; // 1 << 18 slots (6 MiB) of dead-object storage kept between evaluations
 const CLONE_MAX_DEPTH: i32 = 32;
 
 pub struct IVal {
@@ -161,14 +162,16 @@ pub struct SRel {
     pub fnode: NodeId,
 }
 
+/// One serialized slot of a static object. `i` is the payload of every kind that has one: the
+/// value for SK_INT and SK_BOOL, the bits for SK_FLOAT (`f()`), the statics index of the embedded
+/// object for SK_AGG (`child()`).
 pub struct SSlot {
     pub kind: u8,
     pub tm: ModuleId,
     pub ty: TypeId,
     pub i: i64,
-    pub f: f64,
-    pub child: u32, // SK_AGG: statics index of the embedded object
 }
+static_assert(sizeof(SSlot) == 16, "SSlot is a kind byte, a module, a type and one 8-byte payload");
 
 pub struct StaticObj {
     pub shape: u8,
@@ -201,7 +204,8 @@ extend Interp {
     /// name a type id is dropped: a module's provisional ids restart after the checkpoint, so a
     /// stale entry could match a different type, not only miss.
     pub fn remap_types(self: &mut Self, p: &loader::Package) {
-        for i in 0..self.objs.len() {
+        // objects past objs_live are dead: obj_new rewrites their slots and types before reuse
+        for i in 0..self.objs_live {
             let o = self.objs.index_mut(i);
             for s in 0..o.slots.len() {
                 let v = o.slots.index_mut(s);
@@ -529,10 +533,32 @@ pub struct IFoldErr {
     pub detail: String,
 }
 
-struct UFree {
-    pub m: ModuleId,
-    pub n: NodeId,
-    pub user: bool,
+/// A declaration's view shape (`view_of`: kind, `p`, `l`) and the ordinals of its fields named
+/// `ptr` and `len` (`fp`, `fl`; -1 = absent).
+struct DeclView {
+    pub p: i32,
+    pub l: i32,
+    pub fp: i32,
+    pub fl: i32,
+    pub kind: u8,
+}
+
+/// One memoized scalar call: the callee, its arguments (`n` values at `a0` of the memo's pool)
+/// and its result.
+struct MemoRow {
+    pub a0: u32,
+    pub n: u32,
+    pub fm: ModuleId,
+    pub fnode: NodeId,
+    pub v: IVal,
+}
+
+/// Scalar call results keyed by callee and exact argument values. The hash only selects a row; a
+/// hit compares every stored input, so a hash collision is a miss, never a wrong value.
+pub struct CallMemo {
+    pub ix: Map<u64, u32>,
+    pub rows: Vector<MemoRow>,
+    pub args: Vector<IVal>,
 }
 
 /// find_method memo key: the callee (module << 32 | fn) and the receiver with the calling scope
@@ -563,6 +589,8 @@ pub struct Interp {
     pub objs: Vector<IObj>,
     pub objs_live: usize,
     pub live_slots: u64,
+    pub slot_cap: u64, // slot capacity the object store holds, live and retained
+    pub zcell: u32, // the one-slot object every zero-sized place behind a sentinel pointer resolves to; 0 = none yet
     pub failed: bool,
     pub trap: str<'static>,
     pub trap_kind: u8,
@@ -600,14 +628,16 @@ pub struct Interp {
     pub st_fresh_miss: u64,
     pub cont_memo: Map<u64, u64>, // (m << 32 | fn) -> kind << 32 | container: called per interpreted call
     pub method_memo: Map<MKey, u64>, // find_method results (module << 32 | node) once every module is typed
-    pub call_memo: Map<u64, IVal>, // scalar results keyed over every semantic input (callee + args)
+    pub call_memo: CallMemo,
     pub item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
     pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
     pub rets: Vector<IVal>, // the last finished frame's return slots (multi-return call writes)
-    pub ufree: Vector<UFree>, // decl -> has a user free method (folding such values is refused)
+    pub argpool: Vector<Vector<IVal>>, // argument vectors of finished calls, reused by `call`
+    pub ufree: Map<u64, bool>, // (module << 32 | decl) -> has a user free method (folding such values is refused)
     pub subst: Vector<ISub>, // generic bindings, all frames; [sub_base, len) is the active window
     pub sub_base: usize,
     pub ext_memo: Map<u64, u32>, // fn node -> enclosing extend node (NODE_NONE = none)
+    pub view_memo: Map<u64, DeclView>, // (m << 32 | decl) -> decl_view
     pub statics: Vector<StaticObj>, // captured static data groups, appended per constant
     pub all_typed: bool, // silent const-fn failures promote to definite traps only once true
     pub record_folds: bool, // failed folds with promotable traps record into fold_errs
@@ -638,7 +668,7 @@ pub struct Interp {
     pub sref: Map<u64, i64>, // eval_static memo: -1 definite failure, >0 root+1 (retryable absent)
     pub fx: Vector<Vector<u8>>, // shallow effect verdicts per (module, fn node)
     pub fxd: Vector<Vector<u8>>, // deep (all-paths) effect verdicts
-    pub fx_no: Vector<FxNo<'static>>, // first disqualifying site per shallow FX_NO
+    pub fx_no: Map<u64, FxNo<'static>>, // (m << 32 | fn) -> first disqualifying site of its last shallow scan
     pub fx_depth: u32,
     pub pending: Vector<u64>, // deferred static_assert conditions (module << 32 | node)
     pub pending_consts: Vector<u64>, // deferred call-bearing const decls
@@ -664,6 +694,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         objs: Vector::<IObj>::new(),
         objs_live: 0,
         live_slots: 0,
+        slot_cap: 0,
+        zcell: 0,
         failed: false,
         trap: "",
         trap_kind: IT_TRAP_NONE,
@@ -686,14 +718,16 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         st_fresh_miss: 0,
         cont_memo: Map::<u64, u64>::new(),
         method_memo: Map::<MKey, u64>::new(),
-        call_memo: Map::<u64, IVal>::new(),
+        call_memo: CallMemo { ix: Map::<u64, u32>::new(), rows: Vector::<MemoRow>::new(), args: Vector::<IVal>::new() },
         item_memo: Map::<u64, IVal>::new(),
         item_active: Vector::<u64>::new(),
         rets: Vector::<IVal>::new(),
-        ufree: Vector::<UFree>::new(),
+        argpool: Vector::<Vector<IVal>>::new(),
+        ufree: Map::<u64, bool>::new(),
         subst: Vector::<ISub>::new(),
         sub_base: 0,
         ext_memo: Map::<u64, u32>::new(),
+        view_memo: Map::<u64, DeclView>::new(),
         statics: Vector::<StaticObj>::new(),
         all_typed: false,
         record_folds: false,
@@ -717,7 +751,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         sref: Map::<u64, i64>::new(),
         fx: Vector::<Vector<u8>>::new(),
         fxd: Vector::<Vector<u8>>::new(),
-        fx_no: Vector::<FxNo>::new(),
+        fx_no: Map::<u64, FxNo>::new(),
         fx_depth: 0,
         pending: Vector::<u64>::new(),
         pending_consts: Vector::<u64>::new(),
@@ -763,27 +797,43 @@ extend Interp {
     /// Evaluate `cnode` through a REUSED interpreter: the per-evaluation state resets while the
     /// lowered-callee cache and the call memo (scalar-only, so no object id can dangle across the
     /// object-store reset) persist -- one interpreter serves a whole emission pass.
+    /// `max_steps` bounds this evaluation only; the engine's own budget is restored after it.
     pub fn eval_const_in(self: &mut Self, m: ModuleId, cnode: NodeId, max_steps: u32) IVal {
-        self.steps = 0;
+        self.eval_reset();
+        let steps0 = self.max_steps;
         self.max_steps = max_steps;
-        self.failed = false;
-        self.trap = "";
-        self.trap_kind = IT_TRAP_NONE;
-        self.trap_nframes = 0;
-        self.nframes = 0;
-        self.objs_live = 0;
-        self.live_slots = 0;
-        self.item_active.truncate(0);
         self.subst.truncate(0);
         self.sub_base = 0;
         let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
-        if !lw.lower_const(cnode) {
+        let mut r = none();
+        if lw.lower_const(cnode) {
+            let args = Vector::<IVal>::new();
+            r = self.run(&lw.body, &args);
+        } else {
             self.failed = true;
-            return none();
         }
-        let args = Vector::<IVal>::new();
-        let r = self.run(&lw.body, &args);
+        self.max_steps = steps0;
         return r;
+    }
+
+    /// Clear the per-evaluation state: the step count, the trap, the frames, and the object store.
+    /// The dead objects keep their slot storage for reuse while it totals at most IT_RETAIN_SLOTS.
+    fn eval_reset(self: &mut Self) {
+        if self.slot_cap > IT_RETAIN_SLOTS {
+            self.objs.clear();
+            self.slot_cap = 0;
+        }
+        self.steps = 0;
+        self.trap = "";
+        self.trap_kind = IT_TRAP_NONE;
+        self.trap_nframes = 0;
+        self.trap_in_constfn = false;
+        self.nframes = 0;
+        self.objs_live = 0;
+        self.live_slots = 0;
+        self.zcell = 0;
+        self.item_active.truncate(0);
+        self.failed = false;
     }
 
     const fn p(self: &Self) &loader::Package {
@@ -845,33 +895,35 @@ extend Interp {
         return unsafe (self.objs.as_ptr() as *mut IObj + (id - 1) as usize);
     }
 
-    fn obj_new(self: &mut Self, len: u32) u32 {
-        if self.objs_live >= IT_MAX_OBJS || self.live_slots + len as u64 > self.max_slots {
+    fn obj_new(self: &mut Self, len: u64) u32 {
+        if self.objs_live >= IT_MAX_OBJS || len > self.max_slots - self.live_slots {
             self.it_trap(IT_TRAP_BUDGET_MEMORY, "const-eval memory budget exceeded");
             return 0;
         }
         if self.objs_live < self.objs.len() {
             // reuse a retained object: refit its slot vector, zero the metadata push{} would zero
             let o = unsafe (self.objs.as_ptr() as *mut IObj + self.objs_live);
-            unsafe o.slots.clear();
+            unsafe (*o).slots.clear();
             if len != 0 {
-                unsafe o.slots.reserve(len as usize);
+                let c0 = unsafe (*o).slots.capacity();
+                unsafe (*o).slots.reserve(len as usize);
                 for _ in 0..len {
-                    unsafe o.slots.push(none());
+                    unsafe (*o).slots.push(none());
                 }
+                self.slot_cap += (unsafe (*o).slots.capacity() - c0) as u64;
             }
-            unsafe o.dead = 0;
-            unsafe o.is_enum = 0;
-            unsafe o.heap = 0;
-            unsafe o.clos = 0;
-            unsafe o.nargs = 0;
-            unsafe o.uactive = -1;
-            unsafe o.dm = 0;
-            unsafe o.dn = NODE_NONE;
-            unsafe o.bytes = 0;
-            unsafe o.em = 0;
-            unsafe o.et = TYPE_NONE;
-            unsafe o.esz = 0;
+            unsafe (*o).dead = 0;
+            unsafe (*o).is_enum = 0;
+            unsafe (*o).heap = 0;
+            unsafe (*o).clos = 0;
+            unsafe (*o).nargs = 0;
+            unsafe (*o).uactive = -1;
+            unsafe (*o).dm = 0;
+            unsafe (*o).dn = NODE_NONE;
+            unsafe (*o).bytes = 0;
+            unsafe (*o).em = 0;
+            unsafe (*o).et = TYPE_NONE;
+            unsafe (*o).esz = 0;
         } else {
             let mut slots = Vector::<IVal>::new();
             if len != 0 {
@@ -880,6 +932,7 @@ extend Interp {
                     slots.push(none());
                 }
             }
+            self.slot_cap += slots.capacity() as u64;
             self.objs.push(IObj { slots: slots, uactive: -1, dn: NODE_NONE });
         }
         self.objs_live += 1;
@@ -887,22 +940,24 @@ extend Interp {
         return self.objs_live as u32;
     }
 
-    fn obj_resize(self: &mut Self, id: u32, len: u32) bool {
-        let cur = (unsafe self.obj_ptr(id).slots.len()) as u32;
-        if len > cur && self.live_slots + (len - cur) as u64 > self.max_slots {
+    fn obj_resize(self: &mut Self, id: u32, len: u64) bool {
+        let cur = (unsafe (*self.obj_ptr(id)).slots.len()) as u64;
+        if len > cur && len - cur > self.max_slots - self.live_slots {
             self.it_trap(IT_TRAP_BUDGET_MEMORY, "const-eval memory budget exceeded");
             return false;
         }
         let o = self.obj_ptr(id);
         if len > cur {
+            let c0 = unsafe (*o).slots.capacity();
             let mut i = cur;
             while i < len {
-                unsafe o.slots.push(none());
+                unsafe (*o).slots.push(none());
                 i += 1;
             }
+            self.slot_cap += (unsafe (*o).slots.capacity() - c0) as u64;
             self.live_slots += len - cur;
         } else if len < cur {
-            unsafe o.slots.truncate(len as usize);
+            unsafe (*o).slots.truncate(len as usize);
         }
         return true;
     }
@@ -917,10 +972,10 @@ extend Interp {
         }
         let sid = v.i as u32;
         let srcp = self.obj_ptr(sid);
-        if srcp == null || unsafe srcp.dead != 0 {
+        if srcp == null || unsafe (*srcp).dead != 0 {
             return none();
         }
-        let srclen = (unsafe srcp.slots.len()) as u32;
+        let srclen = (unsafe (*srcp).slots.len()) as u32;
         let id = self.obj_new(srclen);
         if id == 0 {
             return none();
@@ -928,30 +983,30 @@ extend Interp {
         let src = self.obj_ptr(sid);
         let dst = self.obj_ptr(id);
         unsafe {
-            dst.dead = src.dead;
-            dst.is_enum = src.is_enum;
-            dst.clos = src.clos;
-            dst.uactive = src.uactive; // a copied union still holds the member it was written through
-            dst.heap = src.heap;
-            dst.dm = src.dm;
-            dst.dn = src.dn;
-            dst.nargs = src.nargs;
-            dst.bytes = src.bytes;
-            dst.em = src.em;
-            dst.et = src.et;
-            dst.esz = src.esz;
+            (*dst).dead = (*src).dead;
+            (*dst).is_enum = (*src).is_enum;
+            (*dst).clos = (*src).clos;
+            (*dst).uactive = (*src).uactive; // a copied union still holds the member it was written through
+            (*dst).heap = (*src).heap;
+            (*dst).dm = (*src).dm;
+            (*dst).dn = (*src).dn;
+            (*dst).nargs = (*src).nargs;
+            (*dst).bytes = (*src).bytes;
+            (*dst).em = (*src).em;
+            (*dst).et = (*src).et;
+            (*dst).esz = (*src).esz;
             for j in 0..4 {
-                dst.am[j] = src.am[j];
-                dst.at[j] = src.at[j];
+                (*dst).am[j] = (*src).am[j];
+                (*dst).at[j] = (*src).at[j];
             }
         }
         for i in 0..srclen {
-            let sv = unsafe self.obj_ptr(sid).slots[i as usize];
+            let sv = unsafe (*self.obj_ptr(sid)).slots[i as usize];
             let cloned = self.obj_clone(sv, depth + 1);
             if sv.kind != IV_NONE && cloned.kind == IV_NONE {
                 return none();
             }
-            unsafe self.obj_ptr(id).slots.set(i as usize, cloned);
+            unsafe (*self.obj_ptr(id)).slots.set(i as usize, cloned);
         }
         let mut out = v;
         out.i = id;
@@ -978,27 +1033,28 @@ extend Interp {
         if o == null {
             return false;
         }
-        if unsafe o.dead != 0 {
+        if unsafe (*o).dead != 0 {
             self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
             return false;
         }
-        if pv_off(pv) as usize >= unsafe o.slots.len() {
+        if pv_off(pv) as usize >= unsafe (*o).slots.len() {
             self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
             return false;
         }
-        *out = unsafe o.slots[pv_off(pv) as usize];
+        *out = unsafe (*o).slots[pv_off(pv) as usize];
         return out.kind != IV_NONE;
     }
 
     // The user-free screen: a value of a type with a user-written `free` method never folds (its
     // destructor is runtime behavior the evaluator cannot honor).
     fn user_free(self: &mut Self, dm: ModuleId, dn: NodeId) bool {
-        for i in 0..self.ufree.len() {
-            let u = self.ufree.at(i);
-            if u.m == dm && u.n == dn {
-                return u.user;
-            }
-        }
+        let key = dm as u64 << 32 | dn as u64;
+        switch self.ufree.get(&key) {
+            Some(u) => {
+                return *u;
+            },
+            None => {},
+        };
         let mut user = false;
         let nm = self.p().modules.len();
         let mut mm: usize = 0;
@@ -1010,9 +1066,8 @@ extend Interp {
                 let mut ii: u32 = 0;
                 while ii < items.len && !user {
                     let iid = unsafe a.list(items)[ii as usize];
-                    let target = a.at_const(iid).as_data.extend_def.target_type;
-                    if a.at_const(iid).kind == NodeKind::NODE_EXTEND && target != NODE_NONE {
-                        let tg = a.resolution_def(target);
+                    if a.at_const(iid).kind == NodeKind::NODE_EXTEND && a.at_const(iid).as_data.extend_def.target_type != NODE_NONE {
+                        let tg = a.resolution_def(a.at_const(iid).as_data.extend_def.target_type);
                         if tg.module == dm && tg.node == dn {
                             let ms = a.at_const(iid).as_data.extend_def.items;
                             for k in 0..ms.len {
@@ -1032,7 +1087,7 @@ extend Interp {
             }
             mm += 1;
         }
-        self.ufree.push(UFree { m: dm, n: dn, user: user });
+        self.ufree.insert(key, user);
         return user;
     }
 
@@ -1339,10 +1394,10 @@ extend Interp {
             if ez.kind == IV_NONE {
                 return none();
             }
-            let alen = (unsafe self.obj_ptr(id).slots.len()) as u32;
+            let alen = (unsafe (*self.obj_ptr(id)).slots.len()) as u32;
             for i in 0..alen {
                 let cloned = self.obj_clone(ez, depth + 1);
-                unsafe self.obj_ptr(id).slots.set(i as usize, cloned);
+                unsafe (*self.obj_ptr(id)).slots.set(i as usize, cloned);
             }
             return IVal { kind: IV_OBJ, tm: m, ty: t, i: id, f: 0.0 };
         }
@@ -1369,20 +1424,20 @@ extend Interp {
             if id == 0 {
                 return none();
             }
-            unsafe self.obj_ptr(id).dm = dm;
-            unsafe self.obj_ptr(id).dn = dn;
+            unsafe (*self.obj_ptr(id)).dm = dm;
+            unsafe (*self.obj_ptr(id)).dn = dn;
             if has_inst {
                 let mut na = inst.n;
                 if na > 4 {
                     na = 4;
                 }
-                unsafe self.obj_ptr(id).nargs = na;
+                unsafe (*self.obj_ptr(id)).nargs = na;
                 for gi in 0..na {
                     let mut gm2: ModuleId = m;
                     let mut gt2 = unsafe inst.args[gi as usize];
                     let _ = self.rty(m, unsafe inst.args[gi as usize], &mut gm2, &mut gt2);
-                    unsafe self.obj_ptr(id).am[gi as usize] = gm2;
-                    unsafe self.obj_ptr(id).at[gi as usize] = gt2;
+                    unsafe (*self.obj_ptr(id)).am[gi as usize] = gm2;
+                    unsafe (*self.obj_ptr(id)).at[gi as usize] = gt2;
                 }
             }
             let mut zam: [ModuleId; 4] = [0, 0, 0, 0];
@@ -1405,7 +1460,7 @@ extend Interp {
                 if fv.kind == IV_NONE {
                     return none();
                 }
-                unsafe self.obj_ptr(id).slots.set(si, fv);
+                unsafe (*self.obj_ptr(id)).slots.set(si, fv);
                 si += 1;
             }
             return IVal { kind: IV_OBJ, tm: m, ty: t, i: id, f: 0.0 };
@@ -1443,7 +1498,7 @@ extend Interp {
                     self.obj_clone(*args.at(i), 0);
                 };
                 av = self.maybe_slice_wrap(b.module, lty, av);
-                unsafe self.obj_ptr(env).slots.set(li, av);
+                unsafe (*self.obj_ptr(env)).slots.set(li, av);
             }
         }
         let mut blk = b.entry;
@@ -1511,7 +1566,7 @@ extend Interp {
                 self.rets.truncate(0);
                 if b.returns != 0 {
                     for ri in 0..b.returns {
-                        self.rets.push(unsafe self.obj_ptr(env).slots[ri as usize]);
+                        self.rets.push(unsafe (*self.obj_ptr(env)).slots[ri as usize]);
                     }
                     r = *self.rets.at(0);
                 } else {
@@ -1631,8 +1686,8 @@ extend Interp {
             // Item-schedule measurement: a dynamic evaluation edge from the checking item.
             let pm = self.pkg as *mut loader::Package;
             let ci = self.p().idx.items.at(self.cur_item as usize);
-            unsafe pm.ctfe_edges.push(ci.module as u64 << 32 | ci.node as u64);
-            unsafe pm.ctfe_edges.push(m as u64 << 32 | fnode as u64);
+            unsafe (*pm).ctfe_edges.push(ci.module as u64 << 32 | ci.node as u64);
+            unsafe (*pm).ctfe_edges.push(m as u64 << 32 | fnode as u64);
         }
         let mut lw = irl::Lowerer::new(self.pkg, m, fnode);
         for i in 0..binds.len() {
@@ -1681,7 +1736,7 @@ extend Interp {
             return;
         }
         let pm = self.pkg as *mut loader::Package;
-        unsafe pm.sched.dyn_edges.insert(caller as u64 << 32 | callee as u64);
+        unsafe (*pm).sched.dyn_edges.insert(caller as u64 << 32 | callee as u64);
     }
 
     /// Name the reader of the evaluations that follow (under the engine lock): the item under
@@ -1736,24 +1791,24 @@ extend Interp {
 
     // An owned compact copy of kept slot `ki` (see `copy_kept`): its index in `bodies`.
     fn own_kept(self: &mut Self, ki: u64) u64 {
-        let kl: *const irl::Lowerer = (unsafe &*self.keep_view).kept.at(ki as usize);
-        let mut lw = irl::Lowerer::new(self.pkg, unsafe kl.body.module, unsafe kl.body.owner.node);
-        lw.adopt(unsafe &*kl);
+        let kl: *const irl::KeptBody = (unsafe &*self.keep_view).kept.at(ki as usize);
+        let mut kc = irl::KeptBody::copy(unsafe &(*kl).body, unsafe &(*kl).closures);
+        let lw = irl::Lowerer::take_kept(self.pkg, &mut kc);
         self.bodies.push(Box::new(lw));
         return self.bodies.len() as u64 - 1;
     }
 
-    // The lowering a body_of slot names.
-    fn body_at(self: &Self, bidx: i64) *const irl::Lowerer {
+    // The body a body_of slot names.
+    fn body_at(self: &Self, bidx: i64) *const ir::CoreBody {
         let sl = self.body_slot[bidx as usize];
         if (sl & BODY_KEPT) != 0 {
             assert(self.keep_view != null);
-            return (unsafe &*self.keep_view).kept.at((sl & BODY_MASK) as usize);
+            return &(unsafe &*self.keep_view).kept.at((sl & BODY_MASK) as usize).body;
         }
         if (sl & BODY_PARENT) != 0 {
-            return (unsafe &*self.parent).bodies.at((sl & BODY_MASK) as usize).get();
+            return &(unsafe &*self.parent).bodies.at((sl & BODY_MASK) as usize).get().body;
         }
-        return self.bodies.at(sl as usize).get();
+        return &self.bodies.at(sl as usize).get().body;
     }
 
     /// Open the read-only view of `keep` (see `keep_view`). The keep must not add, move, or take a
@@ -1761,7 +1816,7 @@ extend Interp {
     pub fn keep_view_set(self: &mut Self, keep: *mut irl::Keep) {
         assert(self.keep_view == null);
         self.eng_enter();
-        unsafe keep.viewers += 1;
+        unsafe (*keep).viewers += 1;
         self.keep_view = keep;
         self.eng_leave();
     }
@@ -1774,6 +1829,25 @@ extend Interp {
         self.st_fresh += other.st_fresh;
         self.st_fresh_generic += other.st_fresh_generic;
         self.st_fresh_miss += other.st_fresh_miss;
+        // A fold that failed on a private engine is reported like one that failed here: which
+        // engine ran a job is scheduling, and diagnostics must not depend on it.
+        for i in 0..other.fold_errs.len() {
+            let r = other.fold_errs.at(i);
+            let mut seen = false;
+            for k in 0..self.fold_errs.len() {
+                if self.fold_errs.at(k).m == r.m && self.fold_errs.at(k).id == r.id {
+                    seen = true;
+                    break;
+                }
+            }
+            if !seen {
+                let mut d = String::new();
+                d.push_string(&r.detail);
+                self.fold_errs.push(
+                    IFoldErr { m: r.m, id: r.id, span: r.span, kind: r.kind, constfn: r.constfn, detail: d },
+                );
+            }
+        }
         self.eng_leave();
     }
 
@@ -1794,20 +1868,35 @@ extend Interp {
             }
         }
         let kp = self.keep_view as *mut irl::Keep;
-        assert(unsafe kp.viewers > 0);
-        unsafe kp.viewers -= 1;
+        assert(unsafe (*kp).viewers > 0);
+        unsafe (*kp).viewers -= 1;
         self.keep_view = null;
         self.eng_leave();
     }
 
+    // Every interpreted call takes its argument vector from a pool (one per live frame), so the
+    // hot path allocates only while the call depth grows.
     fn call(self: &mut Self, b: &ir::CoreBody, env: u32, t: &ir::Terminator) bool {
+        let mut args = Vector::<IVal>::new();
+        switch self.argpool.pop() {
+            Some(v) => {
+                args = v;
+            },
+            None => {},
+        };
+        args.clear();
+        let ok = self.call_in(b, env, t, &mut args);
+        self.argpool.push(args);
+        return ok;
+    }
+
+    fn call_in(self: &mut Self, b: &ir::CoreBody, env: u32, t: &ir::Terminator, args: &mut Vector<IVal>) bool {
         let mut fm = t.callee.module;
         let mut fnode = t.callee.node;
         if t.is_variadic {
             let _ = self.bail();
             return false;
         }
-        let mut args = Vector::<IVal>::new();
         for i in 0..t.args_len {
             let opid = b.oper_pool[(t.args_start + i) as usize];
             let v = self.operand(b, env, opid);
@@ -1828,16 +1917,16 @@ extend Interp {
                 fnode = (fv.i & 0xFFFFFFFF) as NodeId;
             } else if fv.kind == IV_OBJ {
                 let op = self.obj_ptr(fv.i as u32);
-                if op == null || unsafe op.clos == 0 {
+                if op == null || unsafe (*op).clos == 0 {
                     let _ = self.bail();
                     return false;
                 }
-                fm = unsafe op.dm;
-                fnode = unsafe op.dn;
+                fm = unsafe (*op).dm;
+                fnode = unsafe (*op).dn;
                 closure = true;
-                let ncap = unsafe op.slots.len();
+                let ncap = unsafe (*op).slots.len();
                 for ci in 0..ncap {
-                    args.push(unsafe self.obj_ptr(fv.i as u32).slots[ci]);
+                    args.push(unsafe (*self.obj_ptr(fv.i as u32)).slots[ci]);
                 }
             } else {
                 let _ = self.bail();
@@ -1865,12 +1954,12 @@ extend Interp {
                         let _ = self.bail();
                         return false;
                     }
-                    is_extern = da.at_const(fnode).as_data.function.is_extern;
+                    is_extern = da.at_const(fnode).as_data.function.is_extern();
                 }
             }
         }
         if is_extern {
-            return self.intercept(b, env, t, fm, fnode, &args);
+            return self.intercept(b, env, t, fm, fnode, args);
         }
         if !closure {
             // An interface member: the receiver's own override wins; an inherited DEFAULT body
@@ -2051,33 +2140,18 @@ extend Interp {
                 }
             }
         }
-        // The memo key carries every semantic input: the callee identity and each argument's
-        // kind, type, and bits (objects, pointers, and generic instances never memo).
-        let mut mkey: u64 = 1469598103934665603u64;
+        // Objects, pointers, and generic instances never memo.
         let mut memoable = t.dests_len <= 1 && binds.len() == 0 && !closure;
-        mkey = (mkey ^ fm as u64) * 1099511628211u64;
-        mkey = (mkey ^ fnode as u64) * 1099511628211u64;
         for i in 0..args.len() {
-            let av = *args.at(i);
-            if av.kind == IV_OBJ || av.kind == IV_PTR {
+            let ak = args.at(i).kind;
+            if ak == IV_OBJ || ak == IV_PTR {
                 memoable = false;
             }
-            mkey = (mkey ^ av.kind as u64) * 1099511628211u64;
-            mkey = (mkey ^ av.ty as u64) * 1099511628211u64;
-            mkey = (mkey ^ av.i as u64) * 1099511628211u64;
-            mkey = (mkey ^ av.f as u64) * 1099511628211u64;
         }
+        let mkey = memo_key(fm, fnode, args);
         if memoable {
-            let mut hit = false;
             let mut hv = none();
-            switch self.call_memo.get(&mkey) {
-                Some(v) => {
-                    hit = true;
-                    hv = *v;
-                },
-                None => {},
-            };
-            if hit {
+            if self.call_memo.find(mkey, fm, fnode, args, &mut hv) {
                 if t.dests_len >= 1 {
                     let dp = b.dest_pool[t.dests_start as usize];
                     self.write_place(b, env, dp, hv);
@@ -2090,7 +2164,7 @@ extend Interp {
         let mut is_constfn = false;
         if !closure {
             let fa2 = unsafe &*self.p().module_ast_const(fm);
-            is_constfn = fa2.at_const(fnode).as_data.function.is_const;
+            is_constfn = fa2.at_const(fnode).as_data.function.is_const();
         }
         let bidx = self.body_of(fm, fnode, &binds, closure);
         if bidx < 0 {
@@ -2110,8 +2184,7 @@ extend Interp {
             self.it_trap(IT_TRAP_BUDGET_DEPTH, "const-eval call depth exceeded");
             return false;
         }
-        let bp: *const irl::Lowerer = self.body_at(bidx);
-        let bb = (unsafe &(&*bp).body) as *const ir::CoreBody;
+        let bb = self.body_at(bidx);
         // the callee frame's substitution window
         let sb0 = self.subst.len();
         for i in 0..binds.len() {
@@ -2121,7 +2194,7 @@ extend Interp {
         self.sub_base = sb0;
         unsafe self.fstack[self.nframes as usize] = DefId { module: fm, node: fnode };
         self.nframes += 1;
-        let r = self.run(unsafe &*bb, &args);
+        let r = self.run(unsafe &*bb, args);
         self.nframes -= 1;
         self.sub_base = prev_base;
         self.subst.truncate(sb0);
@@ -2135,11 +2208,15 @@ extend Interp {
                     );
                 }
                 self.trap_in_constfn = true;
+            } else if self.trap_kind != IT_TRAP_PANIC && !it_trap_is_ub(self.trap_kind) {
+                // Only a chain of `const fn` frames carries the guarantee: a non-const function
+                // runs here speculatively, and at run time it gets past what the evaluator cannot do.
+                self.trap_in_constfn = false;
             }
             return false;
         }
         if memoable && r.kind != IV_OBJ && r.kind != IV_PTR {
-            self.call_memo.insert(mkey, r);
+            self.call_memo.put(mkey, fm, fnode, args, r);
         }
         // every return slot lands in its destination (self.rets dies with the next frame)
         for di in 0..t.dests_len {
@@ -2186,8 +2263,8 @@ extend Interp {
             if o == 0 {
                 return false;
             }
-            unsafe self.obj_ptr(o).heap = 1;
-            unsafe self.obj_ptr(o).bytes = args.at(0).i as u64;
+            unsafe (*self.obj_ptr(o)).heap = 1;
+            unsafe (*self.obj_ptr(o)).bytes = args.at(0).i as u64;
             out = iv_ptr(b.module, rt, o, 0);
             ok = true;
         } else if self.span_is(fm, nm, "realloc") {
@@ -2202,31 +2279,31 @@ extend Interp {
                 if o == 0 {
                     return false;
                 }
-                unsafe self.obj_ptr(o).heap = 1;
-                unsafe self.obj_ptr(o).bytes = nbytes;
+                unsafe (*self.obj_ptr(o)).heap = 1;
+                unsafe (*self.obj_ptr(o)).bytes = nbytes;
                 out = iv_ptr(b.module, rt, o, 0);
                 ok = true;
             } else {
                 let blk = self.obj_ptr(pid);
-                if blk == null || unsafe blk.heap == 0 || pv_off(*args.at(0)) != 0 {
+                if blk == null || unsafe (*blk).heap == 0 || pv_off(*args.at(0)) != 0 {
                     let _ = self.bail();
                     return false;
                 }
-                if unsafe blk.dead != 0 {
+                if unsafe (*blk).dead != 0 {
                     self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
                     return false;
                 }
-                if unsafe blk.et != TYPE_NONE {
-                    let esz = unsafe blk.esz;
+                if unsafe (*blk).et != TYPE_NONE {
+                    let esz = unsafe (*blk).esz;
                     if esz == 0 || nbytes % esz != 0 {
                         let _ = self.bail();
                         return false;
                     }
-                    if !self.obj_resize(pid, (nbytes / esz) as u32) {
+                    if !self.obj_resize(pid, nbytes / esz) {
                         return false;
                     }
                 }
-                unsafe self.obj_ptr(pid).bytes = nbytes;
+                unsafe (*self.obj_ptr(pid)).bytes = nbytes;
                 out = iv_ptr(b.module, rt, pid, 0);
                 ok = true;
             }
@@ -2238,15 +2315,15 @@ extend Interp {
             let pid = pv_obj(*args.at(0));
             if pid != 0 {
                 let blk = self.obj_ptr(pid);
-                if blk == null || unsafe blk.heap == 0 || pv_off(*args.at(0)) != 0 {
+                if blk == null || unsafe (*blk).heap == 0 || pv_off(*args.at(0)) != 0 {
                     let _ = self.bail();
                     return false;
                 }
-                if unsafe blk.dead != 0 {
+                if unsafe (*blk).dead != 0 {
                     self.it_trap(IT_TRAP_UB_DOUBLE_FREE, "double free");
                     return false;
                 }
-                unsafe blk.dead = 1;
+                unsafe (*blk).dead = 1;
             }
             out = iv_unit();
             ok = true;
@@ -2347,33 +2424,33 @@ extend Interp {
             return true;
         }
         let blk = self.obj_ptr(pid);
-        if blk == null || unsafe blk.heap == 0 {
+        if blk == null || unsafe (*blk).heap == 0 {
             let _ = self.bail();
             return false;
         }
-        if unsafe blk.dead != 0 {
+        if unsafe (*blk).dead != 0 {
             self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
             return false;
         }
-        if unsafe blk.et == TYPE_NONE && pv_off(*args.at(0)) == 0 {
-            let bytes = unsafe blk.bytes;
-            if !self.obj_resize(pid, bytes as u32) {
+        if unsafe (*blk).et == TYPE_NONE && pv_off(*args.at(0)) == 0 {
+            let bytes = unsafe (*blk).bytes;
+            if !self.obj_resize(pid, bytes) {
                 return false;
             }
             let b2 = self.obj_ptr(pid);
-            unsafe b2.em = 0;
-            unsafe b2.et = Ast::builtin(BuiltinType::BT_U8);
-            unsafe b2.esz = 1;
+            unsafe (*b2).em = 0;
+            unsafe (*b2).et = Ast::builtin(BuiltinType::BT_U8);
+            unsafe (*b2).esz = 1;
         }
         let bb = self.obj_ptr(pid);
-        let esz = unsafe bb.esz;
+        let esz = unsafe (*bb).esz;
         if esz == 0 || n % esz != 0 {
             let _ = self.bail();
             return false;
         }
         let count = n / esz;
         let off = pv_off(*args.at(0)) as u64;
-        if off + count > (unsafe bb.slots.len()) as u64 {
+        if off + count > (unsafe (*bb).slots.len()) as u64 {
             self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
             return false;
         }
@@ -2385,7 +2462,7 @@ extend Interp {
                 let _ = self.bail();
                 return false;
             }
-            fill = self.zero_of(unsafe bb.em, unsafe bb.et, 0);
+            fill = self.zero_of(unsafe (*bb).em, unsafe (*bb).et, 0);
             if fill.kind == IV_NONE {
                 let _ = self.bail();
                 return false;
@@ -2393,7 +2470,7 @@ extend Interp {
         }
         for i in 0..count {
             let cloned = self.obj_clone(fill, 0);
-            unsafe self.obj_ptr(pid).slots.set((off + i) as usize, cloned);
+            unsafe (*self.obj_ptr(pid)).slots.set((off + i) as usize, cloned);
         }
         let _ = rt;
         *out = *args.at(0);
@@ -2440,33 +2517,33 @@ extend Interp {
             let _ = self.bail();
             return false;
         }
-        if unsafe dp.dead != 0 || unsafe sp2.dead != 0 {
+        if unsafe (*dp).dead != 0 || unsafe (*sp2).dead != 0 {
             self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
             return false;
         }
         // A fresh HEAP block with no element type yet adopts the source's, exactly as memset does.
         // An inline array (String's small buffer) is not a heap block and must not be reshaped.
-        if unsafe dp.heap != 0 && unsafe dp.et == TYPE_NONE && pv_off(*args.at(0)) == 0 && unsafe sp2.esz != 0 {
-            let bytes = unsafe dp.bytes;
-            let esz0 = unsafe sp2.esz;
-            if bytes % esz0 == 0 && self.obj_resize(did, (bytes / esz0) as u32) {
+        if unsafe (*dp).heap != 0 && unsafe (*dp).et == TYPE_NONE && pv_off(*args.at(0)) == 0 && unsafe (*sp2).esz != 0 {
+            let bytes = unsafe (*dp).bytes;
+            let esz0 = unsafe (*sp2).esz;
+            if bytes % esz0 == 0 && self.obj_resize(did, bytes / esz0) {
                 let d2 = self.obj_ptr(did);
-                unsafe d2.em = unsafe sp2.em;
-                unsafe d2.et = unsafe sp2.et;
-                unsafe d2.esz = esz0;
+                unsafe (*d2).em = unsafe (*sp2).em;
+                unsafe (*d2).et = unsafe (*sp2).et;
+                unsafe (*d2).esz = esz0;
             }
         }
         let db = self.obj_ptr(did);
         let sb = self.obj_ptr(sid);
-        let mut esz = unsafe db.esz;
-        if unsafe db.heap == 0 {
+        let mut esz = unsafe (*db).esz;
+        if unsafe (*db).heap == 0 {
             esz = 0;
             if self.ptr_elem_is_byte(*args.at(0)) {
                 esz = 1;
             }
         }
-        let mut ssz = unsafe sb.esz;
-        if unsafe sb.heap == 0 {
+        let mut ssz = unsafe (*sb).esz;
+        if unsafe (*sb).heap == 0 {
             ssz = 0;
             if self.ptr_elem_is_byte(*args.at(1)) {
                 ssz = 1;
@@ -2479,12 +2556,12 @@ extend Interp {
         let count = n / esz;
         let doff = pv_off(*args.at(0)) as u64;
         let soff = pv_off(*args.at(1)) as u64;
-        if doff + count > (unsafe db.slots.len()) as u64 || soff + count > (unsafe sb.slots.len()) as u64 {
+        if doff + count > (unsafe (*db).slots.len()) as u64 || soff + count > (unsafe (*sb).slots.len()) as u64 {
             self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
             return false;
         }
         for i in 0..count {
-            let sv = unsafe self.obj_ptr(sid).slots[(soff + i) as usize];
+            let sv = unsafe (*self.obj_ptr(sid)).slots[(soff + i) as usize];
             if sv.kind == IV_NONE {
                 let _ = self.bail();
                 return false;
@@ -2494,10 +2571,18 @@ extend Interp {
                 let _ = self.bail();
                 return false;
             }
-            unsafe self.obj_ptr(did).slots.set((doff + i) as usize, cloned);
+            unsafe (*self.obj_ptr(did)).slots.set((doff + i) as usize, cloned);
         }
         *out = *args.at(0);
         return true;
+    }
+
+    // Whether `o`, reached through pointer `p`, holds 1-byte elements.
+    fn byte_block(self: &Self, o: *const IObj, p: IVal) bool {
+        if unsafe (*o).heap != 0 {
+            return unsafe (*o).esz == 1;
+        }
+        return self.ptr_elem_is_byte(p);
     }
 
     fn mem_cmp(self: &mut Self, b: &ir::CoreBody, args: &Vector<IVal>, rt: TypeId, out: &mut IVal) bool {
@@ -2514,24 +2599,26 @@ extend Interp {
         }
         let b1 = self.obj_ptr(pv_obj(*args.at(0)));
         let b2 = self.obj_ptr(pv_obj(*args.at(1)));
-        if b1 == null || b2 == null || unsafe b1.heap == 0 || unsafe b2.heap == 0 || unsafe b1.esz != 1 || unsafe b2.esz != 1 {
-            let _ = self.bail(); // byte-exact comparison is only modeled for 1-byte-element blocks
+        // Byte-exact comparison is modeled for 1-byte elements: a heap block of bytes, or (as in
+        // `mem_cpy`) an inline byte array such as String's small buffer, judged by the pointer's type.
+        if b1 == null || b2 == null || !self.byte_block(b1, *args.at(0)) || !self.byte_block(b2, *args.at(1)) {
+            let _ = self.bail();
             return false;
         }
-        if unsafe b1.dead != 0 || unsafe b2.dead != 0 {
+        if unsafe (*b1).dead != 0 || unsafe (*b2).dead != 0 {
             self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
             return false;
         }
         let o1 = pv_off(*args.at(0)) as u64;
         let o2 = pv_off(*args.at(1)) as u64;
-        if o1 + n > (unsafe b1.slots.len()) as u64 || o2 + n > (unsafe b2.slots.len()) as u64 {
+        if o1 + n > (unsafe (*b1).slots.len()) as u64 || o2 + n > (unsafe (*b2).slots.len()) as u64 {
             self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
             return false;
         }
         let mut r: i64 = 0;
         for i in 0..n {
-            let s1 = unsafe b1.slots[(o1 + i) as usize];
-            let s2 = unsafe b2.slots[(o2 + i) as usize];
+            let s1 = unsafe (*b1).slots[(o1 + i) as usize];
+            let s2 = unsafe (*b2).slots[(o2 + i) as usize];
             if s1.kind != IV_INT || s2.kind != IV_INT {
                 let _ = self.bail(); // uninitialized bytes: not comparable
                 return false;
@@ -2571,8 +2658,20 @@ extend Interp {
     // Field ordinal of decl `sub` inside its aggregate (payload fields ride the variant slot walk).
     fn field_ordinal(self: &Self, dm: ModuleId, owner: NodeId, sub: NodeId) i64 {
         let a = unsafe &*self.p().module_ast_const(dm);
-        let is_tuple = a.at_const(owner).as_data.aggregate.is_tuple;
         let ms = a.at_const(owner).as_data.aggregate.members;
+        if a.at_const(owner).kind == NodeKind::NODE_ENUM {
+            // a struct-payload member (after a downcast): its position in its variant's payload
+            for i in 0..ms.len {
+                let pl = a.at_const(unsafe a.list(ms)[i as usize]).as_data.variant.payload;
+                for k in 0..pl.len {
+                    if unsafe a.list(pl)[k as usize] == sub {
+                        return k;
+                    }
+                }
+            }
+            return -1;
+        }
+        let is_tuple = a.at_const(owner).as_data.aggregate.is_tuple;
         let mut ord: i64 = 0;
         for i in 0..ms.len {
             let fid = unsafe a.list(ms)[i as usize];
@@ -2591,7 +2690,7 @@ extend Interp {
     // Classify decl (dm, dn) as an indexable view the way cemit routes subscripts: 1 = ptr/len
     // view (str, Slice, SliceMut, Vector; `p` and `l` get the ptr/len field ordinals), 2 = Array
     // (`p` gets the data ordinal), 0 = not a view.
-    fn view_of(self: &Self, dm: ModuleId, dn: NodeId, p: &mut i64, l: &mut i64) u8 {
+    const fn view_of(self: &Self, dm: ModuleId, dn: NodeId, p: &mut i32, l: &mut i32) u8 {
         let a = unsafe &*self.p().module_ast_const(dm);
         if a.at_const(dn).kind != NodeKind::NODE_STRUCT || a.at_const(dn).as_data.aggregate.is_tuple {
             return 0;
@@ -2610,7 +2709,7 @@ extend Interp {
             return 0;
         }
         let ms = a.at_const(dn).as_data.aggregate.members;
-        let mut ord: i64 = 0;
+        let mut ord: i32 = 0;
         *p = -1;
         *l = -1;
         for i in 0..ms.len {
@@ -2632,6 +2731,28 @@ extend Interp {
             return 0;
         }
         return kind;
+    }
+
+    // The view shape and the `ptr`/`len` field ordinals of decl (dm, dn), memoized: subscripts,
+    // lengths, slices and view writes ask per operation.
+    fn decl_view(self: &mut Self, dm: ModuleId, dn: NodeId) DeclView {
+        let key = dm as u64 << 32 | dn as u64;
+        switch self.view_memo.get(&key) {
+            Some(v) => {
+                return *v;
+            },
+            None => {},
+        };
+        let mut dv = DeclView { p: -1, l: -1, fp: -1, fl: -1, kind: 0 };
+        let k = (unsafe &*self.p().module_ast_const(dm)).at_const(dn).kind;
+        if k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM {
+            // only an aggregate has fields (a closure object's decl is its closure node)
+            dv.fp = self.ti_findf(dm, dn, "ptr");
+            dv.fl = self.ti_findf(dm, dn, "len");
+            dv.kind = self.view_of(dm, dn, &mut dv.p, &mut dv.l);
+        }
+        self.view_memo.insert(key, dv);
+        return dv;
     }
 
     /// The value of referenced item `(m, cnode)`, lowered and executed on demand. Memoized for
@@ -2675,20 +2796,8 @@ extend Interp {
             if a.at_const(cnode).as_data.variant.payload.len > 0 {
                 return self.bail();
             }
-            let mut ed = NODE_NONE;
-            let items9 = a.at_const(a.root).as_data.program.items;
-            for i9 in 0..items9.len {
-                let iid9 = unsafe a.list(items9)[i9 as usize];
-                if a.at_const(iid9).kind != NodeKind::NODE_ENUM {
-                    continue;
-                }
-                let ms9 = a.at_const(iid9).as_data.aggregate.members;
-                for k9 in 0..ms9.len {
-                    if unsafe a.list(ms9)[k9 as usize] == cnode {
-                        ed = iid9;
-                    }
-                }
-            }
+            let mut vpos: i32 = 0;
+            let ed = self.variant_enum(m, cnode, &mut vpos);
             if ed == NODE_NONE || self.user_free(m, ed) {
                 return self.bail();
             }
@@ -2777,7 +2886,6 @@ extend Interp {
         let mut bytes = Vector::<u8>::new();
         while i < endpos {
             if bytes.len() >= 4096 {
-                bytes.free();
                 return self.bail();
             }
             let mut c = src.byte_at(i as usize);
@@ -2801,7 +2909,6 @@ extend Interp {
                 } else if e == 92 || e == 34 || e == 39 {
                     c = e;
                 } else {
-                    bytes.free();
                     return self.bail();
                 }
             }
@@ -2823,36 +2930,33 @@ extend Interp {
             }
         }
         if dn == NODE_NONE {
-            bytes.free();
             return self.bail();
         }
         let nb = bytes.len() as u32;
         let block = self.obj_new(nb);
         if block == 0 && nb != 0 {
-            bytes.free();
             return none();
         }
         if nb != 0 {
             let bo = self.obj_ptr(block);
-            unsafe bo.heap = 1;
-            unsafe bo.bytes = nb;
-            unsafe bo.em = 0;
-            unsafe bo.et = Ast::builtin(BuiltinType::BT_U8);
-            unsafe bo.esz = 1;
+            unsafe (*bo).heap = 1;
+            unsafe (*bo).bytes = nb;
+            unsafe (*bo).em = 0;
+            unsafe (*bo).et = Ast::builtin(BuiltinType::BT_U8);
+            unsafe (*bo).esz = 1;
             for k in 0..nb {
-                unsafe self.obj_ptr(block).slots.set(
+                unsafe (*self.obj_ptr(block)).slots.set(
                     k as usize,
                     iv_int(0, Ast::builtin(BuiltinType::BT_U8), bytes[k as usize]),
                 );
             }
         }
-        bytes.free();
         let so = self.obj_new(self.field_count(dm, dn));
         if so == 0 {
             return none();
         }
-        unsafe self.obj_ptr(so).dm = dm;
-        unsafe self.obj_ptr(so).dn = dn;
+        unsafe (*self.obj_ptr(so)).dm = dm;
+        unsafe (*self.obj_ptr(so)).dn = dn;
         let da = unsafe &*self.p().module_ast_const(dm);
         let dms = da.at_const(dn).as_data.aggregate.members;
         let mut ptr_i: i64 = -1;
@@ -2873,8 +2977,8 @@ extend Interp {
         if ptr_i < 0 || len_i < 0 {
             return self.bail();
         }
-        unsafe self.obj_ptr(so).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, block, 0));
-        unsafe self.obj_ptr(so).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), nb));
+        unsafe (*self.obj_ptr(so)).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, block, 0));
+        unsafe (*self.obj_ptr(so)).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), nb));
         return IVal { kind: IV_OBJ, tm: m, ty: v.ty, i: so, f: 0.0 };
     }
 
@@ -2888,10 +2992,10 @@ extend Interp {
         if op == null || want_len <= 0 {
             return v;
         }
-        if unsafe op.dn != NODE_NONE || unsafe op.heap != 0 || unsafe op.is_enum != 0 || unsafe op.clos != 0 {
+        if unsafe (*op).dn != NODE_NONE || unsafe (*op).heap != 0 || unsafe (*op).is_enum != 0 || unsafe (*op).clos != 0 {
             return v;
         }
-        let have = (unsafe op.slots.len()) as i64;
+        let have = (unsafe (*op).slots.len()) as i64;
         if have >= want_len {
             return v;
         }
@@ -2909,7 +3013,9 @@ extend Interp {
         self.live_slots += (want_len - have) as u64;
         for _ in have..want_len {
             let cloned = self.obj_clone(ez, 0);
-            unsafe self.obj_ptr(v.i as u32).slots.push(cloned);
+            let c0 = unsafe (*self.obj_ptr(v.i as u32)).slots.capacity();
+            unsafe (*self.obj_ptr(v.i as u32)).slots.push(cloned);
+            self.slot_cap += (unsafe (*self.obj_ptr(v.i as u32)).slots.capacity() - c0) as u64;
         }
         return v;
     }
@@ -2931,20 +3037,21 @@ extend Interp {
             return v;
         }
         let it = *(unsafe &*self.p().module_ast_const(rm)).instance(y.as_data.inst);
-        if self.ti_findf(it.module, it.decl, "ptr") < 0 || self.ti_findf(it.module, it.decl, "len") < 0 {
+        let dv = self.decl_view(it.module, it.decl);
+        if dv.fp < 0 || dv.fl < 0 {
             return v; // not a slice-family destination
         }
         let op = self.obj_ptr(v.i as u32);
         if op == null {
             return v;
         }
-        if unsafe op.dm == it.module && unsafe op.dn == it.decl {
+        if unsafe (*op).dm == it.module && unsafe (*op).dn == it.decl {
             return v; // already the view
         }
-        if unsafe op.dn != NODE_NONE || unsafe op.heap != 0 || unsafe op.is_enum != 0 || unsafe op.clos != 0 {
+        if unsafe (*op).dn != NODE_NONE || unsafe (*op).heap != 0 || unsafe (*op).is_enum != 0 || unsafe (*op).clos != 0 {
             return v; // only shapeless (array) objects wrap
         }
-        let n = (unsafe op.slots.len()) as i64;
+        let n = (unsafe (*op).slots.len()) as i64;
         let w = self.slice_view(m, want, v.i as u32, 0, n);
         if w.kind == IV_OBJ {
             return w;
@@ -2968,8 +3075,9 @@ extend Interp {
         let it = *(unsafe &*self.p().module_ast_const(rm)).instance(y.as_data.inst);
         let sm = it.module;
         let sn = it.decl;
-        let ptr_i = self.ti_findf(sm, sn, "ptr");
-        let len_i = self.ti_findf(sm, sn, "len");
+        let dv = self.decl_view(sm, sn);
+        let ptr_i = dv.fp;
+        let len_i = dv.fl;
         if ptr_i < 0 || len_i < 0 || n < 0 {
             return none();
         }
@@ -2977,21 +3085,21 @@ extend Interp {
         if so == 0 {
             return none();
         }
-        unsafe self.obj_ptr(so).dm = sm;
-        unsafe self.obj_ptr(so).dn = sn;
-        unsafe self.obj_ptr(so).nargs = 1;
-        unsafe self.obj_ptr(so).am[0] = if it.n > 0 {
+        unsafe (*self.obj_ptr(so)).dm = sm;
+        unsafe (*self.obj_ptr(so)).dn = sn;
+        unsafe (*self.obj_ptr(so)).nargs = 1;
+        unsafe (*self.obj_ptr(so)).am[0] = if it.n > 0 {
             rm;
         } else {
             0;
         };
-        unsafe self.obj_ptr(so).at[0] = if it.n > 0 {
+        unsafe (*self.obj_ptr(so)).at[0] = if it.n > 0 {
             it.args[0];
         } else {
             TYPE_NONE;
         };
-        unsafe self.obj_ptr(so).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, obj, off));
-        unsafe self.obj_ptr(so).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), n));
+        unsafe (*self.obj_ptr(so)).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, obj, off));
+        unsafe (*self.obj_ptr(so)).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), n));
         return IVal { kind: IV_OBJ, tm: m, ty: sty, i: so, f: 0.0 };
     }
 
@@ -3010,18 +3118,19 @@ extend Interp {
             return false;
         }
         let op = self.obj_ptr(sv.i as u32);
-        if op == null || unsafe op.dn == NODE_NONE {
+        if op == null || unsafe (*op).dn == NODE_NONE {
             return false;
         }
-        let dm = unsafe op.dm;
-        let dn = unsafe op.dn;
-        let ptr_i = self.ti_findf(dm, dn, "ptr");
-        let len_i = self.ti_findf(dm, dn, "len");
+        let dm = unsafe (*op).dm;
+        let dn = unsafe (*op).dn;
+        let dv = self.decl_view(dm, dn);
+        let ptr_i = dv.fp;
+        let len_i = dv.fl;
         if ptr_i < 0 || len_i < 0 {
             return false;
         }
-        let pv = unsafe op.slots[ptr_i as usize];
-        let lv = unsafe op.slots[len_i as usize];
+        let pv = unsafe (*op).slots[ptr_i as usize];
+        let lv = unsafe (*op).slots[len_i as usize];
         if lv.kind != IV_INT || lv.i < 0 {
             return false;
         }
@@ -3032,15 +3141,15 @@ extend Interp {
             return false;
         }
         let blk = self.obj_ptr(pv_obj(pv));
-        if blk == null || unsafe blk.dead != 0 {
+        if blk == null || unsafe (*blk).dead != 0 {
             return false;
         }
         let off = pv_off(pv) as u64;
-        if off + lv.i as u64 > (unsafe blk.slots.len()) as u64 {
+        if off + lv.i as u64 > (unsafe (*blk).slots.len()) as u64 {
             return false;
         }
         for i in 0..lv.i {
-            let bv = unsafe self.obj_ptr(pv_obj(pv)).slots[(off + i as u64) as usize];
+            let bv = unsafe (*self.obj_ptr(pv_obj(pv))).slots[(off + i as u64) as usize];
             if bv.kind != IV_INT {
                 return false;
             }
@@ -3058,16 +3167,16 @@ extend Interp {
         if b.locals.at(pl.base as usize).storage == ir::LS_STATIC_REF {
             // a referenced item: materialize its value into the local slot on first touch, so
             // projections read through it like any other local
-            if (unsafe self.obj_ptr(env).slots[pl.base as usize]).kind == IV_NONE {
+            if (unsafe (*self.obj_ptr(env)).slots[pl.base as usize]).kind == IV_NONE {
                 let it = b.locals.at(pl.base as usize).item;
                 let v = self.item_value(it.module, it.node);
                 if self.failed {
                     return false;
                 }
-                unsafe self.obj_ptr(env).slots.set(pl.base as usize, v);
+                unsafe (*self.obj_ptr(env)).slots.set(pl.base as usize, v);
             }
         }
-        let mut cur = unsafe self.obj_ptr(env).slots[pl.base as usize];
+        let mut cur = unsafe (*self.obj_ptr(env)).slots[pl.base as usize];
         for i in 0..pl.proj_len {
             let pj = *b.projections.at((pl.proj_start + i) as usize);
             // a string literal materializes into its object form the moment a projection reads
@@ -3078,7 +3187,7 @@ extend Interp {
                     self.failed = true;
                     return false;
                 }
-                unsafe self.obj_ptr(*obj).slots.set((*slot) as usize, sv);
+                unsafe (*self.obj_ptr(*obj)).slots.set((*slot) as usize, sv);
                 cur = sv;
             }
             if pj.kind == ir::PJ_DEREF {
@@ -3094,6 +3203,10 @@ extend Interp {
                 let did = pv_obj(cur);
                 if did == 0 {
                     if pv_off(cur) != 0 {
+                        if self.zst_cell(b, pj.ty, obj, slot) {
+                            cur = unsafe (*self.obj_ptr(*obj)).slots[0];
+                            continue;
+                        }
                         self.failed = true; // sentinel pointer: benign, not provable UB
                         return false;
                     }
@@ -3105,17 +3218,17 @@ extend Interp {
                     self.failed = true;
                     return false;
                 }
-                if unsafe dop.dead != 0 {
+                if unsafe (*dop).dead != 0 {
                     self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
                     return false;
                 }
-                if pv_off(cur) as usize >= unsafe dop.slots.len() {
+                if pv_off(cur) as usize >= unsafe (*dop).slots.len() {
                     self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
                     return false;
                 }
                 *obj = did;
                 *slot = pv_off(cur);
-                cur = unsafe dop.slots[pv_off(cur) as usize];
+                cur = unsafe (*dop).slots[pv_off(cur) as usize];
                 continue;
             }
             let mut idx: i64 = -1;
@@ -3131,9 +3244,9 @@ extend Interp {
                     let mut dn = NODE_NONE;
                     if cur.kind == IV_OBJ {
                         let op = self.obj_ptr(cur.i as u32);
-                        if op != null && unsafe op.dn != NODE_NONE {
-                            dm = unsafe op.dm;
-                            dn = unsafe op.dn;
+                        if op != null && unsafe (*op).dn != NODE_NONE {
+                            dm = unsafe (*op).dm;
+                            dn = unsafe (*op).dn;
                         }
                     }
                     if dn == NODE_NONE {
@@ -3184,23 +3297,24 @@ extend Interp {
                 // subscripting a length-carrying view (str/Slice/SliceMut/Vector) or an Array
                 // routes through its storage member, exactly as cemit subscripts `.ptr`/`.data`
                 let vop = self.obj_ptr(cur.i as u32);
-                if vop != null && unsafe vop.dn != NODE_NONE {
-                    let mut pord: i64 = -1;
-                    let mut lord: i64 = -1;
-                    let vk = self.view_of(unsafe vop.dm, unsafe vop.dn, &mut pord, &mut lord);
+                if vop != null && unsafe (*vop).dn != NODE_NONE {
+                    let dv = self.decl_view(unsafe (*vop).dm, unsafe (*vop).dn);
+                    let vk = dv.kind;
+                    let pord = dv.p;
+                    let lord = dv.l;
                     if vk == 1 {
-                        let lenv = unsafe vop.slots[lord as usize];
+                        let lenv = unsafe (*vop).slots[lord as usize];
                         if lenv.kind == IV_INT && (idx < 0 || idx >= lenv.i) {
                             self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
                             return false;
                         }
-                        cur = unsafe vop.slots[pord as usize];
+                        cur = unsafe (*vop).slots[pord as usize];
                         if cur.kind != IV_PTR {
                             self.failed = true;
                             return false;
                         }
                     } else if vk == 2 {
-                        cur = unsafe vop.slots[pord as usize];
+                        cur = unsafe (*vop).slots[pord as usize];
                     }
                 }
             }
@@ -3209,6 +3323,10 @@ extend Interp {
                 let tid = pv_obj(cur);
                 if tid == 0 {
                     if pv_off(cur) != 0 {
+                        if self.zst_cell(b, pj.ty, obj, slot) {
+                            cur = unsafe (*self.obj_ptr(*obj)).slots[0];
+                            continue;
+                        }
                         self.failed = true; // sentinel pointer: benign, not provable UB
                         return false;
                     }
@@ -3220,18 +3338,18 @@ extend Interp {
                     self.failed = true;
                     return false;
                 }
-                if unsafe top.dead != 0 {
+                if unsafe (*top).dead != 0 {
                     self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
                     return false;
                 }
                 let no = pv_off(cur) as i64 + idx;
-                if no < 0 || no as usize >= unsafe top.slots.len() {
+                if no < 0 || no as usize >= unsafe (*top).slots.len() {
                     self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
                     return false;
                 }
                 *obj = tid;
                 *slot = no as u32;
-                cur = unsafe top.slots[no as usize];
+                cur = unsafe (*top).slots[no as usize];
                 continue;
             }
             if idx >= 0 && cur.kind != IV_OBJ && cur.kind != IV_NONE && (pj.kind == ir::PJ_INDEX_CONST || pj.kind == ir::PJ_INDEX_OP) {
@@ -3244,12 +3362,12 @@ extend Interp {
                     return false;
                 }
                 let ns = (*slot) as i64 + idx;
-                if ns < 0 || ns as usize >= unsafe op2.slots.len() {
+                if ns < 0 || ns as usize >= unsafe (*op2).slots.len() {
                     self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
                     return false;
                 }
                 *slot = ns as u32;
-                cur = unsafe op2.slots[ns as usize];
+                cur = unsafe (*op2).slots[ns as usize];
                 continue;
             }
             if idx < 0 || cur.kind != IV_OBJ {
@@ -3264,10 +3382,10 @@ extend Interp {
             }
             // enum payload objects store the tag at slot 0
             let mut base_slot = idx;
-            if unsafe op.is_enum != 0 {
+            if unsafe (*op).is_enum != 0 {
                 base_slot = idx + 1;
             }
-            if base_slot < 0 || base_slot as usize >= unsafe op.slots.len() {
+            if base_slot < 0 || base_slot as usize >= unsafe (*op).slots.len() {
                 if pj.kind == ir::PJ_INDEX_CONST || pj.kind == ir::PJ_INDEX_OP {
                     self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
                 } else {
@@ -3277,14 +3395,38 @@ extend Interp {
             }
             // a union read through a member other than the one written is refused; the write
             // path re-marks the active member after resolution
-            if is_union && unsafe op.uactive >= 0 && unsafe op.uactive != base_slot as i32 {
+            if is_union && unsafe (*op).uactive >= 0 && unsafe (*op).uactive != base_slot as i32 {
                 self.failed = true;
                 return false;
             }
             *obj = id;
             *slot = base_slot as u32;
-            cur = unsafe op.slots[base_slot as usize];
+            cur = unsafe (*op).slots[base_slot as usize];
         }
+        return true;
+    }
+
+    // A zero-sized pointee behind a sentinel pointer (`alignof(T) as *mut T`) has no storage: every
+    // such place resolves to one shared cell, so loads, stores and borrows of zero-sized values
+    // through it evaluate. False for a pointee with a size (the caller's benign failure stands).
+    fn zst_cell(self: &mut Self, b: &ir::CoreBody, ty: TypeId, obj: &mut u32, slot: &mut u32) bool {
+        let mut m: ModuleId = 0;
+        let mut t = TYPE_NONE;
+        if !self.rty(b.module, ty, &mut m, &mut t) {
+            return false;
+        }
+        let l = self.lsvc.layout(m, t);
+        if !l.ok || l.size != 0 {
+            return false;
+        }
+        if self.zcell == 0 {
+            self.zcell = self.obj_new(1);
+            if self.zcell == 0 {
+                return false;
+            }
+        }
+        *obj = self.zcell;
+        *slot = 0;
         return true;
     }
 
@@ -3294,7 +3436,7 @@ extend Interp {
         if !self.resolve_place(b, env, pid, &mut obj, &mut slot) {
             return none();
         }
-        return unsafe self.obj_ptr(obj).slots[slot as usize];
+        return unsafe (*self.obj_ptr(obj)).slots[slot as usize];
     }
 
     fn write_place(self: &mut Self, b: &ir::CoreBody, env: u32, pid: ir::PlaceId, v0: IVal) {
@@ -3315,13 +3457,13 @@ extend Interp {
             return;
         }
         // a union member write marks the active member
-        if unsafe op.uactive >= 0 || unsafe op.dn != NODE_NONE && obj != env && self.is_union_decl(
-            unsafe op.dm,
-            unsafe op.dn,
+        if unsafe (*op).uactive >= 0 || unsafe (*op).dn != NODE_NONE && obj != env && self.is_union_decl(
+            unsafe (*op).dm,
+            unsafe (*op).dn,
         ) {
-            unsafe op.uactive = slot as i32;
+            unsafe (*op).uactive = slot as i32;
         }
-        unsafe op.slots.set(slot as usize, cv);
+        unsafe (*op).slots.set(slot as usize, cv);
     }
 
     const fn is_union_decl(self: &Self, dm: ModuleId, dn: NodeId) bool {
@@ -3374,7 +3516,7 @@ extend Interp {
             return IVal { kind: IV_UNIT, tm: b.module, ty: c.ty, i: 0, f: 0.0 };
         }
         if c.kind == ir::CK_ITEM {
-            if c.targ_len != 0 {
+            if c.targ_len() != 0 {
                 return self.bail(); // generic associated consts do not fold yet
             }
             return self.item_value(c.item.module, c.item.node);
@@ -3578,16 +3720,24 @@ extend Interp {
             if self.failed {
                 return none();
             }
-            let id = self.obj_new(rv.b);
+            let cv = self.operand(b, env, rv.b);
+            if self.failed {
+                return none();
+            }
+            if cv.kind != IV_INT || cv.i < 0 {
+                return self.bail();
+            }
+            let n = cv.i as u64;
+            let id = self.obj_new(n);
             if id == 0 {
                 return none();
             }
-            for i in 0..rv.b {
+            for i in 0..n {
                 let cloned = self.obj_clone(ev, 0);
                 if ev.kind != IV_NONE && cloned.kind == IV_NONE {
                     return none();
                 }
-                unsafe self.obj_ptr(id).slots.set(i as usize, cloned);
+                unsafe (*self.obj_ptr(id)).slots.set(i as usize, cloned);
             }
             return IVal { kind: IV_OBJ, tm: b.module, ty: rv.target, i: id, f: 0.0 };
         }
@@ -3596,9 +3746,9 @@ extend Interp {
             if id == 0 {
                 return none();
             }
-            unsafe self.obj_ptr(id).clos = 1;
-            unsafe self.obj_ptr(id).dm = rv.item.module;
-            unsafe self.obj_ptr(id).dn = rv.item.node;
+            unsafe (*self.obj_ptr(id)).clos = 1;
+            unsafe (*self.obj_ptr(id)).dm = rv.item.module;
+            unsafe (*self.obj_ptr(id)).dn = rv.item.node;
             for i in 0..rv.b {
                 let opid = b.oper_pool[(rv.a + i) as usize];
                 if opid == ir::IR_NONE {
@@ -3612,7 +3762,7 @@ extend Interp {
                 if v.kind != IV_NONE && cv.kind == IV_NONE {
                     return none();
                 }
-                unsafe self.obj_ptr(id).slots.set(i as usize, cv);
+                unsafe (*self.obj_ptr(id)).slots.set(i as usize, cv);
             }
             return IVal { kind: IV_OBJ, tm: b.module, ty: rv.target, i: id, f: 0.0 };
         }
@@ -3640,19 +3790,20 @@ extend Interp {
                     return self.bail();
                 }
                 // a length-carrying view struct answers its logical `len` field, not its slot count
-                if unsafe op.dn != NODE_NONE {
-                    let pi = self.ti_findf(unsafe op.dm, unsafe op.dn, "ptr");
-                    let li = self.ti_findf(unsafe op.dm, unsafe op.dn, "len");
+                if unsafe (*op).dn != NODE_NONE {
+                    let dv = self.decl_view(unsafe (*op).dm, unsafe (*op).dn);
+                    let pi = dv.fp;
+                    let li = dv.fl;
                     if pi >= 0 && li >= 0 {
-                        let lv2 = unsafe op.slots[li as usize];
+                        let lv2 = unsafe (*op).slots[li as usize];
                         if lv2.kind != IV_INT {
                             return self.bail();
                         }
                         return iv_int(b.module, rv.target, lv2.i);
                     }
                 }
-                let mut n = (unsafe op.slots.len()) as i64;
-                if unsafe op.is_enum != 0 {
+                let mut n = (unsafe (*op).slots.len()) as i64;
+                if unsafe (*op).is_enum != 0 {
                     n -= 1;
                 }
                 return iv_int(b.module, rv.target, n);
@@ -3681,13 +3832,14 @@ extend Interp {
             // storage + total length: a view struct redirects to its ptr block
             let mut sobj = cid;
             let mut soff: u32 = 0;
-            let mut total = (unsafe cp2.slots.len()) as i64;
-            if unsafe cp2.dn != NODE_NONE {
-                let pi2 = self.ti_findf(unsafe cp2.dm, unsafe cp2.dn, "ptr");
-                let li2 = self.ti_findf(unsafe cp2.dm, unsafe cp2.dn, "len");
+            let mut total = (unsafe (*cp2).slots.len()) as i64;
+            if unsafe (*cp2).dn != NODE_NONE {
+                let dv = self.decl_view(unsafe (*cp2).dm, unsafe (*cp2).dn);
+                let pi2 = dv.fp;
+                let li2 = dv.fl;
                 if pi2 >= 0 && li2 >= 0 {
-                    let pv2 = unsafe cp2.slots[pi2 as usize];
-                    let lv3 = unsafe cp2.slots[li2 as usize];
+                    let pv2 = unsafe (*cp2).slots[pi2 as usize];
+                    let lv3 = unsafe (*cp2).slots[li2 as usize];
                     if pv2.kind != IV_PTR || lv3.kind != IV_INT {
                         return self.bail();
                     }
@@ -3744,10 +3896,10 @@ extend Interp {
                 return self.bail();
             }
             let op = self.obj_ptr(v.i as u32);
-            if op == null || unsafe op.is_enum == 0 {
+            if op == null || unsafe (*op).is_enum == 0 {
                 return self.bail();
             }
-            let tag = unsafe op.slots[0];
+            let tag = unsafe (*op).slots[0];
             return iv_int(b.module, rv.target, tag.i);
         }
         if rv.kind == ir::RV_INTRINSIC {
@@ -3919,23 +4071,9 @@ extend Interp {
             }
         } else if rv.c == ir::AGG_VARIANT {
             // the owning enum decl
-            let da = unsafe &*self.p().module_ast_const(rv.item.module);
-            let mut en = NODE_NONE;
-            let items = da.at_const(da.root).as_data.program.items;
-            for i in 0..items.len {
-                let nid = unsafe da.list(items)[i as usize];
-                if da.at_const(nid).kind != NodeKind::NODE_ENUM {
-                    continue;
-                }
-                let ms = da.at_const(nid).as_data.aggregate.members;
-                for k in 0..ms.len {
-                    if unsafe da.list(ms)[k as usize] == rv.item.node {
-                        en = nid;
-                    }
-                }
-            }
+            let mut vpos: i32 = 0;
             dm = rv.item.module;
-            dn = en;
+            dn = self.variant_enum(rv.item.module, rv.item.node, &mut vpos);
         }
         if dn != NODE_NONE && self.user_free(dm, dn) {
             return self.bail(); // a user-free type never folds
@@ -3948,21 +4086,18 @@ extend Interp {
         if id == 0 {
             return none();
         }
-        unsafe self.obj_ptr(id).dm = dm;
-        unsafe self.obj_ptr(id).dn = dn;
-        unsafe self.obj_ptr(id).nargs = nargs;
+        unsafe (*self.obj_ptr(id)).dm = dm;
+        unsafe (*self.obj_ptr(id)).dn = dn;
+        unsafe (*self.obj_ptr(id)).nargs = nargs;
         for gi in 0..nargs {
-            unsafe self.obj_ptr(id).am[gi as usize] = unsafe am[gi as usize];
-            unsafe self.obj_ptr(id).at[gi as usize] = unsafe at[gi as usize];
-        }
-        if dn != NODE_NONE && self.is_union_decl(dm, dn) {
-            unsafe self.obj_ptr(id).uactive = -1;
+            unsafe (*self.obj_ptr(id)).am[gi as usize] = unsafe am[gi as usize];
+            unsafe (*self.obj_ptr(id)).at[gi as usize] = unsafe at[gi as usize];
         }
         let is_union2 = dn != NODE_NONE && self.is_union_decl(dm, dn);
         let mut si: usize = 0;
         if is_enum {
-            unsafe self.obj_ptr(id).is_enum = 1;
-            unsafe self.obj_ptr(id).slots.set(0, iv_int(0, TYPE_NONE, tagv));
+            unsafe (*self.obj_ptr(id)).is_enum = 1;
+            unsafe (*self.obj_ptr(id)).slots.set(0, iv_int(0, TYPE_NONE, tagv));
             si = 1;
         }
         let base2 = si;
@@ -3971,12 +4106,23 @@ extend Interp {
             if opid == ir::IR_NONE {
                 // an omitted member zero-fills (C initializer semantics); a union's inactive
                 // members stay empty, an unresolvable field type stays empty (reads bail)
+                let mut z = none();
                 if !is_union2 && dn != NODE_NONE && !is_enum {
-                    let z = self.zero_field(dm, dn, nargs, &am[0], &at[0], i);
-                    self.failed = false;
-                    if z.kind != IV_NONE {
-                        unsafe self.obj_ptr(id).slots.set(si, z);
+                    z = self.zero_field(dm, dn, nargs, &am[0], &at[0], i);
+                } else if rv.c == ir::AGG_ARRAY {
+                    // a designated array literal's hole zero-fills the same way
+                    let mut em: ModuleId = b.module;
+                    let mut et = rv.target;
+                    if self.rty(b.module, rv.target, &mut em, &mut et) {
+                        let ey = *(unsafe &*self.p().module_ast_const(em)).type_at(et);
+                        if ey.kind == TypeKind::TYPE_ARRAY {
+                            z = self.zero_of(em, ey.as_data.arr.elem, 0);
+                        }
                     }
+                }
+                self.failed = false;
+                if z.kind != IV_NONE {
+                    unsafe (*self.obj_ptr(id)).slots.set(si, z);
                 }
                 si += 1;
                 continue;
@@ -3998,9 +4144,9 @@ extend Interp {
                 }
                 self.failed = false;
             }
-            unsafe self.obj_ptr(id).slots.set(si, cv);
+            unsafe (*self.obj_ptr(id)).slots.set(si, cv);
             if is_union2 {
-                unsafe self.obj_ptr(id).uactive = (si - base2) as i32;
+                unsafe (*self.obj_ptr(id)).uactive = (si - base2) as i32;
             }
             si += 1;
         }
@@ -4100,7 +4246,7 @@ extend Interp {
                 } else {
                     let _ = self.rty(fm, et2, &mut em2, &mut et2);
                 }
-                let id = self.obj_new(lv.i as u32);
+                let id = self.obj_new(lv.i as u64);
                 if id == 0 {
                     return none();
                 }
@@ -4110,7 +4256,7 @@ extend Interp {
                 }
                 for k in 0..lv.i {
                     let cloned = self.obj_clone(ez, 0);
-                    unsafe self.obj_ptr(id).slots.set(k as usize, cloned);
+                    unsafe (*self.obj_ptr(id)).slots.set(k as usize, cloned);
                 }
                 return IVal { kind: IV_OBJ, tm: fm, ty: ft, i: id, f: 0.0 };
             }
@@ -4183,70 +4329,61 @@ extend Interp {
         if vd.node == NODE_NONE {
             return false;
         }
-        let ap = self.p().module_ast_const(vd.module);
-        let a = unsafe &*ap;
-        // owning enum: scan items containing this variant via the variant's enclosing decl walk
-        let items = a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let nid = unsafe a.list(items)[i as usize];
-            if a.at_const(nid).kind != NodeKind::NODE_ENUM {
-                continue;
-            }
-            let ms = a.at_const(nid).as_data.aggregate.members;
-            let mut has_pay = false;
-            for k in 0..ms.len {
-                let mid = unsafe a.list(ms)[k as usize];
-                if a.at_const(mid).kind == NodeKind::NODE_VARIANT && a.at_const(mid).as_data.variant.payload.len != 0 {
-                    has_pay = true;
-                }
-            }
-            let mut cur: i64 = 0;
-            let mut ord: i64 = 0;
-            let mut found = false;
-            for k in 0..ms.len {
-                let mid = unsafe a.list(ms)[k as usize];
-                if a.at_const(mid).kind != NodeKind::NODE_VARIANT {
-                    continue;
-                }
-                let vexpr = a.at_const(mid).as_data.variant.value;
-                if vexpr != NODE_NONE && !has_pay {
-                    let vn = a.at_const(vexpr);
-                    if vn.kind != NodeKind::NODE_LITERAL {
-                        return false;
-                    }
-                    let c = ir::Constant {
-                        kind: ir::CK_INT,
-                        ty: TYPE_NONE,
-                        val: 0,
-                        raw: vn.as_data.literal.raw,
-                        item: DefId { module: 0, node: NODE_NONE },
-                        targ_start: 0,
-                        targ_len: 0,
-                    };
-                    let mut v: i64 = 0;
-                    if !self.lit_value(vd.module, &c, &mut v) {
-                        return false;
-                    }
-                    cur = v;
-                }
-                if mid == vd.node {
-                    // the C tag: declaration ordinal for payload enums, the running constant for
-                    // bare ones
-                    if has_pay {
-                        *out = ord;
-                    } else {
-                        *out = cur;
-                    }
-                    found = true;
-                }
-                cur += 1;
-                ord += 1;
-            }
-            if found {
-                return true;
+        let mut pos: i32 = 0;
+        let nid = self.variant_enum(vd.module, vd.node, &mut pos);
+        if nid == NODE_NONE {
+            return false;
+        }
+        let a = unsafe &*self.p().module_ast_const(vd.module);
+        let ms = a.at_const(nid).as_data.aggregate.members;
+        let mut has_pay = false;
+        for k in 0..ms.len {
+            let mid = unsafe a.list(ms)[k as usize];
+            if a.at_const(mid).kind == NodeKind::NODE_VARIANT && a.at_const(mid).as_data.variant.payload.len != 0 {
+                has_pay = true;
             }
         }
-        return false;
+        let mut cur: i64 = 0;
+        let mut ord: i64 = 0;
+        let mut found = false;
+        for k in 0..ms.len {
+            let mid = unsafe a.list(ms)[k as usize];
+            if a.at_const(mid).kind != NodeKind::NODE_VARIANT {
+                continue;
+            }
+            let vexpr = a.at_const(mid).as_data.variant.value;
+            if vexpr != NODE_NONE && !has_pay {
+                let vn = a.at_const(vexpr);
+                if vn.kind != NodeKind::NODE_LITERAL {
+                    return false;
+                }
+                let c = ir::Constant {
+                    kind: ir::CK_INT,
+                    ty: TYPE_NONE,
+                    val: 0,
+                    raw: vn.as_data.literal.raw,
+                    item: DefId { module: 0, node: NODE_NONE },
+                };
+                let mut v: i64 = 0;
+                if !self.lit_value(vd.module, &c, &mut v) {
+                    return false;
+                }
+                cur = v;
+            }
+            if mid == vd.node {
+                // the C tag: declaration ordinal for payload enums, the running constant for
+                // bare ones
+                if has_pay {
+                    *out = ord;
+                } else {
+                    *out = cur;
+                }
+                found = true;
+            }
+            cur += 1;
+            ord += 1;
+        }
+        return found;
     }
 
     // ---- arithmetic (pinned semantics) ------------------------------------------------------------
@@ -4328,15 +4465,11 @@ extend Interp {
                         }
                     }
                 }
-                lb.free();
-                rb2.free();
                 if teq0 == TokenType::BangEqual {
                     eq = !eq;
                 }
                 return iv_bool(m, target, eq);
             }
-            lb.free();
-            rb2.free();
         }
         return self.bail();
     }
@@ -4625,25 +4758,25 @@ extend Interp {
         if blk == null {
             return out;
         }
-        if unsafe blk.heap != 0 && unsafe blk.et == TYPE_NONE && pv_off(v) == 0 {
+        if unsafe (*blk).heap != 0 && unsafe (*blk).et == TYPE_NONE && pv_off(v) == 0 {
             let l = self.lsvc.layout(em, et);
             if !l.ok || l.size == 0 {
                 return self.bail();
             }
-            let bytes = unsafe blk.bytes;
+            let bytes = unsafe (*blk).bytes;
             if bytes % l.size != 0 {
                 return self.bail();
             }
-            if !self.obj_resize(pv_obj(v), (bytes / l.size) as u32) {
+            if !self.obj_resize(pv_obj(v), bytes / l.size) {
                 return none();
             }
             let b2 = self.obj_ptr(pv_obj(v));
-            unsafe b2.em = em;
-            unsafe b2.et = et;
-            unsafe b2.esz = l.size;
+            unsafe (*b2).em = em;
+            unsafe (*b2).et = et;
+            unsafe (*b2).esz = l.size;
             return out;
         }
-        if unsafe blk.et != TYPE_NONE && !self.teq(unsafe blk.em, unsafe blk.et, em, et) {
+        if unsafe (*blk).et != TYPE_NONE && !self.teq(unsafe (*blk).em, unsafe (*blk).et, em, et) {
             return self.bail();
         }
         return out;
@@ -4867,8 +5000,11 @@ extend Interp {
             let items = a.at_const(a.root).as_data.program.items;
             for i in 0..items.len {
                 let iid = unsafe a.list(items)[i as usize];
+                if a.at_const(iid).kind != NodeKind::NODE_EXTEND {
+                    continue;
+                }
                 let target = a.at_const(iid).as_data.extend_def.target_type;
-                if a.at_const(iid).kind != NodeKind::NODE_EXTEND || target == NODE_NONE {
+                if target == NODE_NONE {
                     continue;
                 }
                 let mut match_recv = false;
@@ -4959,10 +5095,10 @@ extend Interp {
             if op == null {
                 return self.cap_fail(base, IT_TRAP_UNSUPPORTED, "constant value cannot be materialized as static data");
             }
-            if unsafe op.dead != 0 {
+            if unsafe (*op).dead != 0 {
                 return self.cap_fail(base, IT_TRAP_UB_USE_AFTER_FREE, "constant points at freed compile-time memory");
             }
-            let sl = (unsafe op.slots.len()) as u32;
+            let sl = (unsafe (*op).slots.len()) as u32;
             total += sl;
             if total > IT_STATIC_MAX_SLOTS {
                 return self.cap_fail(base, IT_TRAP_TOO_LARGE, "constant is too large to materialize as static data");
@@ -4972,7 +5108,7 @@ extend Interp {
             let mut k = sl;
             while k > 0 {
                 k -= 1;
-                let mut sv = unsafe self.obj_ptr(oid).slots[k as usize];
+                let mut sv = unsafe (*self.obj_ptr(oid)).slots[k as usize];
                 if sv.kind == IV_STR {
                     // a nested string literal materializes into its object form for serialization
                     sv = self.str_materialize(sv.tm, sv);
@@ -4983,7 +5119,7 @@ extend Interp {
                             "constant value cannot be materialized as static data",
                         );
                     }
-                    unsafe self.obj_ptr(oid).slots.set(k as usize, sv);
+                    unsafe (*self.obj_ptr(oid)).slots.set(k as usize, sv);
                 }
                 if sv.kind == IV_OBJ {
                     let c = sv.i as u32;
@@ -5045,7 +5181,7 @@ extend Interp {
         let count = order.len();
         for idx in 0..count {
             let oid = order[idx];
-            let sl = (unsafe self.obj_ptr(oid).slots.len()) as u32;
+            let sl = (unsafe (*self.obj_ptr(oid)).slots.len()) as u32;
             let standalone = embp[oid as usize] == 0;
             let mut g = StaticObj {
                 uactive: -1,
@@ -5061,10 +5197,10 @@ extend Interp {
                 g.pslot = embs[oid as usize];
             }
             let op = self.obj_ptr(oid);
-            if unsafe op.heap != 0 {
+            if unsafe (*op).heap != 0 {
                 g.shape = SS_HEAP;
-                g.etm = unsafe op.em;
-                g.ety = unsafe op.et;
+                g.etm = unsafe (*op).em;
+                g.ety = unsafe (*op).et;
                 g.n = sl;
                 if g.ety == TYPE_NONE {
                     self.statics.push(g);
@@ -5074,10 +5210,10 @@ extend Interp {
                         "constant points at an untyped compile-time heap block",
                     );
                 }
-            } else if unsafe op.is_enum != 0 {
+            } else if unsafe (*op).is_enum != 0 {
                 g.shape = SS_ENUM;
-                g.dm = unsafe op.dm;
-                g.dn = unsafe op.dn;
+                g.dm = unsafe (*op).dm;
+                g.dn = unsafe (*op).dn;
                 let ga = unsafe &*self.p().module_ast_const(g.dm);
                 let gens = ga.at_const(g.dn).as_data.aggregate.generics.len;
                 if standalone && gens != 0 {
@@ -5088,15 +5224,15 @@ extend Interp {
                         "constant value cannot be materialized as static data",
                     );
                 }
-            } else if unsafe op.dn != NODE_NONE && unsafe op.clos == 0 {
+            } else if unsafe (*op).dn != NODE_NONE && unsafe (*op).clos == 0 {
                 g.shape = SS_STRUCT;
-                g.uactive = unsafe op.uactive; // a union serializes the one member it holds
-                g.dm = unsafe op.dm;
-                g.dn = unsafe op.dn;
-                g.nargs = unsafe op.nargs;
+                g.uactive = unsafe (*op).uactive; // a union serializes the one member it holds
+                g.dm = unsafe (*op).dm;
+                g.dn = unsafe (*op).dn;
+                g.nargs = unsafe (*op).nargs;
                 for ci in 0..4 {
-                    unsafe g.am[ci] = unsafe op.am[ci];
-                    unsafe g.at[ci] = unsafe op.at[ci];
+                    unsafe g.am[ci] = unsafe (*op).am[ci];
+                    unsafe g.at[ci] = unsafe (*op).at[ci];
                 }
                 let ga = unsafe &*self.p().module_ast_const(g.dm);
                 let gens = ga.at_const(g.dn).as_data.aggregate.generics.len;
@@ -5108,7 +5244,7 @@ extend Interp {
                         "constant value cannot be materialized as static data",
                     );
                 }
-            } else if unsafe op.clos == 0 {
+            } else if unsafe (*op).clos == 0 {
                 let hm = hintm[oid as usize];
                 let ht = hintt[oid as usize];
                 let mut isarr = false;
@@ -5167,13 +5303,13 @@ extend Interp {
             let oid = order[idx];
             let gi = base as usize + idx;
             let shape = self.statics[gi].shape;
-            let sl = (unsafe self.obj_ptr(oid).slots.len()) as u32;
+            let sl = (unsafe (*self.obj_ptr(oid)).slots.len()) as u32;
             let mut sslots = Vector::<SSlot>::new();
             let mut srels = Vector::<SRel>::new();
             let uact = self.statics[gi].uactive;
             for k in 0..sl {
-                let sv = unsafe self.obj_ptr(oid).slots[k as usize];
-                let mut sk = SSlot { kind: SK_ZERO, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0, child: 0 };
+                let sv = unsafe (*self.obj_ptr(oid)).slots[k as usize];
+                let mut sk = SSlot { kind: SK_ZERO, tm: 0, ty: TYPE_NONE, i: 0 };
                 if uact >= 0 && k as i32 != uact {
                     sslots.push(sk); // an inactive union member holds nothing; never emitted
                     continue;
@@ -5193,7 +5329,7 @@ extend Interp {
                     sk.kind = SK_FLOAT;
                     sk.tm = sv.tm;
                     sk.ty = sv.ty;
-                    sk.f = sv.f;
+                    sk.i = f64_bits(sv.f) as i64;
                 } else if sv.kind == IV_NONE || sv.kind == IV_UNIT {
                     if shape == SS_STRUCT || shape == SS_CELL {
                         return self.cap_fail(
@@ -5217,7 +5353,7 @@ extend Interp {
                         let ti = tgt - 1;
                         let toff = pv_off(sv);
                         let tshape = self.statics[ti as usize].shape;
-                        let tlen = (unsafe self.obj_ptr(order[(ti - base) as usize]).slots.len()) as u32;
+                        let tlen = (unsafe (*self.obj_ptr(order[(ti - base) as usize])).slots.len()) as u32;
                         let past_end = toff == tlen && (tshape == SS_HEAP || tshape == SS_ARRAY);
                         if toff > tlen || toff == tlen && !past_end || toff != 0 && (tshape == SS_ENUM || tshape == SS_CELL) {
                             return self.cap_fail(
@@ -5240,7 +5376,7 @@ extend Interp {
                     let mut fn_ok = fa.at_const(fnid).kind == NodeKind::NODE_FUNCTION;
                     if fn_ok {
                         let fd = fa.at_const(fnid).as_data.function;
-                        fn_ok = fd.generics.len == 0 && (fd.body != NODE_NONE || fd.is_extern);
+                        fn_ok = fd.generics.len == 0 && (fd.body != NODE_NONE || fd.is_extern());
                     }
                     if !fn_ok {
                         return self.cap_fail(
@@ -5253,7 +5389,7 @@ extend Interp {
                     srels.push(SRel { slot: k, kind: SREL_FN, target: 0, toff: 0, fm: fm2, fnode: fnid });
                 } else if sv.kind == IV_OBJ {
                     sk.kind = SK_AGG;
-                    sk.child = map[sv.i as usize] - 1;
+                    sk.i = map[sv.i as usize] - 1;
                 } else {
                     return self.cap_fail(
                         base,
@@ -5285,7 +5421,7 @@ extend Interp {
             return zero;
         }
         let fd = a.at_const(fn_id).as_data.function;
-        if fd.body == NODE_NONE || fd.is_extern || fd.generics.len != 0 {
+        if fd.body == NODE_NONE || fd.is_extern() || fd.generics.len != 0 {
             return zero;
         }
         {
@@ -5296,16 +5432,7 @@ extend Interp {
                 return zero;
             }
         }
-        self.steps = 0;
-        self.trap = "";
-        self.trap_kind = IT_TRAP_NONE;
-        self.trap_nframes = 0;
-        self.trap_in_constfn = false;
-        self.nframes = 0;
-        self.objs_live = 0;
-        self.live_slots = 0;
-        self.item_active.truncate(0);
-        self.failed = false;
+        self.eval_reset();
         self.subst.truncate(0);
         self.sub_base = 0;
         self.top_span = zero;
@@ -5317,9 +5444,9 @@ extend Interp {
             return zero;
         }
         self.lint_on = true;
-        let bp: *const irl::Lowerer = self.body_at(bidx);
+        let bb = self.body_at(bidx);
         let args = Vector::<IVal>::new();
-        let _ = self.run(unsafe &(&*bp).body, &args);
+        let _ = self.run(unsafe &*bb, &args);
         self.lint_on = false;
         self.failed = false;
         if (it_trap_is_ub(self.trap_kind) || self.trap_kind == IT_TRAP_PANIC && self.trap_in_constfn) && self.trap_span.end > self.trap_span.start {
@@ -5375,8 +5502,9 @@ extend Interp {
     // must not surface as a def-site 'const fn' diagnostic.
     @c.cold
     fn fx_disq(self: &mut Self, m: ModuleId, owner: NodeId, site: NodeId, why: str<'static>, deep: bool) u8 {
-        if !deep {
-            self.fx_no.push(FxNo { m: m, fn_id: owner, site: site, why: why });
+        let key = m as u64 << 32 | owner as u64;
+        if !deep && !self.fx_no.contains_key(&key) {
+            self.fx_no.insert(key, FxNo { m: m, fn_id: owner, site: site, why: why });
         }
         return FX_NO;
     }
@@ -5423,28 +5551,32 @@ extend Interp {
 
     /// The recorded disqualifying site for a shallow FX_NO, or null.
     pub const fn fx_no_reason(self: &Self, m: ModuleId, fn_id: NodeId) *const FxNo {
-        for i in 0..self.fx_no.len() {
-            let r = self.fx_no.at(i);
-            if r.m == m && r.fn_id == fn_id {
+        switch self.fx_no.get(&(m as u64 << 32 | fn_id as u64)) {
+            Some(r) => {
                 return r;
-            }
-        }
+            },
+            None => {},
+        };
         return null;
     }
 
     fn fx_scan_fn(self: &mut Self, m: ModuleId, fn_id: NodeId, deep: bool) u8 {
+        if !deep {
+            // a re-scan's own first site replaces the one an earlier scan recorded
+            let _ = self.fx_no.remove(&(m as u64 << 32 | fn_id as u64));
+        }
         let a = unsafe &*self.p().module_ast_const(m);
         if a.nodes.len() == 0 || a.at_const(fn_id).kind != NodeKind::NODE_FUNCTION {
             return FX_MAYBE;
         }
         let fd = a.at_const(fn_id).as_data.function;
-        if fd.is_extern || fd.body == NODE_NONE {
+        if fd.is_extern() || fd.body == NODE_NONE {
             return FX_MAYBE; // externs are classified at their call sites; bodyless may re-dispatch
         }
         if !self.body_avail(m, fd.body) {
             return FX_MAYBE;
         }
-        if fd.is_variadic {
+        if fd.is_variadic() {
             return self.fx_disq(m, fn_id, fn_id, "is variadic", deep);
         }
         return self.fx_scan_stmts(m, fn_id, fd.body, 0, deep);
@@ -5781,24 +5913,13 @@ extend Interp {
         return libm1(name, 0.0).ok || libm2(name, 0.0, 0.0).ok;
     }
 
-    // The declaration position of variant `vd` in its enum (mirrors the payload-enum tag).
-    const fn variant_pos(self: &Self, vm: ModuleId, vd: NodeId, enum_out: &mut NodeId) i32 {
-        let a = unsafe &*self.p().module_ast_const(vm);
-        let items = a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let iid = unsafe a.list(items)[i as usize];
-            if a.at_const(iid).kind == NodeKind::NODE_ENUM {
-                let ms = a.at_const(iid).as_data.aggregate.members;
-                for k in 0..ms.len {
-                    if unsafe a.list(ms)[k as usize] == vd {
-                        *enum_out = iid;
-                        return k as i32;
-                    }
-                }
-            }
-        }
-        *enum_out = NODE_NONE;
-        return 0 - 1;
+    // The enum declaring member `vd` of module `vm` (NODE_NONE = none) and `vd`'s position in
+    // it (mirrors the payload-enum tag; -1 = none).
+    const fn variant_enum(self: &Self, vm: ModuleId, vd: NodeId, pos: &mut i32) NodeId {
+        let mut p64: i64 = 0;
+        let en = self.p().variant_enum(DefId { module: vm, node: vd }, &mut p64);
+        *pos = p64 as i32;
+        return en;
     }
 
     const fn enum_tagged(self: &Self, dm: ModuleId, dn: NodeId) bool {
@@ -5862,8 +5983,8 @@ extend Interp {
         if dk == NodeKind::NODE_VARIANT {
             if deep {
                 // mirror the payload-constructor gates (untagged/user-Free enums bail)
-                let mut ed = NODE_NONE;
-                let vp = self.variant_pos(fd.module, fd.node, &mut ed);
+                let mut vp: i32 = 0;
+                let ed = self.variant_enum(fd.module, fd.node, &mut vp);
                 if vp < 0 || !self.enum_tagged(fd.module, ed) || self.user_free(fd.module, ed) {
                     return fx_meet(acc, FX_MAYBE);
                 }
@@ -5874,14 +5995,14 @@ extend Interp {
             return FX_MAYBE; // fn value bound to a const/local
         }
         let cfd = fa.at_const(fd.node).as_data.function;
-        if cfd.is_extern {
+        if cfd.is_extern() {
             let nm = fa.at_const(cfd.name).as_data.name.text;
             if self.intercept_name(fd.module, nm) {
                 return acc;
             }
             return self.fx_disq(m, owner, id, "calls an extern function", deep);
         }
-        if cfd.is_variadic {
+        if cfd.is_variadic() {
             return self.fx_disq(m, owner, id, "calls a variadic function", deep);
         }
         if cfd.body == NODE_NONE {
@@ -5917,47 +6038,44 @@ extend Interp {
     /// The current trap with its call stack and step count: "<msg> (call stack: outer -> ... ->
     /// inner; steps: N/limit)"; a frameless budget trap names the widening flags instead.
     pub fn trap_detail(self: &mut Self) str {
-        let mut out = String::new();
-        out.push_str(self.trap);
+        self.dbuf.clear();
+        self.dbuf.push_str(self.trap);
         let nf = self.trap_nframes as u32;
         if nf != 0 {
-            out.push_str(" (call stack: ");
+            self.dbuf.push_str(" (call stack: ");
             let mut show = nf;
             if show > 8 {
                 show = 8;
-                out.push_str("... -> ");
+                self.dbuf.push_str("... -> ");
             }
             let mut i = nf - show;
             while i < nf {
                 if i != nf - show {
-                    out.push_str(" -> ");
+                    self.dbuf.push_str(" -> ");
                 }
                 let fv = unsafe self.trap_stack[i as usize];
                 let a = unsafe &*self.p().module_ast_const(fv.module);
                 if a.at_const(fv.node).kind == NodeKind::NODE_FUNCTION {
                     let nm = a.at_const(a.at_const(fv.node).as_data.function.name).as_data.name.text;
                     let src = self.src_of(fv.module);
-                    out.push_str(src.slice(nm.start as usize, nm.end as usize));
+                    self.dbuf.push_str(src.slice(nm.start as usize, nm.end as usize));
                 } else {
-                    out.push_str("<closure>");
+                    self.dbuf.push_str("<closure>");
                 }
                 i += 1;
             }
-            out.push_str("; steps: ");
-            out.push_u64(self.trap_steps);
-            out.push_str("/");
-            out.push_u64(self.max_steps);
-            out.push_str(")");
+            self.dbuf.push_str("; steps: ");
+            self.dbuf.push_u64(self.trap_steps);
+            self.dbuf.push_str("/");
+            self.dbuf.push_u64(self.max_steps);
+            self.dbuf.push_str(")");
         } else if self.trap_kind == IT_TRAP_BUDGET_STEPS || self.trap_kind == IT_TRAP_BUDGET_MEMORY {
-            out.push_str(" (steps: ");
-            out.push_u64(self.trap_steps);
-            out.push_str("/");
-            out.push_u64(self.max_steps);
-            out.push_str("; see --const-eval-steps/--const-eval-memory)");
+            self.dbuf.push_str(" (steps: ");
+            self.dbuf.push_u64(self.trap_steps);
+            self.dbuf.push_str("/");
+            self.dbuf.push_u64(self.max_steps);
+            self.dbuf.push_str("; see --const-eval-steps/--const-eval-memory)");
         }
-        self.dbuf.clear();
-        self.dbuf.push_string(&out);
-        out.free();
         return self.dbuf.as_str();
     }
 
@@ -6004,7 +6122,7 @@ extend Interp {
     /// re-enter implicit folding; another task's live evaluation is NOT a reason to skip (the
     /// facade serializes on entry), or folds would depend on scheduling.
     pub fn folding_self(self: &Self) bool {
-        if self.elock_on && atomic::load_usize(&self.elock_owner, 0) != Interp::etok() {
+        if self.elock_on && unsafe atomic::load_usize(&self.elock_owner, 0) != Interp::etok() {
             return false;
         }
         return self.in_run != 0 || self.ev_depth != 0;
@@ -6027,12 +6145,12 @@ extend Interp {
         }
         let tok = Interp::etok();
         // the fast-path owner read is atomic: it can only equal `tok` when THIS task stored it
-        if atomic::load_usize(&self.elock_owner, 0) == tok {
+        if unsafe atomic::load_usize(&self.elock_owner, 0) == tok {
             self.elock_depth += 1;
             return;
         }
         self.elock_sem.acquire_masked();
-        atomic::store_usize(&mut self.elock_owner, tok, 0);
+        unsafe atomic::store_usize(&mut self.elock_owner, tok, 0);
         self.elock_depth = 1;
     }
 
@@ -6042,7 +6160,7 @@ extend Interp {
         }
         self.elock_depth -= 1;
         if self.elock_depth == 0 {
-            atomic::store_usize(&mut self.elock_owner, 0, 0);
+            unsafe atomic::store_usize(&mut self.elock_owner, 0, 0);
             self.elock_sem.release();
         }
     }
@@ -6097,16 +6215,7 @@ extend Interp {
         }
         let top = self.ev_depth == 0 && self.in_run == 0;
         if top {
-            self.steps = 0;
-            self.trap = "";
-            self.trap_kind = IT_TRAP_NONE;
-            self.trap_nframes = 0;
-            self.trap_in_constfn = false;
-            self.nframes = 0;
-            self.objs_live = 0;
-            self.live_slots = 0;
-            self.item_active.truncate(0);
-            self.failed = false;
+            self.eval_reset();
         }
         let failed0 = self.failed;
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
@@ -6166,16 +6275,7 @@ extend Interp {
         if id == NODE_NONE || self.ev_depth != 0 || self.in_run != 0 {
             return none();
         }
-        self.steps = 0;
-        self.trap = "";
-        self.trap_kind = IT_TRAP_NONE;
-        self.trap_nframes = 0;
-        self.trap_in_constfn = false;
-        self.nframes = 0;
-        self.objs_live = 0;
-        self.live_slots = 0;
-        self.item_active.truncate(0);
-        self.failed = false;
+        self.eval_reset();
         let sb0 = self.subst.len();
         for i in 0..n {
             self.subst.push(
@@ -6351,7 +6451,8 @@ extend Interp {
     }
 
     /// Re-evaluate the deferred asserts: err() gets null detail for a proven-false condition, trap
-    /// detail for a definite trap; still-undecidable conditions stay silent.
+    /// detail for a definite trap, and a reason for a top-level assert that is still undecidable
+    /// (an assert in a function body may depend on unsubstituted generics and stays silent).
     pub fn flush_asserts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
         for i in 0..self.pending.len() {
             let pk = self.pending[i];
@@ -6363,9 +6464,24 @@ extend Interp {
             } else if v.kind == IV_NONE && self.trap.len() != 0 {
                 let _ = self.trap_detail();
                 err(ctx, m, cond, self.dbuf.cstr());
+            } else if v.kind == IV_NONE && self.assert_is_item(m, cond) {
+                err(ctx, m, cond, "the condition does not fold to a constant".ptr() as *const char);
             }
         }
         self.pending.clear();
+    }
+
+    // Whether `cond` is the condition of a top-level static_assert of module `m`.
+    const fn assert_is_item(self: &Self, m: ModuleId, cond: NodeId) bool {
+        let a = unsafe &*self.p().module_ast_const(m);
+        let items = a.at_const(a.root).as_data.program.items;
+        for i in 0..items.len {
+            let n = a.at_const(unsafe a.list(items)[i as usize]);
+            if n.kind == NodeKind::NODE_STATIC_ASSERT && n.as_data.binary.left == cond {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// True when a deferred static_assert of module `m` sits in its body arena: the flush reads
@@ -6421,16 +6537,7 @@ extend Interp {
         if tih.node == NODE_NONE {
             return bad;
         }
-        self.steps = 0;
-        self.trap = "";
-        self.trap_kind = IT_TRAP_NONE;
-        self.trap_nframes = 0;
-        self.trap_in_constfn = false;
-        self.nframes = 0;
-        self.objs_live = 0;
-        self.live_slots = 0;
-        self.item_active.truncate(0);
-        self.failed = false;
+        self.eval_reset();
         self.ev_depth += 1;
         let v = self.type_info_decl(m, tih.mid, tih.node, rty, am, at);
         self.ev_depth -= 1;
@@ -6473,16 +6580,7 @@ extend Interp {
             },
             None => {},
         };
-        self.steps = 0;
-        self.trap = "";
-        self.trap_kind = IT_TRAP_NONE;
-        self.trap_nframes = 0;
-        self.trap_in_constfn = false;
-        self.nframes = 0;
-        self.objs_live = 0;
-        self.live_slots = 0;
-        self.item_active.truncate(0);
-        self.failed = false;
+        self.eval_reset();
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         self.ev_depth += 1;
         let mut lw = irl::Lowerer::new(self.pkg, m, id);
@@ -6566,20 +6664,21 @@ extend Interp {
                 return none();
             }
             let bo = self.obj_ptr(block);
-            unsafe bo.heap = 1;
-            unsafe bo.bytes = nb;
-            unsafe bo.em = 0;
-            unsafe bo.et = Ast::builtin(BuiltinType::BT_U8);
-            unsafe bo.esz = 1;
+            unsafe (*bo).heap = 1;
+            unsafe (*bo).bytes = nb;
+            unsafe (*bo).em = 0;
+            unsafe (*bo).et = Ast::builtin(BuiltinType::BT_U8);
+            unsafe (*bo).esz = 1;
             for k in 0..nb {
-                unsafe self.obj_ptr(block).slots.set(
+                unsafe (*self.obj_ptr(block)).slots.set(
                     k as usize,
                     iv_int(0, Ast::builtin(BuiltinType::BT_U8), bytes.byte_at(k as usize)),
                 );
             }
         }
-        let ptr_i = self.ti_findf(sm, sn, "ptr");
-        let len_i = self.ti_findf(sm, sn, "len");
+        let dv = self.decl_view(sm, sn);
+        let ptr_i = dv.fp;
+        let len_i = dv.fl;
         if ptr_i < 0 || len_i < 0 {
             return none();
         }
@@ -6587,10 +6686,10 @@ extend Interp {
         if so == 0 {
             return none();
         }
-        unsafe self.obj_ptr(so).dm = sm;
-        unsafe self.obj_ptr(so).dn = sn;
-        unsafe self.obj_ptr(so).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, block, 0));
-        unsafe self.obj_ptr(so).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), nb));
+        unsafe (*self.obj_ptr(so)).dm = sm;
+        unsafe (*self.obj_ptr(so)).dn = sn;
+        unsafe (*self.obj_ptr(so)).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, block, 0));
+        unsafe (*self.obj_ptr(so)).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), nb));
         return IVal { kind: IV_OBJ, tm: stym, ty: sty, i: so, f: 0.0 };
     }
 
@@ -6605,13 +6704,13 @@ extend Interp {
             return 0;
         }
         let bo = self.obj_ptr(blk);
-        unsafe bo.heap = 1;
-        unsafe bo.bytes = n as u64 * esz;
-        unsafe bo.em = tim;
-        unsafe bo.et = ety;
-        unsafe bo.esz = esz;
+        unsafe (*bo).heap = 1;
+        unsafe (*bo).bytes = n as u64 * esz;
+        unsafe (*bo).em = tim;
+        unsafe (*bo).et = ety;
+        unsafe (*bo).esz = esz;
         for k in 0..n {
-            unsafe self.obj_ptr(blk).slots.set(k as usize, *objs.at(k as usize));
+            unsafe (*self.obj_ptr(blk)).slots.set(k as usize, *objs.at(k as usize));
         }
         return blk;
     }
@@ -6627,8 +6726,9 @@ extend Interp {
         block: u32,
         n: u32,
     ) IVal {
-        let ptr_i = self.ti_findf(slm, sln, "ptr");
-        let len_i = self.ti_findf(slm, sln, "len");
+        let dv = self.decl_view(slm, sln);
+        let ptr_i = dv.fp;
+        let len_i = dv.fl;
         if ptr_i < 0 || len_i < 0 {
             return none();
         }
@@ -6636,13 +6736,13 @@ extend Interp {
         if so == 0 {
             return none();
         }
-        unsafe self.obj_ptr(so).dm = slm;
-        unsafe self.obj_ptr(so).dn = sln;
-        unsafe self.obj_ptr(so).nargs = 1;
-        unsafe self.obj_ptr(so).am[0] = tim;
-        unsafe self.obj_ptr(so).at[0] = ety;
-        unsafe self.obj_ptr(so).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, block, 0));
-        unsafe self.obj_ptr(so).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), n));
+        unsafe (*self.obj_ptr(so)).dm = slm;
+        unsafe (*self.obj_ptr(so)).dn = sln;
+        unsafe (*self.obj_ptr(so)).nargs = 1;
+        unsafe (*self.obj_ptr(so)).am[0] = tim;
+        unsafe (*self.obj_ptr(so)).at[0] = ety;
+        unsafe (*self.obj_ptr(so)).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, block, 0));
+        unsafe (*self.obj_ptr(so)).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), n));
         return IVal { kind: IV_OBJ, tm: tim, ty: slty, i: so, f: 0.0 };
     }
 
@@ -6673,15 +6773,15 @@ extend Interp {
             let mut e = env;
             let mut found = false;
             while e != null && !found {
-                for i in 0..unsafe e.n {
-                    if unsafe e.pmod == ymod && unsafe e.params[i as usize] == ydecl {
-                        m = unsafe e.argm;
-                        t = unsafe e.args[i as usize];
+                for i in 0..unsafe (*e).n {
+                    if unsafe (*e).pmod == ymod && unsafe (*e).params[i as usize] == ydecl {
+                        m = unsafe (*e).argm;
+                        t = unsafe (*e).args[i as usize];
                         found = true;
                         break;
                     }
                 }
-                e = unsafe e.parent;
+                e = unsafe (*e).parent;
             }
             if !found {
                 return false;
@@ -6720,21 +6820,24 @@ extend Interp {
         if o == 0 {
             return none();
         }
-        unsafe self.obj_ptr(o).dm = em;
-        unsafe self.obj_ptr(o).dn = en;
+        unsafe (*self.obj_ptr(o)).dm = em;
+        unsafe (*self.obj_ptr(o)).dn = en;
         let i_name = self.ti_findf(em, en, "name");
         if i_name < 0 {
             return none();
         }
-        unsafe self.obj_ptr(o).slots.set(i_name as usize, nmv);
+        unsafe (*self.obj_ptr(o)).slots.set(i_name as usize, nmv);
         if tag >= 0 {
             let i_tag = self.ti_findf(em, en, "tag");
             let i_pl = self.ti_findf(em, en, "payload");
             if i_tag < 0 || i_pl < 0 {
                 return none();
             }
-            unsafe self.obj_ptr(o).slots.set(i_tag as usize, iv_int(0, Ast::builtin(BuiltinType::BT_I32), tag));
-            unsafe self.obj_ptr(o).slots.set(i_pl as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), aux as i64));
+            unsafe (*self.obj_ptr(o)).slots.set(i_tag as usize, iv_int(0, Ast::builtin(BuiltinType::BT_I32), tag));
+            unsafe (*self.obj_ptr(o)).slots.set(
+                i_pl as usize,
+                iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), aux as i64),
+            );
         } else {
             let i_off = self.ti_findf(em, en, "offset");
             let i_size = self.ti_findf(em, en, "size");
@@ -6742,12 +6845,15 @@ extend Interp {
             if i_off < 0 || i_size < 0 || i_kind < 0 {
                 return none();
             }
-            unsafe self.obj_ptr(o).slots.set(i_off as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), off as i64));
-            unsafe self.obj_ptr(o).slots.set(
+            unsafe (*self.obj_ptr(o)).slots.set(
+                i_off as usize,
+                iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), off as i64),
+            );
+            unsafe (*self.obj_ptr(o)).slots.set(
                 i_size as usize,
                 iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), size as i64),
             );
-            unsafe self.obj_ptr(o).slots.set(i_kind as usize, iv_int(tim, kty, aux as i64));
+            unsafe (*self.obj_ptr(o)).slots.set(i_kind as usize, iv_int(tim, kty, aux as i64));
         }
         return IVal { kind: IV_OBJ, tm: tim, ty: ety, i: o, f: 0.0 };
     }
@@ -6801,8 +6907,8 @@ extend Interp {
         if o == 0 {
             return none();
         }
-        unsafe self.obj_ptr(o).dm = em;
-        unsafe self.obj_ptr(o).dn = en;
+        unsafe (*self.obj_ptr(o)).dm = em;
+        unsafe (*self.obj_ptr(o)).dn = en;
         let i_name = self.ti_findf(em, en, "name");
         let i_ar = self.ti_findf(em, en, "arity");
         let i_pub = self.ti_findf(em, en, "is_pub");
@@ -6810,10 +6916,13 @@ extend Interp {
         if i_name < 0 || i_ar < 0 || i_pub < 0 || i_ret < 0 {
             return none();
         }
-        unsafe self.obj_ptr(o).slots.set(i_name as usize, nmv);
-        unsafe self.obj_ptr(o).slots.set(i_ar as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), ar));
-        unsafe self.obj_ptr(o).slots.set(i_pub as usize, iv_bool(0, Ast::builtin(BuiltinType::BT_BOOL), fd.is_public));
-        unsafe self.obj_ptr(o).slots.set(i_ret as usize, iv_int(tim, kty, rtag));
+        unsafe (*self.obj_ptr(o)).slots.set(i_name as usize, nmv);
+        unsafe (*self.obj_ptr(o)).slots.set(i_ar as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), ar));
+        unsafe (*self.obj_ptr(o)).slots.set(
+            i_pub as usize,
+            iv_bool(0, Ast::builtin(BuiltinType::BT_BOOL), fd.is_public()),
+        );
+        unsafe (*self.obj_ptr(o)).slots.set(i_ret as usize, iv_int(tim, kty, rtag));
         return IVal { kind: IV_OBJ, tm: tim, ty: hty, i: o, f: 0.0 };
     }
 
@@ -6860,22 +6969,22 @@ extend Interp {
             }
             let o = self.obj_new(self.field_count(mem, men));
             if o == 0 {
-                objs.free();
                 return none();
             }
-            unsafe self.obj_ptr(o).dm = mem;
-            unsafe self.obj_ptr(o).dn = men;
+            unsafe (*self.obj_ptr(o)).dm = mem;
+            unsafe (*self.obj_ptr(o)).dn = men;
             let nmv = self.ti_str(strm, strn, tim, sty, src.slice(ma.key.start as usize, ma.key.end as usize));
-            let mut sv = self.ti_str(strm, strn, tim, sty, "");
-            if ma.vkind == 2 {
-                sv = self.ti_str(strm, strn, tim, sty, src.slice(ma.vspan.start as usize, ma.vspan.end as usize));
-            }
+            let sbytes = if ma.vkind == 2 {
+                src.slice(ma.vspan.start as usize, ma.vspan.end as usize);
+            } else {
+                "";
+            };
+            let sv = self.ti_str(strm, strn, tim, sty, sbytes);
             if nmv.kind != IV_OBJ || sv.kind != IV_OBJ {
-                objs.free();
                 return none();
             }
-            unsafe self.obj_ptr(o).slots.set(i_name as usize, nmv);
-            unsafe self.obj_ptr(o).slots.set(i_kind as usize, iv_int(tim, mkty, ma.vkind));
+            unsafe (*self.obj_ptr(o)).slots.set(i_name as usize, nmv);
+            unsafe (*self.obj_ptr(o)).slots.set(i_kind as usize, iv_int(tim, mkty, ma.vkind));
             let mut bv: i64 = 0;
             if ma.vkind == 0 {
                 bv = ma.ival;
@@ -6884,14 +6993,13 @@ extend Interp {
             if ma.vkind == 1 {
                 iv2 = ma.ival;
             }
-            unsafe self.obj_ptr(o).slots.set(i_b as usize, iv_bool(0, Ast::builtin(BuiltinType::BT_BOOL), bv != 0));
-            unsafe self.obj_ptr(o).slots.set(i_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_I64), iv2));
-            unsafe self.obj_ptr(o).slots.set(i_s as usize, sv);
+            unsafe (*self.obj_ptr(o)).slots.set(i_b as usize, iv_bool(0, Ast::builtin(BuiltinType::BT_BOOL), bv != 0));
+            unsafe (*self.obj_ptr(o)).slots.set(i_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_I64), iv2));
+            unsafe (*self.obj_ptr(o)).slots.set(i_s as usize, sv);
             objs.push(IVal { kind: IV_OBJ, tm: tim, ty: mety, i: o, f: 0.0 });
         }
         let n2 = objs.len() as u32;
         let blk = self.ti_block(tim, mety, mesz, &objs);
-        objs.free();
         if blk == 0 && n2 != 0 {
             return none();
         }
@@ -6924,11 +7032,11 @@ extend Interp {
         if op == null {
             return false;
         }
-        let i_m = self.ti_findf(unsafe op.dm, unsafe op.dn, "meta");
+        let i_m = self.ti_findf(unsafe (*op).dm, unsafe (*op).dn, "meta");
         if i_m < 0 {
             return false;
         }
-        unsafe self.obj_ptr(o).slots.set(i_m as usize, ms);
+        unsafe (*self.obj_ptr(o)).slots.set(i_m as usize, ms);
         return true;
     }
 
@@ -7126,7 +7234,6 @@ extend Interp {
                 let ft = da2.type_of(ftn);
                 let fl = self.lsvc.layout_of(dm2, ft, envp, 1);
                 if ft == TYPE_NONE || !fl.ok {
-                    fobjs.free();
                     return none();
                 }
                 let mut fa3 = fl.align;
@@ -7160,7 +7267,6 @@ extend Interp {
                 }
                 let fv = self.ti_member(strm, strn, tim, sty, kty, fity, fname, off, fl.size, 0 - 1, ftag as u64);
                 if fv.kind != IV_OBJ {
-                    fobjs.free();
                     return none();
                 }
                 if mety != TYPE_NONE && !self.ti_attach_meta(
@@ -7178,7 +7284,6 @@ extend Interp {
                     mty,
                     mesz,
                 ) {
-                    fobjs.free();
                     return none();
                 }
                 fobjs.push(fv);
@@ -7186,7 +7291,6 @@ extend Interp {
             nfields = fobjs.len() as u32;
             fblock = self.ti_block(tim, fity, fesz.size, &fobjs);
             let failed2 = fblock == 0 && nfields != 0;
-            fobjs.free();
             if failed2 {
                 return none();
             }
@@ -7220,7 +7324,6 @@ extend Interp {
                     if vval != NODE_NONE {
                         let e = self.eval(dm2, vval);
                         if e.kind != IV_INT {
-                            vobjs.free();
                             return none();
                         }
                         next = e.i;
@@ -7247,7 +7350,6 @@ extend Interp {
                     da2.at_const(vid).as_data.variant.payload.len,
                 );
                 if vv.kind != IV_OBJ {
-                    vobjs.free();
                     return none();
                 }
                 if mety != TYPE_NONE && !self.ti_attach_meta(
@@ -7265,7 +7367,6 @@ extend Interp {
                     mty,
                     mesz,
                 ) {
-                    vobjs.free();
                     return none();
                 }
                 vobjs.push(vv);
@@ -7273,7 +7374,6 @@ extend Interp {
             nvars = vobjs.len() as u32;
             vblock = self.ti_block(tim, vity, vesz.size, &vobjs);
             let failed2 = vblock == 0 && nvars != 0;
-            vobjs.free();
             if failed2 {
                 return none();
             }
@@ -7369,13 +7469,11 @@ extend Interp {
                     }
                 }
                 if fail {
-                    hobjs.free();
                     return none();
                 }
                 nmeths = hobjs.len() as u32;
                 hblock = self.ti_block(tim, mhty, mhsz, &hobjs);
                 let hfailed = hblock == 0 && nmeths != 0;
-                hobjs.free();
                 if hfailed {
                     return none();
                 }
@@ -7413,8 +7511,8 @@ extend Interp {
         if to == 0 {
             return none();
         }
-        unsafe self.obj_ptr(to).dm = tim;
-        unsafe self.obj_ptr(to).dn = tin;
+        unsafe (*self.obj_ptr(to)).dm = tim;
+        unsafe (*self.obj_ptr(to)).dn = tin;
         let i_name = self.ti_findf(tim, tin, "name");
         let i_kind = self.ti_findf(tim, tin, "kind");
         let i_size = self.ti_findf(tim, tin, "size");
@@ -7426,17 +7524,23 @@ extend Interp {
         if i_name < 0 || i_kind < 0 || i_size < 0 || i_align < 0 || i_elem < 0 || i_len < 0 || i_fields < 0 || i_vars < 0 {
             return none();
         }
-        unsafe self.obj_ptr(to).slots.set(i_elem as usize, iv_int(tim, kty, etag));
-        unsafe self.obj_ptr(to).slots.set(i_len as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), alen as i64));
-        unsafe self.obj_ptr(to).slots.set(i_name as usize, nmv);
-        unsafe self.obj_ptr(to).slots.set(i_kind as usize, iv_int(tim, kty, tag));
-        unsafe self.obj_ptr(to).slots.set(i_size as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), size as i64));
-        unsafe self.obj_ptr(to).slots.set(
+        unsafe (*self.obj_ptr(to)).slots.set(i_elem as usize, iv_int(tim, kty, etag));
+        unsafe (*self.obj_ptr(to)).slots.set(
+            i_len as usize,
+            iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), alen as i64),
+        );
+        unsafe (*self.obj_ptr(to)).slots.set(i_name as usize, nmv);
+        unsafe (*self.obj_ptr(to)).slots.set(i_kind as usize, iv_int(tim, kty, tag));
+        unsafe (*self.obj_ptr(to)).slots.set(
+            i_size as usize,
+            iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), size as i64),
+        );
+        unsafe (*self.obj_ptr(to)).slots.set(
             i_align as usize,
             iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), align as i64),
         );
-        unsafe self.obj_ptr(to).slots.set(i_fields as usize, fsl);
-        unsafe self.obj_ptr(to).slots.set(i_vars as usize, vsl);
+        unsafe (*self.obj_ptr(to)).slots.set(i_fields as usize, fsl);
+        unsafe (*self.obj_ptr(to)).slots.set(i_vars as usize, vsl);
         if mety != TYPE_NONE {
             // the TYPE declaration's own `@reflect` entries (a non-decl kind matches nothing)
             let mut tdm = tm;
@@ -7454,7 +7558,7 @@ extend Interp {
             if tms.kind != IV_OBJ || i_meta < 0 {
                 return none();
             }
-            unsafe self.obj_ptr(to).slots.set(i_meta as usize, tms);
+            unsafe (*self.obj_ptr(to)).slots.set(i_meta as usize, tms);
         }
         if mhty != TYPE_NONE {
             let hsl = self.ti_slice(slm, sln, tim, mhty, mmty, hblock, nmeths);
@@ -7462,8 +7566,84 @@ extend Interp {
             if hsl.kind != IV_OBJ || i_meth < 0 {
                 return none();
             }
-            unsafe self.obj_ptr(to).slots.set(i_meth as usize, hsl);
+            unsafe (*self.obj_ptr(to)).slots.set(i_meth as usize, hsl);
         }
         return IVal { kind: IV_OBJ, tm: m, ty: rty, i: to, f: 0.0 };
+    }
+}
+
+// The call memo's hash over every semantic input: the callee and each argument's kind, type
+// module, type, and bits.
+fn memo_key(fm: ModuleId, fnode: NodeId, args: &Vector<IVal>) u64 {
+    let mut k: u64 = 1469598103934665603u64;
+    k = (k ^ fm as u64) * 1099511628211u64;
+    k = (k ^ fnode as u64) * 1099511628211u64;
+    for i in 0..args.len() {
+        let av = *args.at(i);
+        k = (k ^ av.kind as u64) * 1099511628211u64;
+        k = (k ^ av.tm as u64) * 1099511628211u64;
+        k = (k ^ av.ty as u64) * 1099511628211u64;
+        k = (k ^ av.i as u64) * 1099511628211u64;
+        k = (k ^ f64_bits(av.f)) * 1099511628211u64;
+    }
+    return k;
+}
+
+// Bit-exact value identity: a float compares by encoding, so -0.0 and each NaN stay distinct.
+const fn same_ival(a: IVal, b: IVal) bool {
+    return a.kind == b.kind && a.tm == b.tm && a.ty == b.ty && a.i == b.i && f64_bits(a.f) == f64_bits(b.f);
+}
+
+extend SSlot {
+    /// The SK_FLOAT value.
+    pub const fn f(self: &Self) f64 {
+        return f64_from_bits(self.i as u64);
+    }
+
+    /// The SK_AGG statics index of the embedded object.
+    pub const fn child(self: &Self) u32 {
+        return self.i as u32;
+    }
+}
+
+extend CallMemo {
+    /// The memoized result of `(fm, fnode)` over exactly `args`, into `out`.
+    fn find(self: &Self, key: u64, fm: ModuleId, fnode: NodeId, args: &Vector<IVal>, out: &mut IVal) bool {
+        let mut ri: u32 = 0;
+        switch self.ix.get(&key) {
+            Some(v) => {
+                ri = *v;
+            },
+            None => {
+                return false;
+            },
+        };
+        let row = *self.rows.at(ri as usize);
+        if row.fm != fm || row.fnode != fnode || row.n as usize != args.len() {
+            return false;
+        }
+        for i in 0..args.len() {
+            if !same_ival(*self.args.at(row.a0 as usize + i), *args.at(i)) {
+                return false;
+            }
+        }
+        *out = row.v;
+        return true;
+    }
+
+    /// Record `v` for `(fm, fnode)` over `args`; a colliding key now names this row.
+    fn put(self: &mut Self, key: u64, fm: ModuleId, fnode: NodeId, args: &Vector<IVal>, v: IVal) {
+        let a0 = self.args.len() as u32;
+        for i in 0..args.len() {
+            self.args.push(*args.at(i));
+        }
+        self.ix.insert(key, self.rows.len() as u32);
+        self.rows.push(MemoRow { a0: a0, n: args.len() as u32, fm: fm, fnode: fnode, v: v });
+    }
+
+    pub fn clear(self: &mut Self) {
+        self.ix.clear();
+        self.rows.clear();
+        self.args.clear();
     }
 }

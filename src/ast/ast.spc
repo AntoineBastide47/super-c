@@ -92,6 +92,19 @@ pub struct LifetimeDecl {
     pub list: NodeList,
 }
 
+/// A `where` predicate (`pred`) of the function `func`, recorded at parse time. `where_applies` matches
+/// it to a type parameter through the resolver's binding of its type (`Ast::where_scope`).
+/// `Ast::where_scope` answers.
+pub const WHERE_NONE: u8 = 0;
+pub const WHERE_OWN: u8 = 1;
+pub const WHERE_IN: u8 = 2;
+pub const WHERE_OUT: u8 = 3;
+
+pub struct WhereBound {
+    pub func: NodeId,
+    pub pred: NodeId,
+}
+
 pub struct Attr {
     pub owner: NodeId,
     pub kind: u8,
@@ -197,9 +210,9 @@ pub enum NodeKind {
     // Appended at the END so an older bootstrap compiler keeps the established numeric values.
     NODE_LIFETIME,
     // Sugar-keyword marker: produced by the parser, printed by the formatter, and lowered to a core node by
-    // the HIR lowering (src/hir) before typecheck -- no other pass sees it. NODE_LAUNCH carries CallData
-    // (a placeholder callee + the operand as the sole arg); desugar seeds the callee's resolution to the
-    // runtime shim and flips the kind to NODE_CALL.
+    // the HIR lowering (src/hir) before typecheck -- no other pass sees it. NODE_LAUNCH carries SingleData
+    // wrapping a NODE_CALL with a placeholder callee; the lowering seeds the callee's resolution to the
+    // runtime shim and flips the kind to NODE_EXPRESSION_STATEMENT.
     NODE_LAUNCH,
     // `select { .. }`: a NODE_SELECT holding NODE_SELECT_ARM children (BlockData). Desugar rewrites the
     // whole thing into a block that builds a `std::parallel::selector::Selector`, arms it, waits, and runs
@@ -246,11 +259,43 @@ pub struct FunctionData {
     pub returns: NodeList,
     pub where_clause: NodeList,
     pub body: NodeId,
-    pub is_public: bool,
-    pub is_extern: bool,
-    pub is_variadic: bool,
-    pub is_const: bool, // `const fn`: must evaluate at compile time when its arguments are known
-    pub is_unsafe: bool, // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
+    pub flags: u8, // FN_* bits; one byte keeps Node at 56 bytes
+}
+pub const FN_PUBLIC: u8 = 1;
+pub const FN_EXTERN: u8 = 2;
+pub const FN_VARIADIC: u8 = 4;
+pub const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when its arguments are known
+pub const FN_UNSAFE: u8 = 16; // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
+
+extend FunctionData {
+    pub const fn is_public(self: &Self) bool {
+        return (self.flags & FN_PUBLIC) != 0;
+    }
+
+    pub const fn is_extern(self: &Self) bool {
+        return (self.flags & FN_EXTERN) != 0;
+    }
+
+    pub const fn is_variadic(self: &Self) bool {
+        return (self.flags & FN_VARIADIC) != 0;
+    }
+
+    pub const fn is_const(self: &Self) bool {
+        return (self.flags & FN_CONST) != 0;
+    }
+
+    pub const fn is_unsafe(self: &Self) bool {
+        return (self.flags & FN_UNSAFE) != 0;
+    }
+
+    /// Set or clear the FN_* bit `bit`.
+    pub fn set(self: &mut Self, bit: u8, on: bool) {
+        if on {
+            self.flags = self.flags | bit;
+        } else {
+            self.flags = self.flags & ~bit;
+        }
+    }
 }
 pub struct ParameterData {
     pub name: NodeId,
@@ -294,7 +339,7 @@ pub struct ExtendData {
     pub target_type: NodeId,
     pub items: NodeList,
     // `unsafe extend T as I {}`: the conformance asserts something the compiler cannot check, so the author
-    // carries the obligation. Parsed and preserved; nothing requires it yet.
+    // carries the obligation. The type checker requires it on Send and Sync conformances.
     pub is_unsafe: bool,
 }
 pub struct TypeAliasData {
@@ -492,7 +537,7 @@ pub struct CallData {
     pub args: NodeList,
 }
 // mut_caps is a u32 mutated-capture bitmask (≤32 captures). u32 (not u64) is deliberate: it leaves
-// ClosureData with no 8-aligned member, so NodeAs stays 4-aligned and Node is 56 bytes instead of 64.
+// ClosureData with no 8-aligned member, so NodeAs stays 4-aligned and Node needs no 8-byte padding.
 pub struct ClosureData {
     pub params: NodeList,
     pub returns: NodeList,
@@ -820,19 +865,31 @@ pub fn lin_subst(
         if by.kind == TypeKind::TYPE_CONST_EXPR {
             // Occurs-check: the payload is spelled in the OUTER scope, where `d` names the
             // caller's own parameter -- substituting d inside its own binding compounds the
-            // width once per recursion (`F -> {F+96}` must widen exactly once).
-            let mut fp = Vector::<DefId>::new();
-            let mut fa = Vector::<TypeId>::new();
-            for j in 0..n {
-                let pj = unsafe params[j as usize];
-                if pj.module == d.module && pj.node == d.node {
+            // width once per recursion (`F -> {F+96}` must widen exactly once). Only the payload's own
+            // terms (at most 4) can bind, so the reduced binding list fits in fixed arrays.
+            let pf = *dst.const_lin_at(by.as_data.inst);
+            let mut fp: [DefId; 4] = [[0] = DefId { module: 0, node: NODE_NONE }];
+            let mut fa: [TypeId; 4] = [[0] = TYPE_NONE];
+            let mut nbind: i32 = 0;
+            for t in 0..pf.n {
+                let q = unsafe pf.p[t as usize];
+                if q.module == d.module && q.node == d.node {
                     continue;
                 }
-                fp.push(pj);
-                fa.push(unsafe args[j as usize]);
+                let mut qa = TYPE_NONE;
+                for j in 0..n {
+                    if unsafe params[j as usize].module == q.module && unsafe params[j as usize].node == q.node {
+                        qa = unsafe args[j as usize];
+                    }
+                }
+                if qa != TYPE_NONE {
+                    unsafe fp[nbind as usize] = q;
+                    unsafe fa[nbind as usize] = qa;
+                    nbind = nbind + 1;
+                }
             }
             let mut inner = ConstLin { k: 0, n: 0 };
-            if !lin_subst(dst, dst, by.as_data.inst, fp.as_ptr(), fa.as_ptr(), fp.len() as i32, &mut inner, depth + 1) {
+            if !lin_subst(dst, dst, by.as_data.inst, &fp[0], &fa[0], nbind, &mut inner, depth + 1) {
                 return false;
             }
             if inner.is_concrete() {
@@ -965,6 +1022,8 @@ fn ts_delta(i: usize) u64 {
 /// (node ids, const widths) land clustered, and two live (method, instance) pairs have collided in
 /// practice -- silently dropping a demand seed. The splitmix64 finalizer after the FNV step makes
 /// every input bit reach every output bit, which puts collisions at the 64-bit birthday bound.
+/// The result depends on `h ^ v` only, so `h` must be a running hash: a small tag or bit set passed as
+/// `h` collides with a structured `v` that differs in the same bits. Mix `v` first, then fold the tag in.
 pub const fn skey_mix(h: u64, v: u64) u64 {
     let mut x = (h ^ v) * 1099511628211u64;
     x = (x ^ x >> 30) * 0xBF58476D1CE4E5B9u64;
@@ -1183,24 +1242,32 @@ extend MethodInst as Eq {
 /// of the freeze contract's "growth changes no existing answer". Writers must already hold the
 /// owning module's intern serialization; readers are lock-free: an entry's bytes land before the
 /// length's Release store, and `len()` reads Acquire. Capacity is fixed at POOL_SLOTS chunks;
-/// exceeding it aborts (a pool that large indicates runaway interning, not a real program).
+/// exceeding it aborts (a pool that large indicates runaway interning, not a real program). Entries are
+/// plain values (`T: Copy`): the pool copies them in as padding and never drops one.
 pub const POOL_SHIFT: usize = 12;
 pub const POOL_CHUNK: usize = 1usize << 12;
 pub const POOL_SLOTS: usize = 512;
 
-pub struct ChunkPool<T> {
+// Restated derived conformances: the bootstrap compiler predates the `Copy` derivation and checks the
+// pools' `T: Copy` bound against written conformances only.
+extend DefId as Copy {}
+extend Node as Copy {}
+extend Ty as Copy {}
+extend TyInstance as Copy {}
+
+pub struct ChunkPool<T: Copy> {
     tab: *mut *mut T,
     nchunks: u32,
     n: usize,
 }
 
-extend<T> ChunkPool<T> {
+extend<T: Copy> ChunkPool<T> {
     pub const fn new() ChunkPool<T> {
         return ChunkPool::<T> { tab: null, nchunks: 0, n: 0 };
     }
 
     pub fn len(self: &Self) usize {
-        return atomic::load_usize(&self.n, 1);
+        return unsafe atomic::load_usize(&self.n, 1);
     }
 
     pub const fn at(self: &Self, i: usize) &T {
@@ -1221,7 +1288,7 @@ extend<T> ChunkPool<T> {
             self.nchunks += 1;
         }
         unsafe (unsafe self.tab[i >> POOL_SHIFT])[i & POOL_CHUNK - 1] = v;
-        atomic::store_usize(&mut self.n, i + 1, 2);
+        unsafe atomic::store_usize(&mut self.n, i + 1, 2);
     }
 
     pub const fn index_mut(self: &mut Self, i: usize) &mut T {
@@ -1232,8 +1299,8 @@ extend<T> ChunkPool<T> {
         unsafe (unsafe self.tab[i >> POOL_SHIFT])[i & POOL_CHUNK - 1] = v;
     }
 
-    /// Pad with `v` until a run of `need` entries fits inside ONE chunk, then return its start:
-    /// `list()` hands out raw pointers into a run, so a run must never straddle a chunk boundary.
+    /// Pad with copies of `v` until a run of `need` entries fits inside ONE chunk, then return its
+    /// start: `list()` hands out raw pointers into a run, so a run must never straddle a chunk boundary.
     pub fn run_start(self: &mut Self, need: usize, v: T) usize {
         if need > POOL_CHUNK {
             panic("node list exceeds one arena chunk");
@@ -1256,7 +1323,7 @@ extend<T> ChunkPool<T> {
 
     /// Reset the length; chunks stay allocated for reuse.
     pub fn clear(self: &mut Self) {
-        atomic::store_usize(&mut self.n, 0, 2);
+        unsafe atomic::store_usize(&mut self.n, 0, 2);
     }
 
     pub const fn retained(self: &Self) usize {
@@ -1264,7 +1331,7 @@ extend<T> ChunkPool<T> {
     }
 }
 
-extend<T> ChunkPool<T> as Free {
+extend<T: Copy> ChunkPool<T> as Free {
     pub fn free(self: &mut Self) {
         if self.tab == null {
             return;
@@ -1289,13 +1356,13 @@ const SV_UNFROZEN: usize = 0xFFFFFFFFFFFFFFFFu64 as usize;
 /// point) so concurrent readers of PRE-EXISTING entries never see a realloc; growth past the pinned
 /// capacity lands in realloc-stable chunks. `thaw()` folds the overflow back into the base once the
 /// frontier joins, so every later stage reads a flat array again.
-pub struct SplitVec<T> {
+pub struct SplitVec<T: Copy> {
     base: Vector<T>,
     split: usize, // usize MAX when unfrozen
     ovf: ChunkPool<T>,
 }
 
-extend<T> SplitVec<T> {
+extend<T: Copy> SplitVec<T> {
     pub fn new() SplitVec<T> {
         return SplitVec::<T> { base: Vector::<T>::new(), split: SV_UNFROZEN, ovf: ChunkPool::<T>::new() };
     }
@@ -1363,8 +1430,8 @@ extend<T> SplitVec<T> {
         return self.ovf.ptr_at(i - self.split);
     }
 
-    /// Pad so a run of `need` fits contiguously (base region: reserve exactly; frozen spill: keep
-    /// the run inside one chunk) and return its start.
+    /// Pad with copies of `v` so a run of `need` fits contiguously (base region: reserve exactly;
+    /// frozen spill: keep the run inside one chunk) and return its start.
     pub fn run_start(self: &mut Self, need: usize, v: T) usize {
         if self.split == SV_UNFROZEN || self.base.len() + need <= self.split {
             return self.base.len();
@@ -1469,6 +1536,8 @@ pub struct TypePool {
     pub insts: ChunkPool<TyInstance>,
     iix: Vector<u32>,
     iix_used: u32,
+    /// Canonical forms of const-generic expressions (`{BITS * 2}`), interned by VALUE so two spellings of
+    /// the same width are one id -- which is what makes `{(N * 2) * 2}` and `{N * 4}` the same type.
     pub clins: Vector<ConstLin>,
     pub open: bool,
 }
@@ -1867,8 +1936,6 @@ pub struct Ast {
     pub wide_lits: Vector<WideLit>,
     pub coerces: Vector<CoerceUse>,
     pub coerce_at: Map<u32, u32>,
-    /// Canonical forms of const-generic expressions (`{BITS * 2}`), interned by VALUE so two spellings of
-    /// the same width are one id -- which is what makes `{(N * 2) * 2}` and `{N * 4}` the same type.
     pub method_insts: Vector<MethodInst>,
     pub method_inst_index: Vector<u32>,
     pub dyn_uses: Vector<DynUse>,
@@ -1878,6 +1945,7 @@ pub struct Ast {
     pub attrs: Vector<Attr>,
     pub metas: Vector<MetaAttr>,
     pub lifetime_decls: Vector<LifetimeDecl>,
+    pub where_bounds: Vector<WhereBound>,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
     pub call_info: Map<u32, u64>,
     /// Per operator node: the method the type checker chose, as (module << 32 | node). Two conformances
@@ -1943,6 +2011,7 @@ extend Ast as Free {
         self.attrs.free();
         self.metas.free();
         self.lifetime_decls.free();
+        self.where_bounds.free();
         self.call_info.free();
         self.op_method.free();
         self.seeds.free();
@@ -1990,8 +2059,6 @@ extend Ast {
             root: NODE_NONE,
             module: 0,
         };
-        // nodes/tokens sits at ~0.78 across real corpora; 7/8 trims the over-reserve while keeping
-        // the high-ratio outlier modules from doubling past the reserve.
         // nodes/tokens sits at ~0.78 across real corpora, with bodies holding about 87% of the
         // nodes and 65% of the list entries; the reserves keep the high-ratio outlier modules from
         // doubling past them (a freeze pins capacity, and a full arena would double on its headroom).
@@ -2045,6 +2112,33 @@ extend Ast {
         }
         return id as usize;
     }
+    /// How `where_bounds[w]` bounds the type parameter `gp` for code at `at` (NODE_NONE: no body):
+    /// WHERE_NONE when its type is not `gp`; WHERE_OWN for the function's own parameter, which holds
+    /// wherever that parameter is visible; WHERE_IN / WHERE_OUT for an enclosing extend's or
+    /// interface's parameter, which holds only inside the function (closures included), so the answer
+    /// depends on `at`.
+    pub fn where_scope(self: &Self, w: usize, gp: NodeId, at: NodeId) u8 {
+        let wb = *self.where_bounds.at(w);
+        if self.resolution(self.at_const(wb.pred).as_data.where_predicate.ty) != gp {
+            return WHERE_NONE;
+        }
+        let fd = self.at_const(wb.func);
+        let gens = fd.as_data.function.generics;
+        for i in 0..gens.len {
+            if unsafe self.list(gens)[i as usize] == gp {
+                return WHERE_OWN;
+            }
+        }
+        if at == NODE_NONE || !self.valid(at) {
+            return WHERE_OUT;
+        }
+        let s = self.at_const(at).span.start;
+        if fd.span.start <= s && s < fd.span.end {
+            return WHERE_IN;
+        }
+        return WHERE_OUT;
+    }
+
     /// True when `id` names a node of this module (either arena).
     @c.always_inline
     pub const fn valid(self: &Self, id: NodeId) bool {
@@ -2219,12 +2313,12 @@ extend Ast {
         }
         let tok = Ast::itok();
         // atomic fast path: the owner read can only equal `tok` when THIS task stored it
-        if atomic::load_usize(&self.ilock_owner, 0) == tok {
+        if unsafe atomic::load_usize(&self.ilock_owner, 0) == tok {
             self.ilock_depth += 1;
             return;
         }
         self.ilock_sem.acquire_masked();
-        atomic::store_usize(&mut self.ilock_owner, tok, 0);
+        unsafe atomic::store_usize(&mut self.ilock_owner, tok, 0);
         self.ilock_depth = 1;
     }
 
@@ -2234,7 +2328,7 @@ extend Ast {
         }
         self.ilock_depth -= 1;
         if self.ilock_depth == 0 {
-            atomic::store_usize(&mut self.ilock_owner, 0, 0);
+            unsafe atomic::store_usize(&mut self.ilock_owner, 0, 0);
             self.ilock_sem.release();
         }
     }
@@ -2424,9 +2518,9 @@ extend Ast {
     }
 
     /// Apply a publication: every provisional id this module's tables hold becomes its final id
-    /// (`map` by pool index, `imap` for instance records, `cmap` for const-expression forms), the
-    /// `used` list is rewritten and its membership bits rebuilt, and the pool is cleared.
-    pub fn publish_remap(self: &mut Self, map: &Vector<TypeId>, imap: &Vector<u32>, cmap: &Vector<u32>) {
+    /// (`map` by pool index, `imap` for instance records), the `used` list is rewritten and its
+    /// membership bits rebuilt, and the pool is cleared.
+    pub fn publish_remap(self: &mut Self, map: &Vector<TypeId>, imap: &Vector<u32>) {
         for i in 0..self.types.len() {
             self.types[i] = pub_map1(map, self.types[i]);
         }
@@ -2488,7 +2582,6 @@ extend Ast {
                 self.used_inst[i] = imap[(ii & TYPE_PROV_MASK) as usize];
             }
         }
-        let _ = cmap;
         self.used_bits.clear();
         for i in 0..self.used.len() {
             let id = self.used[i];
@@ -2582,13 +2675,6 @@ extend Ast {
             return self.pool.instance(i);
         }
         return self.instance(self.used_inst[i]);
-    }
-
-    pub const fn nconst_lins(self: &Self) usize {
-        if self.gt == null {
-            return self.pool.nclin();
-        }
-        return unsafe (&*self.gt).nclin() + self.pool.nclin();
     }
 
     /// Is `t` an id this module can resolve (a foreign pool's id is not, under module-local identity)?
@@ -2874,6 +2960,24 @@ extend Ast {
         };
         return sv.ptr_at((list.start & NODE_BODY_MASK) as usize);
     }
+    /// Whether the payload enum `decl` stores its tag in one byte: at most 256 variants and no explicit
+    /// discriminant, so every tag is its variant's ordinal. Any other payload enum keeps the 4-byte C enum.
+    /// The emitter's struct and the layout service both follow this.
+    pub const fn enum_tag_is_byte(self: &Self, decl: NodeId) bool {
+        let ms = self.at_const(decl).as_data.aggregate.members;
+        let mut n: u32 = 0;
+        for i in 0..ms.len {
+            let vid = unsafe self.list(ms)[i as usize];
+            if self.at_const(vid).kind != NodeKind::NODE_VARIANT {
+                continue;
+            }
+            if self.at_const(vid).as_data.variant.value != NODE_NONE {
+                return false;
+            }
+            n += 1;
+        }
+        return n <= 256;
+    }
     /// Resolves `ref_id` to a decl in THIS module (the DefId is stamped with `self.module`); use
     /// set_resolution_def for a foreign target.
     pub const fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
@@ -3080,7 +3184,7 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.method_insts.capacity() * sizeof(MethodInst) + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
+        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.capacity() * 4 + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.method_insts.capacity() * sizeof(MethodInst) + self.method_inst_index.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.free_touched.capacity() * 8;
     }
 
     /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the
@@ -3189,7 +3293,7 @@ fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) {
 }
 
 /// The builtin type a numeric literal's suffix names, or BT_COUNT if it has none. On a match,
-/// *sfx_start (when non-null) receives the suffix's start offset. In a hex literal, f32/f64 only
+/// *sfx_start receives the suffix's start offset. In a hex literal, f32/f64 only
 /// count as a suffix after a 'p' exponent -- otherwise those bytes are hex digits.
 pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) BuiltinType {
     let hex = end - start > 2 && src[start as usize] == b'0' && (src[(start + 1) as usize] | 0x20u8) == b'x';
@@ -3200,66 +3304,46 @@ pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) B
         i = i + 1;
     }
     if end - start > 5 && unsafe cstring::memcmp(unsafe (src.ptr() + (end - 5) as usize), "isize".ptr(), 5) == 0 {
-        if sfx_start != null {
-            *sfx_start = end - 5;
-        }
+        *sfx_start = end - 5;
         return BuiltinType::BT_ISIZE;
     }
     if end - start > 5 && unsafe cstring::memcmp(unsafe (src.ptr() + (end - 5) as usize), "usize".ptr(), 5) == 0 {
-        if sfx_start != null {
-            *sfx_start = end - 5;
-        }
+        *sfx_start = end - 5;
         return BuiltinType::BT_USIZE;
     }
     let mut n: u32 = 3;
     if end - start > n {
         let p = unsafe (src.ptr() + (end - n) as usize);
         if unsafe cstring::memcmp(p, "i16".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_I16;
         }
         if unsafe cstring::memcmp(p, "i32".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_I32;
         }
         if unsafe cstring::memcmp(p, "i64".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_I64;
         }
         if unsafe cstring::memcmp(p, "u16".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_U16;
         }
         if unsafe cstring::memcmp(p, "u32".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_U32;
         }
         if unsafe cstring::memcmp(p, "u64".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_U64;
         }
         if (!hex || hexf) && unsafe cstring::memcmp(p, "f32".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_F32;
         }
         if (!hex || hexf) && unsafe cstring::memcmp(p, "f64".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_F64;
         }
     }
@@ -3267,15 +3351,11 @@ pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) B
     if end - start > n {
         let p = unsafe (src.ptr() + (end - n) as usize);
         if unsafe cstring::memcmp(p, "i8".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_I8;
         }
         if unsafe cstring::memcmp(p, "u8".ptr(), n as usize) == 0 {
-            if sfx_start != null {
-                *sfx_start = end - n;
-            }
+            *sfx_start = end - n;
             return BuiltinType::BT_U8;
         }
     }

@@ -853,3 +853,51 @@ fn two_live_mutable_borrows() {
         "cannot borrow this value as mutable while it is already borrowed as mutable",
     );
 }
+
+// `n` borrows of one local, all live across an `if` (every one is read after it).
+fn many_borrows_src(n: i32) String {
+    let mut s = String::from_str("fn main() i32 {\n    let x: i32 = 1;\n");
+    for i in 0..n {
+        s.push_str(format("    let r{} = &x;\n", i).as_str());
+    }
+    s.push_str("    let mut t = 0;\n    if x > 0 { t = 1; } else { t = 2; }\n");
+    for i in 0..n {
+        s.push_str(format("    t = t + *r{};\n", i).as_str());
+    }
+    s.push_str("    return t;\n}\n");
+    return s;
+}
+
+// A branch snapshot holds every borrow the live state can hold; past the table's capacity the
+// function is rejected with a named limit instead of losing borrows.
+@test
+fn many_live_borrows_across_a_branch() {
+    let ok = many_borrows_src(100);
+    h::expect_ok("100 live borrows across an if", ok.as_str());
+    let over = many_borrows_src(300);
+    h::expect_err_msg("300 live borrows", over.as_str(), "exceeds the borrow checker's limit of 256 live borrows");
+}
+
+// Ownership derived through nested generic instances: `W<W<String>>`, and `S<String>` whose member
+// names `W<T>`, own their String, so a second move is an error and a single move frees it once.
+@test
+fn nested_generic_instances_own_their_members() {
+    let wdecl = "struct W<T> { pub a: T }\nstruct S<T> { pub a: W<T> }\n";
+    let mut twice = String::from_str(wdecl);
+    twice.push_str(
+        "fn take(w: W<W<String>>) i32 { return w.a.a.len() as i32; }\nfn main() i32 { let x = W::<W<String>> { a: W::<String> { a: String::from_str(\"abc\") } }; let n = take(x); return n + take(x); }\n",
+    );
+    h::expect_err_msg("W<W<String>> moved twice", twice.as_str(), "use of moved value");
+    let mut twice_s = String::from_str(wdecl);
+    twice_s.push_str(
+        "fn take(w: S<String>) i32 { return w.a.a.len() as i32; }\nfn main() i32 { let x = S::<String> { a: W::<String> { a: String::from_str(\"abc\") } }; let n = take(x); return n + take(x); }\n",
+    );
+    h::expect_err_msg("S<String> moved twice", twice_s.as_str(), "use of moved value");
+    let mut once = String::from_str(wdecl);
+    once.push_str(
+        "fn take(w: S<String>) i32 { return w.a.a.len() as i32; }\nfn main() i32 { let x = S::<String> { a: W::<String> { a: String::from_str(\"a string long enough to live on the heap\") } }; let y = W::<W<String>> { a: W::<String> { a: String::from_str(\"another string long enough for the heap\") } }; return take(x) + y.a.a.len() as i32; }\n",
+    );
+    let r = h::compile_and_run_env(once.as_str(), "SC_LEAK_CHECK=fatal");
+    assert(r.built, "nested generic owners build");
+    assert_eq(r.exit, 79);
+}

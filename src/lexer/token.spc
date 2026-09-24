@@ -23,9 +23,13 @@ extend Span {
 
 pub type Token = u64;
 
+/// The longest lexeme a Token can hold (24-bit length field).
+pub const TOKEN_MAX_LEN: usize = 0xFFFFFF;
+
 extend Token {
-    /// Packs (kind, start, len). `len` must be < 2^24: it is stored in 24 bits, and a larger value
-    /// would bleed into the kind bits (len() masks on read; new() does not).
+    /// Packs (kind, start, len). `len` must be at most TOKEN_MAX_LEN: it is stored in 24 bits, and a
+    /// larger value would bleed into the kind bits (len() masks on read; new() does not). The lexer
+    /// rejects longer lexemes.
     pub const fn new(kind: TokenType, start: u32, len: u32) Token {
         return start as u64 | len as u64 << 32 | kind as u64 << 56;
     }

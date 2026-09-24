@@ -4,6 +4,7 @@
 // sibling order is first-mention order, which is Core IR order, so two serial runs number identically.
 import ast::ast as *;
 import ir::core as ir;
+import utils::bits as bits;
 
 /// The absent move path.
 pub const MP_NONE: u32 = 0xFFFFFFFF;
@@ -109,7 +110,7 @@ extend MoveForest {
             let mp = f.paths.at(p);
             f.parent.push(mp.parent);
             if mp.first_child == MP_NONE {
-                f.leaf.set(p / 64, f.leaf[p / 64] | 1u64 << (p & 63) as u64);
+                bits::bit_set(&mut f.leaf, p as u32);
             }
         }
     }
@@ -144,24 +145,20 @@ extend MoveForest {
     /// The existing child of `parent` naming field `fdecl` (member places carry field identity in
     /// `sub`), or MP_NONE when that field was never mentioned.
     pub fn field_child(self: &Self, parent: u32, fdecl: NodeId) u32 {
-        let key = elem_key(ir::PJ_FIELD, ir::IR_NONE, fdecl);
-        let mut c = self.paths.at(parent as usize).first_child;
-        while c != MP_NONE {
-            if self.paths.at(c as usize).elem == key {
-                return c;
-            }
-            c = self.paths.at(c as usize).next_sibling;
-        }
-        return MP_NONE;
+        return self.find_child(parent, elem_key(ir::PJ_FIELD, ir::IR_NONE, fdecl));
     }
 
     /// The existing child of `parent` naming positional tuple member `idx` (member places carry the
     /// index in `data` and NODE_NONE in `sub`), or MP_NONE when it was never mentioned.
     pub fn tuple_child(self: &Self, parent: u32, idx: u32) u32 {
-        let key = elem_key(ir::PJ_FIELD, idx, NODE_NONE);
+        return self.find_child(parent, elem_key(ir::PJ_FIELD, idx, NODE_NONE));
+    }
+
+    // The existing child of `parent` for canonical element `elem`, or MP_NONE.
+    fn find_child(self: &Self, parent: u32, elem: u64) u32 {
         let mut c = self.paths.at(parent as usize).first_child;
         while c != MP_NONE {
-            if self.paths.at(c as usize).elem == key {
+            if self.paths.at(c as usize).elem == elem {
                 return c;
             }
             c = self.paths.at(c as usize).next_sibling;
@@ -176,7 +173,7 @@ extend MoveForest {
 
     /// True when `p` tracks no sub-places (its subtree is itself); a dense-bit read, replay-hot.
     pub const fn is_leaf(self: &Self, p: u32) bool {
-        return (*self.leaf.at((p / 64) as usize) >> (p & 63) as u64 & 1u64) != 0;
+        return bits::bit_get(&self.leaf, p);
     }
 
     /// Visit `p` and every descendant (iterative; `scratch` is the caller's reusable stack).

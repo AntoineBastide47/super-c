@@ -88,6 +88,25 @@ fn ws_of(a: str, b: str, c: str, d: str) Ws {
     return Ws { proj: proj, root: root, dir: dir };
 }
 
+// One `an::recompile` round over the test's owned overlays (the server passes borrowed views of its
+// documents the same way).
+fn recompile_ov(
+    ws: &Ws,
+    p: &mut loader::Package,
+    ovf: &Vector<String>,
+    ovt: &Vector<String>,
+    diags: &mut Vector<an::DiagRec>,
+    st: &mut an::RecompileStats,
+) bool {
+    let mut fv = Vector::<str>::new();
+    let mut tv = Vector::<str>::new();
+    for i in 0..ovf.len() {
+        fv.push(ovf.at(i).as_str());
+        tv.push(ovt.at(i).as_str());
+    }
+    return an::recompile(p, unsafe shim::sc_host_platform(), ws.root.as_str(), "", &fv, &tv, diags, st);
+}
+
 // One incremental round and the diagnostic oracle only (the workspaces below need no `bee`).
 fn round_diags(
     ws: &Ws,
@@ -98,7 +117,7 @@ fn round_diags(
     st: &mut an::RecompileStats,
     label: str,
 ) {
-    let ok = an::recompile(p, unsafe shim::sc_host_platform(), ws.root.as_str(), "", ovf, ovt, diags, st);
+    let ok = recompile_ov(ws, p, ovf, ovt, diags, st);
     assert(ok, label);
     let mut rd = Vector::<an::DiagRec>::new();
     let rp = fresh(ws, ovf, ovt, &mut rd);
@@ -236,7 +255,7 @@ fn round(
     st: &mut an::RecompileStats,
     label: str,
 ) {
-    let ok = an::recompile(p, unsafe shim::sc_host_platform(), ws.root.as_str(), "", ovf, ovt, diags, st);
+    let ok = recompile_ov(ws, p, ovf, ovt, diags, st);
     assert(ok, label);
     let mut rd = Vector::<an::DiagRec>::new();
     let mut rp = fresh(ws, ovf, ovt, &mut rd);
@@ -259,16 +278,7 @@ fn incr_noop_round() {
     let mut diags = Vector::<an::DiagRec>::new();
     let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
     let mut st = an::RecompileStats {};
-    let ok = an::recompile(
-        &mut p,
-        unsafe shim::sc_host_platform(),
-        ws.root.as_str(),
-        "",
-        &ovf,
-        &ovt,
-        &mut diags,
-        &mut st,
-    );
+    let ok = recompile_ov(&ws, &mut p, &ovf, &ovt, &mut diags, &mut st);
     assert(ok, "noop ok");
     assert(st.reparsed == 0 && st.analyzed == 0, "noop does no semantic work");
 }
@@ -829,16 +839,7 @@ fn main() {
 )";
     ov(&ws, "a.spc", a1, &mut ovf, &mut ovt);
     let mut st = an::RecompileStats {};
-    let ok = an::recompile(
-        &mut p,
-        unsafe shim::sc_host_platform(),
-        ws.root.as_str(),
-        "",
-        &ovf,
-        &ovt,
-        &mut diags,
-        &mut st,
-    );
+    let ok = recompile_ov(&ws, &mut p, &ovf, &ovt, &mut diags, &mut st);
     assert(!ok, "an import-surface edit falls back to the full compile");
 }
 
@@ -851,16 +852,7 @@ fn incr_parse_error_leaves_domain() {
     let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
     ov(&ws, "b.spc", "import c;\npub fn bee() i32 {", &mut ovf, &mut ovt);
     let mut st = an::RecompileStats {};
-    let ok = an::recompile(
-        &mut p,
-        unsafe shim::sc_host_platform(),
-        ws.root.as_str(),
-        "",
-        &ovf,
-        &ovt,
-        &mut diags,
-        &mut st,
-    );
+    let ok = recompile_ov(&ws, &mut p, &ovf, &ovt, &mut diags, &mut st);
     assert(!ok, "a parse error falls back to the full compile");
 }
 
@@ -927,16 +919,7 @@ fn release_feature_query_parses_back_then_releases() {
     assert(diags_equal(&diags, &rd), "the query leaves the records alone");
     // The next round releases the closed module again.
     let mut st = an::RecompileStats {};
-    let ok = an::recompile(
-        &mut p,
-        unsafe shim::sc_host_platform(),
-        ws.root.as_str(),
-        "",
-        &ovf,
-        &ovt,
-        &mut diags,
-        &mut st,
-    );
+    let ok = recompile_ov(&ws, &mut p, &ovf, &ovt, &mut diags, &mut st);
     assert(ok && st.analyzed == 0, "a no-op round");
     assert(p.modules.at(am).ast.b.released, "released again after the round");
 }
@@ -963,16 +946,7 @@ pub fn bee(extra: i32) i32 {
     // The oracle's probes parsed a back; a following no-op round releases the closed importer
     // again and keeps the open document's bodies.
     let mut st2 = an::RecompileStats {};
-    let ok = an::recompile(
-        &mut p,
-        unsafe shim::sc_host_platform(),
-        ws.root.as_str(),
-        "",
-        &ovf,
-        &ovt,
-        &mut diags,
-        &mut st2,
-    );
+    let ok = recompile_ov(&ws, &mut p, &ovf, &ovt, &mut diags, &mut st2);
     assert(ok && st2.analyzed == 0, "a no-op round");
     let am = mod_of(&p, "/a.spc");
     let bm = mod_of(&p, "/b.spc");
@@ -1029,16 +1003,7 @@ fn main() i32 {
 )";
     ov(&ws, "a.spc", a1, &mut ovf, &mut ovt);
     let mut st = an::RecompileStats {};
-    let ok = an::recompile(
-        &mut p,
-        unsafe shim::sc_host_platform(),
-        ws.root.as_str(),
-        "",
-        &ovf,
-        &ovt,
-        &mut diags,
-        &mut st,
-    );
+    let ok = recompile_ov(&ws, &mut p, &ovf, &ovt, &mut diags, &mut st);
     assert(ok, "demand round");
     let mut rd = Vector::<an::DiagRec>::new();
     let _rp = fresh(&ws, &ovf, &ovt, &mut rd);
@@ -1059,16 +1024,7 @@ fn main() i32 {
     let mut ovt2 = Vector::<String>::new();
     ovt2.push(String::from_str(a2));
     let mut st2 = an::RecompileStats {};
-    let ok2 = an::recompile(
-        &mut p,
-        unsafe shim::sc_host_platform(),
-        ws.root.as_str(),
-        "",
-        &ovf,
-        &ovt2,
-        &mut diags,
-        &mut st2,
-    );
+    let ok2 = recompile_ov(&ws, &mut p, &ovf, &ovt2, &mut diags, &mut st2);
     assert(ok2 && st2.passes == 0 && st2.bodies_back == 0, "a held module serves the next round directly");
     let mut rd2 = Vector::<an::DiagRec>::new();
     let _rp2 = fresh(&ws, &ovf, &ovt2, &mut rd2);

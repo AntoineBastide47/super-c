@@ -57,6 +57,7 @@ pub struct Resolver<'a> {
     pub lint: bool,
     pub lint_decls: Vector<NodeId>, // lets/params declared during resolution (lint only): the unused
     // Pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive.
+    pub bin_spine: Vector<NodeId>, // `resolve_expr`'s stack of left-nested binary nodes (shared by nested walks)
 }
 
 /// A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
@@ -110,39 +111,8 @@ const fn span_is(src: str, s: tok::Span, lit: str) bool {
     return unsafe cstring::memcmp(src.ptr() + s.start as usize, lit.ptr(), n) == 0;
 }
 
-// The BuiltinType index of name `s` (matching ast's enum order), or -1. Pointer/reference forms wrap one
-// of these, which resolves on its own.
-fn builtin_index(src: str, s: tok::Span) i32 {
-    let names: [str; 18] = [
-        "bool",
-        "char",
-        "i8",
-        "i16",
-        "i32",
-        "i64",
-        "isize",
-        "u8",
-        "u16",
-        "u32",
-        "u64",
-        "usize",
-        "f32",
-        "f64",
-        "c32",
-        "c64",
-        "va_list",
-        "void",
-    ];
-    for i in 0..18 {
-        if span_is(src, s, unsafe names[i]) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 fn is_builtin_type(src: str, s: tok::Span) bool {
-    return builtin_index(src, s) >= 0;
+    return bt_of_name(src, s) >= 0;
 }
 
 const fn symbol_key(hash: u32, ns: u8) u64 {
@@ -169,6 +139,7 @@ extend Resolver {
             errors: diag::Errors::new(),
             lint: false,
             lint_decls: Vector::<NodeId>::new(),
+            bin_spine: Vector::<NodeId>::new(),
         };
     }
 
@@ -482,8 +453,18 @@ extend Resolver {
         }
         let pkg = unsafe &*self.package;
         // Join the LONGEST candidate module prefix once; every shorter prefix is a byte prefix of it, so
-        // the probe loop shrinks the viewed length instead of re-joining (and re-allocating) per try.
-        let buf = self.join_segs(&seg[0], nn - 1);
+        // the probe loop shrinks the viewed length instead of re-joining (and re-allocating) per try. A
+        // one-segment prefix is its own source span and needs no join.
+        let buf = if nn > 2 {
+            self.join_segs(&seg[0], nn - 1);
+        } else {
+            String::new();
+        };
+        let prefix = if nn > 2 {
+            buf.as_str().ptr();
+        } else {
+            unsafe (self.source.ptr() + self.name_span(base).start as usize);
+        };
         let mut lens: [usize; 32] = [[0] = 0usize];
         let mut plen: usize = 0;
         i = 0;
@@ -514,7 +495,7 @@ extend Resolver {
                 }
             }
             if !aliased {
-                found = pkg.find(str::from_raw(buf.as_str().ptr(), plen));
+                found = pkg.find(str::from_raw(prefix, plen));
             }
             if found >= 0 {
                 let mid = found as ModuleId;
@@ -536,7 +517,7 @@ extend Resolver {
                             format(
                                 "no public item '{}' in module '{}'",
                                 diag::span_str(self.source, dn.start, dn.end),
-                                str::from_raw(buf.as_str().ptr(), plen),
+                                str::from_raw(prefix, plen),
                             ),
                         );
                         self.errors.note(format("the module was found, but this item is missing or not public"));
@@ -1033,7 +1014,7 @@ extend Resolver {
                         let tparts = self.ast.at_const(ex.target_type).as_data.type_path.parts;
                         if tparts.len == 1 {
                             let seg0 = self.child(tparts, 0);
-                            let b = builtin_index(self.source, self.name_span(seg0));
+                            let b = bt_of_name(self.source, self.name_span(seg0));
                             let pkg = unsafe &*self.package;
                             let mut bd = NODE_NONE;
                             if b >= 0 {
@@ -1259,10 +1240,26 @@ extend Resolver {
                     self.resolve_expr(self.child(kids, i));
                 }
             },
-            NODE_BINARY | NODE_ASSIGNMENT => {
+            NODE_ASSIGNMENT => {
                 let bd = self.ast.at_const(id).as_data.binary;
                 self.resolve_expr(bd.left);
                 self.resolve_expr(bd.right);
+            },
+            NODE_BINARY => {
+                // A left-associative chain (`x + x + ... + x`) nests on its left operand: descend that
+                // spine with a loop, then resolve the right operands innermost first (source order),
+                // so the stack depth does not grow with the chain.
+                let base = self.bin_spine.len();
+                let mut n = id;
+                while self.ast.at_const(n).kind == NodeKind::NODE_BINARY {
+                    self.bin_spine.push(n);
+                    n = self.ast.at_const(n).as_data.binary.left;
+                }
+                self.resolve_expr(n);
+                while self.bin_spine.len() > base {
+                    let b = self.bin_spine.pop().unwrap();
+                    self.resolve_expr(self.ast.at_const(b).as_data.binary.right);
+                }
             },
             NODE_CALL => {
                 let cd = self.ast.at_const(id).as_data.call;
@@ -1409,21 +1406,8 @@ extend Resolver {
         }
         let obj_kind = self.ast.at_const(mb.object).kind;
         if mb.path && obj_kind == NodeKind::NODE_IDENTIFIER {
-            let nm = self.name_is_module(self.name_span(mb.object));
-            if nm.found {
-                let mn = self.name_span(mb.member);
-                let pkg = unsafe &*self.package;
-                let nmp = (unsafe (self.source.ptr() + mn.start as usize)) as *const char;
-                let nl = (mn.end - mn.start) as usize;
-                let decl = pkg.lookup(nm.mid, str::from_raw(nmp as *const u8, nl), false); // a value (function) export takes priority
-                if decl != NODE_NONE {
-                    self.ast.set_resolution_def(id, DefId { module: nm.mid, node: decl });
-                } else {
-                    self.resolve_module_decl(id, nm.mid, mn, true, "item");
-                }
-            } else {
-                self.resolve_ref(mb.object, mb.object, Namespace::NS_TYPE, "type");
-            }
+            // resolve_qualified_member already tried the identifier as an imported module name.
+            self.resolve_ref(mb.object, mb.object, Namespace::NS_TYPE, "type");
         } else {
             // Member name needs a type; deferred to the type checker.
             self.resolve_expr(mb.object);
@@ -1660,8 +1644,8 @@ extend Resolver {
             if t0 != 0 {
                 // Item-schedule measurement: the resolve cost of this item.
                 let pm = self.package as *mut loader::Package;
-                unsafe pm.icost_rs.push(self.ast.module as u64 << 32 | cid as u64);
-                unsafe pm.icost_rs.push(std::parallel::platform::now_ns() - t0);
+                unsafe (*pm).icost_rs.push(self.ast.module as u64 << 32 | cid as u64);
+                unsafe (*pm).icost_rs.push(std::parallel::platform::now_ns() - t0);
             }
         }
         self.scope_exit();

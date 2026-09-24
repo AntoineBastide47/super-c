@@ -121,13 +121,15 @@ extend<T> SliceMut<T> {
         return Option::<&T>::Some(&unsafe self.ptr[i]);
     }
 
-    /// Overwrite the element at `i`: panics when `i >= len`. Takes `&self`: a `[]mut T` view grants
+    /// Overwrite the element at `i`, freeing the replaced one: panics when `i >= len`. Takes `&self`: a `[]mut T` view grants
     /// element mutation through its internal `*mut T` regardless of the binding's mutability, exactly
     /// like the `s[i] = v` index-assignment it mirrors.
     pub const fn set(self: &SliceMut<T>, i: usize, value: T) {
         if i >= self.len {
             panic("SliceMut::set: index out of bounds");
         }
+        // A store through the raw pointer frees nothing, so the replaced element is freed first.
+        unsafe self.ptr[i].free();
         unsafe self.ptr[i] = value;
     }
 

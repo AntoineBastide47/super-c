@@ -5,7 +5,7 @@ import ast::ast as *;
 import ir::core as ir;
 import module::loader as loader;
 
-// The five prelude length-carrying views whose safe access must address through an explicit
+// The six prelude length-carrying views whose safe access must address through an explicit
 // check result. Looked up once per verified body; a null package skips the def-chain rules
 // (structural-only verification, used by unit fixtures).
 struct SafeViews {
@@ -142,7 +142,7 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
             if r.a as usize >= b.operands.len() {
                 return "rvalue-operand-out-of-range";
             }
-        } else if r.kind == ir::RV_BINARY {
+        } else if r.kind == ir::RV_BINARY || r.kind == ir::RV_REPEAT {
             if r.a as usize >= b.operands.len() || r.b as usize >= b.operands.len() {
                 return "rvalue-operand-out-of-range";
             }
@@ -347,7 +347,6 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
                 fail = "slice-end-not-validated";
             }
         }
-        marks.free();
         if fail.len() != 0 {
             return fail;
         }

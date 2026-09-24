@@ -3,9 +3,8 @@
 // caret-annotated terminal block held in a parallel `rendered_*` store (it never rewrites a stored
 // record), and `log` prints warnings then errors. The LSP and the build system read the records
 // directly; nothing parses rendered text back into data.
-// LintFix rows are the structured suggestion store: machine-applicable repairs for `lint --fix`
-// (kind 3 carries generated text via `fix_texts`); `fixable_errs` counts errors carrying one, so
-// --fix may apply despite errors only when EVERY error is fixable.
+// LintFix rows are the structured suggestion store: machine-applicable repairs for `lint --fix`, each
+// attached to the warning it repairs (kind 4 carries generated text via `fix_texts`).
 import string;
 
 /// Per-category cap on recorded diagnostics; emit/warn silently drop rows past it.
@@ -21,16 +20,15 @@ pub const NOTE_NONE: u32 = 0xFFFFFFFF;
 
 /// A machine-applicable fix for a lint diagnostic: kind 0 deletes [start, end); kind 1 inserts '_'
 /// before `start` (unused-binding rename); kind 2 inserts 'const ' before `start` (const-fn
-/// suggestion); kind 3 inserts `fix_texts[text]` before `start` (generated code, e.g. a Free impl);
-/// kind 4 replaces [start, end) with `fix_texts[text]` (an edit no delete/insert pair expresses, e.g.
-/// unwrapping `(*e)` to `e`). Collected alongside `warn` and applied by `lint --fix`; `warn` indexes
-/// the warning it repairs (the LSP turns those into quick fixes; error-attached kind-3 fixes stay CLI-only).
+/// suggestion); kind 4 replaces [start, end) with `fix_texts[text]` (an edit no delete/insert pair
+/// expresses, e.g. unwrapping `(*e)` to `e`). Collected alongside `warn` and applied by `lint --fix`;
+/// `warn` indexes the warning it repairs (the LSP turns those into quick fixes).
 pub struct LintFix {
     pub start: u32,
     pub end: u32,
     pub kind: u8,
     pub warn: u32, // index into `warns`; 0xFFFFFFFF = unattached
-    pub text: u32, // index into `fix_texts` (kind 3); 0xFFFFFFFF = none
+    pub text: u32, // index into `fix_texts` (kind 4); 0xFFFFFFFF = none
     pub module: u32, // owning ModuleId, stamped when fixes drain into the driver's shared vector (0 inside Errors)
 }
 
@@ -63,8 +61,7 @@ pub struct Errors {
     pub rendered_errors: Vector<String>, // finalize's terminal blocks, parallel to the (deduped) records
     pub rendered_warns: Vector<String>,
     pub fixes: Vector<LintFix>,
-    pub fix_texts: Vector<String>, // generated insertion payloads for kind-3 fixes
-    pub fixable_errs: u32, // errors carrying a machine fix; `lint --fix` may proceed when EVERY error is fixable
+    pub fix_texts: Vector<String>, // generated replacement payloads for kind-4 fixes
     pub seq: u32, // next emission sequence
 }
 
@@ -90,7 +87,6 @@ extend Errors {
             rendered_warns: Vector::<String>::new(),
             fixes: Vector::<LintFix>::new(),
             fix_texts: Vector::<String>::new(),
-            fixable_errs: 0,
             seq: 0,
         };
     }
@@ -214,14 +210,12 @@ extend Errors {
             }
             self.fixes.push(f);
         }
-        self.fixable_errs = self.fixable_errs + o.fixable_errs;
         self.seq = self.seq + o.seq;
         o.errors.clear();
         o.warns.clear();
         o.note_pool.clear();
         o.fixes.clear();
         o.fix_texts.clear();
-        o.fixable_errs = 0;
         o.seq = 0;
     }
 
@@ -400,26 +394,7 @@ extend Errors {
             }
         }
         self.errors = uniq;
-        let len = source.len();
-        let mut line_starts = Vector::<u32>::new();
-        line_starts.reserve(len / 16);
-        line_starts.push(0);
-        let mut i: usize = 0;
-        while i < len {
-            let b = source[i];
-            if b == b'\n' {
-                i = i + 1;
-                line_starts.push(i as u32);
-            } else if b == b'\r' {
-                i = i + 1;
-                if i < len && source[i] == b'\n' {
-                    i = i + 1;
-                }
-                line_starts.push(i as u32);
-            } else {
-                i = i + 1;
-            }
-        }
+        let line_starts = line_starts_of(source);
         let mut re = Vector::<String>::new();
         for k in 0..self.errors.len() {
             re.push(render(self.errors.at(k), source, &line_starts, file, &self.note_pool, "error"));
@@ -452,6 +427,32 @@ extend Errors {
             }
         }
     }
+}
+
+// The start offset of every line of `source`: after `\n`, `\r\n`, or a lone `\r`.
+@c.cold
+fn line_starts_of(source: str) Vector<u32> {
+    let len = source.len();
+    let mut line_starts = Vector::<u32>::new();
+    line_starts.reserve(len / 16);
+    line_starts.push(0);
+    let mut i: usize = 0;
+    while i < len {
+        let b = source[i];
+        if b == b'\n' {
+            i = i + 1;
+            line_starts.push(i as u32);
+        } else if b == b'\r' {
+            i = i + 1;
+            if i < len && source[i] == b'\n' {
+                i = i + 1;
+            }
+            line_starts.push(i as u32);
+        } else {
+            i = i + 1;
+        }
+    }
+    return line_starts;
 }
 
 fn line_index(line_starts: &Vector<u32>, off: u32) usize {
@@ -573,25 +574,7 @@ fn render(d: &Diagnostic, source: str, line_starts: &Vector<u32>, file: str, poo
 /// pass cannot reach another file's source. Builds its own line index (cold path).
 @c.cold
 pub fn render_site(source: str, file: str, off: u32, span: u32) String {
-    let mut line_starts = Vector::<u32>::new();
-    line_starts.push(0);
-    let len = source.len();
-    let mut i: usize = 0;
-    while i < len {
-        let b = source[i];
-        if b == 10 {
-            i = i + 1;
-            line_starts.push(i as u32);
-        } else if b == 13 {
-            i = i + 1;
-            if i < len && source[i] == 10 {
-                i = i + 1;
-            }
-            line_starts.push(i as u32);
-        } else {
-            i = i + 1;
-        }
-    }
+    let line_starts = line_starts_of(source);
     let mut out = String::new();
     push_loc_block(&mut out, source, &line_starts, off, span, file);
     return out;

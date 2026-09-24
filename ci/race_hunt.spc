@@ -474,8 +474,8 @@ fn hunt_park_storm() i64 {
                         // Some parks end by their deadline, some by an unpark, some find the word already
                         // changed and never sleep.
                         unsafe sc_runtime::sc_rt_park(w, 0, 20000);
-                        if atomic::load_i32(w, 1) != 0 {
-                            atomic::store_i32(w, 0, 2);
+                        if unsafe atomic::load_i32(w, 1) != 0 {
+                            unsafe atomic::store_i32(w, 0, 2);
                             let _ = k.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
                         }
                     }
@@ -487,7 +487,7 @@ fn hunt_park_storm() i64 {
     for _r in 0..300 {
         for t in 0..8usize {
             let w = (base + t * stride * sizeof(i32)) as *mut i32;
-            atomic::store_i32(w, 1, 2);
+            unsafe atomic::store_i32(w, 1, 2);
             if t % 2 == 0 {
                 unsafe sc_runtime::sc_rt_unpark_one(w);
             } else {

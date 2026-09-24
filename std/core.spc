@@ -9,9 +9,9 @@
 // every value equal to itself (including NaN), so sorting and Map/Set keys work: note `-0.0 != 0.0`
 // under this order, unlike `==`. Complex numbers stay out: they admit no total order.
 
-/// Branch-layout hint: this condition is expected to be TRUE. Semantically the identity function
-/// (and const-evaluable); codegen lowers direct calls to SC_LIKELY (__builtin_expect on GCC/Clang,
-/// the bare condition elsewhere), which steers hot-path block placement: not the hardware predictor.
+/// Branch-layout hint: this condition is expected to be TRUE. The identity function (and
+/// const-evaluable): the inliner removes the call and the emitted C carries no branch hint, so the
+/// call records intent only.
 pub const fn likely(c: bool) bool {
     return c;
 }
@@ -384,6 +384,9 @@ extend u32 as Default {
 extend u32 as Free {
     pub fn free(self: &mut u32) {}
 }
+// Restates the derived conformance for the bootstrap compiler, which checks a `T: Copy` bound against
+// written conformances only (the compiler's node-list pool is a `SplitVec<u32>`).
+extend u32 as Copy {}
 
 extend u64 as Eq {
     pub const fn eq(self: &u64, other: &u64) bool {
@@ -1091,11 +1094,11 @@ extend f32 {
     pub const fn is_sign_negative(self: f32) bool {
         return unsafe copysignf(1.0, self) < 0.0;
     }
-    /// Absolute value; MIN wraps to itself.
+    /// Absolute value: clears the sign bit (-0.0 gives +0.0, a NaN stays a NaN).
     pub const fn abs(self: f32) f32 {
         return unsafe fabsf(self);
     }
-    /// -1, 0, or 1 by sign.
+    /// 1.0 when the sign bit is clear (+0.0 included), -1.0 when it is set (-0.0 included); NaN stays NaN.
     pub const fn signum(self: f32) f32 {
         if self.is_nan() {
             return self;
@@ -1295,11 +1298,11 @@ extend f64 {
     pub const fn is_sign_negative(self: f64) bool {
         return unsafe copysign(1.0, self) < 0.0;
     }
-    /// Absolute value; MIN wraps to itself.
+    /// Absolute value: clears the sign bit (-0.0 gives +0.0, a NaN stays a NaN).
     pub const fn abs(self: f64) f64 {
         return unsafe fabs(self);
     }
-    /// -1, 0, or 1 by sign.
+    /// 1.0 when the sign bit is clear (+0.0 included), -1.0 when it is set (-0.0 included); NaN stays NaN.
     pub const fn signum(self: f64) f64 {
         if self.is_nan() {
             return self;
@@ -1515,7 +1518,10 @@ extend<T> UnsafeCell<T> {
     }
     /// Consume the cell and return the contained value.
     pub const fn into_inner(self: UnsafeCell<T>) T {
-        return self.value;
+        // The value is read out bitwise and the emptied cell is abandoned, so its drop never runs.
+        let v = unsafe *self.get();
+        forget(self);
+        return v;
     }
 }
 
@@ -1688,9 +1694,9 @@ extend MethodInfo {
 pub struct TypeInfo {
     pub name: str<'static>,
     pub kind: TypeTag,
+    pub elem: TypeTag, // beside `kind`: two 4-byte tags share one 8-byte slot
     pub size: usize,
     pub align: usize,
-    pub elem: TypeTag,
     pub len: usize,
     pub fields: Slice<'static, FieldInfo>,
     pub variants: Slice<'static, VariantInfo>,

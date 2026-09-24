@@ -48,7 +48,7 @@ inserts its opener at a mark (`String::insert_str`) and appends the closer.
 A memoization cache is only worth adding when the memo probe cost is less than the
 recomputation cost — never blanket-memo every node.
 
-Memos also carry a soundness contract. The typechecker's memo maps (`arity_memo`,
+Memos also carry a soundness contract. The typechecker's memo maps (
 `attributable_memo`, `free_derive_memo`, `free_ext_memo` in
 `src/typechecker/typechecker.spc`) document theirs at the declaration: a TC memo must
 not change type-pool interning, generic-dependent answers are excluded from the cache
@@ -159,9 +159,10 @@ the single largest waste before the keep existed.
 
 ## Pre-size vectors of large records (no doubling chains through the large allocator)
 
-`Vector<Lowerer>` stores about 1.8 KiB per body: the borrow-check `Keep` and the instance
-graph's `kept` both reach 7 MiB for the compiler's own sources. Growing them by doubling
-frees a 3.5 MiB block into a 7 MiB one on every build; macOS malloc kept those freed
+The borrow-check `Keep` and the instance graph's `kept` once stored a whole `Lowerer` per
+body (about 1.8 KiB) and reached 7 MiB each for the compiler's own sources; they now store
+`KeptBody` records (the body and its closures), but the rule stands. Growing such a vector by
+doubling frees a 3.5 MiB block into a 7 MiB one on every build; macOS malloc kept those freed
 large regions mapped and resident (`vmmap --summary`: `MALLOC_LARGE (empty)`), and the
 100-round serial benchmark climbed from 288 to 445 MiB peak RSS once the surrounding
 allocation sequence changed. `Keep::reserve_bodies` (one node-kind count over the

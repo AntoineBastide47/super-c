@@ -59,3 +59,60 @@ fn growth_rehash() {
     }
     assert(ok, "all 100 keys retrievable after growth/rehash");
 }
+
+// Strings longer than the 23-byte inline budget, so every value owns a heap buffer the leak gate sees.
+fn long_str(tag: str) String {
+    let mut s = String::from_str(tag);
+    s.push_str(" padded well past the inline string budget");
+    return s;
+}
+
+// Equality through `equals` (borrowing): `==` between owned Strings does not release its operands.
+fn is_long(s: &String, tag: str) bool {
+    let w = long_str(tag);
+    return s.equals(&w);
+}
+
+// Overwriting a key frees the value it replaces.
+@test
+fn overwrite_frees_the_replaced_value() {
+    let mut m = Map::<i32, String>::new();
+    m.insert(1, long_str("old"));
+    m.insert(1, long_str("new"));
+    let k1: i32 = 1;
+    assert(is_long(m.get(&k1).unwrap(), "new"), "value overwritten");
+}
+
+// Removing an entry frees its stored key; Set::remove frees the element through the same path.
+@test
+fn remove_frees_the_key() {
+    let mut m = Map::<String, i32>::new();
+    m.insert(long_str("a"), 1);
+    m.insert(long_str("b"), 2);
+    let a = long_str("a");
+    let r = m.remove(&a);
+    assert(r.is_some() && r.unwrap() == 1 && m.len() == 1, "removed");
+    let mut s = Set::<String>::new();
+    s.insert(long_str("x"));
+    s.insert(long_str("y"));
+    let x = long_str("x");
+    let y = long_str("y");
+    assert(s.remove(&x) && s.len() == 1 && s.contains(&y), "set remove");
+}
+
+// Default needs no Default key or value: an empty map holds neither.
+struct NoDefault {
+    pub n: i32,
+}
+
+extend NoDefault as Hash {}
+
+extend NoDefault as Eq {}
+
+@test
+fn default_without_default_elements() {
+    let mut m = Map::<NoDefault, NoDefault>::default();
+    m.insert(NoDefault { n: 1 }, NoDefault { n: 2 });
+    let s = Set::<NoDefault>::default();
+    assert(m.len() == 1 && s.is_empty(), "defaulted containers");
+}

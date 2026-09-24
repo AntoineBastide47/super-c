@@ -3,6 +3,9 @@
 ## Atomics
 
 `Atomic<T>` over integer builtins. Every operation takes an explicit `MemoryOrder`.
+`Atomic<T>` is the safe interface; the raw pointer operations in `ffi/atomic.spc`
+(`atomic::load_i32(p, mo)` and the rest) are `unsafe fn`, since the caller must guarantee
+that `p` is valid and naturally aligned.
 
 ```superc
 let counter = Atomic::<u64>::new(0);

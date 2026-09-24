@@ -47,7 +47,10 @@ const char *sc_bs_arch(void) {
 }
 
 /* ---- allocation accounting (see the header for what is counted) ------------------------------------- */
-#if defined(_WIN32) || defined(__wasm__)
+/* Counted only where this file can interpose malloc and forward to the real allocator: macOS (zone API)
+   and glibc (__libc_*). Everywhere else (Windows, wasm, other libcs) the counters stay at zero and
+   `supported` says so. */
+#if !defined(__APPLE__) && !defined(__GLIBC__)
 int sc_bs_alloc_supported(void) { return 0; }
 void sc_bs_alloc_enable(int on) { (void)on; }
 int sc_bs_alloc_enabled(void) { return 0; }
@@ -175,9 +178,6 @@ void *realloc(void *p, size_t n) {
   return __libc_realloc(p, n);
 }
 void free(void *p) { __libc_free(p); }
-#else
-/* Another libc: nothing safe to forward to, so the counters stay at zero and `supported` says so. */
-int sc_bs_alloc_supported_impl_missing;
 #endif
 #endif
 
@@ -256,7 +256,12 @@ int sc_bs_cpu_model(char *buf, size_t cap) {
 #include <sys/wait.h>
 #include <unistd.h>
 
-long long sc_bs_fork(void) { return (long long)fork(); }
+static void sc_bs_child_reset(void);
+long long sc_bs_fork(void) {
+  pid_t pid = fork();
+  if (pid == 0) sc_bs_child_reset();
+  return (long long)pid;
+}
 int sc_bs_wait(long long pid) {
   int st = 0;
   if (waitpid((pid_t)pid, &st, 0) != (pid_t)pid) return -1;
@@ -326,6 +331,8 @@ long long sc_bs_rss_now(void) {
   if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&ri) != 0) return -1;
   return (long long)ri.ri_resident_size;
 }
+/* The rusage counters read here are the calling process's own, so a forked child has nothing to reset. */
+static void sc_bs_child_reset(void) {}
 #else /* Linux and the rest of POSIX */
 #include <dirent.h>
 #include <stdlib.h>
@@ -405,6 +412,12 @@ int sc_bs_cycles_scope(void) {
   if (sc_bs_scope < 0) sc_bs_open();
   return sc_bs_scope;
 }
+/* An inherited event counts the child only once the child exits, so a forked child drops the parent's
+   events and opens its own on the next read. */
+static void sc_bs_child_reset(void) {
+  sc_bs_close_all();
+  sc_bs_scope = -1;
+}
 long long sc_bs_cycles(void) {
   if (sc_bs_cycles_scope() == 0) return 0;
   long long total = 0;
@@ -416,6 +429,7 @@ long long sc_bs_cycles(void) {
   return total;
 }
 #else
+static void sc_bs_child_reset(void) {}
 long long sc_bs_cycles(void) { return 0; }
 int sc_bs_cycles_scope(void) { return 0; }
 #endif

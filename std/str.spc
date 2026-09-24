@@ -54,14 +54,20 @@ extend str {
         return self.ptr;
     }
 
-    /// The byte at `index` (0 <= index < len). No bounds check: the caller owns the index.
+    /// The byte at `index`. Panics unless `index < len`.
     pub const fn byte_at(self: &str, index: usize) u8 {
+        if index >= self.len {
+            panic("str::byte_at: index out of bounds");
+        }
         return unsafe self.ptr[index];
     }
 
-    /// The sub-view of bytes [start, end): allocation-free, it borrows `self`'s bytes. The caller
-    /// keeps `start`/`end` on UTF-8 boundaries (and within bounds).
+    /// The sub-view of bytes [start, end): allocation-free, it borrows `self`'s bytes. Panics unless
+    /// `start <= end <= len`; the caller keeps `start`/`end` on UTF-8 boundaries.
     pub const fn slice(self: &str, start: usize, end: usize) str {
+        if start > end || end > self.len {
+            panic("str::slice: range out of bounds");
+        }
         return str { ptr: unsafe (self.ptr + start), len: end - start };
     }
 
@@ -267,8 +273,8 @@ extend str as Default {
 }
 
 // Index conformance: `s[i]` borrows the byte at `i`; `s[lo..hi]`; any range form, `..=` including the
-// end byte, an open end meaning `len()`: is the sub-view `slice(lo, hi)`. Byte-addressed and unchecked:
-// the caller keeps the bounds within `len` and on UTF-8 boundaries, exactly like `byte_at`/`slice`.
+// end byte, an open end meaning `len()`: is the sub-view `slice(lo, hi)`. Byte-addressed: bounds past
+// `len` panic, and the caller keeps them on UTF-8 boundaries, exactly like `byte_at`/`slice`.
 // No IndexMut: a `str` is a read-only view.
 extend str as Index<u8, str> {
     pub const fn index(self: &str, i: usize) &u8 {
@@ -473,54 +479,134 @@ extend str {
         };
     }
 
-    /// Decimal float: `[+|-] digits [. digits] [(e|E) [+|-] digits]`. Computed as an integer mantissa
-    /// scaled by a power of ten: exact for the common cases; the last ulp is not guaranteed for
-    /// extreme magnitudes.
+    /// Decimal float: `[+|-] digits [. digits] [(e|E) [+|-] digits]`, correctly rounded (to nearest,
+    /// ties to even), so it agrees with the C compiler's reading of the same literal. Up to 19
+    /// significant digits and a power of ten within 10^22 take one exact IEEE operation; anything else
+    /// takes exact decimal arithmetic (`DecDigits`).
     pub const fn parse_f64(self: &str) Option<f64> {
+        let mut dec = DecDigits { d: Array::<u8, 800>::new(), nd: 0, dp: 0, trunc: false };
+        let mut neg = false;
+        if !self.parse_decimal(&mut dec, &mut neg) {
+            return Option::<f64>::None;
+        }
+        let mut v: f64 = 0.0;
+        let mut exact = false;
+        if dec.nd <= 19 {
+            let mut mant: u64 = 0;
+            for k in 0..dec.nd {
+                mant = mant * 10 + dec.d[k] as u64;
+            }
+            let e10 = dec.dp - dec.nd as i64;
+            if mant <= 1u64 << 53 && e10 >= -22 && e10 <= 22 {
+                // Both operands are exact (every power of ten up to 10^22 is a double), so the one
+                // multiply or divide is the only rounding.
+                let mut p: f64 = 1.0;
+                let mut k: i64 = 0;
+                while k < e10 || k < 0 - e10 {
+                    p = p * 10.0;
+                    k += 1;
+                }
+                v = if e10 < 0 {
+                    mant as f64 / p;
+                } else {
+                    mant as f64 * p;
+                };
+                exact = true;
+            }
+        }
+        if !exact {
+            v = StrF64Bits { u: dec.to_bits(52, 11) }.f;
+        }
+        if neg {
+            v = -v;
+        }
+        return Option::<f64>::Some(v);
+    }
+
+    /// The f32 twin of `parse_f64`, rounded once from the decimal text (a detour through f64 would
+    /// round twice).
+    pub const fn parse_f32(self: &str) Option<f32> {
+        let mut dec = DecDigits { d: Array::<u8, 800>::new(), nd: 0, dp: 0, trunc: false };
+        let mut neg = false;
+        if !self.parse_decimal(&mut dec, &mut neg) {
+            return Option::<f32>::None;
+        }
+        let mut v: f32 = 0.0;
+        let mut exact = false;
+        if dec.nd <= 19 {
+            let mut mant: u64 = 0;
+            for k in 0..dec.nd {
+                mant = mant * 10 + dec.d[k] as u64;
+            }
+            let e10 = dec.dp - dec.nd as i64;
+            if mant <= 1u64 << 24 && e10 >= -10 && e10 <= 10 {
+                // Every power of ten up to 10^10 is exact in f32.
+                let mut p: f32 = 1.0;
+                let mut k: i64 = 0;
+                while k < e10 || k < 0 - e10 {
+                    p = p * 10.0;
+                    k += 1;
+                }
+                v = if e10 < 0 {
+                    mant as f32 / p;
+                } else {
+                    mant as f32 * p;
+                };
+                exact = true;
+            }
+        }
+        if !exact {
+            v = StrF32Bits { u: dec.to_bits(23, 8) as u32 }.f;
+        }
+        if neg {
+            v = -v;
+        }
+        return Option::<f32>::Some(v);
+    }
+
+    // The float grammar of `parse_f64` read into `dec` (trailing zeros trimmed) and `neg`; false when the
+    // text does not match it.
+    const fn parse_decimal(self: &str, dec: &mut DecDigits, neg: &mut bool) bool {
         let n = self.len;
         if n == 0 {
-            return Option::<f64>::None;
+            return false;
         }
         let mut i: usize = 0;
         let b0 = self.byte_at(0);
-        let neg = b0 == b'-';
-        if neg || b0 == b'+' {
+        *neg = b0 == b'-';
+        if *neg || b0 == b'+' {
             i = 1;
         }
-        let mut mant: u64 = 0;
-        let mut exp10: i64 = 0;
         let mut any = false;
+        let mut seen_dot = false;
         while i < n {
             let b = self.byte_at(i);
+            if b == b'.' && !seen_dot {
+                seen_dot = true;
+                dec.dp = dec.nd as i64;
+                i += 1;
+                continue;
+            }
             if b < b'0' || b > b'9' {
                 break;
             }
             any = true;
-            if mant <= 1_844_674_407_370_955_160u64 {
-                mant = mant * 10 + (b - b'0') as u64;
-            } else {
-                // Mantissa saturated: keep the scale, drop precision.
-                exp10 += 1;
+            if b == b'0' && dec.nd == 0 {
+                // A leading zero only moves the point (it matters after the dot).
+                dec.dp -= 1;
+            } else if dec.nd < DEC_DIGITS {
+                dec.d[dec.nd] = b - b'0';
+                dec.nd += 1;
+            } else if b != b'0' {
+                dec.trunc = true;
             }
             i += 1;
-        }
-        if i < n && self.byte_at(i) == b'.' {
-            i += 1;
-            while i < n {
-                let b = self.byte_at(i);
-                if b < b'0' || b > b'9' {
-                    break;
-                }
-                any = true;
-                if mant <= 1_844_674_407_370_955_160u64 {
-                    mant = mant * 10 + (b - b'0') as u64;
-                    exp10 -= 1;
-                }
-                i += 1;
-            }
         }
         if !any {
-            return Option::<f64>::None;
+            return false;
+        }
+        if !seen_dot {
+            dec.dp = dec.nd as i64;
         }
         if i < n && (self.byte_at(i) == b'e' || self.byte_at(i) == b'E') {
             i += 1;
@@ -543,38 +629,252 @@ extend str {
                 i += 1;
             }
             if !eany {
-                return Option::<f64>::None;
+                return false;
             }
-            exp10 += (switch eneg {
-                true => 0 - e,
-                false => e,
-            });
+            if eneg {
+                dec.dp -= e;
+            } else {
+                dec.dp += e;
+            }
         }
         if i != n {
-            return Option::<f64>::None;
+            return false;
         }
-        let mut v = mant as f64;
-        let mut e = exp10;
-        while e > 0 {
-            v = v * 10.0;
-            e -= 1;
+        dec.trim();
+        return true;
+    }
+}
+
+union StrF64Bits {
+    pub u: u64,
+    pub f: f64,
+}
+
+union StrF32Bits {
+    pub u: u32,
+    pub f: f32,
+}
+
+// Digits kept exactly by the decimal slow path. 800 covers every digit that can decide the rounding of
+// an f64 (the longest exact binary fraction has 767 significant digits); digits past it only set `trunc`,
+// which still settles an apparent tie upward.
+const DEC_DIGITS: usize = 800;
+
+// For a decimal point at dp (value below 10^dp), a power of two that keeps the value at least 1/2 after
+// dividing by it (from Go's strconv, like the algorithm below).
+const DEC_POW2: [i64; 9] = [1, 3, 6, 9, 13, 16, 19, 23, 26];
+
+// Exact decimal arithmetic for correctly rounded float parsing: the simple decimal conversion algorithm
+// of Go's strconv. The value is 0.d[0]d[1]..d[nd-1] * 10^dp with digit values 0..=9 and no leading or
+// trailing zero digit; nd == 0 is zero. It is scaled by exact powers of two into [1/2, 1), then shifted
+// by the significand width, and the integer part is rounded to nearest even.
+// (Fields `pub` only so the parser methods on `str` reach them; the type itself is module-private.)
+struct DecDigits {
+    pub d: Array<u8, 800>,
+    pub nd: usize,
+    pub dp: i64,
+    pub trunc: bool, // nonzero digits were dropped past DEC_DIGITS
+}
+
+extend DecDigits {
+    const fn trim(self: &mut DecDigits) {
+        while self.nd > 0 && self.d[self.nd - 1] == 0 {
+            self.nd -= 1;
         }
-        while e < 0 {
-            v = v / 10.0;
-            e += 1;
+        if self.nd == 0 {
+            self.dp = 0;
         }
-        if neg {
-            v = 0.0 - v;
-        }
-        return Option::<f64>::Some(v);
     }
 
-    /// `parse_f64` narrowed to f32.
-    pub const fn parse_f32(self: &str) Option<f32> {
-        return switch self.parse_f64() {
-            Some(v) => Option::<f32>::Some(v as f32),
-            None => Option::<f32>::None,
-        };
+    // Divide by 2^k, 1 <= k <= 60 (so n * 10 below stays within 64 bits). Requires a nonzero value.
+    const fn shr(self: &mut DecDigits, k: u64) {
+        let mut r: usize = 0;
+        let mut w: usize = 0;
+        let mut n: u64 = 0;
+        // Enough leading digits to produce the first output digit.
+        while n >> k == 0 {
+            if r >= self.nd {
+                while n >> k == 0 {
+                    n = n * 10;
+                    r += 1;
+                }
+                break;
+            }
+            n = n * 10 + self.d[r] as u64;
+            r += 1;
+        }
+        self.dp -= r as i64 - 1;
+        let mask = (1u64 << k) - 1;
+        while r < self.nd {
+            let c = self.d[r] as u64;
+            self.d[w] = (n >> k) as u8;
+            w += 1;
+            n = (n & mask) * 10 + c;
+            r += 1;
+        }
+        while n > 0 {
+            let dig = n >> k;
+            n = n & mask;
+            if w < DEC_DIGITS {
+                self.d[w] = dig as u8;
+                w += 1;
+            } else if dig > 0 {
+                self.trunc = true;
+            }
+            n = n * 10;
+        }
+        self.nd = w;
+        self.trim();
+    }
+
+    // Multiply by 2^k, 1 <= k <= 60: the carry stays below 2^60, so n stays within 64 bits. The product
+    // is written least significant digit first from the end of `out` (at most 19 digits longer).
+    const fn shl(self: &mut DecDigits, k: u64) {
+        let mut out = Array::<u8, 820>::new();
+        let mut w: usize = 820;
+        let mut n: u64 = 0;
+        let mut r = self.nd;
+        while r > 0 {
+            r -= 1;
+            n = n + (self.d[r] as u64 << k);
+            w -= 1;
+            out[w] = (n % 10) as u8;
+            n = n / 10;
+        }
+        while n > 0 {
+            w -= 1;
+            out[w] = (n % 10) as u8;
+            n = n / 10;
+        }
+        let cnt = 820 - w;
+        self.dp += (cnt - self.nd) as i64;
+        let mut keep = cnt;
+        if keep > DEC_DIGITS {
+            keep = DEC_DIGITS;
+        }
+        for j in 0..cnt {
+            if j < keep {
+                self.d[j] = out[w + j];
+            } else if out[w + j] != 0 {
+                self.trunc = true;
+            }
+        }
+        self.nd = keep;
+        self.trim();
+    }
+
+    // Multiply by 2^k (k > 0) or divide by 2^-k (k < 0), in steps of at most 60 bits.
+    const fn shift(self: &mut DecDigits, k: i64) {
+        if self.nd == 0 {
+            return;
+        }
+        let mut kk = k;
+        while kk > 60 {
+            self.shl(60);
+            kk -= 60;
+        }
+        while kk < -60 {
+            self.shr(60);
+            kk += 60;
+        }
+        if kk > 0 {
+            self.shl(kk as u64);
+        } else if kk < 0 {
+            self.shr((0 - kk) as u64);
+        }
+    }
+
+    // Whether cutting the digits at index i rounds up: past the half, or exactly at it with an odd digit
+    // before the cut or dropped nonzero digits after it.
+    const fn round_up_at(self: &DecDigits, i: i64) bool {
+        if i < 0 || i >= self.nd as i64 {
+            return false;
+        }
+        let u = i as usize;
+        if self.d[u] == 5 && u + 1 == self.nd {
+            if self.trunc {
+                return true;
+            }
+            return u > 0 && self.d[u - 1] % 2 == 1;
+        }
+        return self.d[u] >= 5;
+    }
+
+    // The integer part, rounded to nearest even. The caller keeps it below 2^64.
+    const fn rounded_integer(self: &DecDigits) u64 {
+        let mut n: u64 = 0;
+        let mut i: i64 = 0;
+        while i < self.dp {
+            n = n * 10;
+            if i < self.nd as i64 {
+                n = n + self.d[i as usize] as u64;
+            }
+            i += 1;
+        }
+        if self.round_up_at(self.dp) {
+            n += 1;
+        }
+        return n;
+    }
+
+    // The IEEE binary encoding (sign bit clear) with `mbits` stored fraction bits and `ebits` exponent
+    // bits, correctly rounded; infinity past the largest finite value. Consumes the digits.
+    const fn to_bits(self: &mut DecDigits, mbits: u64, ebits: u64) u64 {
+        let bias: i64 = 1 - (1i64 << (ebits - 1) as i64);
+        let emask = (1u64 << ebits) - 1;
+        let inf = emask << mbits;
+        if self.nd == 0 || self.dp < -330 {
+            return 0;
+        }
+        if self.dp > 310 {
+            return inf;
+        }
+        // Scale into [1/2, 1), tracking the binary exponent.
+        let mut exp: i64 = 0;
+        while self.dp > 0 {
+            let n: i64 = if self.dp >= 9 {
+                27;
+            } else {
+                unsafe DEC_POW2[self.dp as usize];
+            };
+            self.shift(0 - n);
+            exp += n;
+        }
+        while self.dp < 0 || self.dp == 0 && self.d[0] < 5 {
+            let n: i64 = if 0 - self.dp >= 9 {
+                27;
+            } else {
+                unsafe DEC_POW2[(0 - self.dp) as usize];
+            };
+            self.shift(n);
+            exp -= n;
+        }
+        // [1/2, 1) is [1, 2) one exponent down.
+        exp -= 1;
+        if exp < bias + 1 {
+            // Subnormal: denormalize to the minimum exponent.
+            let n = bias + 1 - exp;
+            self.shift(0 - n);
+            exp += n;
+        }
+        if exp - bias >= emask as i64 {
+            return inf;
+        }
+        self.shift(1 + mbits as i64);
+        let mut mant = self.rounded_integer();
+        if mant == 2u64 << mbits {
+            // Rounding carried into a new bit.
+            mant = mant >> 1;
+            exp += 1;
+            if exp - bias >= emask as i64 {
+                return inf;
+            }
+        }
+        if (mant & 1u64 << mbits) == 0 {
+            // No implicit bit: a subnormal, encoded with a zero exponent field.
+            exp = bias;
+        }
+        return mant & (1u64 << mbits) - 1 | ((exp - bias) as u64 & emask) << mbits;
     }
 }
 

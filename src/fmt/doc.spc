@@ -2,19 +2,20 @@
 // tree of layout intents; the renderer chooses flat or broken form per Group by measuring whether the
 // flat form fits the remaining line width. Pool-allocated exactly like the Ast arena: DocId indices
 // into a flat Vector<DocNode>, Concat children as ranges into a flat Vector<DocId>. Nodes are
-// immutable once created, so DocIds may be shared (join() reuses one separator id); the flat width of
-// every node is memoized AT CREATION (children always exist before parents), making rendering linear.
+// immutable once created, so DocIds may be shared (the four break kinds are single shared nodes); the
+// flat width of every node is memoized AT CREATION (children always exist before parents), making
+// rendering linear. A node is 16 bytes: static texts live in a side table the node indexes.
 
 /// Index into `DocPool.docs`; 0 is the shared Nil.
 pub type DocId = u32;
 
 pub const W_INF: u32 = 0xFFFFFFFFu32; // "contains a hard break": never fits flat
 
-/// Layout intent of one node; the trailing phrases say what `a`, `b`, and `s` hold.
+/// Layout intent of one node; the trailing phrases say what `a` and `b` hold.
 pub enum DocKind {
     DOC_NIL,
     DOC_TEXT_SPAN, // a: start, b: end (byte slice of the source)
-    DOC_TEXT_STR, // s: static text (keywords, punctuation)
+    DOC_TEXT_STR, // a: index of the static text (keywords, punctuation) in `strs`
     DOC_LINE, // space when flat, break+indent when broken
     DOC_SOFTLINE, // nothing when flat, break+indent when broken
     DOC_HARDLINE, // always a break
@@ -22,24 +23,30 @@ pub enum DocKind {
     DOC_CONCAT, // a: first child index in kids, b: child count
     DOC_INDENT, // a: child
     DOC_GROUP, // a: child
-    DOC_IFBREAK, // s: text when the enclosing group broke, a: 1 if a space when flat else 0
+    DOC_IFBREAK, // a: 1 if a space when flat else 0, b: index in `strs` of the text when the group broke
 }
 
 /// One immutable layout node; `w` is the memoized flat width (W_INF when it can never be flat).
-pub struct DocNode<'a> {
-    pub kind: DocKind,
+pub struct DocNode {
+    pub kind: u8, // a DocKind
     pub a: u32,
     pub b: u32,
     pub w: u32, // memoized flat width
-    pub s: str<'a>,
 }
 
 /// Arena of layout nodes for one source; also the renderer.
 pub struct DocPool<'a> {
-    pub docs: Vector<DocNode<'a>>,
+    pub docs: Vector<DocNode>,
     pub kids: Vector<DocId>,
+    pub strs: Vector<str<'a>>, // static texts of DOC_TEXT_STR and DOC_IFBREAK nodes
     pub src: *const u8, // backing bytes for DOC_TEXT_SPAN
 }
+
+// The shared break nodes every pool creates after Nil (id 0).
+const LINE_ID: DocId = 1;
+const SOFTLINE_ID: DocId = 2;
+const HARDLINE_ID: DocId = 3;
+const BLANKLINE_ID: DocId = 4;
 
 /// Columns added per DOC_INDENT level.
 pub const INDENT_WIDTH: i32 = 4;
@@ -84,9 +91,18 @@ extend Renderer {
 extend DocPool {
     /// An empty pool over `src`, the byte buffer DOC_TEXT_SPAN nodes slice. `src` must outlive the pool.
     pub fn new<'a>(src: *const u8) DocPool<'a> {
-        let mut p = DocPool { docs: Vector::<DocNode>::new(), kids: Vector::<DocId>::new(), src: src };
-        // Index 0 is the shared Nil.
-        p.docs.push(DocNode { kind: DocKind::DOC_NIL, a: 0, b: 0, w: 0, s: "" });
+        let mut p = DocPool {
+            docs: Vector::<DocNode>::new(),
+            kids: Vector::<DocId>::new(),
+            strs: Vector::<str>::new(),
+            src: src,
+        };
+        // Index 0 is the shared Nil, then the shared break nodes (LINE_ID..BLANKLINE_ID).
+        p.docs.push(DocNode { kind: DocKind::DOC_NIL as u8, a: 0, b: 0, w: 0 });
+        p.docs.push(DocNode { kind: DocKind::DOC_LINE as u8, a: 0, b: 0, w: 1 });
+        p.docs.push(DocNode { kind: DocKind::DOC_SOFTLINE as u8, a: 0, b: 0, w: 0 });
+        p.docs.push(DocNode { kind: DocKind::DOC_HARDLINE as u8, a: 0, b: 0, w: W_INF });
+        p.docs.push(DocNode { kind: DocKind::DOC_BLANKLINE as u8, a: 0, b: 0, w: W_INF });
         return p;
     }
 
@@ -101,46 +117,53 @@ extend DocPool {
         return 0;
     }
 
+    // Store a static text and return its `strs` index.
+    fn intern(self: &mut Self, s: str) u32 {
+        self.strs.push(s);
+        return (self.strs.len() - 1) as u32;
+    }
+
     /// Static text (keywords, punctuation). The str must outlive the pool (string literals do).
     pub fn txt(self: &mut Self, s: str) DocId {
-        return self.push(DocNode { kind: DocKind::DOC_TEXT_STR, a: 0, b: 0, w: s.len() as u32, s: s });
+        let i = self.intern(s);
+        return self.push(DocNode { kind: DocKind::DOC_TEXT_STR as u8, a: i, b: 0, w: s.len() as u32 });
     }
 
     /// A byte range of the source (identifiers, literals, comments).
     pub fn span(self: &mut Self, start: u32, end: u32) DocId {
-        return self.push(DocNode { kind: DocKind::DOC_TEXT_SPAN, a: start, b: end, w: end - start, s: "" });
+        return self.push(DocNode { kind: DocKind::DOC_TEXT_SPAN as u8, a: start, b: end, w: end - start });
     }
 
     /// A space when flat, a break plus indent when the enclosing group breaks.
-    pub fn line(self: &mut Self) DocId {
-        return self.push(DocNode { kind: DocKind::DOC_LINE, a: 0, b: 0, w: 1, s: "" });
+    pub const fn line(self: &Self) DocId {
+        return LINE_ID;
     }
 
     /// Nothing when flat, a break plus indent when the enclosing group breaks.
-    pub fn softline(self: &mut Self) DocId {
-        return self.push(DocNode { kind: DocKind::DOC_SOFTLINE, a: 0, b: 0, w: 0, s: "" });
+    pub const fn softline(self: &Self) DocId {
+        return SOFTLINE_ID;
     }
 
     /// An unconditional break; forces every enclosing group to break.
-    pub fn hardline(self: &mut Self) DocId {
-        return self.push(DocNode { kind: DocKind::DOC_HARDLINE, a: 0, b: 0, w: W_INF, s: "" });
+    pub const fn hardline(self: &Self) DocId {
+        return HARDLINE_ID;
     }
 
     /// An unconditional break preceded by one empty line; forces every enclosing group to break.
-    pub fn blankline(self: &mut Self) DocId {
-        return self.push(DocNode { kind: DocKind::DOC_BLANKLINE, a: 0, b: 0, w: W_INF, s: "" });
+    pub const fn blankline(self: &Self) DocId {
+        return BLANKLINE_ID;
     }
 
     /// `child` with every break inside it indented one more level.
     pub fn indent(self: &mut Self, child: DocId) DocId {
         let w = self.docs.at(child as usize).w;
-        return self.push(DocNode { kind: DocKind::DOC_INDENT, a: child, b: 0, w: w, s: "" });
+        return self.push(DocNode { kind: DocKind::DOC_INDENT as u8, a: child, b: 0, w: w });
     }
 
     /// A layout choice point: `child` renders flat when it fits the remaining width, else broken.
     pub fn group(self: &mut Self, child: DocId) DocId {
         let w = self.docs.at(child as usize).w;
-        return self.push(DocNode { kind: DocKind::DOC_GROUP, a: child, b: 0, w: w, s: "" });
+        return self.push(DocNode { kind: DocKind::DOC_GROUP as u8, a: child, b: 0, w: w });
     }
 
     /// `s` when the enclosing group broke; when flat: a space if flat_space, else nothing.
@@ -152,37 +175,48 @@ extend DocPool {
             fw = 1;
             fs = 1;
         }
-        return self.push(DocNode { kind: DocKind::DOC_IFBREAK, a: fs, b: 0, w: fw, s: s });
+        let i = self.intern(s);
+        return self.push(DocNode { kind: DocKind::DOC_IFBREAK as u8, a: fs, b: i, w: fw });
     }
 
-    /// Concatenate `parts` (borrowed; ids are copied out). Children land contiguously in kids.
-    pub fn concat(self: &mut Self, parts: &Vector<DocId>) DocId {
+    /// Concatenate `parts[from..]` (borrowed; ids are copied out; `from` lets a caller concatenate the tail
+    /// of a scratch stack). Children land contiguously in kids. No part is Nil and one part is that part
+    /// itself: neither needs a node.
+    pub fn concat(self: &mut Self, parts: &Vector<DocId>, from: usize) DocId {
+        let n = parts.len() - from;
+        if n == 0 {
+            return self.nil();
+        }
+        if n == 1 {
+            return parts[from];
+        }
         let start = self.kids.len() as u32;
         let mut w: u32 = 0;
-        for i in 0..parts.len() {
+        for i in from..parts.len() {
             let c = *parts.at(i);
             self.kids.push(c);
             w = wadd(w, self.docs.at(c as usize).w);
         }
-        return self.push(DocNode { kind: DocKind::DOC_CONCAT, a: start, b: parts.len() as u32, w: w, s: "" });
+        return self.push(DocNode { kind: DocKind::DOC_CONCAT as u8, a: start, b: n as u32, w: w });
     }
 
     fn render_doc(self: &Self, r: &mut Renderer, id: DocId, indent: i32, flat: bool) {
         let n = *self.docs.at(id as usize);
-        switch n.kind {
+        switch n.kind as DocKind {
             DOC_NIL => {},
             DOC_TEXT_SPAN => {
                 let len = (n.b - n.a) as usize;
-                r.out.push_bytes(unsafe (self.src + n.a as usize), len);
+                unsafe (*r.out).push_bytes(unsafe (self.src + n.a as usize), len);
                 r.col = r.col + len as i32;
             },
             DOC_TEXT_STR => {
-                r.out.push_str(n.s);
-                r.col = r.col + n.s.len() as i32;
+                let t = self.strs[n.a as usize];
+                unsafe (*r.out).push_str(t);
+                r.col = r.col + t.len() as i32;
             },
             DOC_LINE => {
                 if flat {
-                    r.out.push_byte(b' ');
+                    unsafe (*r.out).push_byte(b' ');
                     r.col = r.col + 1;
                 } else {
                     r.newline(indent, false);
@@ -222,12 +256,13 @@ extend DocPool {
             DOC_IFBREAK => {
                 if flat {
                     if n.a == 1 {
-                        r.out.push_byte(b' ');
+                        unsafe (*r.out).push_byte(b' ');
                         r.col = r.col + 1;
                     }
                 } else {
-                    r.out.push_str(n.s);
-                    r.col = r.col + n.s.len() as i32;
+                    let t = self.strs[n.b as usize];
+                    unsafe (*r.out).push_str(t);
+                    r.col = r.col + t.len() as i32;
                 }
             },
         };

@@ -59,6 +59,11 @@ extend<T> ChannelState<T> {
             self.cap = ncap;
             return;
         }
+        self.resize(ncap);
+    }
+    /// Move the buffered items to a fresh heap ring of `ncap` slots, rewound to index 0. Under the state
+    /// lock, with `count <= ncap`. `pub` for linkage, like `grow`.
+    pub fn resize(self: &mut ChannelState<T>, ncap: usize) {
         let mut g = Global {};
         let ns = (unsafe g.alloc(ncap * sizeof(T), alignof(T))) as *mut T;
         for i in 0..self.count {
@@ -86,13 +91,19 @@ extend<T> ChannelState<T> {
         unsafe self.slots[idx] = value;
         self.count = self.count + 1;
     }
-    /// Take the oldest item under the lock; the caller checked there is one. `pub` for linkage.
+    /// Take the oldest item under the lock; the caller checked there is one. A heap ring that a burst grew
+    /// is halved once three quarters of it are free, as the timer heap is: the hysteresis keeps a push and
+    /// a pop at the boundary from resizing every time, and the copy is amortized over the pops that emptied
+    /// it. The smallest heap ring is twice the inline one. `pub` for linkage.
     pub fn pop(self: &mut ChannelState<T>) T {
         let v = unsafe {
             self.slots[self.head];
         };
         self.head = (self.head + 1) % self.cap;
         self.count = self.count - 1;
+        if self.heap_ring && self.cap > 2 * UNBOUNDED_START && self.count < self.cap / 4 {
+            self.resize(self.cap / 2);
+        }
         return v;
     }
 }
@@ -211,7 +222,7 @@ pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T> {
 
 /// Another handle to the block: one relaxed increment, as for an `Arc`. `pub` for linkage.
 pub fn retain<T>(p: *mut ChannelInner<T>) *mut ChannelInner<T> {
-    let _ = unsafe atomic::add_usize(&mut p.strong, 1, atomics::MemoryOrder::Relaxed as i32);
+    let _ = unsafe atomic::add_usize(&mut (*p).strong, 1, atomics::MemoryOrder::Relaxed as i32);
     return p;
 }
 
@@ -219,14 +230,14 @@ pub fn retain<T>(p: *mut ChannelInner<T>) *mut ChannelInner<T> {
 /// heap ring included) and the block. AcqRel, as for an `Arc`: the decrement chain orders every handle's
 /// last touch before the free. `pub` for linkage.
 pub fn release<T>(p: *mut ChannelInner<T>) {
-    let prev = unsafe atomic::sub_usize(&mut p.strong, 1, atomics::MemoryOrder::AcqRel as i32);
+    let prev = unsafe atomic::sub_usize(&mut (*p).strong, 1, atomics::MemoryOrder::AcqRel as i32);
     if prev != 1 {
         return;
     }
-    let bytes = unsafe p.bytes;
+    let bytes = unsafe (*p).bytes;
     // Through a raw pointer, like Box::free: freeing the place directly would move out of a dereference.
-    let sp = (&mut unsafe p.state) as *mut sync::Mutex<ChannelState<T>>;
-    sp.free();
+    let sp = (&mut unsafe (*p).state) as *mut sync::Mutex<ChannelState<T>>;
+    unsafe (*sp).free();
     let mut g = Global {};
     unsafe g.dealloc(p, bytes, block_align::<T>());
 }
@@ -272,7 +283,6 @@ extend<T> Channel<T> {
 extend<T> Channel<T> as Free {
     pub fn free(self: &mut Channel<T>) {
         release(self.inner);
-        self.inner = null;
     }
 }
 
@@ -435,7 +445,6 @@ extend<T> Sender<T> as Free {
             }
         }
         release(self.inner);
-        self.inner = null;
     }
 }
 
@@ -581,7 +590,6 @@ extend<T> Receiver<T> as Free {
             }
         }
         release(self.inner);
-        self.inner = null;
     }
 }
 

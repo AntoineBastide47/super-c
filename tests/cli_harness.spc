@@ -32,13 +32,7 @@ extend CliResult {
             return true;
         }
         eprintln("--- expected to find: {}", needle);
-        eprintln("--- captured output (exit {}) follows ---", self.exit);
-        if self.out == null {
-            eprintln("(nothing captured)");
-        } else {
-            unsafe stdio::fputs(self.out, stdio::stderr());
-        }
-        eprintln("--- end of captured output ---");
+        self.show();
         return false;
     }
     /// Check for exit code 0; print the captured output on failure.
@@ -46,14 +40,19 @@ extend CliResult {
         if self.exit == 0 {
             return true;
         }
-        eprintln("--- expected exit 0, got {}; captured output follows ---", self.exit);
+        eprintln("--- expected exit 0 ---");
+        self.show();
+        return false;
+    }
+    /// Print the exit code and the captured output to stderr.
+    pub fn show(self: &CliResult) {
+        eprintln("--- captured output (exit {}) follows ---", self.exit);
         if self.out == null {
             eprintln("(nothing captured)");
         } else {
             unsafe stdio::fputs(self.out, stdio::stderr());
         }
         eprintln("--- end of captured output ---");
-        return false;
     }
 }
 extend CliResult as Free {

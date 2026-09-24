@@ -78,16 +78,30 @@ extend Reader {
         return Option::<str>::Some(l);
     }
 
-    // The next `n` bytes as a body, or None at the end of the stream.
+    // The next `n` bytes as a body, or None at the end of the stream. The buffered bytes are copied
+    // out; the rest is read straight into the body, so `buf` never grows to the size of a message.
     fn body(self: &mut Self, n: usize) Option<String> {
-        while self.buf.len() - self.pos < n {
-            if !self.fill() {
+        let mut body = String::with_capacity(n);
+        let mut have = self.buf.len() - self.pos;
+        if have > n {
+            have = n;
+        }
+        body.push_bytes(unsafe (self.buf.as_ptr() + self.pos), have);
+        self.pos += have;
+        // Each read adds at least one byte, so the loop runs at most n - have times.
+        while body.len() < n {
+            if self.eof {
                 return Option::<String>::None;
             }
+            let want = n - body.len();
+            let dst = body.spare_mut(want);
+            let r = unsafe shim::sc_file_read(self.f, dst, want);
+            if r <= 0 {
+                self.eof = true;
+                return Option::<String>::None;
+            }
+            body.advance_len(r as usize);
         }
-        let mut body = String::with_capacity(n);
-        body.push_bytes(unsafe (self.buf.as_ptr() + self.pos), n);
-        self.pos += n;
         return Option::<String>::Some(body);
     }
 }

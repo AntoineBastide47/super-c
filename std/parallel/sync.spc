@@ -97,29 +97,29 @@ pub const HOOK_AFTER_POP: i32 = 3;
 pub const HOOK_AFTER_RELEASE: i32 = 4;
 
 fn stat_add(p: *mut u64) {
-    let _ = atomic::add_u64(p, 1, 0);
+    let _ = unsafe atomic::add_u64(p, 1, 0);
 }
 
 fn stat_addn(p: *mut u64, n: u64) {
-    let _ = atomic::add_u64(p, n, 0);
+    let _ = unsafe atomic::add_u64(p, n, 0);
 }
 
 /// The coordination counters. All zero unless the module was built with `sync_stats_on()` true.
 pub fn sync_stats() SyncStats {
     return SyncStats {
-        lock_slow: atomic::load_u64(&mut unsafe G_SYNC.lock_slow, 0),
-        lock_parks: atomic::load_u64(&mut unsafe G_SYNC.lock_parks, 0),
-        lock_blocks: atomic::load_u64(&mut unsafe G_SYNC.lock_blocks, 0),
-        lock_spins: atomic::load_u64(&mut unsafe G_SYNC.lock_spins, 0),
-        lock_cas_fail: atomic::load_u64(&mut unsafe G_SYNC.lock_cas_fail, 0),
-        lock_barges: atomic::load_u64(&mut unsafe G_SYNC.lock_barges, 0),
-        lock_scan: atomic::load_u64(&mut unsafe G_SYNC.lock_scan, 0),
-        lock_buckets: atomic::load_u64(&mut unsafe G_SYNC.lock_buckets, 0),
-        cv_waits: atomic::load_u64(&mut unsafe G_SYNC.cv_waits, 0),
-        cv_blocks: atomic::load_u64(&mut unsafe G_SYNC.cv_blocks, 0),
-        wakes: atomic::load_u64(&mut unsafe G_SYNC.wakes, 0),
-        wakes_stale: atomic::load_u64(&mut unsafe G_SYNC.wakes_stale, 0),
-        notifies_idle: atomic::load_u64(&mut unsafe G_SYNC.notifies_idle, 0),
+        lock_slow: unsafe atomic::load_u64(&mut unsafe G_SYNC.lock_slow, 0),
+        lock_parks: unsafe atomic::load_u64(&mut unsafe G_SYNC.lock_parks, 0),
+        lock_blocks: unsafe atomic::load_u64(&mut unsafe G_SYNC.lock_blocks, 0),
+        lock_spins: unsafe atomic::load_u64(&mut unsafe G_SYNC.lock_spins, 0),
+        lock_cas_fail: unsafe atomic::load_u64(&mut unsafe G_SYNC.lock_cas_fail, 0),
+        lock_barges: unsafe atomic::load_u64(&mut unsafe G_SYNC.lock_barges, 0),
+        lock_scan: unsafe atomic::load_u64(&mut unsafe G_SYNC.lock_scan, 0),
+        lock_buckets: unsafe atomic::load_u64(&mut unsafe G_SYNC.lock_buckets, 0),
+        cv_waits: unsafe atomic::load_u64(&mut unsafe G_SYNC.cv_waits, 0),
+        cv_blocks: unsafe atomic::load_u64(&mut unsafe G_SYNC.cv_blocks, 0),
+        wakes: unsafe atomic::load_u64(&mut unsafe G_SYNC.wakes, 0),
+        wakes_stale: unsafe atomic::load_u64(&mut unsafe G_SYNC.wakes_stale, 0),
+        notifies_idle: unsafe atomic::load_u64(&mut unsafe G_SYNC.notifies_idle, 0),
     };
 }
 
@@ -165,6 +165,7 @@ pub fn sync_stats() SyncStats {
 @no_const
 pub struct RawMutex {
     pub locked: i32,
+    pub id: u32, // lock-order checking only: the identity the checker gives this lock, which moves with it
 }
 
 // One parked lock waiter, living on that waiter's stack. A coroutine parks through the scheduler
@@ -233,24 +234,24 @@ fn lot_bucket(m: *mut RawMutex) *mut LotBucket {
 
 // Append; caller holds the bucket lock.
 fn lot_push(b: *mut LotBucket, n: *mut LotNode) {
-    unsafe n.next = null;
-    if unsafe b.tail == null {
-        unsafe b.head = n;
+    unsafe (*n).next = null;
+    if unsafe (*b).tail == null {
+        unsafe (*b).head = n;
     } else {
-        unsafe b.tail.next = n;
+        unsafe (*(*b).tail).next = n;
     }
-    unsafe b.tail = n;
+    unsafe (*b).tail = n;
 }
 
 // Unlink one specific node, if it is still queued (a racing pop may have taken it). Caller holds the
 // bucket lock. A cancelled lock waiter removes its own node through this before its frame dies.
 fn lot_remove(b: *mut LotBucket, n: *mut LotNode) {
     let mut prev: *mut LotNode = null;
-    let mut cur = unsafe b.head;
+    let mut cur = unsafe (*b).head;
     let mut seen: u64 = 0;
     while cur != null && cur != n {
         prev = cur;
-        cur = unsafe cur.next;
+        cur = unsafe (*cur).next;
         seen = seen + 1;
     }
     if sync_stats_on() {
@@ -260,14 +261,14 @@ fn lot_remove(b: *mut LotBucket, n: *mut LotNode) {
         return;
     }
     if prev == null {
-        unsafe b.head = unsafe n.next;
+        unsafe (*b).head = unsafe (*n).next;
     } else {
-        unsafe prev.next = unsafe n.next;
+        unsafe (*prev).next = unsafe (*n).next;
     }
-    if unsafe b.tail == n {
-        unsafe b.tail = prev;
+    if unsafe (*b).tail == n {
+        unsafe (*b).tail = prev;
     }
-    unsafe n.next = null;
+    unsafe (*n).next = null;
 }
 
 // Unlink and return the first node waiting on `addr`; `more` reports whether another remains behind it.
@@ -275,27 +276,27 @@ fn lot_remove(b: *mut LotBucket, n: *mut LotNode) {
 fn lot_pop(b: *mut LotBucket, addr: *mut void, more: &mut bool) *mut LotNode {
     *more = false;
     let mut prev: *mut LotNode = null;
-    let mut cur = unsafe b.head;
+    let mut cur = unsafe (*b).head;
     let mut found: *mut LotNode = null;
     let mut seen: u64 = 0;
     while cur != null {
-        let nx = unsafe cur.next;
+        let nx = unsafe (*cur).next;
         seen = seen + 1;
-        if unsafe cur.addr == addr {
+        if unsafe (*cur).addr == addr {
             if found != null {
                 *more = true;
                 break;
             }
             found = cur;
             if prev == null {
-                unsafe b.head = nx;
+                unsafe (*b).head = nx;
             } else {
-                unsafe prev.next = nx;
+                unsafe (*prev).next = nx;
             }
-            if unsafe b.tail == cur {
-                unsafe b.tail = prev;
+            if unsafe (*b).tail == cur {
+                unsafe (*b).tail = prev;
             }
-            unsafe cur.next = null;
+            unsafe (*cur).next = null;
         } else {
             prev = cur;
         }
@@ -320,13 +321,13 @@ pub unsafe fn commit_raw_unlock(p: *mut void) {
 
 /// Acquire the lock, parking the calling coroutine (or blocking the calling thread) while it is held.
 pub unsafe fn raw_mutex_lock(m: *mut RawMutex) {
-    if atomic::cas_i32(&mut unsafe m.locked, 0, 1, false, 1, 0) {
-        unsafe sc_runtime::sc_rt_lockdep_acquire(m);
+    if unsafe atomic::cas_i32(&mut unsafe (*m).locked, 0, 1, false, 1, 0) {
+        unsafe sc_runtime::sc_rt_lockdep_acquire(&mut unsafe (*m).id);
         // Uncontended: one CAS.
         return;
     }
     let _ = raw_mutex_lock_slow(m, false);
-    unsafe sc_runtime::sc_rt_lockdep_acquire(m);
+    unsafe sc_runtime::sc_rt_lockdep_acquire(&mut unsafe (*m).id);
 }
 
 /// `raw_mutex_lock`, but the park is a cancellation point: a `false` return means the wait was cancelled,
@@ -334,15 +335,15 @@ pub unsafe fn raw_mutex_lock(m: *mut RawMutex) {
 /// caller that can propagate cancellation (the compiler's cancellation edge) may use this form: it must
 /// never hand a guard to code that would unlock a lock it does not hold. `pub` for linkage.
 pub unsafe fn raw_mutex_lock_c(m: *mut RawMutex) bool {
-    if atomic::cas_i32(&mut unsafe m.locked, 0, 1, false, 1, 0) {
-        unsafe sc_runtime::sc_rt_lockdep_acquire(m);
+    if unsafe atomic::cas_i32(&mut unsafe (*m).locked, 0, 1, false, 1, 0) {
+        unsafe sc_runtime::sc_rt_lockdep_acquire(&mut unsafe (*m).id);
         return true;
     }
     if !raw_mutex_lock_slow(m, true) {
         let _ = runtime::cancel_after_wait(true);
         return false;
     }
-    unsafe sc_runtime::sc_rt_lockdep_acquire(m);
+    unsafe sc_runtime::sc_rt_lockdep_acquire(&mut unsafe (*m).id);
     return true;
 }
 
@@ -354,15 +355,15 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
     if sync_stats_on() {
         stat_add(&mut unsafe G_SYNC.lock_slow);
     }
-    let w = &mut unsafe m.locked;
+    let w = &mut unsafe (*m).locked;
     let mut spins: i32 = 0;
     let mut losses: i32 = 0;
     loop {
-        let c = atomic::load_i32(w, 0);
+        let c = unsafe atomic::load_i32(w, 0);
         if (c & 1) == 0 {
             // Free: take it, PRESERVING the parked bit; waiters may remain, and clearing it would let
             // the next unlock take its fast path straight past them.
-            if atomic::cas_i32(w, c, c | 1, false, 1, 0) {
+            if unsafe atomic::cas_i32(w, c, c | 1, false, 1, 0) {
                 if sync_stats_on() && (c & 2) != 0 {
                     // Taken with a waiter already queued: this acquisition overtook it.
                     stat_add(&mut unsafe G_SYNC.lock_barges);
@@ -400,7 +401,7 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
             unsafe sc_runtime::sc_rt_cpu_relax();
             continue;
         }
-        if c != 3 && !atomic::cas_i32(w, 1, 3, false, 0, 0) {
+        if c != 3 && !unsafe atomic::cas_i32(w, 1, 3, false, 0, 0) {
             // The word moved under us: re-read and decide again.
             continue;
         }
@@ -414,9 +415,9 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
         if sync_stats_on() {
             stat_add(&mut unsafe G_SYNC.lock_buckets);
         }
-        unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
-        if atomic::load_i32(w, 0) != 3 {
-            unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+        unsafe sc_runtime::sc_rt_spin_lock(&mut (*b).lock);
+        if unsafe atomic::load_i32(w, 0) != 3 {
+            unsafe sc_runtime::sc_rt_spin_unlock(&mut (*b).lock);
             // Released since we looked: try to take it instead of sleeping through it.
             continue;
         }
@@ -432,7 +433,7 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
             let token = runtime::park_begin(co);
             let mut n = LotNode { co: co, token: token, oswake: 0, addr: m, next: null };
             lot_push(b, &mut n);
-            let reason = runtime::park_current(token, commit_lot_unlock, &mut unsafe b.lock, cancellable);
+            let reason = runtime::park_current(token, commit_lot_unlock, &mut unsafe (*b).lock, cancellable);
             if reason == runtime::WR_CANCEL || reason == runtime::WR_SHUTDOWN {
                 // Cancelled without the lock. Unlink our node (an unlock racing us may have popped it
                 // already: then the pop consumed it and `lot_remove` finds nothing), clear the wait
@@ -441,9 +442,9 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
                 if sync_stats_on() {
                     stat_add(&mut unsafe G_SYNC.lock_buckets);
                 }
-                unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
+                unsafe sc_runtime::sc_rt_spin_lock(&mut (*b).lock);
                 lot_remove(b, &mut n);
-                unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+                unsafe sc_runtime::sc_rt_spin_unlock(&mut (*b).lock);
                 runtime::wait_clear();
                 runtime::park_done(co);
                 return false;
@@ -460,9 +461,9 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
             }
             let mut n = LotNode { co: null, token: 0, oswake: 0, addr: m, next: null };
             lot_push(b, &mut n);
-            unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+            unsafe sc_runtime::sc_rt_spin_unlock(&mut (*b).lock);
             runtime::replay_release(); // about to block: in replay mode the pool runs while we do not
-            while atomic::load_i32(&mut n.oswake, 1) == 0 {
+            while unsafe atomic::load_i32(&mut n.oswake, 1) == 0 {
                 unsafe sc_runtime::sc_rt_park(&mut n.oswake, 0, -1);
             }
         }
@@ -479,14 +480,14 @@ fn raw_mutex_lock_slow(m: *mut RawMutex, cancellable: bool) bool {
 /// failure, exactly as a weak compare-and-exchange may. Every caller already treats `false` as "go and do
 /// something else", and an unbounded retry here would be a wait in a call that promises not to wait.
 pub unsafe fn raw_mutex_try_lock(m: *mut RawMutex) bool {
-    let w = &mut unsafe m.locked;
+    let w = &mut unsafe (*m).locked;
     let mut tries: i32 = 0;
     while tries < TRY_ATTEMPTS {
-        let c = atomic::load_i32(w, 0);
+        let c = unsafe atomic::load_i32(w, 0);
         if (c & 1) != 0 {
             return false;
         }
-        if atomic::cas_i32(w, c, c | 1, false, 1, 0) {
+        if unsafe atomic::cas_i32(w, c, c | 1, false, 1, 0) {
             return true;
         }
         tries = tries + 1;
@@ -497,8 +498,8 @@ pub unsafe fn raw_mutex_try_lock(m: *mut RawMutex) bool {
 /// Release the lock and wake the longest-parked waiter, if any. `pub` for linkage.
 pub unsafe fn raw_mutex_unlock(m: *mut RawMutex) {
     // BEFORE the release: once published, another thread may take and even free this lock.
-    unsafe sc_runtime::sc_rt_lockdep_release(m);
-    if atomic::cas_i32(&mut unsafe m.locked, 1, 0, false, 2, 0) {
+    unsafe sc_runtime::sc_rt_lockdep_release(&mut unsafe (*m).id);
+    if unsafe atomic::cas_i32(&mut unsafe (*m).locked, 1, 0, false, 2, 0) {
         // Nobody parked: one CAS, and the lock is never touched again.
         return;
     }
@@ -515,7 +516,7 @@ fn raw_mutex_unlock_slow(m: *mut RawMutex) {
         if sync_stats_on() {
             stat_add(&mut unsafe G_SYNC.lock_buckets);
         }
-        unsafe sc_runtime::sc_rt_spin_lock(&mut b.lock);
+        unsafe sc_runtime::sc_rt_spin_lock(&mut (*b).lock);
         let mut more = false;
         let n = lot_pop(b, m, &mut more);
         if runtime::sched_hooks_on() {
@@ -524,14 +525,14 @@ fn raw_mutex_unlock_slow(m: *mut RawMutex) {
         if !released {
             // The release store, and the LAST touch of the lock (see `RawMutex`): whoever acquires from
             // here on may legitimately free it. Everything below touches only the static bucket and the
-            // popped waiter's frame, and that frame only under the bucket lock, because a cancelled
-            // waiter may otherwise unlink and die at any moment.
+            // popped waiter's frame and task block, and those only under the bucket lock, because a
+            // cancelled waiter may otherwise unlink and die at any moment.
             let next_word = if more {
                 2;
             } else {
                 0;
             };
-            atomic::store_i32(&mut unsafe m.locked, next_word, 2);
+            unsafe atomic::store_i32(&mut unsafe (*m).locked, next_word, 2);
             released = true;
             if runtime::sched_hooks_on() {
                 // The lock may be taken, released and even destroyed from here on; everything below
@@ -540,24 +541,29 @@ fn raw_mutex_unlock_slow(m: *mut RawMutex) {
             }
         }
         if n == null {
-            unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
+            unsafe sc_runtime::sc_rt_spin_unlock(&mut (*b).lock);
             // A waiter set the bit but has not enqueued yet: it revalidates and sees the release.
             return;
         }
-        let wco = unsafe n.co;
-        let wtoken = unsafe n.token;
+        let wco = unsafe (*n).co;
         if wco == null {
-            atomic::store_i32(&mut unsafe n.oswake, 1, 2);
-            unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
-            unsafe sc_runtime::sc_rt_unpark_one(&mut n.oswake);
+            unsafe atomic::store_i32(&mut unsafe (*n).oswake, 1, 2);
+            unsafe sc_runtime::sc_rt_spin_unlock(&mut (*b).lock);
+            unsafe sc_runtime::sc_rt_unpark_one(&mut (*n).oswake);
             return;
         }
-        unsafe sc_runtime::sc_rt_spin_unlock(&mut b.lock);
         // The wakee RE-CONTENDS rather than being handed the lock: with a ~2.3us wake latency, a hand-off
         // serializes every acquisition behind a wake (measured 781ns/lock on the contended-hammer lane
         // against 296ns for barging), so losing to a spinner is throughput, not loss. A false return means
         // a cancellation claimed that park first: spend the release on the next waiter.
-        if runtime::wake(wco, wtoken) {
+        //
+        // The wake runs UNDER the bucket lock, as a condvar's notify runs under its mutex. A cancellation
+        // that claimed this park first resumes the waiter, which takes the bucket lock to unlink its node
+        // before it can return, complete, and have its task block freed. Released before the wake, that
+        // lock let the block be freed while the wake's claim still read it.
+        let woke = runtime::wake(wco, unsafe (*n).token);
+        unsafe sc_runtime::sc_rt_spin_unlock(&mut (*b).lock);
+        if woke {
             return;
         }
     }
@@ -598,7 +604,7 @@ extend<T> Mutex<T> {
     /// A new unlocked mutex owning `value`.
     pub fn new(value: T) Mutex<T> {
         return Mutex::<T> {
-            raw: UnsafeCell::<RawMutex>::new(RawMutex { locked: 0 }),
+            raw: UnsafeCell::<RawMutex>::new(RawMutex { locked: 0, id: 0 }),
             data: UnsafeCell::<T>::new(value),
         };
     }
@@ -656,7 +662,7 @@ extend<T> Mutex<T> as Free {
         // Deep-free the guarded value (no-op if T isn't Free).
         self.data.get().free();
         // `&mut self`: no guard can be outstanding, so no waiter can be queued either.
-        unsafe sc_runtime::sc_rt_lockdep_forget(self.raw.get());
+        unsafe sc_runtime::sc_rt_lockdep_forget(&mut unsafe (*self.raw.get()).id);
     }
 }
 
@@ -995,12 +1001,6 @@ struct CondQ {
     pub tail: *mut Waiter,
 }
 
-// Did this wake reason leave the wait in its normal (notified, timed out, or spurious) course, as opposed
-// to a cancellation the caller must unwind through?
-const fn cv_normal(reason: u32) bool {
-    return reason != runtime::WR_CANCEL && reason != runtime::WR_SHUTDOWN;
-}
-
 fn wait_cancel_requested(reason: u32) bool {
     return reason == runtime::WR_CANCEL || reason == runtime::WR_SHUTDOWN || runtime::cancel_requested();
 }
@@ -1011,9 +1011,9 @@ fn wait_cancel_requested(reason: u32) bool {
 // race also writes, so the reader must re-check the arm it names. Two notifies under two different queue
 // locks may write it at once, hence the atomic store (relaxed: whichever lands last is as good a hint).
 fn publish_arm(wp: *mut Waiter) {
-    let c = unsafe wp.claim;
+    let c = unsafe (*wp).claim;
     if c != null {
-        atomic::store_i32(c, unsafe wp.arm, 0);
+        unsafe atomic::store_i32(c, unsafe (*wp).arm, 0);
     }
 }
 
@@ -1024,13 +1024,13 @@ fn publish_arm(wp: *mut Waiter) {
 // and then unparks the ADDRESS, and the parking lot never reads through an address it is handed.
 fn wake_waiter(wp: *mut Waiter) bool {
     publish_arm(wp);
-    let co = unsafe wp.co;
+    let co = unsafe (*wp).co;
     let mut won = false;
     if co != null {
-        won = runtime::wake(co, unsafe wp.token);
+        won = runtime::wake(co, unsafe (*wp).token);
     } else {
-        let word = unsafe wp.os;
-        won = atomic::cas_i32(word, 0, 1, false, 2, 0);
+        let word = unsafe (*wp).os;
+        won = unsafe atomic::cas_i32(word, 0, 1, false, 2, 0);
         if won {
             unsafe sc_runtime::sc_rt_unpark_one(word);
         }
@@ -1051,12 +1051,12 @@ fn wake_waiter(wp: *mut Waiter) bool {
 /// claimed the word (2) first: a notify that pops the node afterwards finds it claimed and passes its wake
 /// on. `pub` for `select`; not user-facing.
 pub fn os_wait(word: *mut i32, deadline: u64) u32 {
-    while atomic::load_i32(word, 1) == 0 {
+    while unsafe atomic::load_i32(word, 1) == 0 {
         let mut rel = -1i64;
         if deadline != 0 {
             rel = time::remaining_ns(deadline) as i64;
             if rel == 0 {
-                if atomic::cas_i32(word, 0, 2, false, 1, 1) {
+                if unsafe atomic::cas_i32(word, 0, 2, false, 1, 1) {
                     return runtime::WR_TIMEOUT;
                 }
                 break;
@@ -1096,22 +1096,18 @@ extend Condvar {
     /// accepted: the caller must stop waiting and return through its cleanup.
     pub fn wait<T>(self: &Condvar, guard: &MutexGuard<T>) bool {
         let reason = unsafe self.wait_raw(guard.lock_handle(), 0, true, runtime::WK_CONDVAR);
-        if wait_cancel_requested(reason) {
-            let _ = runtime::cancel_after_wait(true);
-            return false;
-        }
-        return cv_normal(reason);
+        // A notify this wait consumed goes to the caller's re-check and is never dropped: a request that
+        // landed after it is taken at the next cancellation point, as the lock does. A masked task never
+        // accepts here, so it never reports a cancellation either.
+        return reason == runtime::WR_NOTIFY || !wait_cancel_requested(reason) || !runtime::cancel_after_wait(true);
     }
     /// `wait`, but also returning once the monotonic `deadline` (a `time::deadline_in` value) has passed.
     /// A timeout reports `true`: as with `wait`, re-check the condition (and the deadline) in a loop.
     /// `false` means cancelled, exactly as for `wait`.
     pub fn wait_until<T>(self: &Condvar, guard: &MutexGuard<T>, deadline: u64) bool {
         let reason = unsafe self.wait_raw(guard.lock_handle(), deadline, true, runtime::WK_CONDVAR);
-        if wait_cancel_requested(reason) {
-            let _ = runtime::cancel_after_wait(true);
-            return false;
-        }
-        return cv_normal(reason);
+        // As in `wait`: a consumed notify is never reported as a cancellation.
+        return reason == runtime::WR_NOTIFY || !wait_cancel_requested(reason) || !runtime::cancel_after_wait(true);
     }
     /// `wait` for a caller that cannot unwind (a lock acquisition loop, or cleanup): the park is never
     /// claimed by a cancellation, and a pending request stays for the next cancellation point.
@@ -1180,13 +1176,13 @@ extend Condvar {
     /// before it dies. `pub` for `select`; not user-facing.
     pub unsafe fn register(self: &Condvar, wp: *mut Waiter) {
         let q = self.wq.get();
-        unsafe wp.next = null;
-        if unsafe q.tail == null {
-            unsafe q.head = wp;
+        unsafe (*wp).next = null;
+        if unsafe (*q).tail == null {
+            unsafe (*q).head = wp;
         } else {
-            unsafe q.tail.next = wp;
+            unsafe (*(*q).tail).next = wp;
         }
-        unsafe q.tail = wp;
+        unsafe (*q).tail = wp;
     }
     /// Take a `register`ed node back off the queue (a no-op if a notify already popped it). Caller holds the
     /// paired mutex. `pub` for `select`; not user-facing.
@@ -1198,36 +1194,36 @@ extend Condvar {
     fn unlink(self: &Condvar, wp: *mut Waiter) {
         let q = self.wq.get();
         let mut prev: *mut Waiter = null;
-        let mut cur = unsafe q.head;
+        let mut cur = unsafe (*q).head;
         while cur != null && cur != wp {
             prev = cur;
-            cur = unsafe cur.next;
+            cur = unsafe (*cur).next;
         }
         if cur != wp {
             return;
         }
         if prev == null {
-            unsafe q.head = unsafe wp.next;
+            unsafe (*q).head = unsafe (*wp).next;
         } else {
-            unsafe prev.next = unsafe wp.next;
+            unsafe (*prev).next = unsafe (*wp).next;
         }
-        if unsafe q.tail == wp {
-            unsafe q.tail = prev;
+        if unsafe (*q).tail == wp {
+            unsafe (*q).tail = prev;
         }
-        unsafe wp.next = null;
+        unsafe (*wp).next = null;
     }
     // Take the longest-queued node off the queue, or null. Caller holds the paired lock.
     fn pop(self: &Condvar) *mut Waiter {
         let q = self.wq.get();
-        let wp = unsafe q.head;
+        let wp = unsafe (*q).head;
         if wp == null {
             return null;
         }
-        unsafe q.head = unsafe wp.next;
-        if unsafe q.head == null {
-            unsafe q.tail = null;
+        unsafe (*q).head = unsafe (*wp).next;
+        if unsafe (*q).head == null {
+            unsafe (*q).tail = null;
         }
-        unsafe wp.next = null;
+        unsafe (*wp).next = null;
         return wp;
     }
     /// Wake one waiter. Call under the paired mutex.
@@ -1287,7 +1283,7 @@ pub interface Selectable {
 // Once: run an initialiser exactly once across all threads.
 
 /// Runs a closure a single time, no matter how many threads call `call_once`; later calls return
-/// immediately. A relaxed atomic fast-path skips the lock once initialisation has completed.
+/// immediately. An acquire load skips the lock once initialisation has completed.
 @no_const
 pub struct Once {
     done: atomics::Atomic<i32>,
@@ -1308,7 +1304,7 @@ extend Once {
         return self.done.load(atomics::MemoryOrder::Acquire) == 1;
     }
     /// Run `f` if it has not run yet; otherwise return at once. Exactly one caller across all threads ever
-    /// runs `f`. A relaxed atomic fast-path skips the lock once initialisation has completed.
+    /// runs `f`. An acquire load skips the lock once initialisation has completed.
     pub fn call_once<F: fn move()>(self: &Once, f: F) {
         if self.done.load(atomics::MemoryOrder::Acquire) == 1 {
             return;
@@ -1375,6 +1371,10 @@ extend WaitGroup {
         if left > 0 {
             // The common case, and it costs one atomic: no lock, no wake, no park.
             return;
+        }
+        if left < 0 {
+            // More `done` calls than `add`ed: the count no longer says what is outstanding.
+            panic("WaitGroup::done called more times than add");
         }
         // Last one out. Take the gate before notifying: a waiter that has read a non-zero count but is not
         // yet inside `wait` holds it, so this cannot notify into the gap and leave that waiter asleep.

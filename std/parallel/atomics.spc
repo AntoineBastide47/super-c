@@ -40,181 +40,181 @@ pub interface AtomicOps {
 
 extend i32 as AtomicOps {
     fn atomic_load(p: *const i32, mo: i32) i32 {
-        return atomic::load_i32(p, mo);
+        return unsafe atomic::load_i32(p, mo);
     }
     fn atomic_store(p: *mut i32, v: i32, mo: i32) {
-        atomic::store_i32(p, v, mo);
+        unsafe atomic::store_i32(p, v, mo);
     }
     fn atomic_swap(p: *mut i32, v: i32, mo: i32) i32 {
-        return atomic::swap_i32(p, v, mo);
+        return unsafe atomic::swap_i32(p, v, mo);
     }
     fn atomic_add(p: *mut i32, v: i32, mo: i32) i32 {
-        return atomic::add_i32(p, v, mo);
+        return unsafe atomic::add_i32(p, v, mo);
     }
     fn atomic_sub(p: *mut i32, v: i32, mo: i32) i32 {
-        return atomic::sub_i32(p, v, mo);
+        return unsafe atomic::sub_i32(p, v, mo);
     }
     fn atomic_and(p: *mut i32, v: i32, mo: i32) i32 {
-        return atomic::and_i32(p, v, mo);
+        return unsafe atomic::and_i32(p, v, mo);
     }
     fn atomic_or(p: *mut i32, v: i32, mo: i32) i32 {
-        return atomic::or_i32(p, v, mo);
+        return unsafe atomic::or_i32(p, v, mo);
     }
     fn atomic_xor(p: *mut i32, v: i32, mo: i32) i32 {
-        return atomic::xor_i32(p, v, mo);
+        return unsafe atomic::xor_i32(p, v, mo);
     }
     fn atomic_cas(p: *mut i32, expected: i32, desired: i32, weak: bool, so: i32, fo: i32) bool {
-        return atomic::cas_i32(p, expected, desired, weak, so, fo);
+        return unsafe atomic::cas_i32(p, expected, desired, weak, so, fo);
     }
 }
 
 extend i64 as AtomicOps {
     fn atomic_load(p: *const i64, mo: i32) i64 {
-        return atomic::load_i64(p, mo);
+        return unsafe atomic::load_i64(p, mo);
     }
     fn atomic_store(p: *mut i64, v: i64, mo: i32) {
-        atomic::store_i64(p, v, mo);
+        unsafe atomic::store_i64(p, v, mo);
     }
     fn atomic_swap(p: *mut i64, v: i64, mo: i32) i64 {
-        return atomic::swap_i64(p, v, mo);
+        return unsafe atomic::swap_i64(p, v, mo);
     }
     fn atomic_add(p: *mut i64, v: i64, mo: i32) i64 {
-        return atomic::add_i64(p, v, mo);
+        return unsafe atomic::add_i64(p, v, mo);
     }
     fn atomic_sub(p: *mut i64, v: i64, mo: i32) i64 {
-        return atomic::sub_i64(p, v, mo);
+        return unsafe atomic::sub_i64(p, v, mo);
     }
     fn atomic_and(p: *mut i64, v: i64, mo: i32) i64 {
-        return atomic::and_i64(p, v, mo);
+        return unsafe atomic::and_i64(p, v, mo);
     }
     fn atomic_or(p: *mut i64, v: i64, mo: i32) i64 {
-        return atomic::or_i64(p, v, mo);
+        return unsafe atomic::or_i64(p, v, mo);
     }
     fn atomic_xor(p: *mut i64, v: i64, mo: i32) i64 {
-        return atomic::xor_i64(p, v, mo);
+        return unsafe atomic::xor_i64(p, v, mo);
     }
     fn atomic_cas(p: *mut i64, expected: i64, desired: i64, weak: bool, so: i32, fo: i32) bool {
-        return atomic::cas_i64(p, expected, desired, weak, so, fo);
+        return unsafe atomic::cas_i64(p, expected, desired, weak, so, fo);
     }
 }
 
 extend u32 as AtomicOps {
     fn atomic_load(p: *const u32, mo: i32) u32 {
-        return atomic::load_u32(p, mo);
+        return unsafe atomic::load_u32(p, mo);
     }
     fn atomic_store(p: *mut u32, v: u32, mo: i32) {
-        atomic::store_u32(p, v, mo);
+        unsafe atomic::store_u32(p, v, mo);
     }
     fn atomic_swap(p: *mut u32, v: u32, mo: i32) u32 {
-        return atomic::swap_u32(p, v, mo);
+        return unsafe atomic::swap_u32(p, v, mo);
     }
     fn atomic_add(p: *mut u32, v: u32, mo: i32) u32 {
-        return atomic::add_u32(p, v, mo);
+        return unsafe atomic::add_u32(p, v, mo);
     }
     fn atomic_sub(p: *mut u32, v: u32, mo: i32) u32 {
-        return atomic::sub_u32(p, v, mo);
+        return unsafe atomic::sub_u32(p, v, mo);
     }
     fn atomic_and(p: *mut u32, v: u32, mo: i32) u32 {
-        return atomic::and_u32(p, v, mo);
+        return unsafe atomic::and_u32(p, v, mo);
     }
     fn atomic_or(p: *mut u32, v: u32, mo: i32) u32 {
-        return atomic::or_u32(p, v, mo);
+        return unsafe atomic::or_u32(p, v, mo);
     }
     fn atomic_xor(p: *mut u32, v: u32, mo: i32) u32 {
-        return atomic::xor_u32(p, v, mo);
+        return unsafe atomic::xor_u32(p, v, mo);
     }
     fn atomic_cas(p: *mut u32, expected: u32, desired: u32, weak: bool, so: i32, fo: i32) bool {
-        return atomic::cas_u32(p, expected, desired, weak, so, fo);
+        return unsafe atomic::cas_u32(p, expected, desired, weak, so, fo);
     }
 }
 
 extend u64 as AtomicOps {
     fn atomic_load(p: *const u64, mo: i32) u64 {
-        return atomic::load_u64(p, mo);
+        return unsafe atomic::load_u64(p, mo);
     }
     fn atomic_store(p: *mut u64, v: u64, mo: i32) {
-        atomic::store_u64(p, v, mo);
+        unsafe atomic::store_u64(p, v, mo);
     }
     fn atomic_swap(p: *mut u64, v: u64, mo: i32) u64 {
-        return atomic::swap_u64(p, v, mo);
+        return unsafe atomic::swap_u64(p, v, mo);
     }
     fn atomic_add(p: *mut u64, v: u64, mo: i32) u64 {
-        return atomic::add_u64(p, v, mo);
+        return unsafe atomic::add_u64(p, v, mo);
     }
     fn atomic_sub(p: *mut u64, v: u64, mo: i32) u64 {
-        return atomic::sub_u64(p, v, mo);
+        return unsafe atomic::sub_u64(p, v, mo);
     }
     fn atomic_and(p: *mut u64, v: u64, mo: i32) u64 {
-        return atomic::and_u64(p, v, mo);
+        return unsafe atomic::and_u64(p, v, mo);
     }
     fn atomic_or(p: *mut u64, v: u64, mo: i32) u64 {
-        return atomic::or_u64(p, v, mo);
+        return unsafe atomic::or_u64(p, v, mo);
     }
     fn atomic_xor(p: *mut u64, v: u64, mo: i32) u64 {
-        return atomic::xor_u64(p, v, mo);
+        return unsafe atomic::xor_u64(p, v, mo);
     }
     fn atomic_cas(p: *mut u64, expected: u64, desired: u64, weak: bool, so: i32, fo: i32) bool {
-        return atomic::cas_u64(p, expected, desired, weak, so, fo);
+        return unsafe atomic::cas_u64(p, expected, desired, weak, so, fo);
     }
 }
 
 extend usize as AtomicOps {
     fn atomic_load(p: *const usize, mo: i32) usize {
-        return atomic::load_usize(p, mo);
+        return unsafe atomic::load_usize(p, mo);
     }
     fn atomic_store(p: *mut usize, v: usize, mo: i32) {
-        atomic::store_usize(p, v, mo);
+        unsafe atomic::store_usize(p, v, mo);
     }
     fn atomic_swap(p: *mut usize, v: usize, mo: i32) usize {
-        return atomic::swap_usize(p, v, mo);
+        return unsafe atomic::swap_usize(p, v, mo);
     }
     fn atomic_add(p: *mut usize, v: usize, mo: i32) usize {
-        return atomic::add_usize(p, v, mo);
+        return unsafe atomic::add_usize(p, v, mo);
     }
     fn atomic_sub(p: *mut usize, v: usize, mo: i32) usize {
-        return atomic::sub_usize(p, v, mo);
+        return unsafe atomic::sub_usize(p, v, mo);
     }
     fn atomic_and(p: *mut usize, v: usize, mo: i32) usize {
-        return atomic::and_usize(p, v, mo);
+        return unsafe atomic::and_usize(p, v, mo);
     }
     fn atomic_or(p: *mut usize, v: usize, mo: i32) usize {
-        return atomic::or_usize(p, v, mo);
+        return unsafe atomic::or_usize(p, v, mo);
     }
     fn atomic_xor(p: *mut usize, v: usize, mo: i32) usize {
-        return atomic::xor_usize(p, v, mo);
+        return unsafe atomic::xor_usize(p, v, mo);
     }
     fn atomic_cas(p: *mut usize, expected: usize, desired: usize, weak: bool, so: i32, fo: i32) bool {
-        return atomic::cas_usize(p, expected, desired, weak, so, fo);
+        return unsafe atomic::cas_usize(p, expected, desired, weak, so, fo);
     }
 }
 
 extend isize as AtomicOps {
     fn atomic_load(p: *const isize, mo: i32) isize {
-        return atomic::load_isize(p, mo);
+        return unsafe atomic::load_isize(p, mo);
     }
     fn atomic_store(p: *mut isize, v: isize, mo: i32) {
-        atomic::store_isize(p, v, mo);
+        unsafe atomic::store_isize(p, v, mo);
     }
     fn atomic_swap(p: *mut isize, v: isize, mo: i32) isize {
-        return atomic::swap_isize(p, v, mo);
+        return unsafe atomic::swap_isize(p, v, mo);
     }
     fn atomic_add(p: *mut isize, v: isize, mo: i32) isize {
-        return atomic::add_isize(p, v, mo);
+        return unsafe atomic::add_isize(p, v, mo);
     }
     fn atomic_sub(p: *mut isize, v: isize, mo: i32) isize {
-        return atomic::sub_isize(p, v, mo);
+        return unsafe atomic::sub_isize(p, v, mo);
     }
     fn atomic_and(p: *mut isize, v: isize, mo: i32) isize {
-        return atomic::and_isize(p, v, mo);
+        return unsafe atomic::and_isize(p, v, mo);
     }
     fn atomic_or(p: *mut isize, v: isize, mo: i32) isize {
-        return atomic::or_isize(p, v, mo);
+        return unsafe atomic::or_isize(p, v, mo);
     }
     fn atomic_xor(p: *mut isize, v: isize, mo: i32) isize {
-        return atomic::xor_isize(p, v, mo);
+        return unsafe atomic::xor_isize(p, v, mo);
     }
     fn atomic_cas(p: *mut isize, expected: isize, desired: isize, weak: bool, so: i32, fo: i32) bool {
-        return atomic::cas_isize(p, expected, desired, weak, so, fo);
+        return unsafe atomic::cas_isize(p, expected, desired, weak, so, fo);
     }
 }
 

@@ -343,9 +343,12 @@ fn cancellation_at_every_point_of_a_wait_reaches_the_reactor() {
     finish();
 }
 
-// A socket closed under a wait: the close is reported to the reactor, the wait settles as not ready at
-// once rather than at its deadline, the number's next socket starts a new generation, and a read on the
-// dead number fails.
+// A socket closed under a wait: the close is reported to the reactor, the wait settles as not ready,
+// and the number's next socket starts a new generation. The waits have no deadline, so only the close
+// (then the byte) can end them: a missed report fails the bounded wait on the group instead of racing
+// a clock. `wait_pending` sees the wait's record, which comes before its registration, so the close may
+// also land first: the registration then fails on the closed number (or on the reactor's own descriptor
+// that took it, when the wait started the reactor) and the wait settles as not ready all the same.
 @test
 fn close_under_a_wait_settles_it_at_once() {
     rt::set_worker_count(2);
@@ -355,24 +358,18 @@ fn close_under_a_wait_settles_it_at_once() {
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w = wg.clone();
-    let took = counter();
-    let t = took.clone();
+    let not_ready = counter();
+    let t = not_ready.clone();
     launch || {
         defer w.done();
-        let t0 = platform::now_ns();
-        let ok = io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(5)));
-        if !ok {
-            t.get().store((platform::now_ns() - t0) as i64, atomics::MemoryOrder::Release);
-        } else {
-            t.get().store(-1i64, atomics::MemoryOrder::Release);
+        if !io::wait_readable(fd) {
+            bump(&t);
         }
     };
     assert(wait_pending(1), "the wait arms");
     p.b.close();
-    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the wait ends");
-    let el = count(&took);
-    assert(el >= 0, "the wait reports not ready");
-    assert(el < PROMPT_NS as i64, "the wait settles on the close, not at its deadline");
+    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the close ends the wait");
+    assert_eq(count(&not_ready), 1);
     // The reused number serves its new socket.
     let q = pair(&l);
     let hits = counter();
@@ -382,7 +379,9 @@ fn close_under_a_wait_settles_it_at_once() {
     let fd2 = q.b.fd;
     launch || {
         defer w2.done();
-        wait_prompt(fd2, false, &h);
+        if io::wait_readable(fd2) {
+            bump(&h);
+        }
     };
     assert(wait_pending(1), "the new wait arms");
     write_one(&q.a);
@@ -410,17 +409,62 @@ fn an_unregisterable_descriptor_reports_not_ready_at_once() {
     launch || {
         defer w.done();
         let t0 = platform::now_ns();
-        let ok = io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(5)));
+        // The deadline lies far past the gate below: a wait that ends at all did not run to it.
+        let ok = io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(3600)));
         if !ok {
             t.get().store((platform::now_ns() - t0) as i64, atomics::MemoryOrder::Release);
         } else {
             t.get().store(-1i64, atomics::MemoryOrder::Release);
         }
     };
-    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the wait ends");
+    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the wait ends before its deadline");
     let el = count(&took);
     assert(el >= 0, "the wait reports not ready");
-    assert(el < PROMPT_NS as i64, "the wait does not run to its deadline");
+    finish();
+}
+
+// Numbers closed before the reactor starts: its own descriptors take the lowest free numbers, so a wait
+// on a closed number can name one of them. That registration is refused and the wait reports not ready,
+// and the wake pipe keeps its own registration: the disarm of a wait that ends at its deadline, which only
+// a wake delivers, is still acknowledged.
+@test
+fn a_number_the_reactor_took_reports_not_ready() {
+    rt::set_worker_count(2);
+    let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
+    let mut p1 = pair(&l);
+    let mut p2 = pair(&l);
+    let live = pair(&l);
+    let mut fds = Vector::<i32>::new();
+    fds.push(p1.a.fd);
+    fds.push(p1.b.fd);
+    fds.push(p2.b.fd);
+    p1.a.close();
+    p1.b.close();
+    p2.b.close();
+    let wg = sync::WaitGroup::new();
+    let not_ready = counter();
+    for i in 0..fds.len() {
+        wg.add(1);
+        let w = wg.clone();
+        let t = not_ready.clone();
+        let fd = *fds.at(i);
+        launch || {
+            defer w.done();
+            if !io::wait_readable(fd) {
+                bump(&t);
+            }
+        };
+    }
+    assert(wg.wait_timeout(time::Duration::from_secs(10)), "every wait on a closed number ends");
+    assert_eq(count(&not_ready), 3);
+    wg.add(1);
+    let w = wg.clone();
+    let fd = live.b.fd;
+    launch || {
+        defer w.done();
+        let _ = io::wait_until(fd, false, time::deadline_in(time::Duration::from_millis(1)));
+    };
+    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the expired wait's disarm is acknowledged");
     finish();
 }
 
@@ -440,7 +484,8 @@ fn shutdown_settles_a_pending_wait() {
     launch || {
         defer w.done();
         let t0 = platform::now_ns();
-        let ok = io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(5)));
+        // The deadline lies far past the gate below: a wait that ends at all was settled by the shutdown.
+        let ok = io::wait_until(fd, false, time::deadline_in(time::Duration::from_secs(3600)));
         if !ok {
             t.get().store((platform::now_ns() - t0) as i64, atomics::MemoryOrder::Release);
         } else {
@@ -449,10 +494,9 @@ fn shutdown_settles_a_pending_wait() {
     };
     assert(wait_pending(1), "the wait arms");
     io::shutdown();
-    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the settled wait ends");
+    assert(wg.wait_timeout(time::Duration::from_secs(10)), "the settled wait ends before its deadline");
     let el = count(&took);
     assert(el >= 0, "the wait reports not ready");
-    assert(el < PROMPT_NS as i64, "the wait settles before its deadline");
     // A fresh reactor serves the next wait.
     let hits = counter();
     wg.add(1);

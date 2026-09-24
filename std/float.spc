@@ -133,8 +133,11 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         return Float::<E, F, FAMILY>::pack(false, Float::<E, F, FAMILY>::bias() as u64, &z);
     }
 
-    /// +inf, or -inf when `negative`. Panics: FINITE_ONLY family.
+    /// +inf, or -inf when `negative`. Panics: FINITE_ONLY family, which has no infinity.
     pub fn infinity(negative: bool) Float<E, F, FAMILY> {
+        if FAMILY == FloatFamily::FF_FINITE_ONLY {
+            panic("a FINITE_ONLY float format has no infinity");
+        }
         let z = UInt::<{1 + E + F}>::zero();
         return Float::<E, F, FAMILY>::pack(negative, Float::<E, F, FAMILY>::exp_field_max(), &z);
     }
@@ -201,7 +204,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         return FpClass::FP_NORMAL;
     }
 
-    /// True for any NaN (never for FINITE_ONLY).
+    /// True for any NaN; for FINITE_ONLY, the family's single NaN encoding.
     pub fn is_nan(self: &Float<E, F, FAMILY>) bool {
         if FAMILY == FloatFamily::FF_FINITE_ONLY {
             // The single NaN encoding: top exponent AND all-ones fraction.
@@ -712,7 +715,8 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         return out;
     }
 
-    /// Parse `[-]ddd[.ddd][e[+-]ddd]`, plus `nan`, `inf` and `-inf`. None on anything malformed.
+    /// Parse `[-]ddd[.ddd][e[+-]ddd]`, plus `nan`, `inf` and `-inf`. None on anything malformed. A FINITE_ONLY
+    /// format has no infinity, so `inf` saturates to max_finite, as an overflowing literal does.
     pub fn from_str(s: str) Option<Float<E, F, FAMILY>> {
         static_assert(E <= 28, "decimal text runs in a format two exponent bits wider; cap E at 28");
         let n = s.len();
@@ -727,7 +731,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
                 return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::nan());
             }
             if s[i] == b'i' && s[i + 1] == b'n' && s[i + 2] == b'f' {
-                return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::infinity(negv));
+                return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::overflow_result(negv));
             }
         }
         let mut acc = Float::<{E + 2}, {F + 96}, IEEE>::zero();
@@ -796,6 +800,13 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         }
         if i != n {
             return Option::<Float<E, F, FAMILY>>::None;
+        }
+        if acc.is_zero() {
+            // Zero at any scale; scaling could meet an infinite power of ten, and 0 * inf is NaN.
+            if negv {
+                return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::neg_zero());
+            }
+            return Option::<Float<E, F, FAMILY>>::Some(Float::<E, F, FAMILY>::zero());
         }
         let total = e10 + exp_adj;
         let mag = if total < 0 {
@@ -1307,12 +1318,15 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         if self.is_nan() || self.is_infinite() || self.is_zero() {
             return *self;
         }
+        // Past the whole exponent span (normal range plus the subnormal bits) every larger |n| gives the
+        // same overflow or zero; clamping there keeps e + n in range.
+        let span = Float::<E, F, FAMILY>::emax() - Float::<E, F, FAMILY>::emin() + F as i64 + 3;
         let mut nn = n;
-        if nn > 1000000 {
-            nn = 1000000;
+        if nn > span {
+            nn = span;
         }
-        if nn < 0 - 1000000 {
-            nn = 0 - 1000000;
+        if nn < 0 - span {
+            nn = 0 - span;
         }
         let mut e: i64 = 0;
         let sig = self.decode_sig3(&mut e);
@@ -1454,10 +1468,11 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 }
 
-// The operator conformances. `==` is IEEE equality: NaN equals nothing, the zeros are one value;
-// exactly what `==` on the built-in floats means. `<` orders through `cmp`, which needs a TOTAL order,
-// so NaN sorts above +infinity (negative NaN below -infinity); for strict IEEE comparisons, where any
-// NaN makes every comparison false, use ieee_lt/ieee_le.
+// The operator conformances. `Eq`, `Ord` and `Hash` follow ONE total order over the encodings, the same
+// one the built-in f32/f64 conformances use (std/core.spc): `==` is encoding equality (a NaN equals the
+// same NaN encoding, and -0.0 != +0.0), and `<` orders -NaN < -inf < .. < -0.0 < +0.0 < .. < +inf < +NaN.
+// That keeps map keys, sorting and dedup well defined. For IEEE comparisons, where any NaN makes every
+// comparison false and the two zeros are equal, use ieee_eq/ieee_lt/ieee_le.
 extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> as Add {
     type Output = Float<E, F, FAMILY>;
 
@@ -1732,8 +1747,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 }
 
 extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> as Eq {
+    /// Encoding equality: exactly the values `cmp` puts at 0 (see the conformance note above).
     pub fn eq(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) bool {
-        return self.ieee_eq(other);
+        return self.bits == other.bits;
     }
 }
 
@@ -1753,12 +1769,8 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 }
 
 extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> as Hash {
-    /// Consistent with Eq's IEEE equality where equality exists: +0 and -0 are equal and hash alike.
-    /// (NaN equals nothing, so its hash constrains nothing.)
+    /// The encoding's hash: equal encodings, which is what Eq compares, hash alike.
     pub fn hash(self: &Float<E, F, FAMILY>) u64 {
-        if self.is_zero() {
-            return UInt::<{1 + E + F}>::zero().hash();
-        }
         return self.bits.hash();
     }
 }

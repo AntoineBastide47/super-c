@@ -28,12 +28,12 @@ pub struct DiagRec {
     pub severity: u8, // LSP DiagnosticSeverity: 1 = error, 2 = warning
     pub msg: String,
     // machine-applicable fix: -1 = none, else a LintFix kind (0 delete [fix_start, fix_end),
-    // 1 insert '_', 2 insert 'const ', 3 insert `fix_text`, 4 replace [fix_start, fix_end) with
-    // `fix_text`) surfaced as an LSP quick fix.
+    // 1 insert '_', 2 insert 'const ', 4 replace [fix_start, fix_end) with `fix_text`) surfaced as
+    // an LSP quick fix.
     pub fix_kind: i32,
     pub fix_start: u32,
     pub fix_end: u32,
-    pub fix_text: String, // kind-3/4 payload (generated / replacement text); empty otherwise
+    pub fix_text: String, // kind-4 payload (replacement text); empty otherwise
 }
 
 // The editor-facing message for one structured record: the message's first line plus one "= note:"
@@ -67,8 +67,20 @@ fn rec_msg(e: &diag::Errors, d: &diag::Diagnostic) String {
 }
 
 // Append every error/warning record in `e` as a DiagRec against module `m` (the records carry their
-// spans and note chains directly; nothing is parsed back out of rendered text).
+// spans and note chains directly; nothing is parsed back out of rendered text). Fixes attach to
+// warnings only (`Errors::fix` and `fix_replace` index `warns`); the first fix of a warning wins.
 fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
+    let mut wfix = Vector::<u32>::new();
+    wfix.reserve(e.warns.len());
+    for _ in 0..e.warns.len() {
+        wfix.push(0xFFFFFFFF);
+    }
+    for j in 0..e.fixes.len() {
+        let w = e.fixes.at(j).warn as usize;
+        if w < wfix.len() && wfix[w] == 0xFFFFFFFF {
+            wfix.set(w, j as u32);
+        }
+    }
     for severity in 1u8..3u8 {
         let records = if severity == 1 {
             &e.errors;
@@ -76,27 +88,17 @@ fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
             &e.warns;
         };
         for k in 0..records.len() {
-            let fix_id = if severity == 1 {
-                0x80000000 | k as u32;
-            } else {
-                k as u32;
-            };
             let mut fk: i32 = -1;
             let mut fs: u32 = 0;
             let mut fe: u32 = 0;
             let mut ftx = String::new();
-            for j in 0..e.fixes.len() {
-                let f = *e.fixes.at(j);
-                if f.warn == fix_id {
-                    fk = f.kind;
-                    fs = f.start;
-                    if severity == 2 {
-                        fe = f.end;
-                    }
-                    if f.text != 0xFFFFFFFF && f.text as usize < e.fix_texts.len() {
-                        ftx = e.fix_texts.at(f.text as usize).clone();
-                    }
-                    break;
+            if severity == 2 && wfix[k] != 0xFFFFFFFF {
+                let f = *e.fixes.at(wfix[k] as usize);
+                fk = f.kind;
+                fs = f.start;
+                fe = f.end;
+                if f.text != 0xFFFFFFFF && f.text as usize < e.fix_texts.len() {
+                    ftx = e.fix_texts.at(f.text as usize).clone();
                 }
             }
             let d = records.at(k);
@@ -628,7 +630,7 @@ fn touched_items(p: &loader::Package, i: usize, ws: u32, we: u32, out: &mut Vect
             prev_end = end;
         }
     }
-    if open_ext != SLOT_NONE && ws <= 0xFFFFFFFFu32 && we >= prev_end {
+    if open_ext != SLOT_NONE && we >= prev_end {
         header = true;
         out.push(open_ext);
     }
@@ -648,7 +650,7 @@ fn plain_fn(p: &loader::Package, m: usize, k: u32) bool {
         return false;
     }
     let nd = p.modules[m].ast.at_const(it.node);
-    return nd.kind == NodeKind::NODE_FUNCTION && !nd.as_data.function.is_const;
+    return nd.kind == NodeKind::NODE_FUNCTION && !nd.as_data.function.is_const();
 }
 
 // Item-level invalidation over the recorded references. The items an edit touched start
@@ -745,18 +747,28 @@ fn propagate_touched(p: &loader::Package, seeds: &Vector<Vector<u32>>, aff: &mut
     }
 }
 
-// The overlay text for module `i`'s file, or None. Docs are few, so the per-module path compare
-// (realpath-backed) stays cheap.
-fn overlay_for(p: &loader::Package, i: usize, ov_files: &Vector<String>) Option<usize> {
+// The overlay slot of every module's file (-1 = none). Docs are few, so the per-(module, doc) file
+// identity compare stays cheap; the C strings are built once per round.
+fn overlay_slots(p: &loader::Package, ov_files: &Vector<str>) Vector<i64> {
+    let mut fcs = Vector::<String>::new();
+    fcs.reserve(ov_files.len());
     for k in 0..ov_files.len() {
-        let mut fc = String::from_str(ov_files.at(k).as_str());
-        let mut mf = String::from_str(p.modules.at(i).file.as_str());
-        let same = unsafe shim::sc_same_file(fc.cstr(), mf.cstr()) == 1;
-        if same {
-            return Option::<usize>::Some(k);
-        }
+        fcs.push(String::from_str(ov_files[k]));
     }
-    return Option::<usize>::None;
+    let mut out = Vector::<i64>::new();
+    out.reserve(p.modules.len());
+    for i in 0..p.modules.len() {
+        let mut slot: i64 = -1;
+        let mut mf = p.modules.at(i).file.clone();
+        for k in 0..fcs.len() {
+            if unsafe shim::sc_same_file(fcs[k].cstr(), mf.cstr()) == 1 {
+                slot = k as i64;
+                break;
+            }
+        }
+        out.push(slot);
+    }
+    return out;
 }
 
 // Shift every source offset >= `from` by `delta` across the OLD prefix of the arena (the freshly
@@ -851,7 +863,7 @@ fn splice_candidate(a: &Ast, ws: u32, we: u32) NodeId {
             continue;
         }
         let fd = n.as_data.function;
-        if fd.body == NODE_NONE || fd.is_const {
+        if fd.body == NODE_NONE || fd.is_const() {
             continue;
         }
         let bs = a.at_const(fd.body).span;
@@ -865,14 +877,15 @@ fn splice_candidate(a: &Ast, ws: u32, we: u32) NodeId {
 /// Incrementally re-analyze `p` against the current overlays. False = outside the incremental domain
 /// (import surface changed, a prelude module changed, a parse or resolve error appeared, the previous
 /// state was broken): the caller MUST fall back to a full compile; the package may be part-updated.
-/// True: `p` and `diags` (previous round's records in, merged records out) are current.
+/// True: `p` and `diags` (previous round's records in, merged records out) are current. The overlays
+/// are borrowed views (index-aligned file paths and texts): a round copies no document text.
 pub fn recompile(
     p: &mut loader::Package,
     target: i32,
     root_file: str,
     lint_dir: str,
-    ov_files: &Vector<String>,
-    ov_texts: &Vector<String>,
+    ov_files: &Vector<str>,
+    ov_texts: &Vector<str>,
     diags: &mut Vector<DiagRec>,
     st: &mut RecompileStats,
 ) bool {
@@ -886,16 +899,8 @@ pub fn recompile(
             return false;
         }
     }
-    // The overlay slot per module, looked up once per round (a realpath compare per document).
-    let mut ovk = Vector::<i64>::new();
-    for i in 0..n {
-        ovk.push(
-            switch overlay_for(p, i, ov_files) {
-                Some(k) => k as i64,
-                None => 0i64 - 1,
-            },
-        );
-    }
+    // The overlay slot per module, looked up once per round (a file identity compare per document).
+    let ovk = overlay_slots(p, ov_files);
     // Documents opened since their module's bodies were released: the bodies come back (ids
     // stable, so importers keep their analyses) and the module re-analyzes.
     let mut opened = Vector::<usize>::new();
@@ -909,7 +914,7 @@ pub fn recompile(
     // 1) the changed set: modules whose overlay text differs from the analyzed source.
     let mut changed = Vector::<usize>::new();
     for i in 0..n {
-        if ovk[i] >= 0 && ov_texts.at(ovk[i] as usize).as_str() != p.modules[i].source.as_str() {
+        if ovk[i] >= 0 && ov_texts[ovk[i] as usize] != p.modules[i].source.as_str() {
             changed.push(i);
         }
     }
@@ -939,7 +944,7 @@ pub fn recompile(
         }
         let k = ovk[i] as usize;
         let file = p.modules[i].file.clone();
-        let mut ns = String::from_str(ov_texts.at(k).as_str());
+        let mut ns = String::from_str(ov_texts[k]);
         let mut lx = lex::Lexer::new(&mut ns, file.as_str());
         lx.scan_tokens();
         if lx.has_errors() {
@@ -974,9 +979,6 @@ pub fn recompile(
         let mut spliced = false;
         if cand != NODE_NONE {
             spliced = try_body_splice(p, i, cand, toks, ns, file.as_str(), we, delta);
-        } else {
-            ns.free();
-            toks.free();
         }
         if spliced {
             body_sliced.set(c, true);
@@ -985,7 +987,7 @@ pub fn recompile(
             // Full module reparse (fresh lex: the splice attempt consumed the first stream). Fresh
             // ids, so the import surface must be unchanged or the loader's closure caches (and every
             // importer's decl references) would be wrong.
-            let mut ns9 = String::from_str(ov_texts.at(k).as_str());
+            let mut ns9 = String::from_str(ov_texts[k]);
             let mut lx9 = lex::Lexer::new(&mut ns9, file.as_str());
             lx9.scan_tokens();
             if lx9.has_errors() {
@@ -1007,13 +1009,12 @@ pub fn recompile(
             let old = replace(&mut p.modules[i].ast, na);
             p.modules[i].ast.module = i as ModuleId;
             p.modules[i].source = ns9;
-            emit::platform_filter_module(p, i, target);
+            p.platform_filter_module(i, target);
             if same_shape(&old, &p.modules[i].ast) {
                 shaped.set(c, true);
                 win_s.set(c, ws);
                 win_e.set(c, (we as i64 + delta) as u32);
             }
-            old.free();
         }
         st.reparsed += 1;
     }
@@ -1104,7 +1105,6 @@ pub fn recompile(
         if !lsp_resolve_module(p, i, lw, &mut nd) {
             // A resolve failure invalidates this module's retained analyses and its importers';
             // rather than track that incrementally, hand the round to the full path.
-            nd.free();
             return false;
         }
         st.analyzed += 1;
@@ -1119,22 +1119,19 @@ pub fn recompile(
     typecheck_set(p, &mut aff, true, true, root_file, lint_dir, &mut nd, st);
     // 6) merge: keep unaffected modules' records, replace the affected ones' (the set now holds
     // every module the passes analyzed).
-    let mut merged = Vector::<DiagRec>::new();
-    while diags.len() > 0 {
-        let d = diags.remove(diags.len() - 1).unwrap();
-        if d.module as usize < n && !aff[d.module as usize] {
-            merged.push(d);
-        } else {
-            let dd = d;
-            dd.free();
-        }
-    }
-    while merged.len() > 0 {
-        diags.push(merged.remove(merged.len() - 1).unwrap());
-    }
-    while nd.len() > 0 {
-        let d = nd.remove(0).unwrap();
-        diags.push(d);
+    let affr = &aff;
+    diags.retain(|d: &DiagRec| d.module as usize < n && !affr[d.module as usize]);
+    diags.reserve(nd.len());
+    nd.reverse();
+    loop {
+        switch nd.pop() {
+            Some(d) => {
+                diags.push(d);
+            },
+            _ => {
+                break;
+            },
+        };
     }
     release_closed(p, &ovk);
     stats_line(p, "round", t0, st);
@@ -1178,14 +1175,12 @@ fn try_body_splice(
     let old_metas = p.modules[i].ast.metas.len();
     let ns2 = ns;
     let mut ps = par::Parser::new(toks, ns2.as_str(), file);
-    let fresh = replace(&mut ps.ast, replace(&mut p.modules[i].ast, Ast::new(0)));
-    fresh.free();
+    let _ = replace(&mut ps.ast, replace(&mut p.modules[i].ast, Ast::new(0)));
     let nb = ps.reparse_fn_body(at as usize, fnid);
     let bad = ps.has_errors() || nb == NODE_NONE;
     let want_end = (bspan.end as i64 + delta) as u32;
     let arena_back = ps.take_ast();
-    let hold = replace(&mut p.modules[i].ast, arena_back);
-    hold.free();
+    let _ = replace(&mut p.modules[i].ast, arena_back);
     if bad || p.modules[i].ast.at_const(nb).span.end != want_end {
         // Orphaned appends only; the caller full-reparses this module.
         return false;
@@ -1207,7 +1202,7 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
             harvest_parse_errors(p, i, diags);
         }
     }
-    emit::platform_filter(p, target);
+    p.platform_filter(target);
     let n = p.modules.len();
     let mut res_ok = Vector::<bool>::new();
     let mut all_ok = true;
@@ -1241,16 +1236,11 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
         }
     }
     typecheck_set(p, &mut set, all_ok, true, root_file, lint_dir, diags, &mut st);
-    let ovp = (&p.overlay_files) as *const Vector<String>;
-    let mut ovk = Vector::<i64>::new();
-    for i in 0..n {
-        ovk.push(
-            switch overlay_for(p, i, unsafe &*ovp) {
-                Some(k) => k as i64,
-                None => 0i64 - 1,
-            },
-        );
+    let mut views = Vector::<str>::new();
+    for k in 0..p.overlay_files.len() {
+        views.push(p.overlay_files[k].as_str());
     }
+    let ovk = overlay_slots(p, &views);
     release_closed(p, &ovk);
     return st;
 }
@@ -1345,18 +1335,7 @@ fn typecheck_set(
 
 // Drop module `i`'s records from `nd`: a module analyzed again replaces them whole.
 fn drop_records(nd: &mut Vector<DiagRec>, i: usize) {
-    let mut k: usize = 0;
-    for _ in 0..nd.len() {
-        if k >= nd.len() {
-            break;
-        }
-        if nd.at(k).module as usize == i {
-            let d = nd.remove(k).unwrap();
-            d.free();
-        } else {
-            k += 1;
-        }
-    }
+    nd.retain(|d: &DiagRec| d.module as usize != i);
 }
 
 // The members of `set`, each after the members of its import closure (a cycle keeps index order).
@@ -1404,9 +1383,7 @@ fn reparse_bodies(p: &mut loader::Package, i: usize) {
     ps.build_ast();
     assert(!ps.has_errors(), "a parsed module parses again");
     let mut na = ps.take_ast();
-    let old = replace(&mut p.modules[i].ast.b, replace(&mut na.b, BodyArena::new()));
-    old.free();
-    na.free();
+    let _ = replace(&mut p.modules[i].ast.b, replace(&mut na.b, BodyArena::new()));
 }
 
 // Keep module `m`'s bodies live across rounds: the engine demanded them once.

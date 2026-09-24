@@ -1,6 +1,5 @@
-// Core IR inliner (plans/1_bounds_check_elimination.md §8.5, §10): replaces qualifying direct
-// TM_CALLs with the callee's lowered body so the caller-local BCE pass sees the callee's checks
-// and guards. Runs on the emission path only, over ELABORATED bodies: the borrow pass rewrote
+// Core IR inliner: replaces qualifying direct TM_CALLs with the callee's lowered body so the
+// caller-local BCE pass sees the callee's checks and guards. Runs on the emission path only, over ELABORATED bodies: the borrow pass rewrote
 // every kept body with its drop terminators (`ir::drops`), so a callee splices in with its own
 // drops, flag temps and storage markers, and no ownership analysis runs on the merged body (the
 // caller was elaborated before its splices too). Argument operands are reused in place (read
@@ -316,7 +315,7 @@ fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
         return false;
     }
     let f = n.as_data.function;
-    if !f.is_public || f.is_extern || f.body == NODE_NONE || f.generics.len != 0 {
+    if !f.is_public() || f.is_extern() || f.body == NODE_NONE || f.generics.len != 0 {
         return false;
     }
     let ext = extend_of(a, d.node);
@@ -374,8 +373,9 @@ extend InlineCtx {
     }
 }
 
-// The declaration-level checks: 0 = a candidate worth keeping, else the rejection.
-fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>) u64 {
+// The declaration-level checks: 0 = a candidate worth keeping, else the rejection. A candidate's
+// enclosing extend block (or NODE_NONE) is written to `ext`.
+fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>, ext: &mut NodeId) u64 {
     let p = unsafe &*pkg;
     if d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
         return REJ_BASE | IJ_NOT_FN as u64;
@@ -386,7 +386,7 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>) u64 {
         return REJ_BASE | IJ_NOT_FN as u64;
     }
     let f = n.as_data.function;
-    if f.is_extern || f.body == NODE_NONE {
+    if f.is_extern() || f.body == NODE_NONE {
         return REJ_BASE | IJ_NOT_FN as u64;
     }
     for k in 0..a.attrs.len() {
@@ -399,11 +399,11 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, asserts: &Vector<u64>) u64 {
             return REJ_BASE | IJ_NOT_FN as u64;
         }
     }
-    let ext = extend_of(a, d.node);
+    *ext = extend_of(a, d.node);
     // A GENERIC body carrying a static_assert defers it per instantiation; that guard fires
     // only when a call site DEMANDS the instance, and inlining the call erases the demand.
     // Such callees must stay calls. `asserts` holds the module's static_assert spans.
-    if f.generics.len != 0 || ext != NODE_NONE && a.at_const(ext).as_data.extend_def.generics.len != 0 {
+    if f.generics.len != 0 || *ext != NODE_NONE && a.at_const(*ext).as_data.extend_def.generics.len != 0 {
         let bsp = a.at_const(f.body).span;
         for k in 0..asserts.len() {
             let sp = asserts[k];
@@ -456,9 +456,6 @@ extend InlineStore {
         }
         for i in 0..keep.kept.len() {
             let lw = keep.kept.at(i);
-            if lw.env.len() != 0 {
-                continue;
-            }
             let d = lw.body.owner;
             // A closure of a releasable body: never a named callee, and its node may be released.
             if Ast::in_body(d.node) {
@@ -479,31 +476,42 @@ extend InlineStore {
                     assert_spans(unsafe &*(&*pkg).module_ast_const(d.module), asserts.index_mut(dm));
                     has_asserts.set(dm, 1);
                 }
-                r = vet_decl(pkg, d, asserts.at(dm));
+                let mut ext = NODE_NONE;
+                r = vet_decl(pkg, d, asserts.at(dm), &mut ext);
                 if r == 0 {
-                    r = self.vet_body(pkg, d, &lw.body, lw.closures.len());
+                    r = self.vet_body(pkg, d, ext, &lw.body, lw.closures.len());
                 }
             }
             self.keep_ix.insert(key, r);
         }
     }
 
-    // The body-level checks on the env-free lowering of `d` with `nclosures` hoisted closures:
-    // the kept slot, or the rejection.
-    fn vet_body(self: &mut Self, pkg: *const loader::Package, d: DefId, body: &ir::CoreBody, nclosures: usize) u64 {
+    // The body-level checks on the env-free lowering of `d` (in extend block `ext`, or NODE_NONE)
+    // with `nclosures` hoisted closures, after the size gate passed: the kept slot, or the rejection.
+    fn vet_body(
+        self: &mut Self,
+        pkg: *const loader::Package,
+        d: DefId,
+        ext: NodeId,
+        body: &ir::CoreBody,
+        nclosures: usize,
+    ) u64 {
         let p = unsafe &*pkg;
         let a = unsafe &*p.module_ast_const(d.module);
         let f = a.at_const(d.node).as_data.function;
-        let ext = extend_of(a, d.node);
         let mut rej: u64 = 0;
         if body.has_reflect || body.has_zst_cond || nclosures != 0 {
             rej = REJ_BASE | IJ_SHAPE as u64;
-        } else if !body.inline_size_ok {
-            rej = REJ_BASE | IJ_TOO_BIG as u64;
         }
         if rej == 0 {
             for i in 0..body.blocks.len() {
                 let tk = &body.blocks.at(i).term;
+                if tk.kind == ir::TM_RETURN && tk.args_len == ir::RET_CANCEL {
+                    // A cancellation-edge return unwinds the CALLER too; rewiring it as a goto
+                    // would read the poison value and resume normal flow.
+                    rej = REJ_BASE | IJ_SHAPE as u64;
+                    break;
+                }
                 if tk.kind == ir::TM_ASSERT {
                     rej = REJ_BASE | IJ_SHAPE as u64; // the assert message renders from the callee module's source
                     break;
@@ -525,17 +533,6 @@ extend InlineStore {
             for i in 0..body.locals.len() {
                 if body.locals.at(i).storage == ir::LS_STATIC_REF {
                     rej = REJ_BASE | IJ_SHAPE as u64; // item symbol/linkage is the owner TU's business
-                    break;
-                }
-            }
-        }
-        if rej == 0 {
-            for i in 0..body.blocks.len() {
-                let t9 = body.blocks.at(i).term;
-                if t9.kind == ir::TM_RETURN && t9.args_len == ir::RET_CANCEL {
-                    // A cancellation-edge return unwinds the CALLER too; rewiring it as a goto
-                    // would read the poison value and resume normal flow.
-                    rej = REJ_BASE | IJ_SHAPE as u64;
                     break;
                 }
             }
@@ -566,7 +563,7 @@ extend InlineStore {
                     rej = REJ_BASE | IJ_SHAPE as u64; // wide-literal records index the callee module's Ast
                     break;
                 }
-                if c9.kind == ir::CK_ITEM && (c9.targ_len != 0 || !is_concrete_pub_fn(pkg, c9.item)) {
+                if c9.kind == ir::CK_ITEM && (c9.targ_len() != 0 || !is_concrete_pub_fn(pkg, c9.item)) {
                     rej = REJ_BASE | IJ_SHAPE as u64; // fn-value symbols follow the inner-call rule
                     break;
                 }
@@ -603,7 +600,7 @@ fn assign_local_use(b: &mut ir::CoreBody, l: ir::LocalId, op: ir::OperandId, sp:
         ir::Rvalue { kind: ir::RV_USE, a: op, b: 0, c: 0, target: ty, item: DefId { module: 0, node: NODE_NONE } },
     );
     b.statements.push(
-        ir::Statement { kind: ir::ST_ASSIGN, place: pl, rvalue: b.rvalues.len() as u32 - 1, a: 0, b: 0, span: sp },
+        ir::Statement { kind: ir::ST_ASSIGN, place: pl, rvalue: b.rvalues.len() as u32 - 1, a: 0, span: sp },
     );
 }
 
@@ -1024,8 +1021,8 @@ fn splice(
     for i in 0..k.constants.len() {
         let mut c = *k.constants.at(i);
         c.ty = mty(tymap, c.ty);
-        if c.targ_len != 0 {
-            c.targ_start += tg0;
+        if c.kind == ir::CK_ITEM && c.targ_len() != 0 {
+            c.val = ir::targ_val(c.targ_start() + tg0, c.targ_len());
         }
         if c.kind == ir::CK_STR || c.kind == ir::CK_FLOAT || c.kind == ir::CK_INT {
             // the spelling spans a FOREIGN module's source; item marks it (established CK_STR
@@ -1059,6 +1056,7 @@ fn splice(
             rv.a += p0;
         } else if rv.kind == ir::RV_REPEAT {
             rv.a += o0;
+            rv.b += o0;
         } else if rv.kind == ir::RV_DYN {
             rv.a += o0;
             rv.b = mty(tymap, rv.b);
@@ -1193,7 +1191,6 @@ fn splice(
                         place: b.places.len() as u32 - 1,
                         rvalue: b.rvalues.len() as u32 - 1,
                         a: 0,
-                        b: 0,
                         span: sp,
                     },
                 );
@@ -1244,14 +1241,7 @@ fn splice(
                 },
             );
             b.statements.push(
-                ir::Statement {
-                    kind: ir::ST_ASSIGN,
-                    place: dpl,
-                    rvalue: b.rvalues.len() as u32 - 1,
-                    a: 0,
-                    b: 0,
-                    span: sp,
-                },
+                ir::Statement { kind: ir::ST_ASSIGN, place: dpl, rvalue: b.rvalues.len() as u32 - 1, a: 0, span: sp },
             );
         }
         b.blocks.push(ir::BasicBlock { stmt_start: js, stmt_len: k.returns, term: goto_term(t.t0, sp), sealed: true });

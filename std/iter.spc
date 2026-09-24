@@ -8,8 +8,8 @@
 //
 // Elements flow BY VALUE through the pipeline (a borrowing source like `v.iter()` yields `&T`
 // references, which are values themselves). Adapters store the source iterator and the closure by
-// value; a `Free`-owning (`fn move`) closure is not accepted, and `filter` cannot pass owned `Free`
-// elements through (the predicate call would consume them): iterate those by reference instead.
+// value; a `Free`-owning (`fn move`) closure is not accepted. `filter`'s predicate borrows each element
+// (`&T`), so owned elements pass through it.
 
 /// Yields `f(x)` for every `x` the source yields.
 pub struct MapIter<I, T, U, F> {
@@ -38,16 +38,16 @@ pub struct FilterIter<I, T, P> {
 }
 
 /// An iterator yielding only the items of `it` for which `p` holds.
-pub fn filter<I: Iterator<T>, T, P: fn(T) bool>(it: I, p: P) FilterIter<I, T, P> {
+pub fn filter<I: Iterator<T>, T, P: fn(&T) bool>(it: I, p: P) FilterIter<I, T, P> {
     return FilterIter::<I, T, P> { it: it, p: p };
 }
 
-extend<I: Iterator<T>, T, P: fn(T) bool> FilterIter<I, T, P> as Iterator<T> {
+extend<I: Iterator<T>, T, P: fn(&T) bool> FilterIter<I, T, P> as Iterator<T> {
     pub fn next(self: &mut FilterIter<I, T, P>) Option<T> {
         loop {
             switch self.it.next() {
                 Some(x) => {
-                    if self.p(x) {
+                    if self.p(&x) {
                         return Option::<T>::Some(x);
                     }
                 },

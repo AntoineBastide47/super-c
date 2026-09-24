@@ -118,46 +118,46 @@ fn new_shared() arc::Arc<CancelShared> {
 
 // Unlink `m` from its source's list. Caller holds the source lock.
 fn unlink_locked(sh: &CancelShared, m: *mut Member) {
-    let nx = unsafe m.snext;
-    let pv = unsafe m.sprev;
+    let nx = unsafe (*m).snext;
+    let pv = unsafe (*m).sprev;
     if pv != null {
-        unsafe pv.snext = nx;
+        unsafe (*pv).snext = nx;
     } else {
         unsafe sh.head.get()[0] = nx;
     }
     if nx != null {
-        unsafe nx.sprev = pv;
+        unsafe (*nx).sprev = pv;
     } else {
         unsafe sh.tail.get()[0] = pv;
     }
-    atomic::store_i32(&mut unsafe m.linked, 0, 2);
+    unsafe atomic::store_i32(&mut unsafe (*m).linked, 0, 2);
 }
 
 // The completion hook the runtime calls once the task's body has returned and before its block can be
 // recycled: every record leaves its source list (under that source's lock), gives its reference back, and
 // heap records are freed. Runs on the worker, outside any task, holding no lock across records.
 fn membership_release(mb: *mut runtime::Membership) {
-    let inl = (&mut unsafe mb.inline_mem[0]) as *mut Member;
-    let mut m = (unsafe mb.head) as *mut Member;
-    unsafe mb.head = null;
+    let inl = (&mut unsafe (*mb).inline_mem[0]) as *mut Member;
+    let mut m = (unsafe (*mb).head) as *mut Member;
+    unsafe (*mb).head = null;
     let mut g = Global {};
     while m != null {
-        let nx = unsafe m.tnext;
-        let sh = unsafe m.src.get();
+        let nx = unsafe (*m).tnext;
+        let sh = unsafe (*m).src.get();
         // A member the cancel sweep already drained needs no lock: a thousand children unwinding at once
         // would otherwise serialise on their source. Re-checked under the lock, since the sweep may be
         // draining this very record.
-        if atomic::load_i32(&mut unsafe m.linked, 1) != 0 {
+        if unsafe atomic::load_i32(&mut unsafe (*m).linked, 1) != 0 {
             unsafe sc_runtime::sc_rt_spin_lock(sh.spin.get());
-            if atomic::load_i32(&mut unsafe m.linked, 0) != 0 {
+            if unsafe atomic::load_i32(&mut unsafe (*m).linked, 0) != 0 {
                 unlink_locked(sh, m);
             }
             unsafe sc_runtime::sc_rt_spin_unlock(sh.spin.get());
         }
         // The record's reference to the source goes with it: destroyed in place, since the record is raw
         // storage the task owns, not a value the drop elaboration knows.
-        let sp = (&mut unsafe m.src) as *mut arc::Arc<CancelShared>;
-        sp.free();
+        let sp = (&mut unsafe (*m).src) as *mut arc::Arc<CancelShared>;
+        unsafe (*sp).free();
         if m != inl {
             unsafe g.dealloc(m, sizeof(Member), alignof(Member));
         }
@@ -186,31 +186,33 @@ fn group_finish(refs: GroupRefs) {
     refs.w.done();
 }
 
-// What one spawned child owns, boxed for the coroutine trampoline. The group pieces sit behind one raw
-// pointer so the generic part carries only `F` (a field cannot be moved out of an owning aggregate).
+// What one spawned child owns: moved into the task record when it fits there, as `launch` does with a
+// small closure, and boxed otherwise.
 @no_const
 struct ChildEnv<F> {
     pub f: F,
-    pub refs: *mut GroupRefs,
+    pub refs: GroupRefs,
 }
 
-/// The per-`F` child trampoline: unbox, bind the group token, run the body. The finish runs from a
-/// `defer`, so a body that ends through cancellation cleanup still reports. `pub` for linkage.
+// Does a child of this body travel inside the task record?
+const fn child_inline<F>() bool {
+    return sizeof(ChildEnv<F>) <= runtime::ENV_INLINE && alignof(ChildEnv<F>) <= 8;
+}
+
+/// The per-`F` child trampoline: take the body and the group pieces out of the record (each field read is
+/// a copy the trampoline now owns, and the record is abandoned, or freed when boxed), bind the group token,
+/// run the body. The finish runs from a `defer`, so a body that ends through cancellation cleanup still
+/// reports. `pub` for linkage.
 pub fn child_entry<F: fn move() + Send + 'static>(env: *mut void) {
     let pp = env as *mut ChildEnv<F>;
-    let e = unsafe {
-        pp[0];
-    };
-    let mut g = Global {};
-    unsafe g.dealloc(env, sizeof(ChildEnv<F>), alignof(ChildEnv<F>));
-    let rp = e.refs;
-    let refs = unsafe {
-        rp[0];
-    };
-    unsafe g.dealloc(rp, sizeof(GroupRefs), alignof(GroupRefs));
+    let refs = unsafe (*pp).refs;
+    let f = unsafe (*pp).f;
+    if !child_inline::<F>() {
+        let mut g = Global {};
+        unsafe g.dealloc(env, sizeof(ChildEnv<F>), alignof(ChildEnv<F>));
+    }
     refs.tok.bind_current();
     defer group_finish(move refs);
-    let f = e.f;
     f();
 }
 
@@ -242,7 +244,7 @@ extend CancelSource {
         let mut m = unsafe sh.head.get()[0];
         while m != null {
             n = n + 1;
-            m = unsafe m.snext;
+            m = unsafe (*m).snext;
         }
         unsafe sc_runtime::sc_rt_spin_unlock(sh.spin.get());
         return n;
@@ -252,7 +254,7 @@ extend CancelSource {
     /// are cancelled at registration.
     pub fn cancel(self: &CancelSource, reason: u32) {
         let sh = self.shared.get();
-        let mut keys = Array::<u64, 64>::new(); // packed keys: slot << 32 | gen
+        let mut keys = Array::<u64, CANCEL_BATCH>::new(); // packed keys: slot << 32 | gen
         // The flag is raised under the member lock, so a registration sees either the flag (and cancels
         // itself) or its record on the list (and is swept): never neither. The list is then DRAINED a
         // batch at a time: once cancelled, a source has no further use for its members, and unlinking
@@ -268,7 +270,7 @@ extend CancelSource {
             let mut n: usize = 0;
             while n < CANCEL_BATCH && unsafe sh.head.get()[0] != null {
                 let m = unsafe sh.head.get()[0];
-                let k = unsafe m.key;
+                let k = unsafe (*m).key;
                 keys[n] = k.slot as u64 << 32 | k.gen as u64;
                 unlink_locked(sh, m);
                 n = n + 1;
@@ -317,19 +319,19 @@ extend CancelToken {
         }
         let sh = self.shared.get();
         let want = sh as *const CancelShared;
-        let inl = (&mut unsafe mb.inline_mem[0]) as *mut Member;
-        let mut m = (unsafe mb.head) as *mut Member;
+        let inl = (&mut unsafe (*mb).inline_mem[0]) as *mut Member;
+        let mut m = (unsafe (*mb).head) as *mut Member;
         while m != null {
-            if (unsafe m.src.get()) as *const CancelShared == want {
+            if (unsafe (*m).src.get()) as *const CancelShared == want {
                 return; // already a member: one record per (task, source)
             }
-            m = unsafe m.tnext;
+            m = unsafe (*m).tnext;
         }
         // Records are only ever unlinked at completion, so the inline slot is free exactly when the task
         // has no membership yet.
         let mut g = Global {};
-        m = if unsafe mb.head == null {
-            unsafe mb.hook = membership_release;
+        m = if unsafe (*mb).head == null {
+            unsafe (*mb).hook = membership_release;
             inl;
         } else {
             (unsafe g.alloc(sizeof(Member), alignof(Member))) as *mut Member;
@@ -339,10 +341,10 @@ extend CancelToken {
             key: runtime::current_key(),
             snext: null,
             sprev: null,
-            tnext: (unsafe mb.head) as *mut Member,
+            tnext: (unsafe (*mb).head) as *mut Member,
             linked: 1,
         };
-        unsafe mb.head = m;
+        unsafe (*mb).head = m;
         unsafe sc_runtime::sc_rt_spin_lock(sh.spin.get());
         let cancelled = sh.flag.load(atomics::MemoryOrder::Relaxed) != 0;
         let reason = sh.reason.load(atomics::MemoryOrder::Relaxed) as u32;
@@ -350,20 +352,20 @@ extend CancelToken {
             // Appended, so a sweep requests members in registration order: tasks that armed timers in
             // that order come due in that order too (the heap breaks equal deadlines by arm order).
             let last = unsafe sh.tail.get()[0];
-            unsafe m.sprev = last;
+            unsafe (*m).sprev = last;
             if last != null {
-                unsafe last.snext = m;
+                unsafe (*last).snext = m;
             } else {
                 unsafe sh.head.get()[0] = m;
             }
             unsafe sh.tail.get()[0] = m;
         } else {
             // A cancelled source keeps no list: the record stays with the task only.
-            atomic::store_i32(&mut unsafe m.linked, 0, 0);
+            unsafe atomic::store_i32(&mut unsafe (*m).linked, 0, 0);
         }
         unsafe sc_runtime::sc_rt_spin_unlock(sh.spin.get());
         if cancelled {
-            let _ = runtime::request_cancel(unsafe m.key, reason);
+            let _ = runtime::request_cancel(unsafe (*m).key, reason);
         }
     }
 }
@@ -400,11 +402,20 @@ extend TaskGroup {
         }
         self.wg.add(1);
         self.spawned = self.spawned + 1;
+        let c = ChildEnv::<F> {
+            f: f,
+            refs: GroupRefs { tok: self.src.token(), counts: self.counts.clone(), w: self.wg.clone() },
+        };
+        if child_inline::<F>() {
+            // The bytes move into the task record, which owns them from here on: a reused block costs no
+            // allocation.
+            runtime::spawn_coroutine_env(child_entry::<F>, null, (&c) as *const ChildEnv<F>, sizeof(ChildEnv<F>));
+            forget(c);
+            return;
+        }
         let mut g = Global {};
-        let rp = (unsafe g.alloc(sizeof(GroupRefs), alignof(GroupRefs))) as *mut GroupRefs;
-        unsafe rp[0] = GroupRefs { tok: self.src.token(), counts: self.counts.clone(), w: self.wg.clone() };
         let env = (unsafe g.alloc(sizeof(ChildEnv<F>), alignof(ChildEnv<F>))) as *mut ChildEnv<F>;
-        unsafe env[0] = ChildEnv::<F> { f: f, refs: rp };
+        unsafe env[0] = c;
         runtime::spawn_coroutine(child_entry::<F>, env);
     }
     /// Request cooperative cancellation of every child, with the user reason.
@@ -427,10 +438,11 @@ extend TaskGroup {
 }
 
 extend TaskGroup as Free {
-    /// Group drop leaves no child task: cancel them all, join, then release the group's own state.
+    /// Group drop leaves no child task: cancel them all, join, then release the group's own state. The join
+    /// is masked: a request pending on the owner must not end it while children still run.
     pub fn free(self: &mut TaskGroup) {
         self.cancel();
-        let _ = self.join();
+        self.wg.wait_masked();
         self.src.free();
         self.counts.free();
         self.wg.free();

@@ -146,6 +146,17 @@ fn recursion() {
 }
 
 @test
+fn float_constants_exact() {
+    // Folded float consts and static float slots keep every bit: each is compared at run time with
+    // the value libc parses (or computes) from the same text, and infinity and NaN stay valid C.
+    run_exit(
+        "exact float consts and statics",
+        "extern \"C\" { fn strtod(s: *const char, e: *mut *mut char) f64; }\nstruct P { pub a: f64, pub b: f32 }\nconst PI: f64 = 3.14159265358979;\nconst TAU: f64 = PI * 2.0;\nconst F: f32 = 0.1;\nconst PINF: f64 = PI * 1e308;\nconst QNAN: f64 = PINF - PINF;\nstatic mut SP: P = P { a: PI / 7.0, b: 0.1 };\nfn rd(s: str) f64 { return unsafe strtod(s.ptr() as *const char, null); }\nfn main() i32 {\n    let pi = rd(\"3.14159265358979\");\n    let q = QNAN + pi;\n    let mut bad = 0;\n    if PI != pi { bad |= 1; }\n    if TAU != pi * 2.0 { bad |= 2; }\n    if F != rd(\"0.1\") as f32 { bad |= 4; }\n    if PINF <= pi * 1e300 || q == q { bad |= 8; }\n    if unsafe SP.a != pi / 7.0 || unsafe SP.b != rd(\"0.1\") as f32 { bad |= 16; }\n    unsafe exit(bad);\n}\n",
+        0,
+    );
+}
+
+@test
 fn switches() {
     run_exit(
         "switch literal + name binding",
@@ -183,7 +194,7 @@ fn structs_and_methods() {
     );
     run_exit(
         "heap struct via new",
-        "extern \"C\" { fn free(pt: *mut void) void; }\nstruct Box { pub v: i32, }\nfn main() i32 { let b: *Box = new Box { v: 9, }; let r = unsafe b.v; unsafe free(b as *mut void); unsafe exit(r); }\n",
+        "extern \"C\" { fn free(pt: *mut void) void; }\nstruct Box { pub v: i32, }\nfn main() i32 { let b: *Box = new Box { v: 9, }; let r = unsafe (*b).v; unsafe free(b as *mut void); unsafe exit(r); }\n",
         9,
     );
 }
@@ -205,6 +216,13 @@ fn const_generics() {
         "a named const as a const-generic argument",
         "const N: usize = 4;\nstruct Holder { pub cells: Buff<i64, N> }\nstruct Buff<T, const M: usize> { pub b: [T; M] }\nextend<T, const M: usize> Buff<T, M> { fn cap(self: &Self) usize { return M; } }\nfn main() i32 {\n  let h = Holder { cells: Buff::<i64, N> { b: [3, 0, 0, 7] } };\n  unsafe exit(h.cells.b[0] as i32 + h.cells.b[3] as i32 + h.cells.cap() as i32);\n}\n",
         14,
+    );
+    // Radix-prefixed literals in a symbolic field length fold at their own base: 5 + 2 elements.
+    // b[4]=5 + c[1]=7 + sizeof=7.
+    run_exit(
+        "binary and octal literals in a const-generic array length",
+        "struct R<const N: usize> { pub b: [u8; N + 0b100], pub c: [u8; N * 0o2] }\nfn main() i32 {\n  let r = R::<1> { b: [1, 2, 3, 4, 5], c: [6, 7] };\n  return unsafe (r.b[4] + r.c[1]) as i32 + sizeof(R<1>) as i32;\n}\n",
+        19,
     );
 }
 
@@ -375,6 +393,87 @@ fn deref_beyond_methods() {
     );
 }
 
+@test
+fn box_set_frees_the_previous_value() {
+    let r = h::compile_and_run_env(
+        "fn main() i32 {\n    let mut b = Box::<String>::new(String::from_str(\"a string long enough to live on the heap\"));\n    b.set(String::from_str(\"another string long enough for the heap\"));\n    return b.len() as i32;\n}\n",
+        "SC_LEAK_CHECK=fatal",
+    );
+    assert(r.built, "Box::set builds");
+    assert_eq(r.exit, 39);
+}
+
+// A value of an unbounded type parameter owns: a generic body drops what it leaves behind (a
+// parameter it never moves, a local, the value an early return or a `?` skips, the old value `*r = v`
+// overwrites), and so do the std bodies built on the rule (`Option::filter` rejecting its payload,
+// `Option::unwrap_or`'s unused default, `Map::insert`'s duplicate key). The strings are longer than
+// 23 bytes, so each one is a heap block the fatal gate would report.
+@test
+fn generic_values_left_behind_are_dropped() {
+    let r = h::compile_and_run_env(
+        "fn heap(tag: str) String {\n    let mut s = String::from_str(\"a heap string longer than twenty-three bytes: \");\n    s.push_str(tag);\n    return s;\n}\nfn drop_it<T>(x: T) {}\nfn local<T>(x: T) i32 {\n    let y = x;\n    return 1;\n}\nfn early<T>(a: T, b: T, first: bool) T {\n    if first {\n        return a;\n    }\n    return b;\n}\nfn set<T>(r: &mut T, v: T) {\n    *r = v;\n}\nfn tried<T>(x: T, o: Option<i32>) Option<i32> {\n    let v = o?;\n    drop_it(x);\n    return Option::<i32>::Some(v);\n}\nfn main() i32 {\n    drop_it(heap(\"param\"));\n    let n = local(heap(\"local\"));\n    let e = early(heap(\"kept\"), heap(\"skipped\"), true);\n    let mut s = heap(\"old\");\n    set(&mut s, heap(\"new\"));\n    let t = tried(heap(\"question\"), Option::<i32>::None);\n    let f = Option::<String>::Some(heap(\"filtered\")).filter(|x: &String| x.len() < 5);\n    let d = Option::<String>::Some(heap(\"some\")).unwrap_or(heap(\"default\"));\n    let mut m = Map::<String, i32>::new();\n    m.insert(heap(\"key\"), 1);\n    m.insert(heap(\"key\"), 2);\n    if n != 1 || !e.ends_with(\"kept\") || !s.ends_with(\"new\") || t.is_some() || f.is_some() || !d.ends_with(\"some\") || m.len() != 1 {\n        return 1;\n    }\n    return 0;\n}\n",
+        "SC_LEAK_CHECK=fatal",
+    );
+    assert(r.built, "generic bodies that leave values behind build");
+    assert_eq(r.exit, 0);
+}
+
+// A method's `where T: Copy` on its extend's parameter holds in that method only: a sibling method
+// still owns and drops its `T`.
+@test
+fn scoped_where_copy_keeps_sibling_drops() {
+    let r = h::compile_and_run_env(
+        "struct P<T> { pub n: i32 }\nextend<T> P<T> {\n    fn pad(self: &mut Self, v: T) where T: Copy { let a = v; let b = v; self.n = self.n + 2; }\n    fn keep(self: &mut Self, v: T) { let w = v; self.n = self.n + 1; }\n}\nfn main() i32 {\n    let mut p = P::<i32> { n: 0 };\n    p.pad(3);\n    let mut q = P::<String> { n: 0 };\n    q.keep(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return p.n + q.n - 3;\n}\n",
+        "SC_LEAK_CHECK=fatal",
+    );
+    assert(r.built, "a scoped where bound builds");
+    assert_eq(r.exit, 0);
+}
+
+// A generic body is elaborated once, so a drop is scheduled for every instance: the instance whose
+// type owns nothing emits no code for it.
+@test
+fn scalar_instance_drops_nothing() {
+    let src = "fn drop_it<T>(x: T) {}\nfn main() i32 {\n    drop_it(5i64);\n    drop_it(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return 0;\n}\n";
+    h::expect_c("the owning instance frees its parameter", src, "String__free(&x);");
+    h::expect_c("the scalar instance is empty", src, "drop_it__i64(int64_t x) {\n  return;\n}");
+}
+
+@test
+fn leak_tracker_reports_over_aligned_blocks() {
+    // Over-aligned blocks take the platform's aligned allocation, not malloc: the tracker still
+    // records them, so a leaked Box and Vector of a 64-aligned type fail the fatal gate.
+    let r = h::compile_and_run_env(
+        "@c.align(64)\nstruct Big { pub v: i64 }\nfn main() i32 {\n    let b = Box::<Big>::new(Big { v: 3 });\n    let mut v = Vector::<Big>::new();\n    v.push(Big { v: 4 });\n    forget(b);\n    forget(v);\n    return 0;\n}\n",
+        "SC_LEAK_CHECK=fatal",
+    );
+    assert(r.built, "leaked over-aligned blocks build");
+    assert_eq(r.exit, 23);
+}
+
+@test
+fn box_reaches_a_generic_reference_param_unchanged() {
+    // A `&Box<String>` argument binds a generic `&T` param to the Box itself: a derived Clone's
+    // per-field helper and a plain generic fn both receive the Box, never its pointee.
+    let r = h::compile_and_run_env(
+        "@derive(Clone)\nstruct S {\n    pub b: Box<String>,\n    pub n: i32,\n}\nfn same<T: Eq>(a: &T, b: &T) bool { return a.eq(b); }\nfn main() i32 {\n    let a = S { b: Box::<String>::new(String::from_str(\"a string long enough to live on the heap\")), n: 3 };\n    let c = a.clone();\n    if !same(&a.b, &c.b) { return 1; }\n    return c.b.len() as i32 + c.n - a.n;\n}\n",
+        "SC_LEAK_CHECK=fatal",
+    );
+    assert(r.built, "derived Clone over a Box field builds");
+    assert_eq(r.exit, 40);
+}
+
+@test
+fn compile_time_layout_and_zero_sized_maps() {
+    // Nested instances of one generic lay out at compile time (they are no by-value cycle), and a
+    // map or box of zero-sized values folds: its storage is the dangling sentinel.
+    h::expect_exit(
+        "nested instances and zero-sized values at compile time",
+        "struct W<T> { pub v: T }\nstruct Z {}\nstatic_assert(sizeof(W<W<W<i32>>>) == 4, \"nested instances lay out\");\nconst fn count() usize {\n    let mut m = Map::<u32, Z>::new();\n    for i in 0..40u32 {\n        m.insert(i % 20, Z {});\n    }\n    let mut b = Box::<Z>::new(Z {});\n    b.set(Z {});\n    return m.len();\n}\nstatic_assert(count() == 20, \"a map of zero-sized values folds\");\nfn main() i32 { let w = W::<W<i32>> { v: W::<i32> { v: 5 } }; return w.v.v - 5; }\n",
+        0,
+    );
+}
+
 // A closure inside a generic function is monomorphized WITH that function: one C function per
 // instantiation, so its parameter, return and capture types follow the type arguments.
 @test
@@ -386,7 +485,7 @@ fn closures_in_generic_fns() {
     );
     h::expect_exit(
         "a closure capturing a generic value",
-        "fn hold<T>(v: T) T {\n    let f = fn() T { return v; };\n    return f();\n}\nfn main() i32 { return hold(7) - 7; }\n",
+        "fn hold<T: Copy>(v: T) T {\n    let f = fn() T { return v; };\n    return f();\n}\nfn main() i32 { return hold(7) - 7; }\n",
         0,
     );
     h::expect_exit(
@@ -644,5 +743,30 @@ fn tuple_struct_reference_field_obeys_lifetimes() {
         "tuple partial move rejected like a named field",
         "struct Two(String, String);\nfn main() i32 { let t = Two(String::from_str(\"aaaaaaaaaaaaaaaaaaaaaaaaaa\"), String::from_str(\"bbbbbbbbbbbbbbbbbbbbbbbbbb\")); let a = t.0; return a.len() as i32; }\n",
         "cannot move a field out of a value implementing Free",
+    );
+}
+
+@test
+fn names_that_are_standard_macros() {
+    // Fields, payload members, locals, parameters, functions, consts and enum tags spelled like macros
+    // of the standard headers every TU includes (complex.h `I`, errno.h `errno` and `EPERM`, stdio.h
+    // `EOF` and `stdin`, stddef.h `NULL`, stdlib.h `EXIT_FAILURE`, tgmath.h `log`) get escaped C
+    // names; an extern keeps its C name (`sqrt`).
+    run_exit(
+        "standard macro names",
+        "extern \"C\" { fn sqrt(x: f64) f64; }\nenum P { I(i32), errno(i32), EOF { log: i32, NULL: i32 } }\nenum EXIT { SUCCESS, FAILURE }\nstruct S { pub I: i32, pub errno: i32, pub stdin: i32, pub INFINITY: i32, pub log: fn(i32) i32 }\nfn twice(v: i32) i32 { return v * 2; }\nfn I(errno: i32) i32 { let EOF = errno + 1; let NULL = EOF; return NULL; }\nfn log(x: i32) i32 { return x + 1; }\nconst EPERM: i32 = 3;\nfn main() i32 {\n    let s = S { I: 1, errno: 2, stdin: 3, INFINITY: 4, log: twice };\n    let bool = s.I + s.errno + s.stdin + s.INFINITY;\n    let p = P::EOF { log: 4, NULL: 5 };\n    let q = switch p { I(v) => v, errno(v) => v, EOF { log, NULL } => log + NULL };\n    let z = switch EXIT::FAILURE { SUCCESS => 0, FAILURE => 1 };\n    let r = unsafe sqrt(16.0) as i32;\n    unsafe exit(bool + q + z + I(1) + (s.log)(3) + log(1) + EPERM + r);\n}\n",
+        37,
+    );
+}
+
+@test
+fn names_that_c_headers_declare() {
+    // Root-module items spelled like functions and types the included C headers declare (stdlib.h
+    // `malloc`, `abs`, `exit` and `free`, stdio.h `printf` and `FILE`, time.h `tm`) get escaped C
+    // names; an extern keeps its C name (`labs`).
+    h::expect_exit(
+        "C library names",
+        "extern \"C\" { fn labs(x: i64) i64; }\nstruct FILE { pub fd: i32 }\nstruct tm { pub h: i32 }\nfn malloc(n: usize) usize { return n + 1; }\nfn abs(x: i32) i32 { if x < 0 { return 0 - x; } return x; }\nfn printf(x: i32) i32 { return x * 2; }\nfn exit(code: i32) i32 { return code + 3; }\nfn free(f: FILE) i32 { return f.fd; }\nfn time() tm { return tm { h: 7 }; }\nfn main() i32 {\n    let f = FILE { fd: 4 };\n    let l = unsafe labs(-5) as i32;\n    return malloc(1) as i32 + abs(-3) + printf(5) + exit(1) + free(f) + time().h + l;\n}\n",
+        35,
     );
 }

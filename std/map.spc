@@ -138,6 +138,8 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
         }
         let i = self.slot(&key);
         if unsafe self.used[i] != 0 {
+            // A store through the raw pointer frees nothing, so the replaced value is freed here.
+            unsafe self.vals[i].free();
             unsafe self.vals[i] = value;
             return;
         }
@@ -188,6 +190,8 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
             return Option::<V>::None;
         }
         let removed = unsafe self.vals[i];
+        // The stored key is not handed out, so it is freed here (no-op if K isn't Free).
+        unsafe self.keys[i].free();
         unsafe self.used[i] = 0;
         self.len = self.len - 1;
         let mut j = i + 1;
@@ -258,7 +262,7 @@ extend<K: Hash + Eq + Clone, V: Clone, A: Allocator + Default> Map<K, V, A> as F
     }
 }
 
-extend<K: Hash + Eq + Default, V: Default, A: Allocator + Default> Map<K, V, A> as Default {
+extend<K: Hash + Eq, V, A: Allocator + Default> Map<K, V, A> as Default {
     pub const fn default() Map<K, V, A> {
         return Map::<K, V, A>::new();
     }

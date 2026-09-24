@@ -128,7 +128,7 @@ extend Probe {
     }
 
     /// Leave region `k` entered at `m`, less what an inner region already booked since `m`:
-    /// `inner_ns`/`inner_an`/`inner_ab` are that region's totals as read at `m`.
+    /// `ns0`/`an0`/`ab0` are that region's totals as read at `m`.
     pub fn stop_less(self: &mut Self, k: usize, m: Mark, inner: usize, ns0: u64, an0: u64, ab0: u64) {
         if !self.on {
             return;

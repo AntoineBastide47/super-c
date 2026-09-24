@@ -94,7 +94,8 @@ interface member or a member of a generic `extend`); clear: the module arena (`A
 declarations, signatures, constant initializers, pinned bodies). Module-local. Every AST
 item, expression, type annotation, and pattern is a node. The accessors dispatch on the bit;
 a scan enumerates both arenas through `nnodes()` / `nth_id()`, and a per-node scratch table
-is indexed by `dense(id)`. The driver frees the body arenas after emission planning, before
+is indexed by `dense(id)`. Module-arena id 0 is the reserved empty sentinel, but body-arena id
+0 is a real node, so a per-arena scan starts at 0. The driver frees the body arenas after emission planning, before
 the C is planned and rendered; the driver frees each module's body arena when its borrow
 pass ends; the language server frees a closed document's after every round and parses it
 back on demand (`BodyArena.released`, `Interp.body_missing`); the model, the release contract
@@ -204,8 +205,8 @@ measurement that rejected an earlier publication point, the consumer inventory a
 replay-tape category table are in
 [core-ir-publication.md](references/core-ir-publication.md).
 
-**One lowering per body:** `irl::Keep` (`src/ir/lower.spc`) is a cache of spent
-`Lowerer`s keyed by body. Borrowck's lowerings are recycled into it, and emission's
+**One lowering per body:** `irl::Keep` (`src/ir/lower.spc`) is a cache of `KeptBody`
+records (the elaborated body and its closures) keyed by body. Borrowck's lowerings are recycled into it, and emission's
 `InstGraph` walks those kept bodies instead of re-lowering. Bodies with `has_reflect` or
 `has_zst_cond` are the exception: instances must re-lower those under their demand env.
 A zero-size fold is symbolic (`has_zst_cond`) only when a generic parameter is unbound
@@ -323,6 +324,19 @@ the move/init dataflow. Five classifications:
 | `DK_OVER` | Assignment overwrites an initialized value: free it first |
 | `DK_OVERC` | Overwrite of a maybe-moved value: the local's flag guards the free |
 
+Type parameters own: the ownership oracle (`Owner::owns` / `param_owns` in
+`borrowck/facts.spc`, mirrored by the checker's `tc_type_is_free` / `tc_param_owns`) answers
+true for a type parameter unless its bounds reach `Copy` (inline, through the function's
+`where` clause recorded at parse time in `Ast.where_bounds`, or through a superinterface) or it
+has a plain `fn` bound; a generic aggregate judges its members under the argument frame. So a
+generic body gets moves and `TM_DROP`s for its `T` values once, and every instance shares that
+elaborated body. Emission decides per instance: `CEmit::drop_emits_nothing` resolves the dropped
+place's type under the instance substitution and emits nothing when it owns nothing (a scalar,
+a reference, a plain struct); the fold scans skip such drops too, so a scalar instance compiles
+to the same C as before. `Copy` itself is derived in the checker (`tc_copy_marker`, answered in
+`type_satisfies`); an explicit `extend X as Copy {}` is checked against the derivation
+(`check_copy_conformance`).
+
 Production consumer: the borrow pass (`flow_ir::bc_elaborate`, `src/borrowck/flow_ir.spc`),
 once per kept body, right after that body's analyses: the feature bits (an owning local) or
 `ird::assign_may_schedule` (a store whose projected destination owns through auto-freeing
@@ -353,7 +367,8 @@ eligibility, always-panics), and lint probes.
 Driver protocol: `cir.all_typed` and `record_folds` are set **before the first body
 lowers** (mandatory call-site folds must behave exactly as under the backend's own
 lowering); `flush_asserts` / `flush_consts` re-evaluate the ones a check could not fold
-(a callee outside the item's visibility) at the end; `report_fold_errs` surfaces
+(a callee outside the item's visibility) at the end, and a top-level `static_assert`
+that still does not fold then is an error; `report_fold_errs` surfaces
 emission-time fold failures. During the type check the engine answers as the item under
 check (`Interp::set_reader`): a body or a checked type of an item that item cannot see
 (`graph::items::visible`) is a refusal, whatever a worker has done with it.
@@ -380,6 +395,15 @@ Full monomorphization is the only generic backend.
   and a budget stop; the census of per-instance re-lowerings, the decision against a
   symbolic generic IR and the measured closure blowup on width-generic code are in
   [instance-specialization.md](references/instance-specialization.md).
+- **Bounds:** a record whose arguments nest more than 256 levels is not expanded, and a
+  body whose instantiation nests deeper than 256 levels is refused with a located error ("a
+  generic function or type reaches itself with a growing type argument"). A substitution
+  payload is read under its binding's env: the mangler hides the frames above it
+  (`MSub.lim`), so `T := W<T>` never substitutes into itself. A depth refusal inside a std
+  body is reported at the outermost user-declared generic parameter of the chain. Layout
+  and ZST queries under substitution read each binding's argument under its own env
+  (`LayoutEnv.penv`, built per `MSub` by `Mangler::layout_sub`), so a generic body and its
+  concrete caller agree on sizes.
 - **Emit order:** `Package::emit_order` — if module `a` re-homes a concrete instance of
   a generic owned by `b`, then `b` emits first. Kahn topo-sort, lowest-id tiebreak.
 
@@ -399,8 +423,16 @@ Symbols, type spellings and call strings render once and intern into pools
 fingerprint of (callee, receiver instance, targs, env), the same key the demand dedup
 uses, so only the first spelling per TU context constructs it. The recursive renderers
 (`emit_operand` through inlined temporaries, `emit_region` through structured control
-flow) share a nesting counter bounded by `RENDER_NEST_MAX` (256, clang's bracket depth);
-past it the body fails with `nesting`.
+flow) share a nesting counter bounded by `RENDER_NEST_MAX` (256, clang's bracket depth).
+An `else if` chain renders flat (`} else if (..) {` in a loop), and a region that follows
+arms that do not fall through continues in the caller's loop instead of recursing, so only
+a falling chain whose tests need statements first still nests per arm. A body whose
+structured regions pass the bound fails the dry planning pass and takes the flat goto
+layout (`plan_structured`).
+A fold chain of inlined temporaries keeps every link past `INLINE_CHAIN_MAX` (64) as a
+declared temporary, so long expressions stay under that depth. A body that still passes it
+is refused and reported as a located error (`CEmit.refused`, merged from the shards by
+`report_refusals`).
 
 A body renders straight into the TU buffer: `emit_body_core_cf` takes `self.out` out of
 the emitter and threads it as `o: &mut String` through every statement, control-flow

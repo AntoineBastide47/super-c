@@ -58,7 +58,7 @@ fn json_string_escapes() {
 @test
 fn json_dump_roundtrip() {
     let v = parse_ok("{\"a\":[1,2.5,\"x\"],\"b\":{\"c\":true,\"d\":null}}");
-    let out = v.dump(false);
+    let out = v.dump();
     assert_eq(out.as_str(), "{\"a\":[1,2.5,\"x\"],\"b\":{\"c\":true,\"d\":null}}");
     let back = parse_ok(out.as_str());
     // C is a bool, not a number.
@@ -69,7 +69,7 @@ fn json_dump_roundtrip() {
 @test
 fn json_dump_escapes() {
     let v = json::JSON::string(String::from_str("a\"b\\c\nd\te"));
-    let out = v.dump(false);
+    let out = v.dump();
     assert_eq(out.as_str(), "\"a\\\"b\\\\c\\nd\\te\"");
 }
 
@@ -85,7 +85,7 @@ fn json_build_and_emplace() {
     o.emplace("arr", a);
     assert_eq(o.value_i64("x", 0), 4 as i64);
     assert_eq(o.size(), 2 as usize);
-    let out = o.dump(false);
+    let out = o.dump();
     assert_eq(out.as_str(), "{\"x\":4,\"arr\":[true,\"s\"]}");
 }
 
@@ -118,6 +118,12 @@ fn json_rejects_malformed() {
     parse_err("[\"\\uDC00\"]", "Unexpected low surrogate \\uDC00 without preceding high surrogate");
     parse_err("[\"\\q\"]", "Invalid escape sequence");
     parse_err("[\"\\uZZZZ\"]", "Invalid hex digit in \\uXXXX");
+    // A key without a colon before '}', a leading comma in a nested container, and a comma after a
+    // key with no value.
+    parse_err("{\"a\"}", "Missing a colon after a key");
+    parse_err("[[,1]]", "Unexpected ','");
+    parse_err("{\"a\":{,\"b\":1}}", "Unexpected ','");
+    parse_err("{\"x\":1,\"a\":,\"b\":2}", "Missing value for key 'a' in object");
 }
 
 @test
@@ -131,8 +137,28 @@ fn json_numbers() {
     assert_eq(v.at(6).get_number(), 0.02);
     assert_eq(v.at(7).get_number(), 150.0);
     assert_eq(v.at(8).get_i64(), 9007199254740992 as i64);
-    let out = v.dump(false);
+    let out = v.dump();
     assert_eq(out.as_str(), "[0,0,3,1000000,0.25,1000,0.02,150,9007199254740992]");
+}
+
+// Conversion is correctly rounded (no accumulated fraction error), a mantissa past 19 digits keeps
+// its magnitude, and a number outside the i64 range reads as the default.
+@test
+fn json_numbers_rounding_and_range() {
+    let v = parse_ok("[0.3,12345678901234567890123,0.1e1]");
+    assert_eq(v.at(0).get_number(), 0.3);
+    assert_eq(v.at(1).get_number(), 12345678901234567890123.0);
+    assert_eq(v.at(2).get_number(), 1.0);
+    let o = parse_ok("{\"line\":1e300,\"neg\":-1e19,\"ok\":-5}");
+    assert_eq(o.value_i64("line", -1), (-1) as i64);
+    assert_eq(o.value_i64("neg", -1), (-1) as i64);
+    assert_eq(o.value_i64("ok", 0), (-5) as i64);
+}
+
+@test(should_panic)
+fn json_get_i64_out_of_range_panics() {
+    let v = parse_ok("1e300");
+    let _ = v.get_i64();
 }
 
 @test
@@ -158,7 +184,7 @@ fn pathological_exponent_is_bounded() {
     }
     switch json::parse(src.as_str()) {
         Ok(v) => {
-            let d = v.dump(false);
+            let d = v.dump();
             // Saturated to infinity, serialized as null.
             assert_eq(d.as_str(), "null");
             let vv = v;
@@ -173,7 +199,7 @@ fn pathological_exponent_is_bounded() {
     };
     switch json::parse("1e-99999") {
         Ok(v) => {
-            let d = v.dump(false);
+            let d = v.dump();
             assert_eq(d.as_str(), "0");
             let vv = v;
             vv.free();
@@ -233,4 +259,20 @@ fn json_nesting_depth_limit() {
         d.push_byte(b'[');
     }
     parse_err(d.as_str(), "Nesting depth limit exceeded");
+}
+
+// A value stores only its active payload: one tag byte plus the largest payload (String or Vector).
+@test
+fn json_value_layout_is_compact() {
+    assert_eq(sizeof(json::JSON), 32 as usize);
+    assert_eq(sizeof(json::JSONPair), 56 as usize);
+    let v = parse_ok("[\"a\",{\"k\":[1,null]},7]");
+    assert(v.at(0).is_string());
+    assert(v.at(1).at_key("k").at(0).is_number());
+    assert(!v.at(2).is_string());
+    let c = v.clone();
+    assert_eq(c.dump().as_str(), "[\"a\",{\"k\":[1,null]},7]");
+    parse_err("{\"a\":[,1]}", "Unexpected ','");
+    parse_err("[1 2]", "Missing ',' between array members");
+    parse_err("[{} {}]", "Missing ',' between array members");
 }

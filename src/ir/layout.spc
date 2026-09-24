@@ -27,12 +27,18 @@ pub struct Layout {
     /// A failure because a generic parameter had no binding in the env: the query was asked
     /// under an incomplete substitution, as opposed to a type no env can lay out.
     pub unbound: bool,
+    /// The type holds a zero-length array of a sized element. C spells that member `T x[0]`, so
+    /// the type has a C definition even when its size is 0 and is not a storage-elided ZST.
+    pub zarr: bool,
 }
 
 /// One substitution frame for generic-parameter layout: parameter decls of `pmod` bound to argument
-/// types of `argm` (chained through `parent`).
+/// types of `argm`. A lookup that misses this frame continues at `parent`; a bound argument is read
+/// under `penv`, the env it was written in (the emitter's substitution stack hides a binding's own
+/// group from its payload, so the two chains can differ).
 pub struct LayoutEnv {
     pub parent: *const LayoutEnv,
+    pub penv: *const LayoutEnv,
     pub pmod: ModuleId,
     pub params: *const NodeId,
     pub argm: ModuleId,
@@ -46,9 +52,11 @@ struct LayoutAcc {
     pub packed: bool,
     pub is_union: bool,
     pub unbound: bool, // set by acc_field on a failing field (see Layout.unbound)
+    pub zarr: bool, // see Layout.zarr
 }
 
-/// A payload-carrying enum's C shape: `{ u32 tag; union payload; }`.
+/// A payload-carrying enum's C shape: `{ tag; union payload; }`, with a one-byte tag when
+/// `Ast::enum_tag_is_byte` holds and a 4-byte C enum tag otherwise.
 pub struct EnumLayout {
     pub unbound: bool, // see Layout.unbound
     pub ok: bool,
@@ -57,7 +65,12 @@ pub struct EnumLayout {
     pub align: u64,
 }
 
-const MAX_DEPTH: i32 = 32;
+// Recursion guard. A finite type stays far below it: instance arguments nest at most 256 levels
+// (the instance graph and the emitter refuse deeper ones) and a declaration holds at most 64 nested
+// aggregates by value (the checker's BYVAL_MAX_DEPTH), each level costing two steps here. Only a
+// type the checker already reported as infinite (a generic holding itself with a growing
+// argument) reaches it; the walk then fails instead of exhausting the stack.
+const MAX_DEPTH: i32 = 1024;
 
 const fn round_up(v: u64, a: u64) u64 {
     if a <= 1 {
@@ -66,12 +79,10 @@ const fn round_up(v: u64, a: u64) u64 {
     return (v + a - 1) / a * a;
 }
 
-// Debug: the lowerer's zero-size fold sets this around its layout query.
-
 pub struct Svc {
     pub pkg: *const loader::Package,
-    cache: Map<u64, u64>, // (module << 32 | type) -> size << 8 | align (env-free concrete only)
-    active: Vector<u64>, // aggregate decls under query (module << 32 | decl): cycle mark
+    cache: Map<u64, Layout>, // (module << 32 | type) -> layout (env-free concrete only)
+    active: Vector<u64>, // aggregate instantiations under query (declaration and arguments): cycle mark
 }
 
 extend Svc {
@@ -79,7 +90,7 @@ extend Svc {
         if unsafe TS_ON {
             ts_add(TS_LAY_SVC, 1);
         }
-        return Svc { pkg: pkg, cache: Map::<u64, u64>::new(), active: Vector::<u64>::new() };
+        return Svc { pkg: pkg, cache: Map::<u64, Layout>::new(), active: Vector::<u64>::new() };
     }
 
     /// Drop every cached answer: the keys name type ids of one publication, so a checkpoint that
@@ -124,6 +135,103 @@ extend Svc {
         return TYPE_NONE;
     }
 
+    // The layout of the member whose type annotation is `tn`. The checker records `[T; N]` with a
+    // symbolic N at length 0, so a zero-length array annotation takes its length from the
+    // annotation: a const parameter reads its argument in `env`, a length that names no generic
+    // parameter is a real 0, and any other symbolic length is not layoutable.
+    fn member_layout(self: &mut Self, m: ModuleId, tn: NodeId, env: *const LayoutEnv, depth: i32) Layout {
+        let ft = self.mtype(m, tn);
+        if ft == TYPE_NONE {
+            return Layout { ok: false };
+        }
+        let y = *self.a(m).type_at(ft);
+        if y.kind != TypeKind::TYPE_ARRAY || y.as_data.arr.len != 0 || self.a(m).at_const(tn).kind != NodeKind::NODE_ARRAY_TYPE {
+            return self.layout_of(m, ft, env, depth);
+        }
+        let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
+        if !el.ok {
+            return Layout { ok: false, unbound: el.unbound };
+        }
+        if el.size == 0 {
+            // A zero-sized element gives size 0 for every length (see layout_raw).
+            return Layout { ok: true, size: 0, align: el.align, zarr: el.zarr };
+        }
+        let ln = self.a(m).at_const(tn).as_data.array_type.length;
+        let mut n: u64 = 0;
+        let d = self.a(m).resolution_def(ln);
+        if d.node != NODE_NONE && self.a(d.module).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
+            // Innermost frame first; an argument that is an outer parameter continues outward.
+            let mut pm = d.module;
+            let mut pd = d.node;
+            let mut e = env;
+            let mut bound = false;
+            while e != null && !bound {
+                let mut hit = false;
+                for i in 0..unsafe (*e).n {
+                    if !hit && unsafe (*e).pmod == pm && unsafe (*e).params[i as usize] == pd {
+                        hit = true;
+                        let ay = *self.a(unsafe (*e).argm).type_at(unsafe (*e).args[i as usize]);
+                        if ay.kind == TypeKind::TYPE_CONST && ay.as_data.value >= 0 {
+                            n = ay.as_data.value as u64;
+                            bound = true;
+                        } else if ay.kind == TypeKind::TYPE_GENERIC {
+                            pm = ay.module;
+                            pd = ay.as_data.decl;
+                        } else {
+                            return Layout { ok: false };
+                        }
+                    }
+                }
+                // A bound argument naming an outer parameter reads under its binding's env.
+                e = if hit {
+                    unsafe (*e).penv;
+                } else {
+                    unsafe (*e).parent;
+                };
+            }
+            if !bound {
+                return Layout { ok: false, unbound: true };
+            }
+        } else if self.len_names_param(m, ln, 0) {
+            return Layout { ok: false };
+        }
+        if el.size != 0 && n > 0xFFFFFFFFFFFFFFFFu64 / el.size {
+            return Layout { ok: false }; // length * element overflow: unrepresentable
+        }
+        return Layout { ok: true, size: el.size * n, align: el.align, zarr: el.zarr || n == 0 && el.size != 0 };
+    }
+
+    // Whether array length expression `id` may name a generic parameter: true for every form this
+    // walk does not model.
+    fn len_names_param(self: &Self, m: ModuleId, id: NodeId, depth: i32) bool {
+        if id == NODE_NONE || depth > MAX_DEPTH {
+            return true;
+        }
+        let a = self.a(m);
+        let n = a.at_const(id);
+        if n.kind == NodeKind::NODE_LITERAL {
+            return false;
+        }
+        if n.kind == NodeKind::NODE_IDENTIFIER || n.kind == NodeKind::NODE_MEMBER && n.as_data.member.path {
+            let d = a.resolution_def(id);
+            return d.node == NODE_NONE || self.a(d.module).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM;
+        }
+        if n.kind == NodeKind::NODE_UNARY {
+            return self.len_names_param(m, n.as_data.unary.operand, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_CAST {
+            return self.len_names_param(m, n.as_data.cast.expression, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_BINARY {
+            return self.len_names_param(m, n.as_data.binary.left, depth + 1) || self.len_names_param(
+                m,
+                n.as_data.binary.right,
+                depth + 1,
+            );
+        }
+        return true;
+    }
+
     /// Size/align of `(m, t)` under the target data model; not-ok = not layoutable (opaque, unbound
     /// generic, recursive by-value cycle).
     pub fn layout(self: &mut Self, m: ModuleId, t: TypeId) Layout {
@@ -142,27 +250,19 @@ extend Svc {
         // u64 hash, and this cache sits on the emitter's storage-elision hot path
         let key = skey_mix(0, m as u64 << 32 | t as u64);
         if cacheable {
-            let mut have = false;
-            let mut enc: u64 = 0;
-            switch self.cache.get(&key) {
-                Some(v) => {
-                    have = true;
-                    enc = *v;
-                },
-                None => {},
-            };
+            let hit = self.cache.get(&key);
             if unsafe TS_ON {
                 ts_add(TS_LAY, 1);
-                if have {
+                if hit.is_some() {
                     ts_add(TS_LAY_HIT, 1);
                 }
             }
-            if have {
-                if enc == 0 {
-                    return Layout { ok: false };
-                }
-                return Layout { ok: true, size: enc >> 8, align: enc & 0xFF };
-            }
+            switch hit {
+                Some(v) => {
+                    return *v;
+                },
+                None => {},
+            };
         }
         let mut t0: u64 = 0;
         if unsafe TS_ON && depth == 0 {
@@ -174,11 +274,7 @@ extend Svc {
             ts_add(TS_LAY_NS, ts_now() - t0);
         }
         if cacheable {
-            let mut enc: u64 = 0;
-            if r.ok {
-                enc = r.size << 8 | r.align;
-            }
-            self.cache.insert(key, enc);
+            self.cache.insert(key, r);
             if unsafe TS_ON {
                 ts_add(TS_LAY_INS, 1);
             }
@@ -226,28 +322,39 @@ extend Svc {
             let n = y.as_data.arr.len as u64;
             if n == 0 {
                 // The pool interns BOTH a true `[T; 0]` and a symbolic generic `[T; N]` with len 0,
-                // so a material element makes the size unknowable here: refuse. A zero-sized
-                // element gives size 0 for EVERY reading, so that case is layoutable (and keeps
-                // the element alignment for enclosing aggregates).
+                // so a material element makes the size unknowable from the type alone: refuse
+                // (a member annotation decides, see member_layout). A zero-sized element gives
+                // size 0 for EVERY reading, so that case is layoutable (and keeps the element
+                // alignment for enclosing aggregates).
                 if el.size != 0 {
                     return Layout { ok: false };
                 }
-                return Layout { ok: true, size: 0, align: el.align };
+                return Layout { ok: true, size: 0, align: el.align, zarr: el.zarr };
             }
             if el.size != 0 && n > 0xFFFFFFFFFFFFFFFFu64 / el.size {
                 return Layout { ok: false }; // length * element overflow: unrepresentable
             }
-            return Layout { ok: true, size: el.size * n, align: el.align };
+            return Layout { ok: true, size: el.size * n, align: el.align, zarr: el.zarr };
         }
         if y.kind == TypeKind::TYPE_GENERIC {
             let mut e = env;
             while e != null {
-                for i in 0..unsafe e.n {
-                    if unsafe e.pmod == y.module && unsafe e.params[i as usize] == y.as_data.decl {
-                        return self.layout_of(unsafe e.argm, unsafe e.args[i as usize], unsafe e.parent, depth + 1);
+                for i in 0..unsafe (*e).n {
+                    if unsafe (*e).pmod == y.module && unsafe (*e).params[i as usize] == y.as_data.decl {
+                        // An argument unbound in its own env falls back to the next-outer binding
+                        // of the same parameter, as the emitter's substitution lookup does.
+                        let r = self.layout_of(
+                            unsafe (*e).argm,
+                            unsafe (*e).args[i as usize],
+                            unsafe (*e).penv,
+                            depth + 1,
+                        );
+                        if r.ok || !r.unbound {
+                            return r;
+                        }
                     }
                 }
-                e = unsafe e.parent;
+                e = unsafe (*e).parent;
             }
             return Layout { ok: false, unbound: true };
         }
@@ -261,7 +368,7 @@ extend Svc {
             }
             let da = self.a(it.module);
             let gens = da.at_const(it.decl).as_data.aggregate.generics;
-            let mut frame = LayoutEnv { parent: env, pmod: it.module, params: da.list(gens), argm: m, n: 0 };
+            let mut frame = LayoutEnv { parent: env, penv: env, pmod: it.module, params: da.list(gens), argm: m, n: 0 };
             let mut i: u32 = 0;
             while i < gens.len && i as u8 < it.n && frame.n < 8 {
                 unsafe frame.args[frame.n as usize] = unsafe it.args[i as usize];
@@ -273,32 +380,41 @@ extend Svc {
         return Layout { ok: false };
     }
 
-    // Accumulate one field into `acc`; false = unfoldable.
-    fn acc_field(self: &mut Self, acc: *mut LayoutAcc, m: ModuleId, ft: TypeId, env: *const LayoutEnv, depth: i32) bool {
-        let fl = self.layout_of(m, ft, env, depth);
+    // Accumulate the member typed by annotation `tn` into `acc`; false = unfoldable.
+    fn acc_field(self: &mut Self, acc: *mut LayoutAcc, m: ModuleId, tn: NodeId, env: *const LayoutEnv, depth: i32) bool {
+        let fl = self.member_layout(m, tn, env, depth);
         if !fl.ok {
-            unsafe acc.unbound = fl.unbound;
+            unsafe (*acc).unbound = fl.unbound;
             return false;
         }
+        unsafe (*acc).zarr = unsafe (*acc).zarr || fl.zarr;
         let mut fa = fl.align;
-        if unsafe acc.packed {
+        if unsafe (*acc).packed {
             fa = 1;
         }
-        if unsafe acc.is_union {
-            if fl.size > unsafe acc.size {
-                unsafe acc.size = fl.size;
+        if unsafe (*acc).is_union {
+            if fl.size > unsafe (*acc).size {
+                unsafe (*acc).size = fl.size;
             }
         } else {
-            unsafe acc.size = round_up(unsafe acc.size, fa) + fl.size;
+            unsafe (*acc).size = round_up(unsafe (*acc).size, fa) + fl.size;
         }
-        if fa > unsafe acc.align {
-            unsafe acc.align = fa;
+        if fa > unsafe (*acc).align {
+            unsafe (*acc).align = fa;
         }
         return true;
     }
 
     fn aggregate_layout(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv, depth: i32) Layout {
-        let key = dm as u64 << 32 | dn as u64;
+        // The mark names the instantiation, not the declaration: `W<W<i32>>` holds `W<i32>`, which
+        // is no cycle. A repeated argument list re-entered under the same declaration is one.
+        let mut key = skey_mix(0, dm as u64 << 32 | dn as u64);
+        if env != null {
+            key = skey_mix(key, unsafe (*env).argm);
+            for i in 0..unsafe (*env).n {
+                key = skey_mix(key, unsafe (*env).args[i as usize]);
+            }
+        }
         for i in 0..self.active.len() {
             if self.active[i] == key {
                 return Layout { ok: false }; // recursive by-value cycle
@@ -336,24 +452,20 @@ extend Svc {
             if !is_tuple {
                 ftn = ast.at_const(fid).as_data.field.ty;
             }
-            let ft = self.mtype(dm, ftn);
-            if ft == TYPE_NONE {
-                return Layout { ok: false };
-            }
-            if !self.acc_field(&mut acc, dm, ft, env, depth) {
+            if !self.acc_field(&mut acc, dm, ftn, env, depth) {
                 return Layout { ok: false, unbound: acc.unbound };
             }
         }
         let al = self.attr(dm, dn, AttrKind::ATTR_ALIGN);
-        if al != null && unsafe al.arg != 0 {
-            if (unsafe al.arg) as u64 > acc.align {
-                acc.align = unsafe al.arg;
+        if al != null && unsafe (*al).arg != 0 {
+            if (unsafe (*al).arg) as u64 > acc.align {
+                acc.align = unsafe (*al).arg;
             }
         }
         if acc.align == 0 {
             acc.align = 1;
         }
-        return Layout { ok: true, size: round_up(acc.size, acc.align), align: acc.align };
+        return Layout { ok: true, size: round_up(acc.size, acc.align), align: acc.align, zarr: acc.zarr };
     }
 
     // A payload enum's shape under `env` (payload-less enums are a bare 4-byte C enum).
@@ -386,7 +498,7 @@ extend Svc {
                 if struct_payload {
                     tn = ast.at_const(pid).as_data.field.ty;
                 }
-                if !self.acc_field(&mut vs, dm, self.mtype(dm, tn), env, depth) {
+                if !self.acc_field(&mut vs, dm, tn, env, depth) {
                     return EnumLayout { ok: false, unbound: vs.unbound };
                 }
             }
@@ -398,9 +510,14 @@ extend Svc {
                 un.align = vs.align;
             }
         }
-        let poff = round_up(4, un.align);
+        let tag: u64 = if ast.enum_tag_is_byte(dn) {
+            1;
+        } else {
+            4;
+        };
+        let poff = round_up(tag, un.align);
         let ssize = poff + un.size;
-        let mut salign: u64 = 4;
+        let mut salign: u64 = tag;
         if un.align > salign {
             salign = un.align;
         }
@@ -459,8 +576,7 @@ extend Svc {
             } else {
                 ast.at_const(fid).as_data.field.ty;
             };
-            let ft = self.mtype(dm, ftn);
-            let fl = self.layout_of(dm, ft, env, 1);
+            let fl = self.member_layout(dm, ftn, env, 1);
             if !fl.ok {
                 return -1;
             }

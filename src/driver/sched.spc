@@ -71,9 +71,11 @@ extend Jobs {
     }
 }
 
-// One job on a worker: the graph, the stage's callback and context, the job's index.
+// One job on a worker: the graph, its live dependency counts (`g.pending`, taken from the
+// caller's exclusive borrow), the stage's callback and context, the job's index.
 struct Task {
     pub g: *const Jobs,
+    pub pend: *mut u32,
     pub run: fn(*mut void, u32) void,
     pub ctx: *mut void,
     pub j: u32,
@@ -115,9 +117,9 @@ fn run_task(t: Task, wg: &psync::WaitGroup) {
     for k in g.succ_off[t.j as usize] as usize..g.succ_off[t.j as usize + 1] as usize {
         let s = g.succ[k];
         // Release: this job's writes happen-before the successor's start (it reads them).
-        let left = atomic::sub_u32(unsafe (g.pending.as_ptr() as *mut u32 + s as usize), 1, 3);
+        let left = unsafe atomic::sub_u32(unsafe (t.pend + s as usize), 1, 3);
         if left == 1 {
-            spawn(Task { g: t.g, run: t.run, ctx: t.ctx, j: s, ctl: t.ctl, seed: t.seed }, wg);
+            spawn(Task { g: t.g, pend: t.pend, run: t.run, ctx: t.ctx, j: s, ctl: t.ctl, seed: t.seed }, wg);
         }
     }
 }
@@ -125,8 +127,8 @@ fn run_task(t: Task, wg: &psync::WaitGroup) {
 /// Run every job of `g` through `run(ctx, job)`: in `order` on the calling thread when `workers`
 /// is 1, else on the runtime with `workers` workers, each job started by the completion of its
 /// last dependency. `ctl` (null = off) gates the estimated bytes in flight. Returns once every
-/// job has completed.
-pub fn run_jobs(g: &Jobs, workers: u32, run: fn(*mut void, u32) void, ctx: *mut void, ctl: *const tctl::Ctl) {
+/// job has completed. The parallel path counts `g.pending` down to zero, so a graph runs once.
+pub fn run_jobs(g: &mut Jobs, workers: u32, run: fn(*mut void, u32) void, ctx: *mut void, ctl: *const tctl::Ctl) {
     if workers == 1 || g.n <= 1 {
         for k in 0..g.order.len() {
             run(ctx, g.order[k]);
@@ -155,8 +157,9 @@ pub fn run_jobs(g: &Jobs, workers: u32, run: fn(*mut void, u32) void, ctx: *mut 
             ready.push(j as u32);
         }
     }
+    let pend = g.pending.index_mut(0) as *mut u32;
     for k in 0..ready.len() {
-        spawn(Task { g: g, run: run, ctx: ctx, j: ready[k], ctl: ctl, seed: seed }, &wg);
+        spawn(Task { g: g, pend: pend, run: run, ctx: ctx, j: ready[k], ctl: ctl, seed: seed }, &wg);
     }
     wg.wait_masked();
 }

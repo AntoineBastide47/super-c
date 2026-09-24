@@ -12,6 +12,8 @@ pub const TV_BOOL: u8 = 2;
 pub const TV_ARR: u8 = 3;
 pub const TV_TBL: u8 = 4;
 
+const I64_MAX: i64 = 0x7FFFFFFFFFFFFFFF;
+
 /// One `key = "value"` entry of an inline table.
 pub struct TomlPair {
     pub k: String,
@@ -261,7 +263,12 @@ extend Parser {
             let ds = self.i;
             let mut n: i64 = 0;
             while !self.at_end() && self.peek() >= b'0' && self.peek() <= b'9' {
-                n = n * 10 + (self.peek() - b'0') as i64;
+                let d = (self.peek() - b'0') as i64;
+                if n > (I64_MAX - d) / 10 {
+                    self.err(ds, format("integer out of range"));
+                    return Option::<TomlVal>::None;
+                }
+                n = n * 10 + d;
                 self.i = self.i + 1;
             }
             if self.i == ds {
@@ -328,11 +335,11 @@ extend Parser {
     }
 }
 
-/// Parse `src` into items in file order; diagnostics (if any) are rendered against `file` and printed
-/// here. None on any error (one per offending line: the parser resyncs at newlines).
-/// Parse into `errs` instead of reporting: the caller decides what to do with the diagnostics (the
-/// build logs them, the language server turns them into editor squiggles). Spans stay raw: `finalize`
-/// is the step that rewrites messages into rendered blocks, and an editor wants them unrendered.
+/// Parse `src` into items in file order, collecting diagnostics into `errs` instead of reporting them:
+/// the caller decides what to do with them (the build logs them, the language server turns them into
+/// editor squiggles). Spans stay raw: `finalize` is the step that rewrites messages into rendered
+/// blocks, and an editor wants them unrendered. None on any error (one per offending line: the parser
+/// resyncs at newlines).
 pub fn parse_into(src: str, errs: &mut diag::Errors) Option<Vector<TomlItem>> {
     let mut p = Parser {
         src: src,

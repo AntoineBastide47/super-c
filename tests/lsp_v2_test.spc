@@ -568,7 +568,7 @@ fn attribute_inventory_is_complete() {
     }
     let mut plats = Vector::<String>::new();
     par::platform_arg_names(&mut plats);
-    assert_eq(plats.len(), 4);
+    assert_eq(plats.len(), 6);
     let mut archs = Vector::<String>::new();
     par::arch_arg_names(&mut archs);
     assert_eq(archs.len(), 3);
@@ -1204,4 +1204,160 @@ fn lsp_limits_and_eviction() {
     let r4 = response_of(o, "\"id\":4");
     // The budget-evicted package rebuilt and answered.
     assert(r4.contains("foo"));
+}
+
+const STRAY_ERR: str = "fn main() i32 {\n    return missing_name;\n}\n";
+
+fn push_initialized(ses: &mut String) {
+    let b = String::from_str("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
+    frame(ses, &b);
+}
+
+// A document notification without its textDocument is dropped: the server keeps answering.
+@test
+fn lsp_malformed_notifications_are_dropped() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_OK);
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    let mut b = String::new();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"contentChanges\":[]}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":{}}");
+    frame(&mut ses, &b);
+    push_open(&mut ses, root, "src/main.spc", MAIN_OK);
+    push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/hover", 0, 4);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    assert(out.as_str().contains("\"id\":3"));
+}
+
+// The symbol cap applies to workspace hits: the prelude's symbols, which load first, do not use it up.
+@test
+fn lsp_workspace_symbols_cap_after_filter() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_OK);
+    // Swept into the workspace batch, whose package loads the prelude (full of `len` methods) first.
+    p.mkfile("extra/probe.spc", "pub fn my_len_probe() i32 {\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    push_init_caps(&mut ses, root, "{}", "{\"maxResults\":1}");
+    push_initialized(&mut ses);
+    let mut b = String::new();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"workspace/symbol\",\"params\":{\"query\":\"len\"}}");
+    frame(&mut ses, &b);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let r3 = response_of(out.as_str(), "\"id\":3");
+    assert_eq(count(r3, "\"name\""), 1);
+    assert(r3.contains("\"name\":\"my_len_probe\""));
+}
+
+// A closed document's semantic-token state goes with it: a delta against its old result id after a
+// reopen answers with full data.
+@test
+fn lsp_token_state_dropped_on_close() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_OK);
+    let root = str::from_cstr(p.rootp());
+    let caps = "{\"textDocument\":{\"semanticTokens\":{\"requests\":{\"full\":{\"delta\":true}}}}}";
+    let mut ses = String::new();
+    push_init_caps(&mut ses, root, caps, "");
+    push_open(&mut ses, root, "src/main.spc", MAIN_OK);
+    let mut b = String::new();
+    b.format_into(
+        "{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/semanticTokens/full\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/main.spc\"}}}}}}",
+        root,
+    );
+    frame(&mut ses, &b);
+    b.clear();
+    b.format_into(
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/main.spc\"}}}}}}",
+        root,
+    );
+    frame(&mut ses, &b);
+    push_open(&mut ses, root, "src/main.spc", MAIN_OK);
+    b.clear();
+    b.format_into(
+        "{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/semanticTokens/full/delta\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/main.spc\"}},\"previousResultId\":\"1\"}}}}",
+        root,
+    );
+    frame(&mut ses, &b);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let r4 = response_of(out.as_str(), "\"id\":4");
+    assert(r4.contains("\"data\""));
+    assert(!r4.contains("\"edits\""));
+}
+
+// The budget-evicted workspace batch keeps publishing its diagnostics: a later round must not clear
+// the closed file's list.
+@test
+fn lsp_evicted_batch_keeps_diagnostics() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_OK);
+    p.mkfile("extra/stray.spc", STRAY_ERR);
+    let root = str::from_cstr(p.rootp());
+    let mut ses = String::new();
+    push_init_caps(&mut ses, root, "{}", "{\"budgetMb\":1}");
+    push_initialized(&mut ses);
+    push_open(&mut ses, root, "src/main.spc", MAIN_OK);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    // Both rounds publish the stray file's error; neither clears it.
+    assert_eq(count(o, "extra/stray.spc\",\"diagnostics\":[{"), 2);
+    assert(!o.contains("extra/stray.spc\",\"diagnostics\":[]"));
+}
+
+@platform(!windows)
+extern "C" "unistd.h" {
+    fn symlink(target: *const char, link: *const char) i32;
+}
+
+// The workspace sweep never follows a directory link: a link back up the tree must not recurse.
+@platform(!windows)
+@test
+fn lsp_sweep_skips_directory_links() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_OK);
+    p.mkfile("extra/stray.spc", STRAY_ERR);
+    let root = str::from_cstr(p.rootp());
+    let mut target = root.to_string();
+    target.push_str("/extra");
+    // Two links back up: following them would branch at every level.
+    let mut link = root.to_string();
+    link.push_str("/extra/loop");
+    assert_eq(unsafe symlink(target.cstr(), link.cstr()), 0);
+    let mut link2 = root.to_string();
+    link2.push_str("/extra/loop2");
+    assert_eq(unsafe symlink(target.cstr(), link2.cstr()), 0);
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_initialized(&mut ses);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    assert(o.contains("extra/stray.spc\",\"diagnostics\":[{"));
+    assert(!o.contains("/loop"));
 }

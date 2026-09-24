@@ -24,6 +24,77 @@
 import sc_io;
 import std::parallel::io as io;
 
+// The error numbers each platform's headers give, so each target classifies against its own and no number
+// is read in another platform's meaning (Linux ENODATA is 61, which is ECONNREFUSED on Darwin). Winsock
+// reports its WSAE* codes; EPIPE and its two Winsock spellings (CONNABORTED, SHUTDOWN) are `Closed`.
+@platform(macos | ios)
+const fn kind_of(e: i32) IoErrorKind {
+    return if e == 61 {
+        IoErrorKind::Refused;
+    } else if e == 54 {
+        IoErrorKind::Reset;
+    } else if e == 48 {
+        IoErrorKind::AddressInUse;
+    } else if e == 51 || e == 65 {
+        IoErrorKind::Unreachable;
+    } else if e == 32 {
+        IoErrorKind::Closed;
+    } else {
+        IoErrorKind::Other;
+    };
+}
+
+@platform(linux | android)
+const fn kind_of(e: i32) IoErrorKind {
+    return if e == 111 {
+        IoErrorKind::Refused;
+    } else if e == 104 {
+        IoErrorKind::Reset;
+    } else if e == 98 {
+        IoErrorKind::AddressInUse;
+    } else if e == 101 || e == 113 {
+        IoErrorKind::Unreachable;
+    } else if e == 32 {
+        IoErrorKind::Closed;
+    } else {
+        IoErrorKind::Other;
+    };
+}
+
+@platform(windows)
+const fn kind_of(e: i32) IoErrorKind {
+    return if e == 10061 {
+        IoErrorKind::Refused;
+    } else if e == 10054 {
+        IoErrorKind::Reset;
+    } else if e == 10048 {
+        IoErrorKind::AddressInUse;
+    } else if e == 10051 || e == 10065 {
+        IoErrorKind::Unreachable;
+    } else if e == 10053 || e == 10058 {
+        IoErrorKind::Closed;
+    } else {
+        IoErrorKind::Other;
+    };
+}
+
+@platform(wasm)
+const fn kind_of(e: i32) IoErrorKind {
+    return if e == 14 {
+        IoErrorKind::Refused;
+    } else if e == 15 {
+        IoErrorKind::Reset;
+    } else if e == 3 {
+        IoErrorKind::AddressInUse;
+    } else if e == 40 || e == 23 {
+        IoErrorKind::Unreachable;
+    } else if e == 64 {
+        IoErrorKind::Closed;
+    } else {
+        IoErrorKind::Other;
+    };
+}
+
 /// Why an operation failed. `code` is the platform errno, kept so a caller can report or match on the exact
 /// failure; the kind is what most code branches on.
 pub struct IoError {
@@ -45,22 +116,12 @@ extend IoError {
     /// Classify the current errno. `pub` for linkage.
     pub fn last() IoError {
         let e = unsafe sc_io::sc_io_errno();
-        // The numbers differ between platforms, so they are read from the C side rather than written here;
-        // these are the ones POSIX pins down well enough to branch on.
-        let k = if e == 61 || e == 111 || e == 10061 {
-            IoErrorKind::Refused; // ECONNREFUSED: macOS 61, Linux 111, WSAECONNREFUSED 10061
-        } else if e == 54 || e == 104 || e == 10054 {
-            IoErrorKind::Reset; // ECONNRESET
-        } else if e == 48 || e == 98 || e == 10048 {
-            IoErrorKind::AddressInUse; // EADDRINUSE
-        } else if e == 51 || e == 65 || e == 101 || e == 113 || e == 10051 || e == 10065 {
-            IoErrorKind::Unreachable; // ENETUNREACH / EHOSTUNREACH
-        } else if e == 32 || e == 141 || e == 10053 || e == 10058 {
-            IoErrorKind::Closed; // EPIPE, and its two Winsock spellings (CONNABORTED / SHUTDOWN)
-        } else {
-            IoErrorKind::Other;
-        };
-        return IoError { kind: k, code: e };
+        return IoError { kind: kind_of(e), code: e };
+    }
+    /// A wait that ended without readiness: its deadline passed, it was cancelled, the reactor is stopping,
+    /// or the descriptor cannot be watched. None of these is an errno, so the code is 0.
+    const fn wait_failed() IoError {
+        return IoError { kind: IoErrorKind::Other, code: 0 };
     }
     /// The kind, for a caller that does not care about the number.
     pub const fn kind(self: &IoError) IoErrorKind {
@@ -87,7 +148,7 @@ unsafe extend TcpStream as Send {}
 
 extend TcpListener {
     /// Bind and listen on `host:port`; `port` 0 lets the OS choose one (ask `port()` which it picked).
-    /// `None` if the address cannot be bound.
+    /// An error if the address cannot be bound.
     pub fn bind(host: str, port: i32) Result<TcpListener, IoError> {
         let mut h = String::from_str(host);
         let fd = unsafe sc_io::sc_tcp_listen(h.cstr(), port, 128);
@@ -100,7 +161,8 @@ extend TcpListener {
     pub fn port(self: &TcpListener) i32 {
         return unsafe sc_io::sc_tcp_port(self.fd);
     }
-    /// Accept one connection, parking until there is one. `None` only on a real error.
+    /// Accept one connection, parking until there is one. An error when the accept fails or the wait ends
+    /// without a connection (the task was cancelled, or the reactor is stopping).
     pub fn accept(self: &TcpListener) Result<TcpStream, IoError> {
         loop {
             let fd = unsafe sc_io::sc_tcp_accept(self.fd);
@@ -110,11 +172,13 @@ extend TcpListener {
             if unsafe sc_io::sc_io_would_block() == 0 {
                 return Result::<TcpStream, IoError>::Err(IoError::last());
             }
-            io::wait_readable(self.fd);
+            if !io::wait_readable(self.fd) {
+                return Result::<TcpStream, IoError>::Err(IoError::wait_failed());
+            }
         }
     }
-    /// Accept one connection, giving up after `deadline` (a `time::deadline_in` value). `None` on timeout
-    /// or error.
+    /// Accept one connection, giving up after `deadline` (a `time::deadline_in` value). An error on
+    /// timeout or failure; a timeout carries code 0.
     pub fn accept_until(self: &TcpListener, deadline: u64) Result<TcpStream, IoError> {
         loop {
             let fd = unsafe sc_io::sc_tcp_accept(self.fd);
@@ -125,8 +189,7 @@ extend TcpListener {
                 return Result::<TcpStream, IoError>::Err(IoError::last());
             }
             if !io::wait_until(self.fd, false, deadline) {
-                // The deadline, not the socket: a timeout is not an errno, so it is reported as one of ours.
-                return Result::<TcpStream, IoError>::Err(IoError { kind: IoErrorKind::Other, code: 0 });
+                return Result::<TcpStream, IoError>::Err(IoError::wait_failed());
             }
         }
     }
@@ -142,7 +205,7 @@ extend TcpListener as Free {
 }
 
 extend TcpStream {
-    /// Connect to `host:port`, parking until the connection resolves. `None` if it fails.
+    /// Connect to `host:port`, parking until the connection resolves. An error if it fails.
     pub fn connect(host: str, port: i32) Result<TcpStream, IoError> {
         let mut h = String::from_str(host);
         let fd = unsafe sc_io::sc_tcp_connect(h.cstr(), port);
@@ -150,19 +213,16 @@ extend TcpStream {
             return Result::<TcpStream, IoError>::Err(IoError::last());
         }
         // A non-blocking connect finishes asynchronously: the socket becomes writable, and only then does
-        // it say whether it connected, and the failure is in SO_ERROR, not errno.
-        io::wait_writable(fd);
+        // it say whether it connected, and the failure is in SO_ERROR, not errno. A wait that ends without
+        // writability leaves the connect unresolved, so it is a failure, never a connection.
+        if !io::wait_writable(fd) {
+            let _ = io::close(fd);
+            return Result::<TcpStream, IoError>::Err(IoError::wait_failed());
+        }
         let err = unsafe sc_io::sc_tcp_connect_result(fd);
         if err != 0 {
             let _ = io::close(fd);
-            let kind = if err == 61 || err == 111 || err == 10061 {
-                IoErrorKind::Refused;
-            } else if err == 51 || err == 65 || err == 101 || err == 113 || err == 10051 || err == 10065 {
-                IoErrorKind::Unreachable;
-            } else {
-                IoErrorKind::Other;
-            };
-            return Result::<TcpStream, IoError>::Err(IoError { kind: kind, code: err });
+            return Result::<TcpStream, IoError>::Err(IoError { kind: kind_of(err), code: err });
         }
         return Result::<TcpStream, IoError>::Ok(TcpStream { fd: fd });
     }
@@ -226,7 +286,9 @@ extend UdpSocket {
                 let e = IoError::last();
                 return Result::<usize, IoError>::Err(e);
             }
-            io::wait_writable(self.fd);
+            if !io::wait_writable(self.fd) {
+                return Result::<usize, IoError>::Err(IoError::wait_failed());
+            }
         }
     }
     /// Receive one datagram into `buf`, parking until one arrives. Returns how many bytes it held; anything
@@ -240,7 +302,9 @@ extend UdpSocket {
             if unsafe sc_io::sc_io_would_block() == 0 {
                 return Result::<usize, IoError>::Err(IoError::last());
             }
-            io::wait_readable(self.fd);
+            if !io::wait_readable(self.fd) {
+                return Result::<usize, IoError>::Err(IoError::wait_failed());
+            }
         }
     }
 }

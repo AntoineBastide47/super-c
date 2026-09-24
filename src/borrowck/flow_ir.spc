@@ -330,10 +330,22 @@ pub struct BorrowCtx {
 /// bounded by its own needs.
 pub const BC_SCRATCH_BUDGET: u64 = 8u64 << 20;
 
+// Heap bytes a pooled Lowerer keeps: its body's pools and its replay tape, the storage that grows
+// with the largest body it lowered.
+const fn lowerer_bytes(lw: &irl::Lowerer) u64 {
+    let b = &lw.body;
+    return (b.locals.capacity() * sizeof(ir::LocalDecl) + b.blocks.capacity() * sizeof(ir::BasicBlock) + b.statements.capacity() * sizeof(ir::Statement) + b.places.capacity() * sizeof(ir::Place) + b.projections.capacity() * sizeof(ir::Projection) + b.operands.capacity() * sizeof(ir::Operand) + b.rvalues.capacity() * sizeof(ir::Rvalue) + b.constants.capacity() * sizeof(ir::Constant) + b.oper_pool.capacity() * sizeof(ir::OperandId) + b.dest_pool.capacity() * sizeof(ir::PlaceId) + b.targ_pool.capacity() * sizeof(TypeId) + b.asms.capacity() * sizeof(ir::AsmRec) + b.asm_spans.capacity() * sizeof(tok::Span) + (b.switch_pool.capacity() + b.user_moves.capacity() + lw.tape.capacity()) * 8) as u64;
+}
+
 extend BorrowCtx {
-    /// Heap bytes the analyses and the elaboration keep across bodies (capacity, not length).
+    /// Heap bytes the analyses, the elaboration and the Lowerer pool keep across bodies (capacity,
+    /// not length).
     pub const fn scratch_bytes(self: &Self) u64 {
-        return self.forest.scratch_bytes() + self.facts.scratch_bytes() + self.cfg.scratch_bytes() + self.liveness.scratch_bytes() + self.moves.scratch_bytes() + self.solver.scratch_bytes() + self.el.scratch_bytes();
+        let mut pool: u64 = 0;
+        for i in 0..self.lower_pool.len() {
+            pool += lowerer_bytes(self.lower_pool.at(i));
+        }
+        return pool + self.forest.scratch_bytes() + self.facts.scratch_bytes() + self.cfg.scratch_bytes() + self.liveness.scratch_bytes() + self.moves.scratch_bytes() + self.solver.scratch_bytes() + self.el.scratch_bytes();
     }
 
     /// Release the analysis scratch when it outgrew the budget; the next body reallocates to its own size.
@@ -348,6 +360,7 @@ extend BorrowCtx {
         self.moves = bdf::MoveFlow::empty();
         self.solver = bln::Solver::empty();
         self.el = ird::ElabCtx::empty();
+        self.lower_pool = Vector::<irl::Lowerer>::new();
         if self.st.pr.on {
             self.st.t[BT_TRIMS] += 1;
         }
@@ -428,7 +441,7 @@ pub fn body_features(ow: &mut bfx::Owner, body: &ir::CoreBody) u32 {
                 ft = ft | FT_BORROWED_PARAM;
             }
         }
-        if ow.owns(m, ld.ty) {
+        if ow.owns(body.owner, m, ld.ty) {
             ft = ft | FT_OWNED;
         }
     }
@@ -457,11 +470,11 @@ pub const fn stage_skip(ft: u32) bool {
 }
 
 /// Run the six analysis stages for `body` into `ctx` (reset-and-refill keeps vector capacity
-/// across bodies). Returns true when any move or borrow error was recorded: the wording pass
-/// (or the module's serial replay) then has something to say. Pure over the frozen `body`, the
-/// package's read-only ASTs, and the two private accumulators, so workers may run it concurrently.
-/// Under `ctx.validate` the skipped work runs anyway and its emptiness is asserted.
-pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBody) bool {
+/// across bodies); the move and borrow errors land in `ctx.moves.errs` and `ctx.solver.errs`.
+/// Pure over the frozen `body`, the package's read-only ASTs, and the two private accumulators,
+/// so workers may run it concurrently. Under `ctx.validate` the skipped work runs anyway and its
+/// emptiness is asserted.
+pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBody) {
     let ft = body_features(ow, body);
     let lskip = loan_skip(ft);
     let sskip = stage_skip(ft);
@@ -494,7 +507,7 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     if sskip && !ctx.validate {
         ctx.moves.errs.truncate(0);
         ctx.solver.errs.truncate(0);
-        return false;
+        return;
     }
     let t0 = ctx.st.pr.start();
     ctx.forest.build_into(body);
@@ -579,7 +592,6 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
         ctx.st.body_ns.push(body.module as u64 << 32 | body.owner.node as u64);
         ctx.st.body_ns.push(platform_ns() - tb);
     }
-    return ctx.moves.errs.len() != 0 || ctx.solver.errs.len() != 0;
 }
 
 // The validation build's structural checks over one body's analysis products: every move path
@@ -745,6 +757,7 @@ const CAT_F_REF: u8 = 14; // Free field moved out of borrowed content
 const CAT_F_WHOLE: u8 = 15; // Free field moved out of a Free aggregate
 const CAT_F_CAP: u8 = 16; // Free capture moved out of its closure
 const CAT_F_CONST: u8 = 17; // owning const moved
+const CAT_MOVED_PARAM: u8 = 18; // use of a moved value of a type parameter (adds the `Copy` hint)
 
 extend tc::TypeChecker {
     // A body the lowering cannot express is a hard error (no body may go unchecked, and no other
@@ -752,9 +765,9 @@ extend tc::TypeChecker {
     fn bc_lower_err(self: &mut Self, lw: &irl::Lowerer, owner: NodeId) {
         let a = self.cur_ast();
         let sp = if lw.err_node != NODE_NONE {
-            a.at_const(lw.err_node).span;
+            unsafe (*a).at_const(lw.err_node).span;
         } else {
-            a.at_const(owner).span;
+            unsafe (*a).at_const(owner).span;
         };
         self.errors.emit(
             sp.start,
@@ -821,11 +834,11 @@ extend tc::TypeChecker {
                 loop {
                     let idx = self.tc_capture_index(c, d);
                     if idx >= 0 {
-                        let old = self.cur_ast().at(c).as_data.closure.mut_caps as u64;
-                        self.cur_ast().at(c).as_data.closure.mut_caps = (old | 1u64 << idx as u64) as u32;
-                        let cf = self.cur_ast().closure_fact_mut(c);
+                        let old = (unsafe (*self.cur_ast()).at(c).as_data.closure.mut_caps) as u64;
+                        unsafe (*self.cur_ast()).at(c).as_data.closure.mut_caps = (old | 1u64 << idx as u64) as u32;
+                        let cf = unsafe (*self.cur_ast()).closure_fact_mut(c);
                         assert(cf != null, "every checked closure has recorded facts");
-                        unsafe cf.mut_caps = old | 1u64 << idx as u64;
+                        unsafe (*cf).mut_caps = old | 1u64 << idx as u64;
                     }
                     let mut p = NODE_NONE;
                     for j in 0..cns.len() {
@@ -882,7 +895,7 @@ extend tc::TypeChecker {
         // owned-typed local cannot fire any of them: skip the sweep.
         let mut owned = false;
         for l in 0..body.locals.len() {
-            if ow.owns(body.module, body.locals.at(l).ty) {
+            if ow.owns(body.owner, body.module, body.locals.at(l).ty) {
                 owned = true;
                 break;
             }
@@ -897,8 +910,8 @@ extend tc::TypeChecker {
         let onode = body.owner.node;
         if onode != NODE_NONE {
             let oa = self.mod_ast(body.owner.module);
-            if oa.at_const(onode).kind == NodeKind::NODE_CLOSURE {
-                cap_lo = body.returns + oa.at_const(onode).as_data.closure.params.len;
+            if unsafe (*oa).at_const(onode).kind == NodeKind::NODE_CLOSURE {
+                cap_lo = body.returns + unsafe (*oa).at_const(onode).as_data.closure.params.len;
                 cap_hi = body.returns + body.args;
             }
         }
@@ -930,9 +943,9 @@ extend tc::TypeChecker {
                 let mut exempt = false;
                 if t.args_len == 1 && t.callee.node != NODE_NONE {
                     let fa = self.mod_ast(t.callee.module);
-                    let fd = fa.at_const(t.callee.node);
+                    let fd = unsafe (*fa).at_const(t.callee.node);
                     if fd.kind == NodeKind::NODE_FUNCTION {
-                        let nm = fa.at_const(fd.as_data.function.name).as_data.name.text;
+                        let nm = unsafe (*fa).at_const(fd.as_data.function.name).as_data.name.text;
                         exempt = tc::span_is(self.mod_src(t.callee.module), nm, "free");
                     }
                 }
@@ -979,8 +992,8 @@ extend tc::TypeChecker {
             let bl = *body.locals.at(pl.base as usize);
             if bl.storage == ir::LS_STATIC_REF && bl.item.node != NODE_NONE {
                 let ca = self.mod_ast(bl.item.module);
-                if ca.at_const(bl.item.node).kind == NodeKind::NODE_CONST {
-                    let cd = ca.at_const(bl.item.node).as_data.const_def;
+                if unsafe (*ca).at_const(bl.item.node).kind == NodeKind::NODE_CONST {
+                    let cd = unsafe (*ca).at_const(bl.item.node).as_data.const_def;
                     if !cd.is_static_mut && !cd.is_extern && self.tc_type_is_free(pl.ty) {
                         self.bc_ir_push(
                             out,
@@ -995,7 +1008,7 @@ extend tc::TypeChecker {
             }
             // A RUNTIME local const (plain-fn initializer) is a scope-owned value: a copy of it
             // would double-free at scope exit.
-            if bl.decl != NODE_NONE && self.mod_ast(body.module).at_const(bl.decl).kind == NodeKind::NODE_CONST && self.tc_type_is_free(
+            if bl.decl != NODE_NONE && unsafe (*self.mod_ast(body.module)).at_const(bl.decl).kind == NodeKind::NODE_CONST && self.tc_type_is_free(
                 pl.ty,
             ) {
                 self.bc_ir_push(out, seen, CAT_F_CONST, sp, format("cannot move a value out of a 'const' binding"));
@@ -1046,13 +1059,14 @@ extend tc::TypeChecker {
         let deref_of_ind = lik == TypeKind::TYPE_REFERENCE || lik == TypeKind::TYPE_POINTER;
         if deref_of_ind && (last.kind == ir::PJ_DEREF || last.kind == ir::PJ_INDEX_CONST || last.kind == ir::PJ_INDEX_OP) {
             if !in_unsafe && !exempt {
-                self.bc_ir_push(
-                    out,
-                    seen,
-                    CAT_F_DEREF,
-                    sp,
-                    format("cannot move a Free value out of a dereference (it would be freed twice)"),
-                );
+                let msg = if self.type_at(pl.ty).kind == TypeKind::TYPE_GENERIC {
+                    format(
+                        "cannot move a value of a type parameter out of a dereference (it would be freed twice); add a 'Copy' bound to the parameter to copy it, or borrow it",
+                    );
+                } else {
+                    format("cannot move a Free value out of a dereference (it would be freed twice)");
+                };
+                self.bc_ir_push(out, seen, CAT_F_DEREF, sp, msg);
             }
             return;
         }
@@ -1126,7 +1140,7 @@ extend tc::TypeChecker {
         seen: &mut Vector<u64>,
         out: &mut Vector<FlowErr>,
     ) {
-        let _ = bc_run_stages(ow, ctx, body);
+        bc_run_stages(ow, ctx, body);
         let tr = ctx.st.pr.start();
         self.bc_ir_free_rules(ow, body, seen, out);
         // Capture sites: a move-of-moved AT a closure creation is worded as a capture. Only the
@@ -1178,7 +1192,13 @@ extend tc::TypeChecker {
                         format("closure captures a moved value (use of moved value)"),
                     );
                 } else {
-                    self.bc_ir_push(out, seen, CAT_MOVED, er.span, format("use of moved value"));
+                    let pty = ctx.forest.paths.at(er.path as usize).ty;
+                    let cat = if pty != TYPE_NONE && self.type_at(pty).kind == TypeKind::TYPE_GENERIC {
+                        CAT_MOVED_PARAM;
+                    } else {
+                        CAT_MOVED;
+                    };
+                    self.bc_ir_push(out, seen, cat, er.span, format("use of moved value"));
                 }
             }
         }
@@ -1206,7 +1226,7 @@ extend tc::TypeChecker {
                 }
                 self.bc_ir_conflict(body, &ctx.facts, &er, seen, out);
             } else if er.kind == bln::BE_ESCAPE {
-                self.bc_ir_escape(body, &ctx.facts, &mut ctx.solver, &er, seen, out);
+                self.bc_ir_escape(body, &ctx.facts, &ctx.solver, &er, seen, out);
             }
         }
         ctx.st.pr.stop(BP_RULES, tr);
@@ -1318,7 +1338,7 @@ extend tc::TypeChecker {
         self: &mut Self,
         body: &ir::CoreBody,
         f: &bfx::BodyFacts,
-        sv: &mut bln::Solver,
+        sv: &bln::Solver,
         er: &bln::BorrowErr,
         seen: &mut Vector<u64>,
         out: &mut Vector<FlowErr>,
@@ -1386,6 +1406,14 @@ extend tc::TypeChecker {
                     di,
                     format(
                         "a constant of an owning type is read or borrowed, never moved: the copy would free storage the constant still owns",
+                    ),
+                );
+            }
+            if cat == CAT_MOVED_PARAM {
+                self.errors.note_at(
+                    di,
+                    format(
+                        "a value of a type parameter moves on every use: add a 'Copy' bound to the parameter to copy it, or borrow it",
                     ),
                 );
             }

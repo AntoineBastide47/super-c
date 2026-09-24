@@ -17,11 +17,11 @@ fn call_doc(p: &mut d::DocPool, args: []str) d::DocId {
     }
     // Trailing comma only when broken.
     inner.push(p.ifbreak(",", false));
-    let ic = p.concat(&inner);
+    let ic = p.concat(&inner, 0);
     parts.push(p.indent(ic));
     parts.push(p.softline());
     parts.push(p.txt(")"));
-    let body = p.concat(&parts);
+    let body = p.concat(&parts, 0);
     let g = p.group(body);
     return g;
 }
@@ -63,7 +63,7 @@ fn nested_groups_break_outer_first() {
     parts.push(l);
     parts.push(inner);
     parts.push(p.txt(";"));
-    let cc = p.concat(&parts);
+    let cc = p.concat(&parts, 0);
     let ind = p.indent(cc);
     let outer = p.group(ind);
     expect_render(&p, outer, 80, "let x = foo(a, b);\n");
@@ -79,11 +79,11 @@ fn hardline_forces_group_broken() {
     let mut body = Vector::<d::DocId>::new();
     body.push(p.hardline());
     body.push(p.txt("stmt;"));
-    let bc = p.concat(&body);
+    let bc = p.concat(&body, 0);
     parts.push(p.indent(bc));
     parts.push(p.hardline());
     parts.push(p.txt("}"));
-    let cc = p.concat(&parts);
+    let cc = p.concat(&parts, 0);
     let g = p.group(cc);
     // Even at huge width a hardline group breaks.
     expect_render(&p, g, 1000, "{\n    stmt;\n}\n");
@@ -97,7 +97,7 @@ fn blankline_and_span_text() {
     parts.push(p.span(0, 5));
     parts.push(p.blankline());
     parts.push(p.span(6, 11));
-    let cc = p.concat(&parts);
+    let cc = p.concat(&parts, 0);
     expect_render(&p, cc, 80, "hello\n\nworld\n");
 }
 
@@ -111,13 +111,13 @@ fn flat_width_memo() {
     parts.push(l);
     // Shared DocId: DAG reuse is legal.
     parts.push(t);
-    let cc = p.concat(&parts);
+    let cc = p.concat(&parts, 0);
     // 4 + 1 + 4.
     assert_eq(p.docs.at(cc as usize).w, 9u32);
     let h = p.hardline();
     let mut pair = Vector::<d::DocId>::new();
     pair.push(cc);
     pair.push(h);
-    let ph = p.concat(&pair);
+    let ph = p.concat(&pair, 0);
     assert_eq(p.docs.at(ph as usize).w, d::W_INF);
 }

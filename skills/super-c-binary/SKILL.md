@@ -39,11 +39,13 @@ super-c build                # build from build.toml (dev profile, incremental)
 super-c build -o out         # override output binary name
 super-c release              # optimized build (release profile; alias for --profile=release)
 super-c run                  # build + execute the manifest binary
-super-c clean                # remove build outputs (--cache also drops the build-record cache)
+super-c clean                # remove the out-dir and <root dir>/build/raw (--cache also drops the build-record cache); never a user directory
 ```
 
 The build system reads `build.toml` in the working directory. An emit stamp skips the
-entire transpile when no input changed (~25 ms no-op). Parallel C compilation uses
+entire transpile when no input changed (~25 ms no-op); it records the loaded module files and
+the `.spc` listing of every directory the loader searched, so a new file that would shadow an
+import also makes the stamp stale. Parallel C compilation uses
 content-fingerprinted stale detection with longest-job-first scheduling.
 
 ### Testing
@@ -201,7 +203,7 @@ run = [
     "rm -rf stage1-super-c",
 ]
 
-[command.profile]
+[command.profile]           # a command's `env` entries are set in the process environment, never as a shell prefix
 run = [
     "./super-c bench --no-run",
     "samply record --rate 1000 build/bench-bin",
@@ -242,7 +244,7 @@ edit never moves a chunk between shards.
 | `dev` | `opt-level = 1`, `-g` + full ASan/UBSan set, frame pointers | Development (**default**) |
 | `debug` | `opt-level = 0`, `-g` + sanitizers | Unoptimized debugging |
 | `release` | `opt-level = 3`, `-DNDEBUG -fPIE` + section GC, `link-args = ["-O2"]`, strip, `lto = "auto"` | Shipping |
-| `bench` | `opt-level = 3`, `-DNDEBUG -g -fno-omit-frame-pointer`, `lto = "auto"` (+ PGO ingest when present) | Benchmarking/profiling |
+| `bench` | `opt-level = 3`, `-DNDEBUG -g -fno-omit-frame-pointer`, `lto = "auto"` (+ PGO ingest of `<out-dir>/pgo.profdata` when that file exists) | Benchmarking/profiling |
 | `pgogen` | `opt-level = 2`, `-fprofile-generate`, `lto = "auto"` | PGO profile generation |
 | `race` | `opt-level = 1`, `-g -fsanitize=thread -DSC_LOCKDEP` | TSan + lock-order checking |
 | `test` | `opt-level = 1`, no sanitizers | The `super-c test` runner binary only (the compiler under test keeps the selected profile) |
@@ -349,7 +351,7 @@ a `thin` profile keeps `auto` there.
 | `SC_NO_LTO_CACHE` | Link ThinLTO without the linker cache |
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
 | `SC_NO_TU_CACHE` | Disable per-TU journal/replay cache |
-| `SC_BUILD_MEM_BUDGET` | Cap the estimated bytes in flight across the parallel jobs of the type check, the borrow check and the emission (`64M`, `2G`); a job above the whole budget runs alone |
+| `SC_BUILD_MEM_BUDGET` | Cap the estimated bytes in flight across the parallel jobs of the type check, the borrow check and the emission (`64M`, `2G`); a job above the whole budget runs alone; a value that is not digits plus one optional K/M/G suffix, or that overflows, is a fatal error |
 | `SC_TYPE_STATS` | Print the type identity counters per phase and at the end of emission: interning hits and probe steps, foreign lowerings, instance-graph interns, layout cache traffic, the bytes the package type table and the module pools retain, the publication census, and per publication the kept bodies remapped and the time it took (`type-identity.md` in the internals skill) |
 | `SC_SYNTAX_STATS` | Print one syntax accounting line per phase (parse, resolve, typecheck, borrowck, emit): node and child counts with the share inside bodies, the retained bytes of nodes, children, resolutions, types, module pools and the other side tables, the source text, and the module that retains the most (`syntax-ownership.md` in the internals skill) |
 

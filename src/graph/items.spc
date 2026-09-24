@@ -157,7 +157,7 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
             out.push(i as u64 << 32 | ow as u64);
         }
     }
-    // Module-arena ranges (rs, re] -> owner, ascending; the per-item own range for the self test.
+    // Module-arena ranges [rs, re] -> owner, ascending; the per-item own range for the self test.
     let mut rs = Vector::<u32>::new();
     let mut re = Vector::<u32>::new();
     let mut ro = Vector::<u32>::new();
@@ -190,7 +190,7 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
             mstart.set((meta.owner - i0 as u32) as usize, prev);
             mend.set((meta.owner - i0 as u32) as usize, he);
             opened.set((meta.owner - i0 as u32) as usize, true);
-            prev = he;
+            prev = he + 1;
         }
         rs.push(prev);
         re.push(meta.node);
@@ -199,9 +199,10 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
             mstart.set((it - i0 as u32) as usize, prev);
             mend.set((it - i0 as u32) as usize, meta.node);
         }
-        prev = meta.node;
+        prev = meta.node + 1;
     }
-    // Body-arena ranges: each function's body run, in node order.
+    // Body-arena ranges: each function's body run, in node order. Body id 0 is a real node (only
+    // the module arena reserves slot 0), so the starts are inclusive in both arenas.
     let mut bs = Vector::<u32>::new();
     let mut be = Vector::<u32>::new();
     let mut bo = Vector::<u32>::new();
@@ -221,7 +222,7 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
             bo.push(it);
             bstart.set((it - i0 as u32) as usize, prev);
             bend.set((it - i0 as u32) as usize, end);
-            prev = end;
+            prev = end + 1;
         }
     }
     let first_span = if rs.len() != 0 {
@@ -271,7 +272,7 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
         let mut r: usize = 0;
         let n = sv.len();
         let nb = sv.base_len();
-        for x in 1..n {
+        for x in 0..n {
             let d = if x < nb {
                 unsafe *(sv.base_ptr() + x);
             } else {
@@ -288,7 +289,7 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
                 }
             }
             let mut owner = NONE;
-            if r < nr && x as u32 > rng_s[r] {
+            if r < nr && x as u32 >= rng_s[r] {
                 owner = rng_o[r];
                 if !body && r == 0 && (unsafe &*nv.ptr_at(x)).span.start < first_span {
                     continue; // an import path, before the first item
@@ -300,15 +301,16 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
                     continue;
                 }
             }
+            // every owner is an item of module m, so it indexes the per-item ranges
             let ol = (owner - i0 as u32) as usize;
-            if d.module as usize == m && owner >= i0 as u32 && ol < nl {
+            if d.module as usize == m {
                 // Declared inside the owner's own ranges: a local, a parameter, a generic.
                 let tn = d.node & NODE_BODY_MASK;
                 if Ast::in_body(d.node) {
-                    if tn > bstart[ol] && tn <= bend[ol] {
+                    if tn >= bstart[ol] && tn <= bend[ol] {
                         continue;
                     }
-                } else if tn > mstart[ol] && tn <= mend[ol] {
+                } else if tn >= mstart[ol] && tn <= mend[ol] {
                     continue;
                 }
             }
@@ -340,7 +342,7 @@ pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mu
     }
 }
 
-// Lay `edges` out as CSR ranges over `n` owners, targets ascending and deduplicated.
+// Lay `edges` out as CSR ranges over `n` owners, targets deduplicated in first-edge order.
 fn csr(n: usize, edges: &Vector<u64>, off: &mut Vector<u32>, tgt: &mut Vector<u32>) {
     // A counting layout by owner (edge order within a row), then a stamp array over the targets
     // drops the repeats of each row in place: linear in the edges, no sort.
@@ -768,20 +770,29 @@ pub fn finalize(p: &mut loader::Package) {
     for e in p.sched.dyn_edges.iter() {
         edges.push(*e);
     }
-    let mut off = Vector::<u32>::new();
-    let mut tgt = Vector::<u32>::new();
-    csr(n, &edges, &mut off, &mut tgt);
-    p.sched.fin_off = off;
-    p.sched.fin_edges = tgt;
-    p.sched.final_edges = true;
+    build_final(p, &edges);
     p.sched.dyn_edges = Set::<u64>::new();
     let t1 = plat::now_ns();
     p.ensure_sigs();
     let mut hashes = Vector::<u64>::new();
     hashes.resize_default(n);
     let mut c = cache_none();
+    // The current module's attributes as `owner << 32 | index`, sorted: an item reads its own
+    // attributes in declaration order from one range instead of scanning them all.
+    let mut akeys = Vector::<u64>::new();
+    let mut am = p.modules.len();
     for i in 0..n {
-        hashes.set(i, sig_hash(p, &sps, &mut c, i));
+        let m = p.idx.items.at(i).module as usize;
+        if m != am {
+            am = m;
+            akeys.clear();
+            let attrs = &p.modules.at(m).ast.attrs;
+            for k in 0..attrs.len() {
+                akeys.push(attrs.at(k).owner as u64 << 32 | k as u64);
+            }
+            akeys.sort();
+        }
+        hashes.set(i, sig_hash(p, &sps, &mut c, i, &akeys));
     }
     p.sched.sig_hash = hashes;
     p.sched.final_ns = t1 - t0;
@@ -792,7 +803,7 @@ pub fn finalize(p: &mut loader::Package) {
 // signature by kind (parameter and return types, generics and bounds, the owner's target and
 // interface, fields and variants, the aliased or constant type). Types hash structurally with
 // nominal declarations spelled as item keys, so neither node ids nor type numbering enter.
-fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize) u64 {
+fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, akeys: &Vector<u64>) u64 {
     let it = *p.idx.items.at(i);
     let m = it.module as usize;
     let a = &p.modules.at(m).ast;
@@ -804,11 +815,14 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize) u
             0u64;
         },
     );
-    for k in 0..a.attrs.len() {
-        let at = a.attrs.at(k);
-        if at.owner == it.node {
-            h = mix(mix(h, at.kind), at.arg);
-        }
+    let mut k = switch akeys.binary_search(&(it.node as u64 << 32)) {
+        Ok(x) => x,
+        Err(x) => x,
+    };
+    while k < akeys.len() && akeys[k] >> 32 == it.node as u64 {
+        let at = a.attrs.at((akeys[k] & 0xFFFFFFFFu64) as usize);
+        h = mix(mix(h, at.kind), at.arg);
+        k += 1;
     }
     if !a.valid(it.node) {
         return h;
@@ -818,19 +832,19 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize) u
         let fd = nd.as_data.function;
         h = mix(
             h,
-            if fd.is_extern {
+            if fd.is_extern() {
                 1u64;
             } else {
                 0u64;
-            } | if fd.is_variadic {
+            } | if fd.is_variadic() {
                 2u64;
             } else {
                 0u64;
-            } | if fd.is_const {
+            } | if fd.is_const() {
                 4u64;
             } else {
                 0u64;
-            } | if fd.is_unsafe {
+            } | if fd.is_unsafe() {
                 8u64;
             } else {
                 0u64;
@@ -1066,8 +1080,8 @@ pub fn digest(p: &loader::Package) u64 {
 /// Add `ns` to module `m`'s per-module cost row `k` (0 = emission seed, 1 = always-panics).
 pub fn mod_cost(p: &mut loader::Package, m: usize, k: usize, ns: u64) {
     let want = 2 * p.modules.len();
-    while p.icost_mod.len() < want {
-        p.icost_mod.push(0);
+    if p.icost_mod.len() < want {
+        p.icost_mod.resize_default(want);
     }
     p.icost_mod.set(2 * m + k, p.icost_mod[2 * m + k] + ns);
 }
@@ -1097,6 +1111,7 @@ fn makespan_w(
     task_ns: u64,
     wd: &mut Width,
 ) u64 {
+    assert(n < 1usize << 20, "the ready heap packs a job id into 20 bits");
     // Dependents (reverse CSR) and the pending-dependency counts.
     let mut rev_off = Vector::<u32>::new();
     rev_off.resize_default(n + 1);
@@ -1439,12 +1454,7 @@ fn frontier_line(p: &loader::Package, what: str, rec: &Vector<u64>, task_ns: u64
 // Longest-job-first order for the independent-job schedules.
 fn sort_longest_first(v: &mut Vector<u64>) {
     v.sort();
-    let n = v.len();
-    for i in 0..n / 2 {
-        let a = v[i];
-        v.set(i, v[n - 1 - i]);
-        v.set(n - 1 - i, a);
-    }
+    v.reverse();
 }
 
 // The module-level schedule the type check ran before the item scheduler, over the measured

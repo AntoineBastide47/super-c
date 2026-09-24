@@ -7,6 +7,16 @@ write-out stages in `src/driver/emit.spc` (search `Assembly:` and `write_shard`)
 owner rules in `src/emit/tu.spc` (`pick_owner`, `type_owner`) and the spelling rows in
 `src/emit/mangle.spc` (`modpfx`, `mark_used`, `um_hit_kind`).
 
+Identifier escape: `Mangler::ident` appends `_` to a name that is a C keyword or a macro
+from the standard headers the emitted C includes (`c_keyword`, `c_std_macro`: `I`,
+`errno`, `EOF`, the `E`/`SIG`/`FE_`/`INT*_MAX` families and the rest), for fields, payload
+members, locals, parameters, captures and root-module items; an enum tag that joins into
+such a macro is escaped too. An unprefixed file-scope symbol (a single-module root item, a
+prelude item) that equals a name the included headers declare (`C_LIB_NAMES`, and the
+`c_lib_family` prefixes such as `pthread_` and `int*_t`) gets the same `_` (`lib_escape`,
+applied in `qualified()`, free-function symbols and enum tags). Extern names keep their
+exact C spelling (`c_ident` escapes keywords only).
+
 ## Files
 
 | File | Content | Included by |
@@ -17,7 +27,7 @@ owner rules in `src/emit/tu.spc` (`pick_owner`, `type_owner`) and the spelling r
 | `<mod>.c`, `<mod>__p<k>.c` | the module's bodies, sharded by `stable_item_hash(symbol) mod count`; the count comes from the rendered size (`shard_policy`: one shard per 256 KiB of C; a count read from the previous `__sc_shards` is kept while every shard stays within half and one and a half times that), or from `[shards]` in build.toml; a static closure follows the body before it | |
 | `<mod>__inst.c`, `<mod>__inst__p<k>.c` | generic instances of the module's generics, glue of its types, its constants and descriptors, dyn tables of its receivers (same policy per owner; `[instance-shards]` overrides) | |
 | `__sc_shards` | `super-c-shards<TAB>1`, then `module<TAB>tus<TAB>insts` for every module with more than one shard of either kind: the counts this build used, which the next build reads as its starting point | the next build |
-| `__sc_registry.c` | ZST sentinels; the reflection registry: the `@reflect` roots sorted by symbol (each root is an external `const` with hidden visibility except on Windows, defined in its owner's instance shard), one pointer table, one constructor calling `__sc_reflect_register` per root (lookup reads the runtime's table, never constructor order) | |
+| `__sc_registry.c` | ZST sentinels; the reflection registry: the `@reflect` roots sorted by symbol (each root is an external `const` with hidden visibility except on Windows, defined in its owner's instance shard), one pointer table, one constructor passing that sorted table to `__sc_reflect_register` once (the runtime keeps its address and count: no capacity limit, lookup never depends on constructor order) | |
 | `__sc_manifest` | one record per output: kind, path, 64-bit content hash, owner module, shard index, generated headers included; the effective shard counts (`shards` lines, whether chosen or overridden); the C command inputs; the registry roots | tooling |
 
 Every include line is relative (`../` per module directory level); the tree compiles

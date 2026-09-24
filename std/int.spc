@@ -288,25 +288,8 @@ extend<const BITS: usize> IntBits<BITS> {
                 carry = hi;
             }
             if carry != 0 {
-                // Propagate the high half upwards; anything past the top is lost, hence overflow.
-                let mut k = i + n;
-                if k >= n {
-                    over = true;
-                } else {
-                    while carry != 0 && k < n {
-                        let cur = r.get(k);
-                        let s = cur + carry;
-                        carry = (s < cur) as u64;
-                        r.set(k, s);
-                        if BITS % 64 != 0 && k + 1 == n && s >> (BITS % 64) as u64 != 0 {
-                            over = true;
-                        }
-                        k = k + 1;
-                    }
-                    if carry != 0 {
-                        over = true;
-                    }
-                }
+                // The row's last partial product landed in the top limb, so its carry lies past the width.
+                over = true;
             }
         }
         unsafe *overflow = over;
@@ -548,12 +531,11 @@ extend<const BITS: usize> IntBits<BITS> {
         unsafe *rem = r;
     }
 
-    // Divide by a value that fits in one limb, returning the remainder. The path decimal formatting and
-    // parsing take, where the divisor is 10 (or a power of it) and full division would be wasteful.
+    // Divide by a nonzero divisor below 2^32, returning the remainder: the 32-bit halves below keep every
+    // intermediate within 64 bits only for such a divisor. The path decimal formatting and parsing take
+    // (divisor 10, or a radix up to 36), where full division would be wasteful.
     fn divmod_small(self: &IntBits<BITS>, d: u64, quot: *mut IntBits<BITS>) u64 {
-        if d == 0 {
-            panic("integer division by zero");
-        }
+        assert(d != 0 && d >> 32 == 0, "divmod_small: divisor must be in 1..2^32");
         if BITS == 128 && use_i128() {
             let mut ql: u64 = 0;
             let mut qh: u64 = 0;
@@ -895,6 +877,14 @@ extend<const BITS: usize> UInt<BITS> {
             return UInt::<BITS>::zero();
         }
         let two64: f64 = 18446744073709551616.0;
+        // 2^BITS, exact below 2^1024 and infinity past it, where only an infinite v reaches it.
+        let mut limit = (1u64 << (BITS % 64) as u64) as f64;
+        for _i in 0..BITS / 64 {
+            limit = limit * two64;
+        }
+        if v >= limit {
+            return UInt::<BITS>::max();
+        }
         let mut r = UInt::<BITS>::zero();
         let mut rest = v;
         while rest >= 1.0 {
@@ -903,10 +893,6 @@ extend<const BITS: usize> UInt<BITS> {
             while x >= two64 {
                 x = x / two64;
                 sh = sh + 1;
-                if sh * 64 >= BITS {
-                    // Saturates ±inf too: that divide never grounds.
-                    return UInt::<BITS>::max();
-                }
             }
             let chunk = x as u64;
             r = r + UInt::<BITS>::from_u64(chunk).shl(sh * 64);
@@ -1130,7 +1116,7 @@ extend<const BITS: usize> UInt<BITS> {
         return UInt::<BITS> { bits: q };
     }
 
-    /// The quotient (toward zero), or None for a zero divisor or MIN / -1.
+    /// The quotient, or None for a zero divisor.
     pub fn checked_div(self: &UInt<BITS>, other: &UInt<BITS>) Option<UInt<BITS>> {
         if other.is_zero() {
             return Option::<UInt<BITS>>::None;
@@ -1139,7 +1125,7 @@ extend<const BITS: usize> UInt<BITS> {
         return Option::<UInt<BITS>>::Some(self.divmod(other, &mut r));
     }
 
-    /// The remainder (sign of the dividend), or None for a zero divisor or MIN / -1.
+    /// The remainder, or None for a zero divisor.
     pub fn checked_rem(self: &UInt<BITS>, other: &UInt<BITS>) Option<UInt<BITS>> {
         if other.is_zero() {
             return Option::<UInt<BITS>>::None;
@@ -1209,24 +1195,45 @@ extend<const BITS: usize> UInt<BITS> {
     /// Decimal digits. Repeated division by a single limb, which is the cheap path through the divider.
     pub fn to_string(self: &UInt<BITS>) String {
         let mut out = String::new();
-        if self.is_zero() {
-            out.push_byte(b'0');
-            return out;
-        }
-        let mut digits = String::new();
-        let mut cur = self.bits;
-        while !cur.is_zero() {
-            let mut q = IntBits::<BITS>::zero();
-            let d = cur.divmod_small(10, &mut q);
-            digits.push_byte(b'0' + d as u8);
-            cur = q;
-        }
-        let mut i = digits.len();
-        while i > 0 {
-            i = i - 1;
-            out.push_byte(digits.as_str().byte_at(i));
-        }
+        self.push_digits(&mut out, 10);
         return out;
+    }
+
+    // Append the digits in `radix` (2..=36, `a`-`z` past 9) to `out` with one reservation: a value has at
+    // most BITS / floor(log2 radix) + 1 digits. They are written least significant first into the spare
+    // capacity, then reversed in place.
+    fn push_digits(self: &UInt<BITS>, out: &mut String, radix: u32) {
+        let mut lg: usize = 1;
+        while 2u32 << lg as u32 <= radix {
+            lg = lg + 1;
+        }
+        let p = out.spare_mut(BITS / lg + 1);
+        let mut n: usize = 0;
+        let mut cur = self.bits;
+        loop {
+            let mut q = IntBits::<BITS>::zero();
+            let d = cur.divmod_small(radix, &mut q);
+            if d < 10 {
+                unsafe p[n] = b'0' + d as u8;
+            } else {
+                unsafe p[n] = b'a' + (d - 10) as u8;
+            }
+            n = n + 1;
+            cur = q;
+            if cur.is_zero() {
+                break;
+            }
+        }
+        let mut i: usize = 0;
+        let mut j = n - 1;
+        while i < j {
+            let t = unsafe p[i];
+            unsafe p[i] = unsafe p[j];
+            unsafe p[j] = t;
+            i = i + 1;
+            j = j - 1;
+        }
+        out.advance_len(n);
     }
 
     /// Parse decimal digits. `None` on an empty string, a non-digit, or a value too wide to represent.
@@ -1268,27 +1275,7 @@ extend<const BITS: usize> UInt<BITS> {
             panic("radix must be between 2 and 36");
         }
         let mut out = String::new();
-        if self.is_zero() {
-            out.push_byte(b'0');
-            return out;
-        }
-        let mut digits = String::new();
-        let mut cur = self.bits;
-        while !cur.is_zero() {
-            let mut q = IntBits::<BITS>::zero();
-            let d = cur.divmod_small(radix, &mut q);
-            if d < 10 {
-                digits.push_byte(b'0' + d as u8);
-            } else {
-                digits.push_byte(b'a' + (d - 10) as u8);
-            }
-            cur = q;
-        }
-        let mut i = digits.len();
-        while i > 0 {
-            i = i - 1;
-            out.push_byte(digits.as_str().byte_at(i));
-        }
+        self.push_digits(&mut out, radix);
         return out;
     }
 
@@ -1800,21 +1787,30 @@ extend<const BITS: usize> Int<BITS> {
         return Option::<Int<BITS>>::Some(self.wrapping_neg());
     }
 
-    /// Checked by dividing back out: the product is representable exactly when recovering one operand
-    /// from it succeeds.
+    /// Checked through the magnitudes: their unsigned product must not overflow, and the signed result
+    /// must carry the expected sign (a positive product below 2^(BITS-1), a negative one at most that).
     pub fn checked_mul(self: &Int<BITS>, other: &Int<BITS>) Option<Int<BITS>> {
         if self.is_zero() || other.is_zero() {
             return Option::<Int<BITS>>::Some(Int::<BITS>::zero());
         }
-        let mn = Int::<BITS>::min();
-        let neg1 = Int::<BITS>::from_i64(-1);
-        if self.eq(&mn) && other.eq(&neg1) || other.eq(&mn) && self.eq(&neg1) {
-            return Option::<Int<BITS>>::None;
+        let neg = self.is_negative() != other.is_negative();
+        // Two's-complement magnitudes: MIN's is 2^(BITS-1), which the unsigned reading holds exactly.
+        let ma = if self.is_negative() {
+            self.wrapping_neg();
+        } else {
+            *self;
+        };
+        let mb = if other.is_negative() {
+            other.wrapping_neg();
+        } else {
+            *other;
+        };
+        let mut over = false;
+        let mut r = Int::<BITS> { bits: ma.bits.mul_wrap(&mb.bits, &mut over) };
+        if neg {
+            r = r.wrapping_neg();
         }
-        let r = self.wrapping_mul(other);
-        let mut rem = Int::<BITS>::zero();
-        let back = r.divmod(other, &mut rem);
-        if !back.eq(self) || !rem.is_zero() {
+        if over || r.is_negative() != neg {
             return Option::<Int<BITS>>::None;
         }
         return Option::<Int<BITS>>::Some(r);
@@ -2070,16 +2066,7 @@ extend<const BITS: usize> Int<BITS> {
 
     /// The decimal spelling with a leading `-` when negative.
     pub fn to_string(self: &Int<BITS>) String {
-        if !self.is_negative() {
-            return self.to_unsigned().to_string();
-        }
-        // The magnitude through the unsigned view: negating MIN wraps back to MIN, whose unsigned
-        // reading is exactly the magnitude wanted, so this needs no case of its own.
-        let mag = self.wrapping_neg().to_unsigned();
-        let mut out = String::from_str("-");
-        let digits = mag.to_string();
-        out.push_str(digits.as_str());
-        return out;
+        return self.to_string_radix(10);
     }
 
     /// Parse an optionally signed decimal. `None` on anything else, or on a value out of range.
@@ -2121,10 +2108,13 @@ extend<const BITS: usize> Int<BITS> {
         if !self.is_negative() {
             return self.to_unsigned().to_string_radix(radix);
         }
-        let mag = self.wrapping_neg().to_unsigned();
+        if radix < 2 || radix > 36 {
+            panic("radix must be between 2 and 36");
+        }
+        // The magnitude through the unsigned view: negating MIN wraps back to MIN, whose unsigned
+        // reading is exactly the magnitude wanted, so this needs no case of its own.
         let mut out = String::from_str("-");
-        let digits = mag.to_string_radix(radix);
-        out.push_str(digits.as_str());
+        self.wrapping_neg().to_unsigned().push_digits(&mut out, radix);
         return out;
     }
 

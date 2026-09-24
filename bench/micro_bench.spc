@@ -29,7 +29,6 @@ import std::parallel::blocking as blocking;
 import std::parallel::selector as selector;
 import std::parallel::thread as thread;
 import std::testing::bench as bench;
-import std::testing::bench_sys as sys;
 
 const SPAWNS: i64 = 2000; // tasks per round for the spawn lanes
 const LATENCY_SPAWNS: i64 = 500; // one-at-a-time spawns per round for the latency lane
@@ -121,11 +120,11 @@ pub fn spawn_latency(b: &mut bench::Bencher) {
             let w = wg.clone();
             let t0 = platform::now_ns();
             launch || {
-                atomic::store_u64(&mut unsafe G_FIRST_RUN, platform::now_ns(), 2);
+                unsafe atomic::store_u64(&mut unsafe G_FIRST_RUN, platform::now_ns(), 2);
                 w.done();
             };
             wg.wait();
-            let t1 = atomic::load_u64(&mut unsafe G_FIRST_RUN, 1);
+            let t1 = unsafe atomic::load_u64(&mut unsafe G_FIRST_RUN, 1);
             lat.push((t1 - t0) as f64);
         }
         b.tally(LATENCY_SPAWNS, LATENCY_SPAWNS);
@@ -833,7 +832,6 @@ pub fn park_collisions(b: &mut bench::Bencher) {
     let base = words.as_ptr() as usize;
     let acks = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
     let unrelated = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
-    let rss0 = unsafe sys::sc_bs_rss_now();
     let mut handles = Vector::<thread::JoinHandle<i64>>::with_capacity(PARK_THREADS as usize);
     for t in 0..PARK_THREADS as usize {
         let addr = base + t * stride * sizeof(i32);
@@ -846,14 +844,14 @@ pub fn park_collisions(b: &mut bench::Bencher) {
                     let mut stray: i64 = 0;
                     let mut served: i64 = 0;
                     loop {
-                        while atomic::load_i32(w, 1) == 0 {
+                        while unsafe atomic::load_i32(w, 1) == 0 {
                             unsafe sc_runtime::sc_rt_park(w, 0, -1);
-                            if atomic::load_i32(w, 1) == 0 {
+                            if unsafe atomic::load_i32(w, 1) == 0 {
                                 stray = stray + 1;
                             }
                         }
-                        let v = atomic::load_i32(w, 1);
-                        atomic::store_i32(w, 0, 2);
+                        let v = unsafe atomic::load_i32(w, 1);
+                        unsafe atomic::store_i32(w, 0, 2);
                         if v == 2 {
                             break;
                         }
@@ -866,16 +864,12 @@ pub fn park_collisions(b: &mut bench::Bencher) {
             ),
         );
     }
-    // Every thread is parked by now (the first round's first unpark waits for an acknowledgement, so the
-    // reading below happens with the whole set asleep on their words).
-    rt::sleep_ns(50000000);
-    let rss1 = unsafe sys::sc_bs_rss_now();
     let mut expected: i64 = 0;
     while b.running() {
         for _r in 0..PARK_ROUNDS {
             for t in 0..PARK_THREADS as usize {
                 let w = (base + t * stride * sizeof(i32)) as *mut i32;
-                atomic::store_i32(w, 1, 2);
+                unsafe atomic::store_i32(w, 1, 2);
                 unsafe sc_runtime::sc_rt_unpark_one(w);
                 expected = expected + 1;
                 // Each unpark is acknowledged before the next: the figure is one wake's round trip.
@@ -889,7 +883,7 @@ pub fn park_collisions(b: &mut bench::Bencher) {
     let mut served: i64 = 0;
     for t in 0..PARK_THREADS as usize {
         let w = (base + t * stride * sizeof(i32)) as *mut i32;
-        atomic::store_i32(w, 2, 2);
+        unsafe atomic::store_i32(w, 2, 2);
         unsafe sc_runtime::sc_rt_unpark_one(w);
     }
     loop {
@@ -911,22 +905,6 @@ pub fn park_collisions(b: &mut bench::Bencher) {
     note.push_i64(PARK_THREADS);
     note.push_str(" threads parked at once)");
     b.note(note.as_str());
-    // What the lot RETAINS for those threads, which the wake count alone does not say: a targeted wake
-    // may be paid for in records that never come back. Wait records live in the parking frames and are
-    // not retained; what is kept is one parker per thread that has ever parked, plus the bucket table.
-    let per = unsafe sc_runtime::sc_rt_park_bytes_per_thread();
-    let mut held = String::from_str("parking retains ");
-    held.push_u64(per as u64);
-    held.push_str(" B per parked thread (");
-    held.push_f64_prec((per * PARK_THREADS as usize) as f64 / 1024.0, 1);
-    held.push_str(" KiB for ");
-    held.push_i64(PARK_THREADS);
-    held.push_str("), ");
-    held.push_f64_prec((unsafe sc_runtime::sc_rt_park_bytes_fixed()) as f64 / 1024.0, 1);
-    held.push_str(" KiB fixed; resident while parked ");
-    held.push_f64_prec((rss1 - rss0) as f64 / 1024.0, 1);
-    held.push_str(" KiB (thread stacks included)");
-    b.note_more(held.as_str());
 }
 
 // --- fan-in -----------------------------------------------------------------------------------------.

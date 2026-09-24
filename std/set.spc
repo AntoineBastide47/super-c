@@ -1,16 +1,20 @@
-// Set<T, A = Global>: an owning hash set, implemented as a keys-only wrapper over Map<T, bool, A>.
+// Set<T, A = Global>: an owning hash set, implemented as a keys-only wrapper over Map<T, Present, A>. The
+// zero-sized value type gives the map no value array.
 // Elements must be `Hash + Eq`. The set owns its elements; `contains` borrows a lookup key, `insert`
 // takes ownership of a value, and `remove` frees the stored element through Map's key-removal path.
 
-/// A hash set of T (a Map<T, bool> underneath) through allocator A.
+/// A hash set of T (a Map<T, Present> underneath) through allocator A.
 pub struct Set<T, A = Global> {
-    m: Map<T, bool, A>,
+    m: Map<T, Present, A>,
 }
+
+// The zero-sized value every member maps to.
+struct Present {}
 
 extend<T: Hash + Eq, A: Allocator> Set<T, A> {
     /// Empty set backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A) Set<T, A> {
-        return Set::<T, A> { m: Map::<T, bool, A>::new_in(alloc) };
+        return Set::<T, A> { m: Map::<T, Present, A>::new_in(alloc) };
     }
 
     /// Number of elements.
@@ -25,7 +29,7 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> {
 
     /// Insert `value`. A duplicate (per Eq) is freed by Map::insert, and the stored element is kept.
     pub const fn insert(self: &mut Set<T, A>, value: T) {
-        self.m.insert(value, true);
+        self.m.insert(value, Present {});
     }
 
     /// True when `value` is a member.
@@ -60,7 +64,7 @@ extend<T: Hash + Eq, A: Allocator> Set<T, A> as Free {
     }
 }
 
-extend<T: Hash + Eq + Default, A: Allocator + Default> Set<T, A> as Default {
+extend<T: Hash + Eq, A: Allocator + Default> Set<T, A> as Default {
     pub const fn default() Set<T, A> {
         return Set::<T, A>::new();
     }

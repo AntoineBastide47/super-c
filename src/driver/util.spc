@@ -8,11 +8,7 @@ import ast::ast as *;
 import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
-import module::loader as loader;
-import resolver::resolver as resolver;
-import typechecker::typechecker as tc;
 import driver::rt_c as rtc;
-import utils::errors as diag;
 
 /// A 4096-byte path scratch buffer; `PathBuf {}` partial init zero-fills the array.
 pub type PathBuf = Array<char, 4096>;
@@ -55,12 +51,8 @@ pub fn format_source(src: &String, path: str, width: i32, out: &mut String) bool
     let ast = ps.take_ast();
     let emitted = fbld::format_program(&ast, src.as_str(), width, out);
     if emitted != ncomments {
-        eprintln(
-            "fmt: internal error: {} of {} comments would be dropped in '{}'; refusing",
-            ncomments - emitted,
-            ncomments,
-            path,
-        );
+        // Either direction is a formatter defect: a dropped comment or a comment printed twice.
+        eprintln("fmt: internal error: '{}' has {} comments but would print {}; refusing", path, ncomments, emitted);
         return false;
     }
     return true;
@@ -164,6 +156,14 @@ pub fn open_out(path: str) *mut stdio::FILE {
 /// program does not produce (a removed module/instance/@test-runner/@c.source wrapper); a stale TU would
 /// otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
 pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
+    let mut ks = Set::<str>::new();
+    for i in 0..keep.len() {
+        ks.insert(keep[i].as_str());
+    }
+    prune_dir(dir, &ks);
+}
+
+fn prune_dir(dir: *const char, keep: &Set<str>) {
     let d = unsafe shim::sc_opendir(dir);
     if d == null {
         return;
@@ -188,7 +188,7 @@ pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
         }
         let path = (&pb[0]) as *const char;
         if unsafe shim::sc_stat_isdir(path) != 0 {
-            prune_orphans(path, keep);
+            prune_dir(path, keep);
             let _ = unsafe shim::sc_rmdir(path);
             continue;
         }
@@ -196,15 +196,8 @@ pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
         if !(l >= 2 && unsafe name[l - 2] == '.' as char && (unsafe name[l - 1] == 'c' as char || unsafe name[l - 1] == 'h' as char)) {
             continue;
         }
-        let mut kept = false;
-        let mut i: usize = 0;
-        while i < keep.len() && !kept {
-            if keep[i].as_str() == str::from_cstr(path) {
-                kept = true;
-            }
-            i = i + 1;
-        }
-        if !kept {
+        let ps = str::from_cstr(path);
+        if !keep.contains(&ps) {
             let _ = unsafe shim::sc_unlink(path);
         }
     }
@@ -213,21 +206,32 @@ pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
 
 /// The runtime header shared by every generated module (the C standard library includes plus the
 /// leak-tracker interposition), and the tracker's implementation TU the engine compiles alongside.
-pub fn write_super_rt(gen_dir: str) {
-    let path = build_out_path(gen_dir, "super_rt", ".h");
+/// False, after a message, when either file cannot be written in full.
+pub fn write_super_rt(gen_dir: str) bool {
+    let mut path = build_out_path(gen_dir, "super_rt", ".h");
     let f = open_out(path.as_str());
-    if f != null {
-        unsafe stdio::fputs("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n".ptr() as *const char, f);
-        unsafe stdio::fputs(rtc::super_rt_includes(), f);
-        unsafe stdio::fputs("#endif\n".ptr() as *const char, f);
-        unsafe stdio::fclose(f);
+    let mut ok = f != null;
+    if ok {
+        ok = unsafe stdio::fputs("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n".ptr() as *const char, f) >= 0;
+        ok = unsafe stdio::fputs(rtc::super_rt_includes(), f) >= 0 && ok;
+        ok = unsafe stdio::fputs("#endif\n".ptr() as *const char, f) >= 0 && ok;
+        ok = unsafe stdio::fclose(f) == 0 && ok;
     }
-    let cpath = build_out_path(gen_dir, "super_rt", ".c");
+    if !ok {
+        unsafe stdio::perror(path.cstr());
+        return false;
+    }
+    let mut cpath = build_out_path(gen_dir, "super_rt", ".c");
     let cf = open_out(cpath.as_str());
-    if cf != null {
-        unsafe stdio::fputs(rtc::super_rt_source(), cf);
-        unsafe stdio::fclose(cf);
+    ok = cf != null;
+    if ok {
+        ok = unsafe stdio::fputs(rtc::super_rt_source(), cf) >= 0;
+        ok = unsafe stdio::fclose(cf) == 0 && ok;
     }
+    if !ok {
+        unsafe stdio::perror(cpath.cstr());
+    }
+    return ok;
 }
 
 // Cross toolchains
@@ -300,7 +304,8 @@ const fn ndk_host_tag() str<'static> {
 }
 
 /// Flags every translation unit needs for a cross target: the triple, and for wasm the wasi sysroot's
-/// own defaults. Nothing here overrides the manifest: these come first, manifest flags after.
+/// own defaults. Nothing here overrides the manifest: these come first, manifest flags after. Callers
+/// split the result on whitespace (`split_args`), so no quoting: a sysroot path must hold no space.
 pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
     if sdk == 1 {
         // The triple carries the deployment floor: without a version clang assumes an iOS old enough to
@@ -330,17 +335,16 @@ pub fn push_sdk_flags(cmd: &mut String, sdk: i32, arch: i32) {
         let sdkp = stdlib::getenv("WASI_SDK_PATH");
         if sdkp != null && unsafe *sdkp != 0 as char {
             cmd.push_str(" -D_WASI_EMULATED_SIGNAL");
-            cmd.push_str(" -target wasm32-wasi --sysroot \"");
+            cmd.push_str(" -target wasm32-wasi --sysroot=");
             cmd.push_str(str::from_cstr(sdkp));
-            cmd.push_str("/share/wasi-sysroot\"");
+            cmd.push_str("/share/wasi-sysroot");
             return;
         }
         let sr = stdlib::getenv("WASI_SYSROOT");
         if sr != null && unsafe *sr != 0 as char {
             cmd.push_str(" -D_WASI_EMULATED_SIGNAL");
-            cmd.push_str(" -target wasm32-wasi --sysroot \"");
+            cmd.push_str(" -target wasm32-wasi --sysroot=");
             cmd.push_str(str::from_cstr(sr));
-            cmd.push_str("\"");
             return;
         }
         cmd.push_str(" -target wasm32 -nostdlib");

@@ -325,11 +325,11 @@ fn interface_bounds() {
     );
     h::expect_ok(
         "where clause + multi-bound satisfied",
-        "interface A { fn a(self: *mut Self) i32; }\ninterface B { fn b(self: *mut Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { fn a(self: *mut Self) i32 { return unsafe self.v; } }\nextend S as B { fn b(self: *mut Self) i32 { return unsafe self.v; } }\nfn both<T>(x: &mut T) i32 where T: A + B { return x.a() + x.b(); }\nfn main() i32 { let mut s = S { v: 1 }; return both(&mut s); }\n",
+        "interface A { fn a(self: *mut Self) i32; }\ninterface B { fn b(self: *mut Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { fn a(self: *mut Self) i32 { return unsafe (*self).v; } }\nextend S as B { fn b(self: *mut Self) i32 { return unsafe (*self).v; } }\nfn both<T>(x: &mut T) i32 where T: A + B { return x.a() + x.b(); }\nfn main() i32 { let mut s = S { v: 1 }; return both(&mut s); }\n",
     );
     h::expect_ok(
         "conditional extension satisfied",
-        "interface Free { fn free(self: *mut Self) i32; }\nstruct Res { pub id: i32 }\nextend Res as Free { fn free(self: *mut Self) i32 { return unsafe self.id; } }\nstruct Box<T> { pub inner: T }\nextend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\nfn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\nfn main() i32 { let mut b = Box::<Res> { inner: Res { id: 1 } }; return dispose(&mut b); }\n",
+        "interface Free { fn free(self: *mut Self) i32; }\nstruct Res { pub id: i32 }\nextend Res as Free { fn free(self: *mut Self) i32 { return unsafe (*self).id; } }\nstruct Box<T> { pub inner: T }\nextend<T: Free> Box<T> as Free { fn free(self: &mut Box<T>) i32 { return self.inner.free(); } }\nfn dispose<U: Free>(x: &mut U) i32 { return x.free(); }\nfn main() i32 { let mut b = Box::<Res> { inner: Res { id: 1 } }; return dispose(&mut b); }\n",
     );
     h::expect_err_msg(
         "bound not satisfied (turbofish)",
@@ -338,7 +338,7 @@ fn interface_bounds() {
     );
     h::expect_err_msg(
         "extend missing a required method",
-        "interface Writer { fn write(self: *mut Self) i32; fn flush(self: *mut Self) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self) i32 { return unsafe self.count; } }\nfn main() i32 { return 0; }\n",
+        "interface Writer { fn write(self: *mut Self) i32; fn flush(self: *mut Self) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self) i32 { return unsafe (*self).count; } }\nfn main() i32 { return 0; }\n",
         "missing method 'flush'",
     );
     // Selfhost worded: "does not satisfy a where-clause bound".
@@ -354,7 +354,7 @@ fn interface_bounds() {
     );
     h::expect_err_msg(
         "method not declared by any bound",
-        "interface Writer { fn write(self: *mut Self) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self) i32 { return unsafe self.count; } }\nfn f<T: Writer>(w: &mut T) i32 { return w.nope(); }\nfn main() i32 { let mut x = File { count: 0 }; return f(&mut x); }\n",
+        "interface Writer { fn write(self: *mut Self) i32; }\nstruct File { pub count: i32 }\nextend File as Writer { fn write(self: *mut Self) i32 { return unsafe (*self).count; } }\nfn f<T: Writer>(w: &mut T) i32 { return w.nope(); }\nfn main() i32 { let mut x = File { count: 0 }; return f(&mut x); }\n",
         "no field or method 'nope'",
     );
     h::expect_err_msg(
@@ -821,6 +821,17 @@ fn switch_exhaustiveness() {
     h::expect_ok("binding arm is a catch-all", "fn f(n: i32) i32 { return switch n { 0..10 => 1, x => x }; }\n");
 }
 
+// A switch whose pattern matrix exceeds the analysis budget cannot be proven exhaustive: it is
+// rejected unless a catch-all arm covers the rest.
+@test
+fn switch_over_budget_needs_a_catch_all() {
+    h::expect_err_msg(
+        "over-budget switch",
+        "struct S { pub f0: bool, pub f1: bool, pub f2: bool, pub f3: bool, pub f4: bool, pub f5: bool, pub f6: bool, pub f7: bool, pub f8: bool, pub f9: bool, pub f10: bool, pub f11: bool, pub f12: bool, pub f13: bool, pub f14: bool, pub f15: bool, pub f16: bool, pub f17: bool, pub f18: bool, pub f19: bool, }\nfn g(s: S) i32 { return switch s { S { f0: true } => 0, S { f1: true } => 1, S { f2: true } => 2, S { f3: true } => 3, S { f4: true } => 4, S { f5: true } => 5, S { f6: true } => 6, S { f7: true } => 7, S { f8: true } => 8, S { f9: true } => 9, S { f10: true } => 10, S { f11: true } => 11, S { f12: true } => 12, S { f13: true } => 13, S { f14: true } => 14, S { f15: true } => 15, S { f16: true } => 16, S { f17: true } => 17, S { f18: true } => 18, S { f19: true } => 19, S { f0: false, f1: false } => 0, S { f1: false, f2: false } => 0, S { f2: false, f3: false } => 0, S { f3: false, f4: false } => 0, S { f4: false, f5: false } => 0, S { f5: false, f6: false } => 0, S { f6: false, f7: false } => 0, S { f7: false, f8: false } => 0, S { f8: false, f9: false } => 0, S { f9: false, f10: false } => 0, S { f10: false, f11: false } => 0, S { f11: false, f12: false } => 0, S { f12: false, f13: false } => 0, S { f13: false, f14: false } => 0, S { f14: false, f15: false } => 0, S { f15: false, f16: false } => 0, S { f16: false, f17: false } => 0, S { f17: false, f18: false } => 0, S { f18: false, f19: false } => 0, }; }\n",
+        "switch exhaustiveness cannot be checked",
+    );
+}
+
 @test
 fn never_type() {
     h::expect_ok(
@@ -920,9 +931,9 @@ fn unsafe_enforcement() {
         "raw pointer arithmetic requires an 'unsafe' block",
     );
     h::expect_err_msg(
-        "field through raw pointer needs unsafe",
+        "field through raw pointer is not auto-dereferenced",
         "struct S { pub v: i32 }\nfn f(p: *mut S) i32 { return p.v; }\n",
-        "accessing a field through a raw pointer requires an 'unsafe' block",
+        "no auto-dereference through a raw pointer: write '(*p).v' inside 'unsafe'",
     );
     h::expect_ok(
         "unsafe block covers the operation",
@@ -938,7 +949,7 @@ fn unsafe_enforcement() {
     );
     h::expect_ok(
         "unsafe assignment through wrapper is a place",
-        "struct S { pub v: i32 }\nfn f(p: *mut S) { unsafe p.v = 3; }\n",
+        "struct S { pub v: i32 }\nfn f(p: *mut S) { unsafe (*p).v = 3; }\n",
     );
     h::expect_ok("reference operations stay safe", "fn f(r: &mut i32) i32 { *r = 2; return *r; }\n");
     h::expect_ok("pointer comparison stays safe", "fn f(a: *i32, b: *i32) bool { return a == b; }\n");
@@ -1482,6 +1493,11 @@ fn dyn_t() {
         "mismatched types",
     );
     h::expect_err_msg(
+        "a superinterface hierarchy past the vtable limit is not dyn-compatible",
+        "interface I0 { fn m0(self: &Self) i32; }\ninterface I1 { fn m1(self: &Self) i32; }\ninterface I2 { fn m2(self: &Self) i32; }\ninterface I3 { fn m3(self: &Self) i32; }\ninterface I4 { fn m4(self: &Self) i32; }\ninterface I5 { fn m5(self: &Self) i32; }\ninterface I6 { fn m6(self: &Self) i32; }\ninterface I7 { fn m7(self: &Self) i32; }\ninterface I8: I0 + I1 + I2 + I3 + I4 + I5 + I6 + I7 { fn m8(self: &Self) i32; }\nfn use8(x: &dyn I8) i32 { return x.m8(); }\n",
+        "more than 8 interfaces",
+    );
+    h::expect_err_msg(
         "method name collision across the hierarchy is not dyn-compatible",
         "interface A { fn go(self: &Self) i32; }\ninterface B: A { fn go(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn go(self: &S) i32 { return 1; } }\nfn main() i32 { let s = S { v: 2 }; let b: &dyn B = &s; return b.go(); }\n",
         "share a name",
@@ -1617,6 +1633,16 @@ fn array_literal_arity() {
         "struct field literal excess",
         "struct T { pub a: [u32; 2], }\nfn main() i32 { let t: T = T { a: [1u32, 2u32, 3u32] }; return t.a[0] as i32; }\n",
         "array literal has 3 elements but the expected type has length 2",
+    );
+    h::expect_err_msg(
+        "repeat count past the maximum array length",
+        "fn main() i32 { let a = [0u8; 4294967296]; return 0; }\n",
+        "exceeds the maximum array length",
+    );
+    h::expect_err_msg(
+        "designated extent past the maximum array length",
+        "fn main() i32 { let a = [[4294967296] = 1u8]; return 0; }\n",
+        "array literal extent exceeds the maximum array length",
     );
 }
 
@@ -1905,6 +1931,20 @@ fn safety_holes_closed() {
 // DROPPED (needs AST/codegen inspection): computed_scalar_types, computed_pointer_types,
 // computed_reference_type, literal_types, inferred_let_types, str_member_types.
 
+// A method named without a call has no value form: comparing `a.m != b.m` must not compile.
+@test
+fn method_name_is_not_a_value() {
+    h::expect_err_msg(
+        "a method compared without a call is rejected",
+        "struct F { pub v: i32 }\nextend F {\n    fn on(self: &F) bool {\n        return self.v > 0;\n    }\n}\nfn main() i32 {\n    let a = F { v: 1 };\n    let b = F { v: 0 };\n    if a.on != b.on {\n        return 1;\n    }\n    return 0;\n}\n",
+        "'on' is a method, not a value: call it with '()'",
+    );
+    h::expect_ok(
+        "a path to a method stays a function value",
+        "struct F { pub v: i32 }\nextend F {\n    fn on(self: &F) bool {\n        return self.v > 0;\n    }\n}\nfn main() i32 {\n    let f = F::on;\n    let a = F { v: 1 };\n    if f(&a) {\n        return 0;\n    }\n    return 1;\n}\n",
+    );
+}
+
 // Region-aware return (lifetimes Release B). `addr_escape` only sees a reference taken DIRECTLY of a
 // local (`return &x`); these escape indirectly: through a local's owned heap cell, or buried in an
 // aggregate, and were ASan-confirmed dangling reads before this check existed.
@@ -1932,6 +1972,18 @@ fn return_region_escapes() {
     h::expect_ok(
         "returning a borrow of a parameter stays legal",
         "fn pass(x: &i32) &i32 {\n    return x;\n}\nstruct W { pub v: i32 }\nfn field(w: &W) &i32 {\n    return &w.v;\n}\nfn main() i32 {\n    let a = 7;\n    let w = W { v: 1 };\n    return *pass(&a) + *field(&w) - 8;\n}\n",
+    );
+    // A pattern that destructures a reference payload binds by reference (a Copy payload too) and
+    // borrows from the reference's origin: `self` here, a local there.
+    h::expect_exit(
+        "returning a binding under Option<&T> borrows from self",
+        "enum J { S(String), Num(f64) }\nstruct H { pub j: J }\nextend H {\n    fn get(self: &H) Option<&J> {\n        return Option::<&J>::Some(&self.j);\n    }\n    fn name(self: &H) str {\n        if let Some(S(s)) = self.get() {\n            return s.as_str();\n        }\n        return \"none\";\n    }\n    fn num(self: &H) f64 {\n        if let Some(Num(n)) = self.get() {\n            return *n;\n        }\n        return 0.0;\n    }\n}\nfn main() i32 {\n    let h = H { j: J::S(String::from_str(\"abc\")) };\n    let g = H { j: J::Num(2.0) };\n    if h.name().len() != 3 || g.num() != 2.0 || g.name().len() != 4 {\n        return 1;\n    }\n    return 0;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "returning a binding under Option<&T> to a local is rejected",
+        "enum J { S(String), Num(f64) }\nfn bad(p: &J) str {\n    let _ = p;\n    let j = J::S(String::from_str(\"x\"));\n    let o = Option::<&J>::Some(&j);\n    if let Some(S(s)) = o {\n        return s.as_str();\n    }\n    return \"\";\n}\nfn main() i32 { let q = J::Num(1.0); return bad(&q).len() as i32; }\n",
+        "returning a value borrowing from a local",
     );
     // An OWNED value computed from a local borrow is fine: nothing borrowed leaves.
     h::expect_ok(
@@ -2148,7 +2200,7 @@ fn generic_with_lifetime_and_type_param() {
     // And it still monomorphizes ignoring the lifetime (erased): one symbol per (type args).
     h::expect_c(
         "a <'a, T> generic mangles only the type arg",
-        "struct P<'a, T> { pub v: T }\nextend<'a, T> P<'a, T> { pub fn g(self: &P<'a, T>) T { return self.v; } }\nfn main() i32 { let a = P::<i32> { v: 1 }; let b = P::<i32> { v: 2 }; return a.g() + b.g() - 3; }\n",
+        "struct P<'a, T> { pub v: T }\nextend<'a, T: Copy> P<'a, T> { pub fn g(self: &P<'a, T>) T { return self.v; } }\nfn main() i32 { let a = P::<i32> { v: 1 }; let b = P::<i32> { v: 2 }; return a.g() + b.g() - 3; }\n",
         "P__i32",
     );
 }
@@ -2664,6 +2716,73 @@ fn loop_borrow_precision() {
     );
 }
 
+// An unbounded type parameter OWNS (Rust's default): a generic body may use a `T` value once, and only a
+// `Copy` bound, inline, in a `where` clause or through a bound's superinterface, lets it copy. `Copy` is
+// derived from the type's shape; a written conformance must agree with the derivation.
+@test
+fn copy_marker() {
+    h::expect_err_msg(
+        "copying an unbounded T twice is a use of a moved value",
+        "fn twice<T>(x: T) T { let a = x; let b = x; return a; }\nfn main() i32 { return twice(3) - 3; }\n",
+        "use of moved value",
+    );
+    h::expect_err_msg(
+        "an unbounded T is not copied out of a reference",
+        "fn get<T>(r: &T) T { return *r; }\nfn main() i32 { let x = 3; return get(&x) - 3; }\n",
+        "cannot move a value of a type parameter out of a dereference",
+    );
+    h::expect_err_msg(
+        "an owning type cannot declare Copy",
+        "extend String as Copy {}\nfn main() i32 { return 0; }\n",
+        "'Copy' cannot be declared for 'String<Global>': it owns memory",
+    );
+    h::expect_err_msg(
+        "an aggregate with a non-Copy member cannot declare Copy",
+        "struct R<'a> { pub r: &'a mut i32 }\nextend<'a> R<'a> as Copy {}\nfn main() i32 { return 0; }\n",
+        "a member is not 'Copy'",
+    );
+    h::expect_err_msg(
+        "a T: Copy generic rejects an owning argument",
+        "fn dup<T: Copy>(x: T) T { return x; }\nfn main() i32 { let s = dup(String::from_str(\"x\")); return 0; }\n",
+        "does not satisfy bound 'Copy'",
+    );
+    h::expect_err_msg(
+        "&mut T is not Copy",
+        "fn dup<T: Copy>(x: T) {}\nfn main() i32 { let mut v = 1; dup(&mut v); return 0; }\n",
+        "does not satisfy bound 'Copy'",
+    );
+    h::expect_err_msg(
+        "a T: Copy generic rejects an unbounded parameter",
+        "fn dup<T: Copy>(x: T) T { return x; }\nfn pass<U>(x: U) U { return dup(x); }\nfn main() i32 { return pass(1) - 1; }\n",
+        "does not satisfy bound 'Copy'",
+    );
+    h::expect_ok(
+        "a T: Copy body copies freely, and a plain struct of scalars derives Copy",
+        "struct P { pub x: i32, pub y: f64 }\nfn twice<T: Copy>(x: T) T { let a = x; let b = x; return b; }\nfn main() i32 { let p = twice(P { x: 1, y: 2.0 }); return twice(3) - 3 + p.x - 1; }\n",
+    );
+    h::expect_ok(
+        "a written Copy that restates the derivation is accepted; shared references are Copy",
+        "struct Q { pub x: i32, pub r: *const i32 }\nextend Q as Copy {}\nfn dup<T: Copy>(x: T) T { let a = x; return x; }\nfn main() i32 { let v = 2; let q = dup(Q { x: 1, r: &v }); return *dup(&v) - q.x - 1; }\n",
+    );
+    h::expect_ok(
+        "a bound whose superinterface is Copy makes T copyable",
+        "interface Handle: Copy {}\nstruct H { pub id: i32 }\nextend H as Handle {}\nfn two<T: Handle>(h: T) T { let a = h; let b = h; return a; }\nfn main() i32 { return two(H { id: 4 }).id - 4; }\n",
+    );
+    h::expect_ok(
+        "a where-clause Copy bound makes T copyable",
+        "fn twice<T>(x: T) T where T: Copy { let a = x; return x; }\nfn main() i32 { return twice(3) - 3; }\n",
+    );
+    h::expect_ok(
+        "a method's where-clause Copy bound on its extend's T makes T copyable there, closures included",
+        "struct P<T> { pub a: T, pub b: T }\nextend<T> P<T> {\n    fn keep(self: &mut Self, v: T) { self.a = v; }\n    fn pad(self: &mut Self, v: T) where T: Copy { let f = || { let c = v; }; f(); self.a = v; self.b = v; }\n}\nfn main() i32 { let mut p = P::<i32> { a: 0, b: 0 }; p.pad(3); return p.a + p.b - 6; }\n",
+    );
+    h::expect_err_msg(
+        "a where-clause Copy bound on the extend's T holds only in its own method",
+        "struct P<T> { pub a: T, pub b: T }\nextend<T> P<T> {\n    fn pad(self: &mut Self, v: T) where T: Copy { self.a = v; self.b = v; }\n    fn two(self: &mut Self, v: T) { self.a = v; self.b = v; }\n}\nfn main() i32 { return 0; }\n",
+        "use of moved value",
+    );
+}
+
 // `&mut T` is INVARIANT in T: a callee may write either referent's contents into the other (`swap`),
 // so two `&mut T` arguments for the same callee type variable must have equal lifetimes. Passing a
 // long-lived and a short-lived reference lets the long one end up holding the short one's referent
@@ -2672,32 +2791,32 @@ fn loop_borrow_precision() {
 fn mut_ref_invariance() {
     h::expect_err_msg(
         "swapping references of different lifetimes through &mut T is rejected",
-        "fn swap2<T>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let outer = 1;\n    let mut held: &i32 = &outer;\n    {\n        let inner = 9;\n        let mut tmp: &i32 = &inner;\n        swap2(&mut held, &mut tmp);\n    }\n    return *held;\n}\n",
+        "fn swap2<T: Copy>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let outer = 1;\n    let mut held: &i32 = &outer;\n    {\n        let inner = 9;\n        let mut tmp: &i32 = &inner;\n        swap2(&mut held, &mut tmp);\n    }\n    return *held;\n}\n",
         "borrowed value does not live long enough",
     );
     h::expect_ok(
         "swapping plain values through &mut T is fine",
-        "fn swap2<T>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let mut x = 1;\n    let mut y = 2;\n    swap2(&mut x, &mut y);\n    return x - 2;\n}\n",
+        "fn swap2<T: Copy>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let mut x = 1;\n    let mut y = 2;\n    swap2(&mut x, &mut y);\n    return x - 2;\n}\n",
     );
     h::expect_ok(
         "swapping references of the same lifetime is fine",
-        "fn swap2<T>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let p = 1;\n    let q = 2;\n    let mut m: &i32 = &p;\n    let mut n: &i32 = &q;\n    swap2(&mut m, &mut n);\n    return *m - 2;\n}\n",
+        "fn swap2<T: Copy>(a: &mut T, b: &mut T) { let t = *a; *a = *b; *b = t; }\nfn main() i32 {\n    let p = 1;\n    let q = 2;\n    let mut m: &i32 = &p;\n    let mut n: &i32 = &q;\n    swap2(&mut m, &mut n);\n    return *m - 2;\n}\n",
     );
     // Invariance is a property of `&mut` itself, not of the pointee being a bare type variable: the
     // regions inside `Cell<T>` must match too. This was a hole (ASan stack-use-after-scope) while the
     // check only recognised `&mut T`.
     h::expect_err_msg(
         "swapping &mut Cell<T> of different lifetimes is rejected",
-        "struct Cell<T> { pub v: T }\nfn swapcell<T>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let outer = 1;\n    let mut held = Cell::<&i32> { v: &outer };\n    {\n        let inner = 9;\n        let mut tmp = Cell::<&i32> { v: &inner };\n        swapcell(&mut held, &mut tmp);\n    }\n    return *held.v;\n}\n",
+        "struct Cell<T> { pub v: T }\nfn swapcell<T: Copy>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let outer = 1;\n    let mut held = Cell::<&i32> { v: &outer };\n    {\n        let inner = 9;\n        let mut tmp = Cell::<&i32> { v: &inner };\n        swapcell(&mut held, &mut tmp);\n    }\n    return *held.v;\n}\n",
         "borrowed value does not live long enough",
     );
     h::expect_ok(
         "swapping &mut Cell<T> of the same lifetime is fine",
-        "struct Cell<T> { pub v: T }\nfn swapcell<T>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let p = 1;\n    let q = 2;\n    let mut m = Cell::<&i32> { v: &p };\n    let mut n = Cell::<&i32> { v: &q };\n    swapcell(&mut m, &mut n);\n    return *m.v - 2;\n}\n",
+        "struct Cell<T> { pub v: T }\nfn swapcell<T: Copy>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let p = 1;\n    let q = 2;\n    let mut m = Cell::<&i32> { v: &p };\n    let mut n = Cell::<&i32> { v: &q };\n    swapcell(&mut m, &mut n);\n    return *m.v - 2;\n}\n",
     );
     h::expect_ok(
         "swapping &mut Cell<T> of plain values is unconstrained",
-        "struct Cell<T> { pub v: T }\nfn swapcell<T>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let mut m = Cell::<i32> { v: 1 };\n    let mut n = Cell::<i32> { v: 2 };\n    swapcell(&mut m, &mut n);\n    return m.v - 2;\n}\n",
+        "struct Cell<T> { pub v: T }\nfn swapcell<T: Copy>(a: &mut Cell<T>, b: &mut Cell<T>) { let t = a.v; a.v = b.v; b.v = t; }\nfn main() i32 {\n    let mut m = Cell::<i32> { v: 1 };\n    let mut n = Cell::<i32> { v: 2 };\n    swapcell(&mut m, &mut n);\n    return m.v - 2;\n}\n",
     );
 }
 
@@ -2783,6 +2902,41 @@ fn zero_length_arrays() {
         "fn main() i32 {\n    let e: [i32; 0 - 1] = [];\n    return 0;\n}\n",
         "array length",
     );
+    // A zero-length array member is zero-sized in the layout model and in C (`T x[0]`), whatever
+    // spells the zero: a literal, a const argument, or an Array instance. The emitted layout
+    // _Static_asserts hold, a zero value of such a struct compiles, and the Array API runs at N = 0.
+    h::expect_exit(
+        "zero-length array members are zero-sized in the model and in C",
+        "struct S { pub a: [u32; 0], pub b: u8 }\nstruct W<const N: usize> { pub d: [u32; N] }\nstruct Z { pub w: W<0>, pub x: u8 }\nstatic_assert(sizeof(S) == 4);\nstatic_assert(sizeof(W<0>) == 0 && alignof(W<0>) == 4);\nstatic_assert(sizeof(Z) == 4);\nstatic_assert(sizeof(Array<u64, 0>) == 0);\nfn main() i32 {\n    let s = S { a: [], b: 1 };\n    let z = Z { w: W::<0> { d: [] }, x: 2 };\n    let mut a = Array::<u64, 0>::new();\n    a.reverse();\n    let m = a.map(|x: &u64| *x + 1);\n    let rt = sizeof(S) + sizeof(W<0>) + sizeof(Z) + sizeof(Array<u64, 0>);\n    return (rt + m.len()) as i32 - 8 + s.b as i32 + z.x as i32 - 3;\n}\n",
+        0,
+    );
+}
+
+// A `[T; N]` member records its length symbolically, so the layout model reads N from the instance:
+// a false `static_assert` over an Array instance, or over a struct holding one, is an error. A top-level
+// assert whose condition still does not fold once every module is typed is an error, not a pass.
+@test
+fn const_generic_array_layout() {
+    h::expect_err_msg(
+        "a false sizeof assert over an Array instance fails",
+        "static_assert(sizeof(Array<u64, 4>) == 7, \"no\");\nfn main() i32 { return 0; }\n",
+        "static assertion failed",
+    );
+    h::expect_err_msg(
+        "a false sizeof assert over a struct with an Array field fails",
+        "struct H { pub a: Array<u64, 4>, pub b: u8 }\nstatic_assert(sizeof(H) == 33, \"no\");\nfn main() i32 { return 0; }\n",
+        "static assertion failed",
+    );
+    h::expect_exit(
+        "true sizeof asserts over Array instances pass",
+        "struct H { pub a: Array<u64, 4>, pub b: u8 }\nstruct W<const N: usize> { pub d: [u32; N] }\nstatic_assert(sizeof(Array<u64, 4>) == 32);\nstatic_assert(sizeof(H) == 40);\nstatic_assert(sizeof(W<3>) == 12);\nfn main() i32 { return (sizeof(H) + sizeof(W<3>)) as i32 - 52; }\n",
+        0,
+    );
+    // The model does not fold an arithmetic length (`N * 2`), so this assert stays undecidable.
+    let r = h::compile_and_run(
+        "struct T<const N: usize> { pub x: u8, pub d: [u64; N * 2] }\nstatic_assert(sizeof(T<3>) == 56);\nfn main() i32 { return 0; }\n",
+    );
+    assert(!r.built, "an undecidable top-level static_assert fails the build");
 }
 
 // `tc_type_is_free` peels to the referent, so the split-init rule has to gate on the type kind first:
@@ -3156,6 +3310,22 @@ fn rejection_messages() {
         "struct A { pub b: B }\nstruct B { pub a: A }\nfn main() i32 { return 0; }\n",
         "this type embeds itself by value, so it would have infinite size",
     );
+    // A generic holding itself by value with a growing argument is infinite too.
+    h::expect_err_msg(
+        "generic embeds a growing instance of itself",
+        "struct W<T> { pub x: T, pub n: Option<W<W<T>>> }\nfn main() i32 { return 0; }\n",
+        "this type embeds itself by value, so it would have infinite size",
+    );
+    h::expect_err_msg(
+        "a type holding an infinite generic",
+        "struct D { pub e: E<i32> }\nstruct E<T> { pub y: Option<E<E<T>>> }\nfn main() i32 { return 0; }\n",
+        "nested aggregates by value",
+    );
+    // Instances of one generic nested inside each other are finite.
+    h::expect_ok(
+        "nested instances of one generic",
+        "struct Q<T> { pub p: T, pub b: [i32; 2] }\nstruct S { pub q: Q<Q<Q<i32>>> }\nfn main() i32 { return 0; }\n",
+    );
     h::expect_err_msg(
         "no such variant",
         "enum E { A, B }\nfn main() i32 { let e = E::C; return 0; }\n",
@@ -3267,5 +3437,67 @@ fn const_fn_and_reflection_rejections() {
         "type_info of an opaque type",
         "extern \"C\" { type Opaque; }\nfn main() i32 { let s = type_info::<Opaque>().size; return 0; }\n",
         "type_info cannot describe an opaque type",
+    );
+}
+
+// No auto-dereference through a raw pointer (the Rust rule): a field or a method reached through
+// `*T` needs the explicit `(*p)` inside `unsafe`; a method whose `self` IS the raw pointer applies
+// directly. The explicit form keeps the receiver a PLACE: a `&mut self` method mutates the pointee
+// itself, and nothing is copied out and dropped.
+@test
+fn raw_pointer_no_auto_deref() {
+    let decl = "struct P { pub v: i32 }\nextend P {\n    fn get(self: &P) i32 { return self.v; }\n    fn bump(self: &mut P) { self.v = self.v + 1; }\n    fn raw_get(self: *const P) i32 { return unsafe (*self).v; }\n}\n";
+    h::expect_err_msg(
+        "field through a raw pointer",
+        format("{}fn main() i32 {{ let mut p = P {{ v: 1 }}; let q = &mut p as *mut P; return unsafe q.v; }}\n", decl).as_str(),
+        "no auto-dereference through a raw pointer: write '(*q).v' inside 'unsafe'",
+    );
+    h::expect_err_msg(
+        "method through a raw pointer",
+        format(
+            "{}fn main() i32 {{ let mut p = P {{ v: 1 }}; let q = &mut p as *mut P; return unsafe q.get(); }}\n",
+            decl,
+        ).as_str(),
+        "no auto-dereference through a raw pointer: write '(*q).get(..)' inside 'unsafe'",
+    );
+    h::expect_err_msg(
+        "field assignment through a raw pointer",
+        format(
+            "{}fn main() i32 {{ let mut p = P {{ v: 1 }}; let q = &mut p as *mut P; unsafe {{ q.v = 2; }} return 0; }}\n",
+            decl,
+        ).as_str(),
+        "no auto-dereference through a raw pointer",
+    );
+    h::expect_err_msg(
+        "explicit dereference still needs unsafe",
+        format("{}fn main() i32 {{ let mut p = P {{ v: 1 }}; let q = &mut p as *mut P; return (*q).v; }}\n", decl).as_str(),
+        "requires an 'unsafe' block",
+    );
+    h::expect_exit(
+        "explicit forms inside unsafe, and a raw-pointer self",
+        format(
+            "{}fn main() i32 {{ let mut p = P {{ v: 1 }}; let q = &mut p as *mut P; unsafe {{ (*q).v = 2; }} unsafe (*q).bump(); return unsafe (*q).get() + q.raw_get() + p.v; }}\n",
+            decl,
+        ).as_str(),
+        9,
+    );
+    // An owning pointee: the call mutates the original through the place and frees nothing, so
+    // the leak tracker sees one allocation, freed once at scope end.
+    h::expect_exit(
+        "a receiver behind unsafe stays a place",
+        "fn main() i32 {\n    let mut s = String::from_str(\"a string long enough to live on the heap\");\n    let q = &mut s as *mut String;\n    (unsafe (*q)).push_str(\" and more\");\n    unsafe (*q).push_str(\"!\");\n    return (s.len() - 50) as i32;\n}\n",
+        0,
+    );
+}
+
+// `Self` in a signature names the extend that OWNS the signature, whichever item is being checked
+// when the signature is first resolved: a bounded extend calling into another extend of the same
+// generic type must not bind the callee's `Self` to its own generics.
+@test
+fn self_resolves_in_its_own_extend() {
+    h::expect_exit(
+        "bounded extend calls a sibling extend",
+        "struct P<T> { pub v: Vector<T> }\nextend<T: Copy> P<T> { fn pad(self: &mut Self, v: T) { self.push(v); self.push(v); } }\nextend<T> P<T> { fn push(self: &mut Self, v: T) { self.v.push(v); } }\nfn main() i32 { let mut p = P::<i32> { v: Vector::<i32>::new() }; p.pad(3); return p.v.len() as i32 - 2; }\n",
+        0,
     );
 }

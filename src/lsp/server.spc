@@ -45,6 +45,7 @@ pub struct Root {
     pub pkg: loader::Package,
     pub files: Vector<String>, // canonical module file paths, index-aligned with pkg.modules
     pub diags: Vector<analysis::DiagRec>, // last build's records (codeAction reads the fixes)
+    pub pos: Vector<u32>, // after budget eviction: each diag's LSP range as 4 values (start line/char, end line/char)
     pub built: bool,
     pub last_used: u64, // server tick of the last build or input touching this root (LRU eviction order)
 }
@@ -62,6 +63,7 @@ pub struct Server {
     pub folders: Vector<String>, // every canonical workspace folder (ws_root first)
     pub out_folders: Vector<String>, // canonical folder per out_skips entry
     pub out_skips: Vector<String>, // that folder's manifest out-dir name (its sweep skips it)
+    pub swept: Vector<SweptDir>, // the last directory walk of each swept folder
     pub canceled_tick: Vector<u64>, // sv.tick when each canceled id arrived (staleness purge)
     pub last_req_tick: u64, // tick of the most recently handled request
     pub shutdown_seen: bool,
@@ -83,9 +85,25 @@ pub struct Server {
     pub tick: u64, // request counter driving least-recently-used eviction order
     pub tok_uris: Vector<String>, // per-URI semantic-token state for delta requests: URI ...
     pub tok_ids: Vector<u64>, // ... the resultId of the last full response ...
-    pub tok_data: Vector<Vector<i64>>, // ... and its encoded token data
+    pub tok_data: Vector<Vector<u32>>, // ... and its encoded token data
     pub tok_next: u64, // monotonically increasing semantic-token resultId source
 }
+
+/// One .spc file a directory walk found: its path as walked (under the folder) and its canonical form.
+pub struct SweptFile {
+    pub path: String,
+    pub canon: String,
+}
+
+/// A workspace folder's .spc files from its last directory walk, sorted by `path` (`path_cmp`).
+pub struct SweptDir {
+    pub folder: String,
+    pub files: Vector<SweptFile>,
+}
+
+// Directory levels a workspace walk descends below its folder. Links are never followed, so only
+// a real directory cycle (a bind mount) could recurse further.
+const SWEEP_MAX_DEPTH: u32 = 64;
 
 fn dir_of(path: str) String {
     let mut i = path.len();
@@ -124,11 +142,9 @@ const fn path_cmp(a: &String, b: &String) i32 {
 fn respond(f: *mut stdio::FILE, id: &json::JSON, result: &json::JSON) {
     let mut body = String::with_capacity(256);
     body.push_str("{\"jsonrpc\":\"2.0\",\"id\":");
-    let ids = id.dump(false);
-    body.push_string(&ids);
+    id.dump_into(&mut body);
     body.push_str(",\"result\":");
-    let rs = result.dump(false);
-    body.push_string(&rs);
+    result.dump_into(&mut body);
     body.push_byte(b'}');
     transport::write_message(f, body.as_str());
 }
@@ -137,8 +153,7 @@ fn respond(f: *mut stdio::FILE, id: &json::JSON, result: &json::JSON) {
 fn respond_raw(f: *mut stdio::FILE, id: &json::JSON, result: str) {
     let mut body = String::with_capacity(result.len() + 40);
     body.push_str("{\"jsonrpc\":\"2.0\",\"id\":");
-    let ids = id.dump(false);
-    body.push_string(&ids);
+    id.dump_into(&mut body);
     body.push_str(",\"result\":");
     body.push_str(result);
     body.push_byte(b'}');
@@ -148,8 +163,7 @@ fn respond_raw(f: *mut stdio::FILE, id: &json::JSON, result: str) {
 fn send_error(f: *mut stdio::FILE, id: &json::JSON, code: i64, msg: str) {
     let mut body = String::with_capacity(128);
     body.push_str("{\"jsonrpc\":\"2.0\",\"id\":");
-    let ids = id.dump(false);
-    body.push_string(&ids);
+    id.dump_into(&mut body);
     body.push_str(",\"error\":{\"code\":");
     body.push_i64(code);
     body.push_str(",\"message\":");
@@ -172,8 +186,7 @@ fn notify(f: *mut stdio::FILE, method: str, params: &json::JSON) {
     body.push_str("{\"jsonrpc\":\"2.0\",\"method\":");
     json::dump_escaped(method, &mut body);
     body.push_str(",\"params\":");
-    let ps = params.dump(false);
-    body.push_string(&ps);
+    params.dump_into(&mut body);
     body.push_byte(b'}');
     transport::write_message(f, body.as_str());
 }
@@ -183,16 +196,44 @@ fn notify(f: *mut stdio::FILE, method: str, params: &json::JSON) {
 fn range_json(src: str, ls: &Vector<u32>, start: u32, len: u32) json::JSON {
     let s = text::offset_to_pos(src, ls, start);
     let e = text::offset_to_pos(src, ls, start + len);
+    return range_json_pos(s.line, s.character, e.line, e.character);
+}
+
+// An LSP range from positions already converted (line and UTF-16 character of both ends).
+fn range_json_pos(sl: u32, sc: u32, el: u32, ec: u32) json::JSON {
     let mut sp = json::JSON::object();
-    sp.emplace("line", json::JSON::integer(s.line));
-    sp.emplace("character", json::JSON::integer(s.character));
+    sp.emplace("line", json::JSON::integer(sl));
+    sp.emplace("character", json::JSON::integer(sc));
     let mut ep = json::JSON::object();
-    ep.emplace("line", json::JSON::integer(e.line));
-    ep.emplace("character", json::JSON::integer(e.character));
+    ep.emplace("line", json::JSON::integer(el));
+    ep.emplace("character", json::JSON::integer(ec));
     let mut r = json::JSON::object();
     r.emplace("start", sp);
     r.emplace("end", ep);
     return r;
+}
+
+// The line starts of one (root, module) source, recomputed only when the module changes: a
+// response that emits many ranges walks each source once, not once per range.
+struct LsMemo {
+    pub r: usize,
+    pub m: u32,
+    pub ls: Vector<u32>,
+}
+
+extend LsMemo {
+    fn new() LsMemo {
+        return LsMemo { r: lex::USIZE_MAX, m: 0xFFFFFFFF, ls: Vector::<u32>::new() };
+    }
+
+    // Make `ls` the line starts of module `m` of root `r`, whose source is `src`.
+    fn update(self: &mut Self, r: usize, m: u32, src: str) {
+        if self.r != r || self.m != m {
+            self.ls = text::line_starts(src);
+            self.r = r;
+            self.m = m;
+        }
+    }
 }
 
 // Per-URI accumulator for one publish round.
@@ -204,26 +245,20 @@ struct PubSet {
 extend PubSet {
     // Register a URI with its complete list (possibly empty), replacing anything gathered for it.
     fn push_all(self: &mut Self, uri: String, arr: json::JSON) {
-        for i in 0..self.uris.len() {
-            if self.uris.at(i).as_str() == uri.as_str() {
-                self.arrs.set(i, arr);
-                return;
-            }
-        }
-        self.uris.push(uri);
-        self.arrs.push(arr);
+        let i = self.slot(uri);
+        self.arrs.set(i, arr);
     }
-    fn push(self: &mut Self, uri: String, d: json::JSON) {
+
+    // The index of `uri`'s list, registering an empty one first when the URI is new.
+    fn slot(self: &mut Self, uri: String) usize {
         for i in 0..self.uris.len() {
             if self.uris.at(i).as_str() == uri.as_str() {
-                self.arrs[i].push_back(d);
-                return;
+                return i;
             }
         }
         self.uris.push(uri);
-        let mut a = json::JSON::array();
-        a.push_back(d);
-        self.arrs.push(a);
+        self.arrs.push(json::JSON::array());
+        return self.uris.len() - 1;
     }
 }
 
@@ -311,6 +346,21 @@ fn keyed_hit_cmp(x: &KeyedHit, y: &KeyedHit) i32 {
     return 0;
 }
 
+// A workspace symbol hit keyed by its canonical file path (`r` is the root that found it).
+struct KeyedSym {
+    pub path: String,
+    pub r: u32,
+    pub sym: feat::WsSym,
+}
+
+fn keyed_sym_cmp(x: &KeyedSym, y: &KeyedSym) i32 {
+    let c = path_cmp(&x.path, &y.path);
+    if c != 0 {
+        return c;
+    }
+    return x.sym.start.cmp(&y.sym.start);
+}
+
 // One cross-root reference site: root, module (within that root's package), byte span.
 struct RefHit {
     pub r: u32,
@@ -339,7 +389,7 @@ fn valid_ident(nm: str) bool {
 // A request id is valid when it is a string or a number (LSP integer). Booleans, arrays, objects
 // and null are not request ids.
 const fn valid_id(id: &json::JSON) bool {
-    return id.kind == json::JT_STRING || id.kind == json::JT_NUMBER;
+    return id.is_string() || id.is_number();
 }
 
 /// The blocking stdio server loop; returns the process exit code: 0 for a clean shutdown-then-exit,
@@ -356,6 +406,7 @@ pub fn run(std_dir: str, target: i32) i32 {
         folders: Vector::<String>::new(),
         out_folders: Vector::<String>::new(),
         out_skips: Vector::<String>::new(),
+        swept: Vector::<SweptDir>::new(),
         canceled_tick: Vector::<u64>::new(),
         last_req_tick: 0,
         shutdown_seen: false,
@@ -376,7 +427,7 @@ pub fn run(std_dir: str, target: i32) i32 {
         tick: 0,
         tok_uris: Vector::<String>::new(),
         tok_ids: Vector::<u64>::new(),
-        tok_data: Vector::<Vector<i64>>::new(),
+        tok_data: Vector::<Vector<u32>>::new(),
         tok_next: 0,
     };
     let fin = stdio::stdin();
@@ -424,7 +475,7 @@ pub fn run(std_dir: str, target: i32) i32 {
         }
         let jr_ok = req.value_str("jsonrpc") == "2.0";
         let mo = req.value("method");
-        let m_ok = mo.is_some() && mo.unwrap().kind == json::JT_STRING;
+        let m_ok = mo.is_some() && mo.unwrap().is_string();
         // A message with an id and a result/error but no method is the client's response to a
         // server-to-client request (dynamic registration): consume it silently.
         if jr_ok && !m_ok && is_req && (req.contains_key("result") || req.contains_key("error")) {
@@ -466,11 +517,10 @@ pub fn run(std_dir: str, target: i32) i32 {
             switch req.value("params") {
                 Some(params) => switch params.value("id") {
                     Some(cid) => {
-                        sv.canceled.push(cid.dump(false));
+                        sv.canceled.push(cid.dump());
                         sv.canceled_tick.push(sv.tick);
                         if sv.canceled.len() > 64 {
-                            let old = sv.canceled.remove(0).unwrap();
-                            old.free();
+                            let _ = sv.canceled.remove(0);
                             let _ = sv.canceled_tick.remove(0);
                         }
                     },
@@ -484,18 +534,16 @@ pub fn run(std_dir: str, target: i32) i32 {
         // Dispatch is synchronous, so a cancel recorded before the last handled request can only
         // target a completed request: purge it, or a client that reuses ids loses a live request.
         if is_req {
-            let ids = req.at_key("id").dump(false);
+            let ids = req.at_key("id").dump();
             let mut hit = false;
             let mut k: usize = 0;
             while k < sv.canceled.len() {
                 if *sv.canceled_tick.at(k) <= sv.last_req_tick {
-                    let old = sv.canceled.remove(k).unwrap();
-                    old.free();
+                    let _ = sv.canceled.remove(k);
                     let _ = sv.canceled_tick.remove(k);
                 } else if sv.canceled.at(k).as_str() == ids.as_str() {
                     hit = true;
-                    let old = sv.canceled.remove(k).unwrap();
-                    old.free();
+                    let _ = sv.canceled.remove(k);
                     let _ = sv.canceled_tick.remove(k);
                 } else {
                     k += 1;
@@ -521,7 +569,7 @@ pub fn run(std_dir: str, target: i32) i32 {
             }
             // First full round: the manifest build and workspace sweep publish diagnostics for the
             // whole build.toml folder before any document opens.
-            sv.rebuild_all(fout, false);
+            sv.rebuild_all(fout, false, true);
         } else if method == "shutdown" {
             sv.shutdown_seen = true;
             let nullv = json::JSON::default();
@@ -545,7 +593,7 @@ pub fn run(std_dir: str, target: i32) i32 {
             sv.on_folders_changed(&req, fout);
         } else if method == "workspace/didChangeConfiguration" {
             sv.revision += 1;
-            sv.rebuild_all(fout, false);
+            sv.rebuild_all(fout, false, true);
         } else if method == "textDocument/hover" && is_req {
             sv.on_hover(&req, fout);
         } else if method == "textDocument/definition" && is_req {
@@ -630,9 +678,9 @@ extend Server {
         return -1;
     }
 
-    // The workspace-batch root: sweep=true with no origin (the manifest root is origin "" + sweep=false).
+    // The workspace-batch root (the only root with sweep=true; its origin is "").
     const fn is_batch(self: &Self, r: usize) bool {
-        return self.roots.at(r).sweep && self.roots.at(r).origin.len() == 0;
+        return self.roots.at(r).sweep;
     }
 
     // First BUILT root containing `path` (manifest root first; the workspace batch LAST, so an open
@@ -662,7 +710,8 @@ extend Server {
     // Every open doc must belong to some root; docs outside every built package get a per-file root
     // (the `super-c lint <file>` recipe: file dir as root, src/ as the alt root when it exists).
     // Batch ownership does not count: its copy is disk-built, so an open doc needs its own root.
-    fn ensure_roots(self: &mut Self) {
+    // `rescan` walks the workspace folders again; otherwise the batch reuses the last walk.
+    fn ensure_roots(self: &mut Self, rescan: bool) {
         for i in 0..self.docs.len() {
             let path = self.docs.at(i).path.as_str();
             // Only Super-C source compiles. An open build.toml is served by the manifest half of the
@@ -697,12 +746,13 @@ extend Server {
                     pkg: loader::Package::new(),
                     files: Vector::<String>::new(),
                     diags: Vector::<analysis::DiagRec>::new(),
+                    pos: Vector::<u32>::new(),
                     built: false,
                     last_used: 0,
                 },
             );
         }
-        self.ensure_sweep_roots();
+        self.ensure_sweep_roots(rescan);
     }
 
     // The workspace folder that contains `path` ("" when none does).
@@ -732,8 +782,12 @@ extend Server {
     // THE batch root, one shared package (the `super-c lint` recipe) instead of a resident package
     // per file. Hidden entries and the manifest out-dir are skipped. The batch rebuilds only when its
     // member set changes (a file appears/vanishes, a doc opens into a per-file root or closes back);
-    // otherwise its cached diagnostics republish.
-    fn ensure_sweep_roots(self: &mut Self) {
+    // otherwise its cached diagnostics republish. `rescan` repeats the directory walks; a document
+    // edit cannot change the files on disk, so its rounds filter the last walk again.
+    fn ensure_sweep_roots(self: &mut Self, rescan: bool) {
+        if rescan {
+            self.swept.clear();
+        }
         if !self.has_manifest && self.folders.len() == 0 {
             return;
         }
@@ -748,6 +802,21 @@ extend Server {
         }
     }
 
+    // The index in `swept` of `folder`'s last walk, walking it first when there is none.
+    fn swept_index(self: &mut Self, folder: str) usize {
+        for i in 0..self.swept.len() {
+            if self.swept.at(i).folder.as_str() == folder {
+                return i;
+            }
+        }
+        let osk = String::from_str(self.out_skip_of(folder));
+        let mut files = Vector::<SweptFile>::new();
+        Server::walk_dir(folder, 0, osk.as_str(), &mut files);
+        files.sort_by(|x: &SweptFile, y: &SweptFile| path_cmp(&x.path, &y.path));
+        self.swept.push(SweptDir { folder: String::from_str(folder), files: files });
+        return self.swept.len() - 1;
+    }
+
     // One batch root per workspace folder: every unowned .spc under it joins the folder's batch.
     fn ensure_folder_sweep(self: &mut Self, folder: str) {
         let mut alt = String::new();
@@ -757,9 +826,22 @@ extend Server {
                 alt = a;
             }
         }
+        // The walked files no other package owns, in walk order (sorted).
+        let si = self.swept_index(folder);
         let mut cand = Vector::<String>::new();
-        self.sweep_dir(folder, folder, &mut cand);
-        cand.sort_by(path_cmp);
+        for k in 0..self.swept.at(si).files.len() {
+            let sf = self.swept.at(si).files.at(k);
+            let own = self.owning_root(sf.canon.as_str());
+            let mut have = own >= 0 && !self.is_batch(own as usize);
+            for r in 0..self.roots.len() {
+                if self.roots.at(r).origin.as_str() == sf.canon.as_str() {
+                    have = true;
+                }
+            }
+            if !have {
+                cand.push(sf.path.clone());
+            }
+        }
         let mut b: i64 = -1;
         for r in 0..self.roots.len() {
             if self.is_batch(r) && self.roots.at(r).ws.as_str() == folder {
@@ -782,6 +864,7 @@ extend Server {
                     pkg: loader::Package::new(),
                     files: Vector::<String>::new(),
                     diags: Vector::<analysis::DiagRec>::new(),
+                    pos: Vector::<u32>::new(),
                     built: false,
                     last_used: 0,
                 },
@@ -816,10 +899,8 @@ extend Server {
         let mut i: usize = 0;
         while i < self.out_folders.len() {
             if self.out_folders.at(i).as_str() == folder {
-                let of = self.out_folders.remove(i).unwrap();
-                of.free();
-                let os = self.out_skips.remove(i).unwrap();
-                os.free();
+                let _ = self.out_folders.remove(i);
+                let _ = self.out_skips.remove(i);
             } else {
                 i += 1;
             }
@@ -828,7 +909,13 @@ extend Server {
         self.out_skips.push(String::from_str(out_dir));
     }
 
-    fn sweep_dir(self: &mut Self, folder: str, dir: str, cand: &mut Vector<String>) {
+    // Append every .spc file under `dir` (`depth` levels below its folder) to `out`. Links to
+    // directories are never followed (a link can point back up the tree); a link to a .spc file
+    // counts as that file. Hidden entries and, in the folder itself, the out-dir `osk` are skipped.
+    fn walk_dir(dir: str, depth: u32, osk: str, out: &mut Vector<SweptFile>) {
+        if depth > SWEEP_MAX_DEPTH {
+            return;
+        }
         let mut db = String::from_str(dir);
         let dh = unsafe shim::sc_opendir(db.cstr());
         if dh == null {
@@ -847,28 +934,19 @@ extend Server {
             names.push(String::from_cstr(nm));
         }
         unsafe shim::sc_closedir(dh);
-        let osk = String::from_str(self.out_skip_of(folder));
         for i in 0..names.len() {
+            if depth == 0 && osk.len() != 0 && names.at(i).as_str() == osk {
+                continue;
+            }
             let mut p = String::from_str(dir);
             p.push_byte(b'/');
             p.push_string(names.at(i));
-            if dir == folder && osk.len() != 0 && names.at(i).as_str() == osk.as_str() {
-                continue;
-            }
-            if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
-                self.sweep_dir(folder, p.as_str(), cand);
-            } else if p.as_str().ends_with(".spc") {
+            let kind = unsafe shim::sc_lstat_isdir(p.cstr());
+            if kind == 1 {
+                Server::walk_dir(p.as_str(), depth + 1, "", out);
+            } else if kind == 0 && p.as_str().ends_with(".spc") && unsafe shim::sc_stat_isdir(p.cstr()) == 0 {
                 let cp = analysis::canon_path(p.as_str());
-                let own = self.owning_root(cp.as_str());
-                let mut have = own >= 0 && !self.is_batch(own as usize);
-                for r in 0..self.roots.len() {
-                    if self.roots.at(r).origin.as_str() == cp.as_str() {
-                        have = true;
-                    }
-                }
-                if !have {
-                    cand.push(p);
-                }
+                out.push(SweptFile { path: p, canon: cp });
             }
         }
     }
@@ -882,26 +960,11 @@ extend Server {
         return false;
     }
 
-    // Drop per-file roots whose doc closed, sweep roots whose file vanished, and sweep roots the
-    // manifest package has since absorbed (their diagnostics clear via the published-set diff).
+    // Drop per-file roots whose doc closed (their diagnostics clear via the published-set diff).
     fn drop_orphan_roots(self: &mut Self) {
         let mut r: usize = 0;
         while r < self.roots.len() {
             let mut keep = self.roots.at(r).origin.len() == 0;
-            if !keep && self.roots.at(r).sweep {
-                let mut ob = self.roots.at(r).origin.clone();
-                keep = unsafe shim::sc_mtime(ob.cstr()) != 0;
-                if keep {
-                    for q in 0..self.roots.len() {
-                        if q != r && self.roots.at(q).origin.len() == 0 && !self.roots.at(q).sweep && self.roots.at(q).built && self.root_module(
-                            q,
-                            ob.as_str(),
-                        ) >= 0 {
-                            keep = false;
-                        }
-                    }
-                }
-            }
             if !keep {
                 for i in 0..self.docs.len() {
                     if self.docs.at(i).path.as_str() == self.roots.at(r).origin.as_str() {
@@ -912,7 +975,7 @@ extend Server {
             if keep {
                 r += 1;
             } else {
-                self.roots.remove(r).unwrap().free();
+                let _ = self.roots.remove(r);
             }
         }
     }
@@ -923,13 +986,14 @@ extend Server {
     // full compile below. SC_LSP_NO_INCR=1 disables the path entirely (identical full-rebuild
     // behavior, the cache-off parity mode).
     fn build_root(self: &mut Self, r: usize, ps: &mut PubSet, incr: bool) {
-        let mut ovf = Vector::<String>::new();
-        let mut ovt = Vector::<String>::new();
-        for i in 0..self.docs.len() {
-            ovf.push(self.docs.at(i).path.clone());
-            ovt.push(self.docs.at(i).txt.clone());
-        }
         if incr && self.roots.at(r).built && self.roots.at(r).pkg.modules.len() != 0 && stdlib::getenv("SC_LSP_NO_INCR") == null {
+            // The incremental round borrows the documents; only the full compile below owns copies.
+            let mut ovf = Vector::<str>::new();
+            let mut ovt = Vector::<str>::new();
+            for i in 0..self.docs.len() {
+                ovf.push(self.docs.at(i).path.as_str());
+                ovt.push(self.docs.at(i).txt.as_str());
+            }
             let rf9 = self.roots.at(r).root_file.clone();
             let ld9 = if self.roots.at(r).origin.len() == 0 && !self.roots.at(r).sweep {
                 self.roots.at(r).ws.clone();
@@ -950,10 +1014,15 @@ extend Server {
             );
             if ok {
                 self.roots[r].diags = old_diags;
-                self.publish_root_diags(r, ps);
+                self.publish_root_diags(r, ps, "");
                 return;
             }
-            old_diags.free();
+        }
+        let mut ovf = Vector::<String>::new();
+        let mut ovt = Vector::<String>::new();
+        for i in 0..self.docs.len() {
+            ovf.push(self.docs.at(i).path.clone());
+            ovt.push(self.docs.at(i).txt.clone());
         }
         let mut diags = Vector::<analysis::DiagRec>::new();
         let rf = self.roots.at(r).root_file.clone();
@@ -1003,79 +1072,124 @@ extend Server {
         self.roots[r].last_used = self.tick;
         // Retain the records: publishing + codeAction read from them until the next rebuild.
         self.roots[r].diags = diags;
-        self.publish_root_diags(r, ps);
+        self.roots[r].pos = Vector::<u32>::new();
+        self.publish_root_diags(r, ps, "");
+    }
+
+    // Where module `m` of root `r` publishes: its slot in `ps`, or -1 when it publishes elsewhere
+    // or is filtered out (`only` != "" keeps just the module whose canonical file is `only`).
+    // `owners` are the built manifest roots other than `r`.
+    fn publish_slot(self: &Self, r: usize, m: usize, owners: &Vector<usize>, ps: &mut PubSet, only: str) i64 {
+        let file = self.roots.at(r).files.at(m).as_str();
+        if only.len() != 0 && file != only {
+            return -1;
+        }
+        // Files a manifest package owns publish from it alone: a per-file/sweep root's closure
+        // reaches std and friends, and republishing its (possibly stale) copies would duplicate them.
+        for i in 0..owners.len() {
+            if self.root_module(*owners.at(i), file) >= 0 {
+                return -1;
+            }
+        }
+        // A batch module whose file has a live per-file root (its doc is open) publishes from
+        // that root's overlay-fresh build, not the batch's disk-built copy.
+        if self.is_batch(r) {
+            for q in 0..self.roots.len() {
+                if q != r && self.roots.at(q).built && self.roots.at(q).origin.as_str() == file {
+                    return -1;
+                }
+            }
+        }
+        return ps.slot(text::path_to_uri(file)) as i64;
     }
 
     // Convert root `r`'s retained diagnostics into per-URI publish entries (module ids are
-    // per-package). Also republishes a cached sweep root without rebuilding it.
-    fn publish_root_diags(self: &Self, r: usize, ps: &mut PubSet) {
-        // Files a manifest package owns publish from it alone: a per-file/sweep root's closure
-        // reaches std and friends, and republishing its (possibly stale) copies would duplicate them.
-        let mut dedup = false;
+    // per-package). Also republishes a cached sweep root without rebuilding it, and a root whose
+    // package the budget evicted from the positions saved at eviction. `only` as in `publish_slot`.
+    fn publish_root_diags(self: &Self, r: usize, ps: &mut PubSet, only: str) {
+        let root = self.roots.at(r);
+        let evicted = root.pkg.modules.len() == 0;
+        if evicted && root.pos.len() != root.diags.len() * 4 {
+            // No package and no saved positions: nothing was analyzed.
+            return;
+        }
+        let mut owners = Vector::<usize>::new();
         for q in 0..self.roots.len() {
             if q != r && self.roots.at(q).origin.len() == 0 && !self.roots.at(q).sweep && self.roots.at(q).built {
-                dedup = true;
+                owners.push(q);
             }
         }
-        let mut last_mod: i64 = -1;
-        let mut ls = Vector::<u32>::new();
-        for k in 0..self.roots.at(r).diags.len() {
-            let d = self.roots.at(r).diags.at(k);
+        // Per module: -2 not decided yet, else the `publish_slot` verdict.
+        let mut slots = Vector::<i64>::new();
+        slots.reserve(root.files.len());
+        for _ in 0..root.files.len() {
+            slots.push(-2);
+        }
+        let mut lm = LsMemo::new();
+        for k in 0..root.diags.len() {
+            let d = root.diags.at(k);
             let m = d.module as usize;
-            if m >= self.roots.at(r).pkg.modules.len() {
+            if m >= root.files.len() || !evicted && m >= root.pkg.modules.len() {
                 continue;
             }
-            if dedup {
-                let mut owned = false;
-                for q in 0..self.roots.len() {
-                    if q != r && self.roots.at(q).origin.len() == 0 && !self.roots.at(q).sweep && self.roots.at(q).built && self.root_module(
-                        q,
-                        self.roots.at(r).files.at(m).as_str(),
-                    ) >= 0 {
-                        owned = true;
-                    }
-                }
-                if owned {
-                    continue;
-                }
+            if slots[m] == -2 {
+                slots.set(m, self.publish_slot(r, m, &owners, ps, only));
             }
-            // A batch module whose file has a live per-file root (its doc is open) publishes from
-            // that root's overlay-fresh build, not the batch's disk-built copy.
-            if self.is_batch(r) {
-                let mut fresh = false;
-                for q in 0..self.roots.len() {
-                    if q != r && self.roots.at(q).built && self.roots.at(q).origin.as_str() == self.roots.at(r).files.at(
-                        m,
-                    ).as_str() {
-                        fresh = true;
-                    }
-                }
-                if fresh {
-                    continue;
-                }
+            if slots[m] < 0 {
+                continue;
             }
-            let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
-            if d.module as i64 != last_mod {
-                ls = text::line_starts(src);
-                last_mod = d.module;
-            }
+            let range = if evicted {
+                range_json_pos(root.pos[4 * k], root.pos[4 * k + 1], root.pos[4 * k + 2], root.pos[4 * k + 3]);
+            } else {
+                let src = root.pkg.modules.at(m).source.as_str();
+                lm.update(r, d.module, src);
+                range_json(src, &lm.ls, d.start, d.len);
+            };
             let mut dj = json::JSON::object();
-            dj.emplace("range", range_json(src, &ls, d.start, d.len));
+            dj.emplace("range", range);
             dj.emplace("severity", json::JSON::integer(d.severity));
             dj.emplace("source", json::JSON::str("super-c"));
             dj.emplace("message", json::JSON::str(d.msg.as_str()));
-            let uri = text::path_to_uri(self.roots.at(r).files.at(m).as_str());
-            ps.push(uri, dj);
+            ps.arrs[slots[m] as usize].push_back(dj);
         }
     }
 
+    // The LSP positions of root `r`'s diagnostics (4 values each, see `Root.pos`), computed from its
+    // package before a budget eviction drops the sources.
+    fn diag_positions(self: &Self, r: usize) Vector<u32> {
+        let root = self.roots.at(r);
+        let mut pos = Vector::<u32>::new();
+        pos.reserve(root.diags.len() * 4);
+        let mut lm = LsMemo::new();
+        for k in 0..root.diags.len() {
+            let d = root.diags.at(k);
+            if d.module as usize >= root.pkg.modules.len() {
+                // Never published (see `publish_root_diags`); the slot keeps the layout.
+                for _ in 0..4 {
+                    pos.push(0);
+                }
+                continue;
+            }
+            let src = root.pkg.modules.at(d.module as usize).source.as_str();
+            lm.update(r, d.module, src);
+            let sp = text::offset_to_pos(src, &lm.ls, d.start);
+            let ep = text::offset_to_pos(src, &lm.ls, d.start + d.len);
+            pos.push(sp.line);
+            pos.push(sp.character);
+            pos.push(ep.line);
+            pos.push(ep.character);
+        }
+        return pos;
+    }
+
     // The version of the open document the round analyzed (the round is synchronous, so its
-    // current version): a client drops a publication older than its buffer. Publications name
-    // canonical paths; the document is matched on its canonical path.
+    // current version): a client drops a publication older than its buffer. A publication names
+    // either a canonical module path or an open manifest's own URI, so the document matches on its
+    // URI or its canonical path (no realpath needed).
     fn tag_version(self: &Self, params: &mut json::JSON, uri: str) {
-        let path = uri_doc_path(uri);
+        let path = text::uri_to_path(uri);
         for i in 0..self.docs.len() {
-            if self.docs.at(i).path.as_str() == path.as_str() {
+            if self.docs.at(i).uri.as_str() == uri || self.docs.at(i).path.as_str() == path.as_str() {
                 params.emplace("version", json::JSON::integer(self.docs.at(i).version));
                 return;
             }
@@ -1108,8 +1222,9 @@ extend Server {
     }
 
     // Rebuild everything and republish: every URI with diagnostics gets its list, every URI published
-    // last round but clean now gets an explicit empty list.
-    fn rebuild_all(self: &mut Self, f: *mut stdio::FILE, incr: bool) {
+    // last round but clean now gets an explicit empty list. `rescan` walks the workspace folders again
+    // (see `ensure_sweep_roots`).
+    fn rebuild_all(self: &mut Self, f: *mut stdio::FILE, incr: bool, rescan: bool) {
         self.drop_orphan_roots();
         // Manifest roots build first: they decide which docs need per-file roots. Such a build is
         // this round's build of that root: the loop below republishes it instead of compiling twice.
@@ -1122,7 +1237,7 @@ extend Server {
                 self.build_root(r, &mut ps0, false);
             }
         }
-        self.ensure_roots();
+        self.ensure_roots(rescan);
         let mut ps = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
         for r in 0..self.roots.len() {
             // A built sweep root for a closed file republishes its cached diagnostics: rebuilding
@@ -1131,7 +1246,7 @@ extend Server {
                 self.roots.at(r).origin.as_str(),
             );
             if cached || r < seeded.len() && seeded[r] {
-                self.publish_root_diags(r, &mut ps);
+                self.publish_root_diags(r, &mut ps, "");
             } else {
                 self.build_root(r, &mut ps, incr);
             }
@@ -1142,19 +1257,15 @@ extend Server {
             let mut params = json::JSON::object();
             params.emplace("uri", json::JSON::str(ps.uris.at(i).as_str()));
             self.tag_version(&mut params, ps.uris.at(i).as_str());
-            params.emplace("diagnostics", ps.arrs.at(i).clone());
+            params.emplace("diagnostics", replace(ps.arrs.index_mut(i), json::JSON::default()));
             notify(f, "textDocument/publishDiagnostics", &params);
         }
-        // Clear URIs that had diagnostics last round and none now.
+        // Clear URIs that had diagnostics last round and none now (sorted: a binary search each).
+        let mut now = replace(&mut ps.uris, Vector::<String>::new());
+        now.sort();
         for i in 0..self.published.len() {
             let old = self.published.at(i).as_str();
-            let mut still = false;
-            for j in 0..ps.uris.len() {
-                if ps.uris.at(j).as_str() == old {
-                    still = true;
-                }
-            }
-            if !still {
+            if now.binary_search(self.published.at(i)).is_err() {
                 let mut params = json::JSON::object();
                 params.emplace("uri", json::JSON::str(old));
                 self.tag_version(&mut params, old);
@@ -1162,10 +1273,7 @@ extend Server {
                 notify(f, "textDocument/publishDiagnostics", &params);
             }
         }
-        self.published = Vector::<String>::new();
-        for i in 0..ps.uris.len() {
-            self.published.push(ps.uris.at(i).clone());
-        }
+        self.published = now;
         self.enforce_budget();
     }
 
@@ -1211,6 +1319,8 @@ extend Server {
                 break;
             }
             let b = self.roots.at(pick as usize).pkg.retained_bytes();
+            let pos = self.diag_positions(pick as usize);
+            self.roots[pick as usize].pos = pos;
             self.roots[pick as usize].pkg = loader::Package::new();
             total -= b;
         }
@@ -1249,6 +1359,7 @@ extend Server {
             pkg: loader::Package::new(),
             files: Vector::<String>::new(),
             diags: Vector::<analysis::DiagRec>::new(),
+            pos: Vector::<u32>::new(),
             built: false,
             last_used: 0,
         };
@@ -1291,14 +1402,7 @@ extend Server {
                     }
                 }
                 // Parent process: polled between messages so a dead client ends the server.
-                switch params.value("processId") {
-                    Some(pid) => {
-                        if pid.kind == json::JT_NUMBER {
-                            self.parent_pid = pid.get_i64();
-                        }
-                    },
-                    None => {},
-                };
+                self.parent_pid = params.value_i64("processId", 0);
                 // Server settings (the plan's limit knobs live here, not in env vars alone).
                 switch params.value("initializationOptions") {
                     Some(io) => {
@@ -1346,7 +1450,7 @@ extend Server {
                                                 Some(props) => {
                                                     if props.is_array() {
                                                         for i in 0..props.size() {
-                                                            if props.at(i).kind == json::JT_STRING && props.at(i).get_str() == "edit" {
+                                                            if props.at(i).is_string() && props.at(i).get_str() == "edit" {
                                                                 self.cap_action_resolve = true;
                                                             }
                                                         }
@@ -1416,7 +1520,12 @@ extend Server {
     fn on_did_open(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         switch req.value("params") {
             Some(params) => {
-                let td = params.at_key("textDocument");
+                let tdo = params.value("textDocument");
+                if tdo.is_none() {
+                    // A malformed notification is dropped.
+                    return;
+                }
+                let td = tdo.unwrap();
                 let uri = td.value_str("uri");
                 let p = uri_doc_path(uri);
                 let di = self.find_doc(uri);
@@ -1433,7 +1542,7 @@ extend Server {
                         },
                     );
                 }
-                self.rebuild_all(f, true);
+                self.rebuild_all(f, true, true);
             },
             None => {},
         };
@@ -1488,7 +1597,12 @@ extend Server {
     fn apply_did_change(self: &mut Self, req: &json::JSON) bool {
         switch req.value("params") {
             Some(params) => {
-                let uri = params.at_key("textDocument").value_str("uri");
+                let tdo = params.value("textDocument");
+                if tdo.is_none() {
+                    return false;
+                }
+                let td = tdo.unwrap();
+                let uri = td.value_str("uri");
                 let di = self.find_doc(uri);
                 if di < 0 {
                     return false;
@@ -1509,7 +1623,7 @@ extend Server {
                                 return false;
                             }
                             self.docs[di as usize].txt = txt;
-                            self.docs[di as usize].version = params.at_key("textDocument").value_i64("version", 0);
+                            self.docs[di as usize].version = td.value_i64("version", 0);
                             return true;
                         }
                     },
@@ -1552,19 +1666,25 @@ extend Server {
                 break;
             }
         }
-        self.rebuild_all(f, true);
+        // An edit changes no file on disk: the sweep reuses its last directory walk.
+        self.rebuild_all(f, true, false);
     }
 
     fn on_did_close(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         switch req.value("params") {
             Some(params) => {
-                let uri = params.at_key("textDocument").value_str("uri");
+                let tdo = params.value("textDocument");
+                if tdo.is_none() {
+                    return;
+                }
+                let uri = tdo.unwrap().value_str("uri");
                 let di = self.find_doc(uri);
                 if di >= 0 {
-                    self.docs.remove(di as usize).unwrap().free();
+                    let _ = self.docs.remove(di as usize);
                 }
+                self.token_cache_drop(uri);
                 // Overlays revert to the on-disk content.
-                self.rebuild_all(f, false);
+                self.rebuild_all(f, false, true);
             },
             None => {},
         };
@@ -1671,13 +1791,13 @@ extend Server {
         return Hit { ok: true, r: r as usize, m: m as usize, off: off, end: end };
     }
 
-    // A feat::Loc as an LSP Location against root `r`'s modules.
-    fn loc_json(self: &Self, r: usize, l: &feat::Loc) json::JSON {
+    // A feat::Loc as an LSP Location against root `r`'s modules; `lm` keeps the last module's line starts.
+    fn loc_json(self: &Self, r: usize, l: &feat::Loc, lm: &mut LsMemo) json::JSON {
         let src = self.roots.at(r).pkg.modules.at(l.module as usize).source.as_str();
-        let ls = text::line_starts(src);
+        lm.update(r, l.module, src);
         let mut o = json::JSON::object();
         o.emplace("uri", json::JSON::string(text::path_to_uri(self.roots.at(r).files.at(l.module as usize).as_str())));
-        o.emplace("range", range_json(src, &ls, l.start, l.end - l.start));
+        o.emplace("range", range_json(src, &lm.ls, l.start, l.end - l.start));
         return o;
     }
 
@@ -1756,7 +1876,8 @@ extend Server {
         }
         switch feat::definition(&self.roots.at(h.r).pkg, h.m, h.off) {
             Some(l) => {
-                let lj = self.loc_json(h.r, &l);
+                let mut lm = LsMemo::new();
+                let lj = self.loc_json(h.r, &l, &mut lm);
                 respond(f, req.at_key("id"), &lj);
             },
             None => {
@@ -1862,10 +1983,11 @@ extend Server {
             hits.truncate(self.max_results);
         }
         let mut arr = json::JSON::array();
+        let mut lm = LsMemo::new();
         for i in 0..hits.len() {
             let rh = *hits.at(i);
             let l = feat::Loc { module: rh.m, start: rh.s, end: rh.e };
-            arr.push_back(self.loc_json(rh.r as usize, &l));
+            arr.push_back(self.loc_json(rh.r as usize, &l, &mut lm));
         }
         respond(f, req.at_key("id"), &arr);
     }
@@ -1995,18 +2117,16 @@ extend Server {
         let mut doc_changes = json::JSON::array();
         let mut changes = json::JSON::object();
         for k in 0..files.len() {
-            // Insertion sort by descending start (groups are small).
+            // Descending start (end breaks a tie), so each edit leaves the offsets before it intact.
             let g = &mut per[k];
-            for a in 1..g.len() {
-                let mut b = a;
-                while b > 0 && g.at(b - 1).s < g.at(b).s {
-                    let t1 = *g.at(b - 1);
-                    let t2 = *g.at(b);
-                    g.set(b - 1, t2);
-                    g.set(b, t1);
-                    b -= 1;
-                }
-            }
+            g.sort_by(
+                fn(x: &RefHit, y: &RefHit) i32 {
+                    if x.s != y.s {
+                        return y.s.cmp(&x.s);
+                    }
+                    return y.e.cmp(&x.e);
+                },
+            );
             for a in 1..g.len() {
                 if g.at(a).e > g.at(a - 1).s {
                     send_error(f, req.at_key("id"), -32803, "rename would produce overlapping edits");
@@ -2091,12 +2211,12 @@ extend Server {
 
     // The encoded token data (LSP 5-int groups) for module `m` of root `r`, windowed to
     // [w_start, w_end) byte offsets.
-    fn token_data(self: &Self, r: usize, m: usize, w_start: u32, w_end: u32) Vector<i64> {
+    fn token_data(self: &Self, r: usize, m: usize, w_start: u32, w_end: u32) Vector<u32> {
         let pkg = &self.roots.at(r).pkg;
         let toks = feat::semantic_tokens(pkg, m);
         let src = pkg.modules.at(m).source.as_str();
         let ls = text::line_starts(src);
-        let mut data = Vector::<i64>::new();
+        let mut data = Vector::<u32>::new();
         let mut prev_line: u32 = 0;
         let mut prev_char: u32 = 0;
         for i in 0..toks.len() {
@@ -2112,7 +2232,7 @@ extend Server {
             data.push(pos.line - prev_line);
             data.push(dc);
             data.push(text::utf16_len(src, t.start, t.end));
-            data.push(t.ty);
+            data.push(t.ty as u32);
             data.push(t.mods);
             prev_line = pos.line;
             prev_char = pos.character;
@@ -2120,33 +2240,49 @@ extend Server {
         return data;
     }
 
-    const fn data_json(data: &Vector<i64>) json::JSON {
+    const fn data_json(data: &Vector<u32>) json::JSON {
         let mut arr = json::JSON::array();
+        arr.reserve(data.len());
         for i in 0..data.len() {
             arr.push_back(json::JSON::integer(*data.at(i)));
         }
         return arr;
     }
 
-    // Remember `data` as URI's latest full result and hand back its new resultId.
-    fn token_cache_put(self: &mut Self, uri: str, data: &Vector<i64>) u64 {
-        self.tok_next += 1;
-        let id = self.tok_next;
-        let mut copy = Vector::<i64>::new();
-        for i in 0..data.len() {
-            copy.push(*data.at(i));
-        }
+    // The semantic-token cache slot of `uri`, or tok_uris.len() when it has none.
+    fn token_slot(self: &Self, uri: str) usize {
         for i in 0..self.tok_uris.len() {
             if self.tok_uris.at(i).as_str() == uri {
-                self.tok_ids.set(i, id);
-                self.tok_data.set(i, copy);
-                return id;
+                return i;
             }
+        }
+        return self.tok_uris.len();
+    }
+
+    // Remember `data` as URI's latest full result and hand back its new resultId.
+    fn token_cache_put(self: &mut Self, uri: str, data: Vector<u32>) u64 {
+        self.tok_next += 1;
+        let id = self.tok_next;
+        let i = self.token_slot(uri);
+        if i < self.tok_uris.len() {
+            self.tok_ids.set(i, id);
+            self.tok_data.set(i, data);
+            return id;
         }
         self.tok_uris.push(String::from_str(uri));
         self.tok_ids.push(id);
-        self.tok_data.push(copy);
+        self.tok_data.push(data);
         return id;
+    }
+
+    // Forget `uri`'s semantic-token state (its document closed).
+    fn token_cache_drop(self: &mut Self, uri: str) {
+        let i = self.token_slot(uri);
+        if i < self.tok_uris.len() {
+            let _ = self.tok_uris.swap_remove(i);
+            let _ = self.tok_ids.swap_remove(i);
+            let _ = self.tok_data.swap_remove(i);
+        }
     }
 
     fn on_semantic_tokens(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE, ranged: bool) {
@@ -2192,14 +2328,15 @@ extend Server {
             }
         }
         let data = self.token_data(r as usize, m as usize, w_start, w_end);
+        let dj = Server::data_json(&data);
         let mut res = json::JSON::object();
         if !ranged && self.cap_delta_tokens {
-            let id = self.token_cache_put(uri, &data);
+            let id = self.token_cache_put(uri, data);
             let mut ids = String::new();
             ids.push_u64(id);
             res.emplace("resultId", json::JSON::string(ids));
         }
-        res.emplace("data", Server::data_json(&data));
+        res.emplace("data", dj);
         respond(f, req.at_key("id"), &res);
     }
 
@@ -2241,28 +2378,27 @@ extend Server {
         }
         let src_len = self.roots.at(r as usize).pkg.modules.at(m as usize).source.len();
         let data = self.token_data(r as usize, m as usize, 0, src_len as u32);
-        // The cached previous result for this URI, when its id matches the request.
+        // The cached previous result for this URI, when its id matches the request: taken out of
+        // the cache, which this response's result replaces.
         let mut have_prev = false;
-        let mut old = Vector::<i64>::new();
-        for i in 0..self.tok_uris.len() {
-            if self.tok_uris.at(i).as_str() == uri {
-                let mut ids = String::new();
-                ids.push_u64(*self.tok_ids.at(i));
-                if ids.as_str() == prev_id {
-                    have_prev = true;
-                    for k in 0..self.tok_data.at(i).len() {
-                        old.push(*self.tok_data.at(i).at(k));
-                    }
-                }
+        let mut old = Vector::<u32>::new();
+        let slot = self.token_slot(uri);
+        if slot < self.tok_uris.len() {
+            let mut ids = String::new();
+            ids.push_u64(*self.tok_ids.at(slot));
+            if ids.as_str() == prev_id {
+                have_prev = true;
+                old = replace(self.tok_data.index_mut(slot), Vector::<u32>::new());
             }
         }
-        let id = self.token_cache_put(uri, &data);
-        let mut ids = String::new();
-        ids.push_u64(id);
-        let mut res = json::JSON::object();
-        res.emplace("resultId", json::JSON::string(ids));
         if !have_prev {
-            res.emplace("data", Server::data_json(&data));
+            let dj = Server::data_json(&data);
+            let id = self.token_cache_put(uri, data);
+            let mut ids = String::new();
+            ids.push_u64(id);
+            let mut res = json::JSON::object();
+            res.emplace("resultId", json::JSON::string(ids));
+            res.emplace("data", dj);
             respond(f, req.at_key("id"), &res);
             return;
         }
@@ -2286,6 +2422,11 @@ extend Server {
             ed.emplace("data", ins);
             edits.push_back(ed);
         }
+        let id = self.token_cache_put(uri, data);
+        let mut ids = String::new();
+        ids.push_u64(id);
+        let mut res = json::JSON::object();
+        res.emplace("resultId", json::JSON::string(ids));
         res.emplace("edits", edits);
         respond(f, req.at_key("id"), &res);
     }
@@ -2353,13 +2494,14 @@ extend Server {
         } else {
             String::new();
         };
-        let mut ovf = Vector::<String>::new();
-        let mut ovt = Vector::<String>::new();
+        // Borrowed views of the documents, the probe in the cursor's slot.
+        let mut ovf = Vector::<str>::new();
+        let mut ovt = Vector::<str>::new();
         for i in 0..self.docs.len() {
-            ovf.push(self.docs.at(i).path.clone());
-            ovt.push(self.docs.at(i).txt.clone());
+            ovf.push(self.docs.at(i).path.as_str());
+            ovt.push(self.docs.at(i).txt.as_str());
         }
-        let real = replace(ovt.index_mut(slot), synth);
+        ovt.set(slot, synth.as_str());
         let mut out = Vector::<feat::CompItem>::new();
         let mut scratch = Vector::<analysis::DiagRec>::new();
         let mut st = analysis::RecompileStats {};
@@ -2383,7 +2525,7 @@ extend Server {
                 };
             }
             // The real buffers back (the round records nothing: the root's diagnostics stand).
-            *ovt.index_mut(slot) = real;
+            ovt.set(slot, self.docs.at(slot).txt.as_str());
             scratch.clear();
             let mut st2 = analysis::RecompileStats {};
             ok = analysis::recompile(
@@ -2499,10 +2641,14 @@ extend Server {
         return "5";
     }
 
-    // Render `items` as a CompletionList with stable sortText keys.
+    // Render `items` as a CompletionList with stable sortText keys; a repeated label keeps its first offer.
     fn completion_list(items: &Vector<feat::CompItem>) json::JSON {
+        let first = feat::first_offers(items);
         let mut arr = json::JSON::array();
         for i in 0..items.len() {
+            if !first[i] {
+                continue;
+            }
             let it = items.at(i);
             let mut o = json::JSON::object();
             o.emplace("label", json::JSON::str(it.label.as_str()));
@@ -2690,109 +2836,91 @@ extend Server {
         respond(f, req.at_key("id"), &list);
     }
 
-    // One lint fix (diags[k] of root r, module m) as a WorkspaceEdit JSON.
-    fn fix_edit_json(self: &Self, r: usize, m: usize, k: usize) json::JSON {
-        let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
-        let ls = text::line_starts(src);
-        let uri = text::path_to_uri(self.roots.at(r).files.at(m).as_str());
-        let d = self.roots.at(r).diags.at(k);
+    // The TextEdit of lint fix `d` (fix kinds 0, 1, 2 and 4, see analysis::DiagRec) against `src`.
+    fn fix_text_edit(d: &analysis::DiagRec, src: str, ls: &Vector<u32>) json::JSON {
         let mut te = json::JSON::object();
+        if d.fix_kind == 1 || d.fix_kind == 2 {
+            te.emplace("range", range_json(src, ls, d.fix_start, 0));
+        } else {
+            te.emplace("range", range_json(src, ls, d.fix_start, d.fix_end - d.fix_start));
+        }
         if d.fix_kind == 1 {
-            te.emplace("range", range_json(src, &ls, d.fix_start, 0));
             te.emplace("newText", json::JSON::str("_"));
         } else if d.fix_kind == 2 {
-            te.emplace("range", range_json(src, &ls, d.fix_start, 0));
             te.emplace("newText", json::JSON::str("const "));
-        } else if d.fix_kind == 3 {
-            te.emplace("range", range_json(src, &ls, d.fix_start, 0));
-            te.emplace("newText", json::JSON::str(d.fix_text.as_str()));
         } else if d.fix_kind == 4 {
-            te.emplace("range", range_json(src, &ls, d.fix_start, d.fix_end - d.fix_start));
             te.emplace("newText", json::JSON::str(d.fix_text.as_str()));
         } else {
-            te.emplace("range", range_json(src, &ls, d.fix_start, d.fix_end - d.fix_start));
             te.emplace("newText", json::JSON::str(""));
         }
-        let mut edits = json::JSON::array();
-        edits.push_back(te);
+        return te;
+    }
+
+    // `edits` for module `m` of root `r` as a WorkspaceEdit JSON.
+    fn workspace_edit(self: &Self, r: usize, m: usize, edits: json::JSON) json::JSON {
+        let uri = text::path_to_uri(self.roots.at(r).files.at(m).as_str());
         let mut changes = json::JSON::object();
         changes.emplace(uri.as_str(), edits);
         let mut we = json::JSON::object();
         we.emplace("changes", changes);
         return we;
+    }
+
+    // One lint fix (diags[k] of root r, module m, whose line starts are `ls`) as a WorkspaceEdit JSON.
+    fn fix_edit_json(self: &Self, r: usize, m: usize, k: usize, ls: &Vector<u32>) json::JSON {
+        let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
+        let mut edits = json::JSON::array();
+        edits.push_back(Server::fix_text_edit(self.roots.at(r).diags.at(k), src, ls));
+        return self.workspace_edit(r, m, edits);
     }
 
     // Every machine-applicable fix of module `m` as ONE WorkspaceEdit: sorted by descending start,
     // overlapping fixes dropped (first by position wins), so applying the set is always safe.
-    fn fixall_edit_json(self: &Self, r: usize, m: usize) json::JSON {
+    fn fixall_edit_json(self: &Self, r: usize, m: usize, ls: &Vector<u32>) json::JSON {
         let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
-        let ls = text::line_starts(src);
-        let uri = text::path_to_uri(self.roots.at(r).files.at(m).as_str());
-        // Collect (start, end, k), insertion-sorted by DESCENDING start.
-        let mut ks = Vector::<u32>::new();
-        let mut ss = Vector::<u32>::new();
-        let mut es = Vector::<u32>::new();
         let diags = &self.roots.at(r).diags;
+        // The fixes of module `m` by DESCENDING start; equal starts keep diagnostic order.
+        let mut ks = Vector::<u32>::new();
         for k in 0..diags.len() {
             let d = diags.at(k);
-            if d.module as usize != m || d.fix_kind < 0 || d.fix_kind > 4 {
-                continue;
+            if d.module as usize == m && d.fix_kind >= 0 && d.fix_kind <= 4 {
+                ks.push(k as u32);
             }
-            let fe = if d.fix_kind == 1 || d.fix_kind == 2 || d.fix_kind == 3 {
+        }
+        ks.sort_by(
+            fn(x: &u32, y: &u32) i32 {
+                let c = diags.at((*y) as usize).fix_start.cmp(&diags.at((*x) as usize).fix_start);
+                if c != 0 {
+                    return c;
+                }
+                return x.cmp(y);
+            },
+        );
+        let mut edits = json::JSON::array();
+        let mut low: i64 = -1; // lowest start already emitted (descending walk): overlap guard
+        for i in 0..ks.len() {
+            let d = diags.at((*ks.at(i)) as usize);
+            let fe = if d.fix_kind == 1 || d.fix_kind == 2 {
                 d.fix_start;
             } else {
                 d.fix_end;
             };
-            let mut at = ks.len();
-            while at > 0 && *ss.at(at - 1) < d.fix_start {
-                at -= 1;
-            }
-            ks.insert(at, k as u32);
-            ss.insert(at, d.fix_start);
-            es.insert(at, fe);
-        }
-        let mut edits = json::JSON::array();
-        let mut low: i64 = -1; // lowest start already emitted (descending walk): overlap guard
-        for i in 0..ks.len() {
-            if low >= 0 && (*es.at(i)) as i64 > low {
+            if low >= 0 && fe as i64 > low {
                 // Overlaps the fix kept before it: drop it.
                 continue;
             }
-            let d = diags.at((*ks.at(i)) as usize);
-            let mut te = json::JSON::object();
-            if d.fix_kind == 1 {
-                te.emplace("range", range_json(src, &ls, d.fix_start, 0));
-                te.emplace("newText", json::JSON::str("_"));
-            } else if d.fix_kind == 2 {
-                te.emplace("range", range_json(src, &ls, d.fix_start, 0));
-                te.emplace("newText", json::JSON::str("const "));
-            } else if d.fix_kind == 3 {
-                te.emplace("range", range_json(src, &ls, d.fix_start, 0));
-                te.emplace("newText", json::JSON::str(d.fix_text.as_str()));
-            } else if d.fix_kind == 4 {
-                te.emplace("range", range_json(src, &ls, d.fix_start, d.fix_end - d.fix_start));
-                te.emplace("newText", json::JSON::str(d.fix_text.as_str()));
-            } else {
-                te.emplace("range", range_json(src, &ls, d.fix_start, d.fix_end - d.fix_start));
-                te.emplace("newText", json::JSON::str(""));
-            }
-            edits.push_back(te);
+            edits.push_back(Server::fix_text_edit(d, src, ls));
             low = d.fix_start;
         }
-        let mut changes = json::JSON::object();
-        changes.emplace(uri.as_str(), edits);
-        let mut we = json::JSON::object();
-        we.emplace("changes", changes);
-        return we;
+        return self.workspace_edit(r, m, edits);
     }
 
     // The diagnostic echo attached to an action so the client pins it to its squiggle.
-    fn diag_echo(self: &Self, r: usize, m: usize, k: usize) json::JSON {
+    fn diag_echo(self: &Self, r: usize, m: usize, k: usize, ls: &Vector<u32>) json::JSON {
         let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
-        let ls = text::line_starts(src);
         let d = self.roots.at(r).diags.at(k);
         let mut dj = json::JSON::object();
-        dj.emplace("range", range_json(src, &ls, d.start, d.len));
+        dj.emplace("range", range_json(src, ls, d.start, d.len));
         dj.emplace("severity", json::JSON::integer(d.severity));
         dj.emplace("source", json::JSON::str("super-c"));
         dj.emplace("message", json::JSON::str(d.msg.as_str()));
@@ -2849,7 +2977,7 @@ extend Server {
                             want_quickfix = false;
                             want_fixall = false;
                             for i in 0..only.size() {
-                                if only.at(i).kind != json::JT_STRING {
+                                if !only.at(i).is_string() {
                                     continue;
                                 }
                                 let kind = only.at(i).get_str();
@@ -2894,9 +3022,6 @@ extend Server {
                 } else if d.fix_kind == 2 {
                     title.clear();
                     title.push_str("Declare 'const fn'");
-                } else if d.fix_kind == 3 {
-                    title.clear();
-                    title.push_str("Insert generated code");
                 } else if d.fix_kind == 4 {
                     title.clear();
                     title.push_str("Apply fix");
@@ -2904,7 +3029,7 @@ extend Server {
                 let mut act = json::JSON::object();
                 act.emplace("title", json::JSON::string(title));
                 act.emplace("kind", json::JSON::str("quickfix"));
-                act.emplace("diagnostics", self.diag_echo(h.r, h.m, k));
+                act.emplace("diagnostics", self.diag_echo(h.r, h.m, k, &ls));
                 if self.cap_action_resolve {
                     let mut data = json::JSON::object();
                     data.emplace("uri", json::JSON::str(uri.as_str()));
@@ -2912,7 +3037,7 @@ extend Server {
                     data.emplace("diag", json::JSON::integer(k as i64));
                     act.emplace("data", data);
                 } else {
-                    act.emplace("edit", self.fix_edit_json(h.r, h.m, k));
+                    act.emplace("edit", self.fix_edit_json(h.r, h.m, k, &ls));
                 }
                 arr.push_back(act);
             }
@@ -2968,7 +3093,7 @@ extend Server {
                         let mut act = json::JSON::object();
                         act.emplace("title", json::JSON::string(title));
                         act.emplace("kind", json::JSON::str("quickfix"));
-                        act.emplace("diagnostics", self.diag_echo(h.r, h.m, k));
+                        act.emplace("diagnostics", self.diag_echo(h.r, h.m, k, &ls));
                         act.emplace("edit", we);
                         arr.push_back(act);
                     }
@@ -2991,7 +3116,7 @@ extend Server {
                             let mut act = json::JSON::object();
                             act.emplace("title", json::JSON::string(title));
                             act.emplace("kind", json::JSON::str("quickfix"));
-                            act.emplace("diagnostics", self.diag_echo(h.r, h.m, k));
+                            act.emplace("diagnostics", self.diag_echo(h.r, h.m, k, &ls));
                             act.emplace("edit", we);
                             arr.push_back(act);
                         },
@@ -3011,7 +3136,7 @@ extend Server {
                 data.emplace("fixall", json::JSON::boolean(true));
                 act.emplace("data", data);
             } else {
-                act.emplace("edit", self.fixall_edit_json(h.r, h.m));
+                act.emplace("edit", self.fixall_edit_json(h.r, h.m, &ls));
             }
             arr.push_back(act);
         }
@@ -3055,9 +3180,10 @@ extend Server {
             return;
         }
         let mut out = action.clone();
+        let ls = text::line_starts(self.roots.at(r as usize).pkg.modules.at(m as usize).source.as_str());
         let fixall = data.value("fixall").is_some();
         if fixall {
-            out.emplace("edit", self.fixall_edit_json(r as usize, m as usize));
+            out.emplace("edit", self.fixall_edit_json(r as usize, m as usize, &ls));
             respond(f, req.at_key("id"), &out);
             return;
         }
@@ -3067,7 +3193,7 @@ extend Server {
             send_error(f, req.at_key("id"), -32803, "the diagnostic is gone; request code actions again");
             return;
         }
-        out.emplace("edit", self.fix_edit_json(r as usize, m as usize, k as usize));
+        out.emplace("edit", self.fix_edit_json(r as usize, m as usize, k as usize, &ls));
         respond(f, req.at_key("id"), &out);
     }
 
@@ -3107,7 +3233,7 @@ extend Server {
             None => {},
         };
         if any {
-            self.rebuild_all(f, false);
+            self.rebuild_all(f, false, true);
         }
     }
 
@@ -3196,8 +3322,7 @@ extend Server {
                                     let mut k: usize = 0;
                                     while k < self.folders.len() {
                                         if self.folders.at(k).as_str() == c.as_str() {
-                                            let old = self.folders.remove(k).unwrap();
-                                            old.free();
+                                            let _ = self.folders.remove(k);
                                         } else {
                                             k += 1;
                                         }
@@ -3205,7 +3330,7 @@ extend Server {
                                     let mut r: usize = 0;
                                     while r < self.roots.len() {
                                         if self.roots.at(r).ws.as_str() == c.as_str() {
-                                            self.roots.remove(r).unwrap().free();
+                                            let _ = self.roots.remove(r);
                                         } else {
                                             r += 1;
                                         }
@@ -3223,7 +3348,7 @@ extend Server {
         if self.folders.len() != 0 {
             self.ws_root = self.folders.at(0).clone();
         }
-        self.rebuild_all(f, false);
+        self.rebuild_all(f, false, true);
     }
 
     // Navigation and information requests.
@@ -3237,7 +3362,8 @@ extend Server {
         }
         switch feat::type_definition(&self.roots.at(h.r).pkg, h.m, h.off) {
             Some(l) => {
-                let lj = self.loc_json(h.r, &l);
+                let mut lm = LsMemo::new();
+                let lj = self.loc_json(h.r, &l, &mut lm);
                 respond(f, req.at_key("id"), &lj);
             },
             None => {
@@ -3255,8 +3381,9 @@ extend Server {
         }
         let locs = feat::implementations(&self.roots.at(h.r).pkg, h.m, h.off);
         let mut arr = json::JSON::array();
+        let mut lm = LsMemo::new();
         for i in 0..locs.len() {
-            arr.push_back(self.loc_json(h.r, locs.at(i)));
+            arr.push_back(self.loc_json(h.r, locs.at(i), &mut lm));
         }
         respond(f, req.at_key("id"), &arr);
     }
@@ -3349,7 +3476,7 @@ extend Server {
             return;
         }
         let pkg = &self.roots.at(r as usize).pkg;
-        let syms = feat::document_symbols(pkg, m as usize);
+        let syms = feat::document_symbols(pkg, m as usize, true);
         let src = pkg.modules.at(m as usize).source.as_str();
         let ls = text::line_starts(src);
         if self.cap_hier_symbols {
@@ -3409,48 +3536,51 @@ extend Server {
             },
             None => {},
         };
-        let mut arr = json::JSON::array();
-        let mut seen = Vector::<String>::new(); // "file:start" keys already emitted (dedup across roots)
+        // Hits from every built root's workspace modules (std/ffi noise stays out of workspace symbol
+        // lists), each root capped before the merge, so a filtered-out module never uses up the cap.
+        let mut keyed = Vector::<KeyedSym>::new();
         for r in 0..self.roots.len() {
             if !self.roots.at(r).built || self.roots.at(r).pkg.modules.len() == 0 {
                 continue;
             }
-            let mut hits = Vector::<feat::WsSym>::new();
-            feat::workspace_symbols(&self.roots.at(r).pkg, query, self.max_results, &mut hits);
-            for i in 0..hits.len() {
-                let hsym = hits.at(i);
-                let file = self.roots.at(r).files.at(hsym.module as usize).as_str();
-                if !self.in_workspace(file) {
-                    // Std/ffi noise stays out of workspace symbol lists.
-                    continue;
-                }
-                let mut key = String::from_str(file);
-                key.push_byte(b':');
-                key.push_i64(hsym.start);
-                let mut dup = false;
-                for q in 0..seen.len() {
-                    if seen.at(q).as_str() == key.as_str() {
-                        dup = true;
-                    }
-                }
-                if dup {
-                    key.free();
-                    continue;
-                }
-                seen.push(key);
-                let l = feat::Loc { module: hsym.module, start: hsym.start, end: hsym.end };
-                let mut o = json::JSON::object();
-                o.emplace("name", json::JSON::str(hsym.name.as_str()));
-                o.emplace("kind", json::JSON::integer(hsym.kind));
-                o.emplace("location", self.loc_json(r, &l));
-                arr.push_back(o);
-                if arr.size() >= 256 {
-                    break;
-                }
+            let files = &self.roots.at(r).files;
+            let mut searched = Vector::<bool>::new();
+            searched.reserve(files.len());
+            for m in 0..files.len() {
+                searched.push(self.in_workspace(files.at(m).as_str()));
             }
-            if arr.size() >= 256 {
+            let mut hits = Vector::<feat::WsSym>::new();
+            feat::workspace_symbols(&self.roots.at(r).pkg, query, self.max_results, &searched, &mut hits);
+            hits.reverse();
+            loop {
+                switch hits.pop() {
+                    Some(h) => {
+                        keyed.push(KeyedSym { path: files.at(h.module as usize).clone(), r: r as u32, sym: h });
+                    },
+                    _ => {
+                        break;
+                    },
+                };
+            }
+        }
+        // The same file appears in several packages: sort by (file, start), keep one per site.
+        keyed.sort_by(|x: &KeyedSym, y: &KeyedSym| keyed_sym_cmp(x, y));
+        let mut arr = json::JSON::array();
+        let mut ls = LsMemo::new();
+        for i in 0..keyed.len() {
+            if arr.size() >= self.max_results {
                 break;
             }
+            if i > 0 && keyed_sym_cmp(keyed.at(i - 1), keyed.at(i)) == 0 {
+                continue;
+            }
+            let ks = keyed.at(i);
+            let l = feat::Loc { module: ks.sym.module, start: ks.sym.start, end: ks.sym.end };
+            let mut o = json::JSON::object();
+            o.emplace("name", json::JSON::str(ks.sym.name.as_str()));
+            o.emplace("kind", json::JSON::integer(ks.sym.kind));
+            o.emplace("location", self.loc_json(ks.r as usize, &l, &mut ls));
+            arr.push_back(o);
         }
         respond(f, req.at_key("id"), &arr);
     }
@@ -3504,31 +3634,27 @@ extend Server {
 
     fn on_selection_range(self: &mut Self, req: &json::JSON, f: *mut stdio::FILE) {
         let nullv = json::JSON::default();
-        let mut uri = "";
-        let mut positions = json::JSON::array();
-        switch req.value("params") {
-            Some(params) => {
-                switch params.value("textDocument") {
-                    Some(td) => {
-                        uri = td.value_str("uri");
-                    },
-                    None => {},
-                };
-                switch params.value("positions") {
-                    Some(ps) => {
-                        positions = ps.clone();
-                    },
-                    None => {},
-                };
-            },
-            None => {},
-        };
-        let path = uri_doc_path(uri);
-        let r = self.owning_root(path.as_str());
-        if r < 0 || !positions.is_array() {
+        let po = req.value("params");
+        if po.is_none() {
             respond(f, req.at_key("id"), &nullv);
             return;
         }
+        let params = po.unwrap();
+        let mut uri = "";
+        switch params.value("textDocument") {
+            Some(td) => {
+                uri = td.value_str("uri");
+            },
+            None => {},
+        };
+        let pso = params.value("positions");
+        let path = uri_doc_path(uri);
+        let r = self.owning_root(path.as_str());
+        if r < 0 || pso.is_none() || !pso.unwrap().is_array() {
+            respond(f, req.at_key("id"), &nullv);
+            return;
+        }
+        let positions = pso.unwrap();
         let m = self.root_module(r as usize, path.as_str());
         if m >= 0 {
             // The bodies of a document the client never opened may be released.
@@ -3555,7 +3681,7 @@ extend Server {
                 let mut o = json::JSON::object();
                 o.emplace("range", range_json(src, &ls, l.start, l.end - l.start));
                 if !cur.is_null() {
-                    o.emplace("parent", cur.clone());
+                    o.emplace("parent", replace(&mut cur, json::JSON::default()));
                 }
                 cur = o;
             }
@@ -3601,18 +3727,20 @@ extend Server {
     // The complete current diagnostic list for `uri`, assembled from every built root's retained
     // records: exactly the sources a publish round uses.
     fn current_diags_for(self: &Self, uri: str) json::JSON {
+        // Published URIs carry the CANONICAL path; normalize the request URI the same way. Only
+        // that file's records are converted.
+        let path = uri_doc_path(uri);
         let mut ps = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
         for r in 0..self.roots.len() {
             if self.roots.at(r).built {
-                self.publish_root_diags(r, &mut ps);
+                self.publish_root_diags(r, &mut ps, path.as_str());
             }
         }
         self.publish_manifest_diags(&mut ps);
-        // Published URIs carry the CANONICAL path; normalize the request URI the same way.
-        let want = text::path_to_uri(uri_doc_path(uri).as_str());
+        let want = text::path_to_uri(path.as_str());
         for i in 0..ps.uris.len() {
             if ps.uris.at(i).as_str() == want.as_str() || ps.uris.at(i).as_str() == uri {
-                return ps.arrs.at(i).clone();
+                return replace(ps.arrs.index_mut(i), json::JSON::default());
             }
         }
         return json::JSON::array();
@@ -3648,7 +3776,7 @@ extend Server {
             return;
         }
         let arr = self.current_diags_for(uri);
-        let dumped = arr.dump(false);
+        let dumped = arr.dump();
         let mut rid = String::from_str("d");
         rid.push_u64(Server::fnv64(dumped.as_str()));
         let mut res = json::JSON::object();
@@ -3767,18 +3895,24 @@ extend Server {
         }
         let mut hits = Vector::<RefHit>::new();
         self.collect_refs(h.r, d, false, &mut hits);
-        // Group reference sites by their enclosing function (RefHit.s reused as the fn node id).
+        // Group reference sites by their enclosing function (RefHit.s reused as the fn node id). The
+        // hits come grouped by file, so each module's functions and line starts are computed once.
         let mut froms = Vector::<RefHit>::new();
         let mut ranges = Vector::<json::JSON>::new();
+        let mut lm = LsMemo::new();
+        let mut fns = Vector::<feat::FnSpan>::new();
         for i in 0..hits.len() {
             let rh = *hits.at(i);
-            let fnid = feat::enclosing_function(&self.roots.at(rh.r as usize).pkg, rh.m as usize, rh.s);
+            let src = self.roots.at(rh.r as usize).pkg.modules.at(rh.m as usize).source.as_str();
+            if lm.r != rh.r as usize || lm.m != rh.m {
+                fns = feat::body_functions(&self.roots.at(rh.r as usize).pkg, rh.m as usize);
+                lm.update(rh.r as usize, rh.m, src);
+            }
+            let fnid = feat::enclosing_in(&fns, rh.s);
             if fnid == astn::NODE_NONE {
                 continue;
             }
-            let src = self.roots.at(rh.r as usize).pkg.modules.at(rh.m as usize).source.as_str();
-            let ls = text::line_starts(src);
-            let rj = range_json(src, &ls, rh.s, rh.e - rh.s);
+            let rj = range_json(src, &lm.ls, rh.s, rh.e - rh.s);
             let mut gi: i64 = -1;
             for k in 0..froms.len() {
                 if froms.at(k).r == rh.r && froms.at(k).m == rh.m && froms.at(k).s == fnid {
@@ -3798,7 +3932,7 @@ extend Server {
             let fd = astn::DefId { module: g.m as astn::ModuleId, node: g.s };
             let mut o = json::JSON::object();
             o.emplace("from", self.hier_item(g.r as usize, fd, 12));
-            o.emplace("fromRanges", ranges.at(k).clone());
+            o.emplace("fromRanges", replace(ranges.index_mut(k), json::JSON::default()));
             arr.push_back(o);
         }
         respond(f, req.at_key("id"), &arr);
@@ -3843,7 +3977,7 @@ extend Server {
         for k in 0..tos.len() {
             let mut o = json::JSON::object();
             o.emplace("to", self.hier_item(h.r, *tos.at(k), 12));
-            o.emplace("fromRanges", ranges.at(k).clone());
+            o.emplace("fromRanges", replace(ranges.index_mut(k), json::JSON::default()));
             arr.push_back(o);
         }
         respond(f, req.at_key("id"), &arr);

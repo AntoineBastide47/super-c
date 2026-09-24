@@ -24,7 +24,8 @@ ModuleIds are deterministic regardless of readdir order. Parallel under `--jobs`
 ## 2. Platform Filter (`platform_filter`)
 
 `@platform` / `@arch` gating: items are compacted out of each AST by target mask before
-resolution. `--target=` / `--arch=` and `--bootstrap-tags` feed the mask.
+resolution (`Package::platform_filter` in `src/module/loader.spc`; the driver, the LSP and
+`package_from_source` all apply it). Stacked gates on one item intersect. `--target=` / `--arch=` and `--bootstrap-tags` feed the mask.
 
 ## 3. Resolve + HIR, per module (`src/resolver/`, `src/hir/lower.spc`)
 
@@ -91,8 +92,8 @@ Per function (`bc_fn`, extending `TypeChecker`):
    `TM_DROP` terminators and flag temps; the inliner's size verdict is recorded first
    (`CoreBody.inline_size_ok`). Under `SC_BC_VALIDATE=1` the structural verifier and
    `verify_drops` check every elaborated body.
-5. Spent Lowerers are recycled into the shared `irl::Keep` cache — one elaborated lowering
-   per body, reused by emission (a parallel job keeps its own and absorbs it under the
+5. Each spent Lowerer's body and closures are kept as a `KeptBody` in the shared `irl::Keep`
+   cache: one elaborated lowering per body, reused by emission (a parallel job keeps its own and absorbs it under the
    engine lock). Every job leases an oracle + context slot from a bounded pool; a module
    closes (Core IR ready, emission dependencies, body syntax released) when its job ends.
    Diagnostics publish per item in declaration order.
@@ -116,7 +117,9 @@ modular return-lifetime check) run alongside.
   linted module on the item job runner, a private engine leased per worker (the serial
   path scans with the master engine), diagnostics published in declaration order.
 - `cir.flush_asserts` / `flush_consts`: the deferred static_asserts and consts
-  re-evaluate now that every module is fully typed; failures carry the CTFE stack.
+  re-evaluate now that every module is fully typed; failures carry the CTFE stack. A
+  top-level `static_assert` that still does not fold is an error (asserts inside bodies may
+  depend on generics and stay deferred).
 - Test plan construction (`--test` builds).
 
 ## 8. Runtime + External C (`write_super_rt`, `ext_c_collect`)

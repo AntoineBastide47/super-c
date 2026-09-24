@@ -8,7 +8,6 @@
 // NODE_NONE), so parsing always completes and build_ast always produces a NODE_PROGRAM root.
 // PARSE_MAX_DEPTH bounds recursion on types, statements, and expressions.
 import string as cstring;
-import stdlib;
 import lexer::token as *;
 import lexer::token_type as *;
 import ast::ast as *;
@@ -70,7 +69,7 @@ pub struct Parser<'a> {
     pub derive_end: u32,
     pub expand_derive: bool,
     // `@reflect(key = value, ..)` entries pending on the next declaration; flushed with the owner
-    // by add_attrs_to (struct/enum/field/variant only -- anything else is an error).
+    // by add_attrs_to (struct/enum/field/variant/function only -- anything else is an error).
     pub pending_metas: Vector<MetaAttr>,
     /// Bodies parsed while set stay in the module arena: interface members and the members of a
     /// generic `extend` (see `Ast.b`).
@@ -933,20 +932,10 @@ extend Parser {
         // Go-style named returns: `(ret: bool)` binds `ret` in the body as an implicitly declared
         // `let mut ret: bool;` (definite assignment enforced by the usual uninitialized tracking),
         // and a bare `return;` returns the named bindings. All-or-none named.
-        let mut nnamed: u32 = 0;
-        for i in 0..returns.len {
-            if self.ast.at_const(unsafe self.ast.list(returns)[i as usize]).kind == NodeKind::NODE_PARAMETER {
-                nnamed += 1;
-            }
-        }
+        let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
+        let nnamed = self.install_named_returns(returns);
         if nnamed != 0 && nnamed != returns.len {
             self.error_here("either all return values are named or none");
-        }
-        let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
-        if nnamed != 0 && nnamed == returns.len {
-            for i in 0..returns.len {
-                self.nrets.push(unsafe self.ast.list(returns)[i as usize]);
-            }
         }
         let mut body = NODE_NONE;
         let outer_sink = self.ast.sink_body;
@@ -980,16 +969,21 @@ extend Parser {
                         returns: returns,
                         where_clause: where_clause,
                         body: body,
-                        is_public: false,
-                        is_extern: false,
-                        is_variadic: is_variadic,
-                        is_const: false,
-                        is_unsafe: false,
+                        flags: if is_variadic {
+                            FN_VARIADIC;
+                        } else {
+                            0;
+                        },
                     },
                 },
             },
         );
         self.ast.set_lifetimes(__decl, lifetimes);
+        for w in 0..where_clause.len {
+            self.ast.where_bounds.push(
+                WhereBound { func: __decl, pred: unsafe self.ast.list(where_clause)[w as usize] },
+            );
+        }
         return __decl;
     }
 
@@ -1001,18 +995,8 @@ extend Parser {
     pub fn reparse_fn_body(self: &mut Self, at: usize, fnid: NodeId) NodeId {
         self.current = at;
         let returns = self.ast.at_const(fnid).as_data.function.returns;
-        let mut nnamed: u32 = 0;
-        for i in 0..returns.len {
-            if self.ast.at_const(unsafe self.ast.list(returns)[i as usize]).kind == NodeKind::NODE_PARAMETER {
-                nnamed += 1;
-            }
-        }
         let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
-        if nnamed != 0 && nnamed == returns.len {
-            for i in 0..returns.len {
-                self.nrets.push(unsafe self.ast.list(returns)[i as usize]);
-            }
-        }
+        let _ = self.install_named_returns(returns);
         let mut body = NODE_NONE;
         let outer_sink = self.ast.sink_body;
         self.ast.sink_body = Ast::in_body(self.ast.at_const(fnid).as_data.function.body);
@@ -1027,6 +1011,23 @@ extend Parser {
         self.ast.sink_body = outer_sink;
         self.nrets = outer_nrets;
         return body;
+    }
+
+    // Count the named entries of `returns`; when all are named, make them the named-return context
+    // (`nrets`) of the body about to be parsed.
+    fn install_named_returns(self: &mut Self, returns: NodeList) u32 {
+        let mut nnamed: u32 = 0;
+        for i in 0..returns.len {
+            if self.ast.at_const(unsafe self.ast.list(returns)[i as usize]).kind == NodeKind::NODE_PARAMETER {
+                nnamed += 1;
+            }
+        }
+        if nnamed != 0 && nnamed == returns.len {
+            for i in 0..returns.len {
+                self.nrets.push(unsafe self.ast.list(returns)[i as usize]);
+            }
+        }
+        return nnamed;
     }
 
     // Prepend one synthetic `let mut <name>: <ty>;` per named return to `body`'s statements. The
@@ -1208,7 +1209,6 @@ extend Parser {
             let sp0 = self.ast.at_const(vid).span;
             self.errors.emit(sp0.start, sp0.end - sp0.start, format("only '@reflect' applies to a variant declaration"));
         }
-        self.pending_metas.free();
         self.pending_metas = saved_metas;
         self.add_attrs_to(&mut vattrs, vid);
         return vid;
@@ -1315,9 +1315,9 @@ extend Parser {
             return NODE_NONE;
         }
         let f = self.parse_function(true, is_const);
-        self.ast.at(f).as_data.function.is_unsafe = true;
+        self.ast.at(f).as_data.function.set(FN_UNSAFE, true);
         if is_const {
-            self.ast.at(f).as_data.function.is_const = true;
+            self.ast.at(f).as_data.function.set(FN_CONST, true);
         }
         self.ast.at(f).span.start = start;
         return f;
@@ -1330,7 +1330,7 @@ extend Parser {
         self.advance();
         if self.check(TokenType::Fn) {
             let f = self.parse_function(true, true);
-            self.ast.at(f).as_data.function.is_const = true;
+            self.ast.at(f).as_data.function.set(FN_CONST, true);
             self.ast.at(f).span.start = start;
             return f;
         }
@@ -1341,8 +1341,8 @@ extend Parser {
                 return NODE_NONE;
             }
             let f = self.parse_function(true, true);
-            self.ast.at(f).as_data.function.is_const = true;
-            self.ast.at(f).as_data.function.is_unsafe = true;
+            self.ast.at(f).as_data.function.set(FN_CONST, true);
+            self.ast.at(f).as_data.function.set(FN_UNSAFE, true);
             self.ast.at(f).span.start = start;
             return f;
         }
@@ -1462,9 +1462,9 @@ extend Parser {
                     self.error_here("expected 'fn' or 'const fn' after 'unsafe' in an interface");
                 } else {
                     let f = self.parse_function(false, true);
-                    self.ast.at(f).as_data.function.is_unsafe = true;
+                    self.ast.at(f).as_data.function.set(FN_UNSAFE, true);
                     if uconst {
-                        self.ast.at(f).as_data.function.is_const = true;
+                        self.ast.at(f).as_data.function.set(FN_CONST, true);
                     }
                     self.ast.at(f).span.start = ustart;
                     if self.ast.at_const(f).as_data.function.body == NODE_NONE {
@@ -1479,7 +1479,7 @@ extend Parser {
                     self.error_here("expected 'fn' after 'const' in an interface");
                 } else {
                     let f = self.parse_function(false, true);
-                    self.ast.at(f).as_data.function.is_const = true;
+                    self.ast.at(f).as_data.function.set(FN_CONST, true);
                     self.ast.at(f).span.start = cstart;
                     if self.ast.at_const(f).as_data.function.body == NODE_NONE {
                         self.expect(TokenType::Semicolon, "';'");
@@ -1537,13 +1537,13 @@ extend Parser {
             let is_public = self.match(TokenType::Pub);
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(true, false);
-                self.ast.at(f).as_data.function.is_public = is_public;
+                self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
                 self.add_attrs_to(&mut attrs, f);
                 self.ast.push(f);
             } else if self.check(TokenType::Unsafe) {
                 let f = self.parse_unsafe_fn();
                 if f != NODE_NONE {
-                    self.ast.at(f).as_data.function.is_public = is_public;
+                    self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
                     self.add_attrs_to(&mut attrs, f);
                     self.ast.push(f);
                 }
@@ -1554,7 +1554,7 @@ extend Parser {
                 let cn = self.parse_const_or_fn();
                 if cn != NODE_NONE {
                     if self.ast.at_const(cn).kind == NodeKind::NODE_FUNCTION {
-                        self.ast.at(cn).as_data.function.is_public = is_public;
+                        self.ast.at(cn).as_data.function.set(FN_PUBLIC, is_public);
                         self.add_attrs_to(&mut attrs, cn);
                     } else {
                         self.ast.at(cn).as_data.const_def.is_public = is_public;
@@ -1626,8 +1626,8 @@ extend Parser {
                         format("extern function declarations cannot have a body"),
                     );
                 }
-                self.ast.at(f).as_data.function.is_public = is_public;
-                self.ast.at(f).as_data.function.is_extern = true;
+                self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
+                self.ast.at(f).as_data.function.set(FN_EXTERN, true);
                 self.add_attrs_to(&mut attrs, f);
                 self.expect(TokenType::Semicolon, "';'");
                 self.ast.push(f);
@@ -1795,12 +1795,12 @@ extend Parser {
         switch self.peek_type() {
             Fn => {
                 id = self.parse_function(true, false);
-                self.ast.at(id).as_data.function.is_public = is_public;
+                self.ast.at(id).as_data.function.set(FN_PUBLIC, is_public);
             },
             Unsafe => {
                 id = self.parse_unsafe_fn();
                 if id != NODE_NONE {
-                    self.ast.at(id).as_data.function.is_public = is_public;
+                    self.ast.at(id).as_data.function.set(FN_PUBLIC, is_public);
                 }
             },
             Struct => {
@@ -1831,7 +1831,7 @@ extend Parser {
                 id = self.parse_const_or_fn();
                 if id != NODE_NONE {
                     if self.ast.at_const(id).kind == NodeKind::NODE_FUNCTION {
-                        self.ast.at(id).as_data.function.is_public = is_public;
+                        self.ast.at(id).as_data.function.set(FN_PUBLIC, is_public);
                     } else {
                         self.ast.at(id).as_data.const_def.is_public = is_public;
                     }
@@ -1852,9 +1852,7 @@ extend Parser {
                 return NODE_NONE;
             },
         };
-        self.pending_metas.free();
         self.pending_metas = saved_metas;
-        self.derive_ifaces.free();
         self.derive_ifaces = saved_derives;
         self.derive_start = saved_dstart;
         self.derive_end = saved_dend;
@@ -2565,47 +2563,24 @@ extend Parser {
     }
 
     pub fn path_chain_to_type_path(self: &mut Self, chain: NodeId, start: u32) NodeId {
-        // fixed 16-segment cap: a deeper member chain silently loses its leftmost segments
-        let mut segs: [NodeId; 16] = [
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-            0u32,
-        ];
-        let mut n: u32 = 0;
+        let mark = self.ast.mark();
         let mut cur = chain;
         loop {
-            let cn = self.ast.at_const(cur);
-            if n < 16 {
-                unsafe segs[n] = cn.as_data.member.member;
-                n = n + 1;
-            }
-            let o = cn.as_data.member.object;
-            if self.ast.at_const(o).kind != NodeKind::NODE_MEMBER {
-                if n < 16 {
-                    unsafe segs[n] = o;
-                    n = n + 1;
-                }
+            let mb = self.ast.at_const(cur).as_data.member;
+            self.ast.push(mb.member);
+            if self.ast.at_const(mb.object).kind != NodeKind::NODE_MEMBER {
+                self.ast.push(mb.object);
                 break;
             }
-            cur = o;
+            cur = mb.object;
         }
-        let mark = self.ast.mark();
-        while n > 0 {
-            n = n - 1;
-            self.ast.push(unsafe segs[n]);
+        // The walk visits the rightmost segment first; reverse the run so the path reads left to right.
+        let mut i = mark as usize;
+        let mut j = self.ast.scratch.len() - 1;
+        while i < j {
+            self.ast.scratch.swap(i, j);
+            i = i + 1;
+            j = j - 1;
         }
         let parts = self.ast.commit(mark);
         return self.ast.add(
@@ -3798,7 +3773,11 @@ extend Parser {
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
         while !self.check(TokenType::RightBrace) && !self.at_end() {
+            let before = self.current;
             self.ast.push(self.parse_statement());
+            if self.current == before {
+                self.advance(); // progress guarantee: a failed statement that consumed nothing must not loop
+            }
         }
         let statements = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
@@ -3928,57 +3907,49 @@ extend Parser {
         return syntax.arg_end - syntax.arg_start;
     }
 
-    fn parse_attr_int(self: &Self, lit: Token) u32 {
-        let mut buf: [char; 24] = [
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-            0 as char,
-        ];
-        let mut k: usize = 0;
+    // An integer-literal attribute argument, decoded with the lexer's rules: a 0x/0o/0b prefix selects the
+    // base (a leading 0 alone does not), `_` separates digits, and a type suffix is ignored. A value that
+    // does not fit in u32 is diagnosed.
+    fn parse_attr_int(self: &mut Self, lit: Token) u32 {
+        let mut end = lit.end();
+        ast_numeric_suffix(self.source, lit.start(), lit.end(), &mut end);
         let mut i = lit.start();
-        while i < lit.end() && k + 1 < sizeof([char; 24]) {
+        let mut base: u64 = 10;
+        if end - i > 2 && self.source[i as usize] == b'0' {
+            let c = self.source[(i + 1) as usize] | 0x20u8;
+            if c == b'x' {
+                base = 16;
+            } else if c == b'o' {
+                base = 8;
+            } else if c == b'b' {
+                base = 2;
+            }
+            if base != 10 {
+                i = i + 2;
+            }
+        }
+        let mut v: u64 = 0;
+        while i < end {
             let ch = self.source[i as usize];
             if ch != b'_' {
-                unsafe buf[k] = ch as char;
-                k = k + 1;
+                let d = if ch <= b'9' {
+                    ch - b'0';
+                } else {
+                    (ch | 0x20u8) - b'a' + 10u8;
+                };
+                v = v * base + d as u64;
+                if v > 0xFFFFFFFF {
+                    self.errors.emit(lit.start(), lit.len(), String::from_str("integer argument does not fit in u32"));
+                    return 0;
+                }
             }
             i = i + 1;
         }
-        unsafe buf[k] = 0 as char;
-        return (unsafe stdlib::strtoul(&buf[0], null, 0)) as u32;
+        return v as u32;
     }
 
-    // `@arch` is `@platform`'s sibling on the instruction-set axis; the list grammar is identical, so
-    // both go through one parser with the axis's names supplied by the caller.
-    fn parse_platform_attr(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr) {
-        self.parse_axis_attr(syntax, out, false);
-    }
-
-    fn parse_arch_attr(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr) {
-        self.parse_axis_attr(syntax, out, true);
-    }
-
+    // `@platform(...)` (is_arch false) or `@arch(...)`, its sibling on the instruction-set axis: the list
+    // grammar is identical, only the axis's names differ.
     fn parse_axis_attr(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr, is_arch: bool) {
         if !syntax.has_args {
             let msg = if is_arch {
@@ -4192,18 +4163,18 @@ extend Parser {
             // line the runner would otherwise print, for a benchmark whose output IS its own table.
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_BENCH as u8, arg: 0, str_span: Span::empty() };
             if syntax.has_args {
-                let named = argc == 3 && self.attr_arg(&syntax, 0).kind() == TokenType::Identifier && self.text_is(
+                let mut ok = false;
+                if argc == 3 && self.attr_arg(&syntax, 0).kind() == TokenType::Identifier && self.text_is(
                     self.attr_arg(&syntax, 0),
                     "log_results",
-                ) && self.attr_arg(&syntax, 1).kind() == TokenType::Equal;
-                let val = self.attr_arg(&syntax, 2).kind();
-                if named && (val == TokenType::True || val == TokenType::False) {
-                    out.arg = if val == TokenType::False {
-                        1;
-                    } else {
-                        0;
-                    };
-                } else {
+                ) && self.attr_arg(&syntax, 1).kind() == TokenType::Equal {
+                    let val = self.attr_arg(&syntax, 2).kind();
+                    ok = val == TokenType::True || val == TokenType::False;
+                    if val == TokenType::False {
+                        out.arg = 1;
+                    }
+                }
+                if !ok {
                     self.errors.emit(
                         ns.start(),
                         ns.len(),
@@ -4374,12 +4345,12 @@ extend Parser {
         }
         if syntax.parts == 1 && self.text_is(ns, "platform") {
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_PLATFORM as u8, arg: 0, str_span: Span::empty() };
-            self.parse_platform_attr(&syntax, out);
+            self.parse_axis_attr(&syntax, out, false);
             return true;
         }
         if syntax.parts == 1 && self.text_is(ns, "arch") {
             *out = Attr { owner: NODE_NONE, kind: AttrKind::ATTR_ARCH as u8, arg: 0, str_span: Span::empty() };
-            self.parse_arch_attr(&syntax, out);
+            self.parse_axis_attr(&syntax, out, true);
             return true;
         }
         if self.text_is(ns, "fmt") {
@@ -4497,7 +4468,8 @@ extend Parser {
         return true;
     }
 
-    pub fn parse_attributes(self: &mut Self, cap: usize) Vector<Attr> {
+    // `expected` only sizes the first allocation; every parsed attribute is kept.
+    pub fn parse_attributes(self: &mut Self, expected: usize) Vector<Attr> {
         // A stray pending `@reflect` (its position never reached add_attrs_to) is an error, not a
         // silent transfer to whatever declaration comes next.
         if self.pending_metas.len() > 0 {
@@ -4507,10 +4479,10 @@ extend Parser {
         if !self.check(TokenType::At) {
             return attrs;
         }
-        attrs.reserve(cap);
+        attrs.reserve(expected);
         while self.check(TokenType::At) {
             let mut attr = Attr { owner: NODE_NONE, kind: 0, arg: 0, str_span: Span::empty() };
-            if self.parse_attribute(&mut attr) && attrs.len() < cap {
+            if self.parse_attribute(&mut attr) {
                 attrs.push(attr);
             }
         }
@@ -4719,6 +4691,8 @@ pub fn platform_arg_names(out: &mut Vector<String>) {
     out.push(String::from_str("linux"));
     out.push(String::from_str("windows"));
     out.push(String::from_str("wasm"));
+    out.push(String::from_str("ios"));
+    out.push(String::from_str("android"));
 }
 
 /// The identifier vocabulary accepted inside `@arch(...)`.

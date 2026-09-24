@@ -28,9 +28,10 @@ long long sc_bs_cpu_ns(void);
 /* ---- allocation accounting ---------------------------------------------------------------------------
    Counted: every `malloc`, `calloc` and `realloc` call made by this binary's own object code (the program,
    std, the runtime, the ffi shims) while accounting is enabled; `realloc` counts its new size. Not
-   counted: `free`, aligned allocation calls (the runtime makes none), and on macOS the allocations libc
-   makes internally (two-level namespace: libc binds its own malloc); glibc binds ours, so on Linux those
-   count too. Windows counts nothing (no real allocator to forward to across CRTs): `supported` is 0.
+   counted: `free`, aligned allocation calls (std's Global makes them only for types aligned above what
+   malloc guarantees), and on macOS the allocations libc makes internally (two-level namespace: libc binds
+   its own malloc); glibc binds ours, so on Linux those count too. Windows (no real allocator to forward to
+   across CRTs), wasm and libcs other than glibc count nothing: `supported` is 0.
 
    Accounting is per thread (a cache line per thread, handed out on the thread's first counted call, never
    reclaimed, at most SC_BS_ACCT_THREADS; later threads share one atomic line) so counting costs the owning
@@ -57,7 +58,8 @@ const char *sc_bs_os(void);                 /* "macos", "linux", "windows", "was
 const char *sc_bs_arch(void);               /* "aarch64", "x86_64", "wasm32", "unknown" */
 
 /* ---- fresh processes -------------------------------------------------------------------------------
-   `sc_bs_fork` forks (0 in the child, the pid in the parent, -1 where there is no fork: Windows, wasm);
+   `sc_bs_fork` forks (0 in the child, the pid in the parent, -1 where there is no fork: Windows, wasm); on
+   Linux the child drops the parent's cycle events and opens its own on its first `sc_bs_cycles` call;
    `sc_bs_wait` waits for that child and returns its exit code, 128 plus the signal that killed it, or -1
    when the wait itself failed. `sc_bs_flush` flushes every stdio stream (before a fork, so the child does
    not carry the parent's unwritten output). */

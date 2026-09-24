@@ -3,55 +3,29 @@
 /// A code plus an owned message; clones deep-copy the message.
 pub struct Error {
     pub code: i32,
-    message: *mut String,
-}
-
-extern "C" {
-    fn malloc(size: usize) *mut void;
-    fn free(ptr: *mut void) void;
-    fn abort() void;
+    message: String,
 }
 
 extend Error {
-    fn own_message(message: String) *mut String {
-        let p = (unsafe malloc(sizeof(String))) as *mut String;
-        if p as *mut void == null {
-            unsafe abort();
-        }
-        unsafe p[0] = message;
-        return p;
-    }
-
     /// Copies `message`'s bytes into an owned String the Error frees.
     pub fn new(code: i32, message: str) Error {
-        return Error { code: code, message: Error::own_message(String::from_str(message)) };
+        return Error { code: code, message: String::from_str(message) };
     }
 
     /// Takes ownership of `message` (no byte copy).
     pub fn from_string(code: i32, message: String) Error {
-        return Error { code: code, message: Error::own_message(message) };
+        return Error { code: code, message: message };
     }
 
     /// The message text.
     pub fn message(self: &Error) &String {
-        return unsafe &self.message[0];
-    }
-}
-
-extend Error as Free {
-    /// Frees the owned message; further calls are no-ops (the pointer is nulled).
-    pub fn free(self: &mut Error) {
-        if self.message as *mut void != null {
-            self.message.free();
-            unsafe free(self.message);
-            self.message = null;
-        }
+        return &self.message;
     }
 }
 
 extend Error as Clone {
     pub fn clone(self: &Error) Error {
-        return Error { code: self.code, message: Error::own_message(unsafe self.message[0].clone()) };
+        return Error { code: self.code, message: self.message.clone() };
     }
 }
 
@@ -60,7 +34,7 @@ extend Error as Format {
         let mut out = String::from_str("Error(");
         out.push_i64(self.code);
         out.push_str(": ");
-        out.push_string(unsafe &self.message[0]);
+        out.push_string(&self.message);
         out.push_str(")");
         return out;
     }

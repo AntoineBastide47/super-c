@@ -58,6 +58,22 @@ int sc_stat_isdir(const char *path) {
   return S_ISDIR(st.st_mode) ? 1 : 0;
 }
 
+int sc_lstat_isdir(const char *path) {
+#if defined(_WIN32)
+  DWORD a = GetFileAttributesA(path);
+  if (a == INVALID_FILE_ATTRIBUTES)
+    return -1;
+  if (!(a & FILE_ATTRIBUTE_DIRECTORY))
+    return 0;
+  return (a & FILE_ATTRIBUTE_REPARSE_POINT) ? 2 : 1;
+#else
+  struct stat st;
+  if (lstat(path, &st) != 0)
+    return -1;
+  return S_ISDIR(st.st_mode) ? 1 : 0;
+#endif
+}
+
 /* DT_DIR/DT_UNKNOWN are BSD/Linux extensions hidden under strict _POSIX_C_SOURCE; their values are a
    stable ABI so define them if the header didn't. (The d_type FIELD itself is present on both platforms.) */
 #ifndef DT_UNKNOWN
@@ -145,8 +161,9 @@ int sc_exe_path(char *buf, unsigned size) {
   uint32_t sz = size;
   return _NSGetExecutablePath(buf, &sz);
 #elif defined(__linux__)
-  ssize_t n = readlink("/proc/self/exe", buf, (size_t)size - 1);
-  if (n <= 0)
+  /* readlink does not terminate and silently truncates: a result that fills `buf` may be cut short. */
+  ssize_t n = readlink("/proc/self/exe", buf, (size_t)size);
+  if (n <= 0 || (size_t)n >= (size_t)size)
     return -1;
   buf[n] = '\0';
   return 0;
@@ -306,6 +323,27 @@ long long sc_mtime(const char *path) {
   if (stat(path, &st) != 0)
     return 0;
   return (long long)st.st_mtime;
+#endif
+}
+
+long long sc_mtime_ns(const char *path) {
+#if defined(_WIN32)
+  WIN32_FILE_ATTRIBUTE_DATA d;
+  if (!GetFileAttributesExA(path, GetFileExInfoStandard, &d))
+    return 0;
+  /* FILETIME counts 100 ns ticks from 1601; the offset moves the origin to 1970. */
+  const unsigned long long t =
+      ((unsigned long long)d.ftLastWriteTime.dwHighDateTime << 32) | d.ftLastWriteTime.dwLowDateTime;
+  return (long long)(t - 116444736000000000ull) * 100;
+#else
+  struct stat st;
+  if (stat(path, &st) != 0)
+    return 0;
+#if defined(__APPLE__)
+  return (long long)st.st_mtimespec.tv_sec * 1000000000ll + st.st_mtimespec.tv_nsec;
+#else
+  return (long long)st.st_mtim.tv_sec * 1000000000ll + st.st_mtim.tv_nsec;
+#endif
 #endif
 }
 
@@ -647,15 +685,29 @@ long long sc_spawn_argv(const char *const *argv, const char *out_path) {
 #endif
 }
 
-/* sc_spawn_argv + wait: the child's exit code, or -1 on spawn/wait failure. */
+/* sc_spawn_argv + wait: the child's exit code, or -1 on spawn/wait failure. A child a signal ended
+   returns 1 and is named on stderr with the signal: its exit status carries no other trace of it. */
 int sc_exec_argv(const char *const *argv, const char *out_path) {
   long long pid = sc_spawn_argv(argv, out_path);
   if (pid < 0)
     return -1;
+#if defined(_WIN32) || defined(__wasi__)
   int code = 1;
   if (sc_waitpid(pid, &code) != 0)
     return -1;
   return code;
+#else
+  int st = 0;
+  while (waitpid((pid_t)pid, &st, 0) < 0) {
+    if (errno != EINTR)
+      return -1;
+  }
+  if (WIFSIGNALED(st)) {
+    fprintf(stderr, "super-c: '%s' was terminated by signal %d (%s)\n", argv[0], WTERMSIG(st), strsignal(WTERMSIG(st)));
+    return 1;
+  }
+  return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+#endif
 }
 
 /* Wait until ANY of the n spawned children exits: returns its index and stores its exit code, so the
@@ -754,7 +806,6 @@ int sc_waitpid(long long pid, int *code) {
 #endif
 }
 
-/* Atomic-ish rename for the build system's link-then-swap; Windows rename() refuses to replace. */
 int sc_chmod_exec(const char *path) {
 #if defined(_WIN32)
   (void)path; /* no exec bit: Windows decides by extension */
@@ -764,6 +815,7 @@ int sc_chmod_exec(const char *path) {
 #endif
 }
 
+/* Atomic-ish rename for the build system's link-then-swap; Windows rename() refuses to replace. */
 int sc_rename(const char *from, const char *to) {
 #if defined(_WIN32)
   char side[4096];
@@ -807,6 +859,7 @@ int sc_unsetenv(const char *name) {
 }
 
 /* ---- portable process + filesystem helpers for the test harnesses ---------------------------------- */
+#if !defined(__wasi__) /* WASI spawns no children: the env helpers below serve only sc_run */
 /* strdup is POSIX, not C11, and the Windows spelling differs; one copy here keeps both legs identical. */
 static char *sc_strdup_local(const char *s) {
   size_t n = strlen(s) + 1;
@@ -871,6 +924,7 @@ static void sc_env_restore(sc_env_save *saves, int n) {
     free(saves[i].old);
   }
 }
+#endif
 
 int sc_mkdir_p(const char *path) {
   char buf[4096];
@@ -893,8 +947,12 @@ int sc_mkdir_p(const char *path) {
   return sc_stat_isdir(buf) == 1 ? 0 : -1;
 }
 
+/* Links are removed, never followed: a link to a directory must not lose the target's contents. A child
+   whose path does not fit is left in place (a truncated path names another file), so the rmdir fails and
+   the result reports it. */
 int sc_rm_rf(const char *path) {
-  if (sc_stat_isdir(path) == 1) {
+  const int kind = sc_lstat_isdir(path);
+  if (kind == 1) {
     void *d = sc_opendir(path);
     if (d) {
       void *e;
@@ -903,16 +961,20 @@ int sc_rm_rf(const char *path) {
         if (!strcmp(nm, ".") || !strcmp(nm, ".."))
           continue;
         char child[4096];
-        snprintf(child, sizeof child, "%s/%s", path, nm);
+        const int cn = snprintf(child, sizeof child, "%s/%s", path, nm);
+        if (cn < 0 || (size_t)cn >= sizeof child)
+          continue;
         sc_rm_rf(child);
       }
       sc_closedir(d);
     }
     sc_rmdir(path);
-  } else {
+  } else if (kind == 2) {
+    sc_rmdir(path); /* a Windows directory link or junction: rmdir removes the link alone */
+  } else if (kind == 0) {
     sc_unlink(path);
   }
-  return sc_stat_isdir(path) == 1 ? -1 : 0;
+  return sc_lstat_isdir(path) == -1 ? 0 : -1;
 }
 
 const char *sc_tmpdir(void) {
@@ -1063,9 +1125,11 @@ int sc_run(const char *cmd, const char *in_path, const char *out_path, const cha
   int rc = -1;
   if (posix_spawn(&pid, "/bin/sh", &fa, NULL, argv, environ) == 0) {
     int st = 0;
-    while (waitpid(pid, &st, 0) < 0) {
+    pid_t w;
+    while ((w = waitpid(pid, &st, 0)) < 0 && errno == EINTR) {
     }
-    rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    if (w == pid)
+      rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
   }
   posix_spawn_file_actions_destroy(&fa);
   sc_env_restore(saves, nenv);
@@ -1079,8 +1143,11 @@ int sc_exec(const char *cmd) {
   if (posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ) != 0)
     return -1;
   int st = 0;
-  while (waitpid(pid, &st, 0) < 0) {
+  pid_t w;
+  while ((w = waitpid(pid, &st, 0)) < 0 && errno == EINTR) {
   }
+  if (w != pid)
+    return -1;
   return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 #endif

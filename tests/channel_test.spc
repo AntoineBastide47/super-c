@@ -27,12 +27,12 @@ struct Payload {
 
 extend Payload as Free {
     pub fn free(self: &mut Payload) {
-        let _ = atomic::add_i64(&mut unsafe G_FREES, 1, 0);
+        let _ = unsafe atomic::add_i64(&mut unsafe G_FREES, 1, 0);
     }
 }
 
 fn frees() i64 {
-    return atomic::load_i64(&mut unsafe G_FREES, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_FREES, 1);
 }
 
 // Wait, bounded, until `frees()` reaches `want`: a deferred signal fires before the task's locals drop.
@@ -56,7 +56,7 @@ struct Base {
 
 @test_init
 fn fresh_counters() Base {
-    atomic::store_i64(&mut unsafe G_FREES, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_FREES, 0, 0);
     return Base { cancelled: rt::cancelled_tasks() };
 }
 
@@ -73,9 +73,11 @@ fn cancelled(b: &Base) usize {
     return rt::cancelled_tasks() - b.cancelled;
 }
 
-// Runs a per-run allocation figure is measured over: enough that the leak tracker's own occasional
-// allocations stay far below one per run.
-const MEASURE_RUNS: i64 = 64;
+// Runs a per-run allocation figure is measured over: enough that the leak tracker's own allocations stay
+// below one per run. The tracker allocates one table per shard the first time a block lands there (64
+// shards), and it keeps freed blocks allocated for a while, so each run's block has a new address and a
+// new shard: under glibc the first 64 runs paid one table each.
+const MEASURE_RUNS: i64 = 256;
 
 const fn short() time::Duration {
     return time::Duration::from_millis(20);
@@ -174,6 +176,56 @@ fn an_unbounded_channel_allocates_again_only_past_its_inline_ring() {
         // The ninth item outgrows the inline ring: the block, then one heap ring.
         assert_eq(grown, 2);
     }
+}
+
+// A heap ring that grew for a burst is halved as the burst drains, down to twice the inline ring: 64
+// items grow it to 16, 32 and 64 slots, and draining them shrinks it to 32 and then 16.
+@test
+fn an_unbounded_channel_gives_a_burst_ring_back_as_it_drains() {
+    let drained = allocs_per_run(
+        || {
+            let ch = chan::Channel::<i64>::unbounded();
+            let tx = ch.sender();
+            let rx = ch.receiver();
+            for i in 0..64 {
+                let _ = tx.send(i);
+            }
+            for i in 0..64 {
+                assert_eq(rx.recv().unwrap(), i);
+            }
+        },
+    );
+    if drained >= 0 {
+        // The block, three growths, two shrinks.
+        assert_eq(drained, 6);
+    }
+}
+
+// Items keep their order and are destroyed once across every growth and shrink, including resizes taken
+// while the ring's head has wrapped.
+@test
+fn an_unbounded_channel_keeps_order_across_resizes(fx: &mut Base) {
+    let ch = chan::Channel::<Payload>::unbounded();
+    let tx = ch.sender();
+    let rx = ch.receiver();
+    let mut sent: i64 = 0;
+    let mut got: i64 = 0;
+    for _round in 0..3 {
+        for _i in 0..1000 {
+            let _ = tx.send(Payload { n: sent });
+            sent = sent + 1;
+        }
+        for _i in 0..990 {
+            assert_eq(rx.recv().unwrap().n, got);
+            got = got + 1;
+        }
+    }
+    while got < sent {
+        assert_eq(rx.recv().unwrap().n, got);
+        got = got + 1;
+    }
+    assert_eq(frees(), sent);
+    let _ = fx;
 }
 
 @test
@@ -535,13 +587,13 @@ fn select_may_name_one_channel_twice(fx: &mut Base) {
             assert(false, "a receive arm is ready");
         },
     };
-    // Empty again, and a task sends after a moment: the parked wait ends on a receive arm.
+    // Empty again, and a task sends once this thread sleeps: the parked wait ends on a receive arm.
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w = wg.clone();
     let tx2 = tx.clone();
     launch || {
-        time::sleep(short());
+        assert(ph::wait_os_parked(1), "the selecting thread is asleep");
         let _ = tx2.send(8);
         w.done();
     };
@@ -558,6 +610,80 @@ fn select_may_name_one_channel_twice(fx: &mut Base) {
         },
     };
     wg.wait();
+    rt::shutdown();
+    let _ = fx;
+}
+
+// A cancellation that lands after a notify has claimed a parked `select` does not drop that notify: the
+// selector reports the arm it was woken for, and the request waits for the next cancellation point.
+// Dropping it left a receiver queued behind the selector parked with the value available. One busy worker
+// keeps the woken selector from running until the request is in.
+@test
+fn a_cancel_after_a_select_wake_keeps_the_wake(fx: &mut Base) {
+    rt::set_worker_count(1);
+    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
+    let ktx = kch.sender();
+    let krx = kch.receiver();
+    let ch = chan::Channel::<i64>::bounded(1);
+    let tx = ch.sender();
+    let taken = counter();
+    let gate = counter();
+    let busy = counter();
+    let wg = sync::WaitGroup::new();
+    wg.add(2);
+    {
+        let rx = ch.receiver();
+        let w = wg.clone();
+        let t = taken.clone();
+        launch || {
+            defer w.done();
+            let _ = ktx.send(rt::current_key());
+            let mut sel = selector::Selector::new();
+            let _ = sel.arm_recv(&rx);
+            switch sel.wait() {
+                Ready(_i) => {
+                    if rx.try_recv().is_some() {
+                        let _ = t.get().fetch_add(1, atomics::MemoryOrder::AcqRel);
+                    }
+                },
+                TimedOut => {},
+            };
+        };
+    }
+    let key = krx.recv().unwrap();
+    assert(ph::wait_parked(key), "the selector is queued first");
+    {
+        let rx = ch.receiver();
+        let w = wg.clone();
+        let t = taken.clone();
+        launch || {
+            defer w.done();
+            if rx.recv().is_some() {
+                let _ = t.get().fetch_add(1, atomics::MemoryOrder::AcqRel);
+            }
+        };
+    }
+    assert(ph::wait_waiting(rt::WK_CHANNEL_RECV, 1), "the receiver is queued behind it");
+    {
+        let b = busy.clone();
+        let gt = gate.clone();
+        launch || {
+            b.get().store(1, atomics::MemoryOrder::Release);
+            while gt.get().load(atomics::MemoryOrder::Acquire) == 0 {
+                unsafe sc_runtime::sc_rt_cpu_relax();
+            }
+        };
+    }
+    assert(ph::wait_count(&busy, 1), "the only worker is busy");
+    // The send's notify pops the selector's node and claims its park; the selector cannot run yet.
+    let _ = tx.send(1);
+    assert(rt::request_cancel(key, rt::CR_USER), "the woken selector is live");
+    gate.get().store(1, atomics::MemoryOrder::Release);
+    assert(ph::wait_count(&taken, 1), "the value is taken");
+    // Closing the channel ends whichever wait is left.
+    tx.close();
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "both waiters finish");
+    assert_eq(count(&taken), 1);
     rt::shutdown();
     let _ = fx;
 }
@@ -579,7 +705,7 @@ fn a_plain_thread_select_wakes_on_the_arm_that_moves(fx: &mut Base) {
     let w = wg.clone();
     let s = sent_at.clone();
     launch || {
-        time::sleep(time::Duration::from_millis(50));
+        assert(ph::wait_os_parked(1), "the selecting thread is asleep");
         s.get().store(platform::now_ns(), atomics::MemoryOrder::Release);
         let _ = btx.send(3);
         w.done();
@@ -619,78 +745,60 @@ fn a_plain_thread_select_wakes_on_the_arm_that_moves(fx: &mut Base) {
 
 // --- plain-thread condvar waits -----------------------------------------------------------------------------.
 
-// Permits handed out one at a time to WAITERS plain threads parked on one condvar. A notify wakes the
-// longest-queued waiter and no other: a woken thread that finds no permit counts a stray wake.
+// Permits handed out one at a time to WAITERS plain threads queued on one condvar. Each thread takes one
+// permit and leaves, so nothing outside the queue can take a permit meant for the notified thread. A notify
+// wakes the longest-queued waiter and no other: a woken thread that finds no permit counts a stray wake.
 struct Permits {
     pub free: sync::Mutex<i64>,
     pub cv: sync::Condvar,
-    pub stop: sync::Mutex<bool>,
 }
 
 const WAITERS: i64 = 8;
 
-fn stopped(p: &Permits) bool {
-    let g = p.stop.lock();
-    return *g.get();
-}
-
 @test
 fn a_notify_wakes_one_plain_thread_and_no_other() {
-    let st = arc::Arc::<Permits>::new(
-        Permits { free: sync::Mutex::<i64>::new(0), cv: sync::Condvar::new(), stop: sync::Mutex::<bool>::new(false) },
-    );
+    let st = arc::Arc::<Permits>::new(Permits { free: sync::Mutex::<i64>::new(0), cv: sync::Condvar::new() });
+    let queued = counter();
     let strays = counter();
     let served = counter();
     let mut handles = Vector::<thread::JoinHandle<i64>>::new();
     for _t in 0..WAITERS {
         let s = st.clone();
+        let q = queued.clone();
         let stray = strays.clone();
         let done = served.clone();
         handles.push(
             thread::spawn(
                 fn() i64 {
                     let p = s.get();
-                    let mut mine: i64 = 0;
-                    loop {
-                        let mut g = p.free.lock();
-                        while *g.get() == 0 {
-                            if stopped(p) {
-                                return mine;
-                            }
-                            let _ = p.cv.wait(&g);
-                            if *g.get() == 0 && !stopped(p) {
-                                let _ = stray.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
-                            }
+                    let mut g = p.free.lock();
+                    // Counted under the lock that `wait` gives up only once this thread's node is queued, so
+                    // a notifier that takes the lock after seeing the count finds the node in the queue.
+                    let _ = q.get().fetch_add(1, atomics::MemoryOrder::Release);
+                    while *g.get() == 0 {
+                        let _ = p.cv.wait(&g);
+                        if *g.get() == 0 {
+                            let _ = stray.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
                         }
-                        let c = g.get_mut();
-                        *c = *c - 1;
-                        mine = mine + 1;
-                        let _ = done.get().fetch_add(1, atomics::MemoryOrder::Release);
                     }
+                    let c = g.get_mut();
+                    *c = *c - 1;
+                    let _ = done.get().fetch_add(1, atomics::MemoryOrder::Release);
+                    return 1;
                 },
             ),
         );
     }
+    assert(ph::wait_count(&queued, WAITERS), "every thread reaches the condvar");
     let p = st.get();
-    // Let every thread queue up, so each notify has a full queue to pick from.
-    rt::sleep_ns(50000000);
-    let rounds: i64 = 40;
-    for i in 0..rounds {
+    for i in 0..WAITERS {
         {
             let mut g = p.free.lock();
             let c = g.get_mut();
             *c = *c + 1;
             p.cv.notify_one();
         }
-        while count(&served) < i + 1 {
-            rt::sleep_ns(100000);
-        }
-    }
-    {
-        let mut g = p.stop.lock();
-        *g.get_mut() = true;
-        let _h = p.free.lock();
-        p.cv.notify_all();
+        assert(ph::wait_count(&served, i + 1), "the notified thread takes the permit");
     }
     let mut total: i64 = 0;
     loop {
@@ -703,7 +811,7 @@ fn a_notify_wakes_one_plain_thread_and_no_other() {
             },
         };
     }
-    assert_eq(total, rounds);
+    assert_eq(total, WAITERS);
     assert_eq(count(&strays), 0);
 }
 
@@ -746,14 +854,14 @@ fn an_unpark_reaches_only_the_thread_parked_on_that_word() {
                     let w = addr as *mut i32;
                     let mut served: i64 = 0;
                     loop {
-                        while atomic::load_i32(w, 1) == 0 {
+                        while unsafe atomic::load_i32(w, 1) == 0 {
                             unsafe sc_runtime::sc_rt_park(w, 0, -1);
-                            if atomic::load_i32(w, 1) == 0 {
+                            if unsafe atomic::load_i32(w, 1) == 0 {
                                 let _ = s.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
                             }
                         }
-                        let v = atomic::load_i32(w, 1);
-                        atomic::store_i32(w, 0, 2);
+                        let v = unsafe atomic::load_i32(w, 1);
+                        unsafe atomic::store_i32(w, 0, 2);
                         if v == 2 {
                             return served;
                         }
@@ -764,11 +872,12 @@ fn an_unpark_reaches_only_the_thread_parked_on_that_word() {
             ),
         );
     }
+    assert(ph::wait_os_parked(PARKED as usize), "every thread is parked");
     let mut expected: i64 = 0;
     for _r in 0..3 {
         for t in 0..PARKED as usize {
             let w = (base + t * stride * sizeof(i32)) as *mut i32;
-            atomic::store_i32(w, 1, 2);
+            unsafe atomic::store_i32(w, 1, 2);
             unsafe sc_runtime::sc_rt_unpark_one(w);
             expected = expected + 1;
             let deadline = platform::now_ns() + 5000000000;
@@ -787,7 +896,7 @@ fn an_unpark_reaches_only_the_thread_parked_on_that_word() {
     let mut served: i64 = 0;
     for t in 0..PARKED as usize {
         let w = (base + t * stride * sizeof(i32)) as *mut i32;
-        atomic::store_i32(w, 2, 2);
+        unsafe atomic::store_i32(w, 2, 2);
         unsafe sc_runtime::sc_rt_unpark_one(w);
     }
     loop {
@@ -801,7 +910,10 @@ fn an_unpark_reaches_only_the_thread_parked_on_that_word() {
         };
     }
     assert_eq(served, expected);
-    assert_eq(count(&strays), 0);
+    if ph::parks_are_counted() {
+        // The POSIX lot wakes only on an unpark; WaitOnAddress may return with no wake at all.
+        assert_eq(count(&strays), 0);
+    }
 }
 
 @test
@@ -824,9 +936,9 @@ fn unpark_all_wakes_every_thread_on_the_word_and_no_other() {
             thread::spawn(
                 fn() i64 {
                     let w = addr as *mut i32;
-                    while atomic::load_i32(w, 1) == 0 {
+                    while unsafe atomic::load_i32(w, 1) == 0 {
                         unsafe sc_runtime::sc_rt_park(w, 0, -1);
-                        if atomic::load_i32(w, 1) == 0 {
+                        if unsafe atomic::load_i32(w, 1) == 0 {
                             let _ = s.get().fetch_add(1, atomics::MemoryOrder::Relaxed);
                         }
                     }
@@ -836,19 +948,15 @@ fn unpark_all_wakes_every_thread_on_the_word_and_no_other() {
             ),
         );
     }
-    rt::sleep_ns(50000000); // every thread parked
+    assert(ph::wait_os_parked(6), "every thread is parked");
     let w0 = base as *mut i32;
     let w1 = (base + stride * sizeof(i32)) as *mut i32;
-    atomic::store_i32(w0, 1, 2);
+    unsafe atomic::store_i32(w0, 1, 2);
     unsafe sc_runtime::sc_rt_unpark_all(w0);
-    let deadline = platform::now_ns() + 5000000000;
-    while count(&woke) < 3 {
-        assert(platform::now_ns() < deadline, "the three parked on the first word wake");
-        rt::sleep_ns(100000);
-    }
-    rt::sleep_ns(20000000);
+    assert(ph::wait_count(&woke, 3), "the three parked on the first word wake");
+    rt::sleep_ns(20000000); // a window for a wrong wake of the second word's threads to show
     assert_eq(count(&woke), 3); // the other three stay parked
-    atomic::store_i32(w1, 1, 2);
+    unsafe atomic::store_i32(w1, 1, 2);
     unsafe sc_runtime::sc_rt_unpark_all(w1);
     let mut n: i64 = 0;
     loop {
@@ -862,7 +970,9 @@ fn unpark_all_wakes_every_thread_on_the_word_and_no_other() {
         };
     }
     assert_eq(n, 6);
-    assert_eq(count(&strays), 0);
+    if ph::parks_are_counted() {
+        assert_eq(count(&strays), 0); // see `an_unpark_reaches_only_the_thread_parked_on_that_word`
+    }
 }
 
 // --- cancellation at a batch boundary ------------------------------------------------------------------.

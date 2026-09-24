@@ -60,18 +60,17 @@ void sc_rt_spin_unlock(int32_t *word);
    The queue layout and discipline belong to std/parallel/sync.spc; this only hands out the slot. */
 void *sc_rt_lot_bucket(void *addr);
 
-/* What the address-based parking lot retains: bytes per thread that has parked at least once (its own
-   parker, held for the thread's life so a waker can always reach it), and the fixed bytes of the bucket
-   table. Zero on a backend whose wait needs no records of its own (Windows WaitOnAddress). Wait records
-   live in the parking thread's frame and retain nothing. */
-size_t sc_rt_park_bytes_per_thread(void);
-size_t sc_rt_park_bytes_fixed(void);
+/* How many threads are parked in the POSIX parking lot: each has a record queued, so an unpark of its word
+   finds it. For a test that must wait until its threads are asleep (pool workers sleep elsewhere). Zero on a
+   backend that keeps no records (Windows WaitOnAddress, wasm). */
+size_t sc_rt_parked(void);
 
 /* Lock-order tracking, off unless SC_LOCK_ORDER is set (=fatal aborts on the first inversion). `acquire`
-   after a lock is taken, `release` before it is given up, `forget` when it is destroyed. See sc_rt.c. */
-void sc_rt_lockdep_acquire(void *lock);
-void sc_rt_lockdep_release(void *lock);
-void sc_rt_lockdep_forget(void *lock);
+   after a lock is taken, `release` before it is given up, `forget` when it is destroyed. `id` is the lock's
+   own zero-initialized identity word, which moves with the lock. See sc_rt.c. */
+void sc_rt_lockdep_acquire(uint32_t *id);
+void sc_rt_lockdep_release(uint32_t *id);
+void sc_rt_lockdep_forget(uint32_t *id);
 
 /* Sleep the calling OS thread for `ns` nanoseconds (the off-worker path for `parallel::sleep`; a coroutine
    parks on the scheduler's timer heap instead). Negative/zero returns immediately. */
@@ -81,10 +80,10 @@ void sc_rt_sleep_ns(int64_t ns);
    faults instead of corrupting memory. Returns the usable low end (the stack grows down from low+size), or
    NULL on failure: a `size` that is zero, not a whole number of pages or too large to add a guard page to
    is rejected before anything is mapped, and a mapping whose guard cannot be installed is unmapped again,
-   so a returned stack is always guarded. Free with the same `size`; a release the OS refuses is fatal
-   (the runtime cannot account for a mapping it no longer owns). Committed on every platform -- coroutines
-   run on this memory -- but pages are only faulted in as the stack is used, so a task that never goes deep
-   never pays. */
+   so a returned stack is always guarded (wasm has no mprotect: its stacks have no guard page). Free with
+   the same `size`; a release the OS refuses is fatal (the runtime cannot account for a mapping it no
+   longer owns). POSIX commits the whole stack and pages fault in as it is used; Windows x86-64 commits only
+   the top 32 KiB and grows the commit on demand; other Windows builds commit it whole. */
 void *sc_rt_stack_alloc(size_t size);
 void sc_rt_stack_free(void *usable, size_t size);
 /* Bytes currently mapped for task stacks, guard pages included: what `sc_rt_stack_alloc` handed out and
@@ -93,12 +92,12 @@ void sc_rt_stack_free(void *usable, size_t size);
 size_t sc_rt_stack_bytes(void);
 
 /* Turn a coroutine stack overflow into a message instead of a bare SIGSEGV/SIGBUS. `install` arms the
-   calling thread: a signal stack of its own (the faulting stack is by definition exhausted, so the handler
-   cannot run on it) and, once per process, the handler itself. `bounds_set` tells that handler which stack
-   cannot run on it) and, once per process, the handler itself. The handler decides from the faulting stack
-   pointer, so nothing is tracked per switch; `note_size` only supplies the number quoted in the message.
-   Anything not near the stack is left to the default handler -- a wild pointer must still look like the
-   crash it is. Both are no-ops where the mechanism does not exist (Windows, for now). */
+   calling thread: on POSIX a signal stack of its own (the faulting stack is by definition exhausted, so the
+   handler cannot run on it, and the thread's exit releases it) and, once per process, the handler itself;
+   on Windows x86-64 a vectored exception handler that also grows coroutine stacks. The handler decides
+   from the faulting stack pointer, so nothing is tracked per switch; `note_size` only supplies the number
+   quoted in the message. Anything not near the stack is left to the default handler -- a wild pointer must
+   still look like the crash it is. `install` is a no-op on other Windows builds and on wasm. */
 void sc_rt_stack_guard_install(void);
 void sc_rt_stack_note_size(size_t bytes);
 
@@ -144,12 +143,12 @@ void sc_rt_cond_free(void *c);
 void sc_rt_cond_wait(void *c, void *m);
 int sc_rt_cond_timedwait_ns(void *c, void *m, int64_t rel_ns);
 void sc_rt_cond_signal(void *c);
-void sc_rt_cond_broadcast(void *c);
 
-/* Stackful context switch (hand-written assembly on POSIX, fibers on Windows). `sc_rt_ctx_alloc` makes an
-   empty context for the current thread's root (its state is captured on the first switch away).
-   `sc_rt_ctx_init` arms a context to run `entry(arg)` on `stack` (size bytes; ignored on Windows, which owns
-   fiber stacks). `sc_rt_ctx_switch` saves the running context into `from` and resumes `to`. An `entry` that
+/* Stackful context switch (hand-written assembly on x86-64 and aarch64, including Windows x86-64; fibers on
+   other Windows builds; ucontext on other POSIX ABIs). `sc_rt_ctx_alloc` makes an empty context for the
+   current thread's root (its state is captured on the first switch away). `sc_rt_ctx_init` arms a context
+   to run `entry(arg)` on `stack` (size bytes; with fibers `stack` is ignored and `size` sizes the fiber's
+   own stack). `sc_rt_ctx_switch` saves the running context into `from` and resumes `to`. An `entry` that
    returns is a bug the switch traps on -- a coroutine hands control back with a switch, never a return. */
 void *sc_rt_ctx_alloc(void);
 void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), void *arg);

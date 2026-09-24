@@ -584,8 +584,8 @@ fn h_resolve(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled) 
     if i == cap {
         let c = rr.errors.errors.len();
         if c > 0 {
-            unsafe out.errors = c;
-            unsafe copy_msg(&mut out.first[0], rr.errors.rendered_errors.at(0));
+            unsafe (*out).errors = c;
+            unsafe copy_msg(&mut (*out).first[0], rr.errors.rendered_errors.at(0));
         }
     }
     hirl::lower_module(p, i);
@@ -602,8 +602,8 @@ fn h_typecheck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled
     if i == cap {
         let c = t.errors.errors.len();
         if c > 0 {
-            unsafe out.errors = c;
-            unsafe copy_msg(&mut out.first[0], t.errors.rendered_errors.at(0));
+            unsafe (*out).errors = c;
+            unsafe copy_msg(&mut (*out).first[0], t.errors.rendered_errors.at(0));
         }
     }
 }
@@ -625,8 +625,8 @@ fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled,
     if i == cap {
         let c = t.errors.errors.len();
         if c > 0 {
-            unsafe out.errors = c;
-            unsafe copy_msg(&mut out.first[0], t.errors.rendered_errors.at(0));
+            unsafe (*out).errors = c;
+            unsafe copy_msg(&mut (*out).first[0], t.errors.rendered_errors.at(0));
         }
     }
 }

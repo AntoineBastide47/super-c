@@ -1,7 +1,7 @@
 // The reactor: park a coroutine on a file descriptor instead of a thread. Import with
 // `import std::parallel::io;`.
 //
-//     io::wait_readable(fd);              // this worker runs other tasks meanwhile
+//     let ok = io::wait_readable(fd);     // this worker runs other tasks meanwhile
 //     let n = io::read(fd, buf);          // reads, parking whenever the descriptor is not ready
 //
 // `blocking::call` makes a blocking call SAFE by moving it to a thread that is allowed to block, which
@@ -37,7 +37,9 @@
 //
 // Readiness-based on every platform. Windows watches SOCKETS ONLY: a socket is not a CRT file descriptor
 // there, and its select() backend caps the simultaneously parked descriptors at FD_SETSIZE; arming past
-// that reports the wait as not ready rather than silently dropping it.
+// that reports the wait as not ready rather than silently dropping it. WASI preview 1 has no poller and
+// no second thread: there only a plain-thread wait (poll on its one descriptor) works, a task's wait
+// panics when it starts the reactor, and every `net` call fails with ENOTSUP.
 
 import sc_runtime;
 import atomic;
@@ -119,18 +121,21 @@ const CMD_MASK: usize = 1;
 struct FdRec {
     pub rd: *mut IoWait,
     pub wr: *mut IoWait,
-    pub known: i32,
-    pub stale: i32,
-    pub gen: u32,
-    pub pad: u32,
     pub evt: u64,
+    pub gen: u32,
+    pub known: u8, // 0 or 1
+    pub stale: u8, // RD | WR bits
 }
+
+// Sized for 8-byte pointers; smaller on wasm32.
+@arch(x86_64 | aarch64)
+static_assert(sizeof(FdRec) == 32, "FdRec is one per descriptor number: keep it at 32 bytes");
 
 // A batch of poller events: `sc_io::EV_MAX` triples (descriptor, ready bits, dropped bits). Wrapped in a
 // struct so it is zero-initialized: reading an uninitialized array is (rightly) rejected.
 @no_const
 struct EvBuf {
-    pub e: [i32; 192],
+    pub e: [i32; 3 * sc_io::EV_MAX as usize],
 }
 
 // Line-aligned (see `reactor_alloc`), with the fields workers write and the fields the reactor reads on
@@ -171,7 +176,9 @@ static mut G_STATE: i32 = 0; // 0 uninit / 1 building / 2 ready / 3 stopping
 static mut G_REACTOR: *mut Reactor = null;
 
 // Threads inside `close` between reading the reactor state and publishing their report: a stopping
-// reactor leaves only when this is zero, so no report is pushed onto a released reactor.
+// reactor leaves only when this is zero, so no report is pushed onto a released reactor and no exclusion
+// reads its registration counters. The reactor leaves by moving it from 0 to -1, which tells a later closer
+// that nothing can be registering; the next reactor's builder sets it back to 0.
 static mut G_CLOSERS: i32 = 0;
 
 // Closes in progress: raised around every close(2) of a descriptor the reactor may hold, so that no
@@ -207,18 +214,18 @@ static mut G_STATS: IoStats = IoStats {
 pub fn io_stats() IoStats {
     let mut s = unsafe G_STATS;
     let r = unsafe G_REACTOR;
-    if r != null && atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 1) == 2 {
+    if r != null && unsafe atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 1) == 2 {
         // Relaxed reads of counters only the reactor thread writes: a snapshot, not a fence.
-        s.arms = s.arms + atomic::load_u64(&mut unsafe r.st.arms, 0);
-        s.disarms = s.disarms + atomic::load_u64(&mut unsafe r.st.disarms, 0);
-        s.sets = s.sets + atomic::load_u64(&mut unsafe r.st.sets, 0);
-        s.polls = s.polls + atomic::load_u64(&mut unsafe r.st.polls, 0);
-        s.events = s.events + atomic::load_u64(&mut unsafe r.st.events, 0);
-        s.wakes = s.wakes + atomic::load_u64(&mut unsafe r.st.wakes, 0);
-        s.pipe_wakes = s.pipe_wakes + atomic::load_u64(&mut unsafe r.st.pipe_wakes, 0);
-        s.batches = s.batches + atomic::load_u64(&mut unsafe r.st.batches, 0);
-        s.stale = s.stale + atomic::load_u64(&mut unsafe r.st.stale, 0);
-        s.records = atomic::load_u64(&mut unsafe r.st.records, 0);
+        s.arms = s.arms + unsafe atomic::load_u64(&mut unsafe (*r).st.arms, 0);
+        s.disarms = s.disarms + unsafe atomic::load_u64(&mut unsafe (*r).st.disarms, 0);
+        s.sets = s.sets + unsafe atomic::load_u64(&mut unsafe (*r).st.sets, 0);
+        s.polls = s.polls + unsafe atomic::load_u64(&mut unsafe (*r).st.polls, 0);
+        s.events = s.events + unsafe atomic::load_u64(&mut unsafe (*r).st.events, 0);
+        s.wakes = s.wakes + unsafe atomic::load_u64(&mut unsafe (*r).st.wakes, 0);
+        s.pipe_wakes = s.pipe_wakes + unsafe atomic::load_u64(&mut unsafe (*r).st.pipe_wakes, 0);
+        s.batches = s.batches + unsafe atomic::load_u64(&mut unsafe (*r).st.batches, 0);
+        s.stale = s.stale + unsafe atomic::load_u64(&mut unsafe (*r).st.stale, 0);
+        s.records = unsafe atomic::load_u64(&mut unsafe (*r).st.records, 0);
     }
     return s;
 }
@@ -231,15 +238,15 @@ pub fn pending_waits() usize {
 }
 
 fn stat_add(p: *mut u64, n: u64) {
-    atomic::store_u64(p, atomic::load_u64(p, 0) + n, 0);
+    unsafe atomic::store_u64(p, unsafe atomic::load_u64(p, 0) + n, 0);
 }
 
 fn batch_add(b: &mut Batch, co: *mut runtime::Coroutine) {
-    unsafe co.run.next = null;
+    unsafe (*co).run.next = null;
     if b.tail == null {
         b.head = co;
     } else {
-        unsafe b.tail.run.next = co as *mut runtime::Runnable;
+        unsafe (*b.tail).run.next = co as *mut runtime::Runnable;
     }
     b.tail = co;
     b.n = b.n + 1;
@@ -252,7 +259,7 @@ fn batch_flush(r: *mut Reactor, b: &mut Batch) {
         return;
     }
     if io_stats_on() {
-        stat_add(&mut unsafe r.st.batches, 1);
+        stat_add(&mut unsafe (*r).st.batches, 1);
     }
     runtime::run_claimed(b.head, b.tail, b.n);
     b.head = null;
@@ -264,11 +271,11 @@ fn batch_flush(r: *mut Reactor, b: &mut Batch) {
 // (waiters carry their descriptor number), so a resize moves nothing but the records.
 fn rec_for(r: *mut Reactor, fd: i32) *mut FdRec {
     let i = fd as usize;
-    if i >= unsafe r.nrec {
+    if i >= unsafe (*r).nrec {
         if i >= REC_MAX {
             panic("reactor: descriptor number beyond the record table");
         }
-        let mut cap = unsafe r.nrec;
+        let mut cap = unsafe (*r).nrec;
         while cap <= i {
             cap = cap * 2;
         }
@@ -277,22 +284,22 @@ fn rec_for(r: *mut Reactor, fd: i32) *mut FdRec {
         if t == null {
             panic("reactor: cannot grow the record table");
         }
-        let old = unsafe r.recs;
-        let n = unsafe r.nrec;
+        let old = unsafe (*r).recs;
+        let n = unsafe (*r).nrec;
         for k in 0..n {
             unsafe t[k] = unsafe old[k];
         }
         for k in n..cap {
-            unsafe t[k] = FdRec { rd: null, wr: null, known: 0, stale: 0, gen: 0, pad: 0, evt: 0 };
+            unsafe t[k] = FdRec { rd: null, wr: null, evt: 0, gen: 0, known: 0, stale: 0 };
         }
         unsafe g.dealloc(old, n * sizeof(FdRec), alignof(FdRec));
-        unsafe r.recs = t;
-        unsafe r.nrec = cap;
+        unsafe (*r).recs = t;
+        unsafe (*r).nrec = cap;
         if io_stats_on() {
-            atomic::store_u64(&mut unsafe r.st.records, cap as u64, 0);
+            unsafe atomic::store_u64(&mut unsafe (*r).st.records, cap as u64, 0);
         }
     }
-    return unsafe (r.recs + i);
+    return unsafe ((*r).recs + i);
 }
 
 // Count this thread into its registration slot, backing off while a close is pending (see `G_CLOSING`).
@@ -304,27 +311,27 @@ fn reg_enter(r: *mut Reactor) *mut i32 {
     } else {
         1 + wi as usize % REG_SLOTS;
     };
-    let f = unsafe (r.regs + slot * (R_ALIGN / 4));
+    let f = unsafe ((*r).regs + slot * (R_ALIGN / 4));
     loop {
-        let _ = atomic::add_i32(f, 1, 4);
-        if atomic::load_i32(&mut unsafe G_CLOSING, 4) == 0 {
+        let _ = unsafe atomic::add_i32(f, 1, 4);
+        if unsafe atomic::load_i32(&mut unsafe G_CLOSING, 4) == 0 {
             return f;
         }
-        let _ = atomic::sub_i32(f, 1, 4);
-        while atomic::load_i32(&mut unsafe G_CLOSING, 4) != 0 {
+        let _ = unsafe atomic::sub_i32(f, 1, 4);
+        while unsafe atomic::load_i32(&mut unsafe G_CLOSING, 4) != 0 {
             unsafe sc_runtime::sc_rt_cpu_relax();
         }
     }
 }
 
 fn reg_leave(f: *mut i32) {
-    let _ = atomic::sub_i32(f, 1, 2);
+    let _ = unsafe atomic::sub_i32(f, 1, 2);
 }
 
 // Register `want` in `fd` from any thread, excluded against closes: 0 done, 1 always ready, -1 failed.
 fn register(r: *mut Reactor, fd: i32, want: i32, known: i32) i32 {
     let f = reg_enter(r);
-    let rc = unsafe sc_io::sc_io_set(r.poller, fd, want, known);
+    let rc = unsafe sc_io::sc_io_set((*r).poller, fd, want, known);
     reg_leave(f);
     return rc;
 }
@@ -332,20 +339,21 @@ fn register(r: *mut Reactor, fd: i32, want: i32, known: i32) i32 {
 // Add `want` to the poller's interest in `fd`: 0 done, 1 the descriptor is always ready, -1 failed.
 fn set_interest(r: *mut Reactor, fd: i32, rec: *mut FdRec, want: i32) i32 {
     if io_stats_on() {
-        stat_add(&mut unsafe r.st.sets, 1);
+        // Workers count registrations too (`commit_arm`): an atomic add, unlike the reactor's own counters.
+        let _ = unsafe atomic::add_u64(&mut unsafe (*r).st.sets, 1, 0);
     }
-    let rc = register(r, fd, want, unsafe rec.known);
+    let rc = register(r, fd, want, unsafe (*rec).known);
     if rc == 0 {
-        unsafe rec.known = 1;
+        unsafe (*rec).known = 1;
     }
     return rc;
 }
 
 fn list_of(rec: *mut FdRec, dir: i32) *mut *mut IoWait {
     if dir == RD {
-        return &mut unsafe rec.rd;
+        return &mut unsafe (*rec).rd;
     }
-    return &mut unsafe rec.wr;
+    return &mut unsafe (*rec).wr;
 }
 
 // Wake every waiter of one list with `reason` and empty it. A claim lost to a timeout or a cancellation
@@ -354,13 +362,13 @@ fn fire_list(r: *mut Reactor, head: *mut *mut IoWait, reason: u32, b: &mut Batch
     let mut n = unsafe head[0];
     unsafe head[0] = null;
     while n != null {
-        let next = unsafe n.lnext;
-        unsafe n.state = NS_FIRED;
+        let next = unsafe (*n).lnext;
+        unsafe (*n).state = NS_FIRED;
         // The last touch of `n`: on a won claim the frame may end as soon as the batch is flushed.
-        if runtime::claim_wake(unsafe n.co, unsafe n.token, reason) {
-            batch_add(b, unsafe n.co);
+        if runtime::claim_wake(unsafe (*n).co, unsafe (*n).token, reason) {
+            batch_add(b, unsafe (*n).co);
             if reason == runtime::WR_IO && io_stats_on() {
-                stat_add(&mut unsafe r.st.wakes, 1);
+                stat_add(&mut unsafe (*r).st.wakes, 1);
             }
         }
         n = next;
@@ -369,20 +377,20 @@ fn fire_list(r: *mut Reactor, head: *mut *mut IoWait, reason: u32, b: &mut Batch
 
 // Settle one node outside any list: wake it with `reason`; a lost claim leaves it to the disarm.
 fn settle_node(n: *mut IoWait, reason: u32, b: &mut Batch) {
-    unsafe n.state = NS_FIRED;
-    if runtime::claim_wake(unsafe n.co, unsafe n.token, reason) {
-        batch_add(b, unsafe n.co);
+    unsafe (*n).state = NS_FIRED;
+    if runtime::claim_wake(unsafe (*n).co, unsafe (*n).token, reason) {
+        batch_add(b, unsafe (*n).co);
     }
 }
 
 // Acknowledge a disarm: the wait is over for the reactor, and the task's frame may end.
 fn ack(n: *mut IoWait, b: &mut Batch) {
-    unsafe n.state = NS_FIRED;
+    unsafe (*n).state = NS_FIRED;
     // The acknowledgement park is untimed and non-cancellable: this claim is its only waker.
-    if !runtime::claim_wake(unsafe n.co, unsafe n.ack, runtime::WR_IO) {
+    if !runtime::claim_wake(unsafe (*n).co, unsafe (*n).ack, runtime::WR_IO) {
         panic("reactor: the acknowledgement park has exactly one waker");
     }
-    batch_add(b, unsafe n.co);
+    batch_add(b, unsafe (*n).co);
 }
 
 // An arm command. The worker registered the interest itself before publishing (see `commit_arm`) and
@@ -393,28 +401,28 @@ fn ack(n: *mut IoWait, b: &mut Batch) {
 // before this node was seen), or when the other direction has waiters too, so that a backend with one
 // registration per descriptor (epoll) carries both whichever registration landed last.
 fn do_arm(r: *mut Reactor, n: *mut IoWait, b: &mut Batch) {
-    if unsafe n.dir == CLOSE {
+    if unsafe (*n).dir == CLOSE {
         do_close(r, n);
         return;
     }
     if io_stats_on() {
-        stat_add(&mut unsafe r.st.arms, 1);
+        stat_add(&mut unsafe (*r).st.arms, 1);
     }
-    if unsafe n.state == NS_CANCELLED {
+    if unsafe (*n).state == NS_CANCELLED {
         // A deadline beat this arm's publication and the disarm is already waiting for it.
-        unsafe r.deferred = unsafe r.deferred - 1;
+        unsafe (*r).deferred = unsafe (*r).deferred - 1;
         ack(n, b);
         return;
     }
-    if atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 4) == 3 {
+    if unsafe atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 4) == 3 {
         // Shutting down: the wait is settled as not ready; its disarm follows and is acknowledged.
         settle_node(n, runtime::WR_TIMEOUT, b);
         return;
     }
-    if unsafe n.rc != 0 {
+    if unsafe (*n).rc != 0 {
         settle_node(
             n,
-            if unsafe n.rc > 0 {
+            if unsafe (*n).rc > 0 {
                 runtime::WR_IO;
             } else {
                 runtime::WR_TIMEOUT;
@@ -423,33 +431,33 @@ fn do_arm(r: *mut Reactor, n: *mut IoWait, b: &mut Batch) {
         );
         return;
     }
-    let fd = unsafe n.fd;
-    let dir = unsafe n.dir;
+    let fd = unsafe (*n).fd;
+    let dir = unsafe (*n).dir;
     let rec = rec_for(r, fd);
     let head = list_of(rec, dir);
-    unsafe n.lnext = unsafe head[0];
+    unsafe (*n).lnext = unsafe head[0];
     unsafe head[0] = n;
-    unsafe n.state = NS_ARMED;
-    unsafe n.gen = unsafe rec.gen;
-    unsafe rec.known = 1;
+    unsafe (*n).state = NS_ARMED;
+    unsafe (*n).gen = unsafe (*rec).gen;
+    unsafe (*rec).known = 1;
     let mut again: i32 = 0;
-    if (unsafe rec.stale & dir) != 0 {
-        unsafe rec.stale = unsafe rec.stale & ~dir;
+    if (unsafe (*rec).stale & dir) != 0 {
+        unsafe (*rec).stale = (unsafe (*rec).stale & ~dir) as u8;
         again = dir;
     }
-    if unsafe rec.evt > unsafe n.seq {
+    if unsafe (*rec).evt > unsafe (*n).seq {
         // An event on this descriptor was delivered after the worker registered: the one-shot it consumed
         // may have been this node's, whichever waiters that event woke, so the interest is set again.
         again = again | dir;
     }
-    if unsafe rec.rd != null && unsafe rec.wr != null {
+    if unsafe (*rec).rd != null && unsafe (*rec).wr != null {
         again = RD | WR;
     }
     if again != 0 && set_interest(r, fd, rec, again) != 0 {
         // The descriptor cannot be watched any more (closed under its waiters, most often): every wait on
         // it reports not ready, the same answer a failed first registration gives.
-        fire_list(r, &mut unsafe rec.rd, runtime::WR_TIMEOUT, b);
-        fire_list(r, &mut unsafe rec.wr, runtime::WR_TIMEOUT, b);
+        fire_list(r, &mut unsafe (*rec).rd, runtime::WR_TIMEOUT, b);
+        fire_list(r, &mut unsafe (*rec).wr, runtime::WR_TIMEOUT, b);
     }
 }
 
@@ -457,15 +465,15 @@ fn do_arm(r: *mut Reactor, n: *mut IoWait, b: &mut Batch) {
 // the old one settles as not ready at once (its syscall would fail anyway), and the record forgets the
 // backend state, so an arm whose registration raced the close registers again and learns of it.
 fn do_close(r: *mut Reactor, n: *mut IoWait) {
-    let fd = unsafe n.fd;
-    if fd as usize < unsafe r.nrec {
-        let rec = unsafe (r.recs + fd as usize);
-        unsafe rec.gen = unsafe rec.gen + 1;
-        unsafe rec.known = 0;
-        unsafe rec.stale = RD | WR;
+    let fd = unsafe (*n).fd;
+    if fd as usize < unsafe (*r).nrec {
+        let rec = unsafe ((*r).recs + fd as usize);
+        unsafe (*rec).gen = unsafe (*rec).gen + 1;
+        unsafe (*rec).known = 0;
+        unsafe (*rec).stale = (RD | WR) as u8;
         let mut b = Batch { head: null, tail: null, n: 0 };
-        fire_list(r, &mut unsafe rec.rd, runtime::WR_TIMEOUT, &mut b);
-        fire_list(r, &mut unsafe rec.wr, runtime::WR_TIMEOUT, &mut b);
+        fire_list(r, &mut unsafe (*rec).rd, runtime::WR_TIMEOUT, &mut b);
+        fire_list(r, &mut unsafe (*rec).wr, runtime::WR_TIMEOUT, &mut b);
         batch_flush(r, &mut b);
     }
     let mut g = Global {};
@@ -474,16 +482,16 @@ fn do_close(r: *mut Reactor, n: *mut IoWait) {
 
 // Take an armed node off its record's list.
 fn unlink(r: *mut Reactor, n: *mut IoWait) {
-    let rec = unsafe (r.recs + n.fd as usize);
-    if unsafe rec.gen != unsafe n.gen {
+    let rec = unsafe ((*r).recs + (*n).fd as usize);
+    if unsafe (*rec).gen != unsafe (*n).gen {
         panic("reactor: a waiter outlived its descriptor's generation");
     }
-    let mut pp = list_of(rec, unsafe n.dir);
+    let mut pp = list_of(rec, unsafe (*n).dir);
     while unsafe pp[0] != n {
-        pp = &mut unsafe pp[0].lnext;
+        pp = &mut unsafe (*pp[0]).lnext;
     }
-    unsafe pp[0] = unsafe n.lnext;
-    unsafe n.state = NS_FIRED;
+    unsafe pp[0] = unsafe (*n).lnext;
+    unsafe (*n).state = NS_FIRED;
 }
 
 // A disarm command: the wait ended by another wake reason. Unlink the node if it is still armed, then
@@ -491,17 +499,17 @@ fn unlink(r: *mut Reactor, n: *mut IoWait) {
 // into an empty list is ignored, and removing it would cost a call on every expired wait.
 fn do_disarm(r: *mut Reactor, n: *mut IoWait, b: &mut Batch) {
     if io_stats_on() {
-        stat_add(&mut unsafe r.st.disarms, 1);
+        stat_add(&mut unsafe (*r).st.disarms, 1);
     }
-    if unsafe n.state == NS_NEW {
+    if unsafe (*n).state == NS_NEW {
         // The arm has not arrived yet (its worker's hand-off lost the race with the deadline): the
         // acknowledgement waits for it, so the node is never linked after its frame ends. The arm's push
         // brings no wake, so the reactor polls with a bound while an acknowledgement is deferred.
-        unsafe n.state = NS_CANCELLED;
-        unsafe r.deferred = unsafe r.deferred + 1;
+        unsafe (*n).state = NS_CANCELLED;
+        unsafe (*r).deferred = unsafe (*r).deferred + 1;
         return;
     }
-    if unsafe n.state == NS_ARMED {
+    if unsafe (*n).state == NS_ARMED {
         unlink(r, n);
     }
     ack(n, b);
@@ -512,15 +520,15 @@ fn cmd_link(v: usize) *mut usize {
     let n = (v & ~CMD_MASK) as *mut IoWait;
     let tag = v & CMD_MASK;
     if tag == CMD_DISARM {
-        return &mut unsafe n.dnext;
+        return &mut unsafe (*n).dnext;
     }
-    return &mut unsafe n.anext;
+    return &mut unsafe (*n).anext;
 }
 
 // Take every queued command and run them oldest first, so a wait's arm precedes its disarm whenever both
 // were published in that order.
 fn drain_commands(r: *mut Reactor, b: &mut Batch) {
-    let mut v = atomic::swap_usize(&mut unsafe r.cmds, 0, 4);
+    let mut v = unsafe atomic::swap_usize(&mut unsafe (*r).cmds, 0, 4);
     if v == 0 {
         return;
     }
@@ -550,48 +558,48 @@ fn drain_commands(r: *mut Reactor, b: &mut Batch) {
 // of while waiters remain (epoll disables a whole descriptor when either direction fires).
 fn process_events(r: *mut Reactor, evs: &mut EvBuf, n: i32, b: &mut Batch) {
     if io_stats_on() {
-        stat_add(&mut unsafe r.st.events, n as u64);
+        stat_add(&mut unsafe (*r).st.events, n as u64);
     }
     for i in 0..n as usize {
         let fd = unsafe evs.e[3 * i];
         let ready = unsafe evs.e[3 * i + 1];
         let dropped = unsafe evs.e[3 * i + 2];
-        if fd < 0 || fd as usize >= unsafe r.nrec {
+        if fd < 0 || fd as usize >= unsafe (*r).nrec {
             continue;
         }
-        let rec = unsafe (r.recs + fd as usize);
+        let rec = unsafe ((*r).recs + fd as usize);
         // Counted BEFORE the reactor next decides to sleep, and stamped on the record: a worker whose
         // registration predates this event learns from the count that its one-shot may be gone (see
         // `commit_arm`), and `do_arm` learns it from the stamp.
-        unsafe rec.evt = atomic::add_u64(&mut unsafe r.events, 1, 4) + 1;
+        unsafe (*rec).evt = unsafe atomic::add_u64(&mut unsafe (*r).events, 1, 4) + 1;
         // A direction is stale only when the backend dropped an interest there that no waiter had:
         // an end-of-file sets both ready bits, but consumes only the filter that fired.
-        let unowned = dropped & ~(if unsafe rec.rd != null {
+        let unowned = dropped & ~(if unsafe (*rec).rd != null {
             RD;
         } else {
             0;
-        } | if unsafe rec.wr != null {
+        } | if unsafe (*rec).wr != null {
             WR;
         } else {
             0;
         });
         if unowned != 0 {
-            unsafe rec.stale = unsafe rec.stale | unowned;
+            unsafe (*rec).stale = (unsafe (*rec).stale | unowned) as u8;
             if io_stats_on() {
-                stat_add(&mut unsafe r.st.stale, 1);
+                stat_add(&mut unsafe (*r).st.stale, 1);
             }
         }
         if (ready & RD) != 0 {
-            fire_list(r, &mut unsafe rec.rd, runtime::WR_IO, b);
+            fire_list(r, &mut unsafe (*rec).rd, runtime::WR_IO, b);
         }
         if (ready & WR) != 0 {
-            fire_list(r, &mut unsafe rec.wr, runtime::WR_IO, b);
+            fire_list(r, &mut unsafe (*rec).wr, runtime::WR_IO, b);
         }
         let mut want: i32 = 0;
-        if unsafe rec.rd != null {
+        if unsafe (*rec).rd != null {
             want = want | RD;
         }
-        if unsafe rec.wr != null {
+        if unsafe (*rec).wr != null {
             want = want | WR;
         }
         let rearm = want & dropped;
@@ -600,10 +608,10 @@ fn process_events(r: *mut Reactor, evs: &mut EvBuf, n: i32, b: &mut Batch) {
             if rc != 0 {
                 // The descriptor cannot be watched any more: its remaining waits report not ready.
                 if (rearm & RD) != 0 {
-                    fire_list(r, &mut unsafe rec.rd, runtime::WR_TIMEOUT, b);
+                    fire_list(r, &mut unsafe (*rec).rd, runtime::WR_TIMEOUT, b);
                 }
                 if (rearm & WR) != 0 {
-                    fire_list(r, &mut unsafe rec.wr, runtime::WR_TIMEOUT, b);
+                    fire_list(r, &mut unsafe (*rec).wr, runtime::WR_TIMEOUT, b);
                 }
             }
         }
@@ -612,10 +620,10 @@ fn process_events(r: *mut Reactor, evs: &mut EvBuf, n: i32, b: &mut Batch) {
 
 // Shutdown: every armed wait is settled as not ready; its disarm follows and is acknowledged.
 fn settle_all(r: *mut Reactor, b: &mut Batch) {
-    for i in 0..unsafe r.nrec {
-        let rec = unsafe (r.recs + i);
-        fire_list(r, &mut unsafe rec.rd, runtime::WR_TIMEOUT, b);
-        fire_list(r, &mut unsafe rec.wr, runtime::WR_TIMEOUT, b);
+    for i in 0..unsafe (*r).nrec {
+        let rec = unsafe ((*r).recs + i);
+        fire_list(r, &mut unsafe (*rec).rd, runtime::WR_TIMEOUT, b);
+        fire_list(r, &mut unsafe (*rec).wr, runtime::WR_TIMEOUT, b);
     }
 }
 
@@ -629,7 +637,7 @@ fn reactor_main(arg: *mut void) *mut void {
     let sp = (&mut unsafe G_STATE) as *mut i32;
     loop {
         drain_commands(r, &mut b);
-        if atomic::load_i32(sp, 4) == 3 {
+        if unsafe atomic::load_i32(sp, 4) == 3 {
             if !settled {
                 settle_all(r, &mut b);
                 settled = true;
@@ -637,9 +645,16 @@ fn reactor_main(arg: *mut void) *mut void {
             batch_flush(r, &mut b);
             // Every task that can still reach this reactor has recorded an I/O wait: none left means
             // nothing more will be pushed (see `wait_until` for the order that makes this sound).
-            if runtime::tasks_waiting(runtime::WK_IO) == 0 && atomic::load_i32(&mut unsafe G_CLOSERS, 4) == 0 {
-                // A closer counts out after its report is pushed, and one that counts in from here on finds
-                // the reactor stopping and reports nothing: what the list holds now is all it will hold.
+            if runtime::tasks_waiting(runtime::WK_IO) == 0 && unsafe atomic::cas_i32(
+                &mut unsafe G_CLOSERS,
+                0,
+                -1,
+                false,
+                4,
+                4,
+            ) {
+                // A closer counts out after its report is pushed, and one that comes from here on finds
+                // the count negative and reports nothing: what the list holds now is all it will hold.
                 drain_commands(r, &mut b);
                 batch_flush(r, &mut b);
                 break;
@@ -648,28 +663,28 @@ fn reactor_main(arg: *mut void) *mut void {
         batch_flush(r, &mut b);
         // Sleep only with an empty command list: a pusher that sees `sleeping` writes the wake pipe, and
         // one that pushed before this store is caught by the load after it (both sides SeqCst).
-        atomic::store_i32(&mut unsafe r.sleeping, 1, 4);
-        if atomic::load_usize(&mut unsafe r.cmds, 4) != 0 {
-            atomic::store_i32(&mut unsafe r.sleeping, 0, 4);
+        unsafe atomic::store_i32(&mut unsafe (*r).sleeping, 1, 4);
+        if unsafe atomic::load_usize(&mut unsafe (*r).cmds, 4) != 0 {
+            unsafe atomic::store_i32(&mut unsafe (*r).sleeping, 0, 4);
             continue;
         }
         if io_stats_on() {
-            stat_add(&mut unsafe r.st.polls, 1);
+            stat_add(&mut unsafe (*r).st.polls, 1);
         }
         // Poll with a bound while an acknowledgement waits for an arm that brings no wake, and while
         // stopping (a task that recorded its wait and then found the reactor stopping clears the record
         // without a wake); otherwise sleep until an event or a wake.
         let n = unsafe sc_io::sc_io_wait(
-            r.poller,
+            (*r).poller,
             &mut evs.e[0],
             sc_io::EV_MAX,
-            if settled || unsafe r.deferred > 0 {
+            if settled || unsafe (*r).deferred > 0 {
                 1;
             } else {
                 -1;
             },
         );
-        atomic::store_i32(&mut unsafe r.sleeping, 0, 4);
+        unsafe atomic::store_i32(&mut unsafe (*r).sleeping, 0, 4);
         if n < 0 {
             panic("reactor: the poller failed");
         }
@@ -688,17 +703,18 @@ fn push_cmd(r: *mut Reactor, n: *mut IoWait, tag: usize, wake: bool) {
     let tagged = n as usize | tag;
     let link = cmd_link(tagged);
     loop {
-        let head = atomic::load_usize(&mut unsafe r.cmds, 0);
+        let head = unsafe atomic::load_usize(&mut unsafe (*r).cmds, 0);
         unsafe link[0] = head;
-        if atomic::cas_usize(&mut unsafe r.cmds, head, tagged, false, 4, 0) {
+        if unsafe atomic::cas_usize(&mut unsafe (*r).cmds, head, tagged, false, 4, 0) {
             break;
         }
     }
-    if wake && atomic::load_i32(&mut unsafe r.sleeping, 4) != 0 {
+    if wake && unsafe atomic::load_i32(&mut unsafe (*r).sleeping, 4) != 0 {
         if io_stats_on() {
-            stat_add(&mut unsafe r.st.pipe_wakes, 1);
+            // Pushers run on any thread: an atomic add.
+            let _ = unsafe atomic::add_u64(&mut unsafe (*r).st.pipe_wakes, 1, 0);
         }
-        unsafe sc_io::sc_io_wake(r.poller);
+        unsafe sc_io::sc_io_wake((*r).poller);
     }
 }
 
@@ -723,7 +739,7 @@ fn build_reactor() *mut Reactor {
         unsafe regs[k] = 0;
     }
     for k in 0..REC_INIT {
-        unsafe recs[k] = FdRec { rd: null, wr: null, known: 0, stale: 0, gen: 0, pad: 0, evt: 0 };
+        unsafe recs[k] = FdRec { rd: null, wr: null, evt: 0, gen: 0, known: 0, stale: 0 };
     }
     let r = ((base as usize + R_ALIGN - 1) / R_ALIGN * R_ALIGN) as *mut Reactor;
     unsafe r[0] = Reactor {
@@ -765,7 +781,7 @@ fn build_reactor() *mut Reactor {
         unsafe g.dealloc(base, reactor_bytes(), 16);
         panic("reactor: cannot create the poller thread");
     }
-    unsafe r.thread = h;
+    unsafe (*r).thread = h;
     return r;
 }
 
@@ -779,17 +795,19 @@ pub fn ensure_reactor() *mut Reactor {
     unsafe {
         let sp = (&mut G_STATE) as *mut i32; // order codes: 0 Relaxed, 1 Acquire, 2 Release, 4 SeqCst
         loop {
-            let st = atomic::load_i32(sp, 1);
+            let st = unsafe atomic::load_i32(sp, 1);
             if st == 2 {
                 return G_REACTOR;
             }
             if st == 3 {
                 return null;
             }
-            if st == 0 && atomic::cas_i32(sp, 0, 1, false, 4, 0) {
+            if st == 0 && unsafe atomic::cas_i32(sp, 0, 1, false, 4, 0) {
+                // Closers count in again (a previous reactor left the count negative).
+                unsafe atomic::store_i32(&mut G_CLOSERS, 0, 4);
                 let r = build_reactor();
                 G_REACTOR = r;
-                atomic::store_i32(sp, 2, 2);
+                unsafe atomic::store_i32(sp, 2, 2);
                 return r;
             }
             // Being built.
@@ -806,7 +824,7 @@ fn admit() *mut Reactor {
     if ensure_reactor() == null {
         return null;
     }
-    if atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 4) != 2 {
+    if unsafe atomic::load_i32((&mut unsafe G_STATE) as *mut i32, 4) != 2 {
         return null;
     }
     return unsafe G_REACTOR;
@@ -823,13 +841,13 @@ fn commit_arm(p: *mut void) {
     // reactor woken for the command.
     if io_stats_on() {
         // Workers count concurrently: an atomic add, unlike the reactor's own counters.
-        let _ = atomic::add_u64(&mut unsafe r.st.sets, 1, 0);
+        let _ = unsafe atomic::add_u64(&mut unsafe (*r).st.sets, 1, 0);
     }
-    let closes = atomic::load_u64(&mut unsafe G_CLOSES, 4);
-    let seq = atomic::load_u64(&mut unsafe r.events, 4);
-    unsafe n.seq = seq;
-    let rc = register(r, unsafe n.fd, unsafe n.dir, 1);
-    unsafe n.rc = rc;
+    let closes = unsafe atomic::load_u64(&mut unsafe G_CLOSES, 4);
+    let seq = unsafe atomic::load_u64(&mut unsafe (*r).events, 4);
+    unsafe (*n).seq = seq;
+    let rc = register(r, unsafe (*n).fd, unsafe (*n).dir, 1);
+    unsafe (*n).rc = rc;
     // Nothing touches `n` after the push: the reactor may acknowledge it and the frame may end at once.
     push_cmd(r, n, CMD_ARM, rc != 0);
     // The push brings no wake of its own: the event this registration raises is the wake. That event can
@@ -842,11 +860,11 @@ fn commit_arm(p: *mut void) {
     // then sees. Likewise a close between the two reads may have taken the registration with it (the
     // kernel drops a closed descriptor's interests) after its report was processed, leaving this arm with
     // no event and no wake. A close after the push is ordered behind the arm on the command list.
-    if rc == 0 && (atomic::load_u64(&mut unsafe r.events, 4) != seq || atomic::load_u64(&mut unsafe G_CLOSES, 4) != closes) && atomic::load_i32(
-        &mut unsafe r.sleeping,
+    if rc == 0 && (unsafe atomic::load_u64(&mut unsafe (*r).events, 4) != seq || unsafe atomic::load_u64(
+        &mut unsafe G_CLOSES,
         4,
-    ) != 0 {
-        unsafe sc_io::sc_io_wake(r.poller);
+    ) != closes) && unsafe atomic::load_i32(&mut unsafe (*r).sleeping, 4) != 0 {
+        unsafe sc_io::sc_io_wake((*r).poller);
     }
 }
 
@@ -870,12 +888,23 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
         } else {
             0;
         };
-        let ms = if deadline == 0 {
-            -1;
-        } else {
-            (time::remaining_ns(deadline) / 1000000) as i32 + 1;
-        };
-        return unsafe sc_io::sc_io_wait_fd(fd, w, ms) > 0;
+        // poll(2) takes its timeout as an `int` of milliseconds, so a longer wait is several polls, each
+        // ending early only by readiness or an error. Bounded by the deadline.
+        loop {
+            let mut ms: i32 = -1;
+            if deadline != 0 {
+                let left = time::remaining_ns(deadline) / 1000000;
+                ms = if left >= 2147483647 {
+                    2147483647;
+                } else {
+                    left as i32 + 1;
+                };
+            }
+            let rc = unsafe sc_io::sc_io_wait_fd(fd, w, ms);
+            if rc != 0 || ms != 2147483647 {
+                return rc > 0;
+            }
+        }
     }
     if fd < 0 {
         // Never a descriptor: ready, so the caller's syscall reports the real error.
@@ -936,29 +965,46 @@ pub fn close(fd: i32) i32 {
         return unsafe sc_io::sc_io_close(fd);
     }
     let sp = (&mut unsafe G_STATE) as *mut i32;
-    // Count in before reading the state: a stopping reactor waits for the count (see `reactor_main`).
-    let _ = atomic::add_i32(&mut unsafe G_CLOSERS, 1, 4);
-    if atomic::load_i32(sp, 4) != 2 {
+    // Count in before reading the state: a stopping reactor waits for the count (see `reactor_main`). A
+    // negative count means a stopping reactor has left: it saw no admitted wait, so nothing is registering.
+    // Every failed attempt is another closer's successful one.
+    let cp = &mut unsafe G_CLOSERS;
+    let mut c = unsafe atomic::load_i32(cp, 4);
+    while c >= 0 && !unsafe atomic::cas_i32(cp, c, c + 1, false, 4, 4) {
+        c = unsafe atomic::load_i32(cp, 4);
+    }
+    if c < 0 {
+        return unsafe sc_io::sc_io_close(fd);
+    }
+    let st = unsafe atomic::load_i32(sp, 4);
+    if st != 2 && st != 3 {
         // No reactor: nothing can be registering the descriptor.
         let rc = unsafe sc_io::sc_io_close(fd);
-        let _ = atomic::sub_i32(&mut unsafe G_CLOSERS, 1, 4);
+        let _ = unsafe atomic::sub_i32(cp, 1, 4);
         return rc;
     }
+    // Stopping (3) still needs the exclusion: a wait admitted before the stop may be registering now.
     let r = unsafe G_REACTOR;
     // No registration may overlap the close (see `G_CLOSING`): raise the flag, wait out the ones under
     // way, close, lower it.
-    let _ = atomic::add_i32(&mut unsafe G_CLOSING, 1, 4);
+    let _ = unsafe atomic::add_i32(&mut unsafe G_CLOSING, 1, 4);
     for slot in 0..REG_SLOTS + 1 {
-        let f = unsafe (r.regs + slot * (R_ALIGN / 4));
-        while atomic::load_i32(f, 4) != 0 {
+        let f = unsafe ((*r).regs + slot * (R_ALIGN / 4));
+        while unsafe atomic::load_i32(f, 4) != 0 {
             unsafe sc_runtime::sc_rt_cpu_relax();
         }
     }
     let rc = unsafe sc_io::sc_io_close(fd);
-    let _ = atomic::sub_i32(&mut unsafe G_CLOSING, 1, 4);
+    let _ = unsafe atomic::sub_i32(&mut unsafe G_CLOSING, 1, 4);
+    if st == 3 {
+        // A stopping reactor settles every wait as not ready and keeps no record past its exit, so a
+        // report would settle nothing.
+        let _ = unsafe atomic::sub_i32(cp, 1, 4);
+        return rc;
+    }
     // Counted before the report is published, so an arm that saw the old count and then finds the new one
     // knows its registration may have died with the descriptor.
-    let _ = atomic::add_u64(&mut unsafe G_CLOSES, 1, 4);
+    let _ = unsafe atomic::add_u64(&mut unsafe G_CLOSES, 1, 4);
     let mut g = Global {};
     let n = (unsafe g.alloc(sizeof(IoWait), alignof(IoWait))) as *mut IoWait;
     if n == null {
@@ -979,18 +1025,19 @@ pub fn close(fd: i32) i32 {
         lnext: null,
     };
     push_cmd(r, n, CMD_ARM, true);
-    let _ = atomic::sub_i32(&mut unsafe G_CLOSERS, 1, 4);
+    let _ = unsafe atomic::sub_i32(cp, 1, 4);
     return rc;
 }
 
-/// Wait until `fd` can be read without blocking.
-pub fn wait_readable(fd: i32) {
-    let _ = wait_until(fd, false, 0);
+/// Wait until `fd` can be read without blocking. Reports whether it became readable: `false` for the
+/// reasons `wait_until` gives, less the deadline.
+pub fn wait_readable(fd: i32) bool {
+    return wait_until(fd, false, 0);
 }
 
-/// Wait until `fd` can be written without blocking.
-pub fn wait_writable(fd: i32) {
-    let _ = wait_until(fd, true, 0);
+/// Wait until `fd` can be written without blocking. Reports whether it became writable, as `wait_readable`.
+pub fn wait_writable(fd: i32) bool {
+    return wait_until(fd, true, 0);
 }
 
 /// Read from `fd`, parking whenever it is not ready. Returns what the read returned: the byte count, `0`
@@ -1041,8 +1088,8 @@ pub fn write(fd: i32, buf: []u8) isize {
 pub fn shutdown() {
     let sp = (&mut unsafe G_STATE) as *mut i32;
     loop {
-        let st = atomic::load_i32(sp, 4);
-        if st == 2 && atomic::cas_i32(sp, 2, 3, false, 4, 0) {
+        let st = unsafe atomic::load_i32(sp, 4);
+        if st == 2 && unsafe atomic::cas_i32(sp, 2, 3, false, 4, 0) {
             break;
         }
         if st != 1 && st != 2 {
@@ -1052,27 +1099,27 @@ pub fn shutdown() {
     }
     let r = unsafe G_REACTOR;
     // The reactor re-reads the state after every wake.
-    unsafe sc_io::sc_io_wake(r.poller);
-    if unsafe sc_runtime::sc_rt_thread_join(r.thread) != 0 {
+    unsafe sc_io::sc_io_wake((*r).poller);
+    if unsafe sc_runtime::sc_rt_thread_join((*r).thread) != 0 {
         panic("reactor: cannot join the poller thread at shutdown");
     }
-    unsafe sc_io::sc_io_free(r.poller);
+    unsafe sc_io::sc_io_free((*r).poller);
     if io_stats_on() {
         let t = &mut unsafe G_STATS;
-        t.arms = t.arms + unsafe r.st.arms;
-        t.disarms = t.disarms + unsafe r.st.disarms;
-        t.sets = t.sets + unsafe r.st.sets;
-        t.polls = t.polls + unsafe r.st.polls;
-        t.events = t.events + unsafe r.st.events;
-        t.wakes = t.wakes + unsafe r.st.wakes;
-        t.pipe_wakes = t.pipe_wakes + unsafe r.st.pipe_wakes;
-        t.batches = t.batches + unsafe r.st.batches;
-        t.stale = t.stale + unsafe r.st.stale;
+        t.arms = t.arms + unsafe (*r).st.arms;
+        t.disarms = t.disarms + unsafe (*r).st.disarms;
+        t.sets = t.sets + unsafe (*r).st.sets;
+        t.polls = t.polls + unsafe (*r).st.polls;
+        t.events = t.events + unsafe (*r).st.events;
+        t.wakes = t.wakes + unsafe (*r).st.wakes;
+        t.pipe_wakes = t.pipe_wakes + unsafe (*r).st.pipe_wakes;
+        t.batches = t.batches + unsafe (*r).st.batches;
+        t.stale = t.stale + unsafe (*r).st.stale;
     }
     let mut g = Global {};
-    unsafe g.dealloc(r.recs, r.nrec * sizeof(FdRec), alignof(FdRec));
-    unsafe g.dealloc(r.regs, (REG_SLOTS + 1) * R_ALIGN, R_ALIGN);
-    unsafe g.dealloc(r.base, reactor_bytes(), 16);
+    unsafe g.dealloc((*r).recs, (*r).nrec * sizeof(FdRec), alignof(FdRec));
+    unsafe g.dealloc((*r).regs, (REG_SLOTS + 1) * R_ALIGN, R_ALIGN);
+    unsafe g.dealloc((*r).base, reactor_bytes(), 16);
     unsafe G_REACTOR = null;
-    atomic::store_i32(sp, 0, 4);
+    unsafe atomic::store_i32(sp, 0, 4);
 }

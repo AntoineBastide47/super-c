@@ -138,7 +138,12 @@ void sc_rt_spin_unlock(int32_t *w) { __atomic_store_n(w, 0, __ATOMIC_RELEASE); }
    Static storage for the task-aware mutex's waiter queues (see sc_rt.h): 64 line-sized slots, picked by a
    Fibonacci hash of the lock's address. Zero-initialized is exactly the empty state, so there is nothing
    to set up and nothing to tear down. */
-#define SC_RT_MLOT 64
+#define SC_RT_BUCKET_BITS 6
+#define SC_RT_MLOT (1 << SC_RT_BUCKET_BITS)
+/* The bucket of `addr` in either parking lot: a Fibonacci hash keeps the top SC_RT_BUCKET_BITS bits. */
+static unsigned sc_rt_addr_bucket(const void *addr) {
+  return (unsigned)((((uintptr_t)addr >> 4) * 0x9E3779B97F4A7C15ull) >> (64 - SC_RT_BUCKET_BITS));
+}
 static struct {
   int32_t lock;
   int32_t pad;
@@ -176,8 +181,10 @@ void sc_lk_counts(uint64_t *out) { memset(out, 0, 2 * sizeof *out); }
    thousand is found on the run that merely takes both locks, and no thread has to block for it.
 
    The order graph is a set of edges "a was held when b was taken". Taking `b` while holding `a` reports if
-   the reverse edge was ever recorded. Edges are keyed by ADDRESS, so `forget` drops a lock's edges when it
-   is destroyed -- otherwise a reused address inherits a dead lock's history and reports a phantom cycle.
+   the reverse edge was ever recorded. Edges are keyed by an ID the lock carries in its own `id` word, given
+   on its first tracked acquisition (under the lock, so no other thread writes it), not by its address: a
+   lock lives inside the value it guards, and that value may move while unlocked, which would leave the
+   history behind at an address another lock can reuse. `forget` drops a lock's edges when it is destroyed.
 
    The held set is per THREAD. A coroutine that parks while holding a lock and resumes on another worker is
    therefore not followed: `release` of a lock this thread does not hold is ignored rather than guessed at.
@@ -190,13 +197,14 @@ void sc_lk_counts(uint64_t *out) { memset(out, 0, 2 * sizeof *out); }
 #ifdef SC_LOCKDEP
 #define SC_LO_HELD 32
 #define SC_LO_EDGES 4096
-static _Thread_local void *sc_lo_held[SC_LO_HELD];
+static _Thread_local uint32_t sc_lo_held[SC_LO_HELD];
 static _Thread_local int sc_lo_nheld;
 static struct {
-  void *a;
-  void *b;
+  uint32_t a;
+  uint32_t b;
 } sc_lo_edge[SC_LO_EDGES];
 static int sc_lo_nedge;
+static uint32_t sc_lo_next; /* the last ID given out; 0 means "no ID yet" */
 static int32_t sc_lo_lock;
 static int sc_lo_state; /* 0 unknown, 1 off, 2 report, 3 abort */
 
@@ -214,13 +222,15 @@ static int sc_lo_on(void) {
   return st >= 2;
 }
 
-void sc_rt_lockdep_acquire(void *lock) {
+void sc_rt_lockdep_acquire(uint32_t *id) {
   if (!sc_lo_on()) return;
+  if (*id == 0) *id = __atomic_add_fetch(&sc_lo_next, 1, __ATOMIC_RELAXED);
+  uint32_t lock = *id;
   int n = sc_lo_nheld;
   if (n > 0) {
     sc_rt_spin_lock(&sc_lo_lock);
     for (int i = 0; i < n; i++) {
-      void *h = sc_lo_held[i];
+      uint32_t h = sc_lo_held[i];
       if (h == lock) continue; /* recursive take: not an inversion, and not this tool's business */
       int seen = 0;
       for (int k = 0; k < sc_lo_nedge; k++) {
@@ -249,8 +259,9 @@ void sc_rt_lockdep_acquire(void *lock) {
   if (sc_lo_nheld < SC_LO_HELD) sc_lo_held[sc_lo_nheld++] = lock;
 }
 
-void sc_rt_lockdep_release(void *lock) {
+void sc_rt_lockdep_release(uint32_t *id) {
   if (!sc_lo_on()) return;
+  uint32_t lock = *id;
   for (int i = sc_lo_nheld - 1; i >= 0; i--) {
     if (sc_lo_held[i] == lock) {
       for (int k = i; k + 1 < sc_lo_nheld; k++) sc_lo_held[k] = sc_lo_held[k + 1];
@@ -260,8 +271,9 @@ void sc_rt_lockdep_release(void *lock) {
   }
 }
 
-void sc_rt_lockdep_forget(void *lock) {
-  if (!sc_lo_on()) return;
+void sc_rt_lockdep_forget(uint32_t *id) {
+  if (!sc_lo_on() || *id == 0) return;
+  uint32_t lock = *id;
   sc_rt_spin_lock(&sc_lo_lock);
   int w = 0;
   for (int k = 0; k < sc_lo_nedge; k++) {
@@ -271,13 +283,13 @@ void sc_rt_lockdep_forget(void *lock) {
   sc_rt_spin_unlock(&sc_lo_lock);
 }
 #else
-void sc_rt_lockdep_acquire(void *lock) { (void)lock; }
-void sc_rt_lockdep_release(void *lock) { (void)lock; }
-void sc_rt_lockdep_forget(void *lock) { (void)lock; }
+void sc_rt_lockdep_acquire(uint32_t *id) { (void)id; }
+void sc_rt_lockdep_release(uint32_t *id) { (void)id; }
+void sc_rt_lockdep_forget(uint32_t *id) { (void)id; }
 #endif
 
 void *sc_rt_lot_bucket(void *addr) {
-  return &sc_rt_mlot[(size_t)((((uintptr_t)addr >> 4) * 0x9E3779B97F4A7C15ull) >> 58)];
+  return &sc_rt_mlot[sc_rt_addr_bucket(addr)];
 }
 
 /* ---- current worker index: -1 on any thread that is not a pool worker ------------------------------ */
@@ -303,13 +315,21 @@ uint64_t sc_rt_cycles(void) {
 /* ================================ Windows ========================================================== */
 #include <windows.h>
 
+/* The counter frequency is fixed at boot; every thread may cache it, so the cache is a relaxed atomic. */
+static int64_t sc_rt_qpc_freq = 0;
+
 uint64_t sc_rt_now_ns(void) {
-  static LARGE_INTEGER freq;
+  int64_t f = __atomic_load_n(&sc_rt_qpc_freq, __ATOMIC_RELAXED);
+  if (f == 0) {
+    LARGE_INTEGER q;
+    QueryPerformanceFrequency(&q);
+    f = q.QuadPart;
+    __atomic_store_n(&sc_rt_qpc_freq, f, __ATOMIC_RELAXED);
+  }
   LARGE_INTEGER c;
-  if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
   QueryPerformanceCounter(&c);
   /* scale to ns without overflowing: (ticks / freq) seconds -> ns */
-  return (uint64_t)((double)c.QuadPart * 1e9 / (double)freq.QuadPart);
+  return (uint64_t)((double)c.QuadPart * 1e9 / (double)f);
 }
 
 size_t sc_rt_ncpu(void) {
@@ -352,9 +372,7 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
 }
 void sc_rt_unpark_one(int32_t *word) { WakeByAddressSingle(word); }
 void sc_rt_unpark_all(int32_t *word) { WakeByAddressAll(word); }
-/* WaitOnAddress keeps no records of its own, so parking retains nothing here. */
-size_t sc_rt_park_bytes_per_thread(void) { return 0; }
-size_t sc_rt_park_bytes_fixed(void) { return 0; }
+size_t sc_rt_parked(void) { return 0; } /* WaitOnAddress keeps no records of its own */
 
 #if defined(__x86_64__)
 /* How much of a coroutine stack is committed up front. Windows charges commit against RAM + pagefile the
@@ -522,7 +540,8 @@ void sc_rt_stack_guard_install(void) {
   static LONG once = 0;
   SYSTEM_INFO si;
   GetSystemInfo(&si);
-  sc_rt_pagesz = si.dwPageSize;
+  /* Every thread stores the same value while the handler may read it: relaxed makes that defined. */
+  __atomic_store_n(&sc_rt_pagesz, (size_t)si.dwPageSize, __ATOMIC_RELAXED);
   sc_rt_thread_stack_base = sc_teb_read(SC_TEB_STACK_BASE);
   if (InterlockedCompareExchange(&once, 1, 0) == 0) AddVectoredExceptionHandler(1, sc_rt_stack_veh);
 }
@@ -604,7 +623,6 @@ int sc_rt_cond_timedwait_ns(void *c, void *m, int64_t rel_ns) {
   return GetLastError() == ERROR_TIMEOUT ? 1 : -1;
 }
 void sc_rt_cond_signal(void *c) { WakeConditionVariable((CONDITION_VARIABLE *)c); }
-void sc_rt_cond_broadcast(void *c) { WakeAllConditionVariable((CONDITION_VARIABLE *)c); }
 
 /* Fibers. The context is the fiber handle plus the entry closure; the root context converts the current
    thread to a fiber on first use. */
@@ -852,8 +870,7 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
 }
 void sc_rt_unpark_one(int32_t *word) { (void)word; }
 void sc_rt_unpark_all(int32_t *word) { (void)word; }
-size_t sc_rt_park_bytes_per_thread(void) { return 0; }
-size_t sc_rt_park_bytes_fixed(void) { return 0; }
+size_t sc_rt_parked(void) { return 0; }
 
 void *sc_rt_stack_alloc(size_t size) { /* no guard page: wasm has no mprotect */
   if (size == 0 || size % 65536 != 0) return 0;
@@ -919,7 +936,6 @@ int sc_rt_cond_timedwait_ns(void *c, void *m, int64_t rel_ns) {
   return 1; /* the deadline woke it -- no signal can arrive */
 }
 void sc_rt_cond_signal(void *c) { (void)c; }
-void sc_rt_cond_broadcast(void *c) { (void)c; }
 
 /* Stackful coroutines need a second stack to switch to, and wasm's call stack is not addressable. */
 void *sc_rt_ctx_alloc(void) { return sc_rt_alloc(1, 1); }
@@ -1006,11 +1022,12 @@ void sc_rt_thread_yield(void) { sched_yield(); }
    lock, reading each record before signalling its owner, which is sound for the same reason. A bounded
    wait that ends by its deadline claims nothing: a wake sent to a word nobody waits on is dropped, as
    the futex contract says, and the caller re-checks its own condition. */
-#define SC_RT_BUCKETS 64
+#define SC_RT_BUCKETS SC_RT_MLOT
 typedef struct sc_rt_parker {
   pthread_mutex_t m;
-  pthread_cond_t cv;
-  int32_t signaled; /* under `m`: one pending wake, consumed by the sleep it ends */
+  pthread_cond_t cv; /* initialized by the thread's first park (sc_rt_cond_init_mono) */
+  int32_t signaled;  /* under `m`: one pending wake, consumed by the sleep it ends */
+  int32_t ready;     /* owner-only: `cv` is initialized */
 } sc_rt_parker;
 typedef struct sc_rt_pnode {
   int32_t *addr;
@@ -1020,15 +1037,47 @@ typedef struct sc_rt_pnode {
 } sc_rt_pnode;
 static struct {
   int32_t lock;
-  int32_t pad;
   sc_rt_pnode *head;
   sc_rt_pnode *tail;
-  char pad2[40];
 } __attribute__((aligned(64))) sc_rt_lot[SC_RT_BUCKETS];
-static _Thread_local sc_rt_parker sc_rt_self = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0};
+static _Thread_local sc_rt_parker sc_rt_self = {.m = PTHREAD_MUTEX_INITIALIZER};
 
-static unsigned sc_rt_bucket(void *addr) {
-  return (unsigned)(((((uintptr_t)addr >> 4) * 0x9E3779B97F4A7C15ull) >> 58) & (SC_RT_BUCKETS - 1));
+/* Timed waits measure the monotonic clock, so a wall-clock step moves no timeout. Linux binds each
+   condvar to CLOCK_MONOTONIC; Darwin has no such attribute and waits a relative span instead. */
+static void sc_rt_cond_init_mono(pthread_cond_t *c) {
+#if defined(__APPLE__)
+  pthread_cond_init(c, 0);
+#else
+  pthread_condattr_t a;
+  pthread_condattr_init(&a);
+  pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+  pthread_cond_init(c, &a);
+  pthread_condattr_destroy(&a);
+#endif
+}
+
+/* The absolute CLOCK_MONOTONIC time `rel_ns` from now. */
+static void sc_rt_mono_deadline(struct timespec *ts, int64_t rel_ns) {
+  clock_gettime(CLOCK_MONOTONIC, ts);
+  int64_t ns = (int64_t)ts->tv_nsec + rel_ns % 1000000000ll;
+  ts->tv_sec += (time_t)(rel_ns / 1000000000ll + ns / 1000000000ll);
+  ts->tv_nsec = (long)(ns % 1000000000ll);
+}
+
+/* pthread_cond_timedwait against a CLOCK_MONOTONIC `deadline`, on a condvar from sc_rt_cond_init_mono. */
+static int sc_rt_cond_wait_until(pthread_cond_t *c, pthread_mutex_t *m, const struct timespec *deadline) {
+#if defined(__APPLE__)
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  int64_t left = (int64_t)(deadline->tv_sec - now.tv_sec) * 1000000000ll + (deadline->tv_nsec - now.tv_nsec);
+  if (left <= 0) return ETIMEDOUT;
+  struct timespec rel;
+  rel.tv_sec = (time_t)(left / 1000000000ll);
+  rel.tv_nsec = (long)(left % 1000000000ll);
+  return pthread_cond_timedwait_relative_np(c, m, &rel);
+#else
+  return pthread_cond_timedwait(c, m, deadline);
+#endif
 }
 
 /* Unlink `n` from bucket `b`; caller holds the bucket lock and `n` is linked. `prev` is its predecessor. */
@@ -1041,13 +1090,13 @@ static void sc_rt_lot_unlink(unsigned b, sc_rt_pnode *prev, sc_rt_pnode *n) {
   n->linked = 0;
 }
 
-/* Sleep on the calling thread's parker until it is signalled; `ts` (absolute, realtime) bounds the sleep.
+/* Sleep on the calling thread's parker until it is signalled; `ts` (absolute, monotonic) bounds the sleep.
    Reports whether a signal was consumed. */
 static int sc_rt_parker_sleep(sc_rt_parker *p, const struct timespec *ts) {
   pthread_mutex_lock(&p->m);
   while (!p->signaled) {
     if (ts) {
-      if (pthread_cond_timedwait(&p->cv, &p->m, ts) == ETIMEDOUT) break;
+      if (sc_rt_cond_wait_until(&p->cv, &p->m, ts) == ETIMEDOUT) break;
     } else {
       pthread_cond_wait(&p->cv, &p->m);
     }
@@ -1067,7 +1116,11 @@ static void sc_rt_parker_signal(sc_rt_parker *p) {
 
 void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
   if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != expected) return;
-  unsigned b = sc_rt_bucket(word);
+  if (!sc_rt_self.ready) {
+    sc_rt_cond_init_mono(&sc_rt_self.cv);
+    sc_rt_self.ready = 1;
+  }
+  unsigned b = sc_rt_addr_bucket(word);
   sc_rt_pnode n = {word, &sc_rt_self, 0, 1};
   sc_rt_spin_lock(&sc_rt_lot[b].lock);
   /* Re-checked under the lock: an unparker publishes the new state before it takes this lock, so a change
@@ -1085,10 +1138,7 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
   struct timespec ts;
   const struct timespec *deadline = 0;
   if (timeout_ns >= 0) {
-    clock_gettime(CLOCK_REALTIME, &ts);
-    int64_t ns = ts.tv_nsec + timeout_ns % 1000000000ll;
-    ts.tv_sec += (time_t)(timeout_ns / 1000000000ll + ns / 1000000000ll);
-    ts.tv_nsec = (long)(ns % 1000000000ll);
+    sc_rt_mono_deadline(&ts, timeout_ns);
     deadline = &ts;
   }
   if (sc_rt_parker_sleep(n.p, deadline)) return; /* the unparker unlinked the record before signalling */
@@ -1107,7 +1157,7 @@ void sc_rt_park(int32_t *word, int32_t expected, int64_t timeout_ns) {
 }
 
 void sc_rt_unpark_one(int32_t *word) {
-  unsigned b = sc_rt_bucket(word);
+  unsigned b = sc_rt_addr_bucket(word);
   sc_rt_parker *p = 0;
   sc_rt_spin_lock(&sc_rt_lot[b].lock);
   sc_rt_pnode *prev = 0;
@@ -1123,7 +1173,7 @@ void sc_rt_unpark_one(int32_t *word) {
 }
 
 void sc_rt_unpark_all(int32_t *word) {
-  unsigned b = sc_rt_bucket(word);
+  unsigned b = sc_rt_addr_bucket(word);
   sc_rt_pnode *mine = 0; /* the unlinked records, chained through their own `next` */
   sc_rt_spin_lock(&sc_rt_lot[b].lock);
   sc_rt_pnode *prev = 0;
@@ -1148,12 +1198,15 @@ void sc_rt_unpark_all(int32_t *word) {
   }
 }
 
-/* What parking retains, for a program that wants to account for it. Per thread: the parker, kept in
-   thread-local storage for the thread's life once it has parked even once, because an unparker may be
-   about to signal it. Fixed: the bucket table. The wait records themselves live in the parking frames and
-   retain nothing. */
-size_t sc_rt_park_bytes_per_thread(void) { return sizeof(sc_rt_parker); }
-size_t sc_rt_park_bytes_fixed(void) { return sizeof(sc_rt_lot); }
+size_t sc_rt_parked(void) {
+  size_t n = 0;
+  for (unsigned b = 0; b < SC_RT_BUCKETS; b++) {
+    sc_rt_spin_lock(&sc_rt_lot[b].lock);
+    for (sc_rt_pnode *c = sc_rt_lot[b].head; c; c = c->next) n++;
+    sc_rt_spin_unlock(&sc_rt_lot[b].lock);
+  }
+  return n;
+}
 
 void *sc_rt_stack_alloc(size_t size) {
   size_t pg = (size_t)sysconf(_SC_PAGESIZE);
@@ -1208,7 +1261,6 @@ void sc_rt_stack_reuse(void *usable, size_t size) {
    the live stack in thread-local storage -- cost 15ns per switch on macOS, where every _Thread_local access
    goes through tlv_get_addr. */
 static size_t sc_rt_stk_size = 0;
-static size_t sc_rt_pagesz = 4096; /* cached: sysconf is not async-signal-safe */
 
 /* Every worker writes the SAME value here, but "same value" is not a synchronisation argument -- a plain
    write racing a plain read is undefined however benign it looks, and the reader is a signal handler. The
@@ -1279,21 +1331,43 @@ static void sc_rt_overflow(int sig, siginfo_t *si, void *uc) {
   raise(sig);
 }
 
+/* Each worker's signal stack is released when the thread exits, through a thread-specific key: a pool
+   that restarts starts new threads, and each would otherwise keep a mapping forever. */
+static pthread_key_t sc_rt_sigstk_key;
+static pthread_once_t sc_rt_sigstk_once = PTHREAD_ONCE_INIT;
+static int sc_rt_sigstk_keyed = 0;
+
+static size_t sc_rt_sigstk_size(void) { return (size_t)SIGSTKSZ < 32768 ? 32768 : (size_t)SIGSTKSZ; }
+
+static void sc_rt_sigstk_drop(void *m) {
+  stack_t ss;
+  memset(&ss, 0, sizeof ss);
+  ss.ss_flags = SS_DISABLE;
+  sigaltstack(&ss, 0);
+  munmap(m, sc_rt_sigstk_size());
+}
+
+static void sc_rt_sigstk_key_init(void) {
+  sc_rt_sigstk_keyed = pthread_key_create(&sc_rt_sigstk_key, sc_rt_sigstk_drop) == 0;
+}
+
 void sc_rt_stack_guard_install(void) {
   static int32_t once = 0;
-  /* Every worker installs its own guard and caches the same page size here. Same value or not, a plain
-     write racing the handler's read is undefined; relaxed makes it defined and costs nothing. */
-  __atomic_store_n(&sc_rt_pagesz, (size_t)sysconf(_SC_PAGESIZE), __ATOMIC_RELAXED);
   /* A signal stack of this thread's own: the handler runs when a stack is exhausted, so it cannot run on
-     that stack. mmap rather than malloc, so the leak tracker sees no permanent allocation. */
-  size_t sz = (size_t)SIGSTKSZ < 32768 ? 32768 : (size_t)SIGSTKSZ;
-  void *m = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+     that stack. mmap rather than malloc, so the leak tracker sees no permanent allocation. Without the
+     key there is no way to release it at thread exit, so the thread does without. */
+  pthread_once(&sc_rt_sigstk_once, sc_rt_sigstk_key_init);
+  const size_t sz = sc_rt_sigstk_size();
+  void *m = sc_rt_sigstk_keyed ? mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) : MAP_FAILED;
   if (m != MAP_FAILED) {
     stack_t ss;
     memset(&ss, 0, sizeof ss);
     ss.ss_sp = m;
     ss.ss_size = sz;
-    sigaltstack(&ss, 0);
+    if (sigaltstack(&ss, 0) != 0)
+      munmap(m, sz);
+    else if (pthread_setspecific(sc_rt_sigstk_key, m) != 0)
+      sc_rt_sigstk_drop(m);
   }
   if (__sync_val_compare_and_swap(&once, 0, 1) != 0) return; /* the handler itself is process-wide */
   struct sigaction sa;
@@ -1353,7 +1427,7 @@ void sc_rt_mutex_unlock(void *m) { pthread_mutex_unlock((pthread_mutex_t *)m); }
 
 void *sc_rt_cond_new(void) {
   pthread_cond_t *c = (pthread_cond_t *)sc_rt_alloc(sizeof *c, 0);
-  if (c) pthread_cond_init(c, 0);
+  if (c) sc_rt_cond_init_mono(c);
   return c;
 }
 void sc_rt_cond_free(void *p) {
@@ -1369,16 +1443,11 @@ int sc_rt_cond_timedwait_ns(void *cp, void *mp, int64_t rel_ns) {
   pthread_cond_t *c = (pthread_cond_t *)cp;
   pthread_mutex_t *m = (pthread_mutex_t *)mp;
   if (rel_ns < 0) return pthread_cond_wait(c, m);
-  /* pthread_cond_timedwait takes an ABSOLUTE deadline on the cond's clock (realtime by default). */
   struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  int64_t ns = (int64_t)ts.tv_nsec + rel_ns % 1000000000ll;
-  ts.tv_sec += (time_t)(rel_ns / 1000000000ll + ns / 1000000000ll);
-  ts.tv_nsec = (long)(ns % 1000000000ll);
-  return pthread_cond_timedwait(c, m, &ts);
+  sc_rt_mono_deadline(&ts, rel_ns);
+  return sc_rt_cond_wait_until(c, m, &ts);
 }
 void sc_rt_cond_signal(void *c) { pthread_cond_signal((pthread_cond_t *)c); }
-void sc_rt_cond_broadcast(void *c) { pthread_cond_broadcast((pthread_cond_t *)c); }
 
 #if defined(__x86_64__) || defined(__aarch64__)
 /* Hand-written switch. `swapcontext` saves and restores the signal mask, which is a syscall on every switch
@@ -1388,12 +1457,9 @@ void sc_rt_cond_broadcast(void *c) { pthread_cond_broadcast((pthread_cond_t *)c)
    The whole function is emitted from a file-scope asm block: `naked` is unsupported on x86-64 gcc, and a
    compiler-generated prologue would move the stack out from under the register spills below.
 
-   Two things it deliberately does not do. It carries no CFI, so an unwinder walking out of a coroutine
-   stops at the switch instead of continuing onto the resuming stack -- which is the right answer at a
-   coroutine boundary, but it does mean no backtrace crosses one. And it is not shadow-stack safe: CET
-   checks that a `ret` returns where the matching `call` came from, and the first resume of a coroutine
-   returns to an address this code forged, so a build with user-space CET enabled needs
-   -fcf-protection=none. No distribution enables user shadow stacks by default today. */
+   It is not shadow-stack safe: CET checks that a `ret` returns where the matching `call` came from, and
+   the first resume of a coroutine returns to an address this code forged, so a build with user-space CET
+   enabled needs -fcf-protection=none. No distribution enables user shadow stacks by default today. */
 #if defined(__APPLE__)
 #define SC_ASM_NAME(n) "_" n
 #define SC_ASM_FN(n) ".globl " SC_ASM_NAME(n) "\n.private_extern " SC_ASM_NAME(n) "\n.p2align 4\n" SC_ASM_NAME(n) ":\n"
@@ -1409,8 +1475,9 @@ void sc_rt_cond_broadcast(void *c) { pthread_cond_broadcast((pthread_cond_t *)c)
    `sc_ctx_entry` is where a forged frame's final `ret` lands: it moves the saved argument into the first
    argument register and calls the coroutine body. */
 #if defined(__x86_64__)
-/* 48 bytes of registers + the return address `ret` consumes. Chosen so sp+56 (where the trampoline starts)
-   is 16-aligned: SysV wants rsp 16-aligned at a `call`, i.e. 8 mod 16 once inside the callee. */
+/* 48 bytes of registers, 8 for MXCSR and the x87 control word, and the return address `ret` consumes.
+   Chosen so sp+64 (where the trampoline starts) is 16-aligned: SysV wants rsp 16-aligned at a `call`, i.e.
+   8 mod 16 once inside the callee. */
 #define SC_CTX_FRAME 64
 /* clang-format off */
 __asm__(
@@ -1647,7 +1714,8 @@ typedef struct {
 } sc_rt_ctx_posix;
 
 static void sc_rt_uc_tramp(unsigned hi, unsigned lo) {
-  sc_rt_ctx_posix *c = (sc_rt_ctx_posix *)(((uintptr_t)hi << 32) | (uintptr_t)lo);
+  /* Spliced in 64 bits: a shift by 32 of a 32-bit uintptr_t is undefined. */
+  sc_rt_ctx_posix *c = (sc_rt_ctx_posix *)(uintptr_t)(((uint64_t)hi << 32) | (uint64_t)lo);
   c->entry(c->arg);
 }
 
@@ -1663,7 +1731,7 @@ void sc_rt_ctx_init(void *ctx, void *stack, size_t size, void (*entry)(void *), 
   c->uc.uc_stack.ss_sp = stack;
   c->uc.uc_stack.ss_size = size;
   c->uc.uc_link = 0;
-  uintptr_t p = (uintptr_t)c;
+  const uint64_t p = (uint64_t)(uintptr_t)c;
   makecontext(&c->uc, (void (*)(void))sc_rt_uc_tramp, 2, (unsigned)(p >> 32), (unsigned)(p & 0xffffffffu));
 }
 

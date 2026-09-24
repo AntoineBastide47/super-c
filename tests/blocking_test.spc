@@ -33,23 +33,23 @@ struct Payload {
 
 extend Payload as Free {
     pub fn free(self: &mut Payload) {
-        let _ = atomic::add_i64(&mut unsafe G_FREES, 1, 0);
+        let _ = unsafe atomic::add_i64(&mut unsafe G_FREES, 1, 0);
     }
 }
 
 fn frees() i64 {
-    return atomic::load_i64(&mut unsafe G_FREES, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_FREES, 1);
 }
 
 // Code after a cancelled call must never run: the task unwinds through its cancellation ladder instead.
 static mut G_AFTER: i64 = 0;
 
 fn after_mark() {
-    let _ = atomic::add_i64(&mut unsafe G_AFTER, 1, 0);
+    let _ = unsafe atomic::add_i64(&mut unsafe G_AFTER, 1, 0);
 }
 
 fn afters() i64 {
-    return atomic::load_i64(&mut unsafe G_AFTER, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_AFTER, 1);
 }
 
 fn counter() arc::Arc<atomics::Atomic<i64>> {
@@ -243,7 +243,7 @@ fn a_call_allocates_nothing() {
 @test
 fn an_owned_result_is_destroyed_once() {
     rt::set_worker_count(2);
-    atomic::store_i64(&mut unsafe G_FREES, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_FREES, 0, 0);
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w = wg.clone();
@@ -567,7 +567,7 @@ fn a_cancelled_admission_wait_returns_none() {
     let done = sync::WaitGroup::new();
     done.add(1);
     let d = done.clone();
-    atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
     let base = rt::cancelled_tasks();
     launch || {
         defer d.done();
@@ -664,8 +664,8 @@ fn shutdown_with_an_unreturned_call_is_bounded() {
 @test
 fn shutdown_with_an_abandoned_call_is_bounded() {
     rt::set_worker_count(2);
-    atomic::store_i64(&mut unsafe G_FREES, 0, 0);
-    atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_FREES, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
     let kch = chan::Channel::<rt::TaskKey>::bounded(1);
     let ktx = kch.sender();
     let krx = kch.receiver();

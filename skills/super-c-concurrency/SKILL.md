@@ -111,14 +111,18 @@ parks on the scheduler's timer heap (`import std::parallel::time as time;`,
 
 **Waiting costs no allocation, and neither does a primitive.** A `Mutex<T>` holds its lock
 word inline and a `Condvar` holds its wait queue inline, so constructing either allocates
-nothing; a value may therefore not move while a waiter is queued against it, which nothing
-can do, since a waiter only exists once a second thread shares the value through a pointer.
+nothing. Beside the lock word sits a 4-byte identity that the `race` profile's lock-order
+checker assigns and keys its history by, so a lock that moves keeps its history. A value
+must not move while a waiter is queued against it, which nothing can do, since a waiter
+only exists once a second thread shares the value through a pointer.
 Every wait is a node in the waiter's own frame, queued under the paired mutex and unlinked
 by its owner before that frame ends. A coroutine's node carries its park token; a plain
 thread's node carries the address of a wake word in the same frame. A notify claims one
 node under the mutex and wakes it, and passes the wake to the next node when it finds a
 wait already over (a deadline or a cancellation got there first), so a wake is never
-spent on a waiter that cannot use it. `sync_stats()` returns lock, wait and wake counters
+spent on a waiter that cannot use it. A wait (condvar or `select`) that consumed a notify
+returns as notified even when a cancellation is pending: the consumed wake is never lost,
+and the cancellation is taken at the next cancellation point. `sync_stats()` returns lock, wait and wake counters
 when `SYNC_STATS` in `std/parallel/sync.spc` is true, and zeros otherwise.
 
 **What a lock costs.** An uncontended acquisition and release are one atomic
@@ -148,10 +152,10 @@ worker.
 
 Parking an OS thread retains a little: on POSIX, one parker (a mutex, a condvar and a
 flag) per thread that has parked at least once, held for that thread's life so a waker
-can always reach it, plus a fixed bucket table. `sc_rt_park_bytes_per_thread()` and
-`sc_rt_park_bytes_fixed()` report both (120 B and 4 KiB on macOS arm64, against about
-16 KiB of resident stack per thread). Windows parks through `WaitOnAddress` and retains
-nothing. Wait records themselves live in the parking frame and are not retained.
+can always reach it, plus a fixed bucket table. Windows parks through `WaitOnAddress`
+and retains nothing. Wait records themselves live in the parking frame and are not
+retained; `sc_rt_parked()` counts them, so a test can wait until its plain threads are
+asleep (zero on Windows, which keeps no records; pool workers sleep elsewhere).
 
 Method calls auto-deref through the guard (`guard.push(42)`); deref-assignment goes
 through `.get_mut()` (`*guard.get_mut() = v` — plain `*guard = v` is rejected), and any
@@ -197,14 +201,17 @@ while let Some(val) = rx.recv() {           // Option<T>: None once closed and d
 **A channel is one allocation.** The handle count, the state lock, the ring state, both
 wait queues and the ring itself live in one block that the last handle out releases;
 handles are counted atomically like an `Arc`. An unbounded channel starts on that inline
-ring and moves to a heap ring when it outgrows it (doubling); a zero-sized payload has no
-ring at all. An operation on a live channel allocates nothing, waits included.
+ring and moves to a heap ring when it outgrows it (doubling); a heap ring halves again when
+fewer than a quarter of its slots are in use and it holds more than 16, so a drained burst
+gives its memory back. A zero-sized payload has no ring at all. Waits allocate nothing; only
+an unbounded channel's ring growth or shrink allocates.
 
 **Batches wake what they can use.** `send_batch` and `recv_batch` take the lock once per
 run and then wake at most as many waiters as the run delivered items or freed slots,
 rather than broadcasting: each item admits one waiter, and any further wake would only
 queue again. A batch that hits a closed channel, loses its last peer or is cancelled
 leaves its remainder in the caller's vector, in the original order.
+
 ## select
 
 Arms are separated by newlines (no commas). An arm operation is `ch.recv()`,
@@ -348,16 +355,19 @@ a `close` overlapping a `kevent` registration of the same socket wedges both thr
 the kernel for good; registering threads count themselves into per-slot counters and
 back off while a close is pending), then reports the close to the reactor: the record's
 generation moves on, every wait on the number settles as not ready at once, and an arm
-whose registration raced the close registers again and fails. A descriptor closed with
+whose registration raced the close registers again and fails. The exclusion also holds
+while the reactor is stopping; once it has left, a close is a plain close. A descriptor closed with
 a raw `close(2)` instead gets none of this: its waiters run to their deadlines, and on
 macOS the close itself may wedge. Its next file is registered afresh by the next arm.
 `wait_until` reports `false` when the deadline passed, the wait was cancelled, the
-reactor is shutting down or the descriptor cannot be watched (a closed number, the
-Windows set limit); a descriptor the poller cannot watch at all (a regular file under
+reactor is shutting down or the descriptor cannot be watched (a closed number, a number
+the reactor's own poller or wake pipe now holds, the Windows set limit); a descriptor the poller cannot watch at all (a regular file under
 epoll) reports ready.
 `io::shutdown()` settles every pending wait as not ready, keeps acknowledging until no
 admitted wait remains, then joins the thread; a later wait starts a fresh reactor.
-`io::pending_waits()` counts admitted waits (zero when every task has left its wait);
+`io::pending_waits()` counts wait records, which exist before a wait is admitted and
+registered (zero when every task has left its wait), so a test must not treat a count
+as proof that the reactor registered the wait;
 `io_stats()` returns arm, disarm, registration, poll, event, wake and batch counters when
 `IO_STATS` in `io.spc` is true, and zeros otherwise.
 
@@ -458,6 +468,8 @@ profile and fails on any report or nonzero exit.
 
 `std::parallel::task` owns cooperative cancellation. Only a `CancelSource` requests it;
 a `CancelToken` observes it; a `TaskGroup` bundles a source with the children it spawns.
+Dropping a `TaskGroup` joins its children with cancellation masked, so a group never ends
+before its children even when its owner has a cancellation pending.
 
 ```superc
 let (src, tok) = task::CancelSource::new();
@@ -517,7 +529,8 @@ Timed waits live in one indexed binary min-heap under the scheduler lock, ordere
 read in constant time, equal deadlines come due in arm order, and a sweep may reach its
 members in any order. Exactly one idle worker times its park to the earliest deadline;
 the others sleep untimed, and only a new earliest deadline wakes that worker. Due timers
-are made runnable in bounded batches per lock hold. A deadline that would wrap the clock
+are made runnable in bounded batches per lock hold, as one chain on the injection queue,
+and the promoting worker wakes one idle worker for each promoted task past the first. A deadline that would wrap the clock
 saturates (`runtime::deadline_after`, used by `time::deadline_in`).
 
 ## Shutdown

@@ -132,6 +132,24 @@ fn union_free_lint() {
     assert(!d.out_has("union 'Good'"));
 }
 
+// Ownership derives through nested instances of one generic declaration: `W<W<String>>` owns
+// exactly as `W<String>` does, so both unions are flagged.
+@test
+fn union_free_lint_nested_instance() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "struct W<T> {\n    pub x: T,\n}\n\nunion Deep {\n    pub a: W<W<String>>,\n    pub n: u64,\n}\n\nunion Flat {\n    pub a: W<String>,\n    pub n: u64,\n}\n\nfn main() i32 {\n    let d = Deep { n: 1u64 };\n    let f = Flat { n: 1u64 };\n    return (unsafe d.n + unsafe f.n) as i32 - 2;\n}\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut dargs = String::from_str("lint \"");
+    dargs.push_str(root);
+    dargs.push_str("/main.spc\"");
+    let d = p.run_raw(dargs.as_str());
+    assert(d.out_has("union 'Deep' has owning fields ('a') but no 'free'"));
+    assert(d.out_has("union 'Flat' has owning fields ('a') but no 'free'"));
+}
+
 // The local-analysis lints: unnecessary `mut`, back-to-back dead stores, unused loop labels,
 // unreachable statements after a diverging one, unreachable arms after a catch-all, and the
 // cancelling `*&` / `&*` operator pairs. `--fix` deletes `mut ` and the operator pairs; the
@@ -295,6 +313,33 @@ fn type_path_call_marks_a_private_associated_function_used() {
     let root = str::from_cstr(p.rootp());
     let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint solo.spc");
     assert(r.ok(), "a private associated function called through a type path is used");
+}
+
+// A reference that is the first node of a module's first releasable body (a leading turbofish
+// callee) sits at body-arena id 0, a real node: the item edges must keep it, or the unused-item
+// lint reports the generic function unused.
+@test
+fn leading_turbofish_call_marks_a_generic_function_used() {
+    let p = cli::proj_new();
+    let g = "fn g<T>(x: T) T {\n    return x;\n}\n\n";
+    let mains = [
+        "fn main() i32 {\n    g::<i32>(1);\n    return 0;\n}\n",
+        "fn main() i32 {\n    return g::<i32>(1) - 1;\n}\n",
+        "fn main() i32 {\n    return (g::<i32>(1)) - 1;\n}\n",
+        "fn k() i32 {\n    return g::<i32>(1);\n}\n\nfn main() i32 {\n    return k() - 1;\n}\n",
+    ];
+    let root = str::from_cstr(p.rootp());
+    for m in mains {
+        let mut src = String::from_str(g);
+        src.push_str(m);
+        p.mkfile("main.spc", src.as_str());
+        let mut args = String::from_str("lint \"");
+        args.push_str(root);
+        args.push_str("/main.spc\"");
+        let r = p.run_raw(args.as_str());
+        assert(!r.out_has("unused function 'g'"), "a leading turbofish call uses the generic function");
+        assert_eq(r.exit, 0);
+    }
 }
 
 @test

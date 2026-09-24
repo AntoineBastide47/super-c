@@ -25,14 +25,23 @@ struct Payload {
     pub n: i64,
 }
 
+extend Payload {
+    // Parks on `rx` with the receiver alive across the wait.
+    fn wait_on(self: &Payload, rx: &chan::Receiver<i64>) i64 {
+        let got = rx.recv();
+        after_mark();
+        return got.unwrap_or(-1) + self.n;
+    }
+}
+
 extend Payload as Free {
     pub fn free(self: &mut Payload) {
-        let _ = atomic::add_i64(&mut unsafe G_FREES, 1, 0);
+        let _ = unsafe atomic::add_i64(&mut unsafe G_FREES, 1, 0);
     }
 }
 
 fn frees() i64 {
-    return atomic::load_i64(&mut unsafe G_FREES, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_FREES, 1);
 }
 
 // Code after a cancelled wait must never run: bumped there, asserted zero from the main thread.
@@ -41,22 +50,22 @@ static mut G_AFTER: i64 = 0;
 static mut G_UNWOUND: i64 = 0;
 
 fn afters() i64 {
-    return atomic::load_i64(&mut unsafe G_AFTER, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_AFTER, 1);
 }
 
 fn unwounds() i64 {
-    return atomic::load_i64(&mut unsafe G_UNWOUND, 1);
+    return unsafe atomic::load_i64(&mut unsafe G_UNWOUND, 1);
 }
 
 fn after_mark() {
-    let _ = atomic::add_i64(&mut unsafe G_AFTER, 1, 0);
+    let _ = unsafe atomic::add_i64(&mut unsafe G_AFTER, 1, 0);
 }
 
 // The task's completion report, always installed as a `defer`: it runs on the normal exit AND on
 // the compiled cancellation ladder, and records whether the task was unwinding when it fired.
 fn finish(w: &sync::WaitGroup) {
     if rt::cancelling() {
-        let _ = atomic::add_i64(&mut unsafe G_UNWOUND, 1, 0);
+        let _ = unsafe atomic::add_i64(&mut unsafe G_UNWOUND, 1, 0);
     }
     w.done();
 }
@@ -66,7 +75,7 @@ fn finish(w: &sync::WaitGroup) {
 static mut G_HELPER_DEFERS: i64 = 0;
 
 fn helper_defer(v: &Payload) {
-    let _ = atomic::add_i64(&mut unsafe G_HELPER_DEFERS, 1, 0);
+    let _ = unsafe atomic::add_i64(&mut unsafe G_HELPER_DEFERS, 1, 0);
     let _ = v.n;
 }
 
@@ -86,10 +95,10 @@ struct Base {
 
 @test_init
 fn fresh_counters() Base {
-    atomic::store_i64(&mut unsafe G_FREES, 0, 0);
-    atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
-    atomic::store_i64(&mut unsafe G_UNWOUND, 0, 0);
-    atomic::store_i64(&mut unsafe G_HELPER_DEFERS, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_FREES, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_AFTER, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_UNWOUND, 0, 0);
+    unsafe atomic::store_i64(&mut unsafe G_HELPER_DEFERS, 0, 0);
     return Base { cancelled: rt::cancelled_tasks() };
 }
 
@@ -164,9 +173,58 @@ fn edge_unwinds_through_helper_frames_exactly_once(fx: &mut Base) {
     // Neither frame ran past its cancelled wait.
     assert_eq(afters(), 0);
     // The helper defer ran exactly once.
-    assert_eq(atomic::load_i64(&mut unsafe G_HELPER_DEFERS, 1), 1);
+    assert_eq(unsafe atomic::load_i64(&mut unsafe G_HELPER_DEFERS, 1), 1);
     // The helper local and the root local, once each.
     assert_eq(frees(), 2);
+}
+
+fn make_payload() Payload {
+    return Payload { n: 5 };
+}
+
+// Cancel a task parked in a method called on a call-result receiver, as a plain-let initializer or
+// as an expression statement: the edge after the call frees the receiver temporary exactly once.
+fn receiver_edge(fx: &mut Base, as_let: bool) {
+    rt::set_worker_count(2);
+    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
+    let ktx = kch.sender();
+    let krx = kch.receiver();
+    let ch = chan::Channel::<i64>::bounded(1);
+    let rx = ch.receiver();
+    let _tx_keep = ch.sender();
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch || {
+        defer finish(&w);
+        let _ = ktx.send(rt::current_key());
+        if as_let {
+            let v = make_payload().wait_on(&rx);
+            after_mark();
+            let _ = v;
+        } else {
+            make_payload().wait_on(&rx);
+            after_mark();
+        }
+    };
+    let key = krx.recv().unwrap();
+    assert(ph::wait_parked(key), "the task parks");
+    assert(rt::request_cancel(key, rt::CR_USER), "the task is live");
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "the cancelled task finishes");
+    rt::shutdown();
+    assert_eq(cancelled(fx), 1);
+    assert_eq(afters(), 0);
+    assert_eq(frees(), 1);
+}
+
+@test
+fn edge_frees_let_receiver_temporary(fx: &mut Base) {
+    receiver_edge(fx, true);
+}
+
+@test
+fn edge_frees_statement_receiver_temporary(fx: &mut Base) {
+    receiver_edge(fx, false);
 }
 
 @test
@@ -1426,4 +1484,53 @@ fn wait_parked_sleeping(want: usize) bool {
         }
         time::sleep(time::Duration::from_millis(1));
     }
+}
+
+// A group dropped at its scope's end joins its children even when its owner has a request pending and
+// unmasked: a cancellable join was claimed by that request at once and left the child running past the
+// group. The child holds its body under a mask, so the group's own cancel cannot end it early.
+@test
+fn a_group_drop_joins_its_children_with_a_request_pending(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let started = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let finished = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let seen = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(-1));
+    let gate = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    let st = started.clone();
+    let fin = finished.clone();
+    let sn = seen.clone();
+    let gt = gate.clone();
+    launch || {
+        defer w.done();
+        {
+            let mut g = task::TaskGroup::new();
+            let cs = st.clone();
+            let cf = fin.clone();
+            let cg = gt.clone();
+            g.spawn(
+                || {
+                    rt::cancel_mask_enter();
+                    cs.get().store(1, atomics::MemoryOrder::Release);
+                    let _ = ph::wait_count(&cg, 1);
+                    cf.get().store(1, atomics::MemoryOrder::Release);
+                    rt::cancel_mask_exit();
+                },
+            );
+            let _ = ph::wait_count(&st, 1);
+            // Pending and unmasked from here to the drop: no cancellation point comes between.
+            let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);
+        }
+        // The group is gone: what its join left behind. The request is still only pending.
+        sn.get().store(fin.get().load(atomics::MemoryOrder::Acquire), atomics::MemoryOrder::Release);
+    };
+    assert(ph::wait_waiting(rt::WK_WAIT_GROUP, 1), "the drop waits for the child");
+    gate.get().store(1, atomics::MemoryOrder::Release);
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "the owner finishes");
+    assert_eq(seen.get().load(atomics::MemoryOrder::Acquire), 1);
+    assert(ph::wait_quiescent(), "every task is gone");
+    rt::shutdown();
+    let _ = fx;
 }

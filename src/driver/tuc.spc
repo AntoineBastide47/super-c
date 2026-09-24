@@ -92,7 +92,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
         return 0;
     }
     let ep = str::from_cstr(&exe[0]);
-    let mt = unsafe shim::sc_mtime(&mut exe[0]);
+    // Nanoseconds: a different compiler linked to the same path within one second must not match.
+    let mt = unsafe shim::sc_mtime_ns(&mut exe[0]);
     if mt == 0 {
         return 0;
     }
@@ -515,12 +516,14 @@ pub struct TtEnt {
     pub lin: ConstLin,
 }
 
+// Whether child ref `r` of table entry `i` is absent or names an earlier entry.
+const fn tt_earlier(r: u32, i: usize) bool {
+    return r == TT_NONE || r as usize < i;
+}
+
 /// Intern table entry `idx` (children first) into module `am`'s pool. `cache` keys (idx, am).
 pub fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, idx: u32, am: ModuleId) TypeId {
     if idx == TT_NONE {
-        return TYPE_NONE;
-    }
-    if idx as usize >= tab.len() {
         return TYPE_NONE;
     }
     let key = idx as u64 << 32 | am as u64;
@@ -631,8 +634,48 @@ fn ev_tr(
     }
 }
 
-/// Rewrite a decoded event's table refs back to live TypeIds interned into the consuming pools.
-pub fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, ev: &mut mbe::RecEv) {
+// A table ref an event carries: none, or an entry of the section's table.
+const fn tt_ref_ok(tab: &Vector<TtEnt>, r: u32) bool {
+    return r == TT_NONE || r as usize < tab.len();
+}
+
+// Every table ref `ev_patch` rewrites is in range.
+fn ev_refs_ok(tab: &Vector<TtEnt>, ev: &mbe::RecEv) bool {
+    if (ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT || ev.kind == mbe::RK_HEDGE || ev.kind == mbe::RK_DYNTAB) && !tt_ref_ok(
+        tab,
+        ev.d,
+    ) {
+        return false;
+    }
+    if (ev.kind == mbe::RK_DYNREQ || ev.kind == mbe::RK_TI || ev.kind == mbe::RK_MDYN || ev.kind == mbe::RK_DYNTAB) && !tt_ref_ok(
+        tab,
+        ev.b,
+    ) {
+        return false;
+    }
+    if ev.kind == mbe::RK_AGG {
+        for i in 0..ev.xs.len() {
+            if !tt_ref_ok(tab, ev.xs[i]) {
+                return false;
+            }
+        }
+    }
+    if ev.kind == mbe::RK_DEMAND || ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_AGG {
+        for i in 0..ev.subs.len() {
+            if !tt_ref_ok(tab, ev.subs.at(i).at) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Rewrite a decoded event's table refs back to live TypeIds interned into the consuming pools. False,
+/// with nothing rewritten, when a ref is outside the section's table: the section does not match.
+pub fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, ev: &mut mbe::RecEv) bool {
+    if !ev_refs_ok(tab, ev) {
+        return false;
+    }
     if ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT || ev.kind == mbe::RK_HEDGE {
         ev.d = tt_id(p, tab, cache, ev.d, ev.a as ModuleId);
     } else if ev.kind == mbe::RK_DYNREQ || ev.kind == mbe::RK_TI || ev.kind == mbe::RK_MDYN {
@@ -653,14 +696,23 @@ pub fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u
             ev.subs.index_mut(i).at = nv;
         }
     }
+    return true;
 }
 
-fn ser_ev_tr(p: &loader::Package, r: &mut TtRec, o: &mut String, ev: &mbe::RecEv) {
+// `xs` and `sat` are scratch reused across the events of one section.
+fn ser_ev_tr(
+    p: &loader::Package,
+    r: &mut TtRec,
+    o: &mut String,
+    ev: &mbe::RecEv,
+    xs: &mut Vector<u32>,
+    sat: &mut Vector<u32>,
+) {
     let mut b = ev.b;
     let mut d = ev.d;
-    let mut xs = Vector::<u32>::new();
-    let mut sat = Vector::<u32>::new();
-    ev_tr(p, r, ev, &mut b, &mut d, &mut xs, &mut sat);
+    xs.truncate(0);
+    sat.truncate(0);
+    ev_tr(p, r, ev, &mut b, &mut d, xs, sat);
     w8(o, ev.kind);
     w32(o, ev.a);
     w32(o, b);
@@ -689,6 +741,8 @@ fn ser_ev_tr(p: &loader::Package, r: &mut TtRec, o: &mut String, ev: &mbe::RecEv
 pub fn ser_evs(p: &loader::Package, o: &mut String, evs: &Vector<mbe::RecEv>, from: usize, bodies: str) {
     let mut r = tt_new();
     let mut eb = String::new();
+    let mut xs = Vector::<u32>::new();
+    let mut sat = Vector::<u32>::new();
     for i in from..evs.len() {
         let ev = evs.at(i);
         if ev.kind == mbe::RK_CHUNK && ev.s1.len() == 0 {
@@ -704,7 +758,7 @@ pub fn ser_evs(p: &loader::Package, o: &mut String, evs: &Vector<mbe::RecEv>, fr
             w32(&mut eb, 0);
             w32(&mut eb, 0);
         } else {
-            ser_ev_tr(p, &mut r, &mut eb, ev);
+            ser_ev_tr(p, &mut r, &mut eb, ev, &mut xs, &mut sat);
         }
     }
     w32(o, r.count);
@@ -750,10 +804,12 @@ extend Rd {
         self.at += n;
     }
 
-    /// Read the section's type table into `out`; false when the image is truncated or malformed.
+    /// Read the section's type table into `out`; false when the image is truncated or malformed. The
+    /// writer puts children first, so every child ref names an earlier entry: a self or forward ref
+    /// (a cycle for `tt_id`) is malformed.
     pub fn read_table(self: &mut Self, out: &mut Vector<TtEnt>) bool {
         let ntab = self.r32() as usize;
-        for _i in 0..ntab {
+        for i in 0..ntab {
             let mut e = TtEnt {
                 tag: self.r8(),
                 kind: 0,
@@ -827,6 +883,17 @@ extend Rd {
                 return false;
             }
             if !self.ok {
+                return false;
+            }
+            let mut refs_ok = true;
+            if e.tag == TT_WRAP || e.tag == TT_ARR || e.tag == TT_PROJ {
+                refs_ok = tt_earlier(e.r0, i);
+            } else if e.tag == TT_INST {
+                for k in 0..e.n {
+                    refs_ok = refs_ok && tt_earlier(unsafe e.argr[k as usize], i);
+                }
+            }
+            if !refs_ok {
                 return false;
             }
             out.push(e);

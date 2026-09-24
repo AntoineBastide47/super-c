@@ -30,6 +30,17 @@ fn errors() {
     h::expect_resolve_err_msg("undefined value", "fn main() i32 { bar(); }\n", "cannot find value 'bar'");
     h::expect_resolve_err_msg("undefined type", "fn f(x: Widget) {}\n", "cannot find type 'Widget'");
     h::expect_resolve_err_msg("duplicate item", "struct P {}\nstruct P {}\n", "duplicate definition of 'P'");
+    // One definition per platform is not a duplicate: the inactive variant is filtered before resolution.
+    h::expect_ok(
+        "per-platform variants of one item",
+        "@platform(windows)\nfn pick() i32 { return 1; }\n@platform(!windows)\nfn pick() i32 { return 2; }\nfn main() i32 { return pick(); }\n",
+    );
+    // Stacked gates all apply: no platform is both windows and not windows, so the item is gone.
+    h::expect_resolve_err_msg(
+        "stacked platform gates intersect",
+        "@platform(windows)\n@platform(!windows)\nfn gone() i32 { return 1; }\nfn main() i32 { return gone(); }\n",
+        "cannot find value 'gone'",
+    );
     h::expect_resolve_err_msg("duplicate parameter", "fn f(a: i32, a: i32) {}\n", "duplicate definition of 'a'");
     h::expect_resolve_err_msg(
         "duplicate let",

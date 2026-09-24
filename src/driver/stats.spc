@@ -171,12 +171,12 @@ pub fn mark(b: usize) {
     assert(b < B_COUNT);
     let now = platform::now_ns();
     for i in 0..b + 1 {
-        if unsafe g.t[i] == 0 {
-            unsafe g.t[i] = now;
+        if unsafe (*g).t[i] == 0 {
+            unsafe (*g).t[i] = now;
             let k = mem_index(i);
             if k < MEM_N {
-                unsafe g.rss[k] = unsafe shim::sc_peak_rss();
-                if unsafe g.mem_on {
+                unsafe (*g).rss[k] = unsafe shim::sc_peak_rss();
+                if unsafe (*g).mem_on {
                     sample(g, k);
                     unsafe sc_lk_epoch_set(k as u32 + 1);
                 }
@@ -189,11 +189,11 @@ pub fn mark(b: usize) {
 fn sample(g: *mut BuildStats, k: usize) {
     let mut w = Array::<u64, STATS_WORDS>::new();
     unsafe sc_lk_stats(&mut w[0]);
-    unsafe g.alloc_n[k] = w[0];
-    unsafe g.alloc_bytes[k] = w[1];
+    unsafe (*g).alloc_n[k] = w[0];
+    unsafe (*g).alloc_bytes[k] = w[1];
     for e in 0..EPOCHS {
-        unsafe g.live[(k * EPOCHS + e) * 2] = w[2 + 2 * e];
-        unsafe g.live[(k * EPOCHS + e) * 2 + 1] = w[3 + 2 * e];
+        unsafe (*g).live[(k * EPOCHS + e) * 2] = w[2 + 2 * e];
+        unsafe (*g).live[(k * EPOCHS + e) * 2 + 1] = w[3 + 2 * e];
     }
 }
 
@@ -204,14 +204,14 @@ pub fn cc_job(start_ns: u64, end_ns: u64) {
         return;
     }
     assert(end_ns >= start_ns);
-    if unsafe g.cc_jobs == 0 || start_ns < unsafe g.cc_first_ns {
-        unsafe g.cc_first_ns = start_ns;
+    if unsafe (*g).cc_jobs == 0 || start_ns < unsafe (*g).cc_first_ns {
+        unsafe (*g).cc_first_ns = start_ns;
     }
-    if end_ns > unsafe g.cc_last_ns {
-        unsafe g.cc_last_ns = end_ns;
+    if end_ns > unsafe (*g).cc_last_ns {
+        unsafe (*g).cc_last_ns = end_ns;
     }
-    unsafe g.cc_busy_ns += end_ns - start_ns;
-    unsafe g.cc_jobs += 1;
+    unsafe (*g).cc_busy_ns += end_ns - start_ns;
+    unsafe (*g).cc_jobs += 1;
 }
 
 /// The emission's per-instance re-lowering counts, by reason (from the merged emission probe).
@@ -220,8 +220,8 @@ pub fn relower(reflect: u64, zst: u64) {
     if g == null {
         return;
     }
-    unsafe g.relower_reflect = reflect;
-    unsafe g.relower_zst = zst;
+    unsafe (*g).relower_reflect = reflect;
+    unsafe (*g).relower_zst = zst;
 }
 
 /// The build finished with `rc`: publish the record to the SC_BUILD_STATS sink when one is named,
@@ -231,7 +231,7 @@ pub fn finish(rc: i32) {
     if g == null {
         return;
     }
-    unsafe g.rc = rc;
+    unsafe (*g).rc = rc;
     mark(B_LINK);
     let sink = stdlib::getenv("SC_BUILD_STATS");
     if sink != null {

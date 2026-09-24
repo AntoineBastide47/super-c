@@ -112,7 +112,7 @@ pub const CK_FLOAT: u8 = 1; // raw span keeps the exact literal spelling
 pub const CK_BOOL: u8 = 2; // val = 0/1
 pub const CK_STR: u8 = 3; // raw span = content
 pub const CK_UNIT: u8 = 4; // no value (void/empty)
-pub const CK_ITEM: u8 = 5; // item = resolved fn/const DefId
+pub const CK_ITEM: u8 = 5; // item = resolved fn/const DefId; val = bound generic arguments (targ_val)
 pub const CK_WIDE: u8 = 6; // val = wide-literal record index in the module Ast
 
 pub struct Constant {
@@ -121,8 +121,24 @@ pub struct Constant {
     pub val: i64,
     pub raw: tok::Span,
     pub item: DefId,
-    pub targ_start: u32, // CK_ITEM: bound generic arguments in CoreBody.targ_pool
-    pub targ_len: u32,
+}
+static_assert(sizeof(Constant) == 32, "Constant stays 32 bytes: CK_ITEM keeps its generic arguments in val");
+
+/// A CK_ITEM `val`: `len` bound generic arguments from `start` in CoreBody.targ_pool.
+pub const fn targ_val(start: u32, len: u32) i64 {
+    return len as i64 << 32 | start as i64;
+}
+
+extend Constant {
+    /// CK_ITEM: the first bound generic argument in CoreBody.targ_pool.
+    pub const fn targ_start(self: &Self) u32 {
+        return self.val as u32;
+    }
+
+    /// CK_ITEM: the number of bound generic arguments.
+    pub const fn targ_len(self: &Self) u32 {
+        return (self.val >> 32) as u32;
+    }
 }
 
 /// Rvalue kinds.
@@ -167,7 +183,7 @@ pub const RV_UNARY: u8 = 3; // a = OperandId, b = token op
 pub const RV_BINARY: u8 = 4; // a/b = OperandIds, c = token op
 pub const RV_CAST: u8 = 5; // a = OperandId, b = CastKind, target = ty
 pub const RV_AGGREGATE: u8 = 6; // a = operand range start, b = len, c = AggKind, item = decl/variant
-pub const RV_REPEAT: u8 = 7; // a = element OperandId, b = count
+pub const RV_REPEAT: u8 = 7; // a = element OperandId, b = count OperandId
 pub const RV_LEN: u8 = 8; // a = PlaceId
 pub const RV_DISCRIMINANT: u8 = 9; // a = PlaceId
 pub const RV_DYN: u8 = 10; // dynamic-interface construction; a = OperandId, b = alloc TypeId
@@ -206,7 +222,7 @@ pub const IN_SAFEPOINT: u8 = 11; // loop-body preemption marker; printed only fo
 pub const IN_DANGLING: u8 = 12; // non-null aligned no-storage pointer (`dangling::<T>()`; ZST buffers)
 pub const IN_DYN_TID: u8 = 13; // dyn_cast type test: operand = the fat value, target = the queried &T
 pub const IN_DYN_DATA: u8 = 14; // dyn_cast payload: operand = the fat value, target = the result &T
-/// Safe-access checks (bounds-check normalization; see plans/1_bounds_check_elimination.md).
+/// Safe-access checks (bounds-check normalization).
 /// IN_BOUNDS(index, len): panics when index >= len, else returns the unchanged index. The
 /// PROVEN twin has identical language semantics but a BCE proof that the panic edge is
 /// unreachable: the C emitter prints only the index; the interpreter still checks.
@@ -264,7 +280,6 @@ pub struct Statement {
     pub place: PlaceId,
     pub rvalue: RvalueId,
     pub a: u32,
-    pub b: u32,
     pub span: tok::Span,
 }
 
@@ -281,7 +296,7 @@ pub const TM_DROP: u8 = 4; // place; t0 = successor
 pub const TM_ASSERT: u8 = 5; // a = condition OperandId; t0 = success
 pub const TM_UNREACHABLE: u8 = 6;
 
-// Field order packs to 64 bytes (one record per cache line); the byte flags ride the tail padding.
+// Field order leaves no interior padding: 60 bytes, the two byte flags next to the tail padding.
 pub struct Terminator {
     pub a: u32, // per kind (see above)
     pub args_start: u32, // TM_CALL: argument operand range
@@ -462,7 +477,8 @@ extend CoreBody {
     }
 
     /// An exact-size deep copy: every pool reserves its final length, so a kept body carries no
-    /// growth slack and costs one allocation per non-empty pool.
+    /// growth slack and costs one allocation per non-empty pool. The copy leaves out the borrow
+    /// pass inputs `has_uninit_decl` and `user_moves`: every reader of them runs before the copy.
     pub fn compact_from(src: &CoreBody) CoreBody {
         let mut out = CoreBody::new(src.owner, src.module);
         out.args = src.args;

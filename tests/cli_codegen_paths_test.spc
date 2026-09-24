@@ -42,3 +42,22 @@ fn test_build_with_a_global_fixture() {
     assert_eq(child.exit, 0);
     assert(child.out_has("1 passed"), "the global-fixture test runs and passes");
 }
+
+@test
+fn long_statement_else_if_chain_builds() {
+    // A 300-arm `else if` chain whose arms fall through and whose tests need statements first (the
+    // inlined call) nests one region per arm past the renderer's nesting bound: the body takes the
+    // flat goto layout and builds.
+    let p = cli::proj_new();
+    let mut src = String::from_str("fn f(x: i32) i32 {\n    let mut y = 0;\n    if g(x) == 0 { y = 1; }");
+    for i in 1..300 {
+        src.push_str(" else if g(x) == ");
+        src.push_u64(i as u64);
+        src.push_str(" { y = 2; }");
+    }
+    src.push_str("\n    return y;\n}\nfn g(x: i32) i32 { return x * 3; }\nfn main() i32 { return f(0) - 1; }\n");
+    p.mkfile("main.spc", src.as_str());
+    assert(p.compile("main.spc").ok());
+    assert(p.cc_build("").ok());
+    assert_eq(p.run_bin(), 0);
+}

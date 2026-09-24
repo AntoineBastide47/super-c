@@ -102,15 +102,6 @@ pub const fn super_rt_includes() *const char {
 #if __has_include(<wctype.h>)
 #include <wctype.h>
 #endif
-/* Branch-layout hints (std/core `likely`/`unlikely`): __builtin_expect steers block placement on
-   GCC/Clang; every other compiler sees the bare condition. */
-#if defined(__GNUC__) || defined(__clang__)
-#define SC_LIKELY(x) __builtin_expect(!!(x), 1)
-#define SC_UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-#define SC_LIKELY(x) (x)
-#define SC_UNLIKELY(x) (x)
-#endif
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -184,21 +175,10 @@ static __attribute__((unused)) inline size_t __sc_bounds_group(size_t __i, size_
 static _Noreturn __attribute__((unused)) void __sc_zst_ptrdiff(void) {
   __sc_panic("pointer distance on a zero-sized element type");
 }
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic ignored "-Wunused-function"
-#endif
-/* Preemption safepoint. Emitted at loop backedges ONLY when the program uses the coroutine runtime, so
-   one that never `launch`es pays nothing at all -- and when it is emitted the cost is a thread-local
-   decrement and a not-taken branch, not a call. The hook is installed by the scheduler BEFORE it starts
-   any worker, so every read of it happens-after that write and no synchronization is needed here. */
-extern _Thread_local int32_t __sc_pre_tick;
+/* Preemption hook, installed by the scheduler BEFORE it starts any worker, so every read of it
+   happens-after that write and no synchronization is needed here. */
 extern void (*__sc_pre_hook)(void);
 void __sc_set_preempt_hook(void (*__f)(void));
-static inline __attribute__((unused)) void __sc_safepoint(void) {
-  if (--__sc_pre_tick > 0) return;
-  __sc_pre_tick = 2048;
-  if (__sc_pre_hook) __sc_pre_hook();
-}
 /* Cold half of the function-local safepoint tick (`__sc_spc` in emitted bodies): runs the hook
    check and hands back the reset value, so the hot path is one register decrement + branch. */
 static inline __attribute__((unused)) int32_t __sc_preempt_check(void) {
@@ -213,13 +193,13 @@ extern int32_t (*__sc_cancel_hook)(void);
 static inline __attribute__((unused)) int32_t __sc_cancel_tick(void) {
   return __sc_cancel_hook ? __sc_cancel_hook() : 0;
 }
-/* reflection registry (super_rt.c): `@reflect`-tagged concrete types register their exported
-   `sc_typeinfo_<name>` descriptor at startup (constructor order). External tools dlopen the binary
-   and walk the SAME static descriptors the program reads: __sc_reflect_types yields the registered
-   pointers (each a `const TypeInfo *`; layout per std/core.spc, policed by the emitted layout
-   asserts). Fixed capacity: no allocation, so the leak tracker stays silent. */
-void __sc_reflect_register(const void *__ti);
-const void **__sc_reflect_types(size_t *__n);
+/* reflection registry (super_rt.c): the registry TU's constructor registers its static table of the
+   `@reflect`-tagged concrete types' exported `sc_typeinfo_<name>` descriptors. External tools dlopen
+   the binary and walk the SAME static descriptors the program reads: __sc_reflect_types yields the
+   registered pointers (each a `const TypeInfo *`; layout per std/core.spc, policed by the emitted
+   layout asserts). The runtime keeps only the table's address: no copy, no capacity, no allocation. */
+void __sc_reflect_register(const void *const *__roots, size_t __n);
+const void *const *__sc_reflect_types(size_t *__n);
 /* leak tracker (super_rt.c): interposes the emitted code's malloc/realloc/free call sites.
    Inert unless the SC_LEAK_CHECK environment variable is set; compile with -DSC_NO_LEAK_CHECK to
    drop the interposition entirely (super_rt.c still links: the coroutine runtime calls sc_lk_bt_*). */
@@ -227,6 +207,9 @@ void *sc_lk_malloc(size_t __n);
 void *sc_lk_calloc(size_t __n, size_t __m);
 void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
+/* Over-aligned blocks (std/alloc.h): `__align` is a power of two, at least sizeof(void *). */
+void *sc_lk_aligned_alloc(size_t __n, size_t __align);
+void sc_lk_aligned_free(void *__p);
 void sc_lk_fork_child_reset(void);
 void sc_lk_report_now(void);
 /* Suspend/resume per-thread allocation-site capture. A coroutine runtime brackets task execution with
@@ -238,6 +221,8 @@ void sc_lk_bt_resume(void);
 #define calloc(__n, __m) sc_lk_calloc(__n, __m)
 #define realloc(__p, __n) sc_lk_realloc(__p, __n)
 #define free(__p) sc_lk_free(__p)
+/* std/alloc.h routes its over-aligned blocks through sc_lk_aligned_* when this is defined. */
+#define SC_LK_ALIGNED 1
 #endif
 )".ptr() as *const char;
 }
@@ -254,26 +239,28 @@ pub const fn super_rt_source() *const char {
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 
 /* Task id of the coroutine running on this thread (see super_rt.h); 0 = none. */
 _Thread_local uint64_t __sc_task_id = 0;
 void __sc_set_task_id(uint64_t __id) { __sc_task_id = __id; }
 
-/* Preemption safepoint state (see super_rt.h). Inert until a scheduler installs the hook. */
-_Thread_local int32_t __sc_pre_tick = 2048;
+/* Preemption hook (see super_rt.h). Inert until a scheduler installs it. */
 void (*__sc_pre_hook)(void) = 0;
 /* Installed by a scheduler before it starts any worker, so every safepoint's read happens-after it. */
 void __sc_set_preempt_hook(void (*__f)(void)) { __sc_pre_hook = __f; }
 
-/* Reflection registry (see super_rt.h). A fixed static table: registration happens in constructors,
-   before main and before any allocator interposition question can arise. */
-#define SC_REFLECT_MAX 1024
-static const void *__sc_refl[SC_REFLECT_MAX];
+/* Reflection registry (see super_rt.h): the registry TU's root table, recorded by its constructor
+   before main. */
+static const void *const *__sc_refl = 0;
 static size_t __sc_refl_n = 0;
-void __sc_reflect_register(const void *__ti) {
-  if (__sc_refl_n < SC_REFLECT_MAX) __sc_refl[__sc_refl_n++] = __ti;
+void __sc_reflect_register(const void *const *__roots, size_t __n) {
+  __sc_refl = __roots;
+  __sc_refl_n = __n;
 }
-const void **__sc_reflect_types(size_t *__n) {
+const void *const *__sc_reflect_types(size_t *__n) {
   if (__n) *__n = __sc_refl_n;
   return __sc_refl;
 }
@@ -302,6 +289,8 @@ void *sc_lk_malloc(size_t __n);
 void *sc_lk_calloc(size_t __n, size_t __m);
 void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
+void *sc_lk_aligned_alloc(size_t __n, size_t __align);
+void sc_lk_aligned_free(void *__p);
 void sc_lk_fork_child_reset(void);
 void sc_lk_report_now(void);
 int sc_lk_stats_enable(void);
@@ -313,7 +302,18 @@ typedef struct {
   void *site;
   size_t size;
   uint32_t epoch; /* sc_lk_epoch when the block was recorded */
+  uint32_t aligned; /* 1: from sc_lk_aligned_alloc, released by sc_lk_release_block */
 } sc_lk_ent;
+/* Release block `e` with the call matching its allocation (Windows over-aligned blocks need _aligned_free). */
+static void sc_lk_release_block(const sc_lk_ent *e) {
+#if defined(_WIN32)
+  if (e->aligned) {
+    _aligned_free(e->ptr);
+    return;
+  }
+#endif
+  (free)(e->ptr);
+}
 #define SC_LK_EPOCHS 8
 #define SC_LK_SHARDS 64
 #define SC_LK_SHARD_BITS 6
@@ -334,8 +334,10 @@ typedef struct {
   volatile int lock;
 } sc_lk_shard;
 static sc_lk_shard sc_lk_shards[SC_LK_SHARDS];
-static int sc_lk_state; /* 0 = unprobed, 1 = off, 2 = report, 3 = fatal */
+static int sc_lk_state; /* 0 = unprobed, 1 = off, 2 = report, 3 = fatal; atomic: any thread probes it */
 static uint32_t sc_lk_epoch; /* tag for every allocation recorded from now on (sc_lk_epoch_set) */
+static int sc_lk_get(void) { return __atomic_load_n(&sc_lk_state, __ATOMIC_RELAXED); }
+static void sc_lk_set(int __st) { __atomic_store_n(&sc_lk_state, __st, __ATOMIC_RELAXED); }
 static uintptr_t sc_lk_hash(const void *p) {
   return ((uintptr_t)p >> 4) * (uintptr_t)0x9E3779B97F4A7C15ULL;
 }
@@ -346,8 +348,10 @@ static void sc_lk_acquire(sc_lk_shard *s) {
   while (__sync_lock_test_and_set(&s->lock, 1)) {}
 }
 static void sc_lk_release(sc_lk_shard *s) { __sync_lock_release(&s->lock); }
-/* Drop a shard's table and counters (the lock word is left to the caller). */
+/* Drop a shard's table, counters and freed history, releasing the blocks the history holds (the lock word
+   is left to the caller). */
 static void sc_lk_shard_clear(sc_lk_shard *s) {
+  for (size_t i = 0; i < s->freed_count; i++) sc_lk_release_block(&s->freed[i]);
   (free)(s->tab);
   s->tab = NULL;
   s->cap = 0;
@@ -412,7 +416,11 @@ static void sc_lk_erase(sc_lk_shard *s, sc_lk_ent *entry) {
   s->tab[hole].site = NULL;
   s->tab[hole].size = 0;
 }
+/* The history keeps its blocks allocated and frees each one only when a newer entry evicts it. No allocator,
+   the tracked one or a foreign one, can hand out a held address, so a later free or realloc of an address
+   in the history is always a real double free, never a reused block. */
 static void sc_lk_remember_free(sc_lk_shard *s, const sc_lk_ent *entry, void *site) {
+  if (s->freed_count == SC_LK_FREED_HISTORY) sc_lk_release_block(&s->freed[s->freed_next]);
   sc_lk_ent freed = *entry;
   freed.site = sc_lk_bt_off == 0 ? site : NULL;
   s->freed[s->freed_next] = freed;
@@ -434,6 +442,7 @@ static void sc_lk_capture(sc_lk_ent *e, void *p, size_t n, void *site) {
   e->site = sc_lk_bt_off == 0 ? site : NULL;
   e->size = n;
   e->epoch = __atomic_load_n(&sc_lk_epoch, __ATOMIC_RELAXED);
+  e->aligned = 0;
 }
 static void sc_lk_site_print(void *site) {
   if (site == NULL) return;
@@ -462,10 +471,10 @@ static void sc_lk_double(void *p, const sc_lk_ent *snap, void *site) {
   sc_lk_site_print(snap->site);
   fprintf(stderr, "freed again at:\n");
   sc_lk_site_print(site);
-  if (sc_lk_state == 3) abort();
+  if (sc_lk_get() == 3) abort();
 }
 static void sc_lk_disable(void) {
-  sc_lk_state = 1;
+  sc_lk_set(1);
 }
 static int sc_lk_group_cmp(const void *va, const void *vb) {
   const sc_lk_ent *a = (const sc_lk_ent *)va;
@@ -476,7 +485,7 @@ static int sc_lk_group_cmp(const void *va, const void *vb) {
 }
 static void sc_lk_report(void) {
   for (size_t h = 0; h < SC_LK_SHARDS; h++) sc_lk_acquire(&sc_lk_shards[h]);
-  int enabled = sc_lk_state >= 2;
+  int enabled = sc_lk_get() >= 2;
   size_t n = 0;
   size_t bytes = 0;
   size_t dbl = 0;
@@ -501,8 +510,8 @@ static void sc_lk_report(void) {
   } else {
     n = 0;
   }
-  int fatal = enabled && sc_lk_state == 3;
-  sc_lk_state = 1; /* the report's own prints may allocate: stop tracking */
+  int fatal = enabled && sc_lk_get() == 3;
+  sc_lk_set(1); /* the report's own prints may allocate: stop tracking */
   for (size_t h = 0; h < SC_LK_SHARDS; h++) {
     sc_lk_shard *s = &sc_lk_shards[h];
     sc_lk_shard_clear(s);
@@ -534,14 +543,18 @@ static void sc_lk_report(void) {
   if (fatal && (n != 0 || dbl != 0)) _Exit(23);
 }
 static int sc_lk_on(void) {
-  if (sc_lk_state == 0) {
+  int cur = sc_lk_get();
+  if (cur == 0) {
     const char *e = getenv("SC_LEAK_CHECK");
     int st = 1;
     if (e != NULL && e[0] != '\0' && e[0] != '0') st = (e[0] == 'f' || e[0] == 'F') ? 3 : 2;
-    sc_lk_state = st;
-    if (st >= 2) atexit(sc_lk_report);
+    /* One probe wins the move out of the unprobed state, so the exit report is registered once. */
+    if (__atomic_compare_exchange_n(&sc_lk_state, &cur, st, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+      if (st >= 2) atexit(sc_lk_report);
+      cur = st;
+    }
   }
-  return sc_lk_state >= 2;
+  return cur >= 2;
 }
 void sc_lk_fork_child_reset(void) {
   if (!sc_lk_on()) return;
@@ -558,7 +571,8 @@ void sc_lk_report_now(void) {
    the tracker counts (a runtime without one reports 0 through the driver's stand-in). */
 int sc_lk_stats_enable(void) {
   sc_lk_on();
-  if (sc_lk_state == 1) sc_lk_state = 2;
+  int off = 1;
+  __atomic_compare_exchange_n(&sc_lk_state, &off, 2, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
   return 1;
 }
 void sc_lk_epoch_set(uint32_t __e) { __atomic_store_n(&sc_lk_epoch, __e, __ATOMIC_RELAXED); }
@@ -611,39 +625,48 @@ static int sc_lk_insert(sc_lk_shard *s, const sc_lk_ent *e) {
   s->bytes += e->size;
   return 1;
 }
+/* Record new block `p` of `n` bytes allocated at `site`. */
+static void sc_lk_track(void *p, size_t n, void *site, uint32_t aligned) {
+  if (p != NULL && sc_lk_on()) {
+    sc_lk_ent e;
+    sc_lk_capture(&e, p, n, site);
+    e.aligned = aligned;
+    sc_lk_shard *s = sc_lk_shard_for(p);
+    sc_lk_acquire(s);
+    if (sc_lk_get() >= 2 && !sc_lk_insert(s, &e)) sc_lk_disable();
+    sc_lk_release(s);
+  }
+}
 void *sc_lk_malloc(size_t __n) {
   void *site = SC_LK_SITE();
   void *p = (malloc)(__n);
-  if (p != NULL && sc_lk_on()) {
-    sc_lk_ent e;
-    sc_lk_capture(&e, p, __n, site);
-    sc_lk_shard *s = sc_lk_shard_for(p);
-    sc_lk_acquire(s);
-    if (sc_lk_state >= 2 && !sc_lk_insert(s, &e)) sc_lk_disable();
-    sc_lk_release(s);
-  }
+  sc_lk_track(p, __n, site, 0);
   return p;
 }
 void *sc_lk_calloc(size_t __n, size_t __m) {
   void *site = SC_LK_SITE();
   void *p = (calloc)(__n, __m);
-  if (p != NULL && sc_lk_on()) {
-    sc_lk_ent e;
-    sc_lk_capture(&e, p, __n * __m, site);
-    sc_lk_shard *s = sc_lk_shard_for(p);
-    sc_lk_acquire(s);
-    if (sc_lk_state >= 2 && !sc_lk_insert(s, &e)) sc_lk_disable();
-    sc_lk_release(s);
-  }
+  sc_lk_track(p, __n * __m, site, 0);
+  return p;
+}
+void *sc_lk_aligned_alloc(size_t __n, size_t __align) {
+  void *site = SC_LK_SITE();
+#if defined(_WIN32)
+  void *p = _aligned_malloc(__n, __align);
+#else
+  /* C11 aligned_alloc takes a size that is a multiple of the alignment. */
+  void *p = __n > SIZE_MAX - __align ? NULL : aligned_alloc(__align, (__n + __align - 1) & ~(__align - 1));
+#endif
+  sc_lk_track(p, __n, site, 1);
   return p;
 }
 void *sc_lk_realloc(void *__p, size_t __n) {
   void *site = SC_LK_SITE();
   /* The registry key is an ADDRESS, and an address survives the realloc that invalidates the pointer
-     holding it: reading `__p` again after this call is undefined (and GCC's -Wuse-after-free says so).
-     The lock is held ACROSS the realloc: the moment it returns, the old block is free for another
-     thread to receive from malloc, so releasing between the call and the bookkeeping lets that
-     thread's fresh entry at the same address be marked freed here -- a false use-after-free later. */
+     holding it: reading `__p` again after a realloc is undefined (and GCC's -Wuse-after-free says so).
+     A tracked block therefore never goes through realloc: it is copied into a new block and the freed
+     history keeps the old one allocated, so no other thread can receive its address before the
+     bookkeeping below is done. Only untracked blocks go through realloc. */
   const uintptr_t __pa = (uintptr_t)__p;
   int track = sc_lk_on();
   sc_lk_shard *held = NULL;
@@ -652,7 +675,7 @@ void *sc_lk_realloc(void *__p, size_t __n) {
     held = sc_lk_shard_for(__p);
     sc_lk_acquire(held);
   }
-  if (__p != NULL && track && sc_lk_state >= 2) {
+  if (__p != NULL && track && sc_lk_get() >= 2) {
     old = sc_lk_find(held, __p);
     sc_lk_ent *freed = old == NULL ? sc_lk_find_freed(held, __p) : NULL;
     if (freed != NULL) {
@@ -664,12 +687,22 @@ void *sc_lk_realloc(void *__p, size_t __n) {
       sc_lk_site_print(snap.site);
       fprintf(stderr, "reallocated again at:\n");
       sc_lk_site_print(site);
-      if (sc_lk_state == 3) abort();
-      return sc_lk_malloc(__n); /* the old block is gone: hand back fresh memory */
+      if (sc_lk_get() == 3) abort();
+      /* the history still holds the old block: hand back fresh memory with its contents */
+      void *fresh = sc_lk_malloc(__n);
+      if (fresh != NULL) memcpy(fresh, __p, snap.size < __n ? snap.size : __n);
+      return fresh;
     }
   }
-  void *q = (realloc)(__p, __n);
-  if (q != NULL && track && sc_lk_state >= 2) {
+  void *q;
+  if (old != NULL) {
+    /* A tracked block moves, and the old one goes to the freed history, which keeps it allocated. */
+    q = (malloc)(__n);
+    if (q != NULL) memcpy(q, __p, old->size < __n ? old->size : __n);
+  } else {
+    q = (realloc)(__p, __n);
+  }
+  if (q != NULL && track && sc_lk_get() >= 2) {
     sc_lk_ent e;
     sc_lk_capture(&e, q, __n, site);
     int was_tracked = 0;
@@ -689,14 +722,15 @@ void *sc_lk_realloc(void *__p, size_t __n) {
         sc_lk_acquire(next);
         held = next;
       }
-      if (sc_lk_state >= 2 && !sc_lk_insert(held, &e)) sc_lk_disable();
+      if (sc_lk_get() >= 2 && !sc_lk_insert(held, &e)) sc_lk_disable();
     }
   }
   if (held != NULL) sc_lk_release(held);
   return q;
 }
-void sc_lk_free(void *__p) {
-  void *site = SC_LK_SITE();
+/* Unrecord block `__p` freed at `site`, reporting a double free. Returns 1 when the caller must not
+   release the block: the freed history holds it, or it was freed before. */
+static int sc_lk_untrack(void *__p, void *site) {
   int skip = 0;
   if (__p != NULL && sc_lk_on()) {
     int dbl = 0;
@@ -706,7 +740,7 @@ void sc_lk_free(void *__p) {
     snap.site = NULL;
     sc_lk_shard *s = sc_lk_shard_for(__p);
     sc_lk_acquire(s);
-    if (sc_lk_state >= 2) {
+    if (sc_lk_get() >= 2) {
       sc_lk_ent *e = sc_lk_find(s, __p);
       if (e != NULL) {
         sc_lk_ent freed = *e;
@@ -714,6 +748,7 @@ void sc_lk_free(void *__p) {
         s->live--;
         sc_lk_erase(s, e);
         sc_lk_remember_free(s, &freed, site);
+        skip = 1; /* the history holds the block */
       } else {
         sc_lk_ent *freed = sc_lk_find_freed(s, __p);
         if (freed != NULL) {
@@ -727,7 +762,18 @@ void sc_lk_free(void *__p) {
     sc_lk_release(s);
     if (dbl) sc_lk_double(__p, &snap, site);
   }
-  if (!skip) (free)(__p);
+  return skip;
+}
+void sc_lk_free(void *__p) {
+  if (!sc_lk_untrack(__p, SC_LK_SITE())) (free)(__p);
+}
+void sc_lk_aligned_free(void *__p) {
+  if (sc_lk_untrack(__p, SC_LK_SITE())) return;
+#if defined(_WIN32)
+  _aligned_free(__p);
+#else
+  (free)(__p);
+#endif
 }
 )".ptr() as *const char;
 }

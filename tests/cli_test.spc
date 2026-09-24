@@ -251,6 +251,97 @@ fn main() i32 { let b = Bad { a: 1, b: true }; let _ = hop2::wrap(&b); return 0;
     p2.expect_fail("main.spc", "does not satisfy a bound the callee's reflection loop requires");
 }
 
+// An 18-module recursive call cycle hands the bound up one module per discharge pass, so the
+// diagnostic needs more passes than a fixed pass cap of 16 allowed; the cycle offers the same
+// bounds again on every pass, and the passes still end.
+@test
+fn reflect_bound_chain_past_sixteen_hops() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "m18.spc",
+        M"(import m1;
+pub interface Pretty { fn m(self: &Self) i64; }
+extend i32 as Pretty { pub fn m(self: &i32) i64 { return *self; } }
+pub fn render<V: Pretty>(v: &V) i64 { return v.m(); }
+pub fn w18<T>(v: &T, n: i32) i64 { if n > 0 { return m1::w1(v, n - 1); } let mut s: i64 = 0; inline for f in fields(v) { s += render(&f.value); } return s; }
+)",
+    );
+    for k in 1..18 {
+        let name = format("m{}.spc", k);
+        let text = format(
+            "import m{};\npub fn w{}<T>(v: &T, n: i32) i64 {{ return m{}::w{}(v, n); }}\n",
+            k + 1,
+            k,
+            k + 1,
+            k + 1,
+        );
+        p.mkfile(name.as_str(), text.as_str());
+    }
+    p.mkfile(
+        "main.spc",
+        M"(import m1;
+struct Bad { pub a: i32, pub b: bool, }
+fn main() i32 { let b = Bad { a: 1, b: true }; let _ = m1::w1(&b, 1); return 0; }
+)",
+    );
+    p.expect_fail("main.spc", "does not satisfy a bound the callee's reflection loop requires");
+    // A cycle that wraps the type argument once per turn hands up a new bound on every pass: the
+    // limit on a module's bounds ends the passes with an error.
+    let p2 = cli::proj_new();
+    p2.mkfile(
+        "m1.spc",
+        M"(import m2;
+pub struct W<T> { pub a: i32, }
+pub fn w1<T>(v: &T, n: i32) i64 { let _ = v; if n > 0 { let w = W::<T> { a: 1 }; return m2::w2(&w, n - 1); } return 0; }
+)",
+    );
+    p2.mkfile(
+        "m2.spc",
+        M"(import m1;
+pub interface Pretty { fn m(self: &Self) i64; }
+extend i32 as Pretty { pub fn m(self: &i32) i64 { return *self; } }
+pub fn render<V: Pretty>(v: &V) i64 { return v.m(); }
+pub fn w2<T>(v: &T, n: i32) i64 { let mut s: i64 = m1::w1(v, n); inline for f in fields(v) { s += render(&f.value); } return s; }
+)",
+    );
+    p2.mkfile(
+        "main.spc",
+        M"(import m1;
+struct Good { pub a: i32, }
+fn main() i32 { let g = Good { a: 1 }; let _ = m1::w1(&g, 1); return 0; }
+)",
+    );
+    p2.expect_fail("main.spc", "a generic function reaches itself with a growing type argument");
+}
+
+@test
+fn growing_instantiation_is_reported() {
+    // Without reflection: a generic function or type that reaches itself with a growing type
+    // argument is refused once the instantiations nest past the bound, never by exhausting the stack.
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(struct W<T> { pub v: T }
+fn f<T>(x: T, n: i32) i32 { if n > 0 { return f::<W<T>>(W::<T> { v: x }, n - 1); } return n; }
+fn main() i32 { return f::<i32>(1, 3); }
+)",
+    );
+    p.expect_fail("main.spc", "generic instantiation nests deeper than 256 levels");
+    let q = cli::proj_new();
+    q.mkfile(
+        "main.spc",
+        M"(struct W<T> { pub v: T, pub n: Option<Box<W<W<T>>>> }
+fn main() i32 { let w = W::<i32> { v: 1, n: Option::<Box<W<W<i32>>>>::None }; return w.v - 1; }
+)",
+    );
+    // The chain is refused inside std's Option/Box bodies, but the error names the user's type.
+    let rq = q.compile("main.spc");
+    assert(rq.exit != 0, "the growing type fails the build");
+    assert(rq.out_has("generic instantiation nests deeper than 256 levels"), "the depth error is reported");
+    assert(rq.out_has("main.spc:1:10"), "the error is located at the user's type parameter");
+    assert(!rq.out_has("option.spc"), "the error is not located in std");
+}
+
 @test
 fn reflect_enum_variants() {
     let p = cli::proj_new();
@@ -1653,7 +1744,7 @@ fn cross_module_generic_by_value() {
     p.mkfile(
         "opt/opt.spc",
         M"(pub enum Opt<T> { Some(T), None }
-extend<T> Opt<T> {
+extend<T: Copy> Opt<T> {
   pub fn unwrap_or(self: &Opt<T>, d: T) T { return switch self { Some(v) => *v, None => d, }; }
   pub fn map<U>(self: &Opt<T>, f: fn(T) U) Opt<U> {
     return switch self { Some(v) => Opt::<U>::Some(f(*v)), None => Opt::<U>::None, }; }
@@ -1727,7 +1818,7 @@ fn emit_macro_export() {
         M"(extern "C" { fn exit(code: i32) void; }
 @emit_macro
 pub struct Pair<T> { pub a: T, pub b: T }
-extend<T> Pair<T> { pub fn pick(self: &Pair<T>, second: bool) T { if second { return self.b; } return self.a; } }
+extend<T: Copy> Pair<T> { pub fn pick(self: &Pair<T>, second: bool) T { if second { return self.b; } return self.a; } }
 fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p.a); }
 )",
     );
@@ -1846,7 +1937,7 @@ interface I { fn value(self: &Self) i32; fn unused_default(self: &Self) i32 { re
 struct S { pub x: i32 }
 extend S as I { fn value(self: &Self) i32 { return self.x; } }
 struct Wrap<T> { pub v: T }
-extend<T> Wrap<T> {
+extend<T: Copy> Wrap<T> {
   fn get(self: &Self) T { return self.v; }
   fn unused_method(self: &Self) T { return self.v; }
 }
@@ -2194,7 +2285,7 @@ fn main() i32 {
 }
 
 // Preemption: the scheduler is cooperative, so a task that never blocks would own its worker
-// forever. Codegen emits a `__sc_safepoint()` at every loop backedge, but ONLY in a program that uses the
+// forever. Codegen emits a `__sc_spc` countdown at every loop backedge, but ONLY in a program that uses the
 // coroutine runtime, and the scheduler installs a hook that yields when the worker has other work queued.
 // Proven here with one worker and a task that spins on a flag only a SECOND task can set: without
 // preemption the first task never yields, the second never runs, and the flag never flips.
@@ -2313,6 +2404,48 @@ fn main() i32 {
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
+}
+
+// The scan stops at the standard library, and only there: a user module whose name merely begins
+// with `std` is user code, and its loops reached from a launched body get their safepoints.
+@test
+fn std_prefixed_user_module_keeps_safepoints() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "stdx.spc",
+        M"(pub fn spin(n: i64) i64 {
+    let mut t: i64 = 0;
+    for i in 0..n {
+        t = t + i;
+    }
+    return t;
+}
+)",
+    );
+    p.mkfile(
+        "main.spc",
+        M"(import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+import stdx;
+
+fn main() i32 {
+    rt::set_worker_count(1);
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let wa = wg.clone();
+    launch fn() {
+        let _ = stdx::spin(10);
+        wa.done();
+    };
+    wg.wait();
+    rt::shutdown();
+    return 0;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    assert(p.gen_has("stdx.c", "__sc_spc"), "a launched body's loop in a std-prefixed user module is marked");
 }
 
 // The per-TU cache replays a module's emitted C while its own import closure is unchanged, but the
@@ -4655,7 +4788,7 @@ fn cross_module_nested_rehomed_instance() {
         "lib/lib.spc",
         M"(pub struct Inner<T> { pub value: T }
 pub struct Outer<T> { pub inner: Inner<T> }
-extend<T> Outer<T> { pub fn get(self: &Self) T { return self.inner.value; } }
+extend<T: Copy> Outer<T> { pub fn get(self: &Self) T { return self.inner.value; } }
 )",
     );
     p.mkfile(
@@ -4687,7 +4820,7 @@ fn cross_module_interface() {
         M"(import shapes;
 extern "C" { fn exit(code: i32) void; }
 struct Sq { pub s: i32 }
-extend Sq as shapes::Area { fn area(self: *mut Self) i32 { return unsafe (self.s * self.s); } }
+extend Sq as shapes::Area { fn area(self: *mut Self) i32 { return unsafe ((*self).s * (*self).s); } }
 fn total<T: shapes::Area>(x: &mut T) i32 { return x.area(); }
 fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); }
 )",
@@ -5712,6 +5845,47 @@ fn bindgen_walks_paths_recursively() {
     assert(r.out_has("needs '-o <dir>'"));
 }
 
+// Constants outside i64 are left out instead of aborting bindgen; a function-pointer type with an
+// unmodelled parameter is refused like a function with one; and a tag reached only through a record
+// field or a global still gets its opaque declaration.
+@test
+fn bindgen_overflow_fnptr_params_and_field_opaques() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.h",
+        "#ifndef LIB_H\n#define LIB_H\n#define LIB_ALL 0xFFFFFFFFFFFFFFFF\n#define LIB_TOP 0x8000000000000000\n#define LIB_WIDE 99999999999999999999\n#define LIB_MUL (4611686018427387904 * 4)\n#define LIB_SUB (-9223372036854775807 - 2)\n#define LIB_SHL (3 << 62)\n#define LIB_HALF 0x4000000000000000\nenum lib_e { LIB_E_MAX = 0x7FFFFFFFFFFFFFFF, LIB_E_NEXT };\ntypedef int (*lib_cb)(struct { int x; } s);\nint lib_use_cb(lib_cb cb);\nstruct lib_holder { struct lib_hidden *h; int n; };\nextern struct lib_other *lib_global;\nint lib_get(struct lib_holder *h);\n#endif\n",
+    );
+    let root = str::from_cstr(p.rootp());
+    let mut args = String::new();
+    args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
+    assert_eq(p.run_raw(args.as_str()).exit, 0);
+
+    let mut path = String::new();
+    path.format_into("{}/lib.spc", root);
+    let mut spc = String::new();
+    switch loader::read_file(path.as_str()) {
+        Some(t) => {
+            spc.push_string(&t);
+        },
+        None => {},
+    };
+    assert(!spc.as_str().contains("LIB_ALL"));
+    assert(!spc.as_str().contains("LIB_TOP"));
+    assert(!spc.as_str().contains("LIB_WIDE"));
+    assert(!spc.as_str().contains("LIB_MUL"));
+    assert(!spc.as_str().contains("LIB_SUB"));
+    assert(!spc.as_str().contains("LIB_SHL"));
+    assert(spc.as_str().contains("pub const LIB_HALF: i64 = 4611686018427387904;"));
+    assert(!spc.as_str().contains("fn(?"));
+    assert(!spc.as_str().contains("lib_use_cb"));
+    assert(spc.as_str().contains("pub type lib_hidden;"));
+    assert(spc.as_str().contains("pub type lib_other;"));
+
+    // The generated module resolves: every type it names is declared.
+    p.mkfile("main.spc", "import lib;\n\nfn main() i32 {\n    return 0;\n}\n");
+    assert(p.compile("main.spc").ok());
+}
+
 // The shapes a real C library uses that a literals-only reader loses: constants written as expressions
 // (`(1 << 3)`, or one macro in terms of another), types declared as `typedef struct { .. } Name;` with no
 // tag at all, and the globals a library exports. curl.h alone defines 91 of its constants as shift
@@ -6044,6 +6218,79 @@ fn global_object_cache_round_trip() {
     assert(cli::dir_count_suffix(cache.as_str(), ".o") > 0, "a wiped cache repopulates");
     cache.free();
     bdir.free();
+}
+
+// Two source trees with byte-identical sources share one object cache. Their emitted headers include the
+// C header by each tree's absolute path, so a unit's key differs between the trees and neither replays the
+// other's compile: the second tree's objects depend on its own header even after the first tree is gone.
+@test
+fn object_cache_keeps_trees_apart() {
+    let p = cli::proj_new();
+    let root = str::from_cstr(p.rootp());
+    for t in 0..2 {
+        let d = if t == 0 {
+            "a";
+        } else {
+            "b";
+        };
+        let mut f = String::new();
+        f.format_into("{}/build.toml", d);
+        p.mkfile(f.as_str(), "bin = \"app\"\nroot = \"src/main.spc\"\n");
+        f.truncate(0);
+        f.format_into("{}/src/helper.h", d);
+        p.mkfile(f.as_str(), "int helper_val(void);\n");
+        f.truncate(0);
+        f.format_into("{}/src/helper.c", d);
+        p.mkfile(f.as_str(), "#include \"helper.h\"\nint helper_val(void) { return 7; }\n");
+        f.truncate(0);
+        f.format_into("{}/src/main.spc", d);
+        p.mkfile(
+            f.as_str(),
+            "extern \"C\" \"helper.h\" {\n    fn helper_val() i32;\n}\nfn main() i32 {\n    return unsafe helper_val() - 7;\n}\n",
+        );
+    }
+    let mut cache = String::new();
+    cache.format_into("{}/ocache", root);
+    let mut ta = String::new();
+    ta.format_into("{}/a", root);
+    let mut tb = String::new();
+    tb.format_into("{}/b", root);
+    assert(cli::superc_env_in(ta.as_str(), "SC_CACHE_DIR", cache.as_str(), "build").ok(), "tree a builds");
+    bsys::rm_rf(ta.as_str());
+    assert(cli::superc_env_in(tb.as_str(), "SC_CACHE_DIR", cache.as_str(), "build").ok(), "tree b builds");
+    let mut dep = String::new();
+    dep.format_into("{}/build/dev/obj/main.d", tb.as_str());
+    let d = loader::read_file(dep.as_str()).unwrap();
+    let mut own = String::new();
+    own.format_into("{}/src/helper.h", tb.as_str());
+    let mut other = String::new();
+    other.format_into("{}/src/helper.h", ta.as_str());
+    assert(d.as_str().find(own.as_str()) >= 0, "b's object depends on b's header");
+    assert(d.as_str().find(other.as_str()) < 0, "b's object is not a's compile replayed");
+}
+
+// An object restored from the cache relinks the binary like a compiled one: the copy's mtime need not be
+// newer than the binary's (the same second, or a binary dated ahead), so the link cannot rest on mtimes.
+@test
+fn cache_restored_object_relinks() {
+    if cli::on_windows() || cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    let mut cache = String::new();
+    cache.format_into("{}/ocache", root);
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "the first version builds");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 5;\n}\n");
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "the second version builds");
+    let mut touch = String::new();
+    touch.format_into("touch -t 203001010000 \"{}/build/dev/app\"", root);
+    assert_eq(cli::run_quiet(touch.cstr()), 0);
+    // Back to the first version: its object comes from the cache.
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
+    assert_eq(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "run").exit, 3);
 }
 
 // `super-c bench --bench-filter=S` selects benchmarks by substring at run time: the generated root is the
@@ -6577,13 +6824,20 @@ fn build_link_failure_keeps_artifact() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = str::from_cstr(p.rootp());
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    let r0 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    assert(r0.ok(), "initial build");
     let mut bin = String::new();
     bin.format_into("{}/build/dev/app{}", root, str::from_cstr(cli::binext()));
     let mut cmdp = String::new();
     cmdp.format_into("{}/build/__link-build_dev_app{}.cmd", root, str::from_cstr(cli::binext()));
     let b1 = p13_mtime(bin.as_str());
-    let l1 = loader::read_file(cmdp.as_str()).unwrap();
+    let l1 = switch loader::read_file(cmdp.as_str()) {
+        Some(v) => v,
+        None => {
+            r0.show();
+            panic("the initial build left no link record");
+        },
+    };
     p13_tick();
     // A source edit recompiles its object, then the link fails: nothing is published.
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nldflags = [\"-lsc_no_such_library_p15\"]\n");
@@ -6591,11 +6845,44 @@ fn build_link_failure_keeps_artifact() {
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
     assert(!r.ok() && r.out_has("link failed"), "the link fails");
     assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
-    let l2 = loader::read_file(cmdp.as_str()).unwrap();
+    let l2 = switch loader::read_file(cmdp.as_str()) {
+        Some(v) => v,
+        None => {
+            r.show();
+            panic("the failed link removed the link record");
+        },
+    };
     assert(l2.as_str() == l1.as_str(), "the previous link record stays");
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "the next build succeeds");
     assert(p13_mtime(bin.as_str()) > b1, "and links the newer object over the stale binary");
+}
+
+// A failed link is redone by the next build even when the binary, the objects and the generated tree
+// all carry one mtime second: the pending link record, not the mtime order, forces the link.
+@test
+fn build_relinks_after_failed_link_in_same_second() {
+    if cli::on_windows() {
+        return; // find, touch
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = str::from_cstr(p.rootp());
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nldflags = [\"-lsc_no_such_library_p15\"]\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    let x = 1;\n    return x - 1;\n}\n");
+    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    assert(!r.ok() && r.out_has("link failed"), "the link fails");
+    let mut same = String::new();
+    same.format_into("find {}/build -type f -exec touch -t 209901010000 {{}} +", root);
+    assert_eq(cli::run_quiet(same.cstr()), 0);
+    let mut bin = String::new();
+    bin.format_into("{}/build/dev/app", root);
+    let b1 = p13_mtime(bin.as_str());
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "the next build succeeds");
+    assert(p13_mtime(bin.as_str()) != b1, "and relinks over the binary the failed link left");
 }
 
 // A generated file that cannot be published fails the build at the publication boundary: the previous
@@ -6832,4 +7119,64 @@ fn item_jobs_fold_across_an_import_cycle() {
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --jobs=1 -o bin");
     assert(r.ok(), "and under one worker");
     assert_eq(p.run_bin(), 0);
+}
+
+@platform(!windows)
+extern "C" "unistd.h" {
+    fn symlink(target: *const char, link: *const char) i32;
+}
+
+// `sc_rm_rf` removes a link to a directory and leaves the linked directory's contents in place.
+@platform(!windows)
+@test
+fn rm_rf_does_not_follow_a_directory_link() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("target/keep.txt", "kept\n");
+    p.mkfile("tree/other.txt", "gone\n");
+    let root = str::from_cstr(p.rootp());
+    let mut target = root.to_string();
+    target.push_str("/target");
+    let mut link = root.to_string();
+    link.push_str("/tree/link");
+    let mut tree = root.to_string();
+    tree.push_str("/tree");
+    let mut keep = root.to_string();
+    keep.push_str("/target/keep.txt");
+    assert_eq(unsafe symlink(target.cstr(), link.cstr()), 0);
+    assert_eq(unsafe shim::sc_rm_rf(tree.cstr()), 0);
+    assert_eq(unsafe shim::sc_lstat_isdir(tree.cstr()), -1);
+    assert_eq(unsafe shim::sc_lstat_isdir(keep.cstr()), 0);
+}
+
+// A left-associative chain at the parser's limit (4096 operands) nests as deep on its left operand.
+// The compiler under test is the sanitizer build, whose frames are the largest: the resolver, the
+// checker, the lowering and the formatter walk the chain without a stack frame per operator.
+@test
+fn operator_chain_at_the_parser_limit_compiles() {
+    let p = cli::proj_new();
+    let mut src = String::from_str("fn f(x: i32, b: bool) i32 {\n    let s = x");
+    for _ in 1..4096 {
+        src.push_str(" + x");
+    }
+    src.push_str(";\n    let c = b");
+    for _ in 1..4096 {
+        src.push_str(" && b");
+    }
+    src.push_str(
+        ";\n    if c {\n        return s - 4090;\n    }\n    return 0;\n}\n\nfn main() i32 {\n    return f(1, true);\n}\n",
+    );
+    p.mkfile("main.spc", src.as_str());
+    let r = p.compile("main.spc");
+    assert(r.ok());
+    let cc = p.cc_build("");
+    assert(cc.ok());
+    assert_eq(p.run_bin(), 6);
+    let mut args = String::from_str("fmt --check \"");
+    args.push_str(str::from_cstr(p.rootp()));
+    args.push_str("/main.spc\"");
+    let fr = p.run_raw(args.as_str());
+    assert(fr.ok());
 }
